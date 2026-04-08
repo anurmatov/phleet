@@ -1,0 +1,373 @@
+# Fleet — Full Stack Example
+#
+# This is a self-contained example that brings up the entire Fleet stack
+# using locally-built images. Copy .env.example to .env and fill in your
+# values before running.
+#
+# Recommended:
+#   ./setup.sh                      # guided first-time setup
+#
+# Manual (for users who know what they're doing):
+#   cp .env.example .env            # fill in your secrets
+#   cp seed.example.json seed.json  # or write your own agent definitions
+#   docker compose -p fleet -f docker-compose.example.yml up -d
+#
+# Credentials: setup.sh copies your Claude/Codex OAuth credentials into
+# ${FLEET_BASE_DIR} so containers can mount them without exposing your
+# host ~/.claude or ~/.codex. If you're running this compose file without
+# setup.sh, make sure the following files exist under ${FLEET_BASE_DIR}:
+#   .claude-credentials.json  — copy of ~/.claude/.credentials.json
+#   .codex-credentials.json   — copy of ~/.codex/auth.json (if using codex)
+
+services:
+
+  # ── Infrastructure ─────────────────────────────────────────────────────────
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fleet-net
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    volumes:
+      - qdrant_data:/qdrant/storage
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - fleet-net
+
+  fleet-mysql:
+    image: mysql:8.0
+    container_name: fleet-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${FLEET_MYSQL_ROOT_PASSWORD:-changeme}
+      MYSQL_DATABASE: fleet_orchestrator
+      MYSQL_USER: fleet
+      MYSQL_PASSWORD: ${FLEET_MYSQL_PASSWORD:-fleetpass}
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - fleet_mysql_data:/var/lib/mysql
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "fleet", "--password=${FLEET_MYSQL_PASSWORD:-fleetpass}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fleet-net
+
+  temporal-postgresql:
+    image: postgres:16
+    container_name: temporal-postgresql
+    environment:
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_USER: temporal
+    mem_limit: 256m
+    restart: unless-stopped
+    volumes:
+      - temporal_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fleet-net
+
+  temporal-server:
+    image: temporalio/auto-setup:1.29.1
+    container_name: temporal-server
+    ports:
+      - "7233:7233"
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=temporal-postgresql
+      - BIND_ON_IP=0.0.0.0
+    mem_limit: 512m
+    restart: unless-stopped
+    depends_on:
+      temporal-postgresql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "temporal", "workflow", "list", "--namespace", "default"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - fleet-net
+
+  temporal-ui:
+    image: temporalio/ui:2.34.0
+    container_name: temporal-ui
+    ports:
+      - "8080:8080"
+    environment:
+      - TEMPORAL_ADDRESS=temporal-server:7233
+    mem_limit: 256m
+    restart: unless-stopped
+    depends_on:
+      temporal-server:
+        condition: service_healthy
+    networks:
+      - fleet-net
+
+  # ── MinIO (optional — for agent file sharing) ──────────────────────────────
+
+  fleet-minio:
+    image: minio/minio
+    container_name: fleet-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio_data:/data
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fleet-net
+
+  fleet-minio-init:
+    image: minio/mc
+    container_name: fleet-minio-init
+    depends_on:
+      fleet-minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    entrypoint: ["/bin/sh", "-c", "mc alias set fleet http://fleet-minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD && mc mb --ignore-existing fleet/share && mc anonymous set public fleet/share"]
+    restart: on-failure
+    networks:
+      - fleet-net
+
+  # ── Fleet services ─────────────────────────────────────────────────────────
+
+  fleet-memory:
+    build:
+      context: .
+      dockerfile: src/Fleet.Memory/Dockerfile
+    image: fleet:memory
+    container_name: fleet-memory
+    ports:
+      - "3100:3100"
+    volumes:
+      - ${FLEET_BASE_DIR}/memories:/data/memories
+    environment:
+      - Storage__Path=/data/memories
+      - Qdrant__Url=http://qdrant:6334
+      - Qdrant__Collection=fleet_memories
+      # Use ONNX embedding by default (no external dependency).
+      # To use Ollama: set Embedding__Provider=ollama and configure Embedding__Ollama__* below.
+      - Embedding__Provider=${FLEET_MEMORY_EMBEDDING_PROVIDER:-onnx}
+      - Embedding__Dimensions=${FLEET_MEMORY_EMBEDDING_DIMENSIONS:-384}
+      - Embedding__Ollama__Url=${FLEET_MEMORY_OLLAMA_URL:-http://host.docker.internal:11434}
+      - Embedding__Ollama__Model=${FLEET_MEMORY_OLLAMA_MODEL:-nomic-embed-text}
+    mem_limit: 512m
+    restart: unless-stopped
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3100/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fleet-net
+
+  fleet-bridge:
+    build:
+      context: .
+      dockerfile: src/Fleet.Bridge/Dockerfile
+    image: fleet:bridge
+    container_name: fleet-bridge
+    ports:
+      - "3300:3300"
+    environment:
+      - RabbitMq__Host=rabbitmq
+      - RabbitMq__Exchange=fleet.group
+      - Bridge__TimeoutSeconds=300
+      - Bridge__BridgeChatId=${FLEET_GROUP_CHAT_ID:-0}
+      - Bridge__TargetAgent=${FLEET_CTO_AGENT}
+      - Telegram__BotToken=${TELEGRAM_NOTIFIER_BOT_TOKEN}
+    mem_limit: 256m
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3300/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fleet-net
+
+  fleet-temporal-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.temporal
+    image: fleet:temporal-bridge
+    container_name: fleet-temporal-bridge
+    volumes:
+      # Claude credentials — copied by setup.sh from ~/.claude/.credentials.json
+      # (or from the macOS keychain "Claude Code-credentials" entry).
+      - ${FLEET_BASE_DIR}/.claude-credentials.json:/root/.claude/.credentials.json
+      # Codex credentials — copied by setup.sh from ~/.codex/auth.json.
+      # If you're not using codex, create an empty placeholder file:
+      #   touch ${FLEET_BASE_DIR}/.codex-credentials.json
+      - ${FLEET_BASE_DIR}/.codex-credentials.json:/root/.codex/auth.json
+    environment:
+      - RabbitMq__Host=rabbitmq
+      - TemporalBridge__TemporalAddress=temporal-server:7233
+      - TemporalBridge__Namespaces__0=fleet
+      - TemporalBridge__AgentTimeoutSeconds=1800
+      - TemporalBridge__GroupChatId=${FLEET_GROUP_CHAT_ID:-0}
+      - TemporalBridge__OrchestratorAuthToken=${ORCHESTRATOR_AUTH_TOKEN}
+      - TemporalBridge__OrchestratorUrl=http://fleet-orchestrator:3600
+      # The CTO/co-cto agent name — set during ./setup.sh and used by seed workflows
+      # via {{config.CtoAgent}} so they target the user-defined agent without hardcoding.
+      - FleetWorkflows__CtoAgent=${FLEET_CTO_AGENT}
+      - FleetWorkflows__EscalationTarget=${FLEET_CTO_AGENT}
+      # OAuth client IDs for provider token refresh workflow (optional).
+      # Set only if you want the fleet to auto-refresh Claude/Codex tokens.
+      - AuthTokenRefresh__ClaudeClientId=${AUTHTOKENREFRESH__CLAUDECLIENTID:-}
+      - AuthTokenRefresh__CodexClientId=${AUTHTOKENREFRESH__CODEXCLIENTID:-}
+    mem_limit: 256m
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      temporal-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fleet-net
+
+  fleet-playwright:
+    image: mcr.microsoft.com/playwright:v1.59.1-noble
+    container_name: fleet-playwright
+    command: ["npx", "@playwright/mcp@0.0.70", "--port", "3200", "--host", "0.0.0.0", "--browser", "chromium", "--shared-browser-context", "--allowed-hosts", "*"]
+    ports:
+      - "3200:3200"
+    mem_limit: 1g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/3200'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fleet-net
+
+  fleet-orchestrator:
+    build:
+      context: .
+      dockerfile: src/Fleet.Orchestrator/Dockerfile
+    image: fleet:orchestrator
+    container_name: fleet-orchestrator
+    ports:
+      - "3600:3600"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./seed.json:/app/seed.json:ro
+      # Bind-mount FLEET_BASE_DIR at the SAME path inside and outside the container.
+      # This is required because the orchestrator launches child agent containers
+      # via the Docker socket and passes host paths (workspaces, memories, env file)
+      # as bind mounts — those paths must resolve identically on the host.
+      - ${FLEET_BASE_DIR}:${FLEET_BASE_DIR}
+    env_file:
+      - .env
+    environment:
+      - ConnectionStrings__OrchestratorDb=Server=fleet-mysql;Port=3306;Database=fleet_orchestrator;User=fleet;Password=${FLEET_MYSQL_PASSWORD:-fleetpass}
+      - RabbitMq__Host=rabbitmq
+      - Temporal__Address=temporal-server:7233
+      - Temporal__Namespaces__0=fleet
+      - Provisioning__SeedFilePath=/app/seed.json
+      - Provisioning__BaseDir=${FLEET_BASE_DIR}
+      - Provisioning__EnvFilePath=${FLEET_BASE_DIR}/.env
+      - Provisioning__DefaultNetwork=fleet-net
+      - Orchestrator__AuthToken=${ORCHESTRATOR_AUTH_TOKEN}
+    mem_limit: 512m
+    restart: unless-stopped
+    depends_on:
+      fleet-mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_started
+      temporal-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3600/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - fleet-net
+
+  fleet-dashboard:
+    build:
+      context: .
+      dockerfile: src/fleet-dashboard/Dockerfile
+      args:
+        VITE_AUTH_TOKEN: ${ORCHESTRATOR_AUTH_TOKEN:-changeme}
+    image: fleet:dashboard
+    container_name: fleet-dashboard
+    ports:
+      - "3700:80"
+    mem_limit: 64m
+    restart: unless-stopped
+    depends_on:
+      fleet-orchestrator:
+        condition: service_healthy
+    networks:
+      - fleet-net
+
+volumes:
+  qdrant_data:
+  temporal_pg_data:
+  fleet_mysql_data:
+  minio_data:
+
+networks:
+  fleet-net:
+    name: fleet-net
+    driver: bridge

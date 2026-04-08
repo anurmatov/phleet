@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question / discussion
+    url: https://github.com/anurmatov/phleet/discussions
+    about: Ask a question, share an idea, or discuss design — prefer Discussions over Issues for open-ended topics.
+  - name: Security vulnerability
+    url: https://github.com/anurmatov/phleet/security/advisories/new
+    about: Report a security issue privately via GitHub's advisory flow — please do not open a public issue.

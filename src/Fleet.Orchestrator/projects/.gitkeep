@@ -1,0 +1,6 @@
+# Project contexts are baked into the orchestrator image at build time.
+# Drop a directory here named after each project (e.g. ./myproject/context.md)
+# to have it auto-seeded into the orchestrator DB on first run.
+#
+# After startup you can also create project contexts via the MCP tool
+# `create_project_context` or the REST endpoint POST /api/project-contexts.

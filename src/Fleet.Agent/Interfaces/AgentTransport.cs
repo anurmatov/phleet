@@ -1,0 +1,473 @@
+using System.Text.RegularExpressions;
+using Fleet.Agent.Abstractions;
+using Fleet.Agent.Configuration;
+using Fleet.Agent.Models;
+using Fleet.Agent.Services;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Telegram.Bot;
+using Telegram.Bot.Polling;
+using Telegram.Bot.Types;
+using Telegram.Bot.Types.Enums;
+
+namespace Fleet.Agent.Interfaces;
+
+/// <summary>
+/// Thin Telegram shell. Only file that imports Telegram.Bot.*.
+/// Builds IncomingMessage from Telegram updates, delegates to MessageRouter.
+/// Implements IMessageSink for outbound messages (splits at 4000 chars).
+/// </summary>
+public sealed class AgentTransport : BackgroundService, IMessageSink
+{
+    private readonly TelegramBotClient _bot;
+    private readonly AgentOptions _agentConfig;
+    private readonly TelegramOptions _telegramConfig;
+    private readonly GroupRelayService _relay;
+    private readonly TaskManager _taskManager;
+    private readonly GroupBehavior _groupBehavior;
+    private readonly MessageRouter _router;
+    private readonly CommandDispatcher _commands;
+    private readonly VoiceTranscriptionService _voiceTranscription;
+    private readonly TtsService _tts;
+    private readonly ILogger<AgentTransport> _logger;
+
+    private string _botUsername = "";
+
+    public AgentTransport(
+        IOptions<AgentOptions> agentConfig,
+        IOptions<TelegramOptions> telegramConfig,
+        GroupRelayService relay,
+        TaskManager taskManager,
+        GroupBehavior groupBehavior,
+        MessageRouter router,
+        CommandDispatcher commands,
+        VoiceTranscriptionService voiceTranscription,
+        TtsService tts,
+        ILogger<AgentTransport> logger)
+    {
+        _agentConfig = agentConfig.Value;
+        _telegramConfig = telegramConfig.Value;
+        _relay = relay;
+        _taskManager = taskManager;
+        _groupBehavior = groupBehavior;
+        _router = router;
+        _commands = commands;
+        _voiceTranscription = voiceTranscription;
+        _tts = tts;
+        _logger = logger;
+        _bot = new TelegramBotClient(telegramConfig.Value.BotToken);
+
+        // Inject self as IMessageSink to break circular DI
+        _taskManager.Sink = this;
+        _groupBehavior.Sink = this;
+        _router.Sink = this;
+        _commands.Sink = this;
+    }
+
+    private static readonly Regex ImageMarkerRegex = new(@"\[IMAGE:(.+?)\]", RegexOptions.Compiled);
+    private static readonly Regex TaskFailedMarkerRegex = new(@"^\[TASK_FAILED:\s*([^\]]+)\]\s*", RegexOptions.Compiled);
+
+    // --- IMessageSink ---
+
+    public async Task SendTextAsync(long chatId, string text, CancellationToken ct = default)
+    {
+        // chatId==0 means "headless workflow delegation" — no Telegram destination.
+        // The result still flows back to the caller via the relay (see OnTaskCompleted).
+        if (chatId == 0) return;
+
+        // Split on [IMAGE:...] markers; odd-indexed segments are file paths
+        var parts = ImageMarkerRegex.Split(text);
+        for (var i = 0; i < parts.Length; i++)
+        {
+            if (i % 2 == 1)
+            {
+                // This is a captured file path — the surrounding text parts are caption candidates
+                var filePath = parts[i].Trim();
+                var caption = (i - 1 >= 0 ? parts[i - 1].Trim() : null) is { Length: > 0 } before ? before : null;
+                if (caption is null && i + 1 < parts.Length && parts[i + 1].Trim() is { Length: > 0 } after)
+                    caption = after;
+
+                await SendPhotoAsync(chatId, filePath, caption, ct);
+
+                // Skip the adjacent text segment used as caption so it's not sent again
+                if (caption is not null)
+                {
+                    if (i - 1 >= 0 && parts[i - 1].Trim() == caption) parts[i - 1] = "";
+                    else if (i + 1 < parts.Length && parts[i + 1].Trim() == caption) { parts[i + 1] = ""; i++; }
+                }
+            }
+            else
+            {
+                var segment = parts[i].Trim();
+                if (segment.Length == 0) continue;
+
+                // Prepend bold [ShortName] header when PrefixMessages is enabled
+                if (_agentConfig.PrefixMessages && _agentConfig.ShortName.Length > 0)
+                {
+                    var displayName = $"{char.ToUpperInvariant(_agentConfig.ShortName[0])}{_agentConfig.ShortName[1..]}";
+                    foreach (var chunk in SplitMessage(segment, 3990))
+                    {
+                        var escaped = System.Net.WebUtility.HtmlEncode(chunk);
+                        await _bot.SendMessage(chatId, $"<b>{displayName}:</b>\n{escaped}",
+                            parseMode: ParseMode.Html, cancellationToken: ct);
+                    }
+                }
+                else
+                {
+                    foreach (var chunk in SplitMessage(segment, 4000))
+                        await _bot.SendMessage(chatId, chunk, cancellationToken: ct);
+                }
+            }
+        }
+    }
+
+    public async Task SendHtmlTextAsync(long chatId, string htmlText, CancellationToken ct = default)
+    {
+        if (chatId == 0) return;
+
+        // Telegram doesn't support <br>, <br/>, or <br /> — replace all variants with newline.
+        htmlText = Regex.Replace(htmlText, @"<br\s*/?>", "\n", RegexOptions.IgnoreCase);
+        foreach (var chunk in SplitMessage(htmlText, 4000))
+        {
+            var balanced = BalanceBlockquotesInChunk(chunk);
+            await _bot.SendMessage(chatId, balanced, parseMode: ParseMode.Html, cancellationToken: ct);
+        }
+    }
+
+    public async Task SendPhotoAsync(long chatId, string filePath, string? caption, CancellationToken ct = default)
+    {
+        if (chatId == 0) return;
+
+        if (!File.Exists(filePath))
+        {
+            _logger.LogWarning("Photo file not found (likely from remote agent): {FilePath}", filePath);
+            var agentHint = "[image from agent — view in their direct chat]";
+            var message = caption is { Length: > 0 } ? $"{caption}\n{agentHint}" : agentHint;
+            await _bot.SendMessage(chatId, message, cancellationToken: ct);
+            return;
+        }
+
+        try
+        {
+            var bytes = await File.ReadAllBytesAsync(filePath, ct);
+            using var stream = new MemoryStream(bytes);
+            var inputFile = InputFile.FromStream(stream, Path.GetFileName(filePath));
+            await _bot.SendPhoto(chatId, inputFile, caption: caption, cancellationToken: ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to send photo {FilePath}", filePath);
+            await _bot.SendMessage(chatId, $"[photo: {filePath} — send failed]", cancellationToken: ct);
+        }
+    }
+
+    public async Task SendTypingAsync(long chatId, CancellationToken ct = default)
+    {
+        if (chatId == 0) return;
+        await _bot.SendChatAction(chatId, ChatAction.Typing, cancellationToken: ct);
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        _logger.LogInformation("Telegram bot starting for agent {AgentName} (SendOnly={SendOnly})",
+            _agentConfig.Name, _telegramConfig.SendOnly);
+
+        var me = await _bot.GetMe(stoppingToken);
+        _botUsername = me.Username ?? "";
+        _taskManager.SetBotUsername(_botUsername);
+        _groupBehavior.SetBotUsername(_botUsername);
+        _router.SetBotUsername(_botUsername);
+        _logger.LogInformation("Bot username resolved: @{BotUsername}", _botUsername);
+
+        // Propagate shutdown token for debounce cancellation
+        _groupBehavior.SetShutdownToken(stoppingToken);
+        _router.SetShutdownToken(stoppingToken);
+
+        // Initialize relay if configured
+        await _relay.InitializeAsync(stoppingToken);
+        if (_relay.IsEnabled)
+            _relay.MessageReceived += _groupBehavior.OnRelayMessage;
+
+        // Wire up task completion handler for group buffering and relay
+        _taskManager.OnTaskCompleted += OnTaskCompleted;
+        _taskManager.OnToolUse += OnToolUse;
+
+        if (_telegramConfig.SendOnly)
+        {
+            // Send-only mode: no polling, no message handling, no bot commands.
+            // All other wiring (relay, task handlers, bot username) is active.
+            _logger.LogInformation("Telegram bot in send-only mode — skipping polling and message handlers");
+        }
+        else
+        {
+            var commands = new List<BotCommand>
+            {
+                new() { Command = "new",    Description = "Start a parallel task: /new <task>" },
+                new() { Command = "cancel", Description = "Cancel a task: /cancel [id|all]" },
+                new() { Command = "status", Description = "Show running tasks and agent info" },
+                new() { Command = "reset",  Description = "Clear session and start fresh" },
+                new() { Command = "run",    Description = "Send command to executor: /run <command>" },
+                new() { Command = "tts",    Description = "Synthesize speech: reply to any message with /tts" },
+            };
+
+            await _bot.SetMyCommands(commands, cancellationToken: stoppingToken);
+
+            _bot.OnMessage += OnMessage;
+            _bot.OnError += OnError;
+
+            _logger.LogInformation("Telegram bot is receiving messages (GroupListenMode={Mode})",
+                _agentConfig.GroupListenMode);
+        }
+
+        Task? proactiveLoop = _agentConfig.ProactiveIntervalMinutes > 0
+            ? _groupBehavior.RunProactiveLoopAsync(stoppingToken)
+            : null;
+
+        try
+        {
+            await Task.Delay(Timeout.Infinite, stoppingToken);
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected on shutdown
+        }
+        finally
+        {
+            _bot.OnMessage -= OnMessage;
+            _bot.OnError -= OnError;
+            _taskManager.OnTaskCompleted -= OnTaskCompleted;
+            _taskManager.OnToolUse -= OnToolUse;
+            if (_relay.IsEnabled)
+                _relay.MessageReceived -= _groupBehavior.OnRelayMessage;
+            _groupBehavior.CancelAllDebounce();
+            if (proactiveLoop is not null)
+                await proactiveLoop.ContinueWith(_ => { });
+        }
+    }
+
+    private void OnToolUse(long chatId, string toolName, string description) =>
+        _groupBehavior.BufferToolUse(chatId, toolName, description);
+
+    private void OnTaskCompleted(long chatId, string result, string? relaySender, TaskSource source, bool isPartial, string? correlationId, string? taskId)
+    {
+        _groupBehavior.BufferBotResponse(chatId, result);
+
+        _ = Task.Run(async () =>
+        {
+            if (relaySender == "bridge" && correlationId is not null)
+            {
+                await _relay.PublishToAgentAsync("bridge", chatId, result,
+                    type: RelayMessageType.BridgeResponse, correlationId: correlationId, taskId: taskId);
+            }
+            else if (relaySender is not null)
+            {
+                var type = isPartial ? RelayMessageType.PartialResponse : RelayMessageType.Response;
+                var text = taskId is not null ? FormatTaskResponse(result, isPartial) : result;
+                await _relay.PublishToAgentAsync(relaySender, chatId, text, type: type, taskId: taskId);
+            }
+        });
+    }
+
+    private static string FormatTaskResponse(string result, bool isPartial)
+    {
+        // Detect voluntary failure marker: [TASK_FAILED: reason]
+        // Agents can emit this to signal that they refused or cannot complete a delegated task.
+        var taskFailedMatch = TaskFailedMarkerRegex.Match(result);
+        if (taskFailedMatch.Success)
+        {
+            var reason = taskFailedMatch.Groups[1].Value.Trim();
+            var body = result[taskFailedMatch.Length..].TrimStart('\n', '\r');
+            var text = string.IsNullOrEmpty(body) ? $"Task failed: {reason}" : $"Task failed: {reason}\n{body}";
+            return $"[status: failed]\n{text}";
+        }
+
+        // Determine status from result content and isPartial flag
+        var status = isPartial
+            ? (result.StartsWith("Error:", StringComparison.OrdinalIgnoreCase)
+               || result.StartsWith("Task failed:", StringComparison.OrdinalIgnoreCase)
+               ? "failed"
+               : "incomplete")
+            : "completed";
+
+        return $"[status: {status}]\n{result}";
+    }
+
+    private async Task OnMessage(Message message, UpdateType type)
+    {
+        if (type != UpdateType.Message) return;
+
+        // Support text messages and photo messages (with optional caption)
+        var isPhoto = message.Photo is { Length: > 0 };
+        var isVoice = message.Voice is not null;
+        var text = message.Text ?? message.Caption ?? "";
+
+        // Transcribe voice messages if the whisper service is configured
+        if (isVoice && _voiceTranscription.IsEnabled)
+        {
+            // Immediate feedback — let user know we received the voice message
+            await _bot.SendChatAction(message.Chat.Id, ChatAction.Typing);
+
+            try
+            {
+                using var ms = new System.IO.MemoryStream();
+                await _bot.GetInfoAndDownloadFile(message.Voice!.FileId, ms);
+                var audioBytes = ms.ToArray();
+                var transcribed = await _voiceTranscription.TranscribeAsync(audioBytes, "voice.ogg");
+                if (transcribed is not null)
+                {
+                    text = transcribed;
+                    _logger.LogInformation("Voice message transcribed ({Chars} chars) from {Sender}",
+                        text.Length, message.From?.Username ?? "unknown");
+
+                    // Echo transcription back so user can verify whisper got it right
+                    await _bot.SendMessage(
+                        message.Chat.Id,
+                        $"🎤 {transcribed}",
+                        replyParameters: new Telegram.Bot.Types.ReplyParameters { MessageId = message.MessageId });
+                }
+                else
+                {
+                    _logger.LogWarning("Voice transcription returned null for message from {Sender}", message.From?.Username);
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to process voice message from {Sender}", message.From?.Username);
+                return;
+            }
+        }
+        else if (!isPhoto && string.IsNullOrEmpty(message.Text)) return;
+
+        // TTS trigger: /tts command as a reply to any message → synthesize and send replied-to message as voice
+        if (_tts.IsEnabled && !isVoice
+            && text.Equals("/tts", StringComparison.OrdinalIgnoreCase)
+            && message.ReplyToMessage is { } replied)
+        {
+            var sourceText = replied.Text ?? replied.Caption;
+            if (!string.IsNullOrWhiteSpace(sourceText))
+            {
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await _bot.SendChatAction(message.Chat.Id, ChatAction.RecordVoice);
+                        var audioBytes = await _tts.SynthesizeAsync(sourceText);
+                        if (audioBytes is { Length: > 0 })
+                        {
+                            using var ms = new System.IO.MemoryStream(audioBytes);
+                            await _bot.SendVoice(
+                                message.Chat.Id,
+                                new Telegram.Bot.Types.InputFileStream(ms, "response.ogg"),
+                                replyParameters: new Telegram.Bot.Types.ReplyParameters { MessageId = replied.MessageId });
+                            _logger.LogInformation("TTS voice sent for message {MsgId} ({Chars} chars)", replied.MessageId, sourceText.Length);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "TTS voice send failed for message {MsgId}", replied.MessageId);
+                    }
+                });
+            }
+            return;
+        }
+
+        var chatId = message.Chat.Id;
+        var isGroupChat = message.Chat.Type is ChatType.Group or ChatType.Supergroup;
+
+        var isMentioned = _botUsername.Length > 0
+            && text.Contains($"@{_botUsername}", StringComparison.OrdinalIgnoreCase);
+        var isReplyToMe = message.ReplyToMessage?.From?.Username is { } replyUser
+            && replyUser.Equals(_botUsername, StringComparison.OrdinalIgnoreCase);
+        var isNameMentioned = _agentConfig.ShortName.Length > 0
+            && text.Contains(_agentConfig.ShortName, StringComparison.OrdinalIgnoreCase);
+
+        var stripped = _botUsername.Length > 0
+            ? text.Replace($"@{_botUsername}", "", StringComparison.OrdinalIgnoreCase).Trim()
+            : text.Trim();
+
+        var sender = message.From?.Username is { } u ? $"@{u}" : message.From?.FirstName ?? "Unknown";
+        var replyToUsername = message.ReplyToMessage?.From?.Username is { } ru ? $"@{ru}" : null;
+        var replyToText = message.ReplyToMessage?.Text ?? message.ReplyToMessage?.Caption;
+
+        // Download photo if present (largest available size)
+        byte[]? imageBytes = null;
+        string? imageMimeType = null;
+        if (isPhoto)
+        {
+            var largest = message.Photo!.OrderByDescending(p => p.FileSize ?? 0).First();
+            try
+            {
+                using var ms = new System.IO.MemoryStream();
+                await _bot.GetInfoAndDownloadFile(largest.FileId, ms);
+                imageBytes = ms.ToArray();
+                imageMimeType = "image/jpeg";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to download photo {FileId}", largest.FileId);
+            }
+        }
+
+        var msg = new IncomingMessage
+        {
+            ChatId = chatId,
+            UserId = message.From?.Id ?? 0,
+            Text = text,
+            Sender = sender,
+            IsGroupChat = isGroupChat,
+            ReplyToUsername = replyToUsername,
+            ReplyToText = replyToText,
+            IsBotMentioned = isMentioned,
+            IsReplyToBot = isReplyToMe,
+            IsNameMentioned = isNameMentioned,
+            StrippedText = stripped,
+            ImageBytes = imageBytes,
+            ImageMimeType = imageMimeType,
+        };
+
+        await _router.HandleAsync(msg);
+    }
+
+    private Task OnError(Exception exception, HandleErrorSource source)
+    {
+        _logger.LogError(exception, "Telegram bot error from {Source}", source);
+        return Task.CompletedTask;
+    }
+
+    // Ensures a single chunk has balanced <blockquote> open/close tags.
+    // Appends missing closers if opens > closes; strips dangling closers from the end if closes > opens.
+    internal static string BalanceBlockquotesInChunk(string chunk)
+    {
+        var opens = Regex.Matches(chunk, @"<blockquote(\s[^>]*)?>", RegexOptions.IgnoreCase).Count;
+        var closes = Regex.Matches(chunk, @"</blockquote>", RegexOptions.IgnoreCase).Count;
+        if (opens > closes)
+            return chunk + string.Concat(Enumerable.Repeat("</blockquote>", opens - closes));
+        if (closes > opens)
+        {
+            var result = chunk;
+            for (var i = 0; i < closes - opens; i++)
+            {
+                var lastClose = result.LastIndexOf("</blockquote>", StringComparison.OrdinalIgnoreCase);
+                if (lastClose >= 0) result = result.Remove(lastClose, "</blockquote>".Length);
+            }
+            return result;
+        }
+        return chunk;
+    }
+
+    private static IEnumerable<string> SplitMessage(string text, int maxLength)
+    {
+        if (text.Length <= maxLength)
+        {
+            yield return text;
+            yield break;
+        }
+
+        for (var i = 0; i < text.Length; i += maxLength)
+        {
+            yield return text.Substring(i, Math.Min(maxLength, text.Length - i));
+        }
+    }
+}

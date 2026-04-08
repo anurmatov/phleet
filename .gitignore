@@ -1,0 +1,40 @@
+# .NET build output
+**/bin/
+**/obj/
+publish/
+
+# IDE / editor
+.vs/
+.idea/
+*.user
+*.suo
+*.DS_Store
+
+# Repo-root .env — historical location, now generated under /fleet/.env by
+# setup.sh but still ignored here in case someone creates one manually.
+# Also catch common variants so a stray `.env.backup`, `.env.local`, or
+# `.env.prod` can never be added by accident — these files usually contain
+# real secrets.
+.env
+.env.*
+!.env.example
+deploy/.env
+
+# Fleet runtime data dir (setup.sh puts everything here):
+#   .env, seed.json, docker-compose.yml, workspaces/, memories/,
+#   credentials, mysql-backup/. Never commit.
+/fleet/
+
+# Project context files (mounted at deploy time)
+projects/
+# Exception: orchestrator seed projects are baked into the Docker image
+!src/Fleet.Orchestrator/projects/
+
+# Claude Code local state
+.claude/
+
+# ONNX model files (large binary, downloaded at build/CI time via scripts/download-onnx-model.sh)
+models/
+
+# Claude Code MCP config (may contain internal URLs)
+.mcp.json

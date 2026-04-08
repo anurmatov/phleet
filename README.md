@@ -6,6 +6,12 @@
 
 Phleet is an open-source multi-agent AI platform built on .NET 10. Each agent runs as a Docker container, receives tasks via Telegram or RabbitMQ, and executes them using a persistent AI process (Claude or Codex). Agents are coordinated by a central orchestrator backed by Temporal workflows.
 
+<p align="center">
+  <img src=".github/assets/phleet-dashboard.jpg" alt="Phleet dashboard — agents and active workflows" width="900">
+  <br>
+  <em>The fleet dashboard — live agent status, model assignment, and in-flight Temporal workflows.</em>
+</p>
+
 ## Project Status
 
 Phleet has been tested end-to-end on **macOS (Apple silicon, Mac Studio) with Claude** as the primary provider — that's the path I actively run. Other combinations should work but haven't been exercised nearly as hard:

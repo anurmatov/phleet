@@ -47,6 +47,16 @@ gh-auth.sh               — GitHub App JWT utility
 4. Temporal workflows orchestrate multi-step, multi-agent tasks.
 5. Fleet Memory provides shared semantic memory across all agents (search, store, retrieve).
 
+### Visual Workflow Editor
+
+Workflows can be authored as versioned JSON definitions through the dashboard's visual editor — no code, no redeploy. Control-flow primitives (`sequence`, `parallel`, `loop`, `branch`), agent delegation, child-workflow spawning, and signal-waiting compose into Temporal workflows that run on the same engine as compiled ones.
+
+<p align="center">
+  <img src=".github/assets/phleet-workflow-editor.jpg" alt="Phleet workflow editor — visual editor for Temporal workflow definitions" width="900">
+  <br>
+  <em>Editing a workflow definition — steps, arguments, and live JSON/visual/split views.</em>
+</p>
+
 ## Quick Start
 
 ### Prerequisites

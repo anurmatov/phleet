@@ -67,7 +67,7 @@ Workflows can be authored as versioned JSON definitions through the dashboard's 
   - a **notifier bot** — shared by every other agent for DMs and group-chat relay (`TELEGRAM_NOTIFIER_BOT_TOKEN`)
 
   You can technically reuse a single token if you only ever run the co-CTO, but the moment a second agent exists you need the split: Telegram allows only one long-poller per token (see the Troubleshooting entry on 409 Conflict).
-- **A Telegram group** for fleet status reports and cross-agent coordination. Create a group, add **both** bots as members, then forward any message from the group to [@userinfobot](https://t.me/userinfobot) — it replies with the group's negative integer ID, which you'll paste into `.env` as `FLEET_GROUP_CHAT_ID` during setup. Agents post workflow notifications, approval requests, and status updates there; leaving the ID blank disables group routing (bots then only respond to DMs).
+- **A Telegram group** (optional) for observing agent activity. Create a group, add **both** bots as members, then forward any message from the group to [@userinfobot](https://t.me/userinfobot) — it replies with the group's negative integer ID, which you'll paste into `.env` as `FLEET_GROUP_CHAT_ID` during setup. Agents post workflow notifications and status updates there. Leaving the ID blank disables group routing — agents then only respond to DMs, and all coordination happens through Temporal workflows.
 - A GitHub App with repo access ([create one](https://github.com/settings/apps))
 
 ### Setup

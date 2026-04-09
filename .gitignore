@@ -34,7 +34,10 @@ projects/
 .claude/
 
 # ONNX model files (large binary, downloaded at build/CI time via scripts/download-onnx-model.sh)
-models/
+models/*
+!models/fleet-memory/
+models/fleet-memory/*
+!models/fleet-memory/.gitkeep
 
 # Claude Code MCP config (may contain internal URLs)
 .mcp.json

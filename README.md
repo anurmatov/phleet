@@ -12,6 +12,26 @@ Phleet is an open-source multi-agent AI platform built on .NET 10. Each agent ru
   <em>The fleet dashboard — live agent status, model assignment, and in-flight Temporal workflows.</em>
 </p>
 
+## Why Phleet
+
+Phleet is fully self-hosted. Agents run on your own Docker host, use your own Claude or Codex credentials, hit your repos via your own GitHub App, and persist every task, workflow, and memory to databases you control. Nothing leaves your network. No managed tier, no vendor quota, no "we're deprecating this feature in 60 days" risk — you own the fleet end-to-end.
+
+### One agent, then the rest
+
+After `./setup.sh` you have a **single agent** running: the co-CTO. It is the only agent in the orchestrator granted the full agent-lifecycle and workflow-authoring toolset. You don't spin up more agents by editing JSON and restarting containers — you grow the fleet by talking to the co-CTO in Telegram, in plain English.
+
+Things you can ask the co-CTO to do, today, out of the box:
+
+- **Grow the team.** "Create a new developer agent on sonnet, call it `alice`, give it Read/Edit/Bash and fleet-memory, add her to the reporting group." The co-CTO calls `create_agent` → `manage_agent_*` → `provision_agent` and the container is up within a minute.
+- **Shrink the team.** "We don't need the research agent anymore, stop it and clean up the workspace." → `stop_agent` / `deprovision_agent`, container gone, workspace archived on request.
+- **Edit role instructions live.** "Update the developer role to always run `dotnet test` before committing." → `create_instruction` with a new version, `manage_agent_instructions` to swap it in, old version kept for rollback. No redeploy.
+- **Author and version workflows.** "Draft a workflow that spawns a design review, waits for my approval, then runs implementation." → `create_workflow_definition` produces a versioned JSON definition you can run immediately — or open in the visual editor and tweak.
+- **Run and gate workflows.** "Start a PR implementation workflow on issue #123 using agent `alice`." → `temporal_start_workflow`. The co-CTO pings you at the human-review gate; you reply *approved* / *changes_requested* / *rejected*.
+- **Remember across sessions.** "Memorize that we use Conventional Commits in this repo." → stored in fleet-memory (Qdrant + embeddings), searchable by every agent from any future session.
+- **Coordinate the fleet.** The co-CTO maintains an active task-tracker memory, reviews production-risk changes proposed by worker agents before they run, and facilitates the shared Telegram coordination group.
+
+The rest of this README is the plumbing — configuration, deployment, troubleshooting. The point of the co-CTO is that after setup you mostly don't need to touch any of it.
+
 ## Project Status
 
 Phleet has been tested end-to-end on **macOS (Apple silicon, Mac Studio) with Claude** as the primary provider — that's the path I actively run. Other combinations should work but haven't been exercised nearly as hard:

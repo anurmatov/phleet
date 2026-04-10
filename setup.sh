@@ -608,6 +608,7 @@ else
   build_image "fleet:bridge"          "$SCRIPT_DIR/src/Fleet.Bridge/Dockerfile"       "$SCRIPT_DIR"
   build_image "fleet:memory"          "$SCRIPT_DIR/src/Fleet.Memory/Dockerfile"       "$SCRIPT_DIR"
   build_image "fleet:temporal-bridge" "$SCRIPT_DIR/Dockerfile.temporal"               "$SCRIPT_DIR"
+  build_image "fleet:telegram"        "$SCRIPT_DIR/src/Fleet.Telegram/Dockerfile"      "$SCRIPT_DIR"
   # No quotes around $VITE_TOKEN — the `docker build $extra_args` call in
   # build_image() relies on word-splitting, and escaped quotes here would
   # become literal characters inside the baked-in dashboard token → 401s.
@@ -637,6 +638,7 @@ else
     poll_health "fleet-playwright"      30  "fleet-playwright"
     poll_health "fleet-orchestrator"    30  "fleet-orchestrator"
     poll_health "fleet-temporal-bridge" 20  "fleet-temporal-bridge"
+    poll_health "fleet-telegram"        20  "fleet-telegram"
     poll_health "fleet-minio"           15  "fleet-minio"
   else
     echo -e "  ${YELLOW}[dry-run]${NC} Would run: docker compose -p $COMPOSE_PROJECT -f $COMPOSE_FILE --env-file .env up -d"
@@ -808,14 +810,16 @@ else
     "mcp__fleet-orchestrator__start_agent", "mcp__fleet-orchestrator__stop_agent",
     "mcp__fleet-orchestrator__system_health", "mcp__fleet-orchestrator__update_agent_config",
     "mcp__fleet-orchestrator__update_instruction", "mcp__fleet-orchestrator__update_project_context",
-    "mcp__fleet-orchestrator__update_workflow_definition"
+    "mcp__fleet-orchestrator__update_workflow_definition",
+    "mcp__fleet-telegram__send_message", "mcp__fleet-telegram__get_chat_info"
   ],
   "Projects": [],
   "McpEndpoints": [
     {"McpName": "fleet-memory",      "Url": "http://fleet-memory:3100",              "TransportType": "http"},
     {"McpName": "fleet-playwright",  "Url": "http://fleet-playwright:3200/mcp",      "TransportType": "http"},
     {"McpName": "fleet-temporal",    "Url": "http://fleet-temporal-bridge:3001",     "TransportType": "http"},
-    {"McpName": "fleet-orchestrator","Url": "http://fleet-orchestrator:3600/mcp",    "TransportType": "http"}
+    {"McpName": "fleet-orchestrator","Url": "http://fleet-orchestrator:3600/mcp",    "TransportType": "http"},
+    {"McpName": "fleet-telegram",    "Url": "http://fleet-telegram:3800",            "TransportType": "http"}
   ],
   "Provision": false
 }

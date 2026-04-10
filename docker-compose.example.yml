@@ -208,6 +208,28 @@ services:
     networks:
       - fleet-net
 
+  fleet-telegram:
+    build:
+      context: .
+      dockerfile: src/Fleet.Telegram/Dockerfile
+    image: fleet:telegram
+    container_name: fleet-telegram
+    environment:
+      # Bot token map: one entry per agent in your deployment.
+      # Values are injected from .env — keys use the .NET double-underscore override convention.
+      - TelegramBots__Tokens__notifier=${TELEGRAM_NOTIFIER_BOT_TOKEN}
+      # Add per-agent tokens as needed, e.g.:
+      # - TelegramBots__Tokens__myagent=${TELEGRAM_MYAGENT_BOT_TOKEN}
+    mem_limit: 128m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3800/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fleet-net
+
   fleet-bridge:
     build:
       context: .

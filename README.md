@@ -51,6 +51,7 @@ src/
 ├── Fleet.Temporal/      — Temporal workflow engine + bridge (universal workflow runner)
 ├── Fleet.Bridge/        — RabbitMQ relay for inter-agent messaging
 ├── Fleet.Memory/        — semantic memory MCP server (Qdrant + ONNX embeddings)
+├── Fleet.Telegram/      — outbound Telegram MCP server (per-agent bot routing, notifier fallback)
 ├── Fleet.Shared/        — shared utilities
 └── fleet-dashboard/     — React SPA for monitoring and managing agents
 Dockerfile               — agent image (multi-stage, .NET 10)

@@ -43,6 +43,9 @@ public sealed class ExecutionStats
         if (ToolCalls is null or []) return "";
         var lines = string.Join("\n", ToolCalls.Select(t =>
             $"{System.Net.WebUtility.HtmlEncode(t.Name)}({System.Net.WebUtility.HtmlEncode(t.Args)})"));
+        const int MaxToolBlockLength = 2000;
+        if (lines.Length > MaxToolBlockLength)
+            lines = lines[..MaxToolBlockLength] + "...";
         return $"\n<blockquote expandable>{lines}</blockquote>";
     }
 

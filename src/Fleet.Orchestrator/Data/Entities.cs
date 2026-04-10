@@ -23,6 +23,7 @@ public class Agent
     public string ShortName { get; set; } = "";
     public bool ShowStats { get; set; } = true;
     public bool PrefixMessages { get; set; } = false;
+    public bool SuppressToolMessages { get; set; } = false;
     public bool TelegramSendOnly { get; set; } = false;
     public string? TtsServiceUrl { get; set; }
     public string? Image { get; set; }

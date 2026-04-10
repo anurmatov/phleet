@@ -131,6 +131,7 @@ export interface CreateForm {
   autoMemoryEnabled: boolean
   showStats: boolean
   prefixMessages: boolean
+  suppressToolMessages: boolean
   telegramSendOnly: boolean
   provider: string
   codexSandboxMode: string
@@ -159,6 +160,7 @@ export interface AgentConfig {
   displayName: string
   showStats: boolean
   prefixMessages: boolean
+  suppressToolMessages: boolean
   ttsServiceUrl: string
   effort: string
   jsonSchema: string
@@ -192,6 +194,7 @@ export interface ConfigEdits {
   displayName: string
   showStats: boolean
   prefixMessages: boolean
+  suppressToolMessages: boolean
   ttsServiceUrl: string
   effort: string
   jsonSchema: string

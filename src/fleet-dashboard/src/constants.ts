@@ -58,6 +58,7 @@ export const ADVANCED_DEFAULTS: Record<string, string | number | boolean | null>
   shortName: '',
   showStats: true,
   prefixMessages: false,
+  suppressToolMessages: false,
   ttsServiceUrl: null,
   effort: null,
   jsonSchema: null,

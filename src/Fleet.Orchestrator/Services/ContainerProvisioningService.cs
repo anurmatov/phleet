@@ -820,6 +820,7 @@ public sealed class ContainerProvisioningService(
                 agent.ShortName,
                 agent.ShowStats,
                 agent.PrefixMessages,
+                agent.SuppressToolMessages,
                 agent.Effort,
                 agent.JsonSchema,
                 agent.AgentsJson,

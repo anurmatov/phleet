@@ -28,6 +28,7 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory)
         [Description("Short name for the agent (used in group chat). Omit to keep current.")] string? short_name = null,
         [Description("Show stats in status messages. Omit to keep current.")] bool? show_stats = null,
         [Description("Prefix all outgoing telegram messages with bold [ShortName] header for shared-bot visibility. Omit to keep current.")] bool? prefix_messages = null,
+        [Description("Suppress intermediate tool-use progress messages in Telegram — only post the final response. Use for agents serving non-technical users (e.g. family assistant). Omit to keep current.")] bool? suppress_tool_messages = null,
         [Description("Telegram send-only mode: skip polling and message handling, only send messages. Use when multiple agents share a bot token. Omit to keep current.")] bool? telegram_send_only = null,
         [Description("TTS service URL for voice output. Pass empty string to clear. Omit to keep current.")] string? tts_service_url = null,
         [Description("Claude effort level (low/medium/high/max). Pass empty string to clear. Omit to keep current.")] string? effort = null,
@@ -127,6 +128,12 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory)
         {
             changes.AppendLine($"- prefix_messages: {agent.PrefixMessages} → {prefix_messages}");
             agent.PrefixMessages = prefix_messages.Value;
+        }
+
+        if (suppress_tool_messages is not null && suppress_tool_messages != agent.SuppressToolMessages)
+        {
+            changes.AppendLine($"- suppress_tool_messages: {agent.SuppressToolMessages} → {suppress_tool_messages}");
+            agent.SuppressToolMessages = suppress_tool_messages.Value;
         }
 
         if (telegram_send_only is not null && telegram_send_only != agent.TelegramSendOnly)

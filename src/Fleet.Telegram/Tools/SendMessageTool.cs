@@ -14,7 +14,7 @@ public sealed class SendMessageTool(BotClientFactory factory, ILogger<SendMessag
     private const int TelegramMaxLength = 4096;
 
     [McpServerTool(Name = "send_message")]
-    [Description("Post a text message to a Telegram chat. Returns {\"ok\":true,\"message_id\":N} on success or {\"ok\":false,\"error\":\"...\"} on failure.")]
+    [Description("Post a text message to a Telegram chat. Returns {\"ok\":true,\"message_id\":N} on success, {\"ok\":true,\"message_id\":N,\"fallback\":true} when the notifier bot was used as fallback, or {\"ok\":false,\"error\":\"...\"} on failure.")]
     public async Task<string> SendAsync(
         [Description("Telegram chat ID (e.g. -202223699 for a group, or a positive integer for a DM)")] long chat_id,
         [Description("Message text (max 4096 chars per Telegram limit; longer text is split into multiple messages)")] string text,
@@ -40,15 +40,23 @@ public sealed class SendMessageTool(BotClientFactory factory, ILogger<SendMessag
 
         // Split text into chunks if it exceeds the Telegram limit
         var chunks = SplitText(text);
+        if (chunks.Count > 1)
+            logger.LogWarning("Message to chat {ChatId} was split into {Count} chunks (exceeded {Limit} chars)", chat_id, chunks.Count, TelegramMaxLength);
+
         int lastMessageId = 0;
+        bool usedFallback = false;
 
         foreach (var chunk in chunks)
         {
             var result = await TrySendAsync(client, chat_id, chunk, pm, agent_name, cancellationToken);
             if (!result.ok)
-                return JsonSerializer.Serialize(result);
+                return JsonSerializer.Serialize(new { ok = false, error = result.error });
             lastMessageId = result.messageId;
+            if (result.fallback) usedFallback = true;
         }
+
+        if (usedFallback)
+            return JsonSerializer.Serialize(new { ok = true, message_id = lastMessageId, fallback = true });
 
         return JsonSerializer.Serialize(new { ok = true, message_id = lastMessageId });
     }

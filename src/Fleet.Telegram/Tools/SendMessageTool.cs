@@ -16,7 +16,7 @@ public sealed class SendMessageTool(BotClientFactory factory, ILogger<SendMessag
     [McpServerTool(Name = "send_message")]
     [Description("Post a text message to a Telegram chat. Returns {\"ok\":true,\"message_id\":N} on success, {\"ok\":true,\"message_id\":N,\"fallback\":true} when the notifier bot was used as fallback, or {\"ok\":false,\"error\":\"...\"} on failure.")]
     public async Task<string> SendAsync(
-        [Description("Telegram chat ID (e.g. -202223699 for a group, or a positive integer for a DM)")] long chat_id,
+        [Description("Telegram chat ID (e.g. -1001234567890 for a group, or a positive integer for a DM)")] long chat_id,
         [Description("Message text (max 4096 chars per Telegram limit; longer text is split into multiple messages)")] string text,
         [Description("Agent name to send from (uses that agent's dedicated bot token; falls back to notifier bot if unknown)")] string agent_name = "",
         [Description("Parse mode for message formatting: HTML, Markdown, or MarkdownV2. Omit for plain text.")] string parse_mode = "",

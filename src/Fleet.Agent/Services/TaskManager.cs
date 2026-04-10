@@ -446,7 +446,8 @@ public sealed class TaskManager
                         significantUpdates++;
                         toolCalls.Add((ShortenToolName(progress.ToolName), TruncateArgs(progress.ToolArgs ?? "{}", _agentConfig.ToolArgsTruncateLength)));
                         // Suppress progress messages for check-ins — they may end up IDLE
-                        if (source != TaskSource.CheckIn && significantUpdates % 5 == 1)
+                        // Also suppress when SuppressToolMessages is configured (e.g. for non-technical users)
+                        if (!_agentConfig.SuppressToolMessages && source != TaskSource.CheckIn && significantUpdates % 5 == 1)
                         {
                             var summaryText = progress.Summary;
                             if (progress.Summary.StartsWith("Using") && progress.ToolArgs is { } rawArgs)

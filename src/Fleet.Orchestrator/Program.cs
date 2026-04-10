@@ -189,6 +189,7 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         agent.ShortName,
         agent.ShowStats,
         agent.PrefixMessages,
+        agent.SuppressToolMessages,
         agent.TelegramSendOnly,
         agent.TtsServiceUrl,
         agent.Effort,
@@ -258,6 +259,7 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     if (body.ShortName is not null) agent.ShortName = body.ShortName;
     if (body.ShowStats is not null) agent.ShowStats = body.ShowStats.Value;
     if (body.PrefixMessages is not null) agent.PrefixMessages = body.PrefixMessages.Value;
+    if (body.SuppressToolMessages is not null) agent.SuppressToolMessages = body.SuppressToolMessages.Value;
     if (body.TelegramSendOnly is not null) agent.TelegramSendOnly = body.TelegramSendOnly.Value;
     if (body.TtsServiceUrl is not null) agent.TtsServiceUrl = body.TtsServiceUrl == "" ? null : body.TtsServiceUrl;
     if (body.Effort is not null) agent.Effort = body.Effort == "" ? null : body.Effort;
@@ -1014,6 +1016,7 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         ShortName                 = body.ShortName                 ?? "",
         ShowStats                 = body.ShowStats                 ?? true,
         PrefixMessages            = body.PrefixMessages            ?? false,
+        SuppressToolMessages      = body.SuppressToolMessages      ?? false,
         TelegramSendOnly          = body.TelegramSendOnly          ?? false,
         TtsServiceUrl             = string.IsNullOrEmpty(body.TtsServiceUrl) ? null : body.TtsServiceUrl,
         Effort                    = string.IsNullOrEmpty(body.Effort) ? null : body.Effort,
@@ -1876,6 +1879,7 @@ record AgentConfigUpdateRequest(
     string? ShortName,
     bool? ShowStats,
     bool? PrefixMessages,
+    bool? SuppressToolMessages,
     bool? TelegramSendOnly,
     string? TtsServiceUrl,
     string? Effort,
@@ -1934,6 +1938,7 @@ record CreateAgentRequest(
     string? ShortName,
     bool? ShowStats,
     bool? PrefixMessages,
+    bool? SuppressToolMessages,
     bool? TelegramSendOnly,
     string? TtsServiceUrl,
     string? Effort,

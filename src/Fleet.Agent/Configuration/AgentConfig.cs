@@ -19,6 +19,11 @@ public sealed class AgentOptions
     public string ShortName { get; set; } = "";
     public bool ShowStats { get; set; } = true;
     public bool PrefixMessages { get; set; } = false;
+    /// <summary>
+    /// When true, intermediate tool-use progress messages are not sent to Telegram.
+    /// Only the final assistant text response is posted. Default: false (preserves existing behavior).
+    /// </summary>
+    public bool SuppressToolMessages { get; set; } = false;
     public string? Effort { get; set; }
     public string? JsonSchema { get; set; }
     public string? AgentsJson { get; set; }

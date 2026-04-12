@@ -70,4 +70,44 @@ if [ -n "${MINIO_ACCESS_KEY:-}" ] && [ -n "${MINIO_SECRET_KEY:-}" ]; then
     mc alias set fleet "http://fleet-minio:9000" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" --api S3v4 > /dev/null 2>&1 || true
 fi
 
+# Wait for infrastructure dependencies before starting the agent.
+# Prevents crash-restart cycles on macstudio reboot when RabbitMQ/orchestrator
+# aren't ready yet. RabbitMqConnectionHelper retries internally too, but waiting
+# here avoids noisy crash loops before dotnet even starts.
+
+wait_for_tcp() {
+    local host=$1 port=$2 label=$3 deadline=$4
+    local delay=2
+    echo "Waiting for $label ($host:$port)..."
+    while ! (echo > /dev/tcp/$host/$port) 2>/dev/null; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "ERROR: Timed out waiting for $label after 2 minutes" >&2
+            exit 1
+        fi
+        sleep "$delay"
+        delay=$(( delay < 30 ? delay * 2 : 30 ))
+    done
+    echo "$label is ready."
+}
+
+wait_for_http() {
+    local url=$1 label=$2 deadline=$3
+    local delay=2
+    echo "Waiting for $label ($url)..."
+    while ! curl -sf "$url" > /dev/null 2>&1; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "ERROR: Timed out waiting for $label after 2 minutes" >&2
+            exit 1
+        fi
+        sleep "$delay"
+        delay=$(( delay < 30 ? delay * 2 : 30 ))
+    done
+    echo "$label is ready."
+}
+
+DEADLINE=$(( $(date +%s) + 120 ))
+
+wait_for_tcp  "rabbitmq"        5672 "RabbitMQ"    "$DEADLINE"
+wait_for_http "http://fleet-orchestrator:3600/health" "Orchestrator" "$DEADLINE"
+
 exec dotnet Fleet.Agent.dll

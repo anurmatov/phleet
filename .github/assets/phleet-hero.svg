@@ -1,49 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 360">
-  <defs>
-    <radialGradient id="g1">
-      <stop offset="0%" stop-color="#e8a035" stop-opacity="0.3"/>
-      <stop offset="100%" stop-color="#e8a035" stop-opacity="0"/>
-    </radialGradient>
-    <radialGradient id="g2">
-      <stop offset="0%" stop-color="#4dd8c0" stop-opacity="0.3"/>
-      <stop offset="100%" stop-color="#4dd8c0" stop-opacity="0"/>
-    </radialGradient>
-    <radialGradient id="g3">
-      <stop offset="0%" stop-color="#8090a8" stop-opacity="0.3"/>
-      <stop offset="100%" stop-color="#8090a8" stop-opacity="0"/>
-    </radialGradient>
-  </defs>
-
-  <rect width="720" height="360" fill="#fff"/>
-
   <!-- Triangle edges -->
-  <polygon points="360,60 220,295 500,295" fill="none" stroke="#ddd" stroke-width="1"/>
+  <line x1="360" y1="70" x2="225" y2="290" stroke="#ccc" stroke-width="1"/>
+  <line x1="225" y1="290" x2="495" y2="290" stroke="#ccc" stroke-width="1"/>
+  <line x1="495" y1="290" x2="360" y2="70" stroke="#ccc" stroke-width="1"/>
 
-  <!-- Inner lines from midpoints to center -->
-  <line x1="290" y1="178" x2="360" y2="217" stroke="#e8e8e8" stroke-width="0.75"/>
-  <line x1="430" y1="178" x2="360" y2="217" stroke="#e8e8e8" stroke-width="0.75"/>
-  <line x1="360" y1="295" x2="360" y2="217" stroke="#e8e8e8" stroke-width="0.75"/>
-
-  <!-- Glow halos -->
-  <circle cx="360" cy="60" r="48" fill="url(#g1)"/>
-  <circle cx="220" cy="295" r="48" fill="url(#g2)"/>
-  <circle cx="500" cy="295" r="48" fill="url(#g3)"/>
-
-  <!-- Outer rings -->
-  <circle cx="360" cy="60" r="13" fill="none" stroke="#e8a035" stroke-opacity="0.25" stroke-width="1"/>
-  <circle cx="220" cy="295" r="13" fill="none" stroke="#4dd8c0" stroke-opacity="0.25" stroke-width="1"/>
-  <circle cx="500" cy="295" r="13" fill="none" stroke="#8090a8" stroke-opacity="0.25" stroke-width="1"/>
-
-  <!-- Core nodes -->
-  <circle cx="360" cy="60" r="6" fill="#e8a035"/>
-  <circle cx="220" cy="295" r="6" fill="#4dd8c0"/>
-  <circle cx="500" cy="295" r="6" fill="#8090a8"/>
-
-  <!-- Edge midpoint junctions -->
-  <circle cx="290" cy="178" r="2.5" fill="#ccc"/>
-  <circle cx="430" cy="178" r="2.5" fill="#ccc"/>
-  <circle cx="360" cy="295" r="3" fill="none" stroke="#ccc" stroke-width="1"/>
-
-  <!-- Center junction -->
-  <circle cx="360" cy="217" r="2" fill="#ccc"/>
+  <!-- Nodes -->
+  <circle cx="360" cy="70" r="6" fill="#e8a035"/>
+  <circle cx="225" cy="290" r="6" fill="#4dd8c0"/>
+  <circle cx="495" cy="290" r="6" fill="#8090a8"/>
 </svg>

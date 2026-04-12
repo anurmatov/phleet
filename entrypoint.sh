@@ -79,7 +79,7 @@ wait_for_tcp() {
     local host=$1 port=$2 label=$3 deadline=$4
     local delay=2
     echo "Waiting for $label ($host:$port)..."
-    while ! nc -z "$host" "$port" 2>/dev/null; do
+    while ! (echo > /dev/tcp/$host/$port) 2>/dev/null; do
         if [ "$(date +%s)" -ge "$deadline" ]; then
             echo "ERROR: Timed out waiting for $label after 2 minutes" >&2
             exit 1

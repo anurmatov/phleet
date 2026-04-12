@@ -1,7 +1,7 @@
 # Phleet — Autonomous Multi-Agent Platform
 
 <p align="center">
-  <img src=".github/assets/phleet-hero.jpg" alt="Phleet" width="720">
+  <img src=".github/assets/phleet-hero.svg" alt="Phleet" width="720">
 </p>
 
 Phleet is an open-source multi-agent AI platform built on .NET 10. Each agent runs as a Docker container, receives tasks via Telegram or RabbitMQ, and executes them using a persistent AI process (Claude or Codex). Agents are coordinated by a central orchestrator backed by Temporal workflows.

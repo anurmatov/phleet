@@ -16,12 +16,18 @@ public sealed class SendMessageTool(BotClientFactory factory, ILogger<SendMessag
     [McpServerTool(Name = "send_message")]
     [Description("Post a text message to a Telegram chat. Returns {\"ok\":true,\"message_id\":N} on success, {\"ok\":true,\"message_id\":N,\"fallback\":true} when the notifier bot was used as fallback, or {\"ok\":false,\"error\":\"...\"} on failure.")]
     public async Task<string> SendAsync(
-        [Description("Telegram chat ID (e.g. -1001234567890 for a group, or a positive integer for a DM)")] long chat_id,
+        [Description("Telegram chat ID as integer or string (e.g. -1001234567890 or \"-1001234567890\" for a group, positive integer for a DM)")] string chat_id,
         [Description("Message text (max 4096 chars per Telegram limit; longer text is split into multiple messages)")] string text,
         [Description("Agent name to send from (uses that agent's dedicated bot token; falls back to notifier bot if unknown)")] string agent_name = "",
         [Description("Parse mode for message formatting: HTML, Markdown, or MarkdownV2. Omit for plain text.")] string parse_mode = "",
         CancellationToken cancellationToken = default)
     {
+        // Accept chat_id as string or integer — LLM agents often serialize numeric IDs as strings
+        if (!long.TryParse(chat_id?.Trim(), out var chatIdLong))
+            return JsonSerializer.Serialize(new { ok = false, error = $"Invalid chat_id '{chat_id}' — must be a numeric value" });
+        if (chat_id != null && (chat_id.StartsWith('"') || chat_id.EndsWith('"')))
+            logger.LogWarning("chat_id was passed as a quoted string '{ChatId}' — coerced to long {Parsed}", chat_id, chatIdLong);
+
         var client = factory.GetClient(agent_name);
         if (client is null)
         {
@@ -41,14 +47,14 @@ public sealed class SendMessageTool(BotClientFactory factory, ILogger<SendMessag
         // Split text into chunks if it exceeds the Telegram limit
         var chunks = SplitText(text);
         if (chunks.Count > 1)
-            logger.LogWarning("Message to chat {ChatId} was split into {Count} chunks (exceeded {Limit} chars)", chat_id, chunks.Count, TelegramMaxLength);
+            logger.LogWarning("Message to chat {ChatId} was split into {Count} chunks (exceeded {Limit} chars)", chatIdLong, chunks.Count, TelegramMaxLength);
 
         int lastMessageId = 0;
         bool usedFallback = false;
 
         foreach (var chunk in chunks)
         {
-            var result = await TrySendAsync(client, chat_id, chunk, pm, agent_name, cancellationToken);
+            var result = await TrySendAsync(client, chatIdLong, chunk, pm, agent_name, cancellationToken);
             if (!result.ok)
                 return JsonSerializer.Serialize(new { ok = false, error = result.error });
             lastMessageId = result.messageId;

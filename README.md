@@ -114,7 +114,7 @@ The example (`seed.example.json` at the repo root) ships with no agents by defau
 Key fields per agent:
 - `name` — unique identifier
 - `role` — maps to `src/Fleet.Orchestrator/roles/{role}/system.md` (seeded into the `instructions` table on first boot)
-- `model` — e.g. `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5`
+- `model` — e.g. `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`
 - `shortName` — displayed in group messages when `prefixMessages` is on
 - `tools` — whitelist of tool names the agent may call (built-ins + MCP tool IDs)
 - `mcpEndpoints` — MCP servers the agent can reach (`fleet-memory`, `fleet-temporal`, etc.)

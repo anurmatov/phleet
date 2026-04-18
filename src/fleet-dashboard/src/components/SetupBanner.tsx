@@ -645,13 +645,38 @@ export default function SetupBanner({ status, agentCount, onConnected, onNewAgen
             <div className="setup-card-body" style={{ width: '100%' }}>
               <div className="setup-card-title">Provision your first agent</div>
               <div className="setup-card-desc">Pick a role to get started — fields are pre-filled, just choose a name.</div>
+
+              {/* Telegram hard prereq banner */}
+              {!telegramOk && (
+                <div className="setup-prereq-banner setup-prereq-banner--amber">
+                  <span>⚠&nbsp; Connect Telegram first to provision agents — agents need Telegram to receive commands.</span>
+                  <button
+                    className="setup-prereq-link"
+                    onClick={() => setTelegramOpen(true)}
+                  >Configure Telegram</button>
+                </div>
+              )}
+
+              {/* GitHub soft warning */}
+              {telegramOk && !githubOk && (
+                <div className="setup-prereq-banner setup-prereq-banner--muted">
+                  <span>GitHub not configured — agents will chat but can't touch repos until the App is added.</span>
+                  <button
+                    className="setup-prereq-link"
+                    onClick={() => setGithubOpen(true)}
+                  >Configure GitHub</button>
+                </div>
+              )}
+
               {templates.length > 0 && (
                 <div className="template-card-grid">
                   {templates.map(t => (
                     <button
                       key={t.name}
-                      className="template-card"
-                      onClick={() => onNewAgentFromTemplate(t.name)}
+                      className={`template-card${!telegramOk ? ' template-card--disabled' : ''}`}
+                      onClick={() => telegramOk && onNewAgentFromTemplate(t.name)}
+                      disabled={!telegramOk}
+                      style={!telegramOk ? { opacity: 0.45, cursor: 'not-allowed' } : undefined}
                     >
                       <div className="template-card-name">{t.displayName}</div>
                       <div className="template-card-desc">{t.description}</div>

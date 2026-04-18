@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { CreateForm, InstructionSummary } from '../types'
 import { PROVIDER_DEFAULT_MODEL } from '../constants'
 import ModelSelector from './ModelSelector'
@@ -33,6 +34,8 @@ export default function CreateAgentModal({
   onSubmit,
   onClose,
 }: CreateAgentModalProps) {
+  const [shortNameTouched, setShortNameTouched] = useState(false)
+
   return (
     <div className="config-modal-overlay" onClick={onClose}>
       <div className="config-modal create-agent-modal" onClick={e => e.stopPropagation()}>
@@ -66,7 +69,25 @@ export default function CreateAgentModal({
           <div className="config-row">
             <label className="config-label">Name <span style={{ color: 'var(--red)' }}>*</span></label>
             <FieldHint>Unique identifier used as the container name prefix and DB key. Lowercase, no spaces (e.g. <code>anew</code>).</FieldHint>
-            <input className="config-input" value={createForm.name} onChange={e => onFormChange({ name: e.target.value })} placeholder="e.g. anew" />
+            <input
+              className="config-input"
+              value={createForm.name}
+              onChange={e => {
+                const val = e.target.value
+                onFormChange(shortNameTouched ? { name: val } : { name: val, shortName: val })
+              }}
+              placeholder="e.g. anew"
+            />
+          </div>
+          <div className="config-row">
+            <label className="config-label">Short name</label>
+            <FieldHint>Used for heartbeat routing and Telegram commands. Defaults to Name — only set this if you need a different routing key.</FieldHint>
+            <input
+              className="config-input"
+              value={createForm.shortName}
+              onChange={e => { setShortNameTouched(true); onFormChange({ shortName: e.target.value }) }}
+              placeholder="auto-filled from name"
+            />
           </div>
           <div className="config-row">
             <label className="config-label">Display Name</label>

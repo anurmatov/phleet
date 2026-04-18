@@ -257,7 +257,7 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     if (body.ProactiveIntervalMinutes is not null) agent.ProactiveIntervalMinutes = body.ProactiveIntervalMinutes.Value;
     if (body.GroupListenMode is not null) agent.GroupListenMode = body.GroupListenMode;
     if (body.GroupDebounceSeconds is not null) agent.GroupDebounceSeconds = body.GroupDebounceSeconds.Value;
-    if (body.ShortName is not null) agent.ShortName = body.ShortName;
+    if (body.ShortName is not null) agent.ShortName = string.IsNullOrWhiteSpace(body.ShortName) ? agent.Name : body.ShortName.Trim();
     if (body.ShowStats is not null) agent.ShowStats = body.ShowStats.Value;
     if (body.PrefixMessages is not null) agent.PrefixMessages = body.PrefixMessages.Value;
     if (body.SuppressToolMessages is not null) agent.SuppressToolMessages = body.SuppressToolMessages.Value;
@@ -975,7 +975,7 @@ app.MapPost("/api/agents/reprovision-running", async (HttpRequest request, Conta
 });
 
 // REST: create a new agent (insert into DB + provision container)
-app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scopeFactory, ContainerProvisioningService provisioning, AgentRegistry registry) =>
+app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scopeFactory, ContainerProvisioningService provisioning, AgentRegistry registry, SetupService setupService) =>
 {
     using var scope = scopeFactory.CreateScope();
     var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
@@ -989,6 +989,15 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         return Results.BadRequest(new { error = "model is required" });
     if (string.IsNullOrWhiteSpace(body.Role))
         return Results.BadRequest(new { error = "role is required" });
+
+    // Telegram is a hard prerequisite — agents without a valid bot token are headless.
+    var setupStatus = setupService.GetStatus();
+    if (!setupStatus.Telegram.Configured)
+        return Results.Conflict(new
+        {
+            error = "telegram_not_configured",
+            message = "Cannot provision agent: Telegram bot token is not configured. Configure Telegram first using the setup banner."
+        });
 
     var name = body.Name.Trim().ToLowerInvariant();
 
@@ -1014,7 +1023,7 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         ProactiveIntervalMinutes  = body.ProactiveIntervalMinutes  ?? 0,
         GroupListenMode           = body.GroupListenMode           ?? "mention",
         GroupDebounceSeconds      = body.GroupDebounceSeconds      ?? 15,
-        ShortName                 = body.ShortName                 ?? "",
+        ShortName                 = string.IsNullOrWhiteSpace(body.ShortName) ? name : body.ShortName.Trim(),
         ShowStats                 = body.ShowStats                 ?? true,
         PrefixMessages            = body.PrefixMessages            ?? false,
         SuppressToolMessages      = body.SuppressToolMessages      ?? false,

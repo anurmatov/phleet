@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { apiFetch } from '../utils'
+import type { AgentTemplateSummary } from '../types'
 
 // Matches the nested shape returned by SetupStatusDto
 interface SetupStatus {
@@ -11,6 +12,7 @@ interface SetupBannerProps {
   status: SetupStatus | null
   agentCount: number
   onConnected: () => void
+  onNewAgentFromTemplate: (templateName: string) => void
 }
 
 let _toastId = 0
@@ -541,10 +543,18 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
 
 // ── Banner ────────────────────────────────────────────────────────────────────
 
-export default function SetupBanner({ status, agentCount, onConnected }: SetupBannerProps) {
+export default function SetupBanner({ status, agentCount, onConnected, onNewAgentFromTemplate }: SetupBannerProps) {
   const [telegramOpen, setTelegramOpen] = useState(false)
   const [githubOpen, setGithubOpen] = useState(false)
   const [toasts, setToasts] = useState<Array<{ id: number; text: string }>>([])
+  const [templates, setTemplates] = useState<AgentTemplateSummary[]>([])
+
+  useEffect(() => {
+    apiFetch('/api/agent-templates')
+      .then(r => r.ok ? r.json() : [])
+      .then(data => setTemplates(Array.isArray(data) ? data : []))
+      .catch(() => {})
+  }, [])
 
   if (!status) return null
 
@@ -629,13 +639,30 @@ export default function SetupBanner({ status, agentCount, onConnected }: SetupBa
           </div>
         )}
 
-        {/* First agent nudge */}
+        {/* First agent nudge + template grid */}
         {agentCount === 0 && (
-          <div className="setup-card setup-card--info">
-            <div className="setup-card-icon">+</div>
-            <div className="setup-card-body">
+          <div className="setup-card setup-card--info setup-card--templates">
+            <div className="setup-card-body" style={{ width: '100%' }}>
               <div className="setup-card-title">Provision your first agent</div>
-              <div className="setup-card-desc">Use the "New agent" button above to create and start your first agent container.</div>
+              <div className="setup-card-desc">Pick a role to get started — fields are pre-filled, just choose a name.</div>
+              {templates.length > 0 && (
+                <div className="template-card-grid">
+                  {templates.map(t => (
+                    <button
+                      key={t.name}
+                      className="template-card"
+                      onClick={() => onNewAgentFromTemplate(t.name)}
+                    >
+                      <div className="template-card-name">{t.displayName}</div>
+                      <div className="template-card-desc">{t.description}</div>
+                      <div className="template-card-meta">
+                        <span className="template-card-model">{t.defaultModel.replace('claude-', '').replace('-4-6', '')}</span>
+                        <span className="template-card-counts">{t.toolCount} tools · {t.mcpCount} MCPs</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         )}

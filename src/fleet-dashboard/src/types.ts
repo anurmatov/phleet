@@ -216,6 +216,15 @@ export interface ConfigEdits {
   instructions: { name: string; loadOrder: number }[]
 }
 
+export interface AgentTemplateSummary {
+  name: string
+  displayName: string
+  description: string
+  defaultModel: string
+  toolCount: number
+  mcpCount: number
+}
+
 export interface InstructionSummary {
   name: string
   currentVersion: number

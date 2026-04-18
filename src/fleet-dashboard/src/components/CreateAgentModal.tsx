@@ -12,6 +12,7 @@ interface CreateAgentModalProps {
   copyFrom: string
   copyFromLoading: boolean
   allInstructions: InstructionSummary[]
+  templateName?: string
   onCopyFrom: (name: string) => void
   onFormChange: (patch: Partial<CreateForm>) => void
   onSubmit: () => void
@@ -26,6 +27,7 @@ export default function CreateAgentModal({
   copyFrom,
   copyFromLoading,
   allInstructions,
+  templateName,
   onCopyFrom,
   onFormChange,
   onSubmit,
@@ -39,6 +41,11 @@ export default function CreateAgentModal({
           <button className="config-modal-close" onClick={onClose}>✕ close</button>
         </div>
         <div className="config-modal-body">
+          {templateName && (
+            <p className="create-agent-template-note">
+              Based on <strong>{templateName}</strong> template — customize as needed.
+            </p>
+          )}
           <div className="config-row">
             <label className="config-label">Copy from existing agent</label>
             <FieldHint>Pre-fills all fields from an existing agent's config — tools, projects, MCP endpoints, networks, and Telegram config are all copied.</FieldHint>

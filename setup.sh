@@ -110,6 +110,22 @@ is_placeholder() {
   return 1
 }
 
+# Returns 0 (true) if a Telegram bot token value is real (not a placeholder)
+is_configured_telegram() {
+  local tok="$1"
+  is_placeholder "$tok" && return 1
+  [[ "$tok" =~ ^[0-9]+:[A-Za-z0-9_-]{35,}$ ]] || return 1
+  return 0
+}
+
+# Returns 0 (true) if both GitHub App credentials are real (not placeholders)
+is_configured_github() {
+  local id="$1" pem="$2"
+  is_placeholder "$id" && return 1
+  is_placeholder "$pem" && return 1
+  return 0
+}
+
 # Prompt for a config value if it's missing/placeholder; write to env file
 # Usage: prompt_field <file> <key> <label> <guidance> <required:y|n> <masked:y|n> [default]
 prompt_field() {
@@ -736,19 +752,19 @@ else
     read -rp "  Would you like to provision your Assistant (CTO) agent now? (y/n) [y]: " do_provision
     do_provision="${do_provision:-y}"
   else
-    # Default mode: only prompt if real tokens have been configured
+    # Default mode: asymmetric check — telegram is the hard dependency
     _tg_token=$(read_env_var "$ENV_FILE" "TELEGRAM_CTO_BOT_TOKEN")
     _gh_id=$(read_env_var "$ENV_FILE" "GITHUB_APP_ID")
     _gh_pem=$(read_env_var "$ENV_FILE" "GITHUB_APP_PEM")
-    _tokens_ready=true
-    is_placeholder "$_tg_token" && _tokens_ready=false
-    is_placeholder "$_gh_id" && _tokens_ready=false
-    is_placeholder "$_gh_pem" && _tokens_ready=false
-    [[ ! "$_tg_token" =~ ^[0-9]+:[A-Za-z0-9_-]{35,}$ ]] && _tokens_ready=false
 
-    if ! $_tokens_ready; then
-      echo "  Skipped agent provisioning (no tokens configured — finish setup in the dashboard)"
+    if ! is_configured_telegram "$_tg_token"; then
+      echo "  Skipped agent provisioning (Telegram not configured — finish setup in the dashboard)"
       do_provision="n"
+    elif ! is_configured_github "$_gh_id" "$_gh_pem"; then
+      echo -e "  ${YELLOW}⚠  GitHub not configured — the agent will chat but can't touch repos until you add the App in the dashboard.${NC}"
+      echo
+      read -rp "  Provision an agent now? [y/N] " do_provision
+      do_provision="${do_provision:-n}"
     else
       echo "  Stack is up. You can provision your first agent now, or do it later from"
       echo "  the dashboard at http://localhost:${FLEET_DASHBOARD_PORT:-3700}."

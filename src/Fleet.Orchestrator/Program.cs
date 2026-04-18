@@ -999,6 +999,15 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
             message = "Cannot provision agent: Telegram bot token is not configured. Configure Telegram first using the setup banner."
         });
 
+    // First agent must be a co-cto — specialists are provisioned by it on demand.
+    var agentCount = await db.Agents.CountAsync();
+    if (agentCount == 0 && !string.Equals(body.Role.Trim(), "co-cto", StringComparison.OrdinalIgnoreCase))
+        return Results.Conflict(new
+        {
+            error = "cto_required_first",
+            message = "Your first agent must be a co-cto."
+        });
+
     var name = body.Name.Trim().ToLowerInvariant();
 
     if (await db.Agents.AnyAsync(a => a.Name == name))

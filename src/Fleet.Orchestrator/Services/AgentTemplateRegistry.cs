@@ -45,12 +45,6 @@ public record AgentTemplateEntry(
 
 public static class AgentTemplateRegistry
 {
-    private static readonly IReadOnlyList<AgentTemplateMcpEntry> CoreMcps =
-    [
-        new("fleet-memory",    "http://fleet-memory:3100",           "http"),
-        new("fleet-telegram",  "http://fleet-telegram:3800",         "http"),
-    ];
-
     private static readonly IReadOnlyList<AgentTemplateMcpEntry> FullMcps =
     [
         new("fleet-memory",      "http://fleet-memory:3100",              "http"),
@@ -109,32 +103,6 @@ public static class AgentTemplateRegistry
         "mcp__fleet-telegram__send_message", "mcp__fleet-telegram__get_chat_info"
     );
 
-    private static readonly IReadOnlyList<AgentTemplateToolEntry> DevTools = T(
-        "Read", "Glob", "Grep", "Edit", "Write", "Bash", "WebFetch", "WebSearch",
-        "mcp__fleet-memory__memory_get", "mcp__fleet-memory__memory_list",
-        "mcp__fleet-memory__memory_search", "mcp__fleet-memory__memory_stats",
-        "mcp__fleet-temporal__request_memory_store",
-        "mcp__fleet-telegram__send_message", "mcp__fleet-telegram__get_chat_info"
-    );
-
-    private static readonly IReadOnlyList<AgentTemplateToolEntry> OpsTools = T(
-        "Read", "Glob", "Grep", "Bash", "WebFetch",
-        "mcp__fleet-memory__memory_get", "mcp__fleet-memory__memory_list",
-        "mcp__fleet-memory__memory_search", "mcp__fleet-memory__memory_stats",
-        "mcp__fleet-temporal__request_memory_store",
-        "mcp__fleet-telegram__send_message", "mcp__fleet-telegram__get_chat_info"
-    );
-
-    private static readonly IReadOnlyList<AgentTemplateToolEntry> PmTools = T(
-        "Read", "Glob", "Grep", "WebFetch", "WebSearch",
-        "mcp__fleet-memory__memory_get", "mcp__fleet-memory__memory_list",
-        "mcp__fleet-memory__memory_search", "mcp__fleet-memory__memory_stats",
-        "mcp__fleet-temporal__request_memory_store",
-        "mcp__fleet-playwright__browser_navigate", "mcp__fleet-playwright__browser_snapshot",
-        "mcp__fleet-playwright__browser_take_screenshot",
-        "mcp__fleet-telegram__send_message", "mcp__fleet-telegram__get_chat_info"
-    );
-
     private static readonly IReadOnlyList<string> CoreEnvRefs =
         ["TELEGRAM_CTO_BOT_TOKEN", "GITHUB_APP_ID", "GITHUB_APP_PEM"];
 
@@ -169,90 +137,6 @@ public static class AgentTemplateRegistry
                 EnvRefs: CoreEnvRefs,
                 Instructions: [new("base", 1), new("co-cto", 2)])),
 
-        ["dev"] = new AgentTemplateEntry(
-            Name: "dev",
-            DisplayName: "Developer Agent",
-            Description: "Implements features, fixes bugs, writes tests, opens PRs",
-            Config: new AgentTemplateConfig(
-                Model: "claude-sonnet-4-6",
-                Role: "developer",
-                Provider: "claude",
-                MemoryLimitMb: 2048,
-                PermissionMode: "acceptEdits",
-                MaxTurns: 50,
-                WorkDir: "/workspace",
-                ProactiveIntervalMinutes: 0,
-                GroupListenMode: "mention",
-                GroupDebounceSeconds: 15,
-                ShowStats: false,
-                PrefixMessages: false,
-                SuppressToolMessages: false,
-                TelegramSendOnly: false,
-                AutoMemoryEnabled: true,
-                Tools: DevTools,
-                Projects: [],
-                McpEndpoints: CoreMcps,
-                Networks: CoreNetworks,
-                EnvRefs: CoreEnvRefs,
-                Instructions: [new("base", 1)])),
-
-        ["ops"] = new AgentTemplateEntry(
-            Name: "ops",
-            DisplayName: "Ops Agent",
-            Description: "Monitors infra, deploys services, manages servers and CI/CD",
-            Config: new AgentTemplateConfig(
-                Model: "claude-sonnet-4-6",
-                Role: "devops",
-                Provider: "claude",
-                MemoryLimitMb: 2048,
-                PermissionMode: "acceptEdits",
-                MaxTurns: 50,
-                WorkDir: "/workspace",
-                ProactiveIntervalMinutes: 0,
-                GroupListenMode: "mention",
-                GroupDebounceSeconds: 15,
-                ShowStats: false,
-                PrefixMessages: false,
-                SuppressToolMessages: false,
-                TelegramSendOnly: false,
-                AutoMemoryEnabled: true,
-                Tools: OpsTools,
-                Projects: [],
-                McpEndpoints: CoreMcps,
-                Networks: CoreNetworks,
-                EnvRefs: CoreEnvRefs,
-                Instructions: [new("base", 1)])),
-
-        ["pm"] = new AgentTemplateEntry(
-            Name: "pm",
-            DisplayName: "PM Agent",
-            Description: "Product management — specs, issue creation, user research, and stakeholder comms",
-            Config: new AgentTemplateConfig(
-                Model: "claude-sonnet-4-6",
-                Role: "product-manager",
-                Provider: "claude",
-                MemoryLimitMb: 2048,
-                PermissionMode: "acceptEdits",
-                MaxTurns: 50,
-                WorkDir: "/workspace",
-                ProactiveIntervalMinutes: 0,
-                GroupListenMode: "mention",
-                GroupDebounceSeconds: 15,
-                ShowStats: false,
-                PrefixMessages: false,
-                SuppressToolMessages: false,
-                TelegramSendOnly: false,
-                AutoMemoryEnabled: true,
-                Tools: PmTools,
-                Projects: [],
-                McpEndpoints: [
-                    new("fleet-memory",     "http://fleet-memory:3100",           "http"),
-                    new("fleet-playwright", "http://fleet-playwright:3200/mcp",   "http"),
-                    new("fleet-telegram",   "http://fleet-telegram:3800",         "http"),
-                ],
-                Networks: CoreNetworks,
-                EnvRefs: CoreEnvRefs,
-                Instructions: [new("base", 1)])),
     };
 
     public static IReadOnlyList<AgentTemplateSummary> GetAll() =>

@@ -644,7 +644,7 @@ export default function SetupBanner({ status, agentCount, onConnected, onNewAgen
           <div className="setup-card setup-card--info setup-card--templates">
             <div className="setup-card-body" style={{ width: '100%' }}>
               <div className="setup-card-title">Provision your first agent</div>
-              <div className="setup-card-desc">Pick a role to get started — fields are pre-filled, just choose a name.</div>
+              <div className="setup-card-desc">Start with a co-cto — your strategic AI partner. It can provision specialists (dev, ops, pm, etc.) on demand.</div>
 
               {/* Telegram hard prereq banner */}
               {!telegramOk && (

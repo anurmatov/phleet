@@ -364,17 +364,17 @@ prompt_field "$ENV_FILE" "FLEET_CTO_AGENT" "CTO agent short name" \
 
 # Optional Telegram group chat ID for group conversation visibility.
 prompt_field "$ENV_FILE" "FLEET_GROUP_CHAT_ID" "Fleet Telegram group chat ID" \
-  "Create a Telegram group, add every fleet bot (notifier + CTO) as members, then forward any message from the group to @userinfobot — it replies with the group's negative integer ID. Agents use this group to post status updates, workflow notifications, and cross-agent coordination messages. Leave 0 to disable group routing (bots only respond to DMs)." \
+  "Optional. Create a Telegram group, add both bots as members, then forward any message from the group to https://t.me/userinfobot — it replies with the negative integer group ID. Agents use this group for status updates and cross-agent coordination. Leave 0 to skip groups." \
   "n" "n" "0"
 
 prompt_field "$ENV_FILE" "TELEGRAM_NOTIFIER_BOT_TOKEN" "Telegram notifier bot token" \
-  "BotFather → /newbot. Shared bot used by fleet-bridge and worker agents (developer etc.) for DMs and group-chat relay." "y" "y"
+  "Create a bot at https://t.me/BotFather (send /newbot). This bot sends messages from every non-CTO agent and the fleet bridge." "y" "y"
 
 prompt_field "$ENV_FILE" "TELEGRAM_CTO_BOT_TOKEN" "Telegram CTO bot token" \
-  "BotFather → /newbot. Dedicated DM bot for the CTO agent you'll create in step 7. Can reuse TELEGRAM_NOTIFIER_BOT_TOKEN if you only want one bot." "y" "y"
+  "Same flow, second bot: https://t.me/BotFather → /newbot. This is the bot you DM your CTO agent through." "y" "y"
 
 prompt_field "$ENV_FILE" "GITHUB_APP_ID" "GitHub App ID" \
-  "github.com/settings/apps → your app → App ID" "y" "n"
+  "Create a GitHub App at https://github.com/settings/apps/new. The App ID is shown on the app's settings page after creation." "y" "n"
 
 # GITHUB_APP_PEM needs special handling — pasting a ~1700-char base64 blob into
 # a masked `read -s` prompt is unreliable (terminal truncation, bracketed-paste).
@@ -385,7 +385,7 @@ if is_placeholder "$current_pem"; then
   if $DRY_RUN; then
     echo -e "  ${YELLOW}[dry-run]${NC} Would prompt for GITHUB_APP_PEM (file path)"
   else
-    echo -e "  ${YELLOW}→${NC} Path to your GitHub App private key (.pem file downloaded from github.com/settings/apps → your app)."
+    echo -e "  ${YELLOW}→${NC} On your GitHub App settings page (https://github.com/settings/apps): 'Private keys' → 'Generate a private key' → downloads a .pem. Paste the file path here."
     while true; do
       read -rp "  GitHub App private key file path: " pem_path
       # expand leading ~ to $HOME
@@ -710,8 +710,9 @@ else
       read -rp "  Memory limit MB [4096]: "          memory_mb;    memory_mb="${memory_mb:-4096}"
 
       tg_user_id=""
+      echo -e "  ${YELLOW}→${NC} DM https://t.me/userinfobot — it replies with your user ID as soon as you send any message. This whitelists you as the only Telegram user allowed to talk to your agent."
       while true; do
-        read -rp "  Your Telegram user ID (integer — get from @userinfobot): " tg_user_id
+        read -rp "  Your Telegram user ID (integer): " tg_user_id
         [[ "$tg_user_id" =~ ^[0-9]+$ ]] && break
         fail "  Must be a positive integer."
       done

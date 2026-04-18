@@ -313,6 +313,50 @@ public sealed class SetupService
         }
     }
 
+    // ── CTO agent ─────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Writes FLEET_CTO_AGENT to .env and restarts fleet-bridge + fleet-temporal-bridge.
+    /// Called once when the first co-cto agent is created via the dashboard.
+    /// </summary>
+    public async Task<(List<string> Restarted, Dictionary<string, string> Errors)>
+        WriteCtoAgentAsync(string agentName, CancellationToken ct)
+    {
+        if (!await _lock.WaitAsync(TimeSpan.FromSeconds(30), ct))
+            return ([], new Dictionary<string, string> { ["_lock"] = "Another setup operation is in progress" });
+
+        try
+        {
+            await AtomicWriteEnvAsync(new Dictionary<string, string>
+            {
+                ["FLEET_CTO_AGENT"] = agentName
+            });
+
+            var restarted = new List<string>();
+            var errors = new Dictionary<string, string>();
+
+            foreach (var container in new[] { "fleet-bridge", "fleet-temporal-bridge" })
+            {
+                try
+                {
+                    await InfraContainerRecreateAsync(container, ct);
+                    restarted.Add(container);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Could not restart {Container} after writing FLEET_CTO_AGENT", container);
+                    errors[container] = ex.Message;
+                }
+            }
+
+            return (restarted, errors);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     // ── Internals ─────────────────────────────────────────────────────────────
 
     private async Task AtomicWriteEnvAsync(Dictionary<string, string> updates)

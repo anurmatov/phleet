@@ -1088,6 +1088,18 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
     // and list_agents even before provisioning or first heartbeat.
     registry.PreloadFromDbConfig(agent);
 
+    // Bug fix: when the first co-cto agent is created, write FLEET_CTO_AGENT to .env
+    // and restart fleet-bridge + fleet-temporal-bridge so they route to the correct agent.
+    // Only fires when no prior co-cto existed (agentCount == 0 ensures this is the first agent overall).
+    string? ctoEnvMsg = null;
+    if (string.Equals(agent.Role, "co-cto", StringComparison.OrdinalIgnoreCase)
+        && !await db.Agents.AnyAsync(a => a.Role == "co-cto" && a.Id != agent.Id))
+    {
+        var (restarted, restartErrors) = await setupService.WriteCtoAgentAsync(name, ct);
+        if (restartErrors.Count > 0)
+            ctoEnvMsg = $"FLEET_CTO_AGENT set but some restarts failed: {string.Join(", ", restartErrors.Keys)}";
+    }
+
     if (body.Provision != false)
     {
         var result = await provisioning.ProvisionAsync(name);
@@ -1096,10 +1108,16 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
                 new { message = $"Agent '{name}' created in DB but provisioning failed: {result.Message}", agentName = name },
                 statusCode: 207);
 
-        return Results.Created($"/api/agents/{name}", new { message = $"Agent '{name}' created and provisioned", agentName = name });
+        var provisionedMsg = ctoEnvMsg is not null
+            ? $"Agent '{name}' created and provisioned. {ctoEnvMsg}"
+            : $"Agent '{name}' created and provisioned";
+        return Results.Created($"/api/agents/{name}", new { message = provisionedMsg, agentName = name });
     }
 
-    return Results.Created($"/api/agents/{name}", new { message = $"Agent '{name}' created (not provisioned — use POST /api/agents/{name}/reprovision when ready)", agentName = name });
+    var createdMsg = ctoEnvMsg is not null
+        ? $"Agent '{name}' created. {ctoEnvMsg}"
+        : $"Agent '{name}' created (not provisioned — use POST /api/agents/{name}/reprovision when ready)";
+    return Results.Created($"/api/agents/{name}", new { message = createdMsg, agentName = name });
 });
 
 // REST: delete an agent (deprovision container + remove DB records)

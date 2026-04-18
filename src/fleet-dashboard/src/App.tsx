@@ -1520,7 +1520,7 @@ export default function App() {
         mcpEndpoints: createForm.mcpEndpoints,
         telegramUsers: createForm.telegramUsers.split('\n').map(s => parseInt(s.trim())).filter(n => !isNaN(n)),
         telegramGroups: createForm.telegramGroups.split('\n').map(s => parseInt(s.trim())).filter(n => !isNaN(n)),
-        provision: false,
+        provision: !!createTemplateName,
       }
       const r = await apiFetch('/api/agents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       const data = await r.json().catch(() => ({}))
@@ -1536,7 +1536,10 @@ export default function App() {
           }).catch(() => {/* non-fatal — user can set via config panel */})
         }
         setCreateState('success')
-        setCreateMsg(data.message ?? 'Agent created — configure and provision when ready')
+        const defaultMsg = createTemplateName
+          ? `✓ ${createForm.name.trim()} provisioned`
+          : 'Agent created — configure and provision when ready'
+        setCreateMsg(data.message ?? defaultMsg)
         setTimeout(() => { setCreateModalOpen(false); setCreateState('idle'); setCreateMsg(''); setCreateForm(DEFAULT_CREATE_FORM); setCopyFrom(''); setCreateTemplateName(undefined) }, 3000)
       } else {
         setCreateState('error'); setCreateMsg(data.error ?? `Error ${r.status}`)

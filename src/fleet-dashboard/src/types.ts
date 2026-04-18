@@ -254,7 +254,7 @@ export type StopStartState = 'idle' | 'confirming' | 'pending' | 'success' | 'er
 export type WfActionState = 'idle' | 'confirming-cancel' | 'confirming-restart' | 'confirming-terminate' | 'pending' | 'success' | 'error'
 export type CancelState = 'idle' | 'confirming' | 'cancelling' | 'success' | 'error'
 export type ConfigSaveState = 'idle' | 'saving' | 'success' | 'error'
-export type ActiveView = 'agents' | 'workflows' | 'instructions' | 'project-contexts' | 'wf-definitions' | 'alerts' | 'schedules' | 'namespaces' | 'repositories'
+export type ActiveView = 'agents' | 'workflows' | 'instructions' | 'project-contexts' | 'wf-definitions' | 'alerts' | 'schedules' | 'namespaces' | 'repositories' | 'credentials'
 
 export interface ScheduleSummary {
   scheduleId: string

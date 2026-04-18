@@ -43,6 +43,7 @@ public class Agent
     public List<AgentTelegramUser> TelegramUsers { get; set; } = [];
     public List<AgentTelegramGroup> TelegramGroups { get; set; } = [];
     public List<AgentNetwork> Networks { get; set; } = [];
+    public List<AgentCredentialMount> CredentialMounts { get; set; } = [];
 }
 
 public class AgentNetwork
@@ -237,6 +238,34 @@ public class WorkflowDefinitionVersion
     public string? CreatedBy { get; set; }
 
     public WorkflowDefinition WorkflowDefinition { get; set; } = null!;
+}
+
+// ─── Credential Files ─────────────────────────────────────────────────────────
+
+public class CredentialFile
+{
+    public int Id { get; set; }
+    public required string Name { get; set; }
+    public string Type { get; set; } = "generic"; // "ssh-private-key" | "certificate" | "generic"
+    public required string FileName { get; set; }  // actual filename on disk
+    public required string FilePath { get; set; }  // absolute path
+    public long SizeBytes { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+
+    public List<AgentCredentialMount> Mounts { get; set; } = [];
+}
+
+public class AgentCredentialMount
+{
+    public int Id { get; set; }
+    public int AgentId { get; set; }
+    public int CredentialFileId { get; set; }
+    public required string MountPath { get; set; }   // e.g. /workspace/.ssh/server.key
+    public string Mode { get; set; } = "ro";          // "ro" | "rw"
+
+    public Agent Agent { get; set; } = null!;
+    public CredentialFile CredentialFile { get; set; } = null!;
 }
 
 

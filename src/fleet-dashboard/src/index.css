@@ -4739,3 +4739,183 @@ body {
   border-left: 2px solid var(--accent);
   border-radius: 0 4px 4px 0;
 }
+
+/* ── Credentials View ─────────────────────────────────────────────────────── */
+.cred-view {
+  padding: 24px;
+  max-width: 1000px;
+}
+.cred-section {
+  margin-bottom: 40px;
+}
+.cred-section-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.cred-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.cred-section-header .cred-section-title {
+  margin-bottom: 0;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.cred-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+}
+.cred-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+.cred-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.cred-card-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+.cred-status-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 500;
+}
+.cred-status-badge--ok { background: rgba(52,211,153,.15); color: #34d399; }
+.cred-status-badge--missing { background: rgba(156,163,175,.1); color: var(--muted); }
+.cred-card-body {
+  margin-bottom: 10px;
+}
+.cred-masked-row {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.cred-masked-label { color: var(--muted); min-width: 80px; }
+.cred-masked-value { font-family: monospace; color: var(--text); }
+.cred-last-validated {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 6px;
+}
+.cred-card-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.cred-change-hint {
+  font-size: 11px;
+  color: var(--muted);
+}
+.cred-test-result {
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+/* Env var table */
+.cred-env-table {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.cred-env-header {
+  display: grid;
+  grid-template-columns: 2fr 2fr 1.5fr 2fr;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--surface);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  border-bottom: 1px solid var(--border);
+}
+.cred-env-row {
+  display: grid;
+  grid-template-columns: 2fr 2fr 1.5fr 2fr;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  align-items: center;
+  font-size: 13px;
+}
+.cred-env-row:last-child { border-bottom: none; }
+.cred-env-row:hover { background: var(--surface); }
+.cred-env-key { font-family: monospace; font-size: 12px; }
+.cred-env-value { font-family: monospace; font-size: 12px; color: var(--muted); word-break: break-all; }
+.cred-env-used { font-size: 12px; }
+.cred-env-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.cred-env-empty { padding: 24px; text-align: center; color: var(--muted); font-size: 13px; }
+
+.cred-action-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.cred-action-btn:hover { background: var(--surface); }
+.cred-action-btn--danger { color: var(--red); border-color: var(--red); }
+.cred-action-btn--danger:hover { background: rgba(239,68,68,.08); }
+
+/* Files section */
+.cred-upload-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.cred-file-row {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+.cred-file-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--surface);
+}
+.cred-file-name { font-weight: 600; font-size: 13px; }
+.cred-file-type {
+  font-size: 11px;
+  padding: 1px 6px;
+  background: var(--border);
+  border-radius: 10px;
+  color: var(--muted);
+}
+.cred-file-size { font-size: 12px; color: var(--muted); }
+.cred-file-mounts { padding: 0 14px 8px; }
+.cred-mount-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 4px 0;
+  font-size: 12px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+.cred-mount-agent { font-weight: 500; min-width: 80px; }
+.cred-mount-mode { color: var(--muted); }
+.cred-empty { padding: 24px; text-align: center; color: var(--muted); font-size: 13px; }

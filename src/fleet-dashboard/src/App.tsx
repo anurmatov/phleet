@@ -50,6 +50,7 @@ import StartWorkflowModal from './components/StartWorkflowModal'
 import SchedulesView from './components/SchedulesView'
 import NamespacesView from './components/NamespacesView'
 import RepositoriesView from './components/RepositoriesView'
+import SetupBanner from './components/SetupBanner'
 
 type WsMessage =
   | { type: 'workflows'; data: WorkflowSummary[] }
@@ -67,7 +68,7 @@ const DEFAULT_CREATE_FORM: CreateForm = {
   showStats: true, prefixMessages: false, suppressToolMessages: false, telegramSendOnly: false, provider: 'claude',
   codexSandboxMode: '',
   tools: '', projects: '', networks: '', envRefs: '',
-  mcpEndpoints: [], telegramUsers: '', telegramGroups: '',
+  mcpEndpoints: [], telegramUsers: '', telegramGroups: '', instructions: [],
 }
 
 export default function App() {
@@ -177,6 +178,11 @@ export default function App() {
   const [deployState, setDeployState] = useState<Record<string, 'idle' | 'deploying' | 'success' | 'error'>>({})
   const [deployMsg, setDeployMsg] = useState<Record<string, string>>({})
 
+  const [setupStatus, setSetupStatus] = useState<{
+    telegram: { configured: boolean; groupChatEnabled: boolean }
+    gitHub: { configured: boolean }
+  } | null>(null)
+
   const [logViewer, setLogViewer] = useState<string | null>(null)
   const [logLines, setLogLines] = useState<string[]>([])
   const [logAutoScroll, setLogAutoScroll] = useState(true)
@@ -207,6 +213,7 @@ export default function App() {
   const [createMsg, setCreateMsg] = useState('')
   const [copyFrom, setCopyFrom] = useState('')
   const [copyFromLoading, setCopyFromLoading] = useState(false)
+  const [createTemplateName, setCreateTemplateName] = useState<string | undefined>(undefined)
 
   const [deleteStates, setDeleteStates] = useState<Record<string, 'idle' | 'confirming' | 'deleting' | 'success' | 'error'>>({})
   const [deleteMsg, setDeleteMsg] = useState<Record<string, string>>({})
@@ -422,6 +429,11 @@ export default function App() {
     loadInstructions()
     loadProjectContexts()
     fetchCompleted()
+
+    apiFetch('/api/setup/status')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data) setSetupStatus(data) })
+      .catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -759,6 +771,7 @@ export default function App() {
           envRefs: cfg.envRefs.join(', '),
           telegramUsers: cfg.telegramUsers.join(', '),
           telegramGroups: cfg.telegramGroups.join(', '),
+          instructions: cfg.instructions ?? [],
         })
       })
       .catch(() => { setConfigSaveMsg('Failed to load config'); setConfigSaveState('error') })
@@ -813,6 +826,7 @@ export default function App() {
         codexSandboxMode: configEdits.codexSandboxMode || undefined,
         hostPort: configEdits.hostPort ? parseInt(configEdits.hostPort, 10) : null,
         tools, projects, mcpEndpoints: configEdits.mcpEndpoints, networks, envRefs, telegramUsers, telegramGroups,
+        instructions: configEdits.instructions.map(i => ({ instructionName: i.name, loadOrder: i.loadOrder })),
       }),
     })
       .then(async r => {
@@ -1511,15 +1525,67 @@ export default function App() {
       const r = await apiFetch('/api/agents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       const data = await r.json().catch(() => ({}))
       if (r.ok || r.status === 201 || r.status === 207) {
+        // Apply instruction assignments if any were selected
+        if (createForm.instructions.length > 0) {
+          await apiFetch(`/api/agents/${encodeURIComponent(createForm.name.trim())}/config`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              instructions: createForm.instructions.map(i => ({ instructionName: i.name, loadOrder: i.loadOrder })),
+            }),
+          }).catch(() => {/* non-fatal — user can set via config panel */})
+        }
         setCreateState('success')
         setCreateMsg(data.message ?? 'Agent created — configure and provision when ready')
-        setTimeout(() => { setCreateModalOpen(false); setCreateState('idle'); setCreateMsg(''); setCreateForm(DEFAULT_CREATE_FORM); setCopyFrom('') }, 3000)
+        setTimeout(() => { setCreateModalOpen(false); setCreateState('idle'); setCreateMsg(''); setCreateForm(DEFAULT_CREATE_FORM); setCopyFrom(''); setCreateTemplateName(undefined) }, 3000)
       } else {
         setCreateState('error'); setCreateMsg(data.error ?? `Error ${r.status}`)
       }
     } catch {
       setCreateState('error'); setCreateMsg('Request failed')
     }
+  }
+
+  async function handleNewAgentFromTemplate(templateName: string) {
+    try {
+      const r = await apiFetch(`/api/agent-templates/${encodeURIComponent(templateName)}`)
+      if (!r.ok) return
+      const t = await r.json()
+      const form: CreateForm = {
+        ...DEFAULT_CREATE_FORM,
+        role: t.role ?? '',
+        model: t.model ?? PROVIDER_DEFAULT_MODEL['claude'],
+        provider: t.provider ?? 'claude',
+        memoryLimitMb: String(t.memoryLimitMb ?? 4096),
+        permissionMode: t.permissionMode ?? 'acceptEdits',
+        maxTurns: String(t.maxTurns ?? 50),
+        workDir: t.workDir ?? '/workspace',
+        proactiveIntervalMinutes: String(t.proactiveIntervalMinutes ?? 0),
+        groupListenMode: t.groupListenMode ?? 'mention',
+        groupDebounceSeconds: String(t.groupDebounceSeconds ?? 15),
+        showStats: t.showStats ?? false,
+        prefixMessages: t.prefixMessages ?? false,
+        suppressToolMessages: t.suppressToolMessages ?? false,
+        telegramSendOnly: t.telegramSendOnly ?? false,
+        autoMemoryEnabled: t.autoMemoryEnabled ?? true,
+        tools: (t.tools ?? []).map((x: { toolName: string }) => x.toolName).join('\n'),
+        projects: (t.projects ?? []).join('\n'),
+        networks: (t.networks ?? []).join('\n'),
+        envRefs: (t.envRefs ?? []).join('\n'),
+        mcpEndpoints: (t.mcpEndpoints ?? []).map((e: { mcpName: string; url: string; transportType: string }) => ({
+          mcpName: e.mcpName, url: e.url, transportType: e.transportType,
+        })),
+        instructions: (t.instructions ?? []).map((i: { name: string; loadOrder: number }) => ({
+          name: i.name, loadOrder: i.loadOrder,
+        })),
+      }
+      setCreateTemplateName(t.displayName ?? templateName)
+      setCreateForm(form)
+      setCopyFrom('')
+      setCreateState('idle')
+      setCreateMsg('')
+      setCreateModalOpen(true)
+    } catch {/* ignore */}
   }
 
   useEffect(() => {
@@ -1538,7 +1604,9 @@ export default function App() {
       setCreateForm(form)
       setCreateModalOpen(true)
     }
-  }, [])
+    const templateParam = params.get('template')
+    if (templateParam) handleNewAgentFromTemplate(templateParam)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const sorted = Object.values(agents).sort((a, b) => a.agentName.localeCompare(b.agentName))
 
@@ -1581,6 +1649,19 @@ export default function App() {
       />
 
       <main className="app-main">
+        {activeView === 'agents' && (
+          <SetupBanner
+            status={setupStatus}
+            agentCount={Object.keys(agents).length}
+            onConnected={() => {
+              apiFetch('/api/setup/status')
+                .then(r => r.ok ? r.json() : null)
+                .then(data => { if (data) setSetupStatus(data) })
+                .catch(() => {})
+            }}
+            onNewAgentFromTemplate={handleNewAgentFromTemplate}
+          />
+        )}
         {activeView === 'agents' && (
           <AgentsView
             sorted={sorted}
@@ -1915,10 +1996,12 @@ export default function App() {
           agentNames={sorted.map(a => a.agentName)}
           copyFrom={copyFrom}
           copyFromLoading={copyFromLoading}
+          allInstructions={instructions}
+          templateName={createTemplateName}
           onCopyFrom={handleCopyFrom}
           onFormChange={patch => setCreateForm(f => ({ ...f, ...patch }))}
           onSubmit={handleCreateSubmit}
-          onClose={() => setCreateModalOpen(false)}
+          onClose={() => { setCreateModalOpen(false); setCreateTemplateName(undefined) }}
         />
       )}
 
@@ -1931,6 +2014,7 @@ export default function App() {
           configSaveMsg={configSaveMsg}
           configLoading={configLoading}
           configReprovisionConfirm={configReprovisionConfirm}
+          allInstructions={instructions}
           onEditsChange={patch => setConfigEdits(prev => prev ? { ...prev, ...patch } : prev)}
           onSave={andReprovision => saveConfig(configAgent, andReprovision)}
           onReprovisionConfirmToggle={() => setConfigReprovisionConfirm(c => !c)}

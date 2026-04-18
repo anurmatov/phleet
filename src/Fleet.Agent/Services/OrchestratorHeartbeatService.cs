@@ -27,6 +27,7 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
     private readonly AgentOptions _agentConfig;
     private readonly RabbitMqOptions _rabbitConfig;
     private readonly TaskManager _taskManager;
+    private readonly IFleetConnectionState _connectionState;
     private readonly ILogger<OrchestratorHeartbeatService> _logger;
 
     private IConnection? _connection;
@@ -38,11 +39,13 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
         IOptions<AgentOptions> agentConfig,
         IOptions<RabbitMqOptions> rabbitConfig,
         TaskManager taskManager,
+        IFleetConnectionState connectionState,
         ILogger<OrchestratorHeartbeatService> logger)
     {
         _agentConfig = agentConfig.Value;
         _rabbitConfig = rabbitConfig.Value;
         _taskManager = taskManager;
+        _connectionState = connectionState;
         _logger = logger;
     }
 
@@ -167,7 +170,8 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
             UptimeSeconds: (long)(DateTimeOffset.UtcNow - _startedAt).TotalSeconds,
             QueuedCount: queueSnapshot.Count,
             QueuedMessages: queuedMessages,
-            BackgroundTasks: backgroundTasks.Length > 0 ? backgroundTasks : null);
+            BackgroundTasks: backgroundTasks.Length > 0 ? backgroundTasks : null,
+            TelegramConnected: _connectionState.TelegramConnected);
 
         var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
         var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent, Expiration = "60000" };
@@ -215,7 +219,9 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
         long UptimeSeconds,
         int QueuedCount = 0,
         QueuedMessageInfo[]? QueuedMessages = null,
-        BackgroundTaskSummary[]? BackgroundTasks = null);
+        BackgroundTaskSummary[]? BackgroundTasks = null,
+        bool? TelegramConnected = null  // null = legacy agent; false = headless; true = connected
+    );
 
     private sealed record QueuedMessageInfo(string Preview, string Source, DateTimeOffset QueuedAt);
 

@@ -32,6 +32,7 @@ builder.Services.AddSingleton<IAgentExecutor>(sp =>
     };
 });
 
+builder.Services.AddSingleton<IFleetConnectionState, FleetConnectionState>();
 builder.Services.AddSingleton<SessionManager>();
 builder.Services.AddSingleton<GroupRelayService>();
 

@@ -28,6 +28,7 @@ builder.Services.AddSingleton<TaskHistoryStore>();
 builder.Services.AddSingleton<AgentRegistry>();
 builder.Services.AddSingleton<DockerService>();
 builder.Services.AddSingleton<ContainerProvisioningService>();
+builder.Services.AddSingleton<SetupService>();
 
 // HeartbeatConsumerService registered as singleton so tools can inject IRabbitMqStatus
 builder.Services.AddSingleton<HeartbeatConsumerService>();
@@ -211,7 +212,7 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
 });
 
 // REST: update agent DB config (all scalar fields + replace-all for related tables)
-app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, AgentRegistry registry) =>
+app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, AgentRegistry registry, SetupService setupService) =>
 {
     using var scope = scopeFactory.CreateScope();
     var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
@@ -256,7 +257,7 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     if (body.ProactiveIntervalMinutes is not null) agent.ProactiveIntervalMinutes = body.ProactiveIntervalMinutes.Value;
     if (body.GroupListenMode is not null) agent.GroupListenMode = body.GroupListenMode;
     if (body.GroupDebounceSeconds is not null) agent.GroupDebounceSeconds = body.GroupDebounceSeconds.Value;
-    if (body.ShortName is not null) agent.ShortName = body.ShortName;
+    if (body.ShortName is not null) agent.ShortName = string.IsNullOrWhiteSpace(body.ShortName) ? agent.Name : body.ShortName.Trim();
     if (body.ShowStats is not null) agent.ShowStats = body.ShowStats.Value;
     if (body.PrefixMessages is not null) agent.PrefixMessages = body.PrefixMessages.Value;
     if (body.SuppressToolMessages is not null) agent.SuppressToolMessages = body.SuppressToolMessages.Value;
@@ -334,8 +335,10 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     if (body.TelegramUsers is not null)
     {
         db.AgentTelegramUsers.RemoveRange(agent.TelegramUsers);
-        agent.TelegramUsers = body.TelegramUsers
-            .Distinct()
+        var tuSet = new HashSet<long>(body.TelegramUsers.Distinct());
+        var ownerId = setupService.GetTelegramUserId();
+        if (ownerId.HasValue) tuSet.Add(ownerId.Value);
+        agent.TelegramUsers = tuSet
             .Select(u => new AgentTelegramUser { AgentId = agent.Id, UserId = u })
             .ToList();
     }
@@ -974,7 +977,7 @@ app.MapPost("/api/agents/reprovision-running", async (HttpRequest request, Conta
 });
 
 // REST: create a new agent (insert into DB + provision container)
-app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scopeFactory, ContainerProvisioningService provisioning, AgentRegistry registry) =>
+app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scopeFactory, ContainerProvisioningService provisioning, AgentRegistry registry, SetupService setupService) =>
 {
     using var scope = scopeFactory.CreateScope();
     var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
@@ -988,6 +991,24 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         return Results.BadRequest(new { error = "model is required" });
     if (string.IsNullOrWhiteSpace(body.Role))
         return Results.BadRequest(new { error = "role is required" });
+
+    // Telegram is a hard prerequisite — agents without a valid bot token are headless.
+    var setupStatus = setupService.GetStatus();
+    if (!setupStatus.Telegram.Configured)
+        return Results.Conflict(new
+        {
+            error = "telegram_not_configured",
+            message = "Cannot provision agent: Telegram bot token is not configured. Configure Telegram first using the setup banner."
+        });
+
+    // First agent must be a co-cto — specialists are provisioned by it on demand.
+    var agentCount = await db.Agents.CountAsync();
+    if (agentCount == 0 && !string.Equals(body.Role.Trim(), "co-cto", StringComparison.OrdinalIgnoreCase))
+        return Results.Conflict(new
+        {
+            error = "cto_required_first",
+            message = "Your first agent must be a co-cto."
+        });
 
     var name = body.Name.Trim().ToLowerInvariant();
 
@@ -1013,7 +1034,7 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         ProactiveIntervalMinutes  = body.ProactiveIntervalMinutes  ?? 0,
         GroupListenMode           = body.GroupListenMode           ?? "mention",
         GroupDebounceSeconds      = body.GroupDebounceSeconds      ?? 15,
-        ShortName                 = body.ShortName                 ?? "",
+        ShortName                 = string.IsNullOrWhiteSpace(body.ShortName) ? name : body.ShortName.Trim(),
         ShowStats                 = body.ShowStats                 ?? true,
         PrefixMessages            = body.PrefixMessages            ?? false,
         SuppressToolMessages      = body.SuppressToolMessages      ?? false,
@@ -1050,9 +1071,12 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         foreach (var r in body.EnvRefs.Distinct(StringComparer.OrdinalIgnoreCase))
             db.AgentEnvRefs.Add(new AgentEnvRef { AgentId = agent.Id, EnvKeyName = r });
 
-    if (body.TelegramUsers is not null)
-        foreach (var u in body.TelegramUsers.Distinct())
-            db.AgentTelegramUsers.Add(new AgentTelegramUser { AgentId = agent.Id, UserId = u });
+    // Build the final Telegram user set: explicit payload + installer's ID (deduped)
+    var telegramUserSet = new HashSet<long>(body.TelegramUsers?.Distinct() ?? []);
+    var ownerTgId = setupService.GetTelegramUserId();
+    if (ownerTgId.HasValue) telegramUserSet.Add(ownerTgId.Value);
+    foreach (var u in telegramUserSet)
+        db.AgentTelegramUsers.Add(new AgentTelegramUser { AgentId = agent.Id, UserId = u });
 
     if (body.TelegramGroups is not null)
         foreach (var g in body.TelegramGroups.Distinct())
@@ -1847,6 +1871,123 @@ app.MapDelete("/api/repositories/{name}", async (string name, IServiceScopeFacto
     db.Repositories.Remove(repo);
     await db.SaveChangesAsync();
     return Results.Ok(new { deleted = name });
+});
+
+// ── Setup endpoints ───────────────────────────────────────────────────────────
+
+app.MapGet("/api/setup/status", (SetupService setup) =>
+    Results.Ok(setup.GetStatus()));
+
+app.MapPost("/api/setup/telegram/validate", async (
+    HttpRequest request, SetupService setup, CancellationToken ct) =>
+{
+    TelegramSetupRequest? req;
+    try { req = await request.ReadFromJsonAsync<TelegramSetupRequest>(ct); }
+    catch { return Results.BadRequest(new { error = "invalid_json" }); }
+    if (req is null) return Results.BadRequest(new { error = "empty_body" });
+
+    var result = await setup.ValidateTelegramAsync(req, ct);
+    if (!result.Valid)
+        return Results.BadRequest(new { error = result.ErrorCode, detail = result.ErrorDetail });
+    return Results.Ok(new { valid = true, ctoBot = result.CtoBot, notifierBot = result.NotifierBot, groupChat = result.GroupChat, warnings = result.Warnings });
+});
+
+app.MapPost("/api/setup/telegram", async (
+    HttpRequest request, SetupService setup, CancellationToken ct) =>
+{
+    TelegramSetupRequest? req;
+    try { req = await request.ReadFromJsonAsync<TelegramSetupRequest>(ct); }
+    catch { return Results.BadRequest(new { error = "invalid_json" }); }
+    if (req is null) return Results.BadRequest(new { error = "empty_body" });
+
+    SetupWriteResult result;
+    try { result = await setup.WriteTelegramAsync(req, ct); }
+    catch (InvalidOperationException ex) when (ex.Message.Contains("atomically write"))
+    { return Results.Problem(detail: ex.Message, statusCode: 500, title: "env_write_failed"); }
+
+    if (!result.Success)
+    {
+        if (result.ErrorCode is "setup_locked" or "db_unavailable") return Results.StatusCode(503);
+        return Results.BadRequest(new { error = result.ErrorCode, detail = result.ErrorDetail });
+    }
+    if (result.RestartErrors.Count > 0)
+        return Results.Json(new { written = result.Written, restarted = result.Restarted, warnings = result.Warnings, restartErrors = result.RestartErrors }, statusCode: 207);
+    return Results.Ok(new { written = result.Written, restarted = result.Restarted, warnings = result.Warnings });
+});
+
+app.MapPost("/api/setup/github/validate", async (
+    HttpRequest request, SetupService setup, CancellationToken ct) =>
+{
+    GitHubSetupRequest? req;
+    try { req = await request.ReadFromJsonAsync<GitHubSetupRequest>(ct); }
+    catch { return Results.BadRequest(new { error = "invalid_json" }); }
+    if (req is null) return Results.BadRequest(new { error = "empty_body" });
+
+    var result = await setup.ValidateGitHubAsync(req, ct);
+    if (!result.Valid)
+        return Results.BadRequest(new { error = result.ErrorCode, detail = result.ErrorDetail });
+    return Results.Ok(new { valid = true, appId = result.AppId, appName = result.AppName, warnings = result.Warnings });
+});
+
+app.MapPost("/api/setup/github", async (
+    HttpRequest request, SetupService setup, CancellationToken ct) =>
+{
+    GitHubSetupRequest? req;
+    try { req = await request.ReadFromJsonAsync<GitHubSetupRequest>(ct); }
+    catch { return Results.BadRequest(new { error = "invalid_json" }); }
+    if (req is null) return Results.BadRequest(new { error = "empty_body" });
+
+    SetupWriteResult result;
+    try { result = await setup.WriteGitHubAsync(req, ct); }
+    catch (InvalidOperationException ex) when (ex.Message.Contains("atomically write"))
+    { return Results.Problem(detail: ex.Message, statusCode: 500, title: "env_write_failed"); }
+
+    if (!result.Success)
+    {
+        if (result.ErrorCode is "setup_locked" or "db_unavailable") return Results.StatusCode(503);
+        return Results.BadRequest(new { error = result.ErrorCode, detail = result.ErrorDetail });
+    }
+    if (result.RestartErrors.Count > 0)
+        return Results.Json(new { written = result.Written, restarted = result.Restarted, warnings = result.Warnings, restartErrors = result.RestartErrors }, statusCode: 207);
+    return Results.Ok(new { written = result.Written, restarted = result.Restarted, warnings = result.Warnings });
+});
+
+// Agent templates
+app.MapGet("/api/agent-templates", () =>
+    Results.Ok(AgentTemplateRegistry.GetAll()));
+
+app.MapGet("/api/agent-templates/{name}", (string name) =>
+{
+    var entry = AgentTemplateRegistry.TryGet(name);
+    if (entry is null) return Results.NotFound(new { error = $"Template '{name}' not found" });
+    var c = entry.Config;
+    return Results.Ok(new
+    {
+        entry.Name,
+        entry.DisplayName,
+        entry.Description,
+        c.Model,
+        c.Role,
+        c.Provider,
+        c.MemoryLimitMb,
+        c.PermissionMode,
+        c.MaxTurns,
+        c.WorkDir,
+        c.ProactiveIntervalMinutes,
+        c.GroupListenMode,
+        c.GroupDebounceSeconds,
+        c.ShowStats,
+        c.PrefixMessages,
+        c.SuppressToolMessages,
+        c.TelegramSendOnly,
+        c.AutoMemoryEnabled,
+        Tools = c.Tools.Select(t => new { t.ToolName, t.IsEnabled }),
+        Projects = c.Projects,
+        McpEndpoints = c.McpEndpoints.Select(e => new { e.McpName, e.Url, e.TransportType }),
+        Networks = c.Networks,
+        EnvRefs = c.EnvRefs,
+        Instructions = c.Instructions.Select(i => new { i.Name, i.LoadOrder }),
+    });
 });
 
 app.Run();

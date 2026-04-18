@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import type { AgentConfig, ConfigEdits, ConfigSaveState, McpEndpointEntry } from '../types'
+import type { AgentConfig, ConfigEdits, ConfigSaveState, InstructionSummary, McpEndpointEntry } from '../types'
 import { ADVANCED_DEFAULTS, countCustomized, PROVIDER_DEFAULT_MODEL, CLAUDE_PERMISSION_MODES, CODEX_SANDBOX_MODES } from '../constants'
 import ModelSelector from './ModelSelector'
 import FieldHint from './FieldHint'
+import InstructionPicker from './InstructionPicker'
 
 const SHOW_ADVANCED_KEY = 'fleet-dashboard-show-advanced'
 
@@ -14,6 +15,7 @@ interface AgentConfigModalProps {
   configSaveMsg: string
   configLoading: boolean
   configReprovisionConfirm: boolean
+  allInstructions: InstructionSummary[]
   onEditsChange: (patch: Partial<ConfigEdits>) => void
   onSave: (andReprovision: boolean) => void
   onReprovisionConfirmToggle: () => void
@@ -28,6 +30,7 @@ export default function AgentConfigModal({
   configSaveMsg,
   configLoading,
   configReprovisionConfirm,
+  allInstructions,
   onEditsChange,
   onSave,
   onReprovisionConfirmToggle,
@@ -296,6 +299,15 @@ export default function AgentConfigModal({
               <div className="config-field">
                 <FieldHint>Numeric Telegram group IDs where this agent listens (typically negative, e.g. <code>-1001234567890</code>). Comma-separated.</FieldHint>
                 <input className="config-input" value={configEdits.telegramGroups} onChange={e => onEditsChange({ telegramGroups: e.target.value })} placeholder="comma-separated group IDs" />
+              </div>
+              <div className="config-section-label">Instructions</div>
+              <div className="config-field">
+                <FieldHint>Role instructions composed into this agent's system prompt. Checked items are included; load order controls concatenation sequence. <code>base</code> is auto-attached and excluded here.</FieldHint>
+                <InstructionPicker
+                  allInstructions={allInstructions}
+                  selected={configEdits.instructions}
+                  onChange={instructions => onEditsChange({ instructions })}
+                />
               </div>
               </>)}
               <div className="config-actions">

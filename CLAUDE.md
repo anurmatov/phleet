@@ -65,7 +65,7 @@ npm run build  # production build
 
 2. Fill in the prompted values (Telegram bot tokens, GitHub App credentials, etc.) — setup.sh writes them to `./fleet/.env`.
 
-3. Edit `./fleet/seed.json` to define your agents (names, roles, tools, MCP endpoints).
+3. Open the dashboard and use the SetupBanner to provision your first agent (co-cto). `seed.example.json` ships with no agents — agents are provisioned via the dashboard, not seed.json.
 
 4. setup.sh starts the stack automatically. To start/stop later:
    ```bash

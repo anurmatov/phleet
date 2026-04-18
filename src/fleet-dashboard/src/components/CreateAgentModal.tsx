@@ -1,7 +1,9 @@
-import type { CreateForm, McpEndpointEntry } from '../types'
+import { useState } from 'react'
+import type { CreateForm, InstructionSummary } from '../types'
 import { PROVIDER_DEFAULT_MODEL } from '../constants'
 import ModelSelector from './ModelSelector'
 import FieldHint from './FieldHint'
+import InstructionPicker from './InstructionPicker'
 
 interface CreateAgentModalProps {
   createForm: CreateForm
@@ -10,6 +12,8 @@ interface CreateAgentModalProps {
   agentNames: string[]
   copyFrom: string
   copyFromLoading: boolean
+  allInstructions: InstructionSummary[]
+  templateName?: string
   onCopyFrom: (name: string) => void
   onFormChange: (patch: Partial<CreateForm>) => void
   onSubmit: () => void
@@ -23,11 +27,15 @@ export default function CreateAgentModal({
   agentNames,
   copyFrom,
   copyFromLoading,
+  allInstructions,
+  templateName,
   onCopyFrom,
   onFormChange,
   onSubmit,
   onClose,
 }: CreateAgentModalProps) {
+  const [shortNameTouched, setShortNameTouched] = useState(false)
+
   return (
     <div className="config-modal-overlay" onClick={onClose}>
       <div className="config-modal create-agent-modal" onClick={e => e.stopPropagation()}>
@@ -36,6 +44,11 @@ export default function CreateAgentModal({
           <button className="config-modal-close" onClick={onClose}>✕ close</button>
         </div>
         <div className="config-modal-body">
+          {templateName && (
+            <p className="create-agent-template-note">
+              Based on <strong>{templateName}</strong> template — customize as needed.
+            </p>
+          )}
           <div className="config-row">
             <label className="config-label">Copy from existing agent</label>
             <FieldHint>Pre-fills all fields from an existing agent's config — tools, projects, MCP endpoints, networks, and Telegram config are all copied.</FieldHint>
@@ -56,7 +69,25 @@ export default function CreateAgentModal({
           <div className="config-row">
             <label className="config-label">Name <span style={{ color: 'var(--red)' }}>*</span></label>
             <FieldHint>Unique identifier used as the container name prefix and DB key. Lowercase, no spaces (e.g. <code>anew</code>).</FieldHint>
-            <input className="config-input" value={createForm.name} onChange={e => onFormChange({ name: e.target.value })} placeholder="e.g. anew" />
+            <input
+              className="config-input"
+              value={createForm.name}
+              onChange={e => {
+                const val = e.target.value
+                onFormChange(shortNameTouched ? { name: val } : { name: val, shortName: val })
+              }}
+              placeholder="e.g. anew"
+            />
+          </div>
+          <div className="config-row">
+            <label className="config-label">Short name</label>
+            <FieldHint>Used for heartbeat routing and Telegram commands. Defaults to Name — only set this if you need a different routing key.</FieldHint>
+            <input
+              className="config-input"
+              value={createForm.shortName}
+              onChange={e => { setShortNameTouched(true); onFormChange({ shortName: e.target.value }) }}
+              placeholder="auto-filled from name"
+            />
           </div>
           <div className="config-row">
             <label className="config-label">Display Name</label>
@@ -92,8 +123,19 @@ export default function CreateAgentModal({
             <label className="config-label">Memory (MB)</label>
             <input className="config-input config-input-short" type="number" value={createForm.memoryLimitMb} onChange={e => onFormChange({ memoryLimitMb: e.target.value })} />
           </div>
+          {allInstructions.some(i => i.isActive && i.name !== 'base') && (
+            <div className="config-row">
+              <label className="config-label">Instructions</label>
+              <FieldHint>Role instructions to attach at creation. <code>base</code> is auto-attached. Load order is editable after creation via the config panel.</FieldHint>
+              <InstructionPicker
+                allInstructions={allInstructions}
+                selected={createForm.instructions}
+                onChange={instructions => onFormChange({ instructions })}
+              />
+            </div>
+          )}
           <p className="create-agent-hint">
-            After creating, use the <strong>✎ config</strong> button to set up tools, projects, MCP endpoints, instructions, and Telegram config.
+            After creating, use the <strong>✎ config</strong> button to set up tools, projects, MCP endpoints, and Telegram config.
             Then click <strong>↻ Provision</strong> on the agent card to start the container.
           </p>
 

@@ -4390,3 +4390,352 @@ body {
   color: var(--text-muted);
   font-style: italic;
 }
+
+/* ── Setup Banner ────────────────────────────────────────────────────────── */
+
+.setup-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.setup-banner--compact {
+  gap: 8px;
+}
+
+.setup-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+}
+
+.setup-chip--ok {
+  border-color: #166534;
+  color: var(--accent);
+  background: rgba(74, 222, 128, 0.06);
+}
+
+.setup-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  flex: 1;
+  min-width: 240px;
+}
+
+.setup-card--pending {
+  border-color: #44403c;
+}
+
+.setup-card--done {
+  border-color: #166534;
+  opacity: 0.75;
+}
+
+.setup-card--info {
+  border-color: #1e3a5f;
+  background: rgba(59, 130, 246, 0.04);
+}
+
+.setup-card-icon {
+  font-size: 20px;
+  width: 32px;
+  text-align: center;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.setup-card--done .setup-card-icon {
+  color: var(--accent);
+}
+
+.setup-card-body {
+  flex: 1;
+}
+
+.setup-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.setup-card-desc {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.setup-card-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* ── Setup UX additions ─────────────────────────────────────────────────────── */
+
+.setup-helper-link {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+  text-decoration: none;
+}
+.setup-helper-link:hover { color: var(--text); }
+
+.setup-field-hint {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+  margin-bottom: 10px;
+}
+
+.setup-field-error {
+  font-size: 11px;
+  color: var(--red);
+  margin-top: 3px;
+}
+
+.input--error {
+  border-color: var(--red) !important;
+}
+
+.setup-validation-count {
+  font-size: 11px;
+  color: var(--red);
+}
+
+.setup-masked-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.setup-masked-value {
+  flex: 1;
+  font-size: 13px;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+}
+
+.setup-restart-errors {
+  background: rgba(217, 119, 6, 0.08);
+  border: 1px solid rgba(217, 119, 6, 0.35);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+.setup-restart-errors__title {
+  color: #d97706;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.setup-restart-errors__row {
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+.setup-restart-errors__footer {
+  margin-top: 8px;
+}
+.setup-restart-errors__footer a {
+  color: #d97706;
+  font-size: 11px;
+  text-decoration: none;
+}
+.setup-restart-errors__footer a:hover { text-decoration: underline; }
+
+/* Bottom-right success toast */
+@keyframes setup-toast-in {
+  from { transform: translateY(12px); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+.setup-toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  z-index: 9999;
+  pointer-events: none;
+  animation: setup-toast-in 0.25s ease;
+}
+
+/* Scale-in animation for setup chips on first render */
+@keyframes setup-chip-in {
+  from { transform: scale(0.85); opacity: 0; }
+  to   { transform: scale(1);    opacity: 1; }
+}
+.setup-chip--ok {
+  animation: setup-chip-in 0.3s ease;
+}
+
+/* ── Instruction picker ──────────────────────────────────────────────────────── */
+
+.instruction-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.instruction-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.instruction-picker-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  flex: 1;
+}
+
+.instruction-picker-hint {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+/* ── Setup modal intro / footer ─────────────────────────────────────────────── */
+
+.setup-modal-intro {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0 0 16px 0;
+  line-height: 1.5;
+}
+
+.setup-modal-footer-note {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+/* ── Agent template cards ────────────────────────────────────────────────────── */
+
+.setup-card--templates {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.template-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+  width: 100%;
+}
+
+.template-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.template-card:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--bg3);
+}
+
+.setup-prereq-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 5px;
+  font-size: 12px;
+  margin-top: 8px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.setup-prereq-banner--amber {
+  background: color-mix(in srgb, #f59e0b 12%, transparent);
+  border: 1px solid color-mix(in srgb, #f59e0b 40%, transparent);
+  color: #d97706;
+}
+
+.setup-prereq-banner--muted {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.setup-prereq-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  white-space: nowrap;
+  color: inherit;
+}
+
+.template-card-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.template-card-desc {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.template-card-meta {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+  align-items: center;
+}
+
+.template-card-model {
+  font-size: 10px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  color: var(--accent);
+  font-family: monospace;
+}
+
+.template-card-counts {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+/* Create agent — template note */
+.create-agent-template-note {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0 0 12px 0;
+  padding: 6px 10px;
+  background: var(--bg2);
+  border-left: 2px solid var(--accent);
+  border-radius: 0 4px 4px 0;
+}

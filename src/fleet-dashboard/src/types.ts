@@ -142,6 +142,7 @@ export interface CreateForm {
   mcpEndpoints: McpEndpointEntry[]
   telegramUsers: string
   telegramGroups: string
+  instructions: { name: string; loadOrder: number }[]
 }
 
 export interface AgentConfig {
@@ -177,6 +178,7 @@ export interface AgentConfig {
   envRefs: string[]
   telegramUsers: number[]
   telegramGroups: number[]
+  instructions: { name: string; loadOrder: number }[]
 }
 
 export interface ConfigEdits {
@@ -211,6 +213,16 @@ export interface ConfigEdits {
   mcpEndpoints: McpEndpointEntry[]
   telegramUsers: string
   telegramGroups: string
+  instructions: { name: string; loadOrder: number }[]
+}
+
+export interface AgentTemplateSummary {
+  name: string
+  displayName: string
+  description: string
+  defaultModel: string
+  toolCount: number
+  mcpCount: number
 }
 
 export interface InstructionSummary {

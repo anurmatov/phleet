@@ -13,11 +13,13 @@ interface SetupBannerProps {
   onConnected: () => void
 }
 
+let _toastId = 0
+
 // ── Telegram Modal ────────────────────────────────────────────────────────────
 
 interface TelegramModalProps {
   onClose: () => void
-  onConnected: () => void
+  onConnected: (toast: string) => void
 }
 
 function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
@@ -26,10 +28,19 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
   const [groupChatId, setGroupChatId] = useState('')
   const [testState, setTestState] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle')
   const [testMsg, setTestMsg] = useState('')
-  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'success' | 'error'>('idle')
+  const [fieldErrors, setFieldErrors] = useState<Record<string, boolean>>({})
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'error'>('idle')
   const [saveMsg, setSaveMsg] = useState('')
+  const [restartErrors, setRestartErrors] = useState<Record<string, string> | null>(null)
 
-  function resetFeedback() { setTestState('idle'); setSaveState('idle'); setTestMsg(''); setSaveMsg('') }
+  function resetFeedback() {
+    setTestState('idle')
+    setSaveState('idle')
+    setTestMsg('')
+    setSaveMsg('')
+    setFieldErrors({})
+    setRestartErrors(null)
+  }
 
   function buildPayload() {
     return {
@@ -39,9 +50,25 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
     }
   }
 
+  function parseFieldErrors(data: Record<string, unknown>, errDetail: string): Record<string, boolean> {
+    const fe: Record<string, boolean> = {}
+    if (data.errors && typeof data.errors === 'object') {
+      const errs = data.errors as Record<string, unknown>
+      if (errs.cto_token_invalid) fe.ctoToken = true
+      if (errs.notifier_token_invalid) fe.notifierToken = true
+      if (errs.group_chat_invalid) fe.groupChat = true
+    } else {
+      if (errDetail.includes('cto_token_invalid') || /\bcto\b/i.test(errDetail)) fe.ctoToken = true
+      if (errDetail.includes('notifier_token_invalid') || /notifier/i.test(errDetail)) fe.notifierToken = true
+      if (errDetail.includes('group_chat_invalid') || /group.?chat/i.test(errDetail)) fe.groupChat = true
+    }
+    return fe
+  }
+
   async function handleTest() {
     setTestState('testing')
     setTestMsg('')
+    setFieldErrors({})
     try {
       const res = await apiFetch('/api/setup/telegram/validate', {
         method: 'POST',
@@ -57,7 +84,9 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
         setTestMsg(parts.length ? parts.join(', ') : 'Connection OK')
       } else {
         setTestState('error')
-        setTestMsg(data.errorDetail ?? data.error ?? 'Validation failed')
+        const errDetail = String(data.errorDetail ?? data.error ?? 'Validation failed')
+        setTestMsg(errDetail)
+        setFieldErrors(parseFieldErrors(data, errDetail))
       }
     } catch (e) {
       setTestState('error')
@@ -68,6 +97,7 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
   async function handleSave() {
     setSaveState('saving')
     setSaveMsg('')
+    setRestartErrors(null)
     try {
       const res = await apiFetch('/api/setup/telegram', {
         method: 'POST',
@@ -75,13 +105,18 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
         body: JSON.stringify(buildPayload()),
       })
       const data = await res.json()
-      if (res.ok || res.status === 207) {
+      if (res.status === 207) {
+        // Keep modal open; show amber restart-errors block
+        setRestartErrors(data.restartErrors ?? {})
+        setSaveState('error')
+      } else if (res.ok) {
         const errCount = Object.keys(data.restartErrors ?? {}).length
-        setSaveState('success')
-        setSaveMsg(errCount > 0
-          ? `Saved (${errCount} container(s) could not restart — check logs)`
-          : 'Saved and applied')
-        setTimeout(() => { onConnected(); onClose() }, 1200)
+        onConnected(
+          errCount > 0
+            ? `✓ Telegram connected — ${errCount} container${errCount !== 1 ? 's' : ''} restarted`
+            : '✓ Telegram connected'
+        )
+        onClose()
       } else {
         setSaveState('error')
         setSaveMsg(data.errorDetail ?? data.error ?? `Error ${res.status}`)
@@ -92,6 +127,8 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
     }
   }
 
+  const fieldErrorCount = Object.values(fieldErrors).filter(Boolean).length
+
   return (
     <div className="config-modal-overlay" onClick={onClose}>
       <div className="config-modal" style={{ maxWidth: 480 }} onClick={e => e.stopPropagation()}>
@@ -100,61 +137,129 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
           <button className="config-modal-close" onClick={onClose}>✕ close</button>
         </div>
         <div className="config-modal-body">
+
+          {/* CTO bot token */}
           <div className="config-row">
-            <label className="config-label">CTO bot token <span style={{ color: 'var(--red)' }}>*</span></label>
+            <label className="config-label">
+              CTO bot token <span style={{ color: 'var(--red)' }}>*</span>
+              {' '}
+              <a
+                href="https://t.me/BotFather"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="setup-helper-link"
+              >→ t.me/BotFather</a>
+            </label>
             <input
-              className="config-input"
+              className={`config-input${fieldErrors.ctoToken ? ' input--error' : ''}`}
               type="password"
               placeholder="110201543:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
               value={ctoBotToken}
               onChange={e => { setCtoBotToken(e.target.value); resetFeedback() }}
             />
           </div>
+
+          {/* Notifier bot token */}
           <div className="config-row">
-            <label className="config-label">Notifier bot token <span style={{ color: 'var(--muted)', fontWeight: 400 }}>(optional)</span></label>
+            <label className="config-label">
+              Notifier bot token{' '}
+              <span style={{ color: 'var(--muted)', fontWeight: 400 }}>(optional)</span>
+              {' '}
+              <a
+                href="https://t.me/BotFather"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="setup-helper-link"
+              >→ t.me/BotFather</a>
+            </label>
             <input
-              className="config-input"
+              className={`config-input${fieldErrors.notifierToken ? ' input--error' : ''}`}
               type="password"
               placeholder="220301543:BBHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
               value={notifierBotToken}
               onChange={e => { setNotifierBotToken(e.target.value); resetFeedback() }}
             />
           </div>
+
+          {/* Group chat ID */}
           <div className="config-row">
-            <label className="config-label">Group chat ID <span style={{ color: 'var(--muted)', fontWeight: 400 }}>(optional)</span></label>
+            <label className="config-label">
+              Group chat ID{' '}
+              <span style={{ color: 'var(--muted)', fontWeight: 400 }}>(optional)</span>
+              {' '}
+              <a
+                href="https://t.me/userinfobot"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="setup-helper-link"
+              >→ t.me/userinfobot</a>
+            </label>
             <input
-              className="config-input"
+              className={`config-input${fieldErrors.groupChat ? ' input--error' : ''}`}
               placeholder="-1001234567890"
               value={groupChatId}
               onChange={e => setGroupChatId(e.target.value)}
             />
           </div>
 
+          {/* Hint text */}
+          <div className="setup-field-hint">
+            CTO and Notifier can be the same token — one bot per role is just a convention.
+          </div>
+
+          {/* Test result */}
           {testMsg && (
-            <div className="config-feedback" style={{ color: testState === 'ok' ? 'var(--accent)' : 'var(--red)', marginBottom: 8 }}>
+            <div
+              className="config-feedback"
+              style={{ color: testState === 'ok' ? 'var(--accent)' : 'var(--red)', marginBottom: 8 }}
+            >
               {testMsg}
             </div>
           )}
 
-          <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+          {/* 207 amber restart-errors block */}
+          {restartErrors && (
+            <div className="setup-restart-errors">
+              <div className="setup-restart-errors__title">Some containers failed to restart:</div>
+              {Object.entries(restartErrors).map(([k, v]) => (
+                <div key={k} className="setup-restart-errors__row">• {k}: {String(v)}</div>
+              ))}
+              <div className="setup-restart-errors__footer">
+                <a href="#/agents">Restart failed containers from the Agents panel →</a>
+              </div>
+            </div>
+          )}
+
+          {/* Action row */}
+          <div style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'center', flexWrap: 'wrap' }}>
             <button
               className="wfd-cancel-btn"
               disabled={!ctoBotToken || testState === 'testing'}
               onClick={handleTest}
             >
-              {testState === 'testing' ? 'Testing…' : 'Test connection'}
+              {testState === 'testing' ? 'Testing…' : testState === 'ok' ? 'Re-test' : 'Test connection'}
             </button>
             <button
               className="config-save-btn"
-              disabled={!ctoBotToken || saveState === 'saving'}
+              disabled={!ctoBotToken || testState !== 'ok' || saveState === 'saving'}
               onClick={handleSave}
             >
-              {saveState === 'saving' ? 'Saving…' : 'Save & connect'}
+              {saveState === 'saving'
+                ? '✓ .env written · restarting containers…'
+                : 'Save & connect'}
             </button>
+            {testState === 'error' && fieldErrorCount > 0 && (
+              <span className="setup-validation-count">
+                ✕ validation failed ({fieldErrorCount} error{fieldErrorCount !== 1 ? 's' : ''})
+              </span>
+            )}
           </div>
 
           {saveMsg && (
-            <div className="config-feedback" style={{ color: saveState === 'success' ? 'var(--accent)' : 'var(--red)', marginTop: 8 }}>
+            <div
+              className="config-feedback"
+              style={{ color: 'var(--red)', marginTop: 8 }}
+            >
               {saveMsg}
             </div>
           )}
@@ -168,16 +273,21 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
 
 interface GitHubModalProps {
   onClose: () => void
-  onConnected: () => void
+  onConnected: (toast: string) => void
+  configured: boolean
 }
 
-function ConnectGitHubModal({ onClose, onConnected }: GitHubModalProps) {
+function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalProps) {
   const [appId, setAppId] = useState('')
   const [pem, setPem] = useState('')
+  const [appIdRevealed, setAppIdRevealed] = useState(!configured)
+  const [pemRevealed, setPemRevealed] = useState(!configured)
   const [testState, setTestState] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle')
   const [testMsg, setTestMsg] = useState('')
-  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'success' | 'error'>('idle')
+  const [fieldErrors, setFieldErrors] = useState<Record<string, boolean>>({})
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'error'>('idle')
   const [saveMsg, setSaveMsg] = useState('')
+  const [restartErrors, setRestartErrors] = useState<Record<string, string> | null>(null)
 
   function handlePemFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -187,22 +297,45 @@ function ConnectGitHubModal({ onClose, onConnected }: GitHubModalProps) {
     reader.readAsText(file)
   }
 
+  // At least one field changed (revealed + non-empty)
+  const hasChanges = (appIdRevealed && appId !== '') || (pemRevealed && pem !== '')
+  // Test can run if: all revealed fields have values, and there's something to test
+  const canTest = configured
+    ? (!appIdRevealed || !!appId) && (!pemRevealed || !!pem) && (appIdRevealed || pemRevealed)
+    : !!appId && !!pem
+
   async function handleTest() {
     setTestState('testing')
     setTestMsg('')
+    setFieldErrors({})
     try {
       const res = await apiFetch('/api/setup/github/validate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ appId, privateKeyPem: pem }),
+        body: JSON.stringify({
+          appId: appId || undefined,
+          privateKeyPem: pem || undefined,
+        }),
       })
       const data = await res.json()
       if (res.ok && data.valid) {
         setTestState('ok')
         setTestMsg(data.appName ? `App: ${data.appName}` : 'Credentials OK')
+        setFieldErrors({})
       } else {
         setTestState('error')
-        setTestMsg(data.errorDetail ?? data.error ?? 'Validation failed')
+        const errDetail = String(data.errorDetail ?? data.error ?? 'Validation failed')
+        setTestMsg(errDetail)
+        const fe: Record<string, boolean> = {}
+        if (data.errors && typeof data.errors === 'object') {
+          const errs = data.errors as Record<string, unknown>
+          if (errs.pem_invalid) fe.pem = true
+          if (errs.app_id_mismatch) fe.appId = true
+        } else {
+          if (errDetail.includes('pem_invalid') || /pem|private.?key/i.test(errDetail)) fe.pem = true
+          if (errDetail.includes('app_id_mismatch') || /app.?id/i.test(errDetail)) fe.appId = true
+        }
+        setFieldErrors(fe)
       }
     } catch (e) {
       setTestState('error')
@@ -213,20 +346,24 @@ function ConnectGitHubModal({ onClose, onConnected }: GitHubModalProps) {
   async function handleSave() {
     setSaveState('saving')
     setSaveMsg('')
+    setRestartErrors(null)
     try {
       const res = await apiFetch('/api/setup/github', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ appId, privateKeyPem: pem }),
+        body: JSON.stringify({
+          appId: appId || undefined,
+          privateKeyPem: pem || undefined,
+        }),
       })
       const data = await res.json()
-      if (res.ok || res.status === 207) {
-        const errCount = Object.keys(data.restartErrors ?? {}).length
-        setSaveState('success')
-        setSaveMsg(errCount > 0
-          ? `Saved (${errCount} container(s) could not restart — check logs)`
-          : 'Saved and applied')
-        setTimeout(() => { onConnected(); onClose() }, 1200)
+      if (res.status === 207) {
+        // Keep modal open; show amber restart-errors block
+        setRestartErrors(data.restartErrors ?? {})
+        setSaveState('error')
+      } else if (res.ok) {
+        onConnected('✓ GitHub connected')
+        onClose()
       } else {
         setSaveState('error')
         setSaveMsg(data.errorDetail ?? data.error ?? `Error ${res.status}`)
@@ -245,56 +382,117 @@ function ConnectGitHubModal({ onClose, onConnected }: GitHubModalProps) {
           <button className="config-modal-close" onClick={onClose}>✕ close</button>
         </div>
         <div className="config-modal-body">
+
+          {/* App ID */}
           <div className="config-row">
             <label className="config-label">App ID <span style={{ color: 'var(--red)' }}>*</span></label>
-            <input
-              className="config-input"
-              placeholder="123456"
-              value={appId}
-              onChange={e => { setAppId(e.target.value); setTestState('idle'); setSaveState('idle') }}
-            />
-          </div>
-          <div className="config-row">
-            <label className="config-label">Private key (.pem) <span style={{ color: 'var(--red)' }}>*</span></label>
-            <input
-              type="file"
-              accept=".pem,.key"
-              className="config-input"
-              style={{ padding: '6px 8px' }}
-              onChange={handlePemFile}
-            />
-            {pem && (
-              <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
-                {pem.split('\n').length} lines loaded
+            {configured && !appIdRevealed ? (
+              <div className="setup-masked-field">
+                <span className="setup-masked-value">••••••• (configured)</span>
+                <button
+                  className="wfd-cancel-btn"
+                  style={{ flexShrink: 0 }}
+                  onClick={() => setAppIdRevealed(true)}
+                >Change</button>
+              </div>
+            ) : (
+              <input
+                className={`config-input${fieldErrors.appId ? ' input--error' : ''}`}
+                placeholder="123456"
+                value={appId}
+                onChange={e => { setAppId(e.target.value); setTestState('idle') }}
+              />
+            )}
+            {fieldErrors.appId && (
+              <div className="setup-field-error">
+                App ID mismatch — check the App ID in your GitHub App settings.
               </div>
             )}
           </div>
 
+          {/* Private key */}
+          <div className="config-row">
+            <label className="config-label">Private key (.pem) <span style={{ color: 'var(--red)' }}>*</span></label>
+            {configured && !pemRevealed ? (
+              <div className="setup-masked-field">
+                <span className="setup-masked-value">••••••• (configured)</span>
+                <button
+                  className="wfd-cancel-btn"
+                  style={{ flexShrink: 0 }}
+                  onClick={() => setPemRevealed(true)}
+                >Change</button>
+              </div>
+            ) : (
+              <>
+                <input
+                  type="file"
+                  accept=".pem,.key"
+                  className="config-input"
+                  style={{ padding: '6px 8px' }}
+                  onChange={handlePemFile}
+                />
+                {pem && (
+                  <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
+                    {pem.split('\n').length} lines loaded
+                  </div>
+                )}
+              </>
+            )}
+            {fieldErrors.pem && (
+              <div className="setup-field-error">
+                PEM invalid — ensure the file is the private key (.pem) from your GitHub App.
+              </div>
+            )}
+          </div>
+
+          {/* Test result */}
           {testMsg && (
-            <div className="config-feedback" style={{ color: testState === 'ok' ? 'var(--accent)' : 'var(--red)', marginBottom: 8 }}>
+            <div
+              className="config-feedback"
+              style={{ color: testState === 'ok' ? 'var(--accent)' : 'var(--red)', marginBottom: 8 }}
+            >
               {testMsg}
             </div>
           )}
 
+          {/* 207 amber restart-errors block */}
+          {restartErrors && (
+            <div className="setup-restart-errors">
+              <div className="setup-restart-errors__title">Some containers failed to restart:</div>
+              {Object.entries(restartErrors).map(([k, v]) => (
+                <div key={k} className="setup-restart-errors__row">• {k}: {String(v)}</div>
+              ))}
+              <div className="setup-restart-errors__footer">
+                <a href="#/agents">Restart failed containers from the Agents panel →</a>
+              </div>
+            </div>
+          )}
+
+          {/* Action row */}
           <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
             <button
               className="wfd-cancel-btn"
-              disabled={!appId || !pem || testState === 'testing'}
+              disabled={!canTest || testState === 'testing'}
               onClick={handleTest}
             >
-              {testState === 'testing' ? 'Testing…' : 'Test connection'}
+              {testState === 'testing' ? 'Testing…' : testState === 'ok' ? 'Re-test' : 'Test connection'}
             </button>
             <button
               className="config-save-btn"
-              disabled={!appId || !pem || saveState === 'saving'}
+              disabled={(configured && !hasChanges) || testState !== 'ok' || saveState === 'saving'}
               onClick={handleSave}
             >
-              {saveState === 'saving' ? 'Saving…' : 'Save & connect'}
+              {saveState === 'saving'
+                ? '✓ .env written · restarting containers…'
+                : 'Save & connect'}
             </button>
           </div>
 
           {saveMsg && (
-            <div className="config-feedback" style={{ color: saveState === 'success' ? 'var(--accent)' : 'var(--red)', marginTop: 8 }}>
+            <div
+              className="config-feedback"
+              style={{ color: 'var(--red)', marginTop: 8 }}
+            >
               {saveMsg}
             </div>
           )}
@@ -309,6 +507,7 @@ function ConnectGitHubModal({ onClose, onConnected }: GitHubModalProps) {
 export default function SetupBanner({ status, agentCount, onConnected }: SetupBannerProps) {
   const [telegramOpen, setTelegramOpen] = useState(false)
   const [githubOpen, setGithubOpen] = useState(false)
+  const [toasts, setToasts] = useState<Array<{ id: number; text: string }>>([])
 
   if (!status) return null
 
@@ -316,13 +515,29 @@ export default function SetupBanner({ status, agentCount, onConnected }: SetupBa
   const githubOk = status.gitHub.configured
   const bothConfigured = telegramOk && githubOk
 
+  function addToast(text: string) {
+    const id = ++_toastId
+    setToasts(prev => [...prev, { id, text }])
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 5000)
+  }
+
+  function handleModalConnected(toast: string) {
+    addToast(toast)
+    onConnected()
+  }
+
   // Compact chip row once everything is configured and there are agents
   if (bothConfigured && agentCount > 0) {
     return (
-      <div className="setup-banner setup-banner--compact">
-        <span className="setup-chip setup-chip--ok">✓ Telegram</span>
-        <span className="setup-chip setup-chip--ok">✓ GitHub</span>
-      </div>
+      <>
+        <div className="setup-banner setup-banner--compact">
+          <span className="setup-chip setup-chip--ok">✓ Telegram</span>
+          <span className="setup-chip setup-chip--ok">✓ GitHub</span>
+        </div>
+        {toasts.map(t => (
+          <div key={t.id} className="setup-toast">{t.text}</div>
+        ))}
+      </>
     )
   }
 
@@ -389,16 +604,22 @@ export default function SetupBanner({ status, agentCount, onConnected }: SetupBa
         )}
       </div>
 
+      {/* Toasts */}
+      {toasts.map(t => (
+        <div key={t.id} className="setup-toast">{t.text}</div>
+      ))}
+
       {telegramOpen && (
         <ConnectTelegramModal
           onClose={() => setTelegramOpen(false)}
-          onConnected={onConnected}
+          onConnected={handleModalConnected}
         />
       )}
       {githubOpen && (
         <ConnectGitHubModal
           onClose={() => setGithubOpen(false)}
-          onConnected={onConnected}
+          onConnected={handleModalConnected}
+          configured={githubOk}
         />
       )}
     </>

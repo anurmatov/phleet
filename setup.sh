@@ -1013,14 +1013,20 @@ EOF
     fi
 
     echo
-    echo -e "${GREEN}══════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}  Fleet setup complete!${NC}"
-    echo -e "${GREEN}══════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}✓  Fleet stack is up.${NC}"
     echo
-    echo "  → Dashboard: http://localhost:3700  (or FLEET_DASHBOARD_PORT if overridden)"
+    echo -e "   Services running:  rabbitmq · qdrant · temporal · fleet-memory · fleet-bridge"
+    echo -e "                      fleet-telegram · fleet-orchestrator · fleet-dashboard"
     echo
-    echo "  Runtime data lives under: $FLEET_BASE_DIR"
-    echo "  To manage services:   cd fleet && docker compose (up|down|logs)"
+    echo -e "   → Dashboard:  http://localhost:${FLEET_DASHBOARD_PORT:-3700}  (FLEET_DASHBOARD_PORT to override)"
+    echo
+    echo -e "   Next steps visible in the dashboard:"
+    echo -e "     · Connect Telegram bots"
+    echo -e "     · Connect GitHub App"
+    echo -e "     · Provision your first agent"
+    echo
+    echo -e "   Re-run ./setup.sh at any time — it is idempotent."
+    echo -e "   For the full prompted flow:  ./setup.sh --full-setup"
     echo
 
   else

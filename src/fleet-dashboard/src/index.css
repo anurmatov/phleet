@@ -4477,3 +4477,105 @@ body {
   flex-shrink: 0;
   white-space: nowrap;
 }
+
+/* ── Setup UX additions ─────────────────────────────────────────────────────── */
+
+.setup-helper-link {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+  text-decoration: none;
+}
+.setup-helper-link:hover { color: var(--text); }
+
+.setup-field-hint {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+  margin-bottom: 10px;
+}
+
+.setup-field-error {
+  font-size: 11px;
+  color: var(--red);
+  margin-top: 3px;
+}
+
+.input--error {
+  border-color: var(--red) !important;
+}
+
+.setup-validation-count {
+  font-size: 11px;
+  color: var(--red);
+}
+
+.setup-masked-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.setup-masked-value {
+  flex: 1;
+  font-size: 13px;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+}
+
+.setup-restart-errors {
+  background: rgba(217, 119, 6, 0.08);
+  border: 1px solid rgba(217, 119, 6, 0.35);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+.setup-restart-errors__title {
+  color: #d97706;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.setup-restart-errors__row {
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+.setup-restart-errors__footer {
+  margin-top: 8px;
+}
+.setup-restart-errors__footer a {
+  color: #d97706;
+  font-size: 11px;
+  text-decoration: none;
+}
+.setup-restart-errors__footer a:hover { text-decoration: underline; }
+
+/* Bottom-right success toast */
+@keyframes setup-toast-in {
+  from { transform: translateY(12px); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+.setup-toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  z-index: 9999;
+  pointer-events: none;
+  animation: setup-toast-in 0.25s ease;
+}
+
+/* Scale-in animation for setup chips on first render */
+@keyframes setup-chip-in {
+  from { transform: scale(0.85); opacity: 0; }
+  to   { transform: scale(1);    opacity: 1; }
+}
+.setup-chip--ok {
+  animation: setup-chip-in 0.3s ease;
+}

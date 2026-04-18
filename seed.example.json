@@ -1,65 +1,11 @@
 {
-  "agents": [
-    {
-      "name": "developer",
-      "displayName": "Developer",
-      "containerName": "fleet-developer",
-      "role": "developer",
-      "model": "sonnet",
-      "memoryLimitMb": 6144,
-      "isEnabled": true,
-      "permissionMode": "acceptEdits",
-      "maxTurns": 50,
-      "workDir": "/workspace",
-      "proactiveIntervalMinutes": 0,
-      "groupListenMode": "off",
-      "groupDebounceSeconds": 15,
-      "shortName": "Developer",
-      "showStats": false,
-      "telegramSendOnly": true,
-      "prefixMessages": true,
-      "tools": [
-        "Read",
-        "Glob",
-        "Grep",
-        "WebFetch",
-        "WebSearch",
-        "mcp__fleet-memory__memory_get",
-        "mcp__fleet-memory__memory_list",
-        "mcp__fleet-memory__memory_search",
-        "mcp__fleet-memory__memory_stats",
-        "mcp__fleet-temporal__request_memory_store"
-      ],
-      "projects": [],
-      "mcpEndpoints": [
-        {
-          "name": "fleet-memory",
-          "url": "http://fleet-memory:3100",
-          "transport": "http"
-        },
-        {
-          "name": "fleet-temporal",
-          "url": "http://fleet-temporal-bridge:3001",
-          "transport": "http"
-        }
-      ],
-      "envRefs": [
-        "TELEGRAM_NOTIFIER_BOT_TOKEN",
-        "GITHUB_APP_ID"
-      ],
-      "networks": [
-        "fleet-net"
-      ],
-      "telegramUsers": [],
-      "telegramGroups": []
-    }
-  ],
+  "agents": [],
   "workflowDefinitions": [
     {
       "name": "FireAndForgetTaskWorkflow",
       "namespace": "fleet",
       "taskQueue": "fleet",
-      "description": "Lightweight fire-and-forget task delegation. Delegates a single task to the target agent — no result delivery, no notification. Designed for Temporal-scheduled tasks and one-off delegations where the result is visible in the dashboard but doesn't need to be reported back. Prefer TaskDelegationWorkflow when you need guaranteed result delivery to the CTO agent.",
+      "description": "Lightweight fire-and-forget task delegation. Delegates a single task to the target agent \u2014 no result delivery, no notification. Designed for Temporal-scheduled tasks and one-off delegations where the result is visible in the dashboard but doesn't need to be reported back. Prefer TaskDelegationWorkflow when you need guaranteed result delivery to the CTO agent.",
       "definition": {
         "type": "sequence",
         "steps": [
@@ -100,7 +46,7 @@
             "type": "delegate",
             "target": "{{config.CtoAgent}}",
             "outputVar": "_result",
-            "instruction": "TaskDelegationWorkflow completed.\nAgent: {{input.TargetAgent}}\nTask: {{input.TaskDescription}}\nResult:\n{{vars.delegate_result | default: 'Task failed or timed out — check Temporal UI for details'}}",
+            "instruction": "TaskDelegationWorkflow completed.\nAgent: {{input.TargetAgent}}\nTask: {{input.TaskDescription}}\nResult:\n{{vars.delegate_result | default: 'Task failed or timed out \u2014 check Temporal UI for details'}}",
             "ignoreFailure": true,
             "timeoutMinutes": 10
           }
@@ -111,7 +57,7 @@
       "name": "MemoryStoreRequestWorkflow",
       "namespace": "fleet",
       "taskQueue": "fleet",
-      "description": "Memory store request — the CTO agent reviews, searches for duplicates, stores/updates/revises/rejects. Back-and-forth loop with requesting agent. No signal gates or StoreMemory activity — the CTO uses memory MCP tools directly.",
+      "description": "Memory store request \u2014 the CTO agent reviews, searches for duplicates, stores/updates/revises/rejects. Back-and-forth loop with requesting agent. No signal gates or StoreMemory activity \u2014 the CTO uses memory MCP tools directly.",
       "definition": {
         "type": "sequence",
         "steps": [
@@ -131,7 +77,7 @@
                 "type": "delegate",
                 "target": "{{config.CtoAgent}}",
                 "outputVar": "review_response",
-                "instruction": "Review this memory store request from {{input.Agent}}.\n\nProposed memory:\n- Type: {{input.Type}}\n- Title: {{input.Title}}\n- Project: {{input.Project}}\n- Tags: {{input.Tags | default: 'none'}}\n- Content:\n{{input.Content}}\n\nAuthor's latest revision (if any): {{vars.revised_content | default: 'N/A — first review round'}}\n\nYour previous feedback (if any): {{vars.review_response | default: 'N/A — first review round'}}\n\nYour task:\n1. Search fleet-memory for existing memories on this topic — check for duplicates or related memories that should be updated instead of creating new ones.\n2. Evaluate quality: is this worth persisting? Is the title specific enough for search? Does content have actionable signal?\n3. Decide and act:\n   - STORE: no duplicates, good quality → call memory_store, add a ## Related section linking related memories. Start your response with [STORED].\n   - UPDATE: an existing memory covers this topic → call memory_update to append new info, preserving chronological history with dates so the story's evolution is visible. Start your response with [UPDATED].\n   - REVISE: content needs improvement (vague, missing context, wrong structure) → start with [REVISE] and explain exactly what the author should change. Be specific — suggest a better title, point out what's missing, show the format you expect.\n   - REJECT: noise, pure duplicate, or not worth persisting → start with [REJECTED] and explain why.\n\nWhen storing or updating: follow the reweave protocol — check ## Related links in nearby memories and update them if this new knowledge extends or connects to them.\n\nIMPORTANT: Your response MUST start with exactly one of: [STORED], [UPDATED], [REVISE], [REJECTED].",
+                "instruction": "Review this memory store request from {{input.Agent}}.\n\nProposed memory:\n- Type: {{input.Type}}\n- Title: {{input.Title}}\n- Project: {{input.Project}}\n- Tags: {{input.Tags | default: 'none'}}\n- Content:\n{{input.Content}}\n\nAuthor's latest revision (if any): {{vars.revised_content | default: 'N/A \u2014 first review round'}}\n\nYour previous feedback (if any): {{vars.review_response | default: 'N/A \u2014 first review round'}}\n\nYour task:\n1. Search fleet-memory for existing memories on this topic \u2014 check for duplicates or related memories that should be updated instead of creating new ones.\n2. Evaluate quality: is this worth persisting? Is the title specific enough for search? Does content have actionable signal?\n3. Decide and act:\n   - STORE: no duplicates, good quality \u2192 call memory_store, add a ## Related section linking related memories. Start your response with [STORED].\n   - UPDATE: an existing memory covers this topic \u2192 call memory_update to append new info, preserving chronological history with dates so the story's evolution is visible. Start your response with [UPDATED].\n   - REVISE: content needs improvement (vague, missing context, wrong structure) \u2192 start with [REVISE] and explain exactly what the author should change. Be specific \u2014 suggest a better title, point out what's missing, show the format you expect.\n   - REJECT: noise, pure duplicate, or not worth persisting \u2192 start with [REJECTED] and explain why.\n\nWhen storing or updating: follow the reweave protocol \u2014 check ## Related links in nearby memories and update them if this new knowledge extends or connects to them.\n\nIMPORTANT: Your response MUST start with exactly one of: [STORED], [UPDATED], [REVISE], [REJECTED].",
                 "timeoutMinutes": 10
               },
               {
@@ -144,7 +90,7 @@
                     "type": "delegate",
                     "target": "{{input.Agent}}",
                     "outputVar": "revised_content",
-                    "instruction": "Your memory store request needs revision before it can be persisted.\n\nYour original proposal:\n- Title: {{input.Title}}\n- Content: {{input.Content}}\n\nReviewer feedback:\n{{vars.review_response}}\n\nPlease revise your proposal based on this feedback. If the reviewer suggested updating an existing memory instead, provide the updated content that should be appended. Respond with your revised proposal — include both the title and content.",
+                    "instruction": "Your memory store request needs revision before it can be persisted.\n\nYour original proposal:\n- Title: {{input.Title}}\n- Content: {{input.Content}}\n\nReviewer feedback:\n{{vars.review_response}}\n\nPlease revise your proposal based on this feedback. If the reviewer suggested updating an existing memory instead, provide the updated content that should be appended. Respond with your revised proposal \u2014 include both the title and content.",
                     "timeoutMinutes": 30
                   },
                   "STORED": {
@@ -171,7 +117,7 @@
       "name": "UweDesignToPrWorkflow",
       "namespace": "fleet",
       "taskQueue": "fleet",
-      "description": "Thin orchestrator: UweDesignWorkflow child (consensus review + CEO design-approval gate) → UwePrImplementationWorkflow abandoned child. Replaces compiled DesignToPrWorkflow. Input: Description (required), ExistingIssueNumber (optional), Repo (required), DesignAgent (required), ImplementAgent (required), ConsensusAgents (required), MaxConsensusRounds (default 3).",
+      "description": "Thin orchestrator: UweDesignWorkflow child (consensus review + CEO design-approval gate) \u2192 UwePrImplementationWorkflow abandoned child. Replaces compiled DesignToPrWorkflow. Input: Description (required), ExistingIssueNumber (optional), Repo (required), DesignAgent (required), ImplementAgent (required), ConsensusAgents (required), MaxConsensusRounds (default 3).",
       "definition": {
         "name": "root",
         "type": "sequence",
@@ -243,7 +189,7 @@
       "name": "UweDesignWorkflow",
       "namespace": "fleet",
       "taskQueue": "fleet",
-      "description": "Creates or refines a well-specified GitHub issue with multi-agent consensus review, then gates on CEO design-approval. Consensus loop (max 3 rounds) — if exhausted or needs_human_review, escalates to CEO gate instead of cancelling. CEO wait loop (hourly reminders, no auto-cancel). Returns {IssueNumber: N} on approval. Replaces compiled DesignWorkflow.",
+      "description": "Creates or refines a well-specified GitHub issue with multi-agent consensus review, then gates on CEO design-approval. Consensus loop (max 3 rounds) \u2014 if exhausted or needs_human_review, escalates to CEO gate instead of cancelling. CEO wait loop (hourly reminders, no auto-cancel). Returns {IssueNumber: N} on approval. Replaces compiled DesignWorkflow.",
       "definition": {
         "name": "root",
         "type": "sequence",
@@ -268,7 +214,7 @@
                     "type": "delegate",
                     "target": "{{input.TargetAgent}}",
                     "outputVar": "issue_result",
-                    "instruction": "Your task is to create or refine a GitHub issue in repo {{input.Repo}}.\n\nDetermine which action to take by checking in priority order:\n1. Prior issue number from previous iteration: {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)' | default: 'none'}} — if this is a number, REFINE that issue.\n2. ExistingIssueNumber from input: {{input.ExistingIssueNumber | default: 'none'}} — if this is a number, REFINE that issue.\n3. If neither is set — CREATE a new well-specified GitHub issue for: {{input.Description}}.\n\nFor CREATE: use `gh issue create --repo {{input.Repo}}`.\nFor REFINE: use `gh issue edit <N> --repo {{input.Repo}}`.\n\nIncorporate this prior consensus feedback (if any):\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nIncorporate this prior CEO feedback (if any):\n{{vars.approval_signal.Comment | default: 'none'}}\n\nCEO consensus direction (if any):\n{{vars.ceo_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nAt the end of your response, output exactly: ISSUE_NUMBER: <number>",
+                    "instruction": "Your task is to create or refine a GitHub issue in repo {{input.Repo}}.\n\nDetermine which action to take by checking in priority order:\n1. Prior issue number from previous iteration: {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)' | default: 'none'}} \u2014 if this is a number, REFINE that issue.\n2. ExistingIssueNumber from input: {{input.ExistingIssueNumber | default: 'none'}} \u2014 if this is a number, REFINE that issue.\n3. If neither is set \u2014 CREATE a new well-specified GitHub issue for: {{input.Description}}.\n\nFor CREATE: use `gh issue create --repo {{input.Repo}}`.\nFor REFINE: use `gh issue edit <N> --repo {{input.Repo}}`.\n\nIncorporate this prior consensus feedback (if any):\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nIncorporate this prior CEO feedback (if any):\n{{vars.approval_signal.Comment | default: 'none'}}\n\nCEO consensus direction (if any):\n{{vars.ceo_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nAt the end of your response, output exactly: ISSUE_NUMBER: <number>",
                     "timeoutMinutes": 15
                   },
                   {
@@ -309,7 +255,7 @@
                             "name": "notify_needs_human_consensus",
                             "type": "delegate",
                             "target": "{{config.CtoAgent}}",
-                            "instruction": "Post to Telegram group: DesignWorkflow for issue {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} in {{input.Repo}} — consensus review flagged needs_human_review. Manual intervention required. Reasoning: {{vars.consensus_out.ConsolidatedReasoning}}",
+                            "instruction": "Post to Telegram group: DesignWorkflow for issue {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} in {{input.Repo}} \u2014 consensus review flagged needs_human_review. Manual intervention required. Reasoning: {{vars.consensus_out.ConsolidatedReasoning}}",
                             "ignoreFailure": true,
                             "timeoutMinutes": 5
                           },
@@ -409,7 +355,7 @@
                     "notifyStep": {
                       "type": "delegate",
                       "target": "{{config.CtoAgent}}",
-                      "instruction": "Post to Telegram group: Design spec for issue {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} ({{input.Repo}}) approved by consensus. Send design-approval signal to workflow `{{config.WorkflowId | default: 'this workflow'}}`:\n  {\"Decision\":\"approved\"} — approve the design spec\n  {\"Decision\":\"changes_requested\",\"Comment\":\"your feedback\"} — request refinement\n  {\"Decision\":\"rejected\",\"Comment\":\"reason\"} — cancel",
+                      "instruction": "Post to Telegram group: Design spec for issue {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} ({{input.Repo}}) approved by consensus. Send design-approval signal to workflow `{{config.WorkflowId | default: 'this workflow'}}`:\n  {\"Decision\":\"approved\"} \u2014 approve the design spec\n  {\"Decision\":\"changes_requested\",\"Comment\":\"your feedback\"} \u2014 request refinement\n  {\"Decision\":\"rejected\",\"Comment\":\"reason\"} \u2014 cancel",
                       "ignoreFailure": true,
                       "timeoutMinutes": 5
                     },
@@ -521,7 +467,7 @@
                                     "name": "renotify_ceo_reviewers_approve",
                                     "type": "delegate",
                                     "target": "{{config.CtoAgent}}",
-                                    "instruction": "Post to Telegram group: Design spec for issue {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} in {{input.Repo}} — consensus reviewers evaluated your concern and still approve the spec.\n\nReviewer reasoning:\n{{vars.ceo_consensus_out.ConsolidatedReasoning}}\n\nPlease re-evaluate and send a new 'design-approval' signal.",
+                                    "instruction": "Post to Telegram group: Design spec for issue {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} in {{input.Repo}} \u2014 consensus reviewers evaluated your concern and still approve the spec.\n\nReviewer reasoning:\n{{vars.ceo_consensus_out.ConsolidatedReasoning}}\n\nPlease re-evaluate and send a new 'design-approval' signal.",
                                     "ignoreFailure": true,
                                     "timeoutMinutes": 5
                                   },
@@ -544,7 +490,7 @@
                                     "name": "notify_ceo_needs_human",
                                     "type": "delegate",
                                     "target": "{{config.CtoAgent}}",
-                                    "instruction": "Post to Telegram group: DesignWorkflow for issue {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} in {{input.Repo}} — CEO-triggered consensus review flagged needs_human_review. Manual intervention required.",
+                                    "instruction": "Post to Telegram group: DesignWorkflow for issue {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} in {{input.Repo}} \u2014 CEO-triggered consensus review flagged needs_human_review. Manual intervention required.",
                                     "ignoreFailure": true,
                                     "timeoutMinutes": 5
                                   },
@@ -623,7 +569,7 @@
             "type": "delegate",
             "target": "{{config.CtoAgent}}",
             "outputVar": "assess_result",
-            "instruction": "Review the merged PR diff for PR #{{input.PrNumber}} on branch `{{input.BranchName}}` in repo {{input.Repo}} and determine whether any project documentation needs updating.\n\nMerge summary: {{input.MergeSummary}}\n\nSteps:\n1. Fetch the diff: `gh pr diff {{input.PrNumber}} --repo {{input.Repo}}`\n2. Check whether the changes touch: architecture, config, ports, services, schemas, tool mappings, docker config, CI/CD, or infrastructure.\n3. If no doc-relevant changes — respond with exactly: NO_DOC_UPDATES_NEEDED\n4. Otherwise, list what needs updating across:\n   - project contexts in orchestrator DB (update_project_context MCP tool — no PR needed)\n   - fleet-memory entries (memory_store / memory_update — no PR needed)\n   - agent instructions in orchestrator DB (update_instruction MCP tool — no PR needed)\n   - operational context memories: search fleet-memory for relevant WorkflowType operational context entries and list any that need updating (new gotchas, changed behavior, updated limits)",
+            "instruction": "Review the merged PR diff for PR #{{input.PrNumber}} on branch `{{input.BranchName}}` in repo {{input.Repo}} and determine whether any project documentation needs updating.\n\nMerge summary: {{input.MergeSummary}}\n\nSteps:\n1. Fetch the diff: `gh pr diff {{input.PrNumber}} --repo {{input.Repo}}`\n2. Check whether the changes touch: architecture, config, ports, services, schemas, tool mappings, docker config, CI/CD, or infrastructure.\n3. If no doc-relevant changes \u2014 respond with exactly: NO_DOC_UPDATES_NEEDED\n4. Otherwise, list what needs updating across:\n   - project contexts in orchestrator DB (update_project_context MCP tool \u2014 no PR needed)\n   - fleet-memory entries (memory_store / memory_update \u2014 no PR needed)\n   - agent instructions in orchestrator DB (update_instruction MCP tool \u2014 no PR needed)\n   - operational context memories: search fleet-memory for relevant WorkflowType operational context entries and list any that need updating (new gotchas, changed behavior, updated limits)",
             "timeoutMinutes": 15
           },
           {
@@ -644,7 +590,7 @@
                   "type": "delegate",
                   "target": "{{config.CtoAgent}}",
                   "outputVar": "update_round1",
-                  "instruction": "Based on the impact assessment below, update the relevant documentation for PR #{{input.PrNumber}} on branch `{{input.BranchName}}` in repo {{input.Repo}}.\n\nWhat needs updating:\n{{vars.assess_result}}\n\nActions:\n1. Project context changes: use list_project_contexts to check current versions, then update_project_context to create a new version. Do NOT reprovision agents yet — that happens after CEO approval.\n2. fleet-memory entries: update directly using memory_store / memory_update. Include operational context memories (titled 'WorkflowType — operational context') — add new gotchas, behavioral changes, or updated limits introduced by this PR.\n3. Agent instruction changes: use list_instruction_versions to check current content, then update_instruction to create a new version. Do NOT reprovision agents yet.\n\nAt the end of your response, output BOTH lines in exactly this format:\nDOC_PRS: org/repo#N [org/repo#M ...]  or  DOC_PRS: none\nINSTRUCTION_UPDATES: instruction_name1 [instruction_name2 ...]  or  INSTRUCTION_UPDATES: none",
+                  "instruction": "Based on the impact assessment below, update the relevant documentation for PR #{{input.PrNumber}} on branch `{{input.BranchName}}` in repo {{input.Repo}}.\n\nWhat needs updating:\n{{vars.assess_result}}\n\nActions:\n1. Project context changes: use list_project_contexts to check current versions, then update_project_context to create a new version. Do NOT reprovision agents yet \u2014 that happens after CEO approval.\n2. fleet-memory entries: update directly using memory_store / memory_update. Include operational context memories (titled 'WorkflowType \u2014 operational context') \u2014 add new gotchas, behavioral changes, or updated limits introduced by this PR.\n3. Agent instruction changes: use list_instruction_versions to check current content, then update_instruction to create a new version. Do NOT reprovision agents yet.\n\nAt the end of your response, output BOTH lines in exactly this format:\nDOC_PRS: org/repo#N [org/repo#M ...]  or  DOC_PRS: none\nINSTRUCTION_UPDATES: instruction_name1 [instruction_name2 ...]  or  INSTRUCTION_UPDATES: none",
                   "timeoutMinutes": 20
                 },
                 {
@@ -661,7 +607,7 @@
                   "notifyStep": {
                     "type": "delegate",
                     "target": "{{config.CtoAgent}}",
-                    "instruction": "Post to the Telegram group:\n\nDoc maintenance complete for PR #{{input.PrNumber}} in {{input.Repo}} (round 1/2).\n\nChanges made:\n{{vars.update_round1}}\n\nPlease review and signal the workflow with 'doc-review':\n  {\"Decision\":\"approved\"} — merge all doc PRs + reprovision agents with updated instructions\n  {\"Decision\":\"changes_requested\",\"Comment\":\"your feedback\"} — request revisions (1 more round available)\n  {\"Decision\":\"rejected\",\"Comment\":\"reason\"} — close all doc PRs + rollback instruction versions",
+                    "instruction": "Post to the Telegram group:\n\nDoc maintenance complete for PR #{{input.PrNumber}} in {{input.Repo}} (round 1/2).\n\nChanges made:\n{{vars.update_round1}}\n\nPlease review and signal the workflow with 'doc-review':\n  {\"Decision\":\"approved\"} \u2014 merge all doc PRs + reprovision agents with updated instructions\n  {\"Decision\":\"changes_requested\",\"Comment\":\"your feedback\"} \u2014 request revisions (1 more round available)\n  {\"Decision\":\"rejected\",\"Comment\":\"reason\"} \u2014 close all doc PRs + rollback instruction versions",
                     "ignoreFailure": true,
                     "timeoutMinutes": 5
                   },
@@ -727,7 +673,7 @@
                         "type": "delegate",
                         "target": "{{config.CtoAgent}}",
                         "outputVar": "update_round2",
-                        "instruction": "Apply the CEO's feedback on the documentation changes for PR #{{input.PrNumber}} in {{input.Repo}} (revision round 2/2 — final).\n\nCEO decision signal (parse for Comment): {{vars.doc_review_1}}\n\nRound-1 update result (contains DOC_PRS and INSTRUCTION_UPDATES lines):\n{{vars.update_round1}}\n\nActions:\n1. For project context changes: use update_project_context to create a revised version addressing CEO feedback.\n2. For fleet-memory changes: update entries directly.\n3. For instruction changes: use update_instruction to create a revised version — do NOT reprovision yet.\n\nAt the end of your response, output this line:\nINSTRUCTION_UPDATES: instruction_name1 [instruction_name2 ...]  or  INSTRUCTION_UPDATES: none\n\n(DOC_PRS are the same as round 1 — no new PRs are opened in revision.)\n\nReport what was changed.",
+                        "instruction": "Apply the CEO's feedback on the documentation changes for PR #{{input.PrNumber}} in {{input.Repo}} (revision round 2/2 \u2014 final).\n\nCEO decision signal (parse for Comment): {{vars.doc_review_1}}\n\nRound-1 update result (contains DOC_PRS and INSTRUCTION_UPDATES lines):\n{{vars.update_round1}}\n\nActions:\n1. For project context changes: use update_project_context to create a revised version addressing CEO feedback.\n2. For fleet-memory changes: update entries directly.\n3. For instruction changes: use update_instruction to create a revised version \u2014 do NOT reprovision yet.\n\nAt the end of your response, output this line:\nINSTRUCTION_UPDATES: instruction_name1 [instruction_name2 ...]  or  INSTRUCTION_UPDATES: none\n\n(DOC_PRS are the same as round 1 \u2014 no new PRs are opened in revision.)\n\nReport what was changed.",
                         "timeoutMinutes": 20
                       },
                       {
@@ -737,7 +683,7 @@
                         "notifyStep": {
                           "type": "delegate",
                           "target": "{{config.CtoAgent}}",
-                          "instruction": "Post to the Telegram group:\n\nDoc maintenance revision complete for PR #{{input.PrNumber}} in {{input.Repo}} (round 2/2 — final).\n\nChanges made in revision:\n{{vars.update_round2}}\n\nPlease review and signal the workflow with 'doc-review':\n  {\"Decision\":\"approved\"} — merge all doc PRs + reprovision agents\n  {\"Decision\":\"rejected\",\"Comment\":\"reason\"} — close all doc PRs + rollback\n  (Note: this is the final round — any further changes_requested will trigger cleanup without another revision)",
+                          "instruction": "Post to the Telegram group:\n\nDoc maintenance revision complete for PR #{{input.PrNumber}} in {{input.Repo}} (round 2/2 \u2014 final).\n\nChanges made in revision:\n{{vars.update_round2}}\n\nPlease review and signal the workflow with 'doc-review':\n  {\"Decision\":\"approved\"} \u2014 merge all doc PRs + reprovision agents\n  {\"Decision\":\"rejected\",\"Comment\":\"reason\"} \u2014 close all doc PRs + rollback\n  (Note: this is the final round \u2014 any further changes_requested will trigger cleanup without another revision)",
                           "ignoreFailure": true,
                           "timeoutMinutes": 5
                         },
@@ -797,7 +743,7 @@
                               "type": "delegate",
                               "target": "{{config.CtoAgent}}",
                               "outputVar": "cleanup_result",
-                              "instruction": "Doc maintenance for PR #{{input.PrNumber}} in {{input.Repo}} has exhausted both revision rounds without a final CEO decision (timeout or unexpected signal).\n\nRound-1 update result (DOC_PRS and round-1 INSTRUCTION_UPDATES):\n{{vars.update_round1}}\n\nRound-2 update result (additional INSTRUCTION_UPDATES from revision, if any):\n{{vars.update_round2}}\n\nActions — clean up dangling changes:\n1. Find the DOC_PRS line in round-1 result. For each listed PR: `gh pr close <N> --repo <org/repo> --delete-branch`. Skip if 'none'.\n2. Find INSTRUCTION_UPDATES in BOTH round-1 and round-2 results. Combine the lists (dedup by name). For each instruction: use rollback_instruction to revert to the pre-workflow version. Skip if both are 'none'.\n\nPost to Telegram group: Doc maintenance for PR #{{input.PrNumber}} in {{input.Repo}} timed out after 2 rounds. Open PRs closed and instruction versions rolled back. Manual review may be needed.",
+                              "instruction": "Doc maintenance for PR #{{input.PrNumber}} in {{input.Repo}} has exhausted both revision rounds without a final CEO decision (timeout or unexpected signal).\n\nRound-1 update result (DOC_PRS and round-1 INSTRUCTION_UPDATES):\n{{vars.update_round1}}\n\nRound-2 update result (additional INSTRUCTION_UPDATES from revision, if any):\n{{vars.update_round2}}\n\nActions \u2014 clean up dangling changes:\n1. Find the DOC_PRS line in round-1 result. For each listed PR: `gh pr close <N> --repo <org/repo> --delete-branch`. Skip if 'none'.\n2. Find INSTRUCTION_UPDATES in BOTH round-1 and round-2 results. Combine the lists (dedup by name). For each instruction: use rollback_instruction to revert to the pre-workflow version. Skip if both are 'none'.\n\nPost to Telegram group: Doc maintenance for PR #{{input.PrNumber}} in {{input.Repo}} timed out after 2 rounds. Open PRs closed and instruction versions rolled back. Manual review may be needed.",
                               "ignoreFailure": true,
                               "timeoutMinutes": 15
                             },
@@ -863,7 +809,7 @@
             "type": "delegate",
             "target": "{{input.TargetAgent}}",
             "outputVar": "impl_result",
-            "instruction": "Implement the following task in repo {{input.Repo}}. When done, open a PR against main.\n\nTask:\n  Issue number: {{input.IssueNumber | default: 'N/A'}}\n  Description: {{input.Description | default: 'none'}}\n\nBranch name: Use `{{input.BranchName}}` if it is provided and non-empty. Otherwise, auto-generate: use `feat/issue-{{input.IssueNumber}}` if an issue number is provided, or a short `feat/<description-slug>` for description-only tasks.\n\nIMPORTANT: If an issue number is provided, always fetch the latest issue details before starting — run `gh issue view {{input.IssueNumber}} --repo {{input.Repo}} --comments` as your first step and use THAT content as your spec.\n\nAt the end of your response, output the PR URL on its own line:\nPR_URL: https://github.com/{{input.Repo}}/pull/NNN",
+            "instruction": "Implement the following task in repo {{input.Repo}}. When done, open a PR against main.\n\nTask:\n  Issue number: {{input.IssueNumber | default: 'N/A'}}\n  Description: {{input.Description | default: 'none'}}\n\nBranch name: Use `{{input.BranchName}}` if it is provided and non-empty. Otherwise, auto-generate: use `feat/issue-{{input.IssueNumber}}` if an issue number is provided, or a short `feat/<description-slug>` for description-only tasks.\n\nIMPORTANT: If an issue number is provided, always fetch the latest issue details before starting \u2014 run `gh issue view {{input.IssueNumber}} --repo {{input.Repo}} --comments` as your first step and use THAT content as your spec.\n\nAt the end of your response, output the PR URL on its own line:\nPR_URL: https://github.com/{{input.Repo}}/pull/NNN",
             "timeoutMinutes": 30
           },
           {
@@ -951,7 +897,7 @@
                                   "notifyStep": {
                                     "type": "delegate",
                                     "target": "{{config.CtoAgent}}",
-                                    "instruction": "Post to Telegram group: PR for issue #{{input.IssueNumber | default: 'N/A'}} in {{input.Repo}} ({{vars.pr_url}}) needs your human review decision.\n\nConsensus flagged needs_human_review:\n{{vars.consensus_out.ConsolidatedReasoning}}\n\nSend the 'human-review' signal to this workflow:\n  {\"Decision\":\"approved\"} — approve and proceed to merge\n  {\"Decision\":\"changes_requested\",\"Comment\":\"feedback\"} — send back for revision\n  {\"Decision\":\"rejected\"} — cancel the workflow",
+                                    "instruction": "Post to Telegram group: PR for issue #{{input.IssueNumber | default: 'N/A'}} in {{input.Repo}} ({{vars.pr_url}}) needs your human review decision.\n\nConsensus flagged needs_human_review:\n{{vars.consensus_out.ConsolidatedReasoning}}\n\nSend the 'human-review' signal to this workflow:\n  {\"Decision\":\"approved\"} \u2014 approve and proceed to merge\n  {\"Decision\":\"changes_requested\",\"Comment\":\"feedback\"} \u2014 send back for revision\n  {\"Decision\":\"rejected\"} \u2014 cancel the workflow",
                                     "ignoreFailure": true,
                                     "timeoutMinutes": 5
                                   },
@@ -1106,7 +1052,7 @@
                       "name": "phase2_5_unresolved_check",
                       "type": "delegate",
                       "target": "{{config.CtoAgent}}",
-                      "instruction": "Check the PR at {{vars.pr_url}} in repo {{input.Repo}} for any unresolved review comments (use `gh pr view --json reviews,reviewRequests` and `gh api repos/{{input.Repo}}/pulls` to inspect). If there are unresolved inline comments or review threads, address each one — push any fixes to the branch. If there are none, confirm all review comments have been addressed. Report: either 'no unresolved comments' or a summary of what was fixed.",
+                      "instruction": "Check the PR at {{vars.pr_url}} in repo {{input.Repo}} for any unresolved review comments (use `gh pr view --json reviews,reviewRequests` and `gh api repos/{{input.Repo}}/pulls` to inspect). If there are unresolved inline comments or review threads, address each one \u2014 push any fixes to the branch. If there are none, confirm all review comments have been addressed. Report: either 'no unresolved comments' or a summary of what was fixed.",
                       "ignoreFailure": true,
                       "timeoutMinutes": 20
                     }
@@ -1145,7 +1091,7 @@
                 "notifyStep": {
                   "type": "delegate",
                   "target": "{{config.CtoAgent}}",
-                  "instruction": "Post to Telegram group: PR for issue #{{input.IssueNumber | default: 'N/A'}} in repo {{input.Repo}} ({{vars.pr_url}}) has been approved by consensus and is ready to merge.\n\nSend the 'merge-approval' signal to this workflow:\n  {\"Decision\":\"approved\"} — approve and merge\n  {\"Decision\":\"changes_requested\",\"Comment\":\"feedback\"} — request changes before merging\n  {\"Decision\":\"rejected\",\"Comment\":\"reason\"} — reject and close without merging",
+                  "instruction": "Post to Telegram group: PR for issue #{{input.IssueNumber | default: 'N/A'}} in repo {{input.Repo}} ({{vars.pr_url}}) has been approved by consensus and is ready to merge.\n\nSend the 'merge-approval' signal to this workflow:\n  {\"Decision\":\"approved\"} \u2014 approve and merge\n  {\"Decision\":\"changes_requested\",\"Comment\":\"feedback\"} \u2014 request changes before merging\n  {\"Decision\":\"rejected\",\"Comment\":\"reason\"} \u2014 reject and close without merging",
                   "ignoreFailure": true,
                   "timeoutMinutes": 5
                 },
@@ -1252,7 +1198,7 @@
                                 "name": "notify_ceo_consensus_needs_human",
                                 "type": "delegate",
                                 "target": "{{config.CtoAgent}}",
-                                "instruction": "Post to Telegram group: PrImplementationWorkflow for issue #{{input.IssueNumber | default: 'N/A'}} in {{input.Repo}} — CEO-triggered consensus review flagged needs_human_review. Manual intervention required.",
+                                "instruction": "Post to Telegram group: PrImplementationWorkflow for issue #{{input.IssueNumber | default: 'N/A'}} in {{input.Repo}} \u2014 CEO-triggered consensus review flagged needs_human_review. Manual intervention required.",
                                 "ignoreFailure": true,
                                 "timeoutMinutes": 5
                               },
@@ -1323,7 +1269,7 @@
               "name": "notify_outer_loop_exhausted",
               "type": "delegate",
               "target": "{{config.CtoAgent}}",
-              "instruction": "Post to Telegram group: PrImplementationWorkflow for issue #{{input.IssueNumber | default: 'N/A'}} in {{input.Repo}} ({{vars.pr_url}}) has exhausted all 5 outer merge-gate rounds without final approval or rejection. Manual intervention required — check the PR and Temporal dashboard.",
+              "instruction": "Post to Telegram group: PrImplementationWorkflow for issue #{{input.IssueNumber | default: 'N/A'}} in {{input.Repo}} ({{vars.pr_url}}) has exhausted all 5 outer merge-gate rounds without final approval or rejection. Manual intervention required \u2014 check the PR and Temporal dashboard.",
               "ignoreFailure": true,
               "timeoutMinutes": 5
             }
@@ -1384,7 +1330,7 @@
                       "name": "notify_merge_failed",
                       "type": "delegate",
                       "target": "{{config.CtoAgent}}",
-                      "instruction": "Post to Telegram group: PR merge FAILED for issue #{{input.IssueNumber | default: 'N/A'}} in {{input.Repo}} ({{vars.pr_url}}). The merge was attempted but the PR is not in MERGED state. Merge attempt output:\n{{vars.merge_result | default: 'no output'}}\n\nPlease investigate — likely merge conflicts or branch protection rules.",
+                      "instruction": "Post to Telegram group: PR merge FAILED for issue #{{input.IssueNumber | default: 'N/A'}} in {{input.Repo}} ({{vars.pr_url}}). The merge was attempted but the PR is not in MERGED state. Merge attempt output:\n{{vars.merge_result | default: 'no output'}}\n\nPlease investigate \u2014 likely merge conflicts or branch protection rules.",
                       "ignoreFailure": true,
                       "timeoutMinutes": 5
                     }

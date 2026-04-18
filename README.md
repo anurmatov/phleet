@@ -109,7 +109,7 @@ is gitignored — to fully reset, stop containers and `rm -rf fleet/`.
 
 ### Configure Agents
 
-Edit `./fleet/seed.json` to define your agents. The example (`seed.example.json` at the repo root) shows the full schema with an example developer agent.
+The example (`seed.example.json` at the repo root) ships with no agents by default. Your first agent (co-cto) is provisioned via the dashboard SetupBanner after setup — open the dashboard and follow the on-screen steps.
 
 Key fields per agent:
 - `name` — unique identifier

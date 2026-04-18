@@ -445,7 +445,12 @@ _autogen_local_cred() {
       echo -e "  ${YELLOW}[dry-run]${NC} Would auto-generate $key"
       return
     fi
-    write_env_var "$file" "$key" "$(eval "$gencmd")"
+    local newval
+    newval=$(eval "$gencmd") || { echo -e "  ${RED}✗${NC} Failed to generate value for $key — is openssl installed?" >&2; exit 1; }
+    if [[ -z "$newval" ]]; then
+      echo -e "  ${RED}✗${NC} Auto-generation of $key produced an empty value — is openssl installed?" >&2; exit 1
+    fi
+    write_env_var "$file" "$key" "$newval"
     _local_cred_autogenned=true
   fi
 }
@@ -463,7 +468,7 @@ else
   _autogen_local_cred "$ENV_FILE" "MINIO_SECRET_KEY"          "openssl rand -hex 32"
   _autogen_local_cred "$ENV_FILE" "FLEET_MYSQL_ROOT_PASSWORD"  "openssl rand -hex 24"
   _autogen_local_cred "$ENV_FILE" "FLEET_MYSQL_PASSWORD"       "openssl rand -hex 24"
-  if ! $DRY_RUN; then
+  if ! $DRY_RUN && $_local_cred_autogenned; then
     echo
     echo "  Auto-generated local credentials (written to $ENV_FILE):"
     echo "    MinIO access key + secret"

@@ -24,7 +24,7 @@ Phleet is an open-source, self-hosted multi-agent AI platform built on .NET 10. 
 
   A single token works if you only ever run the co-CTO, but once a second agent exists you need the split — Telegram allows only one long-poller per token (see Troubleshooting).
 - **A Telegram group** (optional) for observing agent activity. Create a group, add both bots as members, then forward any message from the group to [@userinfobot](https://t.me/userinfobot) — it replies with the group's negative integer ID. Paste it into `.env` as `FLEET_GROUP_CHAT_ID`. Leaving it blank disables group routing.
-- **A GitHub App** with repo access ([create one](https://github.com/settings/apps)). You'll need its App ID and a downloaded private key (`.pem` file) — `setup.sh` asks for the path and copies the key into `./fleet/github-app-key.pem` (chmod 600).
+- **A GitHub App** with repo access ([create one](https://github.com/settings/apps)). You'll need its App ID and a downloaded private key (`.pem` file) — `setup.sh` asks for the path, base64-encodes the key, and stores it as `GITHUB_APP_PEM` in `./fleet/.env`. Containers decode it to `/tmp/github-app-key.pem` at runtime; there's no persistent key file on the host outside `.env`.
 
 ### 2. Run the setup wizard
 
@@ -179,7 +179,7 @@ Agent config is database-driven (MySQL via EF Core). On first run, the orchestra
 | `./fleet/workspaces/` | Per-agent git workspaces |
 | `./fleet/memories/` | Per-agent memory files |
 | `./fleet/.claude-credentials.json`, `./fleet/.codex-credentials.json` | AI provider credentials (chmod 600) |
-| `./fleet/github-app-key.pem` | GitHub App private key (chmod 600) |
+| `GITHUB_APP_PEM` (in `./fleet/.env`) | GitHub App private key, base64-encoded; decoded inside containers at runtime |
 | `src/Fleet.Orchestrator/appsettings.json` | Orchestrator defaults |
 | `src/Fleet.Agent/appsettings.json` | Agent image defaults |
 

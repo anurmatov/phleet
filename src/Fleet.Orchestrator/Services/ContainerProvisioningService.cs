@@ -40,6 +40,7 @@ public sealed class ContainerProvisioningService(
             .Include(a => a.TelegramUsers)
             .Include(a => a.TelegramGroups)
             .Include(a => a.Networks)
+            .Include(a => a.CredentialMounts).ThenInclude(m => m.CredentialFile)
             .AsSplitQuery()
             .AsNoTracking()
             .FirstOrDefaultAsync(a => a.Name == agentName, ct);
@@ -160,6 +161,13 @@ public sealed class ContainerProvisioningService(
                 binds.Add("./.claude-credentials.json:/root/.claude-host/.credentials.json:ro");
         }
 
+        // Credential file mounts (from Files section in Credentials view)
+        foreach (var mount in agent.CredentialMounts)
+        {
+            if (File.Exists(mount.CredentialFile.FilePath))
+                binds.Add($"{mount.CredentialFile.FilePath}:{mount.MountPath}:{mount.Mode}");
+        }
+
         return binds;
     }
 
@@ -198,6 +206,7 @@ public sealed class ContainerProvisioningService(
             .Include(a => a.Instructions)
                 .ThenInclude(ai => ai.Instruction)
                     .ThenInclude(i => i.Versions)
+            .Include(a => a.CredentialMounts).ThenInclude(m => m.CredentialFile)
             .AsSplitQuery()
             .AsNoTracking()
             .FirstOrDefaultAsync(a => a.Name == agentName, ct);

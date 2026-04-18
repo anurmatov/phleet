@@ -95,6 +95,182 @@ public sealed class SetupService
     }
 
     /// <summary>
+    /// Returns rich connection status with masked current values and last-validated timestamps.
+    /// </summary>
+    public RichConnectionsStatusDto GetRichConnectionsStatus()
+    {
+        Dictionary<string, string> env;
+        try { env = LoadEnvFile(_envFilePath); }
+        catch { env = new(); }
+
+        string? Mask(string key, int visibleSuffix = 4)
+        {
+            if (!env.TryGetValue(key, out var v) || string.IsNullOrEmpty(v)) return null;
+            if (v.Length <= visibleSuffix) return new string('•', 3) + v;
+            return new string('•', 3) + v[^visibleSuffix..];
+        }
+
+        var telegramConfigured =
+            IsConfigured(env, "TELEGRAM_CTO_BOT_TOKEN") &&
+            IsConfigured(env, "TELEGRAM_NOTIFIER_BOT_TOKEN");
+
+        var githubConfigured =
+            IsConfigured(env, "GITHUB_APP_ID") &&
+            IsConfigured(env, "GITHUB_APP_PEM");
+
+        DateTime? ParseUtc(string key) =>
+            env.TryGetValue(key, out var v) && DateTime.TryParse(v, out var dt) ? dt : null;
+
+        var userId = env.TryGetValue("TELEGRAM_USER_ID", out var uid) && !string.IsNullOrEmpty(uid) ? uid : null;
+
+        return new RichConnectionsStatusDto(
+            new RichTelegramStatusDto(
+                telegramConfigured,
+                IsConfigured(env, "FLEET_GROUP_CHAT_ID"),
+                Mask("TELEGRAM_CTO_BOT_TOKEN"),
+                Mask("TELEGRAM_NOTIFIER_BOT_TOKEN"),
+                env.TryGetValue("FLEET_GROUP_CHAT_ID", out var g) && !string.IsNullOrEmpty(g) ? g : null,
+                userId,
+                ParseUtc("TELEGRAM_LAST_VALIDATED_UTC")),
+            new RichGitHubStatusDto(
+                githubConfigured,
+                Mask("GITHUB_APP_ID"),
+                env.TryGetValue("GITHUB_APP_PEM", out var pem) && !string.IsNullOrEmpty(pem)
+                    ? $"•••[{pem.Length} chars]" : null,
+                ParseUtc("GITHUB_LAST_VALIDATED_UTC")));
+    }
+
+    public async Task UpdateLastValidatedAsync(string provider)
+    {
+        var key = provider.Equals("github", StringComparison.OrdinalIgnoreCase)
+            ? "GITHUB_LAST_VALIDATED_UTC"
+            : "TELEGRAM_LAST_VALIDATED_UTC";
+        try
+        {
+            await AtomicWriteEnvAsync(new Dictionary<string, string>
+            {
+                [key] = DateTime.UtcNow.ToString("O")
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not write last-validated timestamp for {Provider}", provider);
+        }
+    }
+
+    /// <summary>
+    /// Returns infra container names that depend on the given env key (from InfraDepMap).
+    /// Used by PUT /api/env-vars/{key} to tell the UI which services need a restart.
+    /// </summary>
+    public List<string> GetAffectedServices(string key) =>
+        InfraDepMap.TryGetValue(key, out var containers)
+            ? [.. containers]
+            : [];
+
+    // Keys managed via the Connections cards — excluded from generic env-vars table
+    private static readonly HashSet<string> ConnectionManagedKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "TELEGRAM_CTO_BOT_TOKEN", "TELEGRAM_NOTIFIER_BOT_TOKEN", "FLEET_GROUP_CHAT_ID",
+        "TELEGRAM_USER_ID", "GITHUB_APP_ID", "GITHUB_APP_PEM",
+        "TELEGRAM_LAST_VALIDATED_UTC", "GITHUB_LAST_VALIDATED_UTC",
+    };
+
+    private static readonly HashSet<string> SensitiveKeyPatterns =
+        new(StringComparer.OrdinalIgnoreCase) { "KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL", "PEM" };
+
+    private static bool IsSensitive(string key) =>
+        SensitiveKeyPatterns.Any(p => key.Contains(p, StringComparison.OrdinalIgnoreCase));
+
+    private static string MaskValue(string key, string value)
+    {
+        if (!IsSensitive(key)) return value;
+        if (value.Length <= 4) return new string('•', 3);
+        return "•••" + value[^4..];
+    }
+
+    public async Task<List<EnvVarDto>> GetEnvVarsAsync(IServiceScopeFactory scopeFactory, CancellationToken ct = default)
+    {
+        Dictionary<string, string> env;
+        try { env = LoadEnvFile(_envFilePath); }
+        catch { env = new(); }
+
+        // Build used-by map from DB
+        var usedBy = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+            var refs = await db.AgentEnvRefs
+                .Include(r => r.Agent)
+                .ToListAsync(ct);
+            foreach (var r in refs)
+            {
+                if (!usedBy.ContainsKey(r.EnvKeyName)) usedBy[r.EnvKeyName] = [];
+                usedBy[r.EnvKeyName].Add(r.Agent.Name);
+            }
+        }
+        catch { /* DB optional */ }
+
+        return env
+            .Where(kv => !ConnectionManagedKeys.Contains(kv.Key))
+            .Select(kv =>
+            {
+                var consumers = usedBy.TryGetValue(kv.Key, out var ub) ? [.. ub] : new List<string>();
+                // Also surface docker-compose infra containers that depend on this key
+                if (InfraDepMap.TryGetValue(kv.Key, out var infraContainers))
+                    foreach (var c in infraContainers)
+                        if (!consumers.Contains(c, StringComparer.OrdinalIgnoreCase))
+                            consumers.Add(c);
+                return new EnvVarDto(kv.Key, MaskValue(kv.Key, kv.Value), IsSensitive(kv.Key), consumers);
+            })
+            .OrderBy(v => v.Key)
+            .ToList();
+    }
+
+    public async Task SetEnvVarAsync(string key, string value)
+    {
+        if (ConnectionManagedKeys.Contains(key))
+            throw new InvalidOperationException($"Key '{key}' is managed via the Connections section — use the Telegram or GitHub card to update it.");
+
+        if (!System.Text.RegularExpressions.Regex.IsMatch(key, @"^[A-Z][A-Z0-9_]*$"))
+            throw new ArgumentException($"Key '{key}' must be uppercase letters, digits, and underscores.");
+
+        await AtomicWriteEnvAsync(new Dictionary<string, string> { [key] = value });
+    }
+
+    public async Task DeleteEnvVarAsync(string key)
+    {
+        if (ConnectionManagedKeys.Contains(key))
+            throw new InvalidOperationException($"Key '{key}' is managed via the Connections section.");
+
+        var lines = File.Exists(_envFilePath)
+            ? await File.ReadAllLinesAsync(_envFilePath)
+            : Array.Empty<string>();
+
+        var updated = lines.Where(line =>
+        {
+            var t = line.Trim();
+            if (t.StartsWith('#') || !t.Contains('=')) return true;
+            var k = t[..t.IndexOf('=')].Trim();
+            return !k.Equals(key, StringComparison.Ordinal);
+        }).ToArray();
+
+        var tmpPath = _envFilePath + ".tmp";
+        await File.WriteAllLinesAsync(tmpPath, updated);
+        File.Move(tmpPath, _envFilePath, overwrite: true);
+    }
+
+    public string? RevealEnvVar(string key)
+    {
+        try
+        {
+            var env = LoadEnvFile(_envFilePath);
+            return env.TryGetValue(key, out var v) ? v : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
     /// Returns the installer's Telegram user ID from TELEGRAM_USER_ID in .env,
     /// or null if the key is absent, empty, or a non-numeric placeholder.
     /// </summary>
@@ -756,3 +932,22 @@ public sealed record SetupWriteResult(
     public static SetupWriteResult Fail(string code, string detail) =>
         new(false, [], [], [], [], code, detail);
 }
+
+public sealed record RichConnectionsStatusDto(RichTelegramStatusDto Telegram, RichGitHubStatusDto GitHub);
+
+public sealed record RichTelegramStatusDto(
+    bool Configured,
+    bool GroupChatEnabled,
+    string? MaskedCtoBotToken,
+    string? MaskedNotifierBotToken,
+    string? GroupChatId,
+    string? UserId,
+    DateTime? LastValidatedUtc);
+
+public sealed record RichGitHubStatusDto(
+    bool Configured,
+    string? MaskedAppId,
+    string? MaskedPrivateKey,
+    DateTime? LastValidatedUtc);
+
+public sealed record EnvVarDto(string Key, string MaskedValue, bool IsSensitive, List<string> UsedBy);

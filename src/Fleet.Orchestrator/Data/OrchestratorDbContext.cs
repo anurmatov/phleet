@@ -28,6 +28,10 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
     public DbSet<WorkflowDefinition> WorkflowDefinitions => Set<WorkflowDefinition>();
     public DbSet<WorkflowDefinitionVersion> WorkflowDefinitionVersions => Set<WorkflowDefinitionVersion>();
 
+    // Credential Files
+    public DbSet<CredentialFile> CredentialFiles => Set<CredentialFile>();
+    public DbSet<AgentCredentialMount> AgentCredentialMounts => Set<AgentCredentialMount>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<Agent>(e =>
@@ -241,6 +245,34 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.HasOne(x => x.WorkflowDefinition)
              .WithMany(d => d.Versions)
              .HasForeignKey(x => x.WorkflowDefinitionId)
+             .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CredentialFile>(e =>
+        {
+            e.ToTable("credential_files");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Name).HasMaxLength(200).IsRequired();
+            e.Property(x => x.Type).HasMaxLength(50).HasDefaultValue("generic");
+            e.Property(x => x.FileName).HasMaxLength(500).IsRequired();
+            e.Property(x => x.FilePath).HasMaxLength(1000).IsRequired();
+            e.HasIndex(x => x.Name).IsUnique();
+        });
+
+        modelBuilder.Entity<AgentCredentialMount>(e =>
+        {
+            e.ToTable("agent_credential_mounts");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.MountPath).HasMaxLength(500).IsRequired();
+            e.Property(x => x.Mode).HasMaxLength(20).HasDefaultValue("ro");
+            e.HasIndex(x => new { x.AgentId, x.CredentialFileId, x.MountPath }).IsUnique();
+            e.HasOne(x => x.Agent)
+             .WithMany(a => a.CredentialMounts)
+             .HasForeignKey(x => x.AgentId)
+             .OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.CredentialFile)
+             .WithMany(f => f.Mounts)
+             .HasForeignKey(x => x.CredentialFileId)
              .OnDelete(DeleteBehavior.Cascade);
         });
 

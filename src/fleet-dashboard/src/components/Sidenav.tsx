@@ -83,6 +83,13 @@ export default function Sidenav({
           <span className="sidenav-item-label">Repositories</span>
         </button>
 
+        <button
+          className={`sidenav-item${activeView === 'credentials' ? ' active' : ''}`}
+          onClick={() => { onNavigate('credentials'); onNavClose() }}
+        >
+          <span className="sidenav-item-label">Credentials</span>
+        </button>
+
         <div className="sidenav-section-label" style={{ marginTop: 16 }}>Workflows</div>
 
         <button

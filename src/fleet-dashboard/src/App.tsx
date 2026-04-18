@@ -50,6 +50,7 @@ import StartWorkflowModal from './components/StartWorkflowModal'
 import SchedulesView from './components/SchedulesView'
 import NamespacesView from './components/NamespacesView'
 import RepositoriesView from './components/RepositoriesView'
+import CredentialsView from './components/CredentialsView'
 import SetupBanner from './components/SetupBanner'
 
 type WsMessage =
@@ -219,7 +220,7 @@ export default function App() {
   const [deleteMsg, setDeleteMsg] = useState<Record<string, string>>({})
 
   // Navigation state — synced with URL hash
-  const VALID_VIEWS: ActiveView[] = ['agents', 'workflows', 'instructions', 'project-contexts', 'wf-definitions', 'alerts', 'schedules', 'namespaces', 'repositories']
+  const VALID_VIEWS: ActiveView[] = ['agents', 'workflows', 'instructions', 'project-contexts', 'wf-definitions', 'alerts', 'schedules', 'namespaces', 'repositories', 'credentials']
   const [activeView, setActiveViewState] = useState<ActiveView>(() => {
     const hash = window.location.hash.slice(1) as ActiveView
     return VALID_VIEWS.includes(hash) ? hash : 'agents'
@@ -1931,6 +1932,15 @@ export default function App() {
 
         {activeView === 'repositories' && (
           <RepositoriesView />
+        )}
+
+        {activeView === 'credentials' && (
+          <CredentialsView onSetupConnected={() => {
+            apiFetch('/api/setup/status')
+              .then(r => r.ok ? r.json() : null)
+              .then(data => { if (data) setSetupStatus(data) })
+              .catch(() => {})
+          }} />
         )}
 
         {activeView === 'alerts' && (

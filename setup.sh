@@ -10,13 +10,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DRY_RUN=false
 SKIP_BUILD=false
 SKIP_SERVICES=false
+PROMPT_LOCAL_CREDS=false
 
 for arg in "$@"; do
   case "$arg" in
-    --dry-run)       DRY_RUN=true ;;
-    --skip-build)    SKIP_BUILD=true ;;
-    --skip-services) SKIP_SERVICES=true ;;
-    *) echo "Unknown flag: $arg. Valid flags: --dry-run --skip-build --skip-services"; exit 1 ;;
+    --dry-run)            DRY_RUN=true ;;
+    --skip-build)         SKIP_BUILD=true ;;
+    --skip-services)      SKIP_SERVICES=true ;;
+    --prompt-local-creds) PROMPT_LOCAL_CREDS=true ;;
+    *) echo "Unknown flag: $arg. Valid flags: --dry-run --skip-build --skip-services --prompt-local-creds"; exit 1 ;;
   esac
 done
 
@@ -411,17 +413,71 @@ if is_placeholder "$current_pem"; then
   fi
 fi
 
-prompt_field "$ENV_FILE" "ORCHESTRATOR_AUTH_TOKEN" "Orchestrator API auth token" \
-  "Protects mutating REST endpoints. To auto-generate: openssl rand -hex 32" "y" "y"
-
 # Note: no separate prompt for VITE_AUTH_TOKEN. The dashboard build arg is
 # sourced directly from ${ORCHESTRATOR_AUTH_TOKEN} in docker-compose.example.yml
 # and in the `docker build` call below, so the two values can't diverge.
 
-prompt_field "$ENV_FILE" "MINIO_ACCESS_KEY"          "MinIO access key"          "" "n" "n" "minioadmin"
-prompt_field "$ENV_FILE" "MINIO_SECRET_KEY"          "MinIO secret key"          "" "n" "y" "minioadmin"
-prompt_field "$ENV_FILE" "FLEET_MYSQL_ROOT_PASSWORD"  "MySQL root password"       "" "n" "y" "fleetroot"
-prompt_field "$ENV_FILE" "FLEET_MYSQL_PASSWORD"       "MySQL fleet user password" "" "n" "y" "fleetpass"
+# ── Local-only credentials ────────────────────────────────────────────────────
+# These five values are internal-only — no external service needs to match them.
+# By default we generate strong random values and skip the prompt (--prompt-local-creds
+# reverts to the explicit prompt-driven flow for each field).
+#
+# Generation also fires when the field still holds a known weak default from
+# .env.example (minioadmin / fleetroot / fleetpass / changeme / your-secret-token-here).
+# Pre-existing real values are always preserved on re-run.
+
+_local_cred_autogenned=false
+
+# Returns 0 (needs generation) if val is empty, a standard placeholder, or a known weak default
+_needs_local_gen() {
+  local val="$1"
+  is_placeholder "$val" && return 0
+  [[ "$val" == "minioadmin" || "$val" == "fleetroot" || "$val" == "fleetpass" ]] && return 0
+  return 1
+}
+
+_autogen_local_cred() {
+  local file="$1" key="$2" gencmd="$3"
+  local val
+  val=$(read_env_var "$file" "$key")
+  if _needs_local_gen "$val"; then
+    if $DRY_RUN; then
+      echo -e "  ${YELLOW}[dry-run]${NC} Would auto-generate $key"
+      return
+    fi
+    local newval
+    newval=$(eval "$gencmd") || { echo -e "  ${RED}✗${NC} Failed to generate value for $key — is openssl installed?" >&2; exit 1; }
+    if [[ -z "$newval" ]]; then
+      echo -e "  ${RED}✗${NC} Auto-generation of $key produced an empty value — is openssl installed?" >&2; exit 1
+    fi
+    write_env_var "$file" "$key" "$newval"
+    _local_cred_autogenned=true
+  fi
+}
+
+if $PROMPT_LOCAL_CREDS; then
+  prompt_field "$ENV_FILE" "ORCHESTRATOR_AUTH_TOKEN"  "Orchestrator API auth token"  \
+    "Protects mutating REST endpoints. To auto-generate: openssl rand -hex 32" "y" "y"
+  prompt_field "$ENV_FILE" "MINIO_ACCESS_KEY"          "MinIO access key"          "" "n" "n" "minioadmin"
+  prompt_field "$ENV_FILE" "MINIO_SECRET_KEY"          "MinIO secret key"          "" "n" "y" "minioadmin"
+  prompt_field "$ENV_FILE" "FLEET_MYSQL_ROOT_PASSWORD"  "MySQL root password"       "" "n" "y" "fleetroot"
+  prompt_field "$ENV_FILE" "FLEET_MYSQL_PASSWORD"       "MySQL fleet user password" "" "n" "y" "fleetpass"
+else
+  _autogen_local_cred "$ENV_FILE" "ORCHESTRATOR_AUTH_TOKEN"   "openssl rand -hex 32"
+  _autogen_local_cred "$ENV_FILE" "MINIO_ACCESS_KEY"          "openssl rand -hex 12"
+  _autogen_local_cred "$ENV_FILE" "MINIO_SECRET_KEY"          "openssl rand -hex 32"
+  _autogen_local_cred "$ENV_FILE" "FLEET_MYSQL_ROOT_PASSWORD"  "openssl rand -hex 24"
+  _autogen_local_cred "$ENV_FILE" "FLEET_MYSQL_PASSWORD"       "openssl rand -hex 24"
+  if ! $DRY_RUN && $_local_cred_autogenned; then
+    echo
+    echo "  Auto-generated local credentials (written to $ENV_FILE):"
+    echo "    MinIO access key + secret"
+    echo "    MySQL root password + fleet-user password"
+    echo "    Orchestrator API auth token"
+    echo
+    echo "  Read $ENV_FILE to see the values if you need them."
+  fi
+fi
 
 # Embedding provider choice
 echo

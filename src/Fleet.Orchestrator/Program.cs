@@ -212,7 +212,7 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
 });
 
 // REST: update agent DB config (all scalar fields + replace-all for related tables)
-app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, AgentRegistry registry) =>
+app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, AgentRegistry registry, SetupService setupService) =>
 {
     using var scope = scopeFactory.CreateScope();
     var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
@@ -335,8 +335,10 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     if (body.TelegramUsers is not null)
     {
         db.AgentTelegramUsers.RemoveRange(agent.TelegramUsers);
-        agent.TelegramUsers = body.TelegramUsers
-            .Distinct()
+        var tuSet = new HashSet<long>(body.TelegramUsers.Distinct());
+        var ownerId = setupService.GetTelegramUserId();
+        if (ownerId.HasValue) tuSet.Add(ownerId.Value);
+        agent.TelegramUsers = tuSet
             .Select(u => new AgentTelegramUser { AgentId = agent.Id, UserId = u })
             .ToList();
     }
@@ -1069,9 +1071,12 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         foreach (var r in body.EnvRefs.Distinct(StringComparer.OrdinalIgnoreCase))
             db.AgentEnvRefs.Add(new AgentEnvRef { AgentId = agent.Id, EnvKeyName = r });
 
-    if (body.TelegramUsers is not null)
-        foreach (var u in body.TelegramUsers.Distinct())
-            db.AgentTelegramUsers.Add(new AgentTelegramUser { AgentId = agent.Id, UserId = u });
+    // Build the final Telegram user set: explicit payload + installer's ID (deduped)
+    var telegramUserSet = new HashSet<long>(body.TelegramUsers?.Distinct() ?? []);
+    var ownerTgId = setupService.GetTelegramUserId();
+    if (ownerTgId.HasValue) telegramUserSet.Add(ownerTgId.Value);
+    foreach (var u in telegramUserSet)
+        db.AgentTelegramUsers.Add(new AgentTelegramUser { AgentId = agent.Id, UserId = u });
 
     if (body.TelegramGroups is not null)
         foreach (var g in body.TelegramGroups.Distinct())

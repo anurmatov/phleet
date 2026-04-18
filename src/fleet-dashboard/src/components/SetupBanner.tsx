@@ -28,6 +28,7 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
   const [ctoBotToken, setCtoBotToken] = useState('')
   const [notifierBotToken, setNotifierBotToken] = useState('')
   const [groupChatId, setGroupChatId] = useState('')
+  const [userId, setUserId] = useState('')
   const [testState, setTestState] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle')
   const [testMsg, setTestMsg] = useState('')
   const [fieldErrors, setFieldErrors] = useState<Record<string, boolean>>({})
@@ -49,6 +50,7 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
       ctoBotToken: ctoBotToken || undefined,
       notifierBotToken: notifierBotToken || undefined,
       groupChatId: groupChatId || undefined,
+      userId: userId || undefined,
     }
   }
 
@@ -208,6 +210,28 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
                 className="setup-helper-link"
               >→ Get your ID (t.me/userinfobot)</a>
               {' '}· add the bot to a group, forward a message from that group to @userinfobot, or use /getchatid
+            </div>
+          </div>
+
+          {/* Your Telegram user ID */}
+          <div className="config-row">
+            <label className="config-label">
+              Your Telegram user ID <span style={{ color: 'var(--red)' }}>*</span>
+            </label>
+            <input
+              className="config-input"
+              placeholder="123456789"
+              value={userId}
+              onChange={e => setUserId(e.target.value.replace(/\D/g, ''))}
+            />
+            <div className="setup-field-hint">
+              <a
+                href="https://t.me/userinfobot"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="setup-helper-link"
+              >→ Get your ID (t.me/userinfobot)</a>
+              {' '}· send it any message — it replies with your numeric ID. Agents auto-add this ID so you can DM them immediately.
             </div>
           </div>
 

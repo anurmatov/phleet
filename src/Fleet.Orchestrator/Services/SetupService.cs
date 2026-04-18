@@ -36,6 +36,7 @@ public sealed class SetupService
         ["TELEGRAM_CTO_BOT_TOKEN"]      = ["fleet-telegram"],
         ["TELEGRAM_NOTIFIER_BOT_TOKEN"] = ["fleet-bridge", "fleet-telegram"],
         ["FLEET_GROUP_CHAT_ID"]         = ["fleet-bridge", "fleet-temporal-bridge"],
+        ["TELEGRAM_USER_ID"]            = [],
         ["GITHUB_APP_ID"]               = [],
         ["GITHUB_APP_PEM"]              = [],
     };
@@ -91,6 +92,27 @@ public sealed class SetupService
         return new SetupStatusDto(
             new TelegramStatusDto(telegramConfigured, groupEnabled),
             new GitHubStatusDto(githubConfigured));
+    }
+
+    /// <summary>
+    /// Returns the installer's Telegram user ID from TELEGRAM_USER_ID in .env,
+    /// or null if the key is absent, empty, or a non-numeric placeholder.
+    /// </summary>
+    public long? GetTelegramUserId()
+    {
+        try
+        {
+            var env = LoadEnvFile(_envFilePath);
+            if (env.TryGetValue("TELEGRAM_USER_ID", out var val)
+                && !string.IsNullOrWhiteSpace(val)
+                && long.TryParse(val, out var id))
+                return id;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not read TELEGRAM_USER_ID from .env");
+        }
+        return null;
     }
 
     // ── Telegram ──────────────────────────────────────────────────────────────
@@ -168,6 +190,10 @@ public sealed class SetupService
             // groupChatId: explicit empty/"0" = clear; null/omitted = no-op
             if (req.GroupChatId is not null)
                 updates["FLEET_GROUP_CHAT_ID"] = (req.GroupChatId == "0" || req.GroupChatId == "") ? "" : req.GroupChatId;
+
+            // userId: store as TELEGRAM_USER_ID so agents can auto-add the installer to their allowlist
+            if (req.UserId is { Length: > 0 } uid && long.TryParse(uid, out _))
+                updates["TELEGRAM_USER_ID"] = uid;
 
             await AtomicWriteEnvAsync(updates);
 
@@ -639,7 +665,8 @@ public sealed record GitHubStatusDto(bool Configured);
 public sealed record TelegramSetupRequest(
     string? CtoBotToken,
     string? NotifierBotToken,
-    string? GroupChatId);
+    string? GroupChatId,
+    string? UserId);
 
 public sealed record GitHubSetupRequest(
     string? AppId,

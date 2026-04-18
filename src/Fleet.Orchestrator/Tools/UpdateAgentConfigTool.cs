@@ -13,7 +13,7 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory)
     [Description("Update agent configuration in the DB. All fields are optional — only provided fields are changed. Does NOT restart the agent; restart separately after updating.")]
     public async Task<string> UpdateAgentConfigAsync(
         [Description("Agent name (e.g. fleet-cto, fleet-dev)")] string agent_name,
-        [Description("New model name (e.g. claude-opus-4-6, claude-sonnet-4-6). Omit to keep current.")] string? model = null,
+        [Description("New model name (e.g. claude-opus-4-7, claude-sonnet-4-6). Omit to keep current.")] string? model = null,
         [Description("New memory limit in MB. Omit to keep current.")] int? memory_limit_mb = null,
         [Description("Set enabled/disabled. Omit to keep current.")] bool? is_enabled = null,
         [Description("Replace the full tool list. Pass comma-separated tool names. Omit to keep current.")] string? tools = null,

@@ -13,7 +13,7 @@ public sealed class CreateAgentTool(IServiceScopeFactory scopeFactory, IConfigur
     public async Task<string> CreateAgentAsync(
         [Description("Agent short name — lowercase, no spaces (e.g. my-agent). Used as the DB key and part of the container name.")] string agent_name,
         [Description("Role for the agent (e.g. developer, cto, ops). Must match a role file.")] string role,
-        [Description("Model to use (e.g. claude-sonnet-4-6, claude-opus-4-6).")] string model,
+        [Description("Model to use (e.g. claude-sonnet-4-6, claude-opus-4-7).")] string model,
         [Description("Display name shown in the dashboard (e.g. 'Fleet Dev'). Defaults to agent_name if omitted.")] string? display_name = null,
         [Description("Memory limit in MB. Defaults to 4096.")] int? memory_limit_mb = null,
         [Description("Docker container name override (e.g. fleet-my-agent). Defaults to 'fleet-{agent_name}'.")] string? container_name = null,

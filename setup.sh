@@ -44,9 +44,9 @@ if $DRY_RUN; then warn "Running in --dry-run mode — no changes will be made.";
 # over values passed via `--env-file`. If the user (or a prior setup run)
 # exported any of these names into their shell, every `docker compose up -d`
 # invocation below would bake the stale shell value into the containers,
-# silently overriding the freshly-written .env file — the exact bug behind
-# a mysterious 401 at step 7/8 when the orchestrator ran with a different
-# ORCHESTRATOR_AUTH_TOKEN than the one setup.sh just saved. Unsetting these
+# silently overriding the freshly-written .env file — e.g. a stale
+# ORCHESTRATOR_AUTH_TOKEN in the shell would cause 401s against the orchestrator.
+# Unsetting these
 # makes .env the single source of truth for compose substitution.
 unset FLEET_BASE_DIR FLEET_CTO_AGENT FLEET_GROUP_CHAT_ID \
       FLEET_MYSQL_ROOT_PASSWORD FLEET_MYSQL_PASSWORD \
@@ -110,21 +110,6 @@ is_placeholder() {
   return 1
 }
 
-# Returns 0 (true) if a Telegram bot token value is real (not a placeholder)
-is_configured_telegram() {
-  local tok="$1"
-  is_placeholder "$tok" && return 1
-  [[ "$tok" =~ ^[0-9]+:[A-Za-z0-9_-]{35,}$ ]] || return 1
-  return 0
-}
-
-# Returns 0 (true) if both GitHub App credentials are real (not placeholders)
-is_configured_github() {
-  local id="$1" pem="$2"
-  is_placeholder "$id" && return 1
-  is_placeholder "$pem" && return 1
-  return 0
-}
 
 # Prompt for a config value if it's missing/placeholder; write to env file
 # Usage: prompt_field <file> <key> <label> <guidance> <required:y|n> <masked:y|n> [default]
@@ -187,7 +172,7 @@ poll_health() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-section "[1/8] Checking prerequisites..."
+section "[1/7] Checking prerequisites..."
 # ─────────────────────────────────────────────────────────────────────────────
 
 check_cmd() {
@@ -232,7 +217,7 @@ check_cmd curl "Install curl — https://curl.se/download.html"
 check_cmd jq   "Install jq — https://jqlang.github.io/jq/download/"
 
 # ─────────────────────────────────────────────────────────────────────────────
-section "[2/8] AI Provider Auth..."
+section "[2/7] AI Provider Auth..."
 # ─────────────────────────────────────────────────────────────────────────────
 
 echo "  Which AI provider(s) do you want to use?"
@@ -329,7 +314,7 @@ if $USE_CLAUDE; then check_creds_claude; fi
 if $USE_CODEX;  then check_creds_codex;  fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-section "[3/8] Configuration..."
+section "[3/7] Configuration..."
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Ensure the fleet data dir exists — all runtime state lives here (.env,
@@ -377,19 +362,12 @@ echo
 # CTO agent name — used by docker-compose to wire FleetWorkflows__CtoAgent
 # into fleet-temporal-bridge and fleet-bridge so seed workflows can resolve
 # {{config.CtoAgent}} at runtime. Must be set BEFORE services start.
-# In --full-setup mode, prompt for the CTO agent name now.
-# Otherwise, write the placeholder 'phleet' silently so docker-compose substitution
-# resolves. The real agent name is chosen when the user provisions their first agent.
-if $PROMPT_TELEGRAM; then
-  prompt_field "$ENV_FILE" "FLEET_CTO_AGENT" "CTO agent short name" \
-    "Lowercase short name for your co-cto agent (used as routing key, e.g. 'myagent'). You'll create this agent in step 7." \
-    "y" "n"
-else
-  _cto_val=$(read_env_var "$ENV_FILE" "FLEET_CTO_AGENT")
-  if [[ -z "$_cto_val" || "$_cto_val" == "changeme" || "$_cto_val" == "phleet" ]]; then
-    if ! $DRY_RUN; then
-      write_env_var "$ENV_FILE" "FLEET_CTO_AGENT" "phleet"
-    fi
+# Write 'phleet' as a default placeholder; the real name is chosen when the
+# user provisions their first agent from the dashboard.
+_cto_val=$(read_env_var "$ENV_FILE" "FLEET_CTO_AGENT")
+if [[ -z "$_cto_val" || "$_cto_val" == "changeme" || "$_cto_val" == "phleet" ]]; then
+  if ! $DRY_RUN; then
+    write_env_var "$ENV_FILE" "FLEET_CTO_AGENT" "phleet"
   fi
 fi
 
@@ -621,7 +599,7 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-section "[4/8] Generating $FLEET_BASE_DIR/docker-compose.yml..."
+section "[4/7] Generating $FLEET_BASE_DIR/docker-compose.yml..."
 # ─────────────────────────────────────────────────────────────────────────────
 
 if [[ ! -f "$COMPOSE_EXAMPLE" ]]; then
@@ -646,7 +624,7 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-section "[5/8] Building Docker images..."
+section "[5/7] Building Docker images..."
 # ─────────────────────────────────────────────────────────────────────────────
 
 if $SKIP_BUILD; then
@@ -708,7 +686,7 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-section "[6/8] Starting services..."
+section "[6/7] Starting services..."
 # ─────────────────────────────────────────────────────────────────────────────
 
 if $SKIP_SERVICES; then
@@ -738,254 +716,27 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-section "[7/8] Provision Assistant agent..."
+section "[7/7] Creating auth-token refresh schedules..."
 # ─────────────────────────────────────────────────────────────────────────────
 
 if $SKIP_SERVICES; then
-  warn "Skipping agent provisioning (--skip-services)"
-else
-  if $DRY_RUN; then
-    do_provision="y"
-    echo -e "  ${YELLOW}[dry-run]${NC} Would prompt for agent provisioning (defaulting to yes)"
-  elif $PROMPT_TELEGRAM; then
-    # --full-setup mode: existing prompt with yes default
-    read -rp "  Would you like to provision your Assistant (CTO) agent now? (y/n) [y]: " do_provision
-    do_provision="${do_provision:-y}"
-  else
-    # Default mode: asymmetric check — telegram is the hard dependency
-    _tg_token=$(read_env_var "$ENV_FILE" "TELEGRAM_CTO_BOT_TOKEN")
-    _gh_id=$(read_env_var "$ENV_FILE" "GITHUB_APP_ID")
-    _gh_pem=$(read_env_var "$ENV_FILE" "GITHUB_APP_PEM")
-
-    if ! is_configured_telegram "$_tg_token"; then
-      echo "  Skipped agent provisioning (Telegram not configured — finish setup in the dashboard)"
-      do_provision="n"
-    elif ! is_configured_github "$_gh_id" "$_gh_pem"; then
-      echo -e "  ${YELLOW}⚠  GitHub not configured — the agent will chat but can't touch repos until you add the App in the dashboard.${NC}"
-      echo
-      read -rp "  Provision an agent now? [y/N] " do_provision
-      do_provision="${do_provision:-n}"
-    else
-      echo "  Stack is up. You can provision your first agent now, or do it later from"
-      echo "  the dashboard at http://localhost:${FLEET_DASHBOARD_PORT:-3700}."
-      echo
-      read -rp "  Provision an agent now? [y/N] " do_provision
-      do_provision="${do_provision:-n}"
-    fi
+  warn "Skipping schedule creation (--skip-services)"
+elif $DRY_RUN; then
+  if $USE_CLAUDE; then
+    echo -e "  ${YELLOW}[dry-run]${NC} Would POST http://localhost:3600/api/schedules (auth-token-refresh-claude-30m)"
   fi
+  if $USE_CODEX; then
+    echo -e "  ${YELLOW}[dry-run]${NC} Would POST http://localhost:3600/api/schedules (auth-token-refresh-codex-30m)"
+  fi
+else
+  ORCH_URL="http://localhost:3600"
+  ORCH_TOKEN=$(read_env_var "$ENV_FILE" "ORCHESTRATOR_AUTH_TOKEN")
 
-  if [[ "$do_provision" =~ ^[Yy]$ ]]; then
-    ORCH_URL="http://localhost:3600"
-    ORCH_TOKEN=$(read_env_var "$ENV_FILE" "ORCHESTRATOR_AUTH_TOKEN")
-
-    # Drift guard: if the orchestrator was started before the current .env was
-    # written (e.g. setup.sh re-run against a pre-existing stack, or ${...}
-    # substitution picked up a shell env var that diverged from .env), the
-    # running Orchestrator__AuthToken will not match ORCH_TOKEN and every API
-    # call below will 401. Detect and force-recreate the affected services.
-    if ! $DRY_RUN; then
-      running_token=$(docker exec fleet-orchestrator printenv Orchestrator__AuthToken 2>/dev/null || true)
-      if [[ -n "$running_token" && "$running_token" != "$ORCH_TOKEN" ]]; then
-        warn "  fleet-orchestrator is running with a stale auth token — recreating"
-        (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env up -d --force-recreate fleet-orchestrator fleet-temporal-bridge)
-        poll_health "fleet-orchestrator"    30 "fleet-orchestrator"
-        poll_health "fleet-temporal-bridge" 20 "fleet-temporal-bridge"
-      fi
-    fi
-
-    # Agent name was set in step [3/8] as FLEET_CTO_AGENT and is the source of truth.
-    agent_name=$(read_env_var "$ENV_FILE" "FLEET_CTO_AGENT")
-    if [[ -z "$agent_name" ]]; then
-      fail "FLEET_CTO_AGENT is not set in .env — re-run setup.sh from step 3."; exit 1
-    fi
-
-    # Group chat ID was set in step [3/8] as FLEET_GROUP_CHAT_ID (0 if disabled).
-    group_chat_id=$(read_env_var "$ENV_FILE" "FLEET_GROUP_CHAT_ID")
-    group_chat_id="${group_chat_id:-0}"
-    tg_group_id=""
-    [[ "$group_chat_id" != "0" ]] && tg_group_id="$group_chat_id"
-
-    # Capitalize first letter for display name default (portable across bash 3.2 / 4+)
-    default_display="$(printf '%s' "${agent_name:0:1}" | tr '[:lower:]' '[:upper:]')${agent_name:1}"
-
-    if $DRY_RUN; then
-      display_name="$default_display"
-      model="claude-opus-4-6"
-      memory_mb="4096"
-      tg_user_id="0"
-      echo -e "  ${YELLOW}[dry-run]${NC} Using defaults: name=$agent_name model=$model memory=${memory_mb}MB"
-    else
-      read -rp "  Display name [$default_display]: " display_name; display_name="${display_name:-$default_display}"
-      echo "  Model options: claude-opus-4-6 / claude-sonnet-4-6"
-      read -rp "  Model [claude-opus-4-6]: "         model;        model="${model:-claude-opus-4-6}"
-      read -rp "  Memory limit MB [4096]: "          memory_mb;    memory_mb="${memory_mb:-4096}"
-
-      tg_user_id=""
-      echo -e "  ${YELLOW}→${NC} DM https://t.me/userinfobot — it replies with your user ID as soon as you send any message. This whitelists you as the only Telegram user allowed to talk to your agent."
-      while true; do
-        read -rp "  Your Telegram user ID (integer): " tg_user_id
-        [[ "$tg_user_id" =~ ^[0-9]+$ ]] && break
-        fail "  Must be a positive integer."
-      done
-    fi
-
-    # Instructions are hardcoded — every setup.sh-provisioned agent is a co-cto, so the
-    # canonical "base + co-cto" pair is the only valid combination here. Users can edit
-    # the agent's instruction set later via the dashboard or MCP tools.
-    instr1="base"
-    instr2="co-cto"
-
-    # Determine provider value based on user's earlier choice.
-    # For "both", default the agent to claude — user can edit later.
-    agent_provider="claude"
-    if $USE_CODEX && ! $USE_CLAUDE; then
-      agent_provider="codex"
-    fi
-
-    if $DRY_RUN; then
-      echo -e "  ${YELLOW}[dry-run]${NC} Would POST $ORCH_URL/api/agents (name=$agent_name)"
-      echo -e "  ${YELLOW}[dry-run]${NC} Would PUT $ORCH_URL/api/agents/$agent_name/config (instructions)"
-      echo -e "  ${YELLOW}[dry-run]${NC} Would POST $ORCH_URL/api/agents/$agent_name/reprovision"
-      if $USE_CLAUDE; then
-        echo -e "  ${YELLOW}[dry-run]${NC} Would POST $ORCH_URL/api/schedules (auth-token-refresh-claude-30m)"
-      fi
-      if $USE_CODEX; then
-        echo -e "  ${YELLOW}[dry-run]${NC} Would POST $ORCH_URL/api/schedules (auth-token-refresh-codex-30m)"
-      fi
-    else
-      # Build TelegramGroups field only if provided
-      tg_groups_field=""
-      if [[ -n "$tg_group_id" && "$tg_group_id" =~ ^-?[0-9]+$ ]]; then
-        tg_groups_field="\"TelegramGroups\": [$tg_group_id],"
-      fi
-
-      # Write agent create payload to temp file (avoids shell quoting issues with large JSON)
-      payload_file=$(mktemp)
-      cat > "$payload_file" <<PAYLOAD
-{
-  "Name": "$agent_name",
-  "ShortName": "$agent_name",
-  "DisplayName": "$display_name",
-  "Role": "co-cto",
-  "Model": "$model",
-  "MemoryLimitMb": $memory_mb,
-  "Provider": "$agent_provider",
-  "PermissionMode": "acceptEdits",
-  "MaxTurns": 50,
-  "AutoMemoryEnabled": true,
-  "ShowStats": false,
-  "GroupListenMode": "all",
-  "GroupDebounceSeconds": 15,
-  "Networks": ["fleet-net"],
-  "EnvRefs": ["TELEGRAM_CTO_BOT_TOKEN", "GITHUB_APP_ID", "GITHUB_APP_PEM"],
-  "TelegramUsers": [$tg_user_id],
-  $tg_groups_field
-  "Tools": [
-    "Read", "Glob", "Grep", "WebFetch", "WebSearch",
-    "mcp__fleet-memory__memory_delete", "mcp__fleet-memory__memory_get",
-    "mcp__fleet-memory__memory_list", "mcp__fleet-memory__memory_search",
-    "mcp__fleet-memory__memory_stats", "mcp__fleet-memory__memory_store",
-    "mcp__fleet-memory__memory_update",
-    "mcp__fleet-playwright__browser_click", "mcp__fleet-playwright__browser_close",
-    "mcp__fleet-playwright__browser_console_messages", "mcp__fleet-playwright__browser_evaluate",
-    "mcp__fleet-playwright__browser_fill_form", "mcp__fleet-playwright__browser_hover",
-    "mcp__fleet-playwright__browser_navigate", "mcp__fleet-playwright__browser_navigate_back",
-    "mcp__fleet-playwright__browser_network_requests", "mcp__fleet-playwright__browser_press_key",
-    "mcp__fleet-playwright__browser_resize", "mcp__fleet-playwright__browser_run_code",
-    "mcp__fleet-playwright__browser_select_option", "mcp__fleet-playwright__browser_snapshot",
-    "mcp__fleet-playwright__browser_tabs", "mcp__fleet-playwright__browser_take_screenshot",
-    "mcp__fleet-playwright__browser_type", "mcp__fleet-playwright__browser_wait_for",
-    "mcp__fleet-temporal__request_memory_store",
-    "mcp__fleet-temporal__temporal_cancel_workflow", "mcp__fleet-temporal__temporal_create_schedule",
-    "mcp__fleet-temporal__temporal_delete_schedule", "mcp__fleet-temporal__temporal_describe_schedule",
-    "mcp__fleet-temporal__temporal_get_workflow_result", "mcp__fleet-temporal__temporal_get_workflow_status",
-    "mcp__fleet-temporal__temporal_list_schedules", "mcp__fleet-temporal__temporal_list_workflow_types",
-    "mcp__fleet-temporal__temporal_list_workflows", "mcp__fleet-temporal__temporal_signal_workflow",
-    "mcp__fleet-temporal__temporal_start_workflow", "mcp__fleet-temporal__temporal_terminate_workflow",
-    "mcp__fleet-orchestrator__agent_logs", "mcp__fleet-orchestrator__create_agent",
-    "mcp__fleet-orchestrator__create_instruction", "mcp__fleet-orchestrator__create_project_context",
-    "mcp__fleet-orchestrator__create_workflow_definition", "mcp__fleet-orchestrator__deprovision_agent",
-    "mcp__fleet-orchestrator__diff_instruction_versions", "mcp__fleet-orchestrator__ensure_networks_exist",
-    "mcp__fleet-orchestrator__get_agent_config", "mcp__fleet-orchestrator__get_agent_history",
-    "mcp__fleet-orchestrator__get_agent_status", "mcp__fleet-orchestrator__get_project_context",
-    "mcp__fleet-orchestrator__get_uwe_reference", "mcp__fleet-orchestrator__get_workflow_definition",
-    "mcp__fleet-orchestrator__list_agent_configs", "mcp__fleet-orchestrator__list_agents",
-    "mcp__fleet-orchestrator__list_instruction_versions", "mcp__fleet-orchestrator__list_project_contexts",
-    "mcp__fleet-orchestrator__list_repositories", "mcp__fleet-orchestrator__list_workflow_definitions",
-    "mcp__fleet-orchestrator__manage_agent_env_refs", "mcp__fleet-orchestrator__manage_agent_instructions",
-    "mcp__fleet-orchestrator__manage_agent_mcp_endpoints", "mcp__fleet-orchestrator__manage_agent_networks",
-    "mcp__fleet-orchestrator__manage_agent_telegram_groups", "mcp__fleet-orchestrator__manage_agent_telegram_users",
-    "mcp__fleet-orchestrator__manage_repository", "mcp__fleet-orchestrator__preview_agent_provision",
-    "mcp__fleet-orchestrator__provision_agent", "mcp__fleet-orchestrator__reprovision_agent",
-    "mcp__fleet-orchestrator__restart_agent", "mcp__fleet-orchestrator__restart_agent_with_version",
-    "mcp__fleet-orchestrator__rollback_instruction", "mcp__fleet-orchestrator__rollback_project_context",
-    "mcp__fleet-orchestrator__start_agent", "mcp__fleet-orchestrator__stop_agent",
-    "mcp__fleet-orchestrator__system_health", "mcp__fleet-orchestrator__update_agent_config",
-    "mcp__fleet-orchestrator__update_instruction", "mcp__fleet-orchestrator__update_project_context",
-    "mcp__fleet-orchestrator__update_workflow_definition",
-    "mcp__fleet-telegram__send_message", "mcp__fleet-telegram__get_chat_info"
-  ],
-  "Projects": [],
-  "McpEndpoints": [
-    {"McpName": "fleet-memory",      "Url": "http://fleet-memory:3100",              "TransportType": "http"},
-    {"McpName": "fleet-playwright",  "Url": "http://fleet-playwright:3200/mcp",      "TransportType": "http"},
-    {"McpName": "fleet-temporal",    "Url": "http://fleet-temporal-bridge:3001",     "TransportType": "http"},
-    {"McpName": "fleet-orchestrator","Url": "http://fleet-orchestrator:3600/mcp",    "TransportType": "http"},
-    {"McpName": "fleet-telegram",    "Url": "http://fleet-telegram:3800",            "TransportType": "http"}
-  ],
-  "Provision": false
-}
-PAYLOAD
-
-      # 7b. Create agent
-      echo "  Creating agent '$agent_name'..."
-      response=$(curl -s -w "\n%{http_code}" \
-        -H "Authorization: Bearer $ORCH_TOKEN" \
-        -H "Content-Type: application/json" \
-        -X POST "$ORCH_URL/api/agents" \
-        --data-binary "@$payload_file" 2>/dev/null)
-      rm -f "$payload_file"
-
-      http_code="${response##*$'\n'}"
-      body="${response%$'\n'*}"
-      if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
-        fail "POST /api/agents failed (HTTP $http_code): $body"; exit 1
-      fi
-      ok "Agent '$agent_name' created"
-
-      # 7c. Assign instructions
-      echo "  Assigning instructions [$instr1, $instr2]..."
-      response=$(curl -s -w "\n%{http_code}" \
-        -H "Authorization: Bearer $ORCH_TOKEN" \
-        -H "Content-Type: application/json" \
-        -X PUT "$ORCH_URL/api/agents/$agent_name/config" \
-        -d "{\"Instructions\":[{\"InstructionName\":\"$instr1\",\"LoadOrder\":0},{\"InstructionName\":\"$instr2\",\"LoadOrder\":1}]}" \
-        2>/dev/null)
-      http_code="${response##*$'\n'}"
-      body="${response%$'\n'*}"
-      if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
-        fail "PUT /api/agents/$agent_name/config failed (HTTP $http_code): $body"; exit 1
-      fi
-      ok "Instructions assigned"
-
-      # 7d. Reprovision
-      echo "  Provisioning container..."
-      response=$(curl -s -w "\n%{http_code}" \
-        -H "Authorization: Bearer $ORCH_TOKEN" \
-        -X POST "$ORCH_URL/api/agents/$agent_name/reprovision" 2>/dev/null)
-      http_code="${response##*$'\n'}"
-      body="${response%$'\n'*}"
-      if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
-        fail "POST /api/agents/$agent_name/reprovision failed (HTTP $http_code): $body"; exit 1
-      fi
-      ok "Agent container provisioned"
-
-      # 7e. Auth-token refresh schedules (provider-gated)
-      create_refresh_schedule() {
-        local provider="$1"     # "claude" or "codex"
-        local schedule_id="auth-token-refresh-${provider}-30m"
-        local payload
-        payload=$(cat <<EOF
+  create_refresh_schedule() {
+    local provider="$1"     # "claude" or "codex"
+    local schedule_id="auth-token-refresh-${provider}-30m"
+    local payload
+    payload=$(cat <<EOF
 {
   "scheduleId": "$schedule_id",
   "namespace": "fleet",
@@ -998,70 +749,40 @@ PAYLOAD
 }
 EOF
 )
-        echo "  Creating schedule: $schedule_id..."
-        response=$(curl -s -w "\n%{http_code}" \
-          -H "Authorization: Bearer $ORCH_TOKEN" \
-          -H "Content-Type: application/json" \
-          -X POST "$ORCH_URL/api/schedules" \
-          -d "$payload" 2>/dev/null)
-        http_code="${response##*$'\n'}"
-        body="${response%$'\n'*}"
-        if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
-          ok "Schedule '$schedule_id' created"
-        elif echo "$body" | grep -qi "already exists\|ALREADY_EXISTS"; then
-          ok "Schedule '$schedule_id' already exists"
-        else
-          warn "Schedule '$schedule_id' failed (HTTP $http_code): $body"
-        fi
-      }
-
-      if $USE_CLAUDE; then create_refresh_schedule "claude"; fi
-      if $USE_CODEX;  then create_refresh_schedule "codex";  fi
-    fi
-
-    # ─────────────────────────────────────────────────────────────────────────
-    section "[8/8] Verifying agent..."
-    # ─────────────────────────────────────────────────────────────────────────
-
-    if $DRY_RUN; then
-      echo -e "  ${YELLOW}[dry-run]${NC} Would poll GET $ORCH_URL/api/agents/$agent_name until status=idle|running"
+    echo "  Creating schedule: $schedule_id..."
+    response=$(curl -s -w "\n%{http_code}" \
+      -H "Authorization: Bearer $ORCH_TOKEN" \
+      -H "Content-Type: application/json" \
+      -X POST "$ORCH_URL/api/schedules" \
+      -d "$payload" 2>/dev/null)
+    http_code="${response##*$'\n'}"
+    body="${response%$'\n'*}"
+    if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
+      ok "Schedule '$schedule_id' created"
+    elif echo "$body" | grep -qi "already exists\|ALREADY_EXISTS"; then
+      ok "Schedule '$schedule_id' already exists"
     else
-      elapsed=0; timeout=60
-      echo -n "  Waiting for $agent_name"
-      while [[ $elapsed -lt $timeout ]]; do
-        status=$(curl -sf "$ORCH_URL/api/agents/$agent_name" 2>/dev/null \
-          | jq -r '.reportedStatus // .status // empty' 2>/dev/null || echo "")
-        if [[ "$status" == "idle" || "$status" == "running" ]]; then
-          echo; ok "Agent '$agent_name' is up!"; break
-        fi
-        echo -n "."; sleep 2; elapsed=$((elapsed + 2))
-      done
-      if [[ $elapsed -ge $timeout ]]; then
-        echo
-        warn "Agent '$agent_name' not yet idle/running after ${timeout}s — check: docker logs fleet-$agent_name"
-      fi
+      warn "Schedule '$schedule_id' failed (HTTP $http_code): $body"
     fi
+  }
 
-  else
-    warn "Skipping agent provisioning."
-    section "[8/8] Setup complete"
-    echo
-  fi
-
-  echo
-  echo -e "${GREEN}✓  Fleet stack is up.${NC}"
-  echo
-  echo -e "   Services running:  rabbitmq · qdrant · temporal · fleet-memory · fleet-bridge"
-  echo -e "                      fleet-telegram · fleet-orchestrator · fleet-dashboard"
-  echo
-  echo -e "   → Dashboard:  http://localhost:${FLEET_DASHBOARD_PORT:-3700}  (FLEET_DASHBOARD_PORT to override)"
-  echo
-  echo -e "   Next steps visible in the dashboard:"
-  echo -e "     · Connect Telegram bots"
-  echo -e "     · Connect GitHub App"
-  echo -e "     · Provision your first agent"
-  echo
-  echo -e "   Re-run ./setup.sh at any time — it is idempotent."
-  echo -e "   For the full prompted flow:  ./setup.sh --full-setup"
-  echo
+  if $USE_CLAUDE; then create_refresh_schedule "claude"; fi
+  if $USE_CODEX;  then create_refresh_schedule "codex";  fi
 fi
+
+echo
+echo -e "${GREEN}✓  Fleet stack is up.${NC}"
+echo
+echo -e "   Services running:  rabbitmq · qdrant · temporal · fleet-memory · fleet-bridge"
+echo -e "                      fleet-telegram · fleet-orchestrator · fleet-dashboard"
+echo
+echo -e "   → Dashboard:  http://localhost:${FLEET_DASHBOARD_PORT:-3700}  (FLEET_DASHBOARD_PORT to override)"
+echo
+echo -e "   Next steps visible in the dashboard:"
+echo -e "     · Connect Telegram bots"
+echo -e "     · Connect GitHub App"
+echo -e "     · Provision your first agent from a template"
+echo
+echo -e "   Re-run ./setup.sh at any time — it is idempotent."
+echo -e "   For the full prompted flow:  ./setup.sh --full-setup"
+echo

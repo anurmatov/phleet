@@ -736,12 +736,26 @@ else
     read -rp "  Would you like to provision your Assistant (CTO) agent now? (y/n) [y]: " do_provision
     do_provision="${do_provision:-y}"
   else
-    # Default mode: opt-in with N default; dashboard is the recommended path
-    echo "  Stack is up. You can provision your first agent now, or do it later from"
-    echo "  the dashboard at http://localhost:3700."
-    echo
-    read -rp "  Provision an agent now? [y/N] " do_provision
-    do_provision="${do_provision:-n}"
+    # Default mode: only prompt if real tokens have been configured
+    _tg_token=$(read_env_var "$ENV_FILE" "TELEGRAM_CTO_BOT_TOKEN")
+    _gh_id=$(read_env_var "$ENV_FILE" "GITHUB_APP_ID")
+    _gh_pem=$(read_env_var "$ENV_FILE" "GITHUB_APP_PEM")
+    _tokens_ready=true
+    is_placeholder "$_tg_token" && _tokens_ready=false
+    is_placeholder "$_gh_id" && _tokens_ready=false
+    is_placeholder "$_gh_pem" && _tokens_ready=false
+    [[ ! "$_tg_token" =~ ^[0-9]+:[A-Za-z0-9_-]{35,}$ ]] && _tokens_ready=false
+
+    if ! $_tokens_ready; then
+      echo "  Skipped agent provisioning (no tokens configured — finish setup in the dashboard)"
+      do_provision="n"
+    else
+      echo "  Stack is up. You can provision your first agent now, or do it later from"
+      echo "  the dashboard at http://localhost:${FLEET_DASHBOARD_PORT:-3700}."
+      echo
+      read -rp "  Provision an agent now? [y/N] " do_provision
+      do_provision="${do_provision:-n}"
+    fi
   fi
 
   if [[ "$do_provision" =~ ^[Yy]$ ]]; then

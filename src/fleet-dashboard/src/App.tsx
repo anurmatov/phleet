@@ -68,7 +68,7 @@ const DEFAULT_CREATE_FORM: CreateForm = {
   showStats: true, prefixMessages: false, suppressToolMessages: false, telegramSendOnly: false, provider: 'claude',
   codexSandboxMode: '',
   tools: '', projects: '', networks: '', envRefs: '',
-  mcpEndpoints: [], telegramUsers: '', telegramGroups: '',
+  mcpEndpoints: [], telegramUsers: '', telegramGroups: '', instructions: [],
 }
 
 export default function App() {
@@ -770,6 +770,7 @@ export default function App() {
           envRefs: cfg.envRefs.join(', '),
           telegramUsers: cfg.telegramUsers.join(', '),
           telegramGroups: cfg.telegramGroups.join(', '),
+          instructions: cfg.instructions ?? [],
         })
       })
       .catch(() => { setConfigSaveMsg('Failed to load config'); setConfigSaveState('error') })
@@ -824,6 +825,7 @@ export default function App() {
         codexSandboxMode: configEdits.codexSandboxMode || undefined,
         hostPort: configEdits.hostPort ? parseInt(configEdits.hostPort, 10) : null,
         tools, projects, mcpEndpoints: configEdits.mcpEndpoints, networks, envRefs, telegramUsers, telegramGroups,
+        instructions: configEdits.instructions.map(i => ({ instructionName: i.name, loadOrder: i.loadOrder })),
       }),
     })
       .then(async r => {
@@ -1522,6 +1524,16 @@ export default function App() {
       const r = await apiFetch('/api/agents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       const data = await r.json().catch(() => ({}))
       if (r.ok || r.status === 201 || r.status === 207) {
+        // Apply instruction assignments if any were selected
+        if (createForm.instructions.length > 0) {
+          await apiFetch(`/api/agents/${encodeURIComponent(createForm.name.trim())}/config`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              instructions: createForm.instructions.map(i => ({ instructionName: i.name, loadOrder: i.loadOrder })),
+            }),
+          }).catch(() => {/* non-fatal — user can set via config panel */})
+        }
         setCreateState('success')
         setCreateMsg(data.message ?? 'Agent created — configure and provision when ready')
         setTimeout(() => { setCreateModalOpen(false); setCreateState('idle'); setCreateMsg(''); setCreateForm(DEFAULT_CREATE_FORM); setCopyFrom('') }, 3000)
@@ -1938,6 +1950,7 @@ export default function App() {
           agentNames={sorted.map(a => a.agentName)}
           copyFrom={copyFrom}
           copyFromLoading={copyFromLoading}
+          allInstructions={instructions}
           onCopyFrom={handleCopyFrom}
           onFormChange={patch => setCreateForm(f => ({ ...f, ...patch }))}
           onSubmit={handleCreateSubmit}
@@ -1954,6 +1967,7 @@ export default function App() {
           configSaveMsg={configSaveMsg}
           configLoading={configLoading}
           configReprovisionConfirm={configReprovisionConfirm}
+          allInstructions={instructions}
           onEditsChange={patch => setConfigEdits(prev => prev ? { ...prev, ...patch } : prev)}
           onSave={andReprovision => saveConfig(configAgent, andReprovision)}
           onReprovisionConfirmToggle={() => setConfigReprovisionConfirm(c => !c)}

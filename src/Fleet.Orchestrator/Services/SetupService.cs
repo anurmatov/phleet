@@ -23,6 +23,7 @@ public sealed class SetupService
     {
         "", "changeme", "your-secret-token-here", "0", "false",
         "minioadmin", "fleetroot", "fleetpass",
+        "123456", "base64-encoded-private-key-here",
     };
 
     // Containers that are compose-managed (no DB record) and must be recreated via Docker API
@@ -32,6 +33,7 @@ public sealed class SetupService
     // Dependency map: env key → which infra containers need restart
     private static readonly Dictionary<string, string[]> InfraDepMap = new()
     {
+        ["TELEGRAM_CTO_BOT_TOKEN"]      = ["fleet-telegram"],
         ["TELEGRAM_NOTIFIER_BOT_TOKEN"] = ["fleet-bridge", "fleet-telegram"],
         ["FLEET_GROUP_CHAT_ID"]         = ["fleet-bridge", "fleet-temporal-bridge"],
         ["GITHUB_APP_ID"]               = [],
@@ -600,7 +602,16 @@ public sealed class SetupService
     // ── Env file helpers ──────────────────────────────────────────────────────
 
     private static bool IsConfigured(Dictionary<string, string> env, string key) =>
-        env.TryGetValue(key, out var val) && !WeakDefaults.Contains(val);
+        env.TryGetValue(key, out var val) && !WeakDefaults.Contains(val) && IsValidFormat(key, val);
+
+    private static bool IsValidFormat(string key, string val) => key switch
+    {
+        "TELEGRAM_CTO_BOT_TOKEN" or "TELEGRAM_NOTIFIER_BOT_TOKEN" =>
+            Regex.IsMatch(val, @"^\d+:[A-Za-z0-9_-]{35,}$"),
+        "GITHUB_APP_ID" =>
+            val.All(char.IsDigit) && val.Length >= 5,
+        _ => true
+    };
 
     private static Dictionary<string, string> LoadEnvFile(string path)
     {

@@ -4579,3 +4579,32 @@ body {
 .setup-chip--ok {
   animation: setup-chip-in 0.3s ease;
 }
+
+/* ── Instruction picker ──────────────────────────────────────────────────────── */
+
+.instruction-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.instruction-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.instruction-picker-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  flex: 1;
+}
+
+.instruction-picker-hint {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 4px;
+}

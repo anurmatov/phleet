@@ -1042,26 +1042,26 @@ EOF
       fi
     fi
 
-    echo
-    echo -e "${GREEN}✓  Fleet stack is up.${NC}"
-    echo
-    echo -e "   Services running:  rabbitmq · qdrant · temporal · fleet-memory · fleet-bridge"
-    echo -e "                      fleet-telegram · fleet-orchestrator · fleet-dashboard"
-    echo
-    echo -e "   → Dashboard:  http://localhost:${FLEET_DASHBOARD_PORT:-3700}  (FLEET_DASHBOARD_PORT to override)"
-    echo
-    echo -e "   Next steps visible in the dashboard:"
-    echo -e "     · Connect Telegram bots"
-    echo -e "     · Connect GitHub App"
-    echo -e "     · Provision your first agent"
-    echo
-    echo -e "   Re-run ./setup.sh at any time — it is idempotent."
-    echo -e "   For the full prompted flow:  ./setup.sh --full-setup"
-    echo
-
   else
     warn "Skipping agent provisioning."
-    section "[8/8] Setup complete (services running, no agent provisioned)"
+    section "[8/8] Setup complete"
     echo
   fi
+
+  echo
+  echo -e "${GREEN}✓  Fleet stack is up.${NC}"
+  echo
+  echo -e "   Services running:  rabbitmq · qdrant · temporal · fleet-memory · fleet-bridge"
+  echo -e "                      fleet-telegram · fleet-orchestrator · fleet-dashboard"
+  echo
+  echo -e "   → Dashboard:  http://localhost:${FLEET_DASHBOARD_PORT:-3700}  (FLEET_DASHBOARD_PORT to override)"
+  echo
+  echo -e "   Next steps visible in the dashboard:"
+  echo -e "     · Connect Telegram bots"
+  echo -e "     · Connect GitHub App"
+  echo -e "     · Provision your first agent"
+  echo
+  echo -e "   Re-run ./setup.sh at any time — it is idempotent."
+  echo -e "   For the full prompted flow:  ./setup.sh --full-setup"
+  echo
 fi

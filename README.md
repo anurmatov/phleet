@@ -4,7 +4,7 @@
   <img src=".github/assets/phleet-hero.svg" alt="Phleet" width="720">
 </p>
 
-Phleet is an open-source multi-agent AI platform built on .NET 10. Each agent runs as a Docker container, receives tasks via Telegram or RabbitMQ, and executes them using a persistent AI process (Claude or Codex). Agents are coordinated by a central orchestrator backed by Temporal workflows.
+Phleet is an open-source, self-hosted multi-agent AI platform built on .NET 10. Each agent runs as a Docker container on your own host, uses your own Claude or Codex credentials, hits your repos via your own GitHub App, and is coordinated by a central orchestrator backed by Temporal workflows. Control plane, state, workflow history, and memory stay on infrastructure you control — only model-inference traffic goes to your chosen provider. No managed tier, no vendor quota, no "we're deprecating this feature in 60 days" risk. You own the fleet end-to-end.
 
 <p align="center">
   <img src=".github/assets/phleet-dashboard.jpg" alt="Phleet dashboard — agents and active workflows" width="900">
@@ -12,11 +12,65 @@ Phleet is an open-source multi-agent AI platform built on .NET 10. Each agent ru
   <em>The fleet dashboard — live agent status, model assignment, and in-flight Temporal workflows.</em>
 </p>
 
-## Why Phleet
+## Quickstart
 
-Phleet is fully self-hosted. Agents run on your own Docker host, use your own Claude or Codex credentials, hit your repos via your own GitHub App, and persist every task, workflow, and memory to databases you control. Nothing leaves your network. No managed tier, no vendor quota, no "we're deprecating this feature in 60 days" risk — you own the fleet end-to-end.
+```bash
+# 1. Clone the repo
+git clone https://github.com/anurmatov/phleet.git
+cd phleet
 
-### One agent, then the rest
+# 2. Run the setup wizard
+./setup.sh
+```
+
+You'll need **Docker + Docker Compose**, **two Telegram bot tokens**, and **a GitHub App** — details below. `setup.sh` will prompt for these as it runs; you can keep the links in this page open while it asks.
+
+`setup.sh` creates a `./fleet/` subdirectory next to the repo and puts all runtime state there: `.env`, `seed.json`, generated `docker-compose.yml`, `workspaces/`, `memories/`, credentials, and mysql backups. The whole dir is gitignored — to fully reset, stop containers and `rm -rf fleet/`.
+
+`seed.example.json` at the repo root ships with **no agents**. Your first agent — the co-CTO — is created interactively via the dashboard's SetupBanner after `setup.sh` finishes. Open the dashboard, connect Telegram, then click the CTO template card and follow the prompts. Once the co-CTO is up, DM it in Telegram and ask it to grow the rest of the fleet for you.
+
+### What you'll need during setup
+
+- Docker and Docker Compose
+- **Two Telegram bots** created via [@BotFather](https://t.me/BotFather):
+  - a **CTO bot** — dedicated to the co-CTO agent's DMs with you (`TELEGRAM_CTO_BOT_TOKEN`)
+  - a **notifier bot** — shared by every other agent for DMs and group-chat relay (`TELEGRAM_NOTIFIER_BOT_TOKEN`)
+
+  You can technically reuse a single token if you only ever run the co-CTO, but the moment a second agent exists you need the split: Telegram allows only one long-poller per token (see the Troubleshooting entry on 409 Conflict).
+- **A Telegram group** (optional) for observing agent activity. Create a group, add **both** bots as members, then forward any message from the group to [@userinfobot](https://t.me/userinfobot) — it replies with the group's negative integer ID, which you'll paste into `.env` as `FLEET_GROUP_CHAT_ID` during setup. Agents post workflow notifications and status updates there. Leaving the ID blank disables group routing — agents then only respond to DMs, and all coordination happens through Temporal workflows.
+- A GitHub App with repo access ([create one](https://github.com/settings/apps))
+
+### Start/stop the stack later
+
+`setup.sh` starts services for you. To start/stop them later, run compose from the `./fleet/` directory:
+
+```bash
+cd fleet
+docker compose up -d
+docker compose down
+```
+
+Services started:
+- `rabbitmq` — message broker
+- `fleet-mysql` — agent config + task history
+- `qdrant` — vector store for Fleet Memory
+- `temporal-postgresql` — Temporal persistence
+- `temporal-server` + `temporal-ui` — workflow engine
+- `fleet-minio` (+ `fleet-minio-init`) — S3-compatible store for inter-agent file sharing
+- `fleet-memory` — semantic memory MCP server
+- `fleet-playwright` — browser automation MCP server
+- `fleet-orchestrator` — agent registry + lifecycle manager
+- `fleet-temporal-bridge` — Temporal workflow runner
+- `fleet-bridge` — RabbitMQ relay
+- `fleet-dashboard` — web UI (default: http://localhost:3700)
+
+All stateful services (mysql, qdrant, temporal postgres, minio, memories) bind-mount their data under `./fleet/` — no named Docker volumes. Back up or wipe the whole installation by archiving or removing that single directory.
+
+### Dashboard
+
+The dashboard provides a real-time view of all agents, their status, logs, config, and Temporal workflows. Auth is controlled by `ORCHESTRATOR_AUTH_TOKEN` in `.env`.
+
+## What you get after setup
 
 After `./setup.sh` you have a **single agent** running: the co-CTO. It is the only agent in the orchestrator granted the full agent-lifecycle and workflow-authoring toolset. You don't spin up more agents by editing JSON and restarting containers — you grow the fleet by talking to the co-CTO in Telegram, in plain English.
 
@@ -31,6 +85,14 @@ Things you can ask the co-CTO to do, today, out of the box:
 - **Coordinate the fleet.** The co-CTO maintains an active task-tracker memory, reviews production-risk changes proposed by worker agents before they run, and facilitates the shared Telegram coordination group.
 
 The rest of this README is the plumbing — configuration, deployment, troubleshooting. The point of the co-CTO is that after setup you mostly don't need to touch any of it.
+
+## Learn by watching
+
+Want to see end-to-end agent engineering in action, not just framework docs? This section collects walkthroughs, blog posts, PR deep-dives, and demo videos of Phleet in real use.
+
+- _Posts and walkthroughs coming soon — watch the repo for updates._
+
+If you write about your Phleet setup, open a PR adding it here.
 
 ## Project Status
 
@@ -78,84 +140,6 @@ Workflows can be authored as versioned JSON definitions through the dashboard's 
   <em>Editing a workflow definition — steps, arguments, and live JSON/visual/split views.</em>
 </p>
 
-## Quick Start
-
-### Prerequisites
-
-- Docker and Docker Compose
-- **Two Telegram bots** created via [@BotFather](https://t.me/BotFather):
-  - a **CTO bot** — dedicated to the co-CTO agent's DMs with you (`TELEGRAM_CTO_BOT_TOKEN`)
-  - a **notifier bot** — shared by every other agent for DMs and group-chat relay (`TELEGRAM_NOTIFIER_BOT_TOKEN`)
-
-  You can technically reuse a single token if you only ever run the co-CTO, but the moment a second agent exists you need the split: Telegram allows only one long-poller per token (see the Troubleshooting entry on 409 Conflict).
-- **A Telegram group** (optional) for observing agent activity. Create a group, add **both** bots as members, then forward any message from the group to [@userinfobot](https://t.me/userinfobot) — it replies with the group's negative integer ID, which you'll paste into `.env` as `FLEET_GROUP_CHAT_ID` during setup. Agents post workflow notifications and status updates there. Leaving the ID blank disables group routing — agents then only respond to DMs, and all coordination happens through Temporal workflows.
-- A GitHub App with repo access ([create one](https://github.com/settings/apps))
-
-### Setup
-
-```bash
-# 1. Clone the repo
-git clone https://github.com/anurmatov/phleet.git
-cd phleet
-
-# 2. Run the setup wizard
-./setup.sh
-```
-
-`setup.sh` creates a `./fleet/` subdirectory next to the repo and puts all
-runtime state there: `.env`, `seed.json`, generated `docker-compose.yml`,
-`workspaces/`, `memories/`, credentials, and mysql backups. The whole dir
-is gitignored — to fully reset, stop containers and `rm -rf fleet/`.
-
-### Configure Agents
-
-The example (`seed.example.json` at the repo root) ships with no agents by default. Your first agent (co-cto) is provisioned via the dashboard SetupBanner after setup — open the dashboard and follow the on-screen steps.
-
-Key fields per agent:
-- `name` — unique identifier
-- `role` — maps to `src/Fleet.Orchestrator/roles/{role}/system.md` (seeded into the `instructions` table on first boot)
-- `model` — e.g. `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`
-- `shortName` — displayed in group messages when `prefixMessages` is on
-- `tools` — whitelist of tool names the agent may call (built-ins + MCP tool IDs)
-- `mcpEndpoints` — MCP servers the agent can reach (`fleet-memory`, `fleet-temporal`, etc.)
-- `envRefs` — names of env vars the container is allowed to read (e.g. `TELEGRAM_NOTIFIER_BOT_TOKEN`, `GITHUB_APP_ID`)
-- `networks` — docker networks to attach (typically `fleet-net`)
-- `telegramUsers` / `telegramGroups` — who may DM the agent / which groups it listens to
-- `groupListenMode` — `off` / `mention` / `all`
-- `telegramSendOnly` — **must be `true`** on every non-CTO agent that shares a Telegram bot token with others (otherwise Telegram returns 409 Conflict — only one long-poller per token)
-- `prefixMessages` — when multiple agents share a bot token, set `true` so outgoing group messages are prefixed with the agent's `shortName` (e.g. `[Developer] ...`)
-
-### Start the Stack
-
-`setup.sh` starts services for you. To start/stop them later, run compose
-from the `./fleet/` directory:
-
-```bash
-cd fleet
-docker compose up -d
-docker compose down
-```
-
-Services started:
-- `rabbitmq` — message broker
-- `fleet-mysql` — agent config + task history
-- `qdrant` — vector store for Fleet Memory
-- `temporal-postgresql` — Temporal persistence
-- `temporal-server` + `temporal-ui` — workflow engine
-- `fleet-minio` (+ `fleet-minio-init`) — S3-compatible store for inter-agent file sharing
-- `fleet-memory` — semantic memory MCP server
-- `fleet-playwright` — browser automation MCP server
-- `fleet-orchestrator` — agent registry + lifecycle manager
-- `fleet-temporal-bridge` — Temporal workflow runner
-- `fleet-bridge` — RabbitMQ relay
-- `fleet-dashboard` — web UI (default: http://localhost:3700)
-
-All stateful services (mysql, qdrant, temporal postgres, minio, memories) bind-mount their data under `./fleet/` — no named Docker volumes. Back up or wipe the whole installation by archiving or removing that single directory.
-
-### Dashboard
-
-The dashboard provides a real-time view of all agents, their status, logs, config, and Temporal workflows. Auth is controlled by `ORCHESTRATOR_AUTH_TOKEN` in `.env`.
-
 ## Build
 
 ```bash
@@ -202,6 +186,23 @@ Agent config is database-driven (MySQL via EF Core). On first run, the orchestra
 The tracked repo root stays clean — only source, `.env.example`, `seed.example.json`, and `docker-compose.example.yml` live there. All runtime state is under `./fleet/`.
 
 See `.env.example` for all required variables with descriptions.
+
+### Agent config fields
+
+Each agent entry in `seed.json` (or created via the co-CTO's `create_agent` flow) has these key fields:
+
+- `name` — unique identifier
+- `role` — maps to `src/Fleet.Orchestrator/roles/{role}/system.md` (seeded into the `instructions` table on first boot)
+- `model` — e.g. `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`
+- `shortName` — displayed in group messages when `prefixMessages` is on
+- `tools` — whitelist of tool names the agent may call (built-ins + MCP tool IDs)
+- `mcpEndpoints` — MCP servers the agent can reach (`fleet-memory`, `fleet-temporal`, etc.)
+- `envRefs` — names of env vars the container is allowed to read (e.g. `TELEGRAM_NOTIFIER_BOT_TOKEN`, `GITHUB_APP_ID`)
+- `networks` — docker networks to attach (typically `fleet-net`)
+- `telegramUsers` / `telegramGroups` — who may DM the agent / which groups it listens to
+- `groupListenMode` — `off` / `mention` / `all`
+- `telegramSendOnly` — **must be `true`** on every non-CTO agent that shares a Telegram bot token with others (otherwise Telegram returns 409 Conflict — only one long-poller per token)
+- `prefixMessages` — when multiple agents share a bot token, set `true` so outgoing group messages are prefixed with the agent's `shortName` (e.g. `[Developer] ...`)
 
 ## Troubleshooting
 

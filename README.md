@@ -4,7 +4,7 @@
   <img src=".github/assets/phleet-hero.svg" alt="Phleet" width="720">
 </p>
 
-Phleet is an open-source, self-hosted multi-agent AI platform built on .NET 10. Agents run as Docker containers on your host, use your Claude or Codex credentials, hit your repos through your own GitHub App, and are coordinated by a central orchestrator backed by Temporal workflows. Only model-inference traffic leaves your infrastructure — you own the fleet end-to-end.
+Phleet is an open-source, self-hosted multi-agent AI platform built on .NET 10. Agents run as Docker containers on your host, use your Claude or Codex credentials, hit your repos through your own GitHub App, and are coordinated by a central orchestrator backed by Temporal workflows. Control plane, runtime state, workflow history, and memory stay on infrastructure you control; external traffic goes only to the providers you configure — Claude/Codex, GitHub, and Telegram.
 
 <p align="center">
   <img src=".github/assets/phleet-dashboard.jpg" alt="Phleet dashboard — agents and active workflows" width="900">

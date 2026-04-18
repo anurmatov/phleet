@@ -178,7 +178,10 @@ export default function App() {
   const [deployState, setDeployState] = useState<Record<string, 'idle' | 'deploying' | 'success' | 'error'>>({})
   const [deployMsg, setDeployMsg] = useState<Record<string, string>>({})
 
-  const [setupStatus, setSetupStatus] = useState<{ telegramConfigured: boolean; githubConfigured: boolean } | null>(null)
+  const [setupStatus, setSetupStatus] = useState<{
+    telegram: { configured: boolean; groupChatEnabled: boolean }
+    gitHub: { configured: boolean }
+  } | null>(null)
 
   const [logViewer, setLogViewer] = useState<string | null>(null)
   const [logLines, setLogLines] = useState<string[]>([])

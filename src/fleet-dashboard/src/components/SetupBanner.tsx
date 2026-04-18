@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { apiFetch } from '../utils'
 
+// Matches the nested shape returned by SetupStatusDto
 interface SetupStatus {
-  telegramConfigured: boolean
-  githubConfigured: boolean
+  telegram: { configured: boolean; groupChatEnabled: boolean }
+  gitHub: { configured: boolean }
 }
 
 interface SetupBannerProps {
@@ -20,12 +21,23 @@ interface TelegramModalProps {
 }
 
 function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
-  const [token, setToken] = useState('')
+  const [ctoBotToken, setCtoBotToken] = useState('')
+  const [notifierBotToken, setNotifierBotToken] = useState('')
   const [groupChatId, setGroupChatId] = useState('')
   const [testState, setTestState] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle')
   const [testMsg, setTestMsg] = useState('')
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'success' | 'error'>('idle')
   const [saveMsg, setSaveMsg] = useState('')
+
+  function resetFeedback() { setTestState('idle'); setSaveState('idle'); setTestMsg(''); setSaveMsg('') }
+
+  function buildPayload() {
+    return {
+      ctoBotToken: ctoBotToken || undefined,
+      notifierBotToken: notifierBotToken || undefined,
+      groupChatId: groupChatId || undefined,
+    }
+  }
 
   async function handleTest() {
     setTestState('testing')
@@ -34,15 +46,18 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
       const res = await apiFetch('/api/setup/telegram/validate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ botToken: token, groupChatId: groupChatId || undefined }),
+        body: JSON.stringify(buildPayload()),
       })
       const data = await res.json()
       if (res.ok && data.valid) {
+        const parts: string[] = []
+        if (data.ctoBot?.username) parts.push(`CTO: @${data.ctoBot.username}`)
+        if (data.notifierBot?.username) parts.push(`Notifier: @${data.notifierBot.username}`)
         setTestState('ok')
-        setTestMsg(data.botUsername ? `Connected as @${data.botUsername}` : 'Connection OK')
+        setTestMsg(parts.length ? parts.join(', ') : 'Connection OK')
       } else {
         setTestState('error')
-        setTestMsg(data.error ?? 'Validation failed')
+        setTestMsg(data.errorDetail ?? data.error ?? 'Validation failed')
       }
     } catch (e) {
       setTestState('error')
@@ -57,16 +72,19 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
       const res = await apiFetch('/api/setup/telegram', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ botToken: token, groupChatId: groupChatId || undefined }),
+        body: JSON.stringify(buildPayload()),
       })
       const data = await res.json()
       if (res.ok || res.status === 207) {
+        const errCount = Object.keys(data.restartErrors ?? {}).length
         setSaveState('success')
-        setSaveMsg(data.restartErrors?.length ? `Saved (some containers could not restart: ${data.restartErrors.join(', ')})` : 'Saved and applied')
+        setSaveMsg(errCount > 0
+          ? `Saved (${errCount} container(s) could not restart — check logs)`
+          : 'Saved and applied')
         setTimeout(() => { onConnected(); onClose() }, 1200)
       } else {
         setSaveState('error')
-        setSaveMsg(data.error ?? `Error ${res.status}`)
+        setSaveMsg(data.errorDetail ?? data.error ?? `Error ${res.status}`)
       }
     } catch (e) {
       setSaveState('error')
@@ -83,13 +101,23 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
         </div>
         <div className="config-modal-body">
           <div className="config-row">
-            <label className="config-label">Bot token <span style={{ color: 'var(--red)' }}>*</span></label>
+            <label className="config-label">CTO bot token <span style={{ color: 'var(--red)' }}>*</span></label>
             <input
               className="config-input"
               type="password"
               placeholder="110201543:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
-              value={token}
-              onChange={e => { setToken(e.target.value); setTestState('idle'); setSaveState('idle') }}
+              value={ctoBotToken}
+              onChange={e => { setCtoBotToken(e.target.value); resetFeedback() }}
+            />
+          </div>
+          <div className="config-row">
+            <label className="config-label">Notifier bot token <span style={{ color: 'var(--muted)', fontWeight: 400 }}>(optional)</span></label>
+            <input
+              className="config-input"
+              type="password"
+              placeholder="220301543:BBHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
+              value={notifierBotToken}
+              onChange={e => { setNotifierBotToken(e.target.value); resetFeedback() }}
             />
           </div>
           <div className="config-row">
@@ -111,14 +139,14 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
           <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
             <button
               className="wfd-cancel-btn"
-              disabled={!token || testState === 'testing'}
+              disabled={!ctoBotToken || testState === 'testing'}
               onClick={handleTest}
             >
               {testState === 'testing' ? 'Testing…' : 'Test connection'}
             </button>
             <button
               className="config-save-btn"
-              disabled={!token || saveState === 'saving'}
+              disabled={!ctoBotToken || saveState === 'saving'}
               onClick={handleSave}
             >
               {saveState === 'saving' ? 'Saving…' : 'Save & connect'}
@@ -171,10 +199,10 @@ function ConnectGitHubModal({ onClose, onConnected }: GitHubModalProps) {
       const data = await res.json()
       if (res.ok && data.valid) {
         setTestState('ok')
-        setTestMsg(data.appSlug ? `App: ${data.appSlug}` : 'Credentials OK')
+        setTestMsg(data.appName ? `App: ${data.appName}` : 'Credentials OK')
       } else {
         setTestState('error')
-        setTestMsg(data.error ?? 'Validation failed')
+        setTestMsg(data.errorDetail ?? data.error ?? 'Validation failed')
       }
     } catch (e) {
       setTestState('error')
@@ -193,12 +221,15 @@ function ConnectGitHubModal({ onClose, onConnected }: GitHubModalProps) {
       })
       const data = await res.json()
       if (res.ok || res.status === 207) {
+        const errCount = Object.keys(data.restartErrors ?? {}).length
         setSaveState('success')
-        setSaveMsg(data.restartErrors?.length ? `Saved (some containers could not restart: ${data.restartErrors.join(', ')})` : 'Saved and applied')
+        setSaveMsg(errCount > 0
+          ? `Saved (${errCount} container(s) could not restart — check logs)`
+          : 'Saved and applied')
         setTimeout(() => { onConnected(); onClose() }, 1200)
       } else {
         setSaveState('error')
-        setSaveMsg(data.error ?? `Error ${res.status}`)
+        setSaveMsg(data.errorDetail ?? data.error ?? `Error ${res.status}`)
       }
     } catch (e) {
       setSaveState('error')
@@ -281,7 +312,9 @@ export default function SetupBanner({ status, agentCount, onConnected }: SetupBa
 
   if (!status) return null
 
-  const bothConfigured = status.telegramConfigured && status.githubConfigured
+  const telegramOk = status.telegram.configured
+  const githubOk = status.gitHub.configured
+  const bothConfigured = telegramOk && githubOk
 
   // Compact chip row once everything is configured and there are agents
   if (bothConfigured && agentCount > 0) {
@@ -297,7 +330,7 @@ export default function SetupBanner({ status, agentCount, onConnected }: SetupBa
     <>
       <div className="setup-banner">
         {/* Telegram card */}
-        {!status.telegramConfigured ? (
+        {!telegramOk ? (
           <div className="setup-card setup-card--pending">
             <div className="setup-card-icon">✈</div>
             <div className="setup-card-body">
@@ -321,7 +354,7 @@ export default function SetupBanner({ status, agentCount, onConnected }: SetupBa
         )}
 
         {/* GitHub card */}
-        {!status.githubConfigured ? (
+        {!githubOk ? (
           <div className="setup-card setup-card--pending">
             <div className="setup-card-icon">⌥</div>
             <div className="setup-card-body">

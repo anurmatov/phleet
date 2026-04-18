@@ -41,17 +41,20 @@ public sealed class SetupService
     private readonly string _envFilePath;
     private readonly IConfiguration _config;
     private readonly DockerService _docker;
+    private readonly ContainerProvisioningService _provisioning;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<SetupService> _logger;
 
     public SetupService(
         IConfiguration config,
         DockerService docker,
+        ContainerProvisioningService provisioning,
         IServiceScopeFactory scopeFactory,
         ILogger<SetupService> logger)
     {
         _config = config;
         _docker = docker;
+        _provisioning = provisioning;
         _scopeFactory = scopeFactory;
         _logger = logger;
         _envFilePath = config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env";
@@ -93,16 +96,6 @@ public sealed class SetupService
     public async Task<TelegramValidateResult> ValidateTelegramAsync(
         TelegramSetupRequest req, CancellationToken ct)
     {
-        var errors = new List<string>();
-
-        if (req.CtoBotToken is not null)
-        {
-            var (ok, info, err) = await CallTelegramGetMeAsync(req.CtoBotToken, ct);
-            if (!ok) return TelegramValidateResult.Fail("cto_token_invalid", err ?? "");
-            return new TelegramValidateResult(true, info, null, null, [], null);
-        }
-
-        // Full validate path
         Bot? ctoBot = null, notifierBot = null;
         GroupInfo? groupInfo = null;
 
@@ -236,15 +229,10 @@ public sealed class SetupService
                     $"GitHub API returned {(int)resp.StatusCode} — check App ID and private key");
             }
         }
-        catch (TaskCanceledException)
+        catch (Exception ex)
         {
             warnings.Add("github_api_unreachable");
-            _logger.LogWarning("GitHub API unreachable during validation (timeout) — proceeding without app name verification");
-        }
-        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException)
-        {
-            warnings.Add("github_api_unreachable");
-            _logger.LogWarning("GitHub API unreachable during validation — proceeding without app name verification");
+            _logger.LogWarning(ex, "GitHub API call failed during validation — proceeding without app name verification");
         }
 
         return new GitHubValidateResult(true, req.AppId, appName, warnings, null, null);
@@ -431,18 +419,20 @@ public sealed class SetupService
             }
         }
 
-        // Restart agent containers (DB-driven reprovision)
+        // Reprovision agent containers (stop → remove → recreate with fresh .env)
         foreach (var name in agentContainers)
         {
             try
             {
-                await _docker.StopContainerAsync(name);
-                await _docker.StartContainerAsync(name);
-                restarted.Add(name);
+                var result = await _provisioning.ReprovisionAsync(name, ct: ct);
+                if (result.Success)
+                    restarted.Add(name);
+                else
+                    errors[name] = result.Message;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to restart agent container {Name}", name);
+                _logger.LogError(ex, "Failed to reprovision agent container {Name}", name);
                 errors[name] = ex.Message;
             }
         }

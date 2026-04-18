@@ -17,10 +17,12 @@ namespace Fleet.Agent.Interfaces;
 /// Thin Telegram shell. Only file that imports Telegram.Bot.*.
 /// Builds IncomingMessage from Telegram updates, delegates to MessageRouter.
 /// Implements IMessageSink for outbound messages (splits at 4000 chars).
+/// When TELEGRAM_BOT_TOKEN is missing or empty the service enters headless mode:
+/// RabbitMQ + MCP remain fully functional; Telegram poller is disabled.
 /// </summary>
 public sealed class AgentTransport : BackgroundService, IMessageSink
 {
-    private readonly TelegramBotClient _bot;
+    private readonly TelegramBotClient? _bot;
     private readonly AgentOptions _agentConfig;
     private readonly TelegramOptions _telegramConfig;
     private readonly GroupRelayService _relay;
@@ -30,6 +32,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     private readonly CommandDispatcher _commands;
     private readonly VoiceTranscriptionService _voiceTranscription;
     private readonly TtsService _tts;
+    private readonly IFleetConnectionState _connectionState;
     private readonly ILogger<AgentTransport> _logger;
 
     private string _botUsername = "";
@@ -44,6 +47,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         CommandDispatcher commands,
         VoiceTranscriptionService voiceTranscription,
         TtsService tts,
+        IFleetConnectionState connectionState,
         ILogger<AgentTransport> logger)
     {
         _agentConfig = agentConfig.Value;
@@ -55,8 +59,12 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         _commands = commands;
         _voiceTranscription = voiceTranscription;
         _tts = tts;
+        _connectionState = connectionState;
         _logger = logger;
-        _bot = new TelegramBotClient(telegramConfig.Value.BotToken);
+
+        // Only create the bot client when a token is available.
+        if (!string.IsNullOrWhiteSpace(telegramConfig.Value.BotToken))
+            _bot = new TelegramBotClient(telegramConfig.Value.BotToken);
 
         // Inject self as IMessageSink to break circular DI
         _taskManager.Sink = this;
@@ -75,6 +83,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         // chatId==0 means "headless workflow delegation" — no Telegram destination.
         // The result still flows back to the caller via the relay (see OnTaskCompleted).
         if (chatId == 0) return;
+        if (_bot is null) return;
 
         // Split on [IMAGE:...] markers; odd-indexed segments are file paths
         var parts = ImageMarkerRegex.Split(text);
@@ -125,6 +134,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     public async Task SendHtmlTextAsync(long chatId, string htmlText, CancellationToken ct = default)
     {
         if (chatId == 0) return;
+        if (_bot is null) return;
 
         // Telegram doesn't support <br>, <br/>, or <br /> — replace all variants with newline.
         htmlText = Regex.Replace(htmlText, @"<br\s*/?>", "\n", RegexOptions.IgnoreCase);
@@ -138,6 +148,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     public async Task SendPhotoAsync(long chatId, string filePath, string? caption, CancellationToken ct = default)
     {
         if (chatId == 0) return;
+        if (_bot is null) return;
 
         if (!File.Exists(filePath))
         {
@@ -165,11 +176,25 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     public async Task SendTypingAsync(long chatId, CancellationToken ct = default)
     {
         if (chatId == 0) return;
+        if (_bot is null) return;
         await _bot.SendChatAction(chatId, ChatAction.Typing, cancellationToken: ct);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Headless mode: no bot token configured — Telegram poller is disabled.
+        // RabbitMQ consumer and MCP server remain fully functional.
+        if (_bot is null)
+        {
+            _logger.LogWarning(
+                "TELEGRAM_BOT_TOKEN is not configured — Telegram poller disabled. " +
+                "Agent will run in headless mode (RabbitMQ + MCP only). " +
+                "Configure via the dashboard Setup panel.");
+            _connectionState.TelegramConnected = false;
+            await RunHeartbeatWaitAsync(stoppingToken);
+            return;
+        }
+
         _logger.LogInformation("Telegram bot starting for agent {AgentName} (SendOnly={SendOnly})",
             _agentConfig.Name, _telegramConfig.SendOnly);
 
@@ -179,6 +204,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         _groupBehavior.SetBotUsername(_botUsername);
         _router.SetBotUsername(_botUsername);
         _logger.LogInformation("Bot username resolved: @{BotUsername}", _botUsername);
+
+        _connectionState.TelegramConnected = true;
 
         // Propagate shutdown token for debounce cancellation
         _groupBehavior.SetShutdownToken(stoppingToken);
@@ -246,6 +273,16 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         }
     }
 
+    /// <summary>
+    /// In headless mode (no Telegram token) we still need to keep the hosted service alive
+    /// so that other background services (OrchestratorHeartbeatService, CliRunner) can run.
+    /// </summary>
+    private static async Task RunHeartbeatWaitAsync(CancellationToken ct)
+    {
+        try { await Task.Delay(Timeout.Infinite, ct); }
+        catch (OperationCanceledException) { }
+    }
+
     private void OnToolUse(long chatId, string toolName, string description) =>
         _groupBehavior.BufferToolUse(chatId, toolName, description);
 
@@ -306,12 +343,12 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         if (isVoice && _voiceTranscription.IsEnabled)
         {
             // Immediate feedback — let user know we received the voice message
-            await _bot.SendChatAction(message.Chat.Id, ChatAction.Typing);
+            await _bot!.SendChatAction(message.Chat.Id, ChatAction.Typing);
 
             try
             {
                 using var ms = new System.IO.MemoryStream();
-                await _bot.GetInfoAndDownloadFile(message.Voice!.FileId, ms);
+                await _bot!.GetInfoAndDownloadFile(message.Voice!.FileId, ms);
                 var audioBytes = ms.ToArray();
                 var transcribed = await _voiceTranscription.TranscribeAsync(audioBytes, "voice.ogg");
                 if (transcribed is not null)
@@ -321,7 +358,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                         text.Length, message.From?.Username ?? "unknown");
 
                     // Echo transcription back so user can verify whisper got it right
-                    await _bot.SendMessage(
+                    await _bot!.SendMessage(
                         message.Chat.Id,
                         $"🎤 {transcribed}",
                         replyParameters: new Telegram.Bot.Types.ReplyParameters { MessageId = message.MessageId });
@@ -352,12 +389,12 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 {
                     try
                     {
-                        await _bot.SendChatAction(message.Chat.Id, ChatAction.RecordVoice);
+                        await _bot!.SendChatAction(message.Chat.Id, ChatAction.RecordVoice);
                         var audioBytes = await _tts.SynthesizeAsync(sourceText);
                         if (audioBytes is { Length: > 0 })
                         {
                             using var ms = new System.IO.MemoryStream(audioBytes);
-                            await _bot.SendVoice(
+                            await _bot!.SendVoice(
                                 message.Chat.Id,
                                 new Telegram.Bot.Types.InputFileStream(ms, "response.ogg"),
                                 replyParameters: new Telegram.Bot.Types.ReplyParameters { MessageId = replied.MessageId });
@@ -400,7 +437,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             try
             {
                 using var ms = new System.IO.MemoryStream();
-                await _bot.GetInfoAndDownloadFile(largest.FileId, ms);
+                await _bot!.GetInfoAndDownloadFile(largest.FileId, ms);
                 imageBytes = ms.ToArray();
                 imageMimeType = "image/jpeg";
             }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fleet — Guided first-time setup script
-# Usage: ./setup.sh [--dry-run] [--skip-build] [--skip-services]
+# Usage: ./setup.sh [--dry-run] [--skip-build] [--skip-services] [--prompt-local-creds] [--full-setup]
 set -euo pipefail
 
 # Capture script directory as absolute path (required for symlink later)
@@ -11,6 +11,8 @@ DRY_RUN=false
 SKIP_BUILD=false
 SKIP_SERVICES=false
 PROMPT_LOCAL_CREDS=false
+PROMPT_TELEGRAM=false
+PROMPT_GITHUB=false
 
 for arg in "$@"; do
   case "$arg" in
@@ -18,7 +20,8 @@ for arg in "$@"; do
     --skip-build)         SKIP_BUILD=true ;;
     --skip-services)      SKIP_SERVICES=true ;;
     --prompt-local-creds) PROMPT_LOCAL_CREDS=true ;;
-    *) echo "Unknown flag: $arg. Valid flags: --dry-run --skip-build --skip-services --prompt-local-creds"; exit 1 ;;
+    --full-setup)         PROMPT_TELEGRAM=true; PROMPT_GITHUB=true ;;
+    *) echo "Unknown flag: $arg. Valid flags: --dry-run --skip-build --skip-services --prompt-local-creds --full-setup"; exit 1 ;;
   esac
 done
 
@@ -335,9 +338,7 @@ else
   ok ".env already exists at $ENV_FILE"
   # Show blank/placeholder fields
   blank_fields=()
-  for key in FLEET_CTO_AGENT TELEGRAM_NOTIFIER_BOT_TOKEN \
-             TELEGRAM_CTO_BOT_TOKEN GITHUB_APP_ID GITHUB_APP_PEM \
-             ORCHESTRATOR_AUTH_TOKEN; do
+  for key in ORCHESTRATOR_AUTH_TOKEN; do
     val=$(read_env_var "$ENV_FILE" "$key")
     is_placeholder "$val" && blank_fields+=("$key")
   done
@@ -360,56 +361,72 @@ echo
 # CTO agent name — used by docker-compose to wire FleetWorkflows__CtoAgent
 # into fleet-temporal-bridge and fleet-bridge so seed workflows can resolve
 # {{config.CtoAgent}} at runtime. Must be set BEFORE services start.
-prompt_field "$ENV_FILE" "FLEET_CTO_AGENT" "CTO agent short name" \
-  "Lowercase short name for your co-cto agent (used as routing key, e.g. 'myagent'). You'll create this agent in step 7." \
-  "y" "n"
+# In --full-setup mode, prompt for the CTO agent name now.
+# Otherwise, write the placeholder 'phleet' silently so docker-compose substitution
+# resolves. The real agent name is chosen when the user provisions their first agent.
+if $PROMPT_TELEGRAM; then
+  prompt_field "$ENV_FILE" "FLEET_CTO_AGENT" "CTO agent short name" \
+    "Lowercase short name for your co-cto agent (used as routing key, e.g. 'myagent'). You'll create this agent in step 7." \
+    "y" "n"
+else
+  _cto_val=$(read_env_var "$ENV_FILE" "FLEET_CTO_AGENT")
+  if [[ -z "$_cto_val" || "$_cto_val" == "changeme" || "$_cto_val" == "phleet" ]]; then
+    if ! $DRY_RUN; then
+      write_env_var "$ENV_FILE" "FLEET_CTO_AGENT" "phleet"
+    fi
+  fi
+fi
 
-# Optional Telegram group chat ID for group conversation visibility.
-prompt_field "$ENV_FILE" "FLEET_GROUP_CHAT_ID" "Fleet Telegram group chat ID" \
-  "Optional. Create a Telegram group, add both bots as members, then forward any message from the group to https://t.me/userinfobot — it replies with the negative integer group ID. Agents use this group for status updates and cross-agent coordination. Leave 0 to skip groups." \
-  "n" "n" "0"
+if $PROMPT_TELEGRAM; then
+  # Optional Telegram group chat ID for group conversation visibility.
+  prompt_field "$ENV_FILE" "FLEET_GROUP_CHAT_ID" "Fleet Telegram group chat ID" \
+    "Optional. Create a Telegram group, add both bots as members, then forward any message from the group to https://t.me/userinfobot — it replies with the negative integer group ID. Agents use this group for status updates and cross-agent coordination. Leave 0 to skip groups." \
+    "n" "n" "0"
 
-prompt_field "$ENV_FILE" "TELEGRAM_NOTIFIER_BOT_TOKEN" "Telegram notifier bot token" \
-  "Create a bot at https://t.me/BotFather (send /newbot). This bot sends messages from every non-CTO agent and the fleet bridge." "y" "y"
+  prompt_field "$ENV_FILE" "TELEGRAM_NOTIFIER_BOT_TOKEN" "Telegram notifier bot token" \
+    "Create a bot at https://t.me/BotFather (send /newbot). This bot sends messages from every non-CTO agent and the fleet bridge." "y" "y"
 
-prompt_field "$ENV_FILE" "TELEGRAM_CTO_BOT_TOKEN" "Telegram CTO bot token" \
-  "Same flow, second bot: https://t.me/BotFather → /newbot. This is the bot you DM your CTO agent through." "y" "y"
+  prompt_field "$ENV_FILE" "TELEGRAM_CTO_BOT_TOKEN" "Telegram CTO bot token" \
+    "Same flow, second bot: https://t.me/BotFather → /newbot. This is the bot you DM your CTO agent through." "y" "y"
+fi
 
-prompt_field "$ENV_FILE" "GITHUB_APP_ID" "GitHub App ID" \
-  "Create a GitHub App at https://github.com/settings/apps/new. The App ID is shown on the app's settings page after creation." "y" "n"
+if $PROMPT_GITHUB; then
+  prompt_field "$ENV_FILE" "GITHUB_APP_ID" "GitHub App ID" \
+    "Create a GitHub App at https://github.com/settings/apps/new. The App ID is shown on the app's settings page after creation." "y" "n"
 
-# GITHUB_APP_PEM needs special handling — pasting a ~1700-char base64 blob into
-# a masked `read -s` prompt is unreliable (terminal truncation, bracketed-paste).
-# Also `base64 -w0` is GNU-only and breaks on macOS BSD base64. So: ask for the
-# PEM file path and do the portable base64 encoding here.
-current_pem=$(read_env_var "$ENV_FILE" "GITHUB_APP_PEM")
-if is_placeholder "$current_pem"; then
-  if $DRY_RUN; then
-    echo -e "  ${YELLOW}[dry-run]${NC} Would prompt for GITHUB_APP_PEM (file path)"
-  else
-    echo -e "  ${YELLOW}→${NC} On your GitHub App settings page (https://github.com/settings/apps): 'Private keys' → 'Generate a private key' → downloads a .pem. Paste the file path here."
-    while true; do
-      read -rp "  GitHub App private key file path: " pem_path
-      # expand leading ~ to $HOME
-      pem_path="${pem_path/#\~/$HOME}"
-      if [[ -z "$pem_path" ]]; then
-        fail "  This field is required."
-        continue
-      fi
-      if [[ ! -f "$pem_path" ]]; then
-        fail "  File not found: $pem_path"
-        continue
-      fi
-      # Portable base64 encoding without line wraps — works on both GNU and BSD base64
-      pem_b64=$(base64 < "$pem_path" | tr -d '\n')
-      if [[ -z "$pem_b64" ]]; then
-        fail "  base64 encoding produced no output — is $pem_path a valid PEM?"
-        continue
-      fi
-      write_env_var "$ENV_FILE" "GITHUB_APP_PEM" "$pem_b64"
-      ok "GitHub App private key encoded and stored (${#pem_b64} chars)"
-      break
-    done
+  # GITHUB_APP_PEM needs special handling — pasting a ~1700-char base64 blob into
+  # a masked `read -s` prompt is unreliable (terminal truncation, bracketed-paste).
+  # Also `base64 -w0` is GNU-only and breaks on macOS BSD base64. So: ask for the
+  # PEM file path and do the portable base64 encoding here.
+  current_pem=$(read_env_var "$ENV_FILE" "GITHUB_APP_PEM")
+  if is_placeholder "$current_pem"; then
+    if $DRY_RUN; then
+      echo -e "  ${YELLOW}[dry-run]${NC} Would prompt for GITHUB_APP_PEM (file path)"
+    else
+      echo -e "  ${YELLOW}→${NC} On your GitHub App settings page (https://github.com/settings/apps): 'Private keys' → 'Generate a private key' → downloads a .pem. Paste the file path here."
+      while true; do
+        read -rp "  GitHub App private key file path: " pem_path
+        # expand leading ~ to $HOME
+        pem_path="${pem_path/#\~/$HOME}"
+        if [[ -z "$pem_path" ]]; then
+          fail "  This field is required."
+          continue
+        fi
+        if [[ ! -f "$pem_path" ]]; then
+          fail "  File not found: $pem_path"
+          continue
+        fi
+        # Portable base64 encoding without line wraps — works on both GNU and BSD base64
+        pem_b64=$(base64 < "$pem_path" | tr -d '\n')
+        if [[ -z "$pem_b64" ]]; then
+          fail "  base64 encoding produced no output — is $pem_path a valid PEM?"
+          continue
+        fi
+        write_env_var "$ENV_FILE" "GITHUB_APP_PEM" "$pem_b64"
+        ok "GitHub App private key encoded and stored (${#pem_b64} chars)"
+        break
+      done
+    fi
   fi
 fi
 
@@ -714,9 +731,17 @@ else
   if $DRY_RUN; then
     do_provision="y"
     echo -e "  ${YELLOW}[dry-run]${NC} Would prompt for agent provisioning (defaulting to yes)"
-  else
+  elif $PROMPT_TELEGRAM; then
+    # --full-setup mode: existing prompt with yes default
     read -rp "  Would you like to provision your Assistant (CTO) agent now? (y/n) [y]: " do_provision
     do_provision="${do_provision:-y}"
+  else
+    # Default mode: opt-in with N default; dashboard is the recommended path
+    echo "  Stack is up. You can provision your first agent now, or do it later from"
+    echo "  the dashboard at http://localhost:3700."
+    echo
+    read -rp "  Provision an agent now? [y/N] " do_provision
+    do_provision="${do_provision:-n}"
   fi
 
   if [[ "$do_provision" =~ ^[Yy]$ ]]; then
@@ -992,10 +1017,7 @@ EOF
     echo -e "${GREEN}  Fleet setup complete!${NC}"
     echo -e "${GREEN}══════════════════════════════════════════════════════${NC}"
     echo
-    echo "  → Send a message to your agent on Telegram to get started."
-    echo "  → Dashboard:        http://localhost:3700"
-    echo "  → Orchestrator API: http://localhost:3600"
-    echo "  → Temporal UI:      http://localhost:8080"
+    echo "  → Dashboard: http://localhost:3700  (or FLEET_DASHBOARD_PORT if overridden)"
     echo
     echo "  Runtime data lives under: $FLEET_BASE_DIR"
     echo "  To manage services:   cd fleet && docker compose (up|down|logs)"

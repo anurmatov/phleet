@@ -28,6 +28,7 @@ builder.Services.AddSingleton<TaskHistoryStore>();
 builder.Services.AddSingleton<AgentRegistry>();
 builder.Services.AddSingleton<DockerService>();
 builder.Services.AddSingleton<ContainerProvisioningService>();
+builder.Services.AddSingleton<SetupService>();
 
 // HeartbeatConsumerService registered as singleton so tools can inject IRabbitMqStatus
 builder.Services.AddSingleton<HeartbeatConsumerService>();
@@ -1847,6 +1848,85 @@ app.MapDelete("/api/repositories/{name}", async (string name, IServiceScopeFacto
     db.Repositories.Remove(repo);
     await db.SaveChangesAsync();
     return Results.Ok(new { deleted = name });
+});
+
+// ── Setup endpoints ───────────────────────────────────────────────────────────
+
+app.MapGet("/api/setup/status", (SetupService setup) =>
+    Results.Ok(setup.GetStatus()));
+
+app.MapPost("/api/setup/telegram/validate", async (
+    HttpRequest request, SetupService setup, CancellationToken ct) =>
+{
+    TelegramSetupRequest? req;
+    try { req = await request.ReadFromJsonAsync<TelegramSetupRequest>(ct); }
+    catch { return Results.BadRequest(new { error = "invalid_json" }); }
+    if (req is null) return Results.BadRequest(new { error = "empty_body" });
+
+    var result = await setup.ValidateTelegramAsync(req, ct);
+    if (!result.Valid)
+        return Results.BadRequest(new { error = result.ErrorCode, detail = result.ErrorDetail });
+    return Results.Ok(new { valid = true, ctoBot = result.CtoBot, notifierBot = result.NotifierBot, groupChat = result.GroupChat, warnings = result.Warnings });
+});
+
+app.MapPost("/api/setup/telegram", async (
+    HttpRequest request, SetupService setup, CancellationToken ct) =>
+{
+    TelegramSetupRequest? req;
+    try { req = await request.ReadFromJsonAsync<TelegramSetupRequest>(ct); }
+    catch { return Results.BadRequest(new { error = "invalid_json" }); }
+    if (req is null) return Results.BadRequest(new { error = "empty_body" });
+
+    SetupWriteResult result;
+    try { result = await setup.WriteTelegramAsync(req, ct); }
+    catch (InvalidOperationException ex) when (ex.Message.Contains("atomically write"))
+    { return Results.Problem(detail: ex.Message, statusCode: 500, title: "env_write_failed"); }
+
+    if (!result.Success)
+    {
+        if (result.ErrorCode is "setup_locked" or "db_unavailable") return Results.StatusCode(503);
+        return Results.BadRequest(new { error = result.ErrorCode, detail = result.ErrorDetail });
+    }
+    if (result.RestartErrors.Count > 0)
+        return Results.Json(new { written = result.Written, restarted = result.Restarted, warnings = result.Warnings, restartErrors = result.RestartErrors }, statusCode: 207);
+    return Results.Ok(new { written = result.Written, restarted = result.Restarted, warnings = result.Warnings });
+});
+
+app.MapPost("/api/setup/github/validate", async (
+    HttpRequest request, SetupService setup, CancellationToken ct) =>
+{
+    GitHubSetupRequest? req;
+    try { req = await request.ReadFromJsonAsync<GitHubSetupRequest>(ct); }
+    catch { return Results.BadRequest(new { error = "invalid_json" }); }
+    if (req is null) return Results.BadRequest(new { error = "empty_body" });
+
+    var result = await setup.ValidateGitHubAsync(req, ct);
+    if (!result.Valid)
+        return Results.BadRequest(new { error = result.ErrorCode, detail = result.ErrorDetail });
+    return Results.Ok(new { valid = true, appId = result.AppId, appName = result.AppName, warnings = result.Warnings });
+});
+
+app.MapPost("/api/setup/github", async (
+    HttpRequest request, SetupService setup, CancellationToken ct) =>
+{
+    GitHubSetupRequest? req;
+    try { req = await request.ReadFromJsonAsync<GitHubSetupRequest>(ct); }
+    catch { return Results.BadRequest(new { error = "invalid_json" }); }
+    if (req is null) return Results.BadRequest(new { error = "empty_body" });
+
+    SetupWriteResult result;
+    try { result = await setup.WriteGitHubAsync(req, ct); }
+    catch (InvalidOperationException ex) when (ex.Message.Contains("atomically write"))
+    { return Results.Problem(detail: ex.Message, statusCode: 500, title: "env_write_failed"); }
+
+    if (!result.Success)
+    {
+        if (result.ErrorCode is "setup_locked" or "db_unavailable") return Results.StatusCode(503);
+        return Results.BadRequest(new { error = result.ErrorCode, detail = result.ErrorDetail });
+    }
+    if (result.RestartErrors.Count > 0)
+        return Results.Json(new { written = result.Written, restarted = result.Restarted, warnings = result.Warnings, restartErrors = result.RestartErrors }, statusCode: 207);
+    return Results.Ok(new { written = result.Written, restarted = result.Restarted, warnings = result.Warnings });
 });
 
 app.Run();

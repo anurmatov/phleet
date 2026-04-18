@@ -50,6 +50,7 @@ import StartWorkflowModal from './components/StartWorkflowModal'
 import SchedulesView from './components/SchedulesView'
 import NamespacesView from './components/NamespacesView'
 import RepositoriesView from './components/RepositoriesView'
+import SetupBanner from './components/SetupBanner'
 
 type WsMessage =
   | { type: 'workflows'; data: WorkflowSummary[] }
@@ -176,6 +177,8 @@ export default function App() {
   const [deployConfirm, setDeployConfirm] = useState<Record<string, boolean>>({})
   const [deployState, setDeployState] = useState<Record<string, 'idle' | 'deploying' | 'success' | 'error'>>({})
   const [deployMsg, setDeployMsg] = useState<Record<string, string>>({})
+
+  const [setupStatus, setSetupStatus] = useState<{ telegramConfigured: boolean; githubConfigured: boolean } | null>(null)
 
   const [logViewer, setLogViewer] = useState<string | null>(null)
   const [logLines, setLogLines] = useState<string[]>([])
@@ -422,6 +425,11 @@ export default function App() {
     loadInstructions()
     loadProjectContexts()
     fetchCompleted()
+
+    apiFetch('/api/setup/status')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data) setSetupStatus(data) })
+      .catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -1581,6 +1589,18 @@ export default function App() {
       />
 
       <main className="app-main">
+        {activeView === 'agents' && (
+          <SetupBanner
+            status={setupStatus}
+            agentCount={Object.keys(agents).length}
+            onConnected={() => {
+              apiFetch('/api/setup/status')
+                .then(r => r.ok ? r.json() : null)
+                .then(data => { if (data) setSetupStatus(data) })
+                .catch(() => {})
+            }}
+          />
+        )}
         {activeView === 'agents' && (
           <AgentsView
             sorted={sorted}

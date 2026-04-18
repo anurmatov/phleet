@@ -4390,3 +4390,90 @@ body {
   color: var(--text-muted);
   font-style: italic;
 }
+
+/* ── Setup Banner ────────────────────────────────────────────────────────── */
+
+.setup-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.setup-banner--compact {
+  gap: 8px;
+}
+
+.setup-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+}
+
+.setup-chip--ok {
+  border-color: #166534;
+  color: var(--accent);
+  background: rgba(74, 222, 128, 0.06);
+}
+
+.setup-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  flex: 1;
+  min-width: 240px;
+}
+
+.setup-card--pending {
+  border-color: #44403c;
+}
+
+.setup-card--done {
+  border-color: #166534;
+  opacity: 0.75;
+}
+
+.setup-card--info {
+  border-color: #1e3a5f;
+  background: rgba(59, 130, 246, 0.04);
+}
+
+.setup-card-icon {
+  font-size: 20px;
+  width: 32px;
+  text-align: center;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.setup-card--done .setup-card-icon {
+  color: var(--accent);
+}
+
+.setup-card-body {
+  flex: 1;
+}
+
+.setup-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.setup-card-desc {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.setup-card-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}

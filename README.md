@@ -4,7 +4,7 @@
   <img src=".github/assets/phleet-hero.svg" alt="Phleet" width="720">
 </p>
 
-Phleet is an open-source, self-hosted multi-agent AI platform built on .NET 10. Each agent runs as a Docker container on your own host, uses your own Claude or Codex credentials, hits your repos via your own GitHub App, and is coordinated by a central orchestrator backed by Temporal workflows. Control plane, state, workflow history, and memory stay on infrastructure you control — only model-inference traffic goes to your chosen provider. No managed tier, no vendor quota, no "we're deprecating this feature in 60 days" risk. You own the fleet end-to-end.
+Phleet is an open-source, self-hosted multi-agent AI platform built on .NET 10. Agents run as Docker containers on your host, use your Claude or Codex credentials, hit your repos through your own GitHub App, and are coordinated by a central orchestrator backed by Temporal workflows. Only model-inference traffic leaves your infrastructure — you own the fleet end-to-end.
 
 <p align="center">
   <img src=".github/assets/phleet-dashboard.jpg" alt="Phleet dashboard — agents and active workflows" width="900">
@@ -14,35 +14,43 @@ Phleet is an open-source, self-hosted multi-agent AI platform built on .NET 10. 
 
 ## Quickstart
 
-```bash
-# 1. Clone the repo
-git clone https://github.com/anurmatov/phleet.git
-cd phleet
+### 1. Prerequisites
 
-# 2. Run the setup wizard
-./setup.sh
-```
-
-You'll need **Docker + Docker Compose**, **two Telegram bot tokens**, and **a GitHub App** — details below. `setup.sh` will prompt for these as it runs; you can keep the links in this page open while it asks.
-
-`setup.sh` creates a `./fleet/` subdirectory next to the repo and puts all runtime state there: `.env`, `seed.json`, generated `docker-compose.yml`, `workspaces/`, `memories/`, credentials, and mysql backups. The whole dir is gitignored — to fully reset, stop containers and `rm -rf fleet/`.
-
-`seed.example.json` at the repo root ships with **no agents**. Your first agent — the co-CTO — is created interactively via the dashboard's SetupBanner after `setup.sh` finishes. Open the dashboard, connect Telegram, then click the CTO template card and follow the prompts. Once the co-CTO is up, DM it in Telegram and ask it to grow the rest of the fleet for you.
-
-### What you'll need during setup
-
-- Docker and Docker Compose
+- **Docker + Docker Compose** (Docker 24+ recommended)
+- **~8 GB RAM and ~20 GB free disk** for the full stack (MySQL, Qdrant, Temporal Postgres, MinIO, agent containers)
 - **Two Telegram bots** created via [@BotFather](https://t.me/BotFather):
   - a **CTO bot** — dedicated to the co-CTO agent's DMs with you (`TELEGRAM_CTO_BOT_TOKEN`)
   - a **notifier bot** — shared by every other agent for DMs and group-chat relay (`TELEGRAM_NOTIFIER_BOT_TOKEN`)
 
-  You can technically reuse a single token if you only ever run the co-CTO, but the moment a second agent exists you need the split: Telegram allows only one long-poller per token (see the Troubleshooting entry on 409 Conflict).
-- **A Telegram group** (optional) for observing agent activity. Create a group, add **both** bots as members, then forward any message from the group to [@userinfobot](https://t.me/userinfobot) — it replies with the group's negative integer ID, which you'll paste into `.env` as `FLEET_GROUP_CHAT_ID` during setup. Agents post workflow notifications and status updates there. Leaving the ID blank disables group routing — agents then only respond to DMs, and all coordination happens through Temporal workflows.
-- A GitHub App with repo access ([create one](https://github.com/settings/apps))
+  A single token works if you only ever run the co-CTO, but once a second agent exists you need the split — Telegram allows only one long-poller per token (see Troubleshooting).
+- **A Telegram group** (optional) for observing agent activity. Create a group, add both bots as members, then forward any message from the group to [@userinfobot](https://t.me/userinfobot) — it replies with the group's negative integer ID. Paste it into `.env` as `FLEET_GROUP_CHAT_ID`. Leaving it blank disables group routing.
+- **A GitHub App** with repo access ([create one](https://github.com/settings/apps)). You'll need its App ID and a downloaded private key (`.pem` file) — `setup.sh` asks for the path and copies the key into `./fleet/github-app-key.pem` (chmod 600).
+
+### 2. Run the setup wizard
+
+```bash
+git clone https://github.com/anurmatov/phleet.git
+cd phleet
+./setup.sh
+```
+
+`setup.sh` prompts for the tokens and GitHub App details as it runs — keep this page open while it asks. It creates a `./fleet/` subdirectory next to the repo and puts all runtime state there: `.env`, `seed.json`, generated `docker-compose.yml`, `workspaces/`, `memories/`, credentials, MinIO, and MySQL backups. The whole dir is gitignored — to fully reset, stop containers and `rm -rf fleet/`.
+
+### 3. Open the dashboard
+
+Once setup finishes, the dashboard is live at:
+
+**👉 http://localhost:3700**
+
+Auth is controlled by `ORCHESTRATOR_AUTH_TOKEN` in `./fleet/.env` — `setup.sh` generates it for you.
+
+### 4. Create your co-CTO agent
+
+`seed.example.json` ships with **no agents**. Your first agent — the co-CTO — is created interactively via the dashboard's SetupBanner. Click the **CTO template card** and follow the prompts. Once the co-CTO is up, DM it in Telegram and ask it to grow the rest of the fleet for you.
 
 ### Start/stop the stack later
 
-`setup.sh` starts services for you. To start/stop them later, run compose from the `./fleet/` directory:
+`setup.sh` starts the services for you. To start/stop them later:
 
 ```bash
 cd fleet
@@ -50,25 +58,7 @@ docker compose up -d
 docker compose down
 ```
 
-Services started:
-- `rabbitmq` — message broker
-- `fleet-mysql` — agent config + task history
-- `qdrant` — vector store for Fleet Memory
-- `temporal-postgresql` — Temporal persistence
-- `temporal-server` + `temporal-ui` — workflow engine
-- `fleet-minio` (+ `fleet-minio-init`) — S3-compatible store for inter-agent file sharing
-- `fleet-memory` — semantic memory MCP server
-- `fleet-playwright` — browser automation MCP server
-- `fleet-orchestrator` — agent registry + lifecycle manager
-- `fleet-temporal-bridge` — Temporal workflow runner
-- `fleet-bridge` — RabbitMQ relay
-- `fleet-dashboard` — web UI (default: http://localhost:3700)
-
-All stateful services (mysql, qdrant, temporal postgres, minio, memories) bind-mount their data under `./fleet/` — no named Docker volumes. Back up or wipe the whole installation by archiving or removing that single directory.
-
-### Dashboard
-
-The dashboard provides a real-time view of all agents, their status, logs, config, and Temporal workflows. Auth is controlled by `ORCHESTRATOR_AUTH_TOKEN` in `.env`.
+All stateful services bind-mount their data under `./fleet/` — no named Docker volumes. Back up or wipe the whole installation by archiving or removing that single directory.
 
 ## What you get after setup
 
@@ -86,13 +76,22 @@ Things you can ask the co-CTO to do, today, out of the box:
 
 The rest of this README is the plumbing — configuration, deployment, troubleshooting. The point of the co-CTO is that after setup you mostly don't need to touch any of it.
 
-## Learn by watching
+## What runs
 
-Want to see end-to-end agent engineering in action, not just framework docs? This section collects walkthroughs, blog posts, PR deep-dives, and demo videos of Phleet in real use.
+`setup.sh` provisions the following services, all on the `fleet-net` Docker network:
 
-- _Posts and walkthroughs coming soon — watch the repo for updates._
-
-If you write about your Phleet setup, open a PR adding it here.
+- `rabbitmq` — message broker
+- `fleet-mysql` — agent config + task history
+- `qdrant` — vector store for Fleet Memory
+- `temporal-postgresql` — Temporal persistence
+- `temporal-server` + `temporal-ui` — workflow engine
+- `fleet-minio` (+ `fleet-minio-init`) — S3-compatible store for inter-agent file sharing
+- `fleet-memory` — semantic memory MCP server
+- `fleet-playwright` — browser automation MCP server
+- `fleet-orchestrator` — agent registry + lifecycle manager
+- `fleet-temporal-bridge` — Temporal workflow runner
+- `fleet-bridge` — RabbitMQ relay
+- `fleet-dashboard` — web UI at http://localhost:3700
 
 ## Project Status
 
@@ -180,6 +179,7 @@ Agent config is database-driven (MySQL via EF Core). On first run, the orchestra
 | `./fleet/workspaces/` | Per-agent git workspaces |
 | `./fleet/memories/` | Per-agent memory files |
 | `./fleet/.claude-credentials.json`, `./fleet/.codex-credentials.json` | AI provider credentials (chmod 600) |
+| `./fleet/github-app-key.pem` | GitHub App private key (chmod 600) |
 | `src/Fleet.Orchestrator/appsettings.json` | Orchestrator defaults |
 | `src/Fleet.Agent/appsettings.json` | Agent image defaults |
 

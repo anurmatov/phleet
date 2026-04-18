@@ -4608,3 +4608,20 @@ body {
   color: var(--muted);
   margin-top: 4px;
 }
+
+/* ── Setup modal intro / footer ─────────────────────────────────────────────── */
+
+.setup-modal-intro {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0 0 16px 0;
+  line-height: 1.5;
+}
+
+.setup-modal-footer-note {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}

@@ -138,17 +138,17 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
         </div>
         <div className="config-modal-body">
 
+          {/* Intro */}
+          <p className="setup-modal-intro">
+            Fleet agents talk to you via Telegram. The CTO bot is your main chat; the notifier bot
+            is a shared bot used for fleet-wide alerts. Group chat ID scopes agent activity to a
+            specific group.
+          </p>
+
           {/* CTO bot token */}
           <div className="config-row">
             <label className="config-label">
               CTO bot token <span style={{ color: 'var(--red)' }}>*</span>
-              {' '}
-              <a
-                href="https://t.me/BotFather"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="setup-helper-link"
-              >→ t.me/BotFather</a>
             </label>
             <input
               className={`config-input${fieldErrors.ctoToken ? ' input--error' : ''}`}
@@ -157,6 +157,15 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
               value={ctoBotToken}
               onChange={e => { setCtoBotToken(e.target.value); resetFeedback() }}
             />
+            <div className="setup-field-hint">
+              <a
+                href="https://t.me/BotFather"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="setup-helper-link"
+              >→ Create a bot (t.me/BotFather)</a>
+              {' '}· paste the HTTP API token from BotFather (format: 123456789:ABC-DEF…)
+            </div>
           </div>
 
           {/* Notifier bot token */}
@@ -164,13 +173,6 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
             <label className="config-label">
               Notifier bot token{' '}
               <span style={{ color: 'var(--muted)', fontWeight: 400 }}>(optional)</span>
-              {' '}
-              <a
-                href="https://t.me/BotFather"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="setup-helper-link"
-              >→ t.me/BotFather</a>
             </label>
             <input
               className={`config-input${fieldErrors.notifierToken ? ' input--error' : ''}`}
@@ -179,6 +181,9 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
               value={notifierBotToken}
               onChange={e => { setNotifierBotToken(e.target.value); resetFeedback() }}
             />
+            <div className="setup-field-hint">
+              CTO and Notifier can be the same token — one bot per role is just a convention.
+            </div>
           </div>
 
           {/* Group chat ID */}
@@ -186,13 +191,6 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
             <label className="config-label">
               Group chat ID{' '}
               <span style={{ color: 'var(--muted)', fontWeight: 400 }}>(optional)</span>
-              {' '}
-              <a
-                href="https://t.me/userinfobot"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="setup-helper-link"
-              >→ t.me/userinfobot</a>
             </label>
             <input
               className={`config-input${fieldErrors.groupChat ? ' input--error' : ''}`}
@@ -200,11 +198,20 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
               value={groupChatId}
               onChange={e => setGroupChatId(e.target.value)}
             />
+            <div className="setup-field-hint">
+              <a
+                href="https://t.me/userinfobot"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="setup-helper-link"
+              >→ Get your ID (t.me/userinfobot)</a>
+              {' '}· add the bot to a group, forward a message from that group to @userinfobot, or use /getchatid
+            </div>
           </div>
 
-          {/* Hint text */}
-          <div className="setup-field-hint">
-            CTO and Notifier can be the same token — one bot per role is just a convention.
+          {/* Footer note */}
+          <div className="setup-modal-footer-note">
+            Both bot tokens must be valid before Save &amp; connect enables.
           </div>
 
           {/* Test result */}
@@ -383,6 +390,13 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
         </div>
         <div className="config-modal-body">
 
+          {/* Intro */}
+          <p className="setup-modal-intro">
+            Fleet uses a GitHub App to authenticate as itself when cloning repos and pushing PRs —
+            not a personal token. You create the app once, install it on your repos, and paste the
+            App ID + private key here.
+          </p>
+
           {/* App ID */}
           <div className="config-row">
             <label className="config-label">App ID <span style={{ color: 'var(--red)' }}>*</span></label>
@@ -408,6 +422,15 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
                 App ID mismatch — check the App ID in your GitHub App settings.
               </div>
             )}
+            <div className="setup-field-hint">
+              <a
+                href="https://github.com/settings/apps/new"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="setup-helper-link"
+              >→ Create a GitHub App (github.com/settings/apps/new)</a>
+              {' '}· numeric ID shown at the top of your app's settings page
+            </div>
           </div>
 
           {/* Private key */}
@@ -443,6 +466,20 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
                 PEM invalid — ensure the file is the private key (.pem) from your GitHub App.
               </div>
             )}
+            <div className="setup-field-hint">
+              <a
+                href="https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="setup-helper-link"
+              >→ How to generate a .pem</a>
+              {' '}· paste the full PEM contents (including BEGIN/END lines) or base64-encoded
+            </div>
+          </div>
+
+          {/* Footer note */}
+          <div className="setup-modal-footer-note">
+            After saving, install the app on the repos you want Fleet to access.
           </div>
 
           {/* Test result */}

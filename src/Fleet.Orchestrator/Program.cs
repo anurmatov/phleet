@@ -1,7 +1,9 @@
 using System.Net.WebSockets;
+using System.Threading.RateLimiting;
 using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -36,6 +38,25 @@ builder.Services.AddSingleton<IRabbitMqStatus>(sp => sp.GetRequiredService<Heart
 builder.Services.AddHostedService(sp => sp.GetRequiredService<HeartbeatConsumerService>());
 
 builder.Services.AddHostedService<AgentStateMonitorService>();
+
+// Rate limiting — fixed-window 10 req/min per bearer token (or IP if unauthenticated)
+builder.Services.AddRateLimiter(rl =>
+{
+    rl.AddPolicy("reveal-rate-limit", ctx =>
+    {
+        var authHeader = ctx.Request.Headers.Authorization.FirstOrDefault() ?? "";
+        var partitionKey = authHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
+            ? authHeader["Bearer ".Length..].Trim()
+            : ctx.Connection.RemoteIpAddress?.ToString() ?? "anon";
+        return RateLimitPartition.GetFixedWindowLimiter(partitionKey, _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 10,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+        });
+    });
+    rl.RejectionStatusCode = 429;
+});
 
 // DB-backed agent config preloader (disabled if DB is not configured)
 if (!string.IsNullOrEmpty(connectionString))
@@ -74,6 +95,9 @@ if (!string.IsNullOrEmpty(connectionString))
 
 // WebSocket support
 app.UseWebSockets();
+
+// Rate limiting middleware
+app.UseRateLimiter();
 
 // Bearer token auth on mutating endpoints (non-GET).
 // If Orchestrator:AuthToken is empty, auth is disabled (dev/backward-compat mode).
@@ -1889,7 +1913,7 @@ app.MapPost("/api/setup/telegram/validate", async (
     var result = await setup.ValidateTelegramAsync(req, ct);
     if (!result.Valid)
         return Results.BadRequest(new { error = result.ErrorCode, detail = result.ErrorDetail });
-    setup.UpdateLastValidated("telegram");
+    await setup.UpdateLastValidatedAsync("telegram");
     return Results.Ok(new { valid = true, ctoBot = result.CtoBot, notifierBot = result.NotifierBot, groupChat = result.GroupChat, warnings = result.Warnings });
 });
 
@@ -1927,7 +1951,7 @@ app.MapPost("/api/setup/github/validate", async (
     var result = await setup.ValidateGitHubAsync(req, ct);
     if (!result.Valid)
         return Results.BadRequest(new { error = result.ErrorCode, detail = result.ErrorDetail });
-    setup.UpdateLastValidated("github");
+    await setup.UpdateLastValidatedAsync("github");
     return Results.Ok(new { valid = true, appId = result.AppId, appName = result.AppName, warnings = result.Warnings });
 });
 
@@ -1967,8 +1991,8 @@ app.MapGet("/api/env-vars", async (SetupService setupService, IServiceScopeFacto
     return Results.Ok(vars);
 });
 
-// GET /api/env-vars/{key}/reveal (auth-gated)
-app.MapGet("/api/env-vars/{key}/reveal", (string key, SetupService setupService, HttpContext ctx) =>
+// GET /api/env-vars/{key}/reveal (auth-gated, rate-limited 10/min)
+app.MapGet("/api/env-vars/{key}/reveal", (string key, SetupService setupService, HttpContext ctx, ILogger<Program> logger) =>
 {
     // Auth check — require Bearer token
     var token = app.Configuration["Orchestrator:AuthToken"];
@@ -1979,8 +2003,10 @@ app.MapGet("/api/env-vars/{key}/reveal", (string key, SetupService setupService,
             return Results.Unauthorized();
     }
     var value = setupService.RevealEnvVar(key);
-    return value is null ? Results.NotFound() : Results.Ok(new { key, value });
-});
+    if (value is null) return Results.NotFound();
+    logger.LogInformation("Env var revealed: key={Key} ip={IP}", key, ctx.Connection.RemoteIpAddress);
+    return Results.Ok(new { key, value });
+}).RequireRateLimiting("reveal-rate-limit");
 
 // PUT /api/env-vars/{key}
 app.MapPut("/api/env-vars/{key}", async (string key, HttpRequest request, SetupService setupService) =>
@@ -1991,7 +2017,8 @@ app.MapPut("/api/env-vars/{key}", async (string key, HttpRequest request, SetupS
     try
     {
         await setupService.SetEnvVarAsync(key, body.Value.Trim());
-        return Results.Ok(new { message = $"'{key}' updated" });
+        var affected = setupService.GetAffectedServices(key);
+        return Results.Ok(new { message = $"'{key}' updated", affectedServices = affected });
     }
     catch (InvalidOperationException ex)
     {
@@ -2137,6 +2164,29 @@ app.MapDelete("/api/credential-files/{id:int}", async (int id, IServiceScopeFact
     db.CredentialFiles.Remove(file);
     await db.SaveChangesAsync();
     return Results.Ok(new { message = $"Credential file '{file.Name}' deleted" });
+});
+
+// GET /api/credential-files/{id}/download (auth-gated)
+app.MapGet("/api/credential-files/{id:int}/download", async (int id, IServiceScopeFactory scopeFactory, HttpContext ctx) =>
+{
+    var token = app.Configuration["Orchestrator:AuthToken"];
+    if (!string.IsNullOrEmpty(token))
+    {
+        var auth = ctx.Request.Headers.Authorization.FirstOrDefault() ?? "";
+        if (!auth.Equals($"Bearer {token}", StringComparison.Ordinal))
+            return Results.Unauthorized();
+    }
+
+    using var scope = scopeFactory.CreateScope();
+    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
+    if (db is null) return Results.Problem("Database not configured");
+
+    var file = await db.CredentialFiles.FindAsync(id);
+    if (file is null) return Results.NotFound();
+    if (!File.Exists(file.FilePath)) return Results.NotFound(new { error = "File not found on disk" });
+
+    var bytes = await File.ReadAllBytesAsync(file.FilePath);
+    return Results.File(bytes, "application/octet-stream", file.FileName);
 });
 
 // POST /api/credential-files/{id}/mount

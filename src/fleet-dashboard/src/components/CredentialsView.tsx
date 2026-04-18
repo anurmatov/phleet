@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { apiFetch } from '../utils'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -71,7 +71,7 @@ function MaskedRow({ label, value }: { label: string; value: string | null }) {
 interface EnvVarEditModalProps {
   editKey: string | null  // null = new
   onClose: () => void
-  onSaved: () => void
+  onSaved: (affectedServices: string[]) => void
 }
 
 function EnvVarEditModal({ editKey, onClose, onSaved }: EnvVarEditModalProps) {
@@ -94,7 +94,8 @@ function EnvVarEditModal({ editKey, onClose, onSaved }: EnvVarEditModalProps) {
         const data = await res.json().catch(() => ({}))
         setErr((data as { error?: string }).error ?? `Error ${res.status}`)
       } else {
-        onSaved()
+        const data = await res.json().catch(() => ({}))
+        onSaved((data as { affectedServices?: string[] }).affectedServices ?? [])
         onClose()
       }
     } catch (e) { setErr(String(e)) }
@@ -227,11 +228,14 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
   const [testMsg, setTestMsg] = useState<Record<string, string>>({})
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [uploadForm, setUploadForm] = useState({ name: '', type: 'generic' })
+  const [droppedFile, setDroppedFile] = useState<File | null>(null)
+  const [isDragging, setIsDragging] = useState(false)
   const [revealKey, setRevealKey] = useState<string | null>(null)
   const [revealValue, setRevealValue] = useState<string | null>(null)
   const [revealLoading, setRevealLoading] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [deleteFileConfirm, setDeleteFileConfirm] = useState<number | null>(null)
+  const [restartBanner, setRestartBanner] = useState<{ services: string[]; restarting: boolean } | null>(null)
 
   void onSetupConnected // used by parent to refresh setup status after connection changes
 
@@ -334,9 +338,61 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
     } catch (e) { showToast(`Failed: ${e}`) }
   }
 
+  function handleVarSaved(affectedServices: string[]) {
+    loadEnvVars()
+    if (affectedServices.length > 0)
+      setRestartBanner({ services: affectedServices, restarting: false })
+  }
+
+  async function handleRestartServices() {
+    if (!restartBanner) return
+    setRestartBanner(b => b ? { ...b, restarting: true } : null)
+    try {
+      await apiFetch('/api/services/restart', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ services: restartBanner.services }),
+      })
+      showToast(`Restarted: ${restartBanner.services.join(', ')}`)
+    } catch (e) { showToast(`Restart failed: ${e}`) }
+    finally { setRestartBanner(null) }
+  }
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragging(true)
+  }, [])
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragging(false)
+  }, [])
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragging(false)
+    const file = e.dataTransfer.files?.[0]
+    if (!file) return
+    setDroppedFile(file)
+    if (!uploadForm.name)
+      setUploadForm(u => ({ ...u, name: file.name.replace(/\.[^.]+$/, '') }))
+  }, [uploadForm.name])
+
+  async function handleDownload(id: number, fileName: string) {
+    try {
+      const res = await apiFetch(`/api/credential-files/${id}/download`)
+      if (!res.ok) { showToast('Download failed'); return }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url; a.download = fileName; a.click()
+      URL.revokeObjectURL(url)
+    } catch (e) { showToast(`Download failed: ${e}`) }
+  }
+
   async function handleUpload() {
-    const file = fileInputRef.current?.files?.[0]
-    if (!file) { setUploadErr('Select a file first'); return }
+    const file = droppedFile ?? fileInputRef.current?.files?.[0]
+    if (!file) { setUploadErr('Select or drop a file first'); return }
     if (!uploadForm.name.trim()) { setUploadErr('Name is required'); return }
 
     setUploading(true)
@@ -351,6 +407,7 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
       if (res.ok) {
         await loadCredFiles()
         setUploadForm({ name: '', type: 'generic' })
+        setDroppedFile(null)
         if (fileInputRef.current) fileInputRef.current.value = ''
         showToast('File uploaded')
       } else {
@@ -379,6 +436,15 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
   return (
     <div className="cred-view">
       {toast && <div className="setup-toast">{toast}</div>}
+      {restartBanner && (
+        <div className="cred-restart-banner">
+          <span>⚠ Restart required — affected services: <strong>{restartBanner.services.join(', ')}</strong></span>
+          <button className="config-save-btn" disabled={restartBanner.restarting} onClick={handleRestartServices}>
+            {restartBanner.restarting ? 'Restarting…' : 'Restart now'}
+          </button>
+          <button className="wfd-cancel-btn" onClick={() => setRestartBanner(null)}>Dismiss</button>
+        </div>
+      )}
 
       <div className="view-header">
         <h2 className="view-title">Credentials</h2>
@@ -522,12 +588,25 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
       {/* ── Files ────────────────────────────────────────────────────────────── */}
       <section className="cred-section">
         <div className="cred-section-title">Credential Files</div>
-        <div className="cred-upload-form">
+        <div
+          className={`cred-upload-form${isDragging ? ' cred-upload-dragging' : ''}`}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+        >
           <input ref={fileInputRef} type="file" className="config-input" style={{ padding: '6px 8px', flex: 1 }}
             onChange={e => {
               const f = e.target.files?.[0]
-              if (f && !uploadForm.name) setUploadForm(u => ({ ...u, name: f.name.replace(/\.[^.]+$/, '') }))
+              if (f) {
+                setDroppedFile(null)
+                if (!uploadForm.name) setUploadForm(u => ({ ...u, name: f.name.replace(/\.[^.]+$/, '') }))
+              }
             }} />
+          {droppedFile && (
+            <span style={{ fontSize: 12, color: 'var(--accent)', whiteSpace: 'nowrap' }}>
+              ↳ {droppedFile.name}
+            </span>
+          )}
           <input className="config-input" style={{ width: 160 }} placeholder="Name (label)"
             value={uploadForm.name} onChange={e => setUploadForm(u => ({ ...u, name: e.target.value }))} />
           <select className="config-input" style={{ width: 160 }} value={uploadForm.type}
@@ -540,6 +619,11 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
             {uploading ? 'Uploading…' : 'Upload'}
           </button>
         </div>
+        {!isDragging && !droppedFile && (
+          <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 8 }}>
+            Drag and drop a file onto the row above to select it.
+          </div>
+        )}
         {uploadErr && <div className="config-feedback" style={{ color: 'var(--red)', marginBottom: 8 }}>{uploadErr}</div>}
 
         {credFiles.length === 0 && (
@@ -556,6 +640,7 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
                 {cf.fileName}
               </span>
               <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                <button className="cred-action-btn" onClick={() => handleDownload(cf.id, cf.fileName)}>↓ Download</button>
                 <button className="cred-action-btn" onClick={() => setMountingFile(cf)}>+ Mount</button>
                 {deleteFileConfirm === cf.id
                   ? <>
@@ -593,7 +678,7 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
         <EnvVarEditModal
           editKey={editingVar === 'new' ? null : editingVar as string}
           onClose={() => setEditingVar(undefined)}
-          onSaved={loadEnvVars}
+          onSaved={handleVarSaved}
         />
       )}
       {mountingFile && (

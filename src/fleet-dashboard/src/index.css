@@ -4876,13 +4876,35 @@ body {
 .cred-action-btn--danger { color: var(--red); border-color: var(--red); }
 .cred-action-btn--danger:hover { background: rgba(239,68,68,.08); }
 
+/* Restart banner */
+.cred-restart-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  margin-bottom: 16px;
+  background: color-mix(in srgb, var(--yellow, #f59e0b) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--yellow, #f59e0b) 40%, transparent);
+  border-radius: 6px;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+
 /* Files section */
 .cred-upload-form {
   display: flex;
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
-  margin-bottom: 16px;
+  margin-bottom: 4px;
+  padding: 8px;
+  border: 2px dashed var(--border);
+  border-radius: 6px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.cred-upload-form.cred-upload-dragging {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 .cred-file-row {
   border: 1px solid var(--border);

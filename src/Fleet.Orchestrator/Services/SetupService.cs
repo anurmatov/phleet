@@ -140,23 +140,32 @@ public sealed class SetupService
                 ParseUtc("GITHUB_LAST_VALIDATED_UTC")));
     }
 
-    public void UpdateLastValidated(string provider)
+    public async Task UpdateLastValidatedAsync(string provider)
     {
         var key = provider.Equals("github", StringComparison.OrdinalIgnoreCase)
             ? "GITHUB_LAST_VALIDATED_UTC"
             : "TELEGRAM_LAST_VALIDATED_UTC";
         try
         {
-            AtomicWriteEnvAsync(new Dictionary<string, string>
+            await AtomicWriteEnvAsync(new Dictionary<string, string>
             {
                 [key] = DateTime.UtcNow.ToString("O")
-            }).GetAwaiter().GetResult();
+            });
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Could not write last-validated timestamp for {Provider}", provider);
         }
     }
+
+    /// <summary>
+    /// Returns infra container names that depend on the given env key (from InfraDepMap).
+    /// Used by PUT /api/env-vars/{key} to tell the UI which services need a restart.
+    /// </summary>
+    public List<string> GetAffectedServices(string key) =>
+        InfraDepMap.TryGetValue(key, out var containers)
+            ? [.. containers]
+            : [];
 
     // Keys managed via the Connections cards — excluded from generic env-vars table
     private static readonly HashSet<string> ConnectionManagedKeys = new(StringComparer.OrdinalIgnoreCase)
@@ -204,11 +213,16 @@ public sealed class SetupService
 
         return env
             .Where(kv => !ConnectionManagedKeys.Contains(kv.Key))
-            .Select(kv => new EnvVarDto(
-                kv.Key,
-                MaskValue(kv.Key, kv.Value),
-                IsSensitive(kv.Key),
-                usedBy.TryGetValue(kv.Key, out var ub) ? ub : []))
+            .Select(kv =>
+            {
+                var consumers = usedBy.TryGetValue(kv.Key, out var ub) ? [.. ub] : new List<string>();
+                // Also surface docker-compose infra containers that depend on this key
+                if (InfraDepMap.TryGetValue(kv.Key, out var infraContainers))
+                    foreach (var c in infraContainers)
+                        if (!consumers.Contains(c, StringComparer.OrdinalIgnoreCase))
+                            consumers.Add(c);
+                return new EnvVarDto(kv.Key, MaskValue(kv.Key, kv.Value), IsSensitive(kv.Key), consumers);
+            })
             .OrderBy(v => v.Key)
             .ToList();
     }

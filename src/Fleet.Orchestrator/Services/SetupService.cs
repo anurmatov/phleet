@@ -781,7 +781,9 @@ public sealed class SetupService
         var psi = new ProcessStartInfo("docker-compose")
         {
             RedirectStandardError = true,
-            RedirectStandardOutput = true,
+            // Do NOT redirect stdout — pipe buffer deadlock if compose writes > 65 KB before exit.
+            // Stdout flows to the orchestrator container's own log stream.
+            RedirectStandardOutput = false,
             UseShellExecute = false,
         };
         foreach (var arg in args) psi.ArgumentList.Add(arg);

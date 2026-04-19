@@ -142,20 +142,39 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
             agentName,
         });
 
-        try
-        {
-            await _channel.BasicPublishAsync(
-                exchange: _rabbitConfig.Exchange,
-                routingKey: "config.changed",
-                body: payload,
-                cancellationToken: ct);
+        // Retry with backoff: 3 attempts, delays [1s, 3s, 10s].
+        // Peers that miss the event will pick up fresh config on their next reconnect.
+        var delays = new[] { TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(10) };
+        Exception? lastEx = null;
 
-            _logger.LogDebug("Published config.changed event (agentName={AgentName})", agentName ?? "(global)");
-        }
-        catch (Exception ex)
+        for (var attempt = 0; attempt <= delays.Length; attempt++)
         {
-            _logger.LogWarning(ex, "Failed to publish config.changed event — peers will sync on next reconciliation");
+            if (attempt > 0)
+                await Task.Delay(delays[attempt - 1], ct);
+
+            try
+            {
+                await _channel.BasicPublishAsync(
+                    exchange: _rabbitConfig.Exchange,
+                    routingKey: "config.changed",
+                    body: payload,
+                    cancellationToken: ct);
+
+                _logger.LogDebug("Published config.changed event (agentName={AgentName})", agentName ?? "(global)");
+                return;
+            }
+            catch (Exception ex)
+            {
+                lastEx = ex;
+                if (attempt < delays.Length)
+                    _logger.LogWarning(ex, "config.changed publish attempt {Attempt} failed — retrying", attempt + 1);
+            }
         }
+
+        _logger.LogError(lastEx,
+            "CONFIG_CHANGED_PUBLISH_EXHAUSTED: all {Attempts} publish attempts failed (agentName={AgentName}). " +
+            "Peers will pick up fresh config on their next reconnect.",
+            delays.Length + 1, agentName ?? "(global)");
     }
 
     public async ValueTask DisposeAsync()

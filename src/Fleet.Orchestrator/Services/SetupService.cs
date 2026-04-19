@@ -614,13 +614,13 @@ public sealed class SetupService
         }
 
         // Notify peers of the config change — failures are logged and swallowed,
-        // .env write is never rolled back. Peers sync on next reconciliation if this fails.
+        // .env write is never rolled back. Peers pick up fresh config on their next reconnect.
         if (_configPublisher is not null)
         {
             try { await _configPublisher.TryPublishAsync(); }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Unexpected error notifying peers of config.changed — peers will sync on next reconciliation");
+                _logger.LogWarning(ex, "Unexpected error notifying peers of config.changed — peers pick up fresh config on reconnect");
             }
         }
     }

@@ -1,6 +1,6 @@
 namespace Fleet.Agent.Models;
 
-public sealed class IncomingMessage
+public sealed record IncomingMessage
 {
     public required long ChatId { get; init; }
     public required long UserId { get; init; }
@@ -14,8 +14,7 @@ public sealed class IncomingMessage
     public bool IsNameMentioned { get; init; }
     public string StrippedText { get; init; } = "";
 
-    // Image support
-    public byte[]? ImageBytes { get; init; }
-    public string? ImageMimeType { get; init; }
-    public bool HasImage => ImageBytes is not null && ImageBytes.Length > 0;
+    // Image support — zero or more images (single photo or media group)
+    public IReadOnlyList<MessageImage> Images { get; init; } = [];
+    public bool HasImage => Images.Count > 0;
 }

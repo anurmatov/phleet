@@ -53,12 +53,12 @@ public sealed class CodexExecutor : IAgentExecutor
 
     public async IAsyncEnumerable<AgentProgress> ExecuteAsync(
         string task,
-        byte[]? imageBytes = null,
-        string? imageMimeType = null,
+        IReadOnlyList<MessageImage>? images = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         _lastActivity = DateTimeOffset.UtcNow;
         await _sendLock.WaitAsync(ct);
+        var hasImages = images is { Count: > 0 };
 
         try
         {
@@ -83,6 +83,16 @@ public sealed class CodexExecutor : IAgentExecutor
         finally
         {
             _sendLock.Release();
+        }
+
+        if (hasImages)
+        {
+            yield return new AgentProgress
+            {
+                EventType = "assistant",
+                Summary = "Note: the Codex provider does not support image input — images will be ignored.",
+                IsSignificant = true,
+            };
         }
 
         await foreach (var progress in StreamEventsAsync(ct))

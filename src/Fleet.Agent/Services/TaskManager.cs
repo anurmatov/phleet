@@ -76,7 +76,7 @@ public sealed class TaskManager
         string? relaySender = null,
         string? correlationId = null,
         string? taskId = null,
-        byte[]? imageBytes = null, string? imageMimeType = null,
+        IReadOnlyList<MessageImage>? images = null,
         long userId = 0)
     {
         var state = GetChatState(chatId);
@@ -115,7 +115,7 @@ public sealed class TaskManager
             _messageQueue.Enqueue(new QueuedMessage(
                 chatId, task, displayText, isSessionTask, source,
                 relaySender, correlationId, taskId,
-                imageBytes, imageMimeType, userId,
+                images, userId,
                 DateTimeOffset.UtcNow, senderDisplay));
 
             var queuePos = _messageQueue.Count;
@@ -142,7 +142,7 @@ public sealed class TaskManager
         {
             try
             {
-                await ProcessTask(chatId, running.Id, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, imageBytes, imageMimeType, cts.Token);
+                await ProcessTask(chatId, running.Id, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, cts.Token);
             }
             catch (Exception ex)
             {
@@ -354,7 +354,7 @@ public sealed class TaskManager
 
     private async Task ProcessTask(long chatId, int taskId, string task, string displayText,
         bool isSessionTask, TaskSource source, string? relaySender, string? correlationId, string? relayTaskId,
-        byte[]? imageBytes, string? imageMimeType, CancellationToken ct)
+        IReadOnlyList<MessageImage>? images, CancellationToken ct)
     {
         var state = GetChatState(chatId);
         string Prefix() => state.Count > 1 ? $"[#{taskId}] " : "";
@@ -416,12 +416,11 @@ public sealed class TaskManager
         try
         {
             var currentTask = task;
-            byte[]? currentImageBytes = imageBytes;
-            string? currentImageMimeType = imageMimeType;
+            IReadOnlyList<MessageImage>? currentImages = images;
 
             while (true)
             {
-                await foreach (var progress in _executor.ExecuteAsync(currentTask, currentImageBytes, currentImageMimeType, ct))
+                await foreach (var progress in _executor.ExecuteAsync(currentTask, currentImages, ct))
                 {
                     if (isSessionTask && progress.SessionId is not null)
                         _sessions.SetSession(chatId, progress.SessionId);
@@ -473,8 +472,7 @@ public sealed class TaskManager
                 {
                     _logger.LogInformation("Task #{TaskId}: delivering queued message to executor", taskId);
                     currentTask = nextMessage;
-                    currentImageBytes = null;
-                    currentImageMimeType = null;
+                    currentImages = null;
                     // Reset per-turn state but accumulate texts and stats
                     lastError = null;
                     errorResult = false;
@@ -669,7 +667,7 @@ public sealed class TaskManager
 
         StartTask(queued.ChatId, queued.Task, queued.DisplayText, queued.IsSessionTask,
             queued.Source, queued.RelaySender, queued.CorrelationId, queued.TaskId,
-            queued.ImageBytes, queued.ImageMimeType, queued.UserId);
+            queued.Images, queued.UserId);
     }
 
     /// <summary>Returns a snapshot of the current queue for heartbeat/status reporting.</summary>

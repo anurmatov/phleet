@@ -188,14 +188,35 @@ public class CredentialsServiceUpsertTests
     }
 
     [Fact]
-    public void Upsert_DuplicateKey_ReplacesFirstDropsRest()
+    public void Upsert_DuplicateKey_ReplacesFirstPreservesRest()
     {
         var lines = new[] { "KEY=first", "OTHER=x", "KEY=second" };
         var result = CredentialsService.UpsertEnvLine(lines, "KEY", "new");
-        var keyLines = result.Where(l => l.StartsWith("KEY=")).ToList();
-        // Only one KEY line: the replacement
-        Assert.Single(keyLines);
-        Assert.Equal("KEY=new", keyLines[0]);
+        // First occurrence replaced; subsequent occurrences preserved as-is
+        Assert.Equal("KEY=new", result[0]);
+        Assert.Equal("OTHER=x", result[1]);
+        Assert.Equal("KEY=second", result[2]);
+        Assert.Equal(3, result.Length);
+    }
+
+    // ── Retry exception sentinel types ────────────────────────────────────────
+
+    [Fact]
+    public void ComposeUnavailableException_CanBeConstructedAndThrown()
+    {
+        var inner = new IOException("disk error");
+        var ex = new ComposeUnavailableException("compose_file_absent: /fleet/docker-compose.yml", inner);
+        Assert.Contains("compose_file_absent", ex.Message);
+        Assert.Same(inner, ex.InnerException);
+    }
+
+    [Fact]
+    public void DbUnavailableException_CanBeConstructedAndThrown()
+    {
+        var inner = new InvalidOperationException("connection refused");
+        var ex = new DbUnavailableException("db_unavailable: connection refused", inner);
+        Assert.Contains("db_unavailable", ex.Message);
+        Assert.Same(inner, ex.InnerException);
     }
 
     // ── Propagation set validation ─────────────────────────────────────────────

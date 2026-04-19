@@ -60,9 +60,9 @@ public sealed record PropagationResult(
 /// Encapsulates all credential registry and save logic:
 ///   - Registry loading + startup validation
 ///   - Propagation preview computation (compose-grep + agent_env_refs)
-///   - Atomic .env write (mutex + tmp rename + bak + cache invalidation)
-///   - Propagation execution (infra stop/start + agent reprovision)
-///   - Audit trail write (fire-and-forget)
+///   - Atomic .env write (mutex + bak-before-write + tmp rename)
+///   - Propagation execution (infra recreate + agent reprovision)
+///   - Audit trail write (fire-and-forget, after mutex release)
 /// </summary>
 public sealed class CredentialsService
 {
@@ -73,7 +73,7 @@ public sealed class CredentialsService
     private readonly string _composeFilePath;
     private readonly string _orchestratorContainerName;
     private readonly ICredentialsReader _credentialsReader;
-    private readonly DockerService _docker;
+    private readonly SetupService _setup;
     private readonly ContainerProvisioningService _provisioning;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<CredentialsService> _logger;
@@ -81,7 +81,7 @@ public sealed class CredentialsService
     public CredentialsService(
         Microsoft.Extensions.Configuration.IConfiguration config,
         ICredentialsReader credentialsReader,
-        DockerService docker,
+        SetupService setup,
         ContainerProvisioningService provisioning,
         IServiceScopeFactory scopeFactory,
         ILogger<CredentialsService> logger)
@@ -91,7 +91,7 @@ public sealed class CredentialsService
         _composeFilePath = Path.Combine(baseDir, "docker-compose.yml");
         _orchestratorContainerName = config["Provisioning:OrchestratorContainerName"] ?? "fleet-orchestrator";
         _credentialsReader = credentialsReader;
-        _docker = docker;
+        _setup = setup;
         _provisioning = provisioning;
         _scopeFactory = scopeFactory;
         _logger = logger;
@@ -174,7 +174,7 @@ public sealed class CredentialsService
 
     public async Task<PropagationPreview> ComputePropagationAsync(string key, CancellationToken ct = default)
     {
-        var (infra, infraWarnings) = ComputeInfraPropagation(key);
+        var (infra, infraWarnings) = ComputeInfraPropagation(key, throwOnUnavailable: false);
         var (agents, agentWarnings) = await ComputeAgentPropagationAsync(key, ct);
         var warnings = new List<string>(infraWarnings.Concat(agentWarnings));
         var selfRecreate = infra.Contains(_orchestratorContainerName, StringComparer.OrdinalIgnoreCase);
@@ -199,45 +199,53 @@ public sealed class CredentialsService
             // 2. Upsert the key into the lines (first-= split, duplicate-key handling)
             var updated = UpsertEnvLine(lines, key, newValue);
 
-            // 3. Write to .env.tmp then rename (atomic)
+            // 3. Backup current .env BEFORE writing new content
+            if (File.Exists(_envFilePath))
+            {
+                try { File.Copy(_envFilePath, _envFilePath + ".bak", overwrite: true); }
+                catch (Exception ex) { _logger.LogWarning(ex, "Could not write .env.bak"); }
+            }
+
+            // 4. Write to .env.tmp then rename atomically
             var dir = Path.GetDirectoryName(_envFilePath) ?? "/";
             var tmpPath = Path.Combine(dir, Path.GetFileName(_envFilePath) + ".tmp");
             await File.WriteAllLinesAsync(tmpPath, updated, ct);
-            File.Move(tmpPath, _envFilePath, overwrite: true);
-
-            // 4. Copy to .env.bak (best-effort)
-            try { File.Copy(_envFilePath, _envFilePath + ".bak", overwrite: true); }
-            catch (Exception ex) { _logger.LogWarning(ex, "Could not write .env.bak"); }
+            try { File.Move(tmpPath, _envFilePath, overwrite: true); }
+            catch
+            {
+                try { File.Delete(tmpPath); } catch { /* best effort */ }
+                throw;
+            }
 
             // 5. Invalidate ICredentialsReader cache synchronously
             _credentialsReader.InvalidateCache();
-
-            // 6. Write audit row fire-and-forget
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await using var scope = _scopeFactory.CreateAsyncScope();
-                    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-                    if (db is not null)
-                    {
-                        db.CredentialsAudit.Add(new CredentialsAudit { KeyName = key });
-                        await db.SaveChangesAsync(CancellationToken.None);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Could not write credentials audit row for key={Key}", key);
-                }
-            }, CancellationToken.None);
-
-            // 7. Run propagation
-            return await RunPropagationAsync(key, ct);
         }
         finally
         {
             WriteMutex.Release();
         }
+
+        // 6. Write audit row fire-and-forget (mutex already released)
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await using var scope = _scopeFactory.CreateAsyncScope();
+                var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
+                if (db is not null)
+                {
+                    db.CredentialsAudit.Add(new CredentialsAudit { KeyName = key });
+                    await db.SaveChangesAsync(CancellationToken.None);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not write credentials audit row for key={Key}", key);
+            }
+        }, CancellationToken.None);
+
+        // 7. Run propagation (mutex already released)
+        return await RunPropagationAsync(key, ct);
     }
 
     // ── Retry propagation for a single target ─────────────────────────────────
@@ -254,7 +262,7 @@ public sealed class CredentialsService
         {
             List<string> infra;
             List<string> infraWarnings;
-            try { (infra, infraWarnings) = ComputeInfraPropagation(key); }
+            try { (infra, infraWarnings) = ComputeInfraPropagation(key, throwOnUnavailable: true); }
             catch (ComposeUnavailableException ex)
             {
                 return (true, false, ex.Message);
@@ -266,8 +274,7 @@ public sealed class CredentialsService
 
             try
             {
-                await _docker.StopContainerAsync(target);
-                await _docker.StartContainerAsync(target);
+                await _setup.InfraContainerRecreateAsync(target, ct);
                 return (true, true, null);
             }
             catch (Exception ex) { return (true, false, ex.Message); }
@@ -297,14 +304,18 @@ public sealed class CredentialsService
 
     // ── Infra propagation (compose parsing) ───────────────────────────────────
 
-    private (List<string> containers, List<string> warnings) ComputeInfraPropagation(string changedKey)
+    private (List<string> containers, List<string> warnings) ComputeInfraPropagation(
+        string changedKey, bool throwOnUnavailable)
     {
         var containers = new List<string>();
         var warnings = new List<string>();
 
         if (!File.Exists(_composeFilePath))
         {
-            warnings.Add($"compose_file_absent: {_composeFilePath}");
+            var msg = $"compose_file_absent: {_composeFilePath}";
+            if (throwOnUnavailable)
+                throw new ComposeUnavailableException(msg);
+            warnings.Add(msg);
             return (containers, warnings);
         }
 
@@ -321,6 +332,7 @@ public sealed class CredentialsService
                 || servicesNode is not YamlMappingNode services)
                 return (containers, warnings);
 
+            var composeDir = Path.GetDirectoryName(_composeFilePath) ?? "/";
             var keyRegex = new Regex(@"\$\{" + Regex.Escape(changedKey) + @"\}", RegexOptions.Compiled);
 
             foreach (var (serviceKeyNode, serviceValueNode) in services.Children)
@@ -333,25 +345,34 @@ public sealed class CredentialsService
                     && cnNode is YamlScalarNode cnScalar && !string.IsNullOrEmpty(cnScalar.Value))
                     containerName = cnScalar.Value;
 
-                if (ServiceConsumesKey(service, changedKey, keyRegex))
+                if (ServiceConsumesKey(service, changedKey, keyRegex, composeDir, _envFilePath))
                     containers.Add(containerName);
             }
         }
+        catch (ComposeUnavailableException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
+            var msg = $"compose_parse_error: {ex.Message}";
+            if (throwOnUnavailable)
+                throw new ComposeUnavailableException(msg, ex);
             _logger.LogWarning(ex, "Could not parse docker-compose.yml at {Path}", _composeFilePath);
-            warnings.Add($"compose_parse_error: {ex.Message}");
+            warnings.Add(msg);
         }
 
         return (containers, warnings);
     }
 
-    private static bool ServiceConsumesKey(YamlMappingNode service, string changedKey, Regex keyRegex)
+    private static bool ServiceConsumesKey(
+        YamlMappingNode service, string changedKey, Regex keyRegex,
+        string composeDir, string envFilePath)
     {
-        // Check env_file: — if present and references .env (any path), this service consumes all keys
+        // Check env_file: — if present and references our .env, this service consumes all keys
         if (service.Children.TryGetValue(new YamlScalarNode("env_file"), out var envFileNode))
         {
-            if (EnvFileNodeContainsDotEnv(envFileNode))
+            if (EnvFileNodeContainsDotEnv(envFileNode, composeDir, envFilePath))
                 return true;
         }
 
@@ -388,21 +409,21 @@ public sealed class CredentialsService
         return ServiceValuesContainInterpolation(service, keyRegex);
     }
 
-    private static bool EnvFileNodeContainsDotEnv(YamlNode node)
+    private static bool EnvFileNodeContainsDotEnv(YamlNode node, string composeDir, string envFilePath)
     {
         // env_file can be a scalar, sequence of scalars, or sequence of mappings {path: ..., required: ...}
         if (node is YamlScalarNode s)
-            return PathIsDotEnv(s.Value);
+            return PathMatchesEnvFile(s.Value, composeDir, envFilePath);
 
         if (node is YamlSequenceNode seq)
         {
             foreach (var item in seq.Children)
             {
-                if (item is YamlScalarNode sc && PathIsDotEnv(sc.Value))
+                if (item is YamlScalarNode sc && PathMatchesEnvFile(sc.Value, composeDir, envFilePath))
                     return true;
                 if (item is YamlMappingNode m
                     && m.Children.TryGetValue(new YamlScalarNode("path"), out var pn)
-                    && pn is YamlScalarNode ps && PathIsDotEnv(ps.Value))
+                    && pn is YamlScalarNode ps && PathMatchesEnvFile(ps.Value, composeDir, envFilePath))
                     return true;
             }
         }
@@ -410,12 +431,26 @@ public sealed class CredentialsService
         return false;
     }
 
-    private static bool PathIsDotEnv(string? path)
+    /// <summary>
+    /// Resolves the env_file path relative to the compose directory and compares
+    /// against the canonical .env file path. Falls back to filename-only comparison
+    /// for relative paths that can't be fully resolved.
+    /// </summary>
+    private static bool PathMatchesEnvFile(string? rawPath, string composeDir, string envFilePath)
     {
-        if (string.IsNullOrEmpty(path)) return false;
-        var name = Path.GetFileName(path);
-        return string.Equals(name, ".env", StringComparison.Ordinal)
-            || string.Equals(name, ".env", StringComparison.OrdinalIgnoreCase);
+        if (string.IsNullOrEmpty(rawPath)) return false;
+
+        // Resolve relative paths against the compose file directory
+        var resolved = Path.IsPathRooted(rawPath)
+            ? rawPath
+            : Path.GetFullPath(Path.Combine(composeDir, rawPath));
+
+        if (string.Equals(resolved, Path.GetFullPath(envFilePath), StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        // Fallback: filename-only match (covers the common case of env_file: .env)
+        var name = Path.GetFileName(rawPath);
+        return string.Equals(name, ".env", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool ServiceValuesContainInterpolation(YamlMappingNode service, Regex keyRegex)
@@ -459,7 +494,7 @@ public sealed class CredentialsService
 
     private async Task<PropagationResult> RunPropagationAsync(string key, CancellationToken ct)
     {
-        var (infra, infraWarnings) = ComputeInfraPropagation(key);
+        var (infra, infraWarnings) = ComputeInfraPropagation(key, throwOnUnavailable: false);
         var warnings = new List<string>(infraWarnings);
 
         List<string> agents;
@@ -483,13 +518,12 @@ public sealed class CredentialsService
         {
             try
             {
-                await _docker.StopContainerAsync(container);
-                await _docker.StartContainerAsync(container);
+                await _setup.InfraContainerRecreateAsync(container, ct);
                 infraRestarted.Add(container);
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to restart infra container {Name}", container);
+                _logger.LogWarning(ex, "Failed to recreate infra container {Name}", container);
                 infraFailed.Add(container);
             }
         }
@@ -525,18 +559,8 @@ public sealed class CredentialsService
     {
         var result = new List<string>(lines.Length + 1);
         var written = false;
-
-        // Find last index of the key to handle duplicates (update first, remove rest)
-        var lastIdx = -1;
-        for (var i = 0; i < lines.Length; i++)
-        {
-            var t = lines[i].Trim();
-            if (t.StartsWith('#') || !t.Contains('=')) continue;
-            var k = t[..t.IndexOf('=')].Trim();
-            if (string.Equals(k, key, StringComparison.Ordinal)) lastIdx = i;
-        }
-
         var firstSeen = false;
+
         for (var i = 0; i < lines.Length; i++)
         {
             var t = lines[i].Trim();
@@ -551,9 +575,9 @@ public sealed class CredentialsService
                         result.Add($"{key}={value}");
                         written = true;
                         firstSeen = true;
+                        continue;
                     }
-                    // Subsequent duplicate occurrences: drop them
-                    continue;
+                    // Subsequent duplicate occurrences: preserve as-is
                 }
             }
             result.Add(lines[i]);

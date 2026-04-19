@@ -687,7 +687,7 @@ public sealed class SetupService
         return (restarted, errors);
     }
 
-    private async Task InfraContainerRecreateAsync(string containerName, CancellationToken ct)
+    internal async Task InfraContainerRecreateAsync(string containerName, CancellationToken ct)
     {
         // Read current container config via Docker inspect
         var json = await _docker.InspectContainerAsync(containerName, ct);

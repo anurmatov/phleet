@@ -16,6 +16,9 @@ public sealed class MemoryUpdateTool(MemoryService memoryService)
         [Description("New comma-separated tags (optional, pass empty to keep current)")] string? tags = null,
         [Description("New project name (optional, pass empty to keep current)")] string? project = null)
     {
+        if (string.IsNullOrWhiteSpace(id))
+            return "memory_update: missing required parameter 'id'.\nHint: pass the memory ID (full UUID or first 8 characters) from memory_search or memory_list.";
+
         try
         {
             List<string>? tagList = tags is not null

@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text;
+using Fleet.Memory.Models;
 using Fleet.Memory.Services;
 using ModelContextProtocol.Server;
 
@@ -16,6 +17,9 @@ public sealed class MemoryListTool(MemoryService memoryService)
         [Description("Filter by agent name (optional)")] string? agent = null,
         [Description("Filter by tag (optional)")] string? tag = null)
     {
+        if (type is not null && !MemoryDocument.ValidTypes.Contains(type))
+            return $"memory_list: invalid value for 'type' filter: '{type}'.\nValid types: {string.Join(", ", MemoryDocument.ValidTypes)}.";
+
         var results = await memoryService.ListAsync(type, project, agent, tag);
 
         if (results.Count == 0)

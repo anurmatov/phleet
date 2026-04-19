@@ -19,8 +19,17 @@ public sealed class MemoryStoreTool(MemoryService memoryService)
         [Description("Comma-separated tags for categorization")] string tags = "",
         [Description("Source context (e.g., session ID, task ID)")] string source = "")
     {
+        if (string.IsNullOrWhiteSpace(type))
+            return $"memory_store: missing required parameter 'type'.\nHint: pass one of: {string.Join(", ", MemoryDocument.ValidTypes)}.";
+
         if (!MemoryDocument.ValidTypes.Contains(type))
-            return $"Error: Invalid type '{type}'. Valid types: {string.Join(", ", MemoryDocument.ValidTypes)}";
+            return $"memory_store: invalid value for 'type': '{type}'.\nValid types: {string.Join(", ", MemoryDocument.ValidTypes)}.";
+
+        if (string.IsNullOrWhiteSpace(title))
+            return "memory_store: missing required parameter 'title'.\nHint: pass a short descriptive title (5-10 words).";
+
+        if (string.IsNullOrWhiteSpace(content))
+            return "memory_store: missing required parameter 'content'.\nHint: pass the full memory content to store.";
 
         var doc = new MemoryDocument
         {

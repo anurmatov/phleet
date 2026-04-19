@@ -13,6 +13,9 @@ public sealed class MemoryDeleteTool(MemoryService memoryService)
         [Description("The memory ID to delete")] string id,
         [Description("If true, permanently delete instead of archiving (default: false)")] bool permanent = false)
     {
+        if (string.IsNullOrWhiteSpace(id))
+            return "memory_delete: missing required parameter 'id'.\nHint: pass the memory ID (full UUID or first 8 characters) from memory_search or memory_list.";
+
         try
         {
             await memoryService.DeleteAsync(id, permanent);

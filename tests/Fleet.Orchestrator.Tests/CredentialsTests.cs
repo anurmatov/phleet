@@ -274,3 +274,101 @@ public class CredentialsServiceUpsertTests
         finally { File.Delete(path); }
     }
 }
+
+// ── GetInfraScope — registry-driven propagation scope ────────────────────────
+
+public class PropagationScopeTests
+{
+    // Helper: build a registry from inline JSON without touching the filesystem.
+    private static CredentialRegistry MakeRegistry(string json)
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(path, json);
+            return CredentialsService.LoadRegistry(path);
+        }
+        finally { File.Delete(path); }
+    }
+
+    // AC: editing a key whose registry Consumers includes fleet-orchestrator
+    //     must set selfRecreate=true (e.g. ORCHESTRATOR_AUTH_TOKEN).
+    [Fact]
+    public void GetInfraScope_OrchestratorInConsumers_SelfRecreateTrue()
+    {
+        var registry = MakeRegistry("""
+            {
+              "entries": [
+                { "key": "ORCHESTRATOR_AUTH_TOKEN", "description": "d", "category": "auth",
+                  "editable": true, "bootstrapOnly": true, "sensitive": true, "confirmRecreate": true,
+                  "consumers": ["fleet-orchestrator"] }
+              ]
+            }
+            """);
+
+        var (containers, selfRecreate) = CredentialsService.GetInfraScope(
+            registry, "ORCHESTRATOR_AUTH_TOKEN", "fleet-orchestrator");
+
+        Assert.True(selfRecreate);
+        Assert.Contains("fleet-orchestrator", containers);
+    }
+
+    // AC: editing a key whose registry Consumers does NOT include fleet-orchestrator
+    //     must set selfRecreate=false (e.g. TELEGRAM_CTO_BOT_TOKEN).
+    [Fact]
+    public void GetInfraScope_OrchestratorNotInConsumers_SelfRecreateFalse()
+    {
+        var registry = MakeRegistry("""
+            {
+              "entries": [
+                { "key": "TELEGRAM_CTO_BOT_TOKEN", "description": "d", "category": "telegram",
+                  "editable": true, "bootstrapOnly": false, "sensitive": true, "confirmRecreate": false,
+                  "consumers": ["fleet-telegram"] }
+              ]
+            }
+            """);
+
+        var (containers, selfRecreate) = CredentialsService.GetInfraScope(
+            registry, "TELEGRAM_CTO_BOT_TOKEN", "fleet-orchestrator");
+
+        Assert.False(selfRecreate);
+        Assert.DoesNotContain("fleet-orchestrator", containers);
+        Assert.Contains("fleet-telegram", containers);
+    }
+
+    // Key not in registry → no consumers, selfRecreate=false.
+    [Fact]
+    public void GetInfraScope_UnknownKey_ReturnsEmpty()
+    {
+        var registry = MakeRegistry("""
+            { "entries": [] }
+            """);
+
+        var (containers, selfRecreate) = CredentialsService.GetInfraScope(
+            registry, "UNKNOWN_KEY", "fleet-orchestrator");
+
+        Assert.Empty(containers);
+        Assert.False(selfRecreate);
+    }
+
+    // Key with empty consumers list → no infra restart, selfRecreate=false.
+    [Fact]
+    public void GetInfraScope_EmptyConsumers_ReturnsEmpty()
+    {
+        var registry = MakeRegistry("""
+            {
+              "entries": [
+                { "key": "TELEGRAM_USER_ID", "description": "d", "category": "telegram",
+                  "editable": true, "bootstrapOnly": false, "sensitive": false, "confirmRecreate": false,
+                  "consumers": [] }
+              ]
+            }
+            """);
+
+        var (containers, selfRecreate) = CredentialsService.GetInfraScope(
+            registry, "TELEGRAM_USER_ID", "fleet-orchestrator");
+
+        Assert.Empty(containers);
+        Assert.False(selfRecreate);
+    }
+}

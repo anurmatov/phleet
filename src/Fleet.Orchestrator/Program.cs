@@ -78,11 +78,13 @@ builder.Services
     .WithHttpTransport()
     .WithToolsFromAssembly();
 
-var app = builder.Build();
-
-// Load credentials registry — fail fast if absent, unparseable, or has duplicate keys
+// Load credentials registry — fail fast if absent, unparseable, or has duplicate keys.
+// Must happen before builder.Build() so it can be injected into CredentialsService via DI.
 var registryPath = Path.Combine(AppContext.BaseDirectory, "credentials-registry.json");
 var credentialRegistry = CredentialsService.LoadRegistry(registryPath);
+builder.Services.AddSingleton(credentialRegistry);
+
+var app = builder.Build();
 
 // Auto-migrate and seed DB on startup
 if (!string.IsNullOrEmpty(connectionString))

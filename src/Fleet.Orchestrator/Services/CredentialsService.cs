@@ -1,11 +1,9 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Text.RegularExpressions;
 using Fleet.Orchestrator.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using YamlDotNet.RepresentationModel;
 
 namespace Fleet.Orchestrator.Services;
 
@@ -59,7 +57,7 @@ public sealed record PropagationResult(
 /// <summary>
 /// Encapsulates all credential registry and save logic:
 ///   - Registry loading + startup validation
-///   - Propagation preview computation (compose-grep + agent_env_refs)
+///   - Propagation preview computation (registry-driven + agent_env_refs)
 ///   - Atomic .env write (mutex + bak-before-write + tmp rename)
 ///   - Propagation execution (infra recreate + agent reprovision)
 ///   - Audit trail write (fire-and-forget, after mutex release)
@@ -70,8 +68,8 @@ public sealed class CredentialsService
     private static readonly SemaphoreSlim WriteMutex = new(1, 1);
 
     private readonly string _envFilePath;
-    private readonly string _composeFilePath;
     private readonly string _orchestratorContainerName;
+    private readonly CredentialRegistry _registry;
     private readonly ICredentialsReader _credentialsReader;
     private readonly SetupService _setup;
     private readonly ContainerProvisioningService _provisioning;
@@ -80,6 +78,7 @@ public sealed class CredentialsService
 
     public CredentialsService(
         Microsoft.Extensions.Configuration.IConfiguration config,
+        CredentialRegistry registry,
         ICredentialsReader credentialsReader,
         SetupService setup,
         ContainerProvisioningService provisioning,
@@ -87,9 +86,8 @@ public sealed class CredentialsService
         ILogger<CredentialsService> logger)
     {
         _envFilePath = config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env";
-        var baseDir = config["Provisioning:BaseDir"] ?? "/app/deploy";
-        _composeFilePath = Path.Combine(baseDir, "docker-compose.yml");
         _orchestratorContainerName = config["Provisioning:OrchestratorContainerName"] ?? "fleet-orchestrator";
+        _registry = registry;
         _credentialsReader = credentialsReader;
         _setup = setup;
         _provisioning = provisioning;
@@ -174,11 +172,9 @@ public sealed class CredentialsService
 
     public async Task<PropagationPreview> ComputePropagationAsync(string key, CancellationToken ct = default)
     {
-        var (infra, infraWarnings) = ComputeInfraPropagation(key, throwOnUnavailable: false);
+        var (infra, selfRecreate) = GetInfraScope(_registry, key, _orchestratorContainerName);
         var (agents, agentWarnings) = await ComputeAgentPropagationAsync(key, ct);
-        var warnings = new List<string>(infraWarnings.Concat(agentWarnings));
-        var selfRecreate = infra.Contains(_orchestratorContainerName, StringComparer.OrdinalIgnoreCase);
-        return new PropagationPreview(key, infra, agents, selfRecreate, warnings);
+        return new PropagationPreview(key, infra, agents, selfRecreate, agentWarnings);
     }
 
     // ── Atomic write + propagation ────────────────────────────────────────────
@@ -260,15 +256,7 @@ public sealed class CredentialsService
     {
         if (type.Equals("infra", StringComparison.OrdinalIgnoreCase))
         {
-            List<string> infra;
-            List<string> infraWarnings;
-            try { (infra, infraWarnings) = ComputeInfraPropagation(key, throwOnUnavailable: true); }
-            catch (ComposeUnavailableException ex)
-            {
-                return (true, false, ex.Message);
-            }
-
-            _ = infraWarnings; // informational
+            var (infra, _) = GetInfraScope(_registry, key, _orchestratorContainerName);
             if (!infra.Contains(target, StringComparer.OrdinalIgnoreCase))
                 return (false, false, null);
 
@@ -302,165 +290,24 @@ public sealed class CredentialsService
         }
     }
 
-    // ── Infra propagation (compose parsing) ───────────────────────────────────
-
-    private (List<string> containers, List<string> warnings) ComputeInfraPropagation(
-        string changedKey, bool throwOnUnavailable)
-    {
-        var containers = new List<string>();
-        var warnings = new List<string>();
-
-        if (!File.Exists(_composeFilePath))
-        {
-            var msg = $"compose_file_absent: {_composeFilePath}";
-            if (throwOnUnavailable)
-                throw new ComposeUnavailableException(msg);
-            warnings.Add(msg);
-            return (containers, warnings);
-        }
-
-        try
-        {
-            var yaml = new YamlStream();
-            using var reader = new StreamReader(_composeFilePath);
-            yaml.Load(reader);
-
-            if (yaml.Documents.Count == 0) return (containers, warnings);
-            var root = (YamlMappingNode)yaml.Documents[0].RootNode;
-
-            if (!root.Children.TryGetValue(new YamlScalarNode("services"), out var servicesNode)
-                || servicesNode is not YamlMappingNode services)
-                return (containers, warnings);
-
-            var composeDir = Path.GetDirectoryName(_composeFilePath) ?? "/";
-            var keyRegex = new Regex(@"\$\{" + Regex.Escape(changedKey) + @"\}", RegexOptions.Compiled);
-
-            foreach (var (serviceKeyNode, serviceValueNode) in services.Children)
-            {
-                var serviceKey = ((YamlScalarNode)serviceKeyNode).Value ?? "";
-                if (serviceValueNode is not YamlMappingNode service) continue;
-
-                var containerName = serviceKey; // default: service key
-                if (service.Children.TryGetValue(new YamlScalarNode("container_name"), out var cnNode)
-                    && cnNode is YamlScalarNode cnScalar && !string.IsNullOrEmpty(cnScalar.Value))
-                    containerName = cnScalar.Value;
-
-                if (ServiceConsumesKey(service, changedKey, keyRegex, composeDir, _envFilePath))
-                    containers.Add(containerName);
-            }
-        }
-        catch (ComposeUnavailableException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            var msg = $"compose_parse_error: {ex.Message}";
-            if (throwOnUnavailable)
-                throw new ComposeUnavailableException(msg, ex);
-            _logger.LogWarning(ex, "Could not parse docker-compose.yml at {Path}", _composeFilePath);
-            warnings.Add(msg);
-        }
-
-        return (containers, warnings);
-    }
-
-    private static bool ServiceConsumesKey(
-        YamlMappingNode service, string changedKey, Regex keyRegex,
-        string composeDir, string envFilePath)
-    {
-        // Check env_file: — if present and references our .env, this service consumes all keys
-        if (service.Children.TryGetValue(new YamlScalarNode("env_file"), out var envFileNode))
-        {
-            if (EnvFileNodeContainsDotEnv(envFileNode, composeDir, envFilePath))
-                return true;
-        }
-
-        // Check environment:
-        if (!service.Children.TryGetValue(new YamlScalarNode("environment"), out var envNode))
-        {
-            // Also scan all values for ${CHANGED_KEY} interpolation
-            return ServiceValuesContainInterpolation(service, keyRegex);
-        }
-
-        if (envNode is YamlMappingNode envMapping)
-        {
-            // Mapping form: KEY: value
-            foreach (var (k, _) in envMapping.Children)
-            {
-                if (k is YamlScalarNode ks && string.Equals(ks.Value, changedKey, StringComparison.Ordinal))
-                    return true;
-            }
-        }
-        else if (envNode is YamlSequenceNode envSeq)
-        {
-            // Sequence form: - KEY=value or - KEY
-            foreach (var item in envSeq.Children)
-            {
-                if (item is not YamlScalarNode scalar || string.IsNullOrEmpty(scalar.Value)) continue;
-                var eqIdx = scalar.Value.IndexOf('=');
-                var k = eqIdx >= 0 ? scalar.Value[..eqIdx] : scalar.Value;
-                if (string.Equals(k, changedKey, StringComparison.Ordinal))
-                    return true;
-            }
-        }
-
-        // Also scan all YAML values in the service for ${CHANGED_KEY} interpolation
-        return ServiceValuesContainInterpolation(service, keyRegex);
-    }
-
-    private static bool EnvFileNodeContainsDotEnv(YamlNode node, string composeDir, string envFilePath)
-    {
-        // env_file can be a scalar, sequence of scalars, or sequence of mappings {path: ..., required: ...}
-        if (node is YamlScalarNode s)
-            return PathMatchesEnvFile(s.Value, composeDir, envFilePath);
-
-        if (node is YamlSequenceNode seq)
-        {
-            foreach (var item in seq.Children)
-            {
-                if (item is YamlScalarNode sc && PathMatchesEnvFile(sc.Value, composeDir, envFilePath))
-                    return true;
-                if (item is YamlMappingNode m
-                    && m.Children.TryGetValue(new YamlScalarNode("path"), out var pn)
-                    && pn is YamlScalarNode ps && PathMatchesEnvFile(ps.Value, composeDir, envFilePath))
-                    return true;
-            }
-        }
-
-        return false;
-    }
+    // ── Infra propagation (registry-driven) ──────────────────────────────────
 
     /// <summary>
-    /// Resolves the env_file path relative to the compose directory and compares
-    /// against the canonical .env file path. Falls back to filename-only comparison
-    /// for relative paths that can't be fully resolved.
+    /// Returns the infra containers that should be restarted when <paramref name="changedKey"/>
+    /// changes, and whether the orchestrator itself is among them.
+    /// Uses <see cref="CredentialRegistry"/> as the authoritative scope source —
+    /// replaces the old docker-compose.yml grepping that incorrectly included any service
+    /// with <c>env_file: .env</c> regardless of which key was changed.
     /// </summary>
-    private static bool PathMatchesEnvFile(string? rawPath, string composeDir, string envFilePath)
+    public static (List<string> containers, bool selfRecreate) GetInfraScope(
+        CredentialRegistry registry, string changedKey, string orchestratorContainerName)
     {
-        if (string.IsNullOrEmpty(rawPath)) return false;
+        if (!registry.TryGet(changedKey, out var entry) || entry is null)
+            return ([], false);
 
-        // Resolve relative paths against the compose file directory
-        var resolved = Path.IsPathRooted(rawPath)
-            ? rawPath
-            : Path.GetFullPath(Path.Combine(composeDir, rawPath));
-
-        if (string.Equals(resolved, Path.GetFullPath(envFilePath), StringComparison.OrdinalIgnoreCase))
-            return true;
-
-        // Fallback: filename-only match (covers the common case of env_file: .env)
-        var name = Path.GetFileName(rawPath);
-        return string.Equals(name, ".env", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool ServiceValuesContainInterpolation(YamlMappingNode service, Regex keyRegex)
-    {
-        foreach (var (_, v) in service.Children)
-        {
-            if (v is YamlScalarNode sv && sv.Value is not null && keyRegex.IsMatch(sv.Value))
-                return true;
-        }
-        return false;
+        var containers = new List<string>(entry.Consumers);
+        var selfRecreate = containers.Contains(orchestratorContainerName, StringComparer.OrdinalIgnoreCase);
+        return (containers, selfRecreate);
     }
 
     // ── Agent propagation (DB) ────────────────────────────────────────────────
@@ -494,8 +341,8 @@ public sealed class CredentialsService
 
     private async Task<PropagationResult> RunPropagationAsync(string key, CancellationToken ct)
     {
-        var (infra, infraWarnings) = ComputeInfraPropagation(key, throwOnUnavailable: false);
-        var warnings = new List<string>(infraWarnings);
+        var (infra, _) = GetInfraScope(_registry, key, _orchestratorContainerName);
+        var warnings = new List<string>();
 
         List<string> agents;
         List<string> agentWarnings;

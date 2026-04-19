@@ -19,6 +19,27 @@ public sealed class SetupService
 {
     private static readonly SemaphoreSlim _lock = new(1, 1);
 
+    // FLEET_CTO_AGENT validation
+    private static readonly Regex BotTokenPattern    = new(@"^\d+:[A-Za-z0-9_-]{30,}$", RegexOptions.Compiled);
+    private static readonly Regex ShortNamePattern   = new(@"^[a-z][a-z0-9_-]*$",       RegexOptions.Compiled);
+
+    /// <summary>
+    /// Validates that <paramref name="value"/> is a legal agent short name for use as FLEET_CTO_AGENT.
+    /// Empty string is accepted (clears the key). Throws <see cref="ArgumentException"/> on invalid input.
+    /// </summary>
+    internal static void ValidateCtoAgentName(string value)
+    {
+        if (value.Length == 0) return; // allow empty (clears key)
+
+        if (BotTokenPattern.IsMatch(value))
+            throw new ArgumentException(
+                $"'{value}' looks like a Telegram bot token — did you mean TELEGRAM_CTO_BOT_TOKEN?");
+
+        if (!ShortNamePattern.IsMatch(value))
+            throw new ArgumentException(
+                $"FLEET_CTO_AGENT must be a valid agent short name (lowercase letters, digits, hyphens, underscores, starting with a letter). Got: '{value}'.");
+    }
+
     // Known-weak default values that count as "not configured"
     private static readonly HashSet<string> WeakDefaults = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -291,6 +312,9 @@ public sealed class SetupService
         if (!System.Text.RegularExpressions.Regex.IsMatch(key, @"^[A-Z][A-Z0-9_]*$"))
             throw new ArgumentException($"Key '{key}' must be uppercase letters, digits, and underscores.");
 
+        if (key == "FLEET_CTO_AGENT")
+            ValidateCtoAgentName(value.Trim());
+
         await AtomicWriteEnvAsync(new Dictionary<string, string> { [key] = value });
     }
 
@@ -552,6 +576,12 @@ public sealed class SetupService
     public async Task<(List<string> Restarted, Dictionary<string, string> Errors)>
         WriteCtoAgentAsync(string agentName, CancellationToken ct)
     {
+        try { ValidateCtoAgentName(agentName); }
+        catch (ArgumentException ex)
+        {
+            return ([], new Dictionary<string, string> { ["_validation"] = ex.Message });
+        }
+
         if (!await _lock.WaitAsync(TimeSpan.FromSeconds(30), ct))
             return ([], new Dictionary<string, string> { ["_lock"] = "Another setup operation is in progress" });
 

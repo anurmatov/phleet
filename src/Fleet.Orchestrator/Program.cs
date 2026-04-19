@@ -1060,6 +1060,16 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
     if (await db.Agents.AnyAsync(a => a.Name == name))
         return Results.Conflict(new { error = $"Agent '{name}' already exists" });
 
+    // Validate co-cto agent name shape before any DB writes — FLEET_CTO_AGENT is derived from this value.
+    if (string.Equals(body.Role.Trim(), "co-cto", StringComparison.OrdinalIgnoreCase))
+    {
+        try { SetupService.ValidateCtoAgentName(name); }
+        catch (ArgumentException ex)
+        {
+            return Results.BadRequest(new { error = "invalid_cto_agent_name", message = ex.Message });
+        }
+    }
+
     var containerName = string.IsNullOrWhiteSpace(body.ContainerName) ? $"fleet-{name}" : body.ContainerName.Trim();
     var displayName   = string.IsNullOrWhiteSpace(body.DisplayName)   ? name               : body.DisplayName.Trim();
 

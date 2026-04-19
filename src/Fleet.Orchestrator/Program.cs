@@ -32,6 +32,8 @@ builder.Services.AddSingleton<AgentRegistry>();
 builder.Services.AddSingleton<DockerService>();
 builder.Services.AddSingleton<ContainerProvisioningService>();
 builder.Services.AddSingleton<SetupService>();
+builder.Services.AddSingleton<ICredentialsReader, EnvFileCredentialsReader>();
+builder.Services.AddSingleton<CredentialsService>();
 
 // HeartbeatConsumerService registered as singleton so tools can inject IRabbitMqStatus
 builder.Services.AddSingleton<HeartbeatConsumerService>();
@@ -77,6 +79,10 @@ builder.Services
     .WithToolsFromAssembly();
 
 var app = builder.Build();
+
+// Load credentials registry — fail fast if absent, unparseable, or has duplicate keys
+var registryPath = Path.Combine(AppContext.BaseDirectory, "credentials-registry.json");
+var credentialRegistry = CredentialsService.LoadRegistry(registryPath);
 
 // Auto-migrate and seed DB on startup
 if (!string.IsNullOrEmpty(connectionString))
@@ -2111,6 +2117,169 @@ app.MapDelete("/api/env-vars/{key}", async (string key, SetupService setupServic
     }
 });
 
+// ── Credential Registry endpoints ──────────────────────────────────────────────────────────────
+
+// GET /api/credentials/registry — registry metadata, no values, no auth required
+app.MapGet("/api/credentials/registry", () =>
+    Results.Ok(new { entries = credentialRegistry.Entries }));
+
+// GET /api/credentials/{key}/value — returns current value for a single registry key
+app.MapGet("/api/credentials/{key}/value", (string key, CredentialsService credentials, HttpContext ctx) =>
+{
+    if (!string.IsNullOrEmpty(orchestratorAuthToken))
+    {
+        var auth = ctx.Request.Headers.Authorization.FirstOrDefault() ?? "";
+        if (!auth.Equals($"Bearer {orchestratorAuthToken}", StringComparison.Ordinal))
+            return Results.Unauthorized();
+    }
+
+    if (!credentialRegistry.TryGet(key, out var entry) || entry is null)
+        return Results.NotFound(new { error = "key_not_found" });
+
+    var value = credentials.ReadEnvValue(key);
+    return Results.Ok(new { key, value, sensitive = entry.Sensitive, editable = entry.Editable });
+});
+
+// GET /api/credentials/{key}/propagation-preview — compute affected services without executing
+app.MapGet("/api/credentials/{key}/propagation-preview", async (string key, CredentialsService credentials, HttpContext ctx, CancellationToken ct) =>
+{
+    if (!string.IsNullOrEmpty(orchestratorAuthToken))
+    {
+        var auth = ctx.Request.Headers.Authorization.FirstOrDefault() ?? "";
+        if (!auth.Equals($"Bearer {orchestratorAuthToken}", StringComparison.Ordinal))
+            return Results.Unauthorized();
+    }
+
+    if (!credentialRegistry.TryGet(key, out _))
+        return Results.NotFound(new { error = "key_not_found" });
+
+    var preview = await credentials.ComputePropagationAsync(key, ct);
+    return Results.Ok(new
+    {
+        key = preview.Key,
+        infra = preview.Infra,
+        agents = preview.Agents,
+        selfRecreate = preview.SelfRecreate,
+        warnings = preview.Warnings,
+    });
+});
+
+// PUT /api/credentials/{key} — atomic write + cache invalidation + propagation
+app.MapPut("/api/credentials/{key}", async (string key, HttpRequest request, CredentialsService credentials, HttpContext ctx, ILogger<Program> logger, CancellationToken ct) =>
+{
+    if (!string.IsNullOrEmpty(orchestratorAuthToken))
+    {
+        var auth = ctx.Request.Headers.Authorization.FirstOrDefault() ?? "";
+        if (!auth.Equals($"Bearer {orchestratorAuthToken}", StringComparison.Ordinal))
+            return Results.Unauthorized();
+    }
+
+    if (!credentialRegistry.TryGet(key, out var entry) || entry is null)
+        return Results.NotFound(new { error = "key_not_found" });
+
+    if (!entry.Editable)
+        return Results.Json(new { error = "not_editable" }, statusCode: 403);
+
+    var body = await request.ReadFromJsonAsync<CredentialSaveRequest>(ct);
+    if (body is null || string.IsNullOrEmpty(body.Value))
+        return Results.BadRequest(new { error = "empty_value_not_allowed" });
+
+    // No-op if same value
+    var current = credentials.ReadEnvValue(key);
+    if (string.Equals(current, body.Value, StringComparison.Ordinal))
+        return Results.Ok(new { changed = false });
+
+    PropagationResult result;
+    try { result = await credentials.SaveAndPropagateAsync(key, body.Value, ct); }
+    catch (TimeoutException ex) { return Results.Problem(ex.Message, statusCode: 503); }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Credential save failed for key={Key}", key);
+        return Results.Problem($"Write failed: {ex.Message}", statusCode: 500);
+    }
+
+    var responseBody = new
+    {
+        key,
+        changed = true,
+        infra = new { restarted = result.InfraRestarted, failed = result.InfraFailed },
+        agents = new
+        {
+            reprovisioned = result.AgentsReprovisioned,
+            failed = result.AgentsFailed.Select(f => new { name = f.Name, error = f.Error }).ToList(),
+        },
+        warnings = result.Warnings,
+        selfRecreate = result.SelfRecreate,
+    };
+
+    if (result.SelfRecreate)
+    {
+        // Restart the orchestrator itself in the background after returning 202
+        var orchestratorName = app.Configuration["Provisioning:OrchestratorContainerName"] ?? "fleet-orchestrator";
+        var dockerSvc = app.Services.GetRequiredService<DockerService>();
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromSeconds(1));
+            try { await dockerSvc.StopContainerAsync(orchestratorName); await dockerSvc.StartContainerAsync(orchestratorName); }
+            catch (Exception ex) { logger.LogWarning(ex, "Self-recreate failed for {Name}", orchestratorName); }
+        }, CancellationToken.None);
+
+        return Results.Json(new
+        {
+            key,
+            changed = true,
+            selfRecreate = true,
+            warning = "The orchestrator will restart. Your dashboard connection will drop for ~10 seconds and reconnect automatically.",
+            infra = responseBody.infra,
+            agents = responseBody.agents,
+            warnings = result.Warnings,
+        }, statusCode: 202);
+    }
+
+    var hasFailures = result.InfraFailed.Count > 0 || result.AgentsFailed.Count > 0;
+    return hasFailures
+        ? Results.Json(responseBody, statusCode: 207)
+        : Results.Ok(responseBody);
+});
+
+// POST /api/credentials/{key}/retry-propagation — retry a single failed target
+app.MapPost("/api/credentials/{key}/retry-propagation", async (string key, HttpRequest request, CredentialsService credentials, HttpContext ctx, CancellationToken ct) =>
+{
+    if (!string.IsNullOrEmpty(orchestratorAuthToken))
+    {
+        var auth = ctx.Request.Headers.Authorization.FirstOrDefault() ?? "";
+        if (!auth.Equals($"Bearer {orchestratorAuthToken}", StringComparison.Ordinal))
+            return Results.Unauthorized();
+    }
+
+    if (!credentialRegistry.TryGet(key, out _))
+        return Results.NotFound(new { error = "key_not_found" });
+
+    var body = await request.ReadFromJsonAsync<RetryPropagationRequest>(ct);
+    if (body is null || string.IsNullOrEmpty(body.Target) || string.IsNullOrEmpty(body.Type))
+        return Results.BadRequest(new { error = "target and type are required" });
+
+    try
+    {
+        var (inScope, success, error) = await credentials.RetryPropagationAsync(key, body.Target, body.Type, ct);
+
+        if (!inScope)
+            return Results.NotFound(new { error = $"target '{body.Target}' is not in the propagation set for key '{key}'" });
+
+        return success
+            ? Results.Ok(new { target = body.Target, type = body.Type, success = true })
+            : Results.Json(new { target = body.Target, type = body.Type, success = false, error }, statusCode: 207);
+    }
+    catch (DbUnavailableException ex)
+    {
+        return Results.Json(new { target = body.Target, type = body.Type, success = false, error = "db_unavailable", detail = ex.Message }, statusCode: 207);
+    }
+    catch (ComposeUnavailableException ex)
+    {
+        return Results.Json(new { target = body.Target, type = body.Type, success = false, error = "compose_unavailable", detail = ex.Message }, statusCode: 207);
+    }
+});
+
 // POST /api/services/restart
 app.MapPost("/api/services/restart", async (HttpRequest request, DockerService docker, CancellationToken ct) =>
 {
@@ -2407,6 +2576,8 @@ record RestartWithVersionRequest(string InstructionName, int VersionNumber, bool
 record SetEnvVarRequest(string Value);
 record RestartServicesRequest(string[] Services);
 record MountCredentialRequest(string AgentName, string MountPath, string? Mode);
+record CredentialSaveRequest(string? Value);
+record RetryPropagationRequest(string? Target, string? Type);
 
 record CreateScheduleRequest(
     string? ScheduleId,

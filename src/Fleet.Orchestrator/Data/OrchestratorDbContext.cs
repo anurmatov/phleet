@@ -32,6 +32,9 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
     public DbSet<CredentialFile> CredentialFiles => Set<CredentialFile>();
     public DbSet<AgentCredentialMount> AgentCredentialMounts => Set<AgentCredentialMount>();
 
+    // Credentials Audit
+    public DbSet<CredentialsAudit> CredentialsAudit => Set<CredentialsAudit>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<Agent>(e =>
@@ -274,6 +277,16 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
              .WithMany(f => f.Mounts)
              .HasForeignKey(x => x.CredentialFileId)
              .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CredentialsAudit>(e =>
+        {
+            e.ToTable("credentials_audit");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).ValueGeneratedOnAdd();
+            e.Property(x => x.KeyName).HasMaxLength(255).IsRequired();
+            e.Property(x => x.Actor).HasMaxLength(255).HasDefaultValue("CEO");
+            e.HasIndex(x => x.ChangedAt);
         });
 
     }

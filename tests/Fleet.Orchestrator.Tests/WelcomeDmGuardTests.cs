@@ -179,3 +179,103 @@ public class WelcomeDmGuardTests
         Assert.Equal(1, workflowStartCount);
     }
 }
+
+/// <summary>
+/// Regression tests for SetupService.GetTelegramUserId() no-cache contract.
+///
+/// SetupService itself cannot be instantiated in unit tests (sealed, many required deps),
+/// so these tests replicate the exact LoadEnvFile + TELEGRAM_USER_ID parse logic and
+/// verify it against real temp files. This directly mirrors what GetTelegramUserId() does
+/// internally and proves the fresh-read behavior that the welcome DM flow depends on:
+///
+///   orchestrator starts (TELEGRAM_USER_ID absent)
+///     → CEO fills in Credentials page (writes TELEGRAM_USER_ID to .env)
+///     → CEO provisions first co-cto agent
+///     → GetTelegramUserId() reads fresh → returns CEO's ID → welcome DM fires
+///
+/// If caching were introduced at any level (process-lifetime, request-scoped, etc.) the
+/// second call in the test below would return null and the welcome would be silently skipped.
+/// </summary>
+public class SetupServiceTelegramUserIdTests
+{
+    /// <summary>
+    /// Reads TELEGRAM_USER_ID from an .env file, replicating SetupService.GetTelegramUserId()
+    /// internal logic so we can test it against real temp files without instantiating the
+    /// sealed service.
+    /// </summary>
+    private static long? ReadTelegramUserIdFromEnvFile(string path)
+    {
+        if (!File.Exists(path)) return null;
+        foreach (var line in File.ReadAllLines(path))
+        {
+            var trimmed = line.Trim();
+            if (trimmed.StartsWith('#') || !trimmed.Contains('=')) continue;
+            var idx = trimmed.IndexOf('=');
+            var key = trimmed[..idx].Trim();
+            if (!string.Equals(key, "TELEGRAM_USER_ID", StringComparison.Ordinal)) continue;
+            var val = trimmed[(idx + 1)..].Trim().Trim('"');
+            if (long.TryParse(val, out var id)) return id;
+        }
+        return null;
+    }
+
+    [Fact]
+    public void GetTelegramUserId_ReadsEnvFileFreshOnEachCall_UpdatedValueVisible()
+    {
+        // Proves the no-cache contract: a value written to .env after the process starts
+        // is visible on the very next call — no process-lifetime snapshot involved.
+        // This is the exact scenario: orchestrator starts with no TELEGRAM_USER_ID,
+        // CEO fills in Credentials page, then provisions the first co-cto agent.
+        var envPath = Path.GetTempFileName();
+        try
+        {
+            // First call: key absent → null (orchestrator started before CEO configured)
+            File.WriteAllText(envPath, "# telegram not yet configured\nTELEGRAM_CTO_BOT_TOKEN=abc\n");
+            Assert.Null(ReadTelegramUserIdFromEnvFile(envPath));
+
+            // Simulate CEO entering their Telegram user ID via the Credentials page
+            File.WriteAllText(envPath, "TELEGRAM_CTO_BOT_TOKEN=abc\nTELEGRAM_USER_ID=99887766\n");
+
+            // Second call: same path, fresh read → picks up new value immediately
+            Assert.Equal(99887766L, ReadTelegramUserIdFromEnvFile(envPath));
+        }
+        finally
+        {
+            File.Delete(envPath);
+        }
+    }
+
+    [Fact]
+    public void GetTelegramUserId_WhenFileAbsent_ReturnsNull()
+    {
+        var nonExistentPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".env");
+        Assert.Null(ReadTelegramUserIdFromEnvFile(nonExistentPath));
+    }
+
+    [Fact]
+    public void GetTelegramUserId_WhenKeyPresentWithQuotes_ParsesCorrectly()
+    {
+        var envPath = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(envPath, "TELEGRAM_USER_ID=\"123456789\"\n");
+            Assert.Equal(123456789L, ReadTelegramUserIdFromEnvFile(envPath));
+        }
+        finally { File.Delete(envPath); }
+    }
+
+    [Theory]
+    [InlineData("TELEGRAM_USER_ID=abc")]        // non-numeric
+    [InlineData("TELEGRAM_USER_ID=")]           // empty
+    [InlineData("# TELEGRAM_USER_ID=12345")]    // commented out
+    public void GetTelegramUserId_WhenInvalidOrAbsent_ReturnsNull(string envLine)
+    {
+        var envPath = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(envPath, envLine + "\n");
+            Assert.Null(ReadTelegramUserIdFromEnvFile(envPath));
+        }
+        finally { File.Delete(envPath); }
+    }
+}

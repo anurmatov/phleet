@@ -89,7 +89,7 @@ public sealed class CodexExecutor : IAgentExecutor
         {
             yield return new AgentProgress
             {
-                EventType = "assistant",
+                EventType = "warning",
                 Summary = "Note: the Codex provider does not support image input — images will be ignored.",
                 IsSignificant = true,
             };

@@ -460,27 +460,25 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         if (message.MediaGroupId is { } mediaGroupId && isPhoto)
         {
             var groupKey = $"{chatId}:{mediaGroupId}";
-            var currentCount = _mediaGroupBuffer.GetImageCount(groupKey);
 
-            if (currentCount >= _telegramConfig.MaxImagesPerGroup)
+            Func<IncomingMessage, Task> flushHandler = async flushedMsg =>
+            {
+                _groupSizeCapped.TryRemove(groupKey, out _);
+                await _router.HandleAsync(flushedMsg);
+            };
+
+            // TryAddPhotoWithCapAsync atomically checks and adds under the same lock.
+            var accepted = await _mediaGroupBuffer.TryAddPhotoWithCapAsync(
+                groupKey, downloadedImage, baseMsg, _telegramConfig.MaxImagesPerGroup, flushHandler);
+
+            if (!accepted)
             {
                 // Warn once when cap is first exceeded, then keep resetting the debounce
                 if (_groupSizeCapped.TryAdd(groupKey, true))
                     await SendTextAsync(chatId, $"({_telegramConfig.MaxImagesPerGroup} images received — only the first {_telegramConfig.MaxImagesPerGroup} will be processed.)");
 
-                await _mediaGroupBuffer.AddPhotoAsync(groupKey, null, baseMsg, async flushedMsg =>
-                {
-                    _groupSizeCapped.TryRemove(groupKey, out _);
-                    await _router.HandleAsync(flushedMsg);
-                });
-                return;
+                await _mediaGroupBuffer.AddPhotoAsync(groupKey, null, baseMsg, flushHandler);
             }
-
-            await _mediaGroupBuffer.AddPhotoAsync(groupKey, downloadedImage, baseMsg, async flushedMsg =>
-            {
-                _groupSizeCapped.TryRemove(groupKey, out _);
-                await _router.HandleAsync(flushedMsg);
-            });
             return;
         }
 

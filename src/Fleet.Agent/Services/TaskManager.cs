@@ -440,7 +440,12 @@ public sealed class TaskManager
                     if (progress.IsErrorResult)
                         errorResult = true;
 
-                    if (progress.IsSignificant && progress.ToolName is not null)
+                    if (progress.EventType == "warning" && progress.IsSignificant)
+                    {
+                        // User-facing warning (e.g. provider capability notice) — deliver immediately
+                        await Sink.SendTextAsync(chatId, progress.Summary);
+                    }
+                    else if (progress.IsSignificant && progress.ToolName is not null)
                     {
                         significantUpdates++;
                         toolCalls.Add((ShortenToolName(progress.ToolName), TruncateArgs(progress.ToolArgs ?? "{}", _agentConfig.ToolArgsTruncateLength)));

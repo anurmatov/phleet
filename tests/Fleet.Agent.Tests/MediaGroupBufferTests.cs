@@ -187,4 +187,90 @@ public class MediaGroupBufferTests
         Assert.Single(received);
         Assert.Equal(42L, received[0].ChatId); // first template wins
     }
+
+    // ── caption concatenation (AC#MEDIUM) ───────────────────────────────────
+
+    [Fact]
+    public async Task Captions_FromMultiplePhotos_AreConcatenatedAndDeduped()
+    {
+        var buffer = new MediaGroupBuffer(maxTotalMs: 10_000);
+        var received = new List<IncomingMessage>();
+
+        static IncomingMessage Captioned(string caption) => new()
+        {
+            ChatId = 1, UserId = 1, Text = caption, StrippedText = caption,
+            Sender = "@u", IsGroupChat = false,
+        };
+
+        Func<IncomingMessage, Task> flush = m => { received.Add(m); return Task.CompletedTask; };
+
+        await buffer.AddPhotoAsync("cap1", MakeImage(1), Captioned("photo one"), flush);
+        await buffer.AddPhotoAsync("cap1", MakeImage(2), Captioned("photo two"), flush);
+        // duplicate of first — should appear only once
+        await buffer.AddPhotoAsync("cap1", MakeImage(3), Captioned("photo one"), flush);
+
+        await Task.Delay(1700);
+
+        Assert.Single(received);
+        // "photo one" and "photo two" joined; "photo one" deduped
+        Assert.Equal("photo one photo two", received[0].StrippedText);
+    }
+
+    [Fact]
+    public async Task Captions_EmptyCaption_NotIncluded()
+    {
+        var buffer = new MediaGroupBuffer(maxTotalMs: 10_000);
+        var received = new List<IncomingMessage>();
+
+        Func<IncomingMessage, Task> flush = m => { received.Add(m); return Task.CompletedTask; };
+
+        await buffer.AddPhotoAsync("cap2", MakeImage(1), MakeTemplate(), flush);
+        await buffer.AddPhotoAsync("cap2", MakeImage(2), MakeTemplate(), flush);
+
+        await Task.Delay(1700);
+
+        Assert.Single(received);
+        Assert.Equal("", received[0].StrippedText); // no captions → empty string
+    }
+
+    // ── AC#6: count cap (TryAddPhotoWithCapAsync returns false) ─────────────
+
+    [Fact]
+    public async Task TryAddPhotoWithCap_RejectsWhenAtCap()
+    {
+        var buffer = new MediaGroupBuffer(maxTotalMs: 10_000);
+        var received = new List<IncomingMessage>();
+        Func<IncomingMessage, Task> flush = m => { received.Add(m); return Task.CompletedTask; };
+
+        const int cap = 2;
+        Assert.True(await buffer.TryAddPhotoWithCapAsync("g6", MakeImage(1), MakeTemplate(), cap, flush));
+        Assert.True(await buffer.TryAddPhotoWithCapAsync("g6", MakeImage(2), MakeTemplate(), cap, flush));
+        // cap reached — third photo rejected
+        Assert.False(await buffer.TryAddPhotoWithCapAsync("g6", MakeImage(3), MakeTemplate(), cap, flush));
+
+        await Task.Delay(1700);
+
+        // Only the two accepted photos in the flush
+        Assert.Single(received);
+        Assert.Equal(2, received[0].Images.Count);
+    }
+
+    [Fact]
+    public async Task TryAddPhotoWithCap_AcceptsNullImageBelowCap()
+    {
+        // A null image (skipped download) still counts as an "accepted" slot
+        // so the debounce timer resets — but it must not inflate the image count.
+        var buffer = new MediaGroupBuffer(maxTotalMs: 10_000);
+        var received = new List<IncomingMessage>();
+        Func<IncomingMessage, Task> flush = m => { received.Add(m); return Task.CompletedTask; };
+
+        Assert.True(await buffer.TryAddPhotoWithCapAsync("g7", MakeImage(1), MakeTemplate(), 5, flush));
+        Assert.True(await buffer.TryAddPhotoWithCapAsync("g7", null,         MakeTemplate(), 5, flush));
+
+        await Task.Delay(1700);
+
+        Assert.Single(received);
+        // null photo skipped — only 1 real image
+        Assert.Single(received[0].Images);
+    }
 }

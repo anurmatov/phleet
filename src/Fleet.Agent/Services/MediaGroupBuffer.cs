@@ -36,6 +36,67 @@ internal sealed class MediaGroupBuffer
     }
 
     /// <summary>
+    /// Atomically checks the image count and adds the photo under the same lock.
+    /// Returns <c>true</c> if the photo was accepted;
+    /// returns <c>false</c> if the group is already at or above <paramref name="maxImages"/>.
+    /// </summary>
+    public async Task<bool> TryAddPhotoWithCapAsync(
+        string groupKey,
+        MessageImage? image,
+        IncomingMessage template,
+        int maxImages,
+        Func<IncomingMessage, Task> flush)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var state = _groups.GetOrAdd(groupKey, _ => new MediaGroupState(template, now));
+
+        bool forceFlushNow;
+        CancellationTokenSource? oldCts;
+        CancellationTokenSource? newCts = null;
+
+        lock (state)
+        {
+            // Atomic: check AND add under the same lock — no race window.
+            if (state.Images.Count >= maxImages)
+                return false;
+
+            if (image is not null)
+                state.Images.Add(image);
+            var caption = template.StrippedText;
+            if (!string.IsNullOrEmpty(caption) && !state.Captions.Contains(caption))
+                state.Captions.Add(caption);
+
+            forceFlushNow = (now - state.FirstReceivedAt).TotalMilliseconds >= _maxTotalMs;
+            oldCts = state.DebounceCts;
+            if (forceFlushNow)
+                state.DebounceCts = null;
+            else
+            {
+                newCts = new CancellationTokenSource();
+                state.DebounceCts = newCts;
+            }
+        }
+
+        oldCts?.Cancel();
+        oldCts?.Dispose();
+
+        if (forceFlushNow)
+        {
+            await FlushGroupAsync(groupKey, flush);
+            return true;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try { await Task.Delay(DebounceWindowMs, newCts!.Token); }
+            catch (OperationCanceledException) { return; }
+            await FlushGroupAsync(groupKey, flush);
+        });
+
+        return true;
+    }
+
+    /// <summary>
     /// Register a new photo for a media group identified by <paramref name="groupKey"/>.
     /// <paramref name="image"/> may be null if the photo was skipped (oversized or download failure).
     /// <paramref name="template"/> carries the message metadata from the first photo; subsequent
@@ -56,6 +117,10 @@ internal sealed class MediaGroupBuffer
         {
             if (image is not null)
                 state.Images.Add(image);
+            // Collect captions from all photos, deduped, for later concatenation on flush.
+            var caption = template.StrippedText;
+            if (!string.IsNullOrEmpty(caption) && !state.Captions.Contains(caption))
+                state.Captions.Add(caption);
             forceFlushNow = (now - state.FirstReceivedAt).TotalMilliseconds >= _maxTotalMs;
         }
 
@@ -96,15 +161,17 @@ internal sealed class MediaGroupBuffer
 
         IReadOnlyList<MessageImage> images;
         IncomingMessage template;
+        string combinedCaption;
         lock (state)
         {
             state.DebounceCts?.Cancel();
             state.DebounceCts?.Dispose();
             images = [.. state.Images];
             template = state.TemplateMessage;
+            combinedCaption = string.Join(" ", state.Captions);
         }
 
-        var msg = template with { Images = images };
+        var msg = template with { Images = images, Text = combinedCaption, StrippedText = combinedCaption };
         await flush(msg);
     }
 
@@ -112,6 +179,8 @@ internal sealed class MediaGroupBuffer
     {
         public IncomingMessage TemplateMessage { get; }
         public List<MessageImage> Images { get; } = [];
+        /// <summary>Captions from all photos in the group, deduplicated, for concatenation on flush.</summary>
+        public List<string> Captions { get; } = [];
         public CancellationTokenSource? DebounceCts { get; set; }
         public DateTimeOffset FirstReceivedAt { get; }
 

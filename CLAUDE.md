@@ -88,6 +88,14 @@ The orchestrator manages agent lifecycle (create, provision, reprovision, stop) 
 
 Workflows are orchestrated via Temporal. The temporal bridge connects Temporal workers to agent containers via RabbitMQ.
 
+## Telegram Image Handling
+
+- **Image-only messages** (no caption): `AgentTransport` passes the photo to `MessageRouter`, which substitutes `TelegramOptions.DefaultImagePrompt` (default: `"(image attached — please analyze)"`) as the task prompt so the executor always receives a non-empty string.
+- **Media groups** (multiple photos sent together): Telegram delivers each photo as a separate `Message` update sharing the same `MediaGroupId`. `AgentTransport` buffers all photos for a group via `MediaGroupBuffer`: it debounces 1500 ms after the last photo, then flushes a single `IncomingMessage` carrying all images. A hard cap of `TelegramOptions.MaxGroupBufferMs` (default: 10 s) force-flushes the group if photos keep trickling in.
+- **Size limits**: individual photos exceeding `MaxImageBytes` (default: 10 MB) are skipped with a Telegram reply warning. Groups exceeding `MaxImagesPerGroup` (default: 10) drop extra photos with a warning.
+- **ClaudeExecutor**: forwards all images as separate content blocks in the multi-modal Claude CLI JSON payload.
+- **CodexExecutor**: emits a user-facing warning and drops images (Codex SDK does not support image input via `runStreamed`).
+
 ## Code Conventions
 
 - .NET 10, C# latest features

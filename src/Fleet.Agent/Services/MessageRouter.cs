@@ -95,6 +95,10 @@ public sealed class MessageRouter
         if (string.IsNullOrEmpty(trimmed) && !msg.HasImage)
             return;
 
+        // Image-only message — inject the default prompt so the LLM knows what to do
+        if (string.IsNullOrEmpty(trimmed) && msg.HasImage)
+            trimmed = _telegramConfig.DefaultImagePrompt;
+
         // --- Command dispatch (delegates to shared CommandDispatcher) ---
 
         // /cancel with empty arg from Telegram means "smart cancel" (differs from relay default of "all")
@@ -121,7 +125,7 @@ public sealed class MessageRouter
                 if (msg.IsGroupChat)
                     task = _groupBehavior.BuildGroupTask(msg.ChatId, msg.Sender, task, msg.ReplyToUsername, msg.ReplyToText);
                 _taskManager.StartTask(msg.ChatId, task, displayText, isSessionTask: false,
-                    source: TaskSource.NewCommand, imageBytes: msg.ImageBytes, imageMimeType: msg.ImageMimeType,
+                    source: TaskSource.NewCommand, images: msg.Images.Count > 0 ? msg.Images : null,
                     userId: msg.UserId);
                 return;
             }
@@ -145,21 +149,29 @@ public sealed class MessageRouter
             _groupBehavior.AddAndPersist(msg.ChatId, msg.Sender, trimmed, null);
         }
 
-        var messageDisplayText = trimmed;
-        if (msg.IsGroupChat)
+        // Build display text that reflects image count for heartbeat/status visibility
+        string messageDisplayText;
+        if (msg.Images.Count > 1)
         {
-            messageDisplayText = $"[From: {msg.Sender}] {trimmed}";
-            trimmed = _groupBehavior.BuildGroupTask(msg.ChatId, msg.Sender, trimmed, msg.ReplyToUsername, msg.ReplyToText);
+            var imageDisplay = string.IsNullOrEmpty(msg.StrippedText)
+                ? $"[{msg.Images.Count} images]"
+                : $"[{msg.Images.Count} images + caption: {trimmed}]";
+            messageDisplayText = msg.IsGroupChat ? $"[From: {msg.Sender}] {imageDisplay}" : imageDisplay;
         }
         else
         {
-            trimmed = _groupBehavior.BuildDmTask(msg.ChatId, trimmed, msg.ReplyToText);
+            messageDisplayText = msg.IsGroupChat ? $"[From: {msg.Sender}] {trimmed}" : trimmed;
         }
+
+        if (msg.IsGroupChat)
+            trimmed = _groupBehavior.BuildGroupTask(msg.ChatId, msg.Sender, trimmed, msg.ReplyToUsername, msg.ReplyToText);
+        else
+            trimmed = _groupBehavior.BuildDmTask(msg.ChatId, trimmed, msg.ReplyToText);
 
         // When busy, StartTask enqueues the message and notifies the user automatically.
         // Use /new <task> for parallel tasks, or /cancel to stop the current one.
         _taskManager.StartTask(msg.ChatId, trimmed, messageDisplayText, isSessionTask: true,
-            imageBytes: msg.ImageBytes, imageMimeType: msg.ImageMimeType, userId: msg.UserId);
+            images: msg.Images.Count > 0 ? msg.Images : null, userId: msg.UserId);
     }
 
     private CancellationToken _shutdownToken = CancellationToken.None;

@@ -36,6 +36,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     private readonly ILogger<AgentTransport> _logger;
 
     private string _botUsername = "";
+    private readonly MediaGroupBuffer _mediaGroupBuffer;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _groupSizeCapped = new();
 
     public AgentTransport(
         IOptions<AgentOptions> agentConfig,
@@ -71,6 +73,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         _groupBehavior.Sink = this;
         _router.Sink = this;
         _commands.Sink = this;
+
+        _mediaGroupBuffer = new MediaGroupBuffer(telegramConfig.Value.MaxGroupBufferMs);
     }
 
     private static readonly Regex ImageMarkerRegex = new(@"\[IMAGE:(.+?)\]", RegexOptions.Compiled);
@@ -428,26 +432,16 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         var replyToUsername = message.ReplyToMessage?.From?.Username is { } ru ? $"@{ru}" : null;
         var replyToText = message.ReplyToMessage?.Text ?? message.ReplyToMessage?.Caption;
 
-        // Download photo if present (largest available size)
-        byte[]? imageBytes = null;
-        string? imageMimeType = null;
+        // Download photo if present (largest available size, with size check and one retry)
+        MessageImage? downloadedImage = null;
         if (isPhoto)
         {
             var largest = message.Photo!.OrderByDescending(p => p.FileSize ?? 0).First();
-            try
-            {
-                using var ms = new System.IO.MemoryStream();
-                await _bot!.GetInfoAndDownloadFile(largest.FileId, ms);
-                imageBytes = ms.ToArray();
-                imageMimeType = "image/jpeg";
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to download photo {FileId}", largest.FileId);
-            }
+            downloadedImage = await DownloadPhotoAsync(largest, chatId, photoIndex: 1);
         }
 
-        var msg = new IncomingMessage
+        // Build the base IncomingMessage (no images yet — filled in below)
+        var baseMsg = new IncomingMessage
         {
             ChatId = chatId,
             UserId = message.From?.Id ?? 0,
@@ -460,11 +454,77 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             IsReplyToBot = isReplyToMe,
             IsNameMentioned = isNameMentioned,
             StrippedText = stripped,
-            ImageBytes = imageBytes,
-            ImageMimeType = imageMimeType,
         };
 
+        // Media group: buffer all photos and flush as one IncomingMessage after debounce
+        if (message.MediaGroupId is { } mediaGroupId && isPhoto)
+        {
+            var groupKey = $"{chatId}:{mediaGroupId}";
+
+            Func<IncomingMessage, Task> flushHandler = async flushedMsg =>
+            {
+                _groupSizeCapped.TryRemove(groupKey, out _);
+                await _router.HandleAsync(flushedMsg);
+            };
+
+            // TryAddPhotoWithCapAsync atomically checks and adds under the same lock.
+            var accepted = await _mediaGroupBuffer.TryAddPhotoWithCapAsync(
+                groupKey, downloadedImage, baseMsg, _telegramConfig.MaxImagesPerGroup, flushHandler);
+
+            if (!accepted)
+            {
+                // Warn once when cap is first exceeded, then keep resetting the debounce
+                if (_groupSizeCapped.TryAdd(groupKey, true))
+                    await SendTextAsync(chatId, $"({_telegramConfig.MaxImagesPerGroup} images received — only the first {_telegramConfig.MaxImagesPerGroup} will be processed.)");
+
+                await _mediaGroupBuffer.AddPhotoAsync(groupKey, null, baseMsg, flushHandler);
+            }
+            return;
+        }
+
+        // Single photo or text-only: process immediately
+        var images = downloadedImage is not null
+            ? (IReadOnlyList<MessageImage>)[downloadedImage]
+            : [];
+        var msg = baseMsg with { Images = images };
         await _router.HandleAsync(msg);
+    }
+
+    /// <summary>
+    /// Download a Telegram photo to memory. Checks size limit, retries once on transient failure.
+    /// Returns null and warns the user if the image is oversized or both download attempts fail.
+    /// </summary>
+    private async Task<MessageImage?> DownloadPhotoAsync(Telegram.Bot.Types.PhotoSize photo, long chatId, int photoIndex)
+    {
+        var sizeBytes = (long)(photo.FileSize ?? 0);
+        if (sizeBytes > 0 && sizeBytes > _telegramConfig.MaxImageBytes)
+        {
+            _logger.LogWarning("Photo #{Index} ({FileId}) exceeds MaxImageBytes ({Size} > {Limit}), skipping",
+                photoIndex, photo.FileId, sizeBytes, _telegramConfig.MaxImageBytes);
+            await SendTextAsync(chatId, $"(Image #{photoIndex} exceeded size limit, skipped.)");
+            return null;
+        }
+
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            try
+            {
+                if (attempt > 0) await Task.Delay(500);
+                using var ms = new System.IO.MemoryStream();
+                await _bot!.GetInfoAndDownloadFile(photo.FileId, ms);
+                return new MessageImage(ms.ToArray(), "image/jpeg");
+            }
+            catch (Exception ex) when (attempt == 0)
+            {
+                _logger.LogWarning(ex, "Photo #{Index} ({FileId}) download failed on attempt 1, retrying in 500ms", photoIndex, photo.FileId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Photo #{Index} ({FileId}) download failed after retry, skipping", photoIndex, photo.FileId);
+                await SendTextAsync(chatId, $"(Image #{photoIndex} download failed, skipped.)");
+            }
+        }
+        return null;
     }
 
     private Task OnError(Exception exception, HandleErrorSource source)

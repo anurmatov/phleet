@@ -40,6 +40,18 @@ public sealed class TelegramOptions
     public List<long> AllowedUserIds { get; set; } = [];
     public List<long> AllowedGroupIds { get; set; } = [];
     public bool SendOnly { get; set; }
+
+    /// <summary>Prompt injected when a message has images but no caption text. Default: "(image attached — please analyze)".</summary>
+    public string DefaultImagePrompt { get; set; } = "(image attached — please analyze)";
+
+    /// <summary>Maximum number of photos to collect from a single media group. Extras are dropped with a user-facing warning. Default: 10.</summary>
+    public int MaxImagesPerGroup { get; set; } = 10;
+
+    /// <summary>Maximum individual photo size in bytes; photos above this limit are skipped with a user-facing warning. Default: 10 MB.</summary>
+    public int MaxImageBytes { get; set; } = 10_485_760;
+
+    /// <summary>Hard-cap on total buffering time for a media group in milliseconds. If photos keep arriving past this limit, the group is force-flushed. Default: 10000 ms.</summary>
+    public int MaxGroupBufferMs { get; set; } = 10_000;
 }
 
 public sealed class RabbitMqOptions

@@ -12,8 +12,7 @@ public sealed record QueuedMessage(
     string? RelaySender,
     string? CorrelationId,
     string? TaskId,
-    byte[]? ImageBytes,
-    string? ImageMimeType,
+    IReadOnlyList<MessageImage>? Images,
     long UserId,
     DateTimeOffset QueuedAt,
     /// <summary>Human-readable sender label for display in heartbeats and dashboard.</summary>

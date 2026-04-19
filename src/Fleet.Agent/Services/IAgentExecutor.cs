@@ -11,8 +11,7 @@ public interface IAgentExecutor : IAsyncDisposable
     /// <summary>Send a task to the LLM process, streaming progress events.</summary>
     IAsyncEnumerable<AgentProgress> ExecuteAsync(
         string task,
-        byte[]? imageBytes = null,
-        string? imageMimeType = null,
+        IReadOnlyList<MessageImage>? images = null,
         CancellationToken ct = default);
 
     /// <summary>Stop the running process gracefully.</summary>

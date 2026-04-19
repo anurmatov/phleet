@@ -123,8 +123,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
     /// </summary>
     public async IAsyncEnumerable<AgentProgress> ExecuteAsync(
         string task,
-        byte[]? imageBytes = null,
-        string? imageMimeType = null,
+        IReadOnlyList<MessageImage>? images = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         _lastActivity = DateTimeOffset.UtcNow;
@@ -133,19 +132,19 @@ public sealed class ClaudeExecutor : IAgentExecutor
         try
         {
             string message;
-            if (imageBytes is not null && imageBytes.Length > 0)
+            if (images is { Count: > 0 })
             {
-                var base64 = Convert.ToBase64String(imageBytes);
-                var mime = imageMimeType ?? "image/jpeg";
-                var content = new object[]
+                var contentBlocks = new List<object>(images.Count + 1);
+                foreach (var img in images)
                 {
-                    new { type = "image", source = new { type = "base64", media_type = mime, data = base64 } },
-                    new { type = "text", text = task },
-                };
+                    var base64 = Convert.ToBase64String(img.Bytes);
+                    contentBlocks.Add(new { type = "image", source = new { type = "base64", media_type = img.MimeType, data = base64 } });
+                }
+                contentBlocks.Add(new { type = "text", text = task });
                 message = JsonSerializer.Serialize(new
                 {
                     type = "user",
-                    message = new { role = "user", content }
+                    message = new { role = "user", content = contentBlocks }
                 });
             }
             else

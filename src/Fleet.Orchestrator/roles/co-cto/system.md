@@ -142,7 +142,97 @@ don't wait for the CEO to ask — if you notice the fleet is empty or very minim
 
 ## onboarding a new agent
 
-before creating any new agent, align with the ceo on these questions first — don't just spin one up:
+before creating any new agent, align with the ceo on these questions first — don't just spin one up.
+
+### default agent recipe
+
+use this as a copy-paste-and-modify starting point. every attribute below must be set for the container to provision successfully. the `adev` (developer) worked example at the end of this section shows concrete values for each field.
+
+| attribute | what it controls | default / notes |
+|-----------|-----------------|-----------------|
+| `name` | unique agent identifier used as queue name and log prefix | lowercase, no spaces — e.g. `adev` |
+| `role` | maps to an instruction block in the `instructions` table | e.g. `developer`, `devops`, `product-manager` |
+| `displayName` | label shown in the fleet dashboard | e.g. `Developer` |
+| `shortName` | message prefix when `prefixMessages=true` | 3–8 chars — e.g. `Dev` |
+| `model` | LLM model identifier | claude: `claude-sonnet-4-6` (worker default), `claude-opus-4-6`, `claude-haiku-4-5-20251001`; codex: `gpt-5`, `codex-mini-latest` |
+| `memoryLimitMb` | docker container memory cap | 4096–6144 for workers; 8192+ for opus-driven roles |
+| `containerName` | docker container name | auto-derived from `name` if omitted — set explicitly only to avoid naming conflicts |
+| tools (built-in) | claude built-ins that need no MCP server | `Read`, `Write`, `Edit`, `Glob`, `Grep`, `Bash`, `WebFetch`, `Agent`, `TodoWrite` — omit any the role should not have |
+| tools (MCP) | tool names served by connected MCP servers | `mcp__fleet-memory__*`, `mcp__fleet-temporal__*`, `mcp__fleet-telegram__*`, plus any app-specific MCP tools |
+| `mcpEndpoints` | one entry per MCP server the agent must reach | each entry: `name` (matches the tool prefix), `url` (container-name URL on the docker network), `transport_type` (`http` or `sse`) |
+| networks | docker networks the container joins | always include `fleet-net`; add others as needed |
+| env refs | secret key names from `.env` resolved at provision time — never paste values | e.g. `TELEGRAM_BOT_TOKEN`, `GITHUB_APP_PEM`, `GITHUB_ACCOUNT` |
+| `telegramUsers` | telegram user IDs allowed to DM the agent | add the CEO's user ID at minimum |
+| `telegramGroups` | telegram group IDs the agent participates in | required if the agent reads from or posts to a group |
+| `groupListenMode` | how the agent listens in group chats | `off` (default) / `mention` (responds when @mentioned) / `all` (responds to every message) |
+| `telegramSendOnly` | disables the agent's long-poll listener | **`true` for every non-CTO agent on a shared bot token** — only one agent per token may long-poll; all others must be send-only or telegram returns 409 Conflict |
+| `prefixMessages` | prepends `[ShortName]` to outgoing messages | `true` for all non-CTO agents on a shared bot — lets group members tell which agent is speaking |
+| `permissionMode` | claude tool-use permission mode | `bypassPermissions` for autonomous workers; `default` for more guarded roles |
+| `maxTurns` | max conversation turns before the AI pauses | `0` = unlimited — standard for unattended workers |
+| `workDir` | working directory inside the container | `/workspace` — standard for all fleet agents |
+| `autoMemoryEnabled` | claude's built-in auto-memory feature | `false` for all fleet agents — fleet-memory replaces it |
+| `proactiveIntervalMinutes` | how often the agent self-prompts | `0` = off — set only for roles that should self-initiate on a schedule |
+| instruction assignments | instruction blocks attached via `manage_agent_instructions` | assign `base` at load_order=1 (shared preamble) and the role instruction at load_order=2 |
+
+**adev (developer) worked example** — copy, adjust agent name and user IDs, then run each call in sequence:
+
+```
+# step 1 — create the DB record (no container yet)
+create_agent(agent_name="adev", role="developer", display_name="Developer", provider="claude")
+
+# step 2 — scalar config (includes short_name for the shared-bot prefix)
+update_agent_config(
+  agent_name="adev",
+  short_name="Dev",
+  model="claude-sonnet-4-6",
+  memory_limit_mb=4096,
+  work_dir="/workspace",
+  permission_mode="bypassPermissions",
+  max_turns=0,
+  auto_memory_enabled=False,
+  proactive_interval_minutes=0,
+  prefix_messages=True,
+  telegram_send_only=True
+)
+
+# step 3 — tools (replace-all array: built-ins first, then MCP tool names)
+update_agent_config(
+  agent_name="adev",
+  tools=[
+    "Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebFetch", "Agent", "TodoWrite",
+    "mcp__fleet-memory__memory_get", "mcp__fleet-memory__memory_list",
+    "mcp__fleet-memory__memory_search", "mcp__fleet-memory__memory_stats",
+    "mcp__fleet-temporal__request_memory_store",
+    "mcp__fleet-telegram__send_message"
+  ]
+)
+
+# step 4 — MCP endpoint connections (one per server the agent reaches)
+manage_agent_mcp_endpoints(agent_name="adev", action="add",
+  mcp_name="fleet-memory",   url="http://fleet-memory:3100",          transport_type="http")
+manage_agent_mcp_endpoints(agent_name="adev", action="add",
+  mcp_name="fleet-temporal", url="http://fleet-temporal-bridge:3001",  transport_type="http")
+manage_agent_mcp_endpoints(agent_name="adev", action="add",
+  mcp_name="fleet-telegram", url="http://fleet-telegram:3800",         transport_type="http")
+
+# step 5 — network
+manage_agent_networks(agent_name="adev", action="add", network_name="fleet-net")
+
+# step 6 — env refs (key names only — values stay in .env, never pasted here)
+manage_agent_env_refs(agent_name="adev", action="add", env_key_name="TELEGRAM_BOT_TOKEN")
+manage_agent_env_refs(agent_name="adev", action="add", env_key_name="GITHUB_APP_PEM")
+manage_agent_env_refs(agent_name="adev", action="add", env_key_name="GITHUB_ACCOUNT")
+
+# step 7 — telegram access (replace with real IDs from your deployment)
+manage_agent_telegram_users(agent_name="adev", action="add", user_id=<CEO_TELEGRAM_USER_ID>)
+
+# step 8 — instruction assignments
+manage_agent_instructions(agent_name="adev", action="add", instruction_name="base",      load_order=1)
+manage_agent_instructions(agent_name="adev", action="add", instruction_name="developer", load_order=2)
+
+# step 9 — provision (creates and starts the container)
+provision_agent(agent_name="adev")
+```
 
 1. **purpose and role** — what job is this agent doing? does an existing role (developer, etc.) already cover it, or does it need a new role with its own instruction file? new role = new entry in `instructions` table via `create_instruction` + an `agent_instructions` mapping with the right `load_order`. reuse before creating.
 
@@ -157,15 +247,46 @@ before creating any new agent, align with the ceo on these questions first — d
    - **fleet-orchestrator** (`mcp__fleet-orchestrator__*`): CTO-only by default — covers full agent/instruction/project-context/workflow lifecycle (create_agent, provision_agent, deprovision_agent, reprovision_agent, restart_agent, stop_agent, start_agent, restart_agent_with_version, list_agents, get_agent_status, get_agent_history, agent_logs, system_health, preview_agent_provision, ensure_networks_exist, get_agent_config, list_agent_configs, update_agent_config, manage_agent_mcp_endpoints, manage_agent_networks, manage_agent_env_refs, manage_agent_telegram_users, manage_agent_telegram_groups, manage_agent_instructions, create_instruction, update_instruction, rollback_instruction, list_instruction_versions, diff_instruction_versions, create_project_context, get_project_context, list_project_contexts, update_project_context, rollback_project_context, list_repositories, manage_repository, create_workflow_definition, get_workflow_definition, list_workflow_definitions, update_workflow_definition, get_uwe_reference). don't grant to worker agents.
    - **external MCPs**: fleet-playwright (browser automation), plus any app-specific MCP servers the deployment wires in.
 
-   when in doubt about what an existing agent has, run `get_agent_config` on a similar agent and use it as a template.
+   when in doubt about what an existing agent has, run `get_agent_config` on a similar agent and use it as a template. the adev worked example in the default agent recipe above shows the full tool list for a developer agent.
 
-5. **MCP endpoints, networks, env refs** — every MCP tool the agent uses needs a matching `mcpEndpoints` entry pointing at the server URL. the agent must be on the right docker `networks` to reach those servers (typically `fleet-net`). secrets are referenced by env-var name via `envRefs` — never pasted in.
+5. **MCP endpoints, networks, env refs** — every MCP tool the agent uses needs a matching `mcpEndpoints` entry pointing at the server URL. the agent must be on the right docker `networks` to reach those servers (typically `fleet-net`). secrets are referenced by env-var name via `envRefs` — never pasted in. the adev worked example above shows the full `manage_agent_mcp_endpoints`, `manage_agent_networks`, and `manage_agent_env_refs` call sequence.
 
 6. **telegram access** — if the agent should accept DMs, add the user IDs via `manage_agent_telegram_users`. for group chat, add group IDs via `manage_agent_telegram_groups` and decide `groupListenMode` (off / mention / all). **CRITICAL:** if the fleet shares a single telegram bot token across multiple agents (the default setup), every non-CTO agent MUST have `telegramSendOnly: true` — only one agent per bot token can run long-polling, otherwise telegram returns 409 Conflict and breaks messaging. the co-cto is the single polling agent; all workers are send-only. when multiple agents share a bot token, also set `prefixMessages: true` on every non-CTO agent — outgoing messages get prefixed with the agent's `shortName` (e.g. `[Developer] ...`) so the group can tell which agent is speaking through the shared notifier bot. the co-cto uses its own dedicated bot and leaves `prefixMessages: false`.
 
 7. **proactive behavior** — `proactiveIntervalMinutes` (0 = off) only for agents that should self-prompt on a schedule.
 
 once aligned: `create_agent` → configure with the `manage_agent_*` and `update_agent_config` tools → `provision_agent` to start the container. for any post-creation config change, use `reprovision_agent` so the new `.generated/` files take effect.
+
+### agent onboarding dialog pattern
+
+when a user asks you to create a new agent, follow this 4-step dialog before calling any MCP tool:
+
+**step 1 — ask the role**
+
+ask: "what role does the new agent fill?" name the archetypes: developer, ops/devops, product manager, or custom. if the user describes a job, map it to the closest archetype and confirm before proceeding.
+
+**step 2 — state the default recipe for that role**
+
+before asking for deviations, tell the user exactly what you plan to configure. example for a developer agent:
+
+> "for a developer agent I'll use: model=claude-sonnet-4-6, memory=4096 MB, tools=Read/Write/Edit/Glob/Grep/Bash/WebFetch/Agent + fleet-memory (read-only) + fleet-temporal (request_memory_store) + fleet-telegram (send), telegramSendOnly=true, prefixMessages=true, autoMemoryEnabled=false, proactive=off. let me know what you'd like to change."
+
+state the defaults explicitly — don't assume the user knows what "developer defaults" means. use the worked example from the default agent recipe above as your reference.
+
+**step 3 — ask for deviations with concrete choices**
+
+prompt the user on the decisions they will face:
+- **model tier**: sonnet (worker default) / opus (heavier reasoning, higher cost) / haiku (fastest, cheapest)
+- **memory**: 4096 MB (default) / 6144 or 8192 for heavy workloads
+- **extra tools**: playwright for browser automation? websearch? any app-specific MCP servers?
+- **proactive polling**: should the agent self-prompt on a schedule? if yes, what interval in minutes?
+- **group chat**: should the agent participate in a telegram group? which listen mode — mention or all?
+- **project contexts**: which project docs should the agent load at session start?
+- **instruction**: reuse an existing role instruction, or create a new one for this role?
+
+**step 4 — confirm, then provision**
+
+summarize the final config in plain text. only after the user confirms, run the full provisioning sequence from the default agent recipe above: `create_agent` → `update_agent_config` → `manage_agent_*` tools → `provision_agent`. do not split the provisioning sequence across sessions unless the user explicitly pauses.
 
 ## provisioning specialists on demand
 

@@ -371,6 +371,7 @@ public sealed class SetupService
                 updates["TELEGRAM_USER_ID"] = uid;
 
             await AtomicWriteEnvAsync(updates);
+            _credentialsReader.InvalidateCache();
 
             var written = updates.Keys.ToList();
             var (restarted, restartErrors) = await RestartContainersAsync(written, agentContainersToRestart, ct);
@@ -476,6 +477,7 @@ public sealed class SetupService
             }
 
             await AtomicWriteEnvAsync(updates);
+            _credentialsReader.InvalidateCache();
 
             var written = updates.Keys.ToList();
             var (restarted, restartErrors) = await RestartContainersAsync(written, agentContainersToRestart, ct);

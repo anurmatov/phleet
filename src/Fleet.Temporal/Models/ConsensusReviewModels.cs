@@ -27,7 +27,14 @@ public sealed record ConsensusReviewInput(
     Dictionary<string, string>? AgentPerspectives = null,
 
     /// <summary>Agent responsible for synthesizing divergent reviews. Required — ConsensusReviewWorkflow will throw ArgumentException if null or empty.</summary>
-    string? Synthesizer = null);
+    string? Synthesizer = null,
+
+    /// <summary>
+    /// Optional review domain that selects the per-domain rubric injected into the reviewer prompt.
+    /// Known values: "code_review" (default), "design_review", "memory_review".
+    /// Null or unrecognised values fall back to "code_review" for backward compatibility.
+    /// </summary>
+    string? ReviewDomain = null);
 
 /// <summary>Output produced by the ConsensusReviewWorkflow.</summary>
 public sealed record ConsensusReviewOutput(

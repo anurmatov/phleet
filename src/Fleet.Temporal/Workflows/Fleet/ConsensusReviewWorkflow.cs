@@ -10,8 +10,10 @@ namespace Fleet.Temporal.Workflows.Fleet;
 ///
 /// Flow:
 ///   1. Fan out: all ReviewerAgents review in parallel via Workflow.WhenAllAsync.
-///      Each agent receives the base ReviewPrompt; if AgentPerspectives contains an entry
-///      for the agent, that perspective instruction is appended.
+///      Each agent receives the base ReviewPrompt plus the domain rubric selected by
+///      ReviewDomain (defaults to "code_review" when null or unrecognised).
+///      If AgentPerspectives contains an entry for the agent, that perspective instruction
+///      is appended after the rubric.
 ///   2. Fast path: unanimous "approved" → return immediately without synthesis.
 ///   3. Any "needs_human_review" → propagate immediately.
 ///   4. Synthesizer consolidates divergent reviews into a single verdict + reasoning.
@@ -34,6 +36,9 @@ public class ConsensusReviewWorkflow
         var synthesizer = input.Synthesizer;
         var workflowId = Workflow.Info.WorkflowId;
 
+        // Inject the domain-specific rubric between the base prompt and the verdict instruction.
+        var rubric = ConsensusReviewDomains.GetRubric(input.ReviewDomain);
+
         var verdictInstruction =
             $"\n\nEnd your response with exactly one of these verdict lines:\n" +
             $"VERDICT: {ReviewVerdict.Approved}\n" +
@@ -45,9 +50,10 @@ public class ConsensusReviewWorkflow
             .Select(agent =>
             {
                 var perspective = input.AgentPerspectives?.GetValueOrDefault(agent);
-                var instruction = string.IsNullOrWhiteSpace(perspective)
-                    ? input.ReviewPrompt + verdictInstruction
-                    : input.ReviewPrompt + "\n\n" + perspective + verdictInstruction;
+                var instruction = input.ReviewPrompt + "\n\n" + rubric;
+                if (!string.IsNullOrWhiteSpace(perspective))
+                    instruction += "\n\n" + perspective;
+                instruction += verdictInstruction;
 
                 return Workflow.ExecuteActivityAsync(
                     (DelegateToAgentActivity a) => a.DelegateToAgentAsync(

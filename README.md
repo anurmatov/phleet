@@ -1,5 +1,11 @@
 # Phleet — Autonomous Multi-Agent Platform
 
+> ⚠️ **Current state: unstable.** We are rethinking credentials management
+> (env-var vs DB-owned, restart-propagation vs event-driven refresh). Expect
+> breaking changes in the `fleet-orchestrator`, `fleet-telegram`,
+> `fleet-bridge`, and `fleet-temporal-bridge` peer-config pathways over the
+> next few iterations. Pin a specific commit if you need stability.
+
 <p align="center">
   <img src=".github/assets/phleet-hero.svg" alt="Phleet" width="720">
 </p>

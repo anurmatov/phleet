@@ -10,10 +10,12 @@ namespace Fleet.Temporal.Workflows.Fleet;
 ///
 /// Flow:
 ///   1. Fan out: all ReviewerAgents review in parallel via Workflow.WhenAllAsync.
-///      Each agent receives the base ReviewPrompt plus the domain rubric selected by
-///      ReviewDomain (defaults to "code_review" when null or unrecognised).
+///      Each agent receives the base ReviewPrompt. When ReviewDomain is set, the matching
+///      domain rubric from ConsensusReviewDomains is appended between the prompt and the
+///      verdict instruction. When ReviewDomain is null/absent, no rubric is injected —
+///      the prompt is sent as-is (backward-compatible with callers that embed their own checklist).
 ///      If AgentPerspectives contains an entry for the agent, that perspective instruction
-///      is appended after the rubric.
+///      is appended after the rubric (if any).
 ///   2. Fast path: unanimous "approved" → return immediately without synthesis.
 ///   3. Any "needs_human_review" → propagate immediately.
 ///   4. Synthesizer consolidates divergent reviews into a single verdict + reasoning.
@@ -36,7 +38,7 @@ public class ConsensusReviewWorkflow
         var synthesizer = input.Synthesizer;
         var workflowId = Workflow.Info.WorkflowId;
 
-        // Inject the domain-specific rubric between the base prompt and the verdict instruction.
+        // Null when ReviewDomain is absent → no rubric injected, preserving existing behaviour.
         var rubric = ConsensusReviewDomains.GetRubric(input.ReviewDomain);
 
         var verdictInstruction =
@@ -50,7 +52,11 @@ public class ConsensusReviewWorkflow
             .Select(agent =>
             {
                 var perspective = input.AgentPerspectives?.GetValueOrDefault(agent);
-                var instruction = input.ReviewPrompt + "\n\n" + rubric;
+
+                // Build instruction: base prompt → optional rubric → optional perspective → verdict
+                var instruction = input.ReviewPrompt;
+                if (rubric is not null)
+                    instruction += "\n\n" + rubric;
                 if (!string.IsNullOrWhiteSpace(perspective))
                     instruction += "\n\n" + perspective;
                 instruction += verdictInstruction;

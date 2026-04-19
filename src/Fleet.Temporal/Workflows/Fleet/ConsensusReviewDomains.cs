@@ -3,12 +3,11 @@ namespace Fleet.Temporal.Workflows.Fleet;
 /// <summary>
 /// Per-domain review rubrics for ConsensusReviewWorkflow.
 ///
-/// Each domain returns a checklist that is injected into the base ReviewPrompt so
-/// reviewers evaluate against consistent, domain-appropriate criteria instead of
-/// improvising their own.
-///
 /// Callers pass the domain string via <see cref="Fleet.Temporal.Models.ConsensusReviewInput.ReviewDomain"/>.
-/// Unrecognised or null values fall back to <see cref="CodeReview"/> (backward compat).
+/// When ReviewDomain is null or absent the workflow injects nothing, preserving exact backward
+/// compatibility with callers that embed their own checklist in ReviewPrompt.
+/// Unrecognised non-null values also return null (no injection) rather than silently
+/// substituting the code-review rubric.
 /// </summary>
 public static class ConsensusReviewDomains
 {
@@ -31,18 +30,20 @@ public static class ConsensusReviewDomains
         };
 
     /// <summary>
-    /// Returns the rubric checklist for the given domain.
-    /// Falls back to the code-review rubric for null or unrecognised values.
+    /// Returns the rubric checklist for the given domain, or null when domain is null/unrecognised.
+    /// The workflow only injects the rubric when the return value is non-null, so callers that
+    /// omit ReviewDomain see no change in reviewer prompt.
     /// </summary>
-    public static string GetRubric(string? domain) =>
+    public static string? GetRubric(string? domain) =>
         domain?.ToLowerInvariant() switch
         {
+            CodeReview => CodeReviewRubric,
             DesignReview => DesignReviewRubric,
             MemoryReview => MemoryReviewRubric,
-            _ => CodeReviewRubric, // covers null, code_review, and any unknown value
+            _ => null, // null domain or unrecognised value → no rubric injected
         };
 
-    private const string CodeReviewRubric =
+    public const string CodeReviewRubric =
         """
         Evaluate using this rubric (one point per criterion):
         1. Does the implementation match the spec / issue requirements?
@@ -52,7 +53,7 @@ public static class ConsensusReviewDomains
         5. Are the edge cases described in the spec covered?
         """;
 
-    private const string DesignReviewRubric =
+    public const string DesignReviewRubric =
         """
         Evaluate using this rubric (one point per criterion):
         1. Is the spec complete enough for a developer to implement without ambiguity?
@@ -62,7 +63,7 @@ public static class ConsensusReviewDomains
         5. Is the acceptance criteria specific and verifiable?
         """;
 
-    private const string MemoryReviewRubric =
+    public const string MemoryReviewRubric =
         """
         Evaluate using this rubric (one point per criterion):
         1. Is the title short, specific, and searchable (would a future search surface it)?

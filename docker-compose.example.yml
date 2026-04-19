@@ -334,6 +334,8 @@ services:
       # This is required because the orchestrator launches child agent containers
       # via the Docker socket and passes host paths (workspaces, memories, env file)
       # as bind mounts — those paths must resolve identically on the host.
+      # This mount also exposes ${FLEET_BASE_DIR}/docker-compose.yml inside the container
+      # so InfraContainerRecreateAsync can find it via Provisioning__ComposeFilePath.
       - ${FLEET_BASE_DIR}:${FLEET_BASE_DIR}
     env_file:
       - .env
@@ -394,4 +396,4 @@ volumes:
 networks:
   fleet-net:
     name: fleet-net
-    driver: bridge
+    external: true

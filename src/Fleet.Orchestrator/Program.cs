@@ -1,4 +1,5 @@
 using System.Net.WebSockets;
+using System.Text.Json;
 using System.Threading.RateLimiting;
 using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
@@ -1001,7 +1002,7 @@ app.MapPost("/api/agents/reprovision-running", async (HttpRequest request, Conta
 });
 
 // REST: create a new agent (insert into DB + provision container)
-app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scopeFactory, ContainerProvisioningService provisioning, AgentRegistry registry, SetupService setupService) =>
+app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scopeFactory, ContainerProvisioningService provisioning, AgentRegistry registry, SetupService setupService, TemporalClientRegistry temporal, ILogger<Program> logger) =>
 {
     using var scope = scopeFactory.CreateScope();
     var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
@@ -1122,6 +1123,32 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         var (_, restartErrors) = await setupService.WriteCtoAgentAsync(name, CancellationToken.None);
         if (restartErrors.Count > 0)
             ctoRestartErrors = restartErrors;
+
+        // Send the first-provision welcome DM — one time only, fire-and-forget.
+        var ceoUserId = setupService.GetTelegramUserId();
+        if (WelcomeDmHelper.ShouldTrigger(agent, body.Provision != false, ceoUserId))
+        {
+            var welcomeInput = JsonSerializer.Serialize(new
+            {
+                TargetAgent = name,
+                TaskDescription = WelcomeDmHelper.BuildWelcomeDirective(name, ceoUserId!.Value),
+                TimeoutMinutes = 5
+            });
+            await WelcomeDmHelper.TriggerAsync(
+                agent,
+                saveWelcomeSentAt: async () => await db.SaveChangesAsync(CancellationToken.None),
+                startWorkflow:     async () => { await temporal.StartWorkflowAsync(
+                    "TaskDelegationWorkflow",
+                    $"welcome-{agent.Id}",
+                    "fleet",
+                    "fleet",
+                    welcomeInput); },
+                logger);
+        }
+        else if (body.Provision != false && agent.WelcomeSentAt is null)
+        {
+            logger.LogWarning("Welcome DM skipped: CEO Telegram user ID not configured.");
+        }
     }
 
     if (body.Provision != false)

@@ -1115,33 +1115,55 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
     // Bug fix: when the first co-cto agent is created, write FLEET_CTO_AGENT to .env
     // and restart fleet-bridge + fleet-temporal-bridge so they route to the correct agent.
     // Only fires when no prior co-cto existed (agentCount == 0 ensures this is the first agent overall).
-    string? ctoEnvMsg = null;
+    Dictionary<string, string>? ctoRestartErrors = null;
     if (string.Equals(agent.Role, "co-cto", StringComparison.OrdinalIgnoreCase)
-        && !await db.Agents.AnyAsync(a => a.Role == "co-cto" && a.Id != agent.Id))
+        && !await db.Agents.AnyAsync(a => a.Role.ToLower() == "co-cto" && a.Id != agent.Id))
     {
-        var (restarted, restartErrors) = await setupService.WriteCtoAgentAsync(name, ct);
+        var (_, restartErrors) = await setupService.WriteCtoAgentAsync(name, CancellationToken.None);
         if (restartErrors.Count > 0)
-            ctoEnvMsg = $"FLEET_CTO_AGENT set but some restarts failed: {string.Join(", ", restartErrors.Keys)}";
+            ctoRestartErrors = restartErrors;
     }
 
     if (body.Provision != false)
     {
         var result = await provisioning.ProvisionAsync(name);
         if (!result.Success)
+            // Item 2: include CTO-env restart errors alongside provisioning failure in 207
             return Results.Json(
-                new { message = $"Agent '{name}' created in DB but provisioning failed: {result.Message}", agentName = name },
+                new
+                {
+                    message = $"Agent '{name}' created in DB but provisioning failed: {result.Message}",
+                    agentName = name,
+                    restart_errors = ctoRestartErrors
+                },
                 statusCode: 207);
 
-        var provisionedMsg = ctoEnvMsg is not null
-            ? $"Agent '{name}' created and provisioned. {ctoEnvMsg}"
-            : $"Agent '{name}' created and provisioned";
-        return Results.Created($"/api/agents/{name}", new { message = provisionedMsg, agentName = name });
+        // Item 1: return 207 when CTO-env restarts failed, even though provision succeeded
+        if (ctoRestartErrors is not null)
+            return Results.Json(
+                new
+                {
+                    message = $"Agent '{name}' created and provisioned. FLEET_CTO_AGENT set but some restarts failed.",
+                    agentName = name,
+                    restart_errors = ctoRestartErrors
+                },
+                statusCode: 207);
+
+        return Results.Created($"/api/agents/{name}", new { message = $"Agent '{name}' created and provisioned", agentName = name });
     }
 
-    var createdMsg = ctoEnvMsg is not null
-        ? $"Agent '{name}' created. {ctoEnvMsg}"
-        : $"Agent '{name}' created (not provisioned — use POST /api/agents/{name}/reprovision when ready)";
-    return Results.Created($"/api/agents/{name}", new { message = createdMsg, agentName = name });
+    // Item 1: return 207 when CTO-env restarts failed (no-provision path)
+    if (ctoRestartErrors is not null)
+        return Results.Json(
+            new
+            {
+                message = $"Agent '{name}' created. FLEET_CTO_AGENT set but some restarts failed.",
+                agentName = name,
+                restart_errors = ctoRestartErrors
+            },
+            statusCode: 207);
+
+    return Results.Created($"/api/agents/{name}", new { message = $"Agent '{name}' created (not provisioned — use POST /api/agents/{name}/reprovision when ready)", agentName = name });
 });
 
 // REST: delete an agent (deprovision container + remove DB records)

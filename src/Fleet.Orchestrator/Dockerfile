@@ -9,7 +9,12 @@ RUN dotnet publish src/Fleet.Orchestrator/Fleet.Orchestrator.csproj -c Release -
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+ARG COMPOSE_VERSION=v2.29.7
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/* \
+  && ARCH=$(uname -m) \
+  && curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${ARCH}" \
+       -o /usr/local/bin/docker-compose \
+  && chmod +x /usr/local/bin/docker-compose
 
 COPY --from=build /app .
 COPY src/Fleet.Orchestrator/projects /app/projects

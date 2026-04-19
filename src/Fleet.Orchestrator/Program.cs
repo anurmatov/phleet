@@ -150,8 +150,19 @@ if (!string.IsNullOrWhiteSpace(orchestratorAuthToken))
 // MCP endpoint — explicitly mapped to /mcp so the auth middleware exemption matches
 app.MapMcp("/mcp");
 
-// Health check
-app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "fleet-orchestrator" }));
+// Force SetupService construction at startup so compose health check logs run eagerly
+_ = app.Services.GetRequiredService<SetupService>();
+
+// Health check — reports degraded if docker-compose file or CLI is missing
+app.MapGet("/health", (SetupService setupSvc) =>
+{
+    var composeDegraded = setupSvc.ComposeDegradedReason;
+    if (composeDegraded is not null)
+        return Results.Json(
+            new { status = "degraded", service = "fleet-orchestrator", compose = composeDegraded },
+            statusCode: 503);
+    return Results.Ok(new { status = "healthy", service = "fleet-orchestrator" });
+});
 
 // REST: list all known agents
 app.MapGet("/api/agents", async (AgentRegistry registry, IServiceScopeFactory scopeFactory) =>

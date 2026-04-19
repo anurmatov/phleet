@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -42,12 +43,27 @@ public sealed class SetupService
     };
 
     private readonly string _envFilePath;
+    private readonly string _composeFilePath;
+    private readonly string? _composeProjectName;
     private readonly IConfiguration _config;
     private readonly DockerService _docker;
     private readonly ContainerProvisioningService _provisioning;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<SetupService> _logger;
     private readonly ICredentialsReader _credentialsReader;
+
+    /// <summary>
+    /// Reason why docker-compose is unavailable (missing file or CLI), or null if healthy.
+    /// Exposed as an instance property so the /health endpoint can inject SetupService and check.
+    /// Setter is internal to allow tests to clear the degraded flag.
+    /// </summary>
+    public string? ComposeDegradedReason { get; internal set; }
+
+    /// <summary>
+    /// Invokes the docker-compose CLI. Replaceable in tests.
+    /// Receives the argument list (after "docker-compose") and returns (exitCode, stderr).
+    /// </summary>
+    internal Func<string[], CancellationToken, Task<(int ExitCode, string Stderr)>> ComposeRunner;
 
     public SetupService(
         IConfiguration config,
@@ -64,6 +80,43 @@ public sealed class SetupService
         _logger = logger;
         _credentialsReader = credentialsReader;
         _envFilePath = config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env";
+        _composeFilePath = config["Provisioning:ComposeFilePath"] ?? "/compose/docker-compose.yml";
+        _composeProjectName = config["Provisioning:ComposeProjectName"];
+
+        ComposeRunner = DefaultRunComposeAsync;
+
+        // Startup health checks — log warnings so ops notices immediately on container start
+        if (!IsDockerComposeOnPath())
+        {
+            ComposeDegradedReason = "docker-compose CLI not found on PATH — infra credential restarts will fail";
+            _logger.LogWarning("{Reason}", ComposeDegradedReason);
+        }
+        else if (!File.Exists(_composeFilePath))
+        {
+            ComposeDegradedReason = $"Compose file not found at {_composeFilePath} — bind-mount docker-compose.yml to this path";
+            _logger.LogWarning("{Reason}", ComposeDegradedReason);
+        }
+    }
+
+    /// <summary>Minimal constructor for unit tests — skips all DI dependencies.</summary>
+    internal SetupService(string composeFilePath, string? composeProjectName,
+        Microsoft.Extensions.Logging.ILogger<SetupService> logger)
+    {
+        _composeFilePath = composeFilePath;
+        _composeProjectName = composeProjectName;
+        _logger = logger;
+        _envFilePath = "";
+        _config = null!;
+        _docker = null!;
+        _provisioning = null!;
+        _scopeFactory = null!;
+        _credentialsReader = null!;
+        ComposeRunner = DefaultRunComposeAsync;
+
+        if (!IsDockerComposeOnPath())
+            ComposeDegradedReason = "docker-compose CLI not found on PATH — infra credential restarts will fail";
+        else if (!File.Exists(_composeFilePath))
+            ComposeDegradedReason = $"Compose file not found at {_composeFilePath} — bind-mount docker-compose.yml to this path";
     }
 
     // ── Status ────────────────────────────────────────────────────────────────
@@ -689,75 +742,63 @@ public sealed class SetupService
         return (restarted, errors);
     }
 
-    internal async Task InfraContainerRecreateAsync(string containerName, CancellationToken ct)
+    /// <summary>
+    /// Recreates an infra compose service via <c>docker-compose up -d --force-recreate --no-deps</c>.
+    /// Uses the compose file + .env as the authoritative source — no Docker-API inspect/create dance.
+    /// </summary>
+    internal async Task InfraContainerRecreateAsync(string serviceName, CancellationToken ct)
     {
-        // Read current container config via Docker inspect
-        var json = await _docker.InspectContainerAsync(containerName, ct);
-        if (json is null)
-        {
-            _logger.LogWarning("Infra container {Name} not found — skipping recreate", containerName);
-            return;
-        }
+        if (ComposeDegradedReason is { } reason)
+            throw new InvalidOperationException($"docker-compose unavailable: {reason}");
 
-        using var doc = JsonDocument.Parse(json);
-        var root = doc.RootElement;
+        var args = BuildComposeArgs(_composeFilePath, _composeProjectName,
+            "up", "-d", "--force-recreate", "--no-deps", serviceName);
+        var (exitCode, stderr) = await ComposeRunner(args, ct);
 
-        var image = root.GetProperty("Config").GetProperty("Image").GetString() ?? "";
-        var memory = root.GetProperty("HostConfig").GetProperty("Memory").GetInt64();
+        if (exitCode != 0)
+            throw new InvalidOperationException(
+                $"docker-compose up failed for {serviceName} (exit {exitCode}): {stderr.Trim()}");
 
-        // Extract existing env key=value list
-        var existingEnv = new List<string>();
-        if (root.GetProperty("Config").TryGetProperty("Env", out var envArr))
-            foreach (var e in envArr.EnumerateArray())
-                if (e.GetString() is { } s) existingEnv.Add(s);
-
-        var binds = new List<string>();
-        if (root.GetProperty("HostConfig").TryGetProperty("Binds", out var bindsEl) && bindsEl.ValueKind != JsonValueKind.Null)
-            foreach (var b in bindsEl.EnumerateArray())
-                if (b.GetString() is { } s) binds.Add(s);
-
-        var networks = new List<string>();
-        if (root.TryGetProperty("NetworkSettings", out var netSettings) &&
-            netSettings.TryGetProperty("Networks", out var nets))
-            foreach (var n in nets.EnumerateObject())
-                networks.Add(n.Name);
-
-        var primaryNetwork = networks.FirstOrDefault() ?? "fleet-net";
-
-        // MergeEnvOverrides: only update keys already present in the container's env.
-        // New keys from .env are intentionally NOT injected — only the orchestrator
-        // (via DB-driven provisioning) controls what env vars a container receives.
-        var envValues = LoadEnvFile(_envFilePath);
-        var mergedEnv = MergeEnvOverrides(existingEnv, envValues);
-
-        // Stop — tolerate "already stopped" (304 Not Modified is handled by StopContainerAsync)
-        await _docker.StopContainerAsync(containerName);
-        await _docker.RemoveContainerAsync(containerName, ct);
-
-        var id = await _docker.CreateContainerAsync(
-            containerName, image, memory, mergedEnv, binds, primaryNetwork, ct: ct);
-
-        if (id is null)
-            throw new InvalidOperationException($"Docker create returned null for {containerName}");
-
-        await _docker.StartContainerAsync(containerName);
-        _logger.LogInformation("Infra container {Name} recreated successfully", containerName);
+        _logger.LogInformation("Infra container {Name} recreated via docker-compose", serviceName);
     }
 
-    internal static List<string> MergeEnvOverrides(
-        IEnumerable<string> existingEnv, Dictionary<string, string> envValues)
+    /// <summary>
+    /// Builds the argument list for a docker-compose command, prepending <c>-f</c> and optional <c>-p</c>.
+    /// </summary>
+    internal static string[] BuildComposeArgs(
+        string composeFilePath, string? projectName, params string[] subcommandArgs)
     {
-        // Only update keys already present in the container's env.
-        // Never inject new keys from .env into an existing container.
-        var result = new List<string>();
-        foreach (var entry in existingEnv)
+        var args = new List<string> { "-f", composeFilePath };
+        if (!string.IsNullOrEmpty(projectName)) { args.Add("-p"); args.Add(projectName); }
+        args.AddRange(subcommandArgs);
+        return [.. args];
+    }
+
+    /// <summary>Default compose runner: shells out to <c>docker-compose</c> with the given args.</summary>
+    internal static async Task<(int ExitCode, string Stderr)> DefaultRunComposeAsync(
+        string[] args, CancellationToken ct)
+    {
+        var psi = new ProcessStartInfo("docker-compose")
         {
-            var eqIdx = entry.IndexOf('=');
-            if (eqIdx < 0) { result.Add(entry); continue; }
-            var key = entry[..eqIdx];
-            result.Add(envValues.TryGetValue(key, out var newVal) ? $"{key}={newVal}" : entry);
-        }
-        return result;
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+        };
+        foreach (var arg in args) psi.ArgumentList.Add(arg);
+
+        using var proc = Process.Start(psi)
+            ?? throw new InvalidOperationException("Failed to start docker-compose process");
+
+        var stderr = await proc.StandardError.ReadToEndAsync(ct);
+        await proc.WaitForExitAsync(ct);
+        return (proc.ExitCode, stderr);
+    }
+
+    /// <summary>Returns true if docker-compose is found on PATH.</summary>
+    internal static bool IsDockerComposeOnPath()
+    {
+        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+        return path.Split(':').Any(dir => File.Exists(Path.Combine(dir, "docker-compose")));
     }
 
     // ── Telegram API helpers ──────────────────────────────────────────────────

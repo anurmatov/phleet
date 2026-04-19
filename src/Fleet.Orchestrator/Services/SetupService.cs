@@ -273,6 +273,12 @@ public sealed class SetupService
     /// <summary>
     /// Returns the installer's Telegram user ID from TELEGRAM_USER_ID in .env,
     /// or null if the key is absent, empty, or a non-numeric placeholder.
+    ///
+    /// NO CACHE: calls <see cref="LoadEnvFile"/> on every invocation so that values
+    /// written to .env after the orchestrator started (e.g. via the Credentials page)
+    /// are picked up immediately — critical for the first-provision welcome DM flow
+    /// where the CEO may configure their user ID between orchestrator startup and the
+    /// first agent provision.
     /// </summary>
     public long? GetTelegramUserId()
     {

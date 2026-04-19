@@ -44,6 +44,12 @@ public class Agent
     public List<AgentTelegramGroup> TelegramGroups { get; set; } = [];
     public List<AgentNetwork> Networks { get; set; } = [];
     public List<AgentCredentialMount> CredentialMounts { get; set; } = [];
+
+    /// <summary>
+    /// Set once when the first-provision welcome DM is dispatched. Acts as the primary
+    /// idempotency gate — if non-null, the welcome is never re-sent on reprovision.
+    /// </summary>
+    public DateTime? WelcomeSentAt { get; set; }
 }
 
 public class AgentNetwork

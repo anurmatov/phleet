@@ -142,6 +142,9 @@ namespace Fleet.Orchestrator.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("varchar(500)");
 
+                    b.Property<DateTime?>("WelcomeSentAt")
+                        .HasColumnType("datetime(6)");
+
                     b.Property<string>("WorkDir")
                         .IsRequired()
                         .ValueGeneratedOnAdd()

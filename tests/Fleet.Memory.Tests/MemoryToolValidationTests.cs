@@ -1,4 +1,4 @@
-using Fleet.Memory.Models;
+using Fleet.Memory.Tools;
 
 namespace Fleet.Memory.Tests;
 
@@ -8,104 +8,40 @@ namespace Fleet.Memory.Tests;
 /// missing or carry invalid enum-like values, instead of surfacing the
 /// generic "An error occurred invoking" message from AIFunctionFactory.
 ///
-/// These tests mirror the validation conditions from the tool source files
-/// (src/Fleet.Memory/Tools/) so that the error paths are covered without
-/// requiring a live MemoryService (which needs Qdrant + filesystem).
+/// Tools are constructed with null! for MemoryService. Validation returns
+/// before the service is ever touched, so the null is never dereferenced.
 /// </summary>
 public class MemoryToolValidationTests
 {
-    // --- helpers mirroring validation in each tool ---
-
-    static string? ValidateStore(string type, string title, string content)
-    {
-        if (string.IsNullOrWhiteSpace(type))
-            return $"memory_store: missing required parameter 'type'.\nHint: pass one of: {string.Join(", ", MemoryDocument.ValidTypes)}.";
-        if (!MemoryDocument.ValidTypes.Contains(type))
-            return $"memory_store: invalid value for 'type': '{type}'.\nValid types: {string.Join(", ", MemoryDocument.ValidTypes)}.";
-        if (string.IsNullOrWhiteSpace(title))
-            return "memory_store: missing required parameter 'title'.\nHint: pass a short descriptive title (5-10 words).";
-        if (string.IsNullOrWhiteSpace(content))
-            return "memory_store: missing required parameter 'content'.\nHint: pass the full memory content to store.";
-        return null;
-    }
-
-    static string? ValidateUpdate(string id)
-    {
-        if (string.IsNullOrWhiteSpace(id))
-            return "memory_update: missing required parameter 'id'.\nHint: pass the memory ID (full UUID or first 8 characters) from memory_search or memory_list.";
-        return null;
-    }
-
-    static string? ValidateDelete(string id)
-    {
-        if (string.IsNullOrWhiteSpace(id))
-            return "memory_delete: missing required parameter 'id'.\nHint: pass the memory ID (full UUID or first 8 characters) from memory_search or memory_list.";
-        return null;
-    }
-
-    static string? ValidateGet(string id)
-    {
-        if (string.IsNullOrWhiteSpace(id))
-            return "memory_get: missing required parameter 'id'.\nHint: pass the memory ID (full UUID or first 8 characters) from memory_search or memory_list.";
-        return null;
-    }
-
-    static string? ValidateSearch(string query, string? type)
-    {
-        if (string.IsNullOrWhiteSpace(query))
-            return "memory_search: missing required parameter 'query'.\nHint: pass a natural language search query describing what you're looking for.";
-        if (type is not null && !MemoryDocument.ValidTypes.Contains(type))
-            return $"memory_search: invalid value for 'type' filter: '{type}'.\nValid types: {string.Join(", ", MemoryDocument.ValidTypes)}.";
-        return null;
-    }
-
-    static string? ValidateList(string? type)
-    {
-        if (type is not null && !MemoryDocument.ValidTypes.Contains(type))
-            return $"memory_list: invalid value for 'type' filter: '{type}'.\nValid types: {string.Join(", ", MemoryDocument.ValidTypes)}.";
-        return null;
-    }
-
     // --- memory_store ---
 
     [Fact]
-    public void Store_MissingType_ReturnsError()
+    public async Task Store_MissingType_ReturnsError()
     {
-        var error = ValidateStore("", "My title", "Some content");
-        Assert.NotNull(error);
-        Assert.Contains("missing required parameter 'type'", error);
+        var result = await new MemoryStoreTool(null!).StoreAsync("", "My title", "Some content");
+        Assert.Contains("missing required parameter 'type'", result);
     }
 
     [Fact]
-    public void Store_InvalidType_ReturnsErrorWithValidList()
+    public async Task Store_InvalidType_ReturnsErrorWithValidList()
     {
-        var error = ValidateStore("bogus", "My title", "Some content");
-        Assert.NotNull(error);
-        Assert.Contains("invalid value for 'type': 'bogus'", error);
-        Assert.Contains("learning", error); // valid types listed
+        var result = await new MemoryStoreTool(null!).StoreAsync("bogus", "My title", "Some content");
+        Assert.Contains("invalid value for 'type': 'bogus'", result);
+        Assert.Contains("learning", result);
     }
 
     [Fact]
-    public void Store_MissingTitle_ReturnsError()
+    public async Task Store_MissingTitle_ReturnsError()
     {
-        var error = ValidateStore("learning", "   ", "Some content");
-        Assert.NotNull(error);
-        Assert.Contains("missing required parameter 'title'", error);
+        var result = await new MemoryStoreTool(null!).StoreAsync("learning", "   ", "Some content");
+        Assert.Contains("missing required parameter 'title'", result);
     }
 
     [Fact]
-    public void Store_MissingContent_ReturnsError()
+    public async Task Store_MissingContent_ReturnsError()
     {
-        var error = ValidateStore("learning", "My title", "");
-        Assert.NotNull(error);
-        Assert.Contains("missing required parameter 'content'", error);
-    }
-
-    [Fact]
-    public void Store_ValidArgs_ReturnsNull()
-    {
-        var error = ValidateStore("learning", "My title", "Some content");
-        Assert.Null(error);
+        var result = await new MemoryStoreTool(null!).StoreAsync("learning", "My title", "");
+        Assert.Contains("missing required parameter 'content'", result);
     }
 
     [Theory]
@@ -117,146 +53,113 @@ public class MemoryToolValidationTests
     [InlineData("codebase_knowledge")]
     [InlineData("user_preference")]
     [InlineData("conversation_summary")]
-    public void Store_AllValidTypes_Pass(string type)
+    public async Task Store_AllValidTypes_PassValidation(string type)
     {
-        var error = ValidateStore(type, "title", "content");
-        Assert.Null(error);
+        // Validation passes → service is called → NullReferenceException (null! dep).
+        // Any other exception or a validation-error string means the type was rejected.
+        try
+        {
+            var result = await new MemoryStoreTool(null!).StoreAsync(type, "title", "content");
+            Assert.DoesNotContain("invalid value for 'type'", result);
+        }
+        catch (NullReferenceException)
+        {
+            // Expected: validation passed, service call reached.
+        }
     }
 
     // --- memory_update ---
 
     [Fact]
-    public void Update_MissingId_ReturnsError()
+    public async Task Update_MissingId_ReturnsError()
     {
-        var error = ValidateUpdate("");
-        Assert.NotNull(error);
-        Assert.Contains("missing required parameter 'id'", error);
+        var result = await new MemoryUpdateTool(null!).UpdateAsync("");
+        Assert.Contains("missing required parameter 'id'", result);
     }
 
     [Fact]
-    public void Update_WhitespaceId_ReturnsError()
+    public async Task Update_WhitespaceId_ReturnsError()
     {
-        var error = ValidateUpdate("   ");
-        Assert.NotNull(error);
-        Assert.Contains("missing required parameter 'id'", error);
-    }
-
-    [Fact]
-    public void Update_ValidId_ReturnsNull()
-    {
-        var error = ValidateUpdate("abc12345");
-        Assert.Null(error);
+        var result = await new MemoryUpdateTool(null!).UpdateAsync("   ");
+        Assert.Contains("missing required parameter 'id'", result);
     }
 
     // --- memory_delete ---
 
     [Fact]
-    public void Delete_MissingId_ReturnsError()
+    public async Task Delete_MissingId_ReturnsError()
     {
-        var error = ValidateDelete("");
-        Assert.NotNull(error);
-        Assert.Contains("missing required parameter 'id'", error);
+        var result = await new MemoryDeleteTool(null!).DeleteAsync("");
+        Assert.Contains("missing required parameter 'id'", result);
     }
 
     [Fact]
-    public void Delete_ValidId_ReturnsNull()
+    public async Task Delete_WhitespaceId_ReturnsError()
     {
-        var error = ValidateDelete("abc12345");
-        Assert.Null(error);
+        var result = await new MemoryDeleteTool(null!).DeleteAsync("   ");
+        Assert.Contains("missing required parameter 'id'", result);
     }
 
     // --- memory_get ---
 
     [Fact]
-    public void Get_MissingId_ReturnsError()
+    public async Task Get_MissingId_ReturnsError()
     {
-        var error = ValidateGet("");
-        Assert.NotNull(error);
-        Assert.Contains("missing required parameter 'id'", error);
+        var result = await new MemoryGetTool(null!).GetAsync("");
+        Assert.Contains("missing required parameter 'id'", result);
     }
 
     [Fact]
-    public void Get_ValidId_ReturnsNull()
+    public async Task Get_WhitespaceId_ReturnsError()
     {
-        var error = ValidateGet("abc12345");
-        Assert.Null(error);
+        var result = await new MemoryGetTool(null!).GetAsync("   ");
+        Assert.Contains("missing required parameter 'id'", result);
     }
 
     // --- memory_search ---
 
     [Fact]
-    public void Search_MissingQuery_ReturnsError()
+    public async Task Search_MissingQuery_ReturnsError()
     {
-        var error = ValidateSearch("", null);
-        Assert.NotNull(error);
-        Assert.Contains("missing required parameter 'query'", error);
+        var result = await new MemorySearchTool(null!).SearchAsync("");
+        Assert.Contains("missing required parameter 'query'", result);
     }
 
     [Fact]
-    public void Search_WhitespaceQuery_ReturnsError()
+    public async Task Search_WhitespaceQuery_ReturnsError()
     {
-        var error = ValidateSearch("   ", null);
-        Assert.NotNull(error);
-        Assert.Contains("missing required parameter 'query'", error);
+        var result = await new MemorySearchTool(null!).SearchAsync("   ");
+        Assert.Contains("missing required parameter 'query'", result);
     }
 
     [Fact]
-    public void Search_InvalidTypeFilter_ReturnsError()
+    public async Task Search_InvalidTypeFilter_ReturnsError()
     {
-        var error = ValidateSearch("some query", "foo");
-        Assert.NotNull(error);
-        Assert.Contains("invalid value for 'type' filter: 'foo'", error);
-    }
-
-    [Fact]
-    public void Search_ValidTypeFilter_ReturnsNull()
-    {
-        var error = ValidateSearch("some query", "learning");
-        Assert.Null(error);
-    }
-
-    [Fact]
-    public void Search_NullTypeFilter_ReturnsNull()
-    {
-        var error = ValidateSearch("some query", null);
-        Assert.Null(error);
+        var result = await new MemorySearchTool(null!).SearchAsync("some query", type: "foo");
+        Assert.Contains("invalid value for 'type' filter: 'foo'", result);
+        Assert.Contains("learning", result);
     }
 
     // --- memory_list ---
 
     [Fact]
-    public void List_InvalidTypeFilter_ReturnsError()
+    public async Task List_InvalidTypeFilter_ReturnsError()
     {
-        var error = ValidateList("not-a-type");
-        Assert.NotNull(error);
-        Assert.Contains("invalid value for 'type' filter: 'not-a-type'", error);
-        Assert.Contains("learning", error); // valid types listed
+        var result = await new MemoryListTool(null!).ListAsync(type: "not-a-type");
+        Assert.Contains("invalid value for 'type' filter: 'not-a-type'", result);
+        Assert.Contains("learning", result);
     }
 
-    [Fact]
-    public void List_ValidTypeFilter_ReturnsNull()
-    {
-        var error = ValidateList("decision");
-        Assert.Null(error);
-    }
+    // --- error message format ---
 
     [Fact]
-    public void List_NullTypeFilter_ReturnsNull()
+    public async Task ErrorMessages_IncludeToolName()
     {
-        var error = ValidateList(null);
-        Assert.Null(error);
-    }
-
-    // --- error message format checks ---
-
-    [Fact]
-    public void ErrorMessages_IncludeToolName()
-    {
-        Assert.StartsWith("memory_store:", ValidateStore("", "t", "c")!);
-        Assert.StartsWith("memory_update:", ValidateUpdate("")!);
-        Assert.StartsWith("memory_delete:", ValidateDelete("")!);
-        Assert.StartsWith("memory_get:", ValidateGet("")!);
-        Assert.StartsWith("memory_search:", ValidateSearch("", null)!);
-        Assert.StartsWith("memory_list:", ValidateList("bad")!);
+        Assert.StartsWith("memory_store:", await new MemoryStoreTool(null!).StoreAsync("", "t", "c"));
+        Assert.StartsWith("memory_update:", await new MemoryUpdateTool(null!).UpdateAsync(""));
+        Assert.StartsWith("memory_delete:", await new MemoryDeleteTool(null!).DeleteAsync(""));
+        Assert.StartsWith("memory_get:", await new MemoryGetTool(null!).GetAsync(""));
+        Assert.StartsWith("memory_search:", await new MemorySearchTool(null!).SearchAsync(""));
+        Assert.StartsWith("memory_list:", await new MemoryListTool(null!).ListAsync(type: "bad"));
     }
 }

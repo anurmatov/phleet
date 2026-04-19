@@ -346,6 +346,8 @@ services:
       - Provisioning__BaseDir=${FLEET_BASE_DIR}
       - Provisioning__EnvFilePath=${FLEET_BASE_DIR}/.env
       - Provisioning__DefaultNetwork=fleet-net
+      - Provisioning__ComposeFilePath=${FLEET_BASE_DIR}/docker-compose.yml
+      - Provisioning__ComposeProjectName=fleet
       - Orchestrator__AuthToken=${ORCHESTRATOR_AUTH_TOKEN}
     mem_limit: 512m
     restart: unless-stopped

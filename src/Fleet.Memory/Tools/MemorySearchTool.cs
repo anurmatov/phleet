@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text;
+using Fleet.Memory.Models;
 using Fleet.Memory.Services;
 using ModelContextProtocol.Server;
 
@@ -17,6 +18,12 @@ public sealed class MemorySearchTool(MemoryService memoryService)
         [Description("Filter by project (optional)")] string? project = null,
         [Description("Filter by agent name (optional)")] string? agent = null)
     {
+        if (string.IsNullOrWhiteSpace(query))
+            return "memory_search: missing required parameter 'query'.\nHint: pass a natural language search query describing what you're looking for.";
+
+        if (type is not null && !MemoryDocument.ValidTypes.Contains(type))
+            return $"memory_search: invalid value for 'type' filter: '{type}'.\nValid types: {string.Join(", ", MemoryDocument.ValidTypes)}.";
+
         var results = await memoryService.SearchAsync(query, limit, type, project, agent);
 
         if (results.Count == 0)

@@ -13,6 +13,9 @@ public sealed class MemoryGetTool(MemoryService memoryService)
     public async Task<string> GetAsync(
         [Description("The memory ID (full UUID or first 8 characters)")] string id)
     {
+        if (string.IsNullOrWhiteSpace(id))
+            return "memory_get: missing required parameter 'id'.\nHint: pass the memory ID (full UUID or first 8 characters) from memory_search or memory_list.";
+
         var doc = await memoryService.GetAsync(id);
 
         if (doc is null)

@@ -341,7 +341,7 @@ public sealed class CredentialsService
 
     private async Task<PropagationResult> RunPropagationAsync(string key, CancellationToken ct)
     {
-        var (infra, _) = GetInfraScope(_registry, key, _orchestratorContainerName);
+        var (infra, selfRecreate) = GetInfraScope(_registry, key, _orchestratorContainerName);
         var warnings = new List<string>();
 
         List<string> agents;
@@ -354,7 +354,6 @@ public sealed class CredentialsService
         }
         warnings.AddRange(agentWarnings);
 
-        var selfRecreate = infra.Contains(_orchestratorContainerName, StringComparer.OrdinalIgnoreCase);
         var infraToRestart = selfRecreate
             ? infra.Where(c => !c.Equals(_orchestratorContainerName, StringComparison.OrdinalIgnoreCase)).ToList()
             : infra;

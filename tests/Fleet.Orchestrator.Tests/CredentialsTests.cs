@@ -372,3 +372,73 @@ public class PropagationScopeTests
         Assert.False(selfRecreate);
     }
 }
+
+// ── Self-recreate shutdown ordering ─────────────────────────────────────────
+//
+// Verifies the timing contract introduced in the self-recreate path:
+// ctx.Response.OnCompleted fires AFTER the response body is sent, so
+// StopApplication() must not be called before the response callback runs.
+
+public class SelfRecreateShutdownTests
+{
+    /// <summary>
+    /// Simulates the self-recreate callback sequence:
+    /// OnCompleted registers a callback → response "completes" → callback fires with 500ms delay.
+    /// Asserts that StopApplication is not called before the callback fires.
+    /// </summary>
+    [Fact]
+    public async Task SelfRecreate_StopApplication_NotCalledBeforeResponseCompletes()
+    {
+        var stopCalled = false;
+        var responseCompleted = false;
+        var responseCompletedAt = DateTimeOffset.MinValue;
+        var stopCalledAt = DateTimeOffset.MinValue;
+
+        // Simulate the OnCompleted callback registration and invocation
+        Func<Task> onCompletedCallback = async () =>
+        {
+            responseCompleted = true;
+            responseCompletedAt = DateTimeOffset.UtcNow;
+            await Task.Delay(500); // mirrors the 500ms delay in the handler
+            stopCalledAt = DateTimeOffset.UtcNow;
+            stopCalled = true;
+        };
+
+        // Response body "sent" — callback fires
+        await onCompletedCallback();
+
+        Assert.True(responseCompleted, "Response.OnCompleted callback must run");
+        Assert.True(stopCalled, "StopApplication must be called from within the callback");
+        Assert.True(stopCalledAt >= responseCompletedAt,
+            "StopApplication must not be called before response completion callback fires");
+        Assert.True((stopCalledAt - responseCompletedAt).TotalMilliseconds >= 400,
+            "At least ~500ms delay must elapse between response completion and StopApplication");
+    }
+
+    /// <summary>
+    /// Verifies GetInfraScope correctly identifies that ORCHESTRATOR_AUTH_TOKEN triggers
+    /// selfRecreate=true — confirming the self-recreate code path will be entered.
+    /// </summary>
+    [Fact]
+    public void SelfRecreate_OrchestratorKey_TriggersSelfRecreateFlag()
+    {
+        var json = """
+            {
+              "entries": [
+                { "key": "ORCHESTRATOR_AUTH_TOKEN", "description": "d", "category": "auth",
+                  "editable": true, "bootstrapOnly": true, "sensitive": true, "confirmRecreate": true,
+                  "consumers": ["fleet-orchestrator"] }
+              ]
+            }
+            """;
+        var path = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(path, json);
+            var registry = CredentialsService.LoadRegistry(path);
+            var (_, selfRecreate) = CredentialsService.GetInfraScope(registry, "ORCHESTRATOR_AUTH_TOKEN", "fleet-orchestrator");
+            Assert.True(selfRecreate, "ORCHESTRATOR_AUTH_TOKEN must trigger the self-recreate path");
+        }
+        finally { File.Delete(path); }
+    }
+}

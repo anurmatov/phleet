@@ -34,6 +34,7 @@ builder.Services.AddSingleton<ContainerProvisioningService>();
 builder.Services.AddSingleton<SetupService>();
 builder.Services.AddSingleton<ICredentialsReader, EnvFileCredentialsReader>();
 builder.Services.AddSingleton<CredentialsService>();
+builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(5));
 
 // HeartbeatConsumerService registered as singleton so tools can inject IRabbitMqStatus
 builder.Services.AddSingleton<HeartbeatConsumerService>();
@@ -2167,7 +2168,7 @@ app.MapGet("/api/credentials/{key}/propagation-preview", async (string key, Cred
 });
 
 // PUT /api/credentials/{key} — atomic write + cache invalidation + propagation
-app.MapPut("/api/credentials/{key}", async (string key, HttpRequest request, CredentialsService credentials, HttpContext ctx, ILogger<Program> logger, CancellationToken ct) =>
+app.MapPut("/api/credentials/{key}", async (string key, HttpRequest request, CredentialsService credentials, HttpContext ctx, IHostApplicationLifetime lifetime, ILogger<Program> logger, CancellationToken ct) =>
 {
     if (!string.IsNullOrEmpty(orchestratorAuthToken))
     {
@@ -2216,15 +2217,12 @@ app.MapPut("/api/credentials/{key}", async (string key, HttpRequest request, Cre
 
     if (result.SelfRecreate)
     {
-        // Restart the orchestrator itself in the background after returning 202
-        var orchestratorName = app.Configuration["Provisioning:OrchestratorContainerName"] ?? "fleet-orchestrator";
-        var dockerSvc = app.Services.GetRequiredService<DockerService>();
-        _ = Task.Run(async () =>
+        // Graceful in-process shutdown — compose restart policy brings the container back up
+        ctx.Response.OnCompleted(async () =>
         {
-            await Task.Delay(TimeSpan.FromSeconds(1));
-            try { await dockerSvc.StopContainerAsync(orchestratorName); await dockerSvc.StartContainerAsync(orchestratorName); }
-            catch (Exception ex) { logger.LogWarning(ex, "Self-recreate failed for {Name}", orchestratorName); }
-        }, CancellationToken.None);
+            await Task.Delay(TimeSpan.FromMilliseconds(500));
+            lifetime.StopApplication();
+        });
 
         return Results.Json(new
         {

@@ -2195,8 +2195,8 @@ app.MapPost("/api/credential-files", async (HttpRequest request, IServiceScopeFa
     // chmod 600 for SSH keys
     if (type == "ssh-private-key")
     {
-        try { File.SetUnixFileMode(filePath, UnixFileMode.UserRead | UnixFileMode.UserWrite); }
-        catch { /* non-Unix, ignore */ }
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(filePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
     }
 
     var credFile = new CredentialFile

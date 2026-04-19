@@ -39,6 +39,7 @@ builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSe
 // HeartbeatConsumerService registered as singleton so tools can inject IRabbitMqStatus
 builder.Services.AddSingleton<HeartbeatConsumerService>();
 builder.Services.AddSingleton<IRabbitMqStatus>(sp => sp.GetRequiredService<HeartbeatConsumerService>());
+builder.Services.AddSingleton<IConfigChangedPublisher>(sp => sp.GetRequiredService<HeartbeatConsumerService>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<HeartbeatConsumerService>());
 
 builder.Services.AddHostedService<AgentStateMonitorService>();
@@ -2152,6 +2153,38 @@ app.MapGet("/api/credentials/{key}/value", (string key, CredentialsService crede
 
     var value = credentials.ReadEnvValue(key);
     return Results.Ok(new { key, value, sensitive = entry.Sensitive, editable = entry.Editable });
+});
+
+// GET /api/config/global — bearer-authed; returns dynamic peer config (bot tokens, routing)
+// Peers (fleet-telegram, fleet-bridge, fleet-temporal-bridge) call this on startup and on
+// config.changed fanout events to refresh their in-memory caches without restarting.
+app.MapGet("/api/config/global", async (ICredentialsReader credentials, IServiceScopeFactory scopeFactory, HttpContext ctx) =>
+{
+    if (!string.IsNullOrEmpty(orchestratorAuthToken))
+    {
+        var auth = ctx.Request.Headers.Authorization.FirstOrDefault() ?? "";
+        if (!auth.Equals($"Bearer {orchestratorAuthToken}", StringComparison.Ordinal))
+            return Results.Unauthorized();
+    }
+
+    var groupChatIdStr = credentials.Get("FLEET_GROUP_CHAT_ID");
+    var groupChatId = long.TryParse(groupChatIdStr, out var gcv) ? (long?)gcv : null;
+    var ctoAgentName = credentials.Get("FLEET_CTO_AGENT");
+    var notifierBotToken = credentials.Get("TELEGRAM_NOTIFIER_BOT_TOKEN");
+
+    // Per-agent bot tokens — key pattern: TELEGRAM_{NAME.ToUpper()}_BOT_TOKEN
+    // Only agents with alphanumeric/underscore names yield valid env var keys.
+    var agentBotTokens = new Dictionary<string, string?>();
+    await using var scope = scopeFactory.CreateAsyncScope();
+    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
+    if (db is not null)
+    {
+        var agentNames = await db.Agents.AsNoTracking().Select(a => a.Name).ToListAsync();
+        foreach (var name in agentNames)
+            agentBotTokens[name] = credentials.Get($"TELEGRAM_{name.ToUpper()}_BOT_TOKEN");
+    }
+
+    return Results.Ok(new { groupChatId, ctoAgentName, notifierBotToken, agentBotTokens });
 });
 
 // GET /api/credentials/{key}/propagation-preview — compute affected services without executing

@@ -13,7 +13,7 @@ namespace Fleet.Orchestrator.Services;
 /// Hosted service that consumes heartbeat and registration messages
 /// from the fleet.orchestrator topic exchange on RabbitMQ.
 /// </summary>
-public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable, IRabbitMqStatus
+public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable, IRabbitMqStatus, IConfigChangedPublisher
 {
     private readonly RabbitMqOptions _rabbitConfig;
     private readonly AgentRegistry _registry;
@@ -124,6 +124,38 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
         }
 
         return Task.CompletedTask;
+    }
+
+    /// <inheritdoc />
+    public async Task TryPublishAsync(string? agentName = null, CancellationToken ct = default)
+    {
+        if (_channel is null)
+        {
+            _logger.LogWarning("Cannot publish config.changed — RabbitMQ channel not initialized");
+            return;
+        }
+
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            @event = "config.changed",
+            scope = agentName is null ? "global" : "agent",
+            agentName,
+        });
+
+        try
+        {
+            await _channel.BasicPublishAsync(
+                exchange: _rabbitConfig.Exchange,
+                routingKey: "config.changed",
+                body: payload,
+                cancellationToken: ct);
+
+            _logger.LogDebug("Published config.changed event (agentName={AgentName})", agentName ?? "(global)");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to publish config.changed event — peers will sync on next reconciliation");
+        }
     }
 
     public async ValueTask DisposeAsync()

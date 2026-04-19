@@ -51,6 +51,7 @@ public sealed class SetupService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<SetupService> _logger;
     private readonly ICredentialsReader _credentialsReader;
+    private readonly IConfigChangedPublisher? _configPublisher;
 
     /// <summary>
     /// Reason why docker-compose is unavailable (missing file or CLI), or null if healthy.
@@ -71,7 +72,8 @@ public sealed class SetupService
         ContainerProvisioningService provisioning,
         IServiceScopeFactory scopeFactory,
         ILogger<SetupService> logger,
-        ICredentialsReader credentialsReader)
+        ICredentialsReader credentialsReader,
+        IConfigChangedPublisher? configPublisher = null)
     {
         _config = config;
         _docker = docker;
@@ -79,6 +81,7 @@ public sealed class SetupService
         _scopeFactory = scopeFactory;
         _logger = logger;
         _credentialsReader = credentialsReader;
+        _configPublisher = configPublisher;
         _envFilePath = config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env";
         _composeFilePath = config["Provisioning:ComposeFilePath"] ?? "/compose/docker-compose.yml";
         _composeProjectName = config["Provisioning:ComposeProjectName"];
@@ -608,6 +611,17 @@ public sealed class SetupService
             // Leave .tmp in place for debugging
             throw new InvalidOperationException(
                 $"Could not atomically write .env — check disk space and file permissions: {ex.Message}", ex);
+        }
+
+        // Notify peers of the config change — failures are logged and swallowed,
+        // .env write is never rolled back. Peers sync on next reconciliation if this fails.
+        if (_configPublisher is not null)
+        {
+            try { await _configPublisher.TryPublishAsync(); }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Unexpected error notifying peers of config.changed — peers will sync on next reconciliation");
+            }
         }
     }
 

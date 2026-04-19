@@ -180,9 +180,10 @@ use this as a copy-paste-and-modify starting point. every attribute below must b
 # step 1 — create the DB record (no container yet)
 create_agent(agent_name="adev", role="developer", display_name="Developer", provider="claude")
 
-# step 2 — scalar config
+# step 2 — scalar config (includes short_name for the shared-bot prefix)
 update_agent_config(
   agent_name="adev",
+  short_name="Dev",
   model="claude-sonnet-4-6",
   memory_limit_mb=4096,
   work_dir="/workspace",
@@ -194,12 +195,17 @@ update_agent_config(
   telegram_send_only=True
 )
 
-# step 3 — tools (add built-ins + MCP tool names via update_agent_config)
-# built-in: Read, Write, Edit, Glob, Grep, Bash, WebFetch, Agent, TodoWrite
-# MCP:      mcp__fleet-memory__memory_get, mcp__fleet-memory__memory_list,
-#           mcp__fleet-memory__memory_search, mcp__fleet-memory__memory_stats,
-#           mcp__fleet-temporal__request_memory_store,
-#           mcp__fleet-telegram__send_message
+# step 3 — tools (replace-all array: built-ins first, then MCP tool names)
+update_agent_config(
+  agent_name="adev",
+  tools=[
+    "Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebFetch", "Agent", "TodoWrite",
+    "mcp__fleet-memory__memory_get", "mcp__fleet-memory__memory_list",
+    "mcp__fleet-memory__memory_search", "mcp__fleet-memory__memory_stats",
+    "mcp__fleet-temporal__request_memory_store",
+    "mcp__fleet-telegram__send_message"
+  ]
+)
 
 # step 4 — MCP endpoint connections (one per server the agent reaches)
 manage_agent_mcp_endpoints(agent_name="adev", action="add",

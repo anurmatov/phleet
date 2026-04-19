@@ -275,3 +275,23 @@ public class AgentCredentialMount
 }
 
 
+
+
+// ─── Credentials Audit ────────────────────────────────────────────────────────
+
+/// <summary>
+/// Audit trail for credential saves. Records which key changed and when.
+/// The value itself is NEVER stored — audit rows record only the fact of a change.
+/// </summary>
+public class CredentialsAudit
+{
+    public long Id { get; set; }
+
+    [MaxLength(255)]
+    public required string KeyName { get; set; }
+
+    public DateTime ChangedAt { get; set; } = DateTime.UtcNow;
+
+    [MaxLength(255)]
+    public string Actor { get; set; } = "CEO";
+}

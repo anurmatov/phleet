@@ -47,19 +47,22 @@ public sealed class SetupService
     private readonly ContainerProvisioningService _provisioning;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<SetupService> _logger;
+    private readonly ICredentialsReader _credentialsReader;
 
     public SetupService(
         IConfiguration config,
         DockerService docker,
         ContainerProvisioningService provisioning,
         IServiceScopeFactory scopeFactory,
-        ILogger<SetupService> logger)
+        ILogger<SetupService> logger,
+        ICredentialsReader credentialsReader)
     {
         _config = config;
         _docker = docker;
         _provisioning = provisioning;
         _scopeFactory = scopeFactory;
         _logger = logger;
+        _credentialsReader = credentialsReader;
         _envFilePath = config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env";
     }
 
@@ -272,28 +275,18 @@ public sealed class SetupService
 
     /// <summary>
     /// Returns the installer's Telegram user ID from TELEGRAM_USER_ID in .env,
-    /// or null if the key is absent, empty, or a non-numeric placeholder.
+    /// or null if the key is absent, empty, or a non-numeric value.
     ///
-    /// NO CACHE: calls <see cref="LoadEnvFile"/> on every invocation so that values
-    /// written to .env after the orchestrator started (e.g. via the Credentials page)
-    /// are picked up immediately — critical for the first-provision welcome DM flow
-    /// where the CEO may configure their user ID between orchestrator startup and the
-    /// first agent provision.
+    /// Reads via <see cref="ICredentialsReader"/> which has a 30-second TTL cache
+    /// and is invalidated synchronously whenever the Credentials page writes a new value.
+    /// This ensures values written to .env after the orchestrator started are picked up
+    /// on the next read — critical for the first-provision welcome DM flow.
     /// </summary>
     public long? GetTelegramUserId()
     {
-        try
-        {
-            var env = LoadEnvFile(_envFilePath);
-            if (env.TryGetValue("TELEGRAM_USER_ID", out var val)
-                && !string.IsNullOrWhiteSpace(val)
-                && long.TryParse(val, out var id))
-                return id;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Could not read TELEGRAM_USER_ID from .env");
-        }
+        var val = _credentialsReader.Get("TELEGRAM_USER_ID");
+        if (!string.IsNullOrWhiteSpace(val) && long.TryParse(val, out var id))
+            return id;
         return null;
     }
 
@@ -378,6 +371,7 @@ public sealed class SetupService
                 updates["TELEGRAM_USER_ID"] = uid;
 
             await AtomicWriteEnvAsync(updates);
+            _credentialsReader.InvalidateCache();
 
             var written = updates.Keys.ToList();
             var (restarted, restartErrors) = await RestartContainersAsync(written, agentContainersToRestart, ct);
@@ -483,6 +477,7 @@ public sealed class SetupService
             }
 
             await AtomicWriteEnvAsync(updates);
+            _credentialsReader.InvalidateCache();
 
             var written = updates.Keys.ToList();
             var (restarted, restartErrors) = await RestartContainersAsync(written, agentContainersToRestart, ct);
@@ -694,7 +689,7 @@ public sealed class SetupService
         return (restarted, errors);
     }
 
-    private async Task InfraContainerRecreateAsync(string containerName, CancellationToken ct)
+    internal async Task InfraContainerRecreateAsync(string containerName, CancellationToken ct)
     {
         // Read current container config via Docker inspect
         var json = await _docker.InspectContainerAsync(containerName, ct);

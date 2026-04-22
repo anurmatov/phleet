@@ -6,6 +6,7 @@ import type { AgentTemplateSummary } from '../types'
 interface SetupStatus {
   telegram: { configured: boolean; groupChatEnabled: boolean }
   gitHub: { configured: boolean }
+  ctoTokenKey?: string
 }
 
 interface SetupBannerProps {
@@ -22,9 +23,10 @@ let _toastId = 0
 interface TelegramModalProps {
   onClose: () => void
   onConnected: (toast: string) => void
+  ctoTokenKey?: string
 }
 
-function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
+function ConnectTelegramModal({ onClose, onConnected, ctoTokenKey }: TelegramModalProps) {
   const [ctoBotToken, setCtoBotToken] = useState('')
   const [notifierBotToken, setNotifierBotToken] = useState('')
   const [groupChatId, setGroupChatId] = useState('')
@@ -102,7 +104,7 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
     try {
       const payload = buildPayload()
       const values: Record<string, string> = {}
-      if (payload.ctoBotToken) values['FLEET_CTO_AGENT_BOT_TOKEN'] = payload.ctoBotToken
+      if (payload.ctoBotToken) values[ctoTokenKey ?? 'TELEGRAM_CTO_BOT_TOKEN'] = payload.ctoBotToken
       if (payload.notifierBotToken) values['TELEGRAM_NOTIFIER_BOT_TOKEN'] = payload.notifierBotToken
       if (payload.groupChatId) values['FLEET_GROUP_CHAT_ID'] = payload.groupChatId
       if (payload.userId) values['TELEGRAM_USER_ID'] = payload.userId
@@ -690,6 +692,7 @@ export default function SetupBanner({ status, agentCount, onConnected, onNewAgen
         <ConnectTelegramModal
           onClose={() => setTelegramOpen(false)}
           onConnected={handleModalConnected}
+          ctoTokenKey={status.ctoTokenKey}
         />
       )}
       {githubOpen && (

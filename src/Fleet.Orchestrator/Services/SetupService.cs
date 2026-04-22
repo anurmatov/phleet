@@ -60,11 +60,14 @@ public sealed class SetupService
             _logger.LogWarning(ex, "Could not read .env at {Path} — returning all-false status", _envFilePath);
             return new SetupStatusDto(
                 new TelegramStatusDto(false, false),
-                new GitHubStatusDto(false));
+                new GitHubStatusDto(false),
+                CtoTokenKey: "TELEGRAM_CTO_BOT_TOKEN");
         }
 
+        var ctoTokenKey = ResolveCtoTokenKey(env);
+
         var telegramConfigured =
-            IsConfigured(env, "TELEGRAM_CTO_BOT_TOKEN") &&
+            IsConfigured(env, ctoTokenKey) &&
             IsConfigured(env, "TELEGRAM_NOTIFIER_BOT_TOKEN");
 
         var groupEnabled =
@@ -77,7 +80,8 @@ public sealed class SetupService
 
         return new SetupStatusDto(
             new TelegramStatusDto(telegramConfigured, groupEnabled),
-            new GitHubStatusDto(githubConfigured));
+            new GitHubStatusDto(githubConfigured),
+            CtoTokenKey: ctoTokenKey);
     }
 
     /// <summary>
@@ -96,8 +100,10 @@ public sealed class SetupService
             return new string('•', 3) + v[^visibleSuffix..];
         }
 
+        var ctoTokenKey = ResolveCtoTokenKey(env);
+
         var telegramConfigured =
-            IsConfigured(env, "TELEGRAM_CTO_BOT_TOKEN") &&
+            IsConfigured(env, ctoTokenKey) &&
             IsConfigured(env, "TELEGRAM_NOTIFIER_BOT_TOKEN");
 
         var githubConfigured =
@@ -113,7 +119,7 @@ public sealed class SetupService
             new RichTelegramStatusDto(
                 telegramConfigured,
                 IsConfigured(env, "FLEET_GROUP_CHAT_ID"),
-                Mask("TELEGRAM_CTO_BOT_TOKEN"),
+                Mask(ctoTokenKey),
                 Mask("TELEGRAM_NOTIFIER_BOT_TOKEN"),
                 env.TryGetValue("FLEET_GROUP_CHAT_ID", out var gr) && !string.IsNullOrEmpty(gr) ? gr : null,
                 userId,
@@ -419,6 +425,22 @@ public sealed class SetupService
         return result.ToArray();
     }
 
+    // ── CTO token key resolution ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Derives the .env key that holds the CTO agent's personal bot token.
+    /// The key pattern is TELEGRAM_{shortname}_BOT_TOKEN, matching fleet-telegram's
+    /// PEER_AGENT_DERIVED_KEYS=TELEGRAM_{SHORTNAME}_BOT_TOKEN subscription.
+    /// Falls back to TELEGRAM_CTO_BOT_TOKEN for legacy installations where
+    /// FLEET_CTO_AGENT was not set in .env.
+    /// </summary>
+    private static string ResolveCtoTokenKey(Dictionary<string, string> env)
+    {
+        if (env.TryGetValue("FLEET_CTO_AGENT", out var ctoAgent) && !string.IsNullOrWhiteSpace(ctoAgent))
+            return $"TELEGRAM_{ctoAgent}_BOT_TOKEN";
+        return "TELEGRAM_CTO_BOT_TOKEN";
+    }
+
     // ── Telegram API helpers ──────────────────────────────────────────────────
 
     private static bool IsBotTokenFormat(string token) =>
@@ -510,7 +532,8 @@ public sealed class SetupService
 
     private static bool IsValidFormat(string key, string val) => key switch
     {
-        "TELEGRAM_CTO_BOT_TOKEN" or "TELEGRAM_NOTIFIER_BOT_TOKEN" =>
+        _ when key.StartsWith("TELEGRAM_", StringComparison.OrdinalIgnoreCase)
+             && key.EndsWith("_BOT_TOKEN", StringComparison.OrdinalIgnoreCase) =>
             Regex.IsMatch(val, @"^\d+:[A-Za-z0-9_-]{35,}$"),
         "GITHUB_APP_ID" =>
             val.All(char.IsDigit) && val.Length >= 5,
@@ -536,7 +559,7 @@ public sealed class SetupService
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────
 
-public sealed record SetupStatusDto(TelegramStatusDto Telegram, GitHubStatusDto GitHub);
+public sealed record SetupStatusDto(TelegramStatusDto Telegram, GitHubStatusDto GitHub, string CtoTokenKey);
 public sealed record TelegramStatusDto(bool Configured, bool GroupChatEnabled);
 public sealed record GitHubStatusDto(bool Configured);
 

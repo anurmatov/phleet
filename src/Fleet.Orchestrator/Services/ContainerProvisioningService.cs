@@ -70,7 +70,8 @@ public sealed class ContainerProvisioningService(
     {
         var containerName = agent.ContainerName;
 
-        var env      = BuildEnv(agent, envValues);
+        var whisperServiceUrl = config["Provisioning:WhisperServiceUrl"] ?? "";
+        var env      = BuildEnv(agent, envValues, whisperServiceUrl);
         var binds    = BuildBinds(agent);
         var networks = BuildNetworks(agent);
         var memBytes = (long)agent.MemoryLimitMb * 1024 * 1024;
@@ -79,7 +80,7 @@ public sealed class ContainerProvisioningService(
         return new ContainerSpec(image, memBytes, env, binds, networks);
     }
 
-    private static List<string> BuildEnv(Agent agent, Dictionary<string, string> envValues)
+    private static List<string> BuildEnv(Agent agent, Dictionary<string, string> envValues, string whisperServiceUrl)
     {
         var env = new List<string>();
 
@@ -115,9 +116,9 @@ public sealed class ContainerProvisioningService(
         if (!agent.AutoMemoryEnabled)
             env.Add("CLAUDE_CODE_DISABLE_AUTO_MEMORY=1");
 
-        // Whisper (speech-to-text) is separate from TTS — co-cto only
-        if (string.Equals(agent.Role, "co-cto", StringComparison.OrdinalIgnoreCase))
-            env.Add("Whisper__ServiceUrl=http://fleet-whisper:8080");
+        // Whisper (speech-to-text) — all agents, URL from config
+        if (!string.IsNullOrWhiteSpace(whisperServiceUrl))
+            env.Add($"Whisper__ServiceUrl={whisperServiceUrl}");
 
         return env;
     }

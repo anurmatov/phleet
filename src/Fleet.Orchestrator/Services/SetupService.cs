@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -12,7 +11,7 @@ namespace Fleet.Orchestrator.Services;
 
 /// <summary>
 /// Handles post-install setup: reading setup status, atomic .env writes,
-/// Telegram/GitHub credential validation, and surgical container restarts.
+/// Telegram/GitHub credential validation.
 /// Shared SemaphoreSlim(1,1) ensures only one setup operation runs at a time.
 /// </summary>
 public sealed class SetupService
@@ -27,43 +26,12 @@ public sealed class SetupService
         "123456", "base64-encoded-private-key-here",
     };
 
-    // Containers that are compose-managed (no DB record) and must be recreated via Docker API
-    private static readonly string[] InfraContainerNames =
-        ["fleet-bridge", "fleet-telegram", "fleet-temporal-bridge"];
-
-    // Dependency map: env key → which infra containers need restart
-    private static readonly Dictionary<string, string[]> InfraDepMap = new()
-    {
-        ["TELEGRAM_CTO_BOT_TOKEN"]      = ["fleet-telegram"],
-        ["TELEGRAM_NOTIFIER_BOT_TOKEN"] = ["fleet-bridge", "fleet-telegram"],
-        ["FLEET_GROUP_CHAT_ID"]         = ["fleet-bridge", "fleet-temporal-bridge"],
-        ["TELEGRAM_USER_ID"]            = [],
-        ["GITHUB_APP_ID"]               = [],
-        ["GITHUB_APP_PEM"]              = [],
-    };
-
     private readonly string _envFilePath;
-    private readonly string _composeFilePath;
-    private readonly string? _composeProjectName;
     private readonly IConfiguration _config;
     private readonly DockerService _docker;
-    private readonly ContainerProvisioningService _provisioning;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<SetupService> _logger;
     private readonly ICredentialsReader _credentialsReader;
-
-    /// <summary>
-    /// Reason why docker-compose is unavailable (missing file or CLI), or null if healthy.
-    /// Exposed as an instance property so the /health endpoint can inject SetupService and check.
-    /// Setter is internal to allow tests to clear the degraded flag.
-    /// </summary>
-    public string? ComposeDegradedReason { get; internal set; }
-
-    /// <summary>
-    /// Invokes the docker-compose CLI. Replaceable in tests.
-    /// Receives the argument list (after "docker-compose") and returns (exitCode, stderr).
-    /// </summary>
-    internal Func<string[], CancellationToken, Task<(int ExitCode, string Stderr)>> ComposeRunner;
 
     public SetupService(
         IConfiguration config,
@@ -75,48 +43,10 @@ public sealed class SetupService
     {
         _config = config;
         _docker = docker;
-        _provisioning = provisioning;
         _scopeFactory = scopeFactory;
         _logger = logger;
         _credentialsReader = credentialsReader;
         _envFilePath = config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env";
-        _composeFilePath = config["Provisioning:ComposeFilePath"] ?? "/compose/docker-compose.yml";
-        _composeProjectName = config["Provisioning:ComposeProjectName"];
-
-        ComposeRunner = DefaultRunComposeAsync;
-
-        // Startup health checks — log warnings so ops notices immediately on container start
-        if (!IsDockerComposeOnPath())
-        {
-            ComposeDegradedReason = "docker-compose CLI not found on PATH — infra credential restarts will fail";
-            _logger.LogWarning("{Reason}", ComposeDegradedReason);
-        }
-        else if (!File.Exists(_composeFilePath))
-        {
-            ComposeDegradedReason = $"Compose file not found at {_composeFilePath} — bind-mount docker-compose.yml to this path";
-            _logger.LogWarning("{Reason}", ComposeDegradedReason);
-        }
-    }
-
-    /// <summary>Minimal constructor for unit tests — skips all DI dependencies.</summary>
-    internal SetupService(string composeFilePath, string? composeProjectName,
-        Microsoft.Extensions.Logging.ILogger<SetupService> logger)
-    {
-        _composeFilePath = composeFilePath;
-        _composeProjectName = composeProjectName;
-        _logger = logger;
-        _envFilePath = "";
-        _config = null!;
-        _docker = null!;
-        _provisioning = null!;
-        _scopeFactory = null!;
-        _credentialsReader = null!;
-        ComposeRunner = DefaultRunComposeAsync;
-
-        if (!IsDockerComposeOnPath())
-            ComposeDegradedReason = "docker-compose CLI not found on PATH — infra credential restarts will fail";
-        else if (!File.Exists(_composeFilePath))
-            ComposeDegradedReason = $"Compose file not found at {_composeFilePath} — bind-mount docker-compose.yml to this path";
     }
 
     // ── Status ────────────────────────────────────────────────────────────────
@@ -185,7 +115,7 @@ public sealed class SetupService
                 IsConfigured(env, "FLEET_GROUP_CHAT_ID"),
                 Mask("TELEGRAM_CTO_BOT_TOKEN"),
                 Mask("TELEGRAM_NOTIFIER_BOT_TOKEN"),
-                env.TryGetValue("FLEET_GROUP_CHAT_ID", out var g) && !string.IsNullOrEmpty(g) ? g : null,
+                env.TryGetValue("FLEET_GROUP_CHAT_ID", out var gr) && !string.IsNullOrEmpty(gr) ? gr : null,
                 userId,
                 ParseUtc("TELEGRAM_LAST_VALIDATED_UTC")),
             new RichGitHubStatusDto(
@@ -213,23 +143,6 @@ public sealed class SetupService
             _logger.LogWarning(ex, "Could not write last-validated timestamp for {Provider}", provider);
         }
     }
-
-    /// <summary>
-    /// Returns infra container names that depend on the given env key (from InfraDepMap).
-    /// Used by PUT /api/env-vars/{key} to tell the UI which services need a restart.
-    /// </summary>
-    public List<string> GetAffectedServices(string key) =>
-        InfraDepMap.TryGetValue(key, out var containers)
-            ? [.. containers]
-            : [];
-
-    // Keys managed via the Connections cards — excluded from generic env-vars table
-    private static readonly HashSet<string> ConnectionManagedKeys = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "TELEGRAM_CTO_BOT_TOKEN", "TELEGRAM_NOTIFIER_BOT_TOKEN", "FLEET_GROUP_CHAT_ID",
-        "TELEGRAM_USER_ID", "GITHUB_APP_ID", "GITHUB_APP_PEM",
-        "TELEGRAM_LAST_VALIDATED_UTC", "GITHUB_LAST_VALIDATED_UTC",
-    };
 
     private static readonly HashSet<string> SensitiveKeyPatterns =
         new(StringComparer.OrdinalIgnoreCase) { "KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL", "PEM" };
@@ -268,15 +181,9 @@ public sealed class SetupService
         catch { /* DB optional */ }
 
         return env
-            .Where(kv => !ConnectionManagedKeys.Contains(kv.Key))
             .Select(kv =>
             {
                 var consumers = usedBy.TryGetValue(kv.Key, out var ub) ? [.. ub] : new List<string>();
-                // Also surface docker-compose infra containers that depend on this key
-                if (InfraDepMap.TryGetValue(kv.Key, out var infraContainers))
-                    foreach (var c in infraContainers)
-                        if (!consumers.Contains(c, StringComparer.OrdinalIgnoreCase))
-                            consumers.Add(c);
                 return new EnvVarDto(kv.Key, MaskValue(kv.Key, kv.Value), IsSensitive(kv.Key), consumers);
             })
             .OrderBy(v => v.Key)
@@ -285,9 +192,6 @@ public sealed class SetupService
 
     public async Task SetEnvVarAsync(string key, string value)
     {
-        if (ConnectionManagedKeys.Contains(key))
-            throw new InvalidOperationException($"Key '{key}' is managed via the Connections section — use the Telegram or GitHub card to update it.");
-
         if (!System.Text.RegularExpressions.Regex.IsMatch(key, @"^[A-Z][A-Z0-9_]*$"))
             throw new ArgumentException($"Key '{key}' must be uppercase letters, digits, and underscores.");
 
@@ -296,9 +200,6 @@ public sealed class SetupService
 
     public async Task DeleteEnvVarAsync(string key)
     {
-        if (ConnectionManagedKeys.Contains(key))
-            throw new InvalidOperationException($"Key '{key}' is managed via the Connections section.");
-
         var lines = File.Exists(_envFilePath)
             ? await File.ReadAllLinesAsync(_envFilePath)
             : Array.Empty<string>();
@@ -329,11 +230,6 @@ public sealed class SetupService
     /// <summary>
     /// Returns the installer's Telegram user ID from TELEGRAM_USER_ID in .env,
     /// or null if the key is absent, empty, or a non-numeric value.
-    ///
-    /// Reads via <see cref="ICredentialsReader"/> which has a 30-second TTL cache
-    /// and is invalidated synchronously whenever the Credentials page writes a new value.
-    /// This ensures values written to .env after the orchestrator started are picked up
-    /// on the next read — critical for the first-provision welcome DM flow.
     /// </summary>
     public long? GetTelegramUserId()
     {
@@ -380,61 +276,6 @@ public sealed class SetupService
         }
 
         return new TelegramValidateResult(true, ctoBot, notifierBot, groupInfo, [], null);
-    }
-
-    public async Task<SetupWriteResult> WriteTelegramAsync(
-        TelegramSetupRequest req, CancellationToken ct)
-    {
-        // Validate first
-        var validation = await ValidateTelegramAsync(req, ct);
-        if (!validation.Valid)
-            return SetupWriteResult.Fail(validation.ErrorCode!, validation.ErrorDetail!);
-
-        // Acquire mutex — wait up to 30 s
-        if (!await _lock.WaitAsync(TimeSpan.FromSeconds(30), ct))
-            return SetupWriteResult.Fail("setup_locked", "Another setup operation is in progress");
-
-        try
-        {
-            // Determine which agent containers need restart (need DB — fail before writing)
-            List<string> agentContainersToRestart;
-            try
-            {
-                agentContainersToRestart = await GetAgentContainersWithEnvRefsAsync(
-                    ["TELEGRAM_CTO_BOT_TOKEN", "TELEGRAM_NOTIFIER_BOT_TOKEN", "FLEET_GROUP_CHAT_ID"], ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "DB unavailable — aborting telegram setup write");
-                return SetupWriteResult.Fail("db_unavailable", "Could not determine container restart targets — try again shortly");
-            }
-
-            var updates = new Dictionary<string, string>();
-            if (req.CtoBotToken is { Length: > 0 } cto)
-                updates["TELEGRAM_CTO_BOT_TOKEN"] = cto;
-            if (req.NotifierBotToken is { Length: > 0 } notifier)
-                updates["TELEGRAM_NOTIFIER_BOT_TOKEN"] = notifier;
-
-            // groupChatId: explicit empty/"0" = clear; null/omitted = no-op
-            if (req.GroupChatId is not null)
-                updates["FLEET_GROUP_CHAT_ID"] = (req.GroupChatId == "0" || req.GroupChatId == "") ? "" : req.GroupChatId;
-
-            // userId: store as TELEGRAM_USER_ID so agents can auto-add the installer to their allowlist
-            if (req.UserId is { Length: > 0 } uid && long.TryParse(uid, out _))
-                updates["TELEGRAM_USER_ID"] = uid;
-
-            await AtomicWriteEnvAsync(updates);
-            _credentialsReader.InvalidateCache();
-
-            var written = updates.Keys.ToList();
-            var (restarted, restartErrors) = await RestartContainersAsync(written, agentContainersToRestart, ct);
-
-            return new SetupWriteResult(true, written, restarted, [], restartErrors, null, null);
-        }
-        finally
-        {
-            _lock.Release();
-        }
     }
 
     // ── GitHub ────────────────────────────────────────────────────────────────
@@ -493,98 +334,6 @@ public sealed class SetupService
         }
 
         return new GitHubValidateResult(true, req.AppId, appName, warnings, null, null);
-    }
-
-    public async Task<SetupWriteResult> WriteGitHubAsync(
-        GitHubSetupRequest req, CancellationToken ct)
-    {
-        var validation = await ValidateGitHubAsync(req, ct);
-        if (!validation.Valid)
-            return SetupWriteResult.Fail(validation.ErrorCode!, validation.ErrorDetail!);
-
-        if (!await _lock.WaitAsync(TimeSpan.FromSeconds(30), ct))
-            return SetupWriteResult.Fail("setup_locked", "Another setup operation is in progress");
-
-        try
-        {
-            List<string> agentContainersToRestart;
-            try
-            {
-                agentContainersToRestart = await GetAgentContainersWithEnvRefsAsync(
-                    ["GITHUB_APP_ID", "GITHUB_APP_PEM"], ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "DB unavailable — aborting GitHub setup write");
-                return SetupWriteResult.Fail("db_unavailable", "Could not determine container restart targets — try again shortly");
-            }
-
-            var updates = new Dictionary<string, string>();
-            if (req.AppId is { Length: > 0 })
-                updates["GITHUB_APP_ID"] = req.AppId;
-            if (req.PrivateKeyPem is { Length: > 0 } pem)
-            {
-                // Store as single-line base64 so it's a valid env-file value
-                var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(pem));
-                updates["GITHUB_APP_PEM"] = b64;
-            }
-
-            await AtomicWriteEnvAsync(updates);
-            _credentialsReader.InvalidateCache();
-
-            var written = updates.Keys.ToList();
-            var (restarted, restartErrors) = await RestartContainersAsync(written, agentContainersToRestart, ct);
-
-            return new SetupWriteResult(true, written, restarted, validation.Warnings, restartErrors, null, null);
-        }
-        finally
-        {
-            _lock.Release();
-        }
-    }
-
-    // ── CTO agent ─────────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Writes FLEET_CTO_AGENT to .env and restarts fleet-bridge + fleet-temporal-bridge.
-    /// Called once when the first co-cto agent is created via the dashboard.
-    /// </summary>
-    public async Task<(List<string> Restarted, Dictionary<string, string> Errors)>
-        WriteCtoAgentAsync(string agentName, CancellationToken ct)
-    {
-        if (!await _lock.WaitAsync(TimeSpan.FromSeconds(30), ct))
-            return ([], new Dictionary<string, string> { ["_lock"] = "Another setup operation is in progress" });
-
-        try
-        {
-            await AtomicWriteEnvAsync(new Dictionary<string, string>
-            {
-                ["FLEET_CTO_AGENT"] = agentName
-            });
-
-            var restarted = new List<string>();
-            var errors = new Dictionary<string, string>();
-
-            foreach (var container in new[] { "fleet-bridge", "fleet-temporal-bridge" })
-            {
-                try
-                {
-                    await InfraContainerRecreateAsync(container, ct);
-                    restarted.Add(container);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Could not restart {Container} after writing FLEET_CTO_AGENT", container);
-                    errors[container] = ex.Message;
-                }
-            }
-
-            return (restarted, errors);
-        }
-        finally
-        {
-            _lock.Release();
-        }
     }
 
     // ── Internals ─────────────────────────────────────────────────────────────
@@ -670,139 +419,6 @@ public sealed class SetupService
         return result.ToArray();
     }
 
-    private async Task<List<string>> GetAgentContainersWithEnvRefsAsync(
-        IEnumerable<string> envKeys, CancellationToken ct)
-    {
-        await using var scope = _scopeFactory.CreateAsyncScope();
-        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-        var keys = envKeys.ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        var containers = await db.Agents
-            .Where(a => a.EnvRefs.Any(r => keys.Contains(r.EnvKeyName)))
-            .Select(a => a.ContainerName)
-            .Distinct()
-            .ToListAsync(ct);
-
-        return containers;
-    }
-
-    private async Task<(List<string> restarted, Dictionary<string, string> errors)>
-        RestartContainersAsync(
-            IEnumerable<string> writtenKeys,
-            List<string> agentContainers,
-            CancellationToken ct)
-    {
-        var restarted = new List<string>();
-        var errors = new Dictionary<string, string>();
-
-        var keySet = writtenKeys.ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        // Determine which infra containers to restart
-        var infraToRestart = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (key, containers) in InfraDepMap)
-        {
-            if (keySet.Contains(key))
-                foreach (var c in containers)
-                    infraToRestart.Add(c);
-        }
-
-        // Restart infra containers (inspect-and-recreate)
-        foreach (var name in infraToRestart)
-        {
-            try
-            {
-                await InfraContainerRecreateAsync(name, ct);
-                restarted.Add(name);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to recreate infra container {Name}", name);
-                errors[name] = ex.Message;
-            }
-        }
-
-        // Reprovision agent containers (stop → remove → recreate with fresh .env)
-        foreach (var name in agentContainers)
-        {
-            try
-            {
-                var result = await _provisioning.ReprovisionAsync(name, ct: ct);
-                if (result.Success)
-                    restarted.Add(name);
-                else
-                    errors[name] = result.Message;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to reprovision agent container {Name}", name);
-                errors[name] = ex.Message;
-            }
-        }
-
-        return (restarted, errors);
-    }
-
-    /// <summary>
-    /// Recreates an infra compose service via <c>docker-compose up -d --force-recreate --no-deps</c>.
-    /// Uses the compose file + .env as the authoritative source — no Docker-API inspect/create dance.
-    /// </summary>
-    internal async Task InfraContainerRecreateAsync(string serviceName, CancellationToken ct)
-    {
-        if (ComposeDegradedReason is { } reason)
-            throw new InvalidOperationException($"docker-compose unavailable: {reason}");
-
-        var args = BuildComposeArgs(_composeFilePath, _composeProjectName,
-            "up", "-d", "--force-recreate", "--no-deps", serviceName);
-        var (exitCode, stderr) = await ComposeRunner(args, ct);
-
-        if (exitCode != 0)
-            throw new InvalidOperationException(
-                $"docker-compose up failed for {serviceName} (exit {exitCode}): {stderr.Trim()}");
-
-        _logger.LogInformation("Infra container {Name} recreated via docker-compose", serviceName);
-    }
-
-    /// <summary>
-    /// Builds the argument list for a docker-compose command, prepending <c>-f</c> and optional <c>-p</c>.
-    /// </summary>
-    internal static string[] BuildComposeArgs(
-        string composeFilePath, string? projectName, params string[] subcommandArgs)
-    {
-        var args = new List<string> { "-f", composeFilePath };
-        if (!string.IsNullOrEmpty(projectName)) { args.Add("-p"); args.Add(projectName); }
-        args.AddRange(subcommandArgs);
-        return [.. args];
-    }
-
-    /// <summary>Default compose runner: shells out to <c>docker-compose</c> with the given args.</summary>
-    internal static async Task<(int ExitCode, string Stderr)> DefaultRunComposeAsync(
-        string[] args, CancellationToken ct)
-    {
-        var psi = new ProcessStartInfo("docker-compose")
-        {
-            RedirectStandardError = true,
-            // Do NOT redirect stdout — pipe buffer deadlock if compose writes > 65 KB before exit.
-            // Stdout flows to the orchestrator container's own log stream.
-            RedirectStandardOutput = false,
-            UseShellExecute = false,
-        };
-        foreach (var arg in args) psi.ArgumentList.Add(arg);
-
-        using var proc = Process.Start(psi)
-            ?? throw new InvalidOperationException("Failed to start docker-compose process");
-
-        var stderr = await proc.StandardError.ReadToEndAsync(ct);
-        await proc.WaitForExitAsync(ct);
-        return (proc.ExitCode, stderr);
-    }
-
-    /// <summary>Returns true if docker-compose is found on PATH.</summary>
-    internal static bool IsDockerComposeOnPath()
-    {
-        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
-        return path.Split(':').Any(dir => File.Exists(Path.Combine(dir, "docker-compose")));
-    }
-
     // ── Telegram API helpers ──────────────────────────────────────────────────
 
     private static bool IsBotTokenFormat(string token) =>
@@ -867,8 +483,6 @@ public sealed class SetupService
 
     private static string GenerateGitHubJwt(string appId, string pem)
     {
-        // Minimal RS256 JWT using only BCL — no external library needed.
-        // Header.Payload signed with RSA private key from PEM.
         using var rsa = System.Security.Cryptography.RSA.Create();
         rsa.ImportFromPem(pem);
 
@@ -995,3 +609,8 @@ public sealed record RichGitHubStatusDto(
     DateTime? LastValidatedUtc);
 
 public sealed record EnvVarDto(string Key, string MaskedValue, bool IsSensitive, List<string> UsedBy);
+
+// ── Sentinel exceptions ───────────────────────────────────────────────────────
+
+public sealed class DbUnavailableException(string message, Exception? inner = null)
+    : Exception(message, inner);

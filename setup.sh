@@ -50,7 +50,8 @@ if $DRY_RUN; then warn "Running in --dry-run mode — no changes will be made.";
 # makes .env the single source of truth for compose substitution.
 unset FLEET_BASE_DIR FLEET_CTO_AGENT FLEET_GROUP_CHAT_ID \
       FLEET_MYSQL_ROOT_PASSWORD FLEET_MYSQL_PASSWORD \
-      ORCHESTRATOR_AUTH_TOKEN TELEGRAM_NOTIFIER_BOT_TOKEN \
+      ORCHESTRATOR_AUTH_TOKEN ORCHESTRATOR_CONFIG_TOKEN \
+      TELEGRAM_NOTIFIER_BOT_TOKEN \
       MINIO_ACCESS_KEY MINIO_SECRET_KEY \
       FLEET_MEMORY_EMBEDDING_PROVIDER FLEET_MEMORY_EMBEDDING_DIMENSIONS \
       FLEET_MEMORY_OLLAMA_URL FLEET_MEMORY_OLLAMA_MODEL \
@@ -104,6 +105,7 @@ is_placeholder() {
   [[ "$val" == "changeme" ]] && return 0
   [[ "$val" == "base64-encoded-private-key-here" ]] && return 0
   [[ "$val" == "your-secret-token-here" ]] && return 0
+  [[ "$val" == "your-config-token-here" ]] && return 0
   [[ "$val" == "123456" ]] && return 0
   [[ "$val" == "123456:"* ]] && return 0
   [[ "$val" == "654321:"* ]] && return 0
@@ -469,12 +471,15 @@ _autogen_local_cred() {
 if $PROMPT_LOCAL_CREDS; then
   prompt_field "$ENV_FILE" "ORCHESTRATOR_AUTH_TOKEN"  "Orchestrator API auth token"  \
     "Protects mutating REST endpoints. To auto-generate: openssl rand -hex 32" "y" "y"
+  prompt_field "$ENV_FILE" "ORCHESTRATOR_CONFIG_TOKEN" "Orchestrator config token" \
+    "Used by peer services (fleet-telegram, fleet-bridge, fleet-temporal-bridge) to bootstrap config. To auto-generate: openssl rand -hex 32" "y" "y"
   prompt_field "$ENV_FILE" "MINIO_ACCESS_KEY"          "MinIO access key"          "" "n" "n" "minioadmin"
   prompt_field "$ENV_FILE" "MINIO_SECRET_KEY"          "MinIO secret key"          "" "n" "y" "minioadmin"
   prompt_field "$ENV_FILE" "FLEET_MYSQL_ROOT_PASSWORD"  "MySQL root password"       "" "n" "y" "fleetroot"
   prompt_field "$ENV_FILE" "FLEET_MYSQL_PASSWORD"       "MySQL fleet user password" "" "n" "y" "fleetpass"
 else
   _autogen_local_cred "$ENV_FILE" "ORCHESTRATOR_AUTH_TOKEN"   "openssl rand -hex 32"
+  _autogen_local_cred "$ENV_FILE" "ORCHESTRATOR_CONFIG_TOKEN" "openssl rand -hex 32"
   _autogen_local_cred "$ENV_FILE" "MINIO_ACCESS_KEY"          "openssl rand -hex 12"
   _autogen_local_cred "$ENV_FILE" "MINIO_SECRET_KEY"          "openssl rand -hex 32"
   _autogen_local_cred "$ENV_FILE" "FLEET_MYSQL_ROOT_PASSWORD"  "openssl rand -hex 24"
@@ -484,7 +489,7 @@ else
     echo "  Auto-generated local credentials (written to $ENV_FILE):"
     echo "    MinIO access key + secret"
     echo "    MySQL root password + fleet-user password"
-    echo "    Orchestrator API auth token"
+    echo "    Orchestrator API auth token + config token"
     echo
     echo "  Read $ENV_FILE to see the values if you need them."
   fi

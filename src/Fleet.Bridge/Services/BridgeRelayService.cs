@@ -16,9 +16,16 @@ namespace Fleet.Bridge.Services;
 /// </summary>
 public sealed class BridgeRelayService : IAsyncDisposable
 {
-    private readonly BridgeOptions _bridgeConfig;
     private readonly RabbitMqOptions _rabbitConfig;
     private readonly ILogger<BridgeRelayService> _logger;
+
+    /// <summary>Target agent routing key — updatable at runtime via peer config.</summary>
+    public string TargetAgent { get; set; }
+
+    /// <summary>Bridge chat ID — updatable at runtime via peer config.</summary>
+    public long BridgeChatId { get; set; }
+
+    private readonly int _timeoutSeconds;
 
     private IConnection? _connection;
     private IChannel? _publishChannel;
@@ -32,7 +39,10 @@ public sealed class BridgeRelayService : IAsyncDisposable
         IOptions<RabbitMqOptions> rabbitConfig,
         ILogger<BridgeRelayService> logger)
     {
-        _bridgeConfig = bridgeConfig.Value;
+        var opts = bridgeConfig.Value;
+        TargetAgent = opts.TargetAgent;
+        BridgeChatId = opts.BridgeChatId;
+        _timeoutSeconds = opts.TimeoutSeconds;
         _rabbitConfig = rabbitConfig.Value;
         _logger = logger;
     }
@@ -111,7 +121,7 @@ public sealed class BridgeRelayService : IAsyncDisposable
                 : $"bridge:{agentName}:{project}";
 
             var message = new RelayMessage(
-                ChatId: _bridgeConfig.BridgeChatId,
+                ChatId: BridgeChatId,
                 Sender: sender,
                 Text: question,
                 Timestamp: DateTimeOffset.UtcNow,
@@ -121,7 +131,7 @@ public sealed class BridgeRelayService : IAsyncDisposable
             var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
             var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
 
-            var target = _bridgeConfig.TargetAgent.ToLowerInvariant();
+            var target = TargetAgent.ToLowerInvariant();
             await _publishChannel.BasicPublishAsync(
                 _rabbitConfig.Exchange, routingKey: target, mandatory: false,
                 basicProperties: props, body: body, cancellationToken: ct);
@@ -129,7 +139,7 @@ public sealed class BridgeRelayService : IAsyncDisposable
             _logger.LogInformation("Bridge request published (correlationId={CorrelationId}, agent={Agent}, target={Target})",
                 correlationId, agentName, target);
 
-            var timeout = TimeSpan.FromSeconds(timeoutSeconds ?? _bridgeConfig.TimeoutSeconds);
+            var timeout = TimeSpan.FromSeconds(timeoutSeconds ?? _timeoutSeconds);
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeoutCts.CancelAfter(timeout);
 
@@ -175,7 +185,7 @@ public sealed class BridgeRelayService : IAsyncDisposable
         {
             // Use status-check type — handled by GroupBehavior.OnRelayMessage directly
             var message = new RelayMessage(
-                ChatId: _bridgeConfig.BridgeChatId,
+                ChatId: BridgeChatId,
                 Sender: "bridge",
                 Text: "",
                 Timestamp: DateTimeOffset.UtcNow,
@@ -185,7 +195,7 @@ public sealed class BridgeRelayService : IAsyncDisposable
             var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
             var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
 
-            var target = _bridgeConfig.TargetAgent.ToLowerInvariant();
+            var target = TargetAgent.ToLowerInvariant();
             await _publishChannel.BasicPublishAsync(
                 _rabbitConfig.Exchange, routingKey: target, mandatory: false,
                 basicProperties: props, body: body, cancellationToken: ct);

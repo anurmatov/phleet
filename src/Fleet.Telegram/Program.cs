@@ -1,12 +1,9 @@
-using Fleet.Telegram.Configuration;
 using Fleet.Telegram.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.Configure<TelegramBotsOptions>(
-    builder.Configuration.GetSection(TelegramBotsOptions.Section));
-
 builder.Services.AddSingleton<BotClientFactory>();
+builder.Services.AddHostedService<PeerConfigHostedService>();
 
 builder.Services
     .AddMcpServer()

@@ -34,7 +34,6 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
   const [fieldErrors, setFieldErrors] = useState<Record<string, boolean>>({})
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'error'>('idle')
   const [saveMsg, setSaveMsg] = useState('')
-  const [restartErrors, setRestartErrors] = useState<Record<string, string> | null>(null)
 
   function resetFeedback() {
     setTestState('idle')
@@ -42,7 +41,6 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
     setTestMsg('')
     setSaveMsg('')
     setFieldErrors({})
-    setRestartErrors(null)
   }
 
   function buildPayload() {
@@ -101,30 +99,28 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
   async function handleSave() {
     setSaveState('saving')
     setSaveMsg('')
-    setRestartErrors(null)
     try {
-      const res = await apiFetch('/api/setup/telegram', {
-        method: 'POST',
+      const payload = buildPayload()
+      const values: Record<string, string> = {}
+      if (payload.ctoBotToken) values['FLEET_CTO_AGENT_BOT_TOKEN'] = payload.ctoBotToken
+      if (payload.notifierBotToken) values['TELEGRAM_NOTIFIER_BOT_TOKEN'] = payload.notifierBotToken
+      if (payload.groupChatId) values['FLEET_GROUP_CHAT_ID'] = payload.groupChatId
+      if (payload.userId) values['TELEGRAM_USER_ID'] = payload.userId
+
+      const putRes = await apiFetch('/api/config/values', {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildPayload()),
+        body: JSON.stringify(values),
       })
-      const data = await res.json()
-      if (res.status === 207) {
-        // Keep modal open; show amber restart-errors block
-        setRestartErrors(data.restartErrors ?? {})
+      if (!putRes.ok) {
+        const data = await putRes.json().catch(() => ({}))
         setSaveState('error')
-      } else if (res.ok) {
-        const errCount = Object.keys(data.restartErrors ?? {}).length
-        onConnected(
-          errCount > 0
-            ? `✓ Telegram connected — ${errCount} container${errCount !== 1 ? 's' : ''} restarted`
-            : '✓ Telegram connected'
-        )
-        onClose()
-      } else {
-        setSaveState('error')
-        setSaveMsg(data.errorDetail ?? data.error ?? `Error ${res.status}`)
+        setSaveMsg((data as { error?: string }).error ?? `Error ${putRes.status}`)
+        return
       }
+      await apiFetch('/api/config/reload', { method: 'POST' })
+      onConnected('✓ Telegram connected')
+      onClose()
     } catch (e) {
       setSaveState('error')
       setSaveMsg(String(e))
@@ -250,19 +246,6 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
             </div>
           )}
 
-          {/* 207 amber restart-errors block */}
-          {restartErrors && (
-            <div className="setup-restart-errors">
-              <div className="setup-restart-errors__title">Some containers failed to restart:</div>
-              {Object.entries(restartErrors).map(([k, v]) => (
-                <div key={k} className="setup-restart-errors__row">• {k}: {String(v)}</div>
-              ))}
-              <div className="setup-restart-errors__footer">
-                <a href="#/agents">Restart failed containers from the Agents panel →</a>
-              </div>
-            </div>
-          )}
-
           {/* Action row */}
           <div style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'center', flexWrap: 'wrap' }}>
             <button
@@ -278,7 +261,7 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
               onClick={handleSave}
             >
               {saveState === 'saving'
-                ? '✓ .env written · restarting containers…'
+                ? 'Saving…'
                 : 'Save & connect'}
             </button>
             {testState === 'error' && fieldErrorCount > 0 && (
@@ -320,7 +303,6 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
   const [fieldErrors, setFieldErrors] = useState<Record<string, boolean>>({})
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'error'>('idle')
   const [saveMsg, setSaveMsg] = useState('')
-  const [restartErrors, setRestartErrors] = useState<Record<string, string> | null>(null)
 
   function handlePemFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -379,28 +361,25 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
   async function handleSave() {
     setSaveState('saving')
     setSaveMsg('')
-    setRestartErrors(null)
     try {
-      const res = await apiFetch('/api/setup/github', {
-        method: 'POST',
+      const values: Record<string, string> = {}
+      if (appId) values['GITHUB_APP_ID'] = appId
+      if (pem) values['GITHUB_APP_PEM'] = pem
+
+      const putRes = await apiFetch('/api/config/values', {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          appId: appId || undefined,
-          privateKeyPem: pem || undefined,
-        }),
+        body: JSON.stringify(values),
       })
-      const data = await res.json()
-      if (res.status === 207) {
-        // Keep modal open; show amber restart-errors block
-        setRestartErrors(data.restartErrors ?? {})
+      if (!putRes.ok) {
+        const data = await putRes.json().catch(() => ({}))
         setSaveState('error')
-      } else if (res.ok) {
-        onConnected('✓ GitHub connected')
-        onClose()
-      } else {
-        setSaveState('error')
-        setSaveMsg(data.errorDetail ?? data.error ?? `Error ${res.status}`)
+        setSaveMsg((data as { error?: string }).error ?? `Error ${putRes.status}`)
+        return
       }
+      await apiFetch('/api/config/reload', { method: 'POST' })
+      onConnected('✓ GitHub connected')
+      onClose()
     } catch (e) {
       setSaveState('error')
       setSaveMsg(String(e))
@@ -518,19 +497,6 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
             </div>
           )}
 
-          {/* 207 amber restart-errors block */}
-          {restartErrors && (
-            <div className="setup-restart-errors">
-              <div className="setup-restart-errors__title">Some containers failed to restart:</div>
-              {Object.entries(restartErrors).map(([k, v]) => (
-                <div key={k} className="setup-restart-errors__row">• {k}: {String(v)}</div>
-              ))}
-              <div className="setup-restart-errors__footer">
-                <a href="#/agents">Restart failed containers from the Agents panel →</a>
-              </div>
-            </div>
-          )}
-
           {/* Action row */}
           <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
             <button
@@ -546,7 +512,7 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
               onClick={handleSave}
             >
               {saveState === 'saving'
-                ? '✓ .env written · restarting containers…'
+                ? 'Saving…'
                 : 'Save & connect'}
             </button>
           </div>

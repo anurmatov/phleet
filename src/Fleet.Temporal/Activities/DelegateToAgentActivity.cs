@@ -25,6 +25,11 @@ public sealed class DelegateToAgentActivity
 
     private readonly RabbitMqOptions _rabbitConfig;
     private readonly TemporalBridgeOptions _bridgeConfig;
+
+    // Returns the effective group chat ID: runtime value from PeerConfigClient takes precedence
+    // over the compose-env value baked into TemporalBridgeOptions at startup.
+    private long EffectiveGroupChatId =>
+        FleetWorkflowConfig.GroupChatId != 0 ? FleetWorkflowConfig.GroupChatId : _bridgeConfig.GroupChatId;
     private readonly TaskCompletionRegistry _registry;
     private readonly ILogger<DelegateToAgentActivity> _logger;
 
@@ -83,7 +88,7 @@ public sealed class DelegateToAgentActivity
 
         try
         {
-            await PublishDirectiveAsync(agentName, instruction, taskId, _bridgeConfig.GroupChatId, ctx.CancellationToken);
+            await PublishDirectiveAsync(agentName, instruction, taskId, EffectiveGroupChatId, ctx.CancellationToken);
         }
         catch (Exception ex)
         {
@@ -119,7 +124,7 @@ public sealed class DelegateToAgentActivity
 
                 try
                 {
-                    await PublishDirectiveAsync(agentName, continuationInstruction, retryTaskId, _bridgeConfig.GroupChatId, ctx.CancellationToken);
+                    await PublishDirectiveAsync(agentName, continuationInstruction, retryTaskId, EffectiveGroupChatId, ctx.CancellationToken);
                 }
                 catch (Exception ex)
                 {
@@ -204,7 +209,7 @@ public sealed class DelegateToAgentActivity
                         agentName, taskId);
                     try
                     {
-                        await PublishDirectiveAsync(agentName, instruction, taskId, _bridgeConfig.GroupChatId, timeoutCts.Token);
+                        await PublishDirectiveAsync(agentName, instruction, taskId, EffectiveGroupChatId, timeoutCts.Token);
                         lastPublished = DateTimeOffset.UtcNow;
                     }
                     catch (OperationCanceledException)
@@ -243,7 +248,7 @@ public sealed class DelegateToAgentActivity
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             var escalationTarget = FleetWorkflowConfig.Instance.EscalationTarget;
             var report = $"[temporal] activity timeout: agent={agentName} did not respond within {(int)timeout.TotalMinutes}m. taskId={taskId}, workflowId={workflowId}. the workflow will fail this activity.";
-            await PublishDirectiveAsync(escalationTarget, report, taskId + "/timeout-report", _bridgeConfig.GroupChatId, cts.Token);
+            await PublishDirectiveAsync(escalationTarget, report, taskId + "/timeout-report", EffectiveGroupChatId, cts.Token);
             _logger.LogInformation("Timeout report sent to {EscalationTarget} for agent {Agent}, taskId={TaskId}", escalationTarget, agentName, taskId);
         }
         catch (Exception ex)
@@ -289,7 +294,7 @@ public sealed class DelegateToAgentActivity
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            await PublishDirectiveAsync(agentName, "/cancel all", taskId + "/cancel", _bridgeConfig.GroupChatId, cts.Token);
+            await PublishDirectiveAsync(agentName, "/cancel all", taskId + "/cancel", EffectiveGroupChatId, cts.Token);
             _logger.LogInformation("Fallback cancel broadcast sent to agent {Agent} for taskId={TaskId}", agentName, taskId);
         }
         catch (Exception ex)

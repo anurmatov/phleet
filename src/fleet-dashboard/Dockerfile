@@ -3,6 +3,9 @@ FROM node:20-slim AS build
 ARG VITE_AUTH_TOKEN=""
 ENV VITE_AUTH_TOKEN=${VITE_AUTH_TOKEN}
 
+ARG VITE_CONFIG_TOKEN=""
+ENV VITE_CONFIG_TOKEN=${VITE_CONFIG_TOKEN}
+
 WORKDIR /app
 COPY src/fleet-dashboard/package.json .
 RUN npm install

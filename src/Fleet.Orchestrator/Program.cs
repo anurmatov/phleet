@@ -33,7 +33,7 @@ builder.Services.AddSingleton<DockerService>();
 builder.Services.AddSingleton<ContainerProvisioningService>();
 builder.Services.AddSingleton<SetupService>();
 builder.Services.AddSingleton<ICredentialsReader, EnvFileCredentialsReader>();
-builder.Services.AddSingleton<CredentialsService>();
+builder.Services.AddSingleton<ConfigService>();
 builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(5));
 
 // HeartbeatConsumerService registered as singleton so tools can inject IRabbitMqStatus
@@ -79,12 +79,6 @@ builder.Services
     .WithHttpTransport()
     .WithToolsFromAssembly();
 
-// Load credentials registry — fail fast if absent, unparseable, or has duplicate keys.
-// Must happen before builder.Build() so it can be injected into CredentialsService via DI.
-var registryPath = Path.Combine(AppContext.BaseDirectory, "credentials-registry.json");
-var credentialRegistry = CredentialsService.LoadRegistry(registryPath);
-builder.Services.AddSingleton(credentialRegistry);
-
 var app = builder.Build();
 
 // Auto-migrate and seed DB on startup
@@ -123,6 +117,7 @@ if (!string.IsNullOrWhiteSpace(orchestratorAuthToken))
         var isReadOnly   = HttpMethods.IsGet(method) || HttpMethods.IsHead(method) || HttpMethods.IsOptions(method);
         var isExemptPath = path.StartsWith("/ws", StringComparison.OrdinalIgnoreCase)
                         || path.StartsWith("/mcp", StringComparison.OrdinalIgnoreCase)
+                        || path.StartsWith("/api/config", StringComparison.OrdinalIgnoreCase)
                         || path.Equals("/health", StringComparison.OrdinalIgnoreCase);
 
         if (isReadOnly || isExemptPath)
@@ -147,21 +142,108 @@ if (!string.IsNullOrWhiteSpace(orchestratorAuthToken))
     });
 }
 
+// Config API auth — ORCHESTRATOR_CONFIG_TOKEN gates /api/config/* (all methods).
+// Separate from ORCHESTRATOR_AUTH_TOKEN so peers can read config without full admin access.
+// Fails CLOSED: if ORCHESTRATOR_CONFIG_TOKEN is not configured all /api/config/* requests
+// return 503 so the endpoint is never accidentally open on a misconfigured deployment.
+var orchestratorConfigToken = app.Configuration["Orchestrator:ConfigToken"] ?? "";
+app.Use(async (context, next) =>
+{
+    var path = context.Request.Path.Value ?? "";
+    if (!path.StartsWith("/api/config", StringComparison.OrdinalIgnoreCase))
+    {
+        await next(context);
+        return;
+    }
+
+    if (string.IsNullOrWhiteSpace(orchestratorConfigToken))
+    {
+        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+        await context.Response.WriteAsJsonAsync(new
+        {
+            error = "Config API unavailable: ORCHESTRATOR_CONFIG_TOKEN is not configured on this orchestrator"
+        });
+        return;
+    }
+
+    var authHeader = context.Request.Headers.Authorization.FirstOrDefault();
+    var token = authHeader?.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) == true
+        ? authHeader["Bearer ".Length..].Trim()
+        : null;
+
+    if (token != orchestratorConfigToken)
+    {
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await context.Response.WriteAsJsonAsync(new { error = "Unauthorized" });
+        return;
+    }
+
+    await next(context);
+});
+
 // MCP endpoint — explicitly mapped to /mcp so the auth middleware exemption matches
 app.MapMcp("/mcp");
 
-// Force SetupService construction at startup so compose health check logs run eagerly
-_ = app.Services.GetRequiredService<SetupService>();
+// Health check
+app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "fleet-orchestrator" }));
 
-// Health check — reports degraded if docker-compose file or CLI is missing
-app.MapGet("/health", (SetupService setupSvc) =>
+// ── Config API ────────────────────────────────────────────────────────────────
+
+// GET /api/config/values?keys=KEY1,KEY2,...
+// Returns literal and agent-derived values for the requested keys.
+// Rate-limited to 10 req/min per bearer token to limit secret enumeration surface.
+app.MapGet("/api/config/values", async (HttpRequest request, ConfigService configService, CancellationToken ct) =>
 {
-    var composeDegraded = setupSvc.ComposeDegradedReason;
-    if (composeDegraded is not null)
-        return Results.Json(
-            new { status = "degraded", service = "fleet-orchestrator", compose = composeDegraded },
-            statusCode: 503);
-    return Results.Ok(new { status = "healthy", service = "fleet-orchestrator" });
+    var keysParam = request.Query["keys"].FirstOrDefault() ?? "";
+    var keys = keysParam
+        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    var result = await configService.GetValuesAsync(keys, ct);
+    return Results.Ok(new { literals = result.Literals, agentDerived = result.AgentDerived });
+}).RequireRateLimiting("reveal-rate-limit");
+
+// GET /api/config/all — returns all non-denylisted .env keys (for dashboard credentials table)
+// Rate-limited to 10 req/min per bearer token to limit secret enumeration surface.
+app.MapGet("/api/config/all", (ConfigService configService) =>
+{
+    var all = configService.GetAll();
+    return Results.Ok(all);
+}).RequireRateLimiting("reveal-rate-limit");
+
+// POST /api/config/reload — re-reads .env, diffs, publishes config.changed
+app.MapPost("/api/config/reload", async (ConfigService configService, CancellationToken ct) =>
+{
+    var changed = await configService.ReloadAsync(ct);
+    return Results.Ok(new { changedKeys = changed, message = $"{changed.Count} key(s) changed, peers notified" });
+});
+
+// PUT /api/config/values — atomically writes key-value pairs to .env + broadcasts config.changed
+app.MapPut("/api/config/values", async (HttpRequest request, ConfigService configService, CancellationToken ct) =>
+{
+    Dictionary<string, string>? kvs;
+    try { kvs = await request.ReadFromJsonAsync<Dictionary<string, string>>(ct); }
+    catch { return Results.BadRequest(new { error = "invalid_json" }); }
+
+    if (kvs is null || kvs.Count == 0)
+        return Results.BadRequest(new { error = "empty_payload" });
+
+    try
+    {
+        var changed = await configService.PutValuesAsync(kvs, ct);
+        return Results.Ok(new { changedKeys = changed, message = $"{changed.Count} key(s) changed, peers notified" });
+    }
+    catch (DenylistedException ex)
+    {
+        return Results.Json(new { error = "denylisted", detail = ex.Message }, statusCode: 403);
+    }
+    catch (TimeoutException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 503);
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem($"Write failed: {ex.Message}", statusCode: 500);
+    }
 });
 
 // REST: list all known agents
@@ -1022,7 +1104,7 @@ app.MapPost("/api/agents/reprovision-running", async (HttpRequest request, Conta
 });
 
 // REST: create a new agent (insert into DB + provision container)
-app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scopeFactory, ContainerProvisioningService provisioning, AgentRegistry registry, SetupService setupService, TemporalClientRegistry temporal, ILogger<Program> logger) =>
+app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scopeFactory, ContainerProvisioningService provisioning, AgentRegistry registry, SetupService setupService, ConfigService configService, TemporalClientRegistry temporal, ILogger<Program> logger) =>
 {
     using var scope = scopeFactory.CreateScope();
     var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
@@ -1133,82 +1215,71 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
     // and list_agents even before provisioning or first heartbeat.
     registry.PreloadFromDbConfig(agent);
 
-    // Bug fix: when the first co-cto agent is created, write FLEET_CTO_AGENT to .env
-    // and restart fleet-bridge + fleet-temporal-bridge so they route to the correct agent.
+    // When the first co-cto agent is created, write FLEET_CTO_AGENT to .env and broadcast
+    // config.changed so peers (fleet-bridge, fleet-temporal-bridge) self-update their routing.
     // Only fires when no prior co-cto existed (agentCount == 0 ensures this is the first agent overall).
-    Dictionary<string, string>? ctoRestartErrors = null;
     if (string.Equals(agent.Role, "co-cto", StringComparison.OrdinalIgnoreCase)
         && !await db.Agents.AnyAsync(a => a.Role.ToLower() == "co-cto" && a.Id != agent.Id))
     {
-        var (_, restartErrors) = await setupService.WriteCtoAgentAsync(name, CancellationToken.None);
-        if (restartErrors.Count > 0)
-            ctoRestartErrors = restartErrors;
-
-        // Send the first-provision welcome DM — one time only, fire-and-forget.
-        var ceoUserId = setupService.GetTelegramUserId();
-        if (WelcomeDmHelper.ShouldTrigger(agent, body.Provision != false, ceoUserId))
+        try
         {
-            var welcomeInput = JsonSerializer.Serialize(new
+            await configService.PutValuesAsync(new Dictionary<string, string>
             {
-                TargetAgent = name,
-                TaskDescription = WelcomeDmHelper.BuildWelcomeDirective(name, ceoUserId!.Value),
-                TimeoutMinutes = 5
-            });
-            await WelcomeDmHelper.TriggerAsync(
-                agent,
-                saveWelcomeSentAt: async () => await db.SaveChangesAsync(CancellationToken.None),
-                startWorkflow:     async () => { await temporal.StartWorkflowAsync(
-                    "TaskDelegationWorkflow",
-                    $"welcome-{agent.Id}",
-                    "fleet",
-                    "fleet",
-                    welcomeInput); },
-                logger);
+                ["FLEET_CTO_AGENT"] = name
+            }, CancellationToken.None);
+            logger.LogInformation("FLEET_CTO_AGENT set to '{Agent}' and config.changed broadcast", name);
         }
-        else if (body.Provision != false && agent.WelcomeSentAt is null)
+        catch (Exception ex)
         {
-            logger.LogWarning("Welcome DM skipped: CEO Telegram user ID not configured.");
+            logger.LogWarning(ex, "Could not write FLEET_CTO_AGENT for new co-cto agent '{Agent}'", name);
         }
+
     }
 
     if (body.Provision != false)
     {
         var result = await provisioning.ProvisionAsync(name);
         if (!result.Success)
-            // Item 2: include CTO-env restart errors alongside provisioning failure in 207
             return Results.Json(
                 new
                 {
                     message = $"Agent '{name}' created in DB but provisioning failed: {result.Message}",
                     agentName = name,
-                    restart_errors = ctoRestartErrors
                 },
                 statusCode: 207);
 
-        // Item 1: return 207 when CTO-env restarts failed, even though provision succeeded
-        if (ctoRestartErrors is not null)
-            return Results.Json(
-                new
+        // Send the first-provision welcome DM — after provisioning so the agent
+        // container is up and consuming RabbitMQ before the directive arrives.
+        if (string.Equals(agent.Role, "co-cto", StringComparison.OrdinalIgnoreCase))
+        {
+            var ceoUserId = setupService.GetTelegramUserId();
+            if (WelcomeDmHelper.ShouldTrigger(agent, true, ceoUserId))
+            {
+                var welcomeInput = JsonSerializer.Serialize(new
                 {
-                    message = $"Agent '{name}' created and provisioned. FLEET_CTO_AGENT set but some restarts failed.",
-                    agentName = name,
-                    restart_errors = ctoRestartErrors
-                },
-                statusCode: 207);
+                    TargetAgent = name,
+                    TaskDescription = WelcomeDmHelper.BuildWelcomeDirective(name, ceoUserId!.Value),
+                    TimeoutMinutes = 5
+                });
+                await WelcomeDmHelper.TriggerAsync(
+                    agent,
+                    saveWelcomeSentAt: async () => await db.SaveChangesAsync(CancellationToken.None),
+                    startWorkflow:     async () => { await temporal.StartWorkflowAsync(
+                        "TaskDelegationWorkflow",
+                        $"welcome-{agent.Id}",
+                        "fleet",
+                        "fleet",
+                        welcomeInput); },
+                    logger);
+            }
+            else if (agent.WelcomeSentAt is null)
+            {
+                logger.LogWarning("Welcome DM skipped: CEO Telegram user ID not configured.");
+            }
+        }
 
         return Results.Created($"/api/agents/{name}", new { message = $"Agent '{name}' created and provisioned", agentName = name });
     }
-
-    // Item 1: return 207 when CTO-env restarts failed (no-provision path)
-    if (ctoRestartErrors is not null)
-        return Results.Json(
-            new
-            {
-                message = $"Agent '{name}' created. FLEET_CTO_AGENT set but some restarts failed.",
-                agentName = name,
-                restart_errors = ctoRestartErrors
-            },
-            statusCode: 207);
 
     return Results.Created($"/api/agents/{name}", new { message = $"Agent '{name}' created (not provisioned — use POST /api/agents/{name}/reprovision when ready)", agentName = name });
 });
@@ -2004,28 +2075,6 @@ app.MapPost("/api/setup/telegram/validate", async (
     return Results.Ok(new { valid = true, ctoBot = result.CtoBot, notifierBot = result.NotifierBot, groupChat = result.GroupChat, warnings = result.Warnings });
 });
 
-app.MapPost("/api/setup/telegram", async (
-    HttpRequest request, SetupService setup, CancellationToken ct) =>
-{
-    TelegramSetupRequest? req;
-    try { req = await request.ReadFromJsonAsync<TelegramSetupRequest>(ct); }
-    catch { return Results.BadRequest(new { error = "invalid_json" }); }
-    if (req is null) return Results.BadRequest(new { error = "empty_body" });
-
-    SetupWriteResult result;
-    try { result = await setup.WriteTelegramAsync(req, ct); }
-    catch (InvalidOperationException ex) when (ex.Message.Contains("atomically write"))
-    { return Results.Problem(detail: ex.Message, statusCode: 500, title: "env_write_failed"); }
-
-    if (!result.Success)
-    {
-        if (result.ErrorCode is "setup_locked" or "db_unavailable") return Results.StatusCode(503);
-        return Results.BadRequest(new { error = result.ErrorCode, detail = result.ErrorDetail });
-    }
-    if (result.RestartErrors.Count > 0)
-        return Results.Json(new { written = result.Written, restarted = result.Restarted, warnings = result.Warnings, restartErrors = result.RestartErrors }, statusCode: 207);
-    return Results.Ok(new { written = result.Written, restarted = result.Restarted, warnings = result.Warnings });
-});
 
 app.MapPost("/api/setup/github/validate", async (
     HttpRequest request, SetupService setup, CancellationToken ct) =>
@@ -2042,254 +2091,38 @@ app.MapPost("/api/setup/github/validate", async (
     return Results.Ok(new { valid = true, appId = result.AppId, appName = result.AppName, warnings = result.Warnings });
 });
 
-app.MapPost("/api/setup/github", async (
-    HttpRequest request, SetupService setup, CancellationToken ct) =>
+// POST /api/setup/github/save — writes GITHUB_APP_ID + GITHUB_APP_PEM to .env.
+// GITHUB_APP_PEM is on the config-API denylist (prevents general agents from reading it back),
+// so it cannot go through PUT /api/config/values. This dedicated setup endpoint bypasses the
+// denylist for the two GitHub App keys only. Auth-gated by ORCHESTRATOR_AUTH_TOKEN.
+app.MapPost("/api/setup/github/save", async (
+    HttpRequest request, SetupService setup, ConfigService configService, CancellationToken ct) =>
 {
     GitHubSetupRequest? req;
     try { req = await request.ReadFromJsonAsync<GitHubSetupRequest>(ct); }
     catch { return Results.BadRequest(new { error = "invalid_json" }); }
     if (req is null) return Results.BadRequest(new { error = "empty_body" });
 
-    SetupWriteResult result;
-    try { result = await setup.WriteGitHubAsync(req, ct); }
-    catch (InvalidOperationException ex) when (ex.Message.Contains("atomically write"))
-    { return Results.Problem(detail: ex.Message, statusCode: 500, title: "env_write_failed"); }
-
-    if (!result.Success)
+    try
     {
-        if (result.ErrorCode is "setup_locked" or "db_unavailable") return Results.StatusCode(503);
-        return Results.BadRequest(new { error = result.ErrorCode, detail = result.ErrorDetail });
+        await setup.SaveGitHubAsync(req.AppId, req.PrivateKeyPem);
+        // Reload to invalidate cache and broadcast config.changed for non-denylisted changes
+        // (GITHUB_APP_ID will be broadcast; GITHUB_APP_PEM is denylisted so it is never broadcast).
+        var changed = await configService.ReloadAsync(ct);
+        return Results.Ok(new { saved = true, changedKeys = changed });
     }
-    if (result.RestartErrors.Count > 0)
-        return Results.Json(new { written = result.Written, restarted = result.Restarted, warnings = result.Warnings, restartErrors = result.RestartErrors }, statusCode: 207);
-    return Results.Ok(new { written = result.Written, restarted = result.Restarted, warnings = result.Warnings });
+    catch (Exception ex)
+    {
+        return Results.Problem($"Save failed: {ex.Message}", statusCode: 500);
+    }
 });
 
-// ── Credentials view ───────────────────────────────────────────────────────────
+
+// ── Credentials / connections view ─────────────────────────────────────────────
 
 // GET /api/credentials/connections — rich status with masked values + last-validated
 app.MapGet("/api/credentials/connections", (SetupService setupService) =>
     Results.Ok(setupService.GetRichConnectionsStatus()));
-
-// GET /api/env-vars
-app.MapGet("/api/env-vars", async (SetupService setupService, IServiceScopeFactory scopeFactory, CancellationToken ct) =>
-{
-    var vars = await setupService.GetEnvVarsAsync(scopeFactory, ct);
-    return Results.Ok(vars);
-});
-
-// GET /api/env-vars/{key}/reveal (auth-gated, rate-limited 10/min)
-app.MapGet("/api/env-vars/{key}/reveal", (string key, SetupService setupService, HttpContext ctx, ILogger<Program> logger) =>
-{
-    // Auth check — require Bearer token
-    var token = app.Configuration["Orchestrator:AuthToken"];
-    if (!string.IsNullOrEmpty(token))
-    {
-        var auth = ctx.Request.Headers.Authorization.FirstOrDefault() ?? "";
-        if (!auth.Equals($"Bearer {token}", StringComparison.Ordinal))
-            return Results.Unauthorized();
-    }
-    var value = setupService.RevealEnvVar(key);
-    if (value is null) return Results.NotFound();
-    logger.LogInformation("Env var revealed: key={Key} ip={IP}", key, ctx.Connection.RemoteIpAddress);
-    return Results.Ok(new { key, value });
-}).RequireRateLimiting("reveal-rate-limit");
-
-// PUT /api/env-vars/{key}
-app.MapPut("/api/env-vars/{key}", async (string key, HttpRequest request, SetupService setupService) =>
-{
-    var body = await request.ReadFromJsonAsync<SetEnvVarRequest>();
-    if (body is null || string.IsNullOrWhiteSpace(body.Value))
-        return Results.BadRequest(new { error = "value is required" });
-    try
-    {
-        await setupService.SetEnvVarAsync(key, body.Value.Trim());
-        var affected = setupService.GetAffectedServices(key);
-        return Results.Ok(new { message = $"'{key}' updated", affectedServices = affected });
-    }
-    catch (InvalidOperationException ex)
-    {
-        return Results.Conflict(new { error = ex.Message });
-    }
-    catch (ArgumentException ex)
-    {
-        return Results.BadRequest(new { error = ex.Message });
-    }
-});
-
-// DELETE /api/env-vars/{key}
-app.MapDelete("/api/env-vars/{key}", async (string key, SetupService setupService) =>
-{
-    try
-    {
-        await setupService.DeleteEnvVarAsync(key);
-        return Results.Ok(new { message = $"'{key}' deleted" });
-    }
-    catch (InvalidOperationException ex)
-    {
-        return Results.Conflict(new { error = ex.Message });
-    }
-});
-
-// ── Credential Registry endpoints ──────────────────────────────────────────────────────────────
-
-// GET /api/credentials/registry — registry metadata, no values, no auth required
-app.MapGet("/api/credentials/registry", () =>
-    Results.Ok(new { entries = credentialRegistry.Entries }));
-
-// GET /api/credentials/{key}/value — returns current value for a single registry key
-app.MapGet("/api/credentials/{key}/value", (string key, CredentialsService credentials, HttpContext ctx) =>
-{
-    if (!string.IsNullOrEmpty(orchestratorAuthToken))
-    {
-        var auth = ctx.Request.Headers.Authorization.FirstOrDefault() ?? "";
-        if (!auth.Equals($"Bearer {orchestratorAuthToken}", StringComparison.Ordinal))
-            return Results.Unauthorized();
-    }
-
-    if (!credentialRegistry.TryGet(key, out var entry) || entry is null)
-        return Results.NotFound(new { error = "key_not_found" });
-
-    var value = credentials.ReadEnvValue(key);
-    return Results.Ok(new { key, value, sensitive = entry.Sensitive, editable = entry.Editable });
-});
-
-// GET /api/credentials/{key}/propagation-preview — compute affected services without executing
-app.MapGet("/api/credentials/{key}/propagation-preview", async (string key, CredentialsService credentials, HttpContext ctx, CancellationToken ct) =>
-{
-    if (!string.IsNullOrEmpty(orchestratorAuthToken))
-    {
-        var auth = ctx.Request.Headers.Authorization.FirstOrDefault() ?? "";
-        if (!auth.Equals($"Bearer {orchestratorAuthToken}", StringComparison.Ordinal))
-            return Results.Unauthorized();
-    }
-
-    if (!credentialRegistry.TryGet(key, out _))
-        return Results.NotFound(new { error = "key_not_found" });
-
-    var preview = await credentials.ComputePropagationAsync(key, ct);
-    return Results.Ok(new
-    {
-        key = preview.Key,
-        infra = preview.Infra,
-        agents = preview.Agents,
-        selfRecreate = preview.SelfRecreate,
-        warnings = preview.Warnings,
-    });
-});
-
-// PUT /api/credentials/{key} — atomic write + cache invalidation + propagation
-app.MapPut("/api/credentials/{key}", async (string key, HttpRequest request, CredentialsService credentials, HttpContext ctx, IHostApplicationLifetime lifetime, ILogger<Program> logger, CancellationToken ct) =>
-{
-    if (!string.IsNullOrEmpty(orchestratorAuthToken))
-    {
-        var auth = ctx.Request.Headers.Authorization.FirstOrDefault() ?? "";
-        if (!auth.Equals($"Bearer {orchestratorAuthToken}", StringComparison.Ordinal))
-            return Results.Unauthorized();
-    }
-
-    if (!credentialRegistry.TryGet(key, out var entry) || entry is null)
-        return Results.NotFound(new { error = "key_not_found" });
-
-    if (!entry.Editable)
-        return Results.Json(new { error = "not_editable" }, statusCode: 403);
-
-    var body = await request.ReadFromJsonAsync<CredentialSaveRequest>(ct);
-    if (body is null || string.IsNullOrEmpty(body.Value))
-        return Results.BadRequest(new { error = "empty_value_not_allowed" });
-
-    // No-op if same value
-    var current = credentials.ReadEnvValue(key);
-    if (string.Equals(current, body.Value, StringComparison.Ordinal))
-        return Results.Ok(new { changed = false });
-
-    PropagationResult result;
-    try { result = await credentials.SaveAndPropagateAsync(key, body.Value, ct); }
-    catch (TimeoutException ex) { return Results.Problem(ex.Message, statusCode: 503); }
-    catch (Exception ex)
-    {
-        logger.LogError(ex, "Credential save failed for key={Key}", key);
-        return Results.Problem($"Write failed: {ex.Message}", statusCode: 500);
-    }
-
-    var responseBody = new
-    {
-        key,
-        changed = true,
-        infra = new { restarted = result.InfraRestarted, failed = result.InfraFailed },
-        agents = new
-        {
-            reprovisioned = result.AgentsReprovisioned,
-            failed = result.AgentsFailed.Select(f => new { name = f.Name, error = f.Error }).ToList(),
-        },
-        warnings = result.Warnings,
-        selfRecreate = result.SelfRecreate,
-    };
-
-    if (result.SelfRecreate)
-    {
-        // Graceful in-process shutdown — compose restart policy brings the container back up
-        ctx.Response.OnCompleted(async () =>
-        {
-            await Task.Delay(TimeSpan.FromMilliseconds(500));
-            lifetime.StopApplication();
-        });
-
-        return Results.Json(new
-        {
-            key,
-            changed = true,
-            selfRecreate = true,
-            warning = "The orchestrator will restart. Your dashboard connection will drop for ~10 seconds and reconnect automatically.",
-            infra = responseBody.infra,
-            agents = responseBody.agents,
-            warnings = result.Warnings,
-        }, statusCode: 202);
-    }
-
-    var hasFailures = result.InfraFailed.Count > 0 || result.AgentsFailed.Count > 0;
-    return hasFailures
-        ? Results.Json(responseBody, statusCode: 207)
-        : Results.Ok(responseBody);
-});
-
-// POST /api/credentials/{key}/retry-propagation — retry a single failed target
-app.MapPost("/api/credentials/{key}/retry-propagation", async (string key, HttpRequest request, CredentialsService credentials, HttpContext ctx, CancellationToken ct) =>
-{
-    if (!string.IsNullOrEmpty(orchestratorAuthToken))
-    {
-        var auth = ctx.Request.Headers.Authorization.FirstOrDefault() ?? "";
-        if (!auth.Equals($"Bearer {orchestratorAuthToken}", StringComparison.Ordinal))
-            return Results.Unauthorized();
-    }
-
-    if (!credentialRegistry.TryGet(key, out _))
-        return Results.NotFound(new { error = "key_not_found" });
-
-    var body = await request.ReadFromJsonAsync<RetryPropagationRequest>(ct);
-    if (body is null || string.IsNullOrEmpty(body.Target) || string.IsNullOrEmpty(body.Type))
-        return Results.BadRequest(new { error = "target and type are required" });
-
-    try
-    {
-        var (inScope, success, error) = await credentials.RetryPropagationAsync(key, body.Target, body.Type, ct);
-
-        if (!inScope)
-            return Results.NotFound(new { error = $"target '{body.Target}' is not in the propagation set for key '{key}'" });
-
-        return success
-            ? Results.Ok(new { target = body.Target, type = body.Type, success = true })
-            : Results.Json(new { target = body.Target, type = body.Type, success = false, error }, statusCode: 207);
-    }
-    catch (DbUnavailableException ex)
-    {
-        return Results.Json(new { target = body.Target, type = body.Type, success = false, error = "db_unavailable", detail = ex.Message }, statusCode: 207);
-    }
-    catch (ComposeUnavailableException ex)
-    {
-        return Results.Json(new { target = body.Target, type = body.Type, success = false, error = "compose_unavailable", detail = ex.Message }, statusCode: 207);
-    }
-});
 
 // POST /api/services/restart
 app.MapPost("/api/services/restart", async (HttpRequest request, DockerService docker, CancellationToken ct) =>
@@ -2584,11 +2417,8 @@ record RepositoryRequest(string? Name, string? FullName);
 
 record RestartWithVersionRequest(string InstructionName, int VersionNumber, bool? Pin);
 
-record SetEnvVarRequest(string Value);
 record RestartServicesRequest(string[] Services);
 record MountCredentialRequest(string AgentName, string MountPath, string? Mode);
-record CredentialSaveRequest(string? Value);
-record RetryPropagationRequest(string? Target, string? Type);
 
 record CreateScheduleRequest(
     string? ScheduleId,

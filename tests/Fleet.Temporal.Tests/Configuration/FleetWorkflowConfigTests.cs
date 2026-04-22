@@ -45,13 +45,18 @@ public sealed class FleetWorkflowConfigTests : IDisposable
     }
 
     [Fact]
-    public void Initialize_CalledTwice_ThrowsInvalidOperationException()
+    public void Initialize_CalledTwice_IsNoOp_RetainsFirstInstance()
     {
-        FleetWorkflowConfig.Initialize(new FleetWorkflowOptions());
+        // Initialize is intentionally a no-op on subsequent calls so that peer-config hosted
+        // services can call it during deferred bootstrap without clobbering the first instance.
+        var first = new FleetWorkflowOptions { EscalationTarget = "first" };
+        var second = new FleetWorkflowOptions { EscalationTarget = "second" };
 
-        var ex = Assert.Throws<InvalidOperationException>(
-            () => FleetWorkflowConfig.Initialize(new FleetWorkflowOptions()));
-        Assert.Contains("already been initialized", ex.Message);
+        FleetWorkflowConfig.Initialize(first);
+        FleetWorkflowConfig.Initialize(second);
+
+        Assert.Same(first, FleetWorkflowConfig.Instance);
+        Assert.Equal("first", FleetWorkflowConfig.Instance.EscalationTarget);
     }
 
     [Fact]

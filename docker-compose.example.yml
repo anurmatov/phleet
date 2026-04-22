@@ -215,13 +215,21 @@ services:
     image: fleet:telegram
     container_name: fleet-telegram
     environment:
-      # Bot token map: one entry per agent in your deployment.
-      # Values are injected from .env — keys use the .NET double-underscore override convention.
-      - TelegramBots__Tokens__notifier=${TELEGRAM_NOTIFIER_BOT_TOKEN}
-      # Add per-agent tokens as needed, e.g.:
-      # - TelegramBots__Tokens__myagent=${TELEGRAM_MYAGENT_BOT_TOKEN}
+      - ORCHESTRATOR_URL=http://fleet-orchestrator:3600
+      - ORCHESTRATOR_CONFIG_TOKEN=${ORCHESTRATOR_CONFIG_TOKEN}
+      - RABBITMQ_URL=amqp://rabbitmq
+      # Literal keys to fetch from orchestrator on startup and re-fetch on config.changed events.
+      - PEER_CONFIG_KEYS=FLEET_CTO_AGENT,TELEGRAM_CTO_BOT_TOKEN,TELEGRAM_NOTIFIER_BOT_TOKEN
+      # Template keys: {SHORTNAME} is expanded per-agent to pull per-agent bot tokens
+      # (for non-CTO agents that need their own dedicated bot).
+      - PEER_AGENT_DERIVED_KEYS=TELEGRAM_{SHORTNAME}_BOT_TOKEN
     mem_limit: 128m
     restart: unless-stopped
+    depends_on:
+      fleet-orchestrator:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3800/health"]
       interval: 10s
@@ -242,13 +250,17 @@ services:
       - RabbitMq__Host=rabbitmq
       - RabbitMq__Exchange=fleet.group
       - Bridge__TimeoutSeconds=300
-      - Bridge__BridgeChatId=${FLEET_GROUP_CHAT_ID:-0}
-      - Bridge__TargetAgent=${FLEET_CTO_AGENT}
-      - Telegram__BotToken=${TELEGRAM_NOTIFIER_BOT_TOKEN}
+      - ORCHESTRATOR_URL=http://fleet-orchestrator:3600
+      - ORCHESTRATOR_CONFIG_TOKEN=${ORCHESTRATOR_CONFIG_TOKEN}
+      - RABBITMQ_URL=amqp://rabbitmq
+      # Keys to self-update when config.changed is broadcast.
+      - PEER_CONFIG_KEYS=FLEET_CTO_AGENT,FLEET_GROUP_CHAT_ID,TELEGRAM_NOTIFIER_BOT_TOKEN
     mem_limit: 256m
     restart: unless-stopped
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      fleet-orchestrator:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3300/health"]
@@ -277,14 +289,20 @@ services:
       - TemporalBridge__TemporalAddress=temporal-server:7233
       - TemporalBridge__Namespaces__0=fleet
       - TemporalBridge__AgentTimeoutSeconds=1800
-      - TemporalBridge__GroupChatId=${FLEET_GROUP_CHAT_ID:-0}
       - TemporalBridge__OrchestratorAuthToken=${ORCHESTRATOR_AUTH_TOKEN}
       - TemporalBridge__OrchestratorUrl=http://fleet-orchestrator:3600
-      # The CTO/co-cto agent name — set during ./setup.sh and used by seed workflows
-      # via {{config.CtoAgent}} so they target the user-defined agent without hardcoding.
-      - FleetWorkflows__CtoAgent=${FLEET_CTO_AGENT}
+      - ORCHESTRATOR_URL=http://fleet-orchestrator:3600
+      - ORCHESTRATOR_CONFIG_TOKEN=${ORCHESTRATOR_CONFIG_TOKEN}
+      - RABBITMQ_URL=amqp://rabbitmq
+      # EscalationTarget: agent that receives workflow failure/timeout notifications and acts as
+      # ConsensusReviewWorkflow Synthesizer. Defaults to the CTO agent name from .env.
       - FleetWorkflows__EscalationTarget=${FLEET_CTO_AGENT}
-      # OAuth client IDs for provider token refresh workflow (optional).
+      # Dynamic keys fetched from orchestrator at startup and live-updated on config.changed events.
+      # FLEET_CTO_AGENT       — CTO agent name for UWE {{config.CtoAgent}} template expressions
+      # FLEET_GROUP_CHAT_ID   — Telegram group chat ID for activity directives (replaces static TemporalBridge__GroupChatId)
+      # AUTHTOKENREFRESH__*   — OAuth client IDs for provider token refresh (applied on restart)
+      - PEER_CONFIG_KEYS=FLEET_CTO_AGENT,FLEET_GROUP_CHAT_ID,AUTHTOKENREFRESH__CLAUDECLIENTID,AUTHTOKENREFRESH__CODEXCLIENTID
+      # OAuth client IDs for provider token refresh workflow (optional — also set as static fallback).
       # Set only if you want the fleet to auto-refresh Claude/Codex tokens.
       - AuthTokenRefresh__ClaudeClientId=${AUTHTOKENREFRESH__CLAUDECLIENTID:-}
       - AuthTokenRefresh__CodexClientId=${AUTHTOKENREFRESH__CODEXCLIENTID:-}
@@ -294,6 +312,8 @@ services:
       rabbitmq:
         condition: service_healthy
       temporal-server:
+        condition: service_healthy
+      fleet-orchestrator:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
@@ -346,9 +366,8 @@ services:
       - Provisioning__BaseDir=${FLEET_BASE_DIR}
       - Provisioning__EnvFilePath=${FLEET_BASE_DIR}/.env
       - Provisioning__DefaultNetwork=fleet-net
-      - Provisioning__ComposeFilePath=${FLEET_BASE_DIR}/docker-compose.yml
-      - Provisioning__ComposeProjectName=fleet
       - Orchestrator__AuthToken=${ORCHESTRATOR_AUTH_TOKEN}
+      - Orchestrator__ConfigToken=${ORCHESTRATOR_CONFIG_TOKEN}
     mem_limit: 512m
     restart: unless-stopped
     depends_on:
@@ -373,6 +392,7 @@ services:
       dockerfile: src/fleet-dashboard/Dockerfile
       args:
         VITE_AUTH_TOKEN: ${ORCHESTRATOR_AUTH_TOKEN:-changeme}
+        VITE_CONFIG_TOKEN: ${ORCHESTRATOR_CONFIG_TOKEN:-}
     image: fleet:dashboard
     container_name: fleet-dashboard
     ports:

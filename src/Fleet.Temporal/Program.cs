@@ -66,6 +66,9 @@ builder.Services.AddHttpClient("orchestrator", (sp, client) =>
 builder.Services.AddSingleton<TaskCompletionRegistry>();
 builder.Services.AddSingleton<WorkflowTypeRegistry>();
 
+// Peer config — fetches FLEET_CTO_AGENT and other keys from orchestrator on startup
+builder.Services.AddHostedService<PeerConfigHostedService>();
+
 // RabbitMQ listener — feeds agent responses into the registry
 builder.Services.AddHostedService<TemporalRelayListener>();
 
@@ -137,15 +140,9 @@ else
         string.Join(", ", configuredNamespaces));
 }
 
-// Initialize static config singleton for determinism-safe access in Temporal workflows
+// Initialize static config singleton for determinism-safe access in Temporal workflows.
+// CtoAgent may be empty at startup — it will be set by PeerConfigHostedService on bootstrap.
 var fleetWorkflowOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<FleetWorkflowOptions>>().Value;
-
-// Fail fast if required fleet workflow config is missing
-if (string.IsNullOrWhiteSpace(fleetWorkflowOptions.EscalationTarget))
-    throw new InvalidOperationException("FleetWorkflows:EscalationTarget is required in configuration.");
-if (string.IsNullOrWhiteSpace(fleetWorkflowOptions.CtoAgent))
-    throw new InvalidOperationException("FleetWorkflows:CtoAgent is required in configuration.");
-
 FleetWorkflowConfig.Initialize(fleetWorkflowOptions);
 
 app.MapMcp();

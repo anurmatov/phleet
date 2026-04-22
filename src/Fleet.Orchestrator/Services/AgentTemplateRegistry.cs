@@ -131,7 +131,7 @@ public static class AgentTemplateRegistry
                 TelegramSendOnly: false,
                 AutoMemoryEnabled: true,
                 Tools: CtoTools,
-                Projects: [],
+                Projects: ["fleet"],
                 McpEndpoints: FullMcps,
                 Networks: CoreNetworks,
                 EnvRefs: CoreEnvRefs,

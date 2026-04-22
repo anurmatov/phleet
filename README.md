@@ -1,16 +1,12 @@
 # Phleet — Autonomous Multi-Agent Platform
 
-> ⚠️ **Current state: unstable.** We are rethinking credentials management
-> (env-var vs DB-owned, restart-propagation vs event-driven refresh). Expect
-> breaking changes in the `fleet-orchestrator`, `fleet-telegram`,
-> `fleet-bridge`, and `fleet-temporal-bridge` peer-config pathways over the
-> next few iterations. Pin a specific commit if you need stability.
-
 <p align="center">
   <img src=".github/assets/phleet-hero.svg" alt="Phleet" width="720">
 </p>
 
-Phleet is an open-source, self-hosted multi-agent AI platform built on .NET 10. Agents run as Docker containers on your host, use your Claude or Codex credentials, hit your repos through your own GitHub App, and are coordinated by a central orchestrator backed by Temporal workflows. Control plane, runtime state, workflow history, and memory stay on infrastructure you control; external traffic goes only to the providers you configure — Claude/Codex, GitHub, and Telegram.
+Phleet is an open-source, self-hosted multi-agent AI platform built on .NET 10, coordinated by a central orchestrator backed by Temporal workflows.
+
+**Your credentials, your repos, your infrastructure.** Agents run as Docker containers on your host, use your Claude or Codex credentials, and hit your repos through your own GitHub App. Control plane, runtime state, workflow history, and memory stay on infrastructure you control; external traffic goes only to the providers you configure — Claude/Codex, GitHub, and Telegram.
 
 <p align="center">
   <img src=".github/assets/phleet-dashboard.jpg" alt="Phleet dashboard — agents and active workflows" width="900">
@@ -70,15 +66,15 @@ All stateful services bind-mount their data under `./fleet/` — no named Docker
 
 After `./setup.sh` you have a **single agent** running: the co-CTO. It is the only agent in the orchestrator granted the full agent-lifecycle and workflow-authoring toolset. You don't spin up more agents by editing JSON and restarting containers — you grow the fleet by talking to the co-CTO in Telegram, in plain English.
 
-Things you can ask the co-CTO to do, today, out of the box:
-
-- **Grow the team.** "Create a new developer agent on sonnet, call it `alice`, give it Read/Edit/Bash and fleet-memory, add her to the reporting group." The co-CTO calls `create_agent` → `manage_agent_*` → `provision_agent` and the container is up within a minute.
-- **Shrink the team.** "We don't need the research agent anymore, stop it and clean up the workspace." → `stop_agent` / `deprovision_agent`, container gone, workspace archived on request.
-- **Edit role instructions live.** "Update the developer role to always run `dotnet test` before committing." → `create_instruction` with a new version, `manage_agent_instructions` to swap it in, old version kept for rollback. No redeploy.
-- **Author and version workflows.** "Draft a workflow that spawns a design review, waits for my approval, then runs implementation." → `create_workflow_definition` produces a versioned JSON definition you can run immediately — or open in the visual editor and tweak.
-- **Run and gate workflows.** "Start a PR implementation workflow on issue #123 using agent `alice`." → `temporal_start_workflow`. The co-CTO pings you at the human-review gate; you reply *approved* / *changes_requested* / *rejected*.
-- **Remember across sessions.** "Memorize that we use Conventional Commits in this repo." → stored in fleet-memory (Qdrant + embeddings), searchable by every agent from any future session.
-- **Coordinate the fleet.** The co-CTO maintains an active task-tracker memory, reviews production-risk changes proposed by worker agents before they run, and facilitates the shared Telegram coordination group.
+| You say | What happens |
+|---------|--------------|
+| *"Create a new developer agent on sonnet, call it `alice`, give it Read/Edit/Bash and fleet-memory."* | The co-CTO calls `create_agent` → `manage_agent_*` → `provision_agent`. Container is up within a minute. |
+| *"We don't need the research agent anymore, stop it and clean up the workspace."* | `stop_agent` / `deprovision_agent`. Container gone, workspace archived on request. |
+| *"Update the developer role to always run `dotnet test` before committing."* | `create_instruction` with a new version, `manage_agent_instructions` to swap it in. Old version kept for rollback. No redeploy. |
+| *"Draft a workflow that spawns a design review, waits for my approval, then runs implementation."* | `create_workflow_definition` produces a versioned JSON definition you can run immediately — or open in the visual editor and tweak. |
+| *"Start a PR implementation workflow on issue #123 using agent `alice`."* | `temporal_start_workflow`. The co-CTO pings you at the human-review gate; you reply *approved* / *changes_requested* / *rejected*. |
+| *"Memorize that we use Conventional Commits in this repo."* | Stored in fleet-memory (Qdrant + embeddings), searchable by every agent from any future session. |
+| *"Keep an eye on the fleet while I'm away."* | The co-CTO maintains an active task-tracker memory, reviews production-risk changes proposed by worker agents before they run, and facilitates the shared Telegram coordination group. |
 
 The rest of this README is the plumbing — configuration, deployment, troubleshooting. The point of the co-CTO is that after setup you mostly don't need to touch any of it.
 
@@ -99,13 +95,14 @@ The rest of this README is the plumbing — configuration, deployment, troublesh
 - `fleet-bridge` — RabbitMQ relay
 - `fleet-dashboard` — web UI at http://localhost:3700
 
-## Project Status
+## Platform support
 
-Phleet has been tested end-to-end on **macOS (Apple silicon, Mac Studio) with Claude** as the primary provider — that's the path I actively run. Other combinations should work but haven't been exercised nearly as hard:
-
-- **Linux host** — expected to work (all containers are linux/amd64 or linux/arm64); untested by me at the time of release.
-- **Windows host** — Docker Desktop + WSL2 is the intended path. Unverified.
-- **Codex provider** — the code paths exist and ship in `seed.example.json`, but Claude has seen far more wall-clock time than Codex in real workflows.
+| Platform | Provider | Status |
+|----------|----------|--------|
+| macOS (Apple silicon) | Claude | ✅ Tested end-to-end — actively run on Mac Studio |
+| Linux | Claude / Codex | ⚠️ Expected to work (all containers are linux/amd64 or linux/arm64); untested at release |
+| Windows | Claude / Codex | ⚠️ Docker Desktop + WSL2 is the intended path. Unverified |
+| Any | Codex | ⚠️ Code paths ship in `seed.example.json`, but Claude has seen far more wall-clock time in real workflows |
 
 If you run Phleet on Windows, on a Linux host, or with Codex as the primary provider and hit something broken — PRs and issue reports are very welcome. Small fixes and "it works on my box" confirmations are just as valuable as new features here.
 
@@ -152,12 +149,12 @@ Workflows can be authored as versioned JSON definitions through the dashboard's 
 dotnet build
 
 # Build Docker images from repo root
-docker build -t phleet:agent .
-docker build -t phleet:orchestrator -f src/Fleet.Orchestrator/Dockerfile .
-docker build -t phleet:memory -f src/Fleet.Memory/Dockerfile .
-docker build -t phleet:temporal-bridge -f Dockerfile.temporal .
-docker build -t phleet:bridge -f src/Fleet.Bridge/Dockerfile .
-docker build -t phleet:dashboard \
+docker build -t fleet:agent .
+docker build -t fleet:orchestrator -f src/Fleet.Orchestrator/Dockerfile .
+docker build -t fleet:memory -f src/Fleet.Memory/Dockerfile .
+docker build -t fleet:temporal-bridge -f Dockerfile.temporal .
+docker build -t fleet:bridge -f src/Fleet.Bridge/Dockerfile .
+docker build -t fleet:dashboard \
   --build-arg VITE_AUTH_TOKEN=your-token \
   -f src/fleet-dashboard/Dockerfile .
 

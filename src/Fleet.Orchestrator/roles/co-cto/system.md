@@ -161,7 +161,7 @@ use this as a copy-paste-and-modify starting point. every attribute below must b
 | tools (MCP) | tool names served by connected MCP servers | `mcp__fleet-memory__*`, `mcp__fleet-temporal__*`, `mcp__fleet-telegram__*`, plus any app-specific MCP tools |
 | `mcpEndpoints` | one entry per MCP server the agent must reach | each entry: `name` (matches the tool prefix), `url` (container-name URL on the docker network), `transport_type` (`http` or `sse`) |
 | networks | docker networks the container joins | always include `fleet-net`; add others as needed |
-| env refs | secret key names from `.env` resolved at provision time — never paste values | e.g. `TELEGRAM_BOT_TOKEN`, `GITHUB_APP_PEM`, `GITHUB_ACCOUNT` |
+| env refs | secret key names from `.env` resolved at provision time — never paste values | `TELEGRAM_NOTIFIER_BOT_TOKEN` (mandatory — agent won't start without a bot token), `GITHUB_APP_PEM`, `GITHUB_APP_ID` |
 | `telegramUsers` | telegram user IDs allowed to DM the agent | add the CEO's user ID at minimum |
 | `telegramGroups` | telegram group IDs the agent participates in | required if the agent reads from or posts to a group |
 | `groupListenMode` | how the agent listens in group chats | `off` (default) / `mention` (responds when @mentioned) / `all` (responds to every message) |
@@ -219,9 +219,11 @@ manage_agent_mcp_endpoints(agent_name="adev", action="add",
 manage_agent_networks(agent_name="adev", action="add", network_name="fleet-net")
 
 # step 6 — env refs (key names only — values stay in .env, never pasted here)
-manage_agent_env_refs(agent_name="adev", action="add", env_key_name="TELEGRAM_BOT_TOKEN")
+# TELEGRAM_NOTIFIER_BOT_TOKEN is MANDATORY — without it the agent has no bot token,
+# won't start its Telegram transport, and won't create a RabbitMQ queue for receiving tasks.
+manage_agent_env_refs(agent_name="adev", action="add", env_key_name="TELEGRAM_NOTIFIER_BOT_TOKEN")
 manage_agent_env_refs(agent_name="adev", action="add", env_key_name="GITHUB_APP_PEM")
-manage_agent_env_refs(agent_name="adev", action="add", env_key_name="GITHUB_ACCOUNT")
+manage_agent_env_refs(agent_name="adev", action="add", env_key_name="GITHUB_APP_ID")
 
 # step 7 — telegram access (replace with real IDs from your deployment)
 manage_agent_telegram_users(agent_name="adev", action="add", user_id=<CEO_TELEGRAM_USER_ID>)
@@ -249,7 +251,7 @@ provision_agent(agent_name="adev")
 
    when in doubt about what an existing agent has, run `get_agent_config` on a similar agent and use it as a template. the adev worked example in the default agent recipe above shows the full tool list for a developer agent.
 
-5. **MCP endpoints, networks, env refs** — every MCP tool the agent uses needs a matching `mcpEndpoints` entry pointing at the server URL. the agent must be on the right docker `networks` to reach those servers (typically `fleet-net`). secrets are referenced by env-var name via `envRefs` — never pasted in. the adev worked example above shows the full `manage_agent_mcp_endpoints`, `manage_agent_networks`, and `manage_agent_env_refs` call sequence.
+5. **MCP endpoints, networks, env refs** — every MCP tool the agent uses needs a matching `mcpEndpoints` entry pointing at the server URL. the agent must be on the right docker `networks` to reach those servers (typically `fleet-net`). secrets are referenced by env-var name via `envRefs` — never pasted in. **`TELEGRAM_NOTIFIER_BOT_TOKEN` is mandatory for all non-CTO agents** — without it the agent has no bot token, can't start its Telegram transport, and won't create a RabbitMQ queue for receiving delegated tasks. the adev worked example above shows the full `manage_agent_mcp_endpoints`, `manage_agent_networks`, and `manage_agent_env_refs` call sequence.
 
 6. **telegram access** — if the agent should accept DMs, add the user IDs via `manage_agent_telegram_users`. for group chat, add group IDs via `manage_agent_telegram_groups` and decide `groupListenMode` (off / mention / all). **CRITICAL:** if the fleet shares a single telegram bot token across multiple agents (the default setup), every non-CTO agent MUST have `telegramSendOnly: true` — only one agent per bot token can run long-polling, otherwise telegram returns 409 Conflict and breaks messaging. the co-cto is the single polling agent; all workers are send-only. when multiple agents share a bot token, also set `prefixMessages: true` on every non-CTO agent — outgoing messages get prefixed with the agent's `shortName` (e.g. `[Developer] ...`) so the group can tell which agent is speaking through the shared notifier bot. the co-cto uses its own dedicated bot and leaves `prefixMessages: false`.
 

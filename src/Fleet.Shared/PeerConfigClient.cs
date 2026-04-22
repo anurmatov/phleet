@@ -51,7 +51,7 @@ public sealed class PeerConfigClient : IAsyncDisposable
 
     // ── State ─────────────────────────────────────────────────────────────────
 
-    private ConfigSnapshot _latest = new([], []);
+    private volatile ConfigSnapshot _latest = new([], []);
     private IConnection? _rabbitConn;
     private IChannel? _rabbitChannel;
 
@@ -139,7 +139,14 @@ public sealed class PeerConfigClient : IAsyncDisposable
                 var snapshot = await FetchAsync(ct);
                 _latest = snapshot;
                 if (OnChanged is not null)
-                    await OnChanged(snapshot);
+                {
+                    try { await OnChanged(snapshot); }
+                    catch (Exception cbEx)
+                    {
+                        _logger.LogWarning(cbEx,
+                            "PeerConfigClient OnChanged callback threw during bootstrap — startup continues");
+                    }
+                }
                 _logger.LogInformation("PeerConfigClient bootstrapped ({Literals} literals, {Templates} templates)",
                     snapshot.Literals.Count, snapshot.AgentDerived.Count);
                 break;

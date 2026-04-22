@@ -56,6 +56,21 @@ public sealed class ConfigService
         return new Regex($"^{escaped}$", RegexOptions.IgnoreCase);
     }
 
+    // ── Mask ──────────────────────────────────────────────────────────────────
+
+    private static readonly string[] SensitivePatterns =
+        ["_TOKEN", "_KEY", "_SECRET", "_PASSWORD", "_PEM", "_PRIVATE", "_CREDENTIAL"];
+
+    internal static bool IsSensitiveKey(string key) =>
+        SensitivePatterns.Any(p => key.Contains(p, StringComparison.OrdinalIgnoreCase));
+
+    internal static string MaskValue(string key, string value)
+    {
+        if (!IsSensitiveKey(key)) return value;
+        if (value.Length <= 4) return new string('•', 3);
+        return "•••" + value[^4..];
+    }
+
     // ── Write mutex ───────────────────────────────────────────────────────────
 
     private static readonly SemaphoreSlim WriteMutex = new(1, 1);
@@ -71,6 +86,12 @@ public sealed class ConfigService
     private Dictionary<string, string>? _cache;
     private DateTime _cacheExpiry = DateTime.MinValue;
     private readonly object _cacheLock = new();
+
+    // Persistent RabbitMQ connection+channel for config.changed publishes (L1).
+    // Recreated on failure; null means not yet initialized or last publish failed.
+    private IConnection? _publishConn;
+    private IChannel? _publishChannel;
+    private readonly SemaphoreSlim _publishLock = new(1, 1);
 
     public ConfigService(
         IConfiguration config,
@@ -107,7 +128,7 @@ public sealed class ConfigService
     // ── API ────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Returns the full .env map minus denylisted keys.
+    /// Returns the full .env map minus denylisted keys, with sensitive values masked.
     /// Used by GET /api/config/all (dashboard Credentials table).
     /// </summary>
     public Dictionary<string, string> GetAll()
@@ -115,7 +136,7 @@ public sealed class ConfigService
         var env = LoadCache();
         return env
             .Where(kv => !IsDenylisted(kv.Key))
-            .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal);
+            .ToDictionary(kv => kv.Key, kv => MaskValue(kv.Key, kv.Value), StringComparer.Ordinal);
     }
 
     /// <summary>
@@ -194,6 +215,16 @@ public sealed class ConfigService
     public async Task<List<string>> ReloadAsync(CancellationToken ct = default)
     {
         var before = LoadCache();
+        return await ReloadCoreAsync(before, ct);
+    }
+
+    /// <summary>
+    /// Core reload that diffs <paramref name="before"/> against a fresh read of the .env file.
+    /// Used by <see cref="ReloadAsync"/> (captures before from cache) and by
+    /// <see cref="PutValuesAsync"/> (captures before before the write so the diff is non-empty).
+    /// </summary>
+    private async Task<List<string>> ReloadCoreAsync(Dictionary<string, string> before, CancellationToken ct)
+    {
         InvalidateCache();
         var after = EnvFileCredentialsReader.LoadEnvFile(_envFilePath);
 
@@ -243,8 +274,12 @@ public sealed class ConfigService
         if (!await WriteMutex.WaitAsync(TimeSpan.FromSeconds(30), ct))
             throw new TimeoutException("Another config write is in progress. Try again shortly.");
 
+        Dictionary<string, string> before;
         try
         {
+            // Capture the pre-write snapshot while holding the mutex so the diff in
+            // ReloadCoreAsync sees the actual delta, not an empty diff (B2/M2 fix).
+            before = LoadCache();
             await AtomicWriteAsync(kvs, ct);
         }
         finally
@@ -252,7 +287,7 @@ public sealed class ConfigService
             WriteMutex.Release();
         }
 
-        return await ReloadAsync(ct);
+        return await ReloadCoreAsync(before, ct);
     }
 
     // ── Atomic write ──────────────────────────────────────────────────────────
@@ -295,6 +330,11 @@ public sealed class ConfigService
 
     // ── RabbitMQ publish ──────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Publishes config.changed using a persistent channel (L1). On any error the channel is
+    /// torn down and set to null so the next call re-initializes it — failure is always logged
+    /// but never propagates to the caller.
+    /// </summary>
     private async Task PublishConfigChangedAsync(List<string> changedKeys, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(_rabbitHost))
@@ -303,25 +343,11 @@ public sealed class ConfigService
             return;
         }
 
+        await _publishLock.WaitAsync(ct);
         try
         {
-            var factory = new ConnectionFactory
-            {
-                HostName = _rabbitHost,
-                ClientProvidedName = "fleet-orchestrator-config",
-                AutomaticRecoveryEnabled = false,
-                RequestedHeartbeat = TimeSpan.FromSeconds(10),
-            };
-
-            await using var conn = await factory.CreateConnectionAsync(ct);
-            await using var channel = await conn.CreateChannelAsync(cancellationToken: ct);
-
-            await channel.ExchangeDeclareAsync(
-                _rabbitExchange,
-                ExchangeType.Topic,
-                durable: true,
-                autoDelete: false,
-                cancellationToken: ct);
+            var channel = await EnsurePublishChannelAsync(ct);
+            if (channel is null) return;
 
             var payload = JsonSerializer.SerializeToUtf8Bytes(new { changedKeys });
             var props = new BasicProperties { ContentType = "application/json", DeliveryMode = DeliveryModes.Persistent };
@@ -339,8 +365,58 @@ public sealed class ConfigService
         catch (Exception ex)
         {
             _logger.LogWarning(ex,
-                "Failed to publish config.changed event — peers will update on next reload");
+                "Failed to publish config.changed event — tearing down channel, peers will update on next reload");
+            await TearDownPublishChannelAsync();
         }
+        finally
+        {
+            _publishLock.Release();
+        }
+    }
+
+    private async Task<IChannel?> EnsurePublishChannelAsync(CancellationToken ct)
+    {
+        if (_publishChannel is { IsOpen: true })
+            return _publishChannel;
+
+        try
+        {
+            if (_publishConn is not { IsOpen: true })
+            {
+                _publishConn = await new ConnectionFactory
+                {
+                    HostName = _rabbitHost,
+                    ClientProvidedName = "fleet-orchestrator-config",
+                    AutomaticRecoveryEnabled = true,
+                    RequestedHeartbeat = TimeSpan.FromSeconds(30),
+                    NetworkRecoveryInterval = TimeSpan.FromSeconds(5),
+                }.CreateConnectionAsync(ct);
+            }
+
+            _publishChannel = await _publishConn.CreateChannelAsync(cancellationToken: ct);
+            await _publishChannel.ExchangeDeclareAsync(
+                _rabbitExchange,
+                ExchangeType.Topic,
+                durable: true,
+                autoDelete: false,
+                cancellationToken: ct);
+
+            return _publishChannel;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to (re-)initialize RabbitMQ publish channel for config.changed");
+            await TearDownPublishChannelAsync();
+            return null;
+        }
+    }
+
+    private async Task TearDownPublishChannelAsync()
+    {
+        try { if (_publishChannel is not null) await _publishChannel.DisposeAsync(); } catch { /* best effort */ }
+        try { if (_publishConn is not null) await _publishConn.DisposeAsync(); } catch { /* best effort */ }
+        _publishChannel = null;
+        _publishConn = null;
     }
 }
 

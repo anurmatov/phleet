@@ -190,6 +190,7 @@ app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "flee
 
 // GET /api/config/values?keys=KEY1,KEY2,...
 // Returns literal and agent-derived values for the requested keys.
+// Rate-limited to 10 req/min per bearer token to limit secret enumeration surface.
 app.MapGet("/api/config/values", async (HttpRequest request, ConfigService configService, CancellationToken ct) =>
 {
     var keysParam = request.Query["keys"].FirstOrDefault() ?? "";
@@ -198,14 +199,15 @@ app.MapGet("/api/config/values", async (HttpRequest request, ConfigService confi
 
     var result = await configService.GetValuesAsync(keys, ct);
     return Results.Ok(new { literals = result.Literals, agentDerived = result.AgentDerived });
-});
+}).RequireRateLimiting("reveal-rate-limit");
 
 // GET /api/config/all — returns all non-denylisted .env keys (for dashboard credentials table)
+// Rate-limited to 10 req/min per bearer token to limit secret enumeration surface.
 app.MapGet("/api/config/all", (ConfigService configService) =>
 {
     var all = configService.GetAll();
     return Results.Ok(all);
-});
+}).RequireRateLimiting("reveal-rate-limit");
 
 // POST /api/config/reload — re-reads .env, diffs, publishes config.changed
 app.MapPost("/api/config/reload", async (ConfigService configService, CancellationToken ct) =>
@@ -2081,6 +2083,32 @@ app.MapPost("/api/setup/github/validate", async (
         return Results.BadRequest(new { error = result.ErrorCode, detail = result.ErrorDetail });
     await setup.UpdateLastValidatedAsync("github");
     return Results.Ok(new { valid = true, appId = result.AppId, appName = result.AppName, warnings = result.Warnings });
+});
+
+// POST /api/setup/github/save — writes GITHUB_APP_ID + GITHUB_APP_PEM to .env.
+// GITHUB_APP_PEM is on the config-API denylist (prevents general agents from reading it back),
+// so it cannot go through PUT /api/config/values. This dedicated setup endpoint bypasses the
+// denylist for the two GitHub App keys only. Auth-gated by ORCHESTRATOR_AUTH_TOKEN.
+app.MapPost("/api/setup/github/save", async (
+    HttpRequest request, SetupService setup, ConfigService configService, CancellationToken ct) =>
+{
+    GitHubSetupRequest? req;
+    try { req = await request.ReadFromJsonAsync<GitHubSetupRequest>(ct); }
+    catch { return Results.BadRequest(new { error = "invalid_json" }); }
+    if (req is null) return Results.BadRequest(new { error = "empty_body" });
+
+    try
+    {
+        await setup.SaveGitHubAsync(req.AppId, req.PrivateKeyPem);
+        // Reload to invalidate cache and broadcast config.changed for non-denylisted changes
+        // (GITHUB_APP_ID will be broadcast; GITHUB_APP_PEM is denylisted so it is never broadcast).
+        var changed = await configService.ReloadAsync(ct);
+        return Results.Ok(new { saved = true, changedKeys = changed });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem($"Save failed: {ex.Message}", statusCode: 500);
+    }
 });
 
 

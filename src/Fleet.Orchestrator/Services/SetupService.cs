@@ -286,6 +286,22 @@ public sealed class SetupService
 
     // ── GitHub ────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Writes GITHUB_APP_ID and/or GITHUB_APP_PEM to .env directly (bypassing the config API
+    /// denylist which intentionally blocks GITHUB_APP_PEM from the general PUT /api/config/values
+    /// endpoint). Called by POST /api/setup/github/save — auth-gated by ORCHESTRATOR_AUTH_TOKEN.
+    /// </summary>
+    public async Task SaveGitHubAsync(string? appId, string? pem)
+    {
+        var updates = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (!string.IsNullOrWhiteSpace(appId))
+            updates["GITHUB_APP_ID"] = appId;
+        if (!string.IsNullOrWhiteSpace(pem))
+            updates["GITHUB_APP_PEM"] = pem;
+        if (updates.Count > 0)
+            await AtomicWriteEnvAsync(updates);
+    }
+
     public async Task<GitHubValidateResult> ValidateGitHubAsync(
         GitHubSetupRequest req, CancellationToken ct)
     {

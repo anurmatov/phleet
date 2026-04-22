@@ -17,5 +17,13 @@ public sealed class FleetWorkflowOptions
     /// <c>{{config.CtoAgent}}</c> so seed-shipped workflow definitions can target the user's
     /// agent without hardcoding a name.
     /// </summary>
-    public string CtoAgent { get; set; } = "";
+    public string CtoAgent
+    {
+        get => _ctoAgent;
+        set => _ctoAgent = value;
+    }
+
+    // volatile so runtime updates from PeerConfigHostedService are immediately visible
+    // to Temporal activity threads without holding a lock on the hot read path.
+    private volatile string _ctoAgent = "";
 }

@@ -363,14 +363,12 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
     setSaveState('saving')
     setSaveMsg('')
     try {
-      const values: Record<string, string> = {}
-      if (appId) values['GITHUB_APP_ID'] = appId
-      if (pem) values['GITHUB_APP_PEM'] = pem
-
-      const putRes = await apiFetch('/api/config/values', {
-        method: 'PUT',
+      // GITHUB_APP_PEM is on the config-API denylist, so use the dedicated setup endpoint
+      // instead of PUT /api/config/values (which would return 403 for GITHUB_APP_PEM).
+      const putRes = await apiFetch('/api/setup/github/save', {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(values),
+        body: JSON.stringify({ appId: appId || undefined, privateKeyPem: pem || undefined }),
       })
       if (!putRes.ok) {
         const data = await putRes.json().catch(() => ({}))

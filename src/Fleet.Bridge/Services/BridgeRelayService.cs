@@ -19,11 +19,22 @@ public sealed class BridgeRelayService : IAsyncDisposable
     private readonly RabbitMqOptions _rabbitConfig;
     private readonly ILogger<BridgeRelayService> _logger;
 
+    private volatile string _targetAgent = "";
+    private long _bridgeChatId;
+
     /// <summary>Target agent routing key — updatable at runtime via peer config.</summary>
-    public string TargetAgent { get; set; }
+    public string TargetAgent
+    {
+        get => _targetAgent;
+        set => _targetAgent = value;
+    }
 
     /// <summary>Bridge chat ID — updatable at runtime via peer config.</summary>
-    public long BridgeChatId { get; set; }
+    public long BridgeChatId
+    {
+        get => Interlocked.Read(ref _bridgeChatId);
+        set => Interlocked.Exchange(ref _bridgeChatId, value);
+    }
 
     private readonly int _timeoutSeconds;
 

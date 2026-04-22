@@ -4,6 +4,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSingleton<BotClientFactory>();
 builder.Services.AddHostedService<PeerConfigHostedService>();
+builder.Services.AddHttpContextAccessor();
 
 builder.Services
     .AddMcpServer()

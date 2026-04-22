@@ -9,7 +9,7 @@ using Telegram.Bot.Types;
 namespace Fleet.Telegram.Tools;
 
 [McpServerToolType]
-public sealed class GetChatInfoTool(BotClientFactory factory, ILogger<GetChatInfoTool> logger)
+public sealed class GetChatInfoTool(BotClientFactory factory, IHttpContextAccessor httpContextAccessor, ILogger<GetChatInfoTool> logger)
 {
     [McpServerTool(Name = "get_chat_info")]
     [Description("Get basic info (title, type) for a Telegram chat ID. Useful for verifying chat IDs before use. Returns {\"ok\":true,\"chat_id\":N,\"title\":\"...\",\"type\":\"...\"} or {\"ok\":false,\"error\":\"...\"}")]
@@ -18,6 +18,9 @@ public sealed class GetChatInfoTool(BotClientFactory factory, ILogger<GetChatInf
         [Description("Agent name to query with (falls back to notifier bot if unknown)")] string agent_name = "",
         CancellationToken cancellationToken = default)
     {
+        if (string.IsNullOrWhiteSpace(agent_name))
+            agent_name = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault() ?? "";
+
         var client = factory.GetClient(agent_name);
         if (client is null)
         {

@@ -9,7 +9,7 @@ using Telegram.Bot.Types.Enums;
 namespace Fleet.Telegram.Tools;
 
 [McpServerToolType]
-public sealed class SendMessageTool(BotClientFactory factory, ILogger<SendMessageTool> logger)
+public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccessor httpContextAccessor, ILogger<SendMessageTool> logger)
 {
     private const int TelegramMaxLength = 4096;
 
@@ -22,6 +22,11 @@ public sealed class SendMessageTool(BotClientFactory factory, ILogger<SendMessag
         [Description("Parse mode for message formatting: HTML, Markdown, or MarkdownV2. Omit for plain text.")] string parse_mode = "",
         CancellationToken cancellationToken = default)
     {
+        // If the LLM didn't pass agent_name, resolve from the ?agent= query parameter
+        // baked into the MCP URL at provision time.
+        if (string.IsNullOrWhiteSpace(agent_name))
+            agent_name = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault() ?? "";
+
         // Accept chat_id as string or integer — LLM agents often serialize numeric IDs as strings
         if (!long.TryParse(chat_id?.Trim(), out var chatIdLong))
             return JsonSerializer.Serialize(new { ok = false, error = $"Invalid chat_id '{chat_id}' — must be a numeric value" });

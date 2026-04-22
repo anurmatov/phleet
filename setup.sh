@@ -635,9 +635,10 @@ section "[5/7] Building Docker images..."
 if $SKIP_BUILD; then
   warn "Skipping image builds (--skip-build)"
 else
-  # VITE_AUTH_TOKEN is just the orchestrator auth token — baked into the
-  # dashboard bundle at build time so it can call the API.
+  # Both tokens are baked into the dashboard bundle at build time so it can
+  # call the general API (VITE_AUTH_TOKEN) and the config API (VITE_CONFIG_TOKEN).
   VITE_TOKEN=$(read_env_var "$ENV_FILE" "ORCHESTRATOR_AUTH_TOKEN")
+  CONFIG_TOKEN=$(read_env_var "$ENV_FILE" "ORCHESTRATOR_CONFIG_TOKEN")
 
   # Download ONNX model + vocab into models/fleet-memory/ before building fleet:memory.
   # Fleet.Memory's Dockerfile bakes them in via `COPY models/fleet-memory/ /app/models/`.
@@ -681,11 +682,11 @@ else
   build_image "fleet:memory"          "$SCRIPT_DIR/src/Fleet.Memory/Dockerfile"       "$SCRIPT_DIR"
   build_image "fleet:temporal-bridge" "$SCRIPT_DIR/Dockerfile.temporal"               "$SCRIPT_DIR"
   build_image "fleet:telegram"        "$SCRIPT_DIR/src/Fleet.Telegram/Dockerfile"      "$SCRIPT_DIR"
-  # No quotes around $VITE_TOKEN — the `docker build $extra_args` call in
-  # build_image() relies on word-splitting, and escaped quotes here would
-  # become literal characters inside the baked-in dashboard token → 401s.
+  # No quotes around $VITE_TOKEN / $CONFIG_TOKEN — the `docker build $extra_args`
+  # call in build_image() relies on word-splitting, and escaped quotes here would
+  # become literal characters inside the baked-in tokens → 401s.
   build_image "fleet:dashboard"       "$SCRIPT_DIR/src/fleet-dashboard/Dockerfile"    "$SCRIPT_DIR" \
-    "--build-arg VITE_AUTH_TOKEN=$VITE_TOKEN"
+    "--build-arg VITE_AUTH_TOKEN=$VITE_TOKEN --build-arg VITE_CONFIG_TOKEN=$CONFIG_TOKEN"
 
   ok "All images built"
 fi

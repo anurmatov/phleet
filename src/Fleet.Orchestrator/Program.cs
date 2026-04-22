@@ -117,6 +117,7 @@ if (!string.IsNullOrWhiteSpace(orchestratorAuthToken))
         var isReadOnly   = HttpMethods.IsGet(method) || HttpMethods.IsHead(method) || HttpMethods.IsOptions(method);
         var isExemptPath = path.StartsWith("/ws", StringComparison.OrdinalIgnoreCase)
                         || path.StartsWith("/mcp", StringComparison.OrdinalIgnoreCase)
+                        || path.StartsWith("/api/config", StringComparison.OrdinalIgnoreCase)
                         || path.Equals("/health", StringComparison.OrdinalIgnoreCase);
 
         if (isReadOnly || isExemptPath)
@@ -1233,31 +1234,6 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
             logger.LogWarning(ex, "Could not write FLEET_CTO_AGENT for new co-cto agent '{Agent}'", name);
         }
 
-        // Send the first-provision welcome DM — one time only, fire-and-forget.
-        var ceoUserId = setupService.GetTelegramUserId();
-        if (WelcomeDmHelper.ShouldTrigger(agent, body.Provision != false, ceoUserId))
-        {
-            var welcomeInput = JsonSerializer.Serialize(new
-            {
-                TargetAgent = name,
-                TaskDescription = WelcomeDmHelper.BuildWelcomeDirective(name, ceoUserId!.Value),
-                TimeoutMinutes = 5
-            });
-            await WelcomeDmHelper.TriggerAsync(
-                agent,
-                saveWelcomeSentAt: async () => await db.SaveChangesAsync(CancellationToken.None),
-                startWorkflow:     async () => { await temporal.StartWorkflowAsync(
-                    "TaskDelegationWorkflow",
-                    $"welcome-{agent.Id}",
-                    "fleet",
-                    "fleet",
-                    welcomeInput); },
-                logger);
-        }
-        else if (body.Provision != false && agent.WelcomeSentAt is null)
-        {
-            logger.LogWarning("Welcome DM skipped: CEO Telegram user ID not configured.");
-        }
     }
 
     if (body.Provision != false)
@@ -1271,6 +1247,36 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
                     agentName = name,
                 },
                 statusCode: 207);
+
+        // Send the first-provision welcome DM — after provisioning so the agent
+        // container is up and consuming RabbitMQ before the directive arrives.
+        if (string.Equals(agent.Role, "co-cto", StringComparison.OrdinalIgnoreCase))
+        {
+            var ceoUserId = setupService.GetTelegramUserId();
+            if (WelcomeDmHelper.ShouldTrigger(agent, true, ceoUserId))
+            {
+                var welcomeInput = JsonSerializer.Serialize(new
+                {
+                    TargetAgent = name,
+                    TaskDescription = WelcomeDmHelper.BuildWelcomeDirective(name, ceoUserId!.Value),
+                    TimeoutMinutes = 5
+                });
+                await WelcomeDmHelper.TriggerAsync(
+                    agent,
+                    saveWelcomeSentAt: async () => await db.SaveChangesAsync(CancellationToken.None),
+                    startWorkflow:     async () => { await temporal.StartWorkflowAsync(
+                        "TaskDelegationWorkflow",
+                        $"welcome-{agent.Id}",
+                        "fleet",
+                        "fleet",
+                        welcomeInput); },
+                    logger);
+            }
+            else if (agent.WelcomeSentAt is null)
+            {
+                logger.LogWarning("Welcome DM skipped: CEO Telegram user ID not configured.");
+            }
+        }
 
         return Results.Created($"/api/agents/{name}", new { message = $"Agent '{name}' created and provisioned", agentName = name });
     }

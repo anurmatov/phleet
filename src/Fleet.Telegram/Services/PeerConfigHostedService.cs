@@ -9,7 +9,8 @@ namespace Fleet.Telegram.Services;
 /// and subscribes to <c>config.changed</c> events for live updates.
 ///
 /// Template key: <c>TELEGRAM_{SHORTNAME}_BOT_TOKEN</c> (declared via PEER_AGENT_DERIVED_KEYS).
-/// Literal key: <c>TELEGRAM_NOTIFIER_BOT_TOKEN</c> (declared via PEER_CONFIG_KEYS).
+/// Literal keys: <c>FLEET_CTO_AGENT</c>, <c>TELEGRAM_CTO_BOT_TOKEN</c>,
+/// <c>TELEGRAM_NOTIFIER_BOT_TOKEN</c> (declared via PEER_CONFIG_KEYS).
 /// </summary>
 public sealed class PeerConfigHostedService : IHostedService, IAsyncDisposable
 {
@@ -43,17 +44,27 @@ public sealed class PeerConfigHostedService : IHostedService, IAsyncDisposable
         snapshot.Literals.TryGetValue("TELEGRAM_NOTIFIER_BOT_TOKEN", out var notifierToken);
         _factory.ApplyNotifierToken(notifierToken);
 
-        // Update per-agent derived clients
+        // Build the merged agent token map: start with derived tokens, then overlay the CTO literal.
         const string template = "TELEGRAM_{SHORTNAME}_BOT_TOKEN";
-        if (snapshot.AgentDerived.TryGetValue(template, out var agentTokenMap))
-            _factory.ApplyAgentDerived(agentTokenMap);
-        else
-            _factory.ApplyAgentDerived([]);
+        var agentTokenMap = snapshot.AgentDerived.TryGetValue(template, out var derived)
+            ? new Dictionary<string, string>(derived, StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        // CTO bot token is a well-known literal — register it under the CTO agent name.
+        if (snapshot.Literals.TryGetValue("FLEET_CTO_AGENT", out var ctoAgent) &&
+            !string.IsNullOrWhiteSpace(ctoAgent) &&
+            snapshot.Literals.TryGetValue("TELEGRAM_CTO_BOT_TOKEN", out var ctoToken) &&
+            !string.IsNullOrWhiteSpace(ctoToken))
+        {
+            agentTokenMap[ctoAgent] = ctoToken;
+        }
+
+        _factory.ApplyAgentDerived(agentTokenMap);
 
         _logger.LogInformation(
             "PeerConfig applied: notifier={HasNotifier}, agents={AgentCount}",
             !string.IsNullOrWhiteSpace(notifierToken),
-            snapshot.AgentDerived.TryGetValue(template, out var m) ? m.Count : 0);
+            agentTokenMap.Count);
 
         return Task.CompletedTask;
     }

@@ -219,8 +219,9 @@ services:
       - ORCHESTRATOR_CONFIG_TOKEN=${ORCHESTRATOR_CONFIG_TOKEN}
       - RABBITMQ_URL=amqp://rabbitmq
       # Literal keys to fetch from orchestrator on startup and re-fetch on config.changed events.
-      - PEER_CONFIG_KEYS=TELEGRAM_NOTIFIER_BOT_TOKEN
-      # Template keys: {SHORTNAME} is expanded per-agent to pull per-agent bot tokens.
+      - PEER_CONFIG_KEYS=FLEET_CTO_AGENT,TELEGRAM_CTO_BOT_TOKEN,TELEGRAM_NOTIFIER_BOT_TOKEN
+      # Template keys: {SHORTNAME} is expanded per-agent to pull per-agent bot tokens
+      # (for non-CTO agents that need their own dedicated bot).
       - PEER_AGENT_DERIVED_KEYS=TELEGRAM_{SHORTNAME}_BOT_TOKEN
     mem_limit: 128m
     restart: unless-stopped

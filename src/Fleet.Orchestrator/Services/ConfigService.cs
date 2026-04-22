@@ -165,7 +165,7 @@ public sealed class ConfigService
                                 ? agent.Name
                                 : agent.ShortName;
                             var expandedKey = template.Replace(
-                                ShortnamePlaceholder, shortName,
+                                ShortnamePlaceholder, shortName.ToUpperInvariant(),
                                 StringComparison.OrdinalIgnoreCase);
                             if (env.TryGetValue(expandedKey, out var tokenVal) &&
                                 !string.IsNullOrEmpty(tokenVal))

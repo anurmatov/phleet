@@ -437,7 +437,7 @@ public sealed class SetupService
     private static string ResolveCtoTokenKey(Dictionary<string, string> env)
     {
         if (env.TryGetValue("FLEET_CTO_AGENT", out var ctoAgent) && !string.IsNullOrWhiteSpace(ctoAgent))
-            return $"TELEGRAM_{ctoAgent}_BOT_TOKEN";
+            return $"TELEGRAM_{ctoAgent.ToUpperInvariant()}_BOT_TOKEN";
         return "TELEGRAM_CTO_BOT_TOKEN";
     }
 

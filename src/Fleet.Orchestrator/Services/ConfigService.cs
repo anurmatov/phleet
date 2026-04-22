@@ -26,10 +26,17 @@ public sealed class ConfigService
     /// peer bot tokens).
     /// </summary>
     private static readonly string[] DenylistPrefixes =
-        ["MYSQL_", "DB_"];
+        ["MYSQL_", "DB_", "FLEET_MYSQL_", "MINIO_", "CLAUDE_CREDENTIALS_", "CODEX_CREDENTIALS_"];
 
     private static readonly HashSet<string> DenylistExact =
-        new(["ORCHESTRATOR_AUTH_TOKEN"], StringComparer.OrdinalIgnoreCase);
+        new([
+            "ORCHESTRATOR_AUTH_TOKEN",
+            "ORCHESTRATOR_CONFIG_TOKEN",
+            "JWT_SECRET",
+            "TOTP_SECRET",
+            "GITHUB_APP_PEM",
+            "POLYMARKET_PRIVATE_KEY",
+        ], StringComparer.OrdinalIgnoreCase);
 
     public static bool IsDenylisted(string key) =>
         DenylistExact.Contains(key) ||

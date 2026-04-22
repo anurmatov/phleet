@@ -10,6 +10,25 @@ public static class FleetWorkflowConfig
     private static FleetWorkflowOptions? _instance;
     private static readonly object _lock = new();
 
+    // GroupChatId is stored separately: it comes from FLEET_GROUP_CHAT_ID via PeerConfigClient
+    // and is used only inside activities (DelegateToAgentActivity), so runtime mutation is safe.
+    private static long _groupChatId;
+
+    /// <summary>
+    /// Telegram group chat ID resolved at runtime from FLEET_GROUP_CHAT_ID via PeerConfigClient.
+    /// Falls back to <c>TemporalBridgeOptions.GroupChatId</c> when zero (set in compose env).
+    /// </summary>
+    public static long GroupChatId => Interlocked.Read(ref _groupChatId);
+
+    /// <summary>
+    /// Update GroupChatId at runtime (called from PeerConfigHostedService on config.changed).
+    /// Safe to call from non-workflow code — never read inside Temporal workflow replay paths.
+    /// </summary>
+    public static void UpdateGroupChatId(long chatId)
+    {
+        Interlocked.Exchange(ref _groupChatId, chatId);
+    }
+
     /// <summary>
     /// The initialized options instance.
     /// </summary>
@@ -33,16 +52,20 @@ public static class FleetWorkflowConfig
 
     /// <summary>
     /// Update CtoAgent at runtime (called from PeerConfigHostedService on config.changed).
+    ///
+    /// NOTE: <see cref="FleetWorkflowOptions.EscalationTarget"/> is intentionally NOT updated here.
+    /// It is read inside Temporal workflow code (<see cref="Workflows.FleetWorkflowBase"/>),
+    /// and live mutations during workflow replay would cause Temporal non-determinism crashes.
+    /// EscalationTarget is set once at startup from appsettings / compose env and stays immutable.
+    /// CtoAgent is only consumed inside activities (via UWE template {{config.CtoAgent}}), so it
+    /// is safe to mutate at runtime.
     /// </summary>
     public static void UpdateCtoAgent(string newValue)
     {
         lock (_lock)
         {
             if (_instance is not null)
-            {
                 _instance.CtoAgent = newValue;
-                _instance.EscalationTarget = newValue;
-            }
         }
     }
 }

@@ -143,33 +143,42 @@ if (!string.IsNullOrWhiteSpace(orchestratorAuthToken))
 
 // Config API auth — ORCHESTRATOR_CONFIG_TOKEN gates /api/config/* (all methods).
 // Separate from ORCHESTRATOR_AUTH_TOKEN so peers can read config without full admin access.
+// Fails CLOSED: if ORCHESTRATOR_CONFIG_TOKEN is not configured all /api/config/* requests
+// return 503 so the endpoint is never accidentally open on a misconfigured deployment.
 var orchestratorConfigToken = app.Configuration["Orchestrator:ConfigToken"] ?? "";
-if (!string.IsNullOrWhiteSpace(orchestratorConfigToken))
+app.Use(async (context, next) =>
 {
-    app.Use(async (context, next) =>
+    var path = context.Request.Path.Value ?? "";
+    if (!path.StartsWith("/api/config", StringComparison.OrdinalIgnoreCase))
     {
-        var path = context.Request.Path.Value ?? "";
-        if (!path.StartsWith("/api/config", StringComparison.OrdinalIgnoreCase))
-        {
-            await next(context);
-            return;
-        }
-
-        var authHeader = context.Request.Headers.Authorization.FirstOrDefault();
-        var token = authHeader?.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) == true
-            ? authHeader["Bearer ".Length..].Trim()
-            : null;
-
-        if (token != orchestratorConfigToken)
-        {
-            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            await context.Response.WriteAsJsonAsync(new { error = "Unauthorized" });
-            return;
-        }
-
         await next(context);
-    });
-}
+        return;
+    }
+
+    if (string.IsNullOrWhiteSpace(orchestratorConfigToken))
+    {
+        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+        await context.Response.WriteAsJsonAsync(new
+        {
+            error = "Config API unavailable: ORCHESTRATOR_CONFIG_TOKEN is not configured on this orchestrator"
+        });
+        return;
+    }
+
+    var authHeader = context.Request.Headers.Authorization.FirstOrDefault();
+    var token = authHeader?.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) == true
+        ? authHeader["Bearer ".Length..].Trim()
+        : null;
+
+    if (token != orchestratorConfigToken)
+    {
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await context.Response.WriteAsJsonAsync(new { error = "Unauthorized" });
+        return;
+    }
+
+    await next(context);
+});
 
 // MCP endpoint — explicitly mapped to /mcp so the auth middleware exemption matches
 app.MapMcp("/mcp");

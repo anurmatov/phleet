@@ -60,7 +60,7 @@ function ConfigEditModal({ editKey, onClose, onSaved }: ConfigEditModalProps) {
         setErr((data as { error?: string }).error ?? `Error ${putRes.status}`)
         return
       }
-      await apiFetch('/api/config/reload', { method: 'POST' })
+      // PUT /api/config/values already calls ReloadAsync internally — no separate reload needed
       onSaved('1 key changed, peers notified')
       onClose()
     } catch (e) { setErr(String(e)) }
@@ -358,8 +358,8 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
     try {
       const res = await apiFetch(`/api/config/values?keys=${encodeURIComponent(key)}`)
       if (res.ok) {
-        const data = await res.json() as Record<string, string>
-        setRevealValue(data[key] ?? '(not set)')
+        const data = await res.json() as { literals?: Record<string, string> }
+        setRevealValue(data.literals?.[key] ?? '(not set)')
       } else {
         setRevealValue('(unauthorized)')
       }

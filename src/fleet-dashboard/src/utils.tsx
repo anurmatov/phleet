@@ -2,10 +2,14 @@ import type { WorkflowSummary } from './types'
 
 export const TEMPORAL_UI  = import.meta.env.VITE_TEMPORAL_UI_URL ?? ''
 export const AUTH_TOKEN   = import.meta.env.VITE_AUTH_TOKEN ?? ''
+export const CONFIG_TOKEN = import.meta.env.VITE_CONFIG_TOKEN ?? ''
 
 export function apiFetch(url: string, init?: RequestInit): Promise<Response> {
-  const headers: HeadersInit = AUTH_TOKEN
-    ? { ...init?.headers, Authorization: `Bearer ${AUTH_TOKEN}` }
+  // /api/config/* requires ORCHESTRATOR_CONFIG_TOKEN (separate from the admin token)
+  const isConfigApi = url.startsWith('/api/config') || url.includes('/api/config/')
+  const token = isConfigApi ? CONFIG_TOKEN : AUTH_TOKEN
+  const headers: HeadersInit = token
+    ? { ...init?.headers, Authorization: `Bearer ${token}` }
     : { ...init?.headers }
   return fetch(url, { ...init, headers })
 }

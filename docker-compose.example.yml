@@ -288,16 +288,17 @@ services:
       - TemporalBridge__TemporalAddress=temporal-server:7233
       - TemporalBridge__Namespaces__0=fleet
       - TemporalBridge__AgentTimeoutSeconds=1800
-      - TemporalBridge__GroupChatId=${FLEET_GROUP_CHAT_ID:-0}
       - TemporalBridge__OrchestratorAuthToken=${ORCHESTRATOR_AUTH_TOKEN}
       - TemporalBridge__OrchestratorUrl=http://fleet-orchestrator:3600
       - ORCHESTRATOR_URL=http://fleet-orchestrator:3600
       - ORCHESTRATOR_CONFIG_TOKEN=${ORCHESTRATOR_CONFIG_TOKEN}
       - RABBITMQ_URL=amqp://rabbitmq
-      # The CTO agent is fetched from orchestrator at startup via PeerConfigClient.
-      # FleetWorkflows__CtoAgent and EscalationTarget are no longer set statically here.
-      - PEER_CONFIG_KEYS=FLEET_CTO_AGENT
-      # OAuth client IDs for provider token refresh workflow (optional).
+      # Dynamic keys fetched from orchestrator at startup and live-updated on config.changed events.
+      # FLEET_CTO_AGENT       — CTO agent name for UWE {{config.CtoAgent}} template expressions
+      # FLEET_GROUP_CHAT_ID   — Telegram group chat ID for activity directives (replaces static TemporalBridge__GroupChatId)
+      # AUTHTOKENREFRESH__*   — OAuth client IDs for provider token refresh (applied on restart)
+      - PEER_CONFIG_KEYS=FLEET_CTO_AGENT,FLEET_GROUP_CHAT_ID,AUTHTOKENREFRESH__CLAUDECLIENTID,AUTHTOKENREFRESH__CODEXCLIENTID
+      # OAuth client IDs for provider token refresh workflow (optional — also set as static fallback).
       # Set only if you want the fleet to auto-refresh Claude/Codex tokens.
       - AuthTokenRefresh__ClaudeClientId=${AUTHTOKENREFRESH__CLAUDECLIENTID:-}
       - AuthTokenRefresh__CodexClientId=${AUTHTOKENREFRESH__CODEXCLIENTID:-}
@@ -387,6 +388,7 @@ services:
       dockerfile: src/fleet-dashboard/Dockerfile
       args:
         VITE_AUTH_TOKEN: ${ORCHESTRATOR_AUTH_TOKEN:-changeme}
+        VITE_CONFIG_TOKEN: ${ORCHESTRATOR_CONFIG_TOKEN:-}
     image: fleet:dashboard
     container_name: fleet-dashboard
     ports:

@@ -55,6 +55,9 @@ public sealed class PeerConfigClient : IAsyncDisposable
     private IConnection? _rabbitConn;
     private IChannel? _rabbitChannel;
 
+    // Reused across all FetchAsync calls to avoid socket exhaustion under rapid config.changed bursts.
+    private readonly HttpClient _httpClient;
+
     public PeerConfigClient(
         string orchestratorUrl,
         string configToken,
@@ -74,6 +77,10 @@ public sealed class PeerConfigClient : IAsyncDisposable
         _templateMatchers = templateKeys
             .Select(t => (t, BuildTemplateRegex(t)))
             .ToList();
+
+        _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+        if (!string.IsNullOrEmpty(configToken))
+            _httpClient.DefaultRequestHeaders.Authorization = new("Bearer", configToken);
     }
 
     /// <summary>
@@ -270,12 +277,7 @@ public sealed class PeerConfigClient : IAsyncDisposable
         var keysParam = string.Join(",", allKeys.Select(Uri.EscapeDataString));
         var url = $"{_orchestratorUrl}/api/config/values?keys={keysParam}";
 
-        using var http = new HttpClient();
-        http.Timeout = TimeSpan.FromSeconds(15);
-        if (!string.IsNullOrEmpty(_configToken))
-            http.DefaultRequestHeaders.Authorization = new("Bearer", _configToken);
-
-        var resp = await http.GetAsync(url, ct);
+        var resp = await _httpClient.GetAsync(url, ct);
         resp.EnsureSuccessStatusCode();
 
         var body = await resp.Content.ReadFromJsonAsync<ConfigValuesDto>(
@@ -313,6 +315,7 @@ public sealed class PeerConfigClient : IAsyncDisposable
             await _rabbitChannel.DisposeAsync();
         if (_rabbitConn is not null)
             await _rabbitConn.DisposeAsync();
+        _httpClient.Dispose();
     }
 }
 

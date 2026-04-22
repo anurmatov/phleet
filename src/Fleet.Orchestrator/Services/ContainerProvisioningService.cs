@@ -854,7 +854,15 @@ public sealed class ContainerProvisioningService(
             .OrderBy(e => e.McpName)
             .ToDictionary(
                 e => e.McpName,
-                e => (object)new { type = e.TransportType, url = e.Url });
+                e =>
+                {
+                    // Append ?agent={name} to fleet-telegram URL so the server knows
+                    // which bot client to use without relying on the LLM to pass it.
+                    var url = e.McpName == "fleet-telegram"
+                        ? $"{e.Url.TrimEnd('/')}?agent={agent.Name}"
+                        : e.Url;
+                    return (object)new { type = e.TransportType, url };
+                });
 
         return JsonSerializer.Serialize(new { mcpServers }, IndentedJson);
     }

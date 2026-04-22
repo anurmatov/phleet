@@ -118,7 +118,6 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
         setSaveMsg((data as { error?: string }).error ?? `Error ${putRes.status}`)
         return
       }
-      await apiFetch('/api/config/reload', { method: 'POST' })
       onConnected('✓ Telegram connected')
       onClose()
     } catch (e) {
@@ -377,7 +376,6 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
         setSaveMsg((data as { error?: string }).error ?? `Error ${putRes.status}`)
         return
       }
-      await apiFetch('/api/config/reload', { method: 'POST' })
       onConnected('✓ GitHub connected')
       onClose()
     } catch (e) {

@@ -29,7 +29,7 @@ public sealed class DelegateToAgentActivity
     // Returns the effective group chat ID: runtime value from PeerConfigClient takes precedence
     // over the compose-env value baked into TemporalBridgeOptions at startup.
     private long EffectiveGroupChatId =>
-        FleetWorkflowConfig.GroupChatId != 0 ? FleetWorkflowConfig.GroupChatId : EffectiveGroupChatId;
+        FleetWorkflowConfig.GroupChatId != 0 ? FleetWorkflowConfig.GroupChatId : _bridgeConfig.GroupChatId;
     private readonly TaskCompletionRegistry _registry;
     private readonly ILogger<DelegateToAgentActivity> _logger;
 

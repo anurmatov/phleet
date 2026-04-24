@@ -153,6 +153,36 @@
             }
           },
           {
+            "on": "{{vars.issue_number | default: ''}}",
+            "name": "check_issue_number",
+            "type": "branch",
+            "cases": {
+              "": {
+                "type": "sequence",
+                "steps": [
+                  {
+                    "name": "notify_design_failed",
+                    "type": "delegate",
+                    "target": "{{config.CtoAgent}}",
+                    "instruction": "Post to Telegram group: UweDesignToPrWorkflow aborted — design phase did not return a valid issue number. Design result: {{vars.design_result | default: '(empty)'}}. No implementation workflow will be launched. Check the UweDesignWorkflow child for details.",
+                    "ignoreFailure": true,
+                    "timeoutMinutes": 5
+                  },
+                  {
+                    "on": "break",
+                    "name": "ctrl_abort",
+                    "type": "branch",
+                    "cases": {
+                      "break": {
+                        "type": "break"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
             "name": "set_impl_attrs",
             "type": "set_attribute",
             "attributes": {
@@ -255,16 +285,7 @@
                             "name": "notify_needs_human_consensus",
                             "type": "delegate",
                             "target": "{{config.CtoAgent}}",
-                            "instruction": "Post to Telegram group: DesignWorkflow for issue {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} in {{input.Repo}} — consensus review flagged needs_human_review. Manual intervention required. Reasoning: {{vars.consensus_out.ConsolidatedReasoning}}",
-                            "ignoreFailure": true,
-                            "timeoutMinutes": 5
-                          },
-                          {
-                            "name": "emit_needs_human_error",
-                            "type": "delegate",
-                            "target": "{{config.CtoAgent}}",
-                            "outputVar": "workflow_result",
-                            "instruction": "Output exactly: ERROR:needs_human_review",
+                            "instruction": "Post to Telegram group: DesignWorkflow for issue {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} in {{input.Repo}} — consensus review flagged needs_human_review. Escalating to CEO approval gate. Reasoning: {{vars.consensus_out.ConsolidatedReasoning}}",
                             "ignoreFailure": true,
                             "timeoutMinutes": 5
                           },

@@ -254,7 +254,58 @@ export type StopStartState = 'idle' | 'confirming' | 'pending' | 'success' | 'er
 export type WfActionState = 'idle' | 'confirming-cancel' | 'confirming-restart' | 'confirming-terminate' | 'pending' | 'success' | 'error'
 export type CancelState = 'idle' | 'confirming' | 'cancelling' | 'success' | 'error'
 export type ConfigSaveState = 'idle' | 'saving' | 'success' | 'error'
-export type ActiveView = 'agents' | 'workflows' | 'instructions' | 'project-contexts' | 'wf-definitions' | 'alerts' | 'schedules' | 'namespaces' | 'repositories' | 'credentials'
+export type ActiveView = 'agents' | 'workflows' | 'instructions' | 'project-contexts' | 'wf-definitions' | 'alerts' | 'schedules' | 'namespaces' | 'repositories' | 'credentials' | 'memory'
+
+// ── Memory types ──────────────────────────────────────────────────────────────
+
+export interface MemoryListItem {
+  id: string
+  title: string
+  project: string
+  type: string
+  tags: string
+  updated_at: string
+}
+
+export interface MemoryDoc {
+  id: string
+  title: string
+  type: string
+  agent: string
+  project: string
+  tags: string[]
+  source: string
+  created_at: string
+  updated_at: string
+  content: string
+}
+
+export interface MemorySearchResult {
+  id: string
+  title: string
+  project: string
+  type: string
+  tags: string[]
+  snippet: string
+  updated_at: string
+}
+
+export interface AgentReadStatsDto {
+  count: number
+  lastReadAt: string
+}
+
+export interface MemoryReadStatsDto {
+  memoryId: string
+  total: number
+  byAgent: Record<string, AgentReadStatsDto>
+  lastReadAt: string
+}
+
+export interface MemoryStatsResponse {
+  since: string
+  entries: MemoryReadStatsDto[]
+}
 
 export interface ScheduleSummary {
   scheduleId: string

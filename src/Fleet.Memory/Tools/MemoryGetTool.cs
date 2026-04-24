@@ -1,12 +1,16 @@
 using System.ComponentModel;
 using System.Text;
 using Fleet.Memory.Services;
+using Microsoft.AspNetCore.Http;
 using ModelContextProtocol.Server;
 
 namespace Fleet.Memory.Tools;
 
 [McpServerToolType]
-public sealed class MemoryGetTool(MemoryService memoryService)
+public sealed class MemoryGetTool(
+    MemoryService memoryService,
+    ReadCounterService readCounter,
+    IHttpContextAccessor httpContextAccessor)
 {
     [McpServerTool(Name = "memory_get")]
     [Description("Get the full content of a specific memory by its ID. Use this after memory_search or memory_list to read the complete memory.")]
@@ -20,6 +24,12 @@ public sealed class MemoryGetTool(MemoryService memoryService)
 
         if (doc is null)
             return $"Memory not found with ID: {id}";
+
+        // Record read attribution. Agent name comes from the ?agent= param baked into
+        // the MCP URL at provision time (same pattern as fleet-telegram PR #76).
+        // Missing attribution falls back to "unknown" — never dropped.
+        var agentName = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault() ?? "unknown";
+        readCounter.RecordRead(doc.Id, agentName);
 
         var sb = new StringBuilder();
         sb.AppendLine($"# {doc.Title}");

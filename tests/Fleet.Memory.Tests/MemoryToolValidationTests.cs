@@ -1,4 +1,6 @@
+using Fleet.Memory.Services;
 using Fleet.Memory.Tools;
+using Microsoft.AspNetCore.Http;
 
 namespace Fleet.Memory.Tests;
 
@@ -105,14 +107,14 @@ public class MemoryToolValidationTests
     [Fact]
     public async Task Get_MissingId_ReturnsError()
     {
-        var result = await new MemoryGetTool(null!).GetAsync("");
+        var result = await new MemoryGetTool(null!, new ReadCounterService(), new HttpContextAccessor()).GetAsync("");
         Assert.Contains("missing required parameter 'id'", result);
     }
 
     [Fact]
     public async Task Get_WhitespaceId_ReturnsError()
     {
-        var result = await new MemoryGetTool(null!).GetAsync("   ");
+        var result = await new MemoryGetTool(null!, new ReadCounterService(), new HttpContextAccessor()).GetAsync("   ");
         Assert.Contains("missing required parameter 'id'", result);
     }
 
@@ -158,7 +160,7 @@ public class MemoryToolValidationTests
         Assert.StartsWith("memory_store:", await new MemoryStoreTool(null!).StoreAsync("", "t", "c"));
         Assert.StartsWith("memory_update:", await new MemoryUpdateTool(null!).UpdateAsync(""));
         Assert.StartsWith("memory_delete:", await new MemoryDeleteTool(null!).DeleteAsync(""));
-        Assert.StartsWith("memory_get:", await new MemoryGetTool(null!).GetAsync(""));
+        Assert.StartsWith("memory_get:", await new MemoryGetTool(null!, new ReadCounterService(), new HttpContextAccessor()).GetAsync(""));
         Assert.StartsWith("memory_search:", await new MemorySearchTool(null!).SearchAsync(""));
         Assert.StartsWith("memory_list:", await new MemoryListTool(null!).ListAsync(type: "bad"));
     }

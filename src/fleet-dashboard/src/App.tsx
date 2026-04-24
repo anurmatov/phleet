@@ -51,6 +51,8 @@ import SchedulesView from './components/SchedulesView'
 import NamespacesView from './components/NamespacesView'
 import RepositoriesView from './components/RepositoriesView'
 import CredentialsView from './components/CredentialsView'
+import MemoryView from './components/MemoryView'
+import { MemoryIdCacheProvider } from './context/MemoryIdCacheContext'
 import SetupBanner from './components/SetupBanner'
 
 type WsMessage =
@@ -1615,6 +1617,7 @@ export default function App() {
   const sorted = Object.values(agents).sort((a, b) => a.agentName.localeCompare(b.agentName))
 
   return (
+  <MemoryIdCacheProvider>
     <div className="app-layout">
       <AppHeader
         wsStatus={wsStatus}
@@ -1943,6 +1946,10 @@ export default function App() {
           }} />
         )}
 
+        {activeView === 'memory' && (
+          <MemoryView />
+        )}
+
         {activeView === 'alerts' && (
           <AlertsView
             alerts={alerts}
@@ -2063,5 +2070,6 @@ export default function App() {
         </div>
       )}
     </div>
+  </MemoryIdCacheProvider>
   )
 }

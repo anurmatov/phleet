@@ -6,6 +6,7 @@ import type {
 } from '../types'
 import { computeDiff } from '../utils'
 import FieldHint from './FieldHint'
+import MemoryText from './MemoryText'
 
 interface ProjectContextsViewProps {
   contexts: ProjectContextSummary[]
@@ -294,7 +295,7 @@ export default function ProjectContextsView({
                                   <span>{v.createdAt}</span>
                                   {v.createdBy && <span>{v.createdBy}</span>}
                                 </div>
-                                {v.reason && <div className="instr-version-reason">{v.reason}</div>}
+                                {v.reason && <div className="instr-version-reason"><MemoryText>{v.reason}</MemoryText></div>}
                               </div>
                             )
                           })}

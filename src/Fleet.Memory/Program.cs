@@ -33,7 +33,11 @@ else
 
 // Services
 builder.Services.AddSingleton<MemoryService>();
+builder.Services.AddSingleton<ReadCounterService>();
 builder.Services.AddHostedService<FileWatcherService>();
+
+// IHttpContextAccessor for agent attribution in MemoryGetTool
+builder.Services.AddHttpContextAccessor();
 
 // MCP Server
 builder.Services
@@ -47,4 +51,142 @@ app.MapMcp();
 
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "fleet-memory" }));
 
+// ── Internal REST API ─────────────────────────────────────────────────────────
+// Internal-network only (not authenticated). The orchestrator proxies these to
+// power the dashboard Memory page.
+
+// GET /internal/memory — list all memories (metadata only, no content bodies)
+app.MapGet("/internal/memory", async (MemoryService memoryService) =>
+{
+    var items = await memoryService.ListAsync();
+    var result = items.Select(d =>
+    {
+        // VectorStore returns tags as a comma-joined string; split back to string[]
+        // to match the string[] shape on the search/get endpoints.
+        var rawTags = d.GetValueOrDefault("tags") ?? "";
+        var tags = string.IsNullOrEmpty(rawTags)
+            ? Array.Empty<string>()
+            : rawTags.Split(", ", StringSplitOptions.RemoveEmptyEntries);
+        return new
+        {
+            id         = d.GetValueOrDefault("memory_id") ?? d.GetValueOrDefault("id") ?? "",
+            title      = d.GetValueOrDefault("title") ?? "",
+            project    = d.GetValueOrDefault("project") ?? "",
+            type       = d.GetValueOrDefault("memory_type") ?? "",
+            tags,
+            updated_at = d.GetValueOrDefault("created") ?? "",
+        };
+    });
+    return Results.Ok(result);
+});
+
+// GET /internal/memory/ids — id-only list for SPA known-memory cache
+app.MapGet("/internal/memory/ids", async (MemoryService memoryService) =>
+{
+    var items = await memoryService.ListAsync();
+    var ids = items
+        .Select(d => d.GetValueOrDefault("memory_id") ?? d.GetValueOrDefault("id") ?? "")
+        .Where(id => !string.IsNullOrEmpty(id))
+        .ToList();
+    return Results.Ok(ids);
+});
+
+// GET /internal/memory/search?q=...
+app.MapGet("/internal/memory/search", async (string? q, MemoryService memoryService) =>
+{
+    if (string.IsNullOrWhiteSpace(q))
+        return Results.BadRequest(new { error = "Missing query parameter 'q'" });
+
+    var docs = await memoryService.SearchAsync(q, limit: 20);
+    var result = docs.Select(d => new
+    {
+        id         = d.Id,
+        title      = d.Title,
+        project    = d.Project,
+        type       = d.Type,
+        tags       = d.Tags,
+        snippet    = d.Content.Length > 200 ? d.Content[..200] + "…" : d.Content,
+        updated_at = d.Updated,
+    });
+    return Results.Ok(result);
+});
+
+// GET /internal/memory/{id} — full content + metadata
+app.MapGet("/internal/memory/{id}", async (string id, MemoryService memoryService) =>
+{
+    var doc = await memoryService.GetAsync(id);
+    if (doc is null)
+        return Results.NotFound(new { error = $"Memory not found: {id}" });
+
+    return Results.Ok(new
+    {
+        id         = doc.Id,
+        title      = doc.Title,
+        type       = doc.Type,
+        agent      = doc.Agent,
+        project    = doc.Project,
+        tags       = doc.Tags,
+        source     = doc.Source,
+        created_at = doc.Created,
+        updated_at = doc.Updated,
+        content    = doc.Content,
+    });
+});
+
+// PUT /internal/memory/{id} — update with optimistic staleness check
+app.MapPut("/internal/memory/{id}", async (string id, HttpRequest request, MemoryService memoryService) =>
+{
+    MemoryUpdateRequest? body;
+    try { body = await request.ReadFromJsonAsync<MemoryUpdateRequest>(); }
+    catch { return Results.BadRequest(new { error = "invalid_json" }); }
+
+    if (body is null)
+        return Results.BadRequest(new { error = "empty_payload" });
+
+    var current = await memoryService.GetAsync(id);
+    if (current is null)
+        return Results.NotFound(new { error = $"Memory not found: {id}" });
+
+    // Staleness check: last_seen_updated_at must match stored updated_at (±1s tolerance)
+    if (!string.IsNullOrEmpty(body.LastSeenUpdatedAt)
+        && DateTimeOffset.TryParse(body.LastSeenUpdatedAt, out var lastSeen)
+        && Math.Abs((lastSeen - current.Updated).TotalSeconds) > 1)
+    {
+        return Results.Json(
+            new { error = "stale", current_updated_at = current.Updated.ToString("o") },
+            statusCode: 409);
+    }
+
+    var updated = await memoryService.UpdateAsync(id,
+        content: body.Content,
+        tags: body.Tags,
+        project: body.Project);
+
+    return Results.Ok(new { id = updated.Id, updated_at = updated.Updated });
+});
+
+// DELETE /internal/memory/{id}
+app.MapDelete("/internal/memory/{id}", async (string id, MemoryService memoryService) =>
+{
+    try
+    {
+        await memoryService.DeleteAsync(id);
+        return Results.Ok(new { deleted = id });
+    }
+    catch (FileNotFoundException)
+    {
+        return Results.NotFound(new { error = $"Memory not found: {id}" });
+    }
+});
+
+// GET /internal/stats/reads — in-memory read counter snapshot (resets on restart)
+app.MapGet("/internal/stats/reads", (ReadCounterService readCounter) =>
+    Results.Ok(new { since = readCounter.Since, entries = readCounter.GetSnapshot() }));
+
 app.Run();
+
+internal record MemoryUpdateRequest(
+    string? Content,
+    List<string>? Tags,
+    string? Project,
+    string? LastSeenUpdatedAt);

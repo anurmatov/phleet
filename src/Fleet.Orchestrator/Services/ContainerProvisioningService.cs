@@ -665,8 +665,9 @@ public sealed class ContainerProvisioningService(
             mcpEndpoints.Count, string.Join(", ", mcpEndpoints),
             agent.PermissionMode);
 
+        var fleetMemoryMcpUrl = config["FleetMemory:McpUrl"] ?? "http://fleet-memory:3100/mcp";
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent));
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent));
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent));
 
         logger.LogInformation(
@@ -851,7 +852,7 @@ public sealed class ContainerProvisioningService(
         return JsonSerializer.Serialize(obj, IndentedJson);
     }
 
-    private static string GenerateMcpJson(Agent agent)
+    private static string GenerateMcpJson(Agent agent, string fleetMemoryMcpUrl)
     {
         var mcpServers = agent.McpEndpoints
             .OrderBy(e => e.McpName)
@@ -859,13 +860,21 @@ public sealed class ContainerProvisioningService(
                 e => e.McpName,
                 e =>
                 {
-                    // Append ?agent={name} to fleet-telegram URL so the server knows
-                    // which bot client to use without relying on the LLM to pass it.
-                    var url = e.McpName == "fleet-telegram"
+                    // Append ?agent={name} to fleet-telegram and fleet-memory URLs so each
+                    // server can identify the calling agent without relying on the LLM to pass it.
+                    var url = (e.McpName == "fleet-telegram" || e.McpName == "fleet-memory")
                         ? $"{e.Url.TrimEnd('/')}?agent={agent.Name}"
                         : e.Url;
                     return (object)new { type = e.TransportType, url };
                 });
+
+        // Every agent gets fleet-memory access for memory_get, even if not in DB.
+        // This is the provisioning-time enforcement point for mandatory read access.
+        if (!mcpServers.ContainsKey("fleet-memory"))
+        {
+            var url = $"{fleetMemoryMcpUrl.TrimEnd('/')}?agent={agent.Name}";
+            mcpServers["fleet-memory"] = new { type = "sse", url };
+        }
 
         return JsonSerializer.Serialize(new { mcpServers }, IndentedJson);
     }
@@ -877,6 +886,13 @@ public sealed class ContainerProvisioningService(
             .OrderBy(t => t.ToolName)
             .Select(t => t.ToolName)
             .ToList();
+
+        // Every agent gets memory_get — provisioning-time enforcement of mandatory read access.
+        if (!allow.Contains("memory_get", StringComparer.OrdinalIgnoreCase))
+        {
+            allow.Add("memory_get");
+            allow.Sort(StringComparer.OrdinalIgnoreCase);
+        }
 
         return JsonSerializer.Serialize(new { permissions = new { allow } }, IndentedJson);
     }

@@ -575,11 +575,8 @@ public sealed class ClaudeExecutor : IAgentExecutor
             sb.Append($"--mcp-config \"{EscapeArg(mcpConfigPath)}\" ");
         }
 
-        var systemPrompt = _promptBuilder.BuildSystemPrompt();
-        if (!string.IsNullOrWhiteSpace(systemPrompt))
-        {
-            sb.Append($"--append-system-prompt \"{EscapeArg(systemPrompt)}\" ");
-        }
+        var systemPromptFile = _promptBuilder.WriteSystemPromptFile();
+        sb.Append($"--append-system-prompt-file \"{EscapeArg(systemPromptFile)}\" ");
 
         return sb.ToString().TrimEnd();
     }

@@ -1,5 +1,6 @@
 using System.Text;
 using Fleet.Agent.Configuration;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace Fleet.Agent.Services;
@@ -8,7 +9,7 @@ namespace Fleet.Agent.Services;
 /// Shared service that builds the system prompt from role files and project contexts.
 /// Injected by both ClaudeExecutor and CodexExecutor so both providers use identical prompts.
 /// </summary>
-public sealed class PromptBuilder(IOptions<AgentOptions> config)
+public sealed class PromptBuilder(IOptions<AgentOptions> config, ILogger<PromptBuilder> logger)
 {
     private readonly AgentOptions _config = config.Value;
 
@@ -122,5 +123,43 @@ public sealed class PromptBuilder(IOptions<AgentOptions> config)
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Assembles the system prompt and writes it atomically to
+    /// <c>{WorkDir}/system-prompt.md</c> (via tmp + rename). Returns the absolute
+    /// path to the written file. Always writes — even when the prompt is empty —
+    /// so the caller can unconditionally pass <c>--append-system-prompt-file</c>.
+    ///
+    /// Throws on any write failure. Never falls back to inline delivery; a write
+    /// failure must be loud and fatal to prevent silent re-exposure of E2BIG risk.
+    /// </summary>
+    public string WriteSystemPromptFile()
+    {
+        var content = BuildSystemPrompt();
+        var filePath = Path.Combine(_config.WorkDir, "system-prompt.md");
+        var tmpPath = filePath + ".tmp";
+
+        try
+        {
+            // Write with UTF-8 without BOM, matching .generated/ file conventions.
+            File.WriteAllText(tmpPath, content, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            // Atomic rename — prevents Claude from reading a partially-written file.
+            File.Move(tmpPath, filePath, overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError("[PromptBuilder] Failed to write system-prompt.md: {Message}", ex.Message);
+            throw;
+        }
+
+        if (!File.Exists(filePath))
+            throw new InvalidOperationException(
+                $"[PromptBuilder] system-prompt.md not found at expected path after write: {filePath}");
+
+        var byteCount = new FileInfo(filePath).Length;
+        logger.LogDebug("[PromptBuilder] Wrote system-prompt.md: {Bytes} bytes at {Path}", byteCount, filePath);
+
+        return filePath;
     }
 }

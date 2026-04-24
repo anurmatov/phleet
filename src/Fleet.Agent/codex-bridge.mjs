@@ -53,7 +53,12 @@ async function runTask(msg) {
     const model = (msg.model && VALID_CODEX_MODELS.has(msg.model)) ? msg.model : undefined;
     const sessionId = msg.sessionId || currentThreadId;
 
-    // Codex SDK reads system instructions from AGENTS.md in the work directory
+    // Codex SDK reads system instructions from AGENTS.md in the work directory.
+    // systemPrompt arrives as a JSON field over stdin (not as a CLI argv), so it is
+    // NOT subject to the Linux ARG_MAX / E2BIG limit that affects the Claude provider.
+    // Measured max across all running Codex agents (2026-04-24): ~8 KB.
+    // If this grows beyond ~50 KB, switch to a file-based approach (write AGENTS.md
+    // atomically in CodexExecutor.cs and reference it here) — see issue #80 for context.
     if (msg.systemPrompt) {
         fs.writeFileSync('/workspace/AGENTS.md', msg.systemPrompt);
     }

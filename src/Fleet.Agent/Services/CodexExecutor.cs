@@ -68,6 +68,14 @@ public sealed class CodexExecutor : IAgentExecutor
                 await StartProcessAsync(ct);
             }
 
+            // System prompt is delivered as a JSON field over stdin (not as a CLI argv),
+            // so it is not subject to the Linux ARG_MAX / E2BIG limit that affects the
+            // Claude provider. codex-bridge.mjs receives this field and writes it to
+            // /workspace/AGENTS.md for the Codex SDK to read.
+            //
+            // Measured system prompt size across all running Codex agents (2026-04-24):
+            // max observed was ~8 KB — well under the 50 KB threshold defined in issue #80.
+            // Revisit this if Codex agent roles or project contexts grow significantly.
             var msgObj = new
             {
                 type = "task",

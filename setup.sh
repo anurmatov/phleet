@@ -382,6 +382,9 @@ if $PROMPT_TELEGRAM; then
   prompt_field "$ENV_FILE" "TELEGRAM_NOTIFIER_BOT_TOKEN" "Telegram notifier bot token" \
     "Create a bot at https://t.me/BotFather (send /newbot). This bot sends messages from every non-CTO agent and the fleet bridge." "y" "y"
 
+  prompt_field "$ENV_FILE" "TELEGRAM_USER_ID" "Your Telegram user ID (numeric)" \
+    "Send any message to @userinfobot on Telegram — it replies with your numeric user ID. This allows agents to DM you directly via the send_to_ceo tool." "y" "n"
+
   prompt_field "$ENV_FILE" "TELEGRAM_CTO_BOT_TOKEN" "Telegram CTO bot token" \
     "Same flow, second bot: https://t.me/BotFather → /newbot. This is the bot you DM your CTO agent through." "y" "y"
 fi

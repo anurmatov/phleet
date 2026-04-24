@@ -3,6 +3,7 @@ using Fleet.Telegram.Services;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSingleton<BotClientFactory>();
+builder.Services.AddSingleton<CeoConfigService>();
 builder.Services.AddHostedService<PeerConfigHostedService>();
 builder.Services.AddHttpContextAccessor();
 

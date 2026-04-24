@@ -9,8 +9,12 @@ public sealed class FleetWorkflowOptions
 {
     public const string Section = "FleetWorkflows";
 
-    /// <summary>Agent name for escalation notifications (e.g. workflow failures, timeout alerts).</summary>
-    public string EscalationTarget { get; set; } = "";
+    /// <summary>
+    /// Agent name for escalation notifications (e.g. workflow failures, timeout alerts).
+    /// Alias for <see cref="CtoAgent"/> — both resolve to the same volatile backing field
+    /// so live updates from PeerConfigHostedService are immediately visible everywhere.
+    /// </summary>
+    public string EscalationTarget => _ctoAgent;
 
     /// <summary>
     /// Short name of the user-defined CTO/co-cto agent. Resolved at workflow runtime as

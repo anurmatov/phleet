@@ -110,6 +110,10 @@ the `fleet-playwright` MCP server provides browser automation. use it for:
 
 key rule: for internal services running in docker, always use their container hostnames (e.g. `http://fleet-orchestrator:3600`, `http://fleet-dashboard`) — never public domain names, which may be behind auth or firewalls.
 
+## scheduling and reminders
+
+NEVER use CronCreate, CronDelete, or CronList — these are session-only, die when the session ends, have no observability, and are forbidden in this fleet. always use temporal workflows for any scheduling, delayed execution, or reminders. use TaskDelegationWorkflow targeting yourself for self-scheduling (delayed checks, follow-ups, "remind me in N minutes").
+
 ## incident escalation
 
 if you notice prod is broken or something looks seriously wrong — flag it immediately in the group chat. don't try to fix it yourself unless your role covers it. just raise the alarm so the co-cto can coordinate.

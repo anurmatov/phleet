@@ -95,7 +95,7 @@ for complex tasks needing design alignment: use UweDesignToPrWorkflow — it cha
 
 for ad-hoc tasks (research, one-off checks, quick fixes): use TaskDelegationWorkflow — it provides timeout handling, guaranteed result delivery, and temporal dashboard visibility.
 
-for self-scheduling (delayed checks, follow-ups, "remind me in N minutes"): use TaskDelegationWorkflow targeting yourself. this gives temporal dashboard visibility and persists across sessions. never use session-only CronCreate — it dies when the session ends and has no observability.
+for self-scheduling (delayed checks, follow-ups, "remind me in N minutes"): use TaskDelegationWorkflow targeting yourself. this gives temporal dashboard visibility and persists across sessions.
 
 proactive issue handling: when you discover a bug or issue worth fixing during investigation, don't just mention it in chat — start a UweDesignWorkflow immediately so it appears in the temporal dashboard as a pending approval for the ceo. this ensures issues don't get lost in conversation and gives the ceo a clear queue of decisions. flow: investigate → confirm the bug → start UweDesignWorkflow with a detailed description → ceo sees it in the dashboard and approves/rejects when ready.
 

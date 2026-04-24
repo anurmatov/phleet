@@ -294,11 +294,8 @@ services:
       - ORCHESTRATOR_URL=http://fleet-orchestrator:3600
       - ORCHESTRATOR_CONFIG_TOKEN=${ORCHESTRATOR_CONFIG_TOKEN}
       - RABBITMQ_URL=amqp://rabbitmq
-      # EscalationTarget: agent that receives workflow failure/timeout notifications and acts as
-      # ConsensusReviewWorkflow Synthesizer. Defaults to the CTO agent name from .env.
-      - FleetWorkflows__EscalationTarget=${FLEET_CTO_AGENT}
       # Dynamic keys fetched from orchestrator at startup and live-updated on config.changed events.
-      # FLEET_CTO_AGENT       — CTO agent name for UWE {{config.CtoAgent}} template expressions
+      # FLEET_CTO_AGENT       — CTO agent name for UWE {{config.CtoAgent}} and {{config.EscalationTarget}} template expressions
       # FLEET_GROUP_CHAT_ID   — Telegram group chat ID for activity directives (replaces static TemporalBridge__GroupChatId)
       # AUTHTOKENREFRESH__*   — OAuth client IDs for provider token refresh (applied on restart)
       - PEER_CONFIG_KEYS=FLEET_CTO_AGENT,FLEET_GROUP_CHAT_ID,AUTHTOKENREFRESH__CLAUDECLIENTID,AUTHTOKENREFRESH__CODEXCLIENTID

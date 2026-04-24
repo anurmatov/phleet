@@ -39,12 +39,7 @@ public sealed class PeerConfigHostedService : IHostedService, IAsyncDisposable
                 "escalations or resolve {{config.CtoAgent}} template expressions. " +
                 "Set FLEET_CTO_AGENT in .env and restart.");
 
-        // Fail fast if EscalationTarget is empty — ConsensusReviewWorkflow and failure notifications
-        // use this as the Synthesizer agent name. An empty string silently drops all escalations.
-        if (string.IsNullOrWhiteSpace(FleetWorkflowConfig.Instance.EscalationTarget))
-            throw new InvalidOperationException(
-                "FleetWorkflows__EscalationTarget is not set — fleet-temporal-bridge cannot route " +
-                "workflow escalations. Set FleetWorkflows__EscalationTarget in compose env and restart.");
+        // EscalationTarget is now an alias for CtoAgent — no separate check needed.
 
         await _client.SubscribeAsync(cancellationToken);
     }

@@ -1195,9 +1195,19 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         foreach (var n in body.Networks.Distinct(StringComparer.OrdinalIgnoreCase))
             db.AgentNetworks.Add(new AgentNetwork { AgentId = agent.Id, NetworkName = n });
 
-    if (body.EnvRefs is not null)
-        foreach (var r in body.EnvRefs.Distinct(StringComparer.OrdinalIgnoreCase))
-            db.AgentEnvRefs.Add(new AgentEnvRef { AgentId = agent.Id, EnvKeyName = r });
+    var envRefSet = new HashSet<string>(
+        body.EnvRefs?.Distinct(StringComparer.OrdinalIgnoreCase) ?? [],
+        StringComparer.OrdinalIgnoreCase);
+    // Every agent needs some Telegram bot token ref to start its transport (without one the
+    // RabbitMQ consumers never get wired up). If the caller didn't pass any *_BOT_TOKEN-shaped
+    // key, seed TELEGRAM_NOTIFIER_BOT_TOKEN so the agent boots with a working default.
+    var hasBotTokenRef = envRefSet.Any(k =>
+        k.StartsWith("TELEGRAM_", StringComparison.OrdinalIgnoreCase) &&
+        k.EndsWith("_BOT_TOKEN", StringComparison.OrdinalIgnoreCase));
+    if (!hasBotTokenRef)
+        envRefSet.Add("TELEGRAM_NOTIFIER_BOT_TOKEN");
+    foreach (var r in envRefSet)
+        db.AgentEnvRefs.Add(new AgentEnvRef { AgentId = agent.Id, EnvKeyName = r });
 
     // Build the final Telegram user set: explicit payload + installer's ID (deduped)
     var telegramUserSet = new HashSet<long>(body.TelegramUsers?.Distinct() ?? []);

@@ -14,6 +14,8 @@ if blocked, say what you need — nothing more.
 
 these output rules have absolute priority. your role instructions define what you do, not how you format messages. never let structured role content (headers, bullets, code blocks) influence your output style.
 
+this applies to every outgoing telegram message — your direct response, and anything you send via the `send_message` MCP tool. when calling send_message, pass plain text (no `parse_mode`), and don't embed markdown characters like `**bold**`, backticks, or `#` headers in the body. telegram will either render them or show them literally — both look wrong.
+
 ## memory discipline
 
 before starting any task, search fleet-memory for relevant context: runbooks, past decisions, architecture docs, and learnings from previous tasks. use broad search terms — try multiple queries if the first returns nothing relevant.

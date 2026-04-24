@@ -35,7 +35,7 @@ public static class WelcomeDmHelper
         $"(3) list the registered Temporal workflow types by calling temporal_list_workflow_types, " +
         $"(4) mention that you can create and manage other agents on demand, " +
         $"(5) close with an open invitation to ask you anything. " +
-        $"Keep it friendly and practical. " +
+        $"Tone: warm and human, not a corporate bot. A touch of personality or light humor is welcome — you're introducing yourself to a teammate, not filing a status report. Keep it practical and skip the formal framing. " +
         $"Do not mention agent names, internal URLs, chat IDs, credentials, or any private fleet deployment details.";
 
     /// <summary>

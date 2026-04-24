@@ -5204,6 +5204,20 @@ body {
 
 .memory-cv-error-inline { color: #f88; font-size: 12px; margin-bottom: 8px; }
 
+.memory-delete-toast {
+  background: var(--accent, #4a9eff);
+  color: #fff;
+  font-size: 13px;
+  padding: 8px 14px;
+  border-radius: 6px;
+  margin-bottom: 10px;
+  animation: memory-toast-fade 0.2s ease;
+}
+@keyframes memory-toast-fade {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
 .memory-cv-content {
   flex: 1;
   overflow-y: auto;

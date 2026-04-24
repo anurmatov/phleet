@@ -59,14 +59,23 @@ app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "flee
 app.MapGet("/internal/memory", async (MemoryService memoryService) =>
 {
     var items = await memoryService.ListAsync();
-    var result = items.Select(d => new
+    var result = items.Select(d =>
     {
-        id         = d.GetValueOrDefault("memory_id") ?? d.GetValueOrDefault("id") ?? "",
-        title      = d.GetValueOrDefault("title") ?? "",
-        project    = d.GetValueOrDefault("project") ?? "",
-        type       = d.GetValueOrDefault("memory_type") ?? "",
-        tags       = d.GetValueOrDefault("tags") ?? "",
-        updated_at = d.GetValueOrDefault("created") ?? "",
+        // VectorStore returns tags as a comma-joined string; split back to string[]
+        // to match the string[] shape on the search/get endpoints.
+        var rawTags = d.GetValueOrDefault("tags") ?? "";
+        var tags = string.IsNullOrEmpty(rawTags)
+            ? Array.Empty<string>()
+            : rawTags.Split(", ", StringSplitOptions.RemoveEmptyEntries);
+        return new
+        {
+            id         = d.GetValueOrDefault("memory_id") ?? d.GetValueOrDefault("id") ?? "",
+            title      = d.GetValueOrDefault("title") ?? "",
+            project    = d.GetValueOrDefault("project") ?? "",
+            type       = d.GetValueOrDefault("memory_type") ?? "",
+            tags,
+            updated_at = d.GetValueOrDefault("created") ?? "",
+        };
     });
     return Results.Ok(result);
 });

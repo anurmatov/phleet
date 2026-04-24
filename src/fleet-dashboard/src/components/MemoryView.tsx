@@ -53,7 +53,9 @@ export default function MemoryView() {
   const [stats, setStats] = useState<MemoryStatsResponse | null>(null)
   const [statsError, setStatsError] = useState('')
   const [statsSince, setStatsSince] = useState('')
+  const [deleteToast, setDeleteToast] = useState('')
   const searchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const { refresh: refreshIdCache } = useMemoryIdCache()
 
   const loadList = useCallback(async () => {
@@ -136,6 +138,9 @@ export default function MemoryView() {
     setSelectedId(null)
     refreshIdCache()
     loadStats()
+    if (toastTimer.current) clearTimeout(toastTimer.current)
+    setDeleteToast('Memory deleted.')
+    toastTimer.current = setTimeout(() => setDeleteToast(''), 3000)
   }
 
   function handleSaved() {
@@ -282,6 +287,7 @@ export default function MemoryView() {
 
       {/* Right pane */}
       <div className="memory-right">
+        {deleteToast && <div className="memory-delete-toast">{deleteToast}</div>}
         {selectedId
           ? <MemoryContentView
               key={selectedId}

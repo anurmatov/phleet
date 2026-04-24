@@ -263,7 +263,7 @@ export interface MemoryListItem {
   title: string
   project: string
   type: string
-  tags: string
+  tags: string[]
   updated_at: string
 }
 

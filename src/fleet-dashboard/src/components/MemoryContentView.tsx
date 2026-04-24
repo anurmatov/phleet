@@ -175,6 +175,9 @@ export default function MemoryContentView({ id, onDeleted, onSaved }: MemoryCont
           />
         </div>
       ) : (
+        // Pre-wrap matches the existing InstructionsView / ProjectContextsView pattern
+        // (no markdown renderer library). MemoryContentView is reused as both the
+        // split-pane view and as a modal portal via MemoryText.
         <div className="memory-cv-content">{doc.content}</div>
       )}
     </div>

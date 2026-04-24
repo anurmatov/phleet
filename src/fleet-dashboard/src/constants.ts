@@ -60,7 +60,6 @@ export const ADVANCED_DEFAULTS: Record<string, string | number | boolean | null>
   showStats: true,
   prefixMessages: false,
   suppressToolMessages: false,
-  ttsServiceUrl: null,
   effort: null,
   jsonSchema: null,
   agentsJson: null,

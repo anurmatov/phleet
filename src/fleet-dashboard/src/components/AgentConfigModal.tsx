@@ -172,11 +172,6 @@ export default function AgentConfigModal({
                 </label>
                 <FieldHint>Hide intermediate tool-use progress messages from Telegram — only post the final response. Use for agents serving non-technical users.</FieldHint>
               </div>
-              <div className="config-field">
-                <label className="config-label">TTS Service URL</label>
-                <FieldHint>URL of a text-to-speech service for voice output. Leave blank to disable.</FieldHint>
-                <input className="config-input" value={configEdits.ttsServiceUrl} onChange={e => onEditsChange({ ttsServiceUrl: e.target.value })} placeholder="leave blank to disable" />
-              </div>
               {isClaude && (
               <div className="config-field">
                 <label className="config-label">Effort <span className="config-provider-badge">Claude only</span></label>

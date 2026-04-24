@@ -320,7 +320,6 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         agent.PrefixMessages,
         agent.SuppressToolMessages,
         agent.TelegramSendOnly,
-        agent.TtsServiceUrl,
         agent.Effort,
         agent.JsonSchema,
         agent.AgentsJson,
@@ -390,7 +389,6 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     if (body.PrefixMessages is not null) agent.PrefixMessages = body.PrefixMessages.Value;
     if (body.SuppressToolMessages is not null) agent.SuppressToolMessages = body.SuppressToolMessages.Value;
     if (body.TelegramSendOnly is not null) agent.TelegramSendOnly = body.TelegramSendOnly.Value;
-    if (body.TtsServiceUrl is not null) agent.TtsServiceUrl = body.TtsServiceUrl == "" ? null : body.TtsServiceUrl;
     if (body.Effort is not null) agent.Effort = body.Effort == "" ? null : body.Effort;
     if (body.JsonSchema is not null) agent.JsonSchema = body.JsonSchema == "" ? null : body.JsonSchema;
     if (body.AgentsJson is not null) agent.AgentsJson = body.AgentsJson == "" ? null : body.AgentsJson;
@@ -1167,7 +1165,6 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         PrefixMessages            = body.PrefixMessages            ?? false,
         SuppressToolMessages      = body.SuppressToolMessages      ?? false,
         TelegramSendOnly          = body.TelegramSendOnly          ?? false,
-        TtsServiceUrl             = string.IsNullOrEmpty(body.TtsServiceUrl) ? null : body.TtsServiceUrl,
         Effort                    = string.IsNullOrEmpty(body.Effort) ? null : body.Effort,
         JsonSchema                = string.IsNullOrEmpty(body.JsonSchema) ? null : body.JsonSchema,
         AgentsJson                = string.IsNullOrEmpty(body.AgentsJson) ? null : body.AgentsJson,
@@ -2476,7 +2473,6 @@ record AgentConfigUpdateRequest(
     bool? PrefixMessages,
     bool? SuppressToolMessages,
     bool? TelegramSendOnly,
-    string? TtsServiceUrl,
     string? Effort,
     string? JsonSchema,
     string? AgentsJson,
@@ -2538,7 +2534,6 @@ record CreateAgentRequest(
     bool? PrefixMessages,
     bool? SuppressToolMessages,
     bool? TelegramSendOnly,
-    string? TtsServiceUrl,
     string? Effort,
     string? JsonSchema,
     string? AgentsJson,

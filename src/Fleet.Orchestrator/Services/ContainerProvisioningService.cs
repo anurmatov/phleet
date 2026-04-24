@@ -71,7 +71,8 @@ public sealed class ContainerProvisioningService(
         var containerName = agent.ContainerName;
 
         var whisperServiceUrl = config["Provisioning:WhisperServiceUrl"] ?? "";
-        var env      = BuildEnv(agent, envValues, whisperServiceUrl);
+        var kokoroServiceUrl  = config["Provisioning:KokoroServiceUrl"]  ?? "";
+        var env      = BuildEnv(agent, envValues, whisperServiceUrl, kokoroServiceUrl);
         var binds    = BuildBinds(agent);
         var networks = BuildNetworks(agent);
         var memBytes = (long)agent.MemoryLimitMb * 1024 * 1024;
@@ -80,7 +81,7 @@ public sealed class ContainerProvisioningService(
         return new ContainerSpec(image, memBytes, env, binds, networks);
     }
 
-    private static List<string> BuildEnv(Agent agent, Dictionary<string, string> envValues, string whisperServiceUrl)
+    private static List<string> BuildEnv(Agent agent, Dictionary<string, string> envValues, string whisperServiceUrl, string kokoroServiceUrl)
     {
         var env = new List<string>();
 
@@ -107,10 +108,6 @@ public sealed class ContainerProvisioningService(
         env.Add($"GIT_USER_NAME={gitName}");
         env.Add($"GIT_USER_EMAIL={gitEmail}");
 
-        // TTS service URL — emitted when configured in DB
-        if (!string.IsNullOrEmpty(agent.TtsServiceUrl))
-            env.Add($"Tts__ServiceUrl={agent.TtsServiceUrl}");
-
         // GitHub App PEM — inject for all agents when present in .env (base64-encoded)
         if (envValues.TryGetValue("GITHUB_APP_PEM", out var githubAppPem))
             env.Add($"GITHUB_APP_PEM={githubAppPem}");
@@ -119,9 +116,13 @@ public sealed class ContainerProvisioningService(
         if (!agent.AutoMemoryEnabled)
             env.Add("CLAUDE_CODE_DISABLE_AUTO_MEMORY=1");
 
-        // Whisper (speech-to-text) — all agents, URL from config
+        // Whisper (speech-to-text) — all agents, URL from cluster config
         if (!string.IsNullOrWhiteSpace(whisperServiceUrl))
             env.Add($"Whisper__ServiceUrl={whisperServiceUrl}");
+
+        // Kokoro TTS (text-to-speech) — all agents, URL from cluster config
+        if (!string.IsNullOrWhiteSpace(kokoroServiceUrl))
+            env.Add($"Tts__ServiceUrl={kokoroServiceUrl}");
 
         return env;
     }
@@ -846,7 +847,6 @@ public sealed class ContainerProvisioningService(
                 AllowedGroupIds = agent.TelegramGroups.Select(g => g.GroupId).ToList(),
                 SendOnly = agent.TelegramSendOnly,
             },
-            Tts = new { ServiceUrl = agent.TtsServiceUrl ?? "" },
         };
 
         return JsonSerializer.Serialize(obj, IndentedJson);

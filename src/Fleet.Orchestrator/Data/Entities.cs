@@ -25,7 +25,6 @@ public class Agent
     public bool PrefixMessages { get; set; } = false;
     public bool SuppressToolMessages { get; set; } = false;
     public bool TelegramSendOnly { get; set; } = false;
-    public string? TtsServiceUrl { get; set; }
     public string? Image { get; set; }
     public string? Effort { get; set; }
     public string? JsonSchema { get; set; }

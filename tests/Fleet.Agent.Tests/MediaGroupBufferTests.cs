@@ -88,24 +88,24 @@ public class MediaGroupBufferTests
     [Fact]
     public async Task HardCap_ForceFlushesWhenTotalTimeExceeded()
     {
-        // maxTotalMs = 200 ms; photos keep arriving every 100 ms (resetting debounce).
-        // After 200 ms the hard cap fires even though the debounce would keep resetting.
-        var buffer = new MediaGroupBuffer(maxTotalMs: 200);
+        // maxTotalMs = 100 ms; photos keep arriving every ~150 ms (resetting debounce).
+        // After the cap elapses, the next arrival force-flushes even though the debounce
+        // would keep resetting. Delays are 50 % above the cap so CI scheduler slop can't
+        // leave the elapsed comparison on the exact boundary (previously flaky with
+        // cap=200, delays=100, total=200 — zero margin).
+        var buffer = new MediaGroupBuffer(maxTotalMs: 100);
         var received = new List<IncomingMessage>();
 
         Func<IncomingMessage, Task> flush = m => { received.Add(m); return Task.CompletedTask; };
 
         await buffer.AddPhotoAsync("g3", MakeImage(1), MakeTemplate(), flush);
-        await Task.Delay(100);
+        await Task.Delay(150);
+        // Second arrival is ~150 ms after the first — elapsed already exceeds the
+        // 100 ms cap, so this call triggers the force-flush synchronously before
+        // returning (FlushGroupAsync is awaited inside AddPhotoAsync on the
+        // force-flush path, so no trailing sleep is needed).
         await buffer.AddPhotoAsync("g3", MakeImage(2), MakeTemplate(), flush);
-        await Task.Delay(100);
-        // This third arrival is at 200 ms from the first — should trigger force-flush
-        await buffer.AddPhotoAsync("g3", MakeImage(3), MakeTemplate(), flush);
 
-        // Give flush time to complete
-        await Task.Delay(100);
-
-        // Group should be flushed (at least once) by the hard cap
         Assert.Single(received);
     }
 

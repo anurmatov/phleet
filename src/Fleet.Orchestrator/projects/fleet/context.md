@@ -335,6 +335,6 @@ deploy note: orchestrator runs as a Docker container on `fleet-net`. `Temporal__
 | TemporalBridge | OrchestratorUrl | http://fleet-orchestrator:3600 | orchestrator REST API URL for targeted task cancellation via HTTP (falls back to RabbitMQ if empty) |
 | TemporalBridge | OrchestratorAuthToken | (empty) | bearer token for orchestrator POST endpoints (same value as `Orchestrator:AuthToken`). set via `TEMPORALBRIDGE__ORCHESTRATORAUTHTOKEN` env var |
 | TemporalBridge | Namespaces | [] | namespace names for Temporal worker registration. deployers must configure explicitly. each configured namespace gets a uniform worker with all workflows and activities registered |
-| FleetWorkflowOptions | EscalationTarget | (none) | used as `Synthesizer` for `ConsensusReviewWorkflow`. exposed as `{{config.*}}` in UWE template expressions |
+| FleetWorkflowOptions | EscalationTarget | (alias) | read-only alias for `CtoAgent` — kept for backward compat in `{{config.EscalationTarget}}` template expressions |
 | AuthTokenRefresh | ClaudeClientId | (empty) | OAuth client ID for Claude CLI token refresh. per-application constant (same for all users), not a secret. set via `AUTHTOKENREFRESH__CLAUDECLIENTID` env var |
 | AuthTokenRefresh | CodexClientId | (empty) | OAuth client ID for Codex CLI token refresh. per-application constant (same for all users), not a secret. set via `AUTHTOKENREFRESH__CODEXCLIENTID` env var |

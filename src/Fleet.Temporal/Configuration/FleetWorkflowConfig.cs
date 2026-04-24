@@ -52,13 +52,7 @@ public static class FleetWorkflowConfig
 
     /// <summary>
     /// Update CtoAgent at runtime (called from PeerConfigHostedService on config.changed).
-    ///
-    /// NOTE: <see cref="FleetWorkflowOptions.EscalationTarget"/> is intentionally NOT updated here.
-    /// It is read inside Temporal workflow code (<see cref="Workflows.FleetWorkflowBase"/>),
-    /// and live mutations during workflow replay would cause Temporal non-determinism crashes.
-    /// EscalationTarget is set once at startup from appsettings / compose env and stays immutable.
-    /// CtoAgent is only consumed inside activities (via UWE template {{config.CtoAgent}}), so it
-    /// is safe to mutate at runtime.
+    /// EscalationTarget is a read-only alias for CtoAgent, so this update covers both.
     /// </summary>
     public static void UpdateCtoAgent(string newValue)
     {

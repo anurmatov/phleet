@@ -36,11 +36,13 @@ public sealed class FleetWorkflowConfigTests : IDisposable
     [Fact]
     public void Initialize_SetsInstance_ReturnsOptions()
     {
-        var opts = new FleetWorkflowOptions { EscalationTarget = "cto" };
+        var opts = new FleetWorkflowOptions { CtoAgent = "cto" };
 
         FleetWorkflowConfig.Initialize(opts);
 
         Assert.Same(opts, FleetWorkflowConfig.Instance);
+        Assert.Equal("cto", FleetWorkflowConfig.Instance.CtoAgent);
+        // EscalationTarget is an alias for CtoAgent
         Assert.Equal("cto", FleetWorkflowConfig.Instance.EscalationTarget);
     }
 
@@ -49,14 +51,14 @@ public sealed class FleetWorkflowConfigTests : IDisposable
     {
         // Initialize is intentionally a no-op on subsequent calls so that peer-config hosted
         // services can call it during deferred bootstrap without clobbering the first instance.
-        var first = new FleetWorkflowOptions { EscalationTarget = "first" };
-        var second = new FleetWorkflowOptions { EscalationTarget = "second" };
+        var first = new FleetWorkflowOptions { CtoAgent = "first" };
+        var second = new FleetWorkflowOptions { CtoAgent = "second" };
 
         FleetWorkflowConfig.Initialize(first);
         FleetWorkflowConfig.Initialize(second);
 
         Assert.Same(first, FleetWorkflowConfig.Instance);
-        Assert.Equal("first", FleetWorkflowConfig.Instance.EscalationTarget);
+        Assert.Equal("first", FleetWorkflowConfig.Instance.CtoAgent);
     }
 
     [Fact]

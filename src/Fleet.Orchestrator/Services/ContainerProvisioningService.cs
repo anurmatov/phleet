@@ -88,8 +88,11 @@ public sealed class ContainerProvisioningService(
         foreach (var envRef in agent.EnvRefs.OrderBy(e => e.EnvKeyName))
         {
             var value = envValues.TryGetValue(envRef.EnvKeyName, out var v) ? v : "<secret>";
-            // TELEGRAM_* keys map to the Telegram__BotToken ASP.NET config key in the container
-            if (envRef.EnvKeyName.StartsWith("TELEGRAM_", StringComparison.OrdinalIgnoreCase))
+            // Only *_BOT_TOKEN-shaped TELEGRAM_* keys map to the Telegram__BotToken ASP.NET config key.
+            // Other TELEGRAM_* keys (e.g. TELEGRAM_USER_ID, TELEGRAM_GROUP_ID) pass through as-is
+            // so they can be used as normal env vars without colliding with the bot token config slot.
+            if (envRef.EnvKeyName.StartsWith("TELEGRAM_", StringComparison.OrdinalIgnoreCase) &&
+                envRef.EnvKeyName.EndsWith("_BOT_TOKEN", StringComparison.OrdinalIgnoreCase))
                 env.Add($"Telegram__BotToken={value}");
             else
                 env.Add($"{envRef.EnvKeyName}={value}");

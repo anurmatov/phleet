@@ -199,10 +199,8 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # Pinned by digest for reproducibility — bump in a follow-up PR after verifying a newer version.
-  # Digest: ghcr.io/remsky/kokoro-fastapi-cpu@sha256:c0663c81d1a37e9841f1bb0a0477bb762476e917b9527480fe3e2fe7c5d67ea6
   fleet-kokoro-tts:
-    image: ghcr.io/remsky/kokoro-fastapi-cpu@sha256:c0663c81d1a37e9841f1bb0a0477bb762476e917b9527480fe3e2fe7c5d67ea6
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
     container_name: fleet-kokoro-tts
     mem_limit: 4g
     restart: unless-stopped

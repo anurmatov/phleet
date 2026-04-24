@@ -1344,5 +1344,11 @@
     }
   ],
   "schedules": [],
-  "repositories": []
+  "repositories": [
+    {
+      "_comment": "Registered repositories are visible to agents so they can create issues and PRs via the GitHub App. Edit the entry below to your own repo, or remove this block entirely — you can also register repositories at runtime via the dashboard or the manage_repository MCP tool.",
+      "name": "example-repo",
+      "fullName": "your-github-org/your-repo-name"
+    }
+  ]
 }

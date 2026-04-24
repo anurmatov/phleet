@@ -96,6 +96,22 @@ example: `mc cp /workspace/screenshot.png fleet/share/developer/screenshot-abc12
 
 agents can fetch each other's files via these urls. don't upload sensitive data — the share bucket is publicly readable.
 
+### images in github issues (private repos)
+
+fleet MinIO URLs (`localhost:9000/...`) work for telegram and inter-agent sharing but NOT for GitHub issue embeds — GitHub's camo proxy can't reach localhost, so images render as broken icons.
+
+what doesn't work (confirmed empirically):
+- data URIs (`data:image/png;base64,...`) — GitHub's HTML sanitiser strips the `src` attribute entirely
+- `raw.githubusercontent.com/<private-repo>/...` — 404 cross-origin without auth
+- `gh gist create --public` with binary PNGs — rejected ("binary file not supported")
+- `gh api POST /gists` — 403 (GitHub App token lacks `gists` scope)
+
+what works:
+- `play.min.io` — public MinIO playground, pre-configured `mc` alias `play`. upload with `mc cp <file> play/<bucket>/` then `mc anonymous set download play/<bucket>`. GitHub's camo proxy fetches it and produces `camo.githubusercontent.com/...` URLs. caveat: buckets auto-cleanup after ~24-48h, so only use for short-lived design spikes.
+- for durable images: commit into the repo directly, or use a public-hostname MinIO bucket if the deployment exposes one.
+
+verify camo is proxying: `gh api repos/{owner}/{repo}/issues/{N} -H 'Accept: application/vnd.github.html+json' --jq '.body_html' | grep -oE '<img[^>]*>'` — each `src` should start with `https://camo.githubusercontent.com/`.
+
 ### playwright screenshots
 
 screenshots from `browser_take_screenshot` save in the **playwright container**, not your container. use `browser_run_code` to grab the image as base64, then pipe directly to MinIO with `mc pipe` — no local file needed.

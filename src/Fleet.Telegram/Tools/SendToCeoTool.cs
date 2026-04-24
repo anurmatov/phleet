@@ -1,9 +1,7 @@
 using System.ComponentModel;
 using System.Text.Json;
-using Fleet.Telegram.Configuration;
 using Fleet.Telegram.Services;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using ModelContextProtocol.Server;
 using Telegram.Bot;
 using Telegram.Bot.Types.Enums;
@@ -14,7 +12,7 @@ namespace Fleet.Telegram.Tools;
 public sealed class SendToCeoTool(
     BotClientFactory factory,
     IHttpContextAccessor httpContextAccessor,
-    IOptions<CeoOptions> ceoOptions,
+    CeoConfigService ceoConfig,
     ILogger<SendToCeoTool> logger)
 {
     private const int TelegramMaxLength = 4096;
@@ -27,7 +25,7 @@ public sealed class SendToCeoTool(
         [Description("Parse mode: HTML, Markdown, or MarkdownV2. Omit for plain text.")] string parse_mode = "",
         CancellationToken ct = default)
     {
-        var chatId = ceoOptions.Value.ChatId;
+        var chatId = ceoConfig.ChatId;
         if (chatId == 0)
             return JsonSerializer.Serialize(new { ok = false, error = "CEO chat ID not configured" });
 

@@ -10,19 +10,22 @@ namespace Fleet.Telegram.Services;
 ///
 /// Template key: <c>TELEGRAM_{SHORTNAME}_BOT_TOKEN</c> (declared via PEER_AGENT_DERIVED_KEYS).
 /// Literal keys: <c>FLEET_CTO_AGENT</c>, <c>TELEGRAM_CTO_BOT_TOKEN</c>,
-/// <c>TELEGRAM_NOTIFIER_BOT_TOKEN</c> (declared via PEER_CONFIG_KEYS).
+/// <c>TELEGRAM_NOTIFIER_BOT_TOKEN</c>, <c>TELEGRAM_USER_ID</c> (declared via PEER_CONFIG_KEYS).
 /// </summary>
 public sealed class PeerConfigHostedService : IHostedService, IAsyncDisposable
 {
     private readonly PeerConfigClient _client;
     private readonly BotClientFactory _factory;
+    private readonly CeoConfigService _ceoConfig;
     private readonly ILogger<PeerConfigHostedService> _logger;
 
     public PeerConfigHostedService(
         BotClientFactory factory,
+        CeoConfigService ceoConfig,
         ILogger<PeerConfigHostedService> logger)
     {
         _factory = factory;
+        _ceoConfig = ceoConfig;
         _logger = logger;
         _client = PeerConfigClient.FromEnvironment(logger);
         _client.OnChanged = OnConfigSnapshotReceived;
@@ -61,10 +64,15 @@ public sealed class PeerConfigHostedService : IHostedService, IAsyncDisposable
 
         _factory.ApplyAgentDerived(agentTokenMap);
 
+        // CEO chat ID — live-updated from TELEGRAM_USER_ID literal key.
+        snapshot.Literals.TryGetValue("TELEGRAM_USER_ID", out var ceoUserIdRaw);
+        _ceoConfig.Apply(ceoUserIdRaw);
+
         _logger.LogInformation(
-            "PeerConfig applied: notifier={HasNotifier}, agents={AgentCount}",
+            "PeerConfig applied: notifier={HasNotifier}, agents={AgentCount}, ceoChatIdConfigured={CeoConfigured}",
             !string.IsNullOrWhiteSpace(notifierToken),
-            agentTokenMap.Count);
+            agentTokenMap.Count,
+            _ceoConfig.ChatId != 0);
 
         return Task.CompletedTask;
     }

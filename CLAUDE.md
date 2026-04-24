@@ -19,6 +19,7 @@ seed.example.json       — example agent bootstrap config (setup.sh copies → 
 docker-compose.example.yml — full stack example (setup.sh copies → ./fleet/docker-compose.yml)
 .env.example            — required environment variables (setup.sh copies → ./fleet/.env)
 setup.sh                — guided installer
+upgrade.sh              — rebuild images + restart (no prompts)
 ./fleet/                — gitignored runtime data dir (created by setup.sh)
 ```
 

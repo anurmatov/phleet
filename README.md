@@ -62,6 +62,15 @@ docker compose down
 
 All stateful services bind-mount their data under `./fleet/` — no named Docker volumes. Back up or wipe the whole installation by archiving or removing that single directory.
 
+### Upgrade after pulling new code
+
+```bash
+./upgrade.sh              # rebuild all images + restart
+./upgrade.sh --no-cache   # force clean rebuild (no Docker layer cache)
+```
+
+`upgrade.sh` skips all prompts — it stops services, regenerates `docker-compose.yml`, rebuilds every image, and restarts. Use it after `git pull` instead of re-running the full `setup.sh`.
+
 ## What you get after setup
 
 After `./setup.sh` you have a **single agent** running: the co-CTO. It is the only agent in the orchestrator granted the full agent-lifecycle and workflow-authoring toolset. You don't spin up more agents by editing JSON and restarting containers — you grow the fleet by talking to the co-CTO in Telegram, in plain English.

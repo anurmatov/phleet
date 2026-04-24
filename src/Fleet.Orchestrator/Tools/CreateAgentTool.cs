@@ -71,9 +71,20 @@ public sealed class CreateAgentTool(IServiceScopeFactory scopeFactory, IConfigur
             AgentId     = agent.Id,
             NetworkName = defaultNetwork,
         });
+
+        // Every agent needs a Telegram bot token to start its transport (without one the
+        // RabbitMQ consumers never get wired up). Seed TELEGRAM_NOTIFIER_BOT_TOKEN as the
+        // default — callers who want a custom per-agent token (e.g. TELEGRAM_CTO_BOT_TOKEN)
+        // can swap it in afterwards via manage_agent_env_refs.
+        const string defaultBotToken = "TELEGRAM_NOTIFIER_BOT_TOKEN";
+        db.AgentEnvRefs.Add(new AgentEnvRef
+        {
+            AgentId    = agent.Id,
+            EnvKeyName = defaultBotToken,
+        });
         await db.SaveChangesAsync();
 
-        return $"Agent '{name}' created in DB (container: {resolvedContainer}, role: {role}, model: {model}, memory: {agent.MemoryLimitMb}MB, short_name: {name}, host_port: {allocatedPort}, networks: [{defaultNetwork}]). " +
+        return $"Agent '{name}' created in DB (container: {resolvedContainer}, role: {role}, model: {model}, memory: {agent.MemoryLimitMb}MB, short_name: {name}, host_port: {allocatedPort}, networks: [{defaultNetwork}], env_refs: [{defaultBotToken}]). " +
                $"Configure it with manage_agent_mcp_endpoints, manage_agent_instructions, manage_agent_env_refs, etc., then call provision_agent to start the container.";
     }
 }

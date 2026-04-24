@@ -685,6 +685,7 @@ else
   build_image "fleet:memory"          "$SCRIPT_DIR/src/Fleet.Memory/Dockerfile"       "$SCRIPT_DIR"
   build_image "fleet:temporal-bridge" "$SCRIPT_DIR/Dockerfile.temporal"               "$SCRIPT_DIR"
   build_image "fleet:telegram"        "$SCRIPT_DIR/src/Fleet.Telegram/Dockerfile"      "$SCRIPT_DIR"
+  build_image "fleet:whisper"         "$SCRIPT_DIR/whisper/Dockerfile"                "$SCRIPT_DIR/whisper"
   # No quotes around $VITE_TOKEN / $CONFIG_TOKEN — the `docker build $extra_args`
   # call in build_image() relies on word-splitting, and escaped quotes here would
   # become literal characters inside the baked-in tokens → 401s.
@@ -716,6 +717,8 @@ else
     poll_health "fleet-temporal-bridge" 20  "fleet-temporal-bridge"
     poll_health "fleet-telegram"        20  "fleet-telegram"
     poll_health "fleet-minio"           15  "fleet-minio"
+    poll_health "fleet-whisper"         60  "fleet-whisper"
+    # fleet-kokoro-tts has no healthcheck endpoint; compose starts it alongside other services
   else
     echo -e "  ${YELLOW}[dry-run]${NC} Would run: docker compose -p $COMPOSE_PROJECT -f $COMPOSE_FILE --env-file .env up -d"
     echo -e "  ${YELLOW}[dry-run]${NC} Would poll health for core services"

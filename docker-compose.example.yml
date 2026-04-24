@@ -173,6 +173,47 @@ services:
     networks:
       - fleet-net
 
+  # ── AI services (speech + voice) ──────────────────────────────────────────
+
+  fleet-whisper:
+    build:
+      context: ./whisper
+      dockerfile: Dockerfile
+    image: fleet:whisper
+    pull_policy: never
+    container_name: fleet-whisper
+    environment:
+      - WHISPER_MODEL=small
+    mem_limit: 4g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fleet-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Pinned by digest for reproducibility — bump in a follow-up PR after verifying a newer version.
+  # Digest: ghcr.io/remsky/kokoro-fastapi-cpu@sha256:c0663c81d1a37e9841f1bb0a0477bb762476e917b9527480fe3e2fe7c5d67ea6
+  fleet-kokoro-tts:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu@sha256:c0663c81d1a37e9841f1bb0a0477bb762476e917b9527480fe3e2fe7c5d67ea6
+    container_name: fleet-kokoro-tts
+    mem_limit: 4g
+    restart: unless-stopped
+    networks:
+      - fleet-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   # ── Fleet services ─────────────────────────────────────────────────────────
 
   fleet-memory:
@@ -363,6 +404,8 @@ services:
       - Provisioning__BaseDir=${FLEET_BASE_DIR}
       - Provisioning__EnvFilePath=${FLEET_BASE_DIR}/.env
       - Provisioning__DefaultNetwork=fleet-net
+      - Provisioning__WhisperServiceUrl=http://fleet-whisper:8080
+      - Provisioning__KokoroServiceUrl=http://fleet-kokoro-tts:8880
       - Orchestrator__AuthToken=${ORCHESTRATOR_AUTH_TOKEN}
       - Orchestrator__ConfigToken=${ORCHESTRATOR_CONFIG_TOKEN}
     mem_limit: 512m

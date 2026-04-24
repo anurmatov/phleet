@@ -248,7 +248,7 @@ agent management:
 - `agent_logs` — fetch container logs
 
 configuration management:
-- `list_agent_configs`, `get_agent_config`, `update_agent_config` — DB-stored agent config (all scalar fields: model, memory, image, provider, codex_sandbox_mode, permission_mode, max_turns, work_dir, proactive/group settings, show_stats, prefix_messages, tts_service_url, effort, json_schema, agents_json, host_port, auto_memory_enabled + replace-all for tools and projects)
+- `list_agent_configs`, `get_agent_config`, `update_agent_config` — DB-stored agent config (all scalar fields: model, memory, image, provider, codex_sandbox_mode, permission_mode, max_turns, work_dir, proactive/group settings, show_stats, prefix_messages, effort, json_schema, agents_json, host_port, auto_memory_enabled + replace-all for tools and projects)
 - `manage_agent_mcp_endpoints(agent_name, action, mcp_name, url?, transport_type?)` — add/update/remove MCP endpoint connections per agent
 - `manage_agent_networks(agent_name, action, network_name)` — add/remove Docker networks per agent
 - `manage_agent_env_refs(agent_name, action, env_key_name)` — add/remove environment variable key references per agent
@@ -294,7 +294,7 @@ MySQL 8.0 (`fleet-mysql` container) stores agent configuration. EF Core 9 + Pome
 schema (`fleet_orchestrator` database):
 | table | purpose |
 |-------|---------|
-| agents | core agent registry (name, role, model, memory limit, container name, enabled, Image, Provider, CodexSandboxMode) + behavior fields (PermissionMode, MaxTurns, WorkDir, ProactiveIntervalMinutes, GroupListenMode, GroupDebounceSeconds, ShortName, ShowStats, PrefixMessages, TtsServiceUrl, AutoMemoryEnabled) + claude CLI flags (Effort, JsonSchema, AgentsJson) + networking (HostPort — optional override for orchestrator→agent HTTP proxy; if null, computed deterministically as `8080 + agent.Id`) |
+| agents | core agent registry (name, role, model, memory limit, container name, enabled, Image, Provider, CodexSandboxMode) + behavior fields (PermissionMode, MaxTurns, WorkDir, ProactiveIntervalMinutes, GroupListenMode, GroupDebounceSeconds, ShortName, ShowStats, PrefixMessages, AutoMemoryEnabled) + claude CLI flags (Effort, JsonSchema, AgentsJson) + networking (HostPort — optional override for orchestrator→agent HTTP proxy; if null, computed deterministically as `8080 + agent.Id`) |
 | agent_tools | tools per agent (many-to-many, with enabled flag) |
 | agent_projects | projects per agent |
 | agent_mcp_endpoints | MCP server connections per agent (name, url, transport type) |
@@ -324,6 +324,8 @@ schema (`fleet_orchestrator` database):
 | Provisioning | EnvFilePath | path to `.env` file for secret resolution (default: `$FLEET_BASE_DIR/.env`) |
 | Provisioning | BaseDir | fleet base directory for `./` path expansion (required — throws `InvalidOperationException` if not configured. set via `FLEET_BASE_DIR` env var) |
 | Provisioning | AgentImage | default Docker image for agent containers (default: `fleet:agent`) |
+| Provisioning | WhisperServiceUrl | URL of the whisper STT service. Injected into all agent containers as `Whisper__ServiceUrl`. Empty/absent = transcription disabled. |
+| Provisioning | KokoroServiceUrl | URL of the Kokoro TTS service. Injected into all agent containers as `Tts__ServiceUrl`. Empty/absent = TTS disabled. |
 
 deploy note: orchestrator runs as a Docker container on `fleet-net`. `Temporal__Address` is set to `temporal-server:7233` for workflow polling. Docker socket is mounted for container provisioning.
 

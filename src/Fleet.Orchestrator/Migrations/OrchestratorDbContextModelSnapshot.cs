@@ -138,10 +138,6 @@ namespace Fleet.Orchestrator.Migrations
                     b.Property<bool>("TelegramSendOnly")
                         .HasColumnType("tinyint(1)");
 
-                    b.Property<string>("TtsServiceUrl")
-                        .HasMaxLength(500)
-                        .HasColumnType("varchar(500)");
-
                     b.Property<DateTime?>("WelcomeSentAt")
                         .HasColumnType("datetime(6)");
 

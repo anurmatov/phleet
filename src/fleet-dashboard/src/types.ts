@@ -124,7 +124,6 @@ export interface CreateForm {
   groupListenMode: string
   groupDebounceSeconds: string
   shortName: string
-  ttsServiceUrl: string
   effort: string
   jsonSchema: string
   agentsJson: string
@@ -162,7 +161,6 @@ export interface AgentConfig {
   showStats: boolean
   prefixMessages: boolean
   suppressToolMessages: boolean
-  ttsServiceUrl: string
   effort: string
   jsonSchema: string
   agentsJson: string
@@ -197,7 +195,6 @@ export interface ConfigEdits {
   showStats: boolean
   prefixMessages: boolean
   suppressToolMessages: boolean
-  ttsServiceUrl: string
   effort: string
   jsonSchema: string
   agentsJson: string

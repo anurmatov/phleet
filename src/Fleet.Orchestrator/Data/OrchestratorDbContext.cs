@@ -52,7 +52,6 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.Property(x => x.WorkDir).HasMaxLength(500).HasDefaultValue("/workspace");
             e.Property(x => x.GroupListenMode).HasMaxLength(50).HasDefaultValue("mention");
             e.Property(x => x.ShortName).HasMaxLength(100).HasDefaultValue("");
-            e.Property(x => x.TtsServiceUrl).HasMaxLength(500);
             e.Property(x => x.Image).HasMaxLength(200);
             e.Property(x => x.Effort).HasMaxLength(20);
             e.Property(x => x.CodexSandboxMode).HasMaxLength(30);

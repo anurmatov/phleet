@@ -30,7 +30,6 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory)
         [Description("Prefix all outgoing telegram messages with bold [ShortName] header for shared-bot visibility. Omit to keep current.")] bool? prefix_messages = null,
         [Description("Suppress intermediate tool-use progress messages in Telegram — only post the final response. Use for agents serving non-technical users (e.g. family assistant). Omit to keep current.")] bool? suppress_tool_messages = null,
         [Description("Telegram send-only mode: skip polling and message handling, only send messages. Use when multiple agents share a bot token. Omit to keep current.")] bool? telegram_send_only = null,
-        [Description("TTS service URL for voice output. Pass empty string to clear. Omit to keep current.")] string? tts_service_url = null,
         [Description("Claude effort level (low/medium/high/max). Pass empty string to clear. Omit to keep current.")] string? effort = null,
         [Description("JSON schema string for --json-schema flag (structured output). Pass empty string to clear. Omit to keep current.")] string? json_schema = null,
         [Description("JSON string for --agents flag (inline subagents). Pass empty string to clear. Omit to keep current.")] string? agents_json = null,
@@ -140,12 +139,6 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory)
         {
             changes.AppendLine($"- telegram_send_only: {agent.TelegramSendOnly} → {telegram_send_only}");
             agent.TelegramSendOnly = telegram_send_only.Value;
-        }
-
-        if (tts_service_url is not null && tts_service_url != (agent.TtsServiceUrl ?? ""))
-        {
-            changes.AppendLine($"- tts_service_url: {agent.TtsServiceUrl ?? "(none)"} → {(tts_service_url == "" ? "(none)" : tts_service_url)}");
-            agent.TtsServiceUrl = tts_service_url == "" ? null : tts_service_url;
         }
 
         if (effort is not null && effort != (agent.Effort ?? ""))

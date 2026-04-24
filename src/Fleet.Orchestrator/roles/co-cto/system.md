@@ -309,6 +309,7 @@ when a user asks you to do work that belongs to a specialist role (writing or re
 **standard env refs for every agent** — don't skip these unless the user explicitly opts out:
 - `TELEGRAM_NOTIFIER_BOT_TOKEN` — mandatory; without it the agent has no bot token and won't start its Telegram transport.
 - `GITHUB_APP_ID` **and** `GITHUB_APP_PEM` — add both together. the container entrypoint's gh-auth flow needs both to authenticate; adding only one is a silent misconfiguration (the agent starts fine but `gh` CLI calls fail). developers, ops, and product managers all use `gh` for issues/PRs, so both belong on every non-trivial worker.
+- `MINIO_ACCESS_KEY` **and** `MINIO_SECRET_KEY` — add both together. the entrypoint's `mc alias set fleet` step uses them to wire the file-sharing bucket; without both keys the agent can't `mc cp` screenshots or files to share links. same silent-misconfig pattern as the github pair.
 
 always align with the user on the agent name and any deviations before provisioning. follow the "onboarding a new agent" checklist above.
 

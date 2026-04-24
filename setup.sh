@@ -154,7 +154,7 @@ prompt_field() {
 # Poll a container's health status until healthy or timeout
 # Usage: poll_health <container_name> <timeout_secs> <display_label>
 poll_health() {
-  local container="$1" timeout="$2" label="$3"
+  local container="$1" timeout="$2" label="$3" fatal="${4:-true}"
   local elapsed=0
   echo -n "  Waiting for $label"
   while [[ $elapsed -lt $timeout ]]; do
@@ -164,13 +164,14 @@ poll_health() {
       healthy)
         echo; ok "$label ready"; return 0 ;;
       unhealthy)
-        echo; fail "$label is unhealthy — run: docker compose -p $COMPOSE_PROJECT -f $COMPOSE_FILE logs $label"; exit 1 ;;
+        echo; fail "$label is unhealthy — run: docker compose -p $COMPOSE_PROJECT -f $COMPOSE_FILE logs $label"
+        $fatal && exit 1 || return 1 ;;
     esac
     echo -n "."; sleep 2; elapsed=$((elapsed + 2))
   done
   echo
   fail "$label timed out after ${timeout}s — run: docker compose -p $COMPOSE_PROJECT -f $COMPOSE_FILE logs $label"
-  exit 1
+  $fatal && exit 1 || return 1
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -717,7 +718,8 @@ else
     poll_health "fleet-temporal-bridge" 20  "fleet-temporal-bridge"
     poll_health "fleet-telegram"        20  "fleet-telegram"
     poll_health "fleet-minio"           15  "fleet-minio"
-    poll_health "fleet-whisper"         60  "fleet-whisper"
+    # Optional AI services — warn on timeout but don't fail setup (model downloads can be slow on first run)
+    poll_health "fleet-whisper"         120 "fleet-whisper" false || warn "fleet-whisper not ready yet — it may still be downloading the model. Check: docker logs fleet-whisper"
     # fleet-kokoro-tts has no healthcheck endpoint; compose starts it alongside other services
   else
     echo -e "  ${YELLOW}[dry-run]${NC} Would run: docker compose -p $COMPOSE_PROJECT -f $COMPOSE_FILE --env-file .env up -d"

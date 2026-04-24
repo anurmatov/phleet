@@ -291,7 +291,14 @@ public sealed class SetupService
         if (!string.IsNullOrWhiteSpace(appId))
             updates["GITHUB_APP_ID"] = appId;
         if (!string.IsNullOrWhiteSpace(pem))
-            updates["GITHUB_APP_PEM"] = pem;
+        {
+            // .env files cannot hold multi-line values — base64-encode the PEM.
+            // Containers decode it at runtime via gh-auth.sh.
+            var trimmed = pem.Trim();
+            updates["GITHUB_APP_PEM"] = trimmed.StartsWith("-----BEGIN")
+                ? Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(trimmed))
+                : trimmed; // already base64-encoded
+        }
         if (updates.Count > 0)
             await AtomicWriteEnvAsync(updates);
     }

@@ -1248,8 +1248,8 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
                 },
                 statusCode: 207);
 
-        // Send the first-provision welcome DM — after provisioning so the agent
-        // container is up and consuming RabbitMQ before the directive arrives.
+        // Welcome DM — fire-and-forget workflow so there's no waiting for a result.
+        // 15s delay gives the agent process time to start consuming RabbitMQ.
         if (string.Equals(agent.Role, "co-cto", StringComparison.OrdinalIgnoreCase))
         {
             var ceoUserId = setupService.GetTelegramUserId();
@@ -1259,17 +1259,21 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
                 {
                     TargetAgent = name,
                     TaskDescription = WelcomeDmHelper.BuildWelcomeDirective(name, ceoUserId!.Value),
-                    TimeoutMinutes = 5
+                    TimeoutMinutes = 1
                 });
                 await WelcomeDmHelper.TriggerAsync(
                     agent,
                     saveWelcomeSentAt: async () => await db.SaveChangesAsync(CancellationToken.None),
-                    startWorkflow:     async () => { await temporal.StartWorkflowAsync(
-                        "TaskDelegationWorkflow",
-                        $"welcome-{agent.Id}",
-                        "fleet",
-                        "fleet",
-                        welcomeInput); },
+                    startWorkflow: async () =>
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(15));
+                        await temporal.StartWorkflowAsync(
+                            "FireAndForgetTaskWorkflow",
+                            $"welcome-{agent.Id}",
+                            "fleet",
+                            "fleet",
+                            welcomeInput);
+                    },
                     logger);
             }
             else if (agent.WelcomeSentAt is null)

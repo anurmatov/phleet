@@ -1651,7 +1651,7 @@ export default function App() {
         onNavClose={() => setNavOpen(false)}
       />
 
-      <main className="app-main">
+      <main className={`app-main${activeView === 'memory' ? ' app-main--memory' : ''}`}>
         {activeView === 'agents' && (
           <SetupBanner
             status={setupStatus}

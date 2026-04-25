@@ -5031,6 +5031,7 @@ body {
 }
 
 .memory-tree-placeholder { padding: 16px 14px; color: var(--muted); font-size: 13px; }
+.memory-tree-placeholder--indent { padding: 6px 10px 6px 30px; }
 .memory-tree-error { padding: 12px 14px; color: #f88; font-size: 13px; }
 .memory-retry-btn {
   margin-left: 8px;

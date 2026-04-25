@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
 import type { MemoryDoc } from '../types'
@@ -21,6 +21,15 @@ interface DeleteModalProps {
   onCancel: () => void
 }
 function DeleteModal({ onConfirm, onCancel }: DeleteModalProps) {
+  // Close on Escape key
+  const cancelRef = useRef(onCancel)
+  cancelRef.current = onCancel
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') cancelRef.current() }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
+
   return createPortal(
     <div className="memory-modal-overlay" onClick={e => { if (e.target === e.currentTarget) onCancel() }}>
       <div className="memory-delete-modal">
@@ -153,7 +162,7 @@ export default function MemoryContentView({ id, onDeleted, onSaved }: MemoryCont
           {state === 'loaded' && (
             <>
               <button className="memory-cv-btn" onClick={startEdit}>Edit</button>
-              <button className="memory-cv-btn memory-cv-btn-danger" onClick={() => setShowDeleteModal(true)}>Delete</button>
+              <button className="memory-cv-btn memory-cv-btn-danger" onClick={() => { setDeleteError(''); setShowDeleteModal(true) }}>Delete</button>
             </>
           )}
           {state === 'editing' && (

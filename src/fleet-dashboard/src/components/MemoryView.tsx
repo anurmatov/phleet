@@ -16,7 +16,8 @@ import { useMemoryIdCache } from '../context/MemoryIdCacheContext'
 import MemoryContentView from './MemoryContentView'
 
 const UNASSIGNED = '(unassigned)'
-const LS_PREFIX = 'memory-tree-proj-'
+// Key format matches spec: memory-tree-collapsed-{project} → "true" (expanded) | "false" (collapsed)
+const LS_PREFIX = 'memory-tree-collapsed-'
 
 function groupTree(items: MemoryListItem[]): Map<string, Map<string, MemoryListItem[]>> {
   const tree = new Map<string, Map<string, MemoryListItem[]>>()
@@ -42,11 +43,11 @@ function shortDate(iso: string): string {
 }
 
 function lsGetExpanded(project: string): boolean {
-  try { return localStorage.getItem(LS_PREFIX + project) === '1' } catch { return false }
+  try { return localStorage.getItem(LS_PREFIX + project) === 'true' } catch { return false }
 }
 
 function lsSetExpanded(project: string, expanded: boolean) {
-  try { localStorage.setItem(LS_PREFIX + project, expanded ? '1' : '0') } catch { /* noop */ }
+  try { localStorage.setItem(LS_PREFIX + project, String(expanded)) } catch { /* noop */ }
 }
 
 export default function MemoryView() {
@@ -119,28 +120,32 @@ export default function MemoryView() {
     return () => clearInterval(interval)
   }, [loadList, loadStats])
 
+  // Extracted so the retry button can call it directly (setFilter(f=>f) is a no-op in React)
+  const runSearch = useCallback(async (q: string) => {
+    setSearchLoading(true)
+    setSearchError('')
+    try {
+      const resp = await apiFetch(`/api/memory/search?q=${encodeURIComponent(q)}`)
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      const data: MemorySearchResult[] = await resp.json()
+      setSearchResults(data)
+    } catch (e) {
+      setSearchError(e instanceof Error ? e.message : String(e))
+      setSearchResults(null)
+    } finally {
+      setSearchLoading(false)
+    }
+  }, [])
+
   // Debounced semantic search
   useEffect(() => {
     if (filterDebounce.current) clearTimeout(filterDebounce.current)
     if (!filter.trim()) { setSearchResults(null); return }
-    filterDebounce.current = setTimeout(async () => {
-      setSearchLoading(true)
-      setSearchError('')
-      try {
-        const resp = await apiFetch(`/api/memory/search?q=${encodeURIComponent(filter)}`)
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-        const data: MemorySearchResult[] = await resp.json()
-        setSearchResults(data)
-      } catch (e) {
-        setSearchError(e instanceof Error ? e.message : String(e))
-        setSearchResults(null)
-      } finally {
-        setSearchLoading(false)
-      }
-    }, 250)
-  }, [filter])
+    filterDebounce.current = setTimeout(() => runSearch(filter), 250)
+  }, [filter, runSearch])
 
-  // M2 + S5: auto-expand project/type containing selected memory, then scroll it into view
+  // M2 + S5: auto-expand project/type containing selected memory, then scroll it into view.
+  // Double rAF ensures the element is in the DOM after state update + paint before scrolling.
   useEffect(() => {
     if (!selectedId || !items.length) return
     const mem = items.find(i => i.id === selectedId)
@@ -158,11 +163,15 @@ export default function MemoryView() {
       next.delete(typeKey)
       return next
     })
-    // Scroll after render
-    setTimeout(() => {
-      const el = document.querySelector<HTMLElement>(`[data-memid="${selectedId}"]`)
-      el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-    }, 50)
+    // Double rAF: first frame commits state, second frame element is in DOM
+    let raf1 = 0, raf2 = 0
+    raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        const el = document.querySelector<HTMLElement>(`[data-memid="${selectedId}"]`)
+        el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+      })
+    })
+    return () => { cancelAnimationFrame(raf1); cancelAnimationFrame(raf2) }
   }, [selectedId, items])
 
   function toggleProject(project: string) {
@@ -186,6 +195,21 @@ export default function MemoryView() {
   function clearFilter() {
     setFilter('')
     setSearchResults(null)
+  }
+
+  // S4: keyboard navigation within the tree — Arrow keys move focus, Escape clears filter
+  function handleTreeKeyDown(e: React.KeyboardEvent<HTMLButtonElement>, memId: string) {
+    if (e.key === 'Escape') {
+      clearFilter()
+      return
+    }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      const all = [...document.querySelectorAll<HTMLButtonElement>('[data-memid]')]
+      const idx = all.findIndex(el => el.dataset.memid === memId)
+      const next = e.key === 'ArrowDown' ? all[idx + 1] : all[idx - 1]
+      next?.focus()
+    }
   }
 
   function handleDeleted(id: string) {
@@ -232,7 +256,7 @@ export default function MemoryView() {
             {searchError && (
               <div className="memory-tree-error">
                 Search failed: {searchError}
-                <button className="memory-retry-btn" onClick={() => setFilter(f => f)}>Retry</button>
+                <button className="memory-retry-btn" onClick={() => runSearch(filter)}>Retry</button>
               </div>
             )}
             {!searchLoading && searchResults !== null && searchResults.length === 0 && (
@@ -280,6 +304,9 @@ export default function MemoryView() {
                       {[...byType.values()].reduce((s, a) => s + a.length, 0)}
                     </span>
                   </button>
+                  {projExpanded && sortedTypes.length === 0 && (
+                    <div className="memory-tree-placeholder memory-tree-placeholder--indent">No memories.</div>
+                  )}
                   {projExpanded && sortedTypes.map(type => {
                     const typeKey = `${project}:${type}`
                     const typeExpanded = !collapsedTypes.has(typeKey) // expanded by default
@@ -297,6 +324,7 @@ export default function MemoryView() {
                             data-memid={mem.id}
                             className={`memory-tree-mem${selectedId === mem.id ? ' memory-selected' : ''}`}
                             onClick={() => setSelectedId(mem.id)}
+                            onKeyDown={e => handleTreeKeyDown(e, mem.id)}
                             title={mem.title}
                           >
                             <span className="memory-tree-mem-title">{mem.title}</span>

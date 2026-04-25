@@ -14,6 +14,16 @@ Phleet is an open-source, self-hosted multi-agent AI platform built on .NET 10, 
   <em>The fleet dashboard — live agent status, model assignment, and in-flight Temporal workflows.</em>
 </p>
 
+## See it in action
+
+<p align="center">
+  <a href="https://youtu.be/DIx7Y3GfmGc">
+    <img src="https://img.youtube.com/vi/DIx7Y3GfmGc/maxresdefault.jpg" alt="I Have an AI Co-CTO. Here's Us Shipping a PR Together" width="720">
+  </a>
+  <br>
+  <em>Watch a one-line request go from idea to merged PR — multi-agent design, consensus review, and prod deploy in ~5 minutes.</em>
+</p>
+
 ## Quickstart
 
 ### 1. Prerequisites

@@ -3143,6 +3143,15 @@ body {
   padding: 24px;
 }
 
+/* Memory page needs zero padding and fixed height so the split-pane layout fills the viewport. */
+.app-main--memory {
+  padding: 0;
+  overflow: hidden;
+  height: calc(100vh - 52px - 36px); /* header (52px) + footer (36px) */
+  display: flex;
+  flex-direction: column;
+}
+
 /* Fixed footer */
 .app-footer {
   position: fixed;
@@ -4968,21 +4977,46 @@ body {
 }
 
 .memory-search-bar {
-  padding: 10px 12px 6px;
+  padding: 8px 10px 6px;
   border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
+/* M4: wrap for input + clear button */
+.memory-search-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+/* M4: muted, compact style distinct from global Cmd+K search */
 .memory-search-input {
   width: 100%;
   box-sizing: border-box;
-  background: var(--input-bg, var(--surface));
+  height: 28px;
+  background: var(--bg, #0d0f14);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 5px;
   color: var(--text);
-  font-size: 13px;
-  padding: 6px 10px;
+  font-size: 12px;
+  padding: 0 26px 0 8px;
+  box-shadow: none;
 }
 .memory-search-input:focus { outline: none; border-color: var(--accent, #7af); }
+
+/* M4: clear (×) button inside the input */
+.memory-search-clear {
+  position: absolute;
+  right: 4px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 3px;
+}
+.memory-search-clear:hover { color: var(--text); }
 
 .memory-search-results {
   flex: 1;
@@ -4997,6 +5031,7 @@ body {
 }
 
 .memory-tree-placeholder { padding: 16px 14px; color: var(--muted); font-size: 13px; }
+.memory-tree-placeholder--indent { padding: 6px 10px 6px 30px; }
 .memory-tree-error { padding: 12px 14px; color: #f88; font-size: 13px; }
 .memory-retry-btn {
   margin-left: 8px;
@@ -5074,7 +5109,9 @@ body {
 .memory-tree-mem.memory-selected,
 .memory-tree-item.memory-selected { background: var(--accent-muted, rgba(120,180,255,0.12)); }
 .memory-tree-mem-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.memory-tree-mem-date { flex-shrink: 0; font-size: 10px; color: var(--muted); }
+/* S2: date hidden by default, revealed on row hover to reclaim title space */
+.memory-tree-mem-date { flex-shrink: 0; font-size: 10px; color: var(--muted); opacity: 0; transition: opacity 0.1s; }
+.memory-tree-mem:hover .memory-tree-mem-date { opacity: 0.6; }
 
 .memory-result-item {
   display: block;
@@ -5092,23 +5129,37 @@ body {
 .memory-result-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
 .memory-result-snippet { font-size: 12px; color: var(--muted); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Read stats panel */
+/* M3: Read stats panel — collapsible footer pinned to bottom of left pane */
 .memory-stats-panel {
   border-top: 1px solid var(--border);
-  max-height: 240px;
-  overflow-y: auto;
+  flex-shrink: 0;
 }
 .memory-stats-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 6px 10px;
+  gap: 4px;
+  padding: 4px 8px;
+}
+/* Toggle button takes up most of the header width */
+.memory-stats-toggle-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: none;
+  color: var(--muted);
   font-size: 11px;
   font-weight: 600;
-  color: var(--muted);
   text-transform: uppercase;
+  cursor: pointer;
+  padding: 2px 2px;
+  text-align: left;
 }
+.memory-stats-toggle-btn:hover { color: var(--text); }
+.memory-stats-chevron { font-size: 9px; flex-shrink: 0; }
 .memory-stats-title { }
+.memory-stats-body { max-height: 200px; overflow-y: auto; }
 .memory-stats-stale { font-size: 11px; color: var(--muted); padding: 0 10px 4px; font-style: italic; }
 .memory-stats-row {
   display: block;
@@ -5231,6 +5282,67 @@ body {
   padding: 12px 14px;
 }
 
+/* S7: markdown-rendered content — drop pre-wrap, style markdown elements */
+.memory-cv-content--md {
+  white-space: normal;
+}
+.memory-cv-content--md h1,
+.memory-cv-content--md h2,
+.memory-cv-content--md h3 {
+  font-weight: 600;
+  margin: 14px 0 6px;
+  color: var(--text);
+}
+.memory-cv-content--md h1 { font-size: 15px; }
+.memory-cv-content--md h2 { font-size: 14px; }
+.memory-cv-content--md h3 { font-size: 13px; }
+.memory-cv-content--md p { margin: 0 0 8px; }
+.memory-cv-content--md ul,
+.memory-cv-content--md ol { margin: 0 0 8px; padding-left: 18px; }
+.memory-cv-content--md li { margin-bottom: 3px; }
+.memory-cv-content--md code {
+  font-family: monospace;
+  font-size: 12px;
+  background: rgba(255,255,255,0.07);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+.memory-cv-content--md pre {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+.memory-cv-content--md pre code {
+  background: none;
+  padding: 0;
+  font-size: 12px;
+}
+.memory-cv-content--md strong { font-weight: 600; }
+.memory-cv-content--md em { font-style: italic; color: var(--muted); }
+.memory-cv-content--md hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+.memory-cv-content--md blockquote {
+  border-left: 3px solid var(--border);
+  padding-left: 10px;
+  color: var(--muted);
+  margin: 8px 0;
+}
+.memory-cv-content--md table {
+  border-collapse: collapse;
+  font-size: 12px;
+  margin: 8px 0;
+  width: 100%;
+}
+.memory-cv-content--md th,
+.memory-cv-content--md td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  text-align: left;
+}
+.memory-cv-content--md th { background: rgba(255,255,255,0.05); font-weight: 600; }
+
 .memory-cv-edit {
   display: flex;
   flex-direction: column;
@@ -5260,6 +5372,23 @@ body {
   resize: vertical;
   white-space: pre-wrap;
 }
+
+/* S6: Delete confirmation modal */
+.memory-delete-modal {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px 24px;
+  min-width: 300px;
+  max-width: 400px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.memory-delete-modal-title { font-size: 15px; font-weight: 600; }
+.memory-delete-modal-body { font-size: 13px; color: var(--muted); }
+.memory-delete-modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
 
 /* Memory modal */
 .memory-modal-overlay {

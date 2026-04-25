@@ -1,4 +1,6 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { createPortal } from 'react-dom'
+import ReactMarkdown from 'react-markdown'
 import type { MemoryDoc } from '../types'
 import { apiFetch } from '../utils'
 import { useMemoryIdCache } from '../context/MemoryIdCacheContext'
@@ -13,6 +15,36 @@ interface MemoryContentViewProps {
 
 type ViewState = 'loading' | 'loaded' | 'editing' | 'saving' | 'not-found' | 'error'
 
+/** S6: Modal-style delete confirmation to reduce accidental deletes. */
+interface DeleteModalProps {
+  onConfirm: () => void
+  onCancel: () => void
+}
+function DeleteModal({ onConfirm, onCancel }: DeleteModalProps) {
+  // Close on Escape key
+  const cancelRef = useRef(onCancel)
+  cancelRef.current = onCancel
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') cancelRef.current() }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
+
+  return createPortal(
+    <div className="memory-modal-overlay" onClick={e => { if (e.target === e.currentTarget) onCancel() }}>
+      <div className="memory-delete-modal">
+        <div className="memory-delete-modal-title">Delete this memory?</div>
+        <div className="memory-delete-modal-body">This cannot be undone.</div>
+        <div className="memory-delete-modal-actions">
+          <button className="memory-cv-btn" onClick={onCancel}>Cancel</button>
+          <button className="memory-cv-btn memory-cv-btn-danger" onClick={onConfirm}>Delete</button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  )
+}
+
 export default function MemoryContentView({ id, onDeleted, onSaved }: MemoryContentViewProps) {
   const [doc, setDoc] = useState<MemoryDoc | null>(null)
   const [state, setState] = useState<ViewState>('loading')
@@ -20,7 +52,7 @@ export default function MemoryContentView({ id, onDeleted, onSaved }: MemoryCont
   const [editContent, setEditContent] = useState('')
   const [editTags, setEditTags] = useState('')
   const [saveError, setSaveError] = useState('')
-  const [deleteConfirm, setDeleteConfirm] = useState(false)
+  const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [deleteError, setDeleteError] = useState('')
   const { refresh: refreshIdCache } = useMemoryIdCache()
 
@@ -29,7 +61,7 @@ export default function MemoryContentView({ id, onDeleted, onSaved }: MemoryCont
     setErrorMsg('')
     setSaveError('')
     setDeleteError('')
-    setDeleteConfirm(false)
+    setShowDeleteModal(false)
     try {
       const resp = await apiFetch(`/api/memory/${encodeURIComponent(id)}`)
       if (resp.status === 404) { setState('not-found'); return }
@@ -84,6 +116,7 @@ export default function MemoryContentView({ id, onDeleted, onSaved }: MemoryCont
 
   async function deleteMemory() {
     if (!doc) return
+    setShowDeleteModal(false)
     try {
       const resp = await apiFetch(`/api/memory/${encodeURIComponent(doc.id)}`, { method: 'DELETE' })
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
@@ -91,7 +124,6 @@ export default function MemoryContentView({ id, onDeleted, onSaved }: MemoryCont
       onDeleted?.(doc.id)
     } catch (e) {
       setDeleteError(e instanceof Error ? e.message : String(e))
-      setDeleteConfirm(false)
     }
   }
 
@@ -116,22 +148,21 @@ export default function MemoryContentView({ id, onDeleted, onSaved }: MemoryCont
 
   return (
     <div className="memory-cv">
+      {/* S6: Delete confirmation modal rendered via portal */}
+      {showDeleteModal && (
+        <DeleteModal
+          onConfirm={deleteMemory}
+          onCancel={() => setShowDeleteModal(false)}
+        />
+      )}
+
       <div className="memory-cv-header">
         <div className="memory-cv-title">{doc.title}</div>
         <div className="memory-cv-actions">
           {state === 'loaded' && (
             <>
               <button className="memory-cv-btn" onClick={startEdit}>Edit</button>
-              {!deleteConfirm
-                ? <button className="memory-cv-btn memory-cv-btn-danger" onClick={() => setDeleteConfirm(true)}>Delete</button>
-                : (
-                  <span className="memory-cv-delete-confirm">
-                    Delete?
-                    <button className="memory-cv-btn memory-cv-btn-danger" onClick={deleteMemory}>Yes</button>
-                    <button className="memory-cv-btn" onClick={() => setDeleteConfirm(false)}>No</button>
-                  </span>
-                )
-              }
+              <button className="memory-cv-btn memory-cv-btn-danger" onClick={() => { setDeleteError(''); setShowDeleteModal(true) }}>Delete</button>
             </>
           )}
           {state === 'editing' && (
@@ -175,10 +206,12 @@ export default function MemoryContentView({ id, onDeleted, onSaved }: MemoryCont
           />
         </div>
       ) : (
-        // Pre-wrap matches the existing InstructionsView / ProjectContextsView pattern
-        // (no markdown renderer library). MemoryContentView is reused as both the
-        // split-pane view and as a modal portal via MemoryText.
-        <div className="memory-cv-content">{doc.content}</div>
+        // S7: render content as markdown for readability.
+        // S9 (MemoryText chips inside markdown body) requires a rehype plugin to safely walk
+        // text nodes — deferred to a follow-up issue to avoid breaking inline formatting.
+        <div className="memory-cv-content memory-cv-content--md">
+          <ReactMarkdown>{doc.content}</ReactMarkdown>
+        </div>
       )}
     </div>
   )

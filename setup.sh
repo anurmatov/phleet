@@ -302,15 +302,34 @@ check_creds_codex() {
     echo "  Open the codex CLI at least once to authenticate, then re-run ./setup.sh"
     exit 1
   fi
-  local expires_ts now
-  expires_ts=$(jq -r '.expires_at // 0' "$creds" 2>/dev/null || echo 0)
-  now=$(date +%s)
-  if [[ "$expires_ts" -le "$now" ]]; then
-    fail "codex credentials at $creds are expired — re-authenticate and re-run ./setup.sh"; exit 1
+  local refresh_token
+  refresh_token=$(jq -r '.tokens.refresh_token // empty' "$creds" 2>/dev/null)
+  if [[ -z "$refresh_token" ]]; then
+    fail "codex credentials at $creds are missing tokens.refresh_token — re-authenticate and re-run ./setup.sh"; exit 1
   fi
-  local human
-  human=$(date -r "$expires_ts" 2>/dev/null || date -d "@$expires_ts" 2>/dev/null || echo "ts=$expires_ts")
-  ok "codex credentials valid (expires $human)"
+  # id_token is a short-lived JWT (~1h) auto-refreshed by the orchestrator's
+  # auth-token-refresh-codex-30m schedule. We only surface its exp for info;
+  # an expired id_token is not fatal as long as refresh_token is present.
+  local id_token payload pad expires_ts now human
+  id_token=$(jq -r '.tokens.id_token // empty' "$creds" 2>/dev/null)
+  expires_ts=0
+  if [[ -n "$id_token" ]]; then
+    payload=$(printf '%s' "$id_token" | awk -F. '{print $2}')
+    if [[ -n "$payload" ]]; then
+      pad=$(( (4 - ${#payload} % 4) % 4 ))
+      expires_ts=$(printf '%s%s' "$payload" "$(printf '=%.0s' $(seq 1 $pad 2>/dev/null))" \
+        | tr '_-' '/+' \
+        | base64 -d 2>/dev/null \
+        | jq -r '.exp // 0' 2>/dev/null || echo 0)
+    fi
+  fi
+  now=$(date +%s)
+  if [[ "$expires_ts" -gt "$now" ]]; then
+    human=$(date -r "$expires_ts" 2>/dev/null || date -d "@$expires_ts" 2>/dev/null || echo "ts=$expires_ts")
+    ok "codex credentials valid (id_token expires $human; refresh_token present)"
+  else
+    ok "codex credentials valid (id_token will be refreshed by orchestrator)"
+  fi
 }
 
 if $USE_CLAUDE; then check_creds_claude; fi

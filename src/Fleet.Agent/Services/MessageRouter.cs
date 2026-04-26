@@ -67,6 +67,8 @@ public sealed class MessageRouter
                 }
                 else
                 {
+                    if (msg.Images.Count > 0)
+                        _groupBehavior.AddPendingImages(msg.ChatId, msg.Images, _telegramConfig.MaxImagesPerGroup);
                     _groupBehavior.ScheduleDebounce(msg.ChatId);
                     return;
                 }

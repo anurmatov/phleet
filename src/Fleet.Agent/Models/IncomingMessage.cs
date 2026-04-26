@@ -17,4 +17,11 @@ public sealed record IncomingMessage
     // Image support — zero or more images (single photo or media group)
     public IReadOnlyList<MessageImage> Images { get; init; } = [];
     public bool HasImage => Images.Count > 0;
+
+    /// <summary>
+    /// True when the original Telegram message contained a media attachment
+    /// (photo, voice, audio, video, video_note, or document).
+    /// MessageRouter uses this to bypass the group mention gate for media messages.
+    /// </summary>
+    public bool HasMediaAttachment { get; init; }
 }

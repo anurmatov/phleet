@@ -26,6 +26,9 @@ public sealed class GroupBehavior
     // Per-group debounce timers (fixes global-timer bug)
     private readonly ConcurrentDictionary<long, CancellationTokenSource> _debounceTimers = new();
 
+    // Pending images buffered from all-mode non-direct-trigger messages; drained at next check-in.
+    private readonly ConcurrentDictionary<long, PendingImagesEntry> _pendingImages = new();
+
     private readonly string _historyPath;
     private bool _historyLoaded;
     private CancellationToken _shutdownToken;
@@ -197,6 +200,33 @@ public sealed class GroupBehavior
                 cts.Dispose();
             }
         }
+    }
+
+    // --- Pending images (all-mode) ---
+
+    /// <summary>
+    /// Buffer images from a non-direct-trigger all-mode message so they can be forwarded
+    /// to the LLM when the debounce check-in fires. Enforces MaxImagesPerGroup cap.
+    /// </summary>
+    public void AddPendingImages(long chatId, IReadOnlyList<MessageImage> images, int maxImages)
+    {
+        if (images.Count == 0) return;
+        var entry = _pendingImages.GetOrAdd(chatId, _ => new PendingImagesEntry());
+        var hadOverflow = entry.AddRange(images, maxImages);
+        if (hadOverflow)
+            _logger.LogWarning("Pending image buffer for group {ChatId} exceeded cap ({Cap}), overflow images dropped", chatId, maxImages);
+    }
+
+    private IReadOnlyList<MessageImage> DrainPendingImages(long chatId)
+    {
+        if (!_pendingImages.TryRemove(chatId, out var entry))
+            return [];
+        if (entry.IsExpired)
+        {
+            _logger.LogDebug("Pending images for group {ChatId} exceeded TTL, dropping without forwarding", chatId);
+            return [];
+        }
+        return entry.Drain();
     }
 
     // --- Relay handling ---
@@ -492,12 +522,14 @@ public sealed class GroupBehavior
         var buffer = GetGroupBuffer(chatId);
         var prompt = _prompts.ForCheckIn(buffer, label, instruction);
         buffer.MarkChecked();
+        var pendingImages = DrainPendingImages(chatId);
         _logger.LogInformation("{Label} triggered for group {ChatId}", label, chatId);
 
         // Delegate entirely to TaskManager — it handles typing, execution,
         // session tracking, tool buffering, IDLE suppression, and completion events.
         _taskManager.StartTask(chatId, prompt, $"[{label}]", isSessionTask: true,
-            source: TaskSource.CheckIn);
+            source: TaskSource.CheckIn,
+            images: pendingImages.Count > 0 ? pendingImages : null);
     }
 
     public string BuildGroupTask(long chatId, string sender, string taskText,
@@ -506,4 +538,48 @@ public sealed class GroupBehavior
 
     public string BuildDmTask(long chatId, string taskText, string? replyToText = null) =>
         _prompts.ForDm(GetGroupBuffer(chatId), taskText, replyToText);
+
+    // --- Pending images buffer entry ---
+
+    private sealed class PendingImagesEntry
+    {
+        /// Images older than this are considered stale and dropped on drain.
+        private static readonly TimeSpan Ttl = TimeSpan.FromMinutes(5);
+
+        private readonly Lock _lock = new();
+        private readonly List<MessageImage> _images = [];
+        private DateTimeOffset _storedAt = DateTimeOffset.UtcNow;
+
+        /// <summary>
+        /// Appends <paramref name="incoming"/> up to <paramref name="cap"/>.
+        /// Returns <c>true</c> if any images were dropped due to the cap.
+        /// </summary>
+        public bool AddRange(IReadOnlyList<MessageImage> incoming, int cap)
+        {
+            lock (_lock)
+            {
+                _storedAt = DateTimeOffset.UtcNow;
+                var hadOverflow = false;
+                foreach (var img in incoming)
+                {
+                    if (_images.Count >= cap) { hadOverflow = true; break; }
+                    _images.Add(img);
+                }
+                return hadOverflow;
+            }
+        }
+
+        public IReadOnlyList<MessageImage> Drain()
+        {
+            lock (_lock)
+            {
+                if (_images.Count == 0) return [];
+                var result = _images.ToArray();
+                _images.Clear();
+                return result;
+            }
+        }
+
+        public bool IsExpired => DateTimeOffset.UtcNow - _storedAt > Ttl;
+    }
 }

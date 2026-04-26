@@ -67,16 +67,18 @@ public sealed class MessageRouter
                 }
                 else
                 {
+                    if (msg.Images.Count > 0)
+                        _groupBehavior.AddPendingImages(msg.ChatId, msg.Images, _telegramConfig.MaxImagesPerGroup);
                     _groupBehavior.ScheduleDebounce(msg.ChatId);
                     return;
                 }
             }
             else
             {
-                // "mention" mode — only @mention or reply-to-me
+                // "mention" mode — only @mention or reply-to-me; media bypasses the mention check
                 if (!_telegramConfig.AllowedUserIds.Contains(msg.UserId))
                     return;
-                if (!(msg.IsBotMentioned || msg.IsReplyToBot))
+                if (!(msg.IsBotMentioned || msg.IsReplyToBot || msg.HasMediaAttachment))
                     return;
             }
         }

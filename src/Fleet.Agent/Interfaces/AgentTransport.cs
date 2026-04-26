@@ -338,9 +338,14 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     {
         if (type != UpdateType.Message) return;
 
-        // Support text messages and photo messages (with optional caption)
+        // Support text messages and media messages (with optional caption)
         var isPhoto = message.Photo is { Length: > 0 };
         var isVoice = message.Voice is not null;
+        var isAudio = message.Audio is not null;
+        var isVideo = message.Video is not null;
+        var isVideoNote = message.VideoNote is not null;
+        var isDocument = message.Document is not null;
+        var isMediaAttachment = isPhoto || isVoice || isAudio || isVideo || isVideoNote || isDocument;
         var text = message.Text ?? message.Caption ?? "";
 
         // Transcribe voice messages if the whisper service is configured
@@ -379,7 +384,18 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 return;
             }
         }
-        else if (!isPhoto && string.IsNullOrEmpty(message.Text)) return;
+        else if (!isMediaAttachment && string.IsNullOrEmpty(message.Text)) return;
+
+        // For non-photo media with no caption, synthesize a readable placeholder so the
+        // agent receives a meaningful description of what was shared.
+        if (string.IsNullOrEmpty(text) && isMediaAttachment)
+        {
+            if (isAudio) text = "(audio message)";
+            else if (isVideoNote) text = "(video note)";
+            else if (isVideo) text = "(video message)";
+            else if (isDocument) text = message.Document!.FileName is { } fn ? $"(document: {fn})" : "(document)";
+            else if (isVoice) text = "(voice message)";
+        }
 
         // TTS trigger: /tts command as a reply to any message → synthesize and send replied-to message as voice
         if (_tts.IsEnabled && !isVoice
@@ -454,6 +470,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             IsReplyToBot = isReplyToMe,
             IsNameMentioned = isNameMentioned,
             StrippedText = stripped,
+            HasMediaAttachment = isMediaAttachment,
         };
 
         // Media group: buffer all photos and flush as one IncomingMessage after debounce

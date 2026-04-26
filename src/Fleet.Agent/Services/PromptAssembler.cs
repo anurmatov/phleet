@@ -21,29 +21,37 @@ public sealed class PromptAssembler
     /// <summary>
     /// Build a prompt for a direct message (DM) task.
     /// </summary>
-    public string ForDm(GroupChatBuffer buffer, string taskText,
+    /// <param name="chatId">The originating Telegram chat ID. Injected as <c>[Chat: {chatId}]</c> into the prompt so the agent has a deterministic reply target.</param>
+    public string ForDm(long chatId, GroupChatBuffer buffer, string taskText,
         string? replyToText = null)
     {
+        var chatTag = $"[Chat: {chatId}]";
         var replyContext = replyToText is not null
             ? $"\n[Replying to: \"{TruncateReplyText(replyToText, 300)}\"]"
             : "";
 
         if (_executor.IsProcessWarm)
-            return replyContext.Length > 0 ? $"{replyContext}\n{taskText}" : taskText;
+            return replyContext.Length > 0
+                ? $"{chatTag}{replyContext}\n{taskText}"
+                : $"{chatTag}\n{taskText}";
 
         var context = buffer.FormatContext();
         if (context.Length > 0)
-            return $"[Recent conversation]\n{context}\n\n[New message]{replyContext}\n{taskText}";
+            return $"[Recent conversation]\n{context}\n\n{chatTag}\n[New message]{replyContext}\n{taskText}";
 
-        return replyContext.Length > 0 ? $"[New message]{replyContext}\n{taskText}" : taskText;
+        return replyContext.Length > 0
+            ? $"{chatTag}\n[New message]{replyContext}\n{taskText}"
+            : $"{chatTag}\n{taskText}";
     }
 
     /// <summary>
     /// Build a prompt for a group message task (mention, reply, or /new).
     /// </summary>
-    public string ForGroupMessage(GroupChatBuffer buffer, string sender, string taskText,
+    /// <param name="chatId">The originating Telegram chat ID. Injected as <c>[Chat: {chatId}]</c> into the prompt so the agent has a deterministic reply target.</param>
+    public string ForGroupMessage(long chatId, GroupChatBuffer buffer, string sender, string taskText,
         string? replyToUsername = null, string? replyToText = null)
     {
+        var chatTag = $"[Chat: {chatId}]";
         var replyContext = replyToUsername is not null && replyToText is not null
             ? $"\n[Replying to {replyToUsername}: \"{TruncateReplyText(replyToText, 300)}\"]"
             : replyToUsername is not null
@@ -51,7 +59,7 @@ public sealed class PromptAssembler
                 : "";
 
         if (_executor.IsProcessWarm)
-            return $"[New message]\n[From: {sender}]{replyContext} {taskText}";
+            return $"{chatTag}\n[New message]\n[From: {sender}]{replyContext} {taskText}";
 
         var context = buffer.FormatContext();
 
@@ -59,7 +67,7 @@ public sealed class PromptAssembler
         if (context.Length > 0)
             result += $"[Recent group conversation]\n{context}\n\n";
 
-        result += $"[New message]\n[From: {sender}]{replyContext} {taskText}";
+        result += $"{chatTag}\n[New message]\n[From: {sender}]{replyContext} {taskText}";
         return result;
     }
 
@@ -69,9 +77,11 @@ public sealed class PromptAssembler
     /// <summary>
     /// Build a prompt for a relay directive from another agent.
     /// </summary>
-    public string ForRelayDirective(GroupChatBuffer buffer, string sender, string text)
+    /// <param name="chatId">The originating Telegram chat ID. Injected as <c>[Chat: {chatId}]</c> into the prompt so the agent has a deterministic reply target.</param>
+    public string ForRelayDirective(long chatId, GroupChatBuffer buffer, string sender, string text)
     {
         return $"""
+            [Chat: {chatId}]
             [Directive from {sender}]
             {text}
             """;
@@ -80,7 +90,8 @@ public sealed class PromptAssembler
     /// <summary>
     /// Build a prompt for a periodic check-in (debounce, proactive, supervision).
     /// </summary>
-    public string ForCheckIn(GroupChatBuffer buffer, string label, string instruction)
+    /// <param name="chatId">The originating Telegram chat ID. Injected as <c>[Chat: {chatId}]</c> into the prompt so the agent has a deterministic reply target.</param>
+    public string ForCheckIn(long chatId, GroupChatBuffer buffer, string label, string instruction)
     {
         var context = _executor.IsProcessWarm
             ? buffer.FormatNewMessages()
@@ -95,12 +106,14 @@ public sealed class PromptAssembler
                 [{contextLabel}]
                 {context}
 
+                [Chat: {chatId}]
                 [{label}]
                 {instruction}
                 """;
         }
 
         return $"""
+            [Chat: {chatId}]
             [{label}]
             {instruction}
             """;

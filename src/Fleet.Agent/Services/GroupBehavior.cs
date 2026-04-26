@@ -252,7 +252,7 @@ public sealed class GroupBehavior
             _ = Task.Run(() =>
             {
                 var buffer = GetGroupBuffer(chatId);
-                var prompt = _prompts.ForRelayDirective(buffer, sender, text);
+                var prompt = _prompts.ForRelayDirective(chatId, buffer, sender, text);
                 buffer.MarkChecked();
                 var displayText = $"[Bridge: {sender}] {TaskManager.TruncateText(text, 500)}";
                 _taskManager.StartTask(chatId, prompt, displayText, isSessionTask: true,
@@ -293,7 +293,7 @@ public sealed class GroupBehavior
         _ = Task.Run(() =>
         {
             var buffer = GetGroupBuffer(chatId);
-            var prompt = _prompts.ForRelayDirective(buffer, sender, text);
+            var prompt = _prompts.ForRelayDirective(chatId, buffer, sender, text);
             buffer.MarkChecked();
             var displayText = $"[From: {sender}] {TaskManager.TruncateText(text, 500)}";
             _taskManager.StartTask(chatId, prompt, displayText, isSessionTask: true,
@@ -520,7 +520,7 @@ public sealed class GroupBehavior
         }
 
         var buffer = GetGroupBuffer(chatId);
-        var prompt = _prompts.ForCheckIn(buffer, label, instruction);
+        var prompt = _prompts.ForCheckIn(chatId, buffer, label, instruction);
         buffer.MarkChecked();
         var pendingImages = DrainPendingImages(chatId);
         _logger.LogInformation("{Label} triggered for group {ChatId}", label, chatId);
@@ -534,10 +534,10 @@ public sealed class GroupBehavior
 
     public string BuildGroupTask(long chatId, string sender, string taskText,
         string? replyToUsername = null, string? replyToText = null) =>
-        _prompts.ForGroupMessage(GetGroupBuffer(chatId), sender, taskText, replyToUsername, replyToText);
+        _prompts.ForGroupMessage(chatId, GetGroupBuffer(chatId), sender, taskText, replyToUsername, replyToText);
 
     public string BuildDmTask(long chatId, string taskText, string? replyToText = null) =>
-        _prompts.ForDm(GetGroupBuffer(chatId), taskText, replyToText);
+        _prompts.ForDm(chatId, GetGroupBuffer(chatId), taskText, replyToText);
 
     // --- Pending images buffer entry ---
 

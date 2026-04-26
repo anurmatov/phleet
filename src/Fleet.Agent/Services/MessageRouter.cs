@@ -73,10 +73,10 @@ public sealed class MessageRouter
             }
             else
             {
-                // "mention" mode — only @mention or reply-to-me
+                // "mention" mode — only @mention or reply-to-me; media bypasses the mention check
                 if (!_telegramConfig.AllowedUserIds.Contains(msg.UserId))
                     return;
-                if (!(msg.IsBotMentioned || msg.IsReplyToBot))
+                if (!(msg.IsBotMentioned || msg.IsReplyToBot || msg.HasMediaAttachment))
                     return;
             }
         }

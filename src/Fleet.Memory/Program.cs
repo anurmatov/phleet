@@ -157,7 +157,7 @@ app.MapPut("/internal/memory/{id}", async (string id, HttpRequest request, Memor
             statusCode: 409);
     }
 
-    var updated = await memoryService.UpdateAsync(id,
+    var (updated, _) = await memoryService.UpdateAsync(id,
         content: body.Content,
         tags: body.Tags,
         project: body.Project);

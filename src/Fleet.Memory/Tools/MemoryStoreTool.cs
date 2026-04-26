@@ -43,16 +43,30 @@ public sealed class MemoryStoreTool(MemoryService memoryService)
             Source = source
         };
 
-        var (stored, similarMemories) = await memoryService.StoreAsync(doc);
-        var result = $"Stored memory '{stored.Title}' (id: {stored.Id}, path: {stored.FilePath})";
-
-        if (similarMemories.Count > 0)
+        try
         {
-            result += "\n\nNote: Found similar existing memories — consider merging or updating instead:";
-            foreach (var (existingId, existingTitle, score) in similarMemories)
-                result += $"\n- {existingId[..8]} — {existingTitle} (similarity: {score:F2})";
-        }
+            var (stored, similarMemories, indexingWarning) = await memoryService.StoreAsync(doc);
 
-        return result;
+            var result = indexingWarning is not null
+                ? $"Stored memory '{stored.Title}' (id: {stored.Id}, path: {stored.FilePath})\n{indexingWarning}"
+                : $"Stored memory '{stored.Title}' (id: {stored.Id}, path: {stored.FilePath})";
+
+            if (similarMemories.Count > 0)
+            {
+                result += "\n\nNote: Found similar existing memories — consider merging or updating instead:";
+                foreach (var (existingId, existingTitle, score) in similarMemories)
+                    result += $"\n- {existingId[..8]} — {existingTitle} (similarity: {score:F2})";
+            }
+
+            return result;
+        }
+        catch (InvalidDataException ex)
+        {
+            return $"error_serialization_validation: {ex.Message}";
+        }
+        catch (IOException ex)
+        {
+            return $"error_write_failed: {ex.Message}";
+        }
     }
 }

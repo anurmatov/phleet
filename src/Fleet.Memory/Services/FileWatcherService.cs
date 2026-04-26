@@ -26,6 +26,9 @@ public sealed class FileWatcherService(
         fileStore.EnsureDirectories();
         await vectorStore.EnsureCollectionAsync(stoppingToken);
 
+        // Clean up stale temp files from any prior crashed write operations
+        fileStore.CleanStaleTempFiles();
+
         // Full index on startup
         await FullIndexAsync(stoppingToken);
 
@@ -89,6 +92,10 @@ public sealed class FileWatcherService(
                 if (fileInfo.Exists)
                     _knownFiles[doc.FilePath] = fileInfo.LastWriteTimeUtc;
             }
+            catch (InvalidDataException ex)
+            {
+                logger.LogError(ex, "Corrupt memory file skipped during full scan: {Path}", doc.FilePath);
+            }
             catch (Exception ex)
             {
                 logger.LogWarning(ex, "Failed to index {Path} during full scan", doc.FilePath);
@@ -140,6 +147,10 @@ public sealed class FileWatcherService(
                     if (filePath.Contains("/_archived/") || filePath.Contains("\\_archived\\"))
                         continue;
 
+                    // Skip temp files (belt-and-suspenders; *.md glob already excludes *.md.tmp.*)
+                    if (Path.GetFileName(filePath).Contains(".tmp."))
+                        continue;
+
                     currentFiles.Add(filePath);
                     var lastWrite = File.GetLastWriteTimeUtc(filePath);
 
@@ -187,6 +198,11 @@ public sealed class FileWatcherService(
     {
         // Skip _archived directory
         if (filePath.Contains("/_archived/") || filePath.Contains("\\_archived\\"))
+            return;
+
+        // Skip temp files from atomic write operations (belt-and-suspenders; they don't
+        // end in .md so the FileSystemWatcher filter already excludes them)
+        if (Path.GetFileName(filePath).Contains(".tmp."))
             return;
 
         // Debounce: only queue if enough time has passed since last event for this path

@@ -31,6 +31,37 @@ public sealed partial class MemoryFileStore(IOptions<StorageOptions> storageOpti
         Directory.CreateDirectory(Path.Combine(_basePath, "_archived"));
     }
 
+    /// <summary>
+    /// Deletes any stale .tmp.* files left behind by crashed write operations.
+    /// Safe to call at startup before FullIndexAsync runs.
+    /// </summary>
+    public void CleanStaleTempFiles()
+    {
+        var cleaned = 0;
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(_basePath, "*.tmp.*", SearchOption.AllDirectories))
+            {
+                try
+                {
+                    File.Delete(file);
+                    cleaned++;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to delete stale temp file: {Path}", file);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Error scanning for stale temp files in {Path}", _basePath);
+        }
+
+        if (cleaned > 0)
+            logger.LogInformation("Cleaned {Count} stale temp file(s) on startup", cleaned);
+    }
+
     public async Task<MemoryDocument> SaveAsync(MemoryDocument doc)
     {
         var dir = Path.Combine(_basePath, doc.Type);
@@ -40,13 +71,29 @@ public sealed partial class MemoryFileStore(IOptions<StorageOptions> storageOpti
         var shortId = doc.Id[..8];
         var date = doc.Created.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         var fileName = $"{date}_{shortId}_{slug}.md";
-        var filePath = Path.Combine(dir, fileName);
+        var finalPath = Path.Combine(dir, fileName);
 
         var content = SerializeToMarkdown(doc);
-        await File.WriteAllTextAsync(filePath, content);
 
-        doc.FilePath = filePath;
-        logger.LogInformation("Saved memory {Id} to {Path}", doc.Id, filePath);
+        // Pre-write validation: round-trip parse to catch YAML issues before touching disk.
+        // Throws InvalidDataException if the serialized content would be unparseable.
+        ParseMarkdown(content, finalPath);
+
+        var tmpPath = $"{finalPath}.tmp.{Guid.NewGuid():N}";
+        await File.WriteAllTextAsync(tmpPath, content);
+
+        try
+        {
+            File.Move(tmpPath, finalPath, overwrite: false);
+        }
+        catch
+        {
+            try { File.Delete(tmpPath); } catch { /* best effort */ }
+            throw;
+        }
+
+        doc.FilePath = finalPath;
+        logger.LogInformation("Saved memory {Id} to {Path}", doc.Id, finalPath);
         return doc;
     }
 
@@ -59,7 +106,23 @@ public sealed partial class MemoryFileStore(IOptions<StorageOptions> storageOpti
         doc.Updated = DateTimeOffset.UtcNow;
 
         var content = SerializeToMarkdown(doc);
-        await File.WriteAllTextAsync(filePath, content);
+
+        // Pre-write validation: catch YAML issues before overwriting the existing file.
+        // Throws InvalidDataException if the new serialized content would be unparseable.
+        ParseMarkdown(content, filePath);
+
+        var tmpPath = $"{filePath}.tmp.{Guid.NewGuid():N}";
+        await File.WriteAllTextAsync(tmpPath, content);
+
+        try
+        {
+            File.Move(tmpPath, filePath, overwrite: true);
+        }
+        catch
+        {
+            try { File.Delete(tmpPath); } catch { /* best effort */ }
+            throw;
+        }
 
         logger.LogInformation("Updated memory {Id} at {Path}", doc.Id, filePath);
         return doc;
@@ -106,9 +169,16 @@ public sealed partial class MemoryFileStore(IOptions<StorageOptions> storageOpti
 
             foreach (var file in Directory.EnumerateFiles(dir, "*.md"))
             {
-                var doc = await ParseFileAsync(file);
-                if (doc is not null)
-                    results.Add(doc);
+                try
+                {
+                    var doc = await ParseFileAsync(file);
+                    if (doc is not null)
+                        results.Add(doc);
+                }
+                catch (InvalidDataException ex)
+                {
+                    logger.LogError(ex, "Skipping corrupt memory file during scan: {Path}", file);
+                }
             }
         }
 
@@ -128,7 +198,17 @@ public sealed partial class MemoryFileStore(IOptions<StorageOptions> storageOpti
 
             foreach (var file in Directory.EnumerateFiles(dir, "*.md"))
             {
-                var doc = await ParseFileAsync(file);
+                MemoryDocument? doc;
+                try
+                {
+                    doc = await ParseFileAsync(file);
+                }
+                catch (InvalidDataException ex)
+                {
+                    logger.LogError(ex, "Skipping corrupt memory file during filtered scan: {Path}", file);
+                    continue;
+                }
+
                 if (doc is null) continue;
 
                 if (project is not null && !MemoryDocument.NormalizeProject(doc.Project).Equals(MemoryDocument.NormalizeProject(project), StringComparison.Ordinal))
@@ -187,7 +267,12 @@ public sealed partial class MemoryFileStore(IOptions<StorageOptions> storageOpti
         return stats;
     }
 
-    private static MemoryDocument? ParseMarkdown(string text, string filePath)
+    /// <summary>
+    /// Parses a memory markdown string.
+    /// Returns null if the text has no frontmatter header (not a memory file).
+    /// Throws <see cref="InvalidDataException"/> if the text has frontmatter but YAML parsing fails.
+    /// </summary>
+    internal static MemoryDocument? ParseMarkdown(string text, string filePath)
     {
         if (!text.StartsWith("---"))
             return null;
@@ -225,9 +310,9 @@ public sealed partial class MemoryFileStore(IOptions<StorageOptions> storageOpti
                 FilePath = filePath
             };
         }
-        catch
+        catch (Exception ex)
         {
-            return null;
+            throw new InvalidDataException($"YAML parse error in {filePath}: {ex.Message}", ex);
         }
     }
 
@@ -245,7 +330,11 @@ public sealed partial class MemoryFileStore(IOptions<StorageOptions> storageOpti
             : DateTimeOffset.UtcNow;
     }
 
-    private static string SerializeToMarkdown(MemoryDocument doc)
+    /// <summary>
+    /// Serializes a memory document to markdown with frontmatter.
+    /// Tag values are double-quoted to prevent YAML injection from special characters.
+    /// </summary>
+    internal static string SerializeToMarkdown(MemoryDocument doc)
     {
         var sb = new StringBuilder();
         sb.AppendLine("---");
@@ -255,7 +344,7 @@ public sealed partial class MemoryFileStore(IOptions<StorageOptions> storageOpti
         if (!string.IsNullOrEmpty(doc.Project))
             sb.AppendLine($"project: {doc.Project}");
         if (doc.Tags.Count > 0)
-            sb.AppendLine($"tags: [{string.Join(", ", doc.Tags)}]");
+            sb.AppendLine($"tags: [{string.Join(", ", doc.Tags.Select(t => $"\"{EscapeYamlString(t)}\""))}]");
         if (!string.IsNullOrEmpty(doc.Source))
             sb.AppendLine($"source: {doc.Source}");
         sb.AppendLine($"created: {doc.Created:yyyy-MM-ddTHH:mm:ssZ}");

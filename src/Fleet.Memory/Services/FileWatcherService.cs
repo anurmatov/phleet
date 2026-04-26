@@ -227,7 +227,19 @@ public sealed class FileWatcherService(
             case FileChangeType.Created:
             case FileChangeType.Modified:
                 logger.LogInformation("File {Type}: {Path}", change.ChangeType, change.FilePath);
-                await memoryService.IndexFileAsync(change.FilePath, ct);
+                try
+                {
+                    await memoryService.IndexFileAsync(change.FilePath, ct);
+                }
+                catch (InvalidDataException ex)
+                {
+                    logger.LogError(ex, "Corrupt memory file skipped during watcher event: {Path}", change.FilePath);
+                    // Update known files so the polling loop does not re-enqueue this corrupt file on every cycle.
+                    var corruptInfo = new FileInfo(change.FilePath);
+                    if (corruptInfo.Exists)
+                        _knownFiles[change.FilePath] = corruptInfo.LastWriteTimeUtc;
+                    break;
+                }
                 // Update known files snapshot
                 var fileInfo = new FileInfo(change.FilePath);
                 if (fileInfo.Exists)

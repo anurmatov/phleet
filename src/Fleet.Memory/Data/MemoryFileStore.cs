@@ -77,7 +77,7 @@ public sealed partial class MemoryFileStore(IOptions<StorageOptions> storageOpti
 
         // Pre-write validation: round-trip parse to catch YAML issues before touching disk.
         // Throws InvalidDataException if the serialized content would be unparseable.
-        ParseMarkdown(content, finalPath);
+        _ = ParseMarkdown(content, finalPath);
 
         var tmpPath = $"{finalPath}.tmp.{Guid.NewGuid():N}";
         await File.WriteAllTextAsync(tmpPath, content);
@@ -109,7 +109,7 @@ public sealed partial class MemoryFileStore(IOptions<StorageOptions> storageOpti
 
         // Pre-write validation: catch YAML issues before overwriting the existing file.
         // Throws InvalidDataException if the new serialized content would be unparseable.
-        ParseMarkdown(content, filePath);
+        _ = ParseMarkdown(content, filePath);
 
         var tmpPath = $"{filePath}.tmp.{Guid.NewGuid():N}";
         await File.WriteAllTextAsync(tmpPath, content);

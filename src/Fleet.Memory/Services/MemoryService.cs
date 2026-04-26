@@ -69,7 +69,8 @@ public sealed class MemoryService(
             // Defensive: pre-write validation in SaveAsync uses the same content, so this
             // should not occur. If it does, clean up the committed file and propagate.
             logger.LogError(ex, "Post-save indexing parse failure for {Path} — deleting file", doc.FilePath);
-            try { File.Delete(doc.FilePath); } catch { /* best effort */ }
+            try { File.Delete(doc.FilePath); }
+            catch (Exception deleteEx) { logger.LogWarning(deleteEx, "Failed to delete file after post-save parse failure: {Path}", doc.FilePath); }
             throw;
         }
         catch (Exception ex)

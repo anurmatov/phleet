@@ -1,9 +1,11 @@
 using System.IO;
 using Fleet.Memory.Data;
 using Fleet.Memory.Models;
+using Fleet.Memory.Services;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Fleet.Memory.Configuration;
+using NSubstitute;
 
 namespace Fleet.Memory.Tests;
 
@@ -287,5 +289,51 @@ public class MemoryWriteAtomicityTests : IDisposable
 
         Assert.False(File.Exists(stale), "Stale temp file should have been deleted");
         Assert.True(File.Exists(real), "Real .md file should be untouched");
+    }
+
+    // ── warning_indexing_deferred ────────────────────────────────────────────────
+
+    [Fact]
+    public async Task StoreAsync_ReturnsIndexingWarning_WhenEmbeddingServiceFails()
+    {
+        // Arrange: embedding service throws to simulate Qdrant/embedding outage.
+        // SimilarityThreshold=0 skips the pre-save similarity check so the mock
+        // is only called inside IndexFileAsync (after the file is committed to disk).
+        var embeddingService = Substitute.For<IEmbeddingService>();
+        embeddingService
+            .EmbedAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromException<float[]>(new HttpRequestException("simulated embedding outage")));
+
+        var qdrantOptions = Options.Create(new QdrantOptions
+        {
+            Url = "http://localhost:1",   // fake — never reached; EmbedAsync throws first
+            SimilarityThreshold = 0       // skip pre-save similarity check
+        });
+        var embeddingOptions = Options.Create(new EmbeddingOptions());
+        var vectorStore = new VectorStore(qdrantOptions, embeddingOptions, NullLogger<VectorStore>.Instance);
+
+        var service = new MemoryService(
+            _store,
+            vectorStore,
+            embeddingService,
+            qdrantOptions,
+            NullLogger<MemoryService>.Instance);
+
+        var doc = new MemoryDocument
+        {
+            Id = Guid.NewGuid().ToString(),
+            Type = "learning",
+            Title = "Indexing warning test",
+            Content = "Should get a warning when embedding service fails"
+        };
+
+        // Act
+        var (stored, _, indexingWarning) = await service.StoreAsync(doc);
+
+        // Assert: warning returned to caller
+        Assert.NotNull(indexingWarning);
+        Assert.StartsWith("warning_indexing_deferred:", indexingWarning);
+        // File must be committed to disk despite indexing failure
+        Assert.True(File.Exists(stored.FilePath), "Memory file must be on disk even when indexing fails");
     }
 }

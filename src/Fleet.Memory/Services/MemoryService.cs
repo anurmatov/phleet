@@ -14,7 +14,13 @@ public sealed class MemoryService(
 {
     private readonly float _similarityThreshold = qdrantOptions.Value.SimilarityThreshold;
 
-    public async Task<(MemoryDocument Stored, List<(string Id, string Title, float Score)> SimilarMemories)> StoreAsync(MemoryDocument doc, CancellationToken ct = default)
+    /// <summary>
+    /// Stores a new memory. Throws <see cref="InvalidDataException"/> if serialization produces
+    /// unparseable YAML (error_serialization_validation). Throws <see cref="IOException"/> if the
+    /// atomic rename fails (error_write_failed). On indexing infrastructure failures the file is
+    /// committed to disk and IndexingWarning is set (warning_indexing_deferred).
+    /// </summary>
+    public async Task<(MemoryDocument Stored, List<(string Id, string Title, float Score)> SimilarMemories, string? IndexingWarning)> StoreAsync(MemoryDocument doc, CancellationToken ct = default)
     {
         if (string.IsNullOrEmpty(doc.Id))
             doc.Id = Guid.NewGuid().ToString();
@@ -33,20 +39,49 @@ public sealed class MemoryService(
             {
                 if (score >= _similarityThreshold)
                 {
-                    var existing = await fileStore.ParseFileAsync(filePath);
-                    if (existing is not null)
-                        similarMemories.Add((existing.Id, existing.Title, score));
+                    try
+                    {
+                        var existing = await fileStore.ParseFileAsync(filePath);
+                        if (existing is not null)
+                            similarMemories.Add((existing.Id, existing.Title, score));
+                    }
+                    catch (InvalidDataException)
+                    {
+                        // Corrupt candidate file — skip it
+                    }
                 }
             }
         }
 
+        // SaveAsync throws InvalidDataException (serialization validation) or IOException (write/rename).
+        // Both propagate to the tool caller for surfacing as error keywords.
         doc = await fileStore.SaveAsync(doc);
 
-        // Embedding and indexing is handled by the FileWatcherService
-        // but we can do it eagerly here for immediate availability
-        await IndexFileAsync(doc.FilePath, ct);
+        // Index immediately at the final path (rename-then-index ordering ensures Qdrant
+        // always receives the correct file path, never a temp path).
+        string? indexingWarning = null;
+        try
+        {
+            await IndexFileAsync(doc.FilePath, ct);
+        }
+        catch (InvalidDataException ex)
+        {
+            // Defensive: pre-write validation in SaveAsync uses the same content, so this
+            // should not occur. If it does, clean up the committed file and propagate.
+            logger.LogError(ex, "Post-save indexing parse failure for {Path} — deleting file", doc.FilePath);
+            try { File.Delete(doc.FilePath); }
+            catch (Exception deleteEx) { logger.LogWarning(deleteEx, "Failed to delete file after post-save parse failure: {Path}", doc.FilePath); }
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Infrastructure failure (Qdrant unavailable, embedding timeout, etc.).
+            // The file is safely committed to disk. FileWatcherService will re-index on recovery.
+            logger.LogWarning(ex, "Indexing deferred for {Path} due to infrastructure failure", doc.FilePath);
+            indexingWarning = $"warning_indexing_deferred: memory written but not yet searchable — {ex.GetType().Name}: {ex.Message}";
+        }
 
-        return (doc, similarMemories);
+        return (doc, similarMemories, indexingWarning);
     }
 
     public async Task<List<MemoryDocument>> SearchAsync(string query, int limit = 10, string? type = null, string? project = null, string? agent = null, CancellationToken ct = default)
@@ -63,9 +98,16 @@ public sealed class MemoryService(
         var documents = new List<MemoryDocument>();
         foreach (var (filePath, score) in results)
         {
-            var doc = await fileStore.ParseFileAsync(filePath);
-            if (doc is not null)
-                documents.Add(doc);
+            try
+            {
+                var doc = await fileStore.ParseFileAsync(filePath);
+                if (doc is not null)
+                    documents.Add(doc);
+            }
+            catch (InvalidDataException ex)
+            {
+                logger.LogError(ex, "Corrupt memory file skipped during search result assembly: {Path}", filePath);
+            }
         }
 
         return documents;
@@ -88,14 +130,29 @@ public sealed class MemoryService(
         if (filePath is null)
             return null;
 
-        return await fileStore.ParseFileAsync(filePath);
+        try
+        {
+            return await fileStore.ParseFileAsync(filePath);
+        }
+        catch (InvalidDataException ex)
+        {
+            logger.LogError(ex, "Memory file {Id} at {Path} is corrupt and cannot be parsed", id, filePath);
+            return null;
+        }
     }
 
-    public async Task<MemoryDocument> UpdateAsync(string id, string? title = null, string? content = null, List<string>? tags = null, string? project = null, CancellationToken ct = default)
+    /// <summary>
+    /// Updates an existing memory. Throws <see cref="FileNotFoundException"/> if not found,
+    /// <see cref="InvalidDataException"/> if the mutation produces unparseable YAML,
+    /// or <see cref="IOException"/> if the atomic rename fails.
+    /// On indexing infrastructure failures the file is committed and IndexingWarning is set.
+    /// </summary>
+    public async Task<(MemoryDocument Doc, string? IndexingWarning)> UpdateAsync(string id, string? title = null, string? content = null, List<string>? tags = null, string? project = null, CancellationToken ct = default)
     {
         var filePath = fileStore.FindFileById(id)
             ?? throw new FileNotFoundException($"Memory not found: {id}");
 
+        // fileStore.UpdateAsync throws InvalidDataException (pre-write validation) or IOException (rename).
         var doc = await fileStore.UpdateAsync(filePath, d =>
         {
             if (title is not null) d.Title = title;
@@ -104,8 +161,26 @@ public sealed class MemoryService(
             if (project is not null) d.Project = MemoryDocument.NormalizeProject(project);
         });
 
-        // Re-index will be handled by FileWatcher
-        return doc;
+        // Index immediately after the rename completes (file is at final path).
+        string? indexingWarning = null;
+        try
+        {
+            await IndexFileAsync(filePath, ct);
+        }
+        catch (InvalidDataException ex)
+        {
+            // Defensive: pre-write validation in fileStore.UpdateAsync should have caught this.
+            logger.LogError(ex, "Post-update indexing parse failure for {Path}", filePath);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Infrastructure failure — file is committed, watcher will retry.
+            logger.LogWarning(ex, "Indexing deferred for {Path} due to infrastructure failure", filePath);
+            indexingWarning = $"warning_indexing_deferred: memory updated but not yet searchable — {ex.GetType().Name}: {ex.Message}";
+        }
+
+        return (doc, indexingWarning);
     }
 
     public async Task DeleteAsync(string id, bool permanent = false, CancellationToken ct = default)
@@ -121,14 +196,18 @@ public sealed class MemoryService(
 
     public Dictionary<string, int> GetStats() => fileStore.GetStats();
 
+    /// <summary>
+    /// Indexes a memory file into Qdrant.
+    /// Throws <see cref="InvalidDataException"/> if the file cannot be parsed (bad YAML or not a memory file).
+    /// Other exceptions indicate infrastructure failures (Qdrant, embedding) and propagate as-is.
+    /// </summary>
     public async Task IndexFileAsync(string filePath, CancellationToken ct = default)
     {
+        // ParseFileAsync throws InvalidDataException for bad YAML (corrupt file).
+        // Returns null only for files without a frontmatter header (not a memory file).
         var doc = await fileStore.ParseFileAsync(filePath);
         if (doc is null)
-        {
-            logger.LogWarning("Could not parse file for indexing: {Path}", filePath);
-            return;
-        }
+            throw new InvalidDataException($"File is not a parseable memory file: {filePath}");
 
         var textToEmbed = $"{doc.Title}\n\n{doc.Content}";
         var embedding = await embeddingService.EmbedAsync(textToEmbed, ct);

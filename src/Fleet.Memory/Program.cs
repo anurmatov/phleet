@@ -157,12 +157,27 @@ app.MapPut("/internal/memory/{id}", async (string id, HttpRequest request, Memor
             statusCode: 409);
     }
 
-    var updated = await memoryService.UpdateAsync(id,
-        content: body.Content,
-        tags: body.Tags,
-        project: body.Project);
-
-    return Results.Ok(new { id = updated.Id, updated_at = updated.Updated });
+    try
+    {
+        var (updated, indexingWarning) = await memoryService.UpdateAsync(id,
+            content: body.Content,
+            tags: body.Tags,
+            project: body.Project);
+        return Results.Ok(new
+        {
+            id = updated.Id,
+            updated_at = updated.Updated,
+            indexing_warning = indexingWarning
+        });
+    }
+    catch (InvalidDataException ex)
+    {
+        return Results.BadRequest(new { error = "error_serialization_validation", detail = ex.Message });
+    }
+    catch (IOException ex)
+    {
+        return Results.Json(new { error = "error_write_failed", detail = ex.Message }, statusCode: 500);
+    }
 });
 
 // DELETE /internal/memory/{id}

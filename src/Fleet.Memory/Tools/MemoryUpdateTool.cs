@@ -30,12 +30,24 @@ public sealed class MemoryUpdateTool(MemoryService memoryService)
             var actualContent = string.IsNullOrEmpty(content) ? null : content;
             var actualProject = string.IsNullOrEmpty(project) ? null : project;
 
-            var doc = await memoryService.UpdateAsync(id, actualTitle, actualContent, tagList, actualProject);
-            return $"Updated memory '{doc.Title}' (id: {doc.Id})";
+            var (doc, indexingWarning) = await memoryService.UpdateAsync(id, actualTitle, actualContent, tagList, actualProject);
+
+            var result = $"Updated memory '{doc.Title}' (id: {doc.Id})";
+            if (indexingWarning is not null)
+                result += $"\n{indexingWarning}";
+            return result;
         }
         catch (FileNotFoundException)
         {
             return $"Memory not found with ID: {id}";
+        }
+        catch (InvalidDataException ex)
+        {
+            return $"error_serialization_validation: {ex.Message}";
+        }
+        catch (IOException ex)
+        {
+            return $"error_write_failed: {ex.Message}";
         }
     }
 }

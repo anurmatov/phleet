@@ -18,6 +18,10 @@ public sealed record IncomingMessage
     public IReadOnlyList<MessageImage> Images { get; init; } = [];
     public bool HasImage => Images.Count > 0;
 
+    // Document support — zero or more PDF documents
+    public IReadOnlyList<MessageDocument> Documents { get; init; } = [];
+    public bool HasDocument => Documents.Count > 0;
+
     /// <summary>
     /// True when the original Telegram message contained a media attachment
     /// (photo, voice, audio, video, video_note, or document).

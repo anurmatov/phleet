@@ -63,6 +63,15 @@ async function runTask(msg) {
         fs.writeFileSync('/workspace/AGENTS.md', msg.systemPrompt);
     }
 
+    // Document blocks: the @openai/codex-sdk (as of the version in use) does not expose
+    // a document content block API via runStreamed(). The documents array is received here
+    // for forward compatibility but native block injection is not attempted — the agent
+    // already has a [document attachment: path] hint in the task text and can read the file
+    // via Bash/Read tools. If the SDK gains document block support, map msg.documents here.
+    if (msg.documents && msg.documents.length > 0) {
+        process.stderr.write(`[codex-bridge] ${msg.documents.length} document(s) received — Codex SDK does not support native document blocks; agent will use hint-only mode (file path in task text).\n`);
+    }
+
     const codex = new Codex();
 
     let finalText = '';

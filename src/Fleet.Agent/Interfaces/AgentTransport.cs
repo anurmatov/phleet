@@ -456,7 +456,14 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             downloadedImage = await DownloadPhotoAsync(largest, chatId, message.MessageId, photoIndex: 1);
         }
 
-        // Build the base IncomingMessage (no images yet — filled in below)
+        // Download PDF document if present and persistence is enabled
+        MessageDocument? downloadedDocument = null;
+        if (isDocument && message.Document!.MimeType == "application/pdf")
+        {
+            downloadedDocument = await DownloadDocumentAsync(message.Document, chatId, message.MessageId, docIndex: 1);
+        }
+
+        // Build the base IncomingMessage (no images/documents yet — filled in below)
         var baseMsg = new IncomingMessage
         {
             ChatId = chatId,
@@ -481,7 +488,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             Func<IncomingMessage, Task> flushHandler = async flushedMsg =>
             {
                 _groupSizeCapped.TryRemove(groupKey, out _);
-                var groupHints = AttachmentSweeper.BuildHints(flushedMsg.Images);
+                var groupHints = AttachmentSweeper.BuildHints(flushedMsg.Images, flushedMsg.Documents);
                 if (groupHints.Length > 0)
                 {
                     var newText = flushedMsg.Text.Length > 0 ? $"{flushedMsg.Text}\n{groupHints}" : groupHints;
@@ -506,19 +513,23 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             return;
         }
 
-        // Single photo or text-only: process immediately
+        // Single photo, document, or text-only: process immediately
         var images = downloadedImage is not null
             ? (IReadOnlyList<MessageImage>)[downloadedImage]
             : [];
-        var hints = AttachmentSweeper.BuildHints(images);
+        var documents = downloadedDocument is not null
+            ? (IReadOnlyList<MessageDocument>)[downloadedDocument]
+            : [];
+        var hints = AttachmentSweeper.BuildHints(images, documents);
         var msg = hints.Length > 0
             ? baseMsg with
             {
                 Images = images,
+                Documents = documents,
                 Text = baseMsg.Text.Length > 0 ? $"{baseMsg.Text}\n{hints}" : hints,
                 StrippedText = baseMsg.StrippedText.Length > 0 ? $"{baseMsg.StrippedText}\n{hints}" : hints,
             }
-            : baseMsg with { Images = images };
+            : baseMsg with { Images = images, Documents = documents };
         await _router.HandleAsync(msg);
     }
 
@@ -589,6 +600,75 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     }
 
 
+
+    /// <summary>
+    /// Download a Telegram document to memory (and optionally persist to disk).
+    /// Only called for PDFs (mime_type == "application/pdf").
+    /// Rejects files exceeding <c>Telegram:MaxDocumentBytes</c> (default: 32 MB) with a
+    /// user-facing warning — no disk write, no LLM block.
+    /// When <c>Telegram:PersistAttachments</c> is enabled the bytes are written to
+    /// <c>{AttachmentDir}/{chatId}-{messageId}-{docIndex}.pdf</c> and the path is stored
+    /// on <see cref="MessageDocument.FilePath"/> so agent tools can reach the bytes later.
+    /// Returns null when persistence is disabled (kill switch) or the file is oversized.
+    /// </summary>
+    private async Task<MessageDocument?> DownloadDocumentAsync(
+        Telegram.Bot.Types.Document document,
+        long chatId,
+        long messageId,
+        int docIndex)
+    {
+        // Kill switch: when PersistAttachments is false, no download, no disk write, no LLM block.
+        if (!_telegramConfig.PersistAttachments)
+            return null;
+
+        var fileSize = document.FileSize ?? 0;
+        if (fileSize > _telegramConfig.MaxDocumentBytes)
+        {
+            _logger.LogWarning("Document ({FileId}) exceeds MaxDocumentBytes ({Size} > {Limit}), rejecting",
+                document.FileId, fileSize, _telegramConfig.MaxDocumentBytes);
+            await SendTextAsync(chatId,
+                $"(PDF too large — {fileSize / 1_048_576} MB exceeds the {_telegramConfig.MaxDocumentBytes / 1_048_576} MB limit. Please send a smaller file.)");
+            return null;
+        }
+
+        try
+        {
+            using var ms = new System.IO.MemoryStream();
+            await _bot!.GetInfoAndDownloadFile(document.FileId, ms);
+            var bytes = ms.ToArray();
+
+            string? filePath = null;
+            try
+            {
+                Directory.CreateDirectory(_telegramConfig.AttachmentDir);
+                filePath = Path.Combine(_telegramConfig.AttachmentDir, $"{chatId}-{messageId}-{docIndex}.pdf");
+                await File.WriteAllBytesAsync(filePath, bytes);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Document #{Index}: failed to persist to disk, continuing without file path", docIndex);
+                filePath = null;
+            }
+
+            if (filePath != null)
+                AttachmentSweeper.SweepExpired(_telegramConfig.AttachmentDir, _telegramConfig.AttachmentRetentionHours, _logger);
+
+            return new MessageDocument(
+                document.FileId,
+                document.MimeType ?? "application/pdf",
+                fileSize,
+                document.FileName)
+            {
+                FilePath = filePath,
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Document ({FileId}) download failed, skipping", document.FileId);
+            await SendTextAsync(chatId, "(PDF download failed — please try again.)");
+            return null;
+        }
+    }
 
     private Task OnError(Exception exception, HandleErrorSource source)
     {

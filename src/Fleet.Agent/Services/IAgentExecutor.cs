@@ -12,6 +12,7 @@ public interface IAgentExecutor : IAsyncDisposable
     IAsyncEnumerable<AgentProgress> ExecuteAsync(
         string task,
         IReadOnlyList<MessageImage>? images = null,
+        IReadOnlyList<MessageDocument>? documents = null,
         CancellationToken ct = default);
 
     /// <summary>Stop the running process gracefully.</summary>

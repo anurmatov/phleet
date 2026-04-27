@@ -77,6 +77,7 @@ public sealed class TaskManager
         string? correlationId = null,
         string? taskId = null,
         IReadOnlyList<MessageImage>? images = null,
+        IReadOnlyList<MessageDocument>? documents = null,
         long userId = 0)
     {
         var state = GetChatState(chatId);
@@ -115,7 +116,7 @@ public sealed class TaskManager
             _messageQueue.Enqueue(new QueuedMessage(
                 chatId, task, displayText, isSessionTask, source,
                 relaySender, correlationId, taskId,
-                images, userId,
+                images, documents, userId,
                 DateTimeOffset.UtcNow, senderDisplay));
 
             var queuePos = _messageQueue.Count;
@@ -142,7 +143,7 @@ public sealed class TaskManager
         {
             try
             {
-                await ProcessTask(chatId, running.Id, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, cts.Token);
+                await ProcessTask(chatId, running.Id, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, cts.Token);
             }
             catch (Exception ex)
             {
@@ -354,7 +355,7 @@ public sealed class TaskManager
 
     private async Task ProcessTask(long chatId, int taskId, string task, string displayText,
         bool isSessionTask, TaskSource source, string? relaySender, string? correlationId, string? relayTaskId,
-        IReadOnlyList<MessageImage>? images, CancellationToken ct)
+        IReadOnlyList<MessageImage>? images, IReadOnlyList<MessageDocument>? documents, CancellationToken ct)
     {
         var state = GetChatState(chatId);
         string Prefix() => state.Count > 1 ? $"[#{taskId}] " : "";
@@ -417,10 +418,11 @@ public sealed class TaskManager
         {
             var currentTask = task;
             IReadOnlyList<MessageImage>? currentImages = images;
+            IReadOnlyList<MessageDocument>? currentDocuments = documents;
 
             while (true)
             {
-                await foreach (var progress in _executor.ExecuteAsync(currentTask, currentImages, ct))
+                await foreach (var progress in _executor.ExecuteAsync(currentTask, currentImages, currentDocuments, ct))
                 {
                     if (isSessionTask && progress.SessionId is not null)
                         _sessions.SetSession(chatId, progress.SessionId);
@@ -478,6 +480,7 @@ public sealed class TaskManager
                     _logger.LogInformation("Task #{TaskId}: delivering queued message to executor", taskId);
                     currentTask = nextMessage;
                     currentImages = null;
+                    currentDocuments = null;
                     // Reset per-turn state but accumulate texts and stats
                     lastError = null;
                     errorResult = false;
@@ -672,7 +675,7 @@ public sealed class TaskManager
 
         StartTask(queued.ChatId, queued.Task, queued.DisplayText, queued.IsSessionTask,
             queued.Source, queued.RelaySender, queued.CorrelationId, queued.TaskId,
-            queued.Images, queued.UserId);
+            queued.Images, queued.Documents, queued.UserId);
     }
 
     /// <summary>Returns a snapshot of the current queue for heartbeat/status reporting.</summary>

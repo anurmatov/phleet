@@ -124,6 +124,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
     public async IAsyncEnumerable<AgentProgress> ExecuteAsync(
         string task,
         IReadOnlyList<MessageImage>? images = null,
+        IReadOnlyList<MessageDocument>? documents = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         _lastActivity = DateTimeOffset.UtcNow;
@@ -132,13 +133,39 @@ public sealed class ClaudeExecutor : IAgentExecutor
         try
         {
             string message;
-            if (images is { Count: > 0 })
+            var hasImages = images is { Count: > 0 };
+            var hasDocuments = documents is { Count: > 0 };
+            if (hasImages || hasDocuments)
             {
-                var contentBlocks = new List<object>(images.Count + 1);
-                foreach (var img in images)
+                var contentBlocks = new List<object>((images?.Count ?? 0) + (documents?.Count ?? 0) + 1);
+                if (hasImages)
                 {
-                    var base64 = Convert.ToBase64String(img.Bytes);
-                    contentBlocks.Add(new { type = "image", source = new { type = "base64", media_type = img.MimeType, data = base64 } });
+                    foreach (var img in images!)
+                    {
+                        var base64 = Convert.ToBase64String(img.Bytes);
+                        contentBlocks.Add(new { type = "image", source = new { type = "base64", media_type = img.MimeType, data = base64 } });
+                    }
+                }
+                if (hasDocuments)
+                {
+                    foreach (var doc in documents!)
+                    {
+                        if (doc.FilePath is null) continue;
+                        byte[] pdfBytes;
+                        try { pdfBytes = await File.ReadAllBytesAsync(doc.FilePath, ct); }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "Failed to read document file {FilePath} for LLM block, skipping", doc.FilePath);
+                            continue;
+                        }
+                        var base64 = Convert.ToBase64String(pdfBytes);
+                        // Claude document content block (see https://docs.anthropic.com/en/docs/build-with-claude/files)
+                        contentBlocks.Add(new
+                        {
+                            type = "document",
+                            source = new { type = "base64", media_type = doc.MimeType, data = base64 }
+                        });
+                    }
                 }
                 contentBlocks.Add(new { type = "text", text = task });
                 message = JsonSerializer.Serialize(new

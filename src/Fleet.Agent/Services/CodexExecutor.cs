@@ -54,11 +54,38 @@ public sealed class CodexExecutor : IAgentExecutor
     public async IAsyncEnumerable<AgentProgress> ExecuteAsync(
         string task,
         IReadOnlyList<MessageImage>? images = null,
+        IReadOnlyList<MessageDocument>? documents = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         _lastActivity = DateTimeOffset.UtcNow;
         await _sendLock.WaitAsync(ct);
         var hasImages = images is { Count: > 0 };
+        var hasDocuments = documents is { Count: > 0 };
+
+        // Build base64 document entries for the stdin payload. The @openai/codex-sdk does not
+        // expose a native document content block API via runStreamed() — codex-bridge.mjs will
+        // log a warning and fall back to hint-only mode. The [document attachment: path] hint
+        // in the task text already provides the agent with a filesystem path it can read via
+        // Bash/Read tools, which is sufficient for v1. If the SDK gains document support in a
+        // future version, codex-bridge.mjs can consume this array without C# changes.
+        List<object>? docEntries = null;
+        if (hasDocuments)
+        {
+            docEntries = [];
+            foreach (var doc in documents!)
+            {
+                if (doc.FilePath is null) continue;
+                try
+                {
+                    var bytes = await File.ReadAllBytesAsync(doc.FilePath, ct);
+                    docEntries.Add(new { mimeType = doc.MimeType, base64 = Convert.ToBase64String(bytes) });
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "CodexExecutor: failed to read document {FilePath}, skipping in stdin payload", doc.FilePath);
+                }
+            }
+        }
 
         try
         {
@@ -83,6 +110,7 @@ public sealed class CodexExecutor : IAgentExecutor
                 systemPrompt = _promptBuilder.BuildSystemPrompt(),
                 model = _config.Model,
                 sessionId = _lastSessionId,
+                documents = docEntries?.Count > 0 ? docEntries : null,
             };
 
             await _stdin!.WriteLineAsync(JsonSerializer.Serialize(msgObj).AsMemory(), ct);

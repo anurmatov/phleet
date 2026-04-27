@@ -81,10 +81,18 @@ if (!isCliMode)
     if (telegramOpts.PersistAttachments)
     {
         var loggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
-        AttachmentSweeper.SweepExpired(
-            telegramOpts.AttachmentDir,
-            telegramOpts.AttachmentRetentionHours,
-            loggerFactory.CreateLogger("AttachmentSweeper"));
+        var sweepLogger = loggerFactory.CreateLogger("AttachmentSweeper");
+        try
+        {
+            AttachmentSweeper.SweepExpired(
+                telegramOpts.AttachmentDir,
+                telegramOpts.AttachmentRetentionHours,
+                sweepLogger);
+        }
+        catch (Exception ex)
+        {
+            sweepLogger.LogWarning(ex, "Startup attachment sweep failed — agent will continue without cleanup");
+        }
     }
 
     var startedAt = DateTimeOffset.UtcNow;

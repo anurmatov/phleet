@@ -59,7 +59,7 @@ public sealed class TelegramOptions
     /// <summary>Directory where attachment files are written. Default: /workspace/attachments.</summary>
     public string AttachmentDir { get; set; } = "/workspace/attachments";
 
-    /// <summary>Attachment files older than this many hours are deleted by the background janitor. Default: 48.</summary>
+    /// <summary>Attachment files older than this many hours are deleted by the lazy sweeper (called on each photo write and once at startup). Default: 48.</summary>
     public int AttachmentRetentionHours { get; set; } = 48;
 }
 

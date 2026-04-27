@@ -557,9 +557,6 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                         Directory.CreateDirectory(_telegramConfig.AttachmentDir);
                         filePath = Path.Combine(_telegramConfig.AttachmentDir, $"{chatId}-{messageId}-{photoIndex}.jpg");
                         await File.WriteAllBytesAsync(filePath, bytes);
-                        // Opportunistic cleanup: amortise expired-file deletion over each write rather
-                        // than running a background timer that would burn CPU on idle agents.
-                        AttachmentSweeper.SweepExpired(_telegramConfig.AttachmentDir, _telegramConfig.AttachmentRetentionHours, _logger);
                     }
                     catch (Exception ex)
                     {
@@ -568,6 +565,11 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                         _logger.LogWarning(ex, "Photo #{Index}: failed to persist attachment to disk, continuing without file path", photoIndex);
                         filePath = null;
                     }
+
+                    // Opportunistic cleanup — called after the write try/catch so a sweep failure
+                    // cannot misfire the catch and nullify a successfully written filePath.
+                    if (filePath != null)
+                        AttachmentSweeper.SweepExpired(_telegramConfig.AttachmentDir, _telegramConfig.AttachmentRetentionHours, _logger);
                 }
 
                 return new MessageImage(bytes, "image/jpeg") { FilePath = filePath };

@@ -23,7 +23,18 @@ internal static class AttachmentSweeper
         var cutoff = DateTime.UtcNow - TimeSpan.FromHours(retentionHours);
         var deleted = 0;
 
-        foreach (var file in Directory.GetFiles(dir))
+        string[] files;
+        try
+        {
+            files = Directory.GetFiles(dir);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Attachment sweep: failed to enumerate {Dir}", dir);
+            return;
+        }
+
+        foreach (var file in files)
         {
             try
             {

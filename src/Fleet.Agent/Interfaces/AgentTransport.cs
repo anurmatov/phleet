@@ -485,7 +485,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 if (groupHints.Length > 0)
                 {
                     var newText = flushedMsg.Text.Length > 0 ? $"{flushedMsg.Text}\n{groupHints}" : groupHints;
-                    flushedMsg = flushedMsg with { Text = newText, StrippedText = newText };
+                    var newStripped = flushedMsg.StrippedText.Length > 0 ? $"{flushedMsg.StrippedText}\n{groupHints}" : groupHints;
+                    flushedMsg = flushedMsg with { Text = newText, StrippedText = newStripped };
                 }
                 await _router.HandleAsync(flushedMsg);
             };

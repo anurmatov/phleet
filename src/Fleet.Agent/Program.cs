@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Http;
 
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -74,6 +75,26 @@ var app = builder.Build();
 
 if (!isCliMode)
 {
+    // One-shot startup sweep: clean up attachment files left over from prior runs.
+    // No background timer — sweep is amortised lazily on each new photo write too.
+    var telegramOpts = app.Services.GetRequiredService<IOptions<TelegramOptions>>().Value;
+    if (telegramOpts.PersistAttachments)
+    {
+        var loggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
+        var sweepLogger = loggerFactory.CreateLogger("AttachmentSweeper");
+        try
+        {
+            AttachmentSweeper.SweepExpired(
+                telegramOpts.AttachmentDir,
+                telegramOpts.AttachmentRetentionHours,
+                sweepLogger);
+        }
+        catch (Exception ex)
+        {
+            sweepLogger.LogWarning(ex, "Startup attachment sweep failed — agent will continue without cleanup");
+        }
+    }
+
     var startedAt = DateTimeOffset.UtcNow;
 
     app.MapGet("/health", () => Results.Ok(new { status = "ok" }));

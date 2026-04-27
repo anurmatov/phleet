@@ -453,7 +453,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         if (isPhoto)
         {
             var largest = message.Photo!.OrderByDescending(p => p.FileSize ?? 0).First();
-            downloadedImage = await DownloadPhotoAsync(largest, chatId, photoIndex: 1);
+            downloadedImage = await DownloadPhotoAsync(largest, chatId, message.MessageId, photoIndex: 1);
         }
 
         // Build the base IncomingMessage (no images yet — filled in below)
@@ -481,6 +481,12 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             Func<IncomingMessage, Task> flushHandler = async flushedMsg =>
             {
                 _groupSizeCapped.TryRemove(groupKey, out _);
+                var groupHints = BuildAttachmentHints(flushedMsg.Images);
+                if (groupHints.Length > 0)
+                {
+                    var newText = flushedMsg.Text.Length > 0 ? $"{flushedMsg.Text}\n{groupHints}" : groupHints;
+                    flushedMsg = flushedMsg with { Text = newText, StrippedText = newText };
+                }
                 await _router.HandleAsync(flushedMsg);
             };
 
@@ -503,15 +509,27 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         var images = downloadedImage is not null
             ? (IReadOnlyList<MessageImage>)[downloadedImage]
             : [];
-        var msg = baseMsg with { Images = images };
+        var hints = BuildAttachmentHints(images);
+        var msg = hints.Length > 0
+            ? baseMsg with
+            {
+                Images = images,
+                Text = baseMsg.Text.Length > 0 ? $"{baseMsg.Text}\n{hints}" : hints,
+                StrippedText = baseMsg.StrippedText.Length > 0 ? $"{baseMsg.StrippedText}\n{hints}" : hints,
+            }
+            : baseMsg with { Images = images };
         await _router.HandleAsync(msg);
     }
 
     /// <summary>
-    /// Download a Telegram photo to memory. Checks size limit, retries once on transient failure.
+    /// Download a Telegram photo to memory (and optionally persist to disk).
+    /// Checks size limit, retries once on transient failure.
     /// Returns null and warns the user if the image is oversized or both download attempts fail.
+    /// When <c>Telegram:PersistAttachments</c> is enabled the bytes are also written to
+    /// <c>{AttachmentDir}/{chatId}-{messageId}-{photoIndex}.jpg</c> and the path is stored
+    /// on <see cref="MessageImage.FilePath"/> so agent tools can reach the bytes later.
     /// </summary>
-    private async Task<MessageImage?> DownloadPhotoAsync(Telegram.Bot.Types.PhotoSize photo, long chatId, int photoIndex)
+    private async Task<MessageImage?> DownloadPhotoAsync(Telegram.Bot.Types.PhotoSize photo, long chatId, long messageId, int photoIndex)
     {
         var sizeBytes = (long)(photo.FileSize ?? 0);
         if (sizeBytes > 0 && sizeBytes > _telegramConfig.MaxImageBytes)
@@ -529,7 +547,25 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 if (attempt > 0) await Task.Delay(500);
                 using var ms = new System.IO.MemoryStream();
                 await _bot!.GetInfoAndDownloadFile(photo.FileId, ms);
-                return new MessageImage(ms.ToArray(), "image/jpeg");
+                var bytes = ms.ToArray();
+
+                string? filePath = null;
+                if (_telegramConfig.PersistAttachments)
+                {
+                    try
+                    {
+                        Directory.CreateDirectory(_telegramConfig.AttachmentDir);
+                        filePath = Path.Combine(_telegramConfig.AttachmentDir, $"{chatId}-{messageId}-{photoIndex}.jpg");
+                        await File.WriteAllBytesAsync(filePath, bytes);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Photo #{Index}: failed to persist attachment to disk, continuing without file path", photoIndex);
+                        filePath = null;
+                    }
+                }
+
+                return new MessageImage(bytes, "image/jpeg") { FilePath = filePath };
             }
             catch (Exception ex) when (attempt == 0)
             {
@@ -542,6 +578,18 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             }
         }
         return null;
+    }
+
+    /// <summary>
+    /// Builds the attachment hint lines for images that were persisted to disk.
+    /// Returns an empty string when no images have a file path (persistence disabled or all skipped).
+    /// </summary>
+    private static string BuildAttachmentHints(IReadOnlyList<MessageImage> images)
+    {
+        var paths = images
+            .Where(i => i.FilePath is not null)
+            .Select(i => $"[image attachment: {i.FilePath}]");
+        return string.Join("\n", paths);
     }
 
     private Task OnError(Exception exception, HandleErrorSource source)

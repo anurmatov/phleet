@@ -52,6 +52,15 @@ public sealed class TelegramOptions
 
     /// <summary>Hard-cap on total buffering time for a media group in milliseconds. If photos keep arriving past this limit, the group is force-flushed. Default: 10000 ms.</summary>
     public int MaxGroupBufferMs { get; set; } = 10_000;
+
+    /// <summary>When true, each downloaded photo is written to disk and a path hint is injected into the message text so agent tools can reach the bytes. Default: true.</summary>
+    public bool PersistAttachments { get; set; } = true;
+
+    /// <summary>Directory where attachment files are written. Default: /workspace/attachments.</summary>
+    public string AttachmentDir { get; set; } = "/workspace/attachments";
+
+    /// <summary>Attachment files older than this many hours are deleted by the background janitor. Default: 48.</summary>
+    public int AttachmentRetentionHours { get; set; } = 48;
 }
 
 public sealed class RabbitMqOptions

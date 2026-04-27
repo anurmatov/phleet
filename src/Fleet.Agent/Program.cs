@@ -68,6 +68,7 @@ else
 
     builder.Services.AddHostedService<WarmupService>();
     builder.Services.AddHostedService<OrchestratorHeartbeatService>();
+    builder.Services.AddHostedService<AttachmentJanitorService>();
 }
 
 var app = builder.Build();

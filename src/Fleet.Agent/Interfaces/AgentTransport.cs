@@ -624,10 +624,9 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         var fileSize = document.FileSize ?? 0;
         if (fileSize > _telegramConfig.MaxDocumentBytes)
         {
-            _logger.LogWarning("Document ({FileId}) exceeds MaxDocumentBytes ({Size} > {Limit}), rejecting",
+            _logger.LogWarning("Document ({FileId}) pre-download size exceeds MaxDocumentBytes ({Size} > {Limit}), rejecting",
                 document.FileId, fileSize, _telegramConfig.MaxDocumentBytes);
-            await SendTextAsync(chatId,
-                $"(PDF too large — {fileSize / 1_048_576} MB exceeds the {_telegramConfig.MaxDocumentBytes / 1_048_576} MB limit. Please send a smaller file.)");
+            await SendTextAsync(chatId, PdfTooLargeMessage(fileSize));
             return null;
         }
 
@@ -636,6 +635,16 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             using var ms = new System.IO.MemoryStream();
             await _bot!.GetInfoAndDownloadFile(document.FileId, ms);
             var bytes = ms.ToArray();
+
+            // Stage 2: actual download may exceed the pre-download estimate (Telegram's FileSize
+            // is advisory). Guard again with the true byte count before touching disk.
+            if (bytes.Length > _telegramConfig.MaxDocumentBytes)
+            {
+                _logger.LogWarning("Document ({FileId}) actual size exceeds MaxDocumentBytes ({Size} > {Limit}) after download, rejecting",
+                    document.FileId, bytes.Length, _telegramConfig.MaxDocumentBytes);
+                await SendTextAsync(chatId, PdfTooLargeMessage(bytes.Length));
+                return null;
+            }
 
             string? filePath = null;
             try
@@ -669,6 +678,9 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             return null;
         }
     }
+
+    private string PdfTooLargeMessage(long sizeBytes) =>
+        $"(PDF too large — {sizeBytes / 1_048_576} MB exceeds the {_telegramConfig.MaxDocumentBytes / 1_048_576} MB limit. Please send a smaller file.)";
 
     private Task OnError(Exception exception, HandleErrorSource source)
     {

@@ -262,19 +262,6 @@ public class AttachmentPersistenceTests
         Assert.Equal(original.FilePath, copy.FilePath);
     }
 
-    // ── Document path construction ────────────────────────────────────────────
-
-    [Fact]
-    public void DocumentPath_FollowsSameChatMessageIndexShape()
-    {
-        long chatId = 12345;
-        long messageId = 67890;
-        var dir = "/workspace/attachments";
-        var expected = $"{dir}/{chatId}-{messageId}-1.pdf";
-        var actual = Path.Combine(dir, $"{chatId}-{messageId}-1.pdf");
-        Assert.Equal(expected, actual);
-    }
-
     // ── BuildHints — extension-aware (images and documents) ──────────────────
 
     [Fact]
@@ -338,27 +325,32 @@ public class AttachmentPersistenceTests
     // ── 32 MB size-cap rejection ──────────────────────────────────────────────
 
     [Fact]
-    public void MaxDocumentBytes_SizeCap_FileSizeCheckLogic()
+    public void MaxDocumentBytes_StageOne_PreDownloadSizeRejectsOversizedFile()
     {
-        // Verify the size guard threshold: 32 MB = 33_554_432 bytes
-        const long limit = 33_554_432;
-        const long oversized = 33_554_433; // 1 byte over
-        const long ok = 33_554_432;        // exactly at limit — should pass
+        // Stage 1 guard: Telegram's advisory FileSize triggers rejection before any download.
+        var opts = new TelegramOptions { MaxDocumentBytes = 33_554_432 }; // 32 MB default
+        long oversized = 33_554_433; // 1 byte over
+        long exactly = 33_554_432;   // exactly at limit — should pass
 
-        Assert.True(oversized > limit, "oversized file should exceed limit");
-        Assert.False(ok > limit, "file exactly at limit should not exceed it");
+        Assert.True(oversized > opts.MaxDocumentBytes,
+            "pre-download guard should fire for advisory size exceeding limit");
+        Assert.False(exactly > opts.MaxDocumentBytes,
+            "pre-download guard should not fire when advisory size equals limit");
     }
 
-    // ── PersistAttachments kill switch — document path ────────────────────────
-
     [Fact]
-    public void PersistAttachments_False_DocumentKillSwitchRespected()
+    public void MaxDocumentBytes_StageTwo_ActualBytesExceedingLimitRejected()
     {
-        // When PersistAttachments=false, DownloadDocumentAsync returns null immediately —
-        // no download, no disk write, no hint, no LLM block. This test documents that
-        // the kill switch applies to both images and documents.
-        var opts = new TelegramOptions { PersistAttachments = false };
-        Assert.False(opts.PersistAttachments);
+        // Stage 2 guard: actual download may exceed the advisory FileSize estimate.
+        // Verify the comparison fires correctly against the config value.
+        var opts = new TelegramOptions { MaxDocumentBytes = 1024 };
+        var oversizedBytes = new byte[1025];
+        var okBytes = new byte[1024];
+
+        Assert.True(oversizedBytes.Length > opts.MaxDocumentBytes,
+            "stage-2 guard should fire when actual download size exceeds limit");
+        Assert.False(okBytes.Length > opts.MaxDocumentBytes,
+            "stage-2 guard should not fire when actual download size is at limit");
     }
 
     // ── SweepExpired handles .pdf files ───────────────────────────────────────

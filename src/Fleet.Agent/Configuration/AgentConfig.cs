@@ -63,7 +63,7 @@ public sealed class TelegramOptions
     public int AttachmentRetentionHours { get; set; } = 48;
 
     /// <summary>Maximum PDF document size in bytes; documents above this limit are rejected with a user-facing warning and not passed to the LLM. Default: 32 MB (Claude SDK per-document limit).</summary>
-    public int MaxDocumentBytes { get; set; } = 33_554_432; // 32 MB
+    public long MaxDocumentBytes { get; set; } = 33_554_432; // 32 MB
 }
 
 public sealed class RabbitMqOptions

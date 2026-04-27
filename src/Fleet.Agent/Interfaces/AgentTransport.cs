@@ -481,7 +481,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             Func<IncomingMessage, Task> flushHandler = async flushedMsg =>
             {
                 _groupSizeCapped.TryRemove(groupKey, out _);
-                var groupHints = BuildAttachmentHints(flushedMsg.Images);
+                var groupHints = AttachmentSweeper.BuildHints(flushedMsg.Images);
                 if (groupHints.Length > 0)
                 {
                     var newText = flushedMsg.Text.Length > 0 ? $"{flushedMsg.Text}\n{groupHints}" : groupHints;
@@ -509,7 +509,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         var images = downloadedImage is not null
             ? (IReadOnlyList<MessageImage>)[downloadedImage]
             : [];
-        var hints = BuildAttachmentHints(images);
+        var hints = AttachmentSweeper.BuildHints(images);
         var msg = hints.Length > 0
             ? baseMsg with
             {
@@ -557,9 +557,14 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                         Directory.CreateDirectory(_telegramConfig.AttachmentDir);
                         filePath = Path.Combine(_telegramConfig.AttachmentDir, $"{chatId}-{messageId}-{photoIndex}.jpg");
                         await File.WriteAllBytesAsync(filePath, bytes);
+                        // Opportunistic cleanup: amortise expired-file deletion over each write rather
+                        // than running a background timer that would burn CPU on idle agents.
+                        AttachmentSweeper.SweepExpired(_telegramConfig.AttachmentDir, _telegramConfig.AttachmentRetentionHours, _logger);
                     }
                     catch (Exception ex)
                     {
+                        // Disk IO failure must not break vision: the agent still sees the image via
+                        // multimodal content blocks; we just lose the filesystem reference.
                         _logger.LogWarning(ex, "Photo #{Index}: failed to persist attachment to disk, continuing without file path", photoIndex);
                         filePath = null;
                     }
@@ -580,17 +585,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         return null;
     }
 
-    /// <summary>
-    /// Builds the attachment hint lines for images that were persisted to disk.
-    /// Returns an empty string when no images have a file path (persistence disabled or all skipped).
-    /// </summary>
-    private static string BuildAttachmentHints(IReadOnlyList<MessageImage> images)
-    {
-        var paths = images
-            .Where(i => i.FilePath is not null)
-            .Select(i => $"[image attachment: {i.FilePath}]");
-        return string.Join("\n", paths);
-    }
+
 
     private Task OnError(Exception exception, HandleErrorSource source)
     {

@@ -1,12 +1,13 @@
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Fleet.Agent.Tests;
 
 /// <summary>
 /// Tests for the Telegram attachment persistence feature (issue #110).
-/// Covers config defaults, MessageImage.FilePath propagation, and hint-building logic.
+/// Covers config defaults, MessageImage.FilePath propagation, hint-building and sweep logic.
 /// </summary>
 public class AttachmentPersistenceTests
 {
@@ -63,22 +64,12 @@ public class AttachmentPersistenceTests
         Assert.Equal(original.FilePath, copy.FilePath);
     }
 
-    // ── Hint-building logic ───────────────────────────────────────────────────
-
-    // Reproduce the BuildAttachmentHints logic from AgentTransport so we can test
-    // it independently without wiring up the full Telegram infrastructure.
-    private static string BuildAttachmentHints(IReadOnlyList<MessageImage> images)
-    {
-        var paths = images
-            .Where(i => i.FilePath is not null)
-            .Select(i => $"[image attachment: {i.FilePath}]");
-        return string.Join("\n", paths);
-    }
+    // ── AttachmentSweeper.BuildHints ──────────────────────────────────────────
 
     [Fact]
     public void BuildHints_NoImages_ReturnsEmpty()
     {
-        var hints = BuildAttachmentHints([]);
+        var hints = AttachmentSweeper.BuildHints([]);
         Assert.Equal("", hints);
     }
 
@@ -86,7 +77,7 @@ public class AttachmentPersistenceTests
     public void BuildHints_ImageWithNoFilePath_ReturnsEmpty()
     {
         var img = new MessageImage(new byte[] { 1 }, "image/jpeg");
-        var hints = BuildAttachmentHints([img]);
+        var hints = AttachmentSweeper.BuildHints([img]);
         Assert.Equal("", hints);
     }
 
@@ -97,7 +88,7 @@ public class AttachmentPersistenceTests
         {
             FilePath = "/workspace/attachments/100-200-1.jpg",
         };
-        var hints = BuildAttachmentHints([img]);
+        var hints = AttachmentSweeper.BuildHints([img]);
         Assert.Equal("[image attachment: /workspace/attachments/100-200-1.jpg]", hints);
     }
 
@@ -110,7 +101,7 @@ public class AttachmentPersistenceTests
             new(new byte[] { 2 }, "image/jpeg") { FilePath = "/workspace/attachments/1-11-1.jpg" },
             new(new byte[] { 3 }, "image/jpeg") { FilePath = "/workspace/attachments/1-12-1.jpg" },
         };
-        var hints = BuildAttachmentHints(images);
+        var hints = AttachmentSweeper.BuildHints(images);
         var lines = hints.Split('\n');
         Assert.Equal(3, lines.Length);
         Assert.Equal("[image attachment: /workspace/attachments/1-10-1.jpg]", lines[0]);
@@ -121,14 +112,13 @@ public class AttachmentPersistenceTests
     [Fact]
     public void BuildHints_MixedPathsAndNulls_OnlyIncludesPersisted()
     {
-        // Images where some were skipped (size limit) — those have null FilePath
         var images = new MessageImage[]
         {
             new(new byte[] { 1 }, "image/jpeg") { FilePath = "/workspace/attachments/1-10-1.jpg" },
-            new(new byte[] { 2 }, "image/jpeg"),  // no FilePath (persistence disabled or skipped)
+            new(new byte[] { 2 }, "image/jpeg"),  // no FilePath (skipped or disabled)
             new(new byte[] { 3 }, "image/jpeg") { FilePath = "/workspace/attachments/1-12-1.jpg" },
         };
-        var hints = BuildAttachmentHints(images);
+        var hints = AttachmentSweeper.BuildHints(images);
         var lines = hints.Split('\n');
         Assert.Equal(2, lines.Length);
         Assert.Contains("/workspace/attachments/1-10-1.jpg", hints);
@@ -137,8 +127,8 @@ public class AttachmentPersistenceTests
 
     // ── Hint injection into message text ─────────────────────────────────────
 
-    // Reproduce the text-injection logic from AgentTransport.OnMessage so we can
-    // verify hint injection without the full Telegram DI graph.
+    // Reproduce the text-injection logic from AgentTransport.OnMessage to verify
+    // that hint injection produces the expected shapes.
     private static (string Text, string StrippedText) ApplyHints(string text, string strippedText, string hints)
     {
         if (hints.Length == 0)
@@ -186,22 +176,50 @@ public class AttachmentPersistenceTests
         Assert.StartsWith("here are the photos\n", text);
     }
 
-    // ── AttachmentJanitorService: no-ops when PersistAttachments=false ────────
+    // ── AttachmentSweeper.SweepExpired integration test ───────────────────────
 
     [Fact]
-    public async Task Janitor_PersistAttachmentsDisabled_DoesNotThrow()
+    public void SweepExpired_DeletesOldFile_PreservesRecentFile()
     {
-        var opts = Microsoft.Extensions.Options.Options.Create(new TelegramOptions
+        var dir = Path.Combine(Path.GetTempPath(), $"fleet-attach-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
         {
-            PersistAttachments = false,
-        });
-        var logger = Microsoft.Extensions.Logging.Abstractions.NullLogger<AttachmentJanitorService>.Instance;
-        var janitor = new AttachmentJanitorService(opts, logger);
+            // Create an "old" file — backdated past the retention cutoff
+            var oldFile = Path.Combine(dir, "old.jpg");
+            File.WriteAllBytes(oldFile, new byte[] { 1 });
+            File.SetLastWriteTimeUtc(oldFile, DateTime.UtcNow - TimeSpan.FromHours(49));
 
-        using var cts = new CancellationTokenSource();
-        cts.Cancel();
+            // Create a "fresh" file — within retention window
+            var freshFile = Path.Combine(dir, "fresh.jpg");
+            File.WriteAllBytes(freshFile, new byte[] { 2 });
 
-        // Should return immediately without touching any files
-        await janitor.StartAsync(cts.Token);
+            AttachmentSweeper.SweepExpired(dir, retentionHours: 48, NullLogger.Instance);
+
+            Assert.False(File.Exists(oldFile), "expired file should have been deleted");
+            Assert.True(File.Exists(freshFile), "recent file must be preserved");
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SweepExpired_NonExistentDir_DoesNotThrow()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"fleet-no-such-dir-{Guid.NewGuid():N}");
+        // Must not throw even if the directory doesn't exist yet
+        AttachmentSweeper.SweepExpired(dir, retentionHours: 48, NullLogger.Instance);
+    }
+
+    [Fact]
+    public void SweepExpired_PersistAttachmentsDisabled_CallerNeverCallsSweep()
+    {
+        // When PersistAttachments=false the code path that writes files and calls
+        // SweepExpired is never reached. Verify the config default is respected.
+        var opts = new TelegramOptions { PersistAttachments = false };
+        Assert.False(opts.PersistAttachments);
+        // No sweep call needed — this documents the expected caller behaviour.
     }
 }

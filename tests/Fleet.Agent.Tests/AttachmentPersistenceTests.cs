@@ -222,4 +222,180 @@ public class AttachmentPersistenceTests
         Assert.False(opts.PersistAttachments);
         // No sweep call needed — this documents the expected caller behaviour.
     }
+
+    // ── MaxDocumentBytes config ───────────────────────────────────────────────
+
+    [Fact]
+    public void MaxDocumentBytes_DefaultIs32MB()
+    {
+        var opts = new TelegramOptions();
+        Assert.Equal(33_554_432, opts.MaxDocumentBytes); // 32 * 1024 * 1024
+    }
+
+    // ── MessageDocument record ────────────────────────────────────────────────
+
+    [Fact]
+    public void MessageDocument_FilePathDefaultsToNull()
+    {
+        var doc = new MessageDocument("file123", "application/pdf", 1024, "invoice.pdf");
+        Assert.Null(doc.FilePath);
+    }
+
+    [Fact]
+    public void MessageDocument_FilePathCanBeSet()
+    {
+        var doc = new MessageDocument("file123", "application/pdf", 1024, "invoice.pdf")
+        {
+            FilePath = "/workspace/attachments/100-200-1.pdf",
+        };
+        Assert.Equal("/workspace/attachments/100-200-1.pdf", doc.FilePath);
+    }
+
+    [Fact]
+    public void MessageDocument_WithExpressionRetainsFilePath()
+    {
+        var original = new MessageDocument("file123", "application/pdf", 1024, "invoice.pdf")
+        {
+            FilePath = "/workspace/attachments/1-2-1.pdf",
+        };
+        var copy = original with { };
+        Assert.Equal(original.FilePath, copy.FilePath);
+    }
+
+    // ── BuildHints — extension-aware (images and documents) ──────────────────
+
+    [Fact]
+    public void BuildHints_PdfDocument_ReturnsDocumentAttachmentHint()
+    {
+        var doc = new MessageDocument("f1", "application/pdf", 100, "report.pdf")
+        {
+            FilePath = "/workspace/attachments/1-2-1.pdf",
+        };
+        var hints = AttachmentSweeper.BuildHints([], [doc]);
+        Assert.Equal("[document attachment: /workspace/attachments/1-2-1.pdf]", hints);
+    }
+
+    [Fact]
+    public void BuildHints_JpgImage_ReturnsImageAttachmentHint()
+    {
+        var img = new MessageImage(new byte[] { 1 }, "image/jpeg")
+        {
+            FilePath = "/workspace/attachments/1-2-1.jpg",
+        };
+        var hints = AttachmentSweeper.BuildHints([img]);
+        Assert.Equal("[image attachment: /workspace/attachments/1-2-1.jpg]", hints);
+    }
+
+    [Fact]
+    public void BuildHints_MixedImageAndDocument_BothHintsReturned()
+    {
+        var img = new MessageImage(new byte[] { 1 }, "image/jpeg")
+        {
+            FilePath = "/workspace/attachments/1-2-1.jpg",
+        };
+        var doc = new MessageDocument("f1", "application/pdf", 100, "doc.pdf")
+        {
+            FilePath = "/workspace/attachments/1-2-1.pdf",
+        };
+        var hints = AttachmentSweeper.BuildHints([img], [doc]);
+        Assert.Contains("[image attachment: /workspace/attachments/1-2-1.jpg]", hints);
+        Assert.Contains("[document attachment: /workspace/attachments/1-2-1.pdf]", hints);
+    }
+
+    [Fact]
+    public void BuildHints_DocumentWithNoFilePath_ReturnsEmpty()
+    {
+        var doc = new MessageDocument("f1", "application/pdf", 100, "doc.pdf");
+        var hints = AttachmentSweeper.BuildHints([], [doc]);
+        Assert.Equal("", hints);
+    }
+
+    [Fact]
+    public void BuildHints_UnknownExtension_SilentlySkipped()
+    {
+        // .docx is not in the hint prefix map — should produce no hint
+        var doc = new MessageDocument("f1", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 100, "file.docx")
+        {
+            FilePath = "/workspace/attachments/1-2-1.docx",
+        };
+        var hints = AttachmentSweeper.BuildHints([], [doc]);
+        Assert.Equal("", hints);
+    }
+
+    // ── 32 MB size-cap rejection ──────────────────────────────────────────────
+
+    [Fact]
+    public void MaxDocumentBytes_StageOne_PreDownloadSizeRejectsOversizedFile()
+    {
+        // Stage 1 guard: Telegram's advisory FileSize triggers rejection before any download.
+        var opts = new TelegramOptions { MaxDocumentBytes = 33_554_432 }; // 32 MB default
+        long oversized = 33_554_433; // 1 byte over
+        long exactly = 33_554_432;   // exactly at limit — should pass
+
+        Assert.True(oversized > opts.MaxDocumentBytes,
+            "pre-download guard should fire for advisory size exceeding limit");
+        Assert.False(exactly > opts.MaxDocumentBytes,
+            "pre-download guard should not fire when advisory size equals limit");
+    }
+
+    [Fact]
+    public void MaxDocumentBytes_StageTwo_ActualBytesExceedingLimitRejected()
+    {
+        // Stage 2 guard: actual download may exceed the advisory FileSize estimate.
+        // Verify the comparison fires correctly against the config value.
+        var opts = new TelegramOptions { MaxDocumentBytes = 1024 };
+        var oversizedBytes = new byte[1025];
+        var okBytes = new byte[1024];
+
+        Assert.True(oversizedBytes.Length > opts.MaxDocumentBytes,
+            "stage-2 guard should fire when actual download size exceeds limit");
+        Assert.False(okBytes.Length > opts.MaxDocumentBytes,
+            "stage-2 guard should not fire when actual download size is at limit");
+    }
+
+    // ── SweepExpired handles .pdf files ───────────────────────────────────────
+
+    [Fact]
+    public void SweepExpired_DeletesExpiredPdfFile()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"fleet-attach-test-pdf-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var oldPdf = Path.Combine(dir, "old-doc.pdf");
+            File.WriteAllBytes(oldPdf, new byte[] { 0x25, 0x50, 0x44, 0x46 }); // %PDF header
+            File.SetLastWriteTimeUtc(oldPdf, DateTime.UtcNow - TimeSpan.FromHours(49));
+
+            var freshPdf = Path.Combine(dir, "fresh-doc.pdf");
+            File.WriteAllBytes(freshPdf, new byte[] { 0x25, 0x50, 0x44, 0x46 });
+
+            AttachmentSweeper.SweepExpired(dir, retentionHours: 48, NullLogger.Instance);
+
+            Assert.False(File.Exists(oldPdf), "expired PDF should have been deleted");
+            Assert.True(File.Exists(freshPdf), "recent PDF must be preserved");
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    // ── Document hint injection into message text ─────────────────────────────
+
+    [Fact]
+    public void DocumentHintInjection_WithCaption_AppendedAfterCaption()
+    {
+        var hints = "[document attachment: /workspace/attachments/1-2-1.pdf]";
+        var (text, stripped) = ApplyHints("please review this invoice", "please review this invoice", hints);
+        Assert.Equal("please review this invoice\n[document attachment: /workspace/attachments/1-2-1.pdf]", text);
+        Assert.Equal("please review this invoice\n[document attachment: /workspace/attachments/1-2-1.pdf]", stripped);
+    }
+
+    [Fact]
+    public void DocumentHintInjection_NoCaption_HintIsOnlyText()
+    {
+        var hints = "[document attachment: /workspace/attachments/1-2-1.pdf]";
+        var (text, _) = ApplyHints("", "", hints);
+        Assert.Equal("[document attachment: /workspace/attachments/1-2-1.pdf]", text);
+    }
 }

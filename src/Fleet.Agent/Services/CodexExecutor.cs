@@ -49,11 +49,20 @@ public sealed class CodexExecutor : IAgentExecutor
         _config = config.Value;
         _promptBuilder = promptBuilder;
         _logger = logger;
+
+        // @openai/codex-sdk@0.118.0 does not expose a document content-block API via
+        // runStreamed(). PDF documents received from Telegram are persisted to disk and a
+        // [document attachment: path] hint is injected into the task text so the agent
+        // can reach the file via Bash/Read tools. See issue #112 amendment for context.
+        _logger.LogInformation(
+            "CodexExecutor: document block passthrough is not supported by @openai/codex-sdk@0.118.0 " +
+            "— agents will use hint-only mode (file path in task text) for PDF attachments");
     }
 
     public async IAsyncEnumerable<AgentProgress> ExecuteAsync(
         string task,
         IReadOnlyList<MessageImage>? images = null,
+        IReadOnlyList<MessageDocument>? documents = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         _lastActivity = DateTimeOffset.UtcNow;

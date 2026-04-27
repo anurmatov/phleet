@@ -54,15 +54,39 @@ internal static class AttachmentSweeper
             logger.LogInformation("Attachment sweep: deleted {Count} expired file(s) from {Dir}", deleted, dir);
     }
 
-    /// <summary>
-    /// Builds the <c>[image attachment: path]</c> hint lines for images persisted to disk.
-    /// Returns an empty string when no images have a file path (persistence disabled or skipped).
-    /// </summary>
-    internal static string BuildHints(IReadOnlyList<MessageImage> images)
+    // Extension-to-hint-prefix map. Unknown extensions produce no hint (silent skip).
+    private static readonly Dictionary<string, string> _hintPrefixes = new(StringComparer.OrdinalIgnoreCase)
     {
-        var paths = images
+        { ".jpg",  "image attachment" },
+        { ".jpeg", "image attachment" },
+        { ".png",  "image attachment" },
+        { ".pdf",  "document attachment" },
+    };
+
+    /// <summary>
+    /// Builds hint lines for attachments persisted to disk, using an extension-aware prefix map.
+    /// Images produce <c>[image attachment: path]</c>; PDFs produce <c>[document attachment: path]</c>.
+    /// Returns an empty string when no attachments have a file path (persistence disabled or skipped).
+    /// Unknown file extensions are silently skipped for forward compatibility.
+    /// </summary>
+    internal static string BuildHints(
+        IReadOnlyList<MessageImage> images,
+        IReadOnlyList<MessageDocument>? documents = null)
+    {
+        var imagePaths = images
             .Where(i => i.FilePath is not null)
-            .Select(i => $"[image attachment: {i.FilePath}]");
-        return string.Join("\n", paths);
+            .Select(i => (Path: i.FilePath!, Ext: Path.GetExtension(i.FilePath!)));
+
+        var docPaths = (documents ?? [])
+            .Where(d => d.FilePath is not null)
+            .Select(d => (Path: d.FilePath!, Ext: Path.GetExtension(d.FilePath!)));
+
+        var hints = imagePaths.Concat(docPaths)
+            .Select(f => _hintPrefixes.TryGetValue(f.Ext, out var prefix)
+                ? $"[{prefix}: {f.Path}]"
+                : null)
+            .Where(h => h is not null);
+
+        return string.Join("\n", hints);
     }
 }

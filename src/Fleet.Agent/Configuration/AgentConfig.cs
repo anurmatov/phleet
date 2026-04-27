@@ -61,6 +61,9 @@ public sealed class TelegramOptions
 
     /// <summary>Attachment files older than this many hours are deleted by the lazy sweeper (called on each photo write and once at startup). Default: 48.</summary>
     public int AttachmentRetentionHours { get; set; } = 48;
+
+    /// <summary>Maximum PDF document size in bytes; documents above this limit are rejected with a user-facing warning and not passed to the LLM. Default: 32 MB (Claude SDK per-document limit).</summary>
+    public long MaxDocumentBytes { get; set; } = 33_554_432; // 32 MB
 }
 
 public sealed class RabbitMqOptions

@@ -13,6 +13,7 @@ public sealed record QueuedMessage(
     string? CorrelationId,
     string? TaskId,
     IReadOnlyList<MessageImage>? Images,
+    IReadOnlyList<MessageDocument>? Documents,
     long UserId,
     DateTimeOffset QueuedAt,
     /// <summary>Human-readable sender label for display in heartbeats and dashboard.</summary>

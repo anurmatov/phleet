@@ -153,7 +153,7 @@ If you run Phleet on Windows, on a Linux host, or with Codex as the primary prov
   <img src=".github/assets/phleet-task-flow.svg" alt="Sequence diagram showing how a task flows from your Telegram DM through the co-CTO, RabbitMQ, Temporal, and a worker agent, then back" width="900">
 </p>
 
-You DM the co-CTO. It starts a Temporal workflow via `fleet-temporal-bridge`. The workflow publishes a `DelegateToAgentActivity` directive into RabbitMQ; the worker agent picks it up from its queue, does the work (reading memory, editing code, opening a PR), and publishes the result back through RabbitMQ. The workflow resumes, notifies the co-CTO, and you get a Telegram reply with the outcome. MCP tool calls (start workflow, read memory) go directly from the agent to the MCP server; everything else flows through RabbitMQ.
+You DM the co-CTO. It starts a Temporal workflow via `fleet-temporal-bridge`. The workflow publishes a task directive into RabbitMQ; the worker agent picks it up from its queue, does the work (reading memory, editing code, opening a PR), and publishes the result back through RabbitMQ. The workflow resumes, notifies the co-CTO, and you get a Telegram reply with the outcome. Model Context Protocol (MCP) tool calls (start workflow, read memory) go directly from the agent to the MCP server; everything else flows through RabbitMQ.
 
 ### Consensus review
 

@@ -1,11 +1,55 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 360">
-  <!-- Triangle edges -->
-  <line x1="360" y1="70" x2="225" y2="290" stroke="#ccc" stroke-width="1"/>
-  <line x1="225" y1="290" x2="495" y2="290" stroke="#ccc" stroke-width="1"/>
-  <line x1="495" y1="290" x2="360" y2="70" stroke="#ccc" stroke-width="1"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <!-- background -->
+  <rect width="1600" height="900" fill="#ffffff"/>
 
-  <!-- Nodes -->
-  <circle cx="360" cy="70" r="6" fill="#e8a035"/>
-  <circle cx="225" cy="290" r="6" fill="#4dd8c0"/>
-  <circle cx="495" cy="290" r="6" fill="#8090a8"/>
+  <!-- subtle dot grid -->
+  <defs>
+    <pattern id="dotgrid" x="0" y="0" width="40" height="40" patternUnits="userSpaceOnUse">
+      <circle cx="20" cy="20" r="1" fill="#eee"/>
+    </pattern>
+  </defs>
+  <rect width="1600" height="900" fill="url(#dotgrid)"/>
+
+  <!-- network of agent nodes scattered in background -->
+  <g stroke="#ddd" stroke-width="1" fill="none">
+    <line x1="160" y1="180" x2="380" y2="320"/>
+    <line x1="380" y1="320" x2="240" y2="540"/>
+    <line x1="240" y1="540" x2="160" y2="720"/>
+    <line x1="160" y1="180" x2="240" y2="540"/>
+    <line x1="1200" y1="240" x2="1440" y2="360"/>
+    <line x1="1200" y1="240" x2="1320" y2="600"/>
+    <line x1="1440" y1="360" x2="1320" y2="600"/>
+    <line x1="1320" y1="600" x2="1460" y2="740"/>
+    <line x1="380" y1="320" x2="1200" y2="240"/>
+    <line x1="240" y1="540" x2="1320" y2="600"/>
+  </g>
+  <g fill="#222">
+    <circle cx="160" cy="180" r="5"/>
+    <circle cx="380" cy="320" r="5"/>
+    <circle cx="240" cy="540" r="5"/>
+    <circle cx="160" cy="720" r="5"/>
+    <circle cx="1200" cy="240" r="5"/>
+    <circle cx="1440" cy="360" r="5"/>
+    <circle cx="1320" cy="600" r="5"/>
+    <circle cx="1460" cy="740" r="5"/>
+  </g>
+
+  <!-- top-left tag -->
+  <text x="80" y="80" font-size="13" fill="#999" font-weight="600" letter-spacing="2">ANVARLAB.COM</text>
+
+  <!-- top-right tag -->
+  <text x="1520" y="80" text-anchor="end" font-size="13" fill="#999" font-weight="600" letter-spacing="2">MULTI-AGENT · SELF-MODIFYING</text>
+
+  <!-- main wordmark -->
+  <text x="800" y="500" text-anchor="middle" font-size="320" font-weight="800" fill="#111" letter-spacing="-8">phleet</text>
+
+  <!-- accent rule -->
+  <line x1="700" y1="560" x2="900" y2="560" stroke="#111" stroke-width="2"/>
+
+  <!-- subtitle -->
+  <text x="800" y="620" text-anchor="middle" font-size="22" fill="#444" font-weight="500">agents that build their own workflows</text>
+
+  <!-- bottom corner labels -->
+  <text x="80" y="850" font-size="12" fill="#bbb" font-weight="500">github.com/anurmatov/phleet</text>
+  <text x="1520" y="850" text-anchor="end" font-size="12" fill="#bbb" font-weight="500">anvar nurmatov · acto</text>
 </svg>

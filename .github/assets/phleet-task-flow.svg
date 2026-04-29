@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 720" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#999"/>
+    </marker>
+    <marker id="arrow-light" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#bbb"/>
+    </marker>
+  </defs>
+
+  <!-- TITLE -->
+  <text x="550" y="36" text-anchor="middle" font-size="22" font-weight="600" fill="#111">How one task flows</text>
+  <text x="550" y="58" text-anchor="middle" font-size="12" fill="#666">You ask the co-CTO to do something. It spawns a workflow. The workflow delegates to a worker. Result comes back.</text>
+
+  <!-- ACTOR HEADS -->
+  <!-- You / Telegram -->
+  <rect x="60" y="86" width="160" height="50" rx="6" fill="#fff" stroke="#222" stroke-width="1.5"/>
+  <text x="140" y="108" text-anchor="middle" font-size="13" font-weight="600" fill="#111">You</text>
+  <text x="140" y="124" text-anchor="middle" font-size="10" fill="#666">via Telegram</text>
+
+  <!-- co-CTO -->
+  <rect x="260" y="86" width="160" height="50" rx="6" fill="#fff" stroke="#111" stroke-width="2"/>
+  <text x="340" y="108" text-anchor="middle" font-size="13" font-weight="600" fill="#111">co-CTO agent</text>
+  <text x="340" y="124" text-anchor="middle" font-size="10" fill="#666">container · LLM</text>
+
+  <!-- RabbitMQ -->
+  <rect x="460" y="86" width="160" height="50" rx="6" fill="#f0f0f0" stroke="#222" stroke-width="1.5"/>
+  <text x="540" y="108" text-anchor="middle" font-size="13" font-weight="600" fill="#111">RabbitMQ</text>
+  <text x="540" y="124" text-anchor="middle" font-size="10" fill="#666">message bus</text>
+
+  <!-- Temporal -->
+  <rect x="660" y="86" width="160" height="50" rx="6" fill="#f0f0f0" stroke="#222" stroke-width="1.5"/>
+  <text x="740" y="108" text-anchor="middle" font-size="13" font-weight="600" fill="#111">Temporal</text>
+  <text x="740" y="124" text-anchor="middle" font-size="10" fill="#666">workflow engine</text>
+
+  <!-- Agent B -->
+  <rect x="860" y="86" width="160" height="50" rx="6" fill="#fff" stroke="#222" stroke-width="1.5"/>
+  <text x="940" y="108" text-anchor="middle" font-size="13" font-weight="600" fill="#111">Agent B</text>
+  <text x="940" y="124" text-anchor="middle" font-size="10" fill="#666">worker · LLM</text>
+
+  <!-- LIFELINES (dashed verticals) -->
+  <line x1="140" y1="138" x2="140" y2="660" stroke="#bbb" stroke-width="1.0" stroke-dasharray="4,4"/>
+  <line x1="340" y1="138" x2="340" y2="660" stroke="#bbb" stroke-width="1.0" stroke-dasharray="4,4"/>
+  <line x1="540" y1="138" x2="540" y2="660" stroke="#bbb" stroke-width="1.0" stroke-dasharray="4,4"/>
+  <line x1="740" y1="138" x2="740" y2="660" stroke="#bbb" stroke-width="1.0" stroke-dasharray="4,4"/>
+  <line x1="940" y1="138" x2="940" y2="660" stroke="#bbb" stroke-width="1.0" stroke-dasharray="4,4"/>
+
+  <!-- ACTIVATION BARS (thin filled rects on lifelines for active periods) -->
+  <!-- co-CTO active during step 1-2 and again at end -->
+  <rect x="335" y="170" width="10" height="80" fill="#f0f0f0" stroke="#222" stroke-width="0.8"/>
+  <rect x="335" y="540" width="10" height="60" fill="#f0f0f0" stroke="#222" stroke-width="0.8"/>
+  <!-- Temporal active throughout middle -->
+  <rect x="735" y="240" width="10" height="320" fill="#f0f0f0" stroke="#222" stroke-width="0.8"/>
+  <!-- Agent B active during work -->
+  <rect x="935" y="320" width="10" height="140" fill="#f0f0f0" stroke="#222" stroke-width="0.8"/>
+
+  <!-- MESSAGES (top to bottom) -->
+
+  <!-- 1. You → co-CTO: DM -->
+  <line x1="140" y1="180" x2="335" y2="180" stroke="#999" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <text x="237" y="174" text-anchor="middle" font-size="11" fill="#111">"implement issue #42 with agent B"</text>
+
+  <!-- 2. co-CTO → Temporal: start workflow (direct MCP call, skips RMQ) -->
+  <line x1="345" y1="220" x2="735" y2="220" stroke="#999" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <text x="540" y="214" text-anchor="middle" font-size="11" fill="#111">start UwePrImplementationWorkflow</text>
+  <text x="540" y="232" text-anchor="middle" font-size="9" fill="#999" font-style="italic">MCP call via fleet-temporal-bridge</text>
+
+  <!-- 3. Temporal → RMQ: publish directive -->
+  <line x1="735" y1="280" x2="550" y2="280" stroke="#999" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <text x="640" y="274" text-anchor="middle" font-size="11" fill="#111">DelegateToAgentActivity(B)</text>
+
+  <!-- 4. RMQ → Agent B: deliver -->
+  <line x1="540" y1="320" x2="935" y2="320" stroke="#999" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <text x="737" y="314" text-anchor="middle" font-size="11" fill="#111">directive arrives in agent's queue</text>
+
+  <!-- 5. Agent B self-note: does work + calls tools -->
+  <path d="M 950 360 H 990 V 410 H 950" fill="none" stroke="#999" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <text x="1000" y="378" font-size="11" fill="#111">does the work</text>
+  <text x="1000" y="394" font-size="10" fill="#666">reads memory · edits code</text>
+  <text x="1000" y="408" font-size="10" fill="#666">runs tests · opens PR</text>
+
+  <!-- 6. Agent B → RMQ: result -->
+  <line x1="935" y1="450" x2="550" y2="450" stroke="#999" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <text x="737" y="444" text-anchor="middle" font-size="11" fill="#111">result: PR #123 opened</text>
+
+  <!-- 7. RMQ → Temporal: continue workflow -->
+  <line x1="540" y1="490" x2="735" y2="490" stroke="#999" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <text x="640" y="484" text-anchor="middle" font-size="11" fill="#111">workflow resumes</text>
+
+  <!-- 8. Temporal → RMQ → co-CTO: notify completion -->
+  <line x1="735" y1="540" x2="345" y2="540" stroke="#999" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <text x="540" y="534" text-anchor="middle" font-size="11" fill="#111">notify co-CTO via RabbitMQ</text>
+
+  <!-- 9. co-CTO → You: reply in Telegram -->
+  <line x1="335" y1="590" x2="140" y2="590" stroke="#999" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <text x="237" y="584" text-anchor="middle" font-size="11" fill="#111">"done — PR #123 ready for review"</text>
+
+  <!-- FOOTNOTE -->
+  <text x="550" y="700" text-anchor="middle" font-size="10" fill="#999" font-style="italic">most cross-component messages flow through RabbitMQ · MCP tool calls (e.g. start workflow, read memory) go direct from agent to MCP server</text>
+</svg>

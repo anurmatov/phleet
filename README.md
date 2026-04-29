@@ -58,7 +58,15 @@ Auth is controlled by `ORCHESTRATOR_AUTH_TOKEN` in `./fleet/.env` — `setup.sh`
 
 ### 4. Create your co-CTO agent
 
-`seed.example.json` ships with **no agents**. Your first agent — the co-CTO — is created interactively via the dashboard's SetupBanner. Click the **CTO template card** and follow the prompts. Once the co-CTO is up, DM it in Telegram and ask it to grow the rest of the fleet for you.
+`seed.example.json` ships with **no agents**. Your first agent — the co-CTO — is created interactively via the dashboard's SetupBanner. Click the **CTO template card** and follow the prompts. Once provisioning completes, you should receive a welcome DM from the CTO bot. **If you don't, send `/start` to your CTO bot first** — Telegram requires the user to initiate the conversation before a bot can DM them.
+
+<p align="center">
+  <img src=".github/assets/phleet-welcome-dm.jpg" alt="The welcome DM from the co-CTO after provisioning" width="380">
+  <br>
+  <em>The co-CTO introduces itself with available tools, workflows, and what it can do.</em>
+</p>
+
+Once the co-CTO is up, DM it in Telegram and ask it to grow the rest of the fleet for you.
 
 ### Start/stop the stack later
 
@@ -127,21 +135,9 @@ If you run Phleet on Windows, on a Linux host, or with Codex as the primary prov
 
 ## Architecture
 
-```
-src/
-├── Fleet.Agent/         — core agent process (Telegram + multi-provider AI executor)
-├── Fleet.Orchestrator/  — agent registry, lifecycle management, REST/WebSocket/MCP API
-├── Fleet.Temporal/      — Temporal workflow engine + bridge (universal workflow runner)
-├── Fleet.Bridge/        — RabbitMQ relay for inter-agent messaging
-├── Fleet.Memory/        — semantic memory MCP server (Qdrant + ONNX embeddings)
-├── Fleet.Telegram/      — outbound Telegram MCP server (per-agent bot routing, notifier fallback)
-├── Fleet.Shared/        — shared utilities
-└── fleet-dashboard/     — React SPA for monitoring and managing agents
-Dockerfile               — agent image (multi-stage, .NET 10)
-Dockerfile.temporal      — temporal bridge image
-entrypoint.sh            — container init script
-gh-auth.sh               — GitHub App JWT utility
-```
+<p align="center">
+  <img src=".github/assets/phleet-architecture.svg" alt="Phleet architecture: agents in containers connected by RabbitMQ, calling tools through MCP, with workflows running in Temporal" width="900">
+</p>
 
 ### How It Works
 
@@ -150,6 +146,22 @@ gh-auth.sh               — GitHub App JWT utility
 3. Agents receive tasks via Telegram DM or RabbitMQ and stream responses back.
 4. Temporal workflows orchestrate multi-step, multi-agent tasks.
 5. Fleet Memory provides shared semantic memory across all agents (search, store, retrieve).
+
+### How a task flows
+
+<p align="center">
+  <img src=".github/assets/phleet-task-flow.svg" alt="Sequence diagram showing how a task flows from your Telegram DM through the co-CTO, RabbitMQ, Temporal, and a worker agent, then back" width="900">
+</p>
+
+You DM the co-CTO. It starts a Temporal workflow via `fleet-temporal-bridge`. The workflow publishes a `DelegateToAgentActivity` directive into RabbitMQ; the worker agent picks it up from its queue, does the work (reading memory, editing code, opening a PR), and publishes the result back through RabbitMQ. The workflow resumes, notifies the co-CTO, and you get a Telegram reply with the outcome. MCP tool calls (start workflow, read memory) go directly from the agent to the MCP server; everything else flows through RabbitMQ.
+
+### Consensus review
+
+<p align="center">
+  <img src=".github/assets/phleet-consensus-review.svg" alt="Consensus review flow: multiple reviewer agents evaluate a subject in parallel, a synthesizer aggregates verdicts, then approved/rejected/changes_requested branches" width="900">
+</p>
+
+Used inside the design, PR-implementation, and memory-store workflows. Multiple reviewer agents — usually different models — evaluate the subject in parallel. A synthesizer aggregates their verdicts. `approved` proceeds, `rejected` escalates to the human, and `changes_requested` loops back to the author for revision and re-review.
 
 ### Visual Workflow Editor
 

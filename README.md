@@ -1,7 +1,7 @@
 # Phleet — Autonomous Multi-Agent Platform
 
 <p align="center">
-  <img src=".github/assets/phleet-hero.png" alt="Phleet" width="720">
+  <img src=".github/assets/phleet-hero.svg" alt="Phleet" width="720">
 </p>
 
 Phleet is an open-source, self-hosted multi-agent AI platform built on .NET 10, coordinated by a central orchestrator backed by Temporal workflows.

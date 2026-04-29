@@ -35,7 +35,7 @@
   </g>
 
   <!-- top-left tag -->
-  <text x="80" y="80" font-size="13" fill="#999" font-weight="600" letter-spacing="2">WORKSHOP · 2026-04-25</text>
+  <text x="80" y="80" font-size="13" fill="#999" font-weight="600" letter-spacing="2">ANVARLAB.COM</text>
 
   <!-- top-right tag -->
   <text x="1520" y="80" text-anchor="end" font-size="13" fill="#999" font-weight="600" letter-spacing="2">MULTI-AGENT · SELF-MODIFYING</text>

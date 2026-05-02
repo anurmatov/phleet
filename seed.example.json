@@ -837,7 +837,7 @@
             "name": "capture_pr_url",
             "type": "set_variable",
             "vars": {
-              "pr_url": "{{vars.impl_result | extract: '(https://github\\.com/{{input.Repo}}/pull/[0-9]+)'}}"
+              "pr_url": "{{vars.impl_result | extract: '(https://github\\.com/[^\\s]+/pull/[0-9]+)'}}"
             }
           },
           {

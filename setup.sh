@@ -335,6 +335,16 @@ check_creds_codex() {
 }
 
 check_creds_gemini() {
+  # Gemini writes GEMINI_API_KEY to $ENV_FILE in step [2/7], before the fleet
+  # data dir and .env are created in step [3/7]. Ensure both exist first so
+  # write_env_var doesn't fail with "No such file or directory".
+  if ! $DRY_RUN; then
+    mkdir -p "$FLEET_BASE_DIR"
+    if [[ ! -f "$ENV_FILE" ]]; then
+      cp "$ENV_EXAMPLE" "$ENV_FILE"
+      chmod 600 "$ENV_FILE"
+    fi
+  fi
   local existing
   existing=$(read_env_var "$ENV_FILE" "GEMINI_API_KEY")
   if [[ -n "$existing" ]] && ! is_placeholder "$existing"; then

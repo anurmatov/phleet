@@ -1,12 +1,16 @@
 using System.ComponentModel;
 using Fleet.Memory.Models;
 using Fleet.Memory.Services;
+using Microsoft.AspNetCore.Http;
 using ModelContextProtocol.Server;
 
 namespace Fleet.Memory.Tools;
 
 [McpServerToolType]
-public sealed class MemoryStoreTool(MemoryService memoryService)
+public sealed class MemoryStoreTool(
+    MemoryService memoryService,
+    AclCacheService aclCache,
+    IHttpContextAccessor httpContextAccessor)
 {
     [McpServerTool(Name = "memory_store")]
     [Description("Store a new memory. Creates a markdown file and indexes it for semantic search. Use this to persist learnings, task results, decisions, error resolutions, and other knowledge.")]
@@ -30,6 +34,22 @@ public sealed class MemoryStoreTool(MemoryService memoryService)
 
         if (string.IsNullOrWhiteSpace(content))
             return "memory_store: missing required parameter 'content'.\nHint: pass the full memory content to store.";
+
+        // ACL gate: agent must be allowed to write to the target project.
+        // Wildcard agents and agents with the target project in their allow-list may store.
+        if (aclCache.IsAclEnabled)
+        {
+            if (!aclCache.IsAvailable)
+                return "memory_store: ACL cache unavailable — orchestrator unreachable. Try again shortly.";
+
+            var agentName = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(agentName))
+                return "memory_store: agent identity required — missing '?agent=' query parameter.";
+
+            var (allowed, denyReason) = aclCache.CanRead(agentName!, project);
+            if (!allowed)
+                return $"memory_store: access denied — {denyReason}. Agent must be in the project allow-list to store memories there.";
+        }
 
         var doc = new MemoryDocument
         {

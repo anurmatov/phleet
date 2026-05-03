@@ -44,6 +44,23 @@ general guidance:
 - subagents share your filesystem but start with fresh context — include all necessary context in the prompt
 - check your environment's available agent types (via the Agent tool help) for the exact names and capabilities on your setup
 
+## memory acl operations
+
+you are the only agent that can manage memory project access for other agents. use the `manage_agent_project_access` MCP tool.
+
+**actions:**
+- `list` — show current project access for an agent
+- `add` — grant access to a specific project (e.g. `add` + `project=fleet`)
+- `remove` — revoke access to a specific project
+- `set_wildcard` — grant wildcard `*` access (reads all projects, including no-project memories)
+- `clear_wildcard` — remove the wildcard; agent falls back to explicit project rows only
+
+**wildcard rule:** co-cto always holds a wildcard row seeded by migration. never remove it unless explicitly instructed by the CEO.
+
+**when an agent reports an ACL denial:** check `/internal/stats/acl-denied` on fleet-memory for the denial counter, identify the project the agent needs, then use `manage_agent_project_access action=add` to grant it. after granting, the change takes effect immediately — no reprovision needed.
+
+**no-project memories during rollout:** if `AclAllowNoProject=false` in config and agents report denial on untagged memories, either enable `AclAllowNoProject=true` in appsettings (allows all agents to read untagged) or use `memory_update` to assign a project to the affected memories.
+
 ## memory gatekeeper
 
 you are the only agent with memory write access — you maintain knowledge quality for the entire team.

@@ -136,6 +136,8 @@ export default function App() {
   const [configSaveMsg, setConfigSaveMsg] = useState('')
   const [configLoading, setConfigLoading] = useState(false)
   const [configReprovisionConfirm, setConfigReprovisionConfirm] = useState(false)
+  const [projectAccess, setProjectAccess] = useState<string[] | null>(null)
+  const [projectAccessLoading, setProjectAccessLoading] = useState(false)
   const [reprovisionAllState, setReprovisionAllState] = useState<ReprovisionAllState>('idle')
   const [reprovisionAllMsg, setReprovisionAllMsg] = useState('')
 
@@ -737,7 +739,14 @@ export default function App() {
     setConfigAgent(agentName)
     setConfigData(null); setConfigEdits(null)
     setConfigSaveState('idle'); setConfigReprovisionConfirm(false)
+    setProjectAccess(null)
     setConfigLoading(true)
+    setProjectAccessLoading(true)
+    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access`)
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then((data: { projects: string[] }) => setProjectAccess(data.projects))
+      .catch(() => setProjectAccess([]))
+      .finally(() => setProjectAccessLoading(false))
     apiFetch(`/api/agents/${encodeURIComponent(agentName)}/config`)
       .then(r => r.ok ? r.json() : Promise.reject(r.status))
       .then((cfg: AgentConfig) => {
@@ -783,6 +792,37 @@ export default function App() {
   function closeConfig() {
     setConfigAgent(null); setConfigData(null); setConfigEdits(null)
     setConfigReprovisionConfirm(false); setConfigSaveState('idle')
+    setProjectAccess(null)
+  }
+
+  async function addProjectAccess(agentName: string, project: string) {
+    await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project }),
+    })
+    const data = await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access`).then(r => r.json())
+    setProjectAccess(data.projects)
+  }
+
+  async function removeProjectAccess(agentName: string, project: string) {
+    await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access/${encodeURIComponent(project)}`, { method: 'DELETE' })
+    const data = await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access`).then(r => r.json())
+    setProjectAccess(data.projects)
+  }
+
+  async function toggleProjectAccessWildcard(agentName: string, enable: boolean) {
+    if (enable) {
+      await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: '*' }),
+      })
+    } else {
+      await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access/${encodeURIComponent('*')}`, { method: 'DELETE' })
+    }
+    const data = await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access`).then(r => r.json())
+    setProjectAccess(data.projects)
   }
 
   function saveConfig(agentName: string, andReprovision: boolean) {
@@ -2031,9 +2071,14 @@ export default function App() {
           configLoading={configLoading}
           configReprovisionConfirm={configReprovisionConfirm}
           allInstructions={instructions}
+          projectAccess={projectAccess}
+          projectAccessLoading={projectAccessLoading}
           onEditsChange={patch => setConfigEdits(prev => prev ? { ...prev, ...patch } : prev)}
           onSave={andReprovision => saveConfig(configAgent, andReprovision)}
           onReprovisionConfirmToggle={() => setConfigReprovisionConfirm(c => !c)}
+          onProjectAccessAdd={project => addProjectAccess(configAgent, project)}
+          onProjectAccessRemove={project => removeProjectAccess(configAgent, project)}
+          onProjectAccessToggleWildcard={enable => toggleProjectAccessWildcard(configAgent, enable)}
           onClose={closeConfig}
         />
       )}

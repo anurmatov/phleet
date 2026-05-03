@@ -16,9 +16,14 @@ interface AgentConfigModalProps {
   configLoading: boolean
   configReprovisionConfirm: boolean
   allInstructions: InstructionSummary[]
+  projectAccess: string[] | null
+  projectAccessLoading: boolean
   onEditsChange: (patch: Partial<ConfigEdits>) => void
   onSave: (andReprovision: boolean) => void
   onReprovisionConfirmToggle: () => void
+  onProjectAccessAdd: (project: string) => void
+  onProjectAccessRemove: (project: string) => void
+  onProjectAccessToggleWildcard: (enable: boolean) => void
   onClose: () => void
 }
 
@@ -31,15 +36,21 @@ export default function AgentConfigModal({
   configLoading,
   configReprovisionConfirm,
   allInstructions,
+  projectAccess,
+  projectAccessLoading,
   onEditsChange,
   onSave,
   onReprovisionConfirmToggle,
+  onProjectAccessAdd,
+  onProjectAccessRemove,
+  onProjectAccessToggleWildcard,
   onClose,
 }: AgentConfigModalProps) {
   const [showAdvanced, setShowAdvanced] = useState<boolean>(() => {
     try { return localStorage.getItem(SHOW_ADVANCED_KEY) === 'true' }
     catch { return false }
   })
+  const [newProject, setNewProject] = useState('')
 
   function toggleAdvanced() {
     const next = !showAdvanced
@@ -305,6 +316,42 @@ export default function AgentConfigModal({
                 />
               </div>
               </>)}
+
+              <div className="config-section-label">Memory Project Access</div>
+              <div className="config-field">
+                <FieldHint>Projects this agent can read from fleet-memory. Add project names explicitly, or grant wildcard (*) for full access. Changes take effect immediately (no reprovision needed).</FieldHint>
+                {projectAccessLoading && <div className="config-loading">Loading…</div>}
+                {!projectAccessLoading && projectAccess !== null && (
+                  <>
+                    {projectAccess.length === 0 && (
+                      <div className="config-hint-text">No project access configured.</div>
+                    )}
+                    {projectAccess.map(p => (
+                      <div key={p} className="config-related-row">
+                        <span className="config-project-chip">{p === '*' ? '* (wildcard — all projects)' : p}</span>
+                        <button className="config-remove-btn" onClick={() => p === '*' ? onProjectAccessToggleWildcard(false) : onProjectAccessRemove(p)}>✕</button>
+                      </div>
+                    ))}
+                    <div className="config-related-row">
+                      <input
+                        className="config-input config-input-sm"
+                        value={newProject}
+                        onChange={e => setNewProject(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter' && newProject.trim()) { onProjectAccessAdd(newProject.trim()); setNewProject('') } }}
+                        placeholder="project name"
+                      />
+                      <button
+                        className="config-add-btn"
+                        onClick={() => { if (newProject.trim()) { onProjectAccessAdd(newProject.trim()); setNewProject('') } }}
+                      >+ add</button>
+                      {!projectAccess.includes('*') && (
+                        <button className="config-add-btn" onClick={() => onProjectAccessToggleWildcard(true)}>set wildcard (*)</button>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+
               <div className="config-actions">
                 <button className="config-save-btn" disabled={configSaveState === 'saving'} onClick={() => onSave(false)}>
                   {configSaveState === 'saving' ? '…' : 'Save'}

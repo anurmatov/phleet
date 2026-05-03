@@ -36,6 +36,7 @@ else
 // Services
 builder.Services.AddSingleton<MemoryService>();
 builder.Services.AddSingleton<ReadCounterService>();
+builder.Services.AddSingleton<AclDeniedCounterService>();
 builder.Services.AddHostedService<FileWatcherService>();
 
 // ACL cache — registered as singleton so tools can inject it, and as hosted service for lifecycle
@@ -204,6 +205,10 @@ app.MapDelete("/internal/memory/{id}", async (string id, MemoryService memorySer
 // GET /internal/stats/reads — in-memory read counter snapshot (resets on restart)
 app.MapGet("/internal/stats/reads", (ReadCounterService readCounter) =>
     Results.Ok(new { since = readCounter.Since, entries = readCounter.GetSnapshot() }));
+
+// GET /internal/stats/acl-denied — in-memory ACL denial counter snapshot (resets on restart)
+app.MapGet("/internal/stats/acl-denied", (AclDeniedCounterService deniedCounter) =>
+    Results.Ok(new { since = deniedCounter.Since, entries = deniedCounter.GetSnapshot() }));
 
 // GET /api/admin/memories/no-project-count — counts memories with no project set (migration planning aid)
 app.MapGet("/api/admin/memories/no-project-count", async (MemoryService memoryService) =>

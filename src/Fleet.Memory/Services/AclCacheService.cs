@@ -138,9 +138,13 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
         // Normalize memory project (empty string means no project set)
         var memProject = (project ?? "").Trim().ToLowerInvariant();
 
-        // No project set → denied unless agent has wildcard (already checked above)
+        // No project set — allow if AclAllowNoProject is on, otherwise deny
         if (string.IsNullOrEmpty(memProject))
-            return (false, "memory has no project — denied to non-wildcard agents");
+        {
+            return opts.AclAllowNoProject
+                ? (true, null)
+                : (false, "memory has no project — denied to non-wildcard agents (set AclAllowNoProject=true to permit during rollout)");
+        }
 
         // Built-in public projects
         foreach (var pub in opts.AclPublicProjects)

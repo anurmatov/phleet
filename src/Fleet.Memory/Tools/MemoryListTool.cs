@@ -11,7 +11,9 @@ namespace Fleet.Memory.Tools;
 public sealed class MemoryListTool(
     MemoryService memoryService,
     AclCacheService aclCache,
-    IHttpContextAccessor httpContextAccessor)
+    IHttpContextAccessor httpContextAccessor,
+    AclDeniedCounterService deniedCounter,
+    ILogger<MemoryListTool> logger)
 {
     [McpServerTool(Name = "memory_list")]
     [Description("List memories with optional filters. Returns a summary of matching memories without full content. Use memory_get to read full content.")]
@@ -19,7 +21,8 @@ public sealed class MemoryListTool(
         [Description("Filter by memory type (optional)")] string? type = null,
         [Description("Filter by project (optional)")] string? project = null,
         [Description("Filter by agent name (optional)")] string? agent = null,
-        [Description("Filter by tag (optional)")] string? tag = null)
+        [Description("Filter by tag (optional)")] string? tag = null,
+        [Description("Maximum number of results (0 = unlimited, default 0)")] int limit = 0)
     {
         if (type is not null && !MemoryDocument.ValidTypes.Contains(type))
             return $"memory_list: invalid value for 'type' filter: '{type}'.\nValid types: {string.Join(", ", MemoryDocument.ValidTypes)}.";
@@ -34,24 +37,39 @@ public sealed class MemoryListTool(
 
         var results = await memoryService.ListDocumentsAsync(type, project, agent, tag);
 
-        // Post-filter by ACL using the typed Project field (consistent with memory_get / memory_search)
+        // Post-filter by ACL with explicit denial logging
         if (aclCache.IsAclEnabled)
         {
-            results = results.Where(d =>
+            var filtered = new List<MemoryDocument>();
+            foreach (var d in results)
             {
-                var (allowed, _) = aclCache.CanRead(agentName!, d.Project ?? "");
-                return allowed;
-            }).ToList();
+                var (allowed, denyReason) = aclCache.CanRead(agentName!, d.Project ?? "");
+                if (allowed)
+                {
+                    filtered.Add(d);
+                }
+                else
+                {
+                    deniedCounter.Increment(agentName!, "memory_list");
+                    logger.LogInformation(
+                        "memory_list: denied agent '{Agent}' on memory '{MemoryId}' (project '{Project}'): {Reason}",
+                        agentName, d.Id, d.Project, denyReason);
+                }
+            }
+            results = filtered;
         }
 
-        if (results.Count == 0)
+        var sorted = results.OrderByDescending(d => d.Created).ToList();
+
+        if (limit > 0 && sorted.Count > limit)
+            sorted = sorted.Take(limit).ToList();
+
+        if (sorted.Count == 0)
             return "No memories found matching the filters.";
 
         var sb = new StringBuilder();
-        sb.AppendLine($"Found {results.Count} memories:");
+        sb.AppendLine($"Found {sorted.Count} memories:");
         sb.AppendLine();
-
-        var sorted = results.OrderByDescending(d => d.Created);
 
         foreach (var doc in sorted)
         {

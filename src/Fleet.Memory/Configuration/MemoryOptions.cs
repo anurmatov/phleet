@@ -18,6 +18,13 @@ public sealed class AclOptions
     /// The operator agent name that must hold a wildcard "*" row. A startup ERROR is logged if missing.
     /// </summary>
     public string AclOperatorAgent { get; set; } = "";
+
+    /// <summary>
+    /// When true, memories with no project set are readable by any agent (not just wildcard agents).
+    /// Default false — non-wildcard agents are denied no-project memories until cleanup is complete.
+    /// Set to true during ACL rollout when the no-project memory backlog is non-zero.
+    /// </summary>
+    public bool AclAllowNoProject { get; set; } = false;
 }
 
 public sealed class OrchestratorOptions

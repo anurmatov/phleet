@@ -37,6 +37,15 @@ public partial class AddAgentProjectAccess : Migration
             INNER JOIN agent_projects ap ON ap.AgentId = a.Id
             WHERE ap.ProjectName IS NOT NULL AND ap.ProjectName != '';
         ");
+
+        // Seed wildcard '*' for all co-cto agents so they retain cross-project read access
+        // after the ACL flag is enabled. Idempotent via INSERT IGNORE.
+        migrationBuilder.Sql(@"
+            INSERT IGNORE INTO agent_project_access (AgentName, Project)
+            SELECT LOWER(TRIM(a.Name)), '*'
+            FROM agents a
+            WHERE LOWER(TRIM(a.Role)) = 'co-cto';
+        ");
     }
 
     /// <inheritdoc />

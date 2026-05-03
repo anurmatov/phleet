@@ -11,7 +11,9 @@ namespace Fleet.Memory.Tools;
 public sealed class MemorySearchTool(
     MemoryService memoryService,
     AclCacheService aclCache,
-    IHttpContextAccessor httpContextAccessor)
+    IHttpContextAccessor httpContextAccessor,
+    AclDeniedCounterService deniedCounter,
+    ILogger<MemorySearchTool> logger)
 {
     [McpServerTool(Name = "memory_search")]
     [Description("Semantic search across all memories. Returns the most relevant memories matching the query. Use this to find prior knowledge, past decisions, error resolutions, and learnings.")]
@@ -43,17 +45,26 @@ public sealed class MemorySearchTool(
 
         var results = await memoryService.SearchAsync(query, fetchLimit, type, project, agent);
 
-        // Post-filter by ACL
+        // Post-filter by ACL with explicit denial logging
         if (aclCache.IsAclEnabled)
         {
-            results = results
-                .Where(d =>
+            var filtered = new List<MemoryDocument>();
+            foreach (var d in results)
+            {
+                var (allowed, denyReason) = aclCache.CanRead(agentName!, d.Project ?? "");
+                if (allowed)
                 {
-                    var (allowed, _) = aclCache.CanRead(agentName!, d.Project ?? "");
-                    return allowed;
-                })
-                .Take(limit)
-                .ToList();
+                    filtered.Add(d);
+                }
+                else
+                {
+                    deniedCounter.Increment(agentName!, "memory_search");
+                    logger.LogInformation(
+                        "memory_search: denied agent '{Agent}' on memory '{MemoryId}' (project '{Project}'): {Reason}",
+                        agentName, d.Id, d.Project, denyReason);
+                }
+            }
+            results = filtered.Take(limit).ToList();
         }
 
         if (results.Count == 0)

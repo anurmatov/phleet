@@ -23,13 +23,15 @@ public class MemoryAclTests
     private static AclCacheService MakeService(
         Dictionary<string, List<string>> acl,
         string[] publicProjects = null!,
-        string operatorAgent = "")
+        string operatorAgent = "",
+        bool allowNoProject = false)
     {
         var aclOpts = Options.Create(new AclOptions
         {
             EnableProjectScopedAcl = true,
             AclPublicProjects = publicProjects ?? [],
             AclOperatorAgent = operatorAgent,
+            AclAllowNoProject = allowNoProject,
         });
         var orchOpts = Options.Create(new OrchestratorOptions { BaseUrl = "http://unused" });
         var svc = new AclCacheService(aclOpts, orchOpts, NullLogger<AclCacheService>.Instance);
@@ -167,6 +169,40 @@ public class MemoryAclTests
         var svc = MakeService(new() { ["agent-a"] = ["alpha"] });
         Assert.True(svc.CanRead("AGENT-A", "alpha").allowed);
         Assert.True(svc.CanRead("Agent-A", "alpha").allowed);
+    }
+
+    // ── AclAllowNoProject flag ────────────────────────────────────────────────
+
+    [Fact]
+    public void AllowNoProject_False_DeniesNoProjectMemory()
+    {
+        var svc = MakeService(new() { ["agent-a"] = ["alpha"] }, allowNoProject: false);
+        var (allowed, _) = svc.CanRead("agent-a", "");
+        Assert.False(allowed);
+    }
+
+    [Fact]
+    public void AllowNoProject_True_PermitsNoProjectMemory()
+    {
+        var svc = MakeService(new() { ["agent-a"] = ["alpha"] }, allowNoProject: true);
+        var (allowed, _) = svc.CanRead("agent-a", "");
+        Assert.True(allowed);
+    }
+
+    [Fact]
+    public void AllowNoProject_True_PermitsNullProject()
+    {
+        var svc = MakeService(new() { ["agent-a"] = ["alpha"] }, allowNoProject: true);
+        var (allowed, _) = svc.CanRead("agent-a", null);
+        Assert.True(allowed);
+    }
+
+    [Fact]
+    public void AllowNoProject_True_AgentWithNoRows_PermitsNoProjectMemory()
+    {
+        var svc = MakeService(new(), allowNoProject: true);
+        var (allowed, _) = svc.CanRead("new-agent", "");
+        Assert.True(allowed);
     }
 
     // ── IsAclEnabled flag ─────────────────────────────────────────────────────

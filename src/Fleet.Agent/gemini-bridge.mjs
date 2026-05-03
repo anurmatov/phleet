@@ -25,6 +25,7 @@
  *   - LegacyAgentProtocol — streaming conversation loop with tool handling via Scheduler
  *   - Config — client configuration, userMemory = system prompt
  *   - MCPServerConfig — HTTP/SSE MCP server descriptors
+ *   - ApprovalMode — YOLO mode suppresses PolicyEngine ASK_USER in headless environments
  */
 
 // NOTE: This bridge uses LegacyAgentProtocol rather than LocalAgentExecutor as originally
@@ -38,6 +39,7 @@ import {
   Config,
   MCPServerConfig,
   AuthType,
+  ApprovalMode,
 } from '@google/gemini-cli-core';
 import readline from 'readline';
 import fs from 'fs';
@@ -131,6 +133,10 @@ async function ensureInitialized(model) {
     checkpointing: false,
     debugMode: false,
     coreTools: [],
+    // YOLO: suppress PolicyEngine ASK_USER in headless mode. Without this, every MCP tool call
+    // is evaluated as requiring user confirmation; the MessageBus has no UI listener in a
+    // non-TTY environment, so calls short-circuit to { confirmed: false } and never execute.
+    approvalMode: ApprovalMode.YOLO,
   });
 
   try {

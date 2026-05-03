@@ -191,7 +191,7 @@ public sealed class GeminiExecutor : IAgentExecutor
 
     // --- Internals ---
 
-    private Task StartProcessAsync(CancellationToken ct)
+    private async Task StartProcessAsync(CancellationToken ct)
     {
         StopReaderAsync();
 
@@ -199,6 +199,16 @@ public sealed class GeminiExecutor : IAgentExecutor
 
         // System prompt is delivered via file to avoid ARG_MAX / E2BIG — same as ClaudeExecutor (PR #81).
         var systemPromptPath = _promptBuilder.WriteSystemPromptFile();
+
+        // Role files reference tools in Claude's double-underscore format (mcp__server__tool).
+        // Gemini SDK registers MCP tools with single underscores (mcp_server_tool).
+        // Write a translated copy so the model can match tool references in the system prompt
+        // to the names that the Gemini SDK actually registers from the MCP servers.
+        var rawPrompt = await File.ReadAllTextAsync(systemPromptPath, ct);
+        var translatedPrompt = rawPrompt.Replace("mcp__", "mcp_");
+        var geminiPromptPath = systemPromptPath + ".gemini";
+        await File.WriteAllTextAsync(geminiPromptPath, translatedPrompt, ct);
+        systemPromptPath = geminiPromptPath;
 
         var apiKey = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
         if (string.IsNullOrEmpty(apiKey))
@@ -227,7 +237,6 @@ public sealed class GeminiExecutor : IAgentExecutor
         _ = Task.Run(() => ReadStdoutAsync(_process.StandardOutput, _eventChannel.Writer, _readerCts.Token));
 
         _logger.LogInformation("GeminiExecutor: bridge process started (pid {Pid})", _process.Id);
-        return Task.CompletedTask;
     }
 
     private async Task ReadStdoutAsync(StreamReader reader, ChannelWriter<BridgeEvent> writer, CancellationToken ct)

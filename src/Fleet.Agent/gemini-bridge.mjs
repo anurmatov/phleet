@@ -182,7 +182,10 @@ async function runTask(msg) {
       if (evType === 'agent_start') {
         emit({ type: 'turn.started' });
       } else if (evType === 'message') {
-        // Text chunks from model
+        // LegacyAgentProtocol emits 'message' for both the injected user turn (role='user')
+        // and the model's reply (role='agent'). Only accumulate agent output — the user turn
+        // carries the full input directive and must never appear in the response payload.
+        if (event.role !== 'agent') return;
         const text = Array.isArray(event.content)
           ? event.content.filter(c => c.type === 'text').map(c => c.text ?? '').join('')
           : '';

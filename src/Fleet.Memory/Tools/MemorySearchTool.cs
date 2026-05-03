@@ -2,12 +2,18 @@ using System.ComponentModel;
 using System.Text;
 using Fleet.Memory.Models;
 using Fleet.Memory.Services;
+using Microsoft.AspNetCore.Http;
 using ModelContextProtocol.Server;
 
 namespace Fleet.Memory.Tools;
 
 [McpServerToolType]
-public sealed class MemorySearchTool(MemoryService memoryService)
+public sealed class MemorySearchTool(
+    MemoryService memoryService,
+    AclCacheService aclCache,
+    IHttpContextAccessor httpContextAccessor,
+    AclDeniedCounterService deniedCounter,
+    ILogger<MemorySearchTool> logger)
 {
     [McpServerTool(Name = "memory_search")]
     [Description("Semantic search across all memories. Returns the most relevant memories matching the query. Use this to find prior knowledge, past decisions, error resolutions, and learnings.")]
@@ -24,7 +30,42 @@ public sealed class MemorySearchTool(MemoryService memoryService)
         if (type is not null && !MemoryDocument.ValidTypes.Contains(type))
             return $"memory_search: invalid value for 'type' filter: '{type}'.\nValid types: {string.Join(", ", MemoryDocument.ValidTypes)}.";
 
-        var results = await memoryService.SearchAsync(query, limit, type, project, agent);
+        var agentName = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+
+        if (aclCache.IsAclEnabled && !aclCache.IsAvailable)
+            return "memory_search: ACL cache unavailable — orchestrator unreachable. Try again shortly.";
+
+        if (aclCache.IsAclEnabled && string.IsNullOrWhiteSpace(agentName))
+            return "memory_search: agent identity required — missing '?agent=' query parameter.";
+
+        // When ACL is active, request a 3x candidate pool to compensate for post-filter evictions.
+        // Known precision trade-off: allowed memories may score lower than disallowed neighbors.
+        // We query 3x, filter, and return up to the original limit — no further expansion.
+        var fetchLimit = aclCache.IsAclEnabled ? limit * 3 : limit;
+
+        var results = await memoryService.SearchAsync(query, fetchLimit, type, project, agent);
+
+        // Post-filter by ACL with explicit denial logging
+        if (aclCache.IsAclEnabled)
+        {
+            var filtered = new List<MemoryDocument>();
+            foreach (var d in results)
+            {
+                var (allowed, denyReason) = aclCache.CanRead(agentName!, d.Project ?? "");
+                if (allowed)
+                {
+                    filtered.Add(d);
+                }
+                else
+                {
+                    deniedCounter.Increment(agentName!, "memory_search");
+                    logger.LogInformation(
+                        "memory_search: denied agent '{Agent}' on memory '{MemoryId}' (project '{Project}'): {Reason}",
+                        agentName, d.Id, d.Project, denyReason);
+                }
+            }
+            results = filtered.Take(limit).ToList();
+        }
 
         if (results.Count == 0)
             return "No memories found matching the query.";
@@ -47,7 +88,6 @@ public sealed class MemorySearchTool(MemoryService memoryService)
             sb.AppendLine($"- **Created**: {doc.Created:yyyy-MM-dd HH:mm}");
             sb.AppendLine();
 
-            // Truncate content for search results
             var preview = doc.Content.Length > 500 ? doc.Content[..500] + "..." : doc.Content;
             sb.AppendLine(preview);
             sb.AppendLine();

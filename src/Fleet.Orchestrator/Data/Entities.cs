@@ -276,6 +276,19 @@ public class AgentCredentialMount
 
 
 
+// ─── Agent Project Access (memory ACL) ───────────────────────────────────────
+
+/// <summary>
+/// Maps an agent to the memory projects it is allowed to read.
+/// A row with Project = "*" grants wildcard access (all projects).
+/// Agent names and project names are stored lowercase, whitespace-trimmed.
+/// </summary>
+public class AgentProjectAccess
+{
+    public required string AgentName { get; set; }
+    public required string Project { get; set; }
+}
+
 // ─── Credentials Audit ────────────────────────────────────────────────────────
 
 /// <summary>

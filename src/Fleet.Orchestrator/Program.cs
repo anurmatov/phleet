@@ -2368,6 +2368,112 @@ app.MapGet("/api/agent-templates/{name}", (string name) =>
     });
 });
 
+// ── Agent Project Access (memory ACL) ────────────────────────────────────────
+// Manages which memory projects each agent can read.
+// Mutations require bearer auth; GET is open (same pattern as other GET /api/agents/* endpoints).
+
+app.MapGet("/api/agents/{name}/project-access", async (string name, IServiceScopeFactory scopeFactory) =>
+{
+    await using var scope = scopeFactory.CreateAsyncScope();
+    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+    var rows = await db.AgentProjectAccess
+        .Where(x => x.AgentName == name.ToLowerInvariant())
+        .Select(x => x.Project)
+        .ToListAsync();
+    return Results.Ok(new { agent = name.ToLowerInvariant(), projects = rows });
+});
+
+app.MapPut("/api/agents/{name}/project-access", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, ConfigService configService, CancellationToken ct) =>
+{
+    ProjectAccessPutRequest? body;
+    try { body = await request.ReadFromJsonAsync<ProjectAccessPutRequest>(ct); }
+    catch { return Results.BadRequest(new { error = "invalid_json" }); }
+    if (body is null) return Results.BadRequest(new { error = "empty_payload" });
+
+    var projects = body.Projects ?? [];
+    var validationError = ValidateProjectList(projects);
+    if (validationError is not null) return Results.BadRequest(new { error = validationError });
+
+    var agentName = name.ToLowerInvariant();
+    var normalized = projects.Select(p => p.Trim().ToLowerInvariant()).Distinct().ToList();
+
+    await using var scope = scopeFactory.CreateAsyncScope();
+    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+
+    var existing = await db.AgentProjectAccess.Where(x => x.AgentName == agentName).ToListAsync(ct);
+    db.AgentProjectAccess.RemoveRange(existing);
+    db.AgentProjectAccess.AddRange(normalized.Select(p => new AgentProjectAccess { AgentName = agentName, Project = p }));
+    await db.SaveChangesAsync(ct);
+
+    await configService.ReloadAsync(ct);
+    return Results.Ok(new { agent = agentName, projects = normalized });
+});
+
+app.MapPost("/api/agents/{name}/project-access", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, ConfigService configService, CancellationToken ct) =>
+{
+    ProjectAccessPostRequest? body;
+    try { body = await request.ReadFromJsonAsync<ProjectAccessPostRequest>(ct); }
+    catch { return Results.BadRequest(new { error = "invalid_json" }); }
+    if (body is null) return Results.BadRequest(new { error = "empty_payload" });
+
+    var project = body.Project?.Trim().ToLowerInvariant() ?? "";
+    if (string.IsNullOrEmpty(project)) return Results.BadRequest(new { error = "project must not be empty" });
+
+    var agentName = name.ToLowerInvariant();
+    await using var scope = scopeFactory.CreateAsyncScope();
+    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+
+    var alreadyExists = await db.AgentProjectAccess.AnyAsync(x => x.AgentName == agentName && x.Project == project, ct);
+    if (!alreadyExists)
+    {
+        db.AgentProjectAccess.Add(new AgentProjectAccess { AgentName = agentName, Project = project });
+        await db.SaveChangesAsync(ct);
+        await configService.ReloadAsync(ct);
+    }
+
+    var rows = await db.AgentProjectAccess.Where(x => x.AgentName == agentName).Select(x => x.Project).ToListAsync(ct);
+    return Results.Ok(new { agent = agentName, projects = rows });
+});
+
+app.MapDelete("/api/agents/{name}/project-access/{project}", async (string name, string project, IServiceScopeFactory scopeFactory, ConfigService configService, CancellationToken ct) =>
+{
+    var agentName = name.ToLowerInvariant();
+    var projectNorm = project.Trim().ToLowerInvariant();
+    await using var scope = scopeFactory.CreateAsyncScope();
+    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+
+    var row = await db.AgentProjectAccess.FirstOrDefaultAsync(x => x.AgentName == agentName && x.Project == projectNorm, ct);
+    if (row is null) return Results.NotFound(new { error = $"No project-access entry '{projectNorm}' for agent '{agentName}'" });
+
+    db.AgentProjectAccess.Remove(row);
+    await db.SaveChangesAsync(ct);
+    await configService.ReloadAsync(ct);
+    return Results.NoContent();
+});
+
+// GET /internal/agent-project-access — Docker-network-only, no auth (mirrors /internal/* pattern from PR #83).
+// Returns the full ACL map consumed by fleet-memory's AclCacheService.
+app.MapGet("/internal/agent-project-access", async (IServiceScopeFactory scopeFactory, CancellationToken ct) =>
+{
+    await using var scope = scopeFactory.CreateAsyncScope();
+    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+    var rows = await db.AgentProjectAccess.AsNoTracking().ToListAsync(ct);
+    var acl = rows
+        .GroupBy(r => r.AgentName)
+        .ToDictionary(g => g.Key, g => g.Select(r => r.Project).ToList());
+    return Results.Ok(new { acl });
+});
+
+static string? ValidateProjectList(List<string>? projects)
+{
+    if (projects is null) return null;
+    foreach (var p in projects)
+    {
+        if (string.IsNullOrWhiteSpace(p)) return "project entries must not be empty or whitespace";
+    }
+    return null;
+}
+
 // ── Memory API (proxied from fleet-memory /internal/*) ───────────────────────
 // All endpoints require bearer-token auth (checked inline since GETs are normally exempt).
 
@@ -2456,6 +2562,9 @@ record WorkflowDefinitionRequest
 }
 
 record ToggleActiveRequest(bool IsActive);
+
+record ProjectAccessPutRequest(List<string>? Projects);
+record ProjectAccessPostRequest(string? Project);
 
 record AgentConfigUpdateRequest(
     string? Model,

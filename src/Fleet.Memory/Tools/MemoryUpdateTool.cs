@@ -1,11 +1,15 @@
 using System.ComponentModel;
 using Fleet.Memory.Services;
+using Microsoft.AspNetCore.Http;
 using ModelContextProtocol.Server;
 
 namespace Fleet.Memory.Tools;
 
 [McpServerToolType]
-public sealed class MemoryUpdateTool(MemoryService memoryService)
+public sealed class MemoryUpdateTool(
+    MemoryService memoryService,
+    AclCacheService aclCache,
+    IHttpContextAccessor httpContextAccessor)
 {
     [McpServerTool(Name = "memory_update")]
     [Description("Update an existing memory's title, content, tags, or project. The memory will be automatically re-indexed for search.")]
@@ -18,6 +22,35 @@ public sealed class MemoryUpdateTool(MemoryService memoryService)
     {
         if (string.IsNullOrWhiteSpace(id))
             return "memory_update: missing required parameter 'id'.\nHint: pass the memory ID (full UUID or first 8 characters) from memory_search or memory_list.";
+
+        // ACL gate: agent must be allowed to read (and therefore update) the target memory.
+        if (aclCache.IsAclEnabled)
+        {
+            if (!aclCache.IsAvailable)
+                return "memory_update: ACL cache unavailable — orchestrator unreachable. Try again shortly.";
+
+            var agentName = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(agentName))
+                return "memory_update: agent identity required — missing '?agent=' query parameter.";
+
+            var probe = await memoryService.GetAsync(id);
+            var existingProject = probe?.Project ?? "";
+            var (allowed, denyReason) = aclCache.CanRead(agentName!, existingProject);
+            if (!allowed)
+                return "memory_update: access denied.";
+
+            // If the caller is changing the project, they must also be in the target project's allow-list.
+            var newProject = string.IsNullOrEmpty(project) ? null : project;
+            if (newProject is not null)
+            {
+                var (targetAllowed, targetReason) = aclCache.CanRead(agentName!, newProject);
+                if (!targetAllowed)
+                    return $"memory_update: access denied — cannot move memory to project '{newProject}': {targetReason}.";
+            }
+
+            if (probe is null)
+                return $"Memory not found with ID: {id}";
+        }
 
         try
         {

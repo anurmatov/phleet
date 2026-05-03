@@ -80,9 +80,10 @@ public sealed class SetupService
         // A provider is "configured" if its primary credential key is present and non-weak in .env.
         var configuredProviders = new List<string>();
         if (IsConfigured(env, "GEMINI_API_KEY")) configuredProviders.Add("gemini");
-        // claude and codex use OAuth credential files — if GEMINI_API_KEY is not set, assume claude
-        // is available (it's the default and its credential file is managed outside .env).
-        if (!configuredProviders.Contains("gemini") || IsConfigured(env, "ANTHROPIC_API_KEY"))
+        if (IsConfigured(env, "OPENAI_API_KEY")) configuredProviders.Add("codex");
+        // claude uses OAuth credentials managed outside .env (no ANTHROPIC_API_KEY needed).
+        // Add it if ANTHROPIC_API_KEY is explicitly set, or as fallback when no other provider is detected.
+        if (IsConfigured(env, "ANTHROPIC_API_KEY") || configuredProviders.Count == 0)
             configuredProviders.Insert(0, "claude");
 
         return new SetupStatusDto(

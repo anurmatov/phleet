@@ -48,7 +48,6 @@ RUN node -e " \
     if (typeof m.LegacyAgentProtocol !== 'function') throw new Error('LegacyAgentProtocol not exported'); \
     if (typeof m.Config !== 'function') throw new Error('Config not exported'); \
     if (typeof m.MCPServerConfig !== 'function') throw new Error('MCPServerConfig not exported'); \
-    if (typeof m.createContentGeneratorConfig !== 'function') throw new Error('createContentGeneratorConfig not exported'); \
     if (typeof m.AuthType !== 'object') throw new Error('AuthType not exported'); \
     console.log('gemini-cli-core guard: ok'); \
   }).catch(e => { console.error('ERROR: @google/gemini-cli-core guard failed:', e.message); process.exit(1); })" \

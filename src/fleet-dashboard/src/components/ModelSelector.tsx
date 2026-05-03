@@ -11,9 +11,12 @@ const PILL_LABELS: Record<string, string> = {
   'gpt-5.4-mini': 'gpt-5.4-mini',
   'gpt-5.3-codex': 'gpt-5.3-codex',
   'codex-mini-latest': 'codex-mini',
-  'gemini-2.5-flash': '2.5 flash',
+  'gemini-3.1-pro-preview': '3.1 pro preview',
+  'gemini-3-flash-preview': '3 flash preview',
+  'gemini-3.1-flash-lite-preview': '3.1 flash-lite preview',
   'gemini-2.5-pro': '2.5 pro',
-  'gemini-2.0-flash': '2.0 flash',
+  'gemini-2.5-flash': '2.5 flash',
+  'gemini-2.5-flash-lite': '2.5 flash-lite',
 }
 
 interface ModelSelectorProps {

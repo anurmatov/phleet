@@ -177,7 +177,7 @@ use this as a copy-paste-and-modify starting point. every attribute below must b
 | `role` | maps to an instruction block in the `instructions` table | e.g. `developer`, `devops`, `product-manager` |
 | `displayName` | label shown in the fleet dashboard | e.g. `Developer` |
 | `shortName` | message prefix when `prefixMessages=true` | 3–8 chars — e.g. `Dev` |
-| `model` | LLM model identifier | claude: `claude-sonnet-4-6` (worker default), `claude-opus-4-6`, `claude-haiku-4-5-20251001`; codex: `gpt-5`, `codex-mini-latest`; gemini: `gemini-2.5-flash` (default), `gemini-2.5-pro`, `gemini-2.0-flash` |
+| `model` | LLM model identifier | claude: `claude-sonnet-4-6` (worker default), `claude-opus-4-6`, `claude-haiku-4-5-20251001`; codex: `gpt-5`, `codex-mini-latest`; gemini: `gemini-2.5-flash` (default), `gemini-2.5-pro`, `gemini-2.5-flash-lite`, `gemini-3-flash-preview`, `gemini-3.1-flash-lite-preview`, `gemini-3.1-pro-preview` |
 | `memoryLimitMb` | docker container memory cap | 4096–6144 for workers; 8192+ for opus-driven roles |
 | `containerName` | docker container name | auto-derived from `name` if omitted — set explicitly only to avoid naming conflicts |
 | tools (built-in) | claude built-ins that need no MCP server | `Read`, `Write`, `Edit`, `Glob`, `Grep`, `Bash`, `WebFetch`, `Agent`, `TodoWrite` — omit any the role should not have |

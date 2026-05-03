@@ -60,7 +60,8 @@ public sealed class SetupService
             _logger.LogWarning(ex, "Could not read .env at {Path} — returning all-false status", _envFilePath);
             return new SetupStatusDto(
                 new TelegramStatusDto(false, false),
-                new GitHubStatusDto(false));
+                new GitHubStatusDto(false),
+                ["claude"]);
         }
 
         var telegramConfigured =
@@ -75,9 +76,19 @@ public sealed class SetupService
             IsConfigured(env, "GITHUB_APP_ID") &&
             IsConfigured(env, "GITHUB_APP_PEM");
 
+        // Determine which AI providers are configured so the dashboard can pre-select the right default.
+        // A provider is "configured" if its primary credential key is present and non-weak in .env.
+        var configuredProviders = new List<string>();
+        if (IsConfigured(env, "GEMINI_API_KEY")) configuredProviders.Add("gemini");
+        // claude and codex use OAuth credential files — if GEMINI_API_KEY is not set, assume claude
+        // is available (it's the default and its credential file is managed outside .env).
+        if (!configuredProviders.Contains("gemini") || IsConfigured(env, "ANTHROPIC_API_KEY"))
+            configuredProviders.Insert(0, "claude");
+
         return new SetupStatusDto(
             new TelegramStatusDto(telegramConfigured, groupEnabled),
-            new GitHubStatusDto(githubConfigured));
+            new GitHubStatusDto(githubConfigured),
+            configuredProviders.ToArray());
     }
 
     /// <summary>
@@ -572,7 +583,7 @@ public sealed class SetupService
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────
 
-public sealed record SetupStatusDto(TelegramStatusDto Telegram, GitHubStatusDto GitHub);
+public sealed record SetupStatusDto(TelegramStatusDto Telegram, GitHubStatusDto GitHub, string[] ConfiguredProviders);
 public sealed record TelegramStatusDto(bool Configured, bool GroupChatEnabled);
 public sealed record GitHubStatusDto(bool Configured);
 

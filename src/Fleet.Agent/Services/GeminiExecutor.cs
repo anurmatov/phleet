@@ -282,14 +282,7 @@ public sealed class GeminiExecutor : IAgentExecutor
             Summary = ev.Text ?? "",
             IsSignificant = true,
         },
-        "item.started" when ev.ItemType == "tool_use" => new AgentProgress
-        {
-            EventType = "tool_use",
-            Summary = $"Using {ev.ToolName}",
-            ToolName = ev.ToolName,
-            ToolArgs = ev.ToolArgs,
-            IsSignificant = true,
-        },
+        "item.started" when ev.ItemType == "tool_use" => MapToolUse(ev),
         "item.completed" when ev.ItemType == "tool_result" => new AgentProgress
         {
             EventType = "tool_result",
@@ -315,6 +308,24 @@ public sealed class GeminiExecutor : IAgentExecutor
         },
         _ => null,
     };
+
+    private AgentProgress MapToolUse(BridgeEvent ev)
+    {
+        var toolName = ev.ToolName ?? "unknown";
+        var argsSnippet = ev.ToolArgs is { Length: > 0 } args
+            ? (args.Length > 200 ? args[..200] + "…" : args)
+            : "{}";
+        // Log to container output only — do NOT mark IsSignificant=true or set ToolName,
+        // which would route the event to Telegram via TaskManager's tool-use path.
+        // Only the final turn.completed text is delivered to Telegram (matches ClaudeExecutor).
+        _logger.LogInformation("Tool call: {ToolName}({Args})", toolName, argsSnippet);
+        return new AgentProgress
+        {
+            EventType = "tool_use",
+            Summary = $"Using {toolName}({argsSnippet})",
+            IsSignificant = false,
+        };
+    }
 
     private AgentProgress BuildTurnCompleted(BridgeEvent ev)
     {

@@ -23,15 +23,20 @@
  *
  * @google/gemini-cli-core API used:
  *   - LegacyAgentProtocol — streaming conversation loop with tool handling via Scheduler
- *   - Config + createContentGeneratorConfig — client configuration, userMemory = system prompt
+ *   - Config — client configuration, userMemory = system prompt
  *   - MCPServerConfig — HTTP/SSE MCP server descriptors
  */
+
+// NOTE: This bridge uses LegacyAgentProtocol rather than LocalAgentExecutor as originally
+// specified. LocalAgentExecutor.run() is a one-shot call that blocks until the agent finishes
+// and does not expose a subscribe/send streaming API. LegacyAgentProtocol provides subscribe()
+// for streaming events and send() for injecting messages, which maps directly onto the bridge's
+// NDJSON protocol (ack → turn.started → item.* → turn.completed). The deviation is intentional.
 
 import {
   LegacyAgentProtocol,
   Config,
   MCPServerConfig,
-  createContentGeneratorConfig,
   AuthType,
 } from '@google/gemini-cli-core';
 import readline from 'readline';
@@ -237,9 +242,14 @@ async function runTask(msg) {
 
 // ── Main loop ────────────────────────────────────────────────────────────────
 
+// LegacyAgentProtocol.send() cannot be called while a prior stream is active.
+// A Promise chain serialises back-to-back task arrivals so each waits for the
+// previous one to finish before starting.
 const rl = readline.createInterface({ input: process.stdin, terminal: false });
 
-rl.on('line', async (line) => {
+let _taskQueue = Promise.resolve();
+
+rl.on('line', (line) => {
   const trimmed = line.trim();
   if (!trimmed) return;
 
@@ -251,12 +261,11 @@ rl.on('line', async (line) => {
     return;
   }
 
-  try {
-    if (msg.type === 'task' || msg.type === 'command') {
-      await runTask(msg);
-    }
-  } catch (err) {
-    emit({ type: 'error', message: err.message ?? String(err) });
+  if (msg.type === 'task' || msg.type === 'command') {
+    // Chain onto the previous task so they run serially, never concurrently.
+    _taskQueue = _taskQueue.then(() => runTask(msg).catch((err) => {
+      emit({ type: 'error', message: err.message ?? String(err) });
+    }));
   }
 });
 

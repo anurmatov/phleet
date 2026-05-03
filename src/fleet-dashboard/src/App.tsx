@@ -186,6 +186,7 @@ export default function App() {
   const [setupStatus, setSetupStatus] = useState<{
     telegram: { configured: boolean; groupChatEnabled: boolean }
     gitHub: { configured: boolean }
+    configuredProviders?: string[]
   } | null>(null)
 
   const [logViewer, setLogViewer] = useState<string | null>(null)
@@ -1686,7 +1687,11 @@ export default function App() {
         onReprovisionAll={handleReprovisionAll}
         onReprovisionAllConfirm={handleReprovisionAllConfirm}
         onReprovisionAllCancel={handleReprovisionAllCancel}
-        onNewAgent={() => { setCreateForm(DEFAULT_CREATE_FORM); setCopyFrom(''); setCreateState('idle'); setCreateMsg(''); setCreateModalOpen(true) }}
+        onNewAgent={() => {
+          const defaultProvider = setupStatus?.configuredProviders?.length === 1 ? setupStatus.configuredProviders[0] : 'claude'
+          setCreateForm({ ...DEFAULT_CREATE_FORM, provider: defaultProvider, model: PROVIDER_DEFAULT_MODEL[defaultProvider] ?? DEFAULT_CREATE_FORM.model })
+          setCopyFrom(''); setCreateState('idle'); setCreateMsg(''); setCreateModalOpen(true)
+        }}
         navOpen={navOpen}
         onNavClose={() => setNavOpen(false)}
       />

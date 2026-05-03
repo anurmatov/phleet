@@ -124,6 +124,21 @@ public sealed class ContainerProvisioningService(
         if (!string.IsNullOrWhiteSpace(kokoroServiceUrl))
             env.Add($"Tts__ServiceUrl={kokoroServiceUrl}");
 
+        // Auto-inject provider credential env var if not already present in the agent's EnvRefs.
+        // Without this, gemini containers crash at startup ("GEMINI_API_KEY is required") even when
+        // the key is in .env — the operator would have to manually add the env ref, easy to miss.
+        if (string.Equals(agent.Provider, "gemini", StringComparison.OrdinalIgnoreCase))
+        {
+            var alreadyHasGeminiKey = agent.EnvRefs.Any(e =>
+                string.Equals(e.EnvKeyName, "GEMINI_API_KEY", StringComparison.OrdinalIgnoreCase));
+            if (!alreadyHasGeminiKey
+                && envValues.TryGetValue("GEMINI_API_KEY", out var geminiKey)
+                && !string.IsNullOrEmpty(geminiKey))
+            {
+                env.Add($"GEMINI_API_KEY={geminiKey}");
+            }
+        }
+
         return env;
     }
 

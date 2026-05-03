@@ -1203,6 +1203,15 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         k.EndsWith("_BOT_TOKEN", StringComparison.OrdinalIgnoreCase));
     if (!hasBotTokenRef)
         envRefSet.Add("TELEGRAM_NOTIFIER_BOT_TOKEN");
+    // Auto-seed the provider credential key so the container can start without manual config.
+    // BuildEnv also auto-injects from .env at provision time, but seeding the DB ref keeps
+    // the config self-documenting and visible in the credentials panel.
+    var resolvedProvider = (body.Provider ?? "claude").Trim().ToLowerInvariant();
+    if (resolvedProvider == "gemini"
+        && !envRefSet.Contains("GEMINI_API_KEY", StringComparer.OrdinalIgnoreCase))
+    {
+        envRefSet.Add("GEMINI_API_KEY");
+    }
     foreach (var r in envRefSet)
         db.AgentEnvRefs.Add(new AgentEnvRef { AgentId = agent.Id, EnvKeyName = r });
 
@@ -1242,6 +1251,17 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
             logger.LogWarning(ex, "Could not write FLEET_CTO_AGENT for new co-cto agent '{Agent}'", name);
         }
 
+        // Grant wildcard (*) memory project access to the operator/CTO agent so it can read
+        // all memory projects under the project-scoped ACL (phleet PR #126).
+        // Without this, a fresh install ships with a memory-blind operator.
+        var alreadyHasWildcard = await db.AgentProjectAccess
+            .AnyAsync(x => x.AgentName == name && x.Project == "*");
+        if (!alreadyHasWildcard)
+        {
+            db.AgentProjectAccess.Add(new AgentProjectAccess { AgentName = name, Project = "*" });
+            await db.SaveChangesAsync();
+            logger.LogInformation("Wildcard memory project access granted to operator agent '{Agent}'", name);
+        }
     }
 
     if (body.Provision != false)

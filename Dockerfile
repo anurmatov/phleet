@@ -38,6 +38,19 @@ COPY --from=build /app .
 COPY src/Fleet.Agent/codex-bridge.mjs /app/codex-bridge.mjs
 RUN cd /app && npm install @openai/codex-sdk@0.118.0
 
+COPY src/Fleet.Agent/gemini-bridge.mjs /app/gemini-bridge.mjs
+COPY src/Fleet.Agent/scripts/gen-gemini-settings.mjs /app/scripts/gen-gemini-settings.mjs
+RUN cd /app && npm install @google/gemini-cli-core@0.40.1
+# Build-time guard: verify GeminiCliAgent and LocalAgentDefinition are exported from the pinned package.
+# Uses dynamic import() because @google/gemini-cli-core is an ES module package (require() throws ReferenceError).
+RUN node -e " \
+  import('@google/gemini-cli-core').then(m => { \
+    if (typeof m.GeminiCliAgent !== 'function') throw new Error('GeminiCliAgent not a constructor'); \
+    if (typeof m.LocalAgentDefinition !== 'function') throw new Error('LocalAgentDefinition not a constructor'); \
+    console.log('gemini-cli-core guard: ok'); \
+  }).catch(e => { console.error('ERROR: @google/gemini-cli-core guard failed:', e.message); process.exit(1); })" \
+  || (echo 'ERROR: @google/gemini-cli-core guard failed — bridge will not work' && exit 1)
+
 RUN mkdir -p /workspace /root/.claude
 
 COPY skills/ /app/skills/

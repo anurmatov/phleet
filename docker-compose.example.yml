@@ -14,10 +14,11 @@
 #
 # Credentials: setup.sh copies your Claude/Codex OAuth credentials into
 # ${FLEET_BASE_DIR} so containers can mount them without exposing your
-# host ~/.claude or ~/.codex. If you're running this compose file without
-# setup.sh, make sure the following files exist under ${FLEET_BASE_DIR}:
-#   .claude-credentials.json  — copy of ~/.claude/.credentials.json
-#   .codex-credentials.json   — copy of ~/.codex/auth.json (if using codex)
+# host ~/.claude or ~/.codex. For providers not selected, setup.sh creates
+# empty placeholder files automatically. If running without setup.sh,
+# ensure the following files exist (can be empty) under ${FLEET_BASE_DIR}:
+#   .claude-credentials.json
+#   .codex-credentials.json
 
 services:
 
@@ -316,12 +317,11 @@ services:
     image: fleet:temporal-bridge
     container_name: fleet-temporal-bridge
     volumes:
-      # Claude credentials — copied by setup.sh from ~/.claude/.credentials.json
-      # (or from the macOS keychain "Claude Code-credentials" entry).
+      # Claude credentials — copied by setup.sh from ~/.claude/.credentials.json.
+      # If you're not using claude, setup.sh creates an empty placeholder automatically.
       - ${FLEET_BASE_DIR}/.claude-credentials.json:/root/.claude/.credentials.json
       # Codex credentials — copied by setup.sh from ~/.codex/auth.json.
-      # If you're not using codex, create an empty placeholder file:
-      #   touch ${FLEET_BASE_DIR}/.codex-credentials.json
+      # If you're not using codex, setup.sh creates an empty placeholder automatically.
       - ${FLEET_BASE_DIR}/.codex-credentials.json:/root/.codex/auth.json
     environment:
       - RabbitMq__Host=rabbitmq

@@ -6,7 +6,7 @@
 
 Phleet is an open-source, self-hosted multi-agent AI platform built on .NET 10, coordinated by a central orchestrator backed by Temporal workflows.
 
-**Your credentials, your repos, your infrastructure.** Agents run as Docker containers on your host, use your Claude or Codex credentials, and hit your repos through your own GitHub App. Control plane, runtime state, workflow history, and memory stay on infrastructure you control; external traffic goes only to the providers you configure — Claude/Codex, GitHub, and Telegram.
+**Your credentials, your repos, your infrastructure.** Agents run as Docker containers on your host, use your Claude, Codex, or Gemini credentials, and hit your repos through your own GitHub App. Control plane, runtime state, workflow history, and memory stay on infrastructure you control; external traffic goes only to the providers you configure — Claude/Codex/Gemini, GitHub, and Telegram.
 
 <p align="center">
   <img src=".github/assets/phleet-dashboard.jpg" alt="Phleet dashboard — agents and active workflows" width="900">
@@ -23,6 +23,22 @@ Phleet is an open-source, self-hosted multi-agent AI platform built on .NET 10, 
   <br>
   <em>Watch a one-line request go from idea to merged PR — multi-agent design, consensus review, and prod deploy in ~5 minutes.</em>
 </p>
+
+## Quickstart: Gemini provider (API key, no OAuth)
+
+If you want to try Phleet without setting up Claude or Codex OAuth credentials, the `gemini` provider lets you run agents with just a Google AI Studio API key — no token refresh workflow needed, keys don't expire.
+
+1. Clone the repo and run `./setup.sh`
+2. At the provider prompt, choose `4) gemini`
+3. Paste your Google AI Studio API key (get a free one at https://aistudio.google.com/apikey — no credit card required)
+4. Complete the remaining setup steps (Telegram bots, GitHub App)
+5. Open the dashboard → Agents → Create → set Provider = Gemini → provision
+
+**Free tier:** 60 req/min / 1,000 req/day. For production use, upgrade to a paid API key.
+**No token refresh schedule is started** — API keys do not expire. If you later add claude or codex agents, re-run `./setup.sh` to create the refresh schedule.
+**Mixed installs** (some agents claude, some gemini): add both keys to `./fleet/.env` manually and select the provider per agent in the dashboard.
+
+---
 
 ## Quickstart
 

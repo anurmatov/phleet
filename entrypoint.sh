@@ -35,6 +35,21 @@ for (const [name, s] of Object.entries(servers)) {
 if (toml) fs.writeFileSync('/root/.codex/config.toml', toml);
 " 2>/dev/null || true
     fi
+elif [ "$PROVIDER" = "gemini" ]; then
+    # Gemini API key auth — validated at .NET startup in GeminiExecutor.
+    # entrypoint.sh validates eagerly for a cleaner fail message before dotnet starts.
+    if [ -z "${GEMINI_API_KEY:-}" ]; then
+        echo "ERROR: provider=gemini requires GEMINI_API_KEY to be set" >&2
+        exit 1
+    fi
+    # Generate ~/.gemini/settings.json (used by direct gemini CLI invocations;
+    # bridge reads MCP config from --mcp-config /workspace/.mcp.json instead).
+    # Only HTTP/SSE transport MCP servers are written here; stdio entries are skipped.
+    MCP_JSON="/workspace/.mcp.json"
+    if [ -f "$MCP_JSON" ]; then
+        mkdir -p /root/.gemini
+        node /app/scripts/gen-gemini-settings.mjs "$MCP_JSON" > /root/.gemini/settings.json 2>/dev/null || true
+    fi
 else
     # Claude auth — always overwrite from host mount (source of truth, kept fresh by AuthTokenRefreshWorkflow)
     if [ -f /root/.claude-host.json ]; then

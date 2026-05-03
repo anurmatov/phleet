@@ -227,15 +227,17 @@ echo "  Which AI provider(s) do you want to use?"
 echo "    1) claude"
 echo "    2) codex"
 echo "    3) both"
+echo "    4) gemini  — requires GEMINI_API_KEY (free tier available at aistudio.google.com)"
 read -rp "  Choice [1]: " provider_choice
 provider_choice="${provider_choice:-1}"
 
-USE_CLAUDE=false; USE_CODEX=false
+USE_CLAUDE=false; USE_CODEX=false; USE_GEMINI=false
 case "$provider_choice" in
   1) USE_CLAUDE=true ;;
   2) USE_CODEX=true ;;
   3) USE_CLAUDE=true; USE_CODEX=true ;;
-  *) fail "Invalid choice — enter 1, 2, or 3"; exit 1 ;;
+  4) USE_GEMINI=true ;;
+  *) fail "Invalid choice — enter 1, 2, 3, or 4"; exit 1 ;;
 esac
 
 # Set by check_creds_claude — path to a readable credentials JSON file
@@ -332,8 +334,35 @@ check_creds_codex() {
   fi
 }
 
+check_creds_gemini() {
+  local existing
+  existing=$(read_env_var "$ENV_FILE" "GEMINI_API_KEY")
+  if [[ -n "$existing" ]] && ! is_placeholder "$existing"; then
+    ok "GEMINI_API_KEY found in $ENV_FILE"
+    return
+  fi
+  prompt_field "$ENV_FILE" "GEMINI_API_KEY" "Google AI Studio API key" \
+    "Free key at https://aistudio.google.com/apikey (free tier: 60 req/min, 1000 req/day; no credit card required). Paste it here." \
+    "y" "y"
+}
+
 if $USE_CLAUDE; then check_creds_claude; fi
 if $USE_CODEX;  then check_creds_codex;  fi
+if $USE_GEMINI; then check_creds_gemini; fi
+
+# Ensure credential placeholder files exist for providers not selected.
+# fleet-temporal-bridge mounts these unconditionally; without the source files,
+# Docker creates empty directories and the container fails on first auth attempt.
+if ! $USE_CLAUDE && [[ ! -f "${FLEET_BASE_DIR}/.claude-credentials.json" ]]; then
+    mkdir -p "$FLEET_BASE_DIR"
+    touch "${FLEET_BASE_DIR}/.claude-credentials.json"
+    ok "Created empty placeholder: .claude-credentials.json (provider=claude not selected)"
+fi
+if ! $USE_CODEX && [[ ! -f "${FLEET_BASE_DIR}/.codex-credentials.json" ]]; then
+    mkdir -p "$FLEET_BASE_DIR"
+    touch "${FLEET_BASE_DIR}/.codex-credentials.json"
+    ok "Created empty placeholder: .codex-credentials.json (provider=codex not selected)"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 section "[3/7] Configuration..."
@@ -801,6 +830,10 @@ EOF
 
   if $USE_CLAUDE; then create_refresh_schedule "claude"; fi
   if $USE_CODEX;  then create_refresh_schedule "codex";  fi
+  # Informational message for gemini-only installs (no schedule needed):
+  if ! $USE_CLAUDE && ! $USE_CODEX; then
+    ok "AuthTokenRefreshWorkflow: skipped — gemini API keys do not expire, no token refresh needed"
+  fi
 fi
 
 echo

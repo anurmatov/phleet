@@ -177,7 +177,7 @@ use this as a copy-paste-and-modify starting point. every attribute below must b
 | `role` | maps to an instruction block in the `instructions` table | e.g. `developer`, `devops`, `product-manager` |
 | `displayName` | label shown in the fleet dashboard | e.g. `Developer` |
 | `shortName` | message prefix when `prefixMessages=true` | 3–8 chars — e.g. `Dev` |
-| `model` | LLM model identifier | claude: `claude-sonnet-4-6` (worker default), `claude-opus-4-6`, `claude-haiku-4-5-20251001`; codex: `gpt-5`, `codex-mini-latest` |
+| `model` | LLM model identifier | claude: `claude-sonnet-4-6` (worker default), `claude-opus-4-6`, `claude-haiku-4-5-20251001`; codex: `gpt-5`, `codex-mini-latest`; gemini: `gemini-2.5-flash` (default), `gemini-2.5-pro`, `gemini-2.0-flash` |
 | `memoryLimitMb` | docker container memory cap | 4096–6144 for workers; 8192+ for opus-driven roles |
 | `containerName` | docker container name | auto-derived from `name` if omitted — set explicitly only to avoid naming conflicts |
 | tools (built-in) | claude built-ins that need no MCP server | `Read`, `Write`, `Edit`, `Glob`, `Grep`, `Bash`, `WebFetch`, `Agent`, `TodoWrite` — omit any the role should not have |
@@ -261,7 +261,10 @@ provision_agent(agent_name="adev")
 
 1. **purpose and role** — what job is this agent doing? does an existing role (developer, etc.) already cover it, or does it need a new role with its own instruction file? new role = new entry in `instructions` table via `create_instruction` + an `agent_instructions` mapping with the right `load_order`. reuse before creating.
 
-2. **provider and model** — claude (default) or codex? for claude: which model (opus/sonnet/haiku)? for codex: which gpt model + what `CodexSandboxMode` (default `danger-full-access`, alternatives `workspace-write` / `read-only`)?
+2. **provider and model** — claude (default), codex, or gemini?
+   - **claude**: which model (opus/sonnet/haiku)?
+   - **codex**: which gpt model + what `CodexSandboxMode` (default `danger-full-access`, alternatives `workspace-write` / `read-only`)?
+   - **gemini**: needs `GEMINI_API_KEY` env var (free tier at https://aistudio.google.com/apikey, no OAuth setup needed). Default model: `gemini-2.5-flash`.
 
 3. **memory limit** — `memoryLimitMb` for the container. typical: 4096-6144 for workers, higher for opus-driven roles.
 

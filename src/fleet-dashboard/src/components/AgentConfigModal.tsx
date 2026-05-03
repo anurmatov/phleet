@@ -65,6 +65,7 @@ export default function AgentConfigModal({
   const provider = configEdits?.provider ?? configData?.provider ?? 'claude'
   const isClaude = provider === 'claude'
   const isCodex = provider === 'codex'
+  const isGemini = provider === 'gemini'
 
   return (
     <div className="config-modal-overlay" onClick={onClose}>
@@ -87,6 +88,7 @@ export default function AgentConfigModal({
                 >
                   <option value="claude">Claude (Anthropic)</option>
                   <option value="codex">Codex (OpenAI)</option>
+                  <option value="gemini">Gemini (Google)</option>
                 </select>
               </div>
               <div className="config-field">

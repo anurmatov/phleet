@@ -158,6 +158,11 @@ public sealed class ContainerProvisioningService(
             if (File.Exists(codexTokenStorePath))
                 binds.Add("./.codex-credentials.json:/root/.codex-host/auth.json:ro");
         }
+        else if (agent.Provider == "gemini")
+        {
+            // No file mount — GEMINI_API_KEY is an env var resolved via the agent's EnvRefs
+            // DB column (add "GEMINI_API_KEY" as an env ref, sourced from the cluster .env).
+        }
         else
         {
             // Mount orchestrator-stored Claude credentials for seeding new containers (entrypoint.sh reads this)

@@ -35,6 +35,9 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
     // Credentials Audit
     public DbSet<CredentialsAudit> CredentialsAudit => Set<CredentialsAudit>();
 
+    // Agent Project Access (memory ACL)
+    public DbSet<AgentProjectAccess> AgentProjectAccess => Set<AgentProjectAccess>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<Agent>(e =>
@@ -286,6 +289,15 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.Property(x => x.KeyName).HasMaxLength(255).IsRequired();
             e.Property(x => x.Actor).HasMaxLength(255).HasDefaultValue("CEO");
             e.HasIndex(x => x.ChangedAt);
+        });
+
+        modelBuilder.Entity<AgentProjectAccess>(e =>
+        {
+            e.ToTable("agent_project_access");
+            e.HasKey(x => new { x.AgentName, x.Project });
+            e.Property(x => x.AgentName).HasMaxLength(100).IsRequired();
+            e.Property(x => x.Project).HasMaxLength(100).IsRequired();
+            e.HasIndex(x => x.AgentName);
         });
 
     }

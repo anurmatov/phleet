@@ -293,6 +293,25 @@ namespace Fleet.Orchestrator.Migrations
                     b.ToTable("agent_projects", (string)null);
                 });
 
+            modelBuilder.Entity("Fleet.Orchestrator.Data.AgentProjectAccess", b =>
+                {
+                    b.Property<string>("AgentName")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("varchar(100)");
+
+                    b.Property<string>("Project")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("varchar(100)");
+
+                    b.HasKey("AgentName", "Project");
+
+                    b.HasIndex("AgentName");
+
+                    b.ToTable("agent_project_access", (string)null);
+                });
+
             modelBuilder.Entity("Fleet.Orchestrator.Data.AgentTelegramGroup", b =>
                 {
                     b.Property<int>("Id")

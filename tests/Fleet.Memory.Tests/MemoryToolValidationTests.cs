@@ -1,6 +1,9 @@
+using Fleet.Memory.Configuration;
 using Fleet.Memory.Services;
 using Fleet.Memory.Tools;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 namespace Fleet.Memory.Tests;
 
@@ -15,6 +18,16 @@ namespace Fleet.Memory.Tests;
 /// </summary>
 public class MemoryToolValidationTests
 {
+    // Disabled ACL service for tool construction in validation tests
+    private static AclCacheService DisabledAcl()
+    {
+        var opts = Options.Create(new AclOptions { EnableProjectScopedAcl = false });
+        var oOpts = Options.Create(new OrchestratorOptions());
+        var svc = new AclCacheService(opts, oOpts, NullLogger<AclCacheService>.Instance);
+        svc.InjectAclForTesting([]);
+        return svc;
+    }
+
     // --- memory_store ---
 
     [Fact]
@@ -107,14 +120,14 @@ public class MemoryToolValidationTests
     [Fact]
     public async Task Get_MissingId_ReturnsError()
     {
-        var result = await new MemoryGetTool(null!, new ReadCounterService(), new HttpContextAccessor()).GetAsync("");
+        var result = await new MemoryGetTool(null!, new ReadCounterService(), DisabledAcl(), new HttpContextAccessor()).GetAsync("");
         Assert.Contains("missing required parameter 'id'", result);
     }
 
     [Fact]
     public async Task Get_WhitespaceId_ReturnsError()
     {
-        var result = await new MemoryGetTool(null!, new ReadCounterService(), new HttpContextAccessor()).GetAsync("   ");
+        var result = await new MemoryGetTool(null!, new ReadCounterService(), DisabledAcl(), new HttpContextAccessor()).GetAsync("   ");
         Assert.Contains("missing required parameter 'id'", result);
     }
 
@@ -123,21 +136,21 @@ public class MemoryToolValidationTests
     [Fact]
     public async Task Search_MissingQuery_ReturnsError()
     {
-        var result = await new MemorySearchTool(null!).SearchAsync("");
+        var result = await new MemorySearchTool(null!, DisabledAcl(), new HttpContextAccessor()).SearchAsync("");
         Assert.Contains("missing required parameter 'query'", result);
     }
 
     [Fact]
     public async Task Search_WhitespaceQuery_ReturnsError()
     {
-        var result = await new MemorySearchTool(null!).SearchAsync("   ");
+        var result = await new MemorySearchTool(null!, DisabledAcl(), new HttpContextAccessor()).SearchAsync("   ");
         Assert.Contains("missing required parameter 'query'", result);
     }
 
     [Fact]
     public async Task Search_InvalidTypeFilter_ReturnsError()
     {
-        var result = await new MemorySearchTool(null!).SearchAsync("some query", type: "foo");
+        var result = await new MemorySearchTool(null!, DisabledAcl(), new HttpContextAccessor()).SearchAsync("some query", type: "foo");
         Assert.Contains("invalid value for 'type' filter: 'foo'", result);
         Assert.Contains("learning", result);
     }
@@ -147,7 +160,7 @@ public class MemoryToolValidationTests
     [Fact]
     public async Task List_InvalidTypeFilter_ReturnsError()
     {
-        var result = await new MemoryListTool(null!).ListAsync(type: "not-a-type");
+        var result = await new MemoryListTool(null!, DisabledAcl(), new HttpContextAccessor()).ListAsync(type: "not-a-type");
         Assert.Contains("invalid value for 'type' filter: 'not-a-type'", result);
         Assert.Contains("learning", result);
     }
@@ -160,8 +173,8 @@ public class MemoryToolValidationTests
         Assert.StartsWith("memory_store:", await new MemoryStoreTool(null!).StoreAsync("", "t", "c"));
         Assert.StartsWith("memory_update:", await new MemoryUpdateTool(null!).UpdateAsync(""));
         Assert.StartsWith("memory_delete:", await new MemoryDeleteTool(null!).DeleteAsync(""));
-        Assert.StartsWith("memory_get:", await new MemoryGetTool(null!, new ReadCounterService(), new HttpContextAccessor()).GetAsync(""));
-        Assert.StartsWith("memory_search:", await new MemorySearchTool(null!).SearchAsync(""));
-        Assert.StartsWith("memory_list:", await new MemoryListTool(null!).ListAsync(type: "bad"));
+        Assert.StartsWith("memory_get:", await new MemoryGetTool(null!, new ReadCounterService(), DisabledAcl(), new HttpContextAccessor()).GetAsync(""));
+        Assert.StartsWith("memory_search:", await new MemorySearchTool(null!, DisabledAcl(), new HttpContextAccessor()).SearchAsync(""));
+        Assert.StartsWith("memory_list:", await new MemoryListTool(null!, DisabledAcl(), new HttpContextAccessor()).ListAsync(type: "bad"));
     }
 }

@@ -2,12 +2,16 @@ using System.ComponentModel;
 using System.Text;
 using Fleet.Memory.Models;
 using Fleet.Memory.Services;
+using Microsoft.AspNetCore.Http;
 using ModelContextProtocol.Server;
 
 namespace Fleet.Memory.Tools;
 
 [McpServerToolType]
-public sealed class MemoryListTool(MemoryService memoryService)
+public sealed class MemoryListTool(
+    MemoryService memoryService,
+    AclCacheService aclCache,
+    IHttpContextAccessor httpContextAccessor)
 {
     [McpServerTool(Name = "memory_list")]
     [Description("List memories with optional filters. Returns a summary of matching memories without full content. Use memory_get to read full content.")]
@@ -20,7 +24,26 @@ public sealed class MemoryListTool(MemoryService memoryService)
         if (type is not null && !MemoryDocument.ValidTypes.Contains(type))
             return $"memory_list: invalid value for 'type' filter: '{type}'.\nValid types: {string.Join(", ", MemoryDocument.ValidTypes)}.";
 
+        var agentName = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+
+        if (aclCache.IsAclEnabled && !aclCache.IsAvailable)
+            return "memory_list: ACL cache unavailable — orchestrator unreachable. Try again shortly.";
+
+        if (aclCache.IsAclEnabled && string.IsNullOrWhiteSpace(agentName))
+            return "memory_list: agent identity required — missing '?agent=' query parameter.";
+
         var results = await memoryService.ListAsync(type, project, agent, tag);
+
+        // Post-filter by ACL (disallowed memories simply don't appear in results)
+        if (aclCache.IsAclEnabled)
+        {
+            results = results.Where(d =>
+            {
+                var memProject = d.GetValueOrDefault("project") ?? "";
+                var (allowed, _) = aclCache.CanRead(agentName!, memProject);
+                return allowed;
+            }).ToList();
+        }
 
         if (results.Count == 0)
             return "No memories found matching the filters.";
@@ -29,7 +52,6 @@ public sealed class MemoryListTool(MemoryService memoryService)
         sb.AppendLine($"Found {results.Count} memories:");
         sb.AppendLine();
 
-        // Sort by created date descending
         var sorted = results.OrderByDescending(d => d.GetValueOrDefault("created", ""));
 
         foreach (var doc in sorted)

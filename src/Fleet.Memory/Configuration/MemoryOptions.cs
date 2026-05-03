@@ -1,5 +1,33 @@
 namespace Fleet.Memory.Configuration;
 
+public sealed class AclOptions
+{
+    public const string Section = "Acl";
+
+    /// <summary>
+    /// When true, read tools enforce project-scoped ACL. When false (default), all reads pass through.
+    /// </summary>
+    public bool EnableProjectScopedAcl { get; set; } = false;
+
+    /// <summary>
+    /// Projects all agents can read regardless of their allow-list. Default: empty.
+    /// </summary>
+    public string[] AclPublicProjects { get; set; } = [];
+
+    /// <summary>
+    /// The operator agent name that must hold a wildcard "*" row. A startup ERROR is logged if missing.
+    /// </summary>
+    public string AclOperatorAgent { get; set; } = "";
+}
+
+public sealed class OrchestratorOptions
+{
+    public const string Section = "Orchestrator";
+
+    /// <summary>Base URL for the fleet-orchestrator (e.g. http://fleet-orchestrator:3600).</summary>
+    public string BaseUrl { get; set; } = "http://fleet-orchestrator:3600";
+}
+
 public sealed class StorageOptions
 {
     public const string Section = "Storage";

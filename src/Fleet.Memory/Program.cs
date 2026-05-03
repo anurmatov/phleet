@@ -8,6 +8,8 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.Configure<StorageOptions>(builder.Configuration.GetSection(StorageOptions.Section));
 builder.Services.Configure<QdrantOptions>(builder.Configuration.GetSection(QdrantOptions.Section));
 builder.Services.Configure<EmbeddingOptions>(builder.Configuration.GetSection(EmbeddingOptions.Section));
+builder.Services.Configure<AclOptions>(builder.Configuration.GetSection(AclOptions.Section));
+builder.Services.Configure<OrchestratorOptions>(builder.Configuration.GetSection(OrchestratorOptions.Section));
 
 // Data layer
 builder.Services.AddSingleton<MemoryFileStore>();
@@ -36,7 +38,12 @@ builder.Services.AddSingleton<MemoryService>();
 builder.Services.AddSingleton<ReadCounterService>();
 builder.Services.AddHostedService<FileWatcherService>();
 
-// IHttpContextAccessor for agent attribution in MemoryGetTool
+// ACL cache — registered as singleton so tools can inject it, and as hosted service for lifecycle
+builder.Services.AddSingleton<AclCacheService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<AclCacheService>());
+builder.Services.AddHostedService<PeerConfigHostedService>();
+
+// IHttpContextAccessor for agent attribution in MemoryGetTool and ACL enforcement
 builder.Services.AddHttpContextAccessor();
 
 // MCP Server
@@ -197,6 +204,14 @@ app.MapDelete("/internal/memory/{id}", async (string id, MemoryService memorySer
 // GET /internal/stats/reads — in-memory read counter snapshot (resets on restart)
 app.MapGet("/internal/stats/reads", (ReadCounterService readCounter) =>
     Results.Ok(new { since = readCounter.Since, entries = readCounter.GetSnapshot() }));
+
+// GET /api/admin/memories/no-project-count — counts memories with no project set (migration planning aid)
+app.MapGet("/api/admin/memories/no-project-count", async (MemoryService memoryService) =>
+{
+    var all = await memoryService.ListAsync();
+    var count = all.Count(d => string.IsNullOrEmpty(d.GetValueOrDefault("project") ?? ""));
+    return Results.Ok(new { no_project_count = count });
+});
 
 app.Run();
 

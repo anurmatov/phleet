@@ -12,7 +12,8 @@ public sealed class MemoryGetTool(
     MemoryService memoryService,
     ReadCounterService readCounter,
     AclCacheService aclCache,
-    IHttpContextAccessor httpContextAccessor)
+    IHttpContextAccessor httpContextAccessor,
+    ILogger<MemoryGetTool> logger)
 {
     [McpServerTool(Name = "memory_get")]
     [Description("Get the full content of a specific memory by its ID. Use this after memory_search or memory_list to read the complete memory.")]
@@ -38,7 +39,10 @@ public sealed class MemoryGetTool(
             var project = probe?.Project ?? "";
             var (allowed, denyReason) = aclCache.CanRead(agentName!, project);
             if (!allowed)
-                return $"memory_get: access denied. {denyReason}";
+            {
+                logger.LogInformation("memory_get: denied agent '{Agent}' on id '{Id}': {Reason}", agentName, id, denyReason);
+                return "memory_get: access denied.";
+            }
 
             if (probe is null)
                 return $"Memory not found with ID: {id}";

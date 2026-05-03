@@ -76,18 +76,30 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
 
     private async Task RunAsync(CancellationToken ct)
     {
+        // Skip all HTTP activity when the feature flag is off.
+        // Mark available immediately so tools don't hit the 503 path.
+        if (!_aclOptions.Value.EnableProjectScopedAcl)
+        {
+            _isAvailable = true;
+            return;
+        }
+
         // Initial fetch with retries; fail-closed until first success
         await FetchWithRetryAsync(isInitial: true, ct);
 
-        // Warn if the operator agent lacks a wildcard row
-        CheckOperatorWildcard();
+        // Operator wildcard check — stay fail-closed if the operator lacks a wildcard row.
+        // Tools will return 503 until the wildcard is added and the next refresh picks it up.
+        TrySetAvailable();
 
         // Periodic refresh every 5 minutes
         using var timer = new PeriodicTimer(RefreshInterval);
         try
         {
             while (await timer.WaitForNextTickAsync(ct))
+            {
                 await RefreshAsync(ct);
+                TrySetAvailable();
+            }
         }
         catch (OperationCanceledException) { }
     }
@@ -190,7 +202,12 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
                             while (!_isAvailable && !ct.IsCancellationRequested)
                             {
                                 await Task.Delay(BackgroundRetryInterval, ct).ConfigureAwait(false);
-                                try { await FetchOnceAsync(ct); return; }
+                                try
+                                {
+                                    await FetchOnceAsync(ct);
+                                    TrySetAvailable();
+                                    return;
+                                }
                                 catch (Exception retryEx)
                                 {
                                     _logger.LogWarning(retryEx, "ACL background retry failed");
@@ -229,22 +246,30 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
 
         _cache = newCache;
         _cacheLoadedAt = DateTimeOffset.UtcNow;
-        _isAvailable = true;
         _logger.LogInformation("ACL cache refreshed: {AgentCount} agents", newCache.Count);
+        // _isAvailable is set by TrySetAvailable() after the operator-wildcard check.
     }
 
-    private void CheckOperatorWildcard()
+    /// <summary>
+    /// Sets _isAvailable=true only when the operator wildcard check passes.
+    /// If AclOperatorAgent is configured but lacks a wildcard row, stays fail-closed
+    /// and logs an error so operators know what to fix.
+    /// </summary>
+    private void TrySetAvailable()
     {
         var operatorAgent = _aclOptions.Value.AclOperatorAgent.Trim().ToLowerInvariant();
-        if (string.IsNullOrEmpty(operatorAgent)) return;
-
-        if (!_cache.TryGetValue(operatorAgent, out var projects) || !projects.Contains("*"))
+        if (!string.IsNullOrEmpty(operatorAgent) &&
+            (!_cache.TryGetValue(operatorAgent, out var projects) || !projects.Contains("*")))
         {
+            _isAvailable = false;
             _logger.LogError(
-                "ACL startup check: operator agent '{Agent}' does not have a wildcard '*' row in agent_project_access. " +
-                "Use PUT /api/agents/{Agent}/project-access with {{\"projects\":[\"*\"]}} to grant full access.",
+                "ACL operator check: agent '{Agent}' is missing the wildcard '*' row in agent_project_access — " +
+                "fleet-memory remains in fail-closed mode. " +
+                "Run: PUT /api/agents/{Agent}/project-access {{\"projects\":[\"*\"]}} to unblock.",
                 operatorAgent, operatorAgent);
+            return;
         }
+        _isAvailable = true;
     }
 
     public async ValueTask DisposeAsync()

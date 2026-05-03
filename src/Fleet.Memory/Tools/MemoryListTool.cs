@@ -32,15 +32,14 @@ public sealed class MemoryListTool(
         if (aclCache.IsAclEnabled && string.IsNullOrWhiteSpace(agentName))
             return "memory_list: agent identity required — missing '?agent=' query parameter.";
 
-        var results = await memoryService.ListAsync(type, project, agent, tag);
+        var results = await memoryService.ListDocumentsAsync(type, project, agent, tag);
 
-        // Post-filter by ACL (disallowed memories simply don't appear in results)
+        // Post-filter by ACL using the typed Project field (consistent with memory_get / memory_search)
         if (aclCache.IsAclEnabled)
         {
             results = results.Where(d =>
             {
-                var memProject = d.GetValueOrDefault("project") ?? "";
-                var (allowed, _) = aclCache.CanRead(agentName!, memProject);
+                var (allowed, _) = aclCache.CanRead(agentName!, d.Project ?? "");
                 return allowed;
             }).ToList();
         }
@@ -52,25 +51,18 @@ public sealed class MemoryListTool(
         sb.AppendLine($"Found {results.Count} memories:");
         sb.AppendLine();
 
-        var sorted = results.OrderByDescending(d => d.GetValueOrDefault("created", ""));
+        var sorted = results.OrderByDescending(d => d.Created);
 
         foreach (var doc in sorted)
         {
-            var title = doc.GetValueOrDefault("title", "Untitled");
-            var memType = doc.GetValueOrDefault("memory_type", "unknown");
-            var memId = doc.GetValueOrDefault("memory_id", "");
-            var created = doc.GetValueOrDefault("created", "");
-            var project2 = doc.GetValueOrDefault("project", "");
-            var tags = doc.GetValueOrDefault("tags", "");
+            var createdDate = doc.Created.ToString("yyyy-MM-dd");
 
-            var createdDate = created.Length >= 10 ? created[..10] : created;
-
-            sb.AppendLine($"- **{title}** ({memType})");
-            sb.Append($"  ID: `{memId}` | Created: {createdDate}");
-            if (!string.IsNullOrEmpty(project2))
-                sb.Append($" | Project: {project2}");
-            if (!string.IsNullOrEmpty(tags))
-                sb.Append($" | Tags: {tags}");
+            sb.AppendLine($"- **{doc.Title}** ({doc.Type})");
+            sb.Append($"  ID: `{doc.Id}` | Created: {createdDate}");
+            if (!string.IsNullOrEmpty(doc.Project))
+                sb.Append($" | Project: {doc.Project}");
+            if (doc.Tags.Count > 0)
+                sb.Append($" | Tags: {string.Join(", ", doc.Tags)}");
             sb.AppendLine();
         }
 

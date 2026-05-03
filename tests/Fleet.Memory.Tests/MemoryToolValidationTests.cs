@@ -120,14 +120,14 @@ public class MemoryToolValidationTests
     [Fact]
     public async Task Get_MissingId_ReturnsError()
     {
-        var result = await new MemoryGetTool(null!, new ReadCounterService(), DisabledAcl(), new HttpContextAccessor()).GetAsync("");
+        var result = await new MemoryGetTool(null!, new ReadCounterService(), DisabledAcl(), new HttpContextAccessor(), NullLogger<MemoryGetTool>.Instance).GetAsync("");
         Assert.Contains("missing required parameter 'id'", result);
     }
 
     [Fact]
     public async Task Get_WhitespaceId_ReturnsError()
     {
-        var result = await new MemoryGetTool(null!, new ReadCounterService(), DisabledAcl(), new HttpContextAccessor()).GetAsync("   ");
+        var result = await new MemoryGetTool(null!, new ReadCounterService(), DisabledAcl(), new HttpContextAccessor(), NullLogger<MemoryGetTool>.Instance).GetAsync("   ");
         Assert.Contains("missing required parameter 'id'", result);
     }
 
@@ -173,7 +173,7 @@ public class MemoryToolValidationTests
         Assert.StartsWith("memory_store:", await new MemoryStoreTool(null!).StoreAsync("", "t", "c"));
         Assert.StartsWith("memory_update:", await new MemoryUpdateTool(null!).UpdateAsync(""));
         Assert.StartsWith("memory_delete:", await new MemoryDeleteTool(null!).DeleteAsync(""));
-        Assert.StartsWith("memory_get:", await new MemoryGetTool(null!, new ReadCounterService(), DisabledAcl(), new HttpContextAccessor()).GetAsync(""));
+        Assert.StartsWith("memory_get:", await new MemoryGetTool(null!, new ReadCounterService(), DisabledAcl(), new HttpContextAccessor(), NullLogger<MemoryGetTool>.Instance).GetAsync(""));
         Assert.StartsWith("memory_search:", await new MemorySearchTool(null!, DisabledAcl(), new HttpContextAccessor()).SearchAsync(""));
         Assert.StartsWith("memory_list:", await new MemoryListTool(null!, DisabledAcl(), new HttpContextAccessor()).ListAsync(type: "bad"));
     }

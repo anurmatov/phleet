@@ -124,6 +124,25 @@ public sealed class MemoryService(
         return await vectorStore.ScrollFilteredAsync(filters.Count > 0 ? filters : null);
     }
 
+    /// <summary>
+    /// Like ListAsync but returns typed MemoryDocument objects (parsed from disk) so callers
+    /// can rely on the typed Project field rather than the Qdrant payload dict key.
+    /// </summary>
+    public async Task<List<MemoryDocument>> ListDocumentsAsync(string? type = null, string? project = null, string? agent = null, string? tag = null)
+    {
+        var payloads = await ListAsync(type, project, agent, tag);
+        var docs = new List<MemoryDocument>(payloads.Count);
+        foreach (var payload in payloads)
+        {
+            if (!payload.TryGetValue("memory_id", out var id) || string.IsNullOrEmpty(id))
+                continue;
+            var doc = await GetAsync(id);
+            if (doc is not null)
+                docs.Add(doc);
+        }
+        return docs;
+    }
+
     public async Task<MemoryDocument?> GetAsync(string id)
     {
         var filePath = fileStore.FindFileById(id);

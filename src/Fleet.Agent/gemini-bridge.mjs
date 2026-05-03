@@ -2,32 +2,37 @@
 /**
  * gemini-bridge.mjs — persistent bridge between .NET GeminiExecutor and @google/gemini-cli-core.
  *
- * Protocol:
- *   stdin:  one JSON line per task/command from .NET
- *     {"type":"task","prompt":"...","model":"gemini-2.5-flash","sessionId":null}
- *     {"type":"task","prompt":"...","images":[{"mimeType":"image/jpeg","base64Data":"..."}]}
- *     {"type":"command","prompt":"/compact","sessionId":"<sessionId>"}
- *   stdout: NDJSON events streamed back
- *     {"type":"ack","sessionId":"<uuid>"}
- *     {"type":"turn.started"}
- *     {"type":"item.started","itemType":"message","text":"..."}
- *     {"type":"item.started","itemType":"tool_use","toolName":"...","toolArgs":"..."}
- *     {"type":"item.completed","itemType":"tool_result","text":"..."}
- *     {"type":"turn.completed","sessionId":"<uuid>","text":"...","usage":{...},"durationMs":0}
- *     {"type":"turn.failed","error":"..."}
- *     {"type":"error","message":"..."}
+ * Protocol (stdin→stdout NDJSON):
+ *   stdin:  {"type":"task","prompt":"...","model":"gemini-2.5-flash","sessionId":null}
+ *           {"type":"task","prompt":"...","images":[{"mimeType":"image/jpeg","base64Data":"..."}]}
+ *           {"type":"command","prompt":"/compact","sessionId":"<sessionId>"}
+ *   stdout: {"type":"ack","sessionId":"<uuid>"}
+ *           {"type":"turn.started"}
+ *           {"type":"item.started","itemType":"message","text":"..."}
+ *           {"type":"item.started","itemType":"tool_use","toolName":"...","toolArgs":"..."}
+ *           {"type":"item.completed","itemType":"tool_result","text":"..."}
+ *           {"type":"turn.completed","sessionId":"<uuid>","text":"...","usage":null,"durationMs":0}
+ *           {"type":"turn.failed","error":"..."}
+ *           {"type":"error","message":"..."}
  *
- * System prompt is delivered exclusively via GEMINI_SYSTEM_MD env var (file path).
- * It does NOT appear in the stdin task message — see GeminiExecutor.StartProcessAsync().
+ * System prompt: GEMINI_SYSTEM_MD file → Config.userMemory → getCoreSystemPrompt().
+ * API key: GEMINI_API_KEY env var, passed in-memory only — never written to disk.
+ * MCP: HTTP/SSE servers from --mcp-config; stdio entries are skipped with stderr warning.
+ * Images: content parts with type='media' (LegacyAgentProtocol contentPartsToGeminiParts format).
+ * PDFs: hint-only ([document attachment: path] in task text) — no inline document data in v1.
  *
- * MCP config is accepted via --mcp-config <path> (same as codex-bridge.mjs).
- * Only HTTP/SSE transport servers are registered; stdio entries are logged and skipped.
- *
- * PDFs: hint-only mode. GeminiExecutor injects [document attachment: path] into the
- * task text (same as CodexExecutor). No inline document data for PDFs in v1.
+ * @google/gemini-cli-core API used:
+ *   - LegacyAgentProtocol — streaming conversation loop with tool handling via Scheduler
+ *   - Config + createContentGeneratorConfig — client configuration, userMemory = system prompt
+ *   - MCPServerConfig — HTTP/SSE MCP server descriptors
  */
 
-import { GeminiCliAgent, LocalAgentDefinition, ToolRegistry, MessageBus, Config } from '@google/gemini-cli-core';
+import {
+  LegacyAgentProtocol,
+  Config,
+  MCPServerConfig,
+  createContentGeneratorConfig,
+} from '@google/gemini-cli-core';
 import readline from 'readline';
 import fs from 'fs';
 import { randomUUID } from 'crypto';
@@ -65,7 +70,8 @@ for (let i = 2; i < process.argv.length; i++) {
   }
 }
 
-const mcpServersConfig = {};
+// MCPServerConfig(command, args, env, cwd, url, httpUrl, headers, tcp, type, ...)
+const httpMcpServers = {};
 if (mcpConfigPath && fs.existsSync(mcpConfigPath)) {
   try {
     const mcpCfg = JSON.parse(fs.readFileSync(mcpConfigPath, 'utf8'));
@@ -75,7 +81,13 @@ if (mcpConfigPath && fs.existsSync(mcpConfigPath)) {
         process.stderr.write(`Gemini bridge: stdio-transport MCP server '${name}' skipped — only HTTP/SSE transport supported\n`);
         continue;
       }
-      mcpServersConfig[name] = s;
+      const type = s.transport_type === 'sse' ? 'sse' : 'http';
+      httpMcpServers[name] = new MCPServerConfig(
+        undefined, undefined, undefined, undefined,
+        s.url,
+        undefined, undefined, undefined,
+        type
+      );
     }
   } catch (e) {
     process.stderr.write(`Gemini bridge: failed to parse MCP config at ${mcpConfigPath}: ${e.message}\n`);
@@ -84,13 +96,53 @@ if (mcpConfigPath && fs.existsSync(mcpConfigPath)) {
 
 // ── Session state ────────────────────────────────────────────────────────────
 
-// Maintain conversation history across tasks for in-process continuity.
-// GeminiCliAgent has no resumeThread() — we keep history and reconstruct per task.
-let conversationHistory = [];
+// Config and protocol are created once on first task and reused.
+// LegacyAgentProtocol maintains conversation history internally via its GeminiClient.
+let config = null;
+let protocol = null;
 let currentSessionId = null;
+let initError = null;
 
 function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
+}
+
+async function ensureInitialized(model) {
+  if (config) return;
+  if (initError) throw initError;
+
+  const hasMcp = Object.keys(httpMcpServers).length > 0;
+  const contentGenConfig = await createContentGeneratorConfig(
+    null, 'gemini-api', process.env.GEMINI_API_KEY
+  );
+
+  config = new Config({
+    sessionId: randomUUID(),
+    model: model || 'gemini-2.5-flash',
+    targetDir: process.cwd(),
+    contentGeneratorConfig: contentGenConfig,
+    // userMemory → getSystemInstructionMemory() → getCoreSystemPrompt() = system instruction
+    userMemory: systemPromptText,
+    mcpServers: hasMcp ? httpMcpServers : undefined,
+    mcpEnabled: hasMcp,
+    extensionsEnabled: false,
+    checkpointing: false,
+    debugMode: false,
+    coreTools: [],
+  });
+
+  try {
+    await config.initialize();
+  } catch (e) {
+    initError = e;
+    config = null;
+    throw e;
+  }
+
+  protocol = new LegacyAgentProtocol({
+    config,
+    promptId: 'fleet-bridge',
+  });
 }
 
 async function runTask(msg) {
@@ -100,106 +152,86 @@ async function runTask(msg) {
   currentSessionId = sessionId;
 
   emit({ type: 'ack', sessionId });
-  emit({ type: 'turn.started' });
+
+  try {
+    await ensureInitialized(model);
+  } catch (err) {
+    emit({ type: 'turn.failed', error: `Initialization failed: ${err.message ?? String(err)}` });
+    return;
+  }
 
   let finalText = '';
 
-  try {
-    const config = new Config({ apiKey: process.env.GEMINI_API_KEY });
-    const registry = new ToolRegistry({ mcpServers: mcpServersConfig });
+  await new Promise((resolve) => {
+    // Subscribe BEFORE send() so we don't miss the agent_start event.
+    const unsubscribe = protocol.subscribe((event) => {
+      const evType = event.type;
 
-    const def = new LocalAgentDefinition({
-      model,
-      systemInstruction: systemPromptText,
-      tools: registry,
-      history: conversationHistory,
+      if (evType === 'agent_start') {
+        emit({ type: 'turn.started' });
+      } else if (evType === 'message') {
+        // Text chunks from model
+        const text = Array.isArray(event.content)
+          ? event.content.filter(c => c.type === 'text').map(c => c.text ?? '').join('')
+          : '';
+        if (text) {
+          finalText += text;
+          emit({ type: 'item.started', itemType: 'message', text });
+        }
+      } else if (evType === 'tool_request') {
+        // Model requested a tool call
+        emit({
+          type: 'item.started',
+          itemType: 'tool_use',
+          toolName: event.name ?? '',
+          toolArgs: JSON.stringify(event.args ?? {}),
+        });
+      } else if (evType === 'tool_response') {
+        // Tool call completed (handled internally by Scheduler)
+        const text = Array.isArray(event.content)
+          ? event.content.filter(c => c.type === 'text').map(c => c.text ?? '').join('')
+          : '';
+        emit({ type: 'item.completed', itemType: 'tool_result', text });
+      } else if (evType === 'agent_end') {
+        unsubscribe();
+        emit({
+          type: 'turn.completed',
+          sessionId,
+          text: finalText,
+          usage: null,
+          durationMs: Date.now() - startMs,
+        });
+        resolve();
+      } else if (evType === 'error') {
+        unsubscribe();
+        emit({
+          type: 'turn.failed',
+          error: event.message ?? event.error?.message ?? 'Unknown error',
+        });
+        resolve();
+      }
     });
 
-    // Build content parts: text + optional images
-    const contentParts = [];
-
-    // Add images if present
-    const images = msg.images;
-    if (Array.isArray(images) && images.length > 0) {
-      for (const img of images) {
-        if (img && img.mimeType && img.base64Data) {
-          contentParts.push({
-            inlineData: { mimeType: img.mimeType, data: img.base64Data },
-          });
+    // Build content parts: images first (type='media'), then text
+    const content = [];
+    if (Array.isArray(msg.images)) {
+      for (const img of msg.images) {
+        if (img?.mimeType && img?.base64Data) {
+          content.push({ type: 'media', data: img.base64Data, mimeType: img.mimeType });
         } else {
           process.stderr.write('Gemini bridge: image entry missing mimeType or base64Data — skipped\n');
         }
       }
     }
+    content.push({ type: 'text', text: msg.prompt || '' });
 
-    // Text part always last
-    contentParts.push({ text: msg.prompt || '' });
-
-    // Determine the prompt to pass to agent.run()
-    // If multipart (images present), pass parts array; otherwise plain string
-    const prompt = contentParts.length > 1 ? contentParts : (msg.prompt || '');
-
-    const agent = new GeminiCliAgent(def, config, new MessageBus());
-
-    for await (const event of agent.run(prompt)) {
-      const evType = event.type ?? '';
-
-      if (evType === 'thought' || evType === 'thinking') {
-        // Gemini thinking steps — skip, not forwarded
-        continue;
-      } else if (evType === 'text' || evType === 'message' || evType === 'content') {
-        const text = event.text ?? event.content ?? '';
-        if (text) {
-          finalText += text;
-          emit({ type: 'item.started', itemType: 'message', text });
-        }
-      } else if (evType === 'tool_call' || evType === 'tool_use' || evType === 'function_call') {
-        emit({
-          type: 'item.started',
-          itemType: 'tool_use',
-          toolName: event.toolName ?? event.name ?? '',
-          toolArgs: JSON.stringify(event.args ?? event.arguments ?? {}),
-        });
-      } else if (evType === 'tool_result' || evType === 'tool_response' || evType === 'function_response') {
-        const resultText = typeof event.result === 'string'
-          ? event.result
-          : JSON.stringify(event.result ?? '');
-        emit({ type: 'item.completed', itemType: 'tool_result', text: resultText });
-      } else if (evType === 'turn_complete' || evType === 'turn.complete' || evType === 'complete') {
-        finalText = event.text ?? finalText;
-        const usage = event.usage ?? null;
-        // Update history for next task
-        if (event.history) {
-          conversationHistory = event.history;
-        }
-        emit({
-          type: 'turn.completed',
-          sessionId,
-          text: finalText,
-          usage: usage ? {
-            input_tokens: usage.inputTokenCount ?? usage.input_tokens ?? 0,
-            output_tokens: usage.outputTokenCount ?? usage.output_tokens ?? 0,
-          } : null,
-          durationMs: Date.now() - startMs,
-        });
-        return;
-      } else if (evType === 'error') {
-        emit({ type: 'turn.failed', error: event.message ?? event.error ?? 'Unknown error' });
-        return;
-      }
-    }
-
-    // If we reach here without a turn_complete event, emit turn.completed
-    emit({
-      type: 'turn.completed',
-      sessionId,
-      text: finalText,
-      usage: null,
-      durationMs: Date.now() - startMs,
+    // send() is non-blocking — the run loop starts in a macrotask via setTimeout.
+    protocol.send({ message: { content } }).catch((err) => {
+      unsubscribe();
+      emit({ type: 'turn.failed', error: err.message ?? String(err) });
+      resolve();
     });
-  } catch (err) {
-    emit({ type: 'turn.failed', error: err.message ?? String(err) });
-  }
+  });
 }
 
 // ── Main loop ────────────────────────────────────────────────────────────────

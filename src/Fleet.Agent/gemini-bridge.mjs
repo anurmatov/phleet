@@ -32,6 +32,7 @@ import {
   Config,
   MCPServerConfig,
   createContentGeneratorConfig,
+  AuthType,
 } from '@google/gemini-cli-core';
 import readline from 'readline';
 import fs from 'fs';
@@ -112,15 +113,11 @@ async function ensureInitialized(model) {
   if (initError) throw initError;
 
   const hasMcp = Object.keys(httpMcpServers).length > 0;
-  const contentGenConfig = await createContentGeneratorConfig(
-    null, 'gemini-api', process.env.GEMINI_API_KEY
-  );
 
   config = new Config({
     sessionId: randomUUID(),
     model: model || 'gemini-2.5-flash',
     targetDir: process.cwd(),
-    contentGeneratorConfig: contentGenConfig,
     // userMemory → getSystemInstructionMemory() → getCoreSystemPrompt() = system instruction
     userMemory: systemPromptText,
     mcpServers: hasMcp ? httpMcpServers : undefined,
@@ -133,6 +130,10 @@ async function ensureInitialized(model) {
 
   try {
     await config.initialize();
+    // refreshAuth creates config.contentGenerator — required before any generateContent call.
+    // initialize() alone leaves contentGenerator null; LegacyAgentProtocol.send() throws
+    // 'Content generator not initialized' without this step.
+    await config.refreshAuth(AuthType.USE_GEMINI, process.env.GEMINI_API_KEY);
   } catch (e) {
     initError = e;
     config = null;

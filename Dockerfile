@@ -45,10 +45,11 @@ RUN cd /app && npm install @google/gemini-cli-core@0.40.1
 # Uses dynamic import() because @google/gemini-cli-core is an ES module package (require() throws ReferenceError).
 RUN node -e " \
   import('@google/gemini-cli-core').then(m => { \
-    if (typeof m.LocalAgentExecutor !== 'function') throw new Error('LocalAgentExecutor not exported'); \
+    if (typeof m.LegacyAgentProtocol !== 'function') throw new Error('LegacyAgentProtocol not exported'); \
     if (typeof m.Config !== 'function') throw new Error('Config not exported'); \
-    if (typeof m.MessageBus !== 'function') throw new Error('MessageBus not exported'); \
-    if (typeof m.ToolRegistry !== 'function') throw new Error('ToolRegistry not exported'); \
+    if (typeof m.MCPServerConfig !== 'function') throw new Error('MCPServerConfig not exported'); \
+    if (typeof m.createContentGeneratorConfig !== 'function') throw new Error('createContentGeneratorConfig not exported'); \
+    if (typeof m.AuthType !== 'object') throw new Error('AuthType not exported'); \
     console.log('gemini-cli-core guard: ok'); \
   }).catch(e => { console.error('ERROR: @google/gemini-cli-core guard failed:', e.message); process.exit(1); })" \
   || (echo 'ERROR: @google/gemini-cli-core guard failed — bridge will not work' && exit 1)

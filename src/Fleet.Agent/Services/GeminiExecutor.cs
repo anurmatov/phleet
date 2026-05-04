@@ -23,9 +23,12 @@ namespace Fleet.Agent.Services;
 /// Two-level refresh: (1) the CLI's google-auth-library refreshes tokens in-place on expiry;
 /// (2) AuthTokenRefreshWorkflow provides a host-side safety net every 30 min.
 ///
-/// Images: hint-only in v1 ([image attachment: path] injected into task text by
-/// AttachmentSweeper.BuildHints). Gemini CLI v0.40.1 headless file attachment is unconfirmed.
-/// PDFs: hint-only ([document attachment: path]). No built-in Read/Write tools in gemini provider.
+/// Images / PDFs / Audio: native multimodal via gemini-cli's @-reference resolver.
+/// Each attachment is staged to a per-task temp directory; the working directory is
+/// set to that dir and "@./filename.ext" refs are passed via -p. The CLI's
+/// handleAtCommand pipeline reads the binary, MIME-detects it, and emits inlineData
+/// parts to the model. Mechanism verified against gemini-cli v0.40.1 (issue #15532).
+/// Video is not supported by the CLI; hint-only fallback for unknown extensions.
 /// MCP: HTTP/SSE transport only. stdio servers are skipped by entrypoint.sh when writing
 /// ~/.gemini/settings.json. Agents must use MCP tools for all filesystem/shell operations.
 /// </summary>
@@ -59,7 +62,7 @@ public sealed class GeminiExecutor : IAgentExecutor
 
         _logger.LogInformation(
             "GeminiExecutor: CLI-per-task mode. " +
-            "Image and PDF attachments are hint-only ([attachment: path] in task text). " +
+            "Multimodal (image/PDF/audio) attachments are passed natively via gemini-cli's @-reference resolver. " +
             "MCP tools require HTTP/SSE transport — stdio servers are skipped.");
     }
 
@@ -72,7 +75,7 @@ public sealed class GeminiExecutor : IAgentExecutor
         _lastActivity = DateTimeOffset.UtcNow;
         _lastSessionId = null; // no session resumption for CLI-per-task
 
-        await foreach (var progress in RunCliAsync(task, ct))
+        await foreach (var progress in RunCliAsync(task, images, documents, ct))
         {
             _lastActivity = DateTimeOffset.UtcNow;
             yield return progress;
@@ -88,7 +91,7 @@ public sealed class GeminiExecutor : IAgentExecutor
         // Run the command as a regular task so the agent at least sees the input and can respond.
         _lastActivity = DateTimeOffset.UtcNow;
 
-        await foreach (var progress in RunCliAsync(command, ct))
+        await foreach (var progress in RunCliAsync(command, images: null, documents: null, ct: ct))
         {
             _lastActivity = DateTimeOffset.UtcNow;
             yield return progress;
@@ -107,11 +110,19 @@ public sealed class GeminiExecutor : IAgentExecutor
 
     private async IAsyncEnumerable<AgentProgress> RunCliAsync(
         string input,
+        IReadOnlyList<MessageImage>? images,
+        IReadOnlyList<MessageDocument>? documents,
         [EnumeratorCancellation] CancellationToken ct)
     {
         // Write system prompt to a temp file. GEMINI_SYSTEM_MD env var points the CLI at it.
         // The file is deleted in the finally block regardless of outcome.
         var systemPromptPath = Path.Combine(Path.GetTempPath(), $"gemini-system-{Guid.NewGuid():N}.md");
+
+        // Per-task attachment staging dir. Each accepted image/PDF/audio is copied here so the
+        // gemini CLI's @-resolver can read it relative to the working directory. The dir is
+        // deleted in finally regardless of outcome (no leftover binary content).
+        var attachmentDir = Path.Combine(Path.GetTempPath(), $"gemini-attach-{Guid.NewGuid():N}");
+
         Process? process = null;
 
         // Capture wall-clock start time before the process starts so DurationMs measures
@@ -127,7 +138,32 @@ public sealed class GeminiExecutor : IAgentExecutor
         {
             await File.WriteAllTextAsync(systemPromptPath, _promptBuilder.BuildSystemPrompt(), ct);
 
+            // Stage attachments and build the @-reference prompt fragment. CWD is set to
+            // attachmentDir so "@./<file>" resolves correctly inside gemini-cli's
+            // handleAtCommand. Files are copied (not symlinked) for portability.
+            Directory.CreateDirectory(attachmentDir);
+            var atRefs = StageAttachments(images, documents, attachmentDir);
+
             var model = string.IsNullOrWhiteSpace(_config.Model) ? "gemini-2.5-flash" : _config.Model;
+
+            // Prompt assembly:
+            //   - The user's task text goes on stdin (avoids ARG_MAX for long prompts).
+            //   - The @-references go in the -p argument. handleAtCommand only resolves @-syntax
+            //     present in the -p value (verified empirically on v0.40.1). The CLI combines
+            //     stdin + -p before sending to the model, so the model sees both: task text
+            //     plus the inlineData from each attachment.
+            //   - When there are no attachments, omit -p entirely; the CLI reads stdin normally.
+            var argList = new List<string>
+            {
+                "--output-format", "stream-json",
+                "-m", model,
+                "--yolo",
+            };
+            if (atRefs.Count > 0)
+            {
+                argList.Add("-p");
+                argList.Add("Attachments to consider: " + string.Join(" ", atRefs));
+            }
 
             var psi = new ProcessStartInfo
             {
@@ -137,12 +173,15 @@ public sealed class GeminiExecutor : IAgentExecutor
                 // --yolo (-y): suppress interactive MCP tool-call approval prompts.
                 //   Without this, the CLI blocks waiting for user confirmation on every tool call
                 //   — the agent hangs indefinitely in headless mode.
-                Arguments = $"--output-format stream-json -m {model} --yolo",
+                // -p (optional): when attachments are present, carries the @-reference fragment
+                //   that triggers handleAtCommand's binary inlineData path.
                 UseShellExecute = false,
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
+                WorkingDirectory = attachmentDir,
             };
+            foreach (var a in argList) psi.ArgumentList.Add(a);
 
             // GEMINI_SYSTEM_MD: CLI reads this env var at startup and treats the file content
             // as the system instruction. --system-prompt-file does NOT exist in v0.40.1 (verified).
@@ -257,7 +296,7 @@ public sealed class GeminiExecutor : IAgentExecutor
         }
         finally
         {
-            // Kill any still-running process and delete the temp system-prompt file.
+            // Kill any still-running process and delete the temp system-prompt file + attachment dir.
             try
             {
                 if (process is not null && !process.HasExited)
@@ -269,8 +308,118 @@ public sealed class GeminiExecutor : IAgentExecutor
 
             try { File.Delete(systemPromptPath); }
             catch { /* non-fatal */ }
+
+            try
+            {
+                if (Directory.Exists(attachmentDir))
+                    Directory.Delete(attachmentDir, recursive: true);
+            }
+            catch { /* non-fatal */ }
         }
     }
+
+    // ── Attachment staging ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Copies eligible image / PDF / audio attachments into <paramref name="stageDir"/>
+    /// using stable random filenames that preserve their extension. Returns the list of
+    /// "@./filename.ext" references to inject into the gemini -p argument.
+    ///
+    /// gemini-cli's handleAtCommand (v0.40.1) routes @-paths through ReadManyFilesTool,
+    /// which detects MIME by extension and emits inlineData parts for image/pdf/audio.
+    /// Files lacking a recognized extension are skipped (the CLI would skip them anyway,
+    /// per the "asset file was not explicitly requested by name or extension" branch in
+    /// the CLI source). Video is not in the CLI's supported set; skipped with a warning.
+    ///
+    /// Files without a persisted FilePath (Telegram:PersistAttachments disabled or
+    /// size-limit exceeded) are skipped — there's nothing on disk to stage.
+    /// </summary>
+    private List<string> StageAttachments(
+        IReadOnlyList<MessageImage>? images,
+        IReadOnlyList<MessageDocument>? documents,
+        string stageDir)
+    {
+        var refs = new List<string>();
+
+        if (images is { Count: > 0 })
+        {
+            foreach (var img in images)
+            {
+                if (string.IsNullOrEmpty(img.FilePath) || !File.Exists(img.FilePath))
+                {
+                    _logger.LogWarning("GeminiExecutor: image attachment has no persisted FilePath — skipped");
+                    continue;
+                }
+                var stagedName = StageOne(img.FilePath, stageDir, img.MimeType);
+                if (stagedName is not null) refs.Add($"@./{stagedName}");
+            }
+        }
+
+        if (documents is { Count: > 0 })
+        {
+            foreach (var doc in documents)
+            {
+                if (string.IsNullOrEmpty(doc.FilePath) || !File.Exists(doc.FilePath))
+                {
+                    _logger.LogWarning("GeminiExecutor: document attachment has no persisted FilePath — skipped");
+                    continue;
+                }
+                var stagedName = StageOne(doc.FilePath, stageDir, doc.MimeType);
+                if (stagedName is not null) refs.Add($"@./{stagedName}");
+            }
+        }
+
+        return refs;
+    }
+
+    /// <summary>
+    /// Copies a single attachment to the staging dir with an extension preserved from
+    /// either the source path or, as fallback, the MIME type. Returns the staged basename
+    /// (relative to stageDir), or null if the attachment type is unsupported by the CLI.
+    /// </summary>
+    private string? StageOne(string srcPath, string stageDir, string? mimeType)
+    {
+        var srcExt = Path.GetExtension(srcPath).ToLowerInvariant();
+        if (string.IsNullOrEmpty(srcExt)) srcExt = MimeToExtension(mimeType);
+
+        // Gemini CLI's @-resolver supports image, pdf, audio. Video and unknowns are
+        // dropped — the CLI would refuse them anyway with a "not explicitly requested"
+        // skip. Logged so the operator can see why an attachment didn't reach the model.
+        if (!IsSupportedExtension(srcExt))
+        {
+            _logger.LogWarning(
+                "GeminiExecutor: attachment {Path} (ext={Ext}, mime={Mime}) is not a supported media type — skipped",
+                srcPath, srcExt, mimeType);
+            return null;
+        }
+
+        var stagedName = $"{Guid.NewGuid():N}{srcExt}";
+        var dstPath = Path.Combine(stageDir, stagedName);
+        File.Copy(srcPath, dstPath, overwrite: false);
+        return stagedName;
+    }
+
+    private static string MimeToExtension(string? mimeType) => (mimeType ?? "").ToLowerInvariant() switch
+    {
+        "image/jpeg" or "image/jpg" => ".jpg",
+        "image/png" => ".png",
+        "image/webp" => ".webp",
+        "image/gif" => ".gif",
+        "application/pdf" => ".pdf",
+        "audio/mpeg" or "audio/mp3" => ".mp3",
+        "audio/wav" or "audio/x-wav" => ".wav",
+        "audio/aac" => ".aac",
+        "audio/ogg" => ".ogg",
+        _ => "",
+    };
+
+    private static bool IsSupportedExtension(string ext) => ext switch
+    {
+        ".jpg" or ".jpeg" or ".png" or ".webp" or ".gif" => true,
+        ".pdf" => true,
+        ".mp3" or ".wav" or ".aac" or ".aiff" or ".aif" or ".ogg" or ".flac" or ".m4a" => true,
+        _ => false,
+    };
 
     // ── stream-json event mapping ─────────────────────────────────────────────
 

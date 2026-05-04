@@ -44,7 +44,11 @@ import {
 import readline from 'readline';
 import fs from 'fs';
 import { randomUUID } from 'crypto';
-import { extractAgentMessageText } from './gemini-message-handler.mjs';
+import {
+  extractAgentMessageText,
+  parseRetryDelayMs,
+  MAX_RETRY_DELAY_MS,
+} from './gemini-message-handler.mjs';
 
 // ── GEMINI_API_KEY guard ─────────────────────────────────────────────────────
 
@@ -134,6 +138,20 @@ const VALID_GEMINI_MODELS = new Set([
 ]);
 const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
 
+// ── Rate-limit retry ─────────────────────────────────────────────────────────
+
+const RATE_LIMIT_RE = /429|rate.?limit|resource.?exhausted|quota.?exceeded/i;
+const MAX_RETRIES = 3;
+
+/**
+ * Extracts the retryDelay value string from a Gemini 429 error message.
+ * Returns null if no retryDelay field is found (caller uses DEFAULT_RETRY_DELAY_MS).
+ */
+function extractRetryDelay(errMessage) {
+  const m = /retry.?delay[^a-z0-9"]*"?(\d+m\d+s|\d+m|\d+s)/i.exec(errMessage ?? '');
+  return m ? m[1] : null;
+}
+
 // ── Session state ────────────────────────────────────────────────────────────
 
 // Config and protocol are created once on first task and reused.
@@ -192,6 +210,89 @@ async function ensureInitialized(model) {
   });
 }
 
+/**
+ * Builds the content-parts array for a single task message (reused across retries).
+ */
+function buildContent(msg) {
+  const content = [];
+  if (Array.isArray(msg.images)) {
+    for (const img of msg.images) {
+      if (img?.mimeType && img?.base64Data) {
+        content.push({ type: 'media', data: img.base64Data, mimeType: img.mimeType });
+      } else {
+        process.stderr.write('Gemini bridge: image entry missing mimeType or base64Data — skipped\n');
+      }
+    }
+  }
+  content.push({ type: 'text', text: msg.prompt || '' });
+  return content;
+}
+
+/**
+ * Runs a single send attempt against the already-initialized protocol.
+ *
+ * Returns one of:
+ *   { success: true,        text, durationMs }
+ *   { rateLimited: true,    errorMsg }       — caller should wait and retry
+ *   { failed: true,         errorMsg }       — non-retryable; caller should emit turn.failed
+ */
+function runSingleAttempt(content, sessionId, startMs) {
+  return new Promise((resolve) => {
+    let finalText = '';
+
+    // Subscribe BEFORE send() so we don't miss agent_start.
+    const unsubscribe = protocol.subscribe((event) => {
+      const evType = event.type;
+
+      if (evType === 'agent_start') {
+        emit({ type: 'turn.started' });
+      } else if (evType === 'message') {
+        // extractAgentMessageText guards against user-role echo and empty content.
+        // See gemini-message-handler.mjs for the role-guard logic and its unit tests.
+        const text = extractAgentMessageText(event);
+        if (text) {
+          finalText += text;
+          emit({ type: 'item.started', itemType: 'message', text });
+        }
+      } else if (evType === 'tool_request') {
+        emit({
+          type: 'item.started',
+          itemType: 'tool_use',
+          toolName: event.name ?? '',
+          toolArgs: JSON.stringify(event.args ?? {}),
+        });
+      } else if (evType === 'tool_response') {
+        const text = Array.isArray(event.content)
+          ? event.content.filter(c => c.type === 'text').map(c => c.text ?? '').join('')
+          : '';
+        emit({ type: 'item.completed', itemType: 'tool_result', text });
+      } else if (evType === 'agent_end') {
+        unsubscribe();
+        resolve({ success: true, text: finalText, durationMs: Date.now() - startMs });
+      } else if (evType === 'error') {
+        unsubscribe();
+        const errorMsg = event.message ?? event.error?.message ?? 'Unknown error';
+        if (RATE_LIMIT_RE.test(errorMsg)) {
+          resolve({ rateLimited: true, errorMsg });
+        } else {
+          resolve({ failed: true, errorMsg });
+        }
+      }
+    });
+
+    // send() is non-blocking — the run loop starts in a macrotask via setTimeout.
+    protocol.send({ message: { content } }).catch((err) => {
+      unsubscribe();
+      const errorMsg = err.message ?? String(err);
+      if (RATE_LIMIT_RE.test(errorMsg)) {
+        resolve({ rateLimited: true, errorMsg });
+      } else {
+        resolve({ failed: true, errorMsg });
+      }
+    });
+  });
+}
+
 async function runTask(msg) {
   const startMs = Date.now();
   let model = DEFAULT_GEMINI_MODEL;
@@ -215,77 +316,46 @@ async function runTask(msg) {
     return;
   }
 
-  let finalText = '';
+  // Build content once — reused across rate-limit retries so images aren't re-encoded.
+  const content = buildContent(msg);
 
-  await new Promise((resolve) => {
-    // Subscribe BEFORE send() so we don't miss the agent_start event.
-    const unsubscribe = protocol.subscribe((event) => {
-      const evType = event.type;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    const result = await runSingleAttempt(content, sessionId, startMs);
 
-      if (evType === 'agent_start') {
-        emit({ type: 'turn.started' });
-      } else if (evType === 'message') {
-        // extractAgentMessageText guards against user-role echo and empty content.
-        // See gemini-message-handler.mjs for the role-guard logic and its unit tests.
-        const text = extractAgentMessageText(event);
-        if (text) {
-          finalText += text;
-          emit({ type: 'item.started', itemType: 'message', text });
-        }
-      } else if (evType === 'tool_request') {
-        // Model requested a tool call
-        emit({
-          type: 'item.started',
-          itemType: 'tool_use',
-          toolName: event.name ?? '',
-          toolArgs: JSON.stringify(event.args ?? {}),
-        });
-      } else if (evType === 'tool_response') {
-        // Tool call completed (handled internally by Scheduler)
-        const text = Array.isArray(event.content)
-          ? event.content.filter(c => c.type === 'text').map(c => c.text ?? '').join('')
-          : '';
-        emit({ type: 'item.completed', itemType: 'tool_result', text });
-      } else if (evType === 'agent_end') {
-        unsubscribe();
-        emit({
-          type: 'turn.completed',
-          sessionId,
-          text: finalText,
-          usage: null,
-          durationMs: Date.now() - startMs,
-        });
-        resolve();
-      } else if (evType === 'error') {
-        unsubscribe();
-        emit({
-          type: 'turn.failed',
-          error: event.message ?? event.error?.message ?? 'Unknown error',
-        });
-        resolve();
-      }
-    });
-
-    // Build content parts: images first (type='media'), then text
-    const content = [];
-    if (Array.isArray(msg.images)) {
-      for (const img of msg.images) {
-        if (img?.mimeType && img?.base64Data) {
-          content.push({ type: 'media', data: img.base64Data, mimeType: img.mimeType });
-        } else {
-          process.stderr.write('Gemini bridge: image entry missing mimeType or base64Data — skipped\n');
-        }
-      }
+    if (result.success) {
+      emit({
+        type: 'turn.completed',
+        sessionId,
+        text: result.text,
+        usage: null,
+        durationMs: result.durationMs,
+      });
+      return;
     }
-    content.push({ type: 'text', text: msg.prompt || '' });
 
-    // send() is non-blocking — the run loop starts in a macrotask via setTimeout.
-    protocol.send({ message: { content } }).catch((err) => {
-      unsubscribe();
-      emit({ type: 'turn.failed', error: err.message ?? String(err) });
-      resolve();
-    });
-  });
+    if (result.failed) {
+      emit({ type: 'turn.failed', error: result.errorMsg });
+      return;
+    }
+
+    // rateLimited — wait then retry if attempts remain.
+    if (attempt >= MAX_RETRIES) {
+      emit({
+        type: 'turn.failed',
+        error: `Rate limited after ${MAX_RETRIES} attempt(s): ${result.errorMsg}`,
+      });
+      return;
+    }
+
+    const delayMs = Math.min(
+      parseRetryDelayMs(extractRetryDelay(result.errorMsg)),
+      MAX_RETRY_DELAY_MS,
+    );
+    process.stderr.write(
+      `Gemini bridge: rate limited, waiting ${Math.round(delayMs / 1000)}s before retry ${attempt}/${MAX_RETRIES - 1}\n`,
+    );
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
 }
 
 // ── Main loop ────────────────────────────────────────────────────────────────

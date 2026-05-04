@@ -23,3 +23,49 @@ export function extractAgentMessageText(event) {
     : '';
   return text || null;
 }
+
+// ── Rate-limit retry helpers ──────────────────────────────────────────────────
+
+/** Default wait when the API doesn't include a retryDelay value. */
+export const DEFAULT_RETRY_DELAY_MS = 30_000;
+
+/** Hard cap so a single rate-limit never blocks the bridge indefinitely. */
+export const MAX_RETRY_DELAY_MS = 90_000;
+
+/**
+ * Parses a Gemini retryDelay string into milliseconds.
+ *
+ * Accepted formats: "23s", "1m", "1m30s".
+ * Returns DEFAULT_RETRY_DELAY_MS for null/undefined/empty/malformed input.
+ * Result is capped at MAX_RETRY_DELAY_MS.
+ *
+ * @param {string|null|undefined} delayStr - The raw retryDelay value from the API.
+ * @returns {number} Milliseconds to wait before retrying.
+ */
+export function parseRetryDelayMs(delayStr) {
+  if (!delayStr || typeof delayStr !== 'string') return DEFAULT_RETRY_DELAY_MS;
+  const s = delayStr.trim();
+
+  // "NmNs" — minutes + seconds
+  const full = /^(\d+)m(\d+)s$/.exec(s);
+  if (full) {
+    const ms = (parseInt(full[1], 10) * 60 + parseInt(full[2], 10)) * 1000;
+    return ms > 0 ? Math.min(ms, MAX_RETRY_DELAY_MS) : DEFAULT_RETRY_DELAY_MS;
+  }
+
+  // "Nm" — minutes only
+  const minsOnly = /^(\d+)m$/.exec(s);
+  if (minsOnly) {
+    const ms = parseInt(minsOnly[1], 10) * 60_000;
+    return ms > 0 ? Math.min(ms, MAX_RETRY_DELAY_MS) : DEFAULT_RETRY_DELAY_MS;
+  }
+
+  // "Ns" — seconds only
+  const secsOnly = /^(\d+)s$/.exec(s);
+  if (secsOnly) {
+    const ms = parseInt(secsOnly[1], 10) * 1000;
+    return ms > 0 ? Math.min(ms, MAX_RETRY_DELAY_MS) : DEFAULT_RETRY_DELAY_MS;
+  }
+
+  return DEFAULT_RETRY_DELAY_MS;
+}

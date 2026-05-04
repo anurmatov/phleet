@@ -178,3 +178,8 @@ dotnet test tests/Fleet.Agent.Tests/
   `gemini-3.1-flash-lite-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`,
   `gemini-2.5-flash-lite`. Unknown model names fall back to `gemini-2.5-flash` with
   a stderr warning — check container logs if the wrong model is running.
+- **Rate-limit auto-retry:** the bridge retries up to 3 attempts on 429 / RESOURCE_EXHAUSTED
+  errors, honoring the `retryDelay` value from the API response (formats: `"23s"`, `"1m30s"`).
+  Individual waits are capped at 90 s. If all retries are exhausted the task fails with
+  `turn.failed` and the outer workflow layer handles escalation. This is best-effort — it
+  does not track per-key quota budgets or pre-empt limits.

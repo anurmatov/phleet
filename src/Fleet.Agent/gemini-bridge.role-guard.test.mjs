@@ -13,7 +13,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractAgentMessageText } from './gemini-message-handler.mjs';
+import {
+  extractAgentMessageText,
+  parseRetryDelayMs,
+  DEFAULT_RETRY_DELAY_MS,
+  MAX_RETRY_DELAY_MS,
+} from './gemini-message-handler.mjs';
 
 /**
  * Drives the actual extractAgentMessageText handler over a sequence of events
@@ -111,4 +116,50 @@ test('smoke-test seam is absent: input not glued to model reply', () => {
     !result.includes(seam),
     `Response must not contain the input+reply seam. Got: ${JSON.stringify(result)}`,
   );
+});
+
+// ── parseRetryDelayMs ─────────────────────────────────────────────────────────
+
+test('parseRetryDelayMs: "23s" parses to 23000', () => {
+  assert.equal(parseRetryDelayMs('23s'), 23_000);
+});
+
+test('parseRetryDelayMs: "1m30s" parses to 90000', () => {
+  assert.equal(parseRetryDelayMs('1m30s'), 90_000);
+});
+
+test('parseRetryDelayMs: "1m" parses to 60000', () => {
+  assert.equal(parseRetryDelayMs('1m'), 60_000);
+});
+
+test('parseRetryDelayMs: "0s" is malformed — returns default', () => {
+  assert.equal(parseRetryDelayMs('0s'), DEFAULT_RETRY_DELAY_MS);
+});
+
+test('parseRetryDelayMs: null returns default', () => {
+  assert.equal(parseRetryDelayMs(null), DEFAULT_RETRY_DELAY_MS);
+});
+
+test('parseRetryDelayMs: undefined returns default', () => {
+  assert.equal(parseRetryDelayMs(undefined), DEFAULT_RETRY_DELAY_MS);
+});
+
+test('parseRetryDelayMs: empty string returns default', () => {
+  assert.equal(parseRetryDelayMs(''), DEFAULT_RETRY_DELAY_MS);
+});
+
+test('parseRetryDelayMs: malformed string returns default', () => {
+  assert.equal(parseRetryDelayMs('abc'), DEFAULT_RETRY_DELAY_MS);
+  assert.equal(parseRetryDelayMs('30'), DEFAULT_RETRY_DELAY_MS);
+  assert.equal(parseRetryDelayMs('1h30m'), DEFAULT_RETRY_DELAY_MS);
+});
+
+test('parseRetryDelayMs: result is capped at MAX_RETRY_DELAY_MS', () => {
+  // 10m = 600000ms, well over the 90s cap
+  const result = parseRetryDelayMs('10m');
+  assert.equal(result, MAX_RETRY_DELAY_MS);
+});
+
+test('parseRetryDelayMs: exact cap boundary "1m30s" equals MAX_RETRY_DELAY_MS', () => {
+  assert.equal(parseRetryDelayMs('1m30s'), MAX_RETRY_DELAY_MS);
 });

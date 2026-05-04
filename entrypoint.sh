@@ -35,10 +35,11 @@ gemini_servers = {}
 
 for name, cfg in servers.items():
     url = cfg.get("url", "")
-    transport = cfg.get("transport_type", cfg.get("transport", ""))
+    # Fleet .mcp.json schema uses "type" for transport (e.g. "http", "sse").
+    # Gemini CLI settings.json uses "transport" with the same values.
+    transport = cfg.get("type", "http")
     if url:
-        # Default to "http" when transport is unspecified (fleet standard)
-        gemini_servers[name] = {"url": url, "transport": transport or "http"}
+        gemini_servers[name] = {"url": url, "transport": transport}
     else:
         print(f"WARN: skipping MCP server '{name}' (no URL — stdio transport not supported by gemini CLI)", file=sys.stderr)
 
@@ -56,6 +57,9 @@ with open(settings_path, "w") as f:
     json.dump(existing, f, indent=2)
 print(f"Gemini MCP: wrote {len(gemini_servers)} server(s) to {settings_path}")
 PYEOF
+        if [ $? -ne 0 ]; then
+            echo "WARN: Failed to write ${GEMINI_SETTINGS} — gemini agent will start without MCP tools" >&2
+        fi
     else
         echo "WARN: ${MCP_CONFIG} not found; gemini agent will start without MCP tools" >&2
     fi

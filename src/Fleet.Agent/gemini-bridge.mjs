@@ -44,6 +44,7 @@ import {
 import readline from 'readline';
 import fs from 'fs';
 import { randomUUID } from 'crypto';
+import { extractAgentMessageText } from './gemini-message-handler.mjs';
 
 // ── GEMINI_API_KEY guard ─────────────────────────────────────────────────────
 
@@ -78,7 +79,25 @@ for (let i = 2; i < process.argv.length; i++) {
   }
 }
 
-// MCPServerConfig(command, args, env, cwd, url, httpUrl, headers, tcp, type, ...)
+/**
+ * Wraps MCPServerConfig's positional constructor with named parameters so the intent of
+ * each argument slot is clear at the call site. MCPServerConfig(command, args, env, cwd,
+ * url, httpUrl, headers, tcp, type, ...) — only url and type are used for HTTP/SSE servers.
+ */
+function makeMcpServerConfig(url, type) {
+  return new MCPServerConfig(
+    /* command  */ undefined,
+    /* args     */ undefined,
+    /* env      */ undefined,
+    /* cwd      */ undefined,
+    /* url      */ url,
+    /* httpUrl  */ undefined,
+    /* headers  */ undefined,
+    /* tcp      */ undefined,
+    /* type     */ type,
+  );
+}
+
 const httpMcpServers = {};
 if (mcpConfigPath && fs.existsSync(mcpConfigPath)) {
   try {
@@ -90,17 +109,25 @@ if (mcpConfigPath && fs.existsSync(mcpConfigPath)) {
         continue;
       }
       const type = s.transport_type === 'sse' ? 'sse' : 'http';
-      httpMcpServers[name] = new MCPServerConfig(
-        undefined, undefined, undefined, undefined,
-        s.url,
-        undefined, undefined, undefined,
-        type
-      );
+      httpMcpServers[name] = makeMcpServerConfig(s.url, type);
     }
   } catch (e) {
     process.stderr.write(`Gemini bridge: failed to parse MCP config at ${mcpConfigPath}: ${e.message}\n`);
   }
 }
+
+// ── Model validation ─────────────────────────────────────────────────────────
+
+// Mirror codex-bridge's VALID_CODEX_MODELS pattern. Unknown model names fall back to
+// the default rather than passing an arbitrary string to the Gemini SDK, which would
+// produce an opaque SDK error instead of a safe fallback.
+const VALID_GEMINI_MODELS = new Set([
+  'gemini-2.5-flash',
+  'gemini-2.5-pro',
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-lite',
+]);
+const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
 
 // ── Session state ────────────────────────────────────────────────────────────
 
@@ -123,7 +150,7 @@ async function ensureInitialized(model) {
 
   config = new Config({
     sessionId: randomUUID(),
-    model: model || 'gemini-2.5-flash',
+    model: model || DEFAULT_GEMINI_MODEL,
     targetDir: process.cwd(),
     // userMemory → getSystemInstructionMemory() → getCoreSystemPrompt() = system instruction
     userMemory: systemPromptText,
@@ -159,7 +186,7 @@ async function ensureInitialized(model) {
 
 async function runTask(msg) {
   const startMs = Date.now();
-  const model = msg.model || 'gemini-2.5-flash';
+  const model = (msg.model && VALID_GEMINI_MODELS.has(msg.model)) ? msg.model : DEFAULT_GEMINI_MODEL;
   const sessionId = msg.sessionId || currentSessionId || randomUUID();
   currentSessionId = sessionId;
 
@@ -182,13 +209,9 @@ async function runTask(msg) {
       if (evType === 'agent_start') {
         emit({ type: 'turn.started' });
       } else if (evType === 'message') {
-        // LegacyAgentProtocol emits 'message' for both the injected user turn (role='user')
-        // and the model's reply (role='agent'). Only accumulate agent output — the user turn
-        // carries the full input directive and must never appear in the response payload.
-        if (event.role !== 'agent') return;
-        const text = Array.isArray(event.content)
-          ? event.content.filter(c => c.type === 'text').map(c => c.text ?? '').join('')
-          : '';
+        // extractAgentMessageText guards against user-role echo and empty content.
+        // See gemini-message-handler.mjs for the role-guard logic and its unit tests.
+        const text = extractAgentMessageText(event);
         if (text) {
           finalText += text;
           emit({ type: 'item.started', itemType: 'message', text });

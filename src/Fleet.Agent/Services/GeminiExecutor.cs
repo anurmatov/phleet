@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Channels;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
@@ -204,8 +205,15 @@ public sealed class GeminiExecutor : IAgentExecutor
         // Gemini SDK registers MCP tools with single underscores (mcp_server_tool).
         // Write a translated copy so the model can match tool references in the system prompt
         // to the names that the Gemini SDK actually registers from the MCP servers.
+        //
+        // Constrain the translation to actual tool-name patterns (mcp__<server>__<tool>) using
+        // a regex rather than a global string replace. A blind Replace("mcp__", "mcp_") would
+        // corrupt prose occurrences in runbooks, memory excerpts, and code examples.
         var rawPrompt = await File.ReadAllTextAsync(systemPromptPath, ct);
-        var translatedPrompt = rawPrompt.Replace("mcp__", "mcp_");
+        var translatedPrompt = Regex.Replace(
+            rawPrompt,
+            @"mcp__([A-Za-z0-9_-]+)__([A-Za-z0-9_-]+)",
+            "mcp_$1_$2");
         var geminiPromptPath = systemPromptPath + ".gemini";
         await File.WriteAllTextAsync(geminiPromptPath, translatedPrompt, ct);
         systemPromptPath = geminiPromptPath;

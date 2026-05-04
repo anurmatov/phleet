@@ -1,7 +1,7 @@
 /**
  * gemini-bridge.role-guard.test.mjs
  *
- * Unit tests for the role-guard fix in the gemini-bridge.mjs message handler.
+ * Unit tests for the role-guard logic in gemini-message-handler.mjs.
  *
  * LegacyAgentProtocol emits 'message' events for BOTH the user turn (role='user')
  * and the model's reply (role='agent'). The bridge must only accumulate agent-role
@@ -13,23 +13,17 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { extractAgentMessageText } from './gemini-message-handler.mjs';
 
 /**
- * Simulates the subscriber callback logic from runTask() in gemini-bridge.mjs.
- * Processes a sequence of events and returns the accumulated finalText.
- * Mirrors the actual handler exactly — if the handler changes, update this too.
+ * Drives the actual extractAgentMessageText handler over a sequence of events
+ * and returns the accumulated finalText — same logic as the bridge's runTask loop.
  */
 function processMessageEvents(events) {
   let finalText = '';
   for (const event of events) {
-    const evType = event.type;
-    if (evType === 'message') {
-      if (event.role !== 'agent') continue;
-      const text = Array.isArray(event.content)
-        ? event.content.filter(c => c.type === 'text').map(c => c.text ?? '').join('')
-        : '';
-      if (text) finalText += text;
-    }
+    const text = extractAgentMessageText(event);
+    if (text) finalText += text;
   }
   return finalText;
 }

@@ -163,7 +163,16 @@ dotnet test tests/Fleet.Agent.Tests/
   (written by `PromptBuilder.WriteSystemPromptFile()`).
 - **MCP:** HTTP/SSE transport servers from `.mcp.json`.
   stdio-transport servers are logged as warnings and skipped.
+- **Built-in tools:** **none** — gemini agents have no Read/Write/Edit/Bash tools.
+  `coreTools: []` is intentional: gemini-cli-core's built-in file/shell tools require
+  interactive approval prompts that have no listener in a headless environment.
+  Gemini is best suited for agents that operate exclusively through MCP tools.
+  **Do not assign gemini to roles that need direct filesystem or shell access** (e.g. a
+  developer agent that reads/edits source files). Use `claude` or `codex` for those roles.
 - **Images:** inline multimodal passthrough.
-  PDFs: hint-only (`[document attachment: <path>]`).
+  PDFs: hint-only (`[document attachment: <path>]`); agents cannot open the file without
+  a built-in Read tool — see the note on built-in tools above.
 - **Model default:** `gemini-2.5-flash`.
   Free tier: 60 req/min, 1,000 req/day.
+  Valid models: `gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-2.0-flash`,
+  `gemini-2.0-flash-lite`. Unknown model names fall back to `gemini-2.5-flash`.

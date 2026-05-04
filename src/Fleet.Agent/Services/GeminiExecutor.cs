@@ -505,9 +505,12 @@ public sealed class GeminiExecutor : IAgentExecutor
                 Summary = $"Using {toolName}",
                 ToolName = toolName ?? "",
                 ToolArgs = toolArgs,
-                // Intermediate event — suppress routing to Telegram on every tool invocation.
-                // Only the terminal FinalResult event is significant (PR #129 pattern).
-                IsSignificant = false,
+                // Tool calls ARE significant — TaskManager gates them via the
+                // user-side SuppressToolMessages flag and a 1-in-5 sampling
+                // counter. Matches ClaudeExecutor's MapAssistantEvent behavior.
+                // (Streaming text deltas remain IsSignificant=false; only the
+                // terminal FinalResult event delivers the assistant response.)
+                IsSignificant = true,
             };
         }
 

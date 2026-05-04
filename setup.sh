@@ -314,13 +314,17 @@ check_creds_gemini() {
     exit 1
   fi
   ok "gemini OAuth credentials found at $creds"
+}
 
-  # Extract OAuth client_id / client_secret from the installed @google/gemini-cli package.
-  # These are public installed-app OAuth constants (same pattern as gcloud / GitHub CLI):
-  # the CLI bundle ships them in plaintext. They are NOT stored in oauth_creds.json, so
-  # the host-side AuthTokenRefreshWorkflow needs them passed via env vars. We extract at
-  # setup time so the values track whatever CLI version the operator has installed —
-  # if Google rotates them in a future release, re-running setup.sh picks up the new ones.
+# Extract gemini-cli's hardcoded OAUTH_CLIENT_ID / OAUTH_CLIENT_SECRET from the
+# installed @google/gemini-cli npm bundle and write them to .env. Called from the
+# step [3/7] credential-copy block, where ENV_FILE is guaranteed to exist (the
+# check_creds_* functions run earlier and only validate, not write — same as
+# claude/codex). These are public installed-app OAuth constants — same pattern
+# as gcloud / GitHub CLI ship — not stored in oauth_creds.json. Re-running setup.sh
+# re-extracts current values, so a future CLI version that rotates them gets
+# picked up automatically.
+extract_gemini_oauth_constants() {
   local gemini_modules
   gemini_modules=$(npm root -g 2>/dev/null)/@google/gemini-cli/bundle
   if [[ ! -d "$gemini_modules" ]]; then
@@ -343,11 +347,9 @@ check_creds_gemini() {
     echo "  Try: npm install -g @google/gemini-cli@latest && ./setup.sh"
     exit 1
   fi
-  if ! $DRY_RUN; then
-    write_env_var "$ENV_FILE" "AUTHTOKENREFRESH__GEMINICLIENTID" "$gemini_oauth_client_id"
-    write_env_var "$ENV_FILE" "AUTHTOKENREFRESH__GEMINICLIENTSECRET" "$gemini_oauth_client_secret"
-  fi
-  ok "gemini OAuth client constants extracted from CLI bundle → $ENV_FILE"
+  write_env_var "$ENV_FILE" "AUTHTOKENREFRESH__GEMINICLIENTID" "$gemini_oauth_client_id"
+  write_env_var "$ENV_FILE" "AUTHTOKENREFRESH__GEMINICLIENTSECRET" "$gemini_oauth_client_secret"
+  ok "Gemini OAuth client constants → $ENV_FILE"
 }
 
 check_creds_codex() {
@@ -661,8 +663,10 @@ if $USE_GEMINI; then
     cp "$HOME/.gemini/oauth_creds.json" "$FLEET_BASE_DIR/.gemini-credentials.json"
     chmod 600 "$FLEET_BASE_DIR/.gemini-credentials.json"
     ok "Gemini credentials → $FLEET_BASE_DIR/.gemini-credentials.json"
+    extract_gemini_oauth_constants
   else
     echo -e "  ${YELLOW}[dry-run]${NC} Would copy ~/.gemini/oauth_creds.json → $FLEET_BASE_DIR/.gemini-credentials.json"
+    echo -e "  ${YELLOW}[dry-run]${NC} Would extract OAUTH_CLIENT_ID/SECRET from @google/gemini-cli bundle → $ENV_FILE"
   fi
 else
   # Placeholder so the compose bind-mount doesn't fail

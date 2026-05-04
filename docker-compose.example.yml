@@ -12,12 +12,13 @@
 #   cp seed.example.json seed.json  # or write your own agent definitions
 #   docker compose -p fleet -f docker-compose.example.yml up -d
 #
-# Credentials: setup.sh copies your Claude/Codex OAuth credentials into
+# Credentials: setup.sh copies your AI provider OAuth credentials into
 # ${FLEET_BASE_DIR} so containers can mount them without exposing your
-# host ~/.claude or ~/.codex. If you're running this compose file without
+# host credential dirs. If you're running this compose file without
 # setup.sh, make sure the following files exist under ${FLEET_BASE_DIR}:
 #   .claude-credentials.json  — copy of ~/.claude/.credentials.json
 #   .codex-credentials.json   — copy of ~/.codex/auth.json (if using codex)
+#   .gemini-credentials.json  — copy of ~/.gemini/oauth_creds.json (if using gemini)
 
 services:
 

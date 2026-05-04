@@ -2,7 +2,65 @@
 # Read provider from generated appsettings (default: claude)
 PROVIDER=$(node -e "try{console.log(require('/app/appsettings.json').Agent.Provider)}catch{console.log('claude')}" 2>/dev/null || echo "claude")
 
-if [ "$PROVIDER" = "codex" ]; then
+if [ "$PROVIDER" = "gemini" ]; then
+    # Gemini auth — OAuth credentials mounted writable directly as ~/.gemini/oauth_creds.json.
+    # The CLI's google-auth-library refreshes the file in-place on token expiry; the writable
+    # bind mount propagates the refreshed token back to the host, preventing stale-token failures
+    # on container restart. No AuthTokenRefreshWorkflow is needed for gemini agents.
+    if [ ! -f "${HOME}/.gemini/oauth_creds.json" ]; then
+        echo "ERROR: ~/.gemini/oauth_creds.json not mounted." >&2
+        echo "Run setup.sh on the host to complete Gemini OAuth setup, then reprovision the agent." >&2
+        exit 1
+    fi
+    chmod 0600 "${HOME}/.gemini/oauth_creds.json"
+
+    # Translate .generated/.mcp.json → ~/.gemini/settings.json (mcpServers block).
+    # The gemini CLI reads MCP server config exclusively from ~/.gemini/settings.json.
+    # It does NOT auto-discover fleet's .generated/.mcp.json. Without this step gemini
+    # agents cannot call any MCP tools (memory, temporal, orchestrator, playwright, etc.).
+    # stdio-transport servers are skipped; only HTTP/SSE is supported by the gemini CLI.
+    MCP_CONFIG=".generated/.mcp.json"
+    GEMINI_SETTINGS="${HOME}/.gemini/settings.json"
+    mkdir -p "${HOME}/.gemini"
+    if [ -f "${MCP_CONFIG}" ]; then
+        python3 - "${MCP_CONFIG}" "${GEMINI_SETTINGS}" <<'PYEOF'
+import json, sys, os
+
+mcp_path, settings_path = sys.argv[1], sys.argv[2]
+with open(mcp_path) as f:
+    mcp = json.load(f)
+
+servers = mcp.get("mcpServers", {})
+gemini_servers = {}
+
+for name, cfg in servers.items():
+    url = cfg.get("url", "")
+    transport = cfg.get("transport_type", cfg.get("transport", ""))
+    if url:
+        # Default to "http" when transport is unspecified (fleet standard)
+        gemini_servers[name] = {"url": url, "transport": transport or "http"}
+    else:
+        print(f"WARN: skipping MCP server '{name}' (no URL — stdio transport not supported by gemini CLI)", file=sys.stderr)
+
+# Merge into existing settings.json (preserves other settings such as theme).
+existing = {}
+if os.path.exists(settings_path):
+    try:
+        with open(settings_path) as f:
+            existing = json.load(f)
+    except Exception:
+        pass
+
+existing["mcpServers"] = gemini_servers
+with open(settings_path, "w") as f:
+    json.dump(existing, f, indent=2)
+print(f"Gemini MCP: wrote {len(gemini_servers)} server(s) to {settings_path}")
+PYEOF
+    else
+        echo "WARN: ${MCP_CONFIG} not found; gemini agent will start without MCP tools" >&2
+    fi
+
+elif [ "$PROVIDER" = "codex" ]; then
     # Codex auth — always overwrite from host mount (source of truth, kept fresh by AuthTokenRefreshWorkflow)
     if [ -f /root/.codex-host/auth.json ]; then
         mkdir -p /root/.codex

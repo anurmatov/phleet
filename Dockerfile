@@ -38,6 +38,18 @@ COPY --from=build /app .
 COPY src/Fleet.Agent/codex-bridge.mjs /app/codex-bridge.mjs
 RUN cd /app && npm install @openai/codex-sdk@0.118.0
 
+# Gemini CLI — headless mode. OAuth credentials mounted writable at runtime by the orchestrator.
+# Pinned to @google/gemini-cli@0.40.1 to match the verified flag set (--output-format stream-json,
+# --yolo, GEMINI_SYSTEM_MD env var) and the stream-json event schema used by GeminiExecutor.cs.
+RUN npm install -g @google/gemini-cli@0.40.1
+# Build-time guard: verify gemini CLI is on PATH and responds to --version.
+RUN gemini --version || (echo 'ERROR: gemini CLI not on PATH — npm install -g may have failed' && exit 1)
+# Build-time guard: @google/gemini-cli-core SDK must NOT be installed globally.
+# GeminiExecutor.cs uses the CLI binary (not the SDK). The SDK was used by the previous
+# bridge approach (issue #128, PR #129) and must not be re-introduced accidentally.
+RUN npm list -g @google/gemini-cli-core 2>&1 | grep -q "empty" || \
+    (echo 'ERROR: @google/gemini-cli-core SDK is installed — remove it; GeminiExecutor uses the CLI binary only' && exit 1)
+
 RUN mkdir -p /workspace /root/.claude
 
 COPY skills/ /app/skills/

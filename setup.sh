@@ -226,16 +226,20 @@ section "[2/7] AI Provider Auth..."
 echo "  Which AI provider(s) do you want to use?"
 echo "    1) claude"
 echo "    2) codex"
-echo "    3) both"
+echo "    3) gemini"
+echo "    4) claude + codex"
+echo "    5) claude + gemini"
 read -rp "  Choice [1]: " provider_choice
 provider_choice="${provider_choice:-1}"
 
-USE_CLAUDE=false; USE_CODEX=false
+USE_CLAUDE=false; USE_CODEX=false; USE_GEMINI=false
 case "$provider_choice" in
   1) USE_CLAUDE=true ;;
   2) USE_CODEX=true ;;
-  3) USE_CLAUDE=true; USE_CODEX=true ;;
-  *) fail "Invalid choice — enter 1, 2, or 3"; exit 1 ;;
+  3) USE_GEMINI=true ;;
+  4) USE_CLAUDE=true; USE_CODEX=true ;;
+  5) USE_CLAUDE=true; USE_GEMINI=true ;;
+  *) fail "Invalid choice — enter 1–5"; exit 1 ;;
 esac
 
 # Set by check_creds_claude — path to a readable credentials JSON file
@@ -295,6 +299,23 @@ check_creds_claude() {
   ok "claude credentials valid (expires $human)"
 }
 
+check_creds_gemini() {
+  local creds="$HOME/.gemini/oauth_creds.json"
+  if [[ ! -f "$creds" ]]; then
+    fail "gemini credentials not found at $creds"
+    echo "  Run 'gemini auth' at least once to complete OAuth, then re-run ./setup.sh"
+    exit 1
+  fi
+  # Basic structure check — file must be valid JSON with an access_token or refresh_token
+  local has_token
+  has_token=$(jq -r '(.access_token // .refresh_token) // empty' "$creds" 2>/dev/null)
+  if [[ -z "$has_token" ]]; then
+    fail "gemini credentials at $creds appear invalid (no access_token or refresh_token) — re-run 'gemini auth'"
+    exit 1
+  fi
+  ok "gemini OAuth credentials found at $creds"
+}
+
 check_creds_codex() {
   local creds="$HOME/.codex/auth.json"
   if [[ ! -f "$creds" ]]; then
@@ -332,8 +353,9 @@ check_creds_codex() {
   fi
 }
 
-if $USE_CLAUDE; then check_creds_claude; fi
-if $USE_CODEX;  then check_creds_codex;  fi
+if $USE_CLAUDE;  then check_creds_claude;  fi
+if $USE_CODEX;   then check_creds_codex;   fi
+if $USE_GEMINI;  then check_creds_gemini;  fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 section "[3/7] Configuration..."
@@ -598,6 +620,21 @@ else
   if ! $DRY_RUN && [[ ! -f "$FLEET_BASE_DIR/.codex-credentials.json" ]]; then
     printf '{}' > "$FLEET_BASE_DIR/.codex-credentials.json"
     chmod 600 "$FLEET_BASE_DIR/.codex-credentials.json"
+  fi
+fi
+if $USE_GEMINI; then
+  if ! $DRY_RUN; then
+    cp "$HOME/.gemini/oauth_creds.json" "$FLEET_BASE_DIR/.gemini-credentials.json"
+    chmod 600 "$FLEET_BASE_DIR/.gemini-credentials.json"
+    ok "Gemini credentials → $FLEET_BASE_DIR/.gemini-credentials.json"
+  else
+    echo -e "  ${YELLOW}[dry-run]${NC} Would copy ~/.gemini/oauth_creds.json → $FLEET_BASE_DIR/.gemini-credentials.json"
+  fi
+else
+  # Placeholder so the compose bind-mount doesn't fail
+  if ! $DRY_RUN && [[ ! -f "$FLEET_BASE_DIR/.gemini-credentials.json" ]]; then
+    printf '{}' > "$FLEET_BASE_DIR/.gemini-credentials.json"
+    chmod 600 "$FLEET_BASE_DIR/.gemini-credentials.json"
   fi
 fi
 

@@ -71,6 +71,15 @@ if os.path.exists(settings_path):
         pass
 
 existing["mcpServers"] = gemini_servers
+
+# Force OAuth-personal auth selection. Without this key the CLI prints
+# "Please set an Auth method in your /root/.gemini/settings.json or specify
+#  one of the following environment variables: GEMINI_API_KEY, ..."
+# even when oauth_creds.json is present — it has the credentials but no
+# instruction to use them. Schema verified against host-side settings.json
+# created by `gemini auth login` interactively (v0.40.1).
+existing.setdefault("security", {}).setdefault("auth", {})["selectedType"] = "oauth-personal"
+
 with open(settings_path, "w") as f:
     json.dump(existing, f, indent=2)
 print(f"Gemini MCP: wrote {len(gemini_servers)} server(s) to {settings_path}")
@@ -80,6 +89,22 @@ PYEOF
         fi
     else
         echo "WARN: ${MCP_CONFIG} not found; gemini agent will start without MCP tools" >&2
+        # Even without MCP we must seed the OAuth auth selector — otherwise the CLI
+        # falls through to "no Auth method configured" and refuses to run.
+        python3 - "${GEMINI_SETTINGS}" <<'PYEOF'
+import json, os, sys
+settings_path = sys.argv[1]
+existing = {}
+if os.path.exists(settings_path):
+    try:
+        with open(settings_path) as f:
+            existing = json.load(f)
+    except Exception:
+        pass
+existing.setdefault("security", {}).setdefault("auth", {})["selectedType"] = "oauth-personal"
+with open(settings_path, "w") as f:
+    json.dump(existing, f, indent=2)
+PYEOF
     fi
 
 elif [ "$PROVIDER" = "codex" ]; then

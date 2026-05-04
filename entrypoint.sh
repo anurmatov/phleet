@@ -40,11 +40,11 @@ gemini_servers = {}
 
 for name, cfg in servers.items():
     url = cfg.get("url", "")
-    # Fleet .mcp.json schema uses "type" for transport (e.g. "http", "sse").
-    # Gemini CLI settings.json uses "transport" with the same values.
-    transport = cfg.get("type", "http")
+    # Gemini CLI mcpServers schema accepts only "url" — the transport is inferred
+    # from the URL scheme. Do NOT include "transport" or "type" keys; the CLI
+    # rejects unknown fields with "Unrecognized key(s) in object" and drops the server.
     if url:
-        gemini_servers[name] = {"url": url, "transport": transport}
+        gemini_servers[name] = {"url": url}
     else:
         print(f"WARN: skipping MCP server '{name}' (no URL — stdio transport not supported by gemini CLI)", file=sys.stderr)
 

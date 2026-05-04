@@ -154,6 +154,15 @@ public sealed class GeminiExecutor : IAgentExecutor
             // indefinitely in headless mode (no human present to approve).
             psi.Environment["GEMINI_CLI_TRUST_WORKSPACE"] = "true";
 
+            // Enforce OAuth-only auth (issue #132 MUST NOT #2). The gemini CLI auto-detects
+            // GEMINI_API_KEY and prefers it over ~/.gemini/oauth_creds.json when both are
+            // present. A leftover GEMINI_API_KEY in the cluster .env (e.g. from PR #129 era)
+            // would silently route traffic through the API-key billing tier instead of OAuth,
+            // surfacing as confusing 429 "prepayment credits depleted" errors mid-task. Strip
+            // the env var here so the CLI must use OAuth.
+            psi.Environment.Remove("GEMINI_API_KEY");
+            psi.Environment.Remove("GOOGLE_API_KEY");
+
             process = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start gemini CLI process");
 
             // Read stderr in background — non-fatal; logged at Warning level.

@@ -14,6 +14,19 @@ if [ "$PROVIDER" = "gemini" ]; then
     fi
     chmod 0600 "${HOME}/.gemini/oauth_creds.json"
 
+    # Enforce OAuth-only auth (issue #132 MUST NOT #2). The gemini CLI auto-detects
+    # GEMINI_API_KEY / GOOGLE_API_KEY and prefers them over oauth_creds.json. A leftover
+    # API key in the cluster .env (e.g. from the PR #129 SDK era) would silently route
+    # traffic through the API-key billing tier instead of OAuth, surfacing as confusing
+    # 429 "prepayment credits depleted" errors mid-task. Fail fast with a clear message
+    # so the operator can clean up .env before the agent starts taking traffic.
+    if [ -n "${GEMINI_API_KEY:-}" ] || [ -n "${GOOGLE_API_KEY:-}" ]; then
+        echo "ERROR: GEMINI_API_KEY or GOOGLE_API_KEY is set but provider=gemini uses OAuth." >&2
+        echo "Remove the API key from ./fleet/.env (and the agent's env refs), then reprovision." >&2
+        echo "OAuth credentials at ~/.gemini/oauth_creds.json are the single source of truth." >&2
+        exit 1
+    fi
+
     # Trust the workspace directory so --yolo is not silently downgraded to "default"
     # approval mode. Without this the CLI prompts for every tool call approval, which
     # hangs indefinitely in headless mode (no human present to approve).

@@ -260,17 +260,6 @@ OAuth tokens in `./fleet/.claude-credentials.json` and `./fleet/.codex-credentia
    cp ~/.codex/auth.json ./fleet/.codex-credentials.json
    chmod 600 ./fleet/.codex-credentials.json
    ```
-
-### Gemini agents start returning "credentials not found"
-
-Gemini uses OAuth tokens stored in `~/.gemini/oauth_creds.json`. The container mounts this file writable so the Gemini CLI's `google-auth-library` can refresh the token in-place — unlike Claude/Codex, **you should not need to manually refresh gemini credentials** as long as the bind mount is writable and the container keeps running.
-
-If the credentials file is missing or corrupted:
-1. On the host, run: `gemini auth` (opens a browser for Google OAuth consent; writes `~/.gemini/oauth_creds.json`)
-2. Re-run `./setup.sh` (choose option 3 or 5) to copy the fresh credentials into `./fleet/.gemini-credentials.json`
-3. Reprovision the affected gemini agents from the dashboard
-
-See `docs/providers/gemini.md` for full details.
 3. Reprovision every affected agent so each container picks up the new file. From the dashboard: click **Reprovision** on each agent. From the CLI:
    ```bash
    TOKEN=$(grep '^ORCHESTRATOR_AUTH_TOKEN=' ./fleet/.env | cut -d= -f2)
@@ -280,6 +269,17 @@ See `docs/providers/gemini.md` for full details.
    ```
 
 Re-running `./setup.sh` also works — it re-copies the credentials and leaves the stack running.
+
+### Gemini agents start returning "credentials not found"
+
+Gemini uses OAuth tokens stored in `~/.gemini/oauth_creds.json`. The container mounts this file writable so the Gemini CLI's `google-auth-library` can refresh tokens in-place — unlike Claude/Codex, **you should not need to manually refresh gemini credentials** as long as the container stays running. Note: all gemini agents share the same `./fleet/.gemini-credentials.json` on the host; concurrent token refreshes rely on `google-auth-library`'s atomic rename write.
+
+If the credentials file is missing or corrupted:
+1. On the host, run: `gemini auth` (opens a browser for Google OAuth consent; writes `~/.gemini/oauth_creds.json`)
+2. Re-run `./setup.sh` (choose option 3 or 5) to copy the fresh credentials into `./fleet/.gemini-credentials.json`
+3. Reprovision the affected gemini agents from the dashboard
+
+See `docs/providers/gemini.md` for full details.
 
 ### Telegram returns 409 Conflict at startup
 

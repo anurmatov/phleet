@@ -9,8 +9,9 @@ namespace Fleet.Agent.Tests;
 
 /// <summary>
 /// Unit tests for GeminiExecutor event mapping logic (issue #132).
+/// Event shapes verified against gemini CLI v0.40.1 live output (canary run 2026-05-04).
 /// Tests cover stream-json parsing, tool call/result handling, error events,
-/// and the raw Gemini API candidates format — all without spawning a real process.
+/// and legacy fallback paths — all without spawning a real process.
 /// </summary>
 public class GeminiExecutorTests
 {
@@ -48,11 +49,89 @@ public class GeminiExecutorTests
         await executor.StopProcessAsync();
     }
 
-    // ── MapEvent: text events ─────────────────────────────────────────────────
+    // ── MapEvent: v0.40.1 primary message format ──────────────────────────────
 
     [Fact]
-    public void MapEvent_TextEvent_ReturnsAssistantChunk()
+    public void MapEvent_MessageAssistant_ReturnsAssistantChunk()
     {
+        // Verified format from gemini CLI v0.40.1 live output.
+        var executor = CreateExecutor();
+        var acc = new StringBuilder();
+        var ev = Parse("{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"Hello world\",\"delta\":true}");
+
+        var result = executor.MapEvent(ev, acc);
+
+        Assert.NotNull(result);
+        Assert.Equal("assistant", result!.EventType);
+        Assert.Equal("Hello world", result.Summary);
+        Assert.Equal("Hello world", acc.ToString());
+        Assert.False(result.IsSignificant); // intermediate chunk — PR #129 pattern
+    }
+
+    [Fact]
+    public void MapEvent_MessageUser_ReturnsNull()
+    {
+        // User echo events should be skipped — they are just the input reflected back.
+        var executor = CreateExecutor();
+        var acc = new StringBuilder();
+        var ev = Parse("{\"type\":\"message\",\"role\":\"user\",\"content\":\"what is 2+2?\"}");
+
+        var result = executor.MapEvent(ev, acc);
+
+        Assert.Null(result);
+        Assert.Equal("", acc.ToString()); // accumulator untouched
+    }
+
+    [Fact]
+    public void MapEvent_InitEvent_ReturnsNull()
+    {
+        var executor = CreateExecutor();
+        var acc = new StringBuilder();
+        var ev = Parse("{\"type\":\"init\",\"session_id\":\"abc\",\"model\":\"gemini-2.5-flash\"}");
+
+        var result = executor.MapEvent(ev, acc);
+
+        Assert.Null(result);
+    }
+
+    // ── MapEvent: v0.40.1 result/error format ────────────────────────────────
+
+    [Fact]
+    public void MapEvent_ResultStatusError_ReturnsErrorResult()
+    {
+        // Verified format: {"type":"result","status":"error","error":{"type":"unknown","message":"..."}}
+        var executor = CreateExecutor();
+        var acc = new StringBuilder();
+        var ev = Parse("{\"type\":\"result\",\"status\":\"error\",\"error\":{\"type\":\"unknown\",\"message\":\"rate limit exceeded\"}}");
+
+        var result = executor.MapEvent(ev, acc);
+
+        Assert.NotNull(result);
+        Assert.Equal("result", result!.EventType);
+        Assert.True(result.IsErrorResult);
+        Assert.Equal("rate limit exceeded", result.FinalResult);
+        Assert.True(result.IsSignificant);
+    }
+
+    [Fact]
+    public void MapEvent_ResultStatusSuccess_ReturnsNull()
+    {
+        // Success end-of-stream event — RunCliAsync handles the final result via exit code 0.
+        var executor = CreateExecutor();
+        var acc = new StringBuilder();
+        var ev = Parse("{\"type\":\"result\",\"status\":\"success\",\"stats\":{\"total_tokens\":100}}");
+
+        var result = executor.MapEvent(ev, acc);
+
+        Assert.Null(result); // handled by exit code path, not MapEvent
+    }
+
+    // ── MapEvent: legacy text events (fallback paths) ─────────────────────────
+
+    [Fact]
+    public void MapEvent_LegacyTextEvent_ReturnsAssistantChunk()
+    {
+        // Legacy/hypothetical format — handled by ExtractEventText fallback.
         var executor = CreateExecutor();
         var acc = new StringBuilder();
         var ev = Parse("{\"type\":\"text\",\"text\":\"Hello world\"}");
@@ -70,7 +149,7 @@ public class GeminiExecutorTests
     {
         var executor = CreateExecutor();
         var acc = new StringBuilder();
-        // Any event with a top-level "text" field should be accumulated.
+        // Any event with a top-level "text" field is accumulated via defensive fallback.
         var ev = Parse("{\"text\":\"chunk\"}");
 
         var result = executor.MapEvent(ev, acc);
@@ -122,7 +201,8 @@ public class GeminiExecutorTests
         Assert.NotNull(result);
         Assert.Equal("tool_use", result!.EventType);
         Assert.Equal("memory_get", result.ToolName);
-        Assert.True(result.IsSignificant);
+        // Intermediate tool-call events are non-significant to avoid Telegram spam per PR #129.
+        Assert.False(result.IsSignificant);
     }
 
     [Theory]
@@ -140,37 +220,6 @@ public class GeminiExecutorTests
         Assert.NotNull(result);
         Assert.Equal("tool_result", result!.EventType);
         Assert.False(result.IsSignificant);
-    }
-
-    // ── MapEvent: error event ─────────────────────────────────────────────────
-
-    [Fact]
-    public void MapEvent_ErrorEvent_ReturnsErrorResult()
-    {
-        var executor = CreateExecutor();
-        var acc = new StringBuilder();
-        var ev = Parse("{\"type\":\"error\",\"message\":\"rate limit exceeded\"}");
-
-        var result = executor.MapEvent(ev, acc);
-
-        Assert.NotNull(result);
-        Assert.Equal("result", result!.EventType);
-        Assert.True(result.IsErrorResult);
-        Assert.Equal("rate limit exceeded", result.FinalResult);
-    }
-
-    [Fact]
-    public void MapEvent_ErrorEventNoMessage_ReturnsUnknownError()
-    {
-        var executor = CreateExecutor();
-        var acc = new StringBuilder();
-        var ev = Parse("{\"type\":\"error\"}");
-
-        var result = executor.MapEvent(ev, acc);
-
-        Assert.NotNull(result);
-        Assert.True(result!.IsErrorResult);
-        Assert.Equal("Unknown error from gemini CLI", result.FinalResult);
     }
 
     // ── MapEvent: no-payload events ───────────────────────────────────────────

@@ -113,6 +113,11 @@ public sealed class GeminiExecutor : IAgentExecutor
         var systemPromptPath = Path.Combine(Path.GetTempPath(), $"gemini-system-{Guid.NewGuid():N}.md");
         Process? process = null;
 
+        // Capture wall-clock start time before the process starts so DurationMs measures
+        // the full task duration. (_lastActivity is updated on every yielded event, so
+        // using it would measure near-zero — last-event-to-exit gap, not task duration.)
+        var startTime = DateTimeOffset.UtcNow;
+
         var accumulator = new StringBuilder();
         var stderrLines = new StringBuilder();
         var turnStarted = false;
@@ -146,6 +151,9 @@ public sealed class GeminiExecutor : IAgentExecutor
 
             // Read stderr in background — non-fatal; logged at Warning level.
             // Collected for the turn.failed error message on non-zero exit.
+            // CancellationToken.None is intentional: the outer ct cancels via process.Kill in
+            // the finally block. Passing ct here would abort the drain mid-read and lose stderr
+            // lines we need for the error message before WaitForExitAsync returns.
             var stderrTask = Task.Run(async () =>
             {
                 try
@@ -213,7 +221,7 @@ public sealed class GeminiExecutor : IAgentExecutor
                     Summary = finalText,
                     FinalResult = finalText,
                     IsSignificant = true,
-                    Stats = new ExecutionStats { DurationMs = (int)(DateTimeOffset.UtcNow - _lastActivity).TotalMilliseconds },
+                    Stats = new ExecutionStats { DurationMs = (int)(DateTimeOffset.UtcNow - startTime).TotalMilliseconds },
                 };
             }
             else
@@ -253,21 +261,68 @@ public sealed class GeminiExecutor : IAgentExecutor
     /// <summary>
     /// Maps a stream-json event from `gemini --output-format stream-json` to a fleet AgentProgress.
     ///
-    /// The exact event schema for gemini CLI v0.40.1 should be verified against live output
-    /// (run `echo "ping" | gemini --output-format stream-json` on the target host and inspect
-    /// the raw lines). The mapping below handles the most likely formats and gracefully falls back
-    /// to text accumulation for any event that carries a text payload.
+    /// Verified against gemini CLI v0.40.1 live output (canary run 2026-05-04).
+    /// Primary event shapes emitted by the v0.40.1 stream-json formatter:
     ///
-    /// Tool call events: verified tool call event field names for v0.40.1 are not confirmed.
-    /// If tool events are not surfaced in stream-json, text accumulation still yields a correct
-    /// final response — the model sees and invokes tools internally, and the final text reflects
-    /// the outcome. Revisit when verified stream-json tool event shapes are confirmed against
-    /// the live binary. See: https://github.com/google-gemini/gemini-cli (stream-json formatter).
+    ///   {"type":"init",  "session_id":"...", "model":"..."}                          — startup; skip
+    ///   {"type":"message","role":"user",      "content":"..."}                       — input echo; skip
+    ///   {"type":"message","role":"assistant", "content":"...", "delta":true}         — text chunk; accumulate
+    ///   {"type":"tool_call",  "name":"...", "args":{...}}                            — tool invocation
+    ///   {"type":"tool_result","callId":"...", "content":"..."}                       — tool response
+    ///   {"type":"result","status":"success", "stats":{...}}                          — end-of-stream; RunCliAsync handles via exit code
+    ///   {"type":"result","status":"error",   "error":{"type":"...","message":"..."}} — API/CLI error
+    ///
+    /// Legacy / defensive fallbacks retained for forward compatibility with CLI schema changes.
     /// </summary>
     internal AgentProgress? MapEvent(JsonElement ev, StringBuilder accumulator)
     {
         // Extract the event type (if present).
         var evType = ev.TryGetProperty("type", out var typeProp) ? typeProp.GetString() : null;
+
+        // ── message (v0.40.1 primary format) ──────────────────────────────────
+        // role=assistant: streaming text delta; role=user: input echo, skip.
+        if (evType is "message")
+        {
+            var role = ev.TryGetProperty("role", out var rp) ? rp.GetString() : null;
+            if (role is not "assistant") return null; // skip user echo and unknown roles
+
+            var content = ev.TryGetProperty("content", out var cp) && cp.ValueKind == JsonValueKind.String
+                ? cp.GetString() : null;
+            if (string.IsNullOrEmpty(content)) return null;
+
+            accumulator.Append(content);
+            return new AgentProgress
+            {
+                EventType = "assistant",
+                Summary = content,
+                // Intermediate streaming chunk — suppress routing to Telegram on every delta.
+                // Only the terminal FinalResult event is significant (PR #129 pattern).
+                IsSignificant = false,
+            };
+        }
+
+        // ── result (v0.40.1: end-of-stream or API error) ──────────────────────
+        // status=success: RunCliAsync emits FinalResult from the accumulated text via exit code 0.
+        // status=error:   emit an immediate error result so the turn fails fast.
+        if (evType is "result")
+        {
+            var status = ev.TryGetProperty("status", out var sp) ? sp.GetString() : null;
+            if (status is not "error") return null; // success handled by exit code path
+
+            string? msg = null;
+            if (ev.TryGetProperty("error", out var errObj) && errObj.ValueKind == JsonValueKind.Object)
+                msg = ExtractText(errObj, "message", "error");
+            msg ??= ExtractText(ev, "message", "error") ?? "Unknown error from gemini CLI";
+
+            return new AgentProgress
+            {
+                EventType = "result",
+                Summary = msg,
+                FinalResult = msg,
+                IsErrorResult = true,
+                IsSignificant = true,
+            };
+        }
 
         // ── Tool call ──────────────────────────────────────────────────────────
         // Handle tool_call / toolCall / function_call event shapes.
@@ -285,7 +340,9 @@ public sealed class GeminiExecutor : IAgentExecutor
                 Summary = $"Using {toolName}",
                 ToolName = toolName ?? "",
                 ToolArgs = toolArgs,
-                IsSignificant = true,
+                // Intermediate event — suppress routing to Telegram on every tool invocation.
+                // Only the terminal FinalResult event is significant (PR #129 pattern).
+                IsSignificant = false,
             };
         }
 
@@ -301,26 +358,10 @@ public sealed class GeminiExecutor : IAgentExecutor
             };
         }
 
-        // ── Error event ────────────────────────────────────────────────────────
-        if (evType is "error")
-        {
-            var msg = ev.TryGetProperty("message", out var m) ? m.GetString()
-                : ev.TryGetProperty("error", out var e) ? e.GetString()
-                : "Unknown error from gemini CLI";
-            return new AgentProgress
-            {
-                EventType = "result",
-                Summary = msg ?? "Error",
-                FinalResult = msg ?? "Error",
-                IsErrorResult = true,
-                IsSignificant = true,
-            };
-        }
-
-        // ── Text / content events ──────────────────────────────────────────────
-        // Handle text, content, thought, finalText, model_turn_complete, and raw
-        // Gemini API candidates format. Any event with a text payload is accumulated
-        // and emitted as a message chunk.
+        // ── Legacy / defensive text extraction ────────────────────────────────
+        // Handles hypothetical schema variations: top-level text field, raw candidates format,
+        // and any future event type that carries a text payload. Belt-and-suspenders — the
+        // v0.40.1 primary format is message/role=assistant above; these fire only for unknowns.
         var text = ExtractEventText(ev, evType);
         if (!string.IsNullOrEmpty(text))
         {
@@ -329,11 +370,11 @@ public sealed class GeminiExecutor : IAgentExecutor
             {
                 EventType = "assistant",
                 Summary = text,
-                IsSignificant = true,
+                IsSignificant = false,
             };
         }
 
-        // Ignore events that carry no text payload (type=usage, heartbeats, etc.).
+        // Ignore events that carry no text payload (init, usage, heartbeats, etc.).
         return null;
     }
 

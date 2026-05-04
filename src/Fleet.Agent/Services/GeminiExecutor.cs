@@ -202,6 +202,16 @@ public sealed class GeminiExecutor : IAgentExecutor
             psi.Environment.Remove("GEMINI_API_KEY");
             psi.Environment.Remove("GOOGLE_API_KEY");
 
+            // Force IPv4-first DNS resolution. cloudcode-pa.googleapis.com publishes both
+            // A and AAAA records; Node's default Happy-Eyeballs picks IPv6 first. Docker
+            // bridge networks have no IPv6 egress by default, so the CLI hangs with
+            // ETIMEDOUT on every loadCodeAssist call before even reaching the model.
+            // Preserves any caller-provided NODE_OPTIONS by appending.
+            var existingNodeOpts = psi.Environment.TryGetValue("NODE_OPTIONS", out var no) ? no ?? "" : "";
+            psi.Environment["NODE_OPTIONS"] = string.IsNullOrEmpty(existingNodeOpts)
+                ? "--dns-result-order=ipv4first"
+                : existingNodeOpts + " --dns-result-order=ipv4first";
+
             process = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start gemini CLI process");
 
             // Read stderr in background — non-fatal; logged at Warning level.

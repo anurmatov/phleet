@@ -381,10 +381,15 @@ public sealed class RefreshAuthTokenActivity
         creds["access_token"] = newAccessToken;
         creds["expiry_date"] = newExpiresAt;
 
+        // File.Move (rename(2)) fails with EBUSY on single-file bind mounts because Docker
+        // holds the host inode at the mount point. Use the claude/codex pattern: write
+        // a tmp file, then File.Copy over the bind-mounted target (writes to the same
+        // inode, which is allowed), then delete the tmp.
         var tmpPath = GeminiCredentialsPath + ".tmp";
         await File.WriteAllTextAsync(tmpPath,
             creds.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), ct);
-        File.Move(tmpPath, GeminiCredentialsPath, overwrite: true);
+        File.Copy(tmpPath, GeminiCredentialsPath, overwrite: true);
+        File.Delete(tmpPath);
 
         _logger.LogInformation("Gemini token refreshed, new expiry in {ExpiresIn}s", expiresIn);
 

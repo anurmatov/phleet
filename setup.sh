@@ -314,6 +314,36 @@ check_creds_gemini() {
     exit 1
   fi
   ok "gemini OAuth credentials found at $creds"
+
+  # Extract OAuth client_id / client_secret from the installed @google/gemini-cli package.
+  # These are public installed-app OAuth constants (same pattern as gcloud / GitHub CLI):
+  # the CLI bundle ships them in plaintext. They are NOT stored in oauth_creds.json, so
+  # the host-side AuthTokenRefreshWorkflow needs them passed via env vars. We extract at
+  # setup time so the values track whatever CLI version the operator has installed —
+  # if Google rotates them in a future release, re-running setup.sh picks up the new ones.
+  local gemini_modules
+  gemini_modules=$(npm root -g 2>/dev/null)/@google/gemini-cli/bundle
+  if [[ ! -d "$gemini_modules" ]]; then
+    fail "Could not locate @google/gemini-cli install dir at $gemini_modules"
+    echo "  Install it with:  npm install -g @google/gemini-cli"
+    exit 1
+  fi
+  local gemini_oauth_client_id gemini_oauth_client_secret
+  gemini_oauth_client_id=$(grep -hoE '"[0-9]{10,}-[a-z0-9]+\.apps\.googleusercontent\.com"' "$gemini_modules"/*.js 2>/dev/null \
+    | head -1 | tr -d '"')
+  gemini_oauth_client_secret=$(grep -hoE '"GOCSPX-[A-Za-z0-9_-]+"' "$gemini_modules"/*.js 2>/dev/null \
+    | head -1 | tr -d '"')
+  if [[ -z "$gemini_oauth_client_id" || -z "$gemini_oauth_client_secret" ]]; then
+    fail "Could not extract OAuth client_id / client_secret from @google/gemini-cli bundle"
+    echo "  Bundle path: $gemini_modules"
+    echo "  Try: npm install -g @google/gemini-cli@latest && ./setup.sh"
+    exit 1
+  fi
+  if ! $DRY_RUN; then
+    write_env_var "$ENV_FILE" "AUTHTOKENREFRESH__GEMINICLIENTID" "$gemini_oauth_client_id"
+    write_env_var "$ENV_FILE" "AUTHTOKENREFRESH__GEMINICLIENTSECRET" "$gemini_oauth_client_secret"
+  fi
+  ok "gemini OAuth client constants extracted from CLI bundle → $ENV_FILE"
 }
 
 check_creds_codex() {
@@ -798,12 +828,15 @@ elif $DRY_RUN; then
   if $USE_CODEX; then
     echo -e "  ${YELLOW}[dry-run]${NC} Would POST http://localhost:3600/api/schedules (auth-token-refresh-codex-30m)"
   fi
+  if $USE_GEMINI; then
+    echo -e "  ${YELLOW}[dry-run]${NC} Would POST http://localhost:3600/api/schedules (auth-token-refresh-gemini-30m)"
+  fi
 else
   ORCH_URL="http://localhost:3600"
   ORCH_TOKEN=$(read_env_var "$ENV_FILE" "ORCHESTRATOR_AUTH_TOKEN")
 
   create_refresh_schedule() {
-    local provider="$1"     # "claude" or "codex"
+    local provider="$1"     # "claude" | "codex" | "gemini"
     local schedule_id="auth-token-refresh-${provider}-30m"
     local payload
     payload=$(cat <<EOF
@@ -838,6 +871,7 @@ EOF
 
   if $USE_CLAUDE; then create_refresh_schedule "claude"; fi
   if $USE_CODEX;  then create_refresh_schedule "codex";  fi
+  if $USE_GEMINI; then create_refresh_schedule "gemini"; fi
 fi
 
 echo

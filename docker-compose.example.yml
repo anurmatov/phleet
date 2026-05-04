@@ -343,11 +343,20 @@ services:
       # FLEET_CTO_AGENT       — CTO agent name for UWE {{config.CtoAgent}} and {{config.EscalationTarget}} template expressions
       # FLEET_GROUP_CHAT_ID   — Telegram group chat ID for activity directives (replaces static TemporalBridge__GroupChatId)
       # AUTHTOKENREFRESH__*   — OAuth client IDs for provider token refresh (applied on restart)
-      - PEER_CONFIG_KEYS=FLEET_CTO_AGENT,FLEET_GROUP_CHAT_ID,AUTHTOKENREFRESH__CLAUDECLIENTID,AUTHTOKENREFRESH__CODEXCLIENTID
+      - PEER_CONFIG_KEYS=FLEET_CTO_AGENT,FLEET_GROUP_CHAT_ID,AUTHTOKENREFRESH__CLAUDECLIENTID,AUTHTOKENREFRESH__CODEXCLIENTID,AUTHTOKENREFRESH__GEMINICLIENTID,AUTHTOKENREFRESH__GEMINICLIENTSECRET
       # OAuth client IDs for provider token refresh workflow (optional — also set as static fallback).
-      # Set only if you want the fleet to auto-refresh Claude/Codex tokens.
+      # Set only if you want the fleet to auto-refresh Claude/Codex/Gemini tokens.
       - AuthTokenRefresh__ClaudeClientId=${AUTHTOKENREFRESH__CLAUDECLIENTID:-}
       - AuthTokenRefresh__CodexClientId=${AUTHTOKENREFRESH__CODEXCLIENTID:-}
+      # Gemini OAuth installed-app constants — extracted by setup.sh from the host's
+      # @google/gemini-cli npm bundle (the CLI ships these in plaintext; they're public
+      # OAuth identifiers, not cryptographic secrets). RefreshGeminiAsync reads them to
+      # call https://oauth2.googleapis.com/token; without them the workflow throws a
+      # non-retryable failure on every gemini refresh. Empty when gemini provider is
+      # not selected — RefreshGeminiAsync is only invoked from auth-token-refresh-gemini-30m
+      # which itself only exists if setup.sh saw USE_GEMINI=true.
+      - AuthTokenRefresh__GeminiClientId=${AUTHTOKENREFRESH__GEMINICLIENTID:-}
+      - AuthTokenRefresh__GeminiClientSecret=${AUTHTOKENREFRESH__GEMINICLIENTSECRET:-}
     mem_limit: 256m
     restart: unless-stopped
     depends_on:

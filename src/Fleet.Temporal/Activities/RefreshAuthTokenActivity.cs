@@ -300,11 +300,28 @@ public sealed class RefreshAuthTokenActivity
         var refreshToken = creds["refresh_token"]?.GetValue<string>()
             ?? throw new InvalidOperationException("Missing refresh_token in Gemini oauth_creds.json");
 
-        // client_id and client_secret are stored inline in the file (unlike Claude/Codex).
-        var clientId = creds["client_id"]?.GetValue<string>()
-            ?? throw new InvalidOperationException("Missing client_id in Gemini oauth_creds.json");
-        var clientSecret = creds["client_secret"]?.GetValue<string>()
-            ?? throw new InvalidOperationException("Missing client_secret in Gemini oauth_creds.json");
+        // The gemini-cli's oauth_creds.json does NOT store client_id / client_secret —
+        // those are hardcoded in the published npm bundle (chunk-B6PIKVSF.js exports
+        // OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET). They're public installed-app OAuth
+        // identifiers, same pattern as gcloud / GitHub CLI ship — not cryptographic
+        // secrets — but GitHub's secret scanner rejects the GOCSPX- prefix if hardcoded
+        // in the repo. setup.sh extracts them from the host's @google/gemini-cli bundle
+        // and writes them to the cluster .env (AUTHTOKENREFRESH__GEMINICLIENT{ID,SECRET}).
+        // Live-updated via PEER_CONFIG_KEYS, same pattern as ClaudeClientId / CodexClientId.
+        var clientId = string.IsNullOrEmpty(_opts.GeminiClientId)
+            ? throw new ApplicationFailureException(
+                "AuthTokenRefresh:GeminiClientId is not configured. Run setup.sh to extract " +
+                "the OAuth constants from the host's @google/gemini-cli bundle, then restart " +
+                "fleet-temporal-bridge.",
+                nonRetryable: true)
+            : _opts.GeminiClientId;
+        var clientSecret = string.IsNullOrEmpty(_opts.GeminiClientSecret)
+            ? throw new ApplicationFailureException(
+                "AuthTokenRefresh:GeminiClientSecret is not configured. Run setup.sh to extract " +
+                "the OAuth constants from the host's @google/gemini-cli bundle, then restart " +
+                "fleet-temporal-bridge.",
+                nonRetryable: true)
+            : _opts.GeminiClientSecret;
 
         var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         var remainingMs = expiryDateMs - nowMs;

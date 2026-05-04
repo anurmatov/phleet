@@ -460,10 +460,16 @@ public sealed class GroupBehavior
     {
         var tmpPath = finalPath + ".tmp";
         await File.WriteAllTextAsync(tmpPath, content);
-        File.Copy(tmpPath, finalPath, overwrite: true);
-        File.Delete(tmpPath);
-        if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
-            File.SetUnixFileMode(finalPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        try
+        {
+            File.Copy(tmpPath, finalPath, overwrite: true);
+            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+                File.SetUnixFileMode(finalPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+        finally
+        {
+            try { File.Delete(tmpPath); } catch { }
+        }
     }
 
     private string? ExtractRelayCommand(string text)

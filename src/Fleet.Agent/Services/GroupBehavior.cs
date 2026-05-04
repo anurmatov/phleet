@@ -440,11 +440,30 @@ public sealed class GroupBehavior
         creds["access_token"] = newAccessToken;
         creds["expiry_date"] = newExpiresAt;
 
-        var tmpPath = credsPath + ".tmp";
-        await File.WriteAllTextAsync(tmpPath, creds.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-        File.Move(tmpPath, credsPath, overwrite: true);
+        var content = creds.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+        try
+        {
+            await WriteCredentialFileAsync(credsPath, content);
+            _logger.LogInformation("Gemini oauth_creds.json updated, new expiry: {ExpiresAt}", newExpiresAt);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to write Gemini oauth_creds.json (path: {Path})", credsPath);
+        }
+    }
 
-        _logger.LogInformation("Gemini oauth_creds.json updated, new expiry: {ExpiresAt}", newExpiresAt);
+    // Write credential content to a bind-mounted file via copy-then-delete.
+    // File.Move / rename(2) fails with EBUSY on Docker bind-mount targets; writing
+    // through an open file descriptor (File.Copy overwrite) succeeds because it
+    // opens the existing inode for writing rather than replacing the directory entry.
+    internal static async Task WriteCredentialFileAsync(string finalPath, string content)
+    {
+        var tmpPath = finalPath + ".tmp";
+        await File.WriteAllTextAsync(tmpPath, content);
+        File.Copy(tmpPath, finalPath, overwrite: true);
+        File.Delete(tmpPath);
+        if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+            File.SetUnixFileMode(finalPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
     }
 
     private string? ExtractRelayCommand(string text)

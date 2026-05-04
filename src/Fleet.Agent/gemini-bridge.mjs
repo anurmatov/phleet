@@ -154,27 +154,27 @@ function extractRetryDelay(errMessage) {
 
 // ── Session state ────────────────────────────────────────────────────────────
 
-// Config and protocol are created once on first task and reused.
-// LegacyAgentProtocol maintains conversation history internally via its GeminiClient.
-let config = null;
-let protocol = null;
+// A fresh Config + LegacyAgentProtocol is created for every task so that
+// LegacyAgentProtocol's internal GeminiClient never accumulates chat history
+// across unrelated turns. Reusing a single protocol caused prior turns' context
+// to bleed into subsequent tasks (cross-turn context accumulation bug).
 let currentSessionId = null;
-let initError = null;
 
 function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
 }
 
-async function ensureInitialized(model) {
-  if (config) return; // Config is created once and reused for the bridge process lifetime.
-  // NOTE: the model argument is only honored on the FIRST call. Subsequent tasks that
-  // arrive with a different model value are silently ignored — the bridge would need to
-  // restart to pick up a different model. This matches the codex-bridge pattern.
-  if (initError) throw initError;
-
+/**
+ * Creates a fresh Config + LegacyAgentProtocol for a single task.
+ * A new instance per turn ensures the underlying GeminiClient starts with an
+ * empty chat history, preventing cross-turn context accumulation. It also
+ * eliminates the subscribe-race concern: any late events from a previous
+ * stream cannot fire on a different protocol instance.
+ */
+async function createProtocol(model) {
   const hasMcp = Object.keys(httpMcpServers).length > 0;
 
-  config = new Config({
+  const config = new Config({
     sessionId: randomUUID(),
     model: model || DEFAULT_GEMINI_MODEL,
     targetDir: process.cwd(),
@@ -192,19 +192,13 @@ async function ensureInitialized(model) {
     approvalMode: ApprovalMode.YOLO,
   });
 
-  try {
-    await config.initialize();
-    // refreshAuth creates config.contentGenerator — required before any generateContent call.
-    // initialize() alone leaves contentGenerator null; LegacyAgentProtocol.send() throws
-    // 'Content generator not initialized' without this step.
-    await config.refreshAuth(AuthType.USE_GEMINI, process.env.GEMINI_API_KEY);
-  } catch (e) {
-    initError = e;
-    config = null;
-    throw e;
-  }
+  // refreshAuth creates config.contentGenerator — required before any generateContent call.
+  // initialize() alone leaves contentGenerator null; LegacyAgentProtocol.send() throws
+  // 'Content generator not initialized' without this step.
+  await config.initialize();
+  await config.refreshAuth(AuthType.USE_GEMINI, process.env.GEMINI_API_KEY);
 
-  protocol = new LegacyAgentProtocol({
+  return new LegacyAgentProtocol({
     config,
     promptId: 'fleet-bridge',
   });
@@ -236,7 +230,7 @@ function buildContent(msg) {
  *   { rateLimited: true,    errorMsg }       — caller should wait and retry
  *   { failed: true,         errorMsg }       — non-retryable; caller should emit turn.failed
  */
-function runSingleAttempt(content, sessionId, startMs) {
+function runSingleAttempt(protocol, content, sessionId, startMs) {
   return new Promise((resolve) => {
     let finalText = '';
 
@@ -309,18 +303,20 @@ async function runTask(msg) {
 
   emit({ type: 'ack', sessionId });
 
+  // Build content once — reused across rate-limit retries so images aren't re-encoded.
+  const content = buildContent(msg);
+
+  // Create a fresh protocol per task — ensures no chat history carries over from prior turns.
+  let protocol;
   try {
-    await ensureInitialized(model);
+    protocol = await createProtocol(model);
   } catch (err) {
     emit({ type: 'turn.failed', error: `Initialization failed: ${err.message ?? String(err)}` });
     return;
   }
 
-  // Build content once — reused across rate-limit retries so images aren't re-encoded.
-  const content = buildContent(msg);
-
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    const result = await runSingleAttempt(content, sessionId, startMs);
+    const result = await runSingleAttempt(protocol, content, sessionId, startMs);
 
     if (result.success) {
       emit({

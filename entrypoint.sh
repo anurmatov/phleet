@@ -4,9 +4,9 @@ PROVIDER=$(node -e "try{console.log(require('/app/appsettings.json').Agent.Provi
 
 if [ "$PROVIDER" = "gemini" ]; then
     # Gemini auth — OAuth credentials mounted writable directly as ~/.gemini/oauth_creds.json.
-    # The CLI's google-auth-library refreshes the file in-place on token expiry; the writable
-    # bind mount propagates the refreshed token back to the host, preventing stale-token failures
-    # on container restart. No AuthTokenRefreshWorkflow is needed for gemini agents.
+    # Two-level refresh: (1) the CLI's google-auth-library refreshes tokens in-place on expiry;
+    # (2) AuthTokenRefreshWorkflow provides a host-side safety net every 30 min, propagating
+    # refreshed tokens back to the host to prevent stale-token failures on container restart.
     if [ ! -f "${HOME}/.gemini/oauth_creds.json" ]; then
         echo "ERROR: ~/.gemini/oauth_creds.json not mounted." >&2
         echo "Run setup.sh on the host to complete Gemini OAuth setup, then reprovision the agent." >&2
@@ -14,12 +14,17 @@ if [ "$PROVIDER" = "gemini" ]; then
     fi
     chmod 0600 "${HOME}/.gemini/oauth_creds.json"
 
-    # Translate .generated/.mcp.json → ~/.gemini/settings.json (mcpServers block).
+    # Trust the workspace directory so --yolo is not silently downgraded to "default"
+    # approval mode. Without this the CLI prompts for every tool call approval, which
+    # hangs indefinitely in headless mode (no human present to approve).
+    export GEMINI_CLI_TRUST_WORKSPACE=true
+
+    # Translate /workspace/.mcp.json → ~/.gemini/settings.json (mcpServers block).
     # The gemini CLI reads MCP server config exclusively from ~/.gemini/settings.json.
-    # It does NOT auto-discover fleet's .generated/.mcp.json. Without this step gemini
+    # It does NOT auto-discover fleet's /workspace/.mcp.json. Without this step gemini
     # agents cannot call any MCP tools (memory, temporal, orchestrator, playwright, etc.).
     # stdio-transport servers are skipped; only HTTP/SSE is supported by the gemini CLI.
-    MCP_CONFIG=".generated/.mcp.json"
+    MCP_CONFIG="/workspace/.mcp.json"
     GEMINI_SETTINGS="${HOME}/.gemini/settings.json"
     mkdir -p "${HOME}/.gemini"
     if [ -f "${MCP_CONFIG}" ]; then

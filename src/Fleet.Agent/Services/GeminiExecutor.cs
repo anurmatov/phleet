@@ -20,7 +20,8 @@ namespace Fleet.Agent.Services;
 /// Matches the subprocess-per-task isolation of ClaudeExecutor and CodexExecutor.
 ///
 /// Auth: OAuth credentials at ~/.gemini/oauth_creds.json (writable bind mount).
-/// The CLI's google-auth-library refreshes tokens in-place — no separate refresh workflow needed.
+/// Two-level refresh: (1) the CLI's google-auth-library refreshes tokens in-place on expiry;
+/// (2) AuthTokenRefreshWorkflow provides a host-side safety net every 30 min.
 ///
 /// Images: hint-only in v1 ([image attachment: path] injected into task text by
 /// AttachmentSweeper.BuildHints). Gemini CLI v0.40.1 headless file attachment is unconfirmed.
@@ -146,6 +147,12 @@ public sealed class GeminiExecutor : IAgentExecutor
             // GEMINI_SYSTEM_MD: CLI reads this env var at startup and treats the file content
             // as the system instruction. --system-prompt-file does NOT exist in v0.40.1 (verified).
             psi.Environment["GEMINI_SYSTEM_MD"] = systemPromptPath;
+
+            // GEMINI_CLI_TRUST_WORKSPACE: prevents the CLI from downgrading --yolo to "default"
+            // approval mode when the working directory is not in its trusted-directory list.
+            // Without this, every tool call blocks waiting for interactive approval, which hangs
+            // indefinitely in headless mode (no human present to approve).
+            psi.Environment["GEMINI_CLI_TRUST_WORKSPACE"] = "true";
 
             process = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start gemini CLI process");
 

@@ -81,13 +81,25 @@ npm run build  # production build
 Each agent is a .NET 10 container that:
 1. Loads config from the orchestrator DB (provisioned via `seed.json` on first run)
 2. Receives tasks via Telegram DM or RabbitMQ
-3. Runs a persistent AI process (`claude -p` or Codex SDK bridge)
-4. Sends tasks via stdin NDJSON, streams responses from stdout
+3. Runs an AI process per provider: claude CLI (`-p --append-system-prompt-file`), Codex SDK bridge (`codex-bridge.mjs`), or gemini CLI (`--output-format stream-json --yolo`)
+4. Sends tasks via stdin, streams NDJSON responses from stdout
 5. Reports heartbeats to the orchestrator
 
 The orchestrator manages agent lifecycle (create, provision, reprovision, stop) and exposes a REST + WebSocket API consumed by the dashboard.
 
 Workflows are orchestrated via Temporal. The temporal bridge connects Temporal workers to agent containers via RabbitMQ.
+
+## Provider Summary
+
+| Provider | Auth | Process model | System prompt delivery | MCP transport |
+|----------|------|--------------|----------------------|---------------|
+| claude | OAuth via `~/.claude/.credentials.json` | Persistent process, session resumption | `--append-system-prompt-file` (temp file) | HTTP/SSE + stdio |
+| codex | OAuth via `~/.codex/auth.json` | Per-turn via `codex-bridge.mjs` | stdin JSON field | HTTP/SSE only |
+| gemini | OAuth via `~/.gemini/oauth_creds.json` (writable bind mount) | Fresh `gemini` CLI per task | `GEMINI_SYSTEM_MD` env var → temp file | HTTP/SSE only (stdio skipped in `entrypoint.sh`) |
+
+For gemini setup: run `gemini auth` once on the host, then `./setup.sh` (choose option 3 or 5).
+No GEMINI_API_KEY needed — authentication is OAuth only.
+See `docs/providers/gemini.md` for a full setup guide.
 
 ## Telegram Image Handling
 

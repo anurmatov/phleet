@@ -2,7 +2,112 @@
 # Read provider from generated appsettings (default: claude)
 PROVIDER=$(node -e "try{console.log(require('/app/appsettings.json').Agent.Provider)}catch{console.log('claude')}" 2>/dev/null || echo "claude")
 
-if [ "$PROVIDER" = "codex" ]; then
+if [ "$PROVIDER" = "gemini" ]; then
+    # Gemini auth — OAuth credentials mounted writable directly as ~/.gemini/oauth_creds.json.
+    # Two-level refresh: (1) the CLI's google-auth-library refreshes tokens in-place on expiry;
+    # (2) AuthTokenRefreshWorkflow provides a host-side safety net every 30 min, propagating
+    # refreshed tokens back to the host to prevent stale-token failures on container restart.
+    if [ ! -f "${HOME}/.gemini/oauth_creds.json" ]; then
+        echo "ERROR: ~/.gemini/oauth_creds.json not mounted." >&2
+        echo "Run setup.sh on the host to complete Gemini OAuth setup, then reprovision the agent." >&2
+        exit 1
+    fi
+    chmod 0600 "${HOME}/.gemini/oauth_creds.json"
+
+    # Enforce OAuth-only auth (issue #132 MUST NOT #2). The gemini CLI auto-detects
+    # GEMINI_API_KEY / GOOGLE_API_KEY and prefers them over oauth_creds.json. A leftover
+    # API key in the cluster .env (e.g. from the PR #129 SDK era) would silently route
+    # traffic through the API-key billing tier instead of OAuth, surfacing as confusing
+    # 429 "prepayment credits depleted" errors mid-task. Fail fast with a clear message
+    # so the operator can clean up .env before the agent starts taking traffic.
+    if [ -n "${GEMINI_API_KEY:-}" ] || [ -n "${GOOGLE_API_KEY:-}" ]; then
+        echo "ERROR: GEMINI_API_KEY or GOOGLE_API_KEY is set but provider=gemini uses OAuth." >&2
+        echo "Remove the API key from ./fleet/.env (and the agent's env refs), then reprovision." >&2
+        echo "OAuth credentials at ~/.gemini/oauth_creds.json are the single source of truth." >&2
+        exit 1
+    fi
+
+    # Trust the workspace directory so --yolo is not silently downgraded to "default"
+    # approval mode. Without this the CLI prompts for every tool call approval, which
+    # hangs indefinitely in headless mode (no human present to approve).
+    export GEMINI_CLI_TRUST_WORKSPACE=true
+
+    # Translate /workspace/.mcp.json → ~/.gemini/settings.json (mcpServers block).
+    # The gemini CLI reads MCP server config exclusively from ~/.gemini/settings.json.
+    # It does NOT auto-discover fleet's /workspace/.mcp.json. Without this step gemini
+    # agents cannot call any MCP tools (memory, temporal, orchestrator, playwright, etc.).
+    # stdio-transport servers are skipped; only HTTP/SSE is supported by the gemini CLI.
+    MCP_CONFIG="/workspace/.mcp.json"
+    GEMINI_SETTINGS="${HOME}/.gemini/settings.json"
+    mkdir -p "${HOME}/.gemini"
+    if [ -f "${MCP_CONFIG}" ]; then
+        python3 - "${MCP_CONFIG}" "${GEMINI_SETTINGS}" <<'PYEOF'
+import json, sys, os
+
+mcp_path, settings_path = sys.argv[1], sys.argv[2]
+with open(mcp_path) as f:
+    mcp = json.load(f)
+
+servers = mcp.get("mcpServers", {})
+gemini_servers = {}
+
+for name, cfg in servers.items():
+    url = cfg.get("url", "")
+    # Gemini CLI mcpServers schema accepts only "url" — the transport is inferred
+    # from the URL scheme. Do NOT include "transport" or "type" keys; the CLI
+    # rejects unknown fields with "Unrecognized key(s) in object" and drops the server.
+    if url:
+        gemini_servers[name] = {"url": url}
+    else:
+        print(f"WARN: skipping MCP server '{name}' (no URL — stdio transport not supported by gemini CLI)", file=sys.stderr)
+
+# Merge into existing settings.json (preserves other settings such as theme).
+existing = {}
+if os.path.exists(settings_path):
+    try:
+        with open(settings_path) as f:
+            existing = json.load(f)
+    except Exception:
+        pass
+
+existing["mcpServers"] = gemini_servers
+
+# Force OAuth-personal auth selection. Without this key the CLI prints
+# "Please set an Auth method in your /root/.gemini/settings.json or specify
+#  one of the following environment variables: GEMINI_API_KEY, ..."
+# even when oauth_creds.json is present — it has the credentials but no
+# instruction to use them. Schema verified against host-side settings.json
+# created by `gemini auth login` interactively (v0.40.1).
+existing.setdefault("security", {}).setdefault("auth", {})["selectedType"] = "oauth-personal"
+
+with open(settings_path, "w") as f:
+    json.dump(existing, f, indent=2)
+print(f"Gemini MCP: wrote {len(gemini_servers)} server(s) to {settings_path}")
+PYEOF
+        if [ $? -ne 0 ]; then
+            echo "WARN: Failed to write ${GEMINI_SETTINGS} — gemini agent will start without MCP tools" >&2
+        fi
+    else
+        echo "WARN: ${MCP_CONFIG} not found; gemini agent will start without MCP tools" >&2
+        # Even without MCP we must seed the OAuth auth selector — otherwise the CLI
+        # falls through to "no Auth method configured" and refuses to run.
+        python3 - "${GEMINI_SETTINGS}" <<'PYEOF'
+import json, os, sys
+settings_path = sys.argv[1]
+existing = {}
+if os.path.exists(settings_path):
+    try:
+        with open(settings_path) as f:
+            existing = json.load(f)
+    except Exception:
+        pass
+existing.setdefault("security", {}).setdefault("auth", {})["selectedType"] = "oauth-personal"
+with open(settings_path, "w") as f:
+    json.dump(existing, f, indent=2)
+PYEOF
+    fi
+
+elif [ "$PROVIDER" = "codex" ]; then
     # Codex auth — always overwrite from host mount (source of truth, kept fresh by AuthTokenRefreshWorkflow)
     if [ -f /root/.codex-host/auth.json ]; then
         mkdir -p /root/.codex

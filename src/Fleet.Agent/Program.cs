@@ -22,6 +22,7 @@ builder.Services.Configure<TtsOptions>(builder.Configuration.GetSection(TtsOptio
 builder.Services.AddSingleton<PromptBuilder>();
 builder.Services.AddSingleton<ClaudeExecutor>();
 builder.Services.AddSingleton<CodexExecutor>();
+builder.Services.AddSingleton<GeminiExecutor>();
 
 builder.Services.AddSingleton<IAgentExecutor>(sp =>
 {
@@ -29,6 +30,7 @@ builder.Services.AddSingleton<IAgentExecutor>(sp =>
     return provider switch
     {
         "codex" => sp.GetRequiredService<CodexExecutor>(),
+        "gemini" => sp.GetRequiredService<GeminiExecutor>(),
         _ => sp.GetRequiredService<ClaudeExecutor>(),
     };
 });

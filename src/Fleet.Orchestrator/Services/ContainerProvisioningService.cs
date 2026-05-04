@@ -151,7 +151,16 @@ public sealed class ContainerProvisioningService(
         if (DockerSockRoles.Contains(role))
             binds.Add("/var/run/docker.sock:/var/run/docker.sock");
 
-        if (agent.Provider == "codex")
+        if (agent.Provider == "gemini")
+        {
+            // Mount gemini OAuth credentials writable — the CLI's google-auth-library refreshes
+            // the file in-place on token expiry, so the mount must be read-write. The refreshed
+            // token propagates back to the host, preventing stale-token failures on container restart.
+            var geminiTokenStorePath = Path.Combine(baseDir, ".gemini-credentials.json");
+            if (File.Exists(geminiTokenStorePath))
+                binds.Add("./.gemini-credentials.json:/root/.gemini/oauth_creds.json:rw");
+        }
+        else if (agent.Provider == "codex")
         {
             // Mount codex credentials for seeding new codex containers (entrypoint.sh reads this)
             var codexTokenStorePath = Path.Combine(baseDir, ".codex-credentials.json");

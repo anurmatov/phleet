@@ -107,6 +107,7 @@ export default function CreateAgentModal({
             >
               <option value="claude">Claude (Anthropic)</option>
               <option value="codex">Codex (OpenAI)</option>
+              <option value="gemini">Gemini (Google)</option>
             </select>
           </div>
           <div className="config-row">

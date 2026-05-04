@@ -226,16 +226,20 @@ section "[2/7] AI Provider Auth..."
 echo "  Which AI provider(s) do you want to use?"
 echo "    1) claude"
 echo "    2) codex"
-echo "    3) both"
+echo "    3) gemini"
+echo "    4) claude + codex"
+echo "    5) claude + gemini"
 read -rp "  Choice [1]: " provider_choice
 provider_choice="${provider_choice:-1}"
 
-USE_CLAUDE=false; USE_CODEX=false
+USE_CLAUDE=false; USE_CODEX=false; USE_GEMINI=false
 case "$provider_choice" in
   1) USE_CLAUDE=true ;;
   2) USE_CODEX=true ;;
-  3) USE_CLAUDE=true; USE_CODEX=true ;;
-  *) fail "Invalid choice — enter 1, 2, or 3"; exit 1 ;;
+  3) USE_GEMINI=true ;;
+  4) USE_CLAUDE=true; USE_CODEX=true ;;
+  5) USE_CLAUDE=true; USE_GEMINI=true ;;
+  *) fail "Invalid choice — enter 1–5"; exit 1 ;;
 esac
 
 # Set by check_creds_claude — path to a readable credentials JSON file
@@ -295,6 +299,59 @@ check_creds_claude() {
   ok "claude credentials valid (expires $human)"
 }
 
+check_creds_gemini() {
+  local creds="$HOME/.gemini/oauth_creds.json"
+  if [[ ! -f "$creds" ]]; then
+    fail "gemini credentials not found at $creds"
+    echo "  Run 'gemini auth' at least once to complete OAuth, then re-run ./setup.sh"
+    exit 1
+  fi
+  # Basic structure check — file must be valid JSON with an access_token or refresh_token
+  local has_token
+  has_token=$(jq -r '(.access_token // .refresh_token) // empty' "$creds" 2>/dev/null)
+  if [[ -z "$has_token" ]]; then
+    fail "gemini credentials at $creds appear invalid (no access_token or refresh_token) — re-run 'gemini auth'"
+    exit 1
+  fi
+  ok "gemini OAuth credentials found at $creds"
+}
+
+# Extract gemini-cli's hardcoded OAUTH_CLIENT_ID / OAUTH_CLIENT_SECRET from the
+# installed @google/gemini-cli npm bundle and write them to .env. Called from the
+# step [3/7] credential-copy block, where ENV_FILE is guaranteed to exist (the
+# check_creds_* functions run earlier and only validate, not write — same as
+# claude/codex). These are public installed-app OAuth constants — same pattern
+# as gcloud / GitHub CLI ship — not stored in oauth_creds.json. Re-running setup.sh
+# re-extracts current values, so a future CLI version that rotates them gets
+# picked up automatically.
+extract_gemini_oauth_constants() {
+  local gemini_modules
+  gemini_modules=$(npm root -g 2>/dev/null)/@google/gemini-cli/bundle
+  if [[ ! -d "$gemini_modules" ]]; then
+    fail "Could not locate @google/gemini-cli install dir at $gemini_modules"
+    echo "  Install it with:  npm install -g @google/gemini-cli"
+    exit 1
+  fi
+  # Anchor on the canonical assignment lines so we don't accidentally pick up other
+  # Google client IDs that appear elsewhere in the bundle (e.g. the Cloud Code Assist
+  # client ID for a different flow). The bundle minifier uses `var OAUTH_CLIENT_ID = "..."`
+  # / `var OAUTH_CLIENT_SECRET = "..."` for the OAuth installed-app constants.
+  local gemini_oauth_client_id gemini_oauth_client_secret
+  gemini_oauth_client_id=$(grep -hE 'OAUTH_CLIENT_ID[[:space:]]*=[[:space:]]*"' "$gemini_modules"/*.js 2>/dev/null \
+    | grep -oE '"[0-9]{10,}-[a-z0-9]+\.apps\.googleusercontent\.com"' | head -1 | tr -d '"')
+  gemini_oauth_client_secret=$(grep -hE 'OAUTH_CLIENT_SECRET[[:space:]]*=[[:space:]]*"' "$gemini_modules"/*.js 2>/dev/null \
+    | grep -oE '"GOCSPX-[A-Za-z0-9_-]+"' | head -1 | tr -d '"')
+  if [[ -z "$gemini_oauth_client_id" || -z "$gemini_oauth_client_secret" ]]; then
+    fail "Could not extract OAuth client_id / client_secret from @google/gemini-cli bundle"
+    echo "  Bundle path: $gemini_modules"
+    echo "  Try: npm install -g @google/gemini-cli@latest && ./setup.sh"
+    exit 1
+  fi
+  write_env_var "$ENV_FILE" "AUTHTOKENREFRESH__GEMINICLIENTID" "$gemini_oauth_client_id"
+  write_env_var "$ENV_FILE" "AUTHTOKENREFRESH__GEMINICLIENTSECRET" "$gemini_oauth_client_secret"
+  ok "Gemini OAuth client constants → $ENV_FILE"
+}
+
 check_creds_codex() {
   local creds="$HOME/.codex/auth.json"
   if [[ ! -f "$creds" ]]; then
@@ -332,8 +389,9 @@ check_creds_codex() {
   fi
 }
 
-if $USE_CLAUDE; then check_creds_claude; fi
-if $USE_CODEX;  then check_creds_codex;  fi
+if $USE_CLAUDE;  then check_creds_claude;  fi
+if $USE_CODEX;   then check_creds_codex;   fi
+if $USE_GEMINI;  then check_creds_gemini;  fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 section "[3/7] Configuration..."
@@ -600,6 +658,23 @@ else
     chmod 600 "$FLEET_BASE_DIR/.codex-credentials.json"
   fi
 fi
+if $USE_GEMINI; then
+  if ! $DRY_RUN; then
+    cp "$HOME/.gemini/oauth_creds.json" "$FLEET_BASE_DIR/.gemini-credentials.json"
+    chmod 600 "$FLEET_BASE_DIR/.gemini-credentials.json"
+    ok "Gemini credentials → $FLEET_BASE_DIR/.gemini-credentials.json"
+    extract_gemini_oauth_constants
+  else
+    echo -e "  ${YELLOW}[dry-run]${NC} Would copy ~/.gemini/oauth_creds.json → $FLEET_BASE_DIR/.gemini-credentials.json"
+    echo -e "  ${YELLOW}[dry-run]${NC} Would extract OAUTH_CLIENT_ID/SECRET from @google/gemini-cli bundle → $ENV_FILE"
+  fi
+else
+  # Placeholder so the compose bind-mount doesn't fail
+  if ! $DRY_RUN && [[ ! -f "$FLEET_BASE_DIR/.gemini-credentials.json" ]]; then
+    printf '{}' > "$FLEET_BASE_DIR/.gemini-credentials.json"
+    chmod 600 "$FLEET_BASE_DIR/.gemini-credentials.json"
+  fi
+fi
 
 # Copy seed.example.json → $FLEET_BASE_DIR/seed.json if missing
 # (the generated compose file mounts ./seed.json from its own directory).
@@ -761,12 +836,15 @@ elif $DRY_RUN; then
   if $USE_CODEX; then
     echo -e "  ${YELLOW}[dry-run]${NC} Would POST http://localhost:3600/api/schedules (auth-token-refresh-codex-30m)"
   fi
+  if $USE_GEMINI; then
+    echo -e "  ${YELLOW}[dry-run]${NC} Would POST http://localhost:3600/api/schedules (auth-token-refresh-gemini-30m)"
+  fi
 else
   ORCH_URL="http://localhost:3600"
   ORCH_TOKEN=$(read_env_var "$ENV_FILE" "ORCHESTRATOR_AUTH_TOKEN")
 
   create_refresh_schedule() {
-    local provider="$1"     # "claude" or "codex"
+    local provider="$1"     # "claude" | "codex" | "gemini"
     local schedule_id="auth-token-refresh-${provider}-30m"
     local payload
     payload=$(cat <<EOF
@@ -801,6 +879,7 @@ EOF
 
   if $USE_CLAUDE; then create_refresh_schedule "claude"; fi
   if $USE_CODEX;  then create_refresh_schedule "codex";  fi
+  if $USE_GEMINI; then create_refresh_schedule "gemini"; fi
 fi
 
 echo

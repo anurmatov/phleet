@@ -12,7 +12,7 @@ namespace Fleet.Temporal.Activities;
 
 /// <summary>
 /// Temporal activity that checks OAuth token expiry and refreshes directly via HTTP.
-/// Supports Claude and Codex providers. No agent delegation needed — avoids the
+/// Supports Claude, Codex, and Gemini providers. No agent delegation needed — avoids the
 /// chicken-and-egg problem where an expired token prevents the agent from refreshing.
 /// </summary>
 public sealed class RefreshAuthTokenActivity
@@ -26,6 +26,12 @@ public sealed class RefreshAuthTokenActivity
     private const string CodexCredentialsPath = "/root/.codex/auth.json";
     private const string CodexTokenEndpoint = "https://auth.openai.com/oauth/token";
     private static readonly TimeSpan CodexRefreshThreshold = TimeSpan.FromDays(1);
+
+    // --- Gemini constants ---
+    private const string GeminiCredentialsPath = "/root/.gemini/oauth_creds.json";
+    private const string GeminiTokenEndpoint = "https://oauth2.googleapis.com/token";
+    // Google access tokens are valid for 1 hour; refresh 15 minutes before expiry.
+    private static readonly TimeSpan GeminiRefreshThreshold = TimeSpan.FromMinutes(15);
 
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<RefreshAuthTokenActivity> _logger;
@@ -47,6 +53,7 @@ public sealed class RefreshAuthTokenActivity
         return provider.ToLowerInvariant() switch
         {
             "codex" => await RefreshCodexAsync(ActivityExecutionContext.Current.CancellationToken, forceRefresh),
+            "gemini" => await RefreshGeminiAsync(ActivityExecutionContext.Current.CancellationToken, forceRefresh),
             _ => await RefreshClaudeAsync(ActivityExecutionContext.Current.CancellationToken, forceRefresh),
         };
     }
@@ -271,6 +278,128 @@ public sealed class RefreshAuthTokenActivity
             ExpiresAt: newExpiresAt,
             IdToken: newIdToken,
             AccountId: accountId);
+    }
+
+    // -------------------------------------------------------------------------
+    // Gemini
+    // -------------------------------------------------------------------------
+
+    private async Task<AgentTokenResult> RefreshGeminiAsync(CancellationToken ct, bool forceRefresh = false)
+    {
+        if (!File.Exists(GeminiCredentialsPath))
+            throw new InvalidOperationException($"Gemini credentials file not found at {GeminiCredentialsPath}");
+
+        var json = await File.ReadAllTextAsync(GeminiCredentialsPath, ct);
+        var creds = JsonNode.Parse(json)
+            ?? throw new InvalidOperationException("Failed to parse Gemini oauth_creds.json");
+
+        // Gemini oauth_creds.json stores expiry as epoch-milliseconds in expiry_date.
+        var expiryDateMs = creds["expiry_date"]?.GetValue<long>()
+            ?? throw new InvalidOperationException("Missing expiry_date in Gemini oauth_creds.json");
+
+        var refreshToken = creds["refresh_token"]?.GetValue<string>()
+            ?? throw new InvalidOperationException("Missing refresh_token in Gemini oauth_creds.json");
+
+        // The gemini-cli's oauth_creds.json does NOT store client_id / client_secret —
+        // those are hardcoded in the published npm bundle (chunk-B6PIKVSF.js exports
+        // OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET). They're public installed-app OAuth
+        // identifiers, same pattern as gcloud / GitHub CLI ship — not cryptographic
+        // secrets — but GitHub's secret scanner rejects the GOCSPX- prefix if hardcoded
+        // in the repo. setup.sh extracts them from the host's @google/gemini-cli bundle
+        // and writes them to the cluster .env (AUTHTOKENREFRESH__GEMINICLIENT{ID,SECRET}).
+        // Live-updated via PEER_CONFIG_KEYS, same pattern as ClaudeClientId / CodexClientId.
+        var clientId = string.IsNullOrEmpty(_opts.GeminiClientId)
+            ? throw new ApplicationFailureException(
+                "AuthTokenRefresh:GeminiClientId is not configured. Run setup.sh to extract " +
+                "the OAuth constants from the host's @google/gemini-cli bundle, then restart " +
+                "fleet-temporal-bridge.",
+                nonRetryable: true)
+            : _opts.GeminiClientId;
+        var clientSecret = string.IsNullOrEmpty(_opts.GeminiClientSecret)
+            ? throw new ApplicationFailureException(
+                "AuthTokenRefresh:GeminiClientSecret is not configured. Run setup.sh to extract " +
+                "the OAuth constants from the host's @google/gemini-cli bundle, then restart " +
+                "fleet-temporal-bridge.",
+                nonRetryable: true)
+            : _opts.GeminiClientSecret;
+
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var remainingMs = expiryDateMs - nowMs;
+
+        if (!forceRefresh && remainingMs > GeminiRefreshThreshold.TotalMilliseconds)
+        {
+            _logger.LogInformation(
+                "Gemini token still valid for {Minutes:F0} minutes, no refresh needed",
+                remainingMs / 60_000.0);
+            return new AgentTokenResult(Refreshed: false, Provider: "gemini");
+        }
+
+        if (forceRefresh)
+            _logger.LogInformation("Force-refreshing Gemini token (remaining: {Minutes:F0} minutes)", remainingMs / 60_000.0);
+
+        _logger.LogInformation(
+            "Gemini token expires in {Minutes:F0} minutes (threshold: {Threshold}m), refreshing",
+            remainingMs / 60_000.0, GeminiRefreshThreshold.TotalMinutes);
+
+        File.Copy(GeminiCredentialsPath, GeminiCredentialsPath + ".backup.json", overwrite: true);
+
+        using var client = _httpClientFactory.CreateClient();
+        var requestContent = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["grant_type"] = "refresh_token",
+            ["client_id"] = clientId,
+            ["client_secret"] = clientSecret,
+            ["refresh_token"] = refreshToken,
+        });
+
+        var response = await client.PostAsync(GeminiTokenEndpoint, requestContent, ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            var body = await response.Content.ReadAsStringAsync(ct);
+            // 400 with error=invalid_grant means the refresh token was revoked — not retryable.
+            if (response.StatusCode == System.Net.HttpStatusCode.BadRequest && body.Contains("invalid_grant"))
+                throw new ApplicationFailureException(
+                    $"Gemini refresh token revoked (invalid_grant). Manual re-auth required via `gemini auth` on host. Body: {body}",
+                    nonRetryable: true);
+
+            throw new InvalidOperationException(
+                $"Gemini token refresh failed with {response.StatusCode}: {body}");
+        }
+
+        var responseJson = await response.Content.ReadAsStringAsync(ct);
+        var tokenResponse = JsonNode.Parse(responseJson);
+
+        var newAccessToken = tokenResponse?["access_token"]?.GetValue<string>()
+            ?? throw new InvalidOperationException("Missing access_token in Gemini refresh response");
+
+        // Google does not rotate refresh tokens on access token refresh.
+        var expiresIn = tokenResponse?["expires_in"]?.GetValue<long>() ?? 3600L;
+        var newExpiresAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + expiresIn * 1000;
+
+        // Update oauth_creds.json atomically. Preserve all existing fields; only overwrite
+        // access_token and expiry_date. refresh_token, client_id, client_secret stay unchanged.
+        creds["access_token"] = newAccessToken;
+        creds["expiry_date"] = newExpiresAt;
+
+        // File.Move (rename(2)) fails with EBUSY on single-file bind mounts because Docker
+        // holds the host inode at the mount point. Use the claude/codex pattern: write
+        // a tmp file, then File.Copy over the bind-mounted target (writes to the same
+        // inode, which is allowed), then delete the tmp.
+        var tmpPath = GeminiCredentialsPath + ".tmp";
+        await File.WriteAllTextAsync(tmpPath,
+            creds.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), ct);
+        File.Copy(tmpPath, GeminiCredentialsPath, overwrite: true);
+        File.Delete(tmpPath);
+
+        _logger.LogInformation("Gemini token refreshed, new expiry in {ExpiresIn}s", expiresIn);
+
+        return new AgentTokenResult(
+            Refreshed: true,
+            Provider: "gemini",
+            AccessToken: newAccessToken,
+            // Google does not issue a new refresh_token; pass the existing one for broadcast consistency.
+            RefreshToken: refreshToken,
+            ExpiresAt: newExpiresAt);
     }
 
     // -------------------------------------------------------------------------

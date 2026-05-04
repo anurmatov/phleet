@@ -328,11 +328,15 @@ check_creds_gemini() {
     echo "  Install it with:  npm install -g @google/gemini-cli"
     exit 1
   fi
+  # Anchor on the canonical assignment lines so we don't accidentally pick up other
+  # Google client IDs that appear elsewhere in the bundle (e.g. the Cloud Code Assist
+  # client ID for a different flow). The bundle minifier uses `var OAUTH_CLIENT_ID = "..."`
+  # / `var OAUTH_CLIENT_SECRET = "..."` for the OAuth installed-app constants.
   local gemini_oauth_client_id gemini_oauth_client_secret
-  gemini_oauth_client_id=$(grep -hoE '"[0-9]{10,}-[a-z0-9]+\.apps\.googleusercontent\.com"' "$gemini_modules"/*.js 2>/dev/null \
-    | head -1 | tr -d '"')
-  gemini_oauth_client_secret=$(grep -hoE '"GOCSPX-[A-Za-z0-9_-]+"' "$gemini_modules"/*.js 2>/dev/null \
-    | head -1 | tr -d '"')
+  gemini_oauth_client_id=$(grep -hE 'OAUTH_CLIENT_ID[[:space:]]*=[[:space:]]*"' "$gemini_modules"/*.js 2>/dev/null \
+    | grep -oE '"[0-9]{10,}-[a-z0-9]+\.apps\.googleusercontent\.com"' | head -1 | tr -d '"')
+  gemini_oauth_client_secret=$(grep -hE 'OAUTH_CLIENT_SECRET[[:space:]]*=[[:space:]]*"' "$gemini_modules"/*.js 2>/dev/null \
+    | grep -oE '"GOCSPX-[A-Za-z0-9_-]+"' | head -1 | tr -d '"')
   if [[ -z "$gemini_oauth_client_id" || -z "$gemini_oauth_client_secret" ]]; then
     fail "Could not extract OAuth client_id / client_secret from @google/gemini-cli bundle"
     echo "  Bundle path: $gemini_modules"

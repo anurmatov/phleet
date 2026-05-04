@@ -109,6 +109,10 @@ public sealed class GeminiExecutor : IAgentExecutor
                 if (encodedImages.Count == 0) encodedImages = null;
             }
 
+            // NOTE: mcp__server__tool references in the task text are NOT translated to
+            // mcp_server_tool format here. Only the system prompt file gets the Gemini variant
+            // written by StartProcessAsync. Task text comes directly from Telegram/RabbitMQ
+            // directives and is expected to use natural language, not tool-name literals.
             var msgObj = new
             {
                 type = "task",

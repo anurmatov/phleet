@@ -121,11 +121,16 @@ if (mcpConfigPath && fs.existsSync(mcpConfigPath)) {
 // Mirror codex-bridge's VALID_CODEX_MODELS pattern. Unknown model names fall back to
 // the default rather than passing an arbitrary string to the Gemini SDK, which would
 // produce an opaque SDK error instead of a safe fallback.
+//
+// IMPORTANT: keep this list in sync with the gemini array in
+// src/fleet-dashboard/src/constants.ts — mismatches cause silent fallback.
 const VALID_GEMINI_MODELS = new Set([
-  'gemini-2.5-flash',
+  'gemini-3.1-pro-preview',
+  'gemini-3-flash-preview',
+  'gemini-3.1-flash-lite-preview',
   'gemini-2.5-pro',
-  'gemini-2.0-flash',
-  'gemini-2.0-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
 ]);
 const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
 
@@ -143,7 +148,10 @@ function emit(obj) {
 }
 
 async function ensureInitialized(model) {
-  if (config) return;
+  if (config) return; // Config is created once and reused for the bridge process lifetime.
+  // NOTE: the model argument is only honored on the FIRST call. Subsequent tasks that
+  // arrive with a different model value are silently ignored — the bridge would need to
+  // restart to pick up a different model. This matches the codex-bridge pattern.
   if (initError) throw initError;
 
   const hasMcp = Object.keys(httpMcpServers).length > 0;
@@ -186,7 +194,15 @@ async function ensureInitialized(model) {
 
 async function runTask(msg) {
   const startMs = Date.now();
-  const model = (msg.model && VALID_GEMINI_MODELS.has(msg.model)) ? msg.model : DEFAULT_GEMINI_MODEL;
+  let model = DEFAULT_GEMINI_MODEL;
+  if (msg.model && VALID_GEMINI_MODELS.has(msg.model)) {
+    model = msg.model;
+  } else if (msg.model) {
+    process.stderr.write(
+      `Gemini bridge: unknown model '${msg.model}' — falling back to ${DEFAULT_GEMINI_MODEL}. ` +
+      `Valid models: ${[...VALID_GEMINI_MODELS].join(', ')}\n`,
+    );
+  }
   const sessionId = msg.sessionId || currentSessionId || randomUUID();
   currentSessionId = sessionId;
 

@@ -174,5 +174,7 @@ dotnet test tests/Fleet.Agent.Tests/
   a built-in Read tool — see the note on built-in tools above.
 - **Model default:** `gemini-2.5-flash`.
   Free tier: 60 req/min, 1,000 req/day.
-  Valid models: `gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-2.0-flash`,
-  `gemini-2.0-flash-lite`. Unknown model names fall back to `gemini-2.5-flash`.
+  Valid models: `gemini-3.1-pro-preview`, `gemini-3-flash-preview`,
+  `gemini-3.1-flash-lite-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`,
+  `gemini-2.5-flash-lite`. Unknown model names fall back to `gemini-2.5-flash` with
+  a stderr warning — check container logs if the wrong model is running.

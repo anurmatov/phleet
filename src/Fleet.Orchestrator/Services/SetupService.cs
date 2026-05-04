@@ -61,7 +61,7 @@ public sealed class SetupService
             return new SetupStatusDto(
                 new TelegramStatusDto(false, false),
                 new GitHubStatusDto(false),
-                ["claude"]);
+                []);
         }
 
         var telegramConfigured =
@@ -80,7 +80,9 @@ public sealed class SetupService
         // A provider is "configured" if its primary credential key is present and non-weak in .env.
         var configuredProviders = new List<string>();
         if (IsConfigured(env, "GEMINI_API_KEY")) configuredProviders.Add("gemini");
-        if (IsConfigured(env, "OPENAI_API_KEY")) configuredProviders.Add("codex");
+        // Codex auth is OAuth via ~/.codex/auth.json, not an API key. Detection uses the
+        // OAuth client ID env var that AuthTokenRefreshWorkflow sets up — not OPENAI_API_KEY.
+        if (IsConfigured(env, "AUTHTOKENREFRESH__CODEXCLIENTID")) configuredProviders.Add("codex");
         // claude uses OAuth credentials managed outside .env (no ANTHROPIC_API_KEY needed).
         // Add it if ANTHROPIC_API_KEY is explicitly set, or as fallback when no other provider is detected.
         if (IsConfigured(env, "ANTHROPIC_API_KEY") || configuredProviders.Count == 0)

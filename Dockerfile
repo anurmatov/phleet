@@ -39,8 +39,10 @@ COPY src/Fleet.Agent/codex-bridge.mjs /app/codex-bridge.mjs
 RUN cd /app && npm install @openai/codex-sdk@0.118.0
 
 COPY src/Fleet.Agent/gemini-bridge.mjs /app/gemini-bridge.mjs
+COPY src/Fleet.Agent/gemini-message-handler.mjs /app/gemini-message-handler.mjs
 COPY src/Fleet.Agent/scripts/gen-gemini-settings.mjs /app/scripts/gen-gemini-settings.mjs
 RUN cd /app && npm install @google/gemini-cli-core@0.40.1
+RUN test -f /app/gemini-message-handler.mjs
 # Build-time guard: verify required exports from the pinned package.
 # Uses dynamic import() because @google/gemini-cli-core is an ES module package (require() throws ReferenceError).
 RUN node -e " \

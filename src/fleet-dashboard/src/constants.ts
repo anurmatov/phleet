@@ -15,9 +15,6 @@ export const PROVIDER_MODELS: Record<string, string[]> = {
     'codex-mini-latest',
   ],
   gemini: [
-    'gemini-3-pro',
-    'gemini-3-flash',
-    'gemini-3-flash-lite',
     'gemini-2.5-pro',
     'gemini-2.5-flash',
     'gemini-2.5-flash-lite',
@@ -28,7 +25,7 @@ export const PROVIDER_MODELS: Record<string, string[]> = {
 export const PROVIDER_DEFAULT_MODEL: Record<string, string> = {
   claude: 'claude-sonnet-4-6',
   codex: 'gpt-5',
-  gemini: 'gemini-3-flash',
+  gemini: 'gemini-2.5-flash',
 }
 
 export const CLAUDE_PERMISSION_MODES: string[] = [

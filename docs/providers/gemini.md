@@ -55,16 +55,26 @@ from `.generated/.mcp.json`.
 |-------|-------|
 | `gemini-2.5-pro` | Most capable |
 | `gemini-2.5-flash` | Balanced (default) |
+| `gemini-2.5-flash-lite` | Lightweight / low-cost |
 | `gemini-2.0-flash` | Fast |
 
 ## Token refresh
 
-The Gemini CLI's `google-auth-library` refreshes OAuth tokens in-place at
-`~/.gemini/oauth_creds.json`. The writable bind mount ensures refreshed tokens
-propagate back to `./fleet/.gemini-credentials.json` on the host, preventing
-stale-token failures across container restarts.
+Token refresh is handled on two levels:
 
-No separate `AuthTokenRefreshWorkflow` schedule is needed for gemini agents.
+1. **In-process refresh (CLI-driven):** The Gemini CLI's `google-auth-library`
+   refreshes OAuth tokens in-place at `~/.gemini/oauth_creds.json` during normal
+   operation. The writable bind mount ensures refreshed tokens propagate back to
+   `./fleet/.gemini-credentials.json` on the host.
+
+2. **Scheduled refresh (AuthTokenRefreshWorkflow):** The same Temporal workflow
+   that refreshes Claude and Codex tokens also handles gemini. Add `"gemini"` to
+   the `Providers` list when starting the schedule. The workflow calls
+   `RefreshAuthTokenActivity` (which POSTs to `https://oauth2.googleapis.com/token`
+   using the `client_id` and `client_secret` stored in the credentials file itself)
+   and broadcasts the new `access_token` to all agents via `fleet.relay`.
+   Google does not rotate the refresh token, so only `access_token` and
+   `expiry_date` are updated in the file.
 
 ## Troubleshooting
 

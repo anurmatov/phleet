@@ -324,6 +324,11 @@ services:
       # If you're not using codex, create an empty placeholder file:
       #   touch ${FLEET_BASE_DIR}/.codex-credentials.json
       - ${FLEET_BASE_DIR}/.codex-credentials.json:/root/.codex/auth.json
+      # Gemini credentials — copied by setup.sh from ~/.gemini/oauth_creds.json.
+      # Mounted read-write so AuthTokenRefreshWorkflow can write refreshed access tokens.
+      # If you're not using gemini, create an empty placeholder file:
+      #   touch ${FLEET_BASE_DIR}/.gemini-credentials.json
+      - ${FLEET_BASE_DIR}/.gemini-credentials.json:/root/.gemini/oauth_creds.json
     environment:
       - RabbitMq__Host=rabbitmq
       - TemporalBridge__TemporalAddress=temporal-server:7233

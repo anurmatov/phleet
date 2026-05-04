@@ -329,6 +329,10 @@ public sealed class GroupBehavior
         {
             await ApplyCodexTokenUpdateAsync(shared!, newAccessToken, newRefreshToken, newExpiresAt.Value);
         }
+        else if (provider == "gemini")
+        {
+            await ApplyGeminiTokenUpdateAsync(newAccessToken, newExpiresAt.Value);
+        }
         else
         {
             await ApplyClaudeTokenUpdateAsync(newAccessToken, newRefreshToken, newExpiresAt.Value);
@@ -413,6 +417,34 @@ public sealed class GroupBehavior
         File.Move(tmpPath, authPath, overwrite: true);
 
         _logger.LogInformation("Codex auth.json updated, new expiry: {ExpiresAt}", newExpiresAt);
+    }
+
+    private async Task ApplyGeminiTokenUpdateAsync(string newAccessToken, long newExpiresAt)
+    {
+        const string credsPath = "/root/.gemini/oauth_creds.json";
+
+        JsonNode creds;
+        if (File.Exists(credsPath))
+        {
+            creds = JsonNode.Parse(await File.ReadAllTextAsync(credsPath))!;
+        }
+        else
+        {
+            _logger.LogInformation("Gemini oauth_creds.json not found, creating from token update");
+            Directory.CreateDirectory(Path.GetDirectoryName(credsPath)!);
+            creds = JsonNode.Parse("{}")!;
+        }
+
+        // Only update access_token and expiry_date — refresh_token, client_id, client_secret
+        // must be preserved exactly as-is (Google does not rotate the refresh token).
+        creds["access_token"] = newAccessToken;
+        creds["expiry_date"] = newExpiresAt;
+
+        var tmpPath = credsPath + ".tmp";
+        await File.WriteAllTextAsync(tmpPath, creds.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        File.Move(tmpPath, credsPath, overwrite: true);
+
+        _logger.LogInformation("Gemini oauth_creds.json updated, new expiry: {ExpiresAt}", newExpiresAt);
     }
 
     private string? ExtractRelayCommand(string text)

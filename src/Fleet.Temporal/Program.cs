@@ -85,6 +85,7 @@ builder.Services.AddHostedService<SearchAttributeInitializer>();
 
 // Temporal client factory — used by MCP tools to resolve per-namespace clients on demand
 builder.Services.AddSingleton<TemporalClientFactory>();
+builder.Services.AddSingleton<ITemporalClientFactory>(sp => sp.GetRequiredService<TemporalClientFactory>());
 
 var temporalOpts = builder.Configuration
     .GetSection(TemporalBridgeOptions.Section)
@@ -116,7 +117,8 @@ foreach (var @namespace in configuredNamespaces)
         .AddScopedActivities<LoadWorkflowConfigActivity>()
         .AddWorkflow<UniversalWorkflow>()
         .AddWorkflow<ConsensusReviewWorkflow>()
-        .AddWorkflow<AuthTokenRefreshWorkflow>();
+        .AddWorkflow<AuthTokenRefreshWorkflow>()
+        .AddWorkflow<NotifyCtoWorkflow>();
 }
 
 // MCP Server

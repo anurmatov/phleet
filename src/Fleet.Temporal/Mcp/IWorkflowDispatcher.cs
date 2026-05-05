@@ -8,7 +8,7 @@ namespace Fleet.Temporal.Mcp;
 public interface IWorkflowDispatcher
 {
     /// <summary>
-    /// Fires a <c>FireAndForgetTaskWorkflow</c> in the <c>fleet</c> namespace targeting
+    /// Fires a <c>NotifyCtoWorkflow</c> in the <c>fleet</c> namespace targeting
     /// <paramref name="targetAgent"/> with the given <paramref name="taskDescription"/>.
     /// Returns the started workflow ID.
     /// </summary>

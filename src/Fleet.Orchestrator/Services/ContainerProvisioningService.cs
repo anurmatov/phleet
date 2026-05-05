@@ -898,17 +898,19 @@ public sealed class ContainerProvisioningService(
             .ToList();
 
         // Every agent gets memory_get — provisioning-time enforcement of mandatory read access.
-        if (!allow.Contains("memory_get", StringComparer.OrdinalIgnoreCase))
-            allow.Add("memory_get");
+        // Use the fully-qualified MCP name so Claude CLI matches the permission without prompting.
+        if (!allow.Contains("mcp__fleet-memory__memory_get", StringComparer.OrdinalIgnoreCase))
+            allow.Add("mcp__fleet-memory__memory_get");
 
         // Auto-grant notify_cto to every agent except the CTO agent itself.
         // If FLEET_CTO_AGENT is unset (empty ctoAgentName), skip the grant entirely — fail-safe
         // over fail-open: a misconfigured CTO name must not silently create a self-loop.
+        // Use the fully-qualified MCP name so Claude CLI matches the permission without prompting.
         if (!string.IsNullOrWhiteSpace(ctoAgentName) &&
             !string.Equals(agent.Name, ctoAgentName, StringComparison.OrdinalIgnoreCase) &&
-            !allow.Contains("notify_cto", StringComparer.OrdinalIgnoreCase))
+            !allow.Contains("mcp__fleet-temporal__notify_cto", StringComparer.OrdinalIgnoreCase))
         {
-            allow.Add("notify_cto");
+            allow.Add("mcp__fleet-temporal__notify_cto");
         }
 
         allow.Sort(StringComparer.OrdinalIgnoreCase);

@@ -4,13 +4,13 @@ namespace Fleet.Temporal.Mcp;
 
 /// <summary>
 /// Production implementation of <see cref="IWorkflowDispatcher"/> that dispatches
-/// <c>FireAndForgetTaskWorkflow</c> via the Temporal client obtained from
-/// <see cref="TemporalClientFactory"/>.
+/// <c>NotifyCtoWorkflow</c> via the Temporal client obtained from
+/// <see cref="ITemporalClientFactory"/>.
 /// </summary>
-internal sealed class TemporalWorkflowDispatcher(TemporalClientFactory clientFactory) : IWorkflowDispatcher
+internal sealed class TemporalWorkflowDispatcher(ITemporalClientFactory clientFactory) : IWorkflowDispatcher
 {
-    private const string FireAndForgetWorkflowType = "FireAndForgetTaskWorkflow";
-    private const string FleetNamespace = "fleet";
+    internal const string NotifyCtoWorkflowType = "NotifyCtoWorkflow";
+    internal const string FleetNamespace = "fleet";
 
     public async Task<string> FireAndForgetAsync(
         string targetAgent,
@@ -18,10 +18,10 @@ internal sealed class TemporalWorkflowDispatcher(TemporalClientFactory clientFac
         CancellationToken ct = default)
     {
         var client = await clientFactory.GetClientAsync(FleetNamespace);
-        var workflowId = $"notify-cto-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+        var workflowId = $"notify-cto-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}-{Guid.NewGuid():N}";
 
         var handle = await client.StartWorkflowAsync(
-            FireAndForgetWorkflowType,
+            NotifyCtoWorkflowType,
             [new { TargetAgent = targetAgent, TaskDescription = taskDescription }],
             new WorkflowOptions(id: workflowId, taskQueue: FleetNamespace));
 

@@ -19,15 +19,13 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
     public async Task<string> SendAsync(
         [Description("Telegram chat ID as integer or string (e.g. -1001234567890 or \"-1001234567890\" for a group, positive integer for a DM)")] string chat_id,
         [Description("Message text (max 4096 chars per Telegram limit; longer text is split into multiple messages)")] string text,
-        [Description("Agent name to send from (uses that agent's dedicated bot token; falls back to notifier bot if unknown)")] string agent_name = "",
         [Description("Parse mode for message formatting: HTML, Markdown, or MarkdownV2. Omit for plain text.")] string parse_mode = "",
         [Description("Optional message ID to reply to. When supplied, the message is sent as a threaded reply. If the target message is not found, the message is sent standalone with a reply_fallback flag in the response.")] int? reply_to_message_id = null,
         CancellationToken cancellationToken = default)
     {
-        // If the LLM didn't pass agent_name, resolve from the ?agent= query parameter
-        // baked into the MCP URL at provision time.
-        if (string.IsNullOrWhiteSpace(agent_name))
-            agent_name = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault() ?? "";
+        // Agent identity is resolved server-side from the ?agent= query parameter
+        // baked into the MCP URL at provision time — never supplied by the caller.
+        var agent_name = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault() ?? "";
 
         // Accept chat_id as string or integer — LLM agents often serialize numeric IDs as strings
         if (!long.TryParse(chat_id?.Trim(), out var chatIdLong))

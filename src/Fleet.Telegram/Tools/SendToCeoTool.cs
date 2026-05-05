@@ -18,10 +18,9 @@ public sealed class SendToCeoTool(
     private const int TelegramMaxLength = 4096;
 
     [McpServerTool(Name = "send_to_ceo")]
-    [Description("Send a direct message to the CEO. The CEO's chat ID is resolved server-side — it never appears in agent context or logs. Returns {\"ok\":true,\"message_id\":N} on success, {\"ok\":true,\"message_id\":N,\"fallback\":true} when the notifier bot was used as fallback, or {\"ok\":false,\"error\":\"...\"} on failure.")]
+    [Description("Send a direct message to the CEO. The CEO's chat ID and sending bot are resolved server-side — neither appears in agent context or logs. Returns {\"ok\":true,\"message_id\":N} on success, {\"ok\":true,\"message_id\":N,\"fallback\":true} when the notifier bot was used as fallback, or {\"ok\":false,\"error\":\"...\"} on failure.")]
     public async Task<string> SendAsync(
         [Description("Message text (max 4096 chars; auto-split if longer)")] string text,
-        [Description("Agent name to send from (uses agent's dedicated bot token; falls back to notifier bot)")] string agent_name = "",
         [Description("Parse mode: HTML, Markdown, or MarkdownV2. Omit for plain text.")] string parse_mode = "",
         CancellationToken ct = default)
     {
@@ -29,8 +28,9 @@ public sealed class SendToCeoTool(
         if (chatId == 0)
             return JsonSerializer.Serialize(new { ok = false, error = "CEO chat ID not configured" });
 
-        if (string.IsNullOrWhiteSpace(agent_name))
-            agent_name = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault() ?? "";
+        // Agent identity is resolved server-side from the ?agent= query parameter
+        // baked into the MCP URL at provision time — never supplied by the caller.
+        var agent_name = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault() ?? "";
 
         var client = factory.GetClient(agent_name);
         if (client is null)

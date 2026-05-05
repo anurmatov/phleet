@@ -37,12 +37,11 @@ public sealed class SetReactionTool(BotClientFactory factory, IHttpContextAccess
         [Description("Telegram chat ID as integer or string")] string chat_id,
         [Description("ID of the message to react to")] int message_id,
         [Description("Standard emoji to react with (e.g. \"👍\"). Must be a non-premium Telegram reaction emoji.")] string emoji,
-        [Description("Agent name to send from (uses that agent's dedicated bot token; falls back to notifier bot if unknown)")] string agent_name = "",
         CancellationToken cancellationToken = default)
     {
-        // Resolve agent name from query param if not provided
-        if (string.IsNullOrWhiteSpace(agent_name))
-            agent_name = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault() ?? "";
+        // Agent identity is resolved server-side from the ?agent= query parameter
+        // baked into the MCP URL at provision time — never supplied by the caller.
+        var agent_name = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault() ?? "";
 
         if (!long.TryParse(chat_id?.Trim(), out var chatIdLong))
             return JsonSerializer.Serialize(new { ok = false, error = $"Invalid chat_id '{chat_id}' — must be a numeric value" });

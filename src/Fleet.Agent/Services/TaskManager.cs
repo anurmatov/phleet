@@ -121,7 +121,8 @@ public sealed class TaskManager
 
             var queuePos = _messageQueue.Count;
             _logger.LogInformation("Message queued (position {Pos}) for chat {ChatId} — agent at capacity ({Total}/{Max})", queuePos, chatId, totalRunning, _agentConfig.MaxConcurrentTasks);
-            _ = Sink.SendTextAsync(chatId, $"I'm busy right now — your message is queued (position {queuePos}). I'll get to it once my current task finishes.");
+            if (!(_agentConfig.SuppressToolMessages && chatId < 0))
+                _ = Sink.SendTextAsync(chatId, $"I'm busy right now — your message is queued (position {queuePos}). I'll get to it once my current task finishes.");
             OnStatusChanged?.Invoke();
             return;
         }
@@ -670,7 +671,8 @@ public sealed class TaskManager
         if (!_messageQueue.TryDequeue(out var queued)) return;
 
         _logger.LogInformation("Draining queued message for chat {ChatId} (source={Source})", queued.ChatId, queued.Source);
-        _ = Sink.SendTextAsync(queued.ChatId, "Now processing your queued message...");
+        if (!(_agentConfig.SuppressToolMessages && queued.ChatId < 0))
+            _ = Sink.SendTextAsync(queued.ChatId, "Now processing your queued message...");
         OnStatusChanged?.Invoke();
 
         StartTask(queued.ChatId, queued.Task, queued.DisplayText, queued.IsSessionTask,

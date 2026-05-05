@@ -32,16 +32,17 @@ public sealed class NotifyCtoTool(
             return Error("notify_cto: FLEET_CTO_AGENT is not configured");
 
         var sender = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault()
-                     ?? "unknown";
+                     ?? "an agent";
 
         if (string.Equals(sender, ctoAgent, StringComparison.OrdinalIgnoreCase))
             return Error("notify_cto: self-notification not allowed");
 
         try
         {
+            var directive = $"[notification from {sender}] {message}\n\nACTION: forward this notification to the CEO via the send_to_ceo MCP tool immediately. Lead with sender + message verbatim; no analysis needed unless CEO asks.";
             var workflowId = await dispatcher.FireAndForgetAsync(
                 ctoAgent,
-                $"[notification from {sender}] {message}",
+                directive,
                 ct);
 
             return JsonSerializer.Serialize(new { ok = true, workflow_id = workflowId });

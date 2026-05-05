@@ -54,13 +54,13 @@ public sealed class NotifyCtoToolTests
     }
 
     [Fact]
-    public async Task NotifyAsync_AgentParamMissing_CallerIsUnknown_Succeeds()
+    public async Task NotifyAsync_AgentParamMissing_CallerIsAnAgent_Succeeds()
     {
         var dispatcher = Substitute.For<IWorkflowDispatcher>();
         dispatcher.FireAndForgetAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns("wf-123");
 
-        // No agentQueryParam → sender falls back to "unknown"
+        // No agentQueryParam → sender falls back to "an agent"
         var tool = BuildTool(ctoAgent: "acto", dispatcher: dispatcher, agentQueryParam: null);
 
         var result = await tool.NotifyAsync("some message");
@@ -68,10 +68,10 @@ public sealed class NotifyCtoToolTests
         var doc = JsonDocument.Parse(result);
         Assert.True(doc.RootElement.GetProperty("ok").GetBoolean());
 
-        // TaskDescription must contain "[notification from unknown]"
+        // TaskDescription must contain "[notification from an agent]"
         await dispatcher.Received(1).FireAndForgetAsync(
             "acto",
-            Arg.Is<string>(s => s.Contains("[notification from unknown]")),
+            Arg.Is<string>(s => s.Contains("[notification from an agent]")),
             Arg.Any<CancellationToken>());
     }
 
@@ -169,7 +169,9 @@ public sealed class NotifyCtoToolTests
 
         await dispatcher.Received(1).FireAndForgetAsync(
             "acto",
-            "[notification from adev] tool X keeps returning 500",
+            Arg.Is<string>(s =>
+                s.StartsWith("[notification from adev] tool X keeps returning 500") &&
+                s.Contains("ACTION: forward this notification to the CEO")),
             Arg.Any<CancellationToken>());
     }
 }

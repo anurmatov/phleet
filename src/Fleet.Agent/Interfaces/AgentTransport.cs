@@ -39,6 +39,10 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     private readonly MediaGroupBuffer _mediaGroupBuffer;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _groupSizeCapped = new();
 
+    // Tracks the last Telegram message_id sent per chatId (updated in SendTextAsync).
+    // Consumed by OnTaskCompleted so BufferBotResponse can persist the outbound message_id.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, long> _lastSentMessageIds = new();
+
     public AgentTransport(
         IOptions<AgentOptions> agentConfig,
         IOptions<TelegramOptions> telegramConfig,
@@ -107,7 +111,10 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                     caption = after;
 
                 await SendPhotoAsync(chatId, filePath, caption, ct);
-                replyUsed = true; // photos consume the reply slot
+                // Photos consume the reply slot even though SendPhotoAsync doesn't pass replyParams.
+                // Edge case: [reply_to: N][IMAGE:...] will silently drop the reply thread on the photo.
+                // Acceptable for now — photo+reply threading is a rare combination.
+                replyUsed = true;
 
                 // Skip the adjacent text segment used as caption so it's not sent again
                 if (caption is not null)
@@ -131,8 +138,9 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                         var replyParams = !replyUsed && replyToMessageId.HasValue
                             ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
                             : null;
-                        await SendMessageWithReplyFallbackAsync(chatId, $"<b>{displayName}:</b>\n{escaped}",
+                        var sentId = await SendMessageWithReplyFallbackAsync(chatId, $"<b>{displayName}:</b>\n{escaped}",
                             ParseMode.Html, replyParams, ct);
+                        _lastSentMessageIds[chatId] = sentId;
                         replyUsed = true;
                     }
                 }
@@ -143,7 +151,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                         var replyParams = !replyUsed && replyToMessageId.HasValue
                             ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
                             : null;
-                        await SendMessageWithReplyFallbackAsync(chatId, chunk, null, replyParams, ct);
+                        var sentId = await SendMessageWithReplyFallbackAsync(chatId, chunk, null, replyParams, ct);
+                        _lastSentMessageIds[chatId] = sentId;
                         replyUsed = true;
                     }
                 }
@@ -151,36 +160,39 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         }
     }
 
-    private async Task SendMessageWithReplyFallbackAsync(
+    /// <summary>
+    /// Sends a text message and returns the Telegram <c>message_id</c> of the sent message.
+    /// Falls back to standalone (without reply threading) when the reply target is not found.
+    /// </summary>
+    private async Task<long> SendMessageWithReplyFallbackAsync(
         long chatId, string text, ParseMode? parseMode,
         Telegram.Bot.Types.ReplyParameters? replyParams,
         CancellationToken ct)
     {
         if (replyParams is null)
         {
-            if (parseMode.HasValue)
-                await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct);
-            else
-                await _bot!.SendMessage(chatId, text, cancellationToken: ct);
-            return;
+            var m = parseMode.HasValue
+                ? await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
+                : await _bot!.SendMessage(chatId, text, cancellationToken: ct);
+            return m.Id;
         }
 
         try
         {
-            if (parseMode.HasValue)
-                await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value,
-                    replyParameters: replyParams, cancellationToken: ct);
-            else
-                await _bot!.SendMessage(chatId, text, replyParameters: replyParams, cancellationToken: ct);
+            var m = parseMode.HasValue
+                ? await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value,
+                    replyParameters: replyParams, cancellationToken: ct)
+                : await _bot!.SendMessage(chatId, text, replyParameters: replyParams, cancellationToken: ct);
+            return m.Id;
         }
         catch (Exception ex) when (ex.Message.Contains("message to be replied not found")
                                 || ex.Message.Contains("reply message not found"))
         {
             _logger.LogWarning("Reply target not found for chat {ChatId} — sending as standalone", chatId);
-            if (parseMode.HasValue)
-                await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct);
-            else
-                await _bot!.SendMessage(chatId, text, cancellationToken: ct);
+            var m = parseMode.HasValue
+                ? await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
+                : await _bot!.SendMessage(chatId, text, cancellationToken: ct);
+            return m.Id;
         }
     }
 
@@ -332,9 +344,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                     AllowedUpdates =
                     [
                         UpdateType.Message,
-                        UpdateType.EditedMessage,
                         UpdateType.MessageReaction,
-                        UpdateType.MessageReactionCount,
                     ]
                 },
                 cancellationToken: stoppingToken);
@@ -382,7 +392,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
 
     private void OnTaskCompleted(long chatId, string result, string? relaySender, TaskSource source, bool isPartial, string? correlationId, string? taskId)
     {
-        _groupBehavior.BufferBotResponse(chatId, result);
+        var lastSentId = _lastSentMessageIds.TryGetValue(chatId, out var id) ? id : 0L;
+        _groupBehavior.BufferBotResponse(chatId, result, telegramMessageId: lastSentId);
 
         _ = Task.Run(async () =>
         {
@@ -561,6 +572,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             Text = text,
             Sender = sender,
             IsGroupChat = isGroupChat,
+            TelegramMessageId = message.MessageId,
+            ReplyToTelegramMessageId = message.ReplyToMessage?.MessageId is { } rtm ? (long)rtm : null,
             ReplyToUsername = replyToUsername,
             ReplyToText = replyToText,
             IsBotMentioned = isMentioned,
@@ -838,28 +851,33 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             }
         }
 
-        var newEmojis = (reaction.NewReaction ?? [])
-            .OfType<ReactionTypeEmoji>()
-            .Select(r => r.Emoji)
-            .ToHashSet();
-        var oldEmojis = (reaction.OldReaction ?? [])
-            .OfType<ReactionTypeEmoji>()
-            .Select(r => r.Emoji)
-            .ToHashSet();
+        var (added, removed) = DiffReactions(reaction.NewReaction, reaction.OldReaction);
+        if (added.Count == 0 && removed.Count == 0) return; // no net change
 
-        if (newEmojis.SetEquals(oldEmojis)) return; // no net change
-
-        foreach (var emoji in newEmojis.Except(oldEmojis))
+        foreach (var emoji in added)
         {
             var text = $"[reaction: {emoji} on message_id={messageId} from user_id={userId}]";
             _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
         }
 
-        foreach (var emoji in oldEmojis.Except(newEmojis))
+        foreach (var emoji in removed)
         {
             var text = $"[reaction removed: {emoji} on message_id={messageId} from user_id={userId}]";
             _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
         }
+    }
+
+    /// <summary>
+    /// Diffs two reaction lists, returning only standard emoji (<see cref="ReactionTypeEmoji"/>)
+    /// that were added or removed. Custom emoji and paid reactions are silently ignored.
+    /// </summary>
+    internal static (HashSet<string> added, HashSet<string> removed) DiffReactions(
+        IEnumerable<ReactionType>? newReaction,
+        IEnumerable<ReactionType>? oldReaction)
+    {
+        var newEmojis = (newReaction ?? []).OfType<ReactionTypeEmoji>().Select(r => r.Emoji).ToHashSet();
+        var oldEmojis = (oldReaction ?? []).OfType<ReactionTypeEmoji>().Select(r => r.Emoji).ToHashSet();
+        return ([.. newEmojis.Except(oldEmojis)], [.. oldEmojis.Except(newEmojis)]);
     }
 
     private Task OnError(Exception exception, HandleErrorSource source)

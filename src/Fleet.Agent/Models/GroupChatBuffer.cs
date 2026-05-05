@@ -11,11 +11,13 @@ public sealed class GroupChatBuffer
     private readonly LinkedList<BufferEntry> _entries = new();
     private DateTimeOffset _lastChecked = DateTimeOffset.MinValue;
 
-    public void Add(string sender, string text, string? replyTo, DateTimeOffset timestamp)
+    public void Add(string sender, string text, string? replyTo, DateTimeOffset timestamp,
+        long telegramMessageId = 0, long? replyToTelegramMessageId = null)
     {
         lock (_lock)
         {
-            _entries.AddLast(new BufferEntry(sender, text, replyTo, timestamp));
+            _entries.AddLast(new BufferEntry(sender, text, replyTo, timestamp,
+                TelegramMessageId: telegramMessageId, ReplyToTelegramMessageId: replyToTelegramMessageId));
             while (_entries.Count > Capacity)
                 _entries.RemoveFirst();
         }
@@ -106,7 +108,9 @@ public sealed class GroupChatBuffer
     {
         lock (_lock)
         {
-            return _entries.Select(e => new SerializedEntry(e.Sender, e.Text, e.ReplyTo, e.Timestamp, e.EntryType)).ToList();
+            return _entries.Select(e => new SerializedEntry(
+                e.Sender, e.Text, e.ReplyTo, e.Timestamp, e.EntryType,
+                e.TelegramMessageId, e.ReplyToTelegramMessageId)).ToList();
         }
     }
 
@@ -116,14 +120,31 @@ public sealed class GroupChatBuffer
         {
             foreach (var e in entries)
             {
-                _entries.AddLast(new BufferEntry(e.Sender, e.Text, e.ReplyTo, e.Timestamp, e.EntryType ?? "message"));
+                _entries.AddLast(new BufferEntry(e.Sender, e.Text, e.ReplyTo, e.Timestamp,
+                    e.EntryType ?? "message",
+                    TelegramMessageId: e.TelegramMessageId,
+                    ReplyToTelegramMessageId: e.ReplyToTelegramMessageId));
                 while (_entries.Count > Capacity)
                     _entries.RemoveFirst();
             }
         }
     }
 
-    private sealed record BufferEntry(string Sender, string Text, string? ReplyTo, DateTimeOffset Timestamp, string EntryType = "message");
+    private sealed record BufferEntry(
+        string Sender,
+        string Text,
+        string? ReplyTo,
+        DateTimeOffset Timestamp,
+        string EntryType = "message",
+        long TelegramMessageId = 0,
+        long? ReplyToTelegramMessageId = null);
 }
 
-public record SerializedEntry(string Sender, string Text, string? ReplyTo, DateTimeOffset Timestamp, string? EntryType = null);
+public record SerializedEntry(
+    string Sender,
+    string Text,
+    string? ReplyTo,
+    DateTimeOffset Timestamp,
+    string? EntryType = null,
+    long TelegramMessageId = 0,
+    long? ReplyToTelegramMessageId = null);

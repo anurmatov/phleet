@@ -56,7 +56,9 @@ public sealed class MessageRouter
             }
 
             // Buffer ALL allowed group messages for context
-            _groupBehavior.AddAndPersist(msg.ChatId, msg.Sender, msg.Text, msg.ReplyToUsername);
+            _groupBehavior.AddAndPersist(msg.ChatId, msg.Sender, msg.Text, msg.ReplyToUsername,
+                telegramMessageId: msg.TelegramMessageId,
+                replyToTelegramMessageId: msg.ReplyToTelegramMessageId);
 
             if (_agentConfig.GroupListenMode.Equals("all", StringComparison.OrdinalIgnoreCase))
             {
@@ -149,7 +151,9 @@ public sealed class MessageRouter
         // Buffer DM messages for context recovery
         if (!msg.IsGroupChat)
         {
-            _groupBehavior.AddAndPersist(msg.ChatId, msg.Sender, trimmed, null);
+            _groupBehavior.AddAndPersist(msg.ChatId, msg.Sender, trimmed, null,
+                telegramMessageId: msg.TelegramMessageId,
+                replyToTelegramMessageId: msg.ReplyToTelegramMessageId);
         }
 
         // Build display text that reflects image count for heartbeat/status visibility

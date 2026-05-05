@@ -7,6 +7,8 @@ public sealed record IncomingMessage
     public required string Text { get; init; }
     public required string Sender { get; init; }
     public required bool IsGroupChat { get; init; }
+    public long TelegramMessageId { get; init; }
+    public long? ReplyToTelegramMessageId { get; init; }
     public string? ReplyToUsername { get; init; }
     public string? ReplyToText { get; init; }
     public bool IsBotMentioned { get; init; }

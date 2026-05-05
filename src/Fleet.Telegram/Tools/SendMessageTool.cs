@@ -4,6 +4,7 @@ using Fleet.Telegram.Services;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Telegram.Bot;
+using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 
 namespace Fleet.Telegram.Tools;
@@ -14,12 +15,13 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
     private const int TelegramMaxLength = 4096;
 
     [McpServerTool(Name = "send_message")]
-    [Description("Post a text message to a Telegram chat. Returns {\"ok\":true,\"message_id\":N} on success, {\"ok\":true,\"message_id\":N,\"fallback\":true} when the notifier bot was used as fallback, or {\"ok\":false,\"error\":\"...\"} on failure.")]
+    [Description("Post a text message to a Telegram chat. Returns {\"ok\":true,\"message_id\":N} on success, {\"ok\":true,\"message_id\":N,\"fallback\":true} when the notifier bot was used as fallback, {\"ok\":true,\"message_id\":N,\"reply_fallback\":true} when the reply target was not found and sent standalone, or {\"ok\":false,\"error\":\"...\"} on failure.")]
     public async Task<string> SendAsync(
         [Description("Telegram chat ID as integer or string (e.g. -1001234567890 or \"-1001234567890\" for a group, positive integer for a DM)")] string chat_id,
         [Description("Message text (max 4096 chars per Telegram limit; longer text is split into multiple messages)")] string text,
         [Description("Agent name to send from (uses that agent's dedicated bot token; falls back to notifier bot if unknown)")] string agent_name = "",
         [Description("Parse mode for message formatting: HTML, Markdown, or MarkdownV2. Omit for plain text.")] string parse_mode = "",
+        [Description("Optional message ID to reply to. When supplied, the message is sent as a threaded reply. If the target message is not found, the message is sent standalone with a reply_fallback flag in the response.")] int? reply_to_message_id = null,
         CancellationToken cancellationToken = default)
     {
         // If the LLM didn't pass agent_name, resolve from the ?agent= query parameter
@@ -56,36 +58,70 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
 
         int lastMessageId = 0;
         bool usedFallback = false;
+        bool usedReplyFallback = false;
+        bool replyConsumed = false;
 
         foreach (var chunk in chunks)
         {
-            var result = await TrySendAsync(client, chatIdLong, chunk, pm, agent_name, cancellationToken);
+            // Only the first chunk uses reply threading; subsequent chunks are standalone
+            var replyId = !replyConsumed ? reply_to_message_id : null;
+            var result = await TrySendAsync(client, chatIdLong, chunk, pm, agent_name, replyId, cancellationToken);
+            replyConsumed = true;
             if (!result.ok)
                 return JsonSerializer.Serialize(new { ok = false, error = result.error });
             lastMessageId = result.messageId;
             if (result.fallback) usedFallback = true;
+            if (result.replyFallback) usedReplyFallback = true;
         }
 
         if (usedFallback)
             return JsonSerializer.Serialize(new { ok = true, message_id = lastMessageId, fallback = true });
+        if (usedReplyFallback)
+            return JsonSerializer.Serialize(new { ok = true, message_id = lastMessageId, reply_fallback = true,
+                warning = "reply target not found, sent as standalone" });
 
         return JsonSerializer.Serialize(new { ok = true, message_id = lastMessageId });
     }
 
-    private async Task<(bool ok, int messageId, string error, bool fallback)> TrySendAsync(
+    private async Task<(bool ok, int messageId, string error, bool fallback, bool replyFallback)> TrySendAsync(
         ITelegramBotClient client,
         long chatId,
         string text,
         ParseMode? parseMode,
         string agentName,
+        int? replyToMessageId,
         CancellationToken ct)
     {
+        ReplyParameters? replyParams = replyToMessageId.HasValue
+            ? new ReplyParameters { MessageId = replyToMessageId.Value }
+            : null;
+
         try
         {
             var msg = parseMode.HasValue
-                ? await client.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
-                : await client.SendMessage(chatId, text, cancellationToken: ct);
-            return (true, msg.Id, string.Empty, false);
+                ? await client.SendMessage(chatId, text, parseMode: parseMode.Value,
+                    replyParameters: replyParams, cancellationToken: ct)
+                : await client.SendMessage(chatId, text,
+                    replyParameters: replyParams, cancellationToken: ct);
+            return (true, msg.Id, string.Empty, false, false);
+        }
+        catch (Exception ex) when (IsReplyNotFound(ex))
+        {
+            // Reply target gone (e.g. message deleted) — fall back to standalone send with a warning
+            logger.LogWarning("Reply target {ReplyId} not found in chat {ChatId} — sending as standalone",
+                replyToMessageId, chatId);
+            try
+            {
+                var msg = parseMode.HasValue
+                    ? await client.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
+                    : await client.SendMessage(chatId, text, cancellationToken: ct);
+                return (true, msg.Id, string.Empty, false, true);
+            }
+            catch (Exception fbEx)
+            {
+                logger.LogError(fbEx, "Standalone fallback also failed for chat {ChatId}", chatId);
+                return (false, 0, fbEx.Message, false, true);
+            }
         }
         catch (Exception ex) when (Is403(ex))
         {
@@ -99,24 +135,26 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
                 try
                 {
                     var msg = parseMode.HasValue
-                        ? await fallback.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
-                        : await fallback.SendMessage(chatId, text, cancellationToken: ct);
-                    return (true, msg.Id, string.Empty, true);
+                        ? await fallback.SendMessage(chatId, text, parseMode: parseMode.Value,
+                            replyParameters: replyParams, cancellationToken: ct)
+                        : await fallback.SendMessage(chatId, text,
+                            replyParameters: replyParams, cancellationToken: ct);
+                    return (true, msg.Id, string.Empty, true, false);
                 }
                 catch (Exception fbEx)
                 {
                     logger.LogError(fbEx, "Fallback bot also failed for chat {ChatId}", chatId);
-                    return (false, 0, fbEx.Message, true);
+                    return (false, 0, fbEx.Message, true, false);
                 }
             }
 
             logger.LogError(ex, "Bot for agent '{AgentName}' got 403 on chat {ChatId}", agentName, chatId);
-            return (false, 0, ex.Message, false);
+            return (false, 0, ex.Message, false, false);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to send message to chat {ChatId}", chatId);
-            return (false, 0, ex.Message, false);
+            return (false, 0, ex.Message, false, false);
         }
     }
 
@@ -125,6 +163,10 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
         ex.Message.Contains("Forbidden") ||
         ex.Message.Contains("bot was blocked") ||
         ex.Message.Contains("not a member");
+
+    private static bool IsReplyNotFound(Exception ex) =>
+        ex.Message.Contains("message to be replied not found") ||
+        ex.Message.Contains("reply message not found");
 
     private static List<string> SplitText(string text)
     {

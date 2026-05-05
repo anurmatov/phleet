@@ -58,8 +58,7 @@ public sealed class MessageRouter
             // Buffer ALL allowed group messages for context
             _groupBehavior.AddAndPersist(msg.ChatId, msg.Sender, msg.Text, msg.ReplyToUsername,
                 telegramMessageId: msg.TelegramMessageId,
-                replyToTelegramMessageId: msg.ReplyToTelegramMessageId,
-                userId: msg.UserId);
+                replyToTelegramMessageId: msg.ReplyToTelegramMessageId);
 
             if (_agentConfig.GroupListenMode.Equals("all", StringComparison.OrdinalIgnoreCase))
             {
@@ -131,8 +130,7 @@ public sealed class MessageRouter
                     task = _groupBehavior.BuildGroupTask(msg.ChatId, msg.Sender, task, msg.ReplyToUsername, msg.ReplyToText, msg.TelegramMessageId);
                 _taskManager.StartTask(msg.ChatId, task, displayText, isSessionTask: false,
                     source: TaskSource.NewCommand, images: msg.Images.Count > 0 ? msg.Images : null,
-                    documents: msg.Documents.Count > 0 ? msg.Documents : null,
-                    userId: msg.UserId);
+                    documents: msg.Documents.Count > 0 ? msg.Documents : null);
                 return;
             }
 
@@ -154,8 +152,7 @@ public sealed class MessageRouter
         {
             _groupBehavior.AddAndPersist(msg.ChatId, msg.Sender, trimmed, null,
                 telegramMessageId: msg.TelegramMessageId,
-                replyToTelegramMessageId: msg.ReplyToTelegramMessageId,
-                userId: msg.UserId);
+                replyToTelegramMessageId: msg.ReplyToTelegramMessageId);
         }
 
         // Build display text that reflects image count for heartbeat/status visibility
@@ -181,8 +178,7 @@ public sealed class MessageRouter
         // Use /new <task> for parallel tasks, or /cancel to stop the current one.
         _taskManager.StartTask(msg.ChatId, trimmed, messageDisplayText, isSessionTask: true,
             images: msg.Images.Count > 0 ? msg.Images : null,
-            documents: msg.Documents.Count > 0 ? msg.Documents : null,
-            userId: msg.UserId);
+            documents: msg.Documents.Count > 0 ? msg.Documents : null);
     }
 
     private CancellationToken _shutdownToken = CancellationToken.None;

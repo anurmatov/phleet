@@ -57,7 +57,9 @@ public sealed class PromptAssembler
                 ? $"\n[Replying to {replyToUsername}]"
                 : "";
 
-        var fromLine = string.Concat($"[From: {sender}]", msgIdTag, replyContext);
+        var fromLine = msgIdTag.Length > 0
+            ? string.Concat($"[From: {sender}] ", msgIdTag, replyContext)
+            : string.Concat($"[From: {sender}]", replyContext);
 
         if (_executor.IsProcessWarm)
             return $"[New message]\n{fromLine} {taskText}";

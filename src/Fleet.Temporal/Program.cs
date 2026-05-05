@@ -62,9 +62,14 @@ builder.Services.AddHttpClient("orchestrator", (sp, client) =>
     client.Timeout = TimeSpan.FromSeconds(30);
 });
 
+// HTTP context accessor — needed by NotifyCtoTool to read the ?agent= query param
+builder.Services.AddHttpContextAccessor();
+
 // Core services
 builder.Services.AddSingleton<TaskCompletionRegistry>();
 builder.Services.AddSingleton<WorkflowTypeRegistry>();
+builder.Services.AddSingleton<CtoAgentConfigService>();
+builder.Services.AddSingleton<IWorkflowDispatcher, TemporalWorkflowDispatcher>();
 
 // Peer config — fetches FLEET_CTO_AGENT and other keys from orchestrator on startup
 builder.Services.AddHostedService<PeerConfigHostedService>();

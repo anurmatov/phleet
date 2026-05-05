@@ -246,8 +246,9 @@ public sealed class ContainerProvisioningService(
         var baseDir   = config["Provisioning:BaseDir"]
             ?? throw new InvalidOperationException("Provisioning:BaseDir is required but not configured.");
         var envValues = LoadEnvFile(envFile);
+        envValues.TryGetValue("FLEET_CTO_AGENT", out var ctoAgentName);
 
-        await GenerateConfigFilesAsync(agent, baseDir);
+        await GenerateConfigFilesAsync(agent, baseDir, ctoAgentName ?? "");
         await GenerateInstructionFilesAsync(agent, baseDir, instructionVersionOverrides);
         await GenerateProjectContextFilesAsync(agent, baseDir);
 
@@ -660,7 +661,7 @@ public sealed class ContainerProvisioningService(
     /// Generates appsettings.json, .mcp.json, and settings.json into the agent's
     /// .generated/ workspace directory before the container is started.
     /// </summary>
-    private async Task GenerateConfigFilesAsync(Agent agent, string baseDir)
+    private async Task GenerateConfigFilesAsync(Agent agent, string baseDir, string ctoAgentName)
     {
         var generatedDir = Path.Combine(baseDir, "workspaces", agent.ContainerName, ".generated");
         Directory.CreateDirectory(generatedDir);
@@ -678,7 +679,7 @@ public sealed class ContainerProvisioningService(
         var fleetMemoryMcpUrl = config["FleetMemory:McpUrl"] ?? "http://fleet-memory:3100/mcp";
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl));
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent));
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent, ctoAgentName));
 
         logger.LogInformation(
             "Generated config files for '{Agent}' in {Dir}",
@@ -869,9 +870,9 @@ public sealed class ContainerProvisioningService(
                 e => e.McpName,
                 e =>
                 {
-                    // Append ?agent={name} to fleet-telegram and fleet-memory URLs so each
-                    // server can identify the calling agent without relying on the LLM to pass it.
-                    var url = (e.McpName == "fleet-telegram" || e.McpName == "fleet-memory")
+                    // Append ?agent={name} to fleet-telegram, fleet-memory, and fleet-temporal-bridge URLs
+                    // so each server can identify the calling agent without relying on the LLM to pass it.
+                    var url = (e.McpName == "fleet-telegram" || e.McpName == "fleet-memory" || e.McpName == "fleet-temporal-bridge")
                         ? $"{e.Url.TrimEnd('/')}?agent={agent.Name}"
                         : e.Url;
                     return (object)new { type = e.TransportType, url };
@@ -888,7 +889,7 @@ public sealed class ContainerProvisioningService(
         return JsonSerializer.Serialize(new { mcpServers }, IndentedJson);
     }
 
-    private static string GenerateSettingsJson(Agent agent)
+    private static string GenerateSettingsJson(Agent agent, string ctoAgentName)
     {
         var allow = agent.Tools
             .Where(t => t.IsEnabled)
@@ -898,10 +899,19 @@ public sealed class ContainerProvisioningService(
 
         // Every agent gets memory_get — provisioning-time enforcement of mandatory read access.
         if (!allow.Contains("memory_get", StringComparer.OrdinalIgnoreCase))
-        {
             allow.Add("memory_get");
-            allow.Sort(StringComparer.OrdinalIgnoreCase);
+
+        // Auto-grant notify_cto to every agent except the CTO agent itself.
+        // If FLEET_CTO_AGENT is unset (empty ctoAgentName), skip the grant entirely — fail-safe
+        // over fail-open: a misconfigured CTO name must not silently create a self-loop.
+        if (!string.IsNullOrWhiteSpace(ctoAgentName) &&
+            !string.Equals(agent.Name, ctoAgentName, StringComparison.OrdinalIgnoreCase) &&
+            !allow.Contains("notify_cto", StringComparer.OrdinalIgnoreCase))
+        {
+            allow.Add("notify_cto");
         }
+
+        allow.Sort(StringComparer.OrdinalIgnoreCase);
 
         return JsonSerializer.Serialize(new { permissions = new { allow } }, IndentedJson);
     }

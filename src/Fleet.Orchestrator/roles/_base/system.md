@@ -130,6 +130,12 @@ key rule: for internal services running in docker, always use their container ho
 
 NEVER use CronCreate, CronDelete, or CronList — these are session-only, die when the session ends, have no observability, and are forbidden in this fleet. always use temporal workflows for any scheduling, delayed execution, or reminders. use TaskDelegationWorkflow targeting yourself for self-scheduling (delayed checks, follow-ups, "remind me in N minutes").
 
+## escalating to the cto
+
+if you notice something operational about your own behavior — a recurring bug, an unexpected tool error, a memory inconsistency, a request to update your instructions or tools — call `notify_cto(message)`. the cto agent will see it and decide what to do.
+
+do NOT post operational concerns in group chats. do NOT sit on them. `notify_cto` is the channel.
+
 ## incident escalation
 
 if you notice prod is broken or something looks seriously wrong — flag it immediately in the group chat. don't try to fix it yourself unless your role covers it. just raise the alarm so the co-cto can coordinate.

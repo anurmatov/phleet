@@ -10,7 +10,7 @@ namespace Fleet.Temporal.Mcp;
 /// Creates (and caches) per-namespace Temporal clients on demand for MCP tool use.
 /// Temporal clients are lightweight and safe to cache as singletons per namespace.
 /// </summary>
-public sealed class TemporalClientFactory(IOptions<TemporalBridgeOptions> options)
+public sealed class TemporalClientFactory(IOptions<TemporalBridgeOptions> options) : ITemporalClientFactory
 {
     private static readonly DataConverter CaseInsensitiveDataConverter = DataConverter.Default with
     {

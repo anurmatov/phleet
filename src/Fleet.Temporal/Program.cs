@@ -62,9 +62,14 @@ builder.Services.AddHttpClient("orchestrator", (sp, client) =>
     client.Timeout = TimeSpan.FromSeconds(30);
 });
 
+// HTTP context accessor — needed by NotifyCtoTool to read the ?agent= query param
+builder.Services.AddHttpContextAccessor();
+
 // Core services
 builder.Services.AddSingleton<TaskCompletionRegistry>();
 builder.Services.AddSingleton<WorkflowTypeRegistry>();
+builder.Services.AddSingleton<CtoAgentConfigService>();
+builder.Services.AddSingleton<IWorkflowDispatcher, TemporalWorkflowDispatcher>();
 
 // Peer config — fetches FLEET_CTO_AGENT and other keys from orchestrator on startup
 builder.Services.AddHostedService<PeerConfigHostedService>();
@@ -80,6 +85,7 @@ builder.Services.AddHostedService<SearchAttributeInitializer>();
 
 // Temporal client factory — used by MCP tools to resolve per-namespace clients on demand
 builder.Services.AddSingleton<TemporalClientFactory>();
+builder.Services.AddSingleton<ITemporalClientFactory>(sp => sp.GetRequiredService<TemporalClientFactory>());
 
 var temporalOpts = builder.Configuration
     .GetSection(TemporalBridgeOptions.Section)
@@ -111,7 +117,8 @@ foreach (var @namespace in configuredNamespaces)
         .AddScopedActivities<LoadWorkflowConfigActivity>()
         .AddWorkflow<UniversalWorkflow>()
         .AddWorkflow<ConsensusReviewWorkflow>()
-        .AddWorkflow<AuthTokenRefreshWorkflow>();
+        .AddWorkflow<AuthTokenRefreshWorkflow>()
+        .AddWorkflow<NotifyCtoWorkflow>();
 }
 
 // MCP Server

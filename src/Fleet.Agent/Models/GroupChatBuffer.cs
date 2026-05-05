@@ -104,6 +104,41 @@ public sealed class GroupChatBuffer
         }
     }
 
+    /// <summary>
+    /// Looks up a buffered message by its Telegram message ID, scanning from most-recent backward.
+    /// Returns false when telegramMessageId &lt;= 0, when no matching entry exists,
+    /// or when the matched entry is a tool_use entry.
+    /// </summary>
+    public bool TryGetByMessageId(long telegramMessageId, out string sender, out string text)
+    {
+        sender = "";
+        text = "";
+
+        if (telegramMessageId <= 0)
+            return false;
+
+        lock (_lock)
+        {
+            var node = _entries.Last;
+            while (node is not null)
+            {
+                var entry = node.Value;
+                if (entry.TelegramMessageId == telegramMessageId)
+                {
+                    if (entry.EntryType == "tool_use")
+                        return false;
+
+                    sender = entry.Sender;
+                    text = entry.Text;
+                    return true;
+                }
+                node = node.Previous;
+            }
+        }
+
+        return false;
+    }
+
     public List<SerializedEntry> GetEntries()
     {
         lock (_lock)

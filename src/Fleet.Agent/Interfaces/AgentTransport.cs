@@ -854,17 +854,32 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         var (added, removed) = DiffReactions(reaction.NewReaction, reaction.OldReaction);
         if (added.Count == 0 && removed.Count == 0) return; // no net change
 
+        var buffer = _groupBehavior.GetGroupBuffer(chatId);
+        var hasOriginal = buffer.TryGetByMessageId(messageId, out _, out var origText);
+        var contentSuffix = hasOriginal ? $": \"{TruncateForReaction(origText)}\"" : "";
+
         foreach (var emoji in added)
         {
-            var text = $"[reaction: {emoji} on message_id={messageId} from user_id={userId}]";
+            var text = $"[reaction: {emoji} on message_id={messageId} from user_id={userId}{contentSuffix}]";
             _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
         }
 
         foreach (var emoji in removed)
         {
-            var text = $"[reaction removed: {emoji} on message_id={messageId} from user_id={userId}]";
+            var text = $"[reaction removed: {emoji} on message_id={messageId} from user_id={userId}{contentSuffix}]";
             _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
         }
+    }
+
+    /// <summary>
+    /// Normalizes a buffered message text for inline use in a reaction task:
+    /// replaces line breaks and tabs with a single space, then caps at 200 chars with a trailing ellipsis.
+    /// </summary>
+    internal static string TruncateForReaction(string text)
+    {
+        // Normalize whitespace: CRLF, LF, CR, tab → single space
+        var flat = text.Replace("\r\n", " ").Replace('\r', ' ').Replace('\n', ' ').Replace('\t', ' ');
+        return flat.Length <= 200 ? flat : flat[..200] + "…";
     }
 
     /// <summary>

@@ -22,36 +22,45 @@ public sealed class PromptAssembler
     /// Build a prompt for a direct message (DM) task.
     /// </summary>
     public string ForDm(GroupChatBuffer buffer, string taskText,
-        string? replyToText = null)
+        string? replyToText = null, long telegramMessageId = 0)
     {
+        var msgIdTag = telegramMessageId > 0 ? $"[telegram_message_id: {telegramMessageId}]" : "";
         var replyContext = replyToText is not null
             ? $"\n[Replying to: \"{TruncateReplyText(replyToText, 300)}\"]"
             : "";
 
         if (_executor.IsProcessWarm)
-            return replyContext.Length > 0 ? $"{replyContext}\n{taskText}" : taskText;
+        {
+            var meta = string.Concat(msgIdTag, replyContext);
+            return meta.Length > 0 ? $"{meta}\n{taskText}" : taskText;
+        }
 
         var context = buffer.FormatContext();
+        var metaCold = string.Concat(msgIdTag, replyContext);
         if (context.Length > 0)
-            return $"[Recent conversation]\n{context}\n\n[New message]{replyContext}\n{taskText}";
+            return $"[Recent conversation]\n{context}\n\n[New message]{metaCold}\n{taskText}";
 
-        return replyContext.Length > 0 ? $"[New message]{replyContext}\n{taskText}" : taskText;
+        return metaCold.Length > 0 ? $"[New message]{metaCold}\n{taskText}" : taskText;
     }
 
     /// <summary>
     /// Build a prompt for a group message task (mention, reply, or /new).
+    /// For media groups, <paramref name="telegramMessageId"/> is the first photo's message ID.
     /// </summary>
     public string ForGroupMessage(GroupChatBuffer buffer, string sender, string taskText,
-        string? replyToUsername = null, string? replyToText = null)
+        string? replyToUsername = null, string? replyToText = null, long telegramMessageId = 0)
     {
+        var msgIdTag = telegramMessageId > 0 ? $"[telegram_message_id: {telegramMessageId}]" : "";
         var replyContext = replyToUsername is not null && replyToText is not null
             ? $"\n[Replying to {replyToUsername}: \"{TruncateReplyText(replyToText, 300)}\"]"
             : replyToUsername is not null
                 ? $"\n[Replying to {replyToUsername}]"
                 : "";
 
+        var fromLine = string.Concat($"[From: {sender}]", msgIdTag, replyContext);
+
         if (_executor.IsProcessWarm)
-            return $"[New message]\n[From: {sender}]{replyContext} {taskText}";
+            return $"[New message]\n{fromLine} {taskText}";
 
         var context = buffer.FormatContext();
 
@@ -59,7 +68,7 @@ public sealed class PromptAssembler
         if (context.Length > 0)
             result += $"[Recent group conversation]\n{context}\n\n";
 
-        result += $"[New message]\n[From: {sender}]{replyContext} {taskText}";
+        result += $"[New message]\n{fromLine} {taskText}";
         return result;
     }
 

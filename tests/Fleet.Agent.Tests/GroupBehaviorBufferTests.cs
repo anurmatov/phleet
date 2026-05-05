@@ -38,9 +38,11 @@ public class GroupBehaviorBufferTests
         // It's only used in OnRelayMessage when text starts with '/' — our tests don't trigger that.
         var commands = (CommandDispatcher)RuntimeHelpers.GetUninitializedObject(typeof(CommandDispatcher));
         var prompts = new PromptAssembler(executor);
+        // TelegramMessageForwarder.Record returns early when _baseUrl is null — safe to use uninitialized in tests.
+        var forwarder = (TelegramMessageForwarder)RuntimeHelpers.GetUninitializedObject(typeof(TelegramMessageForwarder));
 
         _behavior = new GroupBehavior(agentOpts, telegramOpts, executor, relay,
-            taskManager, commands, prompts, NullLogger<GroupBehavior>.Instance);
+            taskManager, commands, prompts, forwarder, NullLogger<GroupBehavior>.Instance);
     }
 
     [Fact]

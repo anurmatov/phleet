@@ -56,6 +56,7 @@ else
     builder.Services.AddSingleton<PromptAssembler>();
     builder.Services.AddSingleton<MessageRouter>();
     builder.Services.AddSingleton<GroupBehavior>();
+    builder.Services.AddSingleton<TelegramMessageForwarder>();
     builder.Services.AddHostedService<AgentTransport>();
     builder.Services.AddHttpClient();
     builder.Services.AddHttpClient("whisper", client =>

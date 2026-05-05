@@ -19,6 +19,7 @@ public sealed class GroupBehavior
     private readonly TaskManager _taskManager;
     private readonly CommandDispatcher _commands;
     private readonly PromptAssembler _prompts;
+    private readonly TelegramMessageForwarder _forwarder;
     private readonly ILogger<GroupBehavior> _logger;
 
     private readonly ConcurrentDictionary<long, GroupChatBuffer> _groupBuffers = new();
@@ -46,6 +47,7 @@ public sealed class GroupBehavior
         TaskManager taskManager,
         CommandDispatcher commands,
         PromptAssembler prompts,
+        TelegramMessageForwarder forwarder,
         ILogger<GroupBehavior> logger)
     {
         _agentConfig = agentConfig.Value;
@@ -55,6 +57,7 @@ public sealed class GroupBehavior
         _taskManager = taskManager;
         _commands = commands;
         _prompts = prompts;
+        _forwarder = forwarder;
         _logger = logger;
 
         _historyPath = Path.Combine(_agentConfig.WorkDir, ".fleet", "chat-history.json");
@@ -79,6 +82,7 @@ public sealed class GroupBehavior
         buffer.Add($"@{_botUsername}", truncated, replyTo: null, DateTimeOffset.UtcNow,
             telegramMessageId: telegramMessageId);
         SaveBuffers();
+        _forwarder.Record(chatId, telegramMessageId, truncated, senderUserId: 0, senderUsername: _botUsername);
     }
 
     public void BufferToolUse(long chatId, string toolName, string description)
@@ -89,13 +93,14 @@ public sealed class GroupBehavior
     }
 
     public void AddAndPersist(long chatId, string sender, string text, string? replyTo,
-        long telegramMessageId = 0, long? replyToTelegramMessageId = null)
+        long telegramMessageId = 0, long? replyToTelegramMessageId = null, long userId = 0)
     {
         var buffer = GetGroupBuffer(chatId);
         buffer.Add(sender, text, replyTo, DateTimeOffset.UtcNow,
             telegramMessageId: telegramMessageId,
             replyToTelegramMessageId: replyToTelegramMessageId);
         SaveBuffers();
+        _forwarder.Record(chatId, telegramMessageId, text, senderUserId: userId, senderUsername: sender);
     }
 
     private void LoadBuffersFromDisk()
@@ -594,11 +599,11 @@ public sealed class GroupBehavior
     }
 
     public string BuildGroupTask(long chatId, string sender, string taskText,
-        string? replyToUsername = null, string? replyToText = null) =>
-        _prompts.ForGroupMessage(GetGroupBuffer(chatId), sender, taskText, replyToUsername, replyToText);
+        string? replyToUsername = null, string? replyToText = null, long telegramMessageId = 0) =>
+        _prompts.ForGroupMessage(GetGroupBuffer(chatId), sender, taskText, replyToUsername, replyToText, telegramMessageId);
 
-    public string BuildDmTask(long chatId, string taskText, string? replyToText = null) =>
-        _prompts.ForDm(GetGroupBuffer(chatId), taskText, replyToText);
+    public string BuildDmTask(long chatId, string taskText, string? replyToText = null, long telegramMessageId = 0) =>
+        _prompts.ForDm(GetGroupBuffer(chatId), taskText, replyToText, telegramMessageId);
 
     // --- Pending images buffer entry ---
 

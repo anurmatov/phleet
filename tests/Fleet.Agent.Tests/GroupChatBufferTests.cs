@@ -75,4 +75,63 @@ public class GroupChatBufferTests
         Assert.Equal("", sender);
         Assert.Equal("", text);
     }
+
+    [Fact]
+    public void FormatContext_IncludesTelegramMessageId_ForTextEntries()
+    {
+        var buffer = new GroupChatBuffer();
+        buffer.Add("alice", "hello", null, DateTimeOffset.UtcNow, telegramMessageId: 10);
+        buffer.Add("bob", "reply here", "alice", DateTimeOffset.UtcNow, telegramMessageId: 20, replyToTelegramMessageId: 10);
+        buffer.Add("carol", "no id message", null, DateTimeOffset.UtcNow, telegramMessageId: 0);
+
+        var result = buffer.FormatContext();
+        var lines = result.Split('\n');
+
+        Assert.Equal(3, lines.Length);
+        Assert.Equal("[telegram_message_id: 10] alice: hello", lines[0]);
+        Assert.Equal("[telegram_message_id: 20] [reply_to_message_id: 10] bob → alice: reply here", lines[1]);
+        Assert.Equal("carol: no id message", lines[2]);
+    }
+
+    [Fact]
+    public void FormatContext_ExcludesToolUseEntries_FromOutput()
+    {
+        var buffer = new GroupChatBuffer();
+        buffer.Add("alice", "hello", null, DateTimeOffset.UtcNow, telegramMessageId: 10);
+        buffer.AddToolUse("my-tool", "did something", DateTimeOffset.UtcNow);
+        buffer.Add("bob", "world", null, DateTimeOffset.UtcNow, telegramMessageId: 20);
+
+        var result = buffer.FormatContext();
+        var lines = result.Split('\n');
+
+        Assert.Equal(2, lines.Length);
+        Assert.Equal("[telegram_message_id: 10] alice: hello", lines[0]);
+        Assert.Equal("[telegram_message_id: 20] bob: world", lines[1]);
+    }
+
+    [Fact]
+    public void FormatNewMessages_IncludesTelegramMessageId_AndPreservesOrder()
+    {
+        var buffer = new GroupChatBuffer();
+        buffer.Add("alice", "first", null, DateTimeOffset.UtcNow, telegramMessageId: 1);
+        buffer.Add("bob", "second", null, DateTimeOffset.UtcNow, telegramMessageId: 2);
+
+        var result = buffer.FormatNewMessages();
+        var lines = result.Split('\n');
+
+        Assert.Equal(2, lines.Length);
+        Assert.Equal("[telegram_message_id: 1] alice: first", lines[0]);
+        Assert.Equal("[telegram_message_id: 2] bob: second", lines[1]);
+    }
+
+    [Fact]
+    public void FormatNewMessages_ZeroMessageId_FallsBackToLegacyFormat()
+    {
+        var buffer = new GroupChatBuffer();
+        buffer.Add("alice", "no id", null, DateTimeOffset.UtcNow, telegramMessageId: 0);
+
+        var result = buffer.FormatNewMessages();
+
+        Assert.Equal("alice: no id", result);
+    }
 }

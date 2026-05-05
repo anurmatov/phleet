@@ -870,9 +870,9 @@ public sealed class ContainerProvisioningService(
                 e => e.McpName,
                 e =>
                 {
-                    // Append ?agent={name} to fleet-telegram, fleet-memory, and fleet-temporal-bridge URLs
+                    // Append ?agent={name} to fleet-telegram, fleet-memory, and fleet-temporal URLs
                     // so each server can identify the calling agent without relying on the LLM to pass it.
-                    var url = (e.McpName == "fleet-telegram" || e.McpName == "fleet-memory" || e.McpName == "fleet-temporal-bridge")
+                    var url = (e.McpName == "fleet-telegram" || e.McpName == "fleet-memory" || e.McpName == "fleet-temporal")
                         ? $"{e.Url.TrimEnd('/')}?agent={agent.Name}"
                         : e.Url;
                     return (object)new { type = e.TransportType, url };

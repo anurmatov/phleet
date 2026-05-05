@@ -171,7 +171,8 @@ public sealed class NotifyCtoToolTests
             "acto",
             Arg.Is<string>(s =>
                 s.StartsWith("[notification from adev] tool X keeps returning 500") &&
-                s.Contains("ACTION: forward this notification to the CEO")),
+                s.Contains("ACTION: do NOT forward verbatim") &&
+                s.Contains("Triage as follows")),
             Arg.Any<CancellationToken>());
     }
 }

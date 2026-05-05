@@ -134,11 +134,11 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
                     agentName, chatId);
                 try
                 {
+                    // Strip reply threading when falling back — the fallback bot may not be
+                    // a member of the same chat thread and the original reply may not be visible.
                     var msg = parseMode.HasValue
-                        ? await fallback.SendMessage(chatId, text, parseMode: parseMode.Value,
-                            replyParameters: replyParams, cancellationToken: ct)
-                        : await fallback.SendMessage(chatId, text,
-                            replyParameters: replyParams, cancellationToken: ct);
+                        ? await fallback.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
+                        : await fallback.SendMessage(chatId, text, cancellationToken: ct);
                     return (true, msg.Id, string.Empty, true, false);
                 }
                 catch (Exception fbEx)

@@ -91,7 +91,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         if (_bot is null) return;
 
         // Extract and strip [reply_to: N] token from agent output (Feature 3b).
-        (text, var replyToMessageId) = ExtractReplyToToken(text);
+        (text, var replyToMessageId) = ExtractReplyToToken(text, _logger);
 
         // Split on [IMAGE:...] markers; odd-indexed segments are file paths
         var parts = ImageMarkerRegex.Split(text);
@@ -189,13 +189,12 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     /// The token is only used as a reply target if it appears at the start or end of the text.
     /// All occurrences are stripped regardless of position.
     /// </summary>
-    internal static (string text, int? replyToMessageId) ExtractReplyToToken(string text)
+    internal static (string text, int? replyToMessageId) ExtractReplyToToken(string text, ILogger? logger = null)
     {
         var matches = ReplyToTokenRegex.Matches(text);
         if (matches.Count == 0) return (text, null);
 
         int? replyToMessageId = null;
-        var trimmed = text.Trim();
 
         // Only use the token as a reply target when at the start or end of the output
         var first = matches[0];
@@ -205,7 +204,10 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         {
             if (int.TryParse(first.Groups[1].Value, out var id) && id > 0)
                 replyToMessageId = id;
-            // else: non-positive integer — strip silently (no reply target)
+            else
+                logger?.LogDebug(
+                    "reply_to token at start/end has non-positive id ({Id}) — stripped without reply target",
+                    first.Groups[1].Value);
         }
 
         // Strip all [reply_to: N] tokens from the text
@@ -322,9 +324,20 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
 
             await _bot.SetMyCommands(commands, cancellationToken: stoppingToken);
 
-            _bot.OnMessage += OnMessage;
-            _bot.OnUpdate += OnUpdate;
-            _bot.OnError += OnError;
+            _bot.StartReceiving(
+                updateHandler: (_, update, _) => HandleTelegramUpdateAsync(update),
+                errorHandler: (_, ex, source, _) => OnError(ex, source),
+                receiverOptions: new ReceiverOptions
+                {
+                    AllowedUpdates =
+                    [
+                        UpdateType.Message,
+                        UpdateType.EditedMessage,
+                        UpdateType.MessageReaction,
+                        UpdateType.MessageReactionCount,
+                    ]
+                },
+                cancellationToken: stoppingToken);
 
             _logger.LogInformation("Telegram bot is receiving messages (GroupListenMode={Mode})",
                 _agentConfig.GroupListenMode);
@@ -344,9 +357,6 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         }
         finally
         {
-            _bot.OnMessage -= OnMessage;
-            _bot.OnUpdate -= OnUpdate;
-            _bot.OnError -= OnError;
             _taskManager.OnTaskCompleted -= OnTaskCompleted;
             _taskManager.OnToolUse -= OnToolUse;
             if (_relay.IsEnabled)
@@ -763,6 +773,17 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         $"(PDF too large — {sizeBytes / 1_048_576} MB exceeds the {_telegramConfig.MaxDocumentBytes / 1_048_576} MB limit. Please send a smaller file.)";
 
     /// <summary>
+    /// Dispatch wrapper used by <see cref="TelegramBotClientExtensions.StartReceiving"/> to route
+    /// each incoming <see cref="Update"/> to the appropriate handler.
+    /// </summary>
+    private Task HandleTelegramUpdateAsync(Update update)
+    {
+        if (update.Type == UpdateType.Message && update.Message is { } msg)
+            return OnMessage(msg, UpdateType.Message);
+        return OnUpdate(update);
+    }
+
+    /// <summary>
     /// Handles non-message update types. Currently processes:
     /// - <c>MessageReaction</c>: emits a synthetic message per changed emoji into the task queue.
     /// - <c>MessageReactionCount</c>: logged and skipped (aggregate counts, out of scope).
@@ -784,8 +805,18 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
 
     private void HandleReaction(MessageReactionUpdated reaction)
     {
+        // Anonymous group admins have no User context (Telegram uses actor_chat instead).
+        // We can't attribute the reaction to a specific user, so discard it.
+        if (reaction.User is null)
+        {
+            _logger.LogWarning(
+                "Ignoring reaction on message {MsgId} in chat {ChatId} — anonymous admin (no user context)",
+                reaction.MessageId, reaction.Chat.Id);
+            return;
+        }
+
         var chatId = reaction.Chat.Id;
-        var userId = reaction.User?.Id ?? 0;
+        var userId = reaction.User.Id;
         var messageId = reaction.MessageId;
 
         // Authorization: same rules as regular messages

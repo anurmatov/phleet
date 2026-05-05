@@ -28,6 +28,9 @@ public sealed class SetReactionTool(BotClientFactory factory, IHttpContextAccess
         "🤷", "🤷‍♀", "😡"
     ];
 
+    /// <summary>Returns true when <paramref name="emoji"/> is a standard (non-premium) Telegram reaction emoji.</summary>
+    internal static bool IsAllowedEmoji(string emoji) => AllowedEmoji.Contains(emoji);
+
     [McpServerTool(Name = "set_reaction")]
     [Description("Set an emoji reaction on a Telegram message. Validates the emoji against the standard allowlist before calling the API. Returns {\"ok\":true} on success or {\"ok\":false,\"error\":\"...\"} on failure.")]
     public async Task<string> SetReactionAsync(
@@ -48,7 +51,7 @@ public sealed class SetReactionTool(BotClientFactory factory, IHttpContextAccess
         if (string.IsNullOrEmpty(emoji))
             return JsonSerializer.Serialize(new { ok = false, error = "emoji is required" });
 
-        if (!AllowedEmoji.Contains(emoji))
+        if (!IsAllowedEmoji(emoji))
             return JsonSerializer.Serialize(new
             {
                 ok = false,

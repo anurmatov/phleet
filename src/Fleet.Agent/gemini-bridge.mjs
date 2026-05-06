@@ -486,12 +486,15 @@ async function runConversationTurn(messageParts, onText, onUsage, depth = 0) {
         );
     }
 
-    // @google/genai sendMessageStream accepts: string | Part | Part[]
-    const input = messageParts.length === 1 && 'text' in messageParts[0]
+    // @google/genai v1.x sendMessageStream signature: ({ message: ContentUnion }).
+    // ContentUnion = string | Part | Part[] | Content. Passing the value directly
+    // (not wrapped in { message }) makes the SDK throw "ContentUnion is required"
+    // because params.message is undefined.
+    const message = messageParts.length === 1 && 'text' in messageParts[0]
         ? messageParts[0].text   // plain string shortcut for text-only messages
         : messageParts;
 
-    const stream = await chat.sendMessageStream(input);
+    const stream = await chat.sendMessageStream({ message });
 
     let lastChunk = null;
     for await (const chunk of stream) {

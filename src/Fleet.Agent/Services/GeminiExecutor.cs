@@ -198,7 +198,7 @@ public sealed class GeminiExecutor : IAgentExecutor
         var psi = new ProcessStartInfo
         {
             FileName = NodeBin,
-            Arguments = $"{BridgePath} --mcp-config {mcpConfigPath}",
+            // Use ArgumentList (not Arguments string) so paths with spaces are quoted safely.
             UseShellExecute = false,
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
@@ -208,6 +208,10 @@ public sealed class GeminiExecutor : IAgentExecutor
 
         // Enforce OAuth-only auth: strip API key env vars that would bypass OAuth
         // and silently use the API-key billing tier (same invariant as entrypoint.sh).
+        psi.ArgumentList.Add(BridgePath);
+        psi.ArgumentList.Add("--mcp-config");
+        psi.ArgumentList.Add(mcpConfigPath);
+
         psi.Environment.Remove("GEMINI_API_KEY");
         psi.Environment.Remove("GOOGLE_API_KEY");
 

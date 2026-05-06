@@ -43,7 +43,7 @@ COPY src/Fleet.Agent/gemini-bridge.mjs /app/gemini-bridge.mjs
 # google-auth-library is installed as a transitive dependency and is used by the bridge
 # for OAuth2Client token management. Installed locally in /app so node can resolve it
 # without a global install — same pattern as @openai/codex-sdk above.
-RUN cd /app && npm install @google/genai
+RUN cd /app && npm install @google/genai@1.52.0
 
 # Gemini CLI — kept for entrypoint.sh compatibility (MCP settings.json translation).
 # The CLI binary is no longer invoked for AI inference (gemini-bridge handles that),

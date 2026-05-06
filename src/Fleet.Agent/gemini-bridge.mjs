@@ -10,7 +10,6 @@
  *   stdin:  one JSON line per task from .NET
  *     {"type":"task","prompt":"...","systemPrompt":"...","model":"gemini-2.5-flash",
  *      "attachments":[{"path":"/abs/path/file.jpg","mimeType":"image/jpeg"}]}
- *     {"type":"command","prompt":"..."}    <- handled as regular task
  *   stdout: JSONL events streamed back (same shape as codex-bridge for C# parity)
  *     {"type":"ack"}
  *     {"type":"turn.started"}
@@ -22,18 +21,26 @@
  *     {"type":"error","message":"..."}
  *
  * Auth: OAuth credentials at ~/.gemini/oauth_creds.json (writable bind mount).
- * google-auth-library's OAuth2Client manages token refresh. Refreshed tokens are
- * persisted back to oauth_creds.json via the 'tokens' event so the host-side
- * AuthTokenRefreshWorkflow and container restarts both see the latest credentials.
+ * google-auth-library's OAuth2Client manages token refresh. An access token is fetched
+ * before each task via getAccessToken() and injected into the GoogleGenAI client via
+ * httpOptions.headers (the documented, SDK-supported mechanism for non-API-key auth on
+ * the Gemini Developer API endpoint). The GoogleGenAI client is re-created whenever the
+ * access token changes (typically every ~1h) so the Authorization header stays fresh.
+ * The credentials file is also re-read before each task to pick up out-of-band updates
+ * from AuthTokenRefreshWorkflow (which rewrites oauth_creds.json from outside the bridge
+ * process). Refreshed tokens from within the bridge are persisted back via the 'tokens'
+ * event so the writable bind mount and container restarts both stay in sync.
  *
  * MCP: Reads server config from --mcp-config (same .mcp.json as codex-bridge).
  * Connects to HTTP MCP servers using the Streamable HTTP transport (JSON-RPC over POST).
  * Tool definitions are fetched once on startup and provided to the model as function
  * declarations. Function calls from the model are routed to the appropriate MCP server.
+ * A depth limit (MAX_FUNCTION_CALL_DEPTH=25, matching codex-bridge) prevents unbounded
+ * recursion from a misbehaving tool that always returns more function calls.
  *
  * System prompt: delivered once via the JSON envelope's systemPrompt field and set as
  * systemInstruction on the Chat. The Chat session is re-created only when the system
- * prompt or model changes — otherwise history accumulates naturally across tasks.
+ * prompt, model, or access token changes — otherwise history accumulates naturally.
  */
 
 import { GoogleGenAI } from '@google/genai';
@@ -51,6 +58,9 @@ const GEMINI_CLIENT_SECRET = process.env.GEMINI_OAUTH_CLIENT_SECRET
     || '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';
 const CREDS_PATH = path.join(process.env.HOME || '/root', '.gemini', 'oauth_creds.json');
 
+// Maximum function-call recursion depth per conversation turn (mirrors codex-bridge).
+const MAX_FUNCTION_CALL_DEPTH = 25;
+
 // ── Parse CLI args ────────────────────────────────────────────────────────────
 let mcpConfigPath = null;
 for (let i = 2; i < process.argv.length; i++) {
@@ -62,7 +72,8 @@ for (let i = 2; i < process.argv.length; i++) {
 
 // ── Shared state ──────────────────────────────────────────────────────────────
 let oauth2Client = null;   // google-auth-library OAuth2Client
-let ai = null;             // GoogleGenAI instance
+let ai = null;             // GoogleGenAI instance (re-created when access token changes)
+let lastAccessToken = null; // tracks current token; triggers ai re-init on change
 let chat = null;           // Current Chat session (holds conversation history)
 let currentSystemPrompt = null;
 let currentModel = null;
@@ -81,8 +92,36 @@ function log(msg) {
     process.stderr.write(`[gemini-bridge] ${msg}\n`);
 }
 
-// ── OAuth setup ───────────────────────────────────────────────────────────────
+// ── OAuth helpers ─────────────────────────────────────────────────────────────
 
+/**
+ * Reads the credentials file and applies the values to client via setCredentials().
+ * Safe to call even when the file has just been updated out-of-band.
+ */
+function applyCredsFromFile(client) {
+    if (!fs.existsSync(CREDS_PATH)) return;
+    try {
+        const creds = JSON.parse(fs.readFileSync(CREDS_PATH, 'utf8'));
+        client.setCredentials({
+            access_token:  creds.access_token,
+            refresh_token: creds.refresh_token,
+            expiry_date:   creds.expiry_date,
+            token_type:    creds.token_type || 'Bearer',
+            id_token:      creds.id_token,
+            // oauth_creds.json may store scopes as an array or space-separated string
+            scope: Array.isArray(creds.scopes)
+                ? creds.scopes.join(' ')
+                : (creds.scope || creds.scopes),
+        });
+    } catch (err) {
+        log(`WARN: failed to read credentials file: ${err.message}`);
+    }
+}
+
+/**
+ * Creates and initialises the OAuth2Client from the credentials file.
+ * Called once on the first task; subsequent tasks call applyCredsFromFile() directly.
+ */
 function initAuth() {
     if (!fs.existsSync(CREDS_PATH)) {
         throw new Error(
@@ -91,19 +130,8 @@ function initAuth() {
         );
     }
 
-    const creds = JSON.parse(fs.readFileSync(CREDS_PATH, 'utf8'));
     const client = new OAuth2Client(GEMINI_CLIENT_ID, GEMINI_CLIENT_SECRET);
-    client.setCredentials({
-        access_token:  creds.access_token,
-        refresh_token: creds.refresh_token,
-        expiry_date:   creds.expiry_date,
-        token_type:    creds.token_type || 'Bearer',
-        id_token:      creds.id_token,
-        // oauth_creds.json may store scopes as an array or space-separated string
-        scope: Array.isArray(creds.scopes)
-            ? creds.scopes.join(' ')
-            : (creds.scope || creds.scopes),
-    });
+    applyCredsFromFile(client);
 
     // Persist refreshed tokens back to oauth_creds.json so the writable bind mount
     // stays in sync. google-auth-library emits 'tokens' whenever it silently refreshes.
@@ -306,7 +334,7 @@ async function callMcpTool(toolName, args) {
     return { result: text };
 }
 
-// ── Chat session management ───────────────────────────────────────────────────
+// ── AI client + chat session management ──────────────────────────────────────
 
 function allFunctionDeclarations() {
     return Object.values(mcpServers).flatMap(s => s.functionDeclarations);
@@ -330,6 +358,51 @@ function ensureChat(systemPrompt, model) {
         `systemPrompt=${systemPrompt ? systemPrompt.length + ' chars' : 'none'})`);
 }
 
+/**
+ * Ensures oauth2Client is initialised and up to date with the creds file, then
+ * ensures the GoogleGenAI client uses a current access token.
+ *
+ * Auth flow:
+ *  1. First call: initAuth() reads ~/.gemini/oauth_creds.json and constructs oauth2Client.
+ *  2. Subsequent calls: applyCredsFromFile() re-reads the file into the existing client.
+ *     This picks up any out-of-band updates from AuthTokenRefreshWorkflow (which rewrites
+ *     oauth_creds.json from outside the bridge) without requiring a bridge restart.
+ *  3. getAccessToken() returns the current access token, auto-refreshing via
+ *     google-auth-library if the token is within its expiry window.
+ *  4. If the token differs from lastAccessToken, a new GoogleGenAI instance is created
+ *     with the fresh bearer token injected via httpOptions.headers (the documented
+ *     mechanism for non-API-key auth on the Gemini Developer API endpoint).
+ *     The chat session is reset on token change since it is bound to the AI client.
+ */
+async function ensureAiClient(systemPrompt, model) {
+    if (!oauth2Client) {
+        // First task: construct client from credentials file.
+        oauth2Client = initAuth();
+    } else {
+        // Subsequent tasks: reload file to pick up AuthTokenRefreshWorkflow updates.
+        applyCredsFromFile(oauth2Client);
+    }
+
+    const { token } = await oauth2Client.getAccessToken();
+    if (!token) throw new Error('Failed to obtain access token from OAuth2Client. Check ~/.gemini/oauth_creds.json.');
+
+    if (!ai || token !== lastAccessToken) {
+        // Create a new GoogleGenAI client with the fresh access token injected as a
+        // bearer Authorization header. This uses the documented httpOptions.headers API
+        // (GoogleGenAIOptions.httpOptions.headers: Record<string, string>) — no apiKey
+        // is required on Node runtimes when auth is provided via headers.
+        // Reference: @google/genai v1.x GoogleGenAIOptions (dist/genai.d.ts).
+        ai = new GoogleGenAI({
+            httpOptions: { headers: { 'Authorization': `Bearer ${token}` } },
+        });
+        lastAccessToken = token;
+        chat = null; // chat session is bound to the old client — must reset
+        log(`GoogleGenAI client (re)initialized (token=...${token.slice(-6)})`);
+    }
+
+    ensureChat(systemPrompt, model);
+}
+
 // ── Task execution ────────────────────────────────────────────────────────────
 
 async function runTask(msg) {
@@ -338,15 +411,7 @@ async function runTask(msg) {
     const systemPrompt = msg.systemPrompt || '';
 
     try {
-        // Lazy-init GoogleGenAI on first task so startup is fast.
-        // @google/genai accepts an auth object with getAccessToken() — OAuth2Client
-        // from google-auth-library satisfies this interface and handles silent refresh.
-        if (!ai) {
-            oauth2Client = initAuth();
-            ai = new GoogleGenAI({ auth: oauth2Client });
-        }
-
-        ensureChat(systemPrompt, model);
+        await ensureAiClient(systemPrompt, model);
 
         emit({ type: 'ack' });
         emit({ type: 'turn.started' });
@@ -393,9 +458,20 @@ async function runTask(msg) {
     }
 }
 
-// Runs one model turn, handles function call round-trips recursively.
-// Calls onText(chunk) for each text delta, onUsage(meta) once with final usage.
-async function runConversationTurn(messageParts, onText, onUsage) {
+/**
+ * Runs one model turn, handles function call round-trips recursively.
+ * Calls onText(chunk) for each text delta, onUsage(meta) once with final usage.
+ *
+ * @param {number} depth - current recursion depth; throws when >= MAX_FUNCTION_CALL_DEPTH.
+ */
+async function runConversationTurn(messageParts, onText, onUsage, depth = 0) {
+    if (depth >= MAX_FUNCTION_CALL_DEPTH) {
+        throw new Error(
+            `Function call depth limit (${MAX_FUNCTION_CALL_DEPTH}) exceeded — ` +
+            `possible infinite tool call loop`
+        );
+    }
+
     // @google/genai sendMessageStream accepts: string | Part | Part[]
     const input = messageParts.length === 1 && 'text' in messageParts[0]
         ? messageParts[0].text   // plain string shortcut for text-only messages
@@ -457,7 +533,7 @@ async function runConversationTurn(messageParts, onText, onUsage) {
     }
 
     // Send tool results back to the model for the next turn
-    await runConversationTurn(responseParts, onText, onUsage);
+    await runConversationTurn(responseParts, onText, onUsage, depth + 1);
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────

@@ -11,18 +11,27 @@ namespace Fleet.Agent.Services;
 
 /// <summary>
 /// Spawns a fresh `gemini` CLI process per task with native session persistence.
-/// System prompt is delivered via a temp file pointed to by GEMINI_SYSTEM_MD.
-/// Task text is written to process stdin; responses stream from stdout as NDJSON
-/// (--output-format stream-json).
+/// System prompt is delivered via a temp file pointed to by GEMINI_SYSTEM_MD on the
+/// first (or post-restart) task only. Task text is written to process stdin; responses
+/// stream from stdout as NDJSON (--output-format stream-json).
 ///
 /// Session persistence via --resume:
-///   The CLI emits an `init` event with a session_id on first invocation. Subsequent
-///   tasks pass `--resume <uuid>` so the model context (including the system prompt
-///   already baked into the session) is not re-transmitted. This avoids resending the
-///   full 27k-char system prompt on every task.
-///   Session ID is held in _lastSessionId (in-memory; resets on container restart).
-///   A container restart begins a fresh session on the first task, then resumes from
-///   that new session onward.
+///   First task: spawns without --resume; CLI emits an `init` event containing
+///   session_id; GeminiExecutor stores it in _lastSessionId.
+///   Subsequent tasks: spawns with `--resume <uuid>`. The saved session already
+///   contains the system prompt history, so GEMINI_SYSTEM_MD is NOT set — this is
+///   the key token-saving mechanism (avoids re-sending the ~27k-char system prompt).
+///   Post-restart (session file on disk but _lastSessionId == null): spawns with
+///   `--resume` (no UUID) so the CLI picks up the latest session from disk.
+///   Stale session (resume fails, non-zero exit): clears _lastSessionId and retries
+///   once as a fresh session with GEMINI_SYSTEM_MD restored.
+///   Thread-safety: GeminiExecutor is per-agent; TaskManager serialises task
+///   execution so only one RunCliAsync is live at a time. No lock needed; the
+///   volatile keyword prevents stale reads across task boundaries.
+///
+/// Auth: OAuth credentials at ~/.gemini/oauth_creds.json (writable bind mount).
+/// Two-level refresh: (1) the CLI's google-auth-library refreshes tokens in-place on expiry;
+/// (2) AuthTokenRefreshWorkflow provides a host-side safety net every 30 min.
 ///
 /// Auth: OAuth credentials at ~/.gemini/oauth_creds.json (writable bind mount).
 /// Two-level refresh: (1) the CLI's google-auth-library refreshes tokens in-place on expiry;
@@ -43,7 +52,10 @@ public sealed class GeminiExecutor : IAgentExecutor
     private readonly PromptBuilder _promptBuilder;
     private readonly ILogger<GeminiExecutor> _logger;
 
-    private string? _lastSessionId;
+    // volatile: prevents stale reads if the runtime ever reorders writes across task
+    // boundaries. TaskManager serialises execution per agent so no concurrent writes,
+    // but volatile makes the guarantee explicit in the code.
+    private volatile string? _lastSessionId;
     private DateTimeOffset _lastActivity = DateTimeOffset.MinValue;
 
     // Gemini CLI per-task spawn: no persistent process, no restart state.
@@ -118,8 +130,9 @@ public sealed class GeminiExecutor : IAgentExecutor
         IReadOnlyList<MessageDocument>? documents,
         [EnumeratorCancellation] CancellationToken ct)
     {
-        // Write system prompt to a temp file. GEMINI_SYSTEM_MD env var points the CLI at it.
-        // The file is deleted in the finally block regardless of outcome.
+        // System prompt temp file — only written and set in GEMINI_SYSTEM_MD for fresh
+        // sessions (no resume). Deleted in finally regardless; File.Delete is a no-op
+        // when the file was never written.
         var systemPromptPath = Path.Combine(Path.GetTempPath(), $"gemini-system-{Guid.NewGuid():N}.md");
 
         // Per-task attachment staging dir. Each accepted image/PDF/audio is copied here so the
@@ -134,18 +147,31 @@ public sealed class GeminiExecutor : IAgentExecutor
         // using it would measure near-zero — last-event-to-exit gap, not task duration.)
         var startTime = DateTimeOffset.UtcNow;
 
-        // Snapshot the session ID before the call starts. If a prior task established a
-        // session, we resume it so the system prompt (already baked into that session's
-        // history) is not re-transmitted to the model.
+        // Snapshot session state before this call starts.
+        //   resumeId != null  → resume an in-memory session from a prior task this process lifetime
+        //   resumeId is null && HasExistingSessionFiles() → post-restart: session files on disk,
+        //     use --resume with no UUID so the CLI picks up the latest saved session
+        //   resumeId is null && no files → first-ever task: start a fresh session
         var resumeId = _lastSessionId;
+        var useLatestSessionResume = resumeId is null && HasExistingSessionFiles();
+        var usedResume = resumeId is not null || useLatestSessionResume;
+
+        // Set after the try/finally to recursively retry with a fresh session when --resume fails.
+        var shouldRetry = false;
 
         var accumulator = new StringBuilder();
         var stderrLines = new StringBuilder();
         var turnStarted = false;
+        var sessionIdCaptured = false; // set to true when init event yields a session_id
 
         try
         {
-            await File.WriteAllTextAsync(systemPromptPath, _promptBuilder.BuildSystemPrompt(), ct);
+            // Only write and apply the system prompt for fresh sessions. On resumed sessions,
+            // the prompt is already baked into the saved session history — re-applying
+            // GEMINI_SYSTEM_MD would re-transmit the full ~27k-char prompt, defeating the
+            // purpose of --resume. GEMINI_SYSTEM_MD is intentionally left unset on resume.
+            if (!usedResume)
+                await File.WriteAllTextAsync(systemPromptPath, _promptBuilder.BuildSystemPrompt(), ct);
 
             // Stage attachments and build the @-reference prompt fragment. CWD is set to
             // attachmentDir so "@./<file>" resolves correctly inside gemini-cli's
@@ -154,40 +180,14 @@ public sealed class GeminiExecutor : IAgentExecutor
             var atRefs = StageAttachments(images, documents, attachmentDir);
 
             var model = string.IsNullOrWhiteSpace(_config.Model) ? "gemini-2.5-flash" : _config.Model;
-
-            // Prompt assembly:
-            //   - The user's task text goes on stdin (avoids ARG_MAX for long prompts).
-            //   - The @-references go in the -p argument. handleAtCommand only resolves @-syntax
-            //     present in the -p value (verified empirically on v0.40.1). The CLI combines
-            //     stdin + -p before sending to the model, so the model sees both: task text
-            //     plus the inlineData from each attachment.
-            //   - When there are no attachments, omit -p entirely; the CLI reads stdin normally.
-            var argList = new List<string>
-            {
-                "--output-format", "stream-json",
-                "-m", model,
-                "--yolo",
-            };
-
-            // Resume the previous session so the system prompt already baked into it is not
-            // re-sent. On the very first task (resumeId is null) the CLI starts a new session
-            // and emits an `init` event with the assigned session_id, which we capture below.
-            if (resumeId is not null)
-            {
-                argList.Add("--resume");
-                argList.Add(resumeId);
-            }
+            var argList = BuildArgList(resumeId, useLatestSessionResume, atRefs, model);
 
             _logger.LogInformation(
                 "GeminiExecutor: {Mode} (sessionId={SessionId})",
-                resumeId is null ? "starting new session" : "resuming session",
-                resumeId ?? "none");
-
-            if (atRefs.Count > 0)
-            {
-                argList.Add("-p");
-                argList.Add("Attachments to consider: " + string.Join(" ", atRefs));
-            }
+                resumeId is not null ? "resuming session" :
+                useLatestSessionResume ? "resuming latest session (post-restart)" :
+                "starting new session",
+                resumeId ?? (useLatestSessionResume ? "(latest)" : "none"));
 
             var psi = new ProcessStartInfo
             {
@@ -197,6 +197,7 @@ public sealed class GeminiExecutor : IAgentExecutor
                 // --yolo (-y): suppress interactive MCP tool-call approval prompts.
                 //   Without this, the CLI blocks waiting for user confirmation on every tool call
                 //   — the agent hangs indefinitely in headless mode.
+                // --resume (optional): resume prior session so system prompt is not re-sent.
                 // -p (optional): when attachments are present, carries the @-reference fragment
                 //   that triggers handleAtCommand's binary inlineData path.
                 UseShellExecute = false,
@@ -209,7 +210,9 @@ public sealed class GeminiExecutor : IAgentExecutor
 
             // GEMINI_SYSTEM_MD: CLI reads this env var at startup and treats the file content
             // as the system instruction. --system-prompt-file does NOT exist in v0.40.1 (verified).
-            psi.Environment["GEMINI_SYSTEM_MD"] = systemPromptPath;
+            // Only set for fresh (non-resume) sessions — see comment above where the file is written.
+            if (!usedResume)
+                psi.Environment["GEMINI_SYSTEM_MD"] = systemPromptPath;
 
             // GEMINI_CLI_TRUST_WORKSPACE: prevents the CLI from downgrading --yolo to "default"
             // approval mode when the working directory is not in its trusted-directory list.
@@ -289,6 +292,7 @@ public sealed class GeminiExecutor : IAgentExecutor
                     if (!string.IsNullOrEmpty(sid))
                     {
                         _lastSessionId = sid;
+                        sessionIdCaptured = true;
                         _logger.LogInformation("GeminiExecutor: session {SessionId} active", sid);
                     }
                 }
@@ -316,6 +320,13 @@ public sealed class GeminiExecutor : IAgentExecutor
 
             if (process.ExitCode == 0)
             {
+                // Warn if the init event never arrived — session ID was not captured.
+                // This means the next task will start a new session (system prompt re-sent).
+                // Observable via this log line; investigate CLI version or output-format changes.
+                if (!sessionIdCaptured)
+                    _logger.LogWarning(
+                        "GeminiExecutor: init event with session_id not received — next task will start a new session (system prompt will be re-sent)");
+
                 var finalText = accumulator.ToString();
                 yield return new AgentProgress
                 {
@@ -328,17 +339,31 @@ public sealed class GeminiExecutor : IAgentExecutor
             }
             else
             {
-                var errorMsg = stderrLines.Length > 0
-                    ? stderrLines.ToString().Trim()
-                    : $"gemini CLI exited with code {process.ExitCode}";
-                yield return new AgentProgress
+                if (usedResume)
                 {
-                    EventType = "result",
-                    Summary = errorMsg,
-                    FinalResult = errorMsg,
-                    IsErrorResult = true,
-                    IsSignificant = true,
-                };
+                    // --resume referenced a stale or missing session file — clear the ID and
+                    // retry once as a fresh session so the task completes. The retry will
+                    // re-write GEMINI_SYSTEM_MD and start a new session.
+                    _lastSessionId = null;
+                    _logger.LogWarning(
+                        "GeminiExecutor: --resume failed (sessionId={SessionId}), retrying as fresh session",
+                        resumeId ?? "(latest)");
+                    shouldRetry = true;
+                }
+                else
+                {
+                    var errorMsg = stderrLines.Length > 0
+                        ? stderrLines.ToString().Trim()
+                        : $"gemini CLI exited with code {process.ExitCode}";
+                    yield return new AgentProgress
+                    {
+                        EventType = "result",
+                        Summary = errorMsg,
+                        FinalResult = errorMsg,
+                        IsErrorResult = true,
+                        IsSignificant = true,
+                    };
+                }
             }
         }
         finally
@@ -363,6 +388,79 @@ public sealed class GeminiExecutor : IAgentExecutor
             }
             catch { /* non-fatal */ }
         }
+
+        // Stale-resume retry: executed after the finally block so temp files are cleaned up
+        // before the new process starts. Only reached when --resume exited non-zero.
+        if (shouldRetry)
+        {
+            await foreach (var p in RunCliAsync(input, images, documents, ct))
+                yield return p;
+        }
+    }
+
+    // ── Arg list builder (internal for unit testing) ──────────────────────────
+
+    /// <summary>
+    /// Builds the gemini CLI argument list for a task.
+    /// Extracted as an internal method so tests can verify --resume presence without
+    /// spawning a real process.
+    /// </summary>
+    internal static List<string> BuildArgList(
+        string? resumeId,
+        bool useLatestSessionResume,
+        IReadOnlyList<string> atRefs,
+        string model)
+    {
+        // Prompt assembly:
+        //   - The user's task text goes on stdin (avoids ARG_MAX for long prompts).
+        //   - The @-references go in the -p argument. handleAtCommand only resolves @-syntax
+        //     present in the -p value (verified empirically on v0.40.1). The CLI combines
+        //     stdin + -p before sending to the model, so the model sees both: task text
+        //     plus the inlineData from each attachment.
+        //   - When there are no attachments, omit -p entirely; the CLI reads stdin normally.
+        var args = new List<string>
+        {
+            "--output-format", "stream-json",
+            "-m", model,
+            "--yolo",
+        };
+
+        if (resumeId is not null)
+        {
+            // Resume a specific session by UUID (in-memory session from a prior task).
+            args.Add("--resume");
+            args.Add(resumeId);
+        }
+        else if (useLatestSessionResume)
+        {
+            // Post-restart: session files exist on disk but we have no in-memory UUID.
+            // --resume with no UUID argument lets the CLI pick up the latest saved session.
+            args.Add("--resume");
+        }
+
+        if (atRefs.Count > 0)
+        {
+            args.Add("-p");
+            args.Add("Attachments to consider: " + string.Join(" ", atRefs));
+        }
+
+        return args;
+    }
+
+    // ── Session file detection (internal for unit testing) ───────────────────
+
+    /// <summary>
+    /// Returns true if any gemini session JSON files exist under ~/.gemini/tmp/.
+    /// Used on first post-restart task to decide whether to pass --resume (no UUID)
+    /// so the CLI picks up the latest saved session from disk.
+    /// </summary>
+    internal static bool HasExistingSessionFiles()
+    {
+        var geminiTmpDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".gemini", "tmp");
+        return Directory.Exists(geminiTmpDir)
+            && Directory.EnumerateFiles(geminiTmpDir, "*.json", SearchOption.AllDirectories).Any();
     }
 
     // ── Attachment staging ────────────────────────────────────────────────────

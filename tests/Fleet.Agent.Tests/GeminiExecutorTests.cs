@@ -225,6 +225,84 @@ public class GeminiExecutorTests
         Assert.False(result.IsSignificant);
     }
 
+    // ── BuildArgList: session resume behavior ─────────────────────────────────
+
+    [Fact]
+    public void BuildArgList_NoSession_DoesNotIncludeResume()
+    {
+        var args = GeminiExecutor.BuildArgList(
+            resumeId: null,
+            useLatestSessionResume: false,
+            atRefs: Array.Empty<string>(),
+            model: "gemini-2.5-flash");
+
+        Assert.DoesNotContain("--resume", args);
+    }
+
+    [Fact]
+    public void BuildArgList_WithSessionId_IncludesResumeWithUuid()
+    {
+        var uuid = "abc-123-def";
+        var args = GeminiExecutor.BuildArgList(
+            resumeId: uuid,
+            useLatestSessionResume: false,
+            atRefs: Array.Empty<string>(),
+            model: "gemini-2.5-flash");
+
+        var resumeIdx = args.IndexOf("--resume");
+        Assert.True(resumeIdx >= 0, "--resume should be present");
+        Assert.Equal(uuid, args[resumeIdx + 1]); // UUID immediately follows --resume
+    }
+
+    [Fact]
+    public void BuildArgList_LatestSessionResume_IncludesResumeWithoutUuid()
+    {
+        // Post-restart path: --resume with no UUID argument so CLI picks latest session.
+        var args = GeminiExecutor.BuildArgList(
+            resumeId: null,
+            useLatestSessionResume: true,
+            atRefs: Array.Empty<string>(),
+            model: "gemini-2.5-flash");
+
+        var resumeIdx = args.IndexOf("--resume");
+        Assert.True(resumeIdx >= 0, "--resume should be present");
+        // The argument immediately after --resume must NOT be another flag or UUID-like string
+        // if it exists — for no-UUID resume, --resume is the last of the resume args.
+        // Verify: either --resume is the last arg, or the next arg is -p (attachments) or
+        // --output-format or -m or --yolo (i.e., not a UUID value).
+        if (resumeIdx + 1 < args.Count)
+            Assert.StartsWith("-", args[resumeIdx + 1]); // next arg is a flag, not a UUID
+    }
+
+    [Fact]
+    public void BuildArgList_AlwaysIncludesOutputFormatAndModel()
+    {
+        var args = GeminiExecutor.BuildArgList(
+            resumeId: null,
+            useLatestSessionResume: false,
+            atRefs: Array.Empty<string>(),
+            model: "gemini-2.5-pro");
+
+        Assert.Contains("--output-format", args);
+        Assert.Contains("stream-json", args);
+        Assert.Contains("-m", args);
+        Assert.Contains("gemini-2.5-pro", args);
+        Assert.Contains("--yolo", args);
+    }
+
+    [Fact]
+    public void BuildArgList_WithAtRefs_IncludesDashP()
+    {
+        var args = GeminiExecutor.BuildArgList(
+            resumeId: null,
+            useLatestSessionResume: false,
+            atRefs: new[] { "@./img.jpg" },
+            model: "gemini-2.5-flash");
+
+        Assert.Contains("-p", args);
+        Assert.Contains("@./img.jpg", args[args.IndexOf("-p") + 1]);
+    }
+
     // ── MapEvent: no-payload events ───────────────────────────────────────────
 
     [Fact]

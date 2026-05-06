@@ -130,7 +130,7 @@ The rest of this README is the plumbing — configuration, deployment, troublesh
 | Linux | Claude / Codex | ⚠️ Expected to work (all containers are linux/amd64 or linux/arm64); untested at release |
 | Windows | Claude / Codex | ⚠️ Docker Desktop + WSL2 is the intended path. Unverified |
 | Any | Codex | ⚠️ Code paths ship in `seed.example.json`, but Claude has seen far more wall-clock time in real workflows |
-| Any | Gemini | ⚠️ Supported via `gemini` CLI headless mode. OAuth-only (no API key needed). See `docs/providers/gemini.md` |
+| Any | Gemini | ⚠️ Supported via `gemini` CLI headless mode. Known trade-offs vs claude/codex: (1) no session persistence in headless mode — system prompt is re-sent on every task, so per-task token cost is higher; (2) PDFs are not passed as native content blocks — agent reads from disk via `@`-reference hints; (3) HTTP/SSE MCP transport only — stdio MCP servers are filtered out; (4) OAuth-only, no API key fallback — personal Google account required. See `docs/providers/gemini.md` for full details. |
 
 If you run Phleet on Windows, on a Linux host, or with Codex or Gemini as the primary provider and hit something broken — PRs and issue reports are very welcome. Small fixes and "it works on my box" confirmations are just as valuable as new features here.
 

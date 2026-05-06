@@ -21,15 +21,16 @@
  *     {"type":"error","message":"..."}
  *
  * Auth: OAuth credentials at ~/.gemini/oauth_creds.json (writable bind mount).
- * google-auth-library's OAuth2Client manages token refresh. An access token is fetched
- * before each task via getAccessToken() and injected into the GoogleGenAI client via
- * httpOptions.headers (the documented, SDK-supported mechanism for non-API-key auth on
- * the Gemini Developer API endpoint). The GoogleGenAI client is re-created whenever the
- * access token changes (typically every ~1h) so the Authorization header stays fresh.
- * The credentials file is also re-read before each task to pick up out-of-band updates
- * from AuthTokenRefreshWorkflow (which rewrites oauth_creds.json from outside the bridge
- * process). Refreshed tokens from within the bridge are persisted back via the 'tokens'
- * event so the writable bind mount and container restarts both stay in sync.
+ * Authentication is handled by intercepting globalThis.fetch — every HTTP request the
+ * @google/genai SDK makes has a fresh `Authorization: Bearer <token>` injected by
+ * google-auth-library's getAccessToken() (which caches and auto-refreshes the token).
+ * GoogleGenAI is created once with a placeholder apiKey to suppress the "API key should
+ * be set" warning; the fetch interceptor removes that placeholder and substitutes the
+ * live bearer token on each request. The GoogleGenAI instance and Chat session are NEVER
+ * recreated due to token rotation — chat history accumulates across the full process
+ * lifetime. Credentials are re-read from file before each task so that out-of-band
+ * updates from AuthTokenRefreshWorkflow (which rewrites oauth_creds.json) are picked up
+ * without a bridge restart.
  *
  * MCP: Reads server config from --mcp-config (same .mcp.json as codex-bridge).
  * Connects to HTTP MCP servers using the Streamable HTTP transport (JSON-RPC over POST).
@@ -40,7 +41,7 @@
  *
  * System prompt: delivered once via the JSON envelope's systemPrompt field and set as
  * systemInstruction on the Chat. The Chat session is re-created only when the system
- * prompt, model, or access token changes — otherwise history accumulates naturally.
+ * prompt or model changes — otherwise history accumulates naturally.
  */
 
 import { GoogleGenAI } from '@google/genai';
@@ -72,9 +73,8 @@ for (let i = 2; i < process.argv.length; i++) {
 
 // ── Shared state ──────────────────────────────────────────────────────────────
 let oauth2Client = null;   // google-auth-library OAuth2Client
-let ai = null;             // GoogleGenAI instance (re-created when access token changes)
-let lastAccessToken = null; // tracks current token; triggers ai re-init on change
-let chat = null;           // Current Chat session (holds conversation history)
+let ai = null;             // GoogleGenAI instance — created ONCE, never recreated
+let chat = null;           // Current Chat session — recreated only on prompt/model change
 let currentSystemPrompt = null;
 let currentModel = null;
 
@@ -92,11 +92,12 @@ function log(msg) {
     process.stderr.write(`[gemini-bridge] ${msg}\n`);
 }
 
-// ── OAuth helpers ─────────────────────────────────────────────────────────────
+// ── OAuth setup ───────────────────────────────────────────────────────────────
 
 /**
  * Reads the credentials file and applies the values to client via setCredentials().
- * Safe to call even when the file has just been updated out-of-band.
+ * Called at initAuth() time and before each task to pick up AuthTokenRefreshWorkflow
+ * out-of-band updates.
  */
 function applyCredsFromFile(client) {
     if (!fs.existsSync(CREDS_PATH)) return;
@@ -119,10 +120,19 @@ function applyCredsFromFile(client) {
 }
 
 /**
- * Creates and initialises the OAuth2Client from the credentials file.
- * Called once on the first task; subsequent tasks call applyCredsFromFile() directly.
+ * Creates and initialises the OAuth2Client from the credentials file, then installs
+ * the fetch interceptor and creates the GoogleGenAI instance (both done exactly once).
+ *
+ * Auth mechanism: we intercept globalThis.fetch to inject a fresh
+ * `Authorization: Bearer <token>` on every HTTP request the SDK makes.  This approach:
+ *  - Keeps GoogleGenAI and Chat stable forever (no recreation on token rotation)
+ *  - Provides a fresh token on every request via getAccessToken() caching in
+ *    google-auth-library (auto-refreshes when near expiry using the refresh_token)
+ *  - Suppresses the SDK's "API key should be set" warning via a placeholder apiKey;
+ *    the fetch interceptor removes the placeholder `x-goog-api-key` header and
+ *    substitutes the live bearer token, so the API sees only the correct OAuth auth
  */
-function initAuth() {
+function initBridge() {
     if (!fs.existsSync(CREDS_PATH)) {
         throw new Error(
             `OAuth credentials not found at ${CREDS_PATH}. ` +
@@ -136,25 +146,65 @@ function initAuth() {
     // Persist refreshed tokens back to oauth_creds.json so the writable bind mount
     // stays in sync. google-auth-library emits 'tokens' whenever it silently refreshes.
     client.on('tokens', (tokens) => {
-        try {
-            const existing = fs.existsSync(CREDS_PATH)
-                ? JSON.parse(fs.readFileSync(CREDS_PATH, 'utf8'))
-                : {};
-            if (tokens.access_token)  existing.access_token  = tokens.access_token;
-            if (tokens.expiry_date)   existing.expiry_date   = tokens.expiry_date;
-            if (tokens.id_token)      existing.id_token      = tokens.id_token;
-            if (tokens.refresh_token) existing.refresh_token = tokens.refresh_token;
-            // Atomic write (copy-then-rename, matching PR #137 pattern)
-            const tmpPath = CREDS_PATH + '.tmp';
-            fs.writeFileSync(tmpPath, JSON.stringify(existing, null, 2), { mode: 0o600 });
-            fs.renameSync(tmpPath, CREDS_PATH);
-            log('Persisted refreshed OAuth tokens');
-        } catch (err) {
-            log(`WARN: failed to persist refreshed tokens: ${err.message}`);
-        }
+        const persist = (retriesLeft) => {
+            try {
+                const existing = fs.existsSync(CREDS_PATH)
+                    ? JSON.parse(fs.readFileSync(CREDS_PATH, 'utf8'))
+                    : {};
+                if (tokens.access_token)  existing.access_token  = tokens.access_token;
+                if (tokens.expiry_date)   existing.expiry_date   = tokens.expiry_date;
+                if (tokens.id_token)      existing.id_token      = tokens.id_token;
+                if (tokens.refresh_token) existing.refresh_token = tokens.refresh_token;
+                // Atomic write (copy-then-rename, matching PR #137 pattern)
+                const tmpPath = CREDS_PATH + '.tmp';
+                fs.writeFileSync(tmpPath, JSON.stringify(existing, null, 2), { mode: 0o600 });
+                fs.renameSync(tmpPath, CREDS_PATH);
+                log('Persisted refreshed OAuth tokens');
+            } catch (err) {
+                // EBUSY can occur when AuthTokenRefreshWorkflow is writing concurrently.
+                // Retry once after 200 ms; after that, log and give up (tokens stay in memory).
+                if (retriesLeft > 0 && err.code === 'EBUSY') {
+                    setTimeout(() => persist(retriesLeft - 1), 200);
+                } else {
+                    log(`WARN: failed to persist refreshed tokens: ${err.message}`);
+                }
+            }
+        };
+        persist(1);
     });
 
-    return client;
+    oauth2Client = client;
+
+    // Install a one-time fetch interceptor that injects the OAuth bearer token on every
+    // HTTP request made by the @google/genai SDK.  The SDK uses globalThis.fetch (Node 18+
+    // built-in).  We wrap it here, before the GoogleGenAI instance is created, so the SDK
+    // picks up the wrapper for its entire lifetime.
+    const baseFetch = globalThis.fetch;
+    globalThis.fetch = async function oauthFetch(url, init = {}) {
+        let token;
+        try {
+            const result = await oauth2Client.getAccessToken();
+            token = result.token;
+        } catch (err) {
+            log(`WARN: getAccessToken() failed — request may be unauthenticated: ${err.message}`);
+        }
+
+        // Build a new Headers object so we can mutate without affecting the caller.
+        const headers = new Headers(init.headers);
+        if (token) headers.set('Authorization', `Bearer ${token}`);
+        // Remove the SDK-injected placeholder API key (set when apiKey is 'oauth-placeholder')
+        // so the Gemini Developer API authenticates via the bearer token, not an API key.
+        headers.delete('x-goog-api-key');
+
+        return baseFetch(url, { ...init, headers });
+    };
+
+    // Create GoogleGenAI exactly once.  The placeholder apiKey suppresses the SDK's
+    // "API key should be set when using the Gemini API" warning; the fetch interceptor
+    // above removes the placeholder from every outgoing request and substitutes the real
+    // OAuth bearer token, so the API endpoint receives correct credentials.
+    ai = new GoogleGenAI({ apiKey: 'oauth-placeholder' });
+    log('GoogleGenAI initialized with OAuth fetch interceptor');
 }
 
 // ── MCP Streamable HTTP client ────────────────────────────────────────────────
@@ -334,7 +384,7 @@ async function callMcpTool(toolName, args) {
     return { result: text };
 }
 
-// ── AI client + chat session management ──────────────────────────────────────
+// ── Chat session management ───────────────────────────────────────────────────
 
 function allFunctionDeclarations() {
     return Object.values(mcpServers).flatMap(s => s.functionDeclarations);
@@ -358,51 +408,6 @@ function ensureChat(systemPrompt, model) {
         `systemPrompt=${systemPrompt ? systemPrompt.length + ' chars' : 'none'})`);
 }
 
-/**
- * Ensures oauth2Client is initialised and up to date with the creds file, then
- * ensures the GoogleGenAI client uses a current access token.
- *
- * Auth flow:
- *  1. First call: initAuth() reads ~/.gemini/oauth_creds.json and constructs oauth2Client.
- *  2. Subsequent calls: applyCredsFromFile() re-reads the file into the existing client.
- *     This picks up any out-of-band updates from AuthTokenRefreshWorkflow (which rewrites
- *     oauth_creds.json from outside the bridge) without requiring a bridge restart.
- *  3. getAccessToken() returns the current access token, auto-refreshing via
- *     google-auth-library if the token is within its expiry window.
- *  4. If the token differs from lastAccessToken, a new GoogleGenAI instance is created
- *     with the fresh bearer token injected via httpOptions.headers (the documented
- *     mechanism for non-API-key auth on the Gemini Developer API endpoint).
- *     The chat session is reset on token change since it is bound to the AI client.
- */
-async function ensureAiClient(systemPrompt, model) {
-    if (!oauth2Client) {
-        // First task: construct client from credentials file.
-        oauth2Client = initAuth();
-    } else {
-        // Subsequent tasks: reload file to pick up AuthTokenRefreshWorkflow updates.
-        applyCredsFromFile(oauth2Client);
-    }
-
-    const { token } = await oauth2Client.getAccessToken();
-    if (!token) throw new Error('Failed to obtain access token from OAuth2Client. Check ~/.gemini/oauth_creds.json.');
-
-    if (!ai || token !== lastAccessToken) {
-        // Create a new GoogleGenAI client with the fresh access token injected as a
-        // bearer Authorization header. This uses the documented httpOptions.headers API
-        // (GoogleGenAIOptions.httpOptions.headers: Record<string, string>) — no apiKey
-        // is required on Node runtimes when auth is provided via headers.
-        // Reference: @google/genai v1.x GoogleGenAIOptions (dist/genai.d.ts).
-        ai = new GoogleGenAI({
-            httpOptions: { headers: { 'Authorization': `Bearer ${token}` } },
-        });
-        lastAccessToken = token;
-        chat = null; // chat session is bound to the old client — must reset
-        log(`GoogleGenAI client (re)initialized (token=...${token.slice(-6)})`);
-    }
-
-    ensureChat(systemPrompt, model);
-}
-
 // ── Task execution ────────────────────────────────────────────────────────────
 
 async function runTask(msg) {
@@ -411,7 +416,16 @@ async function runTask(msg) {
     const systemPrompt = msg.systemPrompt || '';
 
     try {
-        await ensureAiClient(systemPrompt, model);
+        if (!ai) {
+            // First task: one-time bridge initialisation.
+            initBridge();
+        } else {
+            // Subsequent tasks: reload creds file so getAccessToken() inside the fetch
+            // interceptor uses the latest credentials from AuthTokenRefreshWorkflow.
+            applyCredsFromFile(oauth2Client);
+        }
+
+        ensureChat(systemPrompt, model);
 
         emit({ type: 'ack' });
         emit({ type: 'turn.started' });

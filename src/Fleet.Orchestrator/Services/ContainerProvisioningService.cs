@@ -862,6 +862,21 @@ public sealed class ContainerProvisioningService(
         return JsonSerializer.Serialize(obj, IndentedJson);
     }
 
+    /// <summary>
+    /// Appends ?agent={agentName} to a fleet-internal MCP URL, stripping any pre-existing
+    /// query string first. Prevents double-appending if the URL was stored in the DB
+    /// with an old ?agent= already attached (e.g. after a manual DB edit or re-provision).
+    /// Note: ALL existing query params are dropped, not just ?agent=. Fleet-internal MCP
+    /// URLs never carry other query params, so this is intentional and safe.
+    /// </summary>
+    internal static string WithAgentParam(string url, string agentName)
+    {
+        var trimmed = url.TrimEnd('/');
+        var questionIdx = trimmed.IndexOf('?');
+        var basePath = (questionIdx >= 0 ? trimmed[..questionIdx] : trimmed).TrimEnd('/');
+        return $"{basePath}?agent={agentName}";
+    }
+
     private static string GenerateMcpJson(Agent agent, string fleetMemoryMcpUrl)
     {
         var mcpServers = agent.McpEndpoints
@@ -872,8 +887,10 @@ public sealed class ContainerProvisioningService(
                 {
                     // Append ?agent={name} to fleet-telegram, fleet-memory, and fleet-temporal URLs
                     // so each server can identify the calling agent without relying on the LLM to pass it.
+                    // WithAgentParam strips any existing query string before appending to prevent
+                    // double-appending when the URL was stored in the DB with ?agent= already.
                     var url = (e.McpName == "fleet-telegram" || e.McpName == "fleet-memory" || e.McpName == "fleet-temporal")
-                        ? $"{e.Url.TrimEnd('/')}?agent={agent.Name}"
+                        ? WithAgentParam(e.Url, agent.Name)
                         : e.Url;
                     return (object)new { type = e.TransportType, url };
                 });
@@ -882,7 +899,7 @@ public sealed class ContainerProvisioningService(
         // This is the provisioning-time enforcement point for mandatory read access.
         if (!mcpServers.ContainsKey("fleet-memory"))
         {
-            var url = $"{fleetMemoryMcpUrl.TrimEnd('/')}?agent={agent.Name}";
+            var url = WithAgentParam(fleetMemoryMcpUrl, agent.Name);
             mcpServers["fleet-memory"] = new { type = "sse", url };
         }
 

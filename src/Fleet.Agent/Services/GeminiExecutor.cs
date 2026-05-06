@@ -10,14 +10,19 @@ using Microsoft.Extensions.Options;
 namespace Fleet.Agent.Services;
 
 /// <summary>
-/// Spawns a fresh `gemini` CLI process per task.
+/// Spawns a fresh `gemini` CLI process per task with native session persistence.
 /// System prompt is delivered via a temp file pointed to by GEMINI_SYSTEM_MD.
 /// Task text is written to process stdin; responses stream from stdout as NDJSON
 /// (--output-format stream-json).
 ///
-/// Fresh process per task = cross-turn history bleed is structurally impossible.
-/// No module-level chat state; no session objects; no process reuse between ExecuteAsync calls.
-/// Matches the subprocess-per-task isolation of ClaudeExecutor and CodexExecutor.
+/// Session persistence via --resume:
+///   The CLI emits an `init` event with a session_id on first invocation. Subsequent
+///   tasks pass `--resume <uuid>` so the model context (including the system prompt
+///   already baked into the session) is not re-transmitted. This avoids resending the
+///   full 27k-char system prompt on every task.
+///   Session ID is held in _lastSessionId (in-memory; resets on container restart).
+///   A container restart begins a fresh session on the first task, then resumes from
+///   that new session onward.
 ///
 /// Auth: OAuth credentials at ~/.gemini/oauth_creds.json (writable bind mount).
 /// Two-level refresh: (1) the CLI's google-auth-library refreshes tokens in-place on expiry;
@@ -73,7 +78,6 @@ public sealed class GeminiExecutor : IAgentExecutor
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         _lastActivity = DateTimeOffset.UtcNow;
-        _lastSessionId = null; // no session resumption for CLI-per-task
 
         await foreach (var progress in RunCliAsync(task, images, documents, ct))
         {
@@ -130,6 +134,11 @@ public sealed class GeminiExecutor : IAgentExecutor
         // using it would measure near-zero — last-event-to-exit gap, not task duration.)
         var startTime = DateTimeOffset.UtcNow;
 
+        // Snapshot the session ID before the call starts. If a prior task established a
+        // session, we resume it so the system prompt (already baked into that session's
+        // history) is not re-transmitted to the model.
+        var resumeId = _lastSessionId;
+
         var accumulator = new StringBuilder();
         var stderrLines = new StringBuilder();
         var turnStarted = false;
@@ -159,6 +168,21 @@ public sealed class GeminiExecutor : IAgentExecutor
                 "-m", model,
                 "--yolo",
             };
+
+            // Resume the previous session so the system prompt already baked into it is not
+            // re-sent. On the very first task (resumeId is null) the CLI starts a new session
+            // and emits an `init` event with the assigned session_id, which we capture below.
+            if (resumeId is not null)
+            {
+                argList.Add("--resume");
+                argList.Add(resumeId);
+            }
+
+            _logger.LogInformation(
+                "GeminiExecutor: {Mode} (sessionId={SessionId})",
+                resumeId is null ? "starting new session" : "resuming session",
+                resumeId ?? "none");
+
             if (atRefs.Count > 0)
             {
                 argList.Add("-p");
@@ -254,6 +278,19 @@ public sealed class GeminiExecutor : IAgentExecutor
                     // Non-JSON lines (info/warning from CLI startup) — skip, log at Warning.
                     _logger.LogWarning("GeminiExecutor: non-JSON stdout line: {Line}", line);
                     continue;
+                }
+
+                // Capture session ID from the init event so we can resume this session
+                // on the next task, avoiding re-transmission of the system prompt.
+                if (ev.TryGetProperty("type", out var initTypeProp) && initTypeProp.GetString() is "init"
+                    && ev.TryGetProperty("session_id", out var sidProp))
+                {
+                    var sid = sidProp.GetString();
+                    if (!string.IsNullOrEmpty(sid))
+                    {
+                        _lastSessionId = sid;
+                        _logger.LogInformation("GeminiExecutor: session {SessionId} active", sid);
+                    }
                 }
 
                 // Emit turn.started on first parseable event.

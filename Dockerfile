@@ -38,17 +38,24 @@ COPY --from=build /app .
 COPY src/Fleet.Agent/codex-bridge.mjs /app/codex-bridge.mjs
 RUN cd /app && npm install @openai/codex-sdk@0.118.0
 
-# Gemini CLI — headless mode. OAuth credentials mounted writable at runtime by the orchestrator.
-# Pinned to @google/gemini-cli@0.40.1 to match the verified flag set (--output-format stream-json,
-# --yolo, GEMINI_SYSTEM_MD env var) and the stream-json event schema used by GeminiExecutor.cs.
+COPY src/Fleet.Agent/gemini-bridge.mjs /app/gemini-bridge.mjs
+# @google/genai SDK for gemini-bridge.mjs (persistent bridge, issue #145).
+# google-auth-library is installed as a transitive dependency and is used by the bridge
+# for OAuth2Client token management. Installed locally in /app so node can resolve it
+# without a global install — same pattern as @openai/codex-sdk above.
+RUN cd /app && npm install @google/genai
+
+# Gemini CLI — kept for entrypoint.sh compatibility (MCP settings.json translation).
+# The CLI binary is no longer invoked for AI inference (gemini-bridge handles that),
+# but entrypoint.sh checks for the gemini provider and the CLI may be used for auth
+# verification. Pinned to @google/gemini-cli@0.40.1.
 RUN npm install -g @google/gemini-cli@0.40.1
 # Build-time guard: verify gemini CLI is on PATH and responds to --version.
 RUN gemini --version || (echo 'ERROR: gemini CLI not on PATH — npm install -g may have failed' && exit 1)
-# Build-time guard: @google/gemini-cli-core SDK must NOT be installed globally.
-# GeminiExecutor.cs uses the CLI binary (not the SDK). The SDK was used by the previous
-# bridge approach (issue #128, PR #129) and must not be re-introduced accidentally.
+# Build-time guard: @google/gemini-cli-core must NOT be installed globally.
+# The bridge uses @google/genai (in /app/node_modules), not the CLI-internal core package.
 RUN npm list -g @google/gemini-cli-core 2>&1 | grep -q "empty" || \
-    (echo 'ERROR: @google/gemini-cli-core SDK is installed — remove it; GeminiExecutor uses the CLI binary only' && exit 1)
+    (echo 'ERROR: @google/gemini-cli-core is installed globally — remove it; bridge uses @google/genai' && exit 1)
 
 RUN mkdir -p /workspace /root/.claude
 

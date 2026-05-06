@@ -866,12 +866,14 @@ public sealed class ContainerProvisioningService(
     /// Appends ?agent={agentName} to a fleet-internal MCP URL, stripping any pre-existing
     /// query string first. Prevents double-appending if the URL was stored in the DB
     /// with an old ?agent= already attached (e.g. after a manual DB edit or re-provision).
+    /// Note: ALL existing query params are dropped, not just ?agent=. Fleet-internal MCP
+    /// URLs never carry other query params, so this is intentional and safe.
     /// </summary>
-    private static string WithAgentParam(string url, string agentName)
+    internal static string WithAgentParam(string url, string agentName)
     {
         var trimmed = url.TrimEnd('/');
         var questionIdx = trimmed.IndexOf('?');
-        var basePath = questionIdx >= 0 ? trimmed[..questionIdx] : trimmed;
+        var basePath = (questionIdx >= 0 ? trimmed[..questionIdx] : trimmed).TrimEnd('/');
         return $"{basePath}?agent={agentName}";
     }
 

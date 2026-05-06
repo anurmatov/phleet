@@ -11,11 +11,13 @@ public sealed class GroupChatBuffer
     private readonly LinkedList<BufferEntry> _entries = new();
     private DateTimeOffset _lastChecked = DateTimeOffset.MinValue;
 
-    public void Add(string sender, string text, string? replyTo, DateTimeOffset timestamp)
+    public void Add(string sender, string text, string? replyTo, DateTimeOffset timestamp,
+        long telegramMessageId = 0, long? replyToTelegramMessageId = null)
     {
         lock (_lock)
         {
-            _entries.AddLast(new BufferEntry(sender, text, replyTo, timestamp));
+            _entries.AddLast(new BufferEntry(sender, text, replyTo, timestamp,
+                TelegramMessageId: telegramMessageId, ReplyToTelegramMessageId: replyToTelegramMessageId));
             while (_entries.Count > Capacity)
                 _entries.RemoveFirst();
         }
@@ -29,11 +31,7 @@ public sealed class GroupChatBuffer
             if (messages.Count == 0)
                 return "";
 
-            return string.Join('\n', messages.Select(e =>
-            {
-                var prefix = e.ReplyTo is not null ? $"{e.Sender} → {e.ReplyTo}" : e.Sender;
-                return $"{prefix}: {e.Text}";
-            }));
+            return string.Join('\n', messages.Select(FormatEntry));
         }
     }
 
@@ -45,12 +43,16 @@ public sealed class GroupChatBuffer
             if (newEntries.Count == 0)
                 return "";
 
-            return string.Join('\n', newEntries.Select(e =>
-            {
-                var prefix = e.ReplyTo is not null ? $"{e.Sender} → {e.ReplyTo}" : e.Sender;
-                return $"{prefix}: {e.Text}";
-            }));
+            return string.Join('\n', newEntries.Select(FormatEntry));
         }
+    }
+
+    private static string FormatEntry(BufferEntry e)
+    {
+        var prefix = e.ReplyTo is not null ? $"{e.Sender} → {e.ReplyTo}" : e.Sender;
+        var idPrefix = e.TelegramMessageId > 0 ? $"[telegram_message_id: {e.TelegramMessageId}] " : "";
+        var replyIdTag = e.ReplyToTelegramMessageId is > 0 ? $"[reply_to_message_id: {e.ReplyToTelegramMessageId}] " : "";
+        return $"{idPrefix}{replyIdTag}{prefix}: {e.Text}";
     }
 
     public bool HasMessagesSinceLastCheck()
@@ -102,11 +104,48 @@ public sealed class GroupChatBuffer
         }
     }
 
+    /// <summary>
+    /// Looks up a buffered message by its Telegram message ID, scanning from most-recent backward.
+    /// Returns false when telegramMessageId &lt;= 0, when no matching entry exists,
+    /// or when the matched entry is a tool_use entry.
+    /// </summary>
+    public bool TryGetByMessageId(long telegramMessageId, out string sender, out string text)
+    {
+        sender = "";
+        text = "";
+
+        if (telegramMessageId <= 0)
+            return false;
+
+        lock (_lock)
+        {
+            var node = _entries.Last;
+            while (node is not null)
+            {
+                var entry = node.Value;
+                if (entry.TelegramMessageId == telegramMessageId)
+                {
+                    if (entry.EntryType == "tool_use")
+                        return false;
+
+                    sender = entry.Sender;
+                    text = entry.Text;
+                    return true;
+                }
+                node = node.Previous;
+            }
+        }
+
+        return false;
+    }
+
     public List<SerializedEntry> GetEntries()
     {
         lock (_lock)
         {
-            return _entries.Select(e => new SerializedEntry(e.Sender, e.Text, e.ReplyTo, e.Timestamp, e.EntryType)).ToList();
+            return _entries.Select(e => new SerializedEntry(
+                e.Sender, e.Text, e.ReplyTo, e.Timestamp, e.EntryType,
+                e.TelegramMessageId, e.ReplyToTelegramMessageId)).ToList();
         }
     }
 
@@ -116,14 +155,31 @@ public sealed class GroupChatBuffer
         {
             foreach (var e in entries)
             {
-                _entries.AddLast(new BufferEntry(e.Sender, e.Text, e.ReplyTo, e.Timestamp, e.EntryType ?? "message"));
+                _entries.AddLast(new BufferEntry(e.Sender, e.Text, e.ReplyTo, e.Timestamp,
+                    e.EntryType ?? "message",
+                    TelegramMessageId: e.TelegramMessageId,
+                    ReplyToTelegramMessageId: e.ReplyToTelegramMessageId));
                 while (_entries.Count > Capacity)
                     _entries.RemoveFirst();
             }
         }
     }
 
-    private sealed record BufferEntry(string Sender, string Text, string? ReplyTo, DateTimeOffset Timestamp, string EntryType = "message");
+    private sealed record BufferEntry(
+        string Sender,
+        string Text,
+        string? ReplyTo,
+        DateTimeOffset Timestamp,
+        string EntryType = "message",
+        long TelegramMessageId = 0,
+        long? ReplyToTelegramMessageId = null);
 }
 
-public record SerializedEntry(string Sender, string Text, string? ReplyTo, DateTimeOffset Timestamp, string? EntryType = null);
+public record SerializedEntry(
+    string Sender,
+    string Text,
+    string? ReplyTo,
+    DateTimeOffset Timestamp,
+    string? EntryType = null,
+    long TelegramMessageId = 0,
+    long? ReplyToTelegramMessageId = null);

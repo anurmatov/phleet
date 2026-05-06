@@ -22,6 +22,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Fleet.Agent\Fleet.Agent.csproj" />
+    <ProjectReference Include="..\..\src\Fleet.Telegram\Fleet.Telegram.csproj" />
   </ItemGroup>
 
 </Project>

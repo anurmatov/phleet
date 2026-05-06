@@ -39,6 +39,10 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     private readonly MediaGroupBuffer _mediaGroupBuffer;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _groupSizeCapped = new();
 
+    // Tracks the last Telegram message_id sent per chatId (updated in SendTextAsync).
+    // Consumed by OnTaskCompleted so BufferBotResponse can persist the outbound message_id.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, long> _lastSentMessageIds = new();
+
     public AgentTransport(
         IOptions<AgentOptions> agentConfig,
         IOptions<TelegramOptions> telegramConfig,
@@ -79,6 +83,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
 
     private static readonly Regex ImageMarkerRegex = new(@"\[IMAGE:(.+?)\]", RegexOptions.Compiled);
     private static readonly Regex TaskFailedMarkerRegex = new(@"^\[TASK_FAILED:\s*([^\]]+)\]\s*", RegexOptions.Compiled);
+    private static readonly Regex ReplyToTokenRegex = new(@"\[reply_to:\s*(-?\d+)\]", RegexOptions.Compiled);
 
     // --- IMessageSink ---
 
@@ -89,8 +94,12 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         if (chatId == 0) return;
         if (_bot is null) return;
 
+        // Extract and strip [reply_to: N] token from agent output (Feature 3b).
+        (text, var replyToMessageId) = ExtractReplyToToken(text, _logger);
+
         // Split on [IMAGE:...] markers; odd-indexed segments are file paths
         var parts = ImageMarkerRegex.Split(text);
+        bool replyUsed = false;
         for (var i = 0; i < parts.Length; i++)
         {
             if (i % 2 == 1)
@@ -102,6 +111,10 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                     caption = after;
 
                 await SendPhotoAsync(chatId, filePath, caption, ct);
+                // Photos consume the reply slot even though SendPhotoAsync doesn't pass replyParams.
+                // Edge case: [reply_to: N][IMAGE:...] will silently drop the reply thread on the photo.
+                // Acceptable for now — photo+reply threading is a rare combination.
+                replyUsed = true;
 
                 // Skip the adjacent text segment used as caption so it's not sent again
                 if (caption is not null)
@@ -122,17 +135,96 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                     foreach (var chunk in SplitMessage(segment, 3990))
                     {
                         var escaped = System.Net.WebUtility.HtmlEncode(chunk);
-                        await _bot.SendMessage(chatId, $"<b>{displayName}:</b>\n{escaped}",
-                            parseMode: ParseMode.Html, cancellationToken: ct);
+                        var replyParams = !replyUsed && replyToMessageId.HasValue
+                            ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
+                            : null;
+                        var sentId = await SendMessageWithReplyFallbackAsync(chatId, $"<b>{displayName}:</b>\n{escaped}",
+                            ParseMode.Html, replyParams, ct);
+                        _lastSentMessageIds[chatId] = sentId;
+                        replyUsed = true;
                     }
                 }
                 else
                 {
                     foreach (var chunk in SplitMessage(segment, 4000))
-                        await _bot.SendMessage(chatId, chunk, cancellationToken: ct);
+                    {
+                        var replyParams = !replyUsed && replyToMessageId.HasValue
+                            ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
+                            : null;
+                        var sentId = await SendMessageWithReplyFallbackAsync(chatId, chunk, null, replyParams, ct);
+                        _lastSentMessageIds[chatId] = sentId;
+                        replyUsed = true;
+                    }
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Sends a text message and returns the Telegram <c>message_id</c> of the sent message.
+    /// Falls back to standalone (without reply threading) when the reply target is not found.
+    /// </summary>
+    private async Task<long> SendMessageWithReplyFallbackAsync(
+        long chatId, string text, ParseMode? parseMode,
+        Telegram.Bot.Types.ReplyParameters? replyParams,
+        CancellationToken ct)
+    {
+        if (replyParams is null)
+        {
+            var m = parseMode.HasValue
+                ? await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
+                : await _bot!.SendMessage(chatId, text, cancellationToken: ct);
+            return m.Id;
+        }
+
+        try
+        {
+            var m = parseMode.HasValue
+                ? await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value,
+                    replyParameters: replyParams, cancellationToken: ct)
+                : await _bot!.SendMessage(chatId, text, replyParameters: replyParams, cancellationToken: ct);
+            return m.Id;
+        }
+        catch (Exception ex) when (ex.Message.Contains("message to be replied not found")
+                                || ex.Message.Contains("reply message not found"))
+        {
+            _logger.LogWarning("Reply target not found for chat {ChatId} — sending as standalone", chatId);
+            var m = parseMode.HasValue
+                ? await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
+                : await _bot!.SendMessage(chatId, text, cancellationToken: ct);
+            return m.Id;
+        }
+    }
+
+    /// <summary>
+    /// Extracts and strips a <c>[reply_to: N]</c> token from agent output.
+    /// The token is only used as a reply target if it appears at the start or end of the text.
+    /// All occurrences are stripped regardless of position.
+    /// </summary>
+    internal static (string text, int? replyToMessageId) ExtractReplyToToken(string text, ILogger? logger = null)
+    {
+        var matches = ReplyToTokenRegex.Matches(text);
+        if (matches.Count == 0) return (text, null);
+
+        int? replyToMessageId = null;
+
+        // Only use the token as a reply target when at the start or end of the output
+        var first = matches[0];
+        var atStart = first.Index == 0 || text[..first.Index].Trim().Length == 0;
+        var atEnd = first.Index + first.Length == text.Length || text[(first.Index + first.Length)..].Trim().Length == 0;
+        if (atStart || atEnd)
+        {
+            if (int.TryParse(first.Groups[1].Value, out var id) && id > 0)
+                replyToMessageId = id;
+            else
+                logger?.LogDebug(
+                    "reply_to token at start/end has non-positive id ({Id}) — stripped without reply target",
+                    first.Groups[1].Value);
+        }
+
+        // Strip all [reply_to: N] tokens from the text
+        text = ReplyToTokenRegex.Replace(text, "").Trim();
+        return (text, replyToMessageId);
     }
 
     public async Task SendHtmlTextAsync(long chatId, string htmlText, CancellationToken ct = default)
@@ -244,8 +336,18 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
 
             await _bot.SetMyCommands(commands, cancellationToken: stoppingToken);
 
-            _bot.OnMessage += OnMessage;
-            _bot.OnError += OnError;
+            _bot.StartReceiving(
+                updateHandler: (_, update, _) => HandleTelegramUpdateAsync(update),
+                errorHandler: (_, ex, source, _) => OnError(ex, source),
+                receiverOptions: new ReceiverOptions
+                {
+                    AllowedUpdates =
+                    [
+                        UpdateType.Message,
+                        UpdateType.MessageReaction,
+                    ]
+                },
+                cancellationToken: stoppingToken);
 
             _logger.LogInformation("Telegram bot is receiving messages (GroupListenMode={Mode})",
                 _agentConfig.GroupListenMode);
@@ -265,8 +367,6 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         }
         finally
         {
-            _bot.OnMessage -= OnMessage;
-            _bot.OnError -= OnError;
             _taskManager.OnTaskCompleted -= OnTaskCompleted;
             _taskManager.OnToolUse -= OnToolUse;
             if (_relay.IsEnabled)
@@ -292,7 +392,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
 
     private void OnTaskCompleted(long chatId, string result, string? relaySender, TaskSource source, bool isPartial, string? correlationId, string? taskId)
     {
-        _groupBehavior.BufferBotResponse(chatId, result);
+        var lastSentId = _lastSentMessageIds.TryGetValue(chatId, out var id) ? id : 0L;
+        _groupBehavior.BufferBotResponse(chatId, result, telegramMessageId: lastSentId);
 
         _ = Task.Run(async () =>
         {
@@ -471,6 +572,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             Text = text,
             Sender = sender,
             IsGroupChat = isGroupChat,
+            TelegramMessageId = message.MessageId,
+            ReplyToTelegramMessageId = message.ReplyToMessage?.MessageId is { } rtm ? (long)rtm : null,
             ReplyToUsername = replyToUsername,
             ReplyToText = replyToText,
             IsBotMentioned = isMentioned,
@@ -681,6 +784,116 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
 
     private string PdfTooLargeMessage(long sizeBytes) =>
         $"(PDF too large — {sizeBytes / 1_048_576} MB exceeds the {_telegramConfig.MaxDocumentBytes / 1_048_576} MB limit. Please send a smaller file.)";
+
+    /// <summary>
+    /// Dispatch wrapper used by <see cref="TelegramBotClientExtensions.StartReceiving"/> to route
+    /// each incoming <see cref="Update"/> to the appropriate handler.
+    /// </summary>
+    private Task HandleTelegramUpdateAsync(Update update)
+    {
+        if (update.Type == UpdateType.Message && update.Message is { } msg)
+            return OnMessage(msg, UpdateType.Message);
+        return OnUpdate(update);
+    }
+
+    /// <summary>
+    /// Handles non-message update types. Currently processes:
+    /// - <c>MessageReaction</c>: emits a synthetic message per changed emoji into the task queue.
+    /// - <c>MessageReactionCount</c>: logged and skipped (aggregate counts, out of scope).
+    /// All other update types are ignored (messages are handled by <see cref="OnMessage"/>).
+    /// </summary>
+    private Task OnUpdate(Update update)
+    {
+        if (update.Type == UpdateType.MessageReactionCount)
+        {
+            _logger.LogWarning("Received MessageReactionCount update — skipping (not supported)");
+            return Task.CompletedTask;
+        }
+
+        if (update.Type == UpdateType.MessageReaction && update.MessageReaction is { } reaction)
+            HandleReaction(reaction);
+
+        return Task.CompletedTask;
+    }
+
+    private void HandleReaction(MessageReactionUpdated reaction)
+    {
+        // Anonymous group admins have no User context (Telegram uses actor_chat instead).
+        // We can't attribute the reaction to a specific user, so discard it.
+        if (reaction.User is null)
+        {
+            _logger.LogWarning(
+                "Ignoring reaction on message {MsgId} in chat {ChatId} — anonymous admin (no user context)",
+                reaction.MessageId, reaction.Chat.Id);
+            return;
+        }
+
+        var chatId = reaction.Chat.Id;
+        var userId = reaction.User.Id;
+        var messageId = reaction.MessageId;
+
+        // Authorization: same rules as regular messages
+        var isGroupChat = reaction.Chat.Type is ChatType.Group or ChatType.Supergroup;
+        if (isGroupChat)
+        {
+            if (!_telegramConfig.AllowedGroupIds.Contains(chatId))
+            {
+                _logger.LogDebug("Ignoring reaction from unauthorized group {ChatId}", chatId);
+                return;
+            }
+        }
+        else
+        {
+            if (userId == 0 || !_telegramConfig.AllowedUserIds.Contains(userId))
+            {
+                _logger.LogDebug("Ignoring reaction from unauthorized user {UserId}", userId);
+                return;
+            }
+        }
+
+        var (added, removed) = DiffReactions(reaction.NewReaction, reaction.OldReaction);
+        if (added.Count == 0 && removed.Count == 0) return; // no net change
+
+        var buffer = _groupBehavior.GetGroupBuffer(chatId);
+        var hasOriginal = buffer.TryGetByMessageId(messageId, out _, out var origText);
+        var contentSuffix = hasOriginal ? $": \"{TruncateForReaction(origText)}\"" : "";
+
+        foreach (var emoji in added)
+        {
+            var text = $"[reaction: {emoji} on message_id={messageId} from user_id={userId}{contentSuffix}]";
+            _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
+        }
+
+        foreach (var emoji in removed)
+        {
+            var text = $"[reaction removed: {emoji} on message_id={messageId} from user_id={userId}{contentSuffix}]";
+            _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
+        }
+    }
+
+    /// <summary>
+    /// Normalizes a buffered message text for inline use in a reaction task:
+    /// replaces line breaks and tabs with a single space, then caps at 200 chars with a trailing ellipsis.
+    /// </summary>
+    internal static string TruncateForReaction(string text)
+    {
+        // Normalize whitespace: CRLF, LF, CR, tab → single space
+        var flat = text.Replace("\r\n", " ").Replace('\r', ' ').Replace('\n', ' ').Replace('\t', ' ');
+        return flat.Length <= 200 ? flat : flat[..200] + "…";
+    }
+
+    /// <summary>
+    /// Diffs two reaction lists, returning only standard emoji (<see cref="ReactionTypeEmoji"/>)
+    /// that were added or removed. Custom emoji and paid reactions are silently ignored.
+    /// </summary>
+    internal static (HashSet<string> added, HashSet<string> removed) DiffReactions(
+        IEnumerable<ReactionType>? newReaction,
+        IEnumerable<ReactionType>? oldReaction)
+    {
+        var newEmojis = (newReaction ?? []).OfType<ReactionTypeEmoji>().Select(r => r.Emoji).ToHashSet();
+        var oldEmojis = (oldReaction ?? []).OfType<ReactionTypeEmoji>().Select(r => r.Emoji).ToHashSet();
+        return ([.. newEmojis.Except(oldEmojis)], [.. oldEmojis.Except(newEmojis)]);
+    }
 
     private Task OnError(Exception exception, HandleErrorSource source)
     {

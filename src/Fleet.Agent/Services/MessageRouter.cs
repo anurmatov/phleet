@@ -36,7 +36,7 @@ public sealed class MessageRouter
 
     public async Task HandleAsync(IncomingMessage msg)
     {
-        // --- Global kill switch — checked before any auth or routing ---
+        // --- Global kill switch --- checked before any auth or routing ---
         if (msg.IsGroupChat && _telegramConfig.AllowedGroupIds.Contains(msg.ChatId)
             && _telegramConfig.AllowedUserIds.Contains(msg.UserId)
             && msg.StrippedText.Equals("/stop", StringComparison.OrdinalIgnoreCase))
@@ -56,7 +56,9 @@ public sealed class MessageRouter
             }
 
             // Buffer ALL allowed group messages for context
-            _groupBehavior.AddAndPersist(msg.ChatId, msg.Sender, msg.Text, msg.ReplyToUsername);
+            _groupBehavior.AddAndPersist(msg.ChatId, msg.Sender, msg.Text, msg.ReplyToUsername,
+                telegramMessageId: msg.TelegramMessageId,
+                replyToTelegramMessageId: msg.ReplyToTelegramMessageId);
 
             if (_agentConfig.GroupListenMode.Equals("all", StringComparison.OrdinalIgnoreCase))
             {
@@ -125,11 +127,10 @@ public sealed class MessageRouter
                 }
                 var displayText = task;
                 if (msg.IsGroupChat)
-                    task = _groupBehavior.BuildGroupTask(msg.ChatId, msg.Sender, task, msg.ReplyToUsername, msg.ReplyToText);
+                    task = _groupBehavior.BuildGroupTask(msg.ChatId, msg.Sender, task, msg.ReplyToUsername, msg.ReplyToText, msg.TelegramMessageId);
                 _taskManager.StartTask(msg.ChatId, task, displayText, isSessionTask: false,
                     source: TaskSource.NewCommand, images: msg.Images.Count > 0 ? msg.Images : null,
-                    documents: msg.Documents.Count > 0 ? msg.Documents : null,
-                    userId: msg.UserId);
+                    documents: msg.Documents.Count > 0 ? msg.Documents : null);
                 return;
             }
 
@@ -149,7 +150,9 @@ public sealed class MessageRouter
         // Buffer DM messages for context recovery
         if (!msg.IsGroupChat)
         {
-            _groupBehavior.AddAndPersist(msg.ChatId, msg.Sender, trimmed, null);
+            _groupBehavior.AddAndPersist(msg.ChatId, msg.Sender, trimmed, null,
+                telegramMessageId: msg.TelegramMessageId,
+                replyToTelegramMessageId: msg.ReplyToTelegramMessageId);
         }
 
         // Build display text that reflects image count for heartbeat/status visibility
@@ -167,16 +170,15 @@ public sealed class MessageRouter
         }
 
         if (msg.IsGroupChat)
-            trimmed = _groupBehavior.BuildGroupTask(msg.ChatId, msg.Sender, trimmed, msg.ReplyToUsername, msg.ReplyToText);
+            trimmed = _groupBehavior.BuildGroupTask(msg.ChatId, msg.Sender, trimmed, msg.ReplyToUsername, msg.ReplyToText, msg.TelegramMessageId);
         else
-            trimmed = _groupBehavior.BuildDmTask(msg.ChatId, trimmed, msg.ReplyToText);
+            trimmed = _groupBehavior.BuildDmTask(msg.ChatId, trimmed, msg.ReplyToText, msg.TelegramMessageId);
 
         // When busy, StartTask enqueues the message and notifies the user automatically.
         // Use /new <task> for parallel tasks, or /cancel to stop the current one.
         _taskManager.StartTask(msg.ChatId, trimmed, messageDisplayText, isSessionTask: true,
             images: msg.Images.Count > 0 ? msg.Images : null,
-            documents: msg.Documents.Count > 0 ? msg.Documents : null,
-            userId: msg.UserId);
+            documents: msg.Documents.Count > 0 ? msg.Documents : null);
     }
 
     private CancellationToken _shutdownToken = CancellationToken.None;

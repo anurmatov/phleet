@@ -72,11 +72,12 @@ public sealed class GroupBehavior
         return _groupBuffers.GetOrAdd(chatId, _ => new GroupChatBuffer());
     }
 
-    public void BufferBotResponse(long chatId, string text)
+    public void BufferBotResponse(long chatId, string text, long telegramMessageId = 0)
     {
         var buffer = GetGroupBuffer(chatId);
         var truncated = text.Length > 200 ? text[..200] + "..." : text;
-        buffer.Add($"@{_botUsername}", truncated, replyTo: null, DateTimeOffset.UtcNow);
+        buffer.Add($"@{_botUsername}", truncated, replyTo: null, DateTimeOffset.UtcNow,
+            telegramMessageId: telegramMessageId);
         SaveBuffers();
     }
 
@@ -87,10 +88,13 @@ public sealed class GroupBehavior
         SaveBuffers();
     }
 
-    public void AddAndPersist(long chatId, string sender, string text, string? replyTo)
+    public void AddAndPersist(long chatId, string sender, string text, string? replyTo,
+        long telegramMessageId = 0, long? replyToTelegramMessageId = null)
     {
         var buffer = GetGroupBuffer(chatId);
-        buffer.Add(sender, text, replyTo, DateTimeOffset.UtcNow);
+        buffer.Add(sender, text, replyTo, DateTimeOffset.UtcNow,
+            telegramMessageId: telegramMessageId,
+            replyToTelegramMessageId: replyToTelegramMessageId);
         SaveBuffers();
     }
 
@@ -590,11 +594,11 @@ public sealed class GroupBehavior
     }
 
     public string BuildGroupTask(long chatId, string sender, string taskText,
-        string? replyToUsername = null, string? replyToText = null) =>
-        _prompts.ForGroupMessage(GetGroupBuffer(chatId), sender, taskText, replyToUsername, replyToText);
+        string? replyToUsername = null, string? replyToText = null, long telegramMessageId = 0) =>
+        _prompts.ForGroupMessage(GetGroupBuffer(chatId), sender, taskText, replyToUsername, replyToText, telegramMessageId);
 
-    public string BuildDmTask(long chatId, string taskText, string? replyToText = null) =>
-        _prompts.ForDm(GetGroupBuffer(chatId), taskText, replyToText);
+    public string BuildDmTask(long chatId, string taskText, string? replyToText = null, long telegramMessageId = 0) =>
+        _prompts.ForDm(GetGroupBuffer(chatId), taskText, replyToText, telegramMessageId);
 
     // --- Pending images buffer entry ---
 

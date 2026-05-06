@@ -16,6 +16,13 @@ Fleet supports Google Gemini as an AI provider via the `gemini` CLI in headless 
    This opens a browser window for Google OAuth consent. After completing it,
    credentials are saved to `~/.gemini/oauth_creds.json`.
 
+## Known limitations vs other providers
+
+- **No session persistence in headless mode** ([gemini-cli #13924](https://github.com/google-gemini/gemini-cli/issues/13924), [PR #23414](https://github.com/google-gemini/gemini-cli/pull/23414)). The system prompt is re-sent via `GEMINI_SYSTEM_MD` on every task. There is no `--resume` shortcut available in v0.40.1; once upstream lands persistent session support in headless mode, phleet can revisit this.
+- **No native PDF content blocks.** PDFs are passed as `@<path>` filesystem references (hint: `[document attachment: /path]` injected into task text); the agent reads from disk via Read/Bash tools. Compare to claude's `type: "document"` content blocks, which embed the full PDF in the model's context window.
+- **HTTP/SSE MCP transport only.** The gemini CLI does not support stdio-transport MCP servers. `entrypoint.sh` filters them out automatically when generating `~/.gemini/settings.json` from `.generated/.mcp.json`.
+- **OAuth-only auth.** `GEMINI_API_KEY` and `GOOGLE_API_KEY` are explicitly fail-fast'd in `entrypoint.sh`. The agent must mount `~/.gemini/oauth_creds.json` read-write (google-auth-library refreshes tokens in-place). A personal Google account is required.
+
 ## Setup with fleet
 
 Run `./setup.sh` and choose option **3** (gemini) or **5** (claude + gemini).

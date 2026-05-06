@@ -33,10 +33,6 @@ namespace Fleet.Agent.Services;
 /// Two-level refresh: (1) the CLI's google-auth-library refreshes tokens in-place on expiry;
 /// (2) AuthTokenRefreshWorkflow provides a host-side safety net every 30 min.
 ///
-/// Auth: OAuth credentials at ~/.gemini/oauth_creds.json (writable bind mount).
-/// Two-level refresh: (1) the CLI's google-auth-library refreshes tokens in-place on expiry;
-/// (2) AuthTokenRefreshWorkflow provides a host-side safety net every 30 min.
-///
 /// Images / PDFs / Audio: native multimodal via gemini-cli's @-reference resolver.
 /// Each attachment is staged to a per-task temp directory; the working directory is
 /// set to that dir and "@./filename.ext" refs are passed via -p. The CLI's
@@ -128,7 +124,8 @@ public sealed class GeminiExecutor : IAgentExecutor
         string input,
         IReadOnlyList<MessageImage>? images,
         IReadOnlyList<MessageDocument>? documents,
-        [EnumeratorCancellation] CancellationToken ct)
+        [EnumeratorCancellation] CancellationToken ct,
+        bool isRetry = false)
     {
         // System prompt temp file — only written and set in GEMINI_SYSTEM_MD for fresh
         // sessions (no resume). Deleted in finally regardless; File.Delete is a no-op
@@ -151,12 +148,17 @@ public sealed class GeminiExecutor : IAgentExecutor
         //   resumeId != null  → resume an in-memory session from a prior task this process lifetime
         //   resumeId is null && HasExistingSessionFiles() → post-restart: session files on disk,
         //     use --resume with no UUID so the CLI picks up the latest saved session
-        //   resumeId is null && no files → first-ever task: start a fresh session
-        var resumeId = _lastSessionId;
-        var useLatestSessionResume = resumeId is null && HasExistingSessionFiles();
+        //   resumeId is null && no files (or isRetry) → start a fresh session
+        // isRetry suppresses resume entirely: the stale-session retry must start fresh
+        // even if session files still exist on disk (gemini does not delete them on failure).
+        // This guarantees the retry chain terminates after one attempt.
+        var resumeId = isRetry ? null : _lastSessionId;
+        var useLatestSessionResume = !isRetry && resumeId is null && HasExistingSessionFiles();
         var usedResume = resumeId is not null || useLatestSessionResume;
 
-        // Set after the try/finally to recursively retry with a fresh session when --resume fails.
+        // Set after the try/finally to retry once as a fresh session when --resume fails.
+        // isRetry is forwarded as true so the recursive call never resumes, preventing
+        // unbounded recursion on persistently broken session files.
         var shouldRetry = false;
 
         var accumulator = new StringBuilder();
@@ -393,7 +395,7 @@ public sealed class GeminiExecutor : IAgentExecutor
         // before the new process starts. Only reached when --resume exited non-zero.
         if (shouldRetry)
         {
-            await foreach (var p in RunCliAsync(input, images, documents, ct))
+            await foreach (var p in RunCliAsync(input, images, documents, ct, isRetry: true))
                 yield return p;
         }
     }
@@ -456,11 +458,20 @@ public sealed class GeminiExecutor : IAgentExecutor
     /// </summary>
     internal static bool HasExistingSessionFiles()
     {
+        // Session files are stored at ~/.gemini/tmp/<project_hash>/chats/<uuid>.json.
+        // We scan specifically under */chats/ to avoid false positives from other JSON
+        // files (e.g. ~/.gemini/tmp/<hash>/config.json) that may exist in sibling dirs.
         var geminiTmpDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             ".gemini", "tmp");
-        return Directory.Exists(geminiTmpDir)
-            && Directory.EnumerateFiles(geminiTmpDir, "*.json", SearchOption.AllDirectories).Any();
+        if (!Directory.Exists(geminiTmpDir)) return false;
+        return Directory.EnumerateDirectories(geminiTmpDir)
+            .Any(projectHash =>
+            {
+                var chatsDir = Path.Combine(projectHash, "chats");
+                return Directory.Exists(chatsDir)
+                    && Directory.EnumerateFiles(chatsDir, "*.json").Any();
+            });
     }
 
     // ── Attachment staging ────────────────────────────────────────────────────

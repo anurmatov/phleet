@@ -108,17 +108,46 @@ public sealed class GroupBehavior
         try
         {
             var json = File.ReadAllText(_historyPath);
-            var data = JsonSerializer.Deserialize<Dictionary<long, List<SerializedEntry>>>(json);
-            if (data is null)
-                return;
 
-            foreach (var (chatId, entries) in data)
+            // Try the current format: Dictionary<long, PersistedBuffer> (LastChecked + Entries).
+            // Old files use Dictionary<long, List<SerializedEntry>> — values are JSON arrays,
+            // which fail to deserialize as PersistedBuffer objects, so we catch and fall through.
+            Dictionary<long, PersistedBuffer>? newData = null;
+            try
             {
-                var buffer = _groupBuffers.GetOrAdd(chatId, _ => new GroupChatBuffer());
-                buffer.LoadEntries(entries);
+                newData = JsonSerializer.Deserialize<Dictionary<long, PersistedBuffer>>(json);
+            }
+            catch (JsonException)
+            {
+                // Old format — fall through to legacy path
             }
 
-            _logger.LogInformation("Loaded chat history from disk ({Count} chats)", data.Count);
+            if (newData is not null)
+            {
+                foreach (var (chatId, persisted) in newData)
+                {
+                    var buffer = _groupBuffers.GetOrAdd(chatId, _ => new GroupChatBuffer());
+                    buffer.LoadEntries(persisted.Entries);
+                    buffer.LoadState(persisted.LastChecked);
+                }
+                _logger.LogInformation("Loaded chat history from disk ({Count} chats)", newData.Count);
+            }
+            else
+            {
+                // Legacy format: Dictionary<long, List<SerializedEntry>> — no LastChecked stored.
+                // Default to UtcNow so existing messages are not treated as unread after upgrade.
+                var legacyData = JsonSerializer.Deserialize<Dictionary<long, List<SerializedEntry>>>(json);
+                if (legacyData is null) return;
+
+                var now = DateTimeOffset.UtcNow;
+                foreach (var (chatId, entries) in legacyData)
+                {
+                    var buffer = _groupBuffers.GetOrAdd(chatId, _ => new GroupChatBuffer());
+                    buffer.LoadEntries(entries);
+                    buffer.LoadState(now);
+                }
+                _logger.LogInformation("Loaded chat history from disk (legacy format, {Count} chats)", legacyData.Count);
+            }
         }
         catch (Exception ex)
         {
@@ -130,9 +159,16 @@ public sealed class GroupBehavior
     {
         try
         {
-            var data = new Dictionary<long, List<SerializedEntry>>();
+            var data = new Dictionary<long, PersistedBuffer>();
             foreach (var (chatId, buffer) in _groupBuffers)
-                data[chatId] = buffer.GetEntries();
+            {
+                // Normalize MinValue (never-checked buffer) to UtcNow so that on next
+                // load the existing entries are not treated as unread.
+                var lastChecked = buffer.GetLastChecked();
+                if (lastChecked == DateTimeOffset.MinValue)
+                    lastChecked = DateTimeOffset.UtcNow;
+                data[chatId] = new PersistedBuffer(lastChecked, buffer.GetEntries());
+            }
 
             var dir = Path.GetDirectoryName(_historyPath)!;
             Directory.CreateDirectory(dir);
@@ -599,6 +635,15 @@ public sealed class GroupBehavior
 
     public string BuildDmTask(long chatId, string taskText, string? replyToText = null, long telegramMessageId = 0) =>
         _prompts.ForDm(GetGroupBuffer(chatId), taskText, replyToText, telegramMessageId);
+
+    // --- Persistence schema ---
+
+    /// <summary>
+    /// On-disk shape for a single group's chat history (current format).
+    /// Replaces the legacy <c>List&lt;SerializedEntry&gt;</c> value so that
+    /// <see cref="GroupChatBuffer._lastChecked"/> survives agent restarts.
+    /// </summary>
+    private sealed record PersistedBuffer(DateTimeOffset LastChecked, List<SerializedEntry> Entries);
 
     // --- Pending images buffer entry ---
 

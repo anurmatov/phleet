@@ -155,15 +155,18 @@ git config --global user.name "${GIT_USER_NAME:-Fleet Agent}"
 git config --global user.email "${GIT_USER_EMAIL:-fleet@example.com}"
 git config --global safe.directory '*'
 
-# GitHub App auth (opt-in: only runs if GITHUB_APP_ID + PEM available)
-if [ -n "${GITHUB_APP_PEM:-}" ]; then
-    echo "$GITHUB_APP_PEM" | base64 -d > /tmp/github-app-key.pem
+# GitHub App auth (opt-in: only runs if GITHUB_APP_ID / GITHUB_APP_ID_OVERRIDE + PEM available)
+# Prefer GITHUB_APP_PEM_OVERRIDE over GITHUB_APP_PEM so per-agent override takes effect at startup.
+_GITHUB_PEM_B64="${GITHUB_APP_PEM_OVERRIDE:-${GITHUB_APP_PEM:-}}"
+if [ -n "${_GITHUB_PEM_B64:-}" ]; then
+    echo "$_GITHUB_PEM_B64" | base64 -d > /tmp/github-app-key.pem
     chmod 600 /tmp/github-app-key.pem
 fi
-if [ -n "${GITHUB_APP_ID:-}" ] && [ -f /tmp/github-app-key.pem ]; then
+if [ -n "${GITHUB_APP_ID_OVERRIDE:-${GITHUB_APP_ID:-}}" ] && [ -f /tmp/github-app-key.pem ]; then
     /app/gh-auth.sh
-    # Refresh token every 45min (installation tokens expire after 1h)
-    echo "*/45 * * * * GITHUB_APP_ID=${GITHUB_APP_ID} /app/gh-auth.sh >> /var/log/gh-auth.log 2>&1" | crontab -
+    # Refresh token every 45min (installation tokens expire after 1h).
+    # Pass override vars so cron refreshes honour the same App identity as startup.
+    echo "*/45 * * * * GITHUB_APP_ID=${GITHUB_APP_ID:-} GITHUB_APP_ID_OVERRIDE=${GITHUB_APP_ID_OVERRIDE:-} /app/gh-auth.sh >> /var/log/gh-auth.log 2>&1" | crontab -
     cron
 fi
 

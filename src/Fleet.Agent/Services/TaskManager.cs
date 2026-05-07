@@ -491,12 +491,18 @@ public sealed class TaskManager
                 break;
             }
 
-            // Check-in IDLE suppression: if the result is just "IDLE", suppress output entirely
-            if (source == TaskSource.CheckIn
-                && (lastResult is null
-                    || lastResult.Trim().Equals("IDLE", StringComparison.OrdinalIgnoreCase)))
+            // IDLE is an internal contract marker — never deliver it to chat,
+            // regardless of which task source emitted it.
+            if (lastResult is not null && lastResult.Trim().Equals("IDLE", StringComparison.OrdinalIgnoreCase))
             {
-                _logger.LogInformation("Check-in: IDLE, suppressing output for chat {ChatId}", chatId);
+                _logger.LogInformation("Result is IDLE-only, suppressing output for chat {ChatId} (source={Source})", chatId, source);
+                return;
+            }
+
+            // Check-in with no output at all: suppress the empty reply
+            if (source == TaskSource.CheckIn && lastResult is null)
+            {
+                _logger.LogInformation("Check-in: no output, suppressing for chat {ChatId}", chatId);
                 return;
             }
 

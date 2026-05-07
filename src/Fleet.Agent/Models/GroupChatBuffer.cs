@@ -139,6 +139,24 @@ public sealed class GroupChatBuffer
         return false;
     }
 
+    /// <summary>
+    /// Returns the current _lastChecked value for persistence.
+    /// Returns <see cref="DateTimeOffset.MinValue"/> if the buffer has never been checked.
+    /// </summary>
+    public DateTimeOffset GetLastChecked()
+    {
+        lock (_lock) return _lastChecked;
+    }
+
+    /// <summary>
+    /// Sets _lastChecked from a persisted value, restoring the checked-up-to watermark
+    /// so that existing entries are not treated as unread after a restart.
+    /// </summary>
+    public void LoadState(DateTimeOffset lastChecked)
+    {
+        lock (_lock) _lastChecked = lastChecked;
+    }
+
     public List<SerializedEntry> GetEntries()
     {
         lock (_lock)

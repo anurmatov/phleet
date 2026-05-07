@@ -1,12 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
-APP_ID="${GITHUB_APP_ID:-}"
+APP_ID="${GITHUB_APP_ID_OVERRIDE:-${GITHUB_APP_ID:-}}"
 
 # Ensure PEM is available at /tmp/github-app-key.pem (handles cron re-runs)
 if [ ! -f /tmp/github-app-key.pem ]; then
-    if [ -n "${GITHUB_APP_PEM:-}" ]; then
-        echo "$GITHUB_APP_PEM" | base64 -d > /tmp/github-app-key.pem
+    PEM_B64="${GITHUB_APP_PEM_OVERRIDE:-${GITHUB_APP_PEM:-}}"
+    if [ -n "$PEM_B64" ]; then
+        echo "$PEM_B64" | base64 -d > /tmp/github-app-key.pem
         chmod 600 /tmp/github-app-key.pem
     fi
 fi

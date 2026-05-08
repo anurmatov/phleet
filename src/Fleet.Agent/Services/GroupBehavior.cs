@@ -69,7 +69,10 @@ public sealed class GroupBehavior
         if (!_historyLoaded)
             LoadBuffersFromDisk();
 
-        return _groupBuffers.GetOrAdd(chatId, _ => new GroupChatBuffer());
+        var buffer = _groupBuffers.GetOrAdd(chatId, id => new GroupChatBuffer { ChatId = id });
+        // Patch buffers deserialized before ChatId was introduced (ChatId == 0 on load)
+        if (buffer.ChatId == 0) buffer.ChatId = chatId;
+        return buffer;
     }
 
     public void BufferBotResponse(long chatId, string text, long telegramMessageId = 0)
@@ -126,7 +129,8 @@ public sealed class GroupBehavior
             {
                 foreach (var (chatId, persisted) in newData)
                 {
-                    var buffer = _groupBuffers.GetOrAdd(chatId, _ => new GroupChatBuffer());
+                    var buffer = _groupBuffers.GetOrAdd(chatId, id => new GroupChatBuffer { ChatId = id });
+                    if (buffer.ChatId == 0) buffer.ChatId = chatId;
                     buffer.LoadEntries(persisted.Entries);
                     buffer.LoadState(persisted.LastChecked);
                 }
@@ -142,7 +146,8 @@ public sealed class GroupBehavior
                 var now = DateTimeOffset.UtcNow;
                 foreach (var (chatId, entries) in legacyData)
                 {
-                    var buffer = _groupBuffers.GetOrAdd(chatId, _ => new GroupChatBuffer());
+                    var buffer = _groupBuffers.GetOrAdd(chatId, id => new GroupChatBuffer { ChatId = id });
+                    if (buffer.ChatId == 0) buffer.ChatId = chatId;
                     buffer.LoadEntries(entries);
                     buffer.LoadState(now);
                 }
@@ -630,11 +635,30 @@ public sealed class GroupBehavior
     }
 
     public string BuildGroupTask(long chatId, string sender, string taskText,
-        string? replyToUsername = null, string? replyToText = null, long telegramMessageId = 0) =>
-        _prompts.ForGroupMessage(GetGroupBuffer(chatId), sender, taskText, replyToUsername, replyToText, telegramMessageId);
+        string? replyToUsername = null, string? replyToText = null, long telegramMessageId = 0,
+        string? chatTitle = null)
+    {
+        var buffer = GetGroupBuffer(chatId);
+        // Store title on first encounter (don't overwrite once set)
+        if (chatTitle is not null && buffer.ChatTitle is null)
+            buffer.ChatTitle = chatTitle;
+        return _prompts.ForGroupMessage(buffer, sender, taskText, replyToUsername, replyToText, telegramMessageId);
+    }
 
-    public string BuildDmTask(long chatId, string taskText, string? replyToText = null, long telegramMessageId = 0) =>
-        _prompts.ForDm(GetGroupBuffer(chatId), taskText, replyToText, telegramMessageId);
+    public string BuildDmTask(long chatId, string taskText, string? replyToText = null,
+        long telegramMessageId = 0, string? chatUsername = null, string? chatFirstName = null)
+    {
+        var buffer = GetGroupBuffer(chatId);
+        // Build and cache the DM label on first encounter
+        if (buffer.ChatLabel is null)
+        {
+            if (chatUsername is { Length: > 0 })
+                buffer.ChatLabel = $"user=@{chatUsername}";
+            else if (chatFirstName is { Length: > 0 })
+                buffer.ChatLabel = $"name=\"{chatFirstName.Replace("\"", "\\\"")}\"";
+        }
+        return _prompts.ForDm(buffer, taskText, replyToText, telegramMessageId);
+    }
 
     // --- Persistence schema ---
 

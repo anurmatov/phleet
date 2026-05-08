@@ -30,4 +30,15 @@ public sealed record IncomingMessage
     /// MessageRouter uses this to bypass the group mention gate for media messages.
     /// </summary>
     public bool HasMediaAttachment { get; init; }
+
+    // --- Channel anchor fields (populated in AgentTransport from Telegram Chat object) ---
+
+    /// <summary>Chat.Title for group chats. Null for DMs.</summary>
+    public string? ChatTitle { get; init; }
+
+    /// <summary>Chat.Username for DMs (when the user has one). Null for groups or DMs without username.</summary>
+    public string? ChatUsername { get; init; }
+
+    /// <summary>Chat.FirstName for DMs (when available). Null for groups.</summary>
+    public string? ChatFirstName { get; init; }
 }

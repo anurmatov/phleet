@@ -24,21 +24,26 @@ public sealed class PromptAssembler
     public string ForDm(GroupChatBuffer buffer, string taskText,
         string? replyToText = null, long telegramMessageId = 0)
     {
+        var channelAnchor = buffer.RenderHeader();
         var msgIdTag = telegramMessageId > 0 ? $"[telegram_message_id: {telegramMessageId}]" : "";
+        var channelLine = channelAnchor is not null ? $"\n{channelAnchor}" : "";
         var replyContext = replyToText is not null
             ? $"\n[Replying to: \"{TruncateReplyText(replyToText, 300)}\"]"
             : "";
 
         if (_executor.IsProcessWarm)
         {
-            var meta = string.Concat(msgIdTag, replyContext);
+            var meta = string.Concat(msgIdTag, channelLine, replyContext);
             return meta.Length > 0 ? $"{meta}\n{taskText}" : taskText;
         }
 
         var context = buffer.FormatContext();
-        var metaCold = string.Concat(msgIdTag, replyContext);
+        var metaCold = string.Concat(msgIdTag, channelLine, replyContext);
         if (context.Length > 0)
-            return $"[Recent conversation]\n{context}\n\n[New message]{metaCold}\n{taskText}";
+        {
+            var historySection = channelAnchor is not null ? $"{channelAnchor}\n{context}" : context;
+            return $"[Recent conversation]\n{historySection}\n\n[New message]{metaCold}\n{taskText}";
+        }
 
         return metaCold.Length > 0 ? $"[New message]{metaCold}\n{taskText}" : taskText;
     }
@@ -50,27 +55,34 @@ public sealed class PromptAssembler
     public string ForGroupMessage(GroupChatBuffer buffer, string sender, string taskText,
         string? replyToUsername = null, string? replyToText = null, long telegramMessageId = 0)
     {
-        var msgIdTag = telegramMessageId > 0 ? $"[telegram_message_id: {telegramMessageId}]" : "";
+        var channelAnchor = buffer.RenderHeader();
+        var msgIdLine = telegramMessageId > 0 ? $"[telegram_message_id: {telegramMessageId}]\n" : "";
+        var channelLine = channelAnchor is not null ? $"{channelAnchor}\n" : "";
         var replyContext = replyToUsername is not null && replyToText is not null
-            ? $"\n[Replying to {replyToUsername}: \"{TruncateReplyText(replyToText, 300)}\"]"
+            ? $" [Replying to {replyToUsername}: \"{TruncateReplyText(replyToText, 300)}\"]"
             : replyToUsername is not null
-                ? $"\n[Replying to {replyToUsername}]"
+                ? $" [Replying to {replyToUsername}]"
                 : "";
 
-        var fromLine = msgIdTag.Length > 0
-            ? string.Concat($"[From: {sender}] ", msgIdTag, replyContext)
-            : string.Concat($"[From: {sender}]", replyContext);
+        // [telegram_message_id: N]  (optional)
+        // [channel: group ...]      (optional)
+        // [From: sender][reply]
+        var fromLine = $"[From: {sender}]{replyContext}";
+        var header = $"{msgIdLine}{channelLine}{fromLine}";
 
         if (_executor.IsProcessWarm)
-            return $"[New message]\n{fromLine} {taskText}";
+            return $"[New message]\n{header} {taskText}";
 
         var context = buffer.FormatContext();
 
         var result = "";
         if (context.Length > 0)
-            result += $"[Recent group conversation]\n{context}\n\n";
+        {
+            var historySection = channelAnchor is not null ? $"{channelAnchor}\n{context}" : context;
+            result += $"[Recent group conversation]\n{historySection}\n\n";
+        }
 
-        result += $"[New message]\n{fromLine} {taskText}";
+        result += $"[New message]\n{header} {taskText}";
         return result;
     }
 
@@ -83,6 +95,7 @@ public sealed class PromptAssembler
     public string ForRelayDirective(GroupChatBuffer buffer, string sender, string text)
     {
         return $"""
+            [channel: relay]
             [Directive from {sender}]
             {text}
             """;
@@ -90,6 +103,7 @@ public sealed class PromptAssembler
 
     /// <summary>
     /// Build a prompt for a periodic check-in (debounce, proactive, supervision).
+    /// Check-ins are proactively initiated by the agent — no associated Telegram chat.
     /// </summary>
     public string ForCheckIn(GroupChatBuffer buffer, string label, string instruction)
     {
@@ -103,6 +117,7 @@ public sealed class PromptAssembler
                 ? "New messages since last check-in"
                 : "Recent group conversation";
             return $"""
+                [channel: relay]
                 [{contextLabel}]
                 {context}
 
@@ -112,6 +127,7 @@ public sealed class PromptAssembler
         }
 
         return $"""
+            [channel: relay]
             [{label}]
             {instruction}
             """;

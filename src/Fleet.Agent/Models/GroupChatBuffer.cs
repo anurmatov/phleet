@@ -11,6 +11,39 @@ public sealed class GroupChatBuffer
     private readonly LinkedList<BufferEntry> _entries = new();
     private DateTimeOffset _lastChecked = DateTimeOffset.MinValue;
 
+    /// <summary>Telegram chat ID. 0 when not populated (relay, legacy deserialized buffers).</summary>
+    public long ChatId { get; set; }
+
+    /// <summary>Chat.Title for group chats. Null for DM buffers.</summary>
+    public string? ChatTitle { get; set; }
+
+    /// <summary>
+    /// Pre-formatted label segment for DM channel anchors:
+    /// <c>"user=@alice"</c>, <c>"name=\"Alice\""</c>, or null when neither is available.
+    /// </summary>
+    public string? ChatLabel { get; set; }
+
+    /// <summary>
+    /// Returns the <c>[channel: ...]</c> header line for prompt injection,
+    /// or <c>null</c> when <see cref="ChatId"/> is 0 (legacy / relay).
+    /// Groups (chatId &lt; 0): <c>[channel: group chat_id=N title="X"]</c>
+    /// DMs (chatId &gt; 0): <c>[channel: dm chat_id=N user=@X]</c> / <c>name="X"</c> / bare id.
+    /// </summary>
+    public string? RenderHeader()
+    {
+        if (ChatId == 0) return null;
+        if (ChatId < 0)
+        {
+            return ChatTitle is { Length: > 0 }
+                ? $"[channel: group chat_id={ChatId} title=\"{ChatTitle.Replace("\"", "\\\"")}\"]"
+                : $"[channel: group chat_id={ChatId}]";
+        }
+        // DM
+        return ChatLabel is { Length: > 0 }
+            ? $"[channel: dm chat_id={ChatId} {ChatLabel}]"
+            : $"[channel: dm chat_id={ChatId}]";
+    }
+
     public void Add(string sender, string text, string? replyTo, DateTimeOffset timestamp,
         long telegramMessageId = 0, long? replyToTelegramMessageId = null)
     {

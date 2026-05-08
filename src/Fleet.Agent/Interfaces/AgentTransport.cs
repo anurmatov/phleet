@@ -581,6 +581,10 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             IsNameMentioned = isNameMentioned,
             StrippedText = stripped,
             HasMediaAttachment = isMediaAttachment,
+            // Channel anchor fields — used by PromptAssembler to emit [channel: ...] tags
+            ChatTitle = message.Chat.Title,
+            ChatUsername = message.Chat.Username,
+            ChatFirstName = message.Chat.FirstName,
         };
 
         // Media group: buffer all photos and flush as one IncomingMessage after debounce
@@ -854,21 +858,43 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         var (added, removed) = DiffReactions(reaction.NewReaction, reaction.OldReaction);
         if (added.Count == 0 && removed.Count == 0) return; // no net change
 
+        var channelAnchor = BuildChannelAnchorFromChat(reaction.Chat);
         var buffer = _groupBehavior.GetGroupBuffer(chatId);
         var hasOriginal = buffer.TryGetByMessageId(messageId, out _, out var origText);
         var contentSuffix = hasOriginal ? $": \"{TruncateForReaction(origText)}\"" : "";
 
         foreach (var emoji in added)
         {
-            var text = $"[reaction: {emoji} on message_id={messageId} from user_id={userId}{contentSuffix}]";
+            var text = $"{channelAnchor}\n[reaction: {emoji} on message_id={messageId} from user_id={userId}{contentSuffix}]";
             _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
         }
 
         foreach (var emoji in removed)
         {
-            var text = $"[reaction removed: {emoji} on message_id={messageId} from user_id={userId}{contentSuffix}]";
+            var text = $"{channelAnchor}\n[reaction removed: {emoji} on message_id={messageId} from user_id={userId}{contentSuffix}]";
             _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
         }
+    }
+
+    /// <summary>
+    /// Builds a <c>[channel: ...]</c> anchor string from a Telegram <see cref="Chat"/> object.
+    /// Used for reaction events where the full Chat is available directly.
+    /// </summary>
+    internal static string BuildChannelAnchorFromChat(Chat chat)
+    {
+        var chatId = chat.Id;
+        if (chatId < 0)
+        {
+            return chat.Title is { Length: > 0 }
+                ? $"[channel: group chat_id={chatId} title=\"{chat.Title.Replace("\"", "\\\"")}\"]"
+                : $"[channel: group chat_id={chatId}]";
+        }
+        // DM
+        if (chat.Username is { Length: > 0 })
+            return $"[channel: dm chat_id={chatId} user=@{chat.Username}]";
+        if (chat.FirstName is { Length: > 0 })
+            return $"[channel: dm chat_id={chatId} name=\"{chat.FirstName.Replace("\"", "\\\"")}\"]";
+        return $"[channel: dm chat_id={chatId}]";
     }
 
     /// <summary>

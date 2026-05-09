@@ -107,7 +107,7 @@ See `docs/providers/gemini.md` for a full setup guide.
 - **Media groups** (multiple photos sent together): Telegram delivers each photo as a separate `Message` update sharing the same `MediaGroupId`. `AgentTransport` buffers all photos for a group via `MediaGroupBuffer`: it debounces 1500 ms after the last photo, then flushes a single `IncomingMessage` carrying all images. A hard cap of `TelegramOptions.MaxGroupBufferMs` (default: 10 s) force-flushes the group if photos keep trickling in.
 - **Size limits**: individual photos exceeding `MaxImageBytes` (default: 10 MB) are skipped with a Telegram reply warning. Groups exceeding `MaxImagesPerGroup` (default: 10) drop extra photos with a warning.
 - **ClaudeExecutor**: forwards all images as separate content blocks in the multi-modal Claude CLI JSON payload.
-- **CodexExecutor**: emits a user-facing warning and drops images (Codex SDK does not support image input via `runStreamed`).
+- **CodexExecutor**: forwards images that have a persisted `FilePath` as `{type:"local_image",path}` blocks via `@openai/codex-sdk@0.118.0`'s `UserInput[]` form. Images without a `FilePath` (persistence disabled, size limit exceeded, or file swept before dispatch) are skipped with a per-batch warning. PDFs remain hint-only (`[document attachment: path]`).
 
 ## Code Conventions
 

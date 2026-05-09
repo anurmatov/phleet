@@ -75,7 +75,11 @@ async function runTask(msg) {
         const thread = sessionId
             ? codex.resumeThread(sessionId, threadOpts)
             : codex.startThread(threadOpts);
-        const streamed = await thread.runStreamed(msg.prompt);
+        // When images are forwarded, CodexExecutor sets msg.input to a UserInput[]
+        // ({type:"local_image",path} entries followed by {type:"text",text}).
+        // Fall back to the bare-string msg.prompt when no images were forwarded.
+        const input = msg.input ?? msg.prompt;
+        const streamed = await thread.runStreamed(input);
 
         for await (const event of streamed.events) {
             const evType = event.type ?? '';

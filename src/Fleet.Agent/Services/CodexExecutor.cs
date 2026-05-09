@@ -20,6 +20,7 @@ public sealed class CodexExecutor : IAgentExecutor
     private readonly AgentOptions _config;
     private readonly PromptBuilder _promptBuilder;
     private readonly ILogger<CodexExecutor> _logger;
+    private readonly string _normalizedAttachmentDir;
 
     private Process? _process;
     private StreamWriter? _stdin;
@@ -44,19 +45,24 @@ public sealed class CodexExecutor : IAgentExecutor
     public Task<bool> CancelBackgroundTaskAsync(string taskId, CancellationToken ct = default) =>
         Task.FromResult(false);
 
-    public CodexExecutor(IOptions<AgentOptions> config, PromptBuilder promptBuilder, ILogger<CodexExecutor> logger)
+    public CodexExecutor(
+        IOptions<AgentOptions> config,
+        IOptions<TelegramOptions> telegramConfig,
+        PromptBuilder promptBuilder,
+        ILogger<CodexExecutor> logger)
     {
         _config = config.Value;
         _promptBuilder = promptBuilder;
         _logger = logger;
+        _normalizedAttachmentDir = Path.GetFullPath(telegramConfig.Value.AttachmentDir);
 
         // @openai/codex-sdk@0.118.0 does not expose a document content-block API via
         // runStreamed(). PDF documents received from Telegram are persisted to disk and a
         // [document attachment: path] hint is injected into the task text so the agent
         // can reach the file via Bash/Read tools. See issue #112 amendment for context.
         _logger.LogInformation(
-            "CodexExecutor: document block passthrough is not supported by @openai/codex-sdk@0.118.0 " +
-            "— agents will use hint-only mode (file path in task text) for PDF attachments");
+            "CodexExecutor: images forwarded via local_image blocks when FilePath is available; " +
+            "PDF documents use hint-only mode (file path in task text)");
     }
 
     public async IAsyncEnumerable<AgentProgress> ExecuteAsync(
@@ -67,7 +73,7 @@ public sealed class CodexExecutor : IAgentExecutor
     {
         _lastActivity = DateTimeOffset.UtcNow;
         await _sendLock.WaitAsync(ct);
-        var hasImages = images is { Count: > 0 };
+        var (forwardedPaths, skippedCount) = CollectImagePaths(images);
 
         try
         {
@@ -85,16 +91,30 @@ public sealed class CodexExecutor : IAgentExecutor
             // Measured system prompt size across all running Codex agents (2026-04-24):
             // max observed was ~8 KB — well under the 50 KB threshold defined in issue #80.
             // Revisit this if Codex agent roles or project contexts grow significantly.
-            var msgObj = new
+            //
+            // When images are available, an `input` array is added to the message.
+            // The bridge uses `msg.input ?? msg.prompt` so the bare-string path remains
+            // the fallback when no images were forwarded. `prompt` is always present.
+            var msgDict = new Dictionary<string, object?>
             {
-                type = "task",
-                prompt = task,
-                systemPrompt = _promptBuilder.BuildSystemPrompt(),
-                model = _config.Model,
-                sessionId = _lastSessionId,
+                ["type"] = "task",
+                ["prompt"] = task,
+                ["systemPrompt"] = _promptBuilder.BuildSystemPrompt(),
+                ["model"] = _config.Model,
+                ["sessionId"] = _lastSessionId,
             };
 
-            await _stdin!.WriteLineAsync(JsonSerializer.Serialize(msgObj).AsMemory(), ct);
+            if (forwardedPaths.Count > 0)
+            {
+                // UserInput[] per @openai/codex-sdk@0.118.0: images first, text entry last.
+                var inputArray = forwardedPaths
+                    .Select(p => (object)new { type = "local_image", path = p })
+                    .Append((object)new { type = "text", text = task })
+                    .ToArray();
+                msgDict["input"] = inputArray;
+            }
+
+            await _stdin!.WriteLineAsync(JsonSerializer.Serialize(msgDict).AsMemory(), ct);
             await _stdin.FlushAsync();
         }
         finally
@@ -102,12 +122,12 @@ public sealed class CodexExecutor : IAgentExecutor
             _sendLock.Release();
         }
 
-        if (hasImages)
+        if (skippedCount > 0)
         {
             yield return new AgentProgress
             {
                 EventType = "warning",
-                Summary = "Note: the Codex provider does not support image input — images will be ignored.",
+                Summary = $"Codex: {skippedCount} image(s) skipped — no persisted file path or file not found.",
                 IsSignificant = true,
             };
         }
@@ -177,6 +197,61 @@ public sealed class CodexExecutor : IAgentExecutor
     }
 
     // --- Internals ---
+
+    /// <summary>
+    /// Validates each image in <paramref name="images"/> and returns the list of file paths
+    /// that are safe to forward to the Codex SDK as <c>local_image</c> blocks, plus a count
+    /// of images that were skipped (no FilePath, file not found, or path outside AttachmentDir).
+    /// </summary>
+    internal (List<string> ForwardedPaths, int SkippedCount) CollectImagePaths(IReadOnlyList<MessageImage>? images)
+    {
+        if (images is not { Count: > 0 })
+            return ([], 0);
+
+        var forwarded = new List<string>(images.Count);
+        var skipped = 0;
+
+        foreach (var img in images)
+        {
+            if (string.IsNullOrEmpty(img.FilePath))
+            {
+                skipped++;
+                continue;
+            }
+
+            string normalized;
+            try { normalized = Path.GetFullPath(img.FilePath); }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "CodexExecutor: image path '{Path}' is invalid — skipping", img.FilePath);
+                skipped++;
+                continue;
+            }
+
+            // MUST NOT forward paths that escape the configured AttachmentDir.
+            // The bridge process runs in the container's filesystem view; any path outside
+            // /workspace/attachments (default) could reference sensitive host-mounted files.
+            if (!normalized.StartsWith(_normalizedAttachmentDir + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+                && !string.Equals(normalized, _normalizedAttachmentDir, StringComparison.Ordinal))
+            {
+                _logger.LogError(
+                    "CodexExecutor: image path '{Path}' is outside AttachmentDir '{Dir}' — skipping",
+                    img.FilePath, _normalizedAttachmentDir);
+                skipped++;
+                continue;
+            }
+
+            if (!File.Exists(img.FilePath))
+            {
+                skipped++;
+                continue;
+            }
+
+            forwarded.Add(img.FilePath);
+        }
+
+        return (forwarded, skipped);
+    }
 
     private Task StartProcessAsync(CancellationToken ct)
     {

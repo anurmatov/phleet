@@ -3,6 +3,7 @@ using System.Text.Json;
 using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Models;
 using Fleet.Shared;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
@@ -17,6 +18,8 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
 {
     private readonly RabbitMqOptions _rabbitConfig;
     private readonly AgentRegistry _registry;
+    private readonly AgentConfigPublisherService _publisher;
+    private readonly IConfiguration _configuration;
     private readonly ILogger<HeartbeatConsumerService> _logger;
 
     private IConnection? _connection;
@@ -28,10 +31,14 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
     public HeartbeatConsumerService(
         IOptions<RabbitMqOptions> rabbitConfig,
         AgentRegistry registry,
+        AgentConfigPublisherService publisher,
+        IConfiguration configuration,
         ILogger<HeartbeatConsumerService> logger)
     {
         _rabbitConfig = rabbitConfig.Value;
         _registry = registry;
+        _publisher = publisher;
+        _configuration = configuration;
         _logger = logger;
     }
 
@@ -103,6 +110,10 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
 
     private Task OnMessageReceived(object sender, BasicDeliverEventArgs ea)
     {
+        // Route by routing key prefix before attempting deserialization.
+        if (ea.RoutingKey.StartsWith("access-request.", StringComparison.OrdinalIgnoreCase))
+            return HandleAccessRequestAsync(ea);
+
         try
         {
             var json = Encoding.UTF8.GetString(ea.Body.Span);
@@ -124,6 +135,65 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
         }
 
         return Task.CompletedTask;
+    }
+
+    private async Task HandleAccessRequestAsync(BasicDeliverEventArgs ea)
+    {
+        try
+        {
+            var json = Encoding.UTF8.GetString(ea.Body.Span);
+            var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var payload = JsonSerializer.Deserialize<AccessRequestPayload>(json, opts);
+
+            if (payload is null)
+            {
+                _logger.LogWarning("Received null or unparseable access-request payload (routingKey={RoutingKey})", ea.RoutingKey);
+                return;
+            }
+
+            var ctoAgent = _configuration["FLEET_CTO_AGENT"];
+            if (string.IsNullOrWhiteSpace(ctoAgent))
+            {
+                _logger.LogError(
+                    "Received access request for bot '{TargetAgent}' from user {UserId} " +
+                    "but FLEET_CTO_AGENT is not configured — request dropped",
+                    payload.TargetAgent, payload.UserId);
+                return;
+            }
+
+            var userDisplay = payload.Username is not null
+                ? "@" + payload.Username
+                : payload.FirstName ?? "unknown";
+
+            var directive =
+                $"An access request has arrived for bot '{payload.TargetAgent}'.\n\n" +
+                $"User: {userDisplay} (id={payload.UserId})\n" +
+                $"Message: {payload.MessageText}\n" +
+                $"Request ID: {payload.RequestId}\n\n" +
+                $"Review the request and, if approved, call manage_agent_telegram_users " +
+                $"with action=add to grant access.";
+
+            await _publisher.PublishDirectiveToAgentAsync(ctoAgent, directive, type: "access.request");
+
+            _logger.LogInformation(
+                "Access request from user {UserId} for bot '{TargetAgent}' forwarded to CTO agent '{CtoAgent}' (request_id={RequestId})",
+                payload.UserId, payload.TargetAgent, ctoAgent, payload.RequestId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing access-request message (routingKey={RoutingKey})", ea.RoutingKey);
+        }
+    }
+
+    /// <summary>Mirrors Fleet.Agent.Models.AccessRequestPayload — must stay in sync with JSON shape.</summary>
+    private sealed class AccessRequestPayload
+    {
+        public string RequestId { get; init; } = "";
+        public string TargetAgent { get; init; } = "";
+        public long UserId { get; init; }
+        public string? Username { get; init; }
+        public string? FirstName { get; init; }
+        public string MessageText { get; init; } = "";
     }
 
     public async ValueTask DisposeAsync()

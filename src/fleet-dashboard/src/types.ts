@@ -176,6 +176,8 @@ export interface AgentConfig {
   envRefs: string[]
   telegramUsers: number[]
   telegramGroups: number[]
+  canReceiveChatRequests: boolean
+  requestReceivedMessage: string | null
   instructions: { name: string; loadOrder: number }[]
 }
 
@@ -210,6 +212,8 @@ export interface ConfigEdits {
   mcpEndpoints: McpEndpointEntry[]
   telegramUsers: string
   telegramGroups: string
+  canReceiveChatRequests: boolean
+  requestReceivedMessage: string
   instructions: { name: string; loadOrder: number }[]
 }
 

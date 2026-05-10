@@ -25,6 +25,13 @@ public sealed class GroupRelayService : IAsyncDisposable
     private IChannel? _consumeChannel;
     private bool _initialized;
 
+    /// <summary>
+    /// The fleet.orchestrator topic exchange (same one used for heartbeats).
+    /// Access requests are published here so the orchestrator — which knows FLEET_CTO_AGENT — can forward them.
+    /// Agent containers must not know who the CTO is.
+    /// </summary>
+    private const string OrchestratorExchange = "fleet.orchestrator";
+
     private readonly Dictionary<string, DateTimeOffset> _lastPublishTime = new();
     public IReadOnlyDictionary<string, DateTimeOffset> LastPublishTime => _lastPublishTime;
 
@@ -76,6 +83,12 @@ public sealed class GroupRelayService : IAsyncDisposable
             // Declare the direct exchange (idempotent, durable to survive broker restarts)
             await _publishChannel.ExchangeDeclareAsync(
                 _rabbitConfig.Exchange, ExchangeType.Direct, durable: true, autoDelete: false,
+                cancellationToken: ct);
+
+            // Declare the orchestrator topic exchange so we can publish access-request messages to it.
+            // The orchestrator's HeartbeatConsumerService already owns this exchange and resolves FLEET_CTO_AGENT.
+            await _publishChannel.ExchangeDeclareAsync(
+                OrchestratorExchange, ExchangeType.Topic, durable: true, autoDelete: false,
                 cancellationToken: ct);
 
             // Declare a named queue for this agent, bound with routing key = lowercased short name
@@ -169,6 +182,38 @@ public sealed class GroupRelayService : IAsyncDisposable
         }
 
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Publish an access-request payload to the fleet.orchestrator topic exchange.
+    /// The orchestrator resolves FLEET_CTO_AGENT and forwards a directive to the CTO agent.
+    /// Routing key: access-request.{this-agent-shortname}.
+    /// </summary>
+    public async Task PublishAccessRequestAsync(AccessRequestPayload payload)
+    {
+        if (_publishChannel is null || !_initialized)
+        {
+            _logger.LogWarning("PublishAccessRequestAsync called before relay initialized — access request dropped");
+            return;
+        }
+
+        try
+        {
+            var routingKey = $"access-request.{_agentConfig.ShortName.ToLowerInvariant()}";
+            var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload));
+            var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
+            await _publishChannel.BasicPublishAsync(
+                OrchestratorExchange, routingKey: routingKey, mandatory: false,
+                basicProperties: props, body: body);
+
+            _logger.LogInformation(
+                "Access request from user {UserId} published to orchestrator (routing_key={RoutingKey}, request_id={RequestId})",
+                payload.UserId, routingKey, payload.RequestId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to publish access request to orchestrator for user {UserId}", payload.UserId);
+        }
     }
 
     /// <summary>

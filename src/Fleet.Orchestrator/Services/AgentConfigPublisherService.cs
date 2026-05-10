@@ -102,6 +102,52 @@ public sealed class AgentConfigPublisherService : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Publish a relay directive to a specific agent's queue on fleet.group.
+    /// Used by the orchestrator to forward access-request notifications to the CTO agent.
+    /// </summary>
+    public async Task PublishDirectiveToAgentAsync(
+        string agentShortName,
+        string text,
+        string type = "directive",
+        CancellationToken ct = default)
+    {
+        if (!IsEnabled) return;
+
+        try
+        {
+            await EnsureInitializedAsync(ct);
+            if (_channel is null) return;
+
+            var envelope = new
+            {
+                ChatId    = 0L,
+                Sender    = "orchestrator",
+                Text      = text,
+                Timestamp = DateTimeOffset.UtcNow,
+                Type      = type,
+            };
+
+            var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(envelope));
+            var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
+            var routingKey = agentShortName.ToLowerInvariant();
+
+            await _channel.BasicPublishAsync(
+                exchange: AgentDirectExchange,
+                routingKey: routingKey,
+                mandatory: false,
+                basicProperties: props,
+                body: body,
+                cancellationToken: ct);
+
+            _logger.LogInformation("Directive published to agent '{Agent}' ({Length} chars)", agentShortName, text.Length);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to publish directive to agent '{Agent}'", agentShortName);
+        }
+    }
+
     private async Task EnsureInitializedAsync(CancellationToken ct)
     {
         if (_initialized) return;

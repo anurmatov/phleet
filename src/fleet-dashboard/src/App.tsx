@@ -782,6 +782,8 @@ export default function App() {
           envRefs: cfg.envRefs.join(', '),
           telegramUsers: cfg.telegramUsers.join(', '),
           telegramGroups: cfg.telegramGroups.join(', '),
+          canReceiveChatRequests: cfg.canReceiveChatRequests ?? false,
+          requestReceivedMessage: cfg.requestReceivedMessage ?? '',
           instructions: cfg.instructions ?? [],
         })
       })
@@ -837,8 +839,14 @@ export default function App() {
     const projects = configEdits.projects.split(',').map(p => p.trim()).filter(Boolean)
     const networks = configEdits.networks.split(',').map(n => n.trim()).filter(Boolean)
     const envRefs = configEdits.envRefs.split(',').map(r => r.trim()).filter(Boolean)
-    const telegramUsers = configEdits.telegramUsers.split(',').map(s => s.trim()).filter(Boolean).map(Number)
-    const telegramGroups = configEdits.telegramGroups.split(',').map(s => s.trim()).filter(Boolean).map(Number)
+    const newTelegramUsers = configEdits.telegramUsers.split(',').map(s => s.trim()).filter(Boolean).map(Number).filter(n => !isNaN(n))
+    const newTelegramGroups = configEdits.telegramGroups.split(',').map(s => s.trim()).filter(Boolean).map(Number).filter(n => !isNaN(n))
+    const prevUsers = configData?.telegramUsers ?? []
+    const prevGroups = configData?.telegramGroups ?? []
+    const addedUsers = newTelegramUsers.filter(id => !prevUsers.includes(id))
+    const removedUsers = prevUsers.filter(id => !newTelegramUsers.includes(id))
+    const addedGroups = newTelegramGroups.filter(id => !prevGroups.includes(id))
+    const removedGroups = prevGroups.filter(id => !newTelegramGroups.includes(id))
     setConfigSaveState('saving')
     apiFetch(`/api/agents/${encodeURIComponent(agentName)}/config`, {
       method: 'PUT',
@@ -866,12 +874,22 @@ export default function App() {
         autoMemoryEnabled: configEdits.autoMemoryEnabled,
         codexSandboxMode: configEdits.codexSandboxMode || undefined,
         hostPort: configEdits.hostPort ? parseInt(configEdits.hostPort, 10) : null,
-        tools, projects, mcpEndpoints: configEdits.mcpEndpoints, networks, envRefs, telegramUsers, telegramGroups,
+        canReceiveChatRequests: configEdits.canReceiveChatRequests,
+        requestReceivedMessage: configEdits.requestReceivedMessage || undefined,
+        tools, projects, mcpEndpoints: configEdits.mcpEndpoints, networks, envRefs,
         instructions: configEdits.instructions.map(i => ({ instructionName: i.name, loadOrder: i.loadOrder })),
       }),
     })
       .then(async r => {
         if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
+        // Apply telegram user/group diffs via dedicated endpoints (live, no reprovision needed)
+        const userOps = [
+          ...addedUsers.map(id => apiFetch(`/api/agents/${encodeURIComponent(agentName)}/telegram-users`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: id }) })),
+          ...removedUsers.map(id => apiFetch(`/api/agents/${encodeURIComponent(agentName)}/telegram-users/${id}`, { method: 'DELETE' })),
+          ...addedGroups.map(id => apiFetch(`/api/agents/${encodeURIComponent(agentName)}/telegram-groups`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ groupId: id }) })),
+          ...removedGroups.map(id => apiFetch(`/api/agents/${encodeURIComponent(agentName)}/telegram-groups/${id}`, { method: 'DELETE' })),
+        ]
+        if (userOps.length > 0) await Promise.all(userOps)
         if (andReprovision) return apiFetch(`/api/agents/${encodeURIComponent(agentName)}/reprovision`, { method: 'POST' }).then(r2 => { if (!r2.ok) throw new Error('Reprovision failed') })
       })
       .then(() => {

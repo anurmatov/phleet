@@ -47,22 +47,14 @@ public sealed class PeerConfigHostedService : IHostedService, IAsyncDisposable
         snapshot.Literals.TryGetValue("TELEGRAM_NOTIFIER_BOT_TOKEN", out var notifierToken);
         _factory.ApplyNotifierToken(notifierToken);
 
-        // Build the merged agent token map: start with derived tokens, then overlay the CTO literal.
+        // Agent token map comes fully keyed by agent.Name from the orchestrator's env_ref walk.
+        // No CTO overlay needed — the CTO agent appears in the map via its TELEGRAM_CTO_BOT_TOKEN env_ref.
         const string template = "TELEGRAM_{SHORTNAME}_BOT_TOKEN";
         var agentTokenMap = snapshot.AgentDerived.TryGetValue(template, out var derived)
             ? new Dictionary<string, string>(derived, StringComparer.OrdinalIgnoreCase)
             : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        // CTO bot token is a well-known literal — register it under the CTO agent name.
-        if (snapshot.Literals.TryGetValue("FLEET_CTO_AGENT", out var ctoAgent) &&
-            !string.IsNullOrWhiteSpace(ctoAgent) &&
-            snapshot.Literals.TryGetValue("TELEGRAM_CTO_BOT_TOKEN", out var ctoToken) &&
-            !string.IsNullOrWhiteSpace(ctoToken))
-        {
-            agentTokenMap[ctoAgent] = ctoToken;
-        }
-
-        _factory.ApplyAgentDerived(agentTokenMap);
+        _factory.ApplyAgentTokens(agentTokenMap);
 
         // CEO chat ID — live-updated from TELEGRAM_USER_ID literal key.
         snapshot.Literals.TryGetValue("TELEGRAM_USER_ID", out var ceoUserIdRaw);

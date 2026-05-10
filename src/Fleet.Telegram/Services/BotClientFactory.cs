@@ -6,58 +6,69 @@ namespace Fleet.Telegram.Services;
 
 /// <summary>
 /// Singleton factory that maps agent names to <see cref="ITelegramBotClient"/> instances.
-/// Backed by a <see cref="ConcurrentDictionary"/>; updated at runtime via
-/// <see cref="ApplyAgentDerived"/> and <see cref="ApplyNotifierToken"/>.
+///
+/// Two-dict scheme: <c>_tokensByAgent</c> maps agent name → bot token (replaced wholesale
+/// on every <see cref="ApplyAgentTokens"/> call); <c>_clientsByToken</c> caches one
+/// <see cref="ITelegramBotClient"/> per distinct token so agents sharing a token share one
+/// connection pool and token rotation evicts only the stale client.
 /// </summary>
 public sealed class BotClientFactory
 {
-    private readonly ConcurrentDictionary<string, ITelegramBotClient> _clients =
-        new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _tokensByAgentLock = new();
+
+    // agent name → bot token; replaced wholesale on every ApplyAgentTokens call
+    private Dictionary<string, string> _tokensByAgent = new(StringComparer.OrdinalIgnoreCase);
+
+    // bot token → ITelegramBotClient; GetOrAdd on lookup, eviction on rotation
+    private readonly ConcurrentDictionary<string, ITelegramBotClient> _clientsByToken =
+        new(StringComparer.Ordinal);
 
     private volatile ITelegramBotClient? _notifierClient;
     private readonly ILogger<BotClientFactory> _logger;
+    private readonly Func<string, ITelegramBotClient> _createClient;
 
-    public BotClientFactory(ILogger<BotClientFactory> logger)
+    public BotClientFactory(ILogger<BotClientFactory> logger,
+        Func<string, ITelegramBotClient>? createClient = null)
     {
         _logger = logger;
+        _createClient = createClient ?? (t => new TelegramBotClient(t));
     }
 
     /// <summary>
-    /// Diff-based reconcile: removes bots not in the map, adds/updates changed ones.
-    /// On invalid token: logs error and skips that entry.
+    /// Replaces the agent→token map wholesale and evicts <see cref="_clientsByToken"/>
+    /// entries whose tokens are no longer in use.
+    ///
+    /// Empty/whitespace tokens are logged as errors and skipped.
+    /// Race window: a concurrent <see cref="GetClient"/> between eviction and swap may
+    /// briefly recreate an orphaned client — self-heals on the next apply.
     /// </summary>
-    public void ApplyAgentDerived(Dictionary<string, string> agentTokenMap)
+    public void ApplyAgentTokens(Dictionary<string, string> agentTokenMap)
     {
-        // Remove agents no longer in the map
-        foreach (var existingKey in _clients.Keys.ToList())
-        {
-            if (!agentTokenMap.ContainsKey(existingKey))
-            {
-                _clients.TryRemove(existingKey, out _);
-                _logger.LogInformation("Removed Telegram bot for agent '{AgentName}'", existingKey);
-            }
-        }
-
-        // Add or update
+        // Filter out empty tokens before building the incoming set
+        var filtered = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (agentName, token) in agentTokenMap)
         {
             if (string.IsNullOrWhiteSpace(token))
             {
-                _logger.LogError("Skipping agent '{AgentName}' — token is empty", agentName);
+                _logger.LogError(
+                    "Skipping agent '{AgentName}' — token is empty (reason={Reason})",
+                    agentName, "empty_token");
                 continue;
             }
-
-            try
-            {
-                var client = new TelegramBotClient(token);
-                _clients[agentName] = client;
-                _logger.LogInformation("Registered Telegram bot for agent '{AgentName}'", agentName);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Invalid token for agent '{AgentName}' — skipping", agentName);
-            }
+            filtered[agentName] = token;
         }
+
+        // Evict stale clients whose tokens are no longer referenced
+        var incoming = new HashSet<string>(filtered.Values, StringComparer.Ordinal);
+        foreach (var token in _clientsByToken.Keys.ToList())
+            if (!incoming.Contains(token))
+                _clientsByToken.TryRemove(token, out _);
+
+        // Swap agent→token dict wholesale
+        lock (_tokensByAgentLock)
+            _tokensByAgent = new Dictionary<string, string>(filtered, StringComparer.OrdinalIgnoreCase);
+
+        _logger.LogInformation("ApplyAgentTokens: {Count} agents configured", filtered.Count);
     }
 
     /// <summary>Updates the fallback notifier client.</summary>
@@ -72,7 +83,7 @@ public sealed class BotClientFactory
 
         try
         {
-            _notifierClient = new TelegramBotClient(token);
+            _notifierClient = _createClient(token);
             _logger.LogInformation("Notifier bot client updated");
         }
         catch (Exception ex)
@@ -84,20 +95,41 @@ public sealed class BotClientFactory
     /// <summary>
     /// Returns the bot client for the given agent name, or the fallback notifier client
     /// if the agent is unknown or has no configured token.
+    ///
+    /// Lookup path:
+    /// 0. null/whitespace agentName → return notifier (no log)
+    /// 1. hit in <c>_tokensByAgent</c> → <c>_clientsByToken.GetOrAdd(token, …)</c> → return
+    ///    miss → LogWarning(reason=no_bot_token_configured) → return notifier
     /// </summary>
     public ITelegramBotClient? GetClient(string? agentName)
     {
-        if (!string.IsNullOrWhiteSpace(agentName) &&
-            _clients.TryGetValue(agentName, out var client))
-            return client;
+        if (string.IsNullOrWhiteSpace(agentName))
+            return _notifierClient;
 
-        return _notifierClient;
+        Dictionary<string, string> snapshot;
+        lock (_tokensByAgentLock) snapshot = _tokensByAgent;
+
+        if (!snapshot.TryGetValue(agentName, out var token))
+        {
+            _logger.LogWarning(
+                "No dedicated Telegram bot configured for agent '{Agent}' — " +
+                "using notifier bot fallback (reason={Reason})",
+                agentName, "no_bot_token_configured");
+            return _notifierClient;
+        }
+
+        return _clientsByToken.GetOrAdd(token, _createClient);
     }
 
     /// <summary>Returns the fallback notifier bot client directly.</summary>
     public ITelegramBotClient? GetFallbackClient() => _notifierClient;
 
     /// <summary>Returns true if a dedicated client exists for this agent name.</summary>
-    public bool HasClient(string? agentName) =>
-        !string.IsNullOrWhiteSpace(agentName) && _clients.ContainsKey(agentName);
+    public bool HasClient(string? agentName)
+    {
+        if (string.IsNullOrWhiteSpace(agentName)) return false;
+        Dictionary<string, string> snapshot;
+        lock (_tokensByAgentLock) snapshot = _tokensByAgent;
+        return snapshot.ContainsKey(agentName);
+    }
 }

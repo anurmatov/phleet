@@ -174,23 +174,33 @@ public sealed class ConfigService
                 {
                     var agents = await db.Agents
                         .AsNoTracking()
-                        .Select(a => new { a.ShortName, a.Name })
+                        .Include(a => a.EnvRefs)
                         .ToListAsync(ct);
 
                     foreach (var template in templates)
                     {
+                        var rx = TemplateToRegex(template);
                         var perAgent = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
                         foreach (var agent in agents)
                         {
-                            var shortName = string.IsNullOrWhiteSpace(agent.ShortName)
-                                ? agent.Name
-                                : agent.ShortName;
-                            var expandedKey = template.Replace(
-                                ShortnamePlaceholder, shortName.ToUpperInvariant(),
-                                StringComparison.OrdinalIgnoreCase);
-                            if (env.TryGetValue(expandedKey, out var tokenVal) &&
+                            var matches = agent.EnvRefs
+                                .Where(r => rx.IsMatch(r.EnvKeyName))
+                                .OrderBy(r => r.EnvKeyName)
+                                .ToList();
+
+                            if (matches.Count > 1)
+                                _logger.LogWarning(
+                                    "Agent '{Agent}' has {Count} env_refs matching template '{Template}' " +
+                                    "— using '{Selected}'. Remove duplicates to suppress this warning.",
+                                    agent.Name, matches.Count, template, matches[0].EnvKeyName);
+
+                            var envRef = matches.FirstOrDefault();
+                            if (envRef is null) continue;
+
+                            if (env.TryGetValue(envRef.EnvKeyName, out var tokenVal) &&
                                 !string.IsNullOrEmpty(tokenVal))
-                                perAgent[shortName] = tokenVal;
+                                perAgent[agent.Name] = tokenVal;
                         }
                         agentDerived[template] = perAgent;
                     }

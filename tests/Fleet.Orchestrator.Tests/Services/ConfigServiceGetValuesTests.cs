@@ -1,7 +1,9 @@
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Fleet.Orchestrator.Tests.Services;
@@ -47,7 +49,8 @@ public class ConfigServiceGetValuesTests : IDisposable
         return services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
     }
 
-    private ConfigService BuildService(IServiceScopeFactory scopeFactory)
+    private ConfigService BuildService(IServiceScopeFactory scopeFactory,
+        ILogger<ConfigService>? logger = null)
     {
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -60,7 +63,7 @@ public class ConfigServiceGetValuesTests : IDisposable
             new Fleet.Orchestrator.Configuration.RabbitMqOptions { Host = "", Exchange = "" });
 
         return new ConfigService(config, rabbitOptions, scopeFactory,
-            NullLogger<ConfigService>.Instance);
+            logger ?? NullLogger<ConfigService>.Instance);
     }
 
     // ── TemplateToRegex static tests ──────────────────────────────────────────
@@ -182,4 +185,51 @@ public class ConfigServiceGetValuesTests : IDisposable
         Assert.Equal("token-alpha", inner["agent-alpha"]);
         Assert.Equal("token-beta",  inner["agent-beta"]);
     }
+
+    [Fact]
+    public async Task GetValuesAsync_AgentWithTwoMatchingEnvRefs_AlphabeticFirstWins_AndLogsWarning()
+    {
+        await using var db = CreateDb("test_two_matching_envrefs");
+        var agent = new Agent
+        {
+            Name = "multi", ShortName = "multi", DisplayName = "Multi",
+            Role = "dev", Model = "claude", ContainerName = "fleet-multi",
+        };
+        // Two env_refs both matching the template; alphabetically AAA < BBB → AAA wins
+        agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "TELEGRAM_AAA_BOT_TOKEN" });
+        agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "TELEGRAM_BBB_BOT_TOKEN" });
+        db.Agents.Add(agent);
+        await db.SaveChangesAsync();
+
+        await File.WriteAllTextAsync(_envFile,
+            "TELEGRAM_AAA_BOT_TOKEN=val_aaa\nTELEGRAM_BBB_BOT_TOKEN=val_bbb\n");
+
+        var logger = new CapturingLogger<ConfigService>();
+        var svc = BuildService(BuildScopeFactory(db), logger);
+        var result = await svc.GetValuesAsync(["TELEGRAM_{SHORTNAME}_BOT_TOKEN"]);
+
+        var inner = result.AgentDerived["TELEGRAM_{SHORTNAME}_BOT_TOKEN"];
+        Assert.True(inner.ContainsKey("multi"), "agent must appear in inner dict");
+        Assert.Equal("val_aaa", inner["multi"]);
+        Assert.True(logger.HasWarning("Remove duplicates"),
+            "Expected a Warning log about duplicate env_refs");
+    }
+}
+
+/// <summary>
+/// Captures log records for assertion in tests.
+/// </summary>
+file sealed class CapturingLogger<T> : ILogger<T>
+{
+    private readonly List<(LogLevel Level, string Message)> _entries = [];
+
+    public bool HasWarning(string fragment) =>
+        _entries.Any(e => e.Level == LogLevel.Warning && e.Message.Contains(fragment));
+
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
+        Exception? exception, Func<TState, Exception?, string> formatter)
+        => _entries.Add((logLevel, formatter(state, exception)));
+
+    public bool IsEnabled(LogLevel logLevel) => true;
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 }

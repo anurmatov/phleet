@@ -1,4 +1,5 @@
 using Fleet.Telegram.Services;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 using Telegram.Bot;
@@ -15,8 +16,8 @@ public class BotClientFactoryTests
 {
     // Factory helper: each invocation returns a fresh NSubstitute mock.
     // The _clientsByToken.GetOrAdd ensures the factory is called at most once per token.
-    private static BotClientFactory CreateFactory() =>
-        new(NullLogger<BotClientFactory>.Instance,
+    private static BotClientFactory CreateFactory(ILogger<BotClientFactory>? logger = null) =>
+        new(logger ?? NullLogger<BotClientFactory>.Instance,
             _ => Substitute.For<ITelegramBotClient>());
 
     // ── GetClient — null/whitespace agentName ─────────────────────────────────
@@ -87,13 +88,16 @@ public class BotClientFactoryTests
     [Fact]
     public void GetClient_UnknownAgent_ReturnsNotifier()
     {
-        var factory = CreateFactory();
+        var logger = new CapturingLogger<BotClientFactory>();
+        var factory = CreateFactory(logger);
         var notifier = Substitute.For<ITelegramBotClient>();
         factory.ApplyNotifierToken_Direct(notifier);
 
         var result = factory.GetClient("unknown-agent");
 
         Assert.Same(notifier, result);
+        Assert.True(logger.HasWarning("no_bot_token_configured"),
+            "Expected a Warning log with reason=no_bot_token_configured");
     }
 
     // ── Token rotation ────────────────────────────────────────────────────────
@@ -130,12 +134,15 @@ public class BotClientFactoryTests
     [Fact]
     public void ApplyAgentTokens_EmptyToken_AgentNotInMap()
     {
-        var factory = CreateFactory();
+        var logger = new CapturingLogger<BotClientFactory>();
+        var factory = CreateFactory(logger);
         factory.ApplyAgentTokens(new Dictionary<string, string> { ["agent1"] = "" });
 
         // Agent not registered — should fall back to notifier
         Assert.False(factory.HasClient("agent1"));
         Assert.Null(factory.GetClient("agent1"));
+        Assert.True(logger.HasError("empty_token"),
+            "Expected an Error log with reason=empty_token");
     }
 
     // ── HasClient ─────────────────────────────────────────────────────────────
@@ -162,6 +169,27 @@ public class BotClientFactoryTests
         Assert.False(factory.HasClient(null));
         Assert.False(factory.HasClient("  "));
     }
+}
+
+/// <summary>
+/// Captures log records for assertion in tests.
+/// </summary>
+file sealed class CapturingLogger<T> : ILogger<T>
+{
+    private readonly List<(LogLevel Level, string Message)> _entries = [];
+
+    public bool HasWarning(string fragment) =>
+        _entries.Any(e => e.Level == LogLevel.Warning && e.Message.Contains(fragment));
+
+    public bool HasError(string fragment) =>
+        _entries.Any(e => e.Level == LogLevel.Error && e.Message.Contains(fragment));
+
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
+        Exception? exception, Func<TState, Exception?, string> formatter)
+        => _entries.Add((logLevel, formatter(state, exception)));
+
+    public bool IsEnabled(LogLevel logLevel) => true;
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 }
 
 /// <summary>

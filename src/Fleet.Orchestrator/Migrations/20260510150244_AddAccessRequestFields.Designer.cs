@@ -12,7 +12,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace Fleet.Orchestrator.Migrations
 {
     [DbContext(typeof(OrchestratorDbContext))]
-    [Migration("20260510144806_AddAccessRequestFields")]
+    [Migration("20260510150244_AddAccessRequestFields")]
     partial class AddAccessRequestFields
     {
         /// <inheritdoc />

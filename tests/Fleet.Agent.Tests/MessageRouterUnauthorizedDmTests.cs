@@ -84,7 +84,7 @@ public class MessageRouterUnauthorizedDmTests
         Assert.NotEmpty(payload.RequestId);
         Assert.Equal(12345, payload.UserId);
         Assert.Equal("alice", payload.Username);
-        Assert.Null(payload.SchemaVersion > 0 ? null : "bad"); // schema_version is set
+        Assert.True(payload.SchemaVersion > 0);
     }
 
     // ── CtoAgentNameService reads FLEET_CTO_AGENT from env ───────────────────

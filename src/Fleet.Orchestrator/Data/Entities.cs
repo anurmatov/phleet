@@ -54,7 +54,7 @@ public class Agent
 
     /// <summary>
     /// When true, DMs from unknown users trigger an access request routed to
-    /// AccessRequestTargetAgent. Default false (silent drop).
+    /// the CTO agent (resolved from FLEET_CTO_AGENT at runtime). Default false (silent drop).
     /// </summary>
     public bool CanReceiveChatRequests { get; set; } = false;
 

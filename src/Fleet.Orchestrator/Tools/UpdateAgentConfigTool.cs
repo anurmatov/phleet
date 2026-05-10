@@ -37,7 +37,7 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory)
         [Description("Enable Claude's built-in auto-memory. Set to false for agents using fleet-memory (disables CLAUDE_CODE_DISABLE_AUTO_MEMORY). Omit to keep current.")] bool? auto_memory_enabled = null,
         [Description("LLM provider: claude or codex. Omit to keep current.")] string? provider = null,
         [Description("Codex sandbox mode (danger-full-access, workspace-write, read-only). Pass empty string to clear. Omit to keep current. Only applies to codex agents.")] string? codex_sandbox_mode = null,
-        [Description("Enable access-request flow for unknown DMs (CanReceiveChatRequests). When true, unknown DMs are forwarded to access_request_target_agent instead of being silently dropped. Omit to keep current.")] bool? can_receive_chat_requests = null,
+        [Description("Enable access-request flow for unknown DMs (CanReceiveChatRequests). When true, unknown DMs are forwarded to the CTO agent (FLEET_CTO_AGENT) instead of being silently dropped. Omit to keep current.")] bool? can_receive_chat_requests = null,
         [Description("Message sent to requesting user when their access request is queued. Pass empty string to use the built-in default. Max 500 characters. Omit to keep current.")] string? request_received_message = null)
     {
         using var scope = scopeFactory.CreateScope();

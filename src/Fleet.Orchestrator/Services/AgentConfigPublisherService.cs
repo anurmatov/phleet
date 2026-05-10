@@ -10,9 +10,8 @@ namespace Fleet.Orchestrator.Services;
 /// <summary>
 /// Publishes config.update messages to running agent queues so AllowedUserIds and
 /// AllowedGroupIds changes take effect without a reprovision.
-/// Uses the default AMQP exchange (empty string) and the agent's well-known queue name
-/// as the routing key, which guarantees delivery regardless of which named exchange
-/// the agent declared at startup.
+/// Publishes to the <c>fleet.group</c> direct exchange with routing key = agentShortName,
+/// which matches the binding that GroupRelayService declares for each agent queue at startup.
 /// </summary>
 public sealed class AgentConfigPublisherService : IAsyncDisposable
 {

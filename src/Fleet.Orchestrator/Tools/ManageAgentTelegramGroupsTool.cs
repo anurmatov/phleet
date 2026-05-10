@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Services;
 using System.ComponentModel;
 using Fleet.Orchestrator.Data;
 using Microsoft.EntityFrameworkCore;
@@ -6,7 +7,9 @@ using ModelContextProtocol.Server;
 namespace Fleet.Orchestrator.Tools;
 
 [McpServerToolType]
-public sealed class ManageAgentTelegramGroupsTool(IServiceScopeFactory scopeFactory)
+public sealed class ManageAgentTelegramGroupsTool(
+    IServiceScopeFactory scopeFactory,
+    AgentConfigPublisherService publisher)
 {
     [McpServerTool(Name = "manage_agent_telegram_groups")]
     [Description("Add or remove an allowed Telegram group ID for an agent. Only listed group IDs will be monitored by the agent.")]
@@ -36,6 +39,9 @@ public sealed class ManageAgentTelegramGroupsTool(IServiceScopeFactory scopeFact
 
                 agent.TelegramGroups.Add(new AgentTelegramGroup { AgentId = agent.Id, GroupId = group_id });
                 await db.SaveChangesAsync();
+                await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
+                    addedUsers: [], removedUserIds: [],
+                    addedGroupIds: [group_id], removedGroupIds: []);
                 return $"Added Telegram group {group_id} to agent '{agent_name}'.";
             }
 
@@ -47,6 +53,9 @@ public sealed class ManageAgentTelegramGroupsTool(IServiceScopeFactory scopeFact
 
                 db.AgentTelegramGroups.Remove(existing);
                 await db.SaveChangesAsync();
+                await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
+                    addedUsers: [], removedUserIds: [],
+                    addedGroupIds: [], removedGroupIds: [group_id]);
                 return $"Removed Telegram group {group_id} from agent '{agent_name}'.";
             }
 

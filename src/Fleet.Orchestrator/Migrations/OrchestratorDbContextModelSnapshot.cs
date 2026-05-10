@@ -141,6 +141,15 @@ namespace Fleet.Orchestrator.Migrations
                     b.Property<DateTime?>("WelcomeSentAt")
                         .HasColumnType("datetime(6)");
 
+                    b.Property<bool>("CanReceiveChatRequests")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("tinyint(1)")
+                        .HasDefaultValue(false);
+
+                    b.Property<string>("RequestReceivedMessage")
+                        .HasMaxLength(500)
+                        .HasColumnType("varchar(500)");
+
                     b.Property<string>("WorkDir")
                         .IsRequired()
                         .ValueGeneratedOnAdd()

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Fleet.Agent.Abstractions;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
@@ -10,9 +11,12 @@ public sealed class MessageRouter
 {
     private readonly AgentOptions _agentConfig;
     private readonly TelegramOptions _telegramConfig;
+    private readonly AllowlistHolder _allowlist;
     private readonly TaskManager _taskManager;
     private readonly GroupBehavior _groupBehavior;
+    private readonly GroupRelayService _relay;
     private readonly CommandDispatcher _commands;
+    private readonly CtoAgentNameService _ctoAgentNameService;
     private readonly ILogger<MessageRouter> _logger;
 
     /// <summary>Set by AgentTransport after construction to break circular DI.</summary>
@@ -21,24 +25,30 @@ public sealed class MessageRouter
     public MessageRouter(
         IOptions<AgentOptions> agentConfig,
         IOptions<TelegramOptions> telegramConfig,
+        AllowlistHolder allowlist,
         TaskManager taskManager,
         GroupBehavior groupBehavior,
+        GroupRelayService relay,
         CommandDispatcher commands,
+        CtoAgentNameService ctoAgentNameService,
         ILogger<MessageRouter> logger)
     {
         _agentConfig = agentConfig.Value;
         _telegramConfig = telegramConfig.Value;
+        _allowlist = allowlist;
         _taskManager = taskManager;
         _groupBehavior = groupBehavior;
+        _relay = relay;
         _commands = commands;
+        _ctoAgentNameService = ctoAgentNameService;
         _logger = logger;
     }
 
     public async Task HandleAsync(IncomingMessage msg)
     {
         // --- Global kill switch --- checked before any auth or routing ---
-        if (msg.IsGroupChat && _telegramConfig.AllowedGroupIds.Contains(msg.ChatId)
-            && _telegramConfig.AllowedUserIds.Contains(msg.UserId)
+        if (msg.IsGroupChat && _allowlist.IsGroupAllowed(msg.ChatId)
+            && _allowlist.IsUserAllowed(msg.UserId)
             && msg.StrippedText.Equals("/stop", StringComparison.OrdinalIgnoreCase))
         {
             _logger.LogWarning("/stop detected from {Sender} in group {ChatId} — executing emergency halt", msg.Sender, msg.ChatId);
@@ -49,7 +59,7 @@ public sealed class MessageRouter
         // --- Authorization ---
         if (msg.IsGroupChat)
         {
-            if (!_telegramConfig.AllowedGroupIds.Contains(msg.ChatId))
+            if (!_allowlist.IsGroupAllowed(msg.ChatId))
             {
                 _logger.LogWarning("Message from unauthorized group {ChatId}", msg.ChatId);
                 return;
@@ -78,7 +88,7 @@ public sealed class MessageRouter
             else
             {
                 // "mention" mode — only @mention or reply-to-me; media bypasses the mention check
-                if (!_telegramConfig.AllowedUserIds.Contains(msg.UserId))
+                if (!_allowlist.IsUserAllowed(msg.UserId))
                     return;
                 if (!(msg.IsBotMentioned || msg.IsReplyToBot || msg.HasMediaAttachment))
                     return;
@@ -86,9 +96,10 @@ public sealed class MessageRouter
         }
         else
         {
-            if (!_telegramConfig.AllowedUserIds.Contains(msg.UserId))
+            if (!_allowlist.IsUserAllowed(msg.UserId))
             {
-                _logger.LogWarning("Unauthorized message from user {UserId}", msg.UserId);
+                _logger.LogWarning("Unauthorized DM from user {UserId}", msg.UserId);
+                await HandleUnauthorizedDmAsync(msg);
                 return;
             }
         }
@@ -187,4 +198,57 @@ public sealed class MessageRouter
     public void SetShutdownToken(CancellationToken ct) => _shutdownToken = ct;
 
     public void SetBotUsername(string username) => _botUsername = username;
+
+    private async Task HandleUnauthorizedDmAsync(IncomingMessage msg)
+    {
+        if (!_telegramConfig.CanReceiveChatRequests)
+            return; // silent drop (default)
+
+        var targetAgent = _ctoAgentNameService.GetCtoAgentName();
+        if (string.IsNullOrWhiteSpace(targetAgent))
+        {
+            _logger.LogError(
+                "CanReceiveChatRequests=true but FLEET_CTO_AGENT is not configured — " +
+                "access request from user {UserId} dropped", msg.UserId);
+            return;
+        }
+
+        var payload = new AccessRequestPayload
+        {
+            RequestId    = Guid.NewGuid().ToString("N"),
+            TargetAgent  = _agentConfig.ShortName,
+            UserId       = msg.UserId,
+            Username     = msg.ChatUsername,
+            FirstName    = msg.ChatFirstName,
+            MessageText  = msg.StrippedText,
+        };
+
+        var directive = $"An access request has arrived for bot '{payload.TargetAgent}'.\n\n" +
+                        $"User: {(payload.Username is not null ? "@" + payload.Username : payload.FirstName ?? "unknown")} " +
+                        $"(id={payload.UserId})\n" +
+                        $"Message: {payload.MessageText}\n" +
+                        $"Request ID: {payload.RequestId}\n\n" +
+                        $"Review the request and, if approved, call manage_agent_telegram_users " +
+                        $"with action=add to grant access.";
+
+        await _relay.PublishToAgentAsync(targetAgent, chatId: 0, directive,
+            type: RelayMessageType.AccessRequest);
+
+        _logger.LogInformation(
+            "Access request from user {UserId} forwarded to {TargetAgent} (request_id={RequestId})",
+            msg.UserId, targetAgent, payload.RequestId);
+
+        // Optionally reply to the requesting user
+        if (Sink is not null)
+        {
+            var reply = string.IsNullOrWhiteSpace(_telegramConfig.RequestReceivedMessage)
+                ? "Your request has been received and is awaiting approval."
+                : _telegramConfig.RequestReceivedMessage;
+            try { await Sink.SendTextAsync(msg.ChatId, reply); }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to send access-request acknowledgement to user {UserId}", msg.UserId);
+            }
+        }
+    }
 }

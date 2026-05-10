@@ -14,6 +14,7 @@ public sealed class GroupBehavior
 {
     private readonly AgentOptions _agentConfig;
     private readonly TelegramOptions _telegramConfig;
+    private readonly AllowlistHolder _allowlist;
     private readonly IAgentExecutor _executor;
     private readonly GroupRelayService _relay;
     private readonly TaskManager _taskManager;
@@ -41,6 +42,7 @@ public sealed class GroupBehavior
     public GroupBehavior(
         IOptions<AgentOptions> agentConfig,
         IOptions<TelegramOptions> telegramConfig,
+        AllowlistHolder allowlist,
         IAgentExecutor executor,
         GroupRelayService relay,
         TaskManager taskManager,
@@ -50,6 +52,7 @@ public sealed class GroupBehavior
     {
         _agentConfig = agentConfig.Value;
         _telegramConfig = telegramConfig.Value;
+        _allowlist = allowlist;
         _executor = executor;
         _relay = relay;
         _taskManager = taskManager;
@@ -278,6 +281,34 @@ public sealed class GroupBehavior
 
     public void OnRelayMessage(long chatId, string sender, string text, string type, string? correlationId = null, string? taskId = null, string? workflowId = null, string? signalName = null)
     {
+        if (type == RelayMessageType.ConfigUpdate)
+        {
+            _logger.LogInformation("config.update received from orchestrator");
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var update = JsonSerializer.Deserialize<ConfigUpdateMessage>(text,
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    if (update is null) return;
+
+                    var changeset = _allowlist.Apply(new AllowlistDiff(
+                        update.AddedUsers,
+                        update.RemovedUserIds,
+                        update.AddedGroupIds,
+                        update.RemovedGroupIds));
+
+                    foreach (var user in changeset.NewlyAddedUsers)
+                    {
+                        _logger.LogInformation("New user approved: {UserId} — sending welcome DM", user.UserId);
+                        await SendWelcomeDmAsync(user);
+                    }
+                }
+                catch (Exception ex) { _logger.LogError(ex, "Failed to apply config.update"); }
+            });
+            return;
+        }
+
         if (type == RelayMessageType.TokenUpdate)
         {
             _logger.LogInformation("Token update received from {Sender}", sender);
@@ -568,7 +599,7 @@ public sealed class GroupBehavior
     private Task RunProactiveCheckIns(CancellationToken ct)
     {
         // Iterate ALL allowed groups with new messages (fixes first-group-only bug)
-        foreach (var groupId in _telegramConfig.AllowedGroupIds)
+        foreach (var groupId in _allowlist.GetAllowedGroupIds())
         {
             if (!_groupBuffers.TryGetValue(groupId, out var buffer) || !buffer.HasMessagesSinceLastCheck())
                 continue;
@@ -658,6 +689,24 @@ public sealed class GroupBehavior
                 buffer.ChatLabel = $"name=\"{chatFirstName.Replace("\"", "\\\"")}\"";
         }
         return _prompts.ForDm(buffer, taskText, replyToText, telegramMessageId);
+    }
+
+    // --- Welcome DM on approval ---
+
+    private Task SendWelcomeDmAsync(NewlyAddedUser user)
+    {
+        // Use the DM chat ID = UserId. The agent generates the welcome in its own voice.
+        var displayName = user.Username is not null ? $"@{user.Username}"
+            : user.FirstName ?? $"user {user.UserId}";
+        var prompt = $"""
+            [system] A new user ({displayName}, user_id={user.UserId}) was just approved to chat with you.
+            Send them a brief, in-character welcome DM introducing yourself and letting
+            them know they can now message you directly.
+            """;
+        var display = $"[Welcome DM → {displayName}]";
+        _taskManager.StartTask(user.UserId, prompt, display, isSessionTask: false,
+            source: TaskSource.CheckIn);
+        return Task.CompletedTask;
     }
 
     // --- Persistence schema ---

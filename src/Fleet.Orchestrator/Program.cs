@@ -341,7 +341,7 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
 });
 
 // REST: update agent DB config (all scalar fields + replace-all for related tables)
-app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, AgentRegistry registry, SetupService setupService) =>
+app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, AgentRegistry registry, SetupService setupService, AgentConfigPublisherService publisher) =>
 {
     using var scope = scopeFactory.CreateScope();
     var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
@@ -460,6 +460,10 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
             .ToList();
     }
 
+    // Capture old allowlists before mutation so we can publish the diff.
+    var oldUserIds  = new HashSet<long>(agent.TelegramUsers.Select(u => u.UserId));
+    var oldGroupIds = new HashSet<long>(agent.TelegramGroups.Select(g => g.GroupId));
+
     if (body.TelegramUsers is not null)
     {
         db.AgentTelegramUsers.RemoveRange(agent.TelegramUsers);
@@ -511,6 +515,21 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     }
 
     await db.SaveChangesAsync();
+
+    // Publish live allowlist diff so running agents update without reprovision.
+    var newUserIds  = new HashSet<long>(agent.TelegramUsers.Select(u => u.UserId));
+    var newGroupIds = new HashSet<long>(agent.TelegramGroups.Select(g => g.GroupId));
+    var addedUsers   = newUserIds.Except(oldUserIds)
+        .Select(id => new Fleet.Orchestrator.Services.AddedUserInfo { UserId = id })
+        .ToList();
+    var removedUsers = oldUserIds.Except(newUserIds).ToList();
+    var addedGroups  = newGroupIds.Except(oldGroupIds).ToList();
+    var removedGroups = oldGroupIds.Except(newGroupIds).ToList();
+    if (addedUsers.Count > 0 || removedUsers.Count > 0 || addedGroups.Count > 0 || removedGroups.Count > 0)
+        await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
+            addedUsers: addedUsers, removedUserIds: removedUsers,
+            addedGroupIds: addedGroups, removedGroupIds: removedGroups);
+
     return Results.Ok(new { message = $"Agent '{name}' config updated" });
 });
 

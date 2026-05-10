@@ -18,14 +18,6 @@ public partial class AddAccessRequestFields : Migration
             defaultValue: false);
 
         migrationBuilder.AddColumn<string>(
-            name: "AccessRequestTargetAgent",
-            table: "agents",
-            type: "varchar(100)",
-            maxLength: 100,
-            nullable: true)
-            .Annotation("MySql:CharSet", "utf8mb4");
-
-        migrationBuilder.AddColumn<string>(
             name: "RequestReceivedMessage",
             table: "agents",
             type: "varchar(500)",
@@ -38,7 +30,6 @@ public partial class AddAccessRequestFields : Migration
     protected override void Down(MigrationBuilder migrationBuilder)
     {
         migrationBuilder.DropColumn(name: "CanReceiveChatRequests", table: "agents");
-        migrationBuilder.DropColumn(name: "AccessRequestTargetAgent", table: "agents");
         migrationBuilder.DropColumn(name: "RequestReceivedMessage", table: "agents");
     }
 }

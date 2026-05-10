@@ -293,15 +293,15 @@ public sealed class GroupBehavior
                     if (update is null) return;
 
                     var changeset = _allowlist.Apply(new AllowlistDiff(
-                        update.AddedUserIds,
+                        update.AddedUsers,
                         update.RemovedUserIds,
                         update.AddedGroupIds,
                         update.RemovedGroupIds));
 
-                    foreach (var userId in changeset.NewlyAddedUserIds)
+                    foreach (var user in changeset.NewlyAddedUsers)
                     {
-                        _logger.LogInformation("New user approved: {UserId} — sending welcome DM", userId);
-                        await SendWelcomeDmAsync(userId);
+                        _logger.LogInformation("New user approved: {UserId} — sending welcome DM", user.UserId);
+                        await SendWelcomeDmAsync(user);
                     }
                 }
                 catch (Exception ex) { _logger.LogError(ex, "Failed to apply config.update"); }
@@ -693,16 +693,18 @@ public sealed class GroupBehavior
 
     // --- Welcome DM on approval ---
 
-    private Task SendWelcomeDmAsync(long userId)
+    private Task SendWelcomeDmAsync(NewlyAddedUser user)
     {
-        // Use the DM chat ID = userId. The agent generates the welcome in its own voice.
+        // Use the DM chat ID = UserId. The agent generates the welcome in its own voice.
+        var displayName = user.Username is not null ? $"@{user.Username}"
+            : user.FirstName ?? $"user {user.UserId}";
         var prompt = $"""
-            [system] A new user (user_id={userId}) was just approved to chat with you.
+            [system] A new user ({displayName}, user_id={user.UserId}) was just approved to chat with you.
             Send them a brief, in-character welcome DM introducing yourself and letting
             them know they can now message you directly.
             """;
-        var display = $"[Welcome DM → user {userId}]";
-        _taskManager.StartTask(userId, prompt, display, isSessionTask: false,
+        var display = $"[Welcome DM → {displayName}]";
+        _taskManager.StartTask(user.UserId, prompt, display, isSessionTask: false,
             source: TaskSource.CheckIn);
         return Task.CompletedTask;
     }

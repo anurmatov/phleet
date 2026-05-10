@@ -857,7 +857,6 @@ public sealed class ContainerProvisioningService(
                 AllowedGroupIds = agent.TelegramGroups.Select(g => g.GroupId).ToList(),
                 SendOnly = agent.TelegramSendOnly,
                 CanReceiveChatRequests = agent.CanReceiveChatRequests,
-                AccessRequestTargetAgent = agent.AccessRequestTargetAgent,
                 RequestReceivedMessage = agent.RequestReceivedMessage,
             },
         };

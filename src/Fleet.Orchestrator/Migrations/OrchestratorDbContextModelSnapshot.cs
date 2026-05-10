@@ -146,10 +146,6 @@ namespace Fleet.Orchestrator.Migrations
                         .HasColumnType("tinyint(1)")
                         .HasDefaultValue(false);
 
-                    b.Property<string>("AccessRequestTargetAgent")
-                        .HasMaxLength(100)
-                        .HasColumnType("varchar(100)");
-
                     b.Property<string>("RequestReceivedMessage")
                         .HasMaxLength(500)
                         .HasColumnType("varchar(500)");

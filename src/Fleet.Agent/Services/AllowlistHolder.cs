@@ -1,4 +1,5 @@
 using Fleet.Agent.Configuration;
+using Fleet.Agent.Models;
 using Microsoft.Extensions.Options;
 
 namespace Fleet.Agent.Services;
@@ -27,17 +28,18 @@ public sealed class AllowlistHolder
     public IReadOnlyList<long> GetAllowedGroupIds() { lock (_lock) return [.._allowedGroupIds]; }
 
     /// <summary>
-    /// Applies a diff and returns the user_ids that were genuinely new (not previously allowed).
+    /// Applies a diff and returns the users that were genuinely new (not previously allowed),
+    /// including any username/first_name info that was carried in the config.update message.
     /// </summary>
     public AllowlistChangeset Apply(AllowlistDiff diff)
     {
         lock (_lock)
         {
-            var newlyAddedUsers = new List<long>();
-            foreach (var id in diff.AddedUserIds)
+            var newlyAddedUsers = new List<NewlyAddedUser>();
+            foreach (var info in diff.AddedUsers)
             {
-                if (_allowedUserIds.Add(id))
-                    newlyAddedUsers.Add(id);
+                if (_allowedUserIds.Add(info.UserId))
+                    newlyAddedUsers.Add(new NewlyAddedUser(info.UserId, info.Username, info.FirstName));
             }
             foreach (var id in diff.RemovedUserIds)
                 _allowedUserIds.Remove(id);
@@ -53,9 +55,11 @@ public sealed class AllowlistHolder
 }
 
 public sealed record AllowlistDiff(
-    IReadOnlyList<long> AddedUserIds,
+    IReadOnlyList<AddedUserInfo> AddedUsers,
     IReadOnlyList<long> RemovedUserIds,
     IReadOnlyList<long> AddedGroupIds,
     IReadOnlyList<long> RemovedGroupIds);
 
-public sealed record AllowlistChangeset(IReadOnlyList<long> NewlyAddedUserIds);
+public sealed record AllowlistChangeset(IReadOnlyList<NewlyAddedUser> NewlyAddedUsers);
+
+public sealed record NewlyAddedUser(long UserId, string? Username, string? FirstName);

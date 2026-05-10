@@ -75,12 +75,6 @@ public sealed class TelegramOptions
     public bool CanReceiveChatRequests { get; set; } = false;
 
     /// <summary>
-    /// Short name of the control-plane agent that receives and triages access requests.
-    /// Required when CanReceiveChatRequests is true; null → requests are logged but not routed.
-    /// </summary>
-    public string? AccessRequestTargetAgent { get; set; }
-
-    /// <summary>
     /// Optional message sent to the requesting user immediately after their access request is queued.
     /// Falls back to a built-in default when null/empty.
     /// </summary>

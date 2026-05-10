@@ -59,12 +59,6 @@ public class Agent
     public bool CanReceiveChatRequests { get; set; } = false;
 
     /// <summary>
-    /// Short name of the control-plane agent that receives access-request messages.
-    /// Null when CanReceiveChatRequests is false or the operator hasn't configured it yet.
-    /// </summary>
-    public string? AccessRequestTargetAgent { get; set; }
-
-    /// <summary>
     /// Optional reply sent to the requesting user when their access request is queued.
     /// Null → built-in default fallback in the agent.
     /// </summary>

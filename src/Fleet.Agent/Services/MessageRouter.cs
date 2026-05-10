@@ -16,6 +16,7 @@ public sealed class MessageRouter
     private readonly GroupBehavior _groupBehavior;
     private readonly GroupRelayService _relay;
     private readonly CommandDispatcher _commands;
+    private readonly CtoAgentNameService _ctoAgentNameService;
     private readonly ILogger<MessageRouter> _logger;
 
     /// <summary>Set by AgentTransport after construction to break circular DI.</summary>
@@ -29,6 +30,7 @@ public sealed class MessageRouter
         GroupBehavior groupBehavior,
         GroupRelayService relay,
         CommandDispatcher commands,
+        CtoAgentNameService ctoAgentNameService,
         ILogger<MessageRouter> logger)
     {
         _agentConfig = agentConfig.Value;
@@ -38,6 +40,7 @@ public sealed class MessageRouter
         _groupBehavior = groupBehavior;
         _relay = relay;
         _commands = commands;
+        _ctoAgentNameService = ctoAgentNameService;
         _logger = logger;
     }
 
@@ -201,11 +204,11 @@ public sealed class MessageRouter
         if (!_telegramConfig.CanReceiveChatRequests)
             return; // silent drop (default)
 
-        var targetAgent = _telegramConfig.AccessRequestTargetAgent;
+        var targetAgent = _ctoAgentNameService.GetCtoAgentName();
         if (string.IsNullOrWhiteSpace(targetAgent))
         {
             _logger.LogError(
-                "CanReceiveChatRequests=true but AccessRequestTargetAgent is not configured — " +
+                "CanReceiveChatRequests=true but FLEET_CTO_AGENT is not configured — " +
                 "access request from user {UserId} dropped", msg.UserId);
             return;
         }

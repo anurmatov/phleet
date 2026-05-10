@@ -38,8 +38,7 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory)
         [Description("LLM provider: claude or codex. Omit to keep current.")] string? provider = null,
         [Description("Codex sandbox mode (danger-full-access, workspace-write, read-only). Pass empty string to clear. Omit to keep current. Only applies to codex agents.")] string? codex_sandbox_mode = null,
         [Description("Enable access-request flow for unknown DMs (CanReceiveChatRequests). When true, unknown DMs are forwarded to access_request_target_agent instead of being silently dropped. Omit to keep current.")] bool? can_receive_chat_requests = null,
-        [Description("Short name of the agent that receives access-request messages (e.g. 'aops'). Required when can_receive_chat_requests is true. Pass empty string to clear. Omit to keep current.")] string? access_request_target_agent = null,
-        [Description("Message sent to requesting user when their access request is queued. Pass empty string to use the built-in default. Omit to keep current.")] string? request_received_message = null)
+        [Description("Message sent to requesting user when their access request is queued. Pass empty string to use the built-in default. Max 500 characters. Omit to keep current.")] string? request_received_message = null)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
@@ -219,14 +218,10 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory)
             agent.CanReceiveChatRequests = can_receive_chat_requests.Value;
         }
 
-        if (access_request_target_agent is not null && access_request_target_agent != (agent.AccessRequestTargetAgent ?? ""))
-        {
-            changes.AppendLine($"- access_request_target_agent: {agent.AccessRequestTargetAgent ?? "(none)"} → {(access_request_target_agent == "" ? "(none)" : access_request_target_agent)}");
-            agent.AccessRequestTargetAgent = access_request_target_agent == "" ? null : access_request_target_agent;
-        }
-
         if (request_received_message is not null && request_received_message != (agent.RequestReceivedMessage ?? ""))
         {
+            if (request_received_message.Length > 500)
+                return $"request_received_message exceeds the 500-character limit ({request_received_message.Length} chars).";
             changes.AppendLine($"- request_received_message: {(agent.RequestReceivedMessage is null ? "(default)" : "(set)")} → {(request_received_message == "" ? "(default)" : "(set)")}");
             agent.RequestReceivedMessage = request_received_message == "" ? null : request_received_message;
         }

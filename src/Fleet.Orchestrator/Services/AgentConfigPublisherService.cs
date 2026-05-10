@@ -21,10 +21,11 @@ public sealed class AgentConfigPublisherService : IAsyncDisposable
 
     private IConnection? _connection;
     private IChannel? _channel;
-    private bool _initialized;
+    private volatile bool _initialized;
     private readonly SemaphoreSlim _initLock = new(1, 1);
 
-    // The agent-direct exchange name (direct, durable) that agents bind their queues to.
+    // fleet.group is the direct exchange agents bind their individual queues to.
+    // Each agent queue has a binding with routing key = agentShortName.ToLowerInvariant().
     private const string AgentDirectExchange = "fleet.group";
 
     public AgentConfigPublisherService(
@@ -43,14 +44,14 @@ public sealed class AgentConfigPublisherService : IAsyncDisposable
     /// </summary>
     public async Task PublishAllowlistUpdateAsync(
         string agentShortName,
-        IReadOnlyList<long> addedUserIds,
+        IReadOnlyList<AddedUserInfo> addedUsers,
         IReadOnlyList<long> removedUserIds,
         IReadOnlyList<long> addedGroupIds,
         IReadOnlyList<long> removedGroupIds,
         CancellationToken ct = default)
     {
         if (!IsEnabled) return;
-        if (addedUserIds.Count == 0 && removedUserIds.Count == 0 &&
+        if (addedUsers.Count == 0 && removedUserIds.Count == 0 &&
             addedGroupIds.Count == 0 && removedGroupIds.Count == 0) return;
 
         try
@@ -62,7 +63,7 @@ public sealed class AgentConfigPublisherService : IAsyncDisposable
             {
                 schema_version = 1,
                 target_agent   = agentShortName,
-                added_user_ids    = addedUserIds,
+                added_users       = addedUsers,
                 removed_user_ids  = removedUserIds,
                 added_group_ids   = addedGroupIds,
                 removed_group_ids = removedGroupIds,
@@ -93,7 +94,7 @@ public sealed class AgentConfigPublisherService : IAsyncDisposable
 
             _logger.LogInformation(
                 "config.update published to agent '{Agent}' (+{Added} / -{Removed} users, +{AddedG} / -{RemovedG} groups)",
-                agentShortName, addedUserIds.Count, removedUserIds.Count,
+                agentShortName, addedUsers.Count, removedUserIds.Count,
                 addedGroupIds.Count, removedGroupIds.Count);
         }
         catch (Exception ex)
@@ -143,4 +144,21 @@ public sealed class AgentConfigPublisherService : IAsyncDisposable
         if (_connection is not null)
             await _connection.CloseAsync();
     }
+}
+
+/// <summary>
+/// Per-user info carried in a config.update message so the receiving agent can
+/// include the username/first_name in the welcome DM without a Telegram lookup.
+/// Must match the shape of Fleet.Agent.Models.AddedUserInfo (JSON property names).
+/// </summary>
+public sealed class AddedUserInfo
+{
+    [System.Text.Json.Serialization.JsonPropertyName("user_id")]
+    public long UserId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("username")]
+    public string? Username { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("first_name")]
+    public string? FirstName { get; init; }
 }

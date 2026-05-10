@@ -3,6 +3,22 @@ using System.Text.Json.Serialization;
 namespace Fleet.Agent.Models;
 
 /// <summary>
+/// Per-user info carried in a config.update message so welcome DMs can address the
+/// newly-approved user by name without a separate Telegram lookup.
+/// </summary>
+public sealed class AddedUserInfo
+{
+    [JsonPropertyName("user_id")]
+    public long UserId { get; init; }
+
+    [JsonPropertyName("username")]
+    public string? Username { get; init; }
+
+    [JsonPropertyName("first_name")]
+    public string? FirstName { get; init; }
+}
+
+/// <summary>
 /// Payload for a config.update relay message published by the orchestrator
 /// when an agent's AllowedUserIds or AllowedGroupIds are changed at runtime.
 /// </summary>
@@ -14,8 +30,12 @@ public sealed class ConfigUpdateMessage
     [JsonPropertyName("target_agent")]
     public string TargetAgent { get; init; } = "";
 
-    [JsonPropertyName("added_user_ids")]
-    public IReadOnlyList<long> AddedUserIds { get; init; } = [];
+    /// <summary>
+    /// Newly-allowed users, each with optional name info so the welcome DM can
+    /// address them by username or first name.
+    /// </summary>
+    [JsonPropertyName("added_users")]
+    public IReadOnlyList<AddedUserInfo> AddedUsers { get; init; } = [];
 
     [JsonPropertyName("removed_user_ids")]
     public IReadOnlyList<long> RemovedUserIds { get; init; } = [];
@@ -28,7 +48,7 @@ public sealed class ConfigUpdateMessage
 }
 
 /// <summary>
-/// Payload for an access.request relay message published to a control-plane agent
+/// Payload for an access.request relay message published to the CTO agent
 /// when an unknown user DMs a bot with CanReceiveChatRequests=true.
 /// </summary>
 public sealed class AccessRequestPayload
@@ -50,9 +70,6 @@ public sealed class AccessRequestPayload
 
     [JsonPropertyName("first_name")]
     public string? FirstName { get; init; }
-
-    [JsonPropertyName("language_code")]
-    public string? LanguageCode { get; init; }
 
     [JsonPropertyName("message_text")]
     public string MessageText { get; init; } = "";

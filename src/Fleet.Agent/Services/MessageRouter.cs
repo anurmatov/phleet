@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Fleet.Agent.Abstractions;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
@@ -16,7 +15,6 @@ public sealed class MessageRouter
     private readonly GroupBehavior _groupBehavior;
     private readonly GroupRelayService _relay;
     private readonly CommandDispatcher _commands;
-    private readonly CtoAgentNameService _ctoAgentNameService;
     private readonly ILogger<MessageRouter> _logger;
 
     /// <summary>Set by AgentTransport after construction to break circular DI.</summary>
@@ -30,7 +28,6 @@ public sealed class MessageRouter
         GroupBehavior groupBehavior,
         GroupRelayService relay,
         CommandDispatcher commands,
-        CtoAgentNameService ctoAgentNameService,
         ILogger<MessageRouter> logger)
     {
         _agentConfig = agentConfig.Value;
@@ -40,7 +37,6 @@ public sealed class MessageRouter
         _groupBehavior = groupBehavior;
         _relay = relay;
         _commands = commands;
-        _ctoAgentNameService = ctoAgentNameService;
         _logger = logger;
     }
 
@@ -204,39 +200,19 @@ public sealed class MessageRouter
         if (!_telegramConfig.CanReceiveChatRequests)
             return; // silent drop (default)
 
-        var targetAgent = _ctoAgentNameService.GetCtoAgentName();
-        if (string.IsNullOrWhiteSpace(targetAgent))
-        {
-            _logger.LogError(
-                "CanReceiveChatRequests=true but FLEET_CTO_AGENT is not configured — " +
-                "access request from user {UserId} dropped", msg.UserId);
-            return;
-        }
-
         var payload = new AccessRequestPayload
         {
-            RequestId    = Guid.NewGuid().ToString("N"),
-            TargetAgent  = _agentConfig.ShortName,
-            UserId       = msg.UserId,
-            Username     = msg.ChatUsername,
-            FirstName    = msg.ChatFirstName,
-            MessageText  = msg.StrippedText,
+            RequestId   = Guid.NewGuid().ToString("N"),
+            TargetAgent = _agentConfig.ShortName,
+            UserId      = msg.UserId,
+            Username    = msg.ChatUsername,
+            FirstName   = msg.ChatFirstName,
+            MessageText = msg.StrippedText,
         };
 
-        var directive = $"An access request has arrived for bot '{payload.TargetAgent}'.\n\n" +
-                        $"User: {(payload.Username is not null ? "@" + payload.Username : payload.FirstName ?? "unknown")} " +
-                        $"(id={payload.UserId})\n" +
-                        $"Message: {payload.MessageText}\n" +
-                        $"Request ID: {payload.RequestId}\n\n" +
-                        $"Review the request and, if approved, call manage_agent_telegram_users " +
-                        $"with action=add to grant access.";
-
-        await _relay.PublishToAgentAsync(targetAgent, chatId: 0, directive,
-            type: RelayMessageType.AccessRequest);
-
-        _logger.LogInformation(
-            "Access request from user {UserId} forwarded to {TargetAgent} (request_id={RequestId})",
-            msg.UserId, targetAgent, payload.RequestId);
+        // Publish to fleet.orchestrator — the orchestrator resolves FLEET_CTO_AGENT and forwards.
+        // Agent containers do NOT have FLEET_CTO_AGENT; routing is the orchestrator's responsibility.
+        await _relay.PublishAccessRequestAsync(payload);
 
         // Optionally reply to the requesting user
         if (Sink is not null)

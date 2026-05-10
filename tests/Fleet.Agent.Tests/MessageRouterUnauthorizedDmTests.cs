@@ -8,38 +8,32 @@ namespace Fleet.Agent.Tests;
 /// Mirrors the gate predicate inline (same pattern as MessageRouterGroupGateTests) to avoid
 /// wiring the full DI graph through sealed classes.
 ///
-/// Gate predicate:
-///   if (!CanReceiveChatRequests)         → silent drop
-///   if (ctoAgentName is null/empty)      → log error, drop
-///   otherwise                            → forward access.request to CTO agent + optional reply
+/// Gate predicate (agent side — orchestrator resolves CTO agent, not the agent):
+///   if (!CanReceiveChatRequests)  → silent drop
+///   otherwise                    → publish access.request to fleet.orchestrator exchange + optional reply
 /// </summary>
 public class MessageRouterUnauthorizedDmTests
 {
     // ── Gate predicate mirrored from HandleUnauthorizedDmAsync ────────────────
 
-    public enum UnauthorizedDmOutcome { SilentDrop, ConfigError, ForwardAndReply }
+    public enum UnauthorizedDmOutcome { SilentDrop, ForwardToOrchestrator }
 
-    private static UnauthorizedDmOutcome EvalGate(bool canReceive, string ctoAgent) =>
-        !canReceive                          ? UnauthorizedDmOutcome.SilentDrop :
-        string.IsNullOrWhiteSpace(ctoAgent)  ? UnauthorizedDmOutcome.ConfigError :
-                                               UnauthorizedDmOutcome.ForwardAndReply;
+    private static UnauthorizedDmOutcome EvalGate(bool canReceive) =>
+        !canReceive ? UnauthorizedDmOutcome.SilentDrop : UnauthorizedDmOutcome.ForwardToOrchestrator;
 
     // ── Table-driven gate tests ───────────────────────────────────────────────
 
     public static IEnumerable<object[]> GateCases() =>
     [
-        [false, "",     UnauthorizedDmOutcome.SilentDrop],
-        [false, "acto", UnauthorizedDmOutcome.SilentDrop],    // feature off → always drop
-        [true,  "",     UnauthorizedDmOutcome.ConfigError],   // feature on, no CTO
-        [true,  "acto", UnauthorizedDmOutcome.ForwardAndReply],
+        [false, UnauthorizedDmOutcome.SilentDrop],
+        [true,  UnauthorizedDmOutcome.ForwardToOrchestrator],
     ];
 
     [Theory]
     [MemberData(nameof(GateCases))]
-    public void Gate_CanReceiveAndCtoAgent_ProducesExpectedOutcome(
-        bool canReceive, string ctoAgent, UnauthorizedDmOutcome expected)
+    public void Gate_CanReceive_ProducesExpectedOutcome(bool canReceive, UnauthorizedDmOutcome expected)
     {
-        Assert.Equal(expected, EvalGate(canReceive, ctoAgent));
+        Assert.Equal(expected, EvalGate(canReceive));
     }
 
     // ── RequestReceivedMessage — fallback and custom ──────────────────────────
@@ -84,17 +78,7 @@ public class MessageRouterUnauthorizedDmTests
         Assert.NotEmpty(payload.RequestId);
         Assert.Equal(12345, payload.UserId);
         Assert.Equal("alice", payload.Username);
-        Assert.Null(payload.SchemaVersion > 0 ? null : "bad"); // schema_version is set
+        Assert.True(payload.SchemaVersion > 0);
     }
 
-    // ── CtoAgentNameService reads FLEET_CTO_AGENT from env ───────────────────
-
-    [Fact]
-    public void CtoAgentNameService_MissingEnvVar_ReturnsEmptyString()
-    {
-        // Use a config with no keys — simulates container where FLEET_CTO_AGENT is not set
-        var config = new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build();
-        var svc = new Fleet.Agent.Services.CtoAgentNameService(config);
-        Assert.Equal(string.Empty, svc.GetCtoAgentName());
-    }
 }

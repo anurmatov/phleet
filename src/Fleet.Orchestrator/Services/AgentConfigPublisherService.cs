@@ -10,9 +10,8 @@ namespace Fleet.Orchestrator.Services;
 /// <summary>
 /// Publishes config.update messages to running agent queues so AllowedUserIds and
 /// AllowedGroupIds changes take effect without a reprovision.
-/// Uses the default AMQP exchange (empty string) and the agent's well-known queue name
-/// as the routing key, which guarantees delivery regardless of which named exchange
-/// the agent declared at startup.
+/// Publishes to the <c>fleet.group</c> direct exchange with routing key = agentShortName,
+/// which matches the binding that GroupRelayService declares for each agent queue at startup.
 /// </summary>
 public sealed class AgentConfigPublisherService : IAsyncDisposable
 {
@@ -100,6 +99,52 @@ public sealed class AgentConfigPublisherService : IAsyncDisposable
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to publish config.update to agent '{Agent}'", agentShortName);
+        }
+    }
+
+    /// <summary>
+    /// Publish a relay directive to a specific agent's queue on fleet.group.
+    /// Used by the orchestrator to forward access-request notifications to the CTO agent.
+    /// </summary>
+    public async Task PublishDirectiveToAgentAsync(
+        string agentShortName,
+        string text,
+        string type = "directive",
+        CancellationToken ct = default)
+    {
+        if (!IsEnabled) return;
+
+        try
+        {
+            await EnsureInitializedAsync(ct);
+            if (_channel is null) return;
+
+            var envelope = new
+            {
+                ChatId    = 0L,
+                Sender    = "orchestrator",
+                Text      = text,
+                Timestamp = DateTimeOffset.UtcNow,
+                Type      = type,
+            };
+
+            var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(envelope));
+            var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
+            var routingKey = agentShortName.ToLowerInvariant();
+
+            await _channel.BasicPublishAsync(
+                exchange: AgentDirectExchange,
+                routingKey: routingKey,
+                mandatory: false,
+                basicProperties: props,
+                body: body,
+                cancellationToken: ct);
+
+            _logger.LogInformation("Directive published to agent '{Agent}' ({Length} chars)", agentShortName, text.Length);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to publish directive to agent '{Agent}'", agentShortName);
         }
     }
 

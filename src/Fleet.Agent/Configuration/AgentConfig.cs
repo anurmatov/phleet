@@ -69,7 +69,7 @@ public sealed class TelegramOptions
 
     /// <summary>
     /// When true, DMs from users not in AllowedUserIds trigger an access-request message
-    /// to AccessRequestTargetAgent instead of being silently dropped.
+    /// to the CTO agent (resolved from FLEET_CTO_AGENT) instead of being silently dropped.
     /// Default: false (current silent-drop behavior).
     /// </summary>
     public bool CanReceiveChatRequests { get; set; } = false;

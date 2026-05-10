@@ -307,6 +307,26 @@ export default function AgentConfigModal({
                 <FieldHint>Numeric Telegram group IDs where this agent listens (typically negative, e.g. <code>-1001234567890</code>). Comma-separated.</FieldHint>
                 <input className="config-input" value={configEdits.telegramGroups} onChange={e => onEditsChange({ telegramGroups: e.target.value })} placeholder="comma-separated group IDs" />
               </div>
+              <div className="config-section-label">Chat Requests</div>
+              <div className="config-field">
+                <label className="config-field config-field-checkbox">
+                  <input type="checkbox" checked={configEdits.canReceiveChatRequests} onChange={e => onEditsChange({ canReceiveChatRequests: e.target.checked })} />
+                  <span className="config-label">Accept Chat Requests</span>
+                </label>
+                <FieldHint>When enabled, messages from users not on the allowlist are forwarded to the CTO agent for access-request review instead of being silently dropped.</FieldHint>
+              </div>
+              <div className="config-field">
+                <label className="config-label">Request Received Message</label>
+                <FieldHint>Reply sent to a user after their access request is forwarded. Leave blank to send no reply. Max 500 characters.</FieldHint>
+                <textarea
+                  className="config-textarea"
+                  value={configEdits.requestReceivedMessage}
+                  onChange={e => onEditsChange({ requestReceivedMessage: e.target.value })}
+                  placeholder="e.g. Your request has been forwarded for review."
+                  rows={3}
+                  maxLength={500}
+                />
+              </div>
               <div className="config-section-label">Instructions</div>
               <div className="config-field">
                 <FieldHint>Role instructions composed into this agent's system prompt. Checked items are included; load order controls concatenation sequence. <code>base</code> is auto-attached and excluded here.</FieldHint>

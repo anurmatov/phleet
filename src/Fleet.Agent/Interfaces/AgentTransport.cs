@@ -25,6 +25,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     private readonly TelegramBotClient? _bot;
     private readonly AgentOptions _agentConfig;
     private readonly TelegramOptions _telegramConfig;
+    private readonly AllowlistHolder _allowlist;
     private readonly GroupRelayService _relay;
     private readonly TaskManager _taskManager;
     private readonly GroupBehavior _groupBehavior;
@@ -46,6 +47,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     public AgentTransport(
         IOptions<AgentOptions> agentConfig,
         IOptions<TelegramOptions> telegramConfig,
+        AllowlistHolder allowlist,
         GroupRelayService relay,
         TaskManager taskManager,
         GroupBehavior groupBehavior,
@@ -58,6 +60,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     {
         _agentConfig = agentConfig.Value;
         _telegramConfig = telegramConfig.Value;
+        _allowlist = allowlist;
         _relay = relay;
         _taskManager = taskManager;
         _groupBehavior = groupBehavior;
@@ -840,7 +843,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         var isGroupChat = reaction.Chat.Type is ChatType.Group or ChatType.Supergroup;
         if (isGroupChat)
         {
-            if (!_telegramConfig.AllowedGroupIds.Contains(chatId))
+            if (!_allowlist.IsGroupAllowed(chatId))
             {
                 _logger.LogDebug("Ignoring reaction from unauthorized group {ChatId}", chatId);
                 return;
@@ -848,7 +851,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         }
         else
         {
-            if (userId == 0 || !_telegramConfig.AllowedUserIds.Contains(userId))
+            if (userId == 0 || !_allowlist.IsUserAllowed(userId))
             {
                 _logger.LogDebug("Ignoring reaction from unauthorized user {UserId}", userId);
                 return;

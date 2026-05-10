@@ -39,7 +39,8 @@ public class GroupBehaviorBufferTests
         var commands = (CommandDispatcher)RuntimeHelpers.GetUninitializedObject(typeof(CommandDispatcher));
         var prompts = new PromptAssembler(executor);
 
-        _behavior = new GroupBehavior(agentOpts, telegramOpts, executor, relay,
+        var allowlist = new AllowlistHolder(telegramOpts);
+        _behavior = new GroupBehavior(agentOpts, telegramOpts, allowlist, executor, relay,
             taskManager, commands, prompts, NullLogger<GroupBehavior>.Instance);
     }
 

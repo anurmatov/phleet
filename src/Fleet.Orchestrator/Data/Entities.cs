@@ -49,6 +49,26 @@ public class Agent
     /// idempotency gate — if non-null, the welcome is never re-sent on reprovision.
     /// </summary>
     public DateTime? WelcomeSentAt { get; set; }
+
+    // ── Access-request flow ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// When true, DMs from unknown users trigger an access request routed to
+    /// AccessRequestTargetAgent. Default false (silent drop).
+    /// </summary>
+    public bool CanReceiveChatRequests { get; set; } = false;
+
+    /// <summary>
+    /// Short name of the control-plane agent that receives access-request messages.
+    /// Null when CanReceiveChatRequests is false or the operator hasn't configured it yet.
+    /// </summary>
+    public string? AccessRequestTargetAgent { get; set; }
+
+    /// <summary>
+    /// Optional reply sent to the requesting user when their access request is queued.
+    /// Null → built-in default fallback in the agent.
+    /// </summary>
+    public string? RequestReceivedMessage { get; set; }
 }
 
 public class AgentNetwork

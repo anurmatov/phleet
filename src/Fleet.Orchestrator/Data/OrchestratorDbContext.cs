@@ -59,6 +59,9 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.Property(x => x.Effort).HasMaxLength(20);
             e.Property(x => x.CodexSandboxMode).HasMaxLength(30);
             e.Property(x => x.AutoMemoryEnabled).HasDefaultValue(true);
+            e.Property(x => x.CanReceiveChatRequests).HasDefaultValue(false);
+            e.Property(x => x.AccessRequestTargetAgent).HasMaxLength(100);
+            e.Property(x => x.RequestReceivedMessage).HasMaxLength(500);
             e.HasIndex(x => x.Name).IsUnique();
             e.HasIndex(x => x.IsEnabled);
         });

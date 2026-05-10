@@ -37,6 +37,8 @@ builder.Services.AddSingleton<ConfigService>();
 builder.Services.AddSingleton<MemoryProxyService>();
 builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(5));
 
+builder.Services.AddSingleton<AgentConfigPublisherService>();
+
 // HeartbeatConsumerService registered as singleton so tools can inject IRabbitMqStatus
 builder.Services.AddSingleton<HeartbeatConsumerService>();
 builder.Services.AddSingleton<IRabbitMqStatus>(sp => sp.GetRequiredService<HeartbeatConsumerService>());

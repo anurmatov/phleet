@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Services;
 using System.ComponentModel;
 using Fleet.Orchestrator.Data;
 using Microsoft.EntityFrameworkCore;
@@ -6,7 +7,9 @@ using ModelContextProtocol.Server;
 namespace Fleet.Orchestrator.Tools;
 
 [McpServerToolType]
-public sealed class ManageAgentTelegramUsersTool(IServiceScopeFactory scopeFactory)
+public sealed class ManageAgentTelegramUsersTool(
+    IServiceScopeFactory scopeFactory,
+    AgentConfigPublisherService publisher)
 {
     [McpServerTool(Name = "manage_agent_telegram_users")]
     [Description("Add or remove an allowed Telegram user ID for an agent. Only listed user IDs can send DMs to the agent's bot.")]
@@ -36,6 +39,9 @@ public sealed class ManageAgentTelegramUsersTool(IServiceScopeFactory scopeFacto
 
                 agent.TelegramUsers.Add(new AgentTelegramUser { AgentId = agent.Id, UserId = user_id });
                 await db.SaveChangesAsync();
+                await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
+                    addedUserIds: [user_id], removedUserIds: [],
+                    addedGroupIds: [], removedGroupIds: []);
                 return $"Added Telegram user {user_id} to agent '{agent_name}'.";
             }
 
@@ -47,6 +53,9 @@ public sealed class ManageAgentTelegramUsersTool(IServiceScopeFactory scopeFacto
 
                 db.AgentTelegramUsers.Remove(existing);
                 await db.SaveChangesAsync();
+                await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
+                    addedUserIds: [], removedUserIds: [user_id],
+                    addedGroupIds: [], removedGroupIds: []);
                 return $"Removed Telegram user {user_id} from agent '{agent_name}'.";
             }
 

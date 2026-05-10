@@ -51,7 +51,8 @@ public class GroupBehaviorPersistenceTests : IDisposable
         var commands = (CommandDispatcher)RuntimeHelpers.GetUninitializedObject(typeof(CommandDispatcher));
         var prompts = new PromptAssembler(executor);
 
-        return new GroupBehavior(agentOpts, telegramOpts, executor, relay,
+        var allowlist = new AllowlistHolder(telegramOpts);
+        return new GroupBehavior(agentOpts, telegramOpts, allowlist, executor, relay,
             taskManager, commands, prompts, NullLogger<GroupBehavior>.Instance);
     }
 

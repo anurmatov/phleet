@@ -65,6 +65,27 @@ public sealed class TelegramOptions
     /// <summary>Maximum PDF document size in bytes; documents above this limit are rejected with a user-facing warning and not passed to the LLM. Default: 32 MB (Claude SDK per-document limit).</summary>
     public long MaxDocumentBytes { get; set; } = 33_554_432; // 32 MB
 
+    // ── Access-request flow ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// When true, DMs from users not in AllowedUserIds trigger an access-request message
+    /// to AccessRequestTargetAgent instead of being silently dropped.
+    /// Default: false (current silent-drop behavior).
+    /// </summary>
+    public bool CanReceiveChatRequests { get; set; } = false;
+
+    /// <summary>
+    /// Short name of the control-plane agent that receives and triages access requests.
+    /// Required when CanReceiveChatRequests is true; null → requests are logged but not routed.
+    /// </summary>
+    public string? AccessRequestTargetAgent { get; set; }
+
+    /// <summary>
+    /// Optional message sent to the requesting user immediately after their access request is queued.
+    /// Falls back to a built-in default when null/empty.
+    /// </summary>
+    public string? RequestReceivedMessage { get; set; }
+
 }
 
 public sealed class RabbitMqOptions

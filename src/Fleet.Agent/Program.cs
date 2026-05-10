@@ -38,6 +38,7 @@ builder.Services.AddSingleton<IAgentExecutor>(sp =>
 builder.Services.AddSingleton<IFleetConnectionState, FleetConnectionState>();
 builder.Services.AddSingleton<SessionManager>();
 builder.Services.AddSingleton<GroupRelayService>();
+builder.Services.AddSingleton<AllowlistHolder>();
 
 // Determine mode from command-line args
 var isCliMode = args.Any(a => a == "--task");

@@ -34,7 +34,8 @@ public static class WelcomeDmHelper
         $"(2) list your available MCP servers with a one-line description each — read from your .mcp.json, " +
         $"(3) list the registered Temporal workflow types by calling temporal_list_workflow_types, " +
         $"(4) mention that you can create and manage other agents on demand, " +
-        $"(5) close with an open invitation to ask you anything. " +
+        $"(5) close with an open invitation to ask you anything, " +
+        $"(6) explain that phleet's Claude/Codex/Gemini OAuth tokens were seeded from the operator's host CLI auth files, that phleet currently shares the same refresh token as the host CLI, and that the next host-side CLI use will likely invalidate phleet's seeded tokens (symptom: agents start hitting 401 Unauthorized within hours). Offer to rotate phleet's tokens right now by starting AuthTokenRefreshWorkflow with ForceRefresh=true for each provider whose credentials were seeded. If the operator agrees, call temporal_start_workflow for the workflow yourself and report back when it's done. If the operator declines, acknowledge and move on — the rotation will happen on its own at the next scheduled run, but stale-token 401s may occur in the meantime. " +
         $"Tone: warm and human, not a corporate bot. A touch of personality or light humor is welcome — you're introducing yourself to a teammate, not filing a status report. Keep it practical and skip the formal framing. " +
         $"Do not mention agent names, internal URLs, chat IDs, credentials, or any private fleet deployment details.";
 

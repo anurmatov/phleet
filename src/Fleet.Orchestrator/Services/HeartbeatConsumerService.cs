@@ -142,7 +142,7 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
         try
         {
             var json = Encoding.UTF8.GetString(ea.Body.Span);
-            var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var opts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
             var payload = JsonSerializer.Deserialize<AccessRequestPayload>(json, opts);
 
             if (payload is null)
@@ -170,8 +170,9 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
                 $"User: {userDisplay} (id={payload.UserId})\n" +
                 $"Message: {payload.MessageText}\n" +
                 $"Request ID: {payload.RequestId}\n\n" +
-                $"Review the request and, if approved, call manage_agent_telegram_users " +
-                $"with action=add to grant access.";
+                $"Analyze this request and DM the CEO via send_to_ceo with a recommendation (approve / reject) and reasoning. " +
+                $"Wait for the CEO's reply. ONLY after the CEO explicitly approves, call manage_agent_telegram_users with action=add to grant access. " +
+                $"Never auto-approve.";
 
             await _publisher.PublishDirectiveToAgentAsync(ctoAgent, directive, type: "access.request");
 

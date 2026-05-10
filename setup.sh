@@ -832,15 +832,12 @@ if $SKIP_SERVICES; then
 elif $DRY_RUN; then
   if $USE_CLAUDE; then
     echo -e "  ${YELLOW}[dry-run]${NC} Would POST http://localhost:3600/api/schedules (auth-token-refresh-claude-30m)"
-    echo -e "  ${YELLOW}[dry-run]${NC} Would POST http://localhost:3600/api/workflows/start (AuthTokenRefreshWorkflow, provider=claude, ForceRefresh=true)"
   fi
   if $USE_CODEX; then
     echo -e "  ${YELLOW}[dry-run]${NC} Would POST http://localhost:3600/api/schedules (auth-token-refresh-codex-30m)"
-    echo -e "  ${YELLOW}[dry-run]${NC} Would POST http://localhost:3600/api/workflows/start (AuthTokenRefreshWorkflow, provider=codex, ForceRefresh=true)"
   fi
   if $USE_GEMINI; then
     echo -e "  ${YELLOW}[dry-run]${NC} Would POST http://localhost:3600/api/schedules (auth-token-refresh-gemini-30m)"
-    echo -e "  ${YELLOW}[dry-run]${NC} Would POST http://localhost:3600/api/workflows/start (AuthTokenRefreshWorkflow, provider=gemini, ForceRefresh=true)"
   fi
 else
   ORCH_URL="http://localhost:3600"
@@ -880,42 +877,9 @@ EOF
     fi
   }
 
-  # Trigger an immediate token rotation for each seeded provider so phleet and
-  # the host CLI hold independent refresh tokens from minute one. Failure is
-  # non-fatal — the periodic schedule will rotate on the next 30-min tick.
-  trigger_initial_token_refresh() {
-    local provider="$1"
-    local workflow_id="auth-token-initial-refresh-${provider}-$(date +%s)"
-    local payload
-    payload=$(cat <<EOF
-{
-  "workflowType": "AuthTokenRefreshWorkflow",
-  "namespace": "fleet",
-  "taskQueue": "fleet",
-  "workflowId": "$workflow_id",
-  "input": {"Providers":["$provider"],"ForceRefresh":true}
-}
-EOF
-)
-    echo "  Triggering initial token refresh for $provider..."
-    local response http_code body
-    response=$(curl -s -w "\n%{http_code}" \
-      -H "Authorization: Bearer $ORCH_TOKEN" \
-      -H "Content-Type: application/json" \
-      -X POST "$ORCH_URL/api/workflows/start" \
-      -d "$payload" 2>/dev/null)
-    http_code="${response##*$'\n'}"
-    body="${response%$'\n'*}"
-    if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
-      ok "Initial token refresh triggered for $provider"
-    else
-      warn "Initial token refresh for $provider failed (HTTP $http_code): $body — continuing setup"
-    fi
-  }
-
-  if $USE_CLAUDE; then create_refresh_schedule "claude"; trigger_initial_token_refresh "claude"; fi
-  if $USE_CODEX;  then create_refresh_schedule "codex";  trigger_initial_token_refresh "codex";  fi
-  if $USE_GEMINI; then create_refresh_schedule "gemini"; trigger_initial_token_refresh "gemini"; fi
+  if $USE_CLAUDE; then create_refresh_schedule "claude"; fi
+  if $USE_CODEX;  then create_refresh_schedule "codex";  fi
+  if $USE_GEMINI; then create_refresh_schedule "gemini"; fi
 fi
 
 echo

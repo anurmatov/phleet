@@ -2483,7 +2483,7 @@ app.MapDelete("/api/agents/{name}/project-access/{project}", async (string name,
 
 // REST: telegram user add/remove — called by dashboard Save to apply diffs with live allowlist update.
 // These mirror manage_agent_telegram_users / manage_agent_telegram_groups MCP tools.
-app.MapPost("/api/agents/{name}/telegram-users", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, AgentConfigPublisherService publisher, SetupService setupService, CancellationToken ct) =>
+app.MapPost("/api/agents/{name}/telegram-users", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, AgentConfigPublisherService publisher, CancellationToken ct) =>
 {
     await using var scope = scopeFactory.CreateAsyncScope();
     var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
@@ -2504,8 +2504,13 @@ app.MapPost("/api/agents/{name}/telegram-users", async (string name, HttpRequest
     return Results.Ok(new { message = $"Added user {body.UserId} to agent '{name}'" });
 });
 
-app.MapDelete("/api/agents/{name}/telegram-users/{userId}", async (string name, long userId, IServiceScopeFactory scopeFactory, AgentConfigPublisherService publisher, CancellationToken ct) =>
+app.MapDelete("/api/agents/{name}/telegram-users/{userId}", async (string name, long userId, IServiceScopeFactory scopeFactory, AgentConfigPublisherService publisher, SetupService setupService, CancellationToken ct) =>
 {
+    // Guard: refuse to remove the installer's own ID — prevents operator self-lockout.
+    var ownerId = setupService.GetTelegramUserId();
+    if (ownerId.HasValue && ownerId.Value == userId)
+        return Results.BadRequest(new { error = $"Cannot remove the owner's Telegram user ID ({userId}) from the allowlist." });
+
     await using var scope = scopeFactory.CreateAsyncScope();
     var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
 

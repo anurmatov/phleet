@@ -235,4 +235,30 @@ public class CodexExecutorImageTests
             Directory.Delete(attachDir, recursive: true);
         }
     }
+
+    [Fact]
+    public void BuildUserInputs_ImagesFirst_TextLast()
+    {
+        var payload = CodexExecutor.BuildUserInputs("analyze this", ["/tmp/a.png", "/tmp/b.png"]);
+
+        Assert.Equal(3, payload.Count);
+        Assert.Equal("localImage", payload[0]!["type"]!.GetValue<string>());
+        Assert.Equal("/tmp/a.png", payload[0]!["path"]!.GetValue<string>());
+        Assert.Equal("localImage", payload[1]!["type"]!.GetValue<string>());
+        Assert.Equal("/tmp/b.png", payload[1]!["path"]!.GetValue<string>());
+        Assert.Equal("text", payload[2]!["type"]!.GetValue<string>());
+        Assert.Equal("analyze this", payload[2]!["text"]!.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData(null, "danger-full-access")]
+    [InlineData("", "danger-full-access")]
+    [InlineData("read-only", "read-only")]
+    [InlineData("workspace-write", "workspace-write")]
+    [InlineData("danger-full-access", "danger-full-access")]
+    [InlineData("unexpected", "danger-full-access")]
+    public void NormalizeSandboxMode_MapsExpectedValues(string? input, string expected)
+    {
+        Assert.Equal(expected, CodexExecutor.NormalizeSandboxMode(input));
+    }
 }

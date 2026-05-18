@@ -113,6 +113,9 @@ elif [ "$PROVIDER" = "codex" ]; then
         mkdir -p /root/.codex
         cp /root/.codex-host/auth.json /root/.codex/auth.json
     fi
+    # Codex app-server threads are process-lifetime state only in phleet. Clear any stale
+    # persisted sessions on cold start so a reprovision cannot accidentally inherit old rollout state.
+    rm -rf /root/.codex/sessions/* 2>/dev/null || true
     # Generate ~/.codex/config.toml with MCP servers + per-server enabled_tools whitelist
     MCP_JSON="/workspace/.mcp.json"
     if [ -f "$MCP_JSON" ]; then

@@ -37,15 +37,17 @@ public sealed class CodexExecutor : IAgentExecutor
     private string? _activeTurnId;
     private ThreadTokenUsageSnapshot? _lastTurnUsage;
     private int _messageCount;
-    private int _startupStrikeCount;
     private DateTimeOffset _lastActivity = DateTimeOffset.MinValue;
     private volatile bool _restartRequested;
+    private readonly Func<ProcessStartInfo, Process?> _processStarter;
 
     private const string CodexBin = "codex";
     private const string InitializedMethod = "initialized";
+    private const string ThreadShellCommandMethod = "thread/shellCommand";
     private const string ClientName = "phleet";
     private const string ClientVersion = "0.1.0";
     private const int StartupRetryBudget = 3;
+    private static readonly TimeSpan InterruptDrainTimeout = TimeSpan.FromSeconds(3);
 
     public string? LastSessionId => _threadId;
     public DateTimeOffset LastActivity => _lastActivity;
@@ -62,11 +64,22 @@ public sealed class CodexExecutor : IAgentExecutor
         IOptions<TelegramOptions> telegramConfig,
         PromptBuilder promptBuilder,
         ILogger<CodexExecutor> logger)
+        : this(config, telegramConfig, promptBuilder, logger, Process.Start)
+    {
+    }
+
+    internal CodexExecutor(
+        IOptions<AgentOptions> config,
+        IOptions<TelegramOptions> telegramConfig,
+        PromptBuilder promptBuilder,
+        ILogger<CodexExecutor> logger,
+        Func<ProcessStartInfo, Process?> processStarter)
     {
         _config = config.Value;
         _promptBuilder = promptBuilder;
         _logger = logger;
         _normalizedAttachmentDir = Path.GetFullPath(telegramConfig.Value.AttachmentDir);
+        _processStarter = processStarter;
     }
 
     public async IAsyncEnumerable<AgentProgress> ExecuteAsync(
@@ -80,6 +93,8 @@ public sealed class CodexExecutor : IAgentExecutor
 
         string? turnId = null;
         var (forwardedPaths, skippedCount) = CollectImagePaths(images);
+
+        Exception? startupError = null;
 
         try
         {
@@ -100,9 +115,19 @@ public sealed class CodexExecutor : IAgentExecutor
             _activeTurnId = turnId;
             _lastTurnUsage = null;
         }
+        catch (RpcErrorException ex) when (ex.IsAuthFailure)
+        {
+            startupError = ex;
+        }
         finally
         {
             _sendLock.Release();
+        }
+
+        if (startupError is not null)
+        {
+            yield return BuildAuthFailureProgress(startupError);
+            yield break;
         }
 
         if (skippedCount > 0)
@@ -130,6 +155,8 @@ public sealed class CodexExecutor : IAgentExecutor
         _lastActivity = DateTimeOffset.UtcNow;
         await _sendLock.WaitAsync(ct);
 
+        Exception? commandError = null;
+
         try
         {
             await EnsureProcessReadyAsync(ct);
@@ -143,12 +170,24 @@ public sealed class CodexExecutor : IAgentExecutor
                 ["command"] = command,
             };
 
-            await SendRequestAsync("thread/shellCommand", shellParams, ct);
+            // Intentional: `thread/shellCommand` is the v2 thread-scoped shell entrypoint.
+            // It preserves shell syntax (pipes, redirects, quoting) unlike `command/exec`.
+            await SendRequestAsync(ThreadShellCommandMethod, shellParams, ct);
             _lastTurnUsage = null;
+        }
+        catch (RpcErrorException ex) when (ex.IsAuthFailure)
+        {
+            commandError = ex;
         }
         finally
         {
             _sendLock.Release();
+        }
+
+        if (commandError is not null)
+        {
+            yield return BuildAuthFailureProgress(commandError);
+            yield break;
         }
 
         await foreach (var progress in StreamTurnAsync(expectedTurnId: null, ct))
@@ -199,6 +238,23 @@ public sealed class CodexExecutor : IAgentExecutor
         _sendLock.Dispose();
     }
 
+    internal Task EnsureProcessReadyForTestsAsync(CancellationToken ct = default) =>
+        EnsureProcessReadyAsync(ct);
+
+    internal IAsyncEnumerable<AgentProgress> StreamTurnForTests(string? expectedTurnId, CancellationToken ct = default) =>
+        StreamTurnAsync(expectedTurnId, ct);
+
+    internal void SetNotificationChannelForTests(Channel<JsonObject> channel) =>
+        _notificationChannel = channel;
+
+    internal void SetThreadStateForTests(string? threadId, string? activeTurnId)
+    {
+        _threadId = threadId;
+        _activeTurnId = activeTurnId;
+    }
+
+    internal string? ActiveTurnIdForTests => _activeTurnId;
+
     internal (List<string> ForwardedPaths, int SkippedCount) CollectImagePaths(IReadOnlyList<MessageImage>? images)
     {
         if (images is not { Count: > 0 })
@@ -224,6 +280,8 @@ public sealed class CodexExecutor : IAgentExecutor
                 continue;
             }
 
+            // Only allow files inside AttachmentDir. This blocks path-prefix tricks and
+            // traversal like `/attachments/../secret` after full-path normalization.
             if (!normalized.StartsWith(_normalizedAttachmentDir + Path.DirectorySeparatorChar, StringComparison.Ordinal)
                 && !string.Equals(normalized, _normalizedAttachmentDir, StringComparison.Ordinal))
             {
@@ -272,6 +330,7 @@ public sealed class CodexExecutor : IAgentExecutor
         {
             ["type"] = "text",
             ["text"] = task,
+            // The v2 UserInput schema defines text_elements with default [].
             ["text_elements"] = new JsonArray(),
         });
 
@@ -301,7 +360,6 @@ public sealed class CodexExecutor : IAgentExecutor
             catch (Exception ex)
             {
                 lastError = ex;
-                _startupStrikeCount++;
                 _logger.LogWarning(ex, "CodexExecutor startup attempt {Attempt}/{Budget} failed", attempt, StartupRetryBudget);
                 await StopInternalAsync();
             }
@@ -326,7 +384,7 @@ public sealed class CodexExecutor : IAgentExecutor
             CreateNoWindow = true,
         };
 
-        _process = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start codex app-server");
+        _process = _processStarter(psi) ?? throw new InvalidOperationException("Failed to start codex app-server");
         _stdin = new StreamWriter(_process.StandardInput.BaseStream, new UTF8Encoding(false)) { AutoFlush = true };
         _notificationChannel = Channel.CreateUnbounded<JsonObject>(new UnboundedChannelOptions
         {
@@ -438,6 +496,7 @@ public sealed class CodexExecutor : IAgentExecutor
         }
         finally
         {
+            FailPendingRequests(new InvalidOperationException("Codex app-server stdout reader stopped before the request completed."));
             writer.TryComplete();
         }
     }
@@ -485,7 +544,19 @@ public sealed class CodexExecutor : IAgentExecutor
 
         var outcome = await tcs.Task;
         if (outcome.Error is not null)
-            throw RpcErrorException.From(method, outcome.Error);
+        {
+            var rpcError = RpcErrorException.From(method, outcome.Error);
+            if (rpcError.IsAuthFailure)
+            {
+                RequestRestart();
+                _logger.LogWarning(
+                    "Codex auth error from {Method}; restart requested (statusCode={StatusCode}, action={Action})",
+                    method,
+                    rpcError.StatusCode,
+                    rpcError.Action ?? "none");
+            }
+            throw rpcError;
+        }
 
         return outcome.Result ?? new JsonObject();
     }
@@ -526,7 +597,7 @@ public sealed class CodexExecutor : IAgentExecutor
             catch (OperationCanceledException)
             {
                 if (resolvedTurnId is not null)
-                    await InterruptTurnAsync(resolvedTurnId);
+                    await DrainInterruptedTurnAsync(resolvedTurnId);
                 throw;
             }
             catch (ChannelClosedException)
@@ -702,12 +773,11 @@ public sealed class CodexExecutor : IAgentExecutor
                 DurationMs = durationMs,
             };
 
-        _activeTurnId = null;
+            _activeTurnId = null;
 
         if (string.Equals(status, "completed", StringComparison.OrdinalIgnoreCase))
         {
             _messageCount++;
-            _startupStrikeCount = 0;
             return new AgentProgress
             {
                 EventType = "result",
@@ -760,6 +830,54 @@ public sealed class CodexExecutor : IAgentExecutor
         }
     }
 
+    private async Task DrainInterruptedTurnAsync(string turnId)
+    {
+        _activeTurnId = null;
+        await InterruptTurnAsync(turnId);
+
+        if (_notificationChannel is null)
+            return;
+
+        using var drainCts = new CancellationTokenSource(InterruptDrainTimeout);
+
+        try
+        {
+            while (true)
+            {
+                var notification = await _notificationChannel.Reader.ReadAsync(drainCts.Token);
+                var method = notification["method"]?.GetValue<string>();
+                var @params = notification["params"] as JsonObject;
+                if (method is null || @params is null)
+                    continue;
+
+                if (method == "thread/tokenUsage/updated")
+                {
+                    var updateTurnId = @params["turnId"]?.GetValue<string>();
+                    if (updateTurnId == turnId)
+                        _lastTurnUsage = ParseTokenUsage(@params["tokenUsage"] as JsonObject);
+                    continue;
+                }
+
+                if (!AppliesToTurn(@params, turnId))
+                    continue;
+
+                if (method == "turn/completed")
+                {
+                    _ = BuildTurnCompletedProgress(@params, turnId);
+                    return;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("CodexExecutor timed out draining interrupted turn {TurnId}", turnId);
+        }
+        catch (ChannelClosedException)
+        {
+            _logger.LogWarning("CodexExecutor notification channel closed while draining interrupted turn {TurnId}", turnId);
+        }
+    }
+
     private async Task StopInternalAsync()
     {
         _readerCts?.Cancel();
@@ -780,9 +898,7 @@ public sealed class CodexExecutor : IAgentExecutor
             _process = null;
         }
 
-        foreach (var (_, tcs) in _pendingRequests)
-            tcs.TrySetException(new InvalidOperationException("Codex app-server stopped before the request completed."));
-        _pendingRequests.Clear();
+        FailPendingRequests(new InvalidOperationException("Codex app-server stopped before the request completed."));
 
         _stdin?.Dispose();
         _stdin = null;
@@ -792,6 +908,27 @@ public sealed class CodexExecutor : IAgentExecutor
         _lastTurnUsage = null;
         _messageCount = 0;
     }
+
+    private void FailPendingRequests(Exception ex)
+    {
+        foreach (var (id, tcs) in _pendingRequests)
+        {
+            if (_pendingRequests.TryRemove(id, out var pending))
+                pending.TrySetException(ex);
+            else
+                tcs.TrySetException(ex);
+        }
+    }
+
+    private AgentProgress BuildAuthFailureProgress(Exception ex) =>
+        new()
+        {
+            EventType = "result",
+            Summary = "Codex authentication expired; restart requested while refreshed credentials are applied.",
+            FinalResult = $"Codex authentication expired: {ex.Message}",
+            IsErrorResult = true,
+            IsSignificant = true,
+        };
 
     private static bool TryGetRequestId(JsonObject obj, out long id)
     {
@@ -883,12 +1020,26 @@ public sealed class CodexExecutor : IAgentExecutor
         public string Method { get; } = method;
         public long Code { get; } = code;
         public JsonNode? ErrorData { get; } = errorData;
+        public string? ErrorCode { get; init; }
+        public int? StatusCode { get; init; }
+        public string? Action { get; init; }
+        public bool IsAuthFailure =>
+            string.Equals(ErrorCode, "Auth", StringComparison.OrdinalIgnoreCase)
+            && StatusCode == 401
+            && string.Equals(Action, "relogin", StringComparison.OrdinalIgnoreCase);
 
         public static RpcErrorException From(string method, JsonObject error)
         {
             var code = error["code"]?.GetValue<long>() ?? 0;
             var message = error["message"]?.GetValue<string>() ?? "JSON-RPC error";
-            return new RpcErrorException(method, code, message, error["data"]);
+            var data = error["data"];
+            var dataObject = data as JsonObject;
+            return new RpcErrorException(method, code, message, data)
+            {
+                ErrorCode = dataObject?["errorCode"]?.GetValue<string>(),
+                StatusCode = dataObject?["statusCode"]?.GetValue<int?>(),
+                Action = dataObject?["action"]?.GetValue<string>(),
+            };
         }
     }
 }

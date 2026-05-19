@@ -3,6 +3,7 @@ using System.Threading.Channels;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
@@ -12,7 +13,8 @@ public class CodexExecutorTests
 {
     private static CodexExecutor CreateExecutor(
         string attachmentDir = "/workspace/attachments",
-        Func<System.Diagnostics.ProcessStartInfo, System.Diagnostics.Process?>? processStarter = null)
+        Func<System.Diagnostics.ProcessStartInfo, System.Diagnostics.Process?>? processStarter = null,
+        ILogger<CodexExecutor>? logger = null)
     {
         var agentOptions = Options.Create(new AgentOptions
         {
@@ -25,9 +27,20 @@ public class CodexExecutorTests
             AttachmentDir = attachmentDir,
         });
         var promptBuilder = new PromptBuilder(agentOptions, NullLogger<PromptBuilder>.Instance);
+        var resolvedLogger = logger ?? NullLogger<CodexExecutor>.Instance;
         return processStarter is null
-            ? new CodexExecutor(agentOptions, telegramOptions, promptBuilder, NullLogger<CodexExecutor>.Instance)
-            : new CodexExecutor(agentOptions, telegramOptions, promptBuilder, NullLogger<CodexExecutor>.Instance, processStarter);
+            ? new CodexExecutor(agentOptions, telegramOptions, promptBuilder, resolvedLogger)
+            : new CodexExecutor(agentOptions, telegramOptions, promptBuilder, resolvedLogger, processStarter);
+    }
+
+    /// <summary>Captures log messages for assertion in tests.</summary>
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public List<string> Messages { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => Messages.Add(formatter(state, exception));
     }
 
     [Fact]
@@ -252,4 +265,71 @@ public class CodexExecutorTests
                 },
             },
         };
+
+    // Concurrent ExecuteAsync calls must queue rather than throw. We hold _turnLock externally,
+    // start an ExecuteAsync iteration in the background (which blocks waiting for the lock),
+    // then release — verifying the second caller got the lock and proceeded (failing on process
+    // startup as expected, but NOT throwing the old "refused to start a second turn" error).
+    [Fact]
+    public async Task ExecuteAsync_ConcurrentCalls_AreSerialized()
+    {
+        var executor = CreateExecutor(processStarter: _ => null);
+
+        // Hold the turn lock externally so the background call has to wait.
+        await executor.TurnLockForTests.WaitAsync();
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        Exception? caughtEx = null;
+        var backgroundTask = Task.Run(async () =>
+        {
+            try
+            {
+                await foreach (var _ in executor.ExecuteAsync("task", ct: cts.Token)) { }
+            }
+            catch (Exception ex)
+            {
+                caughtEx = ex;
+            }
+        });
+
+        // Give the background task time to start and reach _turnLock.WaitAsync.
+        await Task.Delay(50);
+        Assert.False(backgroundTask.IsCompleted, "ExecuteAsync should be waiting on _turnLock");
+
+        // Release the lock — the background call should now proceed (and fail on process startup).
+        executor.TurnLockForTests.Release();
+        await backgroundTask;
+
+        // The failure must be the startup-exhaustion error, not the old single-flight throw.
+        Assert.NotNull(caughtEx);
+        Assert.IsType<InvalidOperationException>(caughtEx);
+        Assert.DoesNotContain("refused to start a second turn", caughtEx.Message);
+        Assert.Contains("3 attempts", caughtEx.Message);
+    }
+
+    // BuildItemStartedProgress must emit a [codex tool_use:...] log line for every tool item,
+    // mirroring ClaudeExecutor's tool-call logger for observability parity.
+    [Fact]
+    public void BuildItemStartedProgress_LogsToolUse()
+    {
+        var capturer = new CapturingLogger<CodexExecutor>();
+        var executor = CreateExecutor(logger: capturer);
+
+        var @params = new JsonObject
+        {
+            ["item"] = new JsonObject
+            {
+                ["type"] = "commandExecution",
+                ["command"] = "Bash",
+                ["args"] = new JsonArray { "ls", "-la" },
+            },
+        };
+
+        var progress = executor.BuildItemStartedProgressForTests(@params);
+
+        Assert.NotNull(progress);
+        Assert.Equal("tool_use", progress.EventType);
+
+        Assert.Contains(capturer.Messages, m => m.Contains("[codex tool_use:Bash"));
+    }
 }

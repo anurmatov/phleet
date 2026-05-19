@@ -28,6 +28,7 @@ public sealed class CodexExecutor : IAgentExecutor
     private Process? _process;
     private StreamWriter? _stdin;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
+    private readonly SemaphoreSlim _turnLock = new(1, 1);
     private readonly ConcurrentDictionary<long, TaskCompletionSource<RpcOutcome>> _pendingRequests = new();
     private Channel<JsonObject>? _notificationChannel;
     private CancellationTokenSource? _readerCts;
@@ -100,7 +101,11 @@ public sealed class CodexExecutor : IAgentExecutor
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         _lastActivity = DateTimeOffset.UtcNow;
-        await _sendLock.WaitAsync(ct);
+
+        // Serialize concurrent ExecuteAsync calls: the second caller waits here until
+        // the first turn completes, mirroring ClaudeExecutor's _sendLock.WaitAsync pattern.
+        // This replaces the previous single-flight throw (G2 deviation) with graceful queuing.
+        await _turnLock.WaitAsync(ct);
 
         string? turnId = null;
         var (forwardedPaths, skippedCount) = CollectImagePaths(images);
@@ -109,62 +114,69 @@ public sealed class CodexExecutor : IAgentExecutor
 
         try
         {
-            await EnsureProcessReadyAsync(ct);
-
-            // Single-flight design (G2 deviation from spec "queue it"):
-            // Throwing immediately instead of queuing is intentional — the agent loop is
-            // single-flight by design and a second concurrent turn arriving here indicates
-            // a bug in the caller. Queueing would hide the bug and risk reordering replies.
-            if (_activeTurnId is not null)
-                throw new InvalidOperationException("CodexExecutor refused to start a second turn while one is still active.");
-
-            var startParams = new JsonObject
+            await _sendLock.WaitAsync(ct);
+            try
             {
-                ["threadId"] = _threadId!,
-                ["input"] = BuildUserInputs(task, forwardedPaths),
-            };
+                await EnsureProcessReadyAsync(ct);
 
-            var response = await SendRequestAsync("turn/start", startParams, ct);
-            var turn = response.RequireObject("turn");
-            turnId = turn.RequireString("id");
-            _activeTurnId = turnId;
-            _lastTurnUsage = null;
-            _currentTurnAssistantText = "";
-        }
-        catch (RpcErrorException ex)
-        {
-            // Catch all RPC errors per G6 mapping table. Session errors trigger a cold
-            // restart so the next task begins with a fresh thread.
-            LogRpcError(ex);
-            if (ex.IsSessionError) RequestRestart();
-            startupError = ex;
+                // Sanity assert: _turnLock ensures only one ExecuteAsync runs at a time,
+                // so _activeTurnId should always be null here. If not, something cleared
+                // it incorrectly — treat as a hard error rather than silently proceeding.
+                if (_activeTurnId is not null)
+                    throw new InvalidOperationException("CodexExecutor: _activeTurnId non-null despite _turnLock held — state corruption.");
+
+                var startParams = new JsonObject
+                {
+                    ["threadId"] = _threadId!,
+                    ["input"] = BuildUserInputs(task, forwardedPaths),
+                };
+
+                var response = await SendRequestAsync("turn/start", startParams, ct);
+                var turn = response.RequireObject("turn");
+                turnId = turn.RequireString("id");
+                _activeTurnId = turnId;
+                _lastTurnUsage = null;
+                _currentTurnAssistantText = "";
+            }
+            catch (RpcErrorException ex)
+            {
+                // Catch all RPC errors per G6 mapping table. Session errors trigger a cold
+                // restart so the next task begins with a fresh thread.
+                LogRpcError(ex);
+                if (ex.IsSessionError) RequestRestart();
+                startupError = ex;
+            }
+            finally
+            {
+                _sendLock.Release();
+            }
+
+            if (startupError is not null)
+            {
+                yield return BuildRpcErrorProgress((RpcErrorException)startupError);
+                yield break;
+            }
+
+            if (skippedCount > 0)
+            {
+                yield return new AgentProgress
+                {
+                    EventType = "warning",
+                    Summary = $"Codex: {skippedCount} image(s) skipped — no persisted file path or file not found.",
+                    IsSignificant = true,
+                };
+            }
+
+            await foreach (var progress in StreamTurnAsync(turnId!, ct))
+            {
+                _lastActivity = DateTimeOffset.UtcNow;
+                yield return progress;
+                if (progress.FinalResult is not null) yield break;
+            }
         }
         finally
         {
-            _sendLock.Release();
-        }
-
-        if (startupError is not null)
-        {
-            yield return BuildRpcErrorProgress((RpcErrorException)startupError);
-            yield break;
-        }
-
-        if (skippedCount > 0)
-        {
-            yield return new AgentProgress
-            {
-                EventType = "warning",
-                Summary = $"Codex: {skippedCount} image(s) skipped — no persisted file path or file not found.",
-                IsSignificant = true,
-            };
-        }
-
-        await foreach (var progress in StreamTurnAsync(turnId!, ct))
-        {
-            _lastActivity = DateTimeOffset.UtcNow;
-            yield return progress;
-            if (progress.FinalResult is not null) yield break;
+            _turnLock.Release();
         }
     }
 
@@ -260,6 +272,7 @@ public sealed class CodexExecutor : IAgentExecutor
     {
         await StopInternalAsync();
         _sendLock.Dispose();
+        _turnLock.Dispose();
     }
 
     internal Task EnsureProcessReadyForTestsAsync(CancellationToken ct = default) =>
@@ -278,6 +291,11 @@ public sealed class CodexExecutor : IAgentExecutor
     }
 
     internal string? ActiveTurnIdForTests => _activeTurnId;
+
+    internal SemaphoreSlim TurnLockForTests => _turnLock;
+
+    internal AgentProgress? BuildItemStartedProgressForTests(JsonObject @params) =>
+        BuildItemStartedProgress(@params);
 
     internal (List<string> ForwardedPaths, int SkippedCount) CollectImagePaths(IReadOnlyList<MessageImage>? images)
     {
@@ -737,7 +755,8 @@ public sealed class CodexExecutor : IAgentExecutor
     {
         var item = @params["item"] as JsonObject;
         var itemType = item?["type"]?.GetValue<string>();
-        return itemType switch
+
+        AgentProgress? progress = itemType switch
         {
             "commandExecution" => new AgentProgress
             {
@@ -765,6 +784,16 @@ public sealed class CodexExecutor : IAgentExecutor
             },
             _ => null,
         };
+
+        if (progress is not null)
+        {
+            var toolName = progress.ToolName ?? itemType ?? "unknown";
+            var rawArgs = progress.ToolArgs ?? "";
+            var argsPreview = rawArgs.Length > 200 ? rawArgs[..200] + "…" : rawArgs;
+            _logger.LogInformation("[codex tool_use:{Tool}] {Args}", toolName, argsPreview);
+        }
+
+        return progress;
     }
 
     private AgentProgress? BuildItemCompletedProgress(JsonObject @params)

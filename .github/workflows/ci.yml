@@ -45,16 +45,46 @@ jobs:
       - name: Install pinned codex CLI
         run: npm install -g @openai/codex@0.130.0 --silent
 
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
       - name: Generate schema from pinned CLI
         run: codex app-server generate-json-schema --out /tmp/schema-live/
 
-      - name: Diff against committed schema
+      - name: Diff against committed schema (key-order insensitive)
         run: |
-          diff -r protocols/codex-app-server-v2/ /tmp/schema-live/ && echo "Schema matches pinned @openai/codex@0.130.0" || {
-            echo "ERROR: codex app-server schema has drifted from protocols/codex-app-server-v2/"
-            echo "Update the pinned version in Dockerfile and re-generate:"
+          set -euo pipefail
+          COMMITTED=protocols/codex-app-server-v2
+          LIVE=/tmp/schema-live
+          DIFFS=0
+          # Compare each JSON file using jq -S (sorted keys) to ignore formatting/key-order.
+          while IFS= read -r -d '' live_file; do
+            rel="${live_file#$LIVE/}"
+            committed_file="$COMMITTED/$rel"
+            if [ ! -f "$committed_file" ]; then
+              echo "NEW FILE in live schema not in committed: $rel"
+              DIFFS=$((DIFFS+1))
+              continue
+            fi
+            if ! diff <(jq -S . "$committed_file") <(jq -S . "$live_file") > /dev/null 2>&1; then
+              echo "DRIFT: $rel"
+              diff <(jq -S . "$committed_file") <(jq -S . "$live_file") || true
+              DIFFS=$((DIFFS+1))
+            fi
+          done < <(find "$LIVE" -name "*.json" -print0)
+          # Also check for files committed but absent from live output.
+          while IFS= read -r -d '' committed_file; do
+            rel="${committed_file#$COMMITTED/}"
+            if [ ! -f "$LIVE/$rel" ]; then
+              echo "REMOVED FILE in live schema: $rel"
+              DIFFS=$((DIFFS+1))
+            fi
+          done < <(find "$COMMITTED" -name "*.json" -print0)
+          if [ "$DIFFS" -gt 0 ]; then
+            echo "ERROR: $DIFFS file(s) drifted. Regenerate and commit:"
             echo "  npm install -g @openai/codex@<new-version>"
             echo "  codex app-server generate-json-schema --out protocols/codex-app-server-v2/"
             echo "  git add protocols/codex-app-server-v2/ && git commit"
             exit 1
-          }
+          fi
+          echo "Schema matches pinned @openai/codex@0.130.0 (key-order insensitive)"

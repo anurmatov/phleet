@@ -677,7 +677,7 @@ public sealed class ContainerProvisioningService(
             agent.PermissionMode);
 
         var fleetMemoryMcpUrl = config["FleetMemory:McpUrl"] ?? "http://fleet-memory:3100/mcp";
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent));
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent, ctoAgentName));
 
@@ -820,9 +820,20 @@ public sealed class ContainerProvisioningService(
             agent.Name, projectsDir, agent.Projects.Count);
     }
 
-    private static string GenerateAppsettingsJson(Agent agent)
+    private static string GenerateAppsettingsJson(Agent agent, string ctoAgentName)
     {
         var tools = agent.Tools.Where(t => t.IsEnabled).OrderBy(t => t.ToolName).Select(t => t.ToolName).ToList();
+
+        // Mirror GenerateSettingsJson: auto-grant notify_cto in AllowedTools so codex agents
+        // have it in their config.toml enabled_tools (entrypoint.sh derives that list from AllowedTools).
+        // settings.json covers claude/gemini; AllowedTools covers codex. Same CTO self-loop guard applies.
+        if (!string.IsNullOrWhiteSpace(ctoAgentName) &&
+            !string.Equals(agent.Name, ctoAgentName, StringComparison.OrdinalIgnoreCase) &&
+            !tools.Contains("mcp__fleet-temporal__notify_cto", StringComparer.OrdinalIgnoreCase))
+        {
+            tools.Add("mcp__fleet-temporal__notify_cto");
+            tools.Sort(StringComparer.OrdinalIgnoreCase);
+        }
         var projects   = agent.Projects.Select(p => p.ProjectName).ToList();
 
         var obj = new

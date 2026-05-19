@@ -872,7 +872,7 @@ export default function App() {
         jsonSchema: configEdits.jsonSchema,
         agentsJson: configEdits.agentsJson,
         autoMemoryEnabled: configEdits.autoMemoryEnabled,
-        codexSandboxMode: configEdits.codexSandboxMode || null,
+        codexSandboxMode: configEdits.codexSandboxMode,
         hostPort: configEdits.hostPort ? parseInt(configEdits.hostPort, 10) : null,
         canReceiveChatRequests: configEdits.canReceiveChatRequests,
         requestReceivedMessage: configEdits.requestReceivedMessage || undefined,

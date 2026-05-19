@@ -820,20 +820,28 @@ public sealed class ContainerProvisioningService(
             agent.Name, projectsDir, agent.Projects.Count);
     }
 
-    private static string GenerateAppsettingsJson(Agent agent, string ctoAgentName)
+    internal static string GenerateAppsettingsJson(Agent agent, string ctoAgentName)
     {
         var tools = agent.Tools.Where(t => t.IsEnabled).OrderBy(t => t.ToolName).Select(t => t.ToolName).ToList();
 
-        // Mirror GenerateSettingsJson: auto-grant notify_cto in AllowedTools so codex agents
-        // have it in their config.toml enabled_tools (entrypoint.sh derives that list from AllowedTools).
-        // settings.json covers claude/gemini; AllowedTools covers codex. Same CTO self-loop guard applies.
-        if (!string.IsNullOrWhiteSpace(ctoAgentName) &&
-            !string.Equals(agent.Name, ctoAgentName, StringComparison.OrdinalIgnoreCase) &&
-            !tools.Contains("mcp__fleet-temporal__notify_cto", StringComparer.OrdinalIgnoreCase))
+        // Codex derives config.toml enabled_tools from AllowedTools (entrypoint.sh).
+        // Auto-grant the same baseline tools that GenerateSettingsJson grants for claude/gemini,
+        // but gate strictly to codex — other providers don't read AllowedTools this way.
+        if (string.Equals(agent.Provider, "codex", StringComparison.OrdinalIgnoreCase))
         {
-            tools.Add("mcp__fleet-temporal__notify_cto");
+            if (!tools.Contains("mcp__fleet-memory__memory_get", StringComparer.OrdinalIgnoreCase))
+                tools.Add("mcp__fleet-memory__memory_get");
+
+            if (!string.IsNullOrWhiteSpace(ctoAgentName) &&
+                !string.Equals(agent.Name, ctoAgentName, StringComparison.OrdinalIgnoreCase) &&
+                !tools.Contains("mcp__fleet-temporal__notify_cto", StringComparer.OrdinalIgnoreCase))
+            {
+                tools.Add("mcp__fleet-temporal__notify_cto");
+            }
+
             tools.Sort(StringComparer.OrdinalIgnoreCase);
         }
+
         var projects   = agent.Projects.Select(p => p.ProjectName).ToList();
 
         var obj = new

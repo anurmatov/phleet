@@ -11,13 +11,15 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y curl git jq rsync cron openssh-client && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y nodejs && \
-    npm install -g @anthropic-ai/claude-code
+    npm install -g @anthropic-ai/claude-code @openai/codex@0.130.0
 # Fail the build early if the installed claude version does not support --append-system-prompt-file.
 # This flag is required by PromptBuilder.WriteSystemPromptFile() to avoid E2BIG failures.
 # The flag isn't listed as a standalone help entry — it appears inside --bare's description,
 # so we grep for the broader 'append-system-prompt' pattern.
 RUN claude --help 2>&1 | grep -q 'append-system-prompt' || \
     (echo "ERROR: installed claude version does not support --append-system-prompt" && exit 1)
+RUN codex app-server --help > /dev/null 2>&1 || \
+    (echo "ERROR: installed codex version does not support app-server" && exit 1)
 RUN (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg) && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
     apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/*
@@ -35,8 +37,6 @@ ARG GIT_COMMIT=unknown
 ENV FLEET_BUILD_COMMIT=$GIT_COMMIT
 
 COPY --from=build /app .
-COPY src/Fleet.Agent/codex-bridge.mjs /app/codex-bridge.mjs
-RUN cd /app && npm install @openai/codex-sdk@0.118.0
 
 # Gemini CLI — headless mode. OAuth credentials mounted writable at runtime by the orchestrator.
 # Pinned to @google/gemini-cli@0.40.1 to match the verified flag set (--output-format stream-json,

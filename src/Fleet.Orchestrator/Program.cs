@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Threading.RateLimiting;
 using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Helpers;
 using Fleet.Orchestrator.Services;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
@@ -400,13 +401,10 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     if (body.Provider is not null) agent.Provider = body.Provider;
     if (body.CodexSandboxMode is not null)
     {
-        var validModes = new[] { "read-only", "workspace-write", "danger-full-access" };
-        if (body.CodexSandboxMode != "" && !Array.Exists(validModes, m => m == body.CodexSandboxMode))
-            return Results.BadRequest(new
-            {
-                error = $"Invalid CodexSandboxMode '{body.CodexSandboxMode}'. Valid values: read-only, workspace-write, danger-full-access."
-            });
-        agent.CodexSandboxMode = body.CodexSandboxMode == "" ? null : body.CodexSandboxMode;
+        var (sandboxError, sandboxValue) = AgentPatchHelpers.MapCodexSandboxMode(body.CodexSandboxMode);
+        if (sandboxError is not null)
+            return Results.BadRequest(new { error = sandboxError });
+        agent.CodexSandboxMode = sandboxValue;
     }
     if (body.CanReceiveChatRequests is not null) agent.CanReceiveChatRequests = body.CanReceiveChatRequests.Value;
     if (body.RequestReceivedMessage is not null)

@@ -677,7 +677,7 @@ public sealed class ContainerProvisioningService(
             agent.PermissionMode);
 
         var fleetMemoryMcpUrl = config["FleetMemory:McpUrl"] ?? "http://fleet-memory:3100/mcp";
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent));
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent, ctoAgentName));
 
@@ -820,9 +820,28 @@ public sealed class ContainerProvisioningService(
             agent.Name, projectsDir, agent.Projects.Count);
     }
 
-    private static string GenerateAppsettingsJson(Agent agent)
+    internal static string GenerateAppsettingsJson(Agent agent, string ctoAgentName)
     {
         var tools = agent.Tools.Where(t => t.IsEnabled).OrderBy(t => t.ToolName).Select(t => t.ToolName).ToList();
+
+        // Codex derives config.toml enabled_tools from AllowedTools (entrypoint.sh).
+        // Auto-grant the same baseline tools that GenerateSettingsJson grants for claude/gemini,
+        // but gate strictly to codex — other providers don't read AllowedTools this way.
+        if (string.Equals(agent.Provider, "codex", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!tools.Contains("mcp__fleet-memory__memory_get", StringComparer.OrdinalIgnoreCase))
+                tools.Add("mcp__fleet-memory__memory_get");
+
+            if (!string.IsNullOrWhiteSpace(ctoAgentName) &&
+                !string.Equals(agent.Name, ctoAgentName, StringComparison.OrdinalIgnoreCase) &&
+                !tools.Contains("mcp__fleet-temporal__notify_cto", StringComparer.OrdinalIgnoreCase))
+            {
+                tools.Add("mcp__fleet-temporal__notify_cto");
+            }
+
+            tools.Sort(StringComparer.OrdinalIgnoreCase);
+        }
+
         var projects   = agent.Projects.Select(p => p.ProjectName).ToList();
 
         var obj = new

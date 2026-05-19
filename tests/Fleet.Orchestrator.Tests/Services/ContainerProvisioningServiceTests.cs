@@ -1,3 +1,5 @@
+using System.Text.Json;
+using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 
 namespace Fleet.Orchestrator.Tests.Services;
@@ -67,5 +69,80 @@ public class ContainerProvisioningServiceTests
         var twice = ContainerProvisioningService.WithAgentParam(once, "foo");
 
         Assert.Equal(once, twice);
+    }
+
+    // ── GenerateAppsettingsJson: codex auto-grants ────────────────────────────
+    // entrypoint.sh reads AllowedTools from appsettings.json to generate config.toml
+    // enabled_tools for each MCP server. So the baseline grants (memory_get, notify_cto)
+    // that GenerateSettingsJson injects for claude/gemini must also appear in AllowedTools
+    // for codex agents — but ONLY for codex (other providers don't read AllowedTools this way).
+
+    private static List<string> GetAllowedTools(Agent agent, string ctoAgentName = "acto")
+    {
+        var json = ContainerProvisioningService.GenerateAppsettingsJson(agent, ctoAgentName);
+        var doc = JsonDocument.Parse(json);
+        return doc.RootElement
+            .GetProperty("Agent")
+            .GetProperty("AllowedTools")
+            .EnumerateArray()
+            .Select(e => e.GetString()!)
+            .ToList();
+    }
+
+    private static Agent MinimalAgent(string name, string provider) => new()
+    {
+        Name = name,
+        DisplayName = name,
+        Role = "test",
+        Model = "test-model",
+        ContainerName = $"fleet-{name}",
+        Provider = provider,
+    };
+
+    [Fact]
+    public void GenerateAppsettingsJson_CodexAgent_AutoGrantsBothBaselineTools()
+    {
+        var agent = MinimalAgent("acanary", "codex");
+        var tools = GetAllowedTools(agent, "acto");
+
+        Assert.Contains("mcp__fleet-memory__memory_get", tools);
+        Assert.Contains("mcp__fleet-temporal__notify_cto", tools);
+    }
+
+    [Fact]
+    public void GenerateAppsettingsJson_CodexCtoAgent_GetsMemoryGetButNotNotifyCto()
+    {
+        // CTO self-loop guard: notify_cto is not granted to the CTO agent itself.
+        var agent = MinimalAgent("acto", "codex");
+        var tools = GetAllowedTools(agent, "acto");
+
+        Assert.Contains("mcp__fleet-memory__memory_get", tools);
+        Assert.DoesNotContain("mcp__fleet-temporal__notify_cto", tools);
+    }
+
+    [Theory]
+    [InlineData("claude")]
+    [InlineData("gemini")]
+    public void GenerateAppsettingsJson_NonCodexAgent_NoAutoGrantsInAllowedTools(string provider)
+    {
+        // claude/gemini get their baseline grants via settings.json (GenerateSettingsJson).
+        // AllowedTools in appsettings.json is not the right place for those providers.
+        var agent = MinimalAgent("adev", provider);
+        var tools = GetAllowedTools(agent, "acto");
+
+        Assert.DoesNotContain("mcp__fleet-memory__memory_get", tools);
+        Assert.DoesNotContain("mcp__fleet-temporal__notify_cto", tools);
+    }
+
+    [Fact]
+    public void GenerateAppsettingsJson_CodexAgent_NoDeduplication_WhenToolAlreadyPresent()
+    {
+        // If the tool is already in the DB list, don't add it a second time.
+        var agent = MinimalAgent("abot", "codex");
+        agent.Tools.Add(new AgentTool { ToolName = "mcp__fleet-memory__memory_get", IsEnabled = true, AgentId = 0 });
+
+        var tools = GetAllowedTools(agent, "acto");
+
+        Assert.Single(tools, t => t == "mcp__fleet-memory__memory_get");
     }
 }

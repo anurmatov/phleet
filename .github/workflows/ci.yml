@@ -28,3 +28,33 @@ jobs:
 
       - name: Test
         run: dotnet test --no-build --configuration Release --logger "console;verbosity=normal"
+
+  codex-schema-drift:
+    name: Codex app-server schema drift (G10)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install pinned codex CLI
+        run: npm install -g @openai/codex@0.130.0 --silent
+
+      - name: Generate schema from pinned CLI
+        run: codex app-server generate-json-schema --out /tmp/schema-live/
+
+      - name: Diff against committed schema
+        run: |
+          diff -r protocols/codex-app-server-v2/ /tmp/schema-live/ && echo "Schema matches pinned @openai/codex@0.130.0" || {
+            echo "ERROR: codex app-server schema has drifted from protocols/codex-app-server-v2/"
+            echo "Update the pinned version in Dockerfile and re-generate:"
+            echo "  npm install -g @openai/codex@<new-version>"
+            echo "  codex app-server generate-json-schema --out protocols/codex-app-server-v2/"
+            echo "  git add protocols/codex-app-server-v2/ && git commit"
+            exit 1
+          }

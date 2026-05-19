@@ -37,6 +37,11 @@ public sealed class CodexExecutor : IAgentExecutor
     private string? _activeTurnId;
     private ThreadTokenUsageSnapshot? _lastTurnUsage;
     private int _messageCount;
+    // Accumulates assistant text from item/completed notifications of type "agentMessage".
+    // Production codex app-server delivers the reply text here — NOT in turn.items of
+    // turn/completed (turn.items is always empty on the real wire protocol).
+    // Reset at the start of every new turn and cleared on process stop.
+    private string _currentTurnAssistantText = "";
     private DateTimeOffset _lastActivity = DateTimeOffset.MinValue;
     private volatile bool _restartRequested;
     private readonly Func<ProcessStartInfo, Process?> _processStarter;
@@ -53,6 +58,12 @@ public sealed class CodexExecutor : IAgentExecutor
     public DateTimeOffset LastActivity => _lastActivity;
     public bool IsProcessWarm => _process is not null && !_process.HasExited && _messageCount > 0;
 
+    /// <summary>
+    /// Always returns empty for codex-provider agents. The codex app-server v2 protocol's
+    /// <c>item/started</c>/<c>item/completed</c> notifications do not map to Claude's
+    /// background-subagent task semantics. <c>/status</c> and <c>/cancel_bg</c> commands
+    /// will report no background tasks for this provider.
+    /// </summary>
     public IReadOnlyCollection<BackgroundTaskInfo> GetActiveBackgroundTasks() =>
         Array.Empty<BackgroundTaskInfo>();
 
@@ -100,6 +111,10 @@ public sealed class CodexExecutor : IAgentExecutor
         {
             await EnsureProcessReadyAsync(ct);
 
+            // Single-flight design (G2 deviation from spec "queue it"):
+            // Throwing immediately instead of queuing is intentional — the agent loop is
+            // single-flight by design and a second concurrent turn arriving here indicates
+            // a bug in the caller. Queueing would hide the bug and risk reordering replies.
             if (_activeTurnId is not null)
                 throw new InvalidOperationException("CodexExecutor refused to start a second turn while one is still active.");
 
@@ -114,9 +129,14 @@ public sealed class CodexExecutor : IAgentExecutor
             turnId = turn.RequireString("id");
             _activeTurnId = turnId;
             _lastTurnUsage = null;
+            _currentTurnAssistantText = "";
         }
-        catch (RpcErrorException ex) when (ex.IsAuthFailure)
+        catch (RpcErrorException ex)
         {
+            // Catch all RPC errors per G6 mapping table. Session errors trigger a cold
+            // restart so the next task begins with a fresh thread.
+            LogRpcError(ex);
+            if (ex.IsSessionError) RequestRestart();
             startupError = ex;
         }
         finally
@@ -126,7 +146,7 @@ public sealed class CodexExecutor : IAgentExecutor
 
         if (startupError is not null)
         {
-            yield return BuildAuthFailureProgress(startupError);
+            yield return BuildRpcErrorProgress((RpcErrorException)startupError);
             yield break;
         }
 
@@ -161,6 +181,7 @@ public sealed class CodexExecutor : IAgentExecutor
         {
             await EnsureProcessReadyAsync(ct);
 
+            // Same single-flight guard as ExecuteAsync — see comment there.
             if (_activeTurnId is not null)
                 throw new InvalidOperationException("CodexExecutor refused to start a shell command while a turn is already active.");
 
@@ -174,9 +195,12 @@ public sealed class CodexExecutor : IAgentExecutor
             // It preserves shell syntax (pipes, redirects, quoting) unlike `command/exec`.
             await SendRequestAsync(ThreadShellCommandMethod, shellParams, ct);
             _lastTurnUsage = null;
+            _currentTurnAssistantText = "";
         }
-        catch (RpcErrorException ex) when (ex.IsAuthFailure)
+        catch (RpcErrorException ex)
         {
+            LogRpcError(ex);
+            if (ex.IsSessionError) RequestRestart();
             commandError = ex;
         }
         finally
@@ -186,7 +210,7 @@ public sealed class CodexExecutor : IAgentExecutor
 
         if (commandError is not null)
         {
-            yield return BuildAuthFailureProgress(commandError);
+            yield return BuildRpcErrorProgress((RpcErrorException)commandError);
             yield break;
         }
 
@@ -341,6 +365,10 @@ public sealed class CodexExecutor : IAgentExecutor
     {
         Exception? lastError = null;
 
+        // 3-strike budget is in-memory and resets on each call (not on container restart).
+        // This is intentional for now: the budgeted exhaustion gate is primarily a guard
+        // against tight boot-loop crashes within a single agent lifetime, not across
+        // container restarts. Each call gets a fresh 3 attempts.
         for (var attempt = 1; attempt <= StartupRetryBudget; attempt++)
         {
             try
@@ -480,6 +508,10 @@ public sealed class CodexExecutor : IAgentExecutor
 
                 if (TryGetRequestId(obj, out var requestId))
                 {
+                    // _pendingRequests is only written from this loop (single reader) and
+                    // from CancellationToken registrations via TryRemove. ConcurrentDictionary
+                    // makes both paths safe. Do not add a second stdout reader without
+                    // revisiting this assumption.
                     if (_pendingRequests.TryRemove(requestId, out var tcs))
                         tcs.TrySetResult(new RpcOutcome(obj["result"] as JsonObject, obj["error"] as JsonObject));
                     continue;
@@ -527,6 +559,7 @@ public sealed class CodexExecutor : IAgentExecutor
 
         var message = new JsonObject
         {
+            ["jsonrpc"] = "2.0",
             ["id"] = id,
             ["method"] = method,
         };
@@ -546,15 +579,10 @@ public sealed class CodexExecutor : IAgentExecutor
         if (outcome.Error is not null)
         {
             var rpcError = RpcErrorException.From(method, outcome.Error);
+            // Auth failures request a restart here so the token is re-read on next attempt.
+            // Full error logging and G6 classification happen in the caller catch blocks.
             if (rpcError.IsAuthFailure)
-            {
                 RequestRestart();
-                _logger.LogWarning(
-                    "Codex auth error from {Method}; restart requested (statusCode={StatusCode}, action={Action})",
-                    method,
-                    rpcError.StatusCode,
-                    rpcError.Action ?? "none");
-            }
             throw rpcError;
         }
 
@@ -568,6 +596,7 @@ public sealed class CodexExecutor : IAgentExecutor
 
         var message = new JsonObject
         {
+            ["jsonrpc"] = "2.0",
             ["method"] = method,
         };
 
@@ -715,7 +744,7 @@ public sealed class CodexExecutor : IAgentExecutor
                 EventType = "tool_use",
                 Summary = $"Using {item?["command"]?.GetValue<string>() ?? "command"}",
                 ToolName = item?["command"]?.GetValue<string>(),
-                ToolArgs = "{}",
+                ToolArgs = item?["args"]?.ToJsonString() ?? item?["command"]?.GetValue<string>() ?? "{}",
                 IsSignificant = true,
             },
             "mcpToolCall" => new AgentProgress
@@ -742,6 +771,20 @@ public sealed class CodexExecutor : IAgentExecutor
     {
         var item = @params["item"] as JsonObject;
         var itemType = item?["type"]?.GetValue<string>();
+
+        if (itemType == "agentMessage")
+        {
+            // Production codex app-server delivers the assistant's full reply text here —
+            // NOT inside turn.items of the subsequent turn/completed notification.
+            // Accumulate it so BuildTurnCompletedProgress can return the correct FinalResult.
+            // Streaming deltas are already surfaced via item/agentMessage/delta, so no
+            // additional AgentProgress event is emitted here.
+            var assistantText = item?["text"]?.GetValue<string>();
+            if (assistantText is not null)
+                _currentTurnAssistantText = assistantText;
+            return null;
+        }
+
         var text = itemType switch
         {
             "commandExecution" => item?["aggregatedOutput"]?.GetValue<string>() ?? "",
@@ -762,7 +805,12 @@ public sealed class CodexExecutor : IAgentExecutor
     {
         var turn = @params.RequireObject("turn");
         var status = turn["status"]?.GetValue<string>() ?? "failed";
-        var finalText = ExtractAssistantText(turn);
+        // Primary: text accumulated from item/completed(agentMessage) notifications.
+        // Fallback: scan turn.items in case a future protocol version re-populates it.
+        var finalText = string.IsNullOrEmpty(_currentTurnAssistantText)
+            ? ExtractAssistantText(turn)
+            : _currentTurnAssistantText;
+        _currentTurnAssistantText = "";
         var durationMs = turn["durationMs"]?.GetValue<int?>() ?? 0;
         var stats = _lastTurnUsage is null
             ? new ExecutionStats { DurationMs = durationMs }
@@ -813,6 +861,7 @@ public sealed class CodexExecutor : IAgentExecutor
             var id = Interlocked.Increment(ref _nextRequestId);
             var message = new JsonObject
             {
+                ["jsonrpc"] = "2.0",
                 ["id"] = id,
                 ["method"] = "turn/interrupt",
                 ["params"] = new JsonObject
@@ -906,6 +955,7 @@ public sealed class CodexExecutor : IAgentExecutor
         _threadId = null;
         _activeTurnId = null;
         _lastTurnUsage = null;
+        _currentTurnAssistantText = "";
         _messageCount = 0;
     }
 
@@ -920,15 +970,62 @@ public sealed class CodexExecutor : IAgentExecutor
         }
     }
 
-    private AgentProgress BuildAuthFailureProgress(Exception ex) =>
-        new()
+    // G6 error mapping table — classify RpcErrorException and return structured AgentProgress.
+    private AgentProgress BuildRpcErrorProgress(RpcErrorException ex)
+    {
+        if (ex.IsAuthFailure)
+            return new AgentProgress
+            {
+                EventType = "result",
+                Summary = "Codex authentication expired; restart requested while refreshed credentials are applied.",
+                FinalResult = $"Codex authentication expired: {ex.Message}",
+                IsErrorResult = true,
+                IsSignificant = true,
+            };
+
+        if (ex.IsSessionError)
+            return new AgentProgress
+            {
+                EventType = "result",
+                Summary = "Codex session not found; cold restart requested for next task.",
+                FinalResult = $"Codex session error: {ex.Message}",
+                IsErrorResult = true,
+                IsSignificant = true,
+            };
+
+        if (ex.IsContextError)
+            return new AgentProgress
+            {
+                EventType = "result",
+                Summary = "Codex context window or turn limit exceeded.",
+                FinalResult = $"Codex context error: {ex.Message}",
+                IsErrorResult = true,
+                IsSignificant = true,
+            };
+
+        return new AgentProgress
         {
             EventType = "result",
-            Summary = "Codex authentication expired; restart requested while refreshed credentials are applied.",
-            FinalResult = $"Codex authentication expired: {ex.Message}",
+            Summary = $"Codex RPC error ({ex.Method}): {ex.Message}",
+            FinalResult = $"Codex RPC error: {ex.Message}",
             IsErrorResult = true,
             IsSignificant = true,
         };
+    }
+
+    private void LogRpcError(RpcErrorException ex)
+    {
+        if (ex.IsAuthFailure)
+            _logger.LogWarning(
+                "Codex auth error from {Method}; restart requested (statusCode={StatusCode}, action={Action})",
+                ex.Method, ex.StatusCode, ex.Action ?? "none");
+        else if (ex.IsSessionError)
+            _logger.LogWarning("Codex session error from {Method}: {Message}", ex.Method, ex.Message);
+        else if (ex.IsContextError)
+            _logger.LogWarning("Codex context error from {Method}: {Message}", ex.Method, ex.Message);
+        else
+            _logger.LogError("Codex RPC error from {Method} (code={Code}): {Message}", ex.Method, ex.Code, ex.Message);
+    }
 
     private static bool TryGetRequestId(JsonObject obj, out long id)
     {
@@ -1027,6 +1124,17 @@ public sealed class CodexExecutor : IAgentExecutor
             string.Equals(ErrorCode, "Auth", StringComparison.OrdinalIgnoreCase)
             && StatusCode == 401
             && string.Equals(Action, "relogin", StringComparison.OrdinalIgnoreCase);
+
+        // Thread-not-found: triggers cold restart so the next task starts a fresh thread.
+        public bool IsSessionError =>
+            (ErrorCode?.Contains("NotFound", StringComparison.OrdinalIgnoreCase) ?? false)
+            || Message.Contains("thread", StringComparison.OrdinalIgnoreCase) && Message.Contains("not found", StringComparison.OrdinalIgnoreCase);
+
+        // Context-window / turn-limit exceeded.
+        public bool IsContextError =>
+            (ErrorCode?.Contains("ContextWindow", StringComparison.OrdinalIgnoreCase) ?? false)
+            || (ErrorCode?.Contains("TurnLimit", StringComparison.OrdinalIgnoreCase) ?? false)
+            || Message.Contains("context window", StringComparison.OrdinalIgnoreCase);
 
         public static RpcErrorException From(string method, JsonObject error)
         {

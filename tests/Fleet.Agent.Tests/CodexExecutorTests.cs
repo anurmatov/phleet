@@ -156,6 +156,50 @@ public class CodexExecutorTests
             },
         };
 
+    // Real-wire protocol: text arrives via item/completed(agentMessage) before turn/completed.
+    // turn.items in turn/completed is always empty on the live codex app-server.
+    [Fact]
+    public async Task StreamTurn_AgentMessageViaItemCompleted_UsesAccumulatedText()
+    {
+        var executor = CreateExecutor();
+        var channel = Channel.CreateUnbounded<JsonObject>();
+        executor.SetNotificationChannelForTests(channel);
+        executor.SetThreadStateForTests("thread-1", "turn-1");
+
+        await channel.Writer.WriteAsync(TurnStarted("turn-1"));
+        await channel.Writer.WriteAsync(ItemCompleted("turn-1", "agentMessage", "hello from codex"));
+        // turn/completed with no items — matches real wire protocol
+        await channel.Writer.WriteAsync(TurnCompletedNoItems("turn-1"));
+        channel.Writer.TryComplete();
+
+        var progress = await CollectAsync(executor.StreamTurnForTests("turn-1"));
+
+        var final = progress.Last(p => p.FinalResult is not null);
+        Assert.Equal("hello from codex", final.FinalResult);
+        Assert.False(final.IsErrorResult);
+    }
+
+    // Fallback: when no item/completed(agentMessage) was received, use turn.items.
+    // This matches the test fixture shape and guards against future protocol changes.
+    [Fact]
+    public async Task StreamTurn_AgentMessageInTurnItems_FallsBackToExtractAssistantText()
+    {
+        var executor = CreateExecutor();
+        var channel = Channel.CreateUnbounded<JsonObject>();
+        executor.SetNotificationChannelForTests(channel);
+        executor.SetThreadStateForTests("thread-1", "turn-1");
+
+        // TurnCompleted puts agentMessage in turn.items — the fallback path
+        await channel.Writer.WriteAsync(TurnCompleted("turn-1", "fallback text"));
+        channel.Writer.TryComplete();
+
+        var progress = await CollectAsync(executor.StreamTurnForTests("turn-1"));
+
+        var final = progress.Single(p => p.FinalResult is not null);
+        Assert.Equal("fallback text", final.FinalResult);
+        Assert.False(final.IsErrorResult);
+    }
+
     private static JsonObject TokenUsage(string turnId, int inputTokens, int outputTokens) =>
         new()
         {
@@ -170,6 +214,41 @@ public class CodexExecutorTests
                         ["inputTokens"] = inputTokens,
                         ["outputTokens"] = outputTokens,
                     },
+                },
+            },
+        };
+
+    // Matches the real wire protocol: item/completed with the given item type and text.
+    private static JsonObject ItemCompleted(string turnId, string itemType, string text) =>
+        new()
+        {
+            ["method"] = "item/completed",
+            ["params"] = new JsonObject
+            {
+                ["turnId"] = turnId,
+                ["item"] = new JsonObject
+                {
+                    ["type"] = itemType,
+                    ["text"] = text,
+                },
+            },
+        };
+
+    // turn/completed with no items array — matches the real wire protocol where the
+    // assistant text arrives via item/completed(agentMessage) before turn/completed.
+    private static JsonObject TurnCompletedNoItems(string turnId, string status = "completed") =>
+        new()
+        {
+            ["method"] = "turn/completed",
+            ["params"] = new JsonObject
+            {
+                ["threadId"] = "thread-1",
+                ["turn"] = new JsonObject
+                {
+                    ["id"] = turnId,
+                    ["status"] = status,
+                    ["durationMs"] = 1,
+                    // Intentionally no "items" key — production codex app-server omits it.
                 },
             },
         };

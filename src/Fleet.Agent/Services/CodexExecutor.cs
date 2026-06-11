@@ -130,6 +130,9 @@ public sealed class CodexExecutor : IAgentExecutor
                     ["threadId"] = _threadId!,
                     ["input"] = BuildUserInputs(task, forwardedPaths),
                 };
+                var codexEffort = MapEffortToCodex(_config.Effort);
+                if (codexEffort is not null)
+                    startParams["effort"] = codexEffort;
 
                 var response = await SendRequestAsync("turn/start", startParams, ct);
                 var turn = response.RequireObject("turn");
@@ -354,6 +357,20 @@ public sealed class CodexExecutor : IAgentExecutor
             "workspace-write" => "workspace-write",
             "danger-full-access" => "danger-full-access",
             _ => "danger-full-access",
+        };
+
+    // Maps fleet effort tiers to the codex ReasoningEffort enum (none/minimal/low/medium/high/xhigh).
+    // Codex has no "max" level — fleet's "max" collapses to "xhigh" (codex's ceiling).
+    internal static string? MapEffortToCodex(string? effort) =>
+        effort switch
+        {
+            null or "" => null,
+            "low"    => "low",
+            "medium" => "medium",
+            "high"   => "high",
+            "xhigh"  => "xhigh",
+            "max"    => "xhigh", // codex ceiling; fleet "max" == codex "xhigh"
+            _        => null,
         };
 
     internal static JsonArray BuildUserInputs(string task, IReadOnlyList<string> imagePaths)

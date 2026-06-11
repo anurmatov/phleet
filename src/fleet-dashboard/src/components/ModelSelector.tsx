@@ -3,6 +3,8 @@ import { PROVIDER_MODELS } from '../constants'
 
 const PILL_LABELS: Record<string, string> = {
   'claude-sonnet-4-6': 'sonnet 4.6',
+  'claude-opus-4-8': 'opus 4.8',
+  'claude-fable-5': 'fable 5',
   'claude-opus-4-7': 'opus 4.7',
   'claude-opus-4-6': 'opus 4.6',
   'claude-haiku-4-5-20251001': 'haiku 4.5',

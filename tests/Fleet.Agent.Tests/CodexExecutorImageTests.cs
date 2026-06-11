@@ -261,4 +261,18 @@ public class CodexExecutorImageTests
     {
         Assert.Equal(expected, CodexExecutor.NormalizeSandboxMode(input));
     }
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("", null)]
+    [InlineData("low", "low")]
+    [InlineData("medium", "medium")]
+    [InlineData("high", "high")]
+    [InlineData("xhigh", "xhigh")]
+    [InlineData("max", "xhigh")]   // fleet "max" collapses to codex ceiling "xhigh"
+    [InlineData("unknown", null)]
+    public void MapEffortToCodex_MapsExpectedValues(string? input, string? expected)
+    {
+        Assert.Equal(expected, CodexExecutor.MapEffortToCodex(input));
+    }
 }

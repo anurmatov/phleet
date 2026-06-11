@@ -184,15 +184,16 @@ export default function AgentConfigModal({
                 </label>
                 <FieldHint>Hide intermediate tool-use progress messages from Telegram — only post the final response. Use for agents serving non-technical users.</FieldHint>
               </div>
-              {isClaude && (
+              {(isClaude || isCodex) && (
               <div className="config-field">
-                <label className="config-label">Effort <span className="config-provider-badge">Claude only</span></label>
-                <FieldHint>Claude's reasoning effort level. <code>low</code> = faster/cheaper; <code>max</code> = deepest reasoning. Affects latency and cost.</FieldHint>
+                <label className="config-label">Effort <span className="config-provider-badge">Claude + Codex</span></label>
+                <FieldHint>Reasoning effort level. <code>low</code> = faster/cheaper; <code>max</code> = deepest reasoning (Codex maps max → xhigh). Affects latency and cost.</FieldHint>
                 <select className="config-input" value={configEdits.effort} onChange={e => onEditsChange({ effort: e.target.value })}>
                   <option value="">default</option>
                   <option value="low">low</option>
                   <option value="medium">medium</option>
                   <option value="high">high</option>
+                  <option value="xhigh">xhigh</option>
                   <option value="max">max</option>
                 </select>
               </div>

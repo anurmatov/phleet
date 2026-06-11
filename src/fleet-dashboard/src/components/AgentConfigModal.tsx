@@ -188,7 +188,7 @@ export default function AgentConfigModal({
               <div className="config-field">
                 <label className="config-label">Effort <span className="config-provider-badge">Claude + Codex</span></label>
                 <FieldHint>Reasoning effort level. <code>low</code> = faster/cheaper; <code>max</code> = deepest reasoning (Codex maps max → xhigh). Affects latency and cost.</FieldHint>
-                <select className="config-input" value={configEdits.effort} onChange={e => onEditsChange({ effort: e.target.value })}>
+                <select className="config-input" value={configEdits.effort ?? ''} onChange={e => onEditsChange({ effort: e.target.value })}>
                   <option value="">default</option>
                   <option value="low">low</option>
                   <option value="medium">medium</option>

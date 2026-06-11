@@ -145,6 +145,22 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory)
 
         if (effort is not null && effort != (agent.Effort ?? ""))
         {
+            if (effort != "")
+            {
+                var resolvedProvider = provider ?? agent.Provider ?? "claude";
+                string? effortError = resolvedProvider switch
+                {
+                    "claude" when !new[] { "low", "medium", "high", "xhigh", "max" }.Contains(effort)
+                        => $"Invalid effort '{effort}' for claude. Valid values: low, medium, high, xhigh, max.",
+                    "codex" when !new[] { "none", "minimal", "low", "medium", "high", "xhigh" }.Contains(effort)
+                        => $"Invalid effort '{effort}' for codex. Valid values: none, minimal, low, medium, high, xhigh.",
+                    "gemini"
+                        => $"Effort is not supported on gemini agents.",
+                    _ => null,
+                };
+                if (effortError is not null)
+                    return effortError;
+            }
             changes.AppendLine($"- effort: {agent.Effort ?? "(none)"} → {(effort == "" ? "(none)" : effort)}");
             agent.Effort = effort == "" ? null : effort;
         }

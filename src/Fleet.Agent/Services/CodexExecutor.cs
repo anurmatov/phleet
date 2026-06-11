@@ -134,6 +134,7 @@ public sealed class CodexExecutor : IAgentExecutor
                 if (codexEffort is not null)
                     startParams["effort"] = codexEffort;
 
+                _logger.LogDebug("codex turn/start payload: {Payload}", startParams.ToJsonString());
                 var response = await SendRequestAsync("turn/start", startParams, ct);
                 var turn = response.RequireObject("turn");
                 turnId = turn.RequireString("id");

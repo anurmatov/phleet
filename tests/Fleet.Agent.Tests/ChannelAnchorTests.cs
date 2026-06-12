@@ -247,7 +247,7 @@ public class ChannelAnchorTests
     }
 
     [Fact]
-    public void ForCheckIn_WithContext_EmitsRelayAnchorAtTop()
+    public void ForCheckIn_WithContext_EmitsGroupAnchorAtTop()
     {
         var asm = MakeAssembler(warm: false);
         var buffer = new GroupChatBuffer { ChatId = -1009999L, ChatTitle = "Test Group" };
@@ -255,10 +255,24 @@ public class ChannelAnchorTests
 
         var result = asm.ForCheckIn(buffer, "All-messages check-in", "review");
 
-        Assert.Contains("[channel: relay]", result);
-        // relay anchor must be before the context/label
-        Assert.True(result.IndexOf("[channel: relay]", StringComparison.Ordinal)
+        Assert.DoesNotContain("[channel: relay]", result);
+        Assert.Contains("[channel: group chat_id=-1009999 title=\"Test Group\"]", result);
+        // group anchor must be before the context/label
+        Assert.True(result.IndexOf("[channel: group", StringComparison.Ordinal)
                     < result.IndexOf("context message", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ForCheckIn_GroupBufferNoMessages_EmitsGroupAnchor()
+    {
+        var asm = MakeAssembler(warm: true);
+        var buffer = new GroupChatBuffer { ChatId = -1009999L, ChatTitle = "Test Group" };
+
+        var result = asm.ForCheckIn(buffer, "All-messages check-in", "review tasks");
+
+        Assert.DoesNotContain("[channel: relay]", result);
+        Assert.Contains("[channel: group chat_id=-1009999 title=\"Test Group\"]", result);
+        Assert.Contains("review tasks", result);
     }
 
     // ── AgentTransport.BuildChannelAnchorFromChat ────────────────────────────

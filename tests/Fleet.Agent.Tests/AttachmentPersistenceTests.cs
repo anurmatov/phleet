@@ -311,15 +311,15 @@ public class AttachmentPersistenceTests
     }
 
     [Fact]
-    public void BuildHints_UnknownExtension_SilentlySkipped()
+    public void BuildHints_UnknownExtension_EmitsFileAttachmentHint()
     {
-        // .docx is not in the hint prefix map — should produce no hint
+        // .docx and any other unrecognised extension → [file attachment: ...] (issue #179)
         var doc = new MessageDocument("f1", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 100, "file.docx")
         {
             FilePath = "/workspace/attachments/1-2-1.docx",
         };
         var hints = AttachmentSweeper.BuildHints([], [doc]);
-        Assert.Equal("", hints);
+        Assert.Equal("[file attachment: /workspace/attachments/1-2-1.docx]", hints);
     }
 
     // ── 32 MB size-cap rejection ──────────────────────────────────────────────

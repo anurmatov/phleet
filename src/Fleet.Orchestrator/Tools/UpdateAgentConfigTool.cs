@@ -30,7 +30,7 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory)
         [Description("Prefix all outgoing telegram messages with bold [ShortName] header for shared-bot visibility. Omit to keep current.")] bool? prefix_messages = null,
         [Description("Suppress intermediate tool-use progress messages in Telegram — only post the final response. Use for agents serving non-technical users (e.g. family assistant). Omit to keep current.")] bool? suppress_tool_messages = null,
         [Description("Telegram send-only mode: skip polling and message handling, only send messages. Use when multiple agents share a bot token. Omit to keep current.")] bool? telegram_send_only = null,
-        [Description("Claude effort level (low/medium/high/max). Pass empty string to clear. Omit to keep current.")] string? effort = null,
+        [Description("Effort level (low/medium/high/xhigh/max). Applied as --effort on Claude; mapped to codex ReasoningEffort on Codex (max collapses to xhigh). Pass empty string to clear. Omit to keep current.")] string? effort = null,
         [Description("JSON schema string for --json-schema flag (structured output). Pass empty string to clear. Omit to keep current.")] string? json_schema = null,
         [Description("JSON string for --agents flag (inline subagents). Pass empty string to clear. Omit to keep current.")] string? agents_json = null,
         [Description("Host port for the agent's HTTP API (used by orchestrator cancel proxy via 127.0.0.1:{host_port}). Pass 0 to clear. Omit to keep current.")] int? host_port = null,
@@ -145,6 +145,22 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory)
 
         if (effort is not null && effort != (agent.Effort ?? ""))
         {
+            if (effort != "")
+            {
+                var resolvedProvider = provider ?? agent.Provider ?? "claude";
+                string? effortError = resolvedProvider switch
+                {
+                    "claude" when !new[] { "low", "medium", "high", "xhigh", "max" }.Contains(effort)
+                        => $"Invalid effort '{effort}' for claude. Valid values: low, medium, high, xhigh, max.",
+                    "codex" when !new[] { "none", "minimal", "low", "medium", "high", "xhigh" }.Contains(effort)
+                        => $"Invalid effort '{effort}' for codex. Valid values: none, minimal, low, medium, high, xhigh.",
+                    "gemini"
+                        => $"Effort is not supported on gemini agents.",
+                    _ => null,
+                };
+                if (effortError is not null)
+                    return effortError;
+            }
             changes.AppendLine($"- effort: {agent.Effort ?? "(none)"} → {(effort == "" ? "(none)" : effort)}");
             agent.Effort = effort == "" ? null : effort;
         }

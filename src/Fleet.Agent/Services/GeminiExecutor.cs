@@ -344,7 +344,7 @@ public sealed class GeminiExecutor : IAgentExecutor
     /// Files without a persisted FilePath (Telegram:PersistAttachments disabled or
     /// size-limit exceeded) are skipped — there's nothing on disk to stage.
     /// </summary>
-    private List<string> StageAttachments(
+    internal List<string> StageAttachments(
         IReadOnlyList<MessageImage>? images,
         IReadOnlyList<MessageDocument>? documents,
         string stageDir)

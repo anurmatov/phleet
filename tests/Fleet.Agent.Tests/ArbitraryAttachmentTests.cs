@@ -1,7 +1,10 @@
+using System.Text;
+using Fleet.Agent.Configuration;
 using Fleet.Agent.Interfaces;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services;
 using Microsoft.Extensions.Logging.Abstractions;
+using TgDocument = Telegram.Bot.Types.Document;
 
 namespace Fleet.Agent.Tests;
 
@@ -190,5 +193,150 @@ public class ArbitraryAttachmentTests
         // PDF MIME but no file on disk → nothing to send
         var doc = new MessageDocument("fid", "application/pdf", 100, "doc.pdf");
         Assert.False(ClaudeExecutor.ShouldEmitDocumentBlock(doc));
+    }
+
+    // ── ExtractSafeExtension edge cases ───────────────────────────────────────
+
+    [Fact]
+    public void ExtractSafeExtension_TrailingDot_FallsBackToBin()
+    {
+        // "foo." — Path.GetExtension returns "." which the guard maps to .bin
+        Assert.Equal(".bin", AgentTransport.ExtractSafeExtension("foo."));
+    }
+
+    [Fact]
+    public void ExtractSafeExtension_DotPrefixOnly_ReturnsWholeNameAsExtension()
+    {
+        // ".bashrc" — Path.GetExtension in .NET 10 returns ".bashrc" (the whole token)
+        // Lock this structural behavior so callers know what to expect for dotfiles.
+        Assert.Equal(".bashrc", AgentTransport.ExtractSafeExtension(".bashrc"));
+    }
+
+    // ── Test 10: DocumentDownloadHelper gate-removal + BuildHints orchestration ─
+
+    [Fact]
+    public async Task DocumentDownloadHelper_JsonFile_WritesToDiskAndBuildHintsEmitsFileAttachment()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"fleet-doc-gate-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var config = new TelegramOptions
+            {
+                PersistAttachments = true,
+                AttachmentDir = dir,
+                MaxDocumentBytes = 1024 * 1024,
+                AttachmentRetentionHours = 48,
+            };
+            var fakeBytes = Encoding.UTF8.GetBytes("{\"key\":\"value\"}");
+            var downloader = new StubDownloader(fakeBytes);
+            var helper = new DocumentDownloadHelper(downloader, config, (_, _) => Task.CompletedTask, NullLogger.Instance);
+
+            var telegramDoc = new TgDocument
+            {
+                FileId = "test-file-id",
+                FileName = "config.json",
+                MimeType = "application/json",
+                FileSize = fakeBytes.Length,
+            };
+
+            // Exercise the download path — previously gated to PDF only
+            var result = await helper.DownloadAsync(telegramDoc, chatId: 100, messageId: 200, docIndex: 1);
+
+            // File persisted with .json extension
+            Assert.NotNull(result);
+            Assert.NotNull(result!.FilePath);
+            Assert.EndsWith(".json", result.FilePath, StringComparison.OrdinalIgnoreCase);
+            Assert.True(File.Exists(result.FilePath));
+            Assert.Equal(fakeBytes, await File.ReadAllBytesAsync(result.FilePath));
+
+            // BuildHints emits [file attachment: ...] (not [document attachment:])
+            var hints = AttachmentSweeper.BuildHints([], [result]);
+            Assert.Equal($"[file attachment: {result.FilePath}]", hints);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DocumentDownloadHelper_OversizeFile_ReturnsNullAndNotifiesUser()
+    {
+        var config = new TelegramOptions
+        {
+            PersistAttachments = true,
+            AttachmentDir = Path.GetTempPath(),
+            MaxDocumentBytes = 100,
+        };
+        var tooBig = new byte[101];
+        var sentMessages = new List<string>();
+        var helper = new DocumentDownloadHelper(
+            new StubDownloader(tooBig),
+            config,
+            (_, msg) => { sentMessages.Add(msg); return Task.CompletedTask; },
+            NullLogger.Instance);
+
+        var telegramDoc = new TgDocument
+        {
+            FileId = "big",
+            FileName = "data.csv",
+            FileSize = 101,
+        };
+
+        var result = await helper.DownloadAsync(telegramDoc, chatId: 1, messageId: 1, docIndex: 1);
+
+        Assert.Null(result);
+        Assert.Single(sentMessages); // user got the "too large" chat message
+        Assert.Contains("too large", sentMessages[0], StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task DocumentDownloadHelper_NullMimeType_NeverResolvedToPdf()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"fleet-mime-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var config = new TelegramOptions
+            {
+                PersistAttachments = true,
+                AttachmentDir = dir,
+                MaxDocumentBytes = 1024 * 1024,
+            };
+            var helper = new DocumentDownloadHelper(
+                new StubDownloader(new byte[] { 1, 2, 3 }),
+                config,
+                (_, _) => Task.CompletedTask,
+                NullLogger.Instance);
+
+            var telegramDoc = new TgDocument
+            {
+                FileId = "no-mime",
+                FileName = "keyfile.pub",
+                MimeType = null,
+                FileSize = 3,
+            };
+
+            var result = await helper.DownloadAsync(telegramDoc, 1, 1, 1);
+
+            Assert.NotNull(result);
+            // Null MIME must never resolve to "application/pdf" — would cause Anthropic 400
+            Assert.NotEqual("application/pdf", result!.MimeType);
+            Assert.Equal("application/octet-stream", result.MimeType);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    // ── Fake downloader used by DocumentDownloadHelper tests ─────────────────
+
+    private sealed class StubDownloader : IDocumentDownloader
+    {
+        private readonly byte[] _bytes;
+        internal StubDownloader(byte[] bytes) => _bytes = bytes;
+        public Task<byte[]> DownloadAsync(string fileId, CancellationToken ct) => Task.FromResult(_bytes);
     }
 }

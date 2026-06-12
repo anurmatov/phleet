@@ -103,10 +103,12 @@ public sealed class PromptAssembler
 
     /// <summary>
     /// Build a prompt for a periodic check-in (debounce, proactive, supervision).
-    /// Check-ins are proactively initiated by the agent — no associated Telegram chat.
+    /// When the buffer is sourced from a real group/DM, the channel anchor identifies it;
+    /// falls back to <c>[channel: relay]</c> for headless/workflow buffers (ChatId == 0).
     /// </summary>
     public string ForCheckIn(GroupChatBuffer buffer, string label, string instruction)
     {
+        var channelAnchor = buffer.RenderHeader() ?? "[channel: relay]";
         var context = _executor.IsProcessWarm
             ? buffer.FormatNewMessages()
             : buffer.FormatContext();
@@ -117,7 +119,7 @@ public sealed class PromptAssembler
                 ? "New messages since last check-in"
                 : "Recent group conversation";
             return $"""
-                [channel: relay]
+                {channelAnchor}
                 [{contextLabel}]
                 {context}
 
@@ -127,7 +129,7 @@ public sealed class PromptAssembler
         }
 
         return $"""
-            [channel: relay]
+            {channelAnchor}
             [{label}]
             {instruction}
             """;

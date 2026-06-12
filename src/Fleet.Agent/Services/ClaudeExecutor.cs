@@ -108,6 +108,14 @@ public sealed class ClaudeExecutor : IAgentExecutor
     /// </summary>
     public bool IsProcessWarm => _process is not null && !_process.HasExited && _messageCount > 0;
 
+    /// <summary>
+    /// Returns true when <paramref name="doc"/> should be sent as a native
+    /// <c>type: document</c> content block. Only PDFs are supported by the Anthropic API;
+    /// any other MIME type (or null) must be handled as hint-only via Read/Bash.
+    /// </summary>
+    internal static bool ShouldEmitDocumentBlock(MessageDocument doc) =>
+        doc.MimeType == "application/pdf" && doc.FilePath is not null;
+
     private readonly PromptBuilder _promptBuilder;
 
     public ClaudeExecutor(IOptions<AgentOptions> config, ILogger<ClaudeExecutor> logger, PromptBuilder promptBuilder)
@@ -150,9 +158,14 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 {
                     foreach (var doc in documents!)
                     {
-                        if (doc.FilePath is null) continue;
+                        // Only PDF files are supported as native type:document content blocks.
+                        // Non-PDF types (including null MimeType — which now resolves to
+                        // "application/octet-stream" via InferMimeType) must NOT be sent as
+                        // document blocks — the Anthropic API returns 400 for non-PDF bytes.
+                        // Agent reads non-PDF files via Read/Bash using the [file attachment:] hint.
+                        if (!ShouldEmitDocumentBlock(doc)) continue;
                         byte[] pdfBytes;
-                        try { pdfBytes = await File.ReadAllBytesAsync(doc.FilePath, ct); }
+                        try { pdfBytes = await File.ReadAllBytesAsync(doc.FilePath!, ct); }
                         catch (Exception ex)
                         {
                             _logger.LogWarning(ex, "Failed to read document file {FilePath} for LLM block, skipping", doc.FilePath);

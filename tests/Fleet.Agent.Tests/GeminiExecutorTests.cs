@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using Fleet.Agent.Configuration;
+using Fleet.Agent.Models;
 using Fleet.Agent.Services;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -280,5 +281,37 @@ public class GeminiExecutorTests
         var ev = Parse("{\"type\":\"usage\",\"tokens\":100}");
         var result = GeminiExecutor.ExtractEventText(ev, "usage");
         Assert.Null(result);
+    }
+
+    // ── Test 11: Gemini hint-only for unknown extension (spec §4 Option A) ────
+
+    [Fact]
+    public void StageAttachments_UnknownExtension_NoAtReferenceEmitted()
+    {
+        // A .pub file is not in GeminiExecutor.IsSupportedExtension — StageAttachments
+        // must skip it (no @./... reference) so the agent uses Read/Bash via the
+        // [file attachment: ...] hint that BuildHints already placed in the task string.
+        var executor = CreateExecutor();
+        var stageDir = Path.Combine(Path.GetTempPath(), $"gemini-stage-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(stageDir);
+        try
+        {
+            // Write a real file so StageOne doesn't fail on a missing source
+            var srcPath = Path.Combine(stageDir, "100-200-1.pub");
+            File.WriteAllText(srcPath, "ssh-rsa AAAA... user@host");
+
+            var doc = new MessageDocument("fid", "application/octet-stream", 100, "id_rsa.pub")
+            {
+                FilePath = srcPath,
+            };
+
+            var refs = executor.StageAttachments(null, [doc], stageDir);
+
+            Assert.Empty(refs); // no @./... reference — hint-only path
+        }
+        finally
+        {
+            Directory.Delete(stageDir, recursive: true);
+        }
     }
 }

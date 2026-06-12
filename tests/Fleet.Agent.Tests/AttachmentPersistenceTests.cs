@@ -311,23 +311,24 @@ public class AttachmentPersistenceTests
     }
 
     [Fact]
-    public void BuildHints_UnknownExtension_SilentlySkipped()
+    public void BuildHints_UnknownExtension_EmitsFileAttachmentHint()
     {
-        // .docx is not in the hint prefix map — should produce no hint
+        // .docx and any other unrecognised extension → [file attachment: ...] (issue #179)
         var doc = new MessageDocument("f1", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 100, "file.docx")
         {
             FilePath = "/workspace/attachments/1-2-1.docx",
         };
         var hints = AttachmentSweeper.BuildHints([], [doc]);
-        Assert.Equal("", hints);
+        Assert.Equal("[file attachment: /workspace/attachments/1-2-1.docx]", hints);
     }
 
     // ── 32 MB size-cap rejection ──────────────────────────────────────────────
 
     [Fact]
-    public void MaxDocumentBytes_StageOne_PreDownloadSizeRejectsOversizedFile()
+    public void OversizeDocument_PreDownloadAdvisorySize_TriggersRejection()
     {
         // Stage 1 guard: Telegram's advisory FileSize triggers rejection before any download.
+        // Applies to all file types (was PDF-only; now extension-agnostic).
         var opts = new TelegramOptions { MaxDocumentBytes = 33_554_432 }; // 32 MB default
         long oversized = 33_554_433; // 1 byte over
         long exactly = 33_554_432;   // exactly at limit — should pass
@@ -339,10 +340,10 @@ public class AttachmentPersistenceTests
     }
 
     [Fact]
-    public void MaxDocumentBytes_StageTwo_ActualBytesExceedingLimitRejected()
+    public void OversizeDocument_ActualDownloadBytes_TriggersRejection()
     {
         // Stage 2 guard: actual download may exceed the advisory FileSize estimate.
-        // Verify the comparison fires correctly against the config value.
+        // Applies to all file types (was PDF-only; now extension-agnostic).
         var opts = new TelegramOptions { MaxDocumentBytes = 1024 };
         var oversizedBytes = new byte[1025];
         var okBytes = new byte[1024];

@@ -36,6 +36,11 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     private readonly IFleetConnectionState _connectionState;
     private readonly ILogger<AgentTransport> _logger;
 
+    // DocumentDownloadHelper wraps IDocumentDownloader so the download+persist path
+    // can be unit-tested by injecting a fake downloader. Exposed as internal so tests
+    // that directly construct AgentTransport can substitute the helper.
+    internal DocumentDownloadHelper DownloadHelper { get; set; } = null!;
+
     private string _botUsername = "";
     private readonly MediaGroupBuffer _mediaGroupBuffer;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _groupSizeCapped = new();
@@ -82,11 +87,73 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         _commands.Sink = this;
 
         _mediaGroupBuffer = new MediaGroupBuffer(telegramConfig.Value.MaxGroupBufferMs);
+
+        // Wire up the download helper with the real bot downloader.
+        // In headless mode (_bot == null) PersistAttachments should be false;
+        // the NullDownloader throws if somehow reached without a bot.
+        IDocumentDownloader botDownloader = _bot is not null
+            ? new TelegramBotDownloader(_bot)
+            : NullDocumentDownloader.Instance;
+        DownloadHelper = new DocumentDownloadHelper(
+            botDownloader,
+            _telegramConfig,
+            (chatId, text) => SendTextAsync(chatId, text),
+            logger);
+    }
+
+    // ── IDocumentDownloader implementations (private, nested) ────────────────
+
+    private sealed class TelegramBotDownloader : IDocumentDownloader
+    {
+        private readonly TelegramBotClient _bot;
+        internal TelegramBotDownloader(TelegramBotClient bot) => _bot = bot;
+
+        public async Task<byte[]> DownloadAsync(string fileId, CancellationToken ct)
+        {
+            using var ms = new MemoryStream();
+            await _bot.GetInfoAndDownloadFile(fileId, ms, cancellationToken: ct);
+            return ms.ToArray();
+        }
+    }
+
+    private sealed class NullDocumentDownloader : IDocumentDownloader
+    {
+        internal static readonly NullDocumentDownloader Instance = new();
+        public Task<byte[]> DownloadAsync(string fileId, CancellationToken ct)
+            => throw new InvalidOperationException("Cannot download documents: no Telegram bot client is configured.");
     }
 
     private static readonly Regex ImageMarkerRegex = new(@"\[IMAGE:(.+?)\]", RegexOptions.Compiled);
     private static readonly Regex TaskFailedMarkerRegex = new(@"^\[TASK_FAILED:\s*([^\]]+)\]\s*", RegexOptions.Compiled);
     private static readonly Regex ReplyToTokenRegex = new(@"\[reply_to:\s*(-?\d+)\]", RegexOptions.Compiled);
+
+    // ── document download helpers (internal for testability) ─────────────────
+
+    /// <summary>
+    /// Sanitises a Telegram-supplied filename and extracts only the file extension.
+    /// Defeats path traversal by taking only the last path component; strips control
+    /// characters; falls back to ".bin" when no extension is present.
+    /// </summary>
+    internal static string ExtractSafeExtension(string? fileName)
+    {
+        var safeName = (fileName ?? string.Empty).Replace('\\', '/');
+        safeName = Path.GetFileName(safeName);
+        safeName = new string(safeName.Where(c => c >= 0x20).ToArray());
+        var ext = Path.GetExtension(safeName).ToLowerInvariant();
+        return string.IsNullOrEmpty(ext) || ext == "." ? ".bin" : ext;
+    }
+
+    /// <summary>
+    /// Returns a safe MIME type for a known extension; falls back to
+    /// "application/octet-stream" so unknown types never masquerade as PDF.
+    /// </summary>
+    internal static string InferMimeType(string ext) => ext switch
+    {
+        ".pdf" => "application/pdf",
+        ".jpg" or ".jpeg" => "image/jpeg",
+        ".png" => "image/png",
+        _ => "application/octet-stream",
+    };
 
     // --- IMessageSink ---
 
@@ -560,11 +627,11 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             downloadedImage = await DownloadPhotoAsync(largest, chatId, message.MessageId, photoIndex: 1);
         }
 
-        // Download PDF document if present and persistence is enabled
+        // Download any document if present and persistence is enabled
         MessageDocument? downloadedDocument = null;
-        if (isDocument && message.Document!.MimeType == "application/pdf")
+        if (isDocument)
         {
-            downloadedDocument = await DownloadDocumentAsync(message.Document, chatId, message.MessageId, docIndex: 1);
+            downloadedDocument = await DownloadDocumentAsync(message.Document!, chatId, message.MessageId, docIndex: 1);
         }
 
         // Build the base IncomingMessage (no images/documents yet — filled in below)
@@ -712,85 +779,16 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
 
 
     /// <summary>
-    /// Download a Telegram document to memory (and optionally persist to disk).
-    /// Only called for PDFs (mime_type == "application/pdf").
-    /// Rejects files exceeding <c>Telegram:MaxDocumentBytes</c> (default: 32 MB) with a
-    /// user-facing warning — no disk write, no LLM block.
-    /// When <c>Telegram:PersistAttachments</c> is enabled the bytes are written to
-    /// <c>{AttachmentDir}/{chatId}-{messageId}-{docIndex}.pdf</c> and the path is stored
-    /// on <see cref="MessageDocument.FilePath"/> so agent tools can reach the bytes later.
-    /// Returns null when persistence is disabled (kill switch) or the file is oversized.
+    /// Download any Telegram document to memory (and optionally persist to disk).
+    /// Delegates to <see cref="DocumentDownloadHelper"/> which holds the
+    /// <see cref="IDocumentDownloader"/> abstraction; see that class for full details.
     /// </summary>
-    private async Task<MessageDocument?> DownloadDocumentAsync(
+    private Task<MessageDocument?> DownloadDocumentAsync(
         Telegram.Bot.Types.Document document,
         long chatId,
         long messageId,
         int docIndex)
-    {
-        // Kill switch: when PersistAttachments is false, no download, no disk write, no LLM block.
-        if (!_telegramConfig.PersistAttachments)
-            return null;
-
-        var fileSize = document.FileSize ?? 0;
-        if (fileSize > _telegramConfig.MaxDocumentBytes)
-        {
-            _logger.LogWarning("Document ({FileId}) pre-download size exceeds MaxDocumentBytes ({Size} > {Limit}), rejecting",
-                document.FileId, fileSize, _telegramConfig.MaxDocumentBytes);
-            await SendTextAsync(chatId, PdfTooLargeMessage(fileSize));
-            return null;
-        }
-
-        try
-        {
-            using var ms = new System.IO.MemoryStream();
-            await _bot!.GetInfoAndDownloadFile(document.FileId, ms);
-            var bytes = ms.ToArray();
-
-            // Stage 2: actual download may exceed the pre-download estimate (Telegram's FileSize
-            // is advisory). Guard again with the true byte count before touching disk.
-            if (bytes.Length > _telegramConfig.MaxDocumentBytes)
-            {
-                _logger.LogWarning("Document ({FileId}) actual size exceeds MaxDocumentBytes ({Size} > {Limit}) after download, rejecting",
-                    document.FileId, bytes.Length, _telegramConfig.MaxDocumentBytes);
-                await SendTextAsync(chatId, PdfTooLargeMessage(bytes.Length));
-                return null;
-            }
-
-            string? filePath = null;
-            try
-            {
-                Directory.CreateDirectory(_telegramConfig.AttachmentDir);
-                filePath = Path.Combine(_telegramConfig.AttachmentDir, $"{chatId}-{messageId}-{docIndex}.pdf");
-                await File.WriteAllBytesAsync(filePath, bytes);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Document #{Index}: failed to persist to disk, continuing without file path", docIndex);
-                filePath = null;
-            }
-
-            if (filePath != null)
-                AttachmentSweeper.SweepExpired(_telegramConfig.AttachmentDir, _telegramConfig.AttachmentRetentionHours, _logger);
-
-            return new MessageDocument(
-                document.FileId,
-                document.MimeType ?? "application/pdf",
-                fileSize,
-                document.FileName)
-            {
-                FilePath = filePath,
-            };
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Document ({FileId}) download failed, skipping", document.FileId);
-            await SendTextAsync(chatId, "(PDF download failed — please try again.)");
-            return null;
-        }
-    }
-
-    private string PdfTooLargeMessage(long sizeBytes) =>
-        $"(PDF too large — {sizeBytes / 1_048_576} MB exceeds the {_telegramConfig.MaxDocumentBytes / 1_048_576} MB limit. Please send a smaller file.)";
+        => DownloadHelper.DownloadAsync(document, chatId, messageId, docIndex);
 
     /// <summary>
     /// Dispatch wrapper used by <see cref="TelegramBotClientExtensions.StartReceiving"/> to route

@@ -9,7 +9,7 @@ namespace Fleet.Orchestrator.Tools;
 
 [McpServerToolType]
 public sealed class SetConfigValuesTool(
-    ConfigService configService,
+    IConfigWriter configWriter,
     IConfiguration configuration,
     IHttpContextAccessor httpContextAccessor,
     ILogger<SetConfigValuesTool> logger)
@@ -28,6 +28,7 @@ public sealed class SetConfigValuesTool(
           values_json (string): JSON object mapping env var keys to string values.
                                 Keys must match ^[A-Z][A-Z0-9_]*$ (uppercase, digits, underscores; must start with a letter).
                                 Empty string is a valid value (sets KEY= with no value).
+                                Null values are rejected.
                                 Denylisted keys (DB creds, secrets, JWT keys) are rejected with an error listing the offenders; nothing is written.
 
         Returns JSON:
@@ -37,7 +38,7 @@ public sealed class SetConfigValuesTool(
     public async Task<string> SetConfigValuesAsync(
         [Description(
             "JSON object mapping environment variable keys to string values. " +
-            "Keys must match ^[A-Z][A-Z0-9_]*$. " +
+            "Keys must match ^[A-Z][A-Z0-9_]*$. Null values are rejected. " +
             "Example: {\"TELEGRAM_FOO_BOT_TOKEN\":\"abc123\",\"SOME_API_KEY\":\"xyz\"}"
         )] string values_json,
         CancellationToken cancellationToken = default)
@@ -56,40 +57,47 @@ public sealed class SetConfigValuesTool(
             return Err("unauthorized",
                 "Missing or invalid Authorization header. Provide the config token as 'Authorization: Bearer <ORCHESTRATOR_CONFIG_TOKEN>'.");
 
-        // 2. Parse values_json
-        Dictionary<string, string>? kvs;
+        // 2. Parse values_json — use nullable value type to detect null entries explicitly
+        Dictionary<string, string?>? rawKvs;
         try
         {
-            kvs = JsonSerializer.Deserialize<Dictionary<string, string>>(values_json, JsonOpts);
+            rawKvs = JsonSerializer.Deserialize<Dictionary<string, string?>>(values_json, JsonOpts);
         }
         catch (JsonException ex)
         {
             return Err("invalid_json", $"Failed to parse values_json: {ex.Message}");
         }
 
-        if (kvs is null || kvs.Count == 0)
+        if (rawKvs is null || rawKvs.Count == 0)
             return Err("empty_payload", "values_json must be a non-empty JSON object.");
 
-        // 3. Validate key format
+        // 3. Reject null values upfront (spec: "null or omitted value is rejected")
+        var nullKeys = rawKvs.Where(kv => kv.Value is null).Select(kv => kv.Key).ToList();
+        if (nullKeys.Count > 0)
+            return JsonSerializer.Serialize(new { error = "null_value", keys = nullKeys }, JsonOpts);
+
+        var kvs = rawKvs.ToDictionary(kv => kv.Key, kv => kv.Value!, StringComparer.Ordinal);
+
+        // 4. Validate key format
         var invalidKeys = kvs.Keys.Where(k => !ValidKeyRegex.IsMatch(k)).ToList();
         if (invalidKeys.Count > 0)
             return Err("invalid_keys",
                 $"Keys must match ^[A-Z][A-Z0-9_]*$. Invalid key(s): {string.Join(", ", invalidKeys)}");
 
-        // 4. Check denylisted keys — reject entire batch, nothing written
+        // 5. Check denylisted keys — reject entire batch, nothing written
         var denylisted = kvs.Keys.Where(ConfigService.IsDenylisted).ToList();
         if (denylisted.Count > 0)
             return Err("denylisted",
                 $"These keys cannot be written via the config API: {string.Join(", ", denylisted)}");
 
-        // 5. Snapshot which keys already exist (before write) to classify created vs updated
-        var existingBefore = configService.GetExistingKeys(kvs.Keys);
+        // 6. Snapshot which keys already exist (before write) to classify created vs updated
+        var existingBefore = configWriter.GetExistingKeys(kvs.Keys);
 
-        // 6. Atomic write + broadcast (reuses ConfigService.PutValuesAsync — no duplicated write logic)
+        // 7. Atomic write + broadcast (reuses ConfigService.PutValuesAsync — no duplicated write logic)
         List<string> changedKeys;
         try
         {
-            changedKeys = await configService.PutValuesAsync(kvs, cancellationToken);
+            changedKeys = await configWriter.PutValuesAsync(kvs, cancellationToken);
         }
         catch (DenylistedException ex)
         {
@@ -106,7 +114,7 @@ public sealed class SetConfigValuesTool(
             return Err("write_failed", ex.Message);
         }
 
-        // 7. Build structured response
+        // 8. Build structured response
         var changedSet = changedKeys.ToHashSet(StringComparer.Ordinal);
         var created   = changedKeys.Where(k => !existingBefore.Contains(k)).ToList();
         var updated   = changedKeys.Where(k =>  existingBefore.Contains(k)).ToList();

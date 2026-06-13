@@ -15,7 +15,7 @@ namespace Fleet.Orchestrator.Services;
 ///
 /// Replaces the registry-driven CredentialsService propagation model (issue #69).
 /// </summary>
-public sealed class ConfigService
+public sealed class ConfigService : IConfigWriter
 {
     // ── Denylist ──────────────────────────────────────────────────────────────
 
@@ -448,3 +448,15 @@ public sealed record ConfigValuesResult(
     Dictionary<string, Dictionary<string, string>> AgentDerived);
 
 public sealed class DenylistedException(string message) : Exception(message);
+
+// ── Abstraction for testability ───────────────────────────────────────────────
+
+/// <summary>
+/// Write-side subset of <see cref="ConfigService"/> used by <see cref="Fleet.Orchestrator.Tools.SetConfigValuesTool"/>.
+/// Extracted as an interface so the tool can be unit-tested without a real .env file or RabbitMQ connection.
+/// </summary>
+public interface IConfigWriter
+{
+    HashSet<string> GetExistingKeys(IEnumerable<string> keys);
+    Task<List<string>> PutValuesAsync(Dictionary<string, string> kvs, CancellationToken ct = default);
+}

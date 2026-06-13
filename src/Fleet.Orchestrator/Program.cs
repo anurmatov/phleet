@@ -35,6 +35,7 @@ builder.Services.AddSingleton<ContainerProvisioningService>();
 builder.Services.AddSingleton<SetupService>();
 builder.Services.AddSingleton<ICredentialsReader, EnvFileCredentialsReader>();
 builder.Services.AddSingleton<ConfigService>();
+builder.Services.AddSingleton<IConfigWriter>(sp => sp.GetRequiredService<ConfigService>());
 builder.Services.AddSingleton<MemoryProxyService>();
 builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(5));
 

@@ -128,6 +128,17 @@ public sealed class ConfigService
     // ── API ────────────────────────────────────────────────────────────────────
 
     /// <summary>
+    /// Returns the set of keys from <paramref name="keys"/> that currently exist in .env.
+    /// Used by <see cref="Fleet.Orchestrator.Tools.SetConfigValuesTool"/> to classify
+    /// written keys as "created" vs "updated" in the response.
+    /// </summary>
+    public HashSet<string> GetExistingKeys(IEnumerable<string> keys)
+    {
+        var env = LoadCache();
+        return keys.Where(k => env.ContainsKey(k)).ToHashSet(StringComparer.Ordinal);
+    }
+
+    /// <summary>
     /// Returns the full .env map minus denylisted keys, with sensitive values masked.
     /// Used by GET /api/config/all (dashboard Credentials table).
     /// </summary>

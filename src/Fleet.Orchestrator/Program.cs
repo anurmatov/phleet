@@ -38,6 +38,7 @@ builder.Services.AddSingleton<ConfigService>();
 builder.Services.AddSingleton<MemoryProxyService>();
 builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(5));
 
+builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<AgentConfigPublisherService>();
 
 // HeartbeatConsumerService registered as singleton so tools can inject IRabbitMqStatus

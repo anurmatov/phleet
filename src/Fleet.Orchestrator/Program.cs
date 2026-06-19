@@ -334,6 +334,7 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         agent.CodexSandboxMode,
         agent.CanReceiveChatRequests,
         agent.RequestReceivedMessage,
+        agent.MountDockerSock,
         Tools = agent.Tools.Select(t => new { t.ToolName, t.IsEnabled }),
         Projects = agent.Projects.Select(p => p.ProjectName),
         McpEndpoints = agent.McpEndpoints.Select(e => new { e.McpName, e.Url, e.TransportType }),
@@ -415,6 +416,7 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
             return Results.BadRequest(new { error = $"RequestReceivedMessage exceeds 500-character limit ({body.RequestReceivedMessage.Length} chars)." });
         agent.RequestReceivedMessage = body.RequestReceivedMessage == "" ? null : body.RequestReceivedMessage;
     }
+    if (body.MountDockerSock is not null) agent.MountDockerSock = body.MountDockerSock.Value;
 
     // Replace-all for related tables (omit field = keep current)
     if (body.Tools is not null)
@@ -1201,6 +1203,7 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         AutoMemoryEnabled         = body.AutoMemoryEnabled ?? true,
         Provider                  = body.Provider          ?? "claude",
         CodexSandboxMode          = string.IsNullOrEmpty(body.CodexSandboxMode) ? null : body.CodexSandboxMode,
+        MountDockerSock           = body.MountDockerSock   ?? false,
     };
 
     db.Agents.Add(agent);
@@ -2713,7 +2716,8 @@ record AgentConfigUpdateRequest(
     long[]? TelegramGroups,
     InstructionAssignmentEntry[]? Instructions,
     bool? CanReceiveChatRequests,
-    string? RequestReceivedMessage);
+    string? RequestReceivedMessage,
+    bool? MountDockerSock);
 
 record McpEndpointEntry(string McpName, string Url, string TransportType);
 record InstructionAssignmentEntry(string InstructionName, int LoadOrder);
@@ -2774,4 +2778,5 @@ record CreateAgentRequest(
     string[]? EnvRefs,
     long[]? TelegramUsers,
     long[]? TelegramGroups,
-    bool? Provision);
+    bool? Provision,
+    bool? MountDockerSock);

@@ -53,6 +53,12 @@ public class Agent
     // ── Access-request flow ──────────────────────────────────────────────────
 
     /// <summary>
+    /// When true, the container is launched with a /var/run/docker.sock bind mount.
+    /// Default false (safe-by-default). Existing agents are migrated to true to preserve behavior.
+    /// </summary>
+    public bool MountDockerSock { get; set; } = false;
+
+    /// <summary>
     /// When true, DMs from unknown users trigger an access request routed to
     /// the CTO agent (resolved from FLEET_CTO_AGENT at runtime). Default false (silent drop).
     /// </summary>

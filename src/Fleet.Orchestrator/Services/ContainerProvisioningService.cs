@@ -23,9 +23,6 @@ public sealed class ContainerProvisioningService(
     // fleet-net is declared with an explicit name so it keeps its name (not prefixed by Docker Compose).
     private const string FleetNetwork = "fleet-net";
 
-    // Roles whose containers mount /var/run/docker.sock (co-cto, devops, developer)
-    private static readonly HashSet<string> DockerSockRoles =
-        new(["co-cto", "devops", "developer"], StringComparer.OrdinalIgnoreCase);
 
     public async Task<ProvisionPreview> PreviewAsync(string agentName, CancellationToken ct = default)
     {
@@ -130,7 +127,6 @@ public sealed class ContainerProvisioningService(
     private List<string> BuildBinds(Agent agent)
     {
         var containerName = agent.ContainerName;
-        var role = agent.Role;
 
         var baseDir = config["Provisioning:BaseDir"]
             ?? throw new InvalidOperationException("Provisioning:BaseDir is required but not configured.");
@@ -147,8 +143,8 @@ public sealed class ContainerProvisioningService(
             $"./workspaces/{containerName}/.generated/roles:/app/roles:ro",
         };
 
-        // docker.sock is only mounted for roles that need Docker CLI access
-        if (DockerSockRoles.Contains(role))
+        // docker.sock is only mounted when the agent's MountDockerSock flag is on
+        if (agent.MountDockerSock)
             binds.Add("/var/run/docker.sock:/var/run/docker.sock");
 
         if (agent.Provider == "gemini")

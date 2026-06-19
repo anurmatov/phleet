@@ -40,6 +40,7 @@ public sealed class GetAgentConfigTool(IServiceScopeFactory scopeFactory)
         sb.AppendLine($"- Enabled: {agent.IsEnabled}");
         sb.AppendLine($"- Telegram send-only: {agent.TelegramSendOnly}");
         sb.AppendLine($"- Auto memory: {agent.AutoMemoryEnabled}");
+        sb.AppendLine($"- Mount Docker socket: {agent.MountDockerSock}");
         sb.AppendLine();
 
         sb.AppendLine("### Projects");

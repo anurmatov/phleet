@@ -15,9 +15,9 @@ public class ContainerProvisioningServiceTests
     public void WithAgentParam_NoQuery_AppendsAgent()
     {
         var result = ContainerProvisioningService.WithAgentParam(
-            "http://fleet-memory:3100/mcp", "myagent");
+            "http://fleet-memory:3100", "myagent");
 
-        Assert.Equal("http://fleet-memory:3100/mcp?agent=myagent", result);
+        Assert.Equal("http://fleet-memory:3100?agent=myagent", result);
     }
 
     [Fact]
@@ -26,18 +26,18 @@ public class ContainerProvisioningServiceTests
         // This is the actual bug: re-provisioning an agent whose DB URL already
         // had ?agent=old produced http://...?agent=old?agent=new (malformed).
         var result = ContainerProvisioningService.WithAgentParam(
-            "http://fleet-memory:3100/mcp?agent=old", "new");
+            "http://fleet-memory:3100?agent=old", "new");
 
-        Assert.Equal("http://fleet-memory:3100/mcp?agent=new", result);
+        Assert.Equal("http://fleet-memory:3100?agent=new", result);
     }
 
     [Fact]
     public void WithAgentParam_TrailingSlashAndQuery_StripsSlashAndQuery()
     {
         var result = ContainerProvisioningService.WithAgentParam(
-            "http://fleet-memory:3100/mcp/?agent=old", "foo");
+            "http://fleet-memory:3100/?agent=old", "foo");
 
-        Assert.Equal("http://fleet-memory:3100/mcp?agent=foo", result);
+        Assert.Equal("http://fleet-memory:3100?agent=foo", result);
     }
 
     [Fact]
@@ -65,10 +65,87 @@ public class ContainerProvisioningServiceTests
     {
         // Calling WithAgentParam twice (simulate two reprovisions) yields the same URL.
         var once = ContainerProvisioningService.WithAgentParam(
-            "http://fleet-memory:3100/mcp", "foo");
+            "http://fleet-memory:3100", "foo");
         var twice = ContainerProvisioningService.WithAgentParam(once, "foo");
 
         Assert.Equal(once, twice);
+    }
+
+    // ── NormalizeFleetMemoryMcpUrl: defensive strip ───────────────────────────
+    // Ensures malformed FleetMemory:McpUrl values (from old config or misconfiguration)
+    // are cleaned before being written to .mcp.json.
+
+    [Theory]
+    [InlineData("http://fleet-memory:3100/mcp",   "http://fleet-memory:3100")]  // canonical broken config
+    [InlineData("http://fleet-memory:3100/mcp/",  "http://fleet-memory:3100")]  // trailing slash variant
+    [InlineData("http://fleet-memory:3100/MCP",   "http://fleet-memory:3100")]  // case-insensitive
+    [InlineData("http://fleet-memory:3100/",      "http://fleet-memory:3100")]  // root trailing slash
+    [InlineData("http://fleet-memory:3100",       "http://fleet-memory:3100")]  // already correct — no-op
+    public void NormalizeFleetMemoryMcpUrl_StripsMcpSuffix(string input, string expected)
+    {
+        var result = ContainerProvisioningService.NormalizeFleetMemoryMcpUrl(input);
+        Assert.Equal(expected, result);
+    }
+
+    [Theory]
+    [InlineData("http://fleet-memory:3100/mcp/v1")]  // deeper path — left intact
+    public void NormalizeFleetMemoryMcpUrl_PreservesNonTrailingMcpPath(string input)
+    {
+        var result = ContainerProvisioningService.NormalizeFleetMemoryMcpUrl(input);
+        Assert.Equal(input, result);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("not-a-url")]
+    public void NormalizeFleetMemoryMcpUrl_InvalidInput_FallsBackToDefault(string? input)
+    {
+        var result = ContainerProvisioningService.NormalizeFleetMemoryMcpUrl(input);
+        Assert.Equal("http://fleet-memory:3100", result);
+    }
+
+    // ── GenerateMcpJson: auto-inject transport and URL ────────────────────────
+    // Agents with no explicit fleet-memory DB row must receive type=http (not sse)
+    // and a URL with no /mcp segment in the auto-injected fleet-memory entry.
+
+    private static (string type, string url) GetAutoInjectedFleetMemory(Agent agent, string mcpUrl)
+    {
+        var json = ContainerProvisioningService.GenerateMcpJson(agent, mcpUrl);
+        var doc = System.Text.Json.JsonDocument.Parse(json);
+        var server = doc.RootElement.GetProperty("mcpServers").GetProperty("fleet-memory");
+        return (server.GetProperty("type").GetString()!, server.GetProperty("url").GetString()!);
+    }
+
+    [Fact]
+    public void GenerateMcpJson_NoExplicitFleetMemoryRow_UsesHttpTransport()
+    {
+        // Agent with no explicit fleet-memory endpoint row → auto-inject must use type=http
+        var agent = MinimalAgent("atester", "claude");
+        var (type, _) = GetAutoInjectedFleetMemory(agent, "http://fleet-memory:3100");
+        Assert.Equal("http", type);
+    }
+
+    [Fact]
+    public void GenerateMcpJson_NoExplicitFleetMemoryRow_UrlHasNoMcpSegment()
+    {
+        // Auto-injected URL must not contain /mcp
+        var agent = MinimalAgent("atester", "claude");
+        var (_, url) = GetAutoInjectedFleetMemory(agent, "http://fleet-memory:3100");
+        Assert.DoesNotContain("/mcp", url);
+        Assert.Contains("?agent=atester", url);
+    }
+
+    [Fact]
+    public void GenerateMcpJson_BrokenMcpUrlConfig_StillProducesCorrectUrl()
+    {
+        // Defensive strip: even if McpUrl in config still has /mcp, normalization fixes it.
+        var agent = MinimalAgent("atester", "claude");
+        var (type, url) = GetAutoInjectedFleetMemory(agent,
+            ContainerProvisioningService.NormalizeFleetMemoryMcpUrl("http://fleet-memory:3100/mcp"));
+        Assert.Equal("http", type);
+        Assert.DoesNotContain("/mcp", url);
     }
 
     // ── GenerateAppsettingsJson: codex auto-grants ────────────────────────────

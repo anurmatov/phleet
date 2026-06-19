@@ -367,6 +367,7 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
         .Include(a => a.TelegramUsers)
         .Include(a => a.TelegramGroups)
         .Include(a => a.Instructions)
+        .AsSplitQuery()
         .FirstOrDefaultAsync(a => a.Name == name);
 
     if (agent is null)
@@ -1346,6 +1347,7 @@ app.MapDelete("/api/agents/{name}", async (string name, IServiceScopeFactory sco
         .Include(a => a.TelegramUsers)
         .Include(a => a.TelegramGroups)
         .Include(a => a.Instructions)
+        .AsSplitQuery()
         .FirstOrDefaultAsync(a => a.Name == name);
 
     if (agent is null)

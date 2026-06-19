@@ -17,8 +17,9 @@ namespace Fleet.Orchestrator.Migrations
                 nullable: false,
                 defaultValue: false);
 
-            // Backfill existing rows to true so no currently-running agent loses Docker access.
-            migrationBuilder.Sql("UPDATE agents SET MountDockerSock = 1");
+            // Backfill only the roles that had docker.sock access before this migration.
+            // Agents outside these roles keep the safe default (false).
+            migrationBuilder.Sql("UPDATE agents SET MountDockerSock = 1 WHERE Role IN ('co-cto', 'devops', 'developer')");
         }
 
         /// <inheritdoc />

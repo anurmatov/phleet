@@ -126,10 +126,14 @@ public sealed class ContainerProvisioningService(
 
     private List<string> BuildBinds(Agent agent)
     {
-        var containerName = agent.ContainerName;
-
         var baseDir = config["Provisioning:BaseDir"]
             ?? throw new InvalidOperationException("Provisioning:BaseDir is required but not configured.");
+        return BuildBinds(agent, baseDir);
+    }
+
+    internal static List<string> BuildBinds(Agent agent, string baseDir)
+    {
+        var containerName = agent.ContainerName;
 
         var binds = new List<string>
         {

@@ -17,7 +17,8 @@ public sealed class CreateAgentTool(IServiceScopeFactory scopeFactory, IConfigur
         [Description("Display name shown in the dashboard (e.g. 'Fleet Dev'). Defaults to agent_name if omitted.")] string? display_name = null,
         [Description("Memory limit in MB. Defaults to 4096.")] int? memory_limit_mb = null,
         [Description("Docker container name override (e.g. fleet-my-agent). Defaults to 'fleet-{agent_name}'.")] string? container_name = null,
-        [Description("LLM provider: claude (default) or codex (OpenAI via Codex SDK).")] string? provider = null)
+        [Description("LLM provider: claude (default) or codex (OpenAI via Codex SDK).")] string? provider = null,
+        [Description("When true, /var/run/docker.sock is bind-mounted into the container. Grants host Docker access — only set for agents that manage containers (e.g. devops, developer, co-cto). Defaults to false.")] bool? mount_docker_sock = null)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
@@ -49,15 +50,16 @@ public sealed class CreateAgentTool(IServiceScopeFactory scopeFactory, IConfigur
 
         var agent = new Agent
         {
-            Name          = name,
-            DisplayName   = resolvedDisplay,
-            Role          = role.Trim(),
-            Model         = model.Trim(),
-            ContainerName = resolvedContainer,
-            MemoryLimitMb = memory_limit_mb ?? 4096,
-            ShortName     = name,
-            HostPort      = allocatedPort,
-            Provider      = provider ?? "claude",
+            Name            = name,
+            DisplayName     = resolvedDisplay,
+            Role            = role.Trim(),
+            Model           = model.Trim(),
+            ContainerName   = resolvedContainer,
+            MemoryLimitMb   = memory_limit_mb ?? 4096,
+            ShortName       = name,
+            HostPort        = allocatedPort,
+            Provider        = provider ?? "claude",
+            MountDockerSock = mount_docker_sock ?? false,
         };
 
         db.Agents.Add(agent);

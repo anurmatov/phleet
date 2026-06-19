@@ -676,7 +676,7 @@ public sealed class ContainerProvisioningService(
             mcpEndpoints.Count, string.Join(", ", mcpEndpoints),
             agent.PermissionMode);
 
-        var fleetMemoryMcpUrl = config["FleetMemory:McpUrl"] ?? "http://fleet-memory:3100/mcp";
+        var fleetMemoryMcpUrl = NormalizeFleetMemoryMcpUrl(config["FleetMemory:McpUrl"]);
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent, ctoAgentName));
@@ -898,7 +898,30 @@ public sealed class ContainerProvisioningService(
         return $"{basePath}?agent={agentName}";
     }
 
-    private static string GenerateMcpJson(Agent agent, string fleetMemoryMcpUrl)
+    /// <summary>
+    /// Normalizes the FleetMemory:McpUrl config value for use in the auto-inject path.
+    /// Strips a pure trailing /mcp segment (case-insensitive) and any leftover trailing slash.
+    /// Falls back to the hardcoded default when the value is empty, null, or not a valid URI.
+    /// Must only be applied to the auto-inject fallback URL, never to explicit DB rows.
+    /// </summary>
+    internal static string NormalizeFleetMemoryMcpUrl(string? rawUrl)
+    {
+        const string DefaultUrl = "http://fleet-memory:3100";
+
+        if (string.IsNullOrWhiteSpace(rawUrl) || !Uri.TryCreate(rawUrl, UriKind.Absolute, out _))
+            return DefaultUrl;
+
+        // Strip query string; work on path only.
+        var withoutQuery = rawUrl.Split('?')[0].TrimEnd('/');
+
+        // Strip a pure trailing /mcp (case-insensitive). A segment like /mcp/v1 is left intact.
+        if (withoutQuery.EndsWith("/mcp", StringComparison.OrdinalIgnoreCase))
+            withoutQuery = withoutQuery[..^4];
+
+        return withoutQuery.TrimEnd('/');
+    }
+
+    internal static string GenerateMcpJson(Agent agent, string fleetMemoryMcpUrl)
     {
         var mcpServers = agent.McpEndpoints
             .OrderBy(e => e.McpName)
@@ -921,7 +944,7 @@ public sealed class ContainerProvisioningService(
         if (!mcpServers.ContainsKey("fleet-memory"))
         {
             var url = WithAgentParam(fleetMemoryMcpUrl, agent.Name);
-            mcpServers["fleet-memory"] = new { type = "sse", url };
+            mcpServers["fleet-memory"] = new { type = "http", url };
         }
 
         return JsonSerializer.Serialize(new { mcpServers }, IndentedJson);

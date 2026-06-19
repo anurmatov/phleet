@@ -178,6 +178,7 @@ export interface AgentConfig {
   telegramGroups: number[]
   canReceiveChatRequests: boolean
   requestReceivedMessage: string | null
+  mountDockerSock: boolean
   instructions: { name: string; loadOrder: number }[]
 }
 
@@ -214,6 +215,7 @@ export interface ConfigEdits {
   telegramGroups: string
   canReceiveChatRequests: boolean
   requestReceivedMessage: string
+  mountDockerSock: boolean
   instructions: { name: string; loadOrder: number }[]
 }
 

@@ -74,20 +74,20 @@ public class WelcomeDmGuardTests
     {
         var agent = new Agent { Name = "cto", DisplayName = "CTO", Role = "co-cto", Model = "claude-sonnet-4-6", ContainerName = "fleet-cto" };
         bool saveCalled = false;
-        bool workflowStarted = false;
+        var workflowTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         await WelcomeDmHelper.TriggerAsync(
             agent,
             saveWelcomeSentAt: () => { saveCalled = true; return Task.CompletedTask; },
-            startWorkflow: () => { workflowStarted = true; return Task.CompletedTask; },
+            startWorkflow: () => { workflowTcs.TrySetResult(true); return Task.CompletedTask; },
             NullLogger.Instance);
 
         Assert.True(saveCalled);
         Assert.NotNull(agent.WelcomeSentAt);
 
-        // Task.Run runs in background — give it a moment to complete
-        await Task.Delay(100);
-        Assert.True(workflowStarted);
+        // Wait up to 5 s for the fire-and-forget Task.Run to invoke startWorkflow.
+        var completed = await Task.WhenAny(workflowTcs.Task, Task.Delay(5_000)) == workflowTcs.Task;
+        Assert.True(completed, "startWorkflow was not called within 5 s");
     }
 
     // ── TriggerAsync — DB save throws ─────────────────────────────────────────

@@ -145,4 +145,30 @@ public class ContainerProvisioningServiceTests
 
         Assert.Single(tools, t => t == "mcp__fleet-memory__memory_get");
     }
+
+    // ── BuildBinds: MountDockerSock flag ─────────────────────────────────────
+    // Verifies the exact security invariant introduced by #186: docker.sock is
+    // mounted only when the agent's MountDockerSock flag is true.
+
+    [Fact]
+    public void BuildBinds_MountDockerSockTrue_IncludesDockerSockBind()
+    {
+        var agent = MinimalAgent("adev", "claude");
+        agent.MountDockerSock = true;
+
+        var binds = ContainerProvisioningService.BuildBinds(agent, "/fake/base");
+
+        Assert.Contains("/var/run/docker.sock:/var/run/docker.sock", binds);
+    }
+
+    [Fact]
+    public void BuildBinds_MountDockerSockFalse_ExcludesDockerSockBind()
+    {
+        var agent = MinimalAgent("acanary", "claude");
+        agent.MountDockerSock = false;
+
+        var binds = ContainerProvisioningService.BuildBinds(agent, "/fake/base");
+
+        Assert.DoesNotContain("/var/run/docker.sock:/var/run/docker.sock", binds);
+    }
 }

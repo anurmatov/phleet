@@ -38,7 +38,8 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory)
         [Description("LLM provider: claude or codex. Omit to keep current.")] string? provider = null,
         [Description("Codex sandbox mode (danger-full-access, workspace-write, read-only). Pass empty string to clear. Omit to keep current. Only applies to codex agents.")] string? codex_sandbox_mode = null,
         [Description("Enable access-request flow for unknown DMs (CanReceiveChatRequests). When true, unknown DMs are forwarded to the CTO agent (FLEET_CTO_AGENT) instead of being silently dropped. Omit to keep current.")] bool? can_receive_chat_requests = null,
-        [Description("Message sent to requesting user when their access request is queued. Pass empty string to use the built-in default. Max 500 characters. Omit to keep current.")] string? request_received_message = null)
+        [Description("Message sent to requesting user when their access request is queued. Pass empty string to use the built-in default. Max 500 characters. Omit to keep current.")] string? request_received_message = null,
+        [Description("Mount /var/run/docker.sock into the container (grants host-root; leave off unless agent manages containers). Omit to keep current.")] bool? mount_docker_sock = null)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
@@ -240,6 +241,12 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory)
                 return $"request_received_message exceeds the 500-character limit ({request_received_message.Length} chars).";
             changes.AppendLine($"- request_received_message: {(agent.RequestReceivedMessage is null ? "(default)" : "(set)")} → {(request_received_message == "" ? "(default)" : "(set)")}");
             agent.RequestReceivedMessage = request_received_message == "" ? null : request_received_message;
+        }
+
+        if (mount_docker_sock is not null && mount_docker_sock != agent.MountDockerSock)
+        {
+            changes.AppendLine($"- mount_docker_sock: {agent.MountDockerSock} → {mount_docker_sock}");
+            agent.MountDockerSock = mount_docker_sock.Value;
         }
 
         if (changes.Length == 0)

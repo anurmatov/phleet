@@ -298,6 +298,13 @@ export default function AgentConfigModal({
                 </label>
                 <FieldHint>If checked, the agent sends Telegram messages but does not poll for incoming messages. Useful for notification-only agents.</FieldHint>
               </div>
+              <div className="config-field">
+                <label className="config-field config-field-checkbox">
+                  <input type="checkbox" checked={configEdits.mountDockerSock} onChange={e => onEditsChange({ mountDockerSock: e.target.checked })} />
+                  <span className="config-label">Mount Docker socket</span>
+                </label>
+                <FieldHint>Grants the agent access to the host Docker daemon — required for agents that manage containers. Leave off unless the agent needs Docker access (grants host-root).</FieldHint>
+              </div>
               <div className="config-section-label">Telegram Users</div>
               <div className="config-field">
                 <FieldHint>Numeric Telegram user IDs allowed to send tasks to this agent (e.g. <code>123456789</code>). Find your ID via <code>@userinfobot</code>. Comma-separated.</FieldHint>

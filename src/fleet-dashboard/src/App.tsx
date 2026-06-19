@@ -784,6 +784,7 @@ export default function App() {
           telegramGroups: cfg.telegramGroups.join(', '),
           canReceiveChatRequests: cfg.canReceiveChatRequests ?? false,
           requestReceivedMessage: cfg.requestReceivedMessage ?? '',
+          mountDockerSock: cfg.mountDockerSock ?? false,
           instructions: cfg.instructions ?? [],
         })
       })
@@ -876,6 +877,7 @@ export default function App() {
         hostPort: configEdits.hostPort ? parseInt(configEdits.hostPort, 10) : null,
         canReceiveChatRequests: configEdits.canReceiveChatRequests,
         requestReceivedMessage: configEdits.requestReceivedMessage || undefined,
+        mountDockerSock: configEdits.mountDockerSock,
         tools, projects, mcpEndpoints: configEdits.mcpEndpoints, networks, envRefs,
         instructions: configEdits.instructions.map(i => ({ instructionName: i.name, loadOrder: i.loadOrder })),
       }),

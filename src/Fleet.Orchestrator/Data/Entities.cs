@@ -44,6 +44,14 @@ public class Agent
     public List<AgentNetwork> Networks { get; set; } = [];
     public List<AgentCredentialMount> CredentialMounts { get; set; } = [];
 
+    // ── Container provisioning ────────────────────────────────────────────────
+
+    /// <summary>
+    /// When true, /var/run/docker.sock is bind-mounted into the container.
+    /// Default false (safe-by-default). Only enable for agents that manage containers.
+    /// </summary>
+    public bool MountDockerSock { get; set; } = false;
+
     /// <summary>
     /// Set once when the first-provision welcome DM is dispatched. Acts as the primary
     /// idempotency gate — if non-null, the welcome is never re-sent on reprovision.

@@ -1,21 +1,11 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "ProcessExitedNotification",
   "description": "Final process exit notification for `process/spawn`.",
-  "type": "object",
-  "required": [
-    "exitCode",
-    "processHandle",
-    "stderr",
-    "stderrCapReached",
-    "stdout",
-    "stdoutCapReached"
-  ],
   "properties": {
     "exitCode": {
       "description": "Process exit code.",
-      "type": "integer",
-      "format": "int32"
+      "format": "int32",
+      "type": "integer"
     },
     "processHandle": {
       "description": "Client-supplied, connection-scoped `processHandle` from `process/spawn`.",
@@ -37,5 +27,15 @@
       "description": "Whether stdout reached `outputBytesCap`.\n\nIn streaming mode, stdout is empty and cap state is also reported on the final stdout `process/outputDelta` notification.",
       "type": "boolean"
     }
-  }
+  },
+  "required": [
+    "exitCode",
+    "processHandle",
+    "stderr",
+    "stderrCapReached",
+    "stdout",
+    "stdoutCapReached"
+  ],
+  "title": "ProcessExitedNotification",
+  "type": "object"
 }

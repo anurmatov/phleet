@@ -1,26 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "AppListUpdatedNotification",
-  "description": "EXPERIMENTAL - notification emitted when the app list changes.",
-  "type": "object",
-  "required": [
-    "data"
-  ],
-  "properties": {
-    "data": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/AppInfo"
-      }
-    }
-  },
   "definitions": {
     "AppBranding": {
       "description": "EXPERIMENTAL - app metadata returned by app-list APIs.",
-      "type": "object",
-      "required": [
-        "isDiscoverableApp"
-      ],
       "properties": {
         "category": {
           "type": [
@@ -55,15 +37,14 @@
             "null"
           ]
         }
-      }
+      },
+      "required": [
+        "isDiscoverableApp"
+      ],
+      "type": "object"
     },
     "AppInfo": {
       "description": "EXPERIMENTAL - app metadata returned by app-list APIs.",
-      "type": "object",
-      "required": [
-        "id",
-        "name"
-      ],
       "properties": {
         "appMetadata": {
           "anyOf": [
@@ -97,6 +78,24 @@
             "null"
           ]
         },
+        "iconAssets": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "iconDarkAssets": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "id": {
           "type": "string"
         },
@@ -111,18 +110,18 @@
           "type": "boolean"
         },
         "isEnabled": {
-          "description": "Whether this app is enabled in config.toml. Example: ```toml [apps.bad_app] enabled = false ```",
           "default": true,
+          "description": "Whether this app is enabled in config.toml. Example: ```toml [apps.bad_app] enabled = false ```",
           "type": "boolean"
         },
         "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
           "type": [
             "object",
             "null"
-          ],
-          "additionalProperties": {
-            "type": "string"
-          }
+          ]
         },
         "logoUrl": {
           "type": [
@@ -141,24 +140,28 @@
         },
         "pluginDisplayNames": {
           "default": [],
-          "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
         }
-      }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
     },
     "AppMetadata": {
-      "type": "object",
       "properties": {
         "categories": {
+          "items": {
+            "type": "string"
+          },
           "type": [
             "array",
             "null"
-          ],
-          "items": {
-            "type": "string"
-          }
+          ]
         },
         "developer": {
           "type": [
@@ -169,12 +172,6 @@
         "firstPartyRequiresInstall": {
           "type": [
             "boolean",
-            "null"
-          ]
-        },
-        "firstPartyType": {
-          "type": [
-            "string",
             "null"
           ]
         },
@@ -189,13 +186,13 @@
           ]
         },
         "screenshots": {
+          "items": {
+            "$ref": "#/definitions/AppScreenshot"
+          },
           "type": [
             "array",
             "null"
-          ],
-          "items": {
-            "$ref": "#/definitions/AppScreenshot"
-          }
+          ]
         },
         "seoDescription": {
           "type": [
@@ -210,13 +207,13 @@
           ]
         },
         "subCategories": {
+          "items": {
+            "type": "string"
+          },
           "type": [
             "array",
             "null"
-          ],
-          "items": {
-            "type": "string"
-          }
+          ]
         },
         "version": {
           "type": [
@@ -236,24 +233,21 @@
             "null"
           ]
         }
-      }
+      },
+      "type": "object"
     },
     "AppReview": {
-      "type": "object",
-      "required": [
-        "status"
-      ],
       "properties": {
         "status": {
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
     },
     "AppScreenshot": {
-      "type": "object",
-      "required": [
-        "userPrompt"
-      ],
       "properties": {
         "fileId": {
           "type": [
@@ -270,7 +264,25 @@
         "userPrompt": {
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "userPrompt"
+      ],
+      "type": "object"
     }
-  }
+  },
+  "description": "EXPERIMENTAL - notification emitted when the app list changes.",
+  "properties": {
+    "data": {
+      "items": {
+        "$ref": "#/definitions/AppInfo"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "data"
+  ],
+  "title": "AppListUpdatedNotification",
+  "type": "object"
 }

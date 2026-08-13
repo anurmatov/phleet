@@ -18,6 +18,9 @@ public sealed class DockerService : IDisposable
     private const string DefaultSocketPath = "/var/run/docker.sock";
     private const string DockerApiVer      = "v1.41";
 
+    internal const string DefaultLogMaxSize = "10m";
+    internal const string DefaultLogMaxFile = "3";
+
     private readonly HttpClient _http;
     private readonly ILogger<DockerService> _logger;
 
@@ -42,6 +45,13 @@ public sealed class DockerService : IDisposable
 
         // Base address must use http://localhost so the URI path is used as-is
         _http = new HttpClient(handler) { BaseAddress = new Uri("http://localhost") };
+    }
+
+    /// <summary>Internal constructor for testing — accepts a pre-built HttpClient.</summary>
+    internal DockerService(ILogger<DockerService> logger, HttpClient httpClient)
+    {
+        _logger = logger;
+        _http   = httpClient;
     }
 
     /// <summary>Returns the raw JSON from Docker container inspect, or null if not found / socket unavailable.</summary>
@@ -434,6 +444,9 @@ public sealed class DockerService : IDisposable
     /// When <paramref name="hostPort"/> is set, binds container port 8080 to
     /// 127.0.0.1:{hostPort} so the orchestrator (a native host process) can reach
     /// the agent's HTTP API without needing to resolve Docker bridge IPs.
+    /// Log rotation is always applied: <paramref name="logMaxSize"/> and
+    /// <paramref name="logMaxFile"/> default to <see cref="DefaultLogMaxSize"/> /
+    /// <see cref="DefaultLogMaxFile"/> when null or whitespace.
     /// </summary>
     public async Task<string?> CreateContainerAsync(
         string containerName,
@@ -443,10 +456,25 @@ public sealed class DockerService : IDisposable
         IReadOnlyList<string> binds,
         string primaryNetwork,
         int? hostPort = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string? logMaxSize = null,
+        string? logMaxFile = null)
     {
         try
         {
+            var effectiveLogMaxSize = string.IsNullOrWhiteSpace(logMaxSize) ? DefaultLogMaxSize : logMaxSize;
+            var effectiveLogMaxFile = string.IsNullOrWhiteSpace(logMaxFile) ? DefaultLogMaxFile : logMaxFile;
+
+            var logConfig = new
+            {
+                Type   = "json-file",
+                Config = new Dictionary<string, string>
+                {
+                    ["max-size"] = effectiveLogMaxSize,
+                    ["max-file"] = effectiveLogMaxFile,
+                }
+            };
+
             object hostConfig;
             if (hostPort.HasValue)
             {
@@ -462,7 +490,8 @@ public sealed class DockerService : IDisposable
                         {
                             new { HostIp = "127.0.0.1", HostPort = hostPort.Value.ToString() }
                         }
-                    }
+                    },
+                    LogConfig     = logConfig,
                 };
             }
             else
@@ -473,6 +502,7 @@ public sealed class DockerService : IDisposable
                     Binds         = binds,
                     RestartPolicy = new { Name = "unless-stopped" },
                     NetworkMode   = primaryNetwork,
+                    LogConfig     = logConfig,
                 };
             }
 

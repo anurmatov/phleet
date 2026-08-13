@@ -270,6 +270,9 @@ public sealed class ContainerProvisioningService(
             "Provisioning '{Agent}' container='{Container}' image='{Image}'",
             agentName, agent.ContainerName, spec.Image);
 
+        var logMaxSize = config["Provisioning:ContainerLogMaxSize"];
+        var logMaxFile = config["Provisioning:ContainerLogMaxFile"];
+
         var containerId = await docker.CreateContainerAsync(
             agent.ContainerName,
             spec.Image,
@@ -278,7 +281,9 @@ public sealed class ContainerProvisioningService(
             expandedBinds,
             primaryNetwork,
             GetEffectiveHostPort(agent),
-            ct);
+            ct,
+            logMaxSize,
+            logMaxFile);
 
         if (containerId is null)
             return ProvisionResult.Fail(agentName, "Docker API failed to create container — check orchestrator logs");

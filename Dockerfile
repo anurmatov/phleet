@@ -11,7 +11,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y curl git jq rsync cron openssh-client && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y nodejs && \
-    npm install -g @anthropic-ai/claude-code @openai/codex@0.130.0
+    npm install -g @anthropic-ai/claude-code @openai/codex@0.147.0
 # Fail the build early if the installed claude version does not support --append-system-prompt-file.
 # This flag is required by PromptBuilder.WriteSystemPromptFile() to avoid E2BIG failures.
 # The flag isn't listed as a standalone help entry — it appears inside --bare's description,

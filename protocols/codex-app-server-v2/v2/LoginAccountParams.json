@@ -1,70 +1,86 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "LoginAccountParams",
+  "definitions": {
+    "LoginAppBrand": {
+      "enum": [
+        "codex",
+        "chatgpt"
+      ],
+      "type": "string"
+    }
+  },
   "oneOf": [
     {
-      "type": "object",
-      "required": [
-        "apiKey",
-        "type"
-      ],
       "properties": {
         "apiKey": {
           "type": "string"
         },
         "type": {
-          "type": "string",
           "enum": [
             "apiKey"
           ],
-          "title": "ApiKeyv2::LoginAccountParamsType"
+          "title": "ApiKeyv2::LoginAccountParamsType",
+          "type": "string"
         }
       },
-      "title": "ApiKeyv2::LoginAccountParams"
-    },
-    {
-      "type": "object",
       "required": [
+        "apiKey",
         "type"
       ],
+      "title": "ApiKeyv2::LoginAccountParams",
+      "type": "object"
+    },
+    {
       "properties": {
+        "appBrand": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LoginAppBrand"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "codexStreamlinedLogin": {
           "type": "boolean"
         },
         "type": {
-          "type": "string",
           "enum": [
             "chatgpt"
           ],
-          "title": "Chatgptv2::LoginAccountParamsType"
+          "title": "Chatgptv2::LoginAccountParamsType",
+          "type": "string"
+        },
+        "useHostedLoginSuccessPage": {
+          "type": "boolean"
         }
       },
-      "title": "Chatgptv2::LoginAccountParams"
-    },
-    {
-      "type": "object",
       "required": [
         "type"
       ],
+      "title": "Chatgptv2::LoginAccountParams",
+      "type": "object"
+    },
+    {
       "properties": {
         "type": {
-          "type": "string",
           "enum": [
             "chatgptDeviceCode"
           ],
-          "title": "ChatgptDeviceCodev2::LoginAccountParamsType"
+          "title": "ChatgptDeviceCodev2::LoginAccountParamsType",
+          "type": "string"
         }
       },
-      "title": "ChatgptDeviceCodev2::LoginAccountParams"
+      "required": [
+        "type"
+      ],
+      "title": "ChatgptDeviceCodev2::LoginAccountParams",
+      "type": "object"
     },
     {
       "description": "[UNSTABLE] FOR OPENAI INTERNAL USE ONLY - DO NOT USE. The access token must contain the same scopes that Codex-managed ChatGPT auth tokens have.",
-      "type": "object",
-      "required": [
-        "accessToken",
-        "chatgptAccountId",
-        "type"
-      ],
       "properties": {
         "accessToken": {
           "description": "Access token (JWT) supplied by the client. This token is used for backend API requests and email extraction.",
@@ -82,14 +98,46 @@
           ]
         },
         "type": {
-          "type": "string",
           "enum": [
             "chatgptAuthTokens"
           ],
-          "title": "ChatgptAuthTokensv2::LoginAccountParamsType"
+          "title": "ChatgptAuthTokensv2::LoginAccountParamsType",
+          "type": "string"
         }
       },
-      "title": "ChatgptAuthTokensv2::LoginAccountParams"
+      "required": [
+        "accessToken",
+        "chatgptAccountId",
+        "type"
+      ],
+      "title": "ChatgptAuthTokensv2::LoginAccountParams",
+      "type": "object"
+    },
+    {
+      "description": "[UNSTABLE] Managed Amazon Bedrock login is experimental.",
+      "properties": {
+        "apiKey": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "amazonBedrock"
+          ],
+          "title": "AmazonBedrockv2::LoginAccountParamsType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "apiKey",
+        "region",
+        "type"
+      ],
+      "title": "AmazonBedrockv2::LoginAccountParams",
+      "type": "object"
     }
-  ]
+  ],
+  "title": "LoginAccountParams"
 }

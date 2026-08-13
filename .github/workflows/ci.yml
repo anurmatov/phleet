@@ -43,7 +43,7 @@ jobs:
           node-version: '22'
 
       - name: Install pinned codex CLI
-        run: npm install -g @openai/codex@0.130.0 --silent
+        run: npm install -g @openai/codex@0.147.0 --silent
 
       - name: Install jq
         run: sudo apt-get install -y jq
@@ -87,4 +87,4 @@ jobs:
             echo "  git add protocols/codex-app-server-v2/ && git commit"
             exit 1
           fi
-          echo "Schema matches pinned @openai/codex@0.130.0 (key-order insensitive)"
+          echo "Schema matches pinned @openai/codex@0.147.0 (key-order insensitive)"

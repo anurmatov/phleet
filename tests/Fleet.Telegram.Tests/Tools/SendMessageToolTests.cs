@@ -330,4 +330,7 @@ internal sealed class FakeBotClient : ITelegramBotClient
 
     public Task DownloadFile(string filePath, Stream destination,
         CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+    public Task DownloadFile(global::Telegram.Bot.Types.TGFile file, Stream destination,
+        CancellationToken cancellationToken = default) => Task.CompletedTask;
 }

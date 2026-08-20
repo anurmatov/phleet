@@ -25,12 +25,12 @@ public class AgentTransportSendTextTests
     // ── Helper: build a minimal AgentTransport with a captured fake bot ────────
 
     private static (AgentTransport transport, FakeAgentBot bot) BuildTransport(
-        bool useFormatter, bool prefixMessages, string shortName = "acto")
+        bool useFormatter, bool prefixMessages, string shortName = "agent1")
     {
         var agentOpts = Options.Create(new AgentOptions
         {
-            Name = "fleet-acto",
-            Role = "co-cto",
+            Name = "fleet-agent1",
+            Role = "generic-role",
             WorkDir = "/tmp/fleet-test",
             UseFormatter = useFormatter,
             PrefixMessages = prefixMessages,
@@ -106,7 +106,7 @@ public class AgentTransportSendTextTests
     {
         // UseFormatter=false, PrefixMessages=true: legacy SplitMessage(text, 3990),
         // text is HtmlEncoded, wrapped with <b>Name:</b>\n prefix, sent with ParseMode.Html.
-        var (transport, bot) = BuildTransport(useFormatter: false, prefixMessages: true, shortName: "acto");
+        var (transport, bot) = BuildTransport(useFormatter: false, prefixMessages: true, shortName: "agent1");
 
         await transport.SendTextAsync(99, "result: a < b");
 
@@ -115,7 +115,7 @@ public class AgentTransportSendTextTests
         // Legacy prefix path always uses ParseMode.Html
         Assert.Equal(ParseMode.Html, req.ParseMode);
         // Bold prefix present
-        Assert.StartsWith("<b>Acto:</b>\n", req.Text);
+        Assert.StartsWith("<b>Agent1:</b>\n", req.Text);
         // Text is HTML-encoded (< → &lt;) but NOT reformatted by TelegramFormatter
         Assert.Contains("&lt;", req.Text);
         Assert.DoesNotContain("<b>result</b>", req.Text); // no bold from formatter
@@ -145,7 +145,7 @@ public class AgentTransportSendTextTests
         // UseFormatter=true, PrefixMessages=true: prefix budget is deducted per chunk.
         // prefix = "<b>Acto:</b>\n" = 13 chars, so each chunk ≤ 4096 - 13 = 4083.
         // With prefix prepended, the total sent is prefix (13) + chunk (≤4083) = ≤4096.
-        var (transport, bot) = BuildTransport(useFormatter: true, prefixMessages: true, shortName: "acto");
+        var (transport, bot) = BuildTransport(useFormatter: true, prefixMessages: true, shortName: "agent1");
 
         // 5000 plain chars → will be split. With prefix budget, each chunk ≤ 4083.
         var text = new string('x', 5000);
@@ -156,7 +156,7 @@ public class AgentTransportSendTextTests
         {
             Assert.Equal(ParseMode.Html, req.ParseMode);
             Assert.True(req.Text.Length <= 4096, $"Chunk of {req.Text.Length} exceeds 4096");
-            Assert.StartsWith("<b>Acto:</b>\n", req.Text);
+            Assert.StartsWith("<b>Agent1:</b>\n", req.Text);
         }
     }
 

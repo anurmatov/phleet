@@ -306,13 +306,12 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         }
         catch (Exception ex) when (IsParseEntitiesError(ex) && parseMode == ParseMode.Html)
         {
-            // Format rejected by API — strip HTML and resend as plain text so the
-            // message is delivered. Plain resend deliberately drops replyParams
-            // (the reply slot may already have been consumed by a prior chunk).
             _logger.LogWarning(ex,
                 "Parse-entities error for chat {ChatId} — falling back to plain text", chatId);
             var plain = TelegramFormatter.StripHtmlTagsToPlain(text);
-            var m = await _bot!.SendMessage(chatId, plain, cancellationToken: ct);
+            var m = replyParams is not null
+                ? await _bot!.SendMessage(chatId, plain, replyParameters: replyParams, cancellationToken: ct)
+                : await _bot!.SendMessage(chatId, plain, cancellationToken: ct);
             return m.Id;
         }
     }

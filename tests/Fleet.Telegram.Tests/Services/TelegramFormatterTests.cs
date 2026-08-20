@@ -281,10 +281,10 @@ public class TelegramFormatterTests
     [Fact]
     public void FormatAndSplit_WithReservedPrefix_ChunksFitWithinBudget()
     {
-        // A prefix of "**Acto:** \n" is about 12 chars. Verify that when reservedPerChunk
+        // A prefix of "**Agent1:** \n" is about 14 chars. Verify that when reservedPerChunk
         // is non-zero, each returned chunk + the prefix stays within 4096.
-        const string prefixHtml = "<b>Acto:</b>\n";
-        int prefixLen = prefixHtml.Length; // 13
+        const string prefixHtml = "<b>Agent1:</b>\n";
+        int prefixLen = prefixHtml.Length; // 15
 
         // Build a large text so splitting is required.
         var text = string.Concat(Enumerable.Repeat("a ", 2200)); // ~4400 chars before HTML

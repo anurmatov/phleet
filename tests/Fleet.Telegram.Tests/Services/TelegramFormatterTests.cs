@@ -1,4 +1,4 @@
-using Fleet.Telegram.Services;
+using Fleet.Shared;
 
 namespace Fleet.Telegram.Tests.Services;
 
@@ -193,28 +193,110 @@ public class TelegramFormatterTests
     }
 
     [Fact]
-    public void PlainModeStripsFormattingConstructs()
+    public void PlainModePreservesMarkersAndEscapesHtml()
     {
+        // PLAIN sends with ParseMode.Html. Markdown markers must survive as literal
+        // characters; HTML-special chars must be entity-escaped so they render correctly.
         var result = TelegramFormatter.StripToPlain("**bold** and `code` and [link](https://example.com)");
-        Assert.Contains("bold", result);
-        Assert.Contains("code", result);
-        Assert.Contains("link", result);
-        Assert.DoesNotContain("**", result);
-        Assert.DoesNotContain("`", result);
-        Assert.DoesNotContain("[", result);
-        Assert.DoesNotContain("](", result);
+        // Markers survive unchanged
+        Assert.Contains("**", result);
+        Assert.Contains("`", result);
+        Assert.Contains("[link]", result);
+        // No HTML conversion was applied
+        Assert.DoesNotContain("<b>", result);
+        Assert.DoesNotContain("<code>", result);
     }
 
     [Fact]
-    public void PlainModeDoesNotEscapeHtmlEntities()
+    public void PlainModeEscapesHtmlEntities()
     {
-        // PLAIN mode sends with no parse_mode — raw text. HTML entities must NOT appear
-        // because Telegram would render &lt; literally instead of <.
+        // PLAIN sends with ParseMode.Html — angle brackets and ampersands must be
+        // HTML-escaped so they render as the original characters on screen.
         var result = TelegramFormatter.StripToPlain("text with <angle> brackets & ampersands");
-        Assert.Contains("<angle>", result);
-        Assert.Contains("&", result);
-        Assert.DoesNotContain("&lt;", result);
-        Assert.DoesNotContain("&amp;", result);
+        Assert.Contains("&lt;angle&gt;", result);
+        Assert.Contains("&amp;", result);
+        Assert.DoesNotContain("<angle>", result);
+    }
+
+    // ── Glob asterisks and arithmetic don't create bold ───────────────────────
+
+    [Fact]
+    public void SingleAsterisksInGlobPatternsDoNotCreateBold()
+    {
+        // Shell globs *.cs and *.md each contain ONE *, not **. The formatter only
+        // triggers bold on consecutive **, so these must pass through as literal text.
+        var result = TelegramFormatter.ConvertToHtml("files: *.cs and *.md");
+        Assert.DoesNotContain("<b>", result);
+        Assert.Contains("*.cs", result);
+        Assert.Contains("*.md", result);
+    }
+
+    [Fact]
+    public void SpacePaddedDoubleStar_DoesNotCreateBold()
+    {
+        // CommonMark non-space adjacency: "** word **" must NOT become bold because
+        // the character immediately after opening ** is a space.
+        var result = TelegramFormatter.ConvertToHtml("** not bold **");
+        Assert.DoesNotContain("<b>", result);
+        Assert.Contains("**", result);
+    }
+
+    [Fact]
+    public void TightDoubleStar_CreatesBold()
+    {
+        // Opening ** immediately followed by non-whitespace → bold resolves.
+        var result = TelegramFormatter.ConvertToHtml("**bold**");
+        Assert.Contains("<b>bold</b>", result);
+    }
+
+    // ── Long-href hard-cut ────────────────────────────────────────────────────
+
+    [Fact]
+    public void SplitWithLongHref_DoesNotCrashAndRespectsBudget()
+    {
+        // When the <a href="..."> markup itself exceeds 4096 chars, FindSplitPoint backs
+        // all the way to position 0 inside the tag, producing a hard cut at character 1.
+        // This is a known limitation documented here: no safe boundary exists within budget
+        // when the tag markup alone exceeds the chunk limit. The invariants that DO hold:
+        //   • SplitHtml does not throw
+        //   • Every chunk is ≤ 4096 UTF-16 code units
+        //   • The concatenation of all chunks contains the full link text
+        var longUrl = "https://example.com/" + new string('x', 4100);
+        var html = $"<a href=\"{longUrl}\">link text</a>";
+
+        Assert.True(html.Length > 4096);
+        var chunks = TelegramFormatter.SplitHtml(html);
+
+        Assert.NotEmpty(chunks);
+        foreach (var chunk in chunks)
+            Assert.True(chunk.Length <= 4096, $"Chunk length {chunk.Length} exceeds 4096");
+
+        // The link text must appear somewhere across the chunks
+        var combined = string.Join("", chunks);
+        Assert.Contains("link text", combined);
+    }
+
+    // ── Prefix budget: formatter reserves space for the prefix per chunk ──────
+
+    [Fact]
+    public void FormatAndSplit_WithReservedPrefix_ChunksFitWithinBudget()
+    {
+        // A prefix of "**Acto:** \n" is about 12 chars. Verify that when reservedPerChunk
+        // is non-zero, each returned chunk + the prefix stays within 4096.
+        const string prefixHtml = "<b>Acto:</b>\n";
+        int prefixLen = prefixHtml.Length; // 13
+
+        // Build a large text so splitting is required.
+        var text = string.Concat(Enumerable.Repeat("a ", 2200)); // ~4400 chars before HTML
+        var chunks = TelegramFormatter.FormatAndSplit(text, prefixLen);
+
+        Assert.True(chunks.Count > 1, "Expected splitting to occur");
+        foreach (var chunk in chunks)
+        {
+            int combined = prefixLen + chunk.Length;
+            Assert.True(combined <= 4096,
+                $"prefix ({prefixLen}) + chunk ({chunk.Length}) = {combined} exceeds 4096");
+        }
     }
 
     // ── Test 10c: Link href preserved across a split ──────────────────────────

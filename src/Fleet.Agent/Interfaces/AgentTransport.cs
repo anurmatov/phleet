@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using Fleet.Agent.Abstractions;
 using Fleet.Agent.Configuration;
+using Fleet.Shared;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services;
 using Microsoft.Extensions.Hosting;
@@ -199,8 +200,45 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 if (segment.Length == 0) continue;
 
                 // Prepend bold [ShortName] header when PrefixMessages is enabled
-                if (_agentConfig.PrefixMessages && _agentConfig.ShortName.Length > 0)
+                if (_agentConfig.UseFormatter)
                 {
+                    // Formatter path: safe HTML escaping, format-aware splitting.
+                    // The prefix (if any) is counted against every chunk's budget
+                    // so that prefix + chunk ≤ 4096 after combination.
+                    if (_agentConfig.PrefixMessages && _agentConfig.ShortName.Length > 0)
+                    {
+                        var displayName = $"{char.ToUpperInvariant(_agentConfig.ShortName[0])}{_agentConfig.ShortName[1..]}";
+                        var prefix = $"<b>{displayName}:</b>\n";
+                        foreach (var chunk in TelegramFormatter.FormatAndSplit(segment, prefix.Length))
+                        {
+                            if (chunk.Length == 0) continue;
+                            var replyParams = !replyUsed && replyToMessageId.HasValue
+                                ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
+                                : null;
+                            var sentId = await SendMessageWithReplyFallbackAsync(chatId, prefix + chunk,
+                                ParseMode.Html, replyParams, ct);
+                            _lastSentMessageIds[chatId] = sentId;
+                            replyUsed = true;
+                        }
+                    }
+                    else
+                    {
+                        foreach (var chunk in TelegramFormatter.FormatAndSplit(segment))
+                        {
+                            if (chunk.Length == 0) continue;
+                            var replyParams = !replyUsed && replyToMessageId.HasValue
+                                ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
+                                : null;
+                            var sentId = await SendMessageWithReplyFallbackAsync(chatId, chunk,
+                                ParseMode.Html, replyParams, ct);
+                            _lastSentMessageIds[chatId] = sentId;
+                            replyUsed = true;
+                        }
+                    }
+                }
+                else if (_agentConfig.PrefixMessages && _agentConfig.ShortName.Length > 0)
+                {
+                    // Legacy prefix path — byte-identical to pre-formatter behavior.
                     var displayName = $"{char.ToUpperInvariant(_agentConfig.ShortName[0])}{_agentConfig.ShortName[1..]}";
                     foreach (var chunk in SplitMessage(segment, 3990))
                     {
@@ -216,6 +254,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 }
                 else
                 {
+                    // Legacy plain path — byte-identical to pre-formatter behavior.
                     foreach (var chunk in SplitMessage(segment, 4000))
                     {
                         var replyParams = !replyUsed && replyToMessageId.HasValue

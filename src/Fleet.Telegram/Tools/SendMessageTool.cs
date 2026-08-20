@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text.Json;
+using Fleet.Shared;
 using Fleet.Telegram.Services;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
@@ -47,10 +48,13 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
 
         if (forcePlain)
         {
-            // Explicit plain-text opt-out: strip markdown, send without parse_mode
+            // Explicit plain-text opt-out: HTML-escape so every character renders
+            // literally (including & < >), but keep markdown markers as-is — they
+            // are not HTML-special and will appear as literal * ` [ characters.
+            // ParseMode.Html is required for the escaping to take effect correctly.
             var plain = TelegramFormatter.StripToPlain(text);
             chunks = SplitPlain(plain);
-            usingHtml = false;
+            usingHtml = true;
         }
         else
         {
@@ -72,8 +76,9 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
         if (usingHtml && !chunks.All(TelegramFormatter.ValidateHtml))
         {
             logger.LogWarning("Pre-flight HTML validation failed for chat {ChatId} — falling back to plain text", chatIdLong);
+            // StripHtmlTags already unescapes entities and strips tags — use directly as plain text.
             var fallbackText = string.Join("\n", chunks.Select(StripHtmlTags));
-            chunks = SplitPlain(TelegramFormatter.StripToPlain(fallbackText));
+            chunks = SplitPlain(fallbackText);
             usingHtml = false;
             pm = null;
         }
@@ -102,9 +107,10 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
                 pm = null;
                 usingHtml = false;
 
-                // Rebuild remaining chunks as plain text (including current failed chunk)
+                // Rebuild remaining chunks as plain text (including current failed chunk).
+                // StripHtmlTags already unescapes entities — use the result directly.
                 var remainingText = string.Join("\n", chunks[idx..].Select(StripHtmlTags));
-                var plainChunks = SplitPlain(TelegramFormatter.StripToPlain(remainingText));
+                var plainChunks = SplitPlain(remainingText);
 
                 foreach (var plainChunk in plainChunks)
                 {

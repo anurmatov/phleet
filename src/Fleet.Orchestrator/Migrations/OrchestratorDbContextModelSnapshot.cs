@@ -117,6 +117,9 @@ namespace Fleet.Orchestrator.Migrations
                     b.Property<bool>("PrefixMessages")
                         .HasColumnType("tinyint(1)");
 
+                    b.Property<bool>("UseFormatter")
+                        .HasColumnType("tinyint(1)");
+
                     b.Property<int>("ProactiveIntervalMinutes")
                         .HasColumnType("int");
 

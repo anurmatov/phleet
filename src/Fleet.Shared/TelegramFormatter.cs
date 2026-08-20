@@ -1,11 +1,11 @@
 using System.Text;
 using System.Text.RegularExpressions;
 
-namespace Fleet.Telegram.Services;
+namespace Fleet.Shared;
 
 /// <summary>
 /// Converts a permissive Markdown-like subset to Telegram HTML, with automatic
-/// escaping, format-aware splitting, and a plain-text fallback strip.
+/// escaping, format-aware splitting, and a plain-text fallback escape.
 ///
 /// Recognized subset: **bold**, `inline code`, fenced code blocks, [label](url) links.
 /// Anything unrecognized (including list syntax) is treated as literal escaped text.
@@ -22,28 +22,37 @@ public static class TelegramFormatter
 
     /// <summary>
     /// Converts <paramref name="text"/> to Telegram HTML chunks ready to send.
-    /// Each chunk is ≤4096 UTF-16 code units and is independently valid HTML.
+    /// Each chunk is ≤ (4096 - <paramref name="reservedPerChunk"/>) UTF-16 code units
+    /// and is independently valid HTML.
     /// Returns a single empty-string chunk for null/empty/whitespace input.
     /// </summary>
-    public static List<string> FormatAndSplit(string? text)
+    /// <param name="reservedPerChunk">
+    /// Number of characters to reserve per chunk for a prefix that will be prepended
+    /// before sending (e.g. <c>"&lt;b&gt;Acto:&lt;/b&gt;\n".Length</c>). Default 0.
+    /// </param>
+    public static List<string> FormatAndSplit(string? text, int reservedPerChunk = 0)
     {
         if (string.IsNullOrWhiteSpace(text))
             return [string.Empty];
 
         var html = ConvertToHtml(text);
-        return SplitHtml(html);
+        return SplitHtml(html, reservedPerChunk);
     }
 
     /// <summary>
-    /// Returns the text with Markdown-like formatting stripped — suitable for a
-    /// plain-text (no parse_mode) send. Does NOT HTML-escape, because plain-text
-    /// sends have no parse_mode and entities would render literally.
+    /// HTML-escapes <paramref name="text"/> so every character renders literally when
+    /// sent with <c>ParseMode.Html</c>. Markdown markers survive unchanged — they are
+    /// not special in HTML and render as the literal <c>*</c>, <c>`</c>, etc. characters.
+    /// Suitable for <c>parse_mode: PLAIN</c> sends where callers want no formatting.
     /// </summary>
     public static string StripToPlain(string? text)
     {
         if (string.IsNullOrWhiteSpace(text))
             return string.Empty;
-        return StripMarkdown(text);
+        // Escape, don't strip: all characters are sent literally by HTML-escaping
+        // the HTML-special ones. Markdown markers (**,  `, []) are not HTML-special
+        // and pass through unchanged, appearing as literal characters on screen.
+        return EscapeHtml(text);
     }
 
     /// <summary>
@@ -71,7 +80,7 @@ public static class TelegramFormatter
             if (c == '&')
             {
                 // Only entities we emit: &lt; (4) &gt; (4) &amp; (5) &quot; (6)
-                // Bounds: need to access html[i+N] so condition is i+N < html.Length
+                // Bounds: i+N < html.Length means html[i..i+N] is safely indexable.
                 if (i + 3 < html.Length && html[i + 1] == 'l' && html[i + 2] == 't' && html[i + 3] == ';') { i += 4; continue; }
                 if (i + 3 < html.Length && html[i + 1] == 'g' && html[i + 2] == 't' && html[i + 3] == ';') { i += 4; continue; }
                 if (i + 4 < html.Length && html[i + 1] == 'a' && html[i + 2] == 'm' && html[i + 3] == 'p' && html[i + 4] == ';') { i += 5; continue; }
@@ -153,15 +162,24 @@ public static class TelegramFormatter
             }
 
             // Bold: **...**
+            // CommonMark non-space adjacency: opening ** must be followed by non-whitespace,
+            // closing ** must be preceded by non-whitespace. This prevents glob patterns like
+            // "*.cs" and "*.md" (two unrelated single-asterisks) from being misread as bold,
+            // and also avoids matching "** surrounded by spaces **" as bold.
             if (i + 1 < len && text[i] == '*' && text[i + 1] == '*')
             {
                 int closeIdx = text.IndexOf("**", i + 2, StringComparison.Ordinal);
                 if (closeIdx > i)
                 {
-                    var content = EscapeHtml(text.Substring(i + 2, closeIdx - i - 2));
-                    sb.Append("<b>").Append(content).Append("</b>");
-                    i = closeIdx + 2;
-                    continue;
+                    bool openAdj  = i + 2 < len && !char.IsWhiteSpace(text[i + 2]);
+                    bool closeAdj = closeIdx > i + 2 && !char.IsWhiteSpace(text[closeIdx - 1]);
+                    if (openAdj && closeAdj)
+                    {
+                        var content = EscapeHtml(text.Substring(i + 2, closeIdx - i - 2));
+                        sb.Append("<b>").Append(content).Append("</b>");
+                        i = closeIdx + 2;
+                        continue;
+                    }
                 }
             }
 
@@ -208,9 +226,16 @@ public static class TelegramFormatter
 
     // ─── Splitting ───────────────────────────────────────────────────────────
 
-    internal static List<string> SplitHtml(string html)
+    /// <summary>
+    /// Splits <paramref name="html"/> into chunks each ≤ (4096 - <paramref name="reservedPerChunk"/>)
+    /// UTF-16 code units. Every chunk is independently valid HTML: open tags are closed at the
+    /// split point and reopened (with all attributes) in the next chunk.
+    /// </summary>
+    internal static List<string> SplitHtml(string html, int reservedPerChunk = 0)
     {
-        if (html.Length <= TelegramMaxLength)
+        int budget = TelegramMaxLength - Math.Max(0, reservedPerChunk);
+
+        if (html.Length <= budget)
             return [html];
 
         var chunks = new List<string>();
@@ -218,22 +243,22 @@ public static class TelegramFormatter
 
         while (remaining.Length > 0)
         {
-            if (remaining.Length <= TelegramMaxLength)
+            if (remaining.Length <= budget)
             {
                 chunks.Add(remaining);
                 break;
             }
 
             // First pass: find split at full budget to learn which tag (if any) is open.
-            int firstPassSplit = FindSplitPoint(remaining, TelegramMaxLength);
+            int firstPassSplit = FindSplitPoint(remaining, budget);
             string firstPassTag = GetOpenTagAt(remaining, firstPassSplit);
             string firstPassTagName = firstPassTag.Length > 0 ? TagName(firstPassTag) : string.Empty;
 
             // Close tag length is based on tag name only (e.g. "</a>" = 4 chars for tag name "a").
             int closeTagLen = firstPassTagName.Length > 0 ? 3 + firstPassTagName.Length : 0;
 
-            // Second pass: tighten the budget so chunk + close tag ≤ 4096.
-            int effectiveBudget = TelegramMaxLength - closeTagLen;
+            // Second pass: tighten the budget so chunk + close tag ≤ budget.
+            int effectiveBudget = budget - closeTagLen;
             int splitAt = closeTagLen > 0
                 ? FindSplitPoint(remaining, effectiveBudget)
                 : firstPassSplit;
@@ -338,21 +363,6 @@ public static class TelegramFormatter
         }
 
         return stack.Count > 0 ? stack.Peek() : string.Empty;
-    }
-
-    // ─── Plain-text strip ────────────────────────────────────────────────────
-
-    private static string StripMarkdown(string text)
-    {
-        // Remove fenced code blocks (keep content)
-        text = Regex.Replace(text, @"```[^\n]*\n([\s\S]*?)```", "$1");
-        // Remove inline code backticks
-        text = Regex.Replace(text, @"`([^`]+)`", "$1");
-        // Remove bold **
-        text = Regex.Replace(text, @"\*\*(.+?)\*\*", "$1");
-        // Convert [label](url) to label
-        text = Regex.Replace(text, @"\[([^\]]+)\]\([^\)]+\)", "$1");
-        return text;
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────

@@ -110,8 +110,10 @@ public class SendMessageToolTests
     // ── Test 10: parse_mode = PLAIN disables formatting ──────────────────────
 
     [Fact]
-    public async Task ParseModePLAIN_SendsWithoutFormatting()
+    public async Task ParseModePLAIN_SendsWithHtmlModeAndPreservesMarkers()
     {
+        // PLAIN escapes HTML-special chars and sends with ParseMode.Html so the
+        // escaping renders correctly. Markdown markers must survive as literal chars.
         SendMessageRequest? captured = null;
         var bot = new FakeBotClient(req =>
         {
@@ -123,18 +125,18 @@ public class SendMessageToolTests
         await tool.SendAsync("123", "**bold** text", parse_mode: "PLAIN");
 
         Assert.NotNull(captured);
-        // No HTML parse mode set
-        Assert.NotEqual(ParseMode.Html, captured!.ParseMode);
-        // Text does not contain bold tags or raw **
+        // PLAIN now uses ParseMode.Html to honor HTML-entity escaping
+        Assert.Equal(ParseMode.Html, captured!.ParseMode);
+        // No HTML conversion: ** must survive as literal asterisks
         Assert.DoesNotContain("<b>", captured.Text);
-        Assert.DoesNotContain("**", captured.Text);
+        Assert.Contains("**", captured.Text);
     }
 
     [Fact]
-    public async Task ParseModePLAIN_AngleBracketsNotEscaped()
+    public async Task ParseModePLAIN_AngleBracketsAreEscaped()
     {
-        // PLAIN sends raw text with no parse_mode. Angle brackets must NOT become &lt; / &gt;
-        // because Telegram would render the entity literally instead of the character.
+        // PLAIN sends with ParseMode.Html. Angle brackets must be HTML-escaped so
+        // Telegram renders them as the < > characters, not as unknown tags.
         SendMessageRequest? captured = null;
         var bot = new FakeBotClient(req =>
         {
@@ -146,9 +148,10 @@ public class SendMessageToolTests
         await tool.SendAsync("123", "text with <angle>", parse_mode: "PLAIN");
 
         Assert.NotNull(captured);
-        Assert.NotEqual(ParseMode.Html, captured!.ParseMode);
-        Assert.Contains("<angle>", captured.Text);
-        Assert.DoesNotContain("&lt;", captured.Text);
+        Assert.Equal(ParseMode.Html, captured!.ParseMode);
+        // Raw < must be escaped so Telegram's HTML parser sees &lt;angle&gt;
+        Assert.Contains("&lt;angle&gt;", captured.Text);
+        Assert.DoesNotContain("<angle>", captured.Text);
     }
 
     // ── Finding 1 regression: plain prose with angle brackets uses Html mode ──

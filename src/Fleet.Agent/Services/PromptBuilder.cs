@@ -1,5 +1,6 @@
 using System.Text;
 using Fleet.Agent.Configuration;
+using Fleet.Shared;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -120,6 +121,31 @@ public sealed class PromptBuilder(IOptions<AgentOptions> config, ILogger<PromptB
             sb.AppendLine("related links, check them with `memory_get` if they look relevant to your");
             sb.AppendLine("current task. This helps you discover runbooks, context, and decisions");
             sb.AppendLine("that search alone might miss.");
+        }
+
+        // Inject Rich-mode formatting guidance. PlainText and LegacyHtml keep
+        // the base instruction's guidance verbatim — Rich overrides the caution
+        // against headers, lists, and tables that is correct for the other tiers
+        // but wrong for this one.
+        if (_config.FormattingMode == FormattingMode.Rich)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Output Formatting");
+            sb.AppendLine();
+            sb.AppendLine("Your messages are sent via `sendRichMessage` (Bot API 10.1). The full");
+            sb.AppendLine("Markdown-like subset below is supported and **renders as formatted content** —");
+            sb.AppendLine("not as literal characters:");
+            sb.AppendLine();
+            sb.AppendLine("- `# Heading` / `## Subheading` — section headings");
+            sb.AppendLine("- `- item` / `* item` — unordered list");
+            sb.AppendLine("- `1. item` — ordered list");
+            sb.AppendLine("- GFM table: `| col |` header row + `|---|` separator + `| val |` data rows");
+            sb.AppendLine("- `**bold**`, `` `inline code` ``, fenced code blocks, `[label](url)` links");
+            sb.AppendLine();
+            sb.AppendLine("The base-instruction caution about `# headers` and `- bullets` rendering as");
+            sb.AppendLine("literal characters does NOT apply here — use them when they aid clarity.");
+            sb.AppendLine("The ~35-character line-length guideline inside fenced blocks still applies");
+            sb.AppendLine("(mobile fences wrap rather than scroll, so long lines collapse into noise).");
         }
 
         return sb.ToString();

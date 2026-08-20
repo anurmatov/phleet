@@ -23,7 +23,10 @@ namespace Fleet.Agent.Interfaces;
 /// </summary>
 public sealed class AgentTransport : BackgroundService, IMessageSink
 {
-    private readonly TelegramBotClient? _bot;
+    private ITelegramBotClient? _bot;
+
+    /// <summary>Allows tests to inject a fake bot without a real token.</summary>
+    internal ITelegramBotClient? BotForTesting { set => _bot = value; }
     private readonly AgentOptions _agentConfig;
     private readonly TelegramOptions _telegramConfig;
     private readonly AllowlistHolder _allowlist;
@@ -106,8 +109,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
 
     private sealed class TelegramBotDownloader : IDocumentDownloader
     {
-        private readonly TelegramBotClient _bot;
-        internal TelegramBotDownloader(TelegramBotClient bot) => _bot = bot;
+        private readonly ITelegramBotClient _bot;
+        internal TelegramBotDownloader(ITelegramBotClient bot) => _bot = bot;
 
         public async Task<byte[]> DownloadAsync(string fileId, CancellationToken ct)
         {
@@ -272,26 +275,24 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     /// <summary>
     /// Sends a text message and returns the Telegram <c>message_id</c> of the sent message.
     /// Falls back to standalone (without reply threading) when the reply target is not found.
+    /// Falls back to plain text (strips HTML tags) when the API rejects parse-entities so the
+    /// message is always delivered — never silently dropped on a formatting failure.
     /// </summary>
     private async Task<long> SendMessageWithReplyFallbackAsync(
         long chatId, string text, ParseMode? parseMode,
         Telegram.Bot.Types.ReplyParameters? replyParams,
         CancellationToken ct)
     {
-        if (replyParams is null)
-        {
-            var m = parseMode.HasValue
-                ? await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
-                : await _bot!.SendMessage(chatId, text, cancellationToken: ct);
-            return m.Id;
-        }
-
         try
         {
-            var m = parseMode.HasValue
-                ? await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value,
-                    replyParameters: replyParams, cancellationToken: ct)
-                : await _bot!.SendMessage(chatId, text, replyParameters: replyParams, cancellationToken: ct);
+            var m = replyParams is not null
+                ? (parseMode.HasValue
+                    ? await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value,
+                        replyParameters: replyParams, cancellationToken: ct)
+                    : await _bot!.SendMessage(chatId, text, replyParameters: replyParams, cancellationToken: ct))
+                : (parseMode.HasValue
+                    ? await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
+                    : await _bot!.SendMessage(chatId, text, cancellationToken: ct));
             return m.Id;
         }
         catch (Exception ex) when (ex.Message.Contains("message to be replied not found")
@@ -303,7 +304,23 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 : await _bot!.SendMessage(chatId, text, cancellationToken: ct);
             return m.Id;
         }
+        catch (Exception ex) when (IsParseEntitiesError(ex) && parseMode == ParseMode.Html)
+        {
+            // Format rejected by API — strip HTML and resend as plain text so the
+            // message is delivered. Plain resend deliberately drops replyParams
+            // (the reply slot may already have been consumed by a prior chunk).
+            _logger.LogWarning(ex,
+                "Parse-entities error for chat {ChatId} — falling back to plain text", chatId);
+            var plain = TelegramFormatter.StripHtmlTagsToPlain(text);
+            var m = await _bot!.SendMessage(chatId, plain, cancellationToken: ct);
+            return m.Id;
+        }
     }
+
+    private static bool IsParseEntitiesError(Exception ex) =>
+        ex.Message.Contains("can't parse entities") ||
+        ex.Message.Contains("Bad Request: can't parse") ||
+        ex.Message.Contains("parse_mode");
 
     /// <summary>
     /// Extracts and strips a <c>[reply_to: N]</c> token from agent output.

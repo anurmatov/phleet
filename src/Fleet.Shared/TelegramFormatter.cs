@@ -56,13 +56,54 @@ public static class TelegramFormatter
     }
 
     /// <summary>
-    /// Returns true when <paramref name="html"/> contains any formatting tokens.
-    /// Kept for backward compatibility; the send path now always uses Html parse_mode
-    /// when the formatter produced the output.
+    /// Strips Telegram HTML tags from <paramref name="html"/> and returns a plain-text
+    /// fallback string suitable for sending without any parse_mode. Link targets are
+    /// preserved as "label (url)" so context is not lost. HTML entities are unescaped.
+    /// Used as the format-rejected fallback in <c>AgentTransport</c>.
     /// </summary>
-    public static bool HasFormatting(string html) =>
-        html.Contains('<') && (html.Contains("</b>") || html.Contains("</code>") ||
-            html.Contains("</pre>") || html.Contains("</a>"));
+    public static string StripHtmlTagsToPlain(string html)
+    {
+        var sb = new StringBuilder(html.Length);
+        string? pendingHref = null;
+        int i = 0;
+        while (i < html.Length)
+        {
+            if (html[i] != '<') { sb.Append(html[i++]); continue; }
+
+            int end = html.IndexOf('>', i + 1);
+            if (end < 0) { sb.Append(html[i++]); continue; } // unclosed tag — keep < literal
+
+            var inner = html.AsSpan(i + 1, end - i - 1).Trim();
+            i = end + 1;
+
+            if (inner.StartsWith("a ", StringComparison.OrdinalIgnoreCase))
+            {
+                int hrefIdx = inner.IndexOf("href=\"", StringComparison.OrdinalIgnoreCase);
+                if (hrefIdx >= 0)
+                {
+                    int hrefStart = hrefIdx + 6;
+                    int hrefEnd = inner.Slice(hrefStart).IndexOf('"');
+                    if (hrefEnd >= 0)
+                        pendingHref = inner.Slice(hrefStart, hrefEnd).ToString();
+                }
+            }
+            else if (inner.Equals("/a", StringComparison.OrdinalIgnoreCase))
+            {
+                if (pendingHref is not null)
+                {
+                    sb.Append(" (").Append(pendingHref).Append(')');
+                    pendingHref = null;
+                }
+            }
+            // All other tags: skip
+        }
+
+        return sb.ToString()
+            .Replace("&amp;", "&")
+            .Replace("&lt;", "<")
+            .Replace("&gt;", ">")
+            .Replace("&quot;", "\"");
+    }
 
     /// <summary>
     /// Returns true when <paramref name="html"/> is structurally valid for Telegram's

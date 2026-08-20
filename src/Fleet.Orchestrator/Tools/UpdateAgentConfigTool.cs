@@ -28,7 +28,7 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory)
         [Description("Short name for the agent (used in group chat). Omit to keep current.")] string? short_name = null,
         [Description("Show stats in status messages. Omit to keep current.")] bool? show_stats = null,
         [Description("Prefix all outgoing telegram messages with bold [ShortName] header for shared-bot visibility. Omit to keep current.")] bool? prefix_messages = null,
-        [Description("Route outbound text through TelegramFormatter for safe HTML escaping, format-aware splitting, and Markdown→HTML conversion. Default: false (legacy dumb-split behavior). Omit to keep current.")] bool? use_formatter = null,
+        [Description("Outbound Telegram formatting mode: 0=PlainText (legacy dumb-split, no parse_mode), 1=LegacyHtml (Markdown→HTML via TelegramFormatter, ParseMode.Html), 2=Rich (same syntax emitted as sendRichMessage blocks, fallback LegacyHtml→PlainText per message). Omit to keep current.")] byte? formatting_mode = null,
         [Description("Suppress intermediate tool-use progress messages in Telegram — only post the final response. Use for agents serving non-technical users (e.g. family assistant). Omit to keep current.")] bool? suppress_tool_messages = null,
         [Description("Telegram send-only mode: skip polling and message handling, only send messages. Use when multiple agents share a bot token. Omit to keep current.")] bool? telegram_send_only = null,
         [Description("Effort level (low/medium/high/xhigh/max). Applied as --effort on Claude; mapped to codex ReasoningEffort on Codex (max collapses to xhigh). Pass empty string to clear. Omit to keep current.")] string? effort = null,
@@ -133,10 +133,12 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory)
             agent.PrefixMessages = prefix_messages.Value;
         }
 
-        if (use_formatter is not null && use_formatter != agent.UseFormatter)
+        if (formatting_mode is not null && formatting_mode != (byte)agent.FormattingMode)
         {
-            changes.AppendLine($"- use_formatter: {agent.UseFormatter} → {use_formatter}");
-            agent.UseFormatter = use_formatter.Value;
+            if (formatting_mode > 2)
+                return $"Invalid formatting_mode {formatting_mode}. Valid values: 0 (PlainText), 1 (LegacyHtml), 2 (Rich).";
+            changes.AppendLine($"- formatting_mode: {(byte)agent.FormattingMode} → {formatting_mode}");
+            agent.FormattingMode = (Fleet.Shared.FormattingMode)formatting_mode.Value;
         }
 
         if (suppress_tool_messages is not null && suppress_tool_messages != agent.SuppressToolMessages)

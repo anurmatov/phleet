@@ -1,5 +1,6 @@
 namespace Fleet.Orchestrator.Data;
 using System.ComponentModel.DataAnnotations;
+using Fleet.Shared;
 
 public class Agent
 {
@@ -23,7 +24,7 @@ public class Agent
     public string ShortName { get; set; } = "";
     public bool ShowStats { get; set; } = true;
     public bool PrefixMessages { get; set; } = false;
-    public bool UseFormatter { get; set; } = false;
+    public FormattingMode FormattingMode { get; set; } = FormattingMode.PlainText;
     public bool SuppressToolMessages { get; set; } = false;
     public bool TelegramSendOnly { get; set; } = false;
     public string? Image { get; set; }

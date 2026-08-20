@@ -325,6 +325,36 @@ public static class TelegramFormatter
     }
 
     /// <summary>
+    /// Splits plain (unformatted) text into chunks of at most <see cref="TelegramMaxLength"/> chars.
+    /// Prefers newline boundaries in the second half of a chunk; backs off from surrogate pairs.
+    /// Used by the Rich→PlainText last-resort fallback to guarantee delivery without splitting emoji.
+    /// </summary>
+    internal static List<string> SplitPlain(string text)
+    {
+        if (text.Length <= TelegramMaxLength) return [text];
+
+        var chunks = new List<string>();
+        var remaining = text.AsSpan();
+        while (remaining.Length > 0)
+        {
+            if (remaining.Length <= TelegramMaxLength)
+            {
+                chunks.Add(remaining.ToString());
+                break;
+            }
+            int cut = TelegramMaxLength;
+            // don't split a surrogate pair
+            if (char.IsLowSurrogate(remaining[cut]) && cut > 0) cut--;
+            // prefer newline boundary in the second half of the chunk
+            int nl = remaining[..cut].LastIndexOf('\n');
+            if (nl > cut / 2) cut = nl + 1;
+            chunks.Add(remaining[..cut].ToString());
+            remaining = remaining[cut..];
+        }
+        return chunks;
+    }
+
+    /// <summary>
     /// Finds the best split index at or before <paramref name="limit"/> characters.
     /// Prefers paragraph/line boundaries; backs off from tag/surrogate boundaries.
     /// </summary>

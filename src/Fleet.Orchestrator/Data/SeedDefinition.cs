@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Fleet.Shared;
 
 namespace Fleet.Orchestrator.Data;
 
@@ -36,7 +37,7 @@ public sealed class SeedAgent
     public bool   ShowStats                { get; set; } = false;
     public bool   TelegramSendOnly         { get; set; } = false;
     public bool   PrefixMessages           { get; set; } = false;
-    public bool   UseFormatter             { get; set; } = false;
+    public FormattingMode FormattingMode    { get; set; } = FormattingMode.PlainText;
 
     // Associations
     public List<string>      Tools        { get; set; } = [];

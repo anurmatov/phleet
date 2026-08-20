@@ -39,6 +39,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     private readonly TtsService _tts;
     private readonly IFleetConnectionState _connectionState;
     private readonly ILogger<AgentTransport> _logger;
+    private readonly RichFallbackCounter _richFallbackCounter;
 
     // DocumentDownloadHelper wraps IDocumentDownloader so the download+persist path
     // can be unit-tested by injecting a fake downloader. Exposed as internal so tests
@@ -65,7 +66,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         VoiceTranscriptionService voiceTranscription,
         TtsService tts,
         IFleetConnectionState connectionState,
-        ILogger<AgentTransport> logger)
+        ILogger<AgentTransport> logger,
+        RichFallbackCounter? richFallbackCounter = null)
     {
         _agentConfig = agentConfig.Value;
         _telegramConfig = telegramConfig.Value;
@@ -79,6 +81,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         _tts = tts;
         _connectionState = connectionState;
         _logger = logger;
+        _richFallbackCounter = richFallbackCounter ?? new RichFallbackCounter();
 
         // Only create the bot client when a token is available.
         if (!string.IsNullOrWhiteSpace(telegramConfig.Value.BotToken))
@@ -203,9 +206,19 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 if (segment.Length == 0) continue;
 
                 // Prepend bold [ShortName] header when PrefixMessages is enabled
-                if (_agentConfig.UseFormatter)
+                if (_agentConfig.FormattingMode == FormattingMode.Rich)
                 {
-                    // Formatter path: safe HTML escaping, format-aware splitting.
+                    // Rich path: emit sendRichMessage blocks, fall back per-message to LegacyHtml
+                    // then PlainText. Never drops a message. All fallbacks are logged as Warning.
+                    var prefix = _agentConfig.PrefixMessages && _agentConfig.ShortName.Length > 0
+                        ? $"{char.ToUpperInvariant(_agentConfig.ShortName[0])}{_agentConfig.ShortName[1..]}: "
+                        : null;
+                    var fullText = prefix is not null ? prefix + segment : segment;
+                    replyUsed = await SendRichWithFallbackAsync(chatId, fullText, replyToMessageId, replyUsed, ct);
+                }
+                else if (_agentConfig.FormattingMode == FormattingMode.LegacyHtml)
+                {
+                    // LegacyHtml path: Markdown→HTML via TelegramFormatter, ParseMode.Html.
                     // The prefix (if any) is counted against every chunk's budget
                     // so that prefix + chunk ≤ 4096 after combination.
                     if (_agentConfig.PrefixMessages && _agentConfig.ShortName.Length > 0)
@@ -320,6 +333,80 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         ex.Message.Contains("can't parse entities") ||
         ex.Message.Contains("Bad Request: can't parse") ||
         ex.Message.Contains("parse_mode");
+
+    /// <summary>
+    /// Sends text using the Rich path (sendRichMessage) with automatic per-message fallback:
+    /// Rich → LegacyHtml → PlainText. Every fallback is logged as Warning and counted.
+    /// Never drops a message.
+    /// </summary>
+    // Returns true if the reply token was consumed (so the caller can set replyUsed).
+    private async Task<bool> SendRichWithFallbackAsync(
+        long chatId, string text,
+        int? replyToMessageId, bool replyAlreadyUsed,
+        CancellationToken ct)
+    {
+        var agentName = _agentConfig.Name;
+        bool replyUsed = replyAlreadyUsed;
+
+        // ── Try sendRichMessage ───────────────────────────────────────────────
+        try
+        {
+            var blocks = TelegramRichFormatter.ConvertToRichBlocks(text);
+            var richMsg = new Telegram.Bot.Types.InputRichMessage { Blocks = blocks };
+            var replyParams = !replyUsed && replyToMessageId.HasValue
+                ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
+                : null;
+            var m = replyParams is not null
+                ? await _bot!.SendRichMessage(chatId, richMsg, replyParameters: replyParams, cancellationToken: ct)
+                : await _bot!.SendRichMessage(chatId, richMsg, cancellationToken: ct);
+            _lastSentMessageIds[chatId] = m.Id;
+            replyUsed = true;
+            return replyUsed;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "sendRichMessage failed for agent {Agent} chat {Chat} (failureType=rich_to_html) — falling back to LegacyHtml",
+                agentName, chatId);
+            _richFallbackCounter.Increment(agentName, "rich_to_html");
+        }
+
+        // ── LegacyHtml fallback ───────────────────────────────────────────────
+        try
+        {
+            foreach (var chunk in TelegramFormatter.FormatAndSplit(text))
+            {
+                if (chunk.Length == 0) continue;
+                var replyParams = !replyUsed && replyToMessageId.HasValue
+                    ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
+                    : null;
+                var sentId = await SendMessageWithReplyFallbackAsync(chatId, chunk,
+                    ParseMode.Html, replyParams, ct);
+                _lastSentMessageIds[chatId] = sentId;
+                replyUsed = true;
+            }
+            return replyUsed;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "LegacyHtml fallback failed for agent {Agent} chat {Chat} (failureType=html_to_plain) — falling back to PlainText",
+                agentName, chatId);
+            _richFallbackCounter.Increment(agentName, "html_to_plain");
+        }
+
+        // ── PlainText last resort ─────────────────────────────────────────────
+        foreach (var slice in TelegramFormatter.SplitPlain(text))
+        {
+            var replyParams = !replyUsed && replyToMessageId.HasValue
+                ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
+                : null;
+            var sentId = await SendMessageWithReplyFallbackAsync(chatId, slice, null, replyParams, ct);
+            _lastSentMessageIds[chatId] = sentId;
+            replyUsed = true;
+        }
+        return replyUsed;
+    }
 
     /// <summary>
     /// Extracts and strips a <c>[reply_to: N]</c> token from agent output.

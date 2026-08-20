@@ -2,6 +2,8 @@ using Fleet.Agent.Abstractions;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Interfaces;
 using Fleet.Agent.Services;
+using Fleet.Shared;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NSubstitute;
@@ -17,7 +19,7 @@ namespace Fleet.Agent.Tests;
 
 /// <summary>
 /// Integration-style tests for AgentTransport.SendTextAsync.
-/// Verifies flag-ON/OFF routing and parse-entities fallback behavior.
+/// Verifies FormattingMode routing and parse-entities fallback behavior.
 /// Uses a fake ITelegramBotClient injected via the BotForTesting seam.
 /// </summary>
 public class AgentTransportSendTextTests
@@ -25,14 +27,18 @@ public class AgentTransportSendTextTests
     // ── Helper: build a minimal AgentTransport with a captured fake bot ────────
 
     private static (AgentTransport transport, FakeAgentBot bot) BuildTransport(
-        bool useFormatter, bool prefixMessages, string shortName = "agent1")
+        FormattingMode formattingMode = FormattingMode.PlainText,
+        bool prefixMessages = false,
+        string shortName = "agent1",
+        RichFallbackCounter? counter = null,
+        ILogger<AgentTransport>? logger = null)
     {
         var agentOpts = Options.Create(new AgentOptions
         {
             Name = "fleet-agent1",
             Role = "generic-role",
             WorkDir = "/tmp/fleet-test",
-            UseFormatter = useFormatter,
+            FormattingMode = formattingMode,
             PrefixMessages = prefixMessages,
             ShortName = shortName,
         });
@@ -58,37 +64,38 @@ public class AgentTransportSendTextTests
         var transport = new AgentTransport(
             agentOpts, telegramOpts, allowlist, relay, taskMgr,
             groupBhvr, router, cmdDisp, voice, tts, connState,
-            NullLogger<AgentTransport>.Instance);
+            logger ?? NullLogger<AgentTransport>.Instance,
+            counter);
 
         var fakeBot = new FakeAgentBot();
         transport.BotForTesting = fakeBot;
         return (transport, fakeBot);
     }
 
-    // ── F2: flag-OFF plain branch (UseFormatter=false, PrefixMessages=false) ──
+    // ── PlainText: byte-identical output, no formatting ───────────────────────
 
     [Fact]
-    public async Task FlagOff_PlainBranch_SendsWithoutParseMode()
+    public async Task PlainText_SendsWithoutParseMode()
     {
-        // UseFormatter=false, PrefixMessages=false: legacy SplitMessage(text, 4000), no ParseMode.
+        // FormattingMode.PlainText: legacy split at 4000, no ParseMode.
         // Byte-identity guarantee: same text, no HTML escaping applied by the formatter.
-        var (transport, bot) = BuildTransport(useFormatter: false, prefixMessages: false);
+        var (transport, bot) = BuildTransport(formattingMode: FormattingMode.PlainText, prefixMessages: false);
 
         await transport.SendTextAsync(99, "hello **world**");
 
         Assert.Single(bot.Requests);
         var req = bot.Requests[0];
-        // Legacy plain path sends with ParseMode.None (no parse_mode set)
+        // Plain path sends with ParseMode.None (no parse_mode set)
         Assert.Equal(ParseMode.None, req.ParseMode);
         // Text must be byte-identical to input (no formatter transformation)
         Assert.Equal("hello **world**", req.Text);
     }
 
     [Fact]
-    public async Task FlagOff_PlainBranch_LongTextSplitsAt4000()
+    public async Task PlainText_LongTextSplitsAt4000()
     {
-        // Legacy plain path splits at 4000, not 3990 or 4096 minus formatter reserve.
-        var (transport, bot) = BuildTransport(useFormatter: false, prefixMessages: false);
+        // PlainText splits at 4000, not 3990 or 4096 minus formatter reserve.
+        var (transport, bot) = BuildTransport(formattingMode: FormattingMode.PlainText, prefixMessages: false);
 
         var text = new string('a', 4001); // just over the 4000-char boundary
         await transport.SendTextAsync(99, text);
@@ -99,14 +106,14 @@ public class AgentTransportSendTextTests
         Assert.Equal(ParseMode.None, bot.Requests[1].ParseMode);
     }
 
-    // ── F2: flag-OFF prefix branch (UseFormatter=false, PrefixMessages=true) ───
+    // ── PlainText + prefix branch ────────────────────────────────────────────
 
     [Fact]
-    public async Task FlagOff_PrefixBranch_SendsHtmlWithBoldPrefix()
+    public async Task PlainText_WithPrefix_SendsHtmlWithBoldPrefix()
     {
-        // UseFormatter=false, PrefixMessages=true: legacy SplitMessage(text, 3990),
+        // FormattingMode.PlainText, PrefixMessages=true: legacy split at 3990,
         // text is HtmlEncoded, wrapped with <b>Name:</b>\n prefix, sent with ParseMode.Html.
-        var (transport, bot) = BuildTransport(useFormatter: false, prefixMessages: true, shortName: "agent1");
+        var (transport, bot) = BuildTransport(formattingMode: FormattingMode.PlainText, prefixMessages: true, shortName: "agent1");
 
         await transport.SendTextAsync(99, "result: a < b");
 
@@ -121,13 +128,13 @@ public class AgentTransportSendTextTests
         Assert.DoesNotContain("<b>result</b>", req.Text); // no bold from formatter
     }
 
-    // ── F4: wiring — flag-ON routes through TelegramFormatter ─────────────────
+    // ── LegacyHtml: wiring — routes through TelegramFormatter ─────────────────
 
     [Fact]
-    public async Task FlagOn_FormatterPath_SendsWithHtmlParseMode()
+    public async Task LegacyHtml_FormatterPath_SendsWithHtmlParseMode()
     {
-        // UseFormatter=true: FormatAndSplit is called; output always uses ParseMode.Html.
-        var (transport, bot) = BuildTransport(useFormatter: true, prefixMessages: false);
+        // FormattingMode.LegacyHtml: FormatAndSplit is called; output always uses ParseMode.Html.
+        var (transport, bot) = BuildTransport(formattingMode: FormattingMode.LegacyHtml, prefixMessages: false);
 
         await transport.SendTextAsync(99, "**bold** and `code`");
 
@@ -140,12 +147,11 @@ public class AgentTransportSendTextTests
     }
 
     [Fact]
-    public async Task FlagOn_WithPrefix_ChunkFitsWithinBudget()
+    public async Task LegacyHtml_WithPrefix_ChunkFitsWithinBudget()
     {
-        // UseFormatter=true, PrefixMessages=true: prefix budget is deducted per chunk.
+        // FormattingMode.LegacyHtml, PrefixMessages=true: prefix budget is deducted per chunk.
         // prefix = "<b>Agent1:</b>\n" = 15 chars, so each chunk ≤ 4096 - 15 = 4081.
-        // With prefix prepended, the total sent is prefix (15) + chunk (≤4081) = ≤4096.
-        var (transport, bot) = BuildTransport(useFormatter: true, prefixMessages: true, shortName: "agent1");
+        var (transport, bot) = BuildTransport(formattingMode: FormattingMode.LegacyHtml, prefixMessages: true, shortName: "agent1");
 
         // 5000 plain chars → will be split. With prefix budget, each chunk ≤ 4081.
         var text = new string('x', 5000);
@@ -160,14 +166,13 @@ public class AgentTransportSendTextTests
         }
     }
 
-    // ── Parse-entities fallback (F1): dropped → degraded ─────────────────────
+    // ── Parse-entities fallback (LegacyHtml): dropped → degraded ──────────────
 
     [Fact]
-    public async Task FlagOn_ParseEntitiesRejected_FallsBackToPlainDelivery()
+    public async Task LegacyHtml_ParseEntitiesRejected_FallsBackToPlainDelivery()
     {
-        // If the API rejects ParseMode.Html, SendMessageWithReplyFallbackAsync must
-        // fall back to plain text rather than propagating the exception and dropping the message.
-        var (transport, bot) = BuildTransport(useFormatter: true, prefixMessages: false);
+        // If the API rejects ParseMode.Html, fallback to plain text — message must not be dropped.
+        var (transport, bot) = BuildTransport(formattingMode: FormattingMode.LegacyHtml, prefixMessages: false);
 
         bot.ThrowOnHtml = true; // Reject any Html parse_mode send
         await transport.SendTextAsync(99, "**hello**");
@@ -178,15 +183,84 @@ public class AgentTransportSendTextTests
         var lastReq = bot.Requests[^1];
         Assert.Equal(ParseMode.None, lastReq.ParseMode);
     }
+
+    // ── Rich: sendRichMessage fails → LegacyHtml fallback, counter+warning ────
+
+    [Fact]
+    public async Task Rich_SendRichFails_FallsBackToLegacyHtml_IncrementsCounter()
+    {
+        // FakeAgentBot throws InvalidOperationException for any non-SendMessageRequest,
+        // which simulates sendRichMessage failing (e.g. in a private DM where it is not supported).
+        // The fallback chain must catch this, fall back to LegacyHtml, and increment the counter.
+        var counter = new RichFallbackCounter();
+        var (transport, bot) = BuildTransport(
+            formattingMode: FormattingMode.Rich, prefixMessages: false, counter: counter);
+
+        await transport.SendTextAsync(99, "**bold** text");
+
+        // Counter must be incremented for rich_to_html fallback
+        Assert.Equal(1, counter.GetCount("fleet-agent1", "rich_to_html"));
+        // Message must still be delivered via LegacyHtml (SendMessageRequest with Html parse mode)
+        Assert.True(bot.Requests.Count >= 1);
+        Assert.Equal(ParseMode.Html, bot.Requests[0].ParseMode);
+    }
+
+    [Fact]
+    public async Task Rich_SendRichFails_LogsWarning()
+    {
+        // The Warning log must be emitted when sendRichMessage fails.
+        var capturingLogger = new CapturingLogger<AgentTransport>();
+        var counter = new RichFallbackCounter();
+        var (transport, bot) = BuildTransport(
+            formattingMode: FormattingMode.Rich, prefixMessages: false,
+            counter: counter, logger: capturingLogger);
+
+        await transport.SendTextAsync(99, "hello");
+
+        // A Warning with failureType=rich_to_html must have been logged
+        var warnings = capturingLogger.Entries
+            .Where(e => e.Level == LogLevel.Warning && e.Message.Contains("rich_to_html"))
+            .ToList();
+        Assert.True(warnings.Count >= 1, "Expected at least one Warning log mentioning rich_to_html");
+    }
+
+    [Fact]
+    public async Task Rich_SendRichFails_HtmlAlsoFails_FallsBackToPlain_IncrementsCounter()
+    {
+        // When both sendRichMessage and LegacyHtml fail with a non-parse-entities error,
+        // the counter for html_to_plain is incremented and the message is delivered as plain text.
+        // Note: ThrowOnHtml (parse-entities) is caught INSIDE SendMessageWithReplyFallbackAsync
+        // and doesn't propagate. We use ThrowGenericOnHtml which throws an unexpected exception
+        // that does propagate, triggering the html_to_plain fallback in SendRichWithFallbackAsync.
+        var counter = new RichFallbackCounter();
+        var (transport, bot) = BuildTransport(
+            formattingMode: FormattingMode.Rich, prefixMessages: false, counter: counter);
+
+        bot.ThrowGenericOnHtml = true; // Non-parse-entities error — propagates past SendMessageWithReplyFallbackAsync
+
+        await transport.SendTextAsync(99, "**hello**");
+
+        // Both fallback counters should be incremented
+        Assert.Equal(1, counter.GetCount("fleet-agent1", "rich_to_html"));
+        Assert.Equal(1, counter.GetCount("fleet-agent1", "html_to_plain"));
+        // Message must still be delivered (plain text last resort)
+        Assert.True(bot.Requests.Count >= 1);
+        Assert.Equal(ParseMode.None, bot.Requests[^1].ParseMode);
+    }
 }
 
 /// <summary>
 /// Minimal ITelegramBotClient for AgentTransport tests. Captures SendMessage requests.
+/// Throws InvalidOperationException for any request type it doesn't recognise — this
+/// naturally simulates sendRichMessage failures since its request type is not SendMessageRequest.
 /// </summary>
 internal sealed class FakeAgentBot : ITelegramBotClient
 {
     public readonly List<SendMessageRequest> Requests = [];
+    /// <summary>Throw a parse-entities ApiRequestException for Html sends (caught internally by SendMessageWithReplyFallbackAsync).</summary>
     public bool ThrowOnHtml { get; set; }
+    /// <summary>Throw a generic non-parse-entities exception for Html sends (propagates up to SendRichWithFallbackAsync's LegacyHtml catch).</summary>
+    public bool ThrowGenericOnHtml { get; set; }
 
     public bool LocalBotServer => false;
     public long BotId => 1;
@@ -205,6 +279,8 @@ internal sealed class FakeAgentBot : ITelegramBotClient
         {
             if (ThrowOnHtml && smr.ParseMode == ParseMode.Html)
                 throw new ApiRequestException("Bad Request: can't parse entities in the message");
+            if (ThrowGenericOnHtml && smr.ParseMode == ParseMode.Html)
+                throw new Exception("Simulated network error (not a parse-entities error)");
             Requests.Add(smr);
             var msg = new Message { Id = Requests.Count, Chat = new Chat { Id = smr.ChatId.Identifier ?? 0 } };
             return Task.FromResult((TResponse)(object)msg);
@@ -225,4 +301,22 @@ internal sealed class FakeAgentBot : ITelegramBotClient
         => Task.CompletedTask;
     public Task DownloadFile(global::Telegram.Bot.Types.TGFile file, Stream destination, CancellationToken cancellationToken = default)
         => Task.CompletedTask;
+}
+
+/// <summary>
+/// Simple ILogger that captures log entries for test assertions.
+/// </summary>
+internal sealed class CapturingLogger<T> : ILogger<T>
+{
+    public record LogEntry(LogLevel Level, string Message);
+    public readonly List<LogEntry> Entries = [];
+
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+    public bool IsEnabled(LogLevel logLevel) => true;
+
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
+        Exception? exception, Func<TState, Exception?, string> formatter)
+    {
+        Entries.Add(new LogEntry(logLevel, formatter(state, exception)));
+    }
 }

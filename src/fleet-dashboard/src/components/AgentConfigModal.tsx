@@ -178,11 +178,17 @@ export default function AgentConfigModal({
                 <FieldHint>Prepend the agent's short name to each Telegram message (e.g. <code>[Agent]:</code>).</FieldHint>
               </div>
               <div className="config-field">
-                <label className="config-field config-field-checkbox">
-                  <input type="checkbox" checked={configEdits.useFormatter} onChange={e => onEditsChange({ useFormatter: e.target.checked })} />
-                  <span className="config-label">Use Formatter</span>
-                </label>
-                <FieldHint>Convert Markdown-like syntax to Telegram HTML before sending. Affects every message this agent sends — enable per agent to roll out gradually.</FieldHint>
+                <label className="config-label">Formatting Mode</label>
+                <select
+                  value={configEdits.formattingMode}
+                  onChange={e => onEditsChange({ formattingMode: parseInt(e.target.value, 10) })}
+                  className="config-select"
+                >
+                  <option value={0}>PlainText</option>
+                  <option value={1}>LegacyHtml</option>
+                  <option value={2}>Rich</option>
+                </select>
+                <FieldHint>PlainText: no formatting. LegacyHtml: Markdown-like syntax → Telegram HTML. Rich: sendRichMessage with LegacyHtml → PlainText fallback.</FieldHint>
               </div>
               <div className="config-field">
                 <label className="config-field config-field-checkbox">

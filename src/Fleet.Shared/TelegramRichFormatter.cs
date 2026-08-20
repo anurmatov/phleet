@@ -1,6 +1,6 @@
 using Telegram.Bot.Types;
 
-namespace Fleet.Telegram.Services;
+namespace Fleet.Shared;
 
 /// <summary>
 /// Converts a permissive Markdown-like subset to Telegram InputRichBlock structures
@@ -12,12 +12,19 @@ namespace Fleet.Telegram.Services;
 /// </summary>
 internal static class TelegramRichFormatter
 {
+    /// <summary>
+    /// Converts <paramref name="text"/> to an array of <see cref="InputRichBlock"/>.
+    /// Fenced code fences → <see cref="InputRichBlockPreformatted"/>.
+    /// All other content → <see cref="InputRichBlockParagraph"/> with inline
+    /// <see cref="RichText"/> elements for bold, code, links, and plain text.
+    /// </summary>
     internal static InputRichBlock[] ConvertToRichBlocks(string? text)
     {
         if (string.IsNullOrEmpty(text))
             return [new InputRichBlockParagraph { Text = new RichTextText { Text = string.Empty } }];
 
         var blocks = new List<InputRichBlock>();
+        // Inline rich text accumulator for the current paragraph
         var inline = new List<RichText>();
 
         void FlushParagraph()
@@ -62,6 +69,7 @@ internal static class TelegramRichFormatter
                     if (i < len && text[i] == '\n') i++;
                     continue;
                 }
+                // unmatched ``` — fall through as literal
             }
 
             // Inline code: `...`

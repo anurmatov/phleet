@@ -59,6 +59,44 @@ public class SendToCeoToolTests
         Assert.Contains("CEO chat ID", doc.GetProperty("error").GetString());
     }
 
+    // ── empty / whitespace message ─────────────────────────────────────────────
+
+    [Fact]
+    public async Task EmptyMessage_ReturnsError()
+    {
+        var tool = CreateTool(new FakeBotClient());
+        var json = await tool.SendAsync("   ");
+        var doc = JsonDocument.Parse(json).RootElement;
+        Assert.False(doc.GetProperty("ok").GetBoolean());
+        Assert.Contains("empty", doc.GetProperty("error").GetString());
+    }
+
+    // ── long message is split (F2 regression) ─────────────────────────────────
+
+    [Fact]
+    public async Task LongMessage_SplitIntoMultipleChunks()
+    {
+        // A message long enough that StripToPlain's entity-escaping (& → &amp; etc.)
+        // could push it over 4096 chars, exercising SplitPlain.
+        var calls = new List<string>();
+        var bot = new FakeBotClient(req =>
+        {
+            if (req is SendMessageRequest smr)
+                calls.Add(smr.Text);
+            return new Message { Id = calls.Count, Chat = new Chat { Id = 1 } };
+        });
+
+        var tool = CreateTool(bot);
+        // 9000 chars of plain text — well over the 4096-char Telegram limit
+        var longText = new string('a', 3000) + "\n" + new string('b', 3000) + "\n" + new string('c', 3000);
+        var json = await tool.SendAsync(longText, parse_mode: "PLAIN");
+        var doc = JsonDocument.Parse(json).RootElement;
+
+        Assert.True(doc.GetProperty("ok").GetBoolean());
+        Assert.True(calls.Count > 1, $"Expected multiple chunks; got {calls.Count}");
+        Assert.True(calls.All(c => c.Length <= 4096), "Every chunk must be within 4096 chars");
+    }
+
     // ── flag on: auto-detect formats markdown to HTML ─────────────────────────
 
     [Fact]

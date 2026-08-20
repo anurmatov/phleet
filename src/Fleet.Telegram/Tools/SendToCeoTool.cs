@@ -20,7 +20,7 @@ public sealed class SendToCeoTool(
     [Description("Send a direct message to the CEO. The CEO's chat ID and sending bot are resolved server-side — neither appears in agent context or logs. Supports a permissive Markdown-like subset (**bold**, `inline code`, fenced code blocks, [label](url) links) — automatically escaped and rendered as Telegram HTML. Returns {\"ok\":true,\"message_id\":N} on success, with optional flags: \"fallback\":true (notifier bot used), \"format_fallback\":true (formatting rejected by API, resent as plain text).")]
     public async Task<string> SendAsync(
         [Description("Message text. Supports **bold**, `inline code`, fenced code blocks, and [label](url) links.")] string text,
-        [Description("Parse mode override. Omit or empty for auto-detect (converts recognized Markdown subset to HTML). \"PLAIN\" disables all formatting.")] string parse_mode = "",
+        [Description("Parse mode override. Omit or empty for auto-detect (converts recognized Markdown subset to HTML). \"PLAIN\" disables all formatting. Legacy values HTML/MARKDOWN/MARKDOWNV2 are accepted but treated as auto-detect.")] string parse_mode = "",
         CancellationToken ct = default)
     {
         var chatId = ceoConfig.ChatId;
@@ -37,32 +37,43 @@ public sealed class SendToCeoTool(
             return JsonSerializer.Serialize(new { ok = false, error = err });
         }
 
+        // F4: empty message guard (mirrors SendMessageTool:41)
+        if (string.IsNullOrWhiteSpace(text))
+            return JsonSerializer.Serialize(new { ok = false, error = "empty message" });
+
         bool forcePlain = parse_mode?.Trim().Equals("PLAIN", StringComparison.OrdinalIgnoreCase) == true;
 
         List<string> chunks;
+        bool usingHtml;
 
         if (forcePlain)
         {
+            // StripToPlain HTML-escapes, so ParseMode.Html is required for escaping to render correctly.
             var plain = TelegramFormatter.StripToPlain(text);
-            chunks = [plain];
+            chunks = SplitPlain(plain);
+            usingHtml = true;
         }
         else
         {
             chunks = TelegramFormatter.FormatAndSplit(text);
+            usingHtml = true;
         }
 
         if (chunks.Count > 1)
             logger.LogWarning("Message to CEO was split into {Count} chunks (exceeded Telegram limit)", chunks.Count);
 
-        // Pre-flight: validate HTML before the API call to catch formatter bugs.
-        if (!forcePlain && !chunks.All(TelegramFormatter.ValidateHtml))
+        // F3: pre-flight validation must set usingHtml=false and pm=null when falling back to raw text,
+        // because StripHtmlTags unescapes entities — sending raw '<' with ParseMode.Html causes a guaranteed
+        // parse-entities error.
+        if (usingHtml && !chunks.All(TelegramFormatter.ValidateHtml))
         {
             logger.LogWarning("Pre-flight HTML validation failed for CEO message — falling back to plain text");
-            chunks = [string.Join("\n", chunks.Select(StripHtmlTags))];
-            forcePlain = true;
+            var fallbackText = string.Join("\n", chunks.Select(StripHtmlTags));
+            chunks = SplitPlain(fallbackText);
+            usingHtml = false;
         }
 
-        ParseMode pm = ParseMode.Html;
+        ParseMode? pm = usingHtml ? ParseMode.Html : null;
 
         int lastMessageId = 0;
         bool usedFallback = false;
@@ -75,15 +86,17 @@ public sealed class SendToCeoTool(
 
             var result = await TrySendAsync(client, chatId, chunk, pm, agent_name, ct);
 
-            if (!result.ok && result.parseEntitiesError && !forcePlain)
+            if (!result.ok && result.parseEntitiesError && usingHtml)
             {
                 logger.LogWarning("parse-entities error on CEO message chunk {Idx}/{Total} — falling back to plain text",
                     idx + 1, chunks.Count);
                 usedFormatFallback = true;
-                forcePlain = true;
+                usingHtml = false;
 
+                // F1+F2: use SplitPlain (not a bare collection expression) so long stripped
+                // text is correctly chunked; StripHtmlTags unescapes back to raw, pm=null.
                 var remainingText = string.Join("\n", chunks[idx..].Select(StripHtmlTags));
-                var plainChunks = [remainingText];
+                List<string> plainChunks = SplitPlain(remainingText);
 
                 foreach (var plainChunk in plainChunks)
                 {
@@ -176,6 +189,30 @@ public sealed class SendToCeoTool(
         ex.Message.Contains("can't parse entities") ||
         ex.Message.Contains("Bad Request: can't parse") ||
         ex.Message.Contains("parse_mode");
+
+    private static List<string> SplitPlain(string text)
+    {
+        const int max = 4096;
+        if (text.Length <= max) return [text];
+
+        var chunks = new List<string>();
+        var remaining = text.AsSpan();
+        while (remaining.Length > 0)
+        {
+            if (remaining.Length <= max)
+            {
+                chunks.Add(remaining.ToString());
+                break;
+            }
+            int cut = max;
+            if (char.IsLowSurrogate(remaining[cut]) && cut > 0) cut--;
+            int nl = remaining[..cut].LastIndexOf('\n');
+            if (nl > cut / 2) cut = nl + 1;
+            chunks.Add(remaining[..cut].ToString());
+            remaining = remaining[cut..];
+        }
+        return chunks;
+    }
 
     private static string StripHtmlTags(string html)
     {

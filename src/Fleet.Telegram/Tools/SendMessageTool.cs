@@ -347,31 +347,8 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
         ex.Message.Contains("Bad Request: can't parse") ||
         ex.Message.Contains("parse_mode");
 
-    private static List<string> SplitPlain(string text)
-    {
-        const int max = 4096;
-        if (text.Length <= max) return [text];
-
-        var chunks = new List<string>();
-        var remaining = text.AsSpan();
-        while (remaining.Length > 0)
-        {
-            if (remaining.Length <= max)
-            {
-                chunks.Add(remaining.ToString());
-                break;
-            }
-            int cut = max;
-            // don't split a surrogate pair
-            if (char.IsLowSurrogate(remaining[cut]) && cut > 0) cut--;
-            // prefer newline
-            int nl = remaining[..cut].LastIndexOf('\n');
-            if (nl > cut / 2) cut = nl + 1;
-            chunks.Add(remaining[..cut].ToString());
-            remaining = remaining[cut..];
-        }
-        return chunks;
-    }
+    private static List<string> SplitPlain(string text) =>
+        TelegramFormatter.SplitPlain(text);
 
     /// <summary>
     /// Strips HTML tags from a chunk of formatter output, preserving link URLs as

@@ -396,10 +396,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         }
 
         // ── PlainText last resort ─────────────────────────────────────────────
-        const int maxChunk = 4000;
-        for (int offset = 0; offset < text.Length; offset += maxChunk)
+        foreach (var slice in TelegramFormatter.SplitPlain(text))
         {
-            var slice = text.Substring(offset, Math.Min(maxChunk, text.Length - offset));
             var replyParams = !replyUsed && replyToMessageId.HasValue
                 ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
                 : null;

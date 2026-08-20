@@ -270,29 +270,8 @@ public sealed class SendToCeoTool(
         ex.Message.Contains("Bad Request: can't parse") ||
         ex.Message.Contains("parse_mode");
 
-    private static List<string> SplitPlain(string text)
-    {
-        const int max = 4096;
-        if (text.Length <= max) return [text];
-
-        var chunks = new List<string>();
-        var remaining = text.AsSpan();
-        while (remaining.Length > 0)
-        {
-            if (remaining.Length <= max)
-            {
-                chunks.Add(remaining.ToString());
-                break;
-            }
-            int cut = max;
-            if (char.IsLowSurrogate(remaining[cut]) && cut > 0) cut--;
-            int nl = remaining[..cut].LastIndexOf('\n');
-            if (nl > cut / 2) cut = nl + 1;
-            chunks.Add(remaining[..cut].ToString());
-            remaining = remaining[cut..];
-        }
-        return chunks;
-    }
+    private static List<string> SplitPlain(string text) =>
+        TelegramFormatter.SplitPlain(text);
 
     private static string StripHtmlTags(string html)
     {

@@ -143,8 +143,8 @@ public class AgentTransportSendTextTests
     public async Task FlagOn_WithPrefix_ChunkFitsWithinBudget()
     {
         // UseFormatter=true, PrefixMessages=true: prefix budget is deducted per chunk.
-        // prefix = "<b>Acto:</b>\n" = 13 chars, so each chunk ≤ 4096 - 13 = 4083.
-        // With prefix prepended, the total sent is prefix (13) + chunk (≤4083) = ≤4096.
+        // prefix = "<b>Agent1:</b>\n" = 15 chars, so each chunk ≤ 4096 - 15 = 4081.
+        // With prefix prepended, the total sent is prefix (15) + chunk (≤4081) = ≤4096.
         var (transport, bot) = BuildTransport(useFormatter: true, prefixMessages: true, shortName: "agent1");
 
         // 5000 plain chars → will be split. With prefix budget, each chunk ≤ 4083.

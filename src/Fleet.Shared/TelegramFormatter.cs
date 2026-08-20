@@ -28,7 +28,7 @@ public static class TelegramFormatter
     /// </summary>
     /// <param name="reservedPerChunk">
     /// Number of characters to reserve per chunk for a prefix that will be prepended
-    /// before sending (e.g. <c>"&lt;b&gt;Acto:&lt;/b&gt;\n".Length</c>). Default 0.
+    /// before sending (e.g. <c>"&lt;b&gt;Agent1:&lt;/b&gt;\n".Length</c>). Default 0.
     /// </param>
     public static List<string> FormatAndSplit(string? text, int reservedPerChunk = 0)
     {

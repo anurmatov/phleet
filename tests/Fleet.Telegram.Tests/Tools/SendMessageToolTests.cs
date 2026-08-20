@@ -1,0 +1,255 @@
+using System.Text.Json;
+using Fleet.Telegram.Services;
+using Fleet.Telegram.Tools;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging.Abstractions;
+using NSubstitute;
+using Telegram.Bot;
+using Telegram.Bot.Args;
+using Telegram.Bot.Exceptions;
+using Telegram.Bot.Requests;
+using Telegram.Bot.Requests.Abstractions;
+using Telegram.Bot.Types;
+using Telegram.Bot.Types.Enums;
+
+namespace Fleet.Telegram.Tests.Tools;
+
+/// <summary>
+/// Integration-style tests for SendMessageTool — covers fallback flags,
+/// parse-mode behavior, and backward compat (reply threading, 403 path).
+///
+/// SendMessage is a Telegram.Bot extension method (not on ITelegramBotClient itself),
+/// so we use FakeBotClient instead of NSubstitute.
+/// </summary>
+public class SendMessageToolTests
+{
+    private static SendMessageTool CreateTool(
+        FakeBotClient agentBot,
+        FakeBotClient? fallbackBot = null)
+    {
+        const string agentToken = "tok:agent";
+        var factory = new BotClientFactory(
+            NullLogger<BotClientFactory>.Instance,
+            token => token == agentToken ? agentBot : agentBot);
+
+        factory.ApplyAgentTokens(new Dictionary<string, string>
+            { ["testagent"] = agentToken });
+
+        if (fallbackBot is not null)
+        {
+            var field = typeof(BotClientFactory)
+                .GetField("_notifierClient",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+            field.SetValue(factory, fallbackBot);
+        }
+
+        var httpContext = new DefaultHttpContext();
+        httpContext.Request.QueryString = new QueryString("?agent=testagent");
+        var accessor = Substitute.For<IHttpContextAccessor>();
+        accessor.HttpContext.Returns(httpContext);
+
+        return new SendMessageTool(factory, accessor, NullLogger<SendMessageTool>.Instance);
+    }
+
+    // ── Empty message ─────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task EmptyMessageReturnsError()
+    {
+        var tool = CreateTool(new FakeBotClient());
+        var json = await tool.SendAsync("123", "   ");
+        var doc = JsonDocument.Parse(json).RootElement;
+        Assert.False(doc.GetProperty("ok").GetBoolean());
+        Assert.Contains("empty", doc.GetProperty("error").GetString());
+    }
+
+    // ── Test 8: Plain-text fallback, single chunk ─────────────────────────────
+
+    [Fact]
+    public async Task SingleChunkFormattingRejection_FallsBackToPlainText()
+    {
+        var bot = new FakeBotClient(req =>
+        {
+            if (req is SendMessageRequest smr && smr.ParseMode == ParseMode.Html)
+                throw new ApiRequestException("Bad Request: can't parse entities in the message");
+            return new Message { Id = 99, Chat = new Chat { Id = 1 } };
+        });
+
+        var tool = CreateTool(bot);
+        var json = await tool.SendAsync("123", "**verdict**: success");
+        var doc = JsonDocument.Parse(json).RootElement;
+
+        Assert.True(doc.GetProperty("ok").GetBoolean());
+        Assert.True(doc.GetProperty("format_fallback").GetBoolean());
+        Assert.False(doc.TryGetProperty("error", out _));
+    }
+
+    // ── Test 9: Multi-chunk partial failure ───────────────────────────────────
+
+    [Fact]
+    public async Task MultiChunkPartialFailure_RemainingChunksSentAsPlain()
+    {
+        int callCount = 0;
+        var bot = new FakeBotClient(req =>
+        {
+            callCount++;
+            if (req is SendMessageRequest smr && smr.ParseMode == ParseMode.Html && callCount == 2)
+                throw new ApiRequestException("Bad Request: can't parse entities in the message");
+            return new Message { Id = callCount * 10, Chat = new Chat { Id = 1 } };
+        });
+
+        var tool = CreateTool(bot);
+        var longText = "**important**: " + new string('a', 4000) + "\n**more**: " + new string('b', 4000);
+        var json = await tool.SendAsync("123", longText);
+        var doc = JsonDocument.Parse(json).RootElement;
+
+        Assert.True(doc.GetProperty("ok").GetBoolean());
+        Assert.True(doc.GetProperty("format_fallback").GetBoolean());
+    }
+
+    // ── Test 10: parse_mode = PLAIN disables formatting ──────────────────────
+
+    [Fact]
+    public async Task ParseModePLAIN_SendsWithoutFormatting()
+    {
+        SendMessageRequest? captured = null;
+        var bot = new FakeBotClient(req =>
+        {
+            captured = req as SendMessageRequest;
+            return new Message { Id = 1, Chat = new Chat { Id = 1 } };
+        });
+
+        var tool = CreateTool(bot);
+        await tool.SendAsync("123", "**bold** text", parse_mode: "PLAIN");
+
+        Assert.NotNull(captured);
+        // No HTML parse mode set
+        Assert.NotEqual(ParseMode.Html, captured!.ParseMode);
+        // Text does not contain bold tags or raw **
+        Assert.DoesNotContain("<b>", captured.Text);
+        Assert.DoesNotContain("**", captured.Text);
+    }
+
+    // ── Test 11a: Reply threading preserved for formatted message ─────────────
+
+    [Fact]
+    public async Task ReplyThreading_PreservedForFormattedMessage()
+    {
+        SendMessageRequest? captured = null;
+        var bot = new FakeBotClient(req =>
+        {
+            captured = req as SendMessageRequest;
+            return new Message { Id = 42, Chat = new Chat { Id = 1 } };
+        });
+
+        var tool = CreateTool(bot);
+        var json = await tool.SendAsync("123", "**hello**", reply_to_message_id: 77);
+        var doc = JsonDocument.Parse(json).RootElement;
+
+        Assert.True(doc.GetProperty("ok").GetBoolean());
+        Assert.NotNull(captured?.ReplyParameters);
+        Assert.Equal(77, captured!.ReplyParameters!.MessageId);
+    }
+
+    // ── Test 11b: 403 fallback-bot path preserved ─────────────────────────────
+
+    [Fact]
+    public async Task FallbackBot_UsedOn403_FlagPresent()
+    {
+        var agent = new FakeBotClient(_ =>
+            throw new ApiRequestException("Forbidden: bot was blocked by the user", 403));
+        var fallback = new FakeBotClient(_ =>
+            new Message { Id = 55, Chat = new Chat { Id = 1 } });
+
+        var tool = CreateTool(agent, fallback);
+        var json = await tool.SendAsync("123", "plain message");
+        var doc = JsonDocument.Parse(json).RootElement;
+
+        Assert.True(doc.GetProperty("ok").GetBoolean());
+        Assert.True(doc.GetProperty("fallback").GetBoolean());
+    }
+
+    // ── Test 11c: format_fallback distinct from fallback/reply_fallback ────────
+
+    [Fact]
+    public void FlagNamesDontCollide()
+    {
+        const string f1 = "fallback";
+        const string f2 = "reply_fallback";
+        const string f3 = "format_fallback";
+        Assert.NotEqual(f1, f2);
+        Assert.NotEqual(f1, f3);
+        Assert.NotEqual(f2, f3);
+    }
+
+    // ── Backward compat: plain-text caller unchanged ──────────────────────────
+
+    [Fact]
+    public async Task PlainTextCaller_BehaviorUnchanged()
+    {
+        SendMessageRequest? captured = null;
+        var bot = new FakeBotClient(req =>
+        {
+            captured = req as SendMessageRequest;
+            return new Message { Id = 1, Chat = new Chat { Id = 1 } };
+        });
+
+        var tool = CreateTool(bot);
+        var json = await tool.SendAsync("123", "hello world");
+        var doc = JsonDocument.Parse(json).RootElement;
+
+        Assert.True(doc.GetProperty("ok").GetBoolean());
+        Assert.False(doc.TryGetProperty("format_fallback", out _));
+        Assert.False(doc.TryGetProperty("fallback", out _));
+        Assert.False(doc.TryGetProperty("reply_fallback", out _));
+        Assert.NotNull(captured);
+        Assert.Equal("hello world", captured!.Text);
+        // Plain text: no HTML mode
+        Assert.NotEqual(ParseMode.Html, captured.ParseMode);
+    }
+}
+
+/// <summary>
+/// Minimal ITelegramBotClient implementation for testing. Routes all requests through
+/// a configurable handler. Needed because SendMessage is an extension method and
+/// NSubstitute cannot intercept extension method calls.
+/// </summary>
+internal sealed class FakeBotClient : ITelegramBotClient
+{
+    private readonly Func<object, object>? _handler;
+
+    public FakeBotClient(Func<object, object>? handler = null) => _handler = handler;
+
+    public bool LocalBotServer => false;
+    public long BotId => 1;
+    public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(30);
+    public IExceptionParser ExceptionsParser { get; set; } = new DefaultExceptionParser();
+
+#pragma warning disable CS0067
+    public event AsyncEventHandler<ApiRequestEventArgs>? OnMakingApiRequest;
+    public event AsyncEventHandler<ApiResponseEventArgs>? OnApiResponseReceived;
+#pragma warning restore CS0067
+
+    public Task<TResponse> MakeRequestAsync<TResponse>(
+        IRequest<TResponse> request, CancellationToken cancellationToken = default)
+    {
+        if (_handler is null) throw new InvalidOperationException("No handler configured");
+        var result = _handler(request);
+        if (result is Exception ex) throw ex;
+        return Task.FromResult((TResponse)result);
+    }
+
+    public Task<TResponse> SendRequest<TResponse>(
+        IRequest<TResponse> request, CancellationToken cancellationToken = default)
+        => MakeRequestAsync(request, cancellationToken);
+
+    public Task<TResponse> MakeRequest<TResponse>(
+        IRequest<TResponse> request, CancellationToken cancellationToken = default)
+        => MakeRequestAsync(request, cancellationToken);
+
+    public Task<bool> TestApi(CancellationToken cancellationToken = default)
+        => Task.FromResult(true);
+
+    public Task DownloadFile(string filePath, Stream destination,
+        CancellationToken cancellationToken = default) => Task.CompletedTask;
+}

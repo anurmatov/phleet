@@ -12,22 +12,17 @@ namespace Fleet.Telegram.Tools;
 [McpServerToolType]
 public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccessor httpContextAccessor, ILogger<SendMessageTool> logger)
 {
-    private const int TelegramMaxLength = 4096;
-
     [McpServerTool(Name = "send_message")]
-    [Description("Post a text message to a Telegram chat. Returns {\"ok\":true,\"message_id\":N} on success, {\"ok\":true,\"message_id\":N,\"fallback\":true} when the notifier bot was used as fallback, {\"ok\":true,\"message_id\":N,\"reply_fallback\":true} when the reply target was not found and sent standalone, or {\"ok\":false,\"error\":\"...\"} on failure.")]
+    [Description("Post a text message to a Telegram chat. Supports a permissive Markdown-like subset (**bold**, `inline code`, fenced code blocks, [label](url) links) — automatically escaped and rendered as Telegram HTML. Returns {\"ok\":true,\"message_id\":N} on success, with optional flags: \"fallback\":true (notifier bot used), \"reply_fallback\":true (reply target not found, sent standalone), \"format_fallback\":true (formatting rejected by API, resent as plain text).")]
     public async Task<string> SendAsync(
         [Description("Telegram chat ID as integer or string (e.g. -1001234567890 or \"-1001234567890\" for a group, positive integer for a DM)")] string chat_id,
-        [Description("Message text (max 4096 chars per Telegram limit; longer text is split into multiple messages)")] string text,
-        [Description("Parse mode for message formatting: HTML, Markdown, or MarkdownV2. Omit for plain text.")] string parse_mode = "",
+        [Description("Message text. Supports **bold**, `inline code`, fenced code blocks, and [label](url) links. List syntax (- item, 1. item) is not supported by Telegram and renders as literal text.")] string text,
+        [Description("Parse mode override. Omit or empty for auto-detect (converts recognized Markdown subset to HTML). \"PLAIN\" disables all formatting. Legacy values HTML/MARKDOWN/MARKDOWNV2 are accepted but treated as auto-detect.")] string parse_mode = "",
         [Description("Optional message ID to reply to. When supplied, the message is sent as a threaded reply. If the target message is not found, the message is sent standalone with a reply_fallback flag in the response.")] int? reply_to_message_id = null,
         CancellationToken cancellationToken = default)
     {
-        // Agent identity is resolved server-side from the ?agent= query parameter
-        // baked into the MCP URL at provision time — never supplied by the caller.
         var agent_name = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault() ?? "";
 
-        // Accept chat_id as string or integer — LLM agents often serialize numeric IDs as strings
         if (!long.TryParse(chat_id?.Trim(), out var chatIdLong))
             return JsonSerializer.Serialize(new { ok = false, error = $"Invalid chat_id '{chat_id}' — must be a numeric value" });
         if (chat_id != null && (chat_id.StartsWith('"') || chat_id.EndsWith('"')))
@@ -41,47 +36,106 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
             return JsonSerializer.Serialize(new { ok = false, error = err });
         }
 
-        ParseMode? pm = parse_mode?.Trim().ToUpperInvariant() switch
-        {
-            "HTML" => ParseMode.Html,
-            "MARKDOWN" => ParseMode.Markdown,
-            "MARKDOWNV2" => ParseMode.MarkdownV2,
-            _ => null
-        };
+        // Empty/whitespace messages are rejected by Telegram
+        if (string.IsNullOrWhiteSpace(text))
+            return JsonSerializer.Serialize(new { ok = false, error = "empty message" });
 
-        // Split text into chunks if it exceeds the Telegram limit
-        var chunks = SplitText(text);
+        bool forcePlain = parse_mode?.Trim().Equals("PLAIN", StringComparison.OrdinalIgnoreCase) == true;
+
+        List<string> chunks;
+        bool usingHtml;
+
+        if (forcePlain)
+        {
+            // Explicit plain-text opt-out: strip markdown, escape, send without parse_mode
+            var plain = TelegramFormatter.StripToPlain(text);
+            chunks = SplitPlain(plain);
+            usingHtml = false;
+        }
+        else
+        {
+            // Auto-detect: convert recognized Markdown subset to Telegram HTML
+            chunks = TelegramFormatter.FormatAndSplit(text);
+            usingHtml = chunks.Any(TelegramFormatter.HasFormatting);
+        }
+
         if (chunks.Count > 1)
-            logger.LogWarning("Message to chat {ChatId} was split into {Count} chunks (exceeded {Limit} chars)", chatIdLong, chunks.Count, TelegramMaxLength);
+            logger.LogWarning("Message to chat {ChatId} was split into {Count} chunks", chatIdLong, chunks.Count);
+
+        ParseMode? pm = usingHtml ? ParseMode.Html : null;
 
         int lastMessageId = 0;
         bool usedFallback = false;
         bool usedReplyFallback = false;
+        bool usedFormatFallback = false;
         bool replyConsumed = false;
 
-        foreach (var chunk in chunks)
+        for (int idx = 0; idx < chunks.Count; idx++)
         {
-            // Only the first chunk uses reply threading; subsequent chunks are standalone
+            var chunk = chunks[idx];
+            if (string.IsNullOrEmpty(chunk)) continue;
+
             var replyId = !replyConsumed ? reply_to_message_id : null;
             var result = await TrySendAsync(client, chatIdLong, chunk, pm, agent_name, replyId, cancellationToken);
             replyConsumed = true;
+
+            if (!result.ok && result.parseEntitiesError && usingHtml)
+            {
+                // Formatting rejected — fall back to plain text for this and remaining chunks
+                logger.LogWarning("parse-entities error on chunk {Idx}/{Total} for chat {ChatId} — falling back to plain text for remaining chunks",
+                    idx + 1, chunks.Count, chatIdLong);
+                usedFormatFallback = true;
+                pm = null;
+                usingHtml = false;
+
+                // Rebuild remaining chunks as plain text (including current)
+                var remainingText = string.Join("\n", chunks[idx..].Select(StripHtmlTags));
+                var plainChunks = SplitPlain(TelegramFormatter.StripToPlain(remainingText));
+
+                foreach (var plainChunk in plainChunks)
+                {
+                    if (string.IsNullOrEmpty(plainChunk)) continue;
+                    var pr = !replyConsumed ? reply_to_message_id : null;
+                    var plainResult = await TrySendAsync(client, chatIdLong, plainChunk, null, agent_name, pr, cancellationToken);
+                    replyConsumed = true;
+                    if (!plainResult.ok)
+                        return JsonSerializer.Serialize(new { ok = false, error = plainResult.error });
+                    lastMessageId = plainResult.messageId;
+                    if (plainResult.fallback) usedFallback = true;
+                    if (plainResult.replyFallback) usedReplyFallback = true;
+                }
+                // Done — remaining chunks handled above
+                break;
+            }
+
             if (!result.ok)
                 return JsonSerializer.Serialize(new { ok = false, error = result.error });
+
             lastMessageId = result.messageId;
             if (result.fallback) usedFallback = true;
             if (result.replyFallback) usedReplyFallback = true;
         }
 
+        // Build response with whichever flags fired
+        if (usedFallback && usedReplyFallback && usedFormatFallback)
+            return JsonSerializer.Serialize(new { ok = true, message_id = lastMessageId, fallback = true, reply_fallback = true, format_fallback = true });
+        if (usedFallback && usedFormatFallback)
+            return JsonSerializer.Serialize(new { ok = true, message_id = lastMessageId, fallback = true, format_fallback = true });
+        if (usedReplyFallback && usedFormatFallback)
+            return JsonSerializer.Serialize(new { ok = true, message_id = lastMessageId, reply_fallback = true, format_fallback = true,
+                warning = "reply target not found, sent as standalone" });
         if (usedFallback)
             return JsonSerializer.Serialize(new { ok = true, message_id = lastMessageId, fallback = true });
         if (usedReplyFallback)
             return JsonSerializer.Serialize(new { ok = true, message_id = lastMessageId, reply_fallback = true,
                 warning = "reply target not found, sent as standalone" });
+        if (usedFormatFallback)
+            return JsonSerializer.Serialize(new { ok = true, message_id = lastMessageId, format_fallback = true });
 
         return JsonSerializer.Serialize(new { ok = true, message_id = lastMessageId });
     }
 
-    private async Task<(bool ok, int messageId, string error, bool fallback, bool replyFallback)> TrySendAsync(
+    private async Task<(bool ok, int messageId, string error, bool fallback, bool replyFallback, bool parseEntitiesError)> TrySendAsync(
         ITelegramBotClient client,
         long chatId,
         string text,
@@ -101,11 +155,15 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
                     replyParameters: replyParams, cancellationToken: ct)
                 : await client.SendMessage(chatId, text,
                     replyParameters: replyParams, cancellationToken: ct);
-            return (true, msg.Id, string.Empty, false, false);
+            return (true, msg.Id, string.Empty, false, false, false);
+        }
+        catch (Exception ex) when (IsParseEntitiesError(ex))
+        {
+            logger.LogWarning(ex, "Bot API parse-entities error for chat {ChatId}", chatId);
+            return (false, 0, ex.Message, false, false, true);
         }
         catch (Exception ex) when (IsReplyNotFound(ex))
         {
-            // Reply target gone (e.g. message deleted) — fall back to standalone send with a warning
             logger.LogWarning("Reply target {ReplyId} not found in chat {ChatId} — sending as standalone",
                 replyToMessageId, chatId);
             try
@@ -113,17 +171,16 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
                 var msg = parseMode.HasValue
                     ? await client.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
                     : await client.SendMessage(chatId, text, cancellationToken: ct);
-                return (true, msg.Id, string.Empty, false, true);
+                return (true, msg.Id, string.Empty, false, true, false);
             }
             catch (Exception fbEx)
             {
                 logger.LogError(fbEx, "Standalone fallback also failed for chat {ChatId}", chatId);
-                return (false, 0, fbEx.Message, false, true);
+                return (false, 0, fbEx.Message, false, true, false);
             }
         }
         catch (Exception ex) when (Is403(ex))
         {
-            // 403 Forbidden: bot not a member or blocked — try fallback if not already using it
             var fallback = factory.GetFallbackClient();
             if (fallback is not null && fallback != client)
             {
@@ -132,27 +189,25 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
                     agentName, chatId);
                 try
                 {
-                    // Strip reply threading when falling back — the fallback bot may not be
-                    // a member of the same chat thread and the original reply may not be visible.
                     var msg = parseMode.HasValue
                         ? await fallback.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
                         : await fallback.SendMessage(chatId, text, cancellationToken: ct);
-                    return (true, msg.Id, string.Empty, true, false);
+                    return (true, msg.Id, string.Empty, true, false, false);
                 }
                 catch (Exception fbEx)
                 {
                     logger.LogError(fbEx, "Fallback bot also failed for chat {ChatId}", chatId);
-                    return (false, 0, fbEx.Message, true, false);
+                    return (false, 0, fbEx.Message, true, false, false);
                 }
             }
 
             logger.LogError(ex, "Bot for agent '{AgentName}' got 403 on chat {ChatId}", agentName, chatId);
-            return (false, 0, ex.Message, false, false);
+            return (false, 0, ex.Message, false, false, false);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to send message to chat {ChatId}", chatId);
-            return (false, 0, ex.Message, false, false);
+            return (false, 0, ex.Message, false, false, false);
         }
     }
 
@@ -166,23 +221,52 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
         ex.Message.Contains("message to be replied not found") ||
         ex.Message.Contains("reply message not found");
 
-    private static List<string> SplitText(string text)
+    private static bool IsParseEntitiesError(Exception ex) =>
+        ex.Message.Contains("can't parse entities") ||
+        ex.Message.Contains("Bad Request: can't parse") ||
+        ex.Message.Contains("parse_mode");
+
+    private static List<string> SplitPlain(string text)
     {
-        if (text.Length <= TelegramMaxLength)
-            return [text];
+        const int max = 4096;
+        if (text.Length <= max) return [text];
 
         var chunks = new List<string>();
         var remaining = text.AsSpan();
         while (remaining.Length > 0)
         {
-            var chunk = remaining.Length > TelegramMaxLength
-                ? remaining[..TelegramMaxLength]
-                : remaining;
-            chunks.Add(chunk.ToString());
-            remaining = remaining.Length > TelegramMaxLength
-                ? remaining[TelegramMaxLength..]
-                : [];
+            if (remaining.Length <= max)
+            {
+                chunks.Add(remaining.ToString());
+                break;
+            }
+            int cut = max;
+            // don't split a surrogate pair
+            if (char.IsLowSurrogate(remaining[cut]) && cut > 0) cut--;
+            // prefer newline
+            int nl = remaining[..cut].LastIndexOf('\n');
+            if (nl > cut / 2) cut = nl + 1;
+            chunks.Add(remaining[..cut].ToString());
+            remaining = remaining[cut..];
         }
         return chunks;
+    }
+
+    private static string StripHtmlTags(string html)
+    {
+        // Minimal strip for converting already-rendered HTML back to plain before re-escaping
+        var sb = new System.Text.StringBuilder(html.Length);
+        bool inTag = false;
+        foreach (char c in html)
+        {
+            if (c == '<') { inTag = true; continue; }
+            if (c == '>') { inTag = false; continue; }
+            if (!inTag) sb.Append(c);
+        }
+        return sb.ToString()
+            .Replace("&amp;", "&")
+            .Replace("&lt;", "<")
+            .Replace("&gt;", ">")
+            .Replace("&quot;", "\"");
     }
 }

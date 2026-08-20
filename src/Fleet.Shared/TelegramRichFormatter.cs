@@ -310,6 +310,7 @@ internal static class TelegramRichFormatter
             Text     = ParseInlineRichText(col < headerCells.Count ? headerCells[col].Trim() : string.Empty),
             IsHeader = true,
             Align    = col < aligns.Count ? aligns[col] : RichBlockTableCellAlign.Left,
+            Valign   = RichBlockTableCellValign.Middle,
         }).ToList());
 
         int i = start + 2;
@@ -321,6 +322,7 @@ internal static class TelegramRichFormatter
                 Text     = ParseInlineRichText(col < dataCells.Count ? dataCells[col].Trim() : string.Empty),
                 IsHeader = false,
                 Align    = col < aligns.Count ? aligns[col] : RichBlockTableCellAlign.Left,
+                Valign   = RichBlockTableCellValign.Middle,
             }).ToList());
             i++;
         }

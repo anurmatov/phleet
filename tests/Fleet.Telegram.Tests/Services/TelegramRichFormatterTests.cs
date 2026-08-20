@@ -1,4 +1,6 @@
+using System.Text.Json;
 using Fleet.Shared;
+using Telegram.Bot;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 
@@ -361,5 +363,38 @@ public class TelegramRichFormatterTests
         var item   = list.Items.First();
         Assert.False(item.HasCheckbox);
         Assert.False(item.IsChecked);
+    }
+
+    // ── Serialization regression — enum zero-value guard ─────────────────────
+    // All non-nullable Bot API enums on constructed RichBlock* types must be
+    // explicitly set to a valid (non-zero) member, otherwise Telegram.Bot's
+    // EnumConverter throws JsonException at wire-send time.
+    // This test catches any future addition of an enum property that is left
+    // at its default 0, which the construction-only tests above cannot catch.
+
+    [Fact]
+    public void Table_WithHeadingAndLists_SerializesWithoutException()
+    {
+        // Input contains all three Phase-2 block types plus a paragraph.
+        // The table is the critical case: RichBlockTableCell.Valign must be
+        // set to a non-zero value or Telegram.Bot's EnumConverter throws.
+        var input = string.Join("\n",
+            "# Heading",
+            "- alpha",
+            "- beta",
+            "1. one",
+            "| A | B |",
+            "|---|---|",
+            "| x | y |",
+            "footer"
+        );
+
+        var blocks = TelegramRichFormatter.ConvertToRichBlocks(input);
+        var richMessage = new InputRichMessage { Blocks = blocks };
+
+        // Use Telegram.Bot's own JsonSerializerOptions — this is the exact
+        // serializer path that sendRichMessage uses on the wire.
+        var ex = Record.Exception(() => JsonSerializer.Serialize(richMessage, JsonBotAPI.Options));
+        Assert.Null(ex);
     }
 }

@@ -205,6 +205,67 @@ public class TelegramFormatterTests
         Assert.DoesNotContain("](", result);
     }
 
+    [Fact]
+    public void PlainModeDoesNotEscapeHtmlEntities()
+    {
+        // PLAIN mode sends with no parse_mode — raw text. HTML entities must NOT appear
+        // because Telegram would render &lt; literally instead of <.
+        var result = TelegramFormatter.StripToPlain("text with <angle> brackets & ampersands");
+        Assert.Contains("<angle>", result);
+        Assert.Contains("&", result);
+        Assert.DoesNotContain("&lt;", result);
+        Assert.DoesNotContain("&amp;", result);
+    }
+
+    // ── Test 10c: Link href preserved across a split ──────────────────────────
+
+    [Fact]
+    public void SplitPreservesLinkHrefAcrossChunks()
+    {
+        // Build HTML that forces a split in the middle of an <a> link span.
+        // The spec requires the identical tag (including attributes) to reopen in the next chunk.
+        var prefix = new string('a', 4050);
+        var linkContent = new string('b', 100);
+        var html = prefix + $"<a href=\"https://example.com\">{linkContent}</a>";
+
+        Assert.True(html.Length > 4096, $"Expected html.Length > 4096 but was {html.Length}");
+        var chunks = TelegramFormatter.SplitHtml(html);
+
+        Assert.True(chunks.Count >= 2, "Expected at least 2 chunks");
+        // The second chunk must reopen with the FULL href, not a bare <a>
+        Assert.StartsWith("<a href=\"https://example.com\">", chunks[1]);
+    }
+
+    // ── ValidateHtml pre-flight checks ────────────────────────────────────────
+
+    [Fact]
+    public void ValidateHtml_BalancedTags_ReturnsTrue()
+    {
+        Assert.True(TelegramFormatter.ValidateHtml("<b>hello</b> world"));
+        Assert.True(TelegramFormatter.ValidateHtml("<pre>code</pre>"));
+        Assert.True(TelegramFormatter.ValidateHtml("plain text &lt;no tags&gt;"));
+        Assert.True(TelegramFormatter.ValidateHtml(string.Empty));
+    }
+
+    [Fact]
+    public void ValidateHtml_UnbalancedTag_ReturnsFalse()
+    {
+        Assert.False(TelegramFormatter.ValidateHtml("<b>unclosed bold"));
+        Assert.False(TelegramFormatter.ValidateHtml("</b>extra close"));
+    }
+
+    [Fact]
+    public void ValidateHtml_UnescapedAmpersand_ReturnsFalse()
+    {
+        Assert.False(TelegramFormatter.ValidateHtml("AT&T is a company"));
+    }
+
+    [Fact]
+    public void ValidateHtml_WellFormedEntities_ReturnsTrue()
+    {
+        Assert.True(TelegramFormatter.ValidateHtml("a &amp; b &lt; c &gt; d &quot; e"));
+    }
+
     // ── Test 11: Backward compatibility / flag non-collision ─────────────────
 
     [Fact]

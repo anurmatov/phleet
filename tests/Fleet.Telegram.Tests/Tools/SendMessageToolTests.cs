@@ -130,6 +130,81 @@ public class SendMessageToolTests
         Assert.DoesNotContain("**", captured.Text);
     }
 
+    [Fact]
+    public async Task ParseModePLAIN_AngleBracketsNotEscaped()
+    {
+        // PLAIN sends raw text with no parse_mode. Angle brackets must NOT become &lt; / &gt;
+        // because Telegram would render the entity literally instead of the character.
+        SendMessageRequest? captured = null;
+        var bot = new FakeBotClient(req =>
+        {
+            captured = req as SendMessageRequest;
+            return new Message { Id = 1, Chat = new Chat { Id = 1 } };
+        });
+
+        var tool = CreateTool(bot);
+        await tool.SendAsync("123", "text with <angle>", parse_mode: "PLAIN");
+
+        Assert.NotNull(captured);
+        Assert.NotEqual(ParseMode.Html, captured!.ParseMode);
+        Assert.Contains("<angle>", captured.Text);
+        Assert.DoesNotContain("&lt;", captured.Text);
+    }
+
+    // ── Finding 1 regression: plain prose with angle brackets uses Html mode ──
+
+    [Fact]
+    public async Task PlainProseWithAngleBrackets_SentWithHtmlModeAndEscaped()
+    {
+        // Before fix: usingHtml was false for prose with no formatting tokens,
+        // so text got escaped but sent with pm=null → &lt; rendered literally.
+        // After fix: always use ParseMode.Html so escaping is correct.
+        SendMessageRequest? captured = null;
+        var bot = new FakeBotClient(req =>
+        {
+            captured = req as SendMessageRequest;
+            return new Message { Id = 1, Chat = new Chat { Id = 1 } };
+        });
+
+        var tool = CreateTool(bot);
+        await tool.SendAsync("123", "Result is List<string> and a < b");
+
+        Assert.NotNull(captured);
+        Assert.Equal(ParseMode.Html, captured!.ParseMode);
+        Assert.Contains("&lt;string&gt;", captured.Text);
+        Assert.DoesNotContain("List<string>", captured.Text); // raw < must not appear
+    }
+
+    // ── Finding 2 regression: reply thread preserved when format fallback fires ─
+
+    [Fact]
+    public async Task FormatFallback_PreservesReplyThread()
+    {
+        // Before fix: replyConsumed was set unconditionally before checking result.ok,
+        // so the plain-text retry got pr=null and the reply thread was silently dropped.
+        int callCount = 0;
+        SendMessageRequest? firstPlainRequest = null;
+        var bot = new FakeBotClient(req =>
+        {
+            callCount++;
+            var smr = (SendMessageRequest)req;
+            if (smr.ParseMode == ParseMode.Html)
+                throw new ApiRequestException("Bad Request: can't parse entities in the message");
+            firstPlainRequest ??= smr;
+            return new Message { Id = callCount * 10, Chat = new Chat { Id = 1 } };
+        });
+
+        var tool = CreateTool(bot);
+        var json = await tool.SendAsync("123", "**verdict**: success", reply_to_message_id: 42);
+        var doc = JsonDocument.Parse(json).RootElement;
+
+        Assert.True(doc.GetProperty("ok").GetBoolean());
+        Assert.True(doc.GetProperty("format_fallback").GetBoolean());
+        // Reply must be carried to the first plain-text chunk, not dropped
+        Assert.NotNull(firstPlainRequest?.ReplyParameters);
+        Assert.Equal(42, firstPlainRequest!.ReplyParameters!.MessageId);
+    }
+
     // ── Test 11a: Reply threading preserved for formatted message ─────────────
 
     [Fact]
@@ -204,8 +279,8 @@ public class SendMessageToolTests
         Assert.False(doc.TryGetProperty("reply_fallback", out _));
         Assert.NotNull(captured);
         Assert.Equal("hello world", captured!.Text);
-        // Plain text: no HTML mode
-        Assert.NotEqual(ParseMode.Html, captured.ParseMode);
+        // Formatter always uses Html parse_mode; "hello world" has no special chars so it's safe
+        Assert.Equal(ParseMode.Html, captured.ParseMode);
     }
 }
 

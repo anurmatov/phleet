@@ -47,22 +47,36 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
 
         if (forcePlain)
         {
-            // Explicit plain-text opt-out: strip markdown, escape, send without parse_mode
+            // Explicit plain-text opt-out: strip markdown, send without parse_mode
             var plain = TelegramFormatter.StripToPlain(text);
             chunks = SplitPlain(plain);
             usingHtml = false;
         }
         else
         {
-            // Auto-detect: convert recognized Markdown subset to Telegram HTML
+            // Auto-detect: convert recognized Markdown subset to Telegram HTML.
+            // The formatter always produces valid escaped HTML, so always use Html parse_mode —
+            // even for plain prose with < > & characters (which would render as &lt; etc.
+            // without parse_mode and confuse readers).
             chunks = TelegramFormatter.FormatAndSplit(text);
-            usingHtml = chunks.Any(TelegramFormatter.HasFormatting);
+            usingHtml = true;
         }
 
         if (chunks.Count > 1)
             logger.LogWarning("Message to chat {ChatId} was split into {Count} chunks", chatIdLong, chunks.Count);
 
         ParseMode? pm = usingHtml ? ParseMode.Html : null;
+
+        // Pre-flight: validate HTML structure before the API call to avoid unnecessary rejections.
+        // This catches formatter bugs; in normal operation every chunk should pass.
+        if (usingHtml && !chunks.All(TelegramFormatter.ValidateHtml))
+        {
+            logger.LogWarning("Pre-flight HTML validation failed for chat {ChatId} — falling back to plain text", chatIdLong);
+            var fallbackText = string.Join("\n", chunks.Select(StripHtmlTags));
+            chunks = SplitPlain(TelegramFormatter.StripToPlain(fallbackText));
+            usingHtml = false;
+            pm = null;
+        }
 
         int lastMessageId = 0;
         bool usedFallback = false;
@@ -77,18 +91,18 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
 
             var replyId = !replyConsumed ? reply_to_message_id : null;
             var result = await TrySendAsync(client, chatIdLong, chunk, pm, agent_name, replyId, cancellationToken);
-            replyConsumed = true;
 
             if (!result.ok && result.parseEntitiesError && usingHtml)
             {
-                // Formatting rejected — fall back to plain text for this and remaining chunks
+                // Formatting rejected — fall back to plain text for this and remaining chunks.
+                // Preserve the reply thread on the first plain-text send (replyConsumed not yet set).
                 logger.LogWarning("parse-entities error on chunk {Idx}/{Total} for chat {ChatId} — falling back to plain text for remaining chunks",
                     idx + 1, chunks.Count, chatIdLong);
                 usedFormatFallback = true;
                 pm = null;
                 usingHtml = false;
 
-                // Rebuild remaining chunks as plain text (including current)
+                // Rebuild remaining chunks as plain text (including current failed chunk)
                 var remainingText = string.Join("\n", chunks[idx..].Select(StripHtmlTags));
                 var plainChunks = SplitPlain(TelegramFormatter.StripToPlain(remainingText));
 
@@ -97,7 +111,7 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
                     if (string.IsNullOrEmpty(plainChunk)) continue;
                     var pr = !replyConsumed ? reply_to_message_id : null;
                     var plainResult = await TrySendAsync(client, chatIdLong, plainChunk, null, agent_name, pr, cancellationToken);
-                    replyConsumed = true;
+                    if (plainResult.ok) replyConsumed = true; // only mark consumed on success
                     if (!plainResult.ok)
                         return JsonSerializer.Serialize(new { ok = false, error = plainResult.error });
                     lastMessageId = plainResult.messageId;
@@ -111,6 +125,8 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
             if (!result.ok)
                 return JsonSerializer.Serialize(new { ok = false, error = result.error });
 
+            // Only mark reply consumed after a successful send
+            replyConsumed = true;
             lastMessageId = result.messageId;
             if (result.fallback) usedFallback = true;
             if (result.replyFallback) usedReplyFallback = true;
@@ -252,17 +268,49 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
         return chunks;
     }
 
+    /// <summary>
+    /// Strips HTML tags from a chunk of formatter output, preserving link URLs as
+    /// "label (url)" so context is not lost when falling back to plain text.
+    /// Also unescapes HTML entities (&amp; &lt; &gt; &quot;).
+    /// </summary>
     private static string StripHtmlTags(string html)
     {
-        // Minimal strip for converting already-rendered HTML back to plain before re-escaping
         var sb = new System.Text.StringBuilder(html.Length);
-        bool inTag = false;
-        foreach (char c in html)
+        string? pendingHref = null;
+        int i = 0;
+        while (i < html.Length)
         {
-            if (c == '<') { inTag = true; continue; }
-            if (c == '>') { inTag = false; continue; }
-            if (!inTag) sb.Append(c);
+            if (html[i] != '<') { sb.Append(html[i++]); continue; }
+
+            int end = html.IndexOf('>', i + 1);
+            if (end < 0) { sb.Append(html[i++]); continue; } // unclosed tag — treat < as literal
+
+            string inner = html.Substring(i + 1, end - i - 1).Trim();
+            i = end + 1;
+
+            if (inner.StartsWith("a ", StringComparison.OrdinalIgnoreCase))
+            {
+                // Extract href="..." manually to avoid a Regex dependency
+                int hrefIdx = inner.IndexOf("href=\"", StringComparison.OrdinalIgnoreCase);
+                if (hrefIdx >= 0)
+                {
+                    int hrefStart = hrefIdx + 6;
+                    int hrefEnd = inner.IndexOf('"', hrefStart);
+                    if (hrefEnd > hrefStart)
+                        pendingHref = inner.Substring(hrefStart, hrefEnd - hrefStart);
+                }
+            }
+            else if (inner.Equals("/a", StringComparison.OrdinalIgnoreCase))
+            {
+                if (pendingHref != null)
+                {
+                    sb.Append(" (").Append(pendingHref).Append(')');
+                    pendingHref = null;
+                }
+            }
+            // All other tags: skip
         }
+
         return sb.ToString()
             .Replace("&amp;", "&")
             .Replace("&lt;", "<")

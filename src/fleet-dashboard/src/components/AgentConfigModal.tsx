@@ -175,7 +175,14 @@ export default function AgentConfigModal({
                   <input type="checkbox" checked={configEdits.prefixMessages} onChange={e => onEditsChange({ prefixMessages: e.target.checked })} />
                   <span className="config-label">Prefix Messages</span>
                 </label>
-                <FieldHint>Prepend the agent's short name to each Telegram message (e.g. <code>[Acto]:</code>).</FieldHint>
+                <FieldHint>Prepend the agent's short name to each Telegram message (e.g. <code>[Agent]:</code>).</FieldHint>
+              </div>
+              <div className="config-field">
+                <label className="config-field config-field-checkbox">
+                  <input type="checkbox" checked={configEdits.useFormatter} onChange={e => onEditsChange({ useFormatter: e.target.checked })} />
+                  <span className="config-label">Use Formatter</span>
+                </label>
+                <FieldHint>Convert Markdown-like syntax to Telegram HTML before sending. Affects every message this agent sends — enable per agent to roll out gradually.</FieldHint>
               </div>
               <div className="config-field">
                 <label className="config-field config-field-checkbox">

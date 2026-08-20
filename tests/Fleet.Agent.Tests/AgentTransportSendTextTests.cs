@@ -147,7 +147,7 @@ public class AgentTransportSendTextTests
         // With prefix prepended, the total sent is prefix (15) + chunk (≤4081) = ≤4096.
         var (transport, bot) = BuildTransport(useFormatter: true, prefixMessages: true, shortName: "agent1");
 
-        // 5000 plain chars → will be split. With prefix budget, each chunk ≤ 4083.
+        // 5000 plain chars → will be split. With prefix budget, each chunk ≤ 4081.
         var text = new string('x', 5000);
         await transport.SendTextAsync(99, text);
 

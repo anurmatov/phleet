@@ -119,7 +119,7 @@ public static class DbSeeder
                 ShowStats                = def.ShowStats,
                 TelegramSendOnly         = def.TelegramSendOnly,
                 PrefixMessages           = def.PrefixMessages,
-                UseFormatter             = def.UseFormatter,
+                FormattingMode           = def.FormattingMode,
             };
             db.Agents.Add(agent);
             await db.SaveChangesAsync();

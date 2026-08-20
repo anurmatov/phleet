@@ -869,7 +869,7 @@ public sealed class ContainerProvisioningService(
                 agent.ShortName,
                 agent.ShowStats,
                 agent.PrefixMessages,
-                agent.UseFormatter,
+                agent.FormattingMode,
                 agent.SuppressToolMessages,
                 agent.Effort,
                 agent.JsonSchema,
@@ -902,6 +902,14 @@ public sealed class ContainerProvisioningService(
         var questionIdx = trimmed.IndexOf('?');
         var basePath = (questionIdx >= 0 ? trimmed[..questionIdx] : trimmed).TrimEnd('/');
         return $"{basePath}?agent={agentName}";
+    }
+
+    internal static string WithAgentTelegramParams(string url, string agentName, byte formattingMode)
+    {
+        var trimmed = url.TrimEnd('/');
+        var questionIdx = trimmed.IndexOf('?');
+        var basePath = (questionIdx >= 0 ? trimmed[..questionIdx] : trimmed).TrimEnd('/');
+        return $"{basePath}?agent={agentName}&formatting_mode={formattingMode}";
     }
 
     /// <summary>
@@ -939,9 +947,13 @@ public sealed class ContainerProvisioningService(
                     // so each server can identify the calling agent without relying on the LLM to pass it.
                     // WithAgentParam strips any existing query string before appending to prevent
                     // double-appending when the URL was stored in the DB with ?agent= already.
-                    var url = (e.McpName == "fleet-telegram" || e.McpName == "fleet-memory" || e.McpName == "fleet-temporal")
-                        ? WithAgentParam(e.Url, agent.Name)
-                        : e.Url;
+                    // fleet-telegram also gets ?formatting_mode={n} so send tools can honour the agent's
+                    // FormattingMode without an extra orchestrator round-trip on every send.
+                    var url = e.McpName == "fleet-telegram"
+                        ? WithAgentTelegramParams(e.Url, agent.Name, (byte)agent.FormattingMode)
+                        : (e.McpName == "fleet-memory" || e.McpName == "fleet-temporal")
+                            ? WithAgentParam(e.Url, agent.Name)
+                            : e.Url;
                     return (object)new { type = e.TransportType, url };
                 });
 

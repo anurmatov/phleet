@@ -69,6 +69,7 @@ else
     });
     builder.Services.AddSingleton<VoiceTranscriptionService>();
     builder.Services.AddSingleton<TtsService>();
+    builder.Services.AddSingleton<RichFallbackCounter>();
 
     builder.Services.AddHostedService<WarmupService>();
     builder.Services.AddHostedService<OrchestratorHeartbeatService>();

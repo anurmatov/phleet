@@ -14,7 +14,7 @@ namespace Fleet.Telegram.Tools;
 public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccessor httpContextAccessor, ILogger<SendMessageTool> logger)
 {
     [McpServerTool(Name = "send_message")]
-    [Description("Post a text message to a Telegram chat. Supports a permissive Markdown-like subset (**bold**, `inline code`, fenced code blocks, [label](url) links) — automatically escaped and rendered as Telegram HTML. Returns {\"ok\":true,\"message_id\":N} on success, with optional flags: \"fallback\":true (notifier bot used), \"reply_fallback\":true (reply target not found, sent standalone), \"format_fallback\":true (formatting rejected by API, resent as plain text).")]
+    [Description("Post a text message to a Telegram chat. Supports a permissive Markdown-like subset (**bold**, `inline code`, fenced code blocks, [label](url) links) — automatically escaped and rendered as Telegram HTML. Returns {\"ok\":true,\"message_id\":N} on success, with optional flags: \"fallback\":true (notifier bot used), \"reply_fallback\":true (reply target not found, sent standalone), \"format_fallback\":true (formatting rejected by API, resent as plain text), \"rich_fallback\":true (sendRichMessage failed, fell back to LegacyHtml or PlainText).")]
     public async Task<string> SendAsync(
         [Description("Telegram chat ID as integer or string (e.g. -1001234567890 or \"-1001234567890\" for a group, positive integer for a DM)")] string chat_id,
         [Description("Message text. Supports **bold**, `inline code`, fenced code blocks, and [label](url) links. List syntax (- item, 1. item) is not supported by Telegram and renders as literal text.")] string text,
@@ -23,6 +23,9 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
         CancellationToken cancellationToken = default)
     {
         var agent_name = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault() ?? "";
+        var formattingModeRaw = httpContextAccessor.HttpContext?.Request.Query["formatting_mode"].FirstOrDefault() ?? "1";
+        byte.TryParse(formattingModeRaw, out var formattingModeByte);
+        var formattingMode = (Fleet.Shared.FormattingMode)Math.Clamp((int)formattingModeByte, 0, 2);
 
         if (!long.TryParse(chat_id?.Trim(), out var chatIdLong))
             return JsonSerializer.Serialize(new { ok = false, error = $"Invalid chat_id '{chat_id}' — must be a numeric value" });
@@ -42,6 +45,13 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
             return JsonSerializer.Serialize(new { ok = false, error = "empty message" });
 
         bool forcePlain = parse_mode?.Trim().Equals("PLAIN", StringComparison.OrdinalIgnoreCase) == true;
+
+        // ── Rich path: sendRichMessage with LegacyHtml → PlainText fallback ──
+        if (formattingMode == Fleet.Shared.FormattingMode.Rich && !forcePlain)
+        {
+            return await SendRichWithFallbackAsync(
+                client, chatIdLong, text, agent_name, reply_to_message_id, cancellationToken);
+        }
 
         List<string> chunks;
         bool usingHtml;
@@ -155,6 +165,95 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
             return JsonSerializer.Serialize(new { ok = true, message_id = lastMessageId, format_fallback = true });
 
         return JsonSerializer.Serialize(new { ok = true, message_id = lastMessageId });
+    }
+
+    private async Task<string> SendRichWithFallbackAsync(
+        ITelegramBotClient client, long chatId, string text,
+        string agentName, int? replyToMessageId, CancellationToken ct)
+    {
+        int lastMessageId = 0;
+        bool usedFallback = false;
+        bool usedReplyFallback = false;
+        bool richFallback = false;
+
+        ReplyParameters? replyParams = replyToMessageId.HasValue
+            ? new ReplyParameters { MessageId = replyToMessageId.Value }
+            : null;
+
+        // ── Try sendRichMessage ─────────────────────────────────────────────
+        try
+        {
+            var blocks = TelegramRichFormatter.ConvertToRichBlocks(text);
+            var richMsg = new InputRichMessage { Blocks = blocks };
+            var m = replyParams is not null
+                ? await client.SendRichMessage(chatId, richMsg, replyParameters: replyParams, cancellationToken: ct)
+                : await client.SendRichMessage(chatId, richMsg, cancellationToken: ct);
+            return JsonSerializer.Serialize(new { ok = true, message_id = m.Id });
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "sendRichMessage failed for agent {Agent} chat {Chat} (failureType=rich_to_html) — falling back to LegacyHtml",
+                agentName, chatId);
+            richFallback = true;
+        }
+
+        // ── LegacyHtml fallback ─────────────────────────────────────────────
+        bool htmlFailed = false;
+        try
+        {
+            var chunks = TelegramFormatter.FormatAndSplit(text);
+            bool replyConsumed = false;
+            foreach (var chunk in chunks)
+            {
+                if (string.IsNullOrEmpty(chunk)) continue;
+                var rp = !replyConsumed ? replyToMessageId : null;
+                var result = await TrySendAsync(client, chatId, chunk, ParseMode.Html, agentName, rp, ct);
+                if (!result.ok)
+                    return JsonSerializer.Serialize(new { ok = false, error = result.error });
+                replyConsumed = true;
+                lastMessageId = result.messageId;
+                if (result.fallback) usedFallback = true;
+                if (result.replyFallback) usedReplyFallback = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "LegacyHtml fallback failed for agent {Agent} chat {Chat} (failureType=html_to_plain) — falling back to PlainText",
+                agentName, chatId);
+            htmlFailed = true;
+        }
+
+        // ── PlainText last resort ────────────────────────────────────────────
+        if (htmlFailed)
+        {
+            const int maxChunk = 4000;
+            bool replyConsumed = false;
+            for (int offset = 0; offset < text.Length; offset += maxChunk)
+            {
+                var slice = text.Substring(offset, Math.Min(maxChunk, text.Length - offset));
+                var rp = !replyConsumed ? replyToMessageId : null;
+                var result = await TrySendAsync(client, chatId, slice, null, agentName, rp, ct);
+                if (!result.ok)
+                    return JsonSerializer.Serialize(new { ok = false, error = result.error });
+                replyConsumed = true;
+                lastMessageId = result.messageId;
+                if (result.fallback) usedFallback = true;
+                if (result.replyFallback) usedReplyFallback = true;
+            }
+        }
+
+        // Build response
+        var resp = new System.Collections.Generic.Dictionary<string, object>
+        {
+            ["ok"] = true,
+            ["message_id"] = lastMessageId,
+            ["rich_fallback"] = richFallback,
+        };
+        if (usedFallback) resp["fallback"] = true;
+        if (usedReplyFallback) resp["reply_fallback"] = true;
+        return JsonSerializer.Serialize(resp);
     }
 
     private async Task<(bool ok, int messageId, string error, bool fallback, bool replyFallback, bool parseEntitiesError)> TrySendAsync(

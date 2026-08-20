@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using Fleet.Agent.Abstractions;
 using Fleet.Agent.Configuration;
+using Fleet.Shared;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services;
 using Microsoft.Extensions.Hosting;
@@ -22,7 +23,10 @@ namespace Fleet.Agent.Interfaces;
 /// </summary>
 public sealed class AgentTransport : BackgroundService, IMessageSink
 {
-    private readonly TelegramBotClient? _bot;
+    private ITelegramBotClient? _bot;
+
+    /// <summary>Allows tests to inject a fake bot without a real token.</summary>
+    internal ITelegramBotClient? BotForTesting { set => _bot = value; }
     private readonly AgentOptions _agentConfig;
     private readonly TelegramOptions _telegramConfig;
     private readonly AllowlistHolder _allowlist;
@@ -105,8 +109,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
 
     private sealed class TelegramBotDownloader : IDocumentDownloader
     {
-        private readonly TelegramBotClient _bot;
-        internal TelegramBotDownloader(TelegramBotClient bot) => _bot = bot;
+        private readonly ITelegramBotClient _bot;
+        internal TelegramBotDownloader(ITelegramBotClient bot) => _bot = bot;
 
         public async Task<byte[]> DownloadAsync(string fileId, CancellationToken ct)
         {
@@ -199,8 +203,45 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 if (segment.Length == 0) continue;
 
                 // Prepend bold [ShortName] header when PrefixMessages is enabled
-                if (_agentConfig.PrefixMessages && _agentConfig.ShortName.Length > 0)
+                if (_agentConfig.UseFormatter)
                 {
+                    // Formatter path: safe HTML escaping, format-aware splitting.
+                    // The prefix (if any) is counted against every chunk's budget
+                    // so that prefix + chunk ≤ 4096 after combination.
+                    if (_agentConfig.PrefixMessages && _agentConfig.ShortName.Length > 0)
+                    {
+                        var displayName = $"{char.ToUpperInvariant(_agentConfig.ShortName[0])}{_agentConfig.ShortName[1..]}";
+                        var prefix = $"<b>{displayName}:</b>\n";
+                        foreach (var chunk in TelegramFormatter.FormatAndSplit(segment, prefix.Length))
+                        {
+                            if (chunk.Length == 0) continue;
+                            var replyParams = !replyUsed && replyToMessageId.HasValue
+                                ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
+                                : null;
+                            var sentId = await SendMessageWithReplyFallbackAsync(chatId, prefix + chunk,
+                                ParseMode.Html, replyParams, ct);
+                            _lastSentMessageIds[chatId] = sentId;
+                            replyUsed = true;
+                        }
+                    }
+                    else
+                    {
+                        foreach (var chunk in TelegramFormatter.FormatAndSplit(segment))
+                        {
+                            if (chunk.Length == 0) continue;
+                            var replyParams = !replyUsed && replyToMessageId.HasValue
+                                ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
+                                : null;
+                            var sentId = await SendMessageWithReplyFallbackAsync(chatId, chunk,
+                                ParseMode.Html, replyParams, ct);
+                            _lastSentMessageIds[chatId] = sentId;
+                            replyUsed = true;
+                        }
+                    }
+                }
+                else if (_agentConfig.PrefixMessages && _agentConfig.ShortName.Length > 0)
+                {
+                    // Legacy prefix path — byte-identical to pre-formatter behavior.
                     var displayName = $"{char.ToUpperInvariant(_agentConfig.ShortName[0])}{_agentConfig.ShortName[1..]}";
                     foreach (var chunk in SplitMessage(segment, 3990))
                     {
@@ -216,6 +257,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 }
                 else
                 {
+                    // Legacy plain path — byte-identical to pre-formatter behavior.
                     foreach (var chunk in SplitMessage(segment, 4000))
                     {
                         var replyParams = !replyUsed && replyToMessageId.HasValue
@@ -233,26 +275,24 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     /// <summary>
     /// Sends a text message and returns the Telegram <c>message_id</c> of the sent message.
     /// Falls back to standalone (without reply threading) when the reply target is not found.
+    /// Falls back to plain text (strips HTML tags) when the API rejects parse-entities so the
+    /// message is always delivered — never silently dropped on a formatting failure.
     /// </summary>
     private async Task<long> SendMessageWithReplyFallbackAsync(
         long chatId, string text, ParseMode? parseMode,
         Telegram.Bot.Types.ReplyParameters? replyParams,
         CancellationToken ct)
     {
-        if (replyParams is null)
-        {
-            var m = parseMode.HasValue
-                ? await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
-                : await _bot!.SendMessage(chatId, text, cancellationToken: ct);
-            return m.Id;
-        }
-
         try
         {
-            var m = parseMode.HasValue
-                ? await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value,
-                    replyParameters: replyParams, cancellationToken: ct)
-                : await _bot!.SendMessage(chatId, text, replyParameters: replyParams, cancellationToken: ct);
+            var m = replyParams is not null
+                ? (parseMode.HasValue
+                    ? await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value,
+                        replyParameters: replyParams, cancellationToken: ct)
+                    : await _bot!.SendMessage(chatId, text, replyParameters: replyParams, cancellationToken: ct))
+                : (parseMode.HasValue
+                    ? await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
+                    : await _bot!.SendMessage(chatId, text, cancellationToken: ct));
             return m.Id;
         }
         catch (Exception ex) when (ex.Message.Contains("message to be replied not found")
@@ -264,7 +304,22 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 : await _bot!.SendMessage(chatId, text, cancellationToken: ct);
             return m.Id;
         }
+        catch (Exception ex) when (IsParseEntitiesError(ex) && parseMode == ParseMode.Html)
+        {
+            _logger.LogWarning(ex,
+                "Parse-entities error for chat {ChatId} — falling back to plain text", chatId);
+            var plain = TelegramFormatter.StripHtmlTagsToPlain(text);
+            var m = replyParams is not null
+                ? await _bot!.SendMessage(chatId, plain, replyParameters: replyParams, cancellationToken: ct)
+                : await _bot!.SendMessage(chatId, plain, cancellationToken: ct);
+            return m.Id;
+        }
     }
+
+    private static bool IsParseEntitiesError(Exception ex) =>
+        ex.Message.Contains("can't parse entities") ||
+        ex.Message.Contains("Bad Request: can't parse") ||
+        ex.Message.Contains("parse_mode");
 
     /// <summary>
     /// Extracts and strips a <c>[reply_to: N]</c> token from agent output.

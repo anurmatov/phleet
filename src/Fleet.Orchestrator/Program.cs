@@ -323,6 +323,7 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         agent.ShortName,
         agent.ShowStats,
         agent.PrefixMessages,
+        agent.UseFormatter,
         agent.SuppressToolMessages,
         agent.TelegramSendOnly,
         agent.Effort,
@@ -396,6 +397,7 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     if (body.ShortName is not null) agent.ShortName = string.IsNullOrWhiteSpace(body.ShortName) ? agent.Name : body.ShortName.Trim();
     if (body.ShowStats is not null) agent.ShowStats = body.ShowStats.Value;
     if (body.PrefixMessages is not null) agent.PrefixMessages = body.PrefixMessages.Value;
+    if (body.UseFormatter is not null) agent.UseFormatter = body.UseFormatter.Value;
     if (body.SuppressToolMessages is not null) agent.SuppressToolMessages = body.SuppressToolMessages.Value;
     if (body.TelegramSendOnly is not null) agent.TelegramSendOnly = body.TelegramSendOnly.Value;
     if (body.Effort is not null) agent.Effort = body.Effort == "" ? null : body.Effort;
@@ -1196,6 +1198,7 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         ShortName                 = string.IsNullOrWhiteSpace(body.ShortName) ? name : body.ShortName.Trim(),
         ShowStats                 = body.ShowStats                 ?? true,
         PrefixMessages            = body.PrefixMessages            ?? false,
+        UseFormatter              = body.UseFormatter              ?? false,
         SuppressToolMessages      = body.SuppressToolMessages      ?? false,
         TelegramSendOnly          = body.TelegramSendOnly          ?? false,
         Effort                    = string.IsNullOrEmpty(body.Effort) ? null : body.Effort,
@@ -2391,6 +2394,7 @@ app.MapGet("/api/agent-templates/{name}", (string name) =>
         c.GroupDebounceSeconds,
         c.ShowStats,
         c.PrefixMessages,
+        c.UseFormatter,
         c.SuppressToolMessages,
         c.TelegramSendOnly,
         c.AutoMemoryEnabled,
@@ -2701,6 +2705,7 @@ record AgentConfigUpdateRequest(
     string? ShortName,
     bool? ShowStats,
     bool? PrefixMessages,
+    bool? UseFormatter,
     bool? SuppressToolMessages,
     bool? TelegramSendOnly,
     string? Effort,
@@ -2765,6 +2770,7 @@ record CreateAgentRequest(
     string? ShortName,
     bool? ShowStats,
     bool? PrefixMessages,
+    bool? UseFormatter,
     bool? SuppressToolMessages,
     bool? TelegramSendOnly,
     string? Effort,

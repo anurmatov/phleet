@@ -70,6 +70,7 @@ export const ADVANCED_DEFAULTS: Record<string, string | number | boolean | null>
   shortName: '',
   showStats: true,
   prefixMessages: false,
+  useFormatter: false,
   suppressToolMessages: false,
   effort: null,
   jsonSchema: null,

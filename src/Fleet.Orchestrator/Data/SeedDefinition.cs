@@ -36,6 +36,7 @@ public sealed class SeedAgent
     public bool   ShowStats                { get; set; } = false;
     public bool   TelegramSendOnly         { get; set; } = false;
     public bool   PrefixMessages           { get; set; } = false;
+    public bool   UseFormatter             { get; set; } = false;
 
     // Associations
     public List<string>      Tools        { get; set; } = [];

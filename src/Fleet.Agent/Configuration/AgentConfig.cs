@@ -20,6 +20,13 @@ public sealed class AgentOptions
     public bool ShowStats { get; set; } = true;
     public bool PrefixMessages { get; set; } = false;
     /// <summary>
+    /// When true, outbound text is routed through TelegramFormatter for safe HTML escaping,
+    /// format-aware splitting, and Markdown→HTML conversion. Default: false (byte-identical
+    /// to legacy behavior: raw SplitMessage + WebUtility.HtmlEncode on the prefix branch,
+    /// raw split with no parse_mode on the plain branch).
+    /// </summary>
+    public bool UseFormatter { get; set; } = false;
+    /// <summary>
     /// When true, intermediate tool-use progress messages are not sent to Telegram.
     /// Only the final assistant text response is posted. Default: false (preserves existing behavior).
     /// </summary>

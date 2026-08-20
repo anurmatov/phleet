@@ -179,16 +179,16 @@ export default function AgentConfigModal({
               </div>
               <div className="config-field">
                 <label className="config-label">Formatting Mode</label>
+                <FieldHint>PlainText: no formatting. LegacyHtml: Markdown-like syntax → Telegram HTML. Rich: sendRichMessage with LegacyHtml → PlainText fallback.</FieldHint>
                 <select
                   value={configEdits.formattingMode}
                   onChange={e => onEditsChange({ formattingMode: parseInt(e.target.value, 10) })}
-                  className="config-select"
+                  className="config-input"
                 >
                   <option value={0}>PlainText</option>
                   <option value={1}>LegacyHtml</option>
                   <option value={2}>Rich</option>
                 </select>
-                <FieldHint>PlainText: no formatting. LegacyHtml: Markdown-like syntax → Telegram HTML. Rich: sendRichMessage with LegacyHtml → PlainText fallback.</FieldHint>
               </div>
               <div className="config-field">
                 <label className="config-field config-field-checkbox">

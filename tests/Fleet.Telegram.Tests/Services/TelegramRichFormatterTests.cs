@@ -380,6 +380,9 @@ public class TelegramRichFormatterTests
         // set to a non-zero value or Telegram.Bot's EnumConverter throws.
         var input = string.Join("\n",
             "# Heading",
+            "```bash",
+            "dotnet build",
+            "```",
             "- alpha",
             "- beta",
             "1. one",

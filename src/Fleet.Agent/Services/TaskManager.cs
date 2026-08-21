@@ -508,7 +508,11 @@ public sealed class TaskManager
 
             if (lastResult is not null)
             {
-                var marker = errorResult ? " [incomplete — hit limit]" : "";
+                // IsErrorResult covers max-turns exhaustion, auth failures, RPC errors and
+                // executor crashes alike — so the marker must not assert a specific cause.
+                // It previously claimed "hit limit" for every one of them, which sends
+                // anyone debugging a dead executor after the wrong problem.
+                var marker = errorResult ? " [incomplete — executor reported an error]" : "";
                 // Send the final text to Telegram, but relay ALL assistant texts
                 // so that agent addresses from intermediate turns aren't lost
                 await SendWithStatsAsync($"{Prefix()}{lastResult}{marker}");
@@ -520,6 +524,16 @@ public sealed class TaskManager
                 if (isSessionTask)
                     _sessions.ClearSession(chatId);
                 var errorMsg = $"Task failed: {lastError}";
+                await SendWithStatsAsync($"{Prefix()}{errorMsg}");
+                OnTaskCompleted?.Invoke(chatId, errorMsg, relaySender, source, true, correlationId, relayTaskId);
+            }
+            else if (errorResult)
+            {
+                // A result event flagged as an error but carrying no text: the turn failed
+                // and produced nothing. Reporting "Done!" here is what let a dead executor
+                // look healthy — the error flag must survive even with no output to show.
+                var errorMsg = "Task failed: executor reported an error and produced no output";
+                _logger.LogError("Task #{TaskId} for chat {ChatId}: {Error}", taskId, chatId, errorMsg);
                 await SendWithStatsAsync($"{Prefix()}{errorMsg}");
                 OnTaskCompleted?.Invoke(chatId, errorMsg, relaySender, source, true, correlationId, relayTaskId);
             }

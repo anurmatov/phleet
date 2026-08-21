@@ -400,4 +400,138 @@ public class TelegramRichFormatterTests
         var ex = Record.Exception(() => JsonSerializer.Serialize(richMessage, JsonBotAPI.Options));
         Assert.Null(ex);
     }
+
+    // ── Termination guarantee tests (issue #222) ──────────────────────────────
+    // These inputs hung before the fix (pinned thread, 100% CPU, never returned).
+    // Each is run on a background thread under a hard timeout so a regression
+    // fails the test rather than hanging the CI runner.
+
+    private static void AssertTerminates(string input, int timeoutMs = 3000)
+    {
+        var task = Task.Run(() => TelegramRichFormatter.ConvertToRichBlocks(input));
+        Assert.True(
+            task.Wait(timeoutMs),
+            $"ConvertToRichBlocks did not return within {timeoutMs}ms for: " +
+            (input.Length > 60 ? input[..60] + "…" : input));
+    }
+
+    [Fact]
+    public void Hang_UnclosedFence_Terminates() =>
+        AssertTerminates("```\nsome code with no closing fence");
+
+    [Fact]
+    public void Hang_UnclosedInlineCode_Terminates() =>
+        AssertTerminates("run the `command");
+
+    [Fact]
+    public void Hang_UnclosedBold_Terminates() =>
+        AssertTerminates("this is ** not bold");
+
+    [Fact]
+    public void Hang_SquareBracketInArrayIndex_Terminates() =>
+        AssertTerminates("array[0] indexing");
+
+    [Fact]
+    public void Hang_HttpUrlRejectedByValidator_Terminates() =>
+        AssertTerminates("[site](http://example.com)");
+
+    [Fact]
+    public void Hang_ReplyToToken_Terminates() =>
+        AssertTerminates("see [reply_to: 5] tag");
+
+    // Property-style sweep: every special character in isolation, doubled,
+    // and in unterminated forms.  A regression on any input fails rather
+    // than hanging the runner.
+    [Theory]
+    [InlineData("`")]
+    [InlineData("``")]
+    [InlineData("`a")]
+    [InlineData("a`")]
+    [InlineData("**")]
+    [InlineData("**a")]
+    [InlineData("a**")]
+    [InlineData("***")]
+    [InlineData("**a **")]
+    [InlineData("[")]
+    [InlineData("[a")]
+    [InlineData("[a]")]
+    [InlineData("[a](")]
+    [InlineData("[a](http://x)")]
+    [InlineData("[a] not a link")]
+    [InlineData("```")]
+    [InlineData("```\n")]
+    [InlineData("#")]
+    [InlineData("##")]
+    [InlineData("# ")]
+    [InlineData("## ")]
+    [InlineData("- ")]
+    [InlineData("* ")]
+    [InlineData("1. ")]
+    [InlineData("|")]
+    [InlineData("|---|")]
+    public void PropertySweep_ArbitraryInput_AlwaysTerminates(string input) =>
+        AssertTerminates(input);
+
+    // ── Adjacent list kind tests (issue #222 lower-severity) ─────────────────
+
+    [Fact]
+    public void MixedListKinds_UnorderedThenOrdered_ProduceTwoSeparateBlocks()
+    {
+        var blocks = TelegramRichFormatter.ConvertToRichBlocks("- a\n1. b");
+        Assert.Equal(2, blocks.Length);
+        var first  = Assert.IsType<InputRichBlockList>(blocks[0]);
+        var second = Assert.IsType<InputRichBlockList>(blocks[1]);
+        Assert.Null(first.Items.First().Value);
+        Assert.Equal(1, second.Items.First().Value);
+    }
+
+    [Fact]
+    public void MixedListKinds_OrderedThenUnordered_ProduceTwoSeparateBlocks()
+    {
+        var blocks = TelegramRichFormatter.ConvertToRichBlocks("1. first\n- second");
+        Assert.Equal(2, blocks.Length);
+        Assert.IsType<InputRichBlockList>(blocks[0]);
+        Assert.IsType<InputRichBlockList>(blocks[1]);
+    }
+
+    // ── Table column count validation (issue #222 lower-severity) ────────────
+
+    [Fact]
+    public void Table_MismatchedColumnCount_FallsThroughAsParagraph()
+    {
+        // Header has 2 columns, separator has 1 — not a valid GFM table.
+        var input = "price is 5 | 6\n|---|";
+        var blocks = TelegramRichFormatter.ConvertToRichBlocks(input);
+        Assert.DoesNotContain(blocks, b => b is InputRichBlockTable);
+    }
+
+    [Fact]
+    public void Table_MatchingColumnCount_IsStillRecognised()
+    {
+        var blocks = TelegramRichFormatter.ConvertToRichBlocks("| A | B |\n|---|---|\n| a | b |");
+        Single<InputRichBlockTable>(blocks);
+    }
+
+    // ── Empty heading guard (issue #222 lower-severity) ───────────────────────
+
+    [Fact]
+    public void BareH1_DoesNotProduceHeadingBlock()
+    {
+        var blocks = TelegramRichFormatter.ConvertToRichBlocks("#");
+        Assert.DoesNotContain(blocks, b => b is InputRichBlockSectionHeading);
+    }
+
+    [Fact]
+    public void BareH2_DoesNotProduceHeadingBlock()
+    {
+        var blocks = TelegramRichFormatter.ConvertToRichBlocks("##");
+        Assert.DoesNotContain(blocks, b => b is InputRichBlockSectionHeading);
+    }
+
+    [Fact]
+    public void H1_WhitespaceOnlyText_DoesNotProduceHeadingBlock()
+    {
+        var blocks = TelegramRichFormatter.ConvertToRichBlocks("# ");
+        Assert.DoesNotContain(blocks, b => b is InputRichBlockSectionHeading);
+    }
 }

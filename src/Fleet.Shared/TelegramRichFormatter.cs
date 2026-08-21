@@ -55,42 +55,53 @@ internal static class TelegramRichFormatter
                     i = closeIdx + 1;
                     continue;
                 }
-                // Unmatched ``` — fall through to paragraph
+                // Unmatched ``` — consume the line to guarantee progress.
+                // Following lines are absorbed by the paragraph accumulator below.
+                i++;
+                continue;
             }
 
             // ── ATX headings — check ## before # to avoid prefix collision ──
             if (line.StartsWith("## ", StringComparison.Ordinal) || line == "##")
             {
-                var headingText = line.Length > 3 ? line[3..] : string.Empty;
-                blocks.Add(new InputRichBlockSectionHeading
-                {
-                    Text = ParseInlineRichText(headingText.Trim()),
-                    Size = 2,
-                });
+                var headingText = line.Length > 3 ? line[3..].Trim() : string.Empty;
+                if (headingText.Length > 0)
+                    blocks.Add(new InputRichBlockSectionHeading
+                    {
+                        Text = ParseInlineRichText(headingText),
+                        Size = 2,
+                    });
+                // Bare ## (empty text): consume the line without emitting a block.
                 i++;
                 continue;
             }
             if (line.StartsWith("# ", StringComparison.Ordinal) || line == "#")
             {
-                var headingText = line.Length > 2 ? line[2..] : string.Empty;
-                blocks.Add(new InputRichBlockSectionHeading
-                {
-                    Text = ParseInlineRichText(headingText.Trim()),
-                    Size = 1,
-                });
+                var headingText = line.Length > 2 ? line[2..].Trim() : string.Empty;
+                if (headingText.Length > 0)
+                    blocks.Add(new InputRichBlockSectionHeading
+                    {
+                        Text = ParseInlineRichText(headingText),
+                        Size = 1,
+                    });
+                // Bare # (empty text): consume the line without emitting a block.
                 i++;
                 continue;
             }
 
             // ── List: consecutive "-" / "*" / "N." items ──────────────────────
-            if (IsListItem(line, out _, out _))
+            // A run of items is broken when the ordered/unordered kind changes,
+            // so "- a\n1. b" produces two separate list blocks rather than one.
+            if (IsListItem(line, out _, out int? firstItemNum))
             {
+                bool isOrderedList = firstItemNum.HasValue;
                 var items = new List<InputRichBlockListItem>();
-                while (i < lines.Length && IsListItem(lines[i], out string itemText, out int? itemNum))
+                while (i < lines.Length && IsListItem(lines[i], out string itemText, out int? itemNum)
+                       && itemNum.HasValue == isOrderedList)
                 {
                     items.Add(new InputRichBlockListItem
                     {
-                        Blocks     = [new InputRichBlockParagraph { Text = ParseInlineRichText(itemText) }],
+                        Blocks      = [new InputRichBlockParagraph { Text = ParseInlineRichText(itemText) }],
                         HasCheckbox = false,
                         IsChecked   = false,
                         Value       = itemNum,
@@ -102,9 +113,10 @@ internal static class TelegramRichFormatter
             }
 
             // ── GFM table: header row | separator row | data rows ─────────────
-            // A "table" requires the *next* line to be a valid separator.
-            // No separator → the pipe-containing line is treated as paragraph text.
-            if (IsPipeLine(line) && i + 1 < lines.Length && IsSeparatorLine(lines[i + 1]))
+            // A "table" requires the *next* line to be a valid separator whose
+            // column count matches the header. Mismatches fall through as paragraph text.
+            if (IsPipeLine(line) && i + 1 < lines.Length && IsSeparatorLine(lines[i + 1]) &&
+                SplitTableRow(line).Count == SplitTableRow(lines[i + 1]).Count)
             {
                 int consumed = ConsumeTable(lines, i, out var tableBlock);
                 blocks.Add(tableBlock);
@@ -121,7 +133,8 @@ internal static class TelegramRichFormatter
                 if (cur.StartsWith("# ", StringComparison.Ordinal) || cur == "#") break;
                 if (cur.StartsWith("## ", StringComparison.Ordinal) || cur == "##") break;
                 if (IsListItem(cur, out _, out _)) break;
-                if (IsPipeLine(cur) && i + 1 < lines.Length && IsSeparatorLine(lines[i + 1])) break;
+                if (IsPipeLine(cur) && i + 1 < lines.Length && IsSeparatorLine(lines[i + 1]) &&
+                    SplitTableRow(cur).Count == SplitTableRow(lines[i + 1]).Count) break;
                 paraLines.Add(cur);
                 i++;
             }
@@ -225,6 +238,13 @@ internal static class TelegramRichFormatter
             }
             if (i > litStart)
                 inline.Add(new RichTextText { Text = text[litStart..i] });
+            else
+            {
+                // A special character that matched no construct. Emit it as literal
+                // text and advance one position to guarantee loop progress.
+                inline.Add(new RichTextText { Text = text[i..(i + 1)] });
+                i++;
+            }
         }
 
         return inline.Count == 0 ? new RichTextText { Text = string.Empty }

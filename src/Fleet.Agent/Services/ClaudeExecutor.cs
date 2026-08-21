@@ -295,6 +295,11 @@ public sealed class ClaudeExecutor : IAgentExecutor
                         };
                     }
 
+                    if (evt.Type == "result" && progress.IsErrorResult)
+                    {
+                        _logger.LogError("Claude result reported error: {Result}", progress.FinalResult ?? "(no message)");
+                    }
+
                     yield return progress;
 
                     // "result" event means this response is complete — process stays alive

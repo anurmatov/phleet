@@ -37,7 +37,10 @@ public sealed class WarmupService : BackgroundService
             {
                 if (progress.EventType == "result")
                 {
-                    _logger.LogInformation("WarmupService: warmup complete — executor process is ready");
+                    if (progress.IsErrorResult)
+                        _logger.LogError("WarmupService: warmup returned error — executor may be misconfigured: {Result}", progress.FinalResult ?? "(no message)");
+                    else
+                        _logger.LogInformation("WarmupService: warmup complete — executor process is ready");
                     break;
                 }
             }

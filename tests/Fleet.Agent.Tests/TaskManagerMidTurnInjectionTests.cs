@@ -134,6 +134,39 @@ public class TaskManagerMidTurnInjectionTests
         Assert.Equal(1, counter.GetCount("claude", expectedOutcome));
     }
 
+    // Late-injection (final-answer gate) returns NoActiveTurn("already begun…") —
+    // the same status as genuine no-active-turn so it maps to DegradedToQueue,
+    // but the error string distinguishes it in logs from a cap-exhaustion degradation.
+    [Fact]
+    public async Task StartTask_LateInjection_FinalAnswerGate_DegradesToQueue_WithDistinctErrorText()
+    {
+        const string lateError = "Claude has already begun emitting its final answer for this turn.";
+        var executor = new ControllableExecutor
+        {
+            InjectionResult = MidTurnInjectionResult.NoActiveTurn(lateError),
+        };
+        var counter = new InjectionOutcomeCounter();
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink, counter);
+
+        var idle = WaitForIdle(manager, 123);
+        _ = manager.StartTask(123, "first", "first", isSessionTask: true);
+        await executor.WaitForExecuteCountAsync(1);
+
+        _ = manager.StartTask(123, "late message", "late message", isSessionTask: true);
+        await counter.WaitForCountAsync("claude", InjectionOutcomeCounter.DegradedToQueue, 1);
+
+        executor.ReleaseAllTurns();
+        await idle;
+
+        // Message was queued and delivered as its own turn — not injected.
+        Assert.Empty(executor.InjectedTasks);
+        Assert.Equal(["first", "late message"], executor.ExecutedTasks);
+        Assert.Equal(1, counter.GetCount("claude", InjectionOutcomeCounter.DegradedToQueue));
+        // The error string is distinct from the cap-exhaustion degradation.
+        Assert.Contains("final answer", lateError, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public async Task StartTask_CheckInDuringRunningTurn_IsDeferredNotDropped()
     {

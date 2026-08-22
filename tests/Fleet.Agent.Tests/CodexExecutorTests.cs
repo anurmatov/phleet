@@ -342,4 +342,80 @@ public class CodexExecutorTests
 
         Assert.Contains(capturer.Messages, m => m.Contains("[codex tool_use:Bash"));
     }
+
+    private static JsonObject AgentMessageParams(string? phase, string? text = null) =>
+        new()
+        {
+            ["item"] = new JsonObject
+            {
+                ["type"] = "agentMessage",
+                ["phase"] = phase,
+                ["text"] = text ?? "hello",
+            },
+        };
+
+    [Fact]
+    public void BuildItemStartedProgress_AgentMessage_FinalAnswerPhase_SetsFlag()
+    {
+        var executor = CreateExecutor();
+        Assert.False(executor.TurnHasFinalAnswerPhaseForTests);
+
+        executor.BuildItemStartedProgressForTests(AgentMessageParams("final_answer"));
+
+        Assert.True(executor.TurnHasFinalAnswerPhaseForTests);
+    }
+
+    [Fact]
+    public void BuildItemCompletedProgress_AgentMessage_FinalAnswerPhase_SetsFlag()
+    {
+        var executor = CreateExecutor();
+
+        executor.BuildItemCompletedProgressForTests(AgentMessageParams("final_answer", "done"));
+
+        Assert.True(executor.TurnHasFinalAnswerPhaseForTests);
+    }
+
+    [Fact]
+    public void BuildItemStartedProgress_AgentMessage_CommentaryPhase_DoesNotSetFlag()
+    {
+        var executor = CreateExecutor();
+
+        executor.BuildItemStartedProgressForTests(AgentMessageParams("commentary"));
+
+        Assert.False(executor.TurnHasFinalAnswerPhaseForTests);
+    }
+
+    [Fact]
+    public void BuildItemStartedProgress_AgentMessage_NoPhase_DoesNotSetFlag()
+    {
+        var executor = CreateExecutor();
+        // Build params without the phase key at all.
+        var @params = new JsonObject
+        {
+            ["item"] = new JsonObject
+            {
+                ["type"] = "agentMessage",
+                ["text"] = "thinking…",
+            },
+        };
+
+        executor.BuildItemStartedProgressForTests(@params);
+
+        Assert.False(executor.TurnHasFinalAnswerPhaseForTests);
+    }
+
+    [Fact]
+    public async Task TryInjectMessageAsync_WhenFlagSet_ReturnsNoActiveTurn()
+    {
+        var executor = CreateExecutor();
+        // Simulate having an active turn so the process check would pass.
+        executor.SetThreadStateForTests("thread-1", "turn-1");
+        // Manually trip the flag via BuildItemStartedProgress.
+        executor.BuildItemStartedProgressForTests(AgentMessageParams("final_answer"));
+
+        var result = await executor.TryInjectMessageAsync("late message", null, null, CancellationToken.None);
+
+        Assert.Equal(MidTurnInjectionStatus.NoActiveTurn, result.Status);
+        Assert.Contains("final_answer", result.Error ?? "");
+    }
 }

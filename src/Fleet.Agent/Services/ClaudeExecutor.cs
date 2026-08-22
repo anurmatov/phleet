@@ -30,6 +30,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
     private int _messageCount;
     private DateTimeOffset _lastActivity = DateTimeOffset.MinValue;
     private volatile bool _restartRequested;
+    private volatile bool _turnCommittedToFinalAnswer;
     private ExecutionStats? _previousCumulativeStats;
 
     // Continuous background stdout reader — feeds all NDJSON events into this channel.
@@ -153,6 +154,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                     if (messageBytes > 10_000)
                         _logger.LogWarning("Large input detected ({Size} bytes, message #{Num})",
                             messageBytes, _messageCount + 1);
+                    _turnCommittedToFinalAnswer = false;
                     await WriteStdinLineAsync(message, ct);
                 }
                 catch (IOException) when (attempt < 2)
@@ -281,6 +283,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
         IReadOnlyList<MessageDocument>? documents = null,
         CancellationToken ct = default)
     {
+        if (_turnCommittedToFinalAnswer)
+            return MidTurnInjectionResult.NoActiveTurn("Claude has already begun emitting its final answer for this turn.");
+
         if (_process is null || _process.HasExited || _stdin is null)
             return MidTurnInjectionResult.NoActiveTurn("Claude process is not running.");
 
@@ -428,6 +433,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
     internal Task WriteStdinLineForTestsAsync(string message, bool useLock, CancellationToken ct = default) =>
         useLock ? WriteStdinLineAsync(message, ct) : WriteStdinLineUnlockedAsync(message, ct);
+
+    internal AgentProgress ParseProgressForTests(ClaudeStreamEvent evt) => ParseProgress(evt);
+    internal bool TurnCommittedToFinalAnswerForTests => _turnCommittedToFinalAnswer;
 
     // --- Stdout channel helpers ---
 
@@ -956,10 +964,11 @@ public sealed class ClaudeExecutor : IAgentExecutor
             };
         }
 
-        // Extract text blocks
+        // Extract text blocks — no tool_use means this is Claude's terminal answer for the turn.
         var text = string.Join("\n", blocks.Where(b => b.Type == "text" && b.Text is not null).Select(b => b.Text!));
         if (!string.IsNullOrEmpty(text))
         {
+            self._turnCommittedToFinalAnswer = true;
             return new AgentProgress
             {
                 IsSignificant = true,

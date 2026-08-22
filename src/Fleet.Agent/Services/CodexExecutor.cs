@@ -45,6 +45,7 @@ public sealed class CodexExecutor : IAgentExecutor
     private string _currentTurnAssistantText = "";
     private DateTimeOffset _lastActivity = DateTimeOffset.MinValue;
     private volatile bool _restartRequested;
+    private volatile bool _turnHasFinalAnswerPhase;
     private readonly Func<ProcessStartInfo, Process?> _processStarter;
 
     private const string CodexBin = "codex";
@@ -140,6 +141,7 @@ public sealed class CodexExecutor : IAgentExecutor
                 var turn = response.RequireObject("turn");
                 turnId = turn.RequireString("id");
                 _activeTurnId = turnId;
+                _turnHasFinalAnswerPhase = false;
                 _lastTurnUsage = null;
                 _currentTurnAssistantText = "";
             }
@@ -191,6 +193,9 @@ public sealed class CodexExecutor : IAgentExecutor
         IReadOnlyList<MessageDocument>? documents = null,
         CancellationToken ct = default)
     {
+        if (_turnHasFinalAnswerPhase)
+            return MidTurnInjectionResult.NoActiveTurn("Codex turn has already emitted its final answer (phase=final_answer); injecting now cannot affect the current turn's response.");
+
         if (_threadId is null || _activeTurnId is null || _process is null || _process.HasExited)
             return MidTurnInjectionResult.NoActiveTurn("Codex has no active turn to steer.");
 
@@ -351,6 +356,11 @@ public sealed class CodexExecutor : IAgentExecutor
 
     internal AgentProgress? BuildItemStartedProgressForTests(JsonObject @params) =>
         BuildItemStartedProgress(@params);
+
+    internal AgentProgress? BuildItemCompletedProgressForTests(JsonObject @params) =>
+        BuildItemCompletedProgress(@params);
+
+    internal bool TurnHasFinalAnswerPhaseForTests => _turnHasFinalAnswerPhase;
 
     internal (List<string> ForwardedPaths, int SkippedCount) CollectImagePaths(IReadOnlyList<MessageImage>? images)
     {
@@ -760,6 +770,7 @@ public sealed class CodexExecutor : IAgentExecutor
                 {
                     resolvedTurnId = startedTurnId;
                     _activeTurnId = resolvedTurnId;
+                    _turnHasFinalAnswerPhase = false;
                 }
 
                 if (startedTurnId == resolvedTurnId)
@@ -781,6 +792,7 @@ public sealed class CodexExecutor : IAgentExecutor
                 {
                     resolvedTurnId = discovered;
                     _activeTurnId = discovered;
+                    _turnHasFinalAnswerPhase = false;
                 }
             }
 
@@ -825,6 +837,14 @@ public sealed class CodexExecutor : IAgentExecutor
     {
         var item = @params["item"] as JsonObject;
         var itemType = item?["type"]?.GetValue<string>();
+
+        if (itemType == "agentMessage")
+        {
+            var phase = item?["phase"]?.GetValue<string>();
+            if (string.Equals(phase, "final_answer", StringComparison.OrdinalIgnoreCase))
+                _turnHasFinalAnswerPhase = true;
+            return null;
+        }
 
         AgentProgress? progress = itemType switch
         {
@@ -873,6 +893,9 @@ public sealed class CodexExecutor : IAgentExecutor
 
         if (itemType == "agentMessage")
         {
+            var phase = item?["phase"]?.GetValue<string>();
+            if (string.Equals(phase, "final_answer", StringComparison.OrdinalIgnoreCase))
+                _turnHasFinalAnswerPhase = true;
             // Production codex app-server delivers the assistant's full reply text here —
             // NOT inside turn.items of the subsequent turn/completed notification.
             // Accumulate it so BuildTurnCompletedProgress can return the correct FinalResult.
@@ -1053,6 +1076,7 @@ public sealed class CodexExecutor : IAgentExecutor
         _notificationChannel = null;
         _threadId = null;
         _activeTurnId = null;
+        _turnHasFinalAnswerPhase = false;
         _lastTurnUsage = null;
         _currentTurnAssistantText = "";
         _messageCount = 0;

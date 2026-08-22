@@ -1,6 +1,8 @@
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Fleet.Agent.Configuration;
+using Fleet.Agent.Models;
 using Fleet.Agent.Services;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -44,6 +46,78 @@ public class ClaudeExecutorMidTurnInjectionTests
             .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
         Assert.Equal(3, writtenLines.Length);
         Assert.All(lines, expected => Assert.Contains(expected, writtenLines));
+    }
+
+    // --- TurnCommittedToFinalAnswer flag tests ---
+
+    // An "assistant" event where Message.Content contains only text blocks — Claude's terminal answer.
+    private static ClaudeStreamEvent TextOnlyAssistantEvent(string text = "Hello, world!") =>
+        new()
+        {
+            Type = "assistant",
+            Message = new ClaudeMessage
+            {
+                Content =
+                [
+                    new ClaudeContentBlock { Type = "text", Text = text },
+                ],
+            },
+        };
+
+    // An "assistant" event where Message.Content contains a tool_use block — mid-loop, not terminal.
+    private static ClaudeStreamEvent ToolUseAssistantEvent() =>
+        new()
+        {
+            Type = "assistant",
+            Message = new ClaudeMessage
+            {
+                Content =
+                [
+                    new ClaudeContentBlock { Type = "tool_use", Name = "Bash", Id = "x" },
+                ],
+            },
+        };
+
+    [Fact]
+    public void TextOnlyAssistantEvent_SetsCommittedFlag()
+    {
+        var executor = BuildExecutor();
+        Assert.False(executor.TurnCommittedToFinalAnswerForTests);
+
+        executor.ParseProgressForTests(TextOnlyAssistantEvent());
+
+        Assert.True(executor.TurnCommittedToFinalAnswerForTests);
+    }
+
+    [Fact]
+    public void ToolUseAssistantEvent_DoesNotSetCommittedFlag()
+    {
+        var executor = BuildExecutor();
+
+        executor.ParseProgressForTests(ToolUseAssistantEvent());
+
+        Assert.False(executor.TurnCommittedToFinalAnswerForTests);
+    }
+
+    [Fact]
+    public async Task CommittedFlag_BlocksInjection_WithExpectedErrorText()
+    {
+        var executor = BuildExecutor();
+        executor.ParseProgressForTests(TextOnlyAssistantEvent());
+        Assert.True(executor.TurnCommittedToFinalAnswerForTests);
+
+        var result = await executor.TryInjectMessageAsync("late message", null, null, CancellationToken.None);
+
+        Assert.Equal(MidTurnInjectionStatus.NoActiveTurn, result.Status);
+        Assert.Contains("final answer", result.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void CommittedFlag_IsFalseOnFreshExecutor()
+    {
+        // The flag must start cleared so the first turn is always injectable.
+        var executor = BuildExecutor();
+        Assert.False(executor.TurnCommittedToFinalAnswerForTests);
     }
 
     private static ClaudeExecutor BuildExecutor()

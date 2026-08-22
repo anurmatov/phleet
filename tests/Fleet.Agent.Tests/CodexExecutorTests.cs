@@ -447,7 +447,7 @@ public class CodexExecutorTests
             var injectTask = executor.TryInjectMessageAsync("mid-turn injection", null, null, cts.Token);
             await Task.WhenAll(resolveTask, injectTask);
 
-            Assert.Equal(MidTurnInjectionStatus.Injected, injectTask.Result.Status);
+            Assert.Equal(MidTurnInjectionStatus.Injected, (await injectTask).Status);
         }
         finally
         {

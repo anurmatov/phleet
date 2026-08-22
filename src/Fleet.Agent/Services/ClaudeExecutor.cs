@@ -971,9 +971,12 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
     private AgentProgress HandleResultEvent(ClaudeStreamEvent evt)
     {
-        // Resetting the flag here ensures that a subsequent TryInjectMessageAsync call (after turn
-        // completion) returns "no active turn" rather than the stale "final answer already begun" message.
-        _turnCommittedToFinalAnswer = false;
+        // _turnCommittedToFinalAnswer is intentionally NOT reset here. Clearing it on the result
+        // event would open a window between result-parse and TaskManager.Closed=true (which includes
+        // sending the reply) during which TryInjectMessageAsync would pass all checks, write to the
+        // live process stdin, and return Injected — only for the injected message to be discarded by
+        // DrainStaleTurnEvents at the start of the next turn. The sticky flag is the correct gate.
+        // The flag is cleared at the start of the next turn via ExecuteAsync, before the next write.
         return new AgentProgress
         {
             IsSignificant = true,

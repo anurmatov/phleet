@@ -525,6 +525,69 @@ public class DebouncedGroupBatchTests
         Assert.Empty(peeked);
     }
 
+    // ─── Image-cap exhaustion ─────────────────────────────────────────────────
+
+    [Fact]
+    public void PendingImages_AddRange_AtCap_DropsFurtherImages()
+    {
+        // When the pending-image buffer is at cap, additional images are dropped.
+        // The kept images and the dropped images are both deterministic.
+        var executor = new ControllableExecutor { InjectionResult = MidTurnInjectionResult.Injected };
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink);
+        var behavior = BuildGroupBehavior(manager, executor, sink);
+
+        const long chatId = 10;
+        var img1 = new MessageImage([0x01], "image/png");
+        var img2 = new MessageImage([0x02], "image/png");
+        var img3 = new MessageImage([0x03], "image/png");
+
+        // Fill to cap of 2.
+        behavior.AddPendingImages(chatId, [img1, img2], maxImages: 2);
+        // This image must be dropped — cap is already reached.
+        behavior.AddPendingImages(chatId, [img3], maxImages: 2);
+
+        var peeked = behavior.PeekPendingImagesForTest(chatId);
+
+        Assert.Equal(2, peeked.Count);
+        Assert.Same(img1, peeked[0]);
+        Assert.Same(img2, peeked[1]);
+    }
+
+    [Fact]
+    public void PendingImages_AddRange_AtCap_StillUpdatesBoundary()
+    {
+        // Even when all incoming images are dropped because the buffer is at cap,
+        // _storedAt is updated. This means CommitPendingImages with a boundary set
+        // before the second AddRange must NOT remove the entry (late images present).
+        var executor = new ControllableExecutor { InjectionResult = MidTurnInjectionResult.Injected };
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink);
+        var behavior = BuildGroupBehavior(manager, executor, sink);
+
+        const long chatId = 11;
+        var img = new MessageImage([0x01], "image/png");
+
+        // First add — fills the cap-1 buffer.
+        behavior.AddPendingImages(chatId, [img], maxImages: 1);
+
+        // Snapshot boundary: everything before this is "old".
+        var boundaryBeforeSecondAdd = DateTimeOffset.UtcNow.AddMilliseconds(1);
+
+        // Small sleep so the second AddRange's UtcNow is strictly after the boundary.
+        System.Threading.Thread.Sleep(5);
+
+        // Second add — dropped because at cap, but _storedAt is refreshed to UtcNow.
+        behavior.AddPendingImages(chatId, [img], maxImages: 1);
+
+        // Commit with boundary = before second add → _storedAt > boundary → MUST NOT remove.
+        behavior.CommitPendingImagesForTest(chatId, boundaryBeforeSecondAdd);
+
+        Assert.True(behavior.HasPendingImages(chatId),
+            "_storedAt is updated even when all images are dropped at cap; " +
+            "CommitPendingImages must treat this as 'new arrival' and keep the entry");
+    }
+
     // ─── BuildGroupBehavior helper ────────────────────────────────────────────
 
     private static GroupBehavior BuildGroupBehavior(TaskManager manager, IAgentExecutor executor, IMessageSink sink)

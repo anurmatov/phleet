@@ -344,6 +344,72 @@ public class TaskManagerDeduplicationTests
         Assert.Equal(CompletionKind.Completed, capturedKind);
     }
 
+    [Fact]
+    public async Task TruncatedResult_FromRelaySource_FiresOnTaskCompletedWithIncompleteKind()
+    {
+        // When the executor signals IsErrorResult=true (max-turns exhaustion / truncation),
+        // OnTaskCompleted must fire with CompletionKind.Incomplete so the workflow
+        // continuation loop can retry — NOT CompletionKind.Failed which abandons the work.
+        var exec = new TruncatingExecutor("partial output");
+        var manager = BuildManager(exec);
+
+        CompletionKind? capturedKind = null;
+        string? capturedResult = null;
+        var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        manager.OnTaskCompleted += (_, result, _, _, _, _, _, kind) =>
+        {
+            capturedResult = result;
+            capturedKind = kind;
+            completed.TrySetResult();
+        };
+
+        _ = manager.StartTask(1, "relay task", "relay task", isSessionTask: false,
+            source: TaskSource.Relay, relaySender: "orchestrator", correlationId: "corr-trunc", taskId: "tid-trunc");
+
+        await completed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(CompletionKind.Incomplete, capturedKind);
+        Assert.NotNull(capturedResult);
+        Assert.Contains("partial output", capturedResult, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task QueueFull_Bridge_FiresOnTaskCompletedWithFailedKind()
+    {
+        // Bridge tasks dropped at queue capacity must fire OnTaskCompleted with
+        // relaySender="bridge" and CompletionKind.Failed so the calling workflow
+        // can surface the error rather than hanging indefinitely.
+        var exec = new BlockingExecutor();
+        var manager = BuildManager(exec);
+
+        _ = manager.StartTask(1, "blocker", "blocker", isSessionTask: false);
+        await exec.WaitForExecuteCountAsync(1);
+
+        // Fill the queue to capacity.
+        for (var i = 0; i < 20; i++)
+            await manager.StartTask(i + 10, $"filler-{i}", $"filler-{i}", isSessionTask: false);
+
+        string? capturedRelaySender = null;
+        CompletionKind? capturedKind = null;
+        var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        manager.OnTaskCompleted += (_, _, sender, _, _, _, _, kind) =>
+        {
+            capturedRelaySender = sender;
+            capturedKind = kind;
+            completed.TrySetResult();
+        };
+
+        // Drop a bridge task — correlationId identifies it as bridge-originating.
+        var outcome = await manager.StartTask(99, "bridge-drop", "bridge-drop", isSessionTask: false,
+            source: TaskSource.Bridge, correlationId: "corr-bridge-drop");
+
+        Assert.Equal(TaskDispatchOutcome.QueueFull, outcome);
+        await completed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(CompletionKind.Failed, capturedKind);
+        Assert.Equal("bridge", capturedRelaySender);
+
+        exec.ReleaseAllTurns();
+    }
+
     // ── Exception safety ─────────────────────────────────────────────────────
 
     [Fact]
@@ -439,6 +505,41 @@ public class TaskManagerDeduplicationTests
             while (Volatile.Read(ref _executeCount) < expected)
                 await Task.Delay(10, cts.Token);
         }
+
+        public Task<MidTurnInjectionResult> TryInjectMessageAsync(string task, IReadOnlyList<MessageImage>? images = null, IReadOnlyList<MessageDocument>? documents = null, CancellationToken ct = default)
+            => Task.FromResult(MidTurnInjectionResult.NoActiveTurn());
+        public Task StopProcessAsync() => Task.CompletedTask;
+        public Task<bool> TryStopProcessAsync() => Task.FromResult(false);
+        public void RequestRestart() { }
+        public IAsyncEnumerable<AgentProgress> SendCommandAsync(string command, CancellationToken ct = default) => ExecuteAsync(command, ct: ct);
+        public IReadOnlyCollection<BackgroundTaskInfo> GetActiveBackgroundTasks() => [];
+        public Task<bool> CancelBackgroundTaskAsync(string taskId, CancellationToken ct = default) => Task.FromResult(false);
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    /// <summary>Yields one result event with IsErrorResult=true, simulating max-turns exhaustion.</summary>
+    private sealed class TruncatingExecutor(string result) : IAgentExecutor
+    {
+        public string? LastSessionId => null;
+        public DateTimeOffset LastActivity => DateTimeOffset.UtcNow;
+        public bool IsProcessWarm => true;
+
+#pragma warning disable CS1998
+        public async IAsyncEnumerable<AgentProgress> ExecuteAsync(
+            string task,
+            IReadOnlyList<MessageImage>? images = null,
+            IReadOnlyList<MessageDocument>? documents = null,
+            [EnumeratorCancellation] CancellationToken ct = default)
+        {
+            yield return new AgentProgress
+            {
+                EventType = "result",
+                Summary = result,
+                FinalResult = result,
+                IsErrorResult = true, // signals truncation / max-turns exhaustion
+            };
+        }
+#pragma warning restore CS1998
 
         public Task<MidTurnInjectionResult> TryInjectMessageAsync(string task, IReadOnlyList<MessageImage>? images = null, IReadOnlyList<MessageDocument>? documents = null, CancellationToken ct = default)
             => Task.FromResult(MidTurnInjectionResult.NoActiveTurn());

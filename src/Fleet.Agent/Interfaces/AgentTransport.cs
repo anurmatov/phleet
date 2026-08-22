@@ -618,6 +618,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 {
                     CompletionKind.Idle => "[status: idle]",
                     CompletionKind.Failed => $"[status: failed]\n{result}",
+                    CompletionKind.Incomplete => $"[status: incomplete]\n{result}",
                     _ => result,
                 };
                 await _relay.PublishToAgentAsync("bridge", chatId, bridgeResult,

@@ -253,7 +253,10 @@ public sealed class TaskManager
         } // end exception-safety try
         catch
         {
-            if (!skipDedupReservationAcquire && taskId is not null)
+            // Release unconditionally: skipDedupReservationAcquire governs acquisition, not release.
+            // On drain re-entry (skipDedupReservationAcquire=true) an exception here means the task
+            // was dequeued but never ran — without TryRemove the taskId leaks permanently.
+            if (taskId is not null)
                 _activeTaskIds.TryRemove(taskId, out _);
             throw;
         }
@@ -661,7 +664,9 @@ public sealed class TaskManager
                 // so that agent addresses from intermediate turns aren't lost
                 await SendWithStatsAsync($"{Prefix()}{lastResult}{marker}");
                 var fullText = string.Join("\n", allAssistantTexts);
-                OnTaskCompleted?.Invoke(chatId, fullText, relaySender, source, errorResult, correlationId, relayTaskId, errorResult ? CompletionKind.Failed : CompletionKind.Completed);
+                // errorResult covers max-turns exhaustion (IsErrorResult from executor) — use
+                // Incomplete so the workflow continuation loop can retry, not Failed which abandons.
+                OnTaskCompleted?.Invoke(chatId, fullText, relaySender, source, errorResult, correlationId, relayTaskId, errorResult ? CompletionKind.Incomplete : CompletionKind.Completed);
             }
             else if (lastError is not null)
             {

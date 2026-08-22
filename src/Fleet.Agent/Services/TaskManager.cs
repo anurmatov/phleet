@@ -77,7 +77,7 @@ public sealed class TaskManager
 
     public bool HasRunningTasks(long chatId) => GetChatState(chatId).Count > 0;
 
-    public void StartTask(long chatId, string task, string displayText, bool isSessionTask,
+    public Task<TaskDispatchOutcome> StartTask(long chatId, string task, string displayText, bool isSessionTask,
         TaskSource source = TaskSource.UserMessage,
         string? relaySender = null,
         string? correlationId = null,
@@ -87,7 +87,7 @@ public sealed class TaskManager
         long userId = 0) =>
         StartTaskCore(chatId, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, skipPendingQueueCheck: false);
 
-    private void StartTaskCore(long chatId, string task, string displayText, bool isSessionTask,
+    private async Task<TaskDispatchOutcome> StartTaskCore(long chatId, string task, string displayText, bool isSessionTask,
         TaskSource source = TaskSource.UserMessage,
         string? relaySender = null,
         string? correlationId = null,
@@ -95,26 +95,29 @@ public sealed class TaskManager
         IReadOnlyList<MessageImage>? images = null,
         IReadOnlyList<MessageDocument>? documents = null,
         long userId = 0,
-        bool skipPendingQueueCheck = false)
+        bool skipPendingQueueCheck = false,
+        bool skipDedupReservationAcquire = false)
     {
         var state = GetChatState(chatId);
 
-        // Dedup: ignore re-delivered bridge directives with the same taskId
-        if (taskId is not null && !_activeTaskIds.TryAdd(taskId, true))
+        // Dedup: ignore re-delivered bridge directives with the same taskId.
+        // DrainQueue passes skipDedupReservationAcquire=true because the reservation was
+        // already acquired when the task entered the queue and is still held.
+        if (!skipDedupReservationAcquire && taskId is not null && !_activeTaskIds.TryAdd(taskId, true))
         {
             _logger.LogInformation("Duplicate taskId={TaskId} ignored (already in-flight)", taskId);
-            return;
+            return TaskDispatchOutcome.Dropped;
         }
 
         if (TryGetRunningSessionTask(state, out var runningSession))
         {
-            if (source == TaskSource.UserMessage && isSessionTask)
+            // UserMessage and DebouncedGroupBatch are both injection-eligible for same-chat turns
+            if ((source == TaskSource.UserMessage || source == TaskSource.DebouncedGroupBatch) && isSessionTask)
             {
                 if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
                 var message = new MidTurnMessage(task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
                     images, documents, userId, DateTimeOffset.UtcNow);
-                _ = DeliverMidTurnMessageAsync(chatId, runningSession, message);
-                return;
+                return await DeliverMidTurnMessageAsync(chatId, runningSession, message);
             }
 
             if (source == TaskSource.CheckIn)
@@ -122,8 +125,7 @@ public sealed class TaskManager
                 if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
                 var message = new MidTurnMessage(task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
                     images, documents, userId, DateTimeOffset.UtcNow);
-                _ = DeferUntilTurnEndAsync(chatId, runningSession, message, notifyUser: false);
-                return;
+                return await DeferUntilTurnEndAsync(chatId, runningSession, message, notifyUser: false);
             }
 
             if (source is TaskSource.Relay or TaskSource.Bridge)
@@ -136,24 +138,30 @@ public sealed class TaskManager
             var pendingResult = TryAppendToPendingQueue(chatId, queuedPart);
             if (pendingResult == PendingQueueResult.Merged)
             {
-                if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
+                // Keep the taskId reservation — it covers the task's lifetime in the queue.
+                // DrainQueue will call StartTaskCore with skipDedupReservationAcquire=true,
+                // and the reservation is released by the finally block in Task.Run.
                 _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.MergedIntoQueue);
                 OnStatusChanged?.Invoke();
-                return;
+                return TaskDispatchOutcome.Queued;
             }
 
             if (pendingResult == PendingQueueResult.EnqueueFresh)
             {
-                if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
                 if (source == TaskSource.CheckIn)
                 {
-                    // Preserve the existing capacity behavior: check-ins that cannot
-                    // attach to a running turn are dropped, not queued behind user work.
+                    // Check-ins are dropped rather than queued behind user work.
+                    if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
                     _logger.LogDebug("Check-in skipped — agent already has a pending queued entry for chat {ChatId}", chatId);
-                    return;
+                    return TaskDispatchOutcome.Dropped;
                 }
-                EnqueueFreshMessage(chatId, queuedPart, notifyUser: source != TaskSource.CheckIn, completeBridgeOnDrop: true);
-                return;
+                var enqueued = EnqueueFreshMessage(chatId, queuedPart,
+                    notifyUser: source is not (TaskSource.CheckIn or TaskSource.DebouncedGroupBatch),
+                    completeBridgeOnDrop: true);
+                // Release the reservation only when enqueue failed — a queued task keeps it.
+                if (!enqueued && taskId is not null)
+                    _activeTaskIds.TryRemove(taskId, out _);
+                return enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull;
             }
         }
 
@@ -164,20 +172,32 @@ public sealed class TaskManager
         var hasRunningTask = _chatTasks.Values.Any(s => s.Count > 0);
         if (hasRunningTask)
         {
-            // Undo the taskId reservation — we're not actually running it yet
-            if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
-
             // Check-ins silently skip when at capacity instead of queuing
             if (source == TaskSource.CheckIn)
             {
+                if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
                 _logger.LogDebug("Check-in skipped — agent already has a running task");
-                return;
+                return TaskDispatchOutcome.Dropped;
             }
 
-            EnqueueFreshMessage(chatId, queuedPart, notifyUser: true, completeBridgeOnDrop: true);
-            return;
+            // DebouncedGroupBatch (different-chat) and all other sources go to the global FIFO.
+            // DebouncedGroupBatch must NOT use DeferUntilTurnEndAsync — that is reserved for
+            // CheckIn. The FIFO preserves ordering with other queued work.
+            // DebouncedGroupBatch is silent: sending "I'm busy" for automated group checks is noise.
+            var enqueued = EnqueueFreshMessage(chatId, queuedPart,
+                notifyUser: source != TaskSource.DebouncedGroupBatch,
+                completeBridgeOnDrop: true);
+            // Release the reservation only when enqueue failed — a queued task keeps it.
+            if (!enqueued && taskId is not null)
+                _activeTaskIds.TryRemove(taskId, out _);
+            return enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull;
         }
 
+        // Exception safety: if anything between here and Task.Run fires throws, release the
+        // reservation so the same taskId can be retried. The Task.Run finally block handles
+        // the release once the task has been handed off successfully.
+        try
+        {
         var cts = new CancellationTokenSource();
         var running = state.Add(displayText, cts, isSessionTask, userId, bridgeTaskId: taskId);
 
@@ -228,6 +248,18 @@ public sealed class TaskManager
                 DrainQueue();
             }
         });
+
+        return TaskDispatchOutcome.Ran;
+        } // end exception-safety try
+        catch
+        {
+            // Release unconditionally: skipDedupReservationAcquire governs acquisition, not release.
+            // On drain re-entry (skipDedupReservationAcquire=true) an exception here means the task
+            // was dequeued but never ran — without TryRemove the taskId leaks permanently.
+            if (taskId is not null)
+                _activeTaskIds.TryRemove(taskId, out _);
+            throw;
+        }
     }
 
     public async Task HandleStop(long chatId)
@@ -519,7 +551,7 @@ public sealed class TaskManager
                         toolCalls.Add((ShortenToolName(progress.ToolName), TruncateArgs(progress.ToolArgs ?? "{}", _agentConfig.ToolArgsTruncateLength)));
                         // Suppress progress messages for check-ins — they may end up IDLE
                         // Also suppress when SuppressToolMessages is configured (e.g. for non-technical users)
-                        if (!_agentConfig.SuppressToolMessages && source != TaskSource.CheckIn && significantUpdates % 5 == 1)
+                        if (!_agentConfig.SuppressToolMessages && source is not (TaskSource.CheckIn or TaskSource.DebouncedGroupBatch) && significantUpdates % 5 == 1)
                         {
                             var summaryText = progress.Summary;
                             if (progress.Summary.StartsWith("Using") && progress.ToolArgs is { } rawArgs)
@@ -607,13 +639,17 @@ public sealed class TaskManager
             if (lastResult is not null && lastResult.Trim().Equals("IDLE", StringComparison.OrdinalIgnoreCase))
             {
                 _logger.LogInformation("Result is IDLE-only, suppressing output for chat {ChatId} (source={Source})", chatId, source);
+                // Relay/bridge callers have a delegate step waiting — fire OnTaskCompleted with
+                // CompletionKind.Idle so the workflow can advance instead of hanging to retry exhaustion.
+                if (source is TaskSource.Relay or TaskSource.Bridge)
+                    OnTaskCompleted?.Invoke(chatId, "", relaySender, source, false, correlationId, relayTaskId, CompletionKind.Idle);
                 return;
             }
 
-            // Check-in with no output at all: suppress the empty reply
-            if (source == TaskSource.CheckIn && lastResult is null)
+            // Check-in and debounced group batch with no output at all: suppress the empty reply
+            if (source is TaskSource.CheckIn or TaskSource.DebouncedGroupBatch && lastResult is null)
             {
-                _logger.LogInformation("Check-in: no output, suppressing for chat {ChatId}", chatId);
+                _logger.LogInformation("{Source}: no output, suppressing for chat {ChatId}", source, chatId);
                 return;
             }
 
@@ -628,7 +664,9 @@ public sealed class TaskManager
                 // so that agent addresses from intermediate turns aren't lost
                 await SendWithStatsAsync($"{Prefix()}{lastResult}{marker}");
                 var fullText = string.Join("\n", allAssistantTexts);
-                OnTaskCompleted?.Invoke(chatId, fullText, relaySender, source, errorResult, correlationId, relayTaskId);
+                // errorResult covers max-turns exhaustion (IsErrorResult from executor) — use
+                // Incomplete so the workflow continuation loop can retry, not Failed which abandons.
+                OnTaskCompleted?.Invoke(chatId, fullText, relaySender, source, errorResult, correlationId, relayTaskId, errorResult ? CompletionKind.Incomplete : CompletionKind.Completed);
             }
             else if (lastError is not null)
             {
@@ -636,7 +674,7 @@ public sealed class TaskManager
                     _sessions.ClearSession(chatId);
                 var errorMsg = $"Task failed: {lastError}";
                 await SendWithStatsAsync($"{Prefix()}{errorMsg}");
-                OnTaskCompleted?.Invoke(chatId, errorMsg, relaySender, source, true, correlationId, relayTaskId);
+                OnTaskCompleted?.Invoke(chatId, errorMsg, relaySender, source, true, correlationId, relayTaskId, CompletionKind.Failed);
             }
             else if (errorResult)
             {
@@ -646,19 +684,19 @@ public sealed class TaskManager
                 var errorMsg = "Task failed: executor reported an error and produced no output";
                 _logger.LogError("Task #{TaskId} for chat {ChatId}: {Error}", taskId, chatId, errorMsg);
                 await SendWithStatsAsync($"{Prefix()}{errorMsg}");
-                OnTaskCompleted?.Invoke(chatId, errorMsg, relaySender, source, true, correlationId, relayTaskId);
+                OnTaskCompleted?.Invoke(chatId, errorMsg, relaySender, source, true, correlationId, relayTaskId, CompletionKind.Failed);
             }
             else
             {
                 await SendWithStatsAsync($"{Prefix()}Done! (no text output)");
-                OnTaskCompleted?.Invoke(chatId, "Done! (no text output)", relaySender, source, false, correlationId, relayTaskId);
+                OnTaskCompleted?.Invoke(chatId, "Done! (no text output)", relaySender, source, false, correlationId, relayTaskId, CompletionKind.Completed);
             }
         }
         catch (OperationCanceledException)
         {
             _logger.LogInformation("Task #{TaskId} cancelled for chat {ChatId}", taskId, chatId);
             await SendWithStatsAsync($"{Prefix()}Task cancelled.");
-            OnTaskCompleted?.Invoke(chatId, "Task cancelled.", relaySender, source, false, correlationId, relayTaskId);
+            OnTaskCompleted?.Invoke(chatId, "Task cancelled.", relaySender, source, false, correlationId, relayTaskId, CompletionKind.Failed);
         }
         catch (Exception ex)
         {
@@ -667,7 +705,7 @@ public sealed class TaskManager
             await SendWithStatsAsync($"{Prefix()}{errorMsg}");
             if (isSessionTask)
                 _sessions.ClearSession(chatId);
-            OnTaskCompleted?.Invoke(chatId, errorMsg, relaySender, source, true, correlationId, relayTaskId);
+            OnTaskCompleted?.Invoke(chatId, errorMsg, relaySender, source, true, correlationId, relayTaskId, CompletionKind.Failed);
         }
         finally
         {
@@ -683,23 +721,22 @@ public sealed class TaskManager
         return running is not null;
     }
 
-    private async Task DeliverMidTurnMessageAsync(long chatId, RunningTask running, MidTurnMessage message)
+    private async Task<TaskDispatchOutcome> DeliverMidTurnMessageAsync(long chatId, RunningTask running, MidTurnMessage message)
     {
         await running.TurnDispatchLock.WaitAsync();
         try
         {
             if (running.Closed)
             {
-                if (EnqueueMessage(chatId, message, notifyUser: true))
-                    _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DegradedToQueue);
-                return;
+                var enqueued = EnqueueMessage(chatId, message, notifyUser: true);
+                if (enqueued) _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DegradedToQueue);
+                return enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull;
             }
 
             if (running.InjectionCount >= MaxMidTurnInjectionsPerTurn)
             {
-                await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: true);
                 _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DegradedToQueue);
-                return;
+                return await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: true);
             }
 
             var result = await _executor.TryInjectMessageAsync(FormatInjectedMessage(message.Task),
@@ -711,22 +748,22 @@ public sealed class TaskManager
                 running.InjectedMessagesForResume.Add(message);
                 _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.Injected);
                 _logger.LogInformation("Injected mid-turn message into running task #{TaskId} for chat {ChatId}", running.Id, chatId);
-                return;
+                return TaskDispatchOutcome.Injected;
             }
 
-            await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: true);
-            var outcome = result.Status == MidTurnInjectionStatus.Failed
+            var counterOutcome = result.Status == MidTurnInjectionStatus.Failed
                 ? InjectionOutcomeCounter.FailedThenQueued
                 : InjectionOutcomeCounter.DegradedToQueue;
-            _injectionCounter.Increment(_agentConfig.Provider, outcome);
+            _injectionCounter.Increment(_agentConfig.Provider, counterOutcome);
             _logger.LogInformation("Mid-turn injection unavailable for chat {ChatId} (status={Status}, error={Error}); queued for turn-end delivery",
                 chatId, result.Status, result.Error);
+            return await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: true);
         }
         catch (Exception ex)
         {
-            await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: true);
             _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.FailedThenQueued);
             _logger.LogWarning(ex, "Mid-turn injection failed for chat {ChatId}; queued for turn-end delivery", chatId);
+            return await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: true);
         }
         finally
         {
@@ -735,7 +772,7 @@ public sealed class TaskManager
     }
 
 
-    private async Task DeferUntilTurnEndAsync(long chatId, RunningTask running, MidTurnMessage message, bool notifyUser)
+    private async Task<TaskDispatchOutcome> DeferUntilTurnEndAsync(long chatId, RunningTask running, MidTurnMessage message, bool notifyUser)
     {
         await running.TurnDispatchLock.WaitAsync();
         try
@@ -743,8 +780,9 @@ public sealed class TaskManager
             // Check-ins are not conversational corrections, so do not fold them into
             // the current response chain. Queue them to start only after the current
             // task has sent its own terminal response and DrainQueue runs.
-            if (EnqueueMessage(chatId, message, notifyUser))
-                _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DegradedToQueue);
+            var enqueued = EnqueueMessage(chatId, message, notifyUser);
+            if (enqueued) _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DegradedToQueue);
+            return enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull;
         }
         finally
         {
@@ -752,12 +790,12 @@ public sealed class TaskManager
         }
     }
 
-    private async Task EnqueueForTurnEndAsync(long chatId, RunningTask running, MidTurnMessage message, bool notifyUser)
+    private async Task<TaskDispatchOutcome> EnqueueForTurnEndAsync(long chatId, RunningTask running, MidTurnMessage message, bool notifyUser)
     {
         if (!running.Inbox.Writer.TryWrite(message))
         {
-            EnqueueMessage(chatId, message, notifyUser);
-            return;
+            var enqueued = EnqueueMessage(chatId, message, notifyUser);
+            return enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull;
         }
 
         if (notifyUser && !(_agentConfig.SuppressToolMessages && chatId < 0))
@@ -772,6 +810,7 @@ public sealed class TaskManager
             }
         }
         OnStatusChanged?.Invoke();
+        return TaskDispatchOutcome.Queued;
     }
 
     private void DrainInboxToGlobalQueue(long chatId, RunningTask running)
@@ -844,9 +883,16 @@ public sealed class TaskManager
         {
             _logger.LogWarning("Message queue full ({Max}) — dropping incoming task from chat {ChatId}", MaxQueueDepth, chatId);
             _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DroppedAtQueueCap);
-            _ = Sink.SendTextAsync(chatId, $"Queue is full ({MaxQueueDepth} messages waiting). Please wait for tasks to complete.");
-            if (completeBridgeOnDrop && part.Source == TaskSource.Bridge && part.CorrelationId is not null)
-                OnTaskCompleted?.Invoke(chatId, "[status: failed]\nagent queue full", "bridge", part.Source, true, part.CorrelationId, part.TaskId);
+            // DebouncedGroupBatch drops silently — the notice is noise for automated checks.
+            if (part.Source != TaskSource.DebouncedGroupBatch)
+                _ = Sink.SendTextAsync(chatId, $"Queue is full ({MaxQueueDepth} messages waiting). Please wait for tasks to complete.");
+            // Production relay passes taskId but no correlationId — gate on either so relay
+            // completions are not dead code when the source has only a taskId.
+            if (completeBridgeOnDrop && part.Source is TaskSource.Bridge or TaskSource.Relay
+                    && (part.CorrelationId is not null || part.TaskId is not null))
+                OnTaskCompleted?.Invoke(chatId, "agent queue full",
+                    part.Source == TaskSource.Bridge ? "bridge" : part.RelaySender,
+                    part.Source, false, part.CorrelationId, part.TaskId, CompletionKind.Failed);
             return false;
         }
 
@@ -986,6 +1032,9 @@ public sealed class TaskManager
                     {
                         found = true;
                         retained.RemoveAt(retained.Count - 1);
+                        // Release the dedup reservation so a future re-delivery is not rejected as a duplicate.
+                        if (item.TaskId is not null)
+                            _activeTaskIds.TryRemove(item.TaskId, out _);
                     }
                 }
             }
@@ -1013,7 +1062,22 @@ public sealed class TaskManager
     /// </summary>
     public async Task CancelAllAsync()
     {
-        // Cancel all running tasks
+        // Drain the queue FIRST so that when cancelling running tasks triggers DrainQueue,
+        // there is nothing left to dequeue and no queued reservation is accidentally promoted
+        // to a running reservation before we release it.
+        var queued = new List<QueuedMessage>();
+        while (_messageQueue.TryDequeue(out var msg))
+            queued.Add(msg);
+        foreach (var msg in queued)
+        {
+            if (msg.TaskId is not null)
+                _activeTaskIds.TryRemove(msg.TaskId, out _);
+        }
+        lock (_pendingQueueIndexLock)
+            _pendingQueueByChat.Clear();
+
+        // Cancel all running tasks (their finally blocks will call DrainQueue, which now finds
+        // an empty queue and returns immediately).
         foreach (var (_, state) in _chatTasks)
         {
             foreach (var t in state.Snapshot())
@@ -1022,11 +1086,6 @@ public sealed class TaskManager
                 catch (ObjectDisposedException) { }
             }
         }
-
-        // Clear the pending queue
-        while (_messageQueue.TryDequeue(out _)) { }
-        lock (_pendingQueueIndexLock)
-            _pendingQueueByChat.Clear();
 
         _logger.LogInformation("CancelAll: all running tasks cancelled and queue cleared");
     }
@@ -1058,9 +1117,10 @@ public sealed class TaskManager
             _ = Sink.SendTextAsync(queued.ChatId, "Now processing your queued message...");
         OnStatusChanged?.Invoke();
 
-        StartTaskCore(queued.ChatId, payload.Task, payload.DisplayText, payload.IsSessionTask,
+        _ = StartTaskCore(queued.ChatId, payload.Task, payload.DisplayText, payload.IsSessionTask,
             payload.Source, payload.RelaySender, payload.CorrelationId, payload.TaskId,
-            payload.Images, payload.Documents, payload.UserId, skipPendingQueueCheck: true);
+            payload.Images, payload.Documents, payload.UserId,
+            skipPendingQueueCheck: true, skipDedupReservationAcquire: true);
 
         RemovePendingIndexIfCurrent(queued);
     }
@@ -1085,9 +1145,9 @@ public sealed class TaskManager
 
     /// <summary>
     /// Raised when a task completes with a result.
-    /// Parameters: chatId, result, relaySender (null if Telegram-originated), source, isPartial (hit max-turns/error), correlationId, taskId.
+    /// Parameters: chatId, result, relaySender (null if Telegram-originated), source, isPartial (hit max-turns/error), correlationId, taskId, kind.
     /// </summary>
-    public event Action<long, string, string?, TaskSource, bool, string?, string?>? OnTaskCompleted;
+    public event Action<long, string, string?, TaskSource, bool, string?, string?, CompletionKind>? OnTaskCompleted;
 
     /// <summary>
     /// Raised for each significant tool-use event during task execution.

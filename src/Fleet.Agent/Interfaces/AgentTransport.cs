@@ -602,29 +602,45 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     private void OnToolUse(long chatId, string toolName, string description) =>
         _groupBehavior.BufferToolUse(chatId, toolName, description);
 
-    private void OnTaskCompleted(long chatId, string result, string? relaySender, TaskSource source, bool isPartial, string? correlationId, string? taskId)
+    private void OnTaskCompleted(long chatId, string result, string? relaySender, TaskSource source, bool isPartial, string? correlationId, string? taskId, CompletionKind kind)
     {
-        var lastSentId = _lastSentMessageIds.TryGetValue(chatId, out var id) ? id : 0L;
-        _groupBehavior.BufferBotResponse(chatId, result, telegramMessageId: lastSentId);
+        if (!string.IsNullOrEmpty(result))
+        {
+            var lastSentId = _lastSentMessageIds.TryGetValue(chatId, out var id) ? id : 0L;
+            _groupBehavior.BufferBotResponse(chatId, result, telegramMessageId: lastSentId);
+        }
 
         _ = Task.Run(async () =>
         {
             if (relaySender == "bridge" && correlationId is not null)
             {
-                await _relay.PublishToAgentAsync("bridge", chatId, result,
+                var bridgeResult = kind switch
+                {
+                    CompletionKind.Idle => "[status: idle]",
+                    CompletionKind.Failed => $"[status: failed]\n{result}",
+                    CompletionKind.Incomplete => $"[status: incomplete]\n{result}",
+                    _ => result,
+                };
+                await _relay.PublishToAgentAsync("bridge", chatId, bridgeResult,
                     type: RelayMessageType.BridgeResponse, correlationId: correlationId, taskId: taskId);
             }
             else if (relaySender is not null)
             {
                 var type = isPartial ? RelayMessageType.PartialResponse : RelayMessageType.Response;
-                var text = taskId is not null ? FormatTaskResponse(result, isPartial) : result;
+                var text = taskId is not null ? FormatTaskResponse(result, isPartial, kind) : result;
                 await _relay.PublishToAgentAsync(relaySender, chatId, text, type: type, taskId: taskId);
             }
         });
     }
 
-    private static string FormatTaskResponse(string result, bool isPartial)
+    private static string FormatTaskResponse(string result, bool isPartial, CompletionKind kind)
     {
+        if (kind == CompletionKind.Idle)
+            return "[status: idle]";
+
+        if (kind == CompletionKind.Failed)
+            return $"[status: failed]\n{result}";
+
         // Detect voluntary failure marker: [TASK_FAILED: reason]
         // Agents can emit this to signal that they refused or cannot complete a delegated task.
         var taskFailedMatch = TaskFailedMarkerRegex.Match(result);
@@ -1009,13 +1025,13 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         foreach (var emoji in added)
         {
             var text = $"{channelAnchor}\n[reaction: {emoji} on message_id={messageId} from user_id={userId}{contentSuffix}]";
-            _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
+            _ = _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
         }
 
         foreach (var emoji in removed)
         {
             var text = $"{channelAnchor}\n[reaction removed: {emoji} on message_id={messageId} from user_id={userId}{contentSuffix}]";
-            _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
+            _ = _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
         }
     }
 

@@ -230,10 +230,21 @@ public class UniversalWorkflow
             });
 
         if (step.OutputVar != null)
-            SetVar(step.OutputVar, result.Text);
+            SetVar(step.OutputVar, ResolveOutputVar(result));
 
         return result.Text;
     }
+
+    /// <summary>
+    /// Returns the value to store in outputVar from a delegate result.
+    /// When the agent answered IDLE, Text is empty and the status prefix is all the
+    /// caller has — store "[status: idle]" so templates using
+    /// <c>{{vars.x | default: '...'}}</c> don't fire their fallback on a normal IDLE.
+    /// </summary>
+    internal static string ResolveOutputVar(AgentTaskResult result) =>
+        string.IsNullOrEmpty(result.Text) && result.Status == "idle"
+            ? "[status: idle]"
+            : result.Text;
 
     private async Task<object?> ExecuteDelegateWithEscalationAsync(DelegateWithEscalationStep step)
     {

@@ -213,7 +213,7 @@ public sealed class GroupBehavior
             try
             {
                 await Task.Delay(delay, linkedCts.Token);
-                StartGroupCheckIn(chatId, "All-messages check-in", """
+                await StartDebouncedGroupCheckInAsync(chatId, "All-messages check-in", """
                     Review the conversation above. If anything needs your input, action, or
                     follow-up — respond. If nothing needs attention: IDLE
                     """, _shutdownToken);
@@ -277,6 +277,41 @@ public sealed class GroupBehavior
         return entry.Drain();
     }
 
+    /// <summary>
+    /// Returns a snapshot of buffered pending images without removing them.
+    /// Excludes TTL-expired entries (they must not be delivered) but does NOT
+    /// remove the expired entry — that is deferred to <see cref="CommitPendingImages"/>.
+    /// </summary>
+    private IReadOnlyList<MessageImage> PeekPendingImages(long chatId)
+    {
+        if (!_pendingImages.TryGetValue(chatId, out var entry))
+            return [];
+        if (entry.IsExpired)
+        {
+            _logger.LogDebug("Pending images for group {ChatId} exceeded TTL, excluding from snapshot (CommitPendingImages will clean up)", chatId);
+            return [];
+        }
+        return entry.Peek();
+    }
+
+    /// <summary>
+    /// Removes the pending-images entry for <paramref name="chatId"/> when all images
+    /// in storage predate <paramref name="boundary"/> (i.e. no new images arrived after
+    /// the snapshot). Also removes expired entries so they are not left behind indefinitely.
+    /// </summary>
+    private void CommitPendingImages(long chatId, DateTimeOffset boundary)
+    {
+        if (!_pendingImages.TryGetValue(chatId, out var entry))
+            return;
+        if (!entry.ShouldCommit(boundary))
+        {
+            // New images arrived after our snapshot — leave them for the next cycle.
+            _logger.LogDebug("Pending images for group {ChatId}: new images arrived after snapshot boundary, not committing", chatId);
+            return;
+        }
+        _pendingImages.TryRemove(chatId, out _);
+    }
+
     // --- Relay handling ---
 
     public void OnRelayMessage(long chatId, string sender, string text, string type, string? correlationId = null, string? taskId = null, string? workflowId = null, string? signalName = null)
@@ -331,7 +366,7 @@ public sealed class GroupBehavior
                 var prompt = _prompts.ForRelayDirective(buffer, sender, text);
                 buffer.MarkChecked();
                 var displayText = $"[Bridge: {sender}] {TaskManager.TruncateText(text, 500)}";
-                _taskManager.StartTask(chatId, prompt, displayText, isSessionTask: true,
+                _ = _taskManager.StartTask(chatId, prompt, displayText, isSessionTask: true,
                     source: TaskSource.Bridge, relaySender: "bridge", correlationId: correlationId, taskId: taskId);
             });
             return;
@@ -372,7 +407,7 @@ public sealed class GroupBehavior
             var prompt = _prompts.ForRelayDirective(buffer, sender, text);
             buffer.MarkChecked();
             var displayText = $"[From: {sender}] {TaskManager.TruncateText(text, 500)}";
-            _taskManager.StartTask(chatId, prompt, displayText, isSessionTask: true,
+            _ = _taskManager.StartTask(chatId, prompt, displayText, isSessionTask: true,
                 source: TaskSource.Relay, relaySender: sender, taskId: taskId);
         });
     }
@@ -636,8 +671,14 @@ public sealed class GroupBehavior
         return Task.CompletedTask;
     }
 
-    // --- Shared check-in method ---
+    // --- Check-in dispatch methods ---
 
+    /// <summary>
+    /// Dispatches a check-in for the proactive timer sweep and the welcome DM.
+    /// Stamps the watermark with wall-clock time before dispatch and drains pending
+    /// images destructively (existing behaviour — these callers are not batch-sensitive).
+    /// Uses <see cref="TaskSource.CheckIn"/> so IDLE and no-output suppression apply.
+    /// </summary>
     public void StartGroupCheckIn(long chatId, string label, string instruction, CancellationToken ct)
     {
         var buffer = GetGroupBuffer(chatId);
@@ -648,9 +689,41 @@ public sealed class GroupBehavior
 
         // Delegate entirely to TaskManager — it handles typing, execution,
         // session tracking, tool buffering, IDLE suppression, and completion events.
-        _taskManager.StartTask(chatId, prompt, $"[{label}]", isSessionTask: true,
+        _ = _taskManager.StartTask(chatId, prompt, $"[{label}]", isSessionTask: true,
             source: TaskSource.CheckIn,
             images: pendingImages.Count > 0 ? pendingImages : null);
+    }
+
+    /// <summary>
+    /// Dispatches a human-originated group-chat batch after the debounce timer fires.
+    /// Uses the peek/commit pattern so that images and the watermark are only advanced
+    /// once the task manager has accepted the batch (Ran, Injected, or Queued).
+    /// Uses <see cref="TaskSource.DebouncedGroupBatch"/> to enable same-chat mid-turn
+    /// injection and to trigger IDLE and no-output suppression.
+    /// </summary>
+    private async Task StartDebouncedGroupCheckInAsync(long chatId, string label, string instruction, CancellationToken ct)
+    {
+        var buffer = GetGroupBuffer(chatId);
+        var batchTime = DateTimeOffset.UtcNow;
+        var pendingImages = PeekPendingImages(chatId);
+        var prompt = _prompts.ForCheckIn(buffer, label, instruction);
+        _logger.LogInformation("{Label} triggered for group {ChatId}", label, chatId);
+
+        var outcome = await _taskManager.StartTask(chatId, prompt, $"[{label}]", isSessionTask: true,
+            source: TaskSource.DebouncedGroupBatch,
+            images: pendingImages.Count > 0 ? pendingImages : null);
+
+        if (outcome is TaskDispatchOutcome.Ran or TaskDispatchOutcome.Injected or TaskDispatchOutcome.Queued)
+        {
+            buffer.MarkChecked(batchTime);
+            // CommitPendingImages is unconditional: even when pendingImages is empty, committed
+            // entries with storedAt ≤ batchTime need cleanup (e.g. images that expired mid-batch).
+            CommitPendingImages(chatId, batchTime);
+        }
+        else
+        {
+            _logger.LogDebug("{Label}: dispatch outcome={Outcome} for group {ChatId} — not advancing watermark or committing images", label, outcome, chatId);
+        }
     }
 
     public string BuildGroupTask(long chatId, string sender, string taskText,
@@ -692,7 +765,7 @@ public sealed class GroupBehavior
             them know they can now message you directly.
             """;
         var display = $"[Welcome DM → {displayName}]";
-        _taskManager.StartTask(user.UserId, prompt, display, isSessionTask: false,
+        _ = _taskManager.StartTask(user.UserId, prompt, display, isSessionTask: false,
             source: TaskSource.CheckIn);
         return Task.CompletedTask;
     }
@@ -747,6 +820,65 @@ public sealed class GroupBehavior
             }
         }
 
-        public bool IsExpired => DateTimeOffset.UtcNow - _storedAt > Ttl;
+        /// <summary>
+        /// Returns a copy of the buffered images without removing them.
+        /// </summary>
+        public IReadOnlyList<MessageImage> Peek()
+        {
+            lock (_lock)
+            {
+                return _images.Count == 0 ? [] : [.. _images];
+            }
+        }
+
+        /// <summary>
+        /// Returns <c>true</c> when all images in storage were stored at or before
+        /// <paramref name="boundary"/> — meaning no new images arrived after the snapshot
+        /// and it is safe to remove the entire entry.
+        /// Also returns <c>true</c> when the entry is TTL-expired, so stale entries are
+        /// cleaned up whenever a commit runs.
+        /// </summary>
+        public bool ShouldCommit(DateTimeOffset boundary)
+        {
+            lock (_lock) return _storedAt <= boundary || IsExpiredLocked;
+        }
+
+        public bool IsExpired
+        {
+            get { lock (_lock) return IsExpiredLocked; }
+        }
+
+        private bool IsExpiredLocked => DateTimeOffset.UtcNow - _storedAt > Ttl;
+
+        /// <summary>Testing seam: sets _storedAt to simulate images that arrived in the past.</summary>
+        internal void BackdateStoredAtForTest(TimeSpan age)
+        {
+            lock (_lock) _storedAt = DateTimeOffset.UtcNow - age;
+        }
+    }
+
+    // ─── Internal testing seams ─────────────────────────────────────────────────
+    // Exposed via InternalsVisibleTo for Fleet.Agent.Tests. Production code never calls these.
+
+    /// <summary>Invokes <see cref="StartDebouncedGroupCheckInAsync"/> directly, bypassing the debounce timer.</summary>
+    internal Task TriggerDebouncedGroupBatchForTestAsync(long chatId, string label = "test", string instruction = "check-in")
+        => StartDebouncedGroupCheckInAsync(chatId, label, instruction, CancellationToken.None);
+
+    /// <summary>Returns <c>true</c> when the pending-images dictionary has an entry for <paramref name="chatId"/>.</summary>
+    internal bool HasPendingImages(long chatId) => _pendingImages.ContainsKey(chatId);
+
+    /// <summary>Exposes <see cref="CommitPendingImages"/> for boundary-logic tests.</summary>
+    internal void CommitPendingImagesForTest(long chatId, DateTimeOffset boundary)
+        => CommitPendingImages(chatId, boundary);
+
+    /// <summary>Exposes <see cref="PeekPendingImages"/> for TTL tests.</summary>
+    internal IReadOnlyList<MessageImage> PeekPendingImagesForTest(long chatId)
+        => PeekPendingImages(chatId);
+
+    /// <summary>Sets the pending-images entry for <paramref name="chatId"/> to appear older than <paramref name="age"/>.</summary>
+    internal void BackdatePendingImagesForTest(long chatId, TimeSpan age)
+    {
+        if (_pendingImages.TryGetValue(chatId, out var entry))
+            entry.BackdateStoredAtForTest(age);
     }
 }

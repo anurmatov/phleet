@@ -362,6 +362,26 @@ public sealed class CodexExecutor : IAgentExecutor
 
     internal bool TurnHasFinalAnswerPhaseForTests => _turnHasFinalAnswerPhase;
 
+    internal void SetProcessForTests(System.Diagnostics.Process? process) => _process = process;
+
+    internal void SetStdinForTests(StreamWriter writer) => _stdin = writer;
+
+    // Polls _pendingRequests until a TCS appears, resolves it with the given result, and returns.
+    // Use in tests alongside TryInjectMessageAsync to simulate a codex app-server responding to turn/steer.
+    internal async Task<bool> WaitAndCompleteNextPendingSteerForTests(JsonObject result, CancellationToken ct = default)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            foreach (var (id, tcs) in _pendingRequests)
+            {
+                if (_pendingRequests.TryRemove(id, out var found) && found.TrySetResult(new RpcOutcome(result, null)))
+                    return true;
+            }
+            await Task.Delay(1, ct);
+        }
+        return false;
+    }
+
     internal (List<string> ForwardedPaths, int SkippedCount) CollectImagePaths(IReadOnlyList<MessageImage>? images)
     {
         if (images is not { Count: > 0 })
@@ -944,6 +964,7 @@ public sealed class CodexExecutor : IAgentExecutor
             };
 
             _activeTurnId = null;
+            _turnHasFinalAnswerPhase = false;
 
         if (string.Equals(status, "completed", StringComparison.OrdinalIgnoreCase))
         {
@@ -1004,6 +1025,7 @@ public sealed class CodexExecutor : IAgentExecutor
     private async Task DrainInterruptedTurnAsync(string turnId)
     {
         _activeTurnId = null;
+        _turnHasFinalAnswerPhase = false;
         await InterruptTurnAsync(turnId);
 
         if (_notificationChannel is null)

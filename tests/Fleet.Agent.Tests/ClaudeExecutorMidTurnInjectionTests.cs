@@ -120,6 +120,36 @@ public class ClaudeExecutorMidTurnInjectionTests
         Assert.False(executor.TurnCommittedToFinalAnswerForTests);
     }
 
+    [Fact]
+    public async Task AfterToolUse_InjectionStillSucceeds()
+    {
+        // A tool_use assistant event must NOT set the final-answer flag.
+        // After seeing one, TryInjectMessageAsync must proceed and return Injected.
+        var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "/bin/cat",
+            RedirectStandardInput = true,
+            UseShellExecute = false,
+        })!;
+        try
+        {
+            var executor = BuildExecutor();
+            executor.SetProcessForTests(process);
+            executor.SetStdinForTests(process.StandardInput);
+            executor.ParseProgressForTests(ToolUseAssistantEvent());
+            Assert.False(executor.TurnCommittedToFinalAnswerForTests);
+
+            var result = await executor.TryInjectMessageAsync("mid-turn injection", null, null, CancellationToken.None);
+
+            Assert.Equal(MidTurnInjectionStatus.Injected, result.Status);
+        }
+        finally
+        {
+            process.Kill();
+            process.Dispose();
+        }
+    }
+
     private static ClaudeExecutor BuildExecutor()
     {
         var options = Options.Create(new AgentOptions

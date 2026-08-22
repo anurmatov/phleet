@@ -436,6 +436,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
     internal AgentProgress ParseProgressForTests(ClaudeStreamEvent evt) => ParseProgress(evt);
     internal bool TurnCommittedToFinalAnswerForTests => _turnCommittedToFinalAnswer;
+    internal void SetProcessForTests(Process? process) => _process = process;
 
     // --- Stdout channel helpers ---
 
@@ -915,20 +916,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
         {
             "assistant" => ParseAssistantEvent(this, evt),
 
-            "result" => new AgentProgress
-            {
-                IsSignificant = true,
-                Summary = !string.IsNullOrEmpty(evt.Result)
-                    ? TruncateText(evt.Result, 500)
-                    : "Task completed",
-                EventType = evt.Type,
-                FinalResult = evt.Result,
-                SessionId = evt.SessionId,
-                IsErrorResult = evt.IsError == true,
-                StructuredOutput = evt.StructuredOutput.HasValue
-                    ? evt.StructuredOutput.Value.GetRawText()
-                    : null,
-            },
+            "result" => HandleResultEvent(evt),
 
             _ => new AgentProgress
             {
@@ -979,6 +967,27 @@ public sealed class ClaudeExecutor : IAgentExecutor
         }
 
         return new AgentProgress { IsSignificant = false, Summary = "Assistant event", EventType = evt.Type };
+    }
+
+    private AgentProgress HandleResultEvent(ClaudeStreamEvent evt)
+    {
+        // Resetting the flag here ensures that a subsequent TryInjectMessageAsync call (after turn
+        // completion) returns "no active turn" rather than the stale "final answer already begun" message.
+        _turnCommittedToFinalAnswer = false;
+        return new AgentProgress
+        {
+            IsSignificant = true,
+            Summary = !string.IsNullOrEmpty(evt.Result)
+                ? TruncateText(evt.Result, 500)
+                : "Task completed",
+            EventType = evt.Type,
+            FinalResult = evt.Result,
+            SessionId = evt.SessionId,
+            IsErrorResult = evt.IsError == true,
+            StructuredOutput = evt.StructuredOutput.HasValue
+                ? evt.StructuredOutput.Value.GetRawText()
+                : null,
+        };
     }
 
     private static string DescribeToolUse(string name, Dictionary<string, object>? input)

@@ -418,4 +418,41 @@ public class CodexExecutorTests
         Assert.Equal(MidTurnInjectionStatus.NoActiveTurn, result.Status);
         Assert.Contains("final_answer", result.Error ?? "");
     }
+
+    [Fact]
+    public async Task AfterCommentaryPhase_InjectionStillSucceeds()
+    {
+        // After a commentary-phase (or absent-phase) agentMessage, the final-answer flag must NOT
+        // be set, so TryInjectMessageAsync must proceed to turn/steer and return Injected.
+        var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "/bin/cat",
+            RedirectStandardInput = true,
+            UseShellExecute = false,
+        })!;
+        try
+        {
+            var executor = CreateExecutor();
+            executor.SetProcessForTests(process);
+            executor.SetStdinForTests(process.StandardInput);
+            executor.SetThreadStateForTests("thread-1", "turn-1");
+            executor.BuildItemStartedProgressForTests(AgentMessageParams("commentary"));
+            Assert.False(executor.TurnHasFinalAnswerPhaseForTests);
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            // WaitAndCompleteNextPendingSteerForTests polls _pendingRequests until the turn/steer
+            // RPC is registered, then resolves it with a successful response.
+            var resolveTask = executor.WaitAndCompleteNextPendingSteerForTests(
+                new JsonObject { ["turnId"] = "turn-1" }, cts.Token);
+            var injectTask = executor.TryInjectMessageAsync("mid-turn injection", null, null, cts.Token);
+            await Task.WhenAll(resolveTask, injectTask);
+
+            Assert.Equal(MidTurnInjectionStatus.Injected, injectTask.Result.Status);
+        }
+        finally
+        {
+            process.Kill();
+            process.Dispose();
+        }
+    }
 }

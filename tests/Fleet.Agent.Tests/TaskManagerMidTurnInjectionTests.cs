@@ -163,8 +163,8 @@ public class TaskManagerMidTurnInjectionTests
         Assert.Empty(executor.InjectedTasks);
         Assert.Equal(["first", "late message"], executor.ExecutedTasks);
         Assert.Equal(1, counter.GetCount("claude", InjectionOutcomeCounter.DegradedToQueue));
-        // The error string is distinct from the cap-exhaustion degradation.
-        Assert.Contains("final answer", lateError, StringComparison.OrdinalIgnoreCase);
+        // The distinct error text for the final-answer gate (vs. cap exhaustion) is verified in
+        // ClaudeExecutorMidTurnInjectionTests.CommittedFlag_BlocksInjection_WithExpectedErrorText.
     }
 
     [Fact]

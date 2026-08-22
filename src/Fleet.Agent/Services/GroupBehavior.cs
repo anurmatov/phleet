@@ -604,12 +604,6 @@ public sealed class GroupBehavior
             if (!_groupBuffers.TryGetValue(groupId, out var buffer) || !buffer.HasMessagesSinceLastCheck())
                 continue;
 
-            if (_taskManager.HasRunningTasks(groupId))
-            {
-                _logger.LogDebug("Proactive check-in: tasks running in group {ChatId}, skipping", groupId);
-                continue;
-            }
-
             buffer.MarkChecked();
 
             var isAllMode = _agentConfig.GroupListenMode.Equals("all", StringComparison.OrdinalIgnoreCase);
@@ -646,12 +640,6 @@ public sealed class GroupBehavior
 
     public void StartGroupCheckIn(long chatId, string label, string instruction, CancellationToken ct)
     {
-        if (_taskManager.HasRunningTasks(chatId))
-        {
-            _logger.LogDebug("{Label} skipped — tasks running in group {ChatId}", label, chatId);
-            return;
-        }
-
         var buffer = GetGroupBuffer(chatId);
         var prompt = _prompts.ForCheckIn(buffer, label, instruction);
         buffer.MarkChecked();

@@ -22,9 +22,10 @@ public sealed class ClaudeExecutor : IAgentExecutor
     private readonly ILogger<ClaudeExecutor> _logger;
 
     private Process? _process;
-    private StreamWriter? _stdin;
+    private TextWriter? _stdin;
     private StreamReader? _stdout;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
+    private readonly SemaphoreSlim _stdinWriteLock = new(1, 1);
     private string? _lastSessionId;
     private int _messageCount;
     private DateTimeOffset _lastActivity = DateTimeOffset.MinValue;
@@ -55,9 +56,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
     /// Request cancellation of a specific background subagent task by sending a TaskStop
     /// command to the Claude process via stdin.
     /// Returns false if the task ID is not in the active set.
-    /// Uses a non-blocking tryacquire on _sendLock so the cancel endpoint never times out
-    /// behind an active execution turn. If the lock is held, the task_stop message is written
-    /// directly (stdin writes are thread-safe) and we return true immediately.
+    /// Uses a non-blocking try-acquire on the narrow stdin write lock so the cancel
+    /// endpoint never waits behind a concurrent injection write. If the lock is held,
+    /// the task_stop message falls back to the pre-existing direct write path.
     /// </summary>
     public async Task<bool> CancelBackgroundTaskAsync(string taskId, CancellationToken ct = default)
     {
@@ -75,27 +76,16 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
         _logger.LogInformation("Sending task_stop for background task {TaskId}", taskId);
 
-        if (await _sendLock.WaitAsync(TimeSpan.Zero))
+        if (await _stdinWriteLock.WaitAsync(TimeSpan.Zero))
         {
-            // Lock acquired — write under the lock as normal.
-            try
-            {
-                await _stdin!.WriteLineAsync(message.AsMemory(), ct);
-                await _stdin.FlushAsync();
-            }
-            finally
-            {
-                _sendLock.Release();
-            }
+            try { await WriteStdinLineUnlockedAsync(message, ct); }
+            finally { _stdinWriteLock.Release(); }
         }
         else
         {
-            // Lock is held by an active execution turn. Write directly — StreamWriter
-            // internal writes on a UTF-8 pipe are effectively atomic for single-line
-            // NDJSON messages; the worst case is interleaved bytes on the pipe, which
-            // Claude's stream-json parser handles gracefully. This avoids a timeout.
-            await _stdin!.WriteLineAsync(message.AsMemory(), ct);
-            await _stdin.FlushAsync();
+            // A cancel must never wait behind an ordinary user-message injection.
+            // Preserve the pre-existing non-blocking bypass for this rare fixed-shape signal.
+            await WriteStdinLineUnlockedAsync(message, ct);
         }
 
         return true;
@@ -140,61 +130,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
         try
         {
-            string message;
-            var hasImages = images is { Count: > 0 };
-            var hasDocuments = documents is { Count: > 0 };
-            if (hasImages || hasDocuments)
-            {
-                var contentBlocks = new List<object>((images?.Count ?? 0) + (documents?.Count ?? 0) + 1);
-                if (hasImages)
-                {
-                    foreach (var img in images!)
-                    {
-                        var base64 = Convert.ToBase64String(img.Bytes);
-                        contentBlocks.Add(new { type = "image", source = new { type = "base64", media_type = img.MimeType, data = base64 } });
-                    }
-                }
-                if (hasDocuments)
-                {
-                    foreach (var doc in documents!)
-                    {
-                        // Only PDF files are supported as native type:document content blocks.
-                        // Non-PDF types (including null MimeType — which now resolves to
-                        // "application/octet-stream" via InferMimeType) must NOT be sent as
-                        // document blocks — the Anthropic API returns 400 for non-PDF bytes.
-                        // Agent reads non-PDF files via Read/Bash using the [file attachment:] hint.
-                        if (!ShouldEmitDocumentBlock(doc)) continue;
-                        byte[] pdfBytes;
-                        try { pdfBytes = await File.ReadAllBytesAsync(doc.FilePath!, ct); }
-                        catch (Exception ex)
-                        {
-                            _logger.LogWarning(ex, "Failed to read document file {FilePath} for LLM block, skipping", doc.FilePath);
-                            continue;
-                        }
-                        var base64 = Convert.ToBase64String(pdfBytes);
-                        // Claude document content block (see https://docs.anthropic.com/en/docs/build-with-claude/files)
-                        contentBlocks.Add(new
-                        {
-                            type = "document",
-                            source = new { type = "base64", media_type = doc.MimeType, data = base64 }
-                        });
-                    }
-                }
-                contentBlocks.Add(new { type = "text", text = task });
-                message = JsonSerializer.Serialize(new
-                {
-                    type = "user",
-                    message = new { role = "user", content = contentBlocks }
-                });
-            }
-            else
-            {
-                message = JsonSerializer.Serialize(new
-                {
-                    type = "user",
-                    message = new { role = "user", content = task }
-                });
-            }
+            var message = await BuildUserMessageJsonAsync(task, images, documents, ct);
 
             var attempt = 0;
 
@@ -217,8 +153,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                     if (messageBytes > 10_000)
                         _logger.LogWarning("Large input detected ({Size} bytes, message #{Num})",
                             messageBytes, _messageCount + 1);
-                    await _stdin!.WriteLineAsync(message.AsMemory(), ct);
-                    await _stdin.FlushAsync();
+                    await WriteStdinLineAsync(message, ct);
                 }
                 catch (IOException) when (attempt < 2)
                 {
@@ -267,6 +202,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                             IsSignificant = true,
                             Summary = "Claude process died unexpectedly",
                             EventType = "error",
+                            IsProcessExit = true,
                         };
                         yield break;
                     }
@@ -339,6 +275,35 @@ public sealed class ClaudeExecutor : IAgentExecutor
         }
     }
 
+    public async Task<MidTurnInjectionResult> TryInjectMessageAsync(
+        string task,
+        IReadOnlyList<MessageImage>? images = null,
+        IReadOnlyList<MessageDocument>? documents = null,
+        CancellationToken ct = default)
+    {
+        if (_process is null || _process.HasExited || _stdin is null)
+            return MidTurnInjectionResult.NoActiveTurn("Claude process is not running.");
+
+        var message = await BuildUserMessageJsonAsync(task, images, documents, ct);
+        if (!await _stdinWriteLock.WaitAsync(TimeSpan.FromSeconds(2), ct))
+            return MidTurnInjectionResult.Failed("Timed out waiting to write to Claude stdin.");
+
+        try
+        {
+            await WriteStdinLineUnlockedAsync(message, ct);
+            _lastActivity = DateTimeOffset.UtcNow;
+            return MidTurnInjectionResult.Injected;
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
+        {
+            return MidTurnInjectionResult.Failed(ex.Message);
+        }
+        finally
+        {
+            _stdinWriteLock.Release();
+        }
+    }
+
     /// <summary>
     /// Stop the persistent process (used by /reset and shutdown).
     /// Next call to ExecuteAsync will start a fresh process.
@@ -384,7 +349,85 @@ public sealed class ClaudeExecutor : IAgentExecutor
     {
         await KillProcessAsync();
         _sendLock.Dispose();
+        _stdinWriteLock.Dispose();
     }
+
+    internal async Task<string> BuildUserMessageJsonAsync(
+        string task,
+        IReadOnlyList<MessageImage>? images,
+        IReadOnlyList<MessageDocument>? documents,
+        CancellationToken ct)
+    {
+        var hasImages = images is { Count: > 0 };
+        var hasDocuments = documents is { Count: > 0 };
+        if (!hasImages && !hasDocuments)
+        {
+            return JsonSerializer.Serialize(new
+            {
+                type = "user",
+                message = new { role = "user", content = task }
+            });
+        }
+
+        var contentBlocks = new List<object>((images?.Count ?? 0) + (documents?.Count ?? 0) + 1);
+        if (hasImages)
+        {
+            foreach (var img in images!)
+            {
+                var base64 = Convert.ToBase64String(img.Bytes);
+                contentBlocks.Add(new { type = "image", source = new { type = "base64", media_type = img.MimeType, data = base64 } });
+            }
+        }
+
+        if (hasDocuments)
+        {
+            foreach (var doc in documents!)
+            {
+                if (!ShouldEmitDocumentBlock(doc)) continue;
+                byte[] pdfBytes;
+                try { pdfBytes = await File.ReadAllBytesAsync(doc.FilePath!, ct); }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to read document file {FilePath} for LLM block, skipping", doc.FilePath);
+                    continue;
+                }
+                var base64 = Convert.ToBase64String(pdfBytes);
+                contentBlocks.Add(new
+                {
+                    type = "document",
+                    source = new { type = "base64", media_type = doc.MimeType, data = base64 }
+                });
+            }
+        }
+
+        contentBlocks.Add(new { type = "text", text = task });
+        return JsonSerializer.Serialize(new
+        {
+            type = "user",
+            message = new { role = "user", content = contentBlocks }
+        });
+    }
+
+    private async Task WriteStdinLineAsync(string message, CancellationToken ct)
+    {
+        await _stdinWriteLock.WaitAsync(ct);
+        try { await WriteStdinLineUnlockedAsync(message, ct); }
+        finally { _stdinWriteLock.Release(); }
+    }
+
+    private async Task WriteStdinLineUnlockedAsync(string message, CancellationToken ct)
+    {
+        if (_stdin is null)
+            throw new InvalidOperationException("Claude stdin is not available.");
+
+        await _stdin.WriteLineAsync(message.AsMemory(), ct);
+        await _stdin.FlushAsync();
+    }
+
+    internal void SetStdinForTests(TextWriter writer) => _stdin = writer;
+
+    internal Task WriteStdinLineForTestsAsync(string message, bool useLock, CancellationToken ct = default) =>
+        useLock ? WriteStdinLineAsync(message, ct) : WriteStdinLineUnlockedAsync(message, ct);
 
     // --- Stdout channel helpers ---
 
@@ -510,8 +553,8 @@ public sealed class ClaudeExecutor : IAgentExecutor
         _process = Process.Start(psi)
             ?? throw new InvalidOperationException("Failed to start claude process");
 
-        _stdin = _process.StandardInput;
-        _stdin.AutoFlush = false;
+        _process.StandardInput.AutoFlush = false;
+        _stdin = TextWriter.Synchronized(_process.StandardInput);
         _stdout = _process.StandardOutput;
 
         // Read stderr in background for logging (lives for process lifetime)
@@ -662,8 +705,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 type = "user",
                 message = new { role = "user", content = command }
             });
-            await _stdin!.WriteLineAsync(message.AsMemory(), ct);
-            await _stdin.FlushAsync();
+            await WriteStdinLineAsync(message, ct);
 
             // Read response events until "result" — via the channel, not _stdout directly.
             while (!ct.IsCancellationRequested)

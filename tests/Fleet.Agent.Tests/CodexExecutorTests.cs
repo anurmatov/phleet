@@ -307,6 +307,16 @@ public class CodexExecutorTests
         Assert.Contains("3 attempts", caughtEx.Message);
     }
 
+    [Theory]
+    [InlineData(-32600, "no active turn to steer", true)]
+    [InlineData(-32600, "expected active turn id `old` but found `new`", true)]
+    [InlineData(-32600, "other invalid request", false)]
+    [InlineData(-32000, "no active turn to steer", false)]
+    public void IsTurnSteerPreconditionFailure_MatchesOnlyTurnBoundaryErrors(long code, string message, bool expected)
+    {
+        Assert.Equal(expected, CodexExecutor.IsTurnSteerPreconditionFailureForTests(code, message));
+    }
+
     // BuildItemStartedProgress must emit a [codex tool_use:...] log line for every tool item,
     // mirroring ClaudeExecutor's tool-call logger for observability parity.
     [Fact]

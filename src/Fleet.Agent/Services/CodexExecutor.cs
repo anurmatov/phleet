@@ -54,6 +54,7 @@ public sealed class CodexExecutor : IAgentExecutor
     private const string ClientVersion = "0.1.0";
     private const int StartupRetryBudget = 3;
     private static readonly TimeSpan InterruptDrainTimeout = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan TurnSteerTimeout = TimeSpan.FromSeconds(2);
 
     public string? LastSessionId => _threadId;
     public DateTimeOffset LastActivity => _lastActivity;
@@ -181,6 +182,56 @@ public sealed class CodexExecutor : IAgentExecutor
         finally
         {
             _turnLock.Release();
+        }
+    }
+
+    public async Task<MidTurnInjectionResult> TryInjectMessageAsync(
+        string task,
+        IReadOnlyList<MessageImage>? images = null,
+        IReadOnlyList<MessageDocument>? documents = null,
+        CancellationToken ct = default)
+    {
+        if (_threadId is null || _activeTurnId is null || _process is null || _process.HasExited)
+            return MidTurnInjectionResult.NoActiveTurn("Codex has no active turn to steer.");
+
+        var expectedTurnId = _activeTurnId;
+        var (forwardedPaths, _) = CollectImagePaths(images);
+        var steerParams = new JsonObject
+        {
+            ["threadId"] = _threadId,
+            ["expectedTurnId"] = expectedTurnId,
+            ["input"] = BuildUserInputs(task, forwardedPaths),
+        };
+
+        try
+        {
+            await _sendLock.WaitAsync(ct);
+            try
+            {
+                using var steerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                steerCts.CancelAfter(TurnSteerTimeout);
+                var response = await SendRequestAsync("turn/steer", steerParams, steerCts.Token);
+                var acceptedTurnId = response["turnId"]?.GetValue<string>();
+                return string.Equals(acceptedTurnId, expectedTurnId, StringComparison.Ordinal)
+                    ? MidTurnInjectionResult.Injected
+                    : MidTurnInjectionResult.Failed($"turn/steer returned unexpected turnId '{acceptedTurnId}'.");
+            }
+            finally
+            {
+                _sendLock.Release();
+            }
+        }
+        catch (RpcErrorException ex) when (IsTurnSteerPreconditionFailure(ex))
+        {
+            return MidTurnInjectionResult.NoActiveTurn(ex.Message);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return MidTurnInjectionResult.Failed($"turn/steer timed out after {TurnSteerTimeout.TotalSeconds:0}s.");
+        }
+        catch (Exception ex) when (ex is RpcErrorException or InvalidOperationException or IOException or ObjectDisposedException)
+        {
+            return MidTurnInjectionResult.Failed(ex.Message);
         }
     }
 
@@ -679,6 +730,7 @@ public sealed class CodexExecutor : IAgentExecutor
                     Summary = "Codex app-server exited unexpectedly",
                     FinalResult = "Codex app-server exited unexpectedly",
                     IsErrorResult = true,
+                    IsProcessExit = true,
                     IsSignificant = true,
                 };
                 yield break;
@@ -1154,6 +1206,15 @@ public sealed class CodexExecutor : IAgentExecutor
         }
         return string.Join("", parts);
     }
+
+    internal static bool IsTurnSteerPreconditionFailureForTests(long code, string message) =>
+        IsTurnSteerPreconditionFailure(new RpcErrorException("turn/steer", code, message, null));
+
+    private static bool IsTurnSteerPreconditionFailure(RpcErrorException ex) =>
+        string.Equals(ex.Method, "turn/steer", StringComparison.Ordinal)
+        && ex.Code == -32600
+        && (ex.Message.Contains("no active turn to steer", StringComparison.OrdinalIgnoreCase)
+            || ex.Message.Contains("expected active turn id", StringComparison.OrdinalIgnoreCase));
 
     private sealed record RpcOutcome(JsonObject? Result, JsonObject? Error);
 

@@ -152,6 +152,39 @@ public class ClaudeExecutorMidTurnInjectionTests
     }
 
     [Fact]
+    public void DrainStaleTurnEvents_StaleResultEvent_IsConsumedNotPassedThrough()
+    {
+        // A background subtask's "result" event arrives between turns and must be consumed
+        // by the drain so the new turn's read loop cannot see it and exit prematurely.
+        var executor = BuildExecutor();
+        var channel = Channel.CreateUnbounded<ClaudeStreamEvent>();
+        executor.SetEventChannelForTests(channel);
+        channel.Writer.TryWrite(new ClaudeStreamEvent { Type = "result", Result = "background result" });
+
+        executor.DrainStaleTurnEventsForTests();
+
+        Assert.False(channel.Reader.TryRead(out _), "result event must be consumed by drain");
+        Assert.False(executor.TurnCommittedToFinalAnswerForTests);
+        Assert.Null(executor.PreservedDrainedAnswerTextForTests);
+    }
+
+    [Fact]
+    public void DrainStaleTurnEvents_TaskNotificationEvent_IsDiscarded()
+    {
+        // A background subtask's "task_notification" event must be consumed by the drain
+        // and not reach the new turn's read loop.
+        var executor = BuildExecutor();
+        var channel = Channel.CreateUnbounded<ClaudeStreamEvent>();
+        executor.SetEventChannelForTests(channel);
+        channel.Writer.TryWrite(new ClaudeStreamEvent { Type = "task_notification" });
+
+        executor.DrainStaleTurnEventsForTests();
+
+        Assert.False(channel.Reader.TryRead(out _), "task_notification must be consumed by drain");
+        Assert.Null(executor.PreservedDrainedAnswerTextForTests);
+    }
+
+    [Fact]
     public void DrainStaleTurnEvents_AssistantTextEvent_PreservesTextWithoutSettingFlag()
     {
         // Arrange: an assistant text event in the channel (the previous turn's lost answer).

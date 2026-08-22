@@ -161,9 +161,8 @@ public sealed class ClaudeExecutor : IAgentExecutor
                     yield return new AgentProgress
                     {
                         IsSignificant = true,
-                        Summary = TruncateText(preserved, 500),
-                        EventType = "assistant",
-                        FinalResult = preserved,
+                        Summary = preserved,
+                        EventType = "recovered_answer",
                     };
                 }
 
@@ -479,7 +478,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
     private void DrainStaleTurnEvents()
     {
         if (_eventChannel is null) return;
-        var discarded = 0;
+        var discardedByType = new Dictionary<string, int>();
         while (_eventChannel.Reader.TryRead(out var stale))
         {
             if (stale.Type == "assistant")
@@ -494,7 +493,10 @@ public sealed class ClaudeExecutor : IAgentExecutor
                         .Select(b => b.Text!));
                     if (!string.IsNullOrEmpty(text))
                     {
-                        _preservedDrainedAnswerText = text;
+                        // Concatenate in case multiple stale assistant events arrived.
+                        _preservedDrainedAnswerText = _preservedDrainedAnswerText is null
+                            ? text
+                            : _preservedDrainedAnswerText + "\n" + text;
                         _logger.LogInformation(
                             "Preserved {Length}-char stale assistant answer text for out-of-band delivery",
                             text.Length);
@@ -503,13 +505,16 @@ public sealed class ClaudeExecutor : IAgentExecutor
             }
             else if (stale.Type != "system")
             {
-                discarded++;
+                discardedByType[stale.Type] = discardedByType.GetValueOrDefault(stale.Type) + 1;
             }
         }
-        if (discarded > 0)
+        if (discardedByType.Count > 0)
+        {
+            var summary = string.Join(", ", discardedByType.Select(kv => $"{kv.Key}×{kv.Value}"));
             _logger.LogInformation(
-                "Drained {Count} stale non-system non-assistant event(s) from stdout channel before new turn",
-                discarded);
+                "Drained {Count} stale non-system non-assistant event(s) from stdout channel before new turn: {Types}",
+                discardedByType.Values.Sum(), summary);
+        }
     }
 
     /// <summary>
@@ -648,6 +653,10 @@ public sealed class ClaudeExecutor : IAgentExecutor
     private async Task KillProcessAsync()
     {
         if (_process is null) return;
+
+        // Clear any preserved stale answer — text from one conversation must not surface
+        // in a later unrelated conversation when the process is restarted.
+        _preservedDrainedAnswerText = null;
 
         // Cancel the background reader first so it stops reading from the pipe
         // before we close the process (avoids ObjectDisposedException races).

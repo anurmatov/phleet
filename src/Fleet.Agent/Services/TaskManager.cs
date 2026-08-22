@@ -757,7 +757,7 @@ public sealed class TaskManager
             _injectionCounter.Increment(_agentConfig.Provider, counterOutcome);
             _logger.LogInformation("Mid-turn injection unavailable for chat {ChatId} (status={Status}, error={Error}); queued for turn-end delivery",
                 chatId, result.Status, result.Error);
-            return await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: true);
+            return await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: false);
         }
         catch (Exception ex)
         {

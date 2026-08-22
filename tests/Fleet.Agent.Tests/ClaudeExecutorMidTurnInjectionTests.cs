@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading.Channels;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services;
@@ -148,6 +149,26 @@ public class ClaudeExecutorMidTurnInjectionTests
             process.Kill();
             process.Dispose();
         }
+    }
+
+    [Fact]
+    public void DrainStaleTurnEvents_AssistantTextEvent_PreservesTextWithoutSettingFlag()
+    {
+        // Arrange: an assistant text event in the channel (the previous turn's lost answer).
+        var executor = BuildExecutor();
+        var channel = Channel.CreateUnbounded<ClaudeStreamEvent>();
+        executor.SetEventChannelForTests(channel);
+        channel.Writer.TryWrite(TextOnlyAssistantEvent("stale answer from prior turn"));
+        channel.Writer.TryComplete();
+
+        // Act: drain — must NOT call ParseAssistantEvent.
+        executor.DrainStaleTurnEventsForTests();
+
+        // _turnCommittedToFinalAnswer must remain false so the injection gate is not
+        // tripped for the new turn that is about to start.
+        Assert.False(executor.TurnCommittedToFinalAnswerForTests);
+        // The answer text must be preserved for out-of-band delivery.
+        Assert.Equal("stale answer from prior turn", executor.PreservedDrainedAnswerTextForTests);
     }
 
     private static ClaudeExecutor BuildExecutor()

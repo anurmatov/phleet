@@ -460,6 +460,8 @@ public sealed class ClaudeExecutor : IAgentExecutor
     internal void SetProcessForTests(Process? process) => _process = process;
     internal void SetEventChannelForTests(System.Threading.Channels.Channel<ClaudeStreamEvent> channel) => _eventChannel = channel;
     internal void DrainStaleTurnEventsForTests() => DrainStaleTurnEvents();
+    // Mirrors the SendCommandAsync drain path (drain + discard preserved text).
+    internal void DrainForSendCommandForTests() { DrainStaleTurnEvents(); _preservedDrainedAnswerText = null; }
     internal string? PreservedDrainedAnswerTextForTests => _preservedDrainedAnswerText;
 
     // --- Stdout channel helpers ---
@@ -766,6 +768,10 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
             // Discard any stale between-turn events before writing (same as ExecuteAsync).
             DrainStaleTurnEvents();
+            // /run is not a conversational turn. If the drain extracted a stale assistant
+            // answer it must be discarded here — not carried into the next ExecuteAsync turn
+            // where it would surface as a recovered_answer event in an unrelated conversation.
+            _preservedDrainedAnswerText = null;
 
             // Wrap as a user message containing the slash command
             var message = JsonSerializer.Serialize(new

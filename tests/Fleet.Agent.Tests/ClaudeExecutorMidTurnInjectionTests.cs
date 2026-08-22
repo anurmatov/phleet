@@ -152,6 +152,24 @@ public class ClaudeExecutorMidTurnInjectionTests
     }
 
     [Fact]
+    public void DrainStaleTurnEvents_OnSendCommandPath_StaleAssistantTextIsDiscarded()
+    {
+        // SendCommandAsync calls DrainStaleTurnEvents then immediately clears
+        // _preservedDrainedAnswerText. Without this clear, stale conversational text
+        // would surface as a recovered_answer event in the next unrelated ExecuteAsync turn.
+        var executor = BuildExecutor();
+        var channel = Channel.CreateUnbounded<ClaudeStreamEvent>();
+        executor.SetEventChannelForTests(channel);
+        channel.Writer.TryWrite(TextOnlyAssistantEvent("stale conversational answer"));
+
+        // Simulate the /run drain path: drain (would store text) then discard.
+        executor.DrainForSendCommandForTests();
+
+        // The preserved field must be null — no text leaks into the next turn.
+        Assert.Null(executor.PreservedDrainedAnswerTextForTests);
+    }
+
+    [Fact]
     public void DrainStaleTurnEvents_StaleResultEvent_IsConsumedNotPassedThrough()
     {
         // A background subtask's "result" event arrives between turns and must be consumed

@@ -13,6 +13,9 @@ public sealed class TaskManager
     private readonly IAgentExecutor _executor;
     private readonly SessionManager _sessions;
     private readonly ILogger<TaskManager> _logger;
+    private readonly InjectionOutcomeCounter _injectionCounter;
+
+    private const int MaxMidTurnInjectionsPerTurn = 3;
 
     private readonly ConcurrentDictionary<long, ChatTaskState> _chatTasks = new();
     // taskId dedup: tracks bridge taskIds that are currently in-flight
@@ -34,12 +37,14 @@ public sealed class TaskManager
         IOptions<AgentOptions> agentConfig,
         IAgentExecutor executor,
         SessionManager sessions,
-        ILogger<TaskManager> logger)
+        ILogger<TaskManager> logger,
+        InjectionOutcomeCounter? injectionCounter = null)
     {
         _agentConfig = agentConfig.Value;
         _executor = executor;
         _sessions = sessions;
         _logger = logger;
+        _injectionCounter = injectionCounter ?? new InjectionOutcomeCounter();
     }
 
     /// <summary>Returns a snapshot of active background subagent tasks from the executor.</summary>
@@ -57,20 +62,6 @@ public sealed class TaskManager
 
     public bool HasRunningTasks(long chatId) => GetChatState(chatId).Count > 0;
 
-    /// <summary>
-    /// Append a message to the running session task's inbox so it's delivered
-    /// as additional context after the current turn completes.
-    /// Returns true if enqueued, false if no suitable task found.
-    /// </summary>
-    public bool AppendToRunningTask(long chatId, string text)
-    {
-        var state = GetChatState(chatId);
-        var sessionTask = state.Snapshot().FirstOrDefault(t => t.IsSessionTask);
-        if (sessionTask is null) return false;
-        sessionTask.Inbox.Writer.TryWrite(text);
-        return true;
-    }
-
     public void StartTask(long chatId, string task, string displayText, bool isSessionTask,
         TaskSource source = TaskSource.UserMessage,
         string? relaySender = null,
@@ -87,6 +78,30 @@ public sealed class TaskManager
         {
             _logger.LogInformation("Duplicate taskId={TaskId} ignored (already in-flight)", taskId);
             return;
+        }
+
+        if (TryGetRunningSessionTask(state, out var runningSession))
+        {
+            if (source == TaskSource.UserMessage && isSessionTask)
+            {
+                if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
+                var message = new MidTurnMessage(task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
+                    images, documents, userId, DateTimeOffset.UtcNow);
+                _ = DeliverMidTurnMessageAsync(chatId, runningSession, message);
+                return;
+            }
+
+            if (source == TaskSource.CheckIn)
+            {
+                if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
+                var message = new MidTurnMessage(task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
+                    images, documents, userId, DateTimeOffset.UtcNow);
+                _ = DeferUntilTurnEndAsync(chatId, runningSession, message, notifyUser: false);
+                return;
+            }
+
+            if (source is TaskSource.Relay or TaskSource.Bridge)
+                _logger.LogInformation("Not injecting {Source} task into running conversational turn for chat {ChatId}; using normal capacity path", source, chatId);
         }
 
         var totalRunning = _chatTasks.Values.Sum(s => s.Count);
@@ -152,7 +167,17 @@ public sealed class TaskManager
             }
             finally
             {
-                state.Remove(running.Id);
+                await running.TurnDispatchLock.WaitAsync();
+                try
+                {
+                    running.Closed = true;
+                    DrainInboxToGlobalQueue(chatId, running);
+                    state.Remove(running.Id);
+                }
+                finally
+                {
+                    running.TurnDispatchLock.Release();
+                }
                 // Release taskId dedup slot so the agent can accept a re-send of the same task
                 if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
                 // Remove from user-level index
@@ -367,6 +392,7 @@ public sealed class TaskManager
         List<string> allAssistantTexts = [];
         ExecutionStats? stats = null;
         var errorResult = false;
+        var processExitResult = false;
         var toolCalls = new List<(string Name, string Args)>();
 
         using var typingCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -443,6 +469,9 @@ public sealed class TaskManager
                     if (progress.IsErrorResult)
                         errorResult = true;
 
+                    if (progress.IsProcessExit)
+                        processExitResult = true;
+
                     if (progress.EventType == "warning" && progress.IsSignificant)
                     {
                         // User-facing warning (e.g. provider capability notice) — deliver immediately
@@ -475,17 +504,63 @@ public sealed class TaskManager
                     }
                 }
 
-                // After turn completes, check if user sent additional context mid-task
-                if (inboxReader is not null && inboxReader.TryRead(out var nextMessage))
+                var completingTask = state.Get(taskId);
+                if (completingTask is not null)
+                    await completingTask.TurnDispatchLock.WaitAsync(ct);
+
+                try
                 {
-                    _logger.LogInformation("Task #{TaskId}: delivering queued message to executor", taskId);
-                    currentTask = nextMessage;
-                    currentImages = null;
-                    currentDocuments = null;
-                    // Reset per-turn state but accumulate texts and stats
-                    lastError = null;
-                    errorResult = false;
-                    continue;
+                    if (processExitResult && completingTask is not null && completingTask.InjectedMessagesForResume.Count > 0)
+                    {
+                        var redeliver = completingTask.InjectedMessagesForResume.ToList();
+                        completingTask.InjectedMessagesForResume.Clear();
+                        foreach (var injected in redeliver)
+                            _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.PossibleDuplicateAfterResume);
+
+                        var firstRedelivery = redeliver[0];
+                        foreach (var injected in redeliver.Skip(1))
+                            completingTask.Inbox.Writer.TryWrite(injected);
+
+                        completingTask.InjectionCount = 0;
+                        currentTask = firstRedelivery.Task;
+                        currentImages = firstRedelivery.Images;
+                        currentDocuments = firstRedelivery.Documents;
+                        lastError = null;
+                        errorResult = false;
+                        processExitResult = false;
+                        continue;
+                    }
+
+                    // After turn completes, atomically check the fallback inbox before
+                    // closing the live-delivery window. This prevents a message from
+                    // being enqueued between TryRead(false) and Closed=true.
+                    if (inboxReader is not null && inboxReader.TryRead(out var nextMessage))
+                    {
+                        _logger.LogInformation("Task #{TaskId}: delivering queued mid-turn fallback message to executor", taskId);
+                        currentTask = nextMessage.Task;
+                        currentImages = nextMessage.Images;
+                        currentDocuments = nextMessage.Documents;
+                        if (completingTask is not null)
+                        {
+                            completingTask.InjectionCount = 0;
+                            completingTask.InjectedMessagesForResume.Clear();
+                        }
+                        // Reset per-turn state but accumulate texts and stats
+                        lastError = null;
+                        errorResult = false;
+                        processExitResult = false;
+                        continue;
+                    }
+
+                    if (completingTask is not null)
+                    {
+                        completingTask.InjectedMessagesForResume.Clear();
+                        completingTask.Closed = true;
+                    }
+                }
+                finally
+                {
+                    completingTask?.TurnDispatchLock.Release();
                 }
 
                 break;
@@ -564,6 +639,143 @@ public sealed class TaskManager
             await typingTask;
         }
     }
+
+
+    private static bool TryGetRunningSessionTask(ChatTaskState state, out RunningTask running)
+    {
+        running = state.Snapshot().FirstOrDefault(t => t.IsSessionTask)!;
+        return running is not null;
+    }
+
+    private async Task DeliverMidTurnMessageAsync(long chatId, RunningTask running, MidTurnMessage message)
+    {
+        await running.TurnDispatchLock.WaitAsync();
+        try
+        {
+            if (running.Closed)
+            {
+                if (EnqueueMessage(chatId, message, notifyUser: true))
+                    _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DegradedToQueue);
+                return;
+            }
+
+            if (running.InjectionCount >= MaxMidTurnInjectionsPerTurn)
+            {
+                await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: true);
+                _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DegradedToQueue);
+                return;
+            }
+
+            var result = await _executor.TryInjectMessageAsync(FormatInjectedMessage(message.Task),
+                message.Images, message.Documents, running.Cts.Token);
+
+            if (result.Status == MidTurnInjectionStatus.Injected)
+            {
+                running.InjectionCount++;
+                running.InjectedMessagesForResume.Add(message);
+                _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.Injected);
+                _logger.LogInformation("Injected mid-turn message into running task #{TaskId} for chat {ChatId}", running.Id, chatId);
+                return;
+            }
+
+            await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: true);
+            var outcome = result.Status == MidTurnInjectionStatus.Failed
+                ? InjectionOutcomeCounter.FailedThenQueued
+                : InjectionOutcomeCounter.DegradedToQueue;
+            _injectionCounter.Increment(_agentConfig.Provider, outcome);
+            _logger.LogInformation("Mid-turn injection unavailable for chat {ChatId} (status={Status}, error={Error}); queued for turn-end delivery",
+                chatId, result.Status, result.Error);
+        }
+        catch (Exception ex)
+        {
+            await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: true);
+            _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.FailedThenQueued);
+            _logger.LogWarning(ex, "Mid-turn injection failed for chat {ChatId}; queued for turn-end delivery", chatId);
+        }
+        finally
+        {
+            running.TurnDispatchLock.Release();
+        }
+    }
+
+
+    private async Task DeferUntilTurnEndAsync(long chatId, RunningTask running, MidTurnMessage message, bool notifyUser)
+    {
+        await running.TurnDispatchLock.WaitAsync();
+        try
+        {
+            // Check-ins are not conversational corrections, so do not fold them into
+            // the current response chain. Queue them to start only after the current
+            // task has sent its own terminal response and DrainQueue runs.
+            if (EnqueueMessage(chatId, message, notifyUser))
+                _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DegradedToQueue);
+        }
+        finally
+        {
+            running.TurnDispatchLock.Release();
+        }
+    }
+
+    private async Task EnqueueForTurnEndAsync(long chatId, RunningTask running, MidTurnMessage message, bool notifyUser)
+    {
+        if (!running.Inbox.Writer.TryWrite(message))
+        {
+            EnqueueMessage(chatId, message, notifyUser);
+            return;
+        }
+
+        if (notifyUser && !(_agentConfig.SuppressToolMessages && chatId < 0))
+        {
+            try
+            {
+                await Sink.SendTextAsync(chatId, "I'm busy right now — your message is queued. I'll get to it once my current turn finishes.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to send mid-turn queue notice for chat {ChatId}", chatId);
+            }
+        }
+        OnStatusChanged?.Invoke();
+    }
+
+    private void DrainInboxToGlobalQueue(long chatId, RunningTask running)
+    {
+        while (running.Inbox.Reader.TryRead(out var pending))
+        {
+            if (EnqueueMessage(chatId, pending, notifyUser: false))
+                _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DegradedToQueue);
+        }
+    }
+
+    private bool EnqueueMessage(long chatId, MidTurnMessage message, bool notifyUser)
+    {
+        if (_messageQueue.Count >= MaxQueueDepth)
+        {
+            _logger.LogWarning("Message queue full ({Max}) — dropping incoming task from chat {ChatId}", MaxQueueDepth, chatId);
+            _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DroppedAtQueueCap);
+            _ = Sink.SendTextAsync(chatId, $"Queue is full ({MaxQueueDepth} messages waiting). Please wait for tasks to complete.");
+            return false;
+        }
+
+        var senderDisplay = message.RelaySender ?? message.Source.ToString().ToLowerInvariant();
+        _messageQueue.Enqueue(new QueuedMessage(chatId, message.Task, message.DisplayText, message.IsSessionTask, message.Source,
+            message.RelaySender, message.CorrelationId, message.TaskId, message.Images, message.Documents,
+            message.UserId, DateTimeOffset.UtcNow, senderDisplay));
+
+        var queuePos = _messageQueue.Count;
+        if (notifyUser && !(_agentConfig.SuppressToolMessages && chatId < 0))
+            _ = Sink.SendTextAsync(chatId, $"I'm busy right now — your message is queued (position {queuePos}). I'll get to it once my current task finishes.");
+        OnStatusChanged?.Invoke();
+        return true;
+    }
+
+    internal static string FormatInjectedMessage(string original) =>
+        """
+        [NEW MESSAGE — arrived while you were still working on the previous
+        instruction. This is not a tool result. Decide whether to finish your
+        current step, adjust your plan, or stop and address this first.]
+
+        """ + original;
 
     private async Task RunTypingLoopAsync(long chatId, CancellationToken ct)
     {

@@ -6,6 +6,22 @@ namespace Fleet.Agent.Services;
 /// Abstraction over the LLM process that executes agent tasks.
 /// Implementations manage process lifecycle, streaming I/O, and session state.
 /// </summary>
+public enum MidTurnInjectionStatus
+{
+    Injected,
+    Unsupported,
+    NoActiveTurn,
+    Failed,
+}
+
+public sealed record MidTurnInjectionResult(MidTurnInjectionStatus Status, string? Error = null)
+{
+    public static MidTurnInjectionResult Injected { get; } = new(MidTurnInjectionStatus.Injected);
+    public static MidTurnInjectionResult Unsupported { get; } = new(MidTurnInjectionStatus.Unsupported);
+    public static MidTurnInjectionResult NoActiveTurn(string? error = null) => new(MidTurnInjectionStatus.NoActiveTurn, error);
+    public static MidTurnInjectionResult Failed(string error) => new(MidTurnInjectionStatus.Failed, error);
+}
+
 public interface IAgentExecutor : IAsyncDisposable
 {
     /// <summary>Send a task to the LLM process, streaming progress events.</summary>
@@ -14,6 +30,18 @@ public interface IAgentExecutor : IAsyncDisposable
         IReadOnlyList<MessageImage>? images = null,
         IReadOnlyList<MessageDocument>? documents = null,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Attempts to deliver additional user input into the currently active turn without
+    /// waiting for that turn to finish. Providers without a live injection primitive
+    /// return Unsupported so TaskManager can queue the message for the next turn.
+    /// </summary>
+    Task<MidTurnInjectionResult> TryInjectMessageAsync(
+        string task,
+        IReadOnlyList<MessageImage>? images = null,
+        IReadOnlyList<MessageDocument>? documents = null,
+        CancellationToken ct = default) =>
+        Task.FromResult(MidTurnInjectionResult.Unsupported);
 
     /// <summary>Stop the running process gracefully.</summary>
     Task StopProcessAsync();

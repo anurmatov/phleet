@@ -33,6 +33,9 @@ public sealed class AgentProgress
     /// <summary>True when the result event indicates an error (max-turns, tool failure, etc.).</summary>
     public bool IsErrorResult { get; init; }
 
+    /// <summary>True only when the provider process exited mid-turn and injected input may need at-least-once redelivery.</summary>
+    public bool IsProcessExit { get; init; }
+
     /// <summary>Structured JSON output when --json-schema is used and response validates against schema.</summary>
     public string? StructuredOutput { get; init; }
 }

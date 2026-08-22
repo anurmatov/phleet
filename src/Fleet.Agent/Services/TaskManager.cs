@@ -24,6 +24,7 @@ public sealed class TaskManager
     // Global FIFO queue for messages that arrive while the agent is at capacity.
     private readonly ConcurrentQueue<QueuedMessage> _messageQueue = new();
     private readonly ConcurrentDictionary<long, QueuedMessage> _pendingQueueByChat = new();
+    private readonly object _pendingQueueIndexLock = new();
     // MaxQueueDepth caps queue entries. MaxQueuedPartsPerEntry caps merged user messages
     // inside one entry; overflowing the parts cap creates a new entry, not a drop.
     private const int MaxQueueDepth = 20;
@@ -45,6 +46,7 @@ public sealed class TaskManager
     public IMessageSink Sink { get; set; } = null!;
 
     internal Action? QueueEntryClaimedForTest { get; set; }
+    internal Action? QueueEntryDequeuedForBridgeCancelForTest { get; set; }
 
     public TaskManager(
         IOptions<AgentOptions> agentConfig,
@@ -143,6 +145,13 @@ public sealed class TaskManager
             if (pendingResult == PendingQueueResult.EnqueueFresh)
             {
                 if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
+                if (source == TaskSource.CheckIn)
+                {
+                    // Preserve the existing capacity behavior: check-ins that cannot
+                    // attach to a running turn are dropped, not queued behind user work.
+                    _logger.LogDebug("Check-in skipped — agent already has a pending queued entry for chat {ChatId}", chatId);
+                    return;
+                }
                 EnqueueFreshMessage(chatId, queuedPart, notifyUser: source != TaskSource.CheckIn, completeBridgeOnDrop: true);
                 return;
             }
@@ -803,8 +812,12 @@ public sealed class TaskManager
 
     private PendingQueueResult TryAppendToPendingQueue(long chatId, QueuedMessagePart part)
     {
-        if (!_pendingQueueByChat.TryGetValue(chatId, out var pending))
-            return PendingQueueResult.NoPending;
+        QueuedMessage? pending;
+        lock (_pendingQueueIndexLock)
+        {
+            if (!_pendingQueueByChat.TryGetValue(chatId, out pending))
+                return PendingQueueResult.NoPending;
+        }
 
         pending.QueueDispatchLock.Wait();
         try
@@ -840,7 +853,10 @@ public sealed class TaskManager
         var queued = new QueuedMessage(chatId, part);
         _messageQueue.Enqueue(queued);
         if (part.Source == TaskSource.UserMessage)
-            _pendingQueueByChat[chatId] = queued;
+        {
+            lock (_pendingQueueIndexLock)
+                _pendingQueueByChat[chatId] = queued;
+        }
 
         var queuePos = _messageQueue.Count;
         _logger.LogInformation("Message queued (position {Pos}) for chat {ChatId}; queue entries={EntryCount}, max parts per entry={MaxParts}",
@@ -853,17 +869,26 @@ public sealed class TaskManager
 
     private void RemovePendingIndexIfCurrent(QueuedMessage queued)
     {
-        if (_pendingQueueByChat.TryGetValue(queued.ChatId, out var current) && ReferenceEquals(current, queued))
-            _pendingQueueByChat.TryRemove(queued.ChatId, out _);
+        lock (_pendingQueueIndexLock)
+        {
+            if (_pendingQueueByChat.TryGetValue(queued.ChatId, out var current) && ReferenceEquals(current, queued))
+                _pendingQueueByChat.TryRemove(queued.ChatId, out _);
+        }
     }
 
     private void RebuildPendingQueueIndex()
     {
-        _pendingQueueByChat.Clear();
-        foreach (var queued in _messageQueue)
+        lock (_pendingQueueIndexLock)
         {
-            if (queued.Source == TaskSource.UserMessage && !queued.Claimed)
-                _pendingQueueByChat[queued.ChatId] = queued;
+            // Rebuild is a rare cancellation cleanup. Holding the index lock makes it
+            // atomic against fresh enqueue/index writes; a concurrent merge that already
+            // captured an entry still completes under that entry's QueueDispatchLock.
+            _pendingQueueByChat.Clear();
+            foreach (var queued in _messageQueue)
+            {
+                if (queued.Source == TaskSource.UserMessage && !queued.Claimed)
+                    _pendingQueueByChat[queued.ChatId] = queued;
+            }
         }
     }
 
@@ -951,16 +976,25 @@ public sealed class TaskManager
         {
             // Check the pending queue — drain and re-enqueue non-matching items
             var retained = new List<QueuedMessage>();
-            while (_messageQueue.TryDequeue(out var item))
+            try
             {
-                if (item.ContainsTaskId(bridgeTaskId))
-                    found = true;
-                else
+                while (_messageQueue.TryDequeue(out var item))
+                {
                     retained.Add(item);
+                    QueueEntryDequeuedForBridgeCancelForTest?.Invoke();
+                    if (item.ContainsTaskId(bridgeTaskId))
+                    {
+                        found = true;
+                        retained.RemoveAt(retained.Count - 1);
+                    }
+                }
             }
-            foreach (var item in retained)
-                _messageQueue.Enqueue(item);
-            RebuildPendingQueueIndex();
+            finally
+            {
+                foreach (var item in retained)
+                    _messageQueue.Enqueue(item);
+                RebuildPendingQueueIndex();
+            }
         }
 
         if (found)
@@ -991,7 +1025,8 @@ public sealed class TaskManager
 
         // Clear the pending queue
         while (_messageQueue.TryDequeue(out _)) { }
-        _pendingQueueByChat.Clear();
+        lock (_pendingQueueIndexLock)
+            _pendingQueueByChat.Clear();
 
         _logger.LogInformation("CancelAll: all running tasks cancelled and queue cleared");
     }
@@ -1000,7 +1035,7 @@ public sealed class TaskManager
     private void DrainQueue()
     {
         if (_messageQueue.IsEmpty) return;
-        if (!_messageQueue.TryPeek(out var queued)) return;
+        if (!_messageQueue.TryDequeue(out var queued)) return;
 
         queued.QueueDispatchLock.Wait();
         try
@@ -1011,23 +1046,6 @@ public sealed class TaskManager
         finally
         {
             queued.QueueDispatchLock.Release();
-        }
-
-        if (!_messageQueue.TryDequeue(out var dequeued))
-        {
-            queued.QueueDispatchLock.Wait();
-            try { queued.Claimed = false; }
-            finally { queued.QueueDispatchLock.Release(); }
-            return;
-        }
-        if (!ReferenceEquals(queued, dequeued))
-        {
-            _logger.LogWarning("DrainQueue saw queue head change while claiming; re-enqueueing unexpected entry for chat {ChatId}", dequeued.ChatId);
-            queued.QueueDispatchLock.Wait();
-            try { queued.Claimed = false; }
-            finally { queued.QueueDispatchLock.Release(); }
-            _messageQueue.Enqueue(dequeued);
-            return;
         }
 
         QueueEntryClaimedForTest?.Invoke();

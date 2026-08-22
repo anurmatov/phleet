@@ -74,8 +74,18 @@ public sealed class QueuedMessage
         return true;
     }
 
-    public bool ContainsTaskId(string taskId) =>
-        _parts.Any(part => part.TaskId == taskId);
+    public bool ContainsTaskId(string taskId)
+    {
+        QueueDispatchLock.Wait();
+        try
+        {
+            return _parts.Any(part => part.TaskId == taskId);
+        }
+        finally
+        {
+            QueueDispatchLock.Release();
+        }
+    }
 
     public QueuedMessagePayload BuildPayload(DateTimeOffset startedAt) =>
         new(

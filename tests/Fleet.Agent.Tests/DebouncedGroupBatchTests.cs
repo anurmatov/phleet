@@ -366,6 +366,184 @@ public class DebouncedGroupBatchTests
         await executor.WaitForExecuteCountAsync(2);
     }
 
+    // ─── Issue #232 acceptance criteria: QueueFull + peek/commit ────────────
+
+    [Fact]
+    public async Task DebouncedGroupBatch_QueueFull_OutcomeIsQueueFull()
+    {
+        // When the global queue is at capacity, DebouncedGroupBatch returns QueueFull.
+        var executor = new ControllableExecutor { InjectionResult = MidTurnInjectionResult.Injected };
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink);
+
+        // Occupy the single running slot on chat 1.
+        _ = manager.StartTask(1, "blocker", "blocker", isSessionTask: false);
+        await executor.WaitForExecuteCountAsync(1);
+
+        // Fill the queue to capacity (MaxQueueDepth = 20).
+        for (var i = 0; i < 20; i++)
+            await manager.StartTask(i + 10, $"filler-{i}", $"filler-{i}", isSessionTask: false);
+
+        // A DebouncedGroupBatch task on a different chat must now return QueueFull.
+        var outcome = await manager.StartTask(99, "batch", "batch", isSessionTask: true,
+            source: TaskSource.DebouncedGroupBatch);
+
+        Assert.Equal(TaskDispatchOutcome.QueueFull, outcome);
+
+        executor.ReleaseAllTurns();
+    }
+
+    [Fact]
+    public async Task StartDebouncedGroupCheckIn_QueueFull_DoesNotAdvanceWatermark()
+    {
+        // When the queue is full, StartDebouncedGroupCheckInAsync must NOT advance the
+        // GroupChatBuffer watermark (so the messages are re-examined on the next cycle).
+        var executor = new ControllableExecutor { InjectionResult = MidTurnInjectionResult.Injected };
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink);
+        var behavior = BuildGroupBehavior(manager, executor, sink);
+
+        const long chatId = 5;
+
+        // Add a message so there is something since the last check.
+        behavior.GetGroupBuffer(chatId).Add("user", "hello", null, DateTimeOffset.UtcNow, telegramMessageId: 1);
+        Assert.True(behavior.GetGroupBuffer(chatId).HasMessagesSinceLastCheck());
+
+        // Fill queue.
+        _ = manager.StartTask(1, "blocker", "blocker", isSessionTask: false);
+        await executor.WaitForExecuteCountAsync(1);
+        for (var i = 0; i < 20; i++)
+            await manager.StartTask(i + 10, $"filler-{i}", $"filler-{i}", isSessionTask: false);
+
+        // Trigger debounced batch — will get QueueFull.
+        await behavior.TriggerDebouncedGroupBatchForTestAsync(chatId);
+
+        // Watermark must NOT have been advanced.
+        Assert.True(behavior.GetGroupBuffer(chatId).HasMessagesSinceLastCheck(),
+            "Watermark must not advance on QueueFull so messages are re-delivered next cycle");
+
+        executor.ReleaseAllTurns();
+    }
+
+    [Fact]
+    public async Task StartDebouncedGroupCheckIn_QueueFull_DoesNotCommitPendingImages()
+    {
+        // When the queue is full, pending images must be retained for the next batch.
+        var executor = new ControllableExecutor { InjectionResult = MidTurnInjectionResult.Injected };
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink);
+        var behavior = BuildGroupBehavior(manager, executor, sink);
+
+        const long chatId = 6;
+        var img = new MessageImage([0xFF], "image/png");
+        behavior.AddPendingImages(chatId, [img], maxImages: 10);
+        Assert.True(behavior.HasPendingImages(chatId));
+
+        // Fill queue.
+        _ = manager.StartTask(1, "blocker", "blocker", isSessionTask: false);
+        await executor.WaitForExecuteCountAsync(1);
+        for (var i = 0; i < 20; i++)
+            await manager.StartTask(i + 10, $"filler-{i}", $"filler-{i}", isSessionTask: false);
+
+        // Trigger debounced batch — QueueFull.
+        await behavior.TriggerDebouncedGroupBatchForTestAsync(chatId);
+
+        // Images must still be in the pending buffer.
+        Assert.True(behavior.HasPendingImages(chatId),
+            "Pending images must not be committed on QueueFull so they are included in the next batch");
+
+        executor.ReleaseAllTurns();
+    }
+
+    [Fact]
+    public void PendingImages_SnapshotRace_BoundaryKeepsLateImages()
+    {
+        // If images arrive between the snapshot boundary and the commit call, they must
+        // NOT be removed (because the snapshot didn't include them).
+        var executor = new ControllableExecutor { InjectionResult = MidTurnInjectionResult.Injected };
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink);
+        var behavior = BuildGroupBehavior(manager, executor, sink);
+
+        const long chatId = 7;
+        var img = new MessageImage([0x01], "image/png");
+
+        // Add images NOW — their _storedAt ≈ DateTimeOffset.UtcNow.
+        behavior.AddPendingImages(chatId, [img], maxImages: 10);
+
+        // Commit with a boundary set 1 second in the past → images were stored AFTER the boundary.
+        var pastBoundary = DateTimeOffset.UtcNow.AddSeconds(-1);
+        behavior.CommitPendingImagesForTest(chatId, pastBoundary);
+
+        // Entry must survive because new images arrived after the snapshot boundary.
+        Assert.True(behavior.HasPendingImages(chatId),
+            "Images added after the snapshot boundary must not be removed by CommitPendingImages");
+    }
+
+    [Fact]
+    public void PendingImages_WhenExpired_CleanedUpByCommit()
+    {
+        // An expired entry (storedAt > TTL ago) is cleaned up by CommitPendingImages,
+        // even when the boundary precedes the entry.
+        var executor = new ControllableExecutor { InjectionResult = MidTurnInjectionResult.Injected };
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink);
+        var behavior = BuildGroupBehavior(manager, executor, sink);
+
+        const long chatId = 8;
+        var img = new MessageImage([0x02], "image/png");
+        behavior.AddPendingImages(chatId, [img], maxImages: 10);
+
+        // Backdate the entry past the 5-minute TTL.
+        behavior.BackdatePendingImagesForTest(chatId, TimeSpan.FromMinutes(6));
+
+        // Commit with any boundary — expired entries must be removed.
+        behavior.CommitPendingImagesForTest(chatId, DateTimeOffset.UtcNow);
+
+        Assert.False(behavior.HasPendingImages(chatId),
+            "Expired pending-images entry must be cleaned up by CommitPendingImages");
+    }
+
+    [Fact]
+    public void PendingImages_WhenExpired_PeekExcludesExpiredImages()
+    {
+        // Peeking an expired entry must return an empty list (no stale images delivered).
+        var executor = new ControllableExecutor { InjectionResult = MidTurnInjectionResult.Injected };
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink);
+        var behavior = BuildGroupBehavior(manager, executor, sink);
+
+        const long chatId = 9;
+        var img = new MessageImage([0x03], "image/png");
+        behavior.AddPendingImages(chatId, [img], maxImages: 10);
+
+        // Backdate past TTL.
+        behavior.BackdatePendingImagesForTest(chatId, TimeSpan.FromMinutes(6));
+
+        var peeked = behavior.PeekPendingImagesForTest(chatId);
+
+        Assert.Empty(peeked);
+    }
+
+    // ─── BuildGroupBehavior helper ────────────────────────────────────────────
+
+    private static GroupBehavior BuildGroupBehavior(TaskManager manager, IAgentExecutor executor, IMessageSink sink)
+    {
+        var agentOptions = Options.Create(new AgentOptions { Name = "test", Role = "test", WorkDir = "/tmp" });
+        var telegramOptions = Options.Create(new TelegramOptions());
+        var rabbitOptions = Options.Create(new RabbitMqOptions());
+        var allowlist = new AllowlistHolder(telegramOptions);
+        // GroupRelayService constructor does not connect — connection is deferred to InitializeAsync.
+        var relay = new GroupRelayService(agentOptions, rabbitOptions, NullLogger<GroupRelayService>.Instance);
+        var commands = new CommandDispatcher(manager, executor, agentOptions, NullLogger<CommandDispatcher>.Instance);
+        commands.Sink = sink;
+        var prompts = new PromptAssembler(executor);
+        var behavior = new GroupBehavior(agentOptions, telegramOptions, allowlist, executor, relay,
+            manager, commands, prompts, NullLogger<GroupBehavior>.Instance);
+        behavior.Sink = sink;
+        return behavior;
+    }
+
     // ─── ControllableExecutor (local copy mirrors the one in TaskManagerMidTurnInjectionTests) ─
 
     private sealed class ControllableExecutor : IAgentExecutor

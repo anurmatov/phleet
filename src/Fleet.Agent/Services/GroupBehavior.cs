@@ -849,5 +849,36 @@ public sealed class GroupBehavior
         }
 
         private bool IsExpiredLocked => DateTimeOffset.UtcNow - _storedAt > Ttl;
+
+        /// <summary>Testing seam: sets _storedAt to simulate images that arrived in the past.</summary>
+        internal void BackdateStoredAtForTest(TimeSpan age)
+        {
+            lock (_lock) _storedAt = DateTimeOffset.UtcNow - age;
+        }
+    }
+
+    // ─── Internal testing seams ─────────────────────────────────────────────────
+    // Exposed via InternalsVisibleTo for Fleet.Agent.Tests. Production code never calls these.
+
+    /// <summary>Invokes <see cref="StartDebouncedGroupCheckInAsync"/> directly, bypassing the debounce timer.</summary>
+    internal Task TriggerDebouncedGroupBatchForTestAsync(long chatId, string label = "test", string instruction = "check-in")
+        => StartDebouncedGroupCheckInAsync(chatId, label, instruction, CancellationToken.None);
+
+    /// <summary>Returns <c>true</c> when the pending-images dictionary has an entry for <paramref name="chatId"/>.</summary>
+    internal bool HasPendingImages(long chatId) => _pendingImages.ContainsKey(chatId);
+
+    /// <summary>Exposes <see cref="CommitPendingImages"/> for boundary-logic tests.</summary>
+    internal void CommitPendingImagesForTest(long chatId, DateTimeOffset boundary)
+        => CommitPendingImages(chatId, boundary);
+
+    /// <summary>Exposes <see cref="PeekPendingImages"/> for TTL tests.</summary>
+    internal IReadOnlyList<MessageImage> PeekPendingImagesForTest(long chatId)
+        => PeekPendingImages(chatId);
+
+    /// <summary>Sets the pending-images entry for <paramref name="chatId"/> to appear older than <paramref name="age"/>.</summary>
+    internal void BackdatePendingImagesForTest(long chatId, TimeSpan age)
+    {
+        if (_pendingImages.TryGetValue(chatId, out var entry))
+            entry.BackdateStoredAtForTest(age);
     }
 }

@@ -189,8 +189,10 @@ public class TaskManagerDeduplicationTests
             completed.TrySetResult();
         };
 
+        // No correlationId — matches production relay shape (correlationId is not set).
+        // The gate now checks CorrelationId is not null || TaskId is not null, so taskId alone is enough.
         var outcome = await manager.StartTask(99, "relay-drop", "relay-drop", isSessionTask: false,
-            source: TaskSource.Relay, taskId: "dropped-relay", relaySender: "agent-x", correlationId: "corr-drop");
+            source: TaskSource.Relay, taskId: "dropped-relay", relaySender: "agent-x");
 
         Assert.Equal(TaskDispatchOutcome.QueueFull, outcome);
         await completed.Task.WaitAsync(TimeSpan.FromSeconds(2));
@@ -215,9 +217,9 @@ public class TaskManagerDeduplicationTests
         for (var i = 0; i < 20; i++)
             await manager.StartTask(i + 10, $"filler-{i}", $"filler-{i}", isSessionTask: false);
 
-        // Drop a relay task (queue full).
+        // Drop a relay task (queue full). No correlationId — production relay shape.
         var dropped = await manager.StartTask(99, "relay", "relay", isSessionTask: false,
-            source: TaskSource.Relay, taskId: "relay-tid", relaySender: "ag", correlationId: "c");
+            source: TaskSource.Relay, taskId: "relay-tid", relaySender: "ag");
         Assert.Equal(TaskDispatchOutcome.QueueFull, dropped);
 
         // Release the blocker — the queue drains, capacity returns.
@@ -342,6 +344,29 @@ public class TaskManagerDeduplicationTests
         Assert.Equal(CompletionKind.Completed, capturedKind);
     }
 
+    // ── Exception safety ─────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task StartTask_WhenExecutorThrows_ReleasesReservation()
+    {
+        // If the executor throws during task execution, the Task.Run finally block
+        // must still release the taskId reservation so the same id can be retried.
+        var exec = new ThrowingExecutor();
+        var manager = BuildManager(exec);
+
+        var outcome = await manager.StartTask(1, "task", "task", isSessionTask: false, taskId: "exc-tid");
+        Assert.Equal(TaskDispatchOutcome.Ran, outcome);
+
+        // Wait for the task to finish (exception is caught inside Task.Run's try/catch)
+        await PollUntilIdleAsync(manager, 1);
+
+        // Reservation must be released — the same taskId is accepted again, not Dropped
+        var retry = await manager.StartTask(1, "retry", "retry", isSessionTask: false, taskId: "exc-tid");
+        Assert.NotEqual(TaskDispatchOutcome.Dropped, retry);
+
+        await PollUntilIdleAsync(manager, 1);
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     /// <summary>Yields one result event immediately and returns.</summary>
@@ -414,6 +439,36 @@ public class TaskManagerDeduplicationTests
             while (Volatile.Read(ref _executeCount) < expected)
                 await Task.Delay(10, cts.Token);
         }
+
+        public Task<MidTurnInjectionResult> TryInjectMessageAsync(string task, IReadOnlyList<MessageImage>? images = null, IReadOnlyList<MessageDocument>? documents = null, CancellationToken ct = default)
+            => Task.FromResult(MidTurnInjectionResult.NoActiveTurn());
+        public Task StopProcessAsync() => Task.CompletedTask;
+        public Task<bool> TryStopProcessAsync() => Task.FromResult(false);
+        public void RequestRestart() { }
+        public IAsyncEnumerable<AgentProgress> SendCommandAsync(string command, CancellationToken ct = default) => ExecuteAsync(command, ct: ct);
+        public IReadOnlyCollection<BackgroundTaskInfo> GetActiveBackgroundTasks() => [];
+        public Task<bool> CancelBackgroundTaskAsync(string taskId, CancellationToken ct = default) => Task.FromResult(false);
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    /// <summary>Throws immediately in ExecuteAsync to test exception-safety of reservation release.</summary>
+    private sealed class ThrowingExecutor : IAgentExecutor
+    {
+        public string? LastSessionId => null;
+        public DateTimeOffset LastActivity => DateTimeOffset.UtcNow;
+        public bool IsProcessWarm => true;
+
+#pragma warning disable CS1998, CS0162
+        public async IAsyncEnumerable<AgentProgress> ExecuteAsync(
+            string task,
+            IReadOnlyList<MessageImage>? images = null,
+            IReadOnlyList<MessageDocument>? documents = null,
+            [EnumeratorCancellation] CancellationToken ct = default)
+        {
+            throw new InvalidOperationException("executor failure (test)");
+            yield break; // required: makes this an iterator; unreachable by design
+        }
+#pragma warning restore CS1998, CS0162
 
         public Task<MidTurnInjectionResult> TryInjectMessageAsync(string task, IReadOnlyList<MessageImage>? images = null, IReadOnlyList<MessageDocument>? documents = null, CancellationToken ct = default)
             => Task.FromResult(MidTurnInjectionResult.NoActiveTurn());

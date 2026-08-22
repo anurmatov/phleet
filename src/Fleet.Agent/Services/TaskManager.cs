@@ -193,6 +193,11 @@ public sealed class TaskManager
             return enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull;
         }
 
+        // Exception safety: if anything between here and Task.Run fires throws, release the
+        // reservation so the same taskId can be retried. The Task.Run finally block handles
+        // the release once the task has been handed off successfully.
+        try
+        {
         var cts = new CancellationTokenSource();
         var running = state.Add(displayText, cts, isSessionTask, userId, bridgeTaskId: taskId);
 
@@ -245,6 +250,13 @@ public sealed class TaskManager
         });
 
         return TaskDispatchOutcome.Ran;
+        } // end exception-safety try
+        catch
+        {
+            if (!skipDedupReservationAcquire && taskId is not null)
+                _activeTaskIds.TryRemove(taskId, out _);
+            throw;
+        }
     }
 
     public async Task HandleStop(long chatId)
@@ -866,11 +878,16 @@ public sealed class TaskManager
         {
             _logger.LogWarning("Message queue full ({Max}) — dropping incoming task from chat {ChatId}", MaxQueueDepth, chatId);
             _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DroppedAtQueueCap);
-            _ = Sink.SendTextAsync(chatId, $"Queue is full ({MaxQueueDepth} messages waiting). Please wait for tasks to complete.");
-            if (completeBridgeOnDrop && part.Source is TaskSource.Bridge or TaskSource.Relay && part.CorrelationId is not null)
-                OnTaskCompleted?.Invoke(chatId, "[status: failed]\nagent queue full",
+            // DebouncedGroupBatch drops silently — the notice is noise for automated checks.
+            if (part.Source != TaskSource.DebouncedGroupBatch)
+                _ = Sink.SendTextAsync(chatId, $"Queue is full ({MaxQueueDepth} messages waiting). Please wait for tasks to complete.");
+            // Production relay passes taskId but no correlationId — gate on either so relay
+            // completions are not dead code when the source has only a taskId.
+            if (completeBridgeOnDrop && part.Source is TaskSource.Bridge or TaskSource.Relay
+                    && (part.CorrelationId is not null || part.TaskId is not null))
+                OnTaskCompleted?.Invoke(chatId, "agent queue full",
                     part.Source == TaskSource.Bridge ? "bridge" : part.RelaySender,
-                    part.Source, true, part.CorrelationId, part.TaskId, CompletionKind.Failed);
+                    part.Source, false, part.CorrelationId, part.TaskId, CompletionKind.Failed);
             return false;
         }
 

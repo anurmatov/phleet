@@ -614,7 +614,12 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         {
             if (relaySender == "bridge" && correlationId is not null)
             {
-                var bridgeResult = kind == CompletionKind.Idle ? "[status: idle]" : result;
+                var bridgeResult = kind switch
+                {
+                    CompletionKind.Idle => "[status: idle]",
+                    CompletionKind.Failed => $"[status: failed]\n{result}",
+                    _ => result,
+                };
                 await _relay.PublishToAgentAsync("bridge", chatId, bridgeResult,
                     type: RelayMessageType.BridgeResponse, correlationId: correlationId, taskId: taskId);
             }
@@ -631,6 +636,9 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     {
         if (kind == CompletionKind.Idle)
             return "[status: idle]";
+
+        if (kind == CompletionKind.Failed)
+            return $"[status: failed]\n{result}";
 
         // Detect voluntary failure marker: [TASK_FAILED: reason]
         // Agents can emit this to signal that they refused or cannot complete a delegated task.

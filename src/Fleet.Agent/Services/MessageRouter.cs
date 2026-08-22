@@ -135,7 +135,7 @@ public sealed class MessageRouter
                 var displayText = task;
                 if (msg.IsGroupChat)
                     task = _groupBehavior.BuildGroupTask(msg.ChatId, msg.Sender, task, msg.ReplyToUsername, msg.ReplyToText, msg.TelegramMessageId, msg.ChatTitle);
-                _taskManager.StartTask(msg.ChatId, task, displayText, isSessionTask: false,
+                _ = _taskManager.StartTask(msg.ChatId, task, displayText, isSessionTask: false,
                     source: TaskSource.NewCommand, images: msg.Images.Count > 0 ? msg.Images : null,
                     documents: msg.Documents.Count > 0 ? msg.Documents : null);
                 return;
@@ -183,7 +183,7 @@ public sealed class MessageRouter
 
         // When busy, StartTask enqueues the message and notifies the user automatically.
         // Use /new <task> for parallel tasks, or /cancel to stop the current one.
-        _taskManager.StartTask(msg.ChatId, trimmed, messageDisplayText, isSessionTask: true,
+        _ = _taskManager.StartTask(msg.ChatId, trimmed, messageDisplayText, isSessionTask: true,
             images: msg.Images.Count > 0 ? msg.Images : null,
             documents: msg.Documents.Count > 0 ? msg.Documents : null);
     }

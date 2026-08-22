@@ -58,7 +58,7 @@ public class IdleSuppressionTests
         var tm = BuildManager(executor, sink);
         var idle = WaitForIdle(tm, chatId: 1);
 
-        tm.StartTask(chatId: 1, task: "ping", displayText: "ping",
+        _ = tm.StartTask(chatId: 1, task: "ping", displayText: "ping",
             isSessionTask: false, source: TaskSource.UserMessage);
 
         await idle;
@@ -82,7 +82,7 @@ public class IdleSuppressionTests
         var tm = BuildManager(executor, sink);
         var idle = WaitForIdle(tm, chatId: 2);
 
-        tm.StartTask(chatId: 2, task: "ping", displayText: "ping",
+        _ = tm.StartTask(chatId: 2, task: "ping", displayText: "ping",
             isSessionTask: false, source: TaskSource.UserMessage);
 
         await idle;
@@ -103,7 +103,7 @@ public class IdleSuppressionTests
         var tm = BuildManager(executor, sink);
         var idle = WaitForIdle(tm, chatId: 3);
 
-        tm.StartTask(chatId: 3, task: "ping", displayText: "ping",
+        _ = tm.StartTask(chatId: 3, task: "ping", displayText: "ping",
             isSessionTask: false, source: TaskSource.UserMessage);
 
         await idle;
@@ -126,7 +126,7 @@ public class IdleSuppressionTests
         var tm = BuildManager(executor, sink);
         var idle = WaitForIdle(tm, chatId: 4);
 
-        tm.StartTask(chatId: 4, task: "ping", displayText: "ping",
+        _ = tm.StartTask(chatId: 4, task: "ping", displayText: "ping",
             isSessionTask: false, source: TaskSource.CheckIn);
 
         await idle;

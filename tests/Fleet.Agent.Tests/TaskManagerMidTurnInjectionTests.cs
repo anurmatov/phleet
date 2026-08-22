@@ -21,10 +21,10 @@ public class TaskManagerMidTurnInjectionTests
         var manager = BuildManager(executor, sink, counter);
 
         var idle = WaitForIdle(manager, 123);
-        manager.StartTask(123, "first", "first", isSessionTask: true);
+        _ = manager.StartTask(123, "first", "first", isSessionTask: true);
         await executor.WaitForExecuteCountAsync(1);
 
-        manager.StartTask(123, "second", "second", isSessionTask: true);
+        _ = manager.StartTask(123, "second", "second", isSessionTask: true);
         await executor.WaitForInjectionCountAsync(1);
 
         Assert.Contains("[NEW MESSAGE", executor.InjectedTasks.Single());
@@ -45,11 +45,11 @@ public class TaskManagerMidTurnInjectionTests
         var manager = BuildManager(executor, sink, counter);
 
         var idle = WaitForIdle(manager, 123);
-        manager.StartTask(123, "first", "first", isSessionTask: true);
+        _ = manager.StartTask(123, "first", "first", isSessionTask: true);
         await executor.WaitForExecuteCountAsync(1);
 
         for (var i = 1; i <= 5; i++)
-            manager.StartTask(123, $"message {i}", $"message {i}", isSessionTask: true);
+            _ = manager.StartTask(123, $"message {i}", $"message {i}", isSessionTask: true);
 
         await executor.WaitForInjectionCountAsync(3);
         await counter.WaitForCountAsync("claude", InjectionOutcomeCounter.DegradedToQueue, 2);
@@ -82,10 +82,10 @@ public class TaskManagerMidTurnInjectionTests
         var manager = BuildManager(executor, sink, counter);
 
         var idle = WaitForIdle(manager, 123);
-        manager.StartTask(123, "first", "first", isSessionTask: true);
+        _ = manager.StartTask(123, "first", "first", isSessionTask: true);
         await executor.WaitForExecuteCountAsync(1);
 
-        manager.StartTask(123, "second", "second", isSessionTask: true);
+        _ = manager.StartTask(123, "second", "second", isSessionTask: true);
         await executor.WaitForInjectionStartedAsync();
         executor.ReleaseAllTurns();
         await Task.Delay(50);
@@ -120,10 +120,10 @@ public class TaskManagerMidTurnInjectionTests
         var manager = BuildManager(executor, sink, counter);
 
         var idle = WaitForIdle(manager, 123);
-        manager.StartTask(123, "first", "first", isSessionTask: true);
+        _ = manager.StartTask(123, "first", "first", isSessionTask: true);
         await executor.WaitForExecuteCountAsync(1);
 
-        manager.StartTask(123, "second", "second", isSessionTask: true);
+        _ = manager.StartTask(123, "second", "second", isSessionTask: true);
         await counter.WaitForCountAsync("claude", expectedOutcome, 1);
 
         executor.ReleaseAllTurns();
@@ -142,10 +142,10 @@ public class TaskManagerMidTurnInjectionTests
         var sink = Substitute.For<IMessageSink>();
         var manager = BuildManager(executor, sink, counter);
 
-        manager.StartTask(123, "first", "first", isSessionTask: true);
+        _ = manager.StartTask(123, "first", "first", isSessionTask: true);
         await executor.WaitForExecuteCountAsync(1);
 
-        manager.StartTask(123, "check-in", "check-in", isSessionTask: true, source: TaskSource.CheckIn);
+        _ = manager.StartTask(123, "check-in", "check-in", isSessionTask: true, source: TaskSource.CheckIn);
         executor.ReleaseAllTurns();
         await executor.WaitForExecuteCountAsync(2);
         await WaitUntilIdleAsync(manager, 123);
@@ -162,10 +162,10 @@ public class TaskManagerMidTurnInjectionTests
         var sink = Substitute.For<IMessageSink>();
         var manager = BuildManager(executor, sink, counter);
 
-        manager.StartTask(123, "first", "first", isSessionTask: true);
+        _ = manager.StartTask(123, "first", "first", isSessionTask: true);
         await executor.WaitForExecuteCountAsync(1);
 
-        manager.StartTask(123, "second", "second", isSessionTask: true);
+        _ = manager.StartTask(123, "second", "second", isSessionTask: true);
         await counter.WaitForCountAsync("claude", InjectionOutcomeCounter.DegradedToQueue, 1);
 
         await manager.HandleCancel(123, "all");
@@ -188,10 +188,10 @@ public class TaskManagerMidTurnInjectionTests
         var manager = BuildManager(executor, sink, counter);
 
         var idle = WaitForIdle(manager, 123);
-        manager.StartTask(123, "first", "first", isSessionTask: true);
+        _ = manager.StartTask(123, "first", "first", isSessionTask: true);
         await executor.WaitForExecuteCountAsync(1);
 
-        manager.StartTask(123, "second", "second", isSessionTask, source: source);
+        _ = manager.StartTask(123, "second", "second", isSessionTask, source: source);
         executor.ReleaseAllTurns();
         await idle;
         await executor.WaitForExecuteCountAsync(2);
@@ -211,10 +211,10 @@ public class TaskManagerMidTurnInjectionTests
         var manager = BuildManager(executor, sink, counter);
 
         var idle = WaitForIdle(manager, 123);
-        manager.StartTask(123, "first", "first", isSessionTask: true);
+        _ = manager.StartTask(123, "first", "first", isSessionTask: true);
         await executor.WaitForExecuteCountAsync(1);
 
-        manager.StartTask(123, "second", "second", isSessionTask: true);
+        _ = manager.StartTask(123, "second", "second", isSessionTask: true);
         await executor.WaitForInjectionCountAsync(1);
 
         executor.ReleaseAllTurns();
@@ -234,10 +234,10 @@ public class TaskManagerMidTurnInjectionTests
         var manager = BuildManager(executor, sink, counter);
 
         var idle = WaitForIdle(manager, 123);
-        manager.StartTask(123, "first", "first", isSessionTask: true);
+        _ = manager.StartTask(123, "first", "first", isSessionTask: true);
         await executor.WaitForExecuteCountAsync(1);
 
-        manager.StartTask(123, "second", "second", isSessionTask: true);
+        _ = manager.StartTask(123, "second", "second", isSessionTask: true);
         await executor.WaitForInjectionCountAsync(1);
 
         executor.ReleaseAllTurns();
@@ -256,11 +256,11 @@ public class TaskManagerMidTurnInjectionTests
         var manager = BuildManager(executor, sink, counter);
 
         var idle = WaitForIdle(manager, 1);
-        manager.StartTask(1, "chat1 running", "chat1 running", isSessionTask: true);
+        _ = manager.StartTask(1, "chat1 running", "chat1 running", isSessionTask: true);
         await executor.WaitForExecuteCountAsync(1);
 
-        manager.StartTask(2, "[telegram_message_id: 10]\nmessage b", "message b", isSessionTask: true);
-        manager.StartTask(2, "[telegram_message_id: 11]\nmessage d", "message d", isSessionTask: true);
+        _ = manager.StartTask(2, "[telegram_message_id: 10]\nmessage b", "message b", isSessionTask: true);
+        _ = manager.StartTask(2, "[telegram_message_id: 11]\nmessage d", "message d", isSessionTask: true);
 
         var queued = Assert.Single(manager.GetQueueSnapshot());
         Assert.Equal(2, queued.PartCount);
@@ -289,14 +289,14 @@ public class TaskManagerMidTurnInjectionTests
         manager.OnTaskCompleted += (_, _, _, _, _, correlationId, _) => completed.Enqueue(correlationId);
 
         var idle = WaitForIdle(manager, 1);
-        manager.StartTask(1, "chat1 running", "chat1 running", isSessionTask: true);
+        _ = manager.StartTask(1, "chat1 running", "chat1 running", isSessionTask: true);
         await executor.WaitForExecuteCountAsync(1);
 
-        manager.StartTask(2, "user b", "user b", isSessionTask: true);
-        manager.StartTask(2, "relay", "relay", isSessionTask: true, source: TaskSource.Relay, correlationId: "relay-1");
-        manager.StartTask(2, "bridge", "bridge", isSessionTask: true, source: TaskSource.Bridge, correlationId: "bridge-1", taskId: "bridge-task");
-        manager.StartTask(2, "check-in", "check-in", isSessionTask: true, source: TaskSource.CheckIn);
-        manager.StartTask(2, "user d", "user d", isSessionTask: true);
+        _ = manager.StartTask(2, "user b", "user b", isSessionTask: true);
+        _ = manager.StartTask(2, "relay", "relay", isSessionTask: true, source: TaskSource.Relay, correlationId: "relay-1");
+        _ = manager.StartTask(2, "bridge", "bridge", isSessionTask: true, source: TaskSource.Bridge, correlationId: "bridge-1", taskId: "bridge-task");
+        _ = manager.StartTask(2, "check-in", "check-in", isSessionTask: true, source: TaskSource.CheckIn);
+        _ = manager.StartTask(2, "user d", "user d", isSessionTask: true);
 
         var snapshot = manager.GetQueueSnapshot();
         Assert.Equal(3, snapshot.Count);
@@ -321,11 +321,11 @@ public class TaskManagerMidTurnInjectionTests
         var manager = BuildManager(executor, sink, counter);
 
         var idle = WaitForIdle(manager, 1);
-        manager.StartTask(1, "chat1 running", "chat1 running", isSessionTask: true);
+        _ = manager.StartTask(1, "chat1 running", "chat1 running", isSessionTask: true);
         await executor.WaitForExecuteCountAsync(1);
 
-        manager.StartTask(2, "user b", "user b", isSessionTask: true);
-        manager.StartTask(2, "check-in", "check-in", isSessionTask: true, source: TaskSource.CheckIn);
+        _ = manager.StartTask(2, "user b", "user b", isSessionTask: true);
+        _ = manager.StartTask(2, "check-in", "check-in", isSessionTask: true, source: TaskSource.CheckIn);
 
         var queued = Assert.Single(manager.GetQueueSnapshot());
         Assert.Equal(TaskSource.UserMessage, queued.Source);
@@ -348,11 +348,11 @@ public class TaskManagerMidTurnInjectionTests
         var doc2 = new MessageDocument("doc2", "application/pdf", 1, "b.pdf");
 
         var idle = WaitForIdle(manager, 1);
-        manager.StartTask(1, "chat1 running", "chat1 running", isSessionTask: true);
+        _ = manager.StartTask(1, "chat1 running", "chat1 running", isSessionTask: true);
         await executor.WaitForExecuteCountAsync(1);
 
-        manager.StartTask(2, "user b", "user b", isSessionTask: true, images: [image1], documents: [doc1]);
-        manager.StartTask(2, "user d", "user d", isSessionTask: true, images: [image2], documents: [doc2]);
+        _ = manager.StartTask(2, "user b", "user b", isSessionTask: true, images: [image1], documents: [doc1]);
+        _ = manager.StartTask(2, "user d", "user d", isSessionTask: true, images: [image2], documents: [doc2]);
 
         executor.ReleaseAllTurns();
         await idle;
@@ -371,11 +371,11 @@ public class TaskManagerMidTurnInjectionTests
         var manager = BuildManager(executor, sink, counter);
 
         var idle = WaitForIdle(manager, 1);
-        manager.StartTask(1, "chat1 running", "chat1 running", isSessionTask: true);
+        _ = manager.StartTask(1, "chat1 running", "chat1 running", isSessionTask: true);
         await executor.WaitForExecuteCountAsync(1);
 
         for (var i = 1; i <= 12; i++)
-            manager.StartTask(2, $"user {i}", $"user {i}", isSessionTask: true);
+            _ = manager.StartTask(2, $"user {i}", $"user {i}", isSessionTask: true);
 
         var snapshot = manager.GetQueueSnapshot();
         Assert.Equal(2, snapshot.Count);
@@ -403,14 +403,14 @@ public class TaskManagerMidTurnInjectionTests
         };
 
         var idle = WaitForIdle(manager, 1);
-        manager.StartTask(1, "chat1 running", "chat1 running", isSessionTask: true);
+        _ = manager.StartTask(1, "chat1 running", "chat1 running", isSessionTask: true);
         await executor.WaitForExecuteCountAsync(1);
-        manager.StartTask(2, "queued first", "queued first", isSessionTask: true);
+        _ = manager.StartTask(2, "queued first", "queued first", isSessionTask: true);
 
         executor.ReleaseAllTurns();
         Assert.True(claimed.Wait(TimeSpan.FromSeconds(5)));
 
-        manager.StartTask(2, "queued second", "queued second", isSessionTask: true);
+        _ = manager.StartTask(2, "queued second", "queued second", isSessionTask: true);
         Assert.Single(executor.ExecutedTasks);
         Assert.Single(manager.GetQueueSnapshot());
 
@@ -438,14 +438,14 @@ public class TaskManagerMidTurnInjectionTests
         };
 
         var idle = WaitForIdle(manager, 1);
-        manager.StartTask(1, "chat1 running", "chat1 running", isSessionTask: true);
+        _ = manager.StartTask(1, "chat1 running", "chat1 running", isSessionTask: true);
         await executor.WaitForExecuteCountAsync(1);
-        manager.StartTask(2, "queued first", "queued first", isSessionTask: true);
+        _ = manager.StartTask(2, "queued first", "queued first", isSessionTask: true);
 
         var cancelTask = Task.Run(() => manager.CancelByBridgeTaskIdAsync("missing-bridge-task"));
         Assert.True(dequeuedForCancel.Wait(TimeSpan.FromSeconds(5)));
 
-        manager.StartTask(2, "queued second", "queued second", isSessionTask: true);
+        _ = manager.StartTask(2, "queued second", "queued second", isSessionTask: true);
         releaseCancel.Set();
 
         Assert.False(await cancelTask.WaitAsync(TimeSpan.FromSeconds(5)));
@@ -465,15 +465,15 @@ public class TaskManagerMidTurnInjectionTests
         var manager = BuildManager(executor, sink, counter);
 
         var idle = WaitForIdle(manager, 1);
-        manager.StartTask(1, "chat1 running", "chat1 running", isSessionTask: true);
+        _ = manager.StartTask(1, "chat1 running", "chat1 running", isSessionTask: true);
         await executor.WaitForExecuteCountAsync(1);
 
-        manager.StartTask(2, "fresh user", "fresh user", isSessionTask: true);
-        manager.StartTask(3, "other fresh user", "other fresh user", isSessionTask: true);
+        _ = manager.StartTask(2, "fresh user", "fresh user", isSessionTask: true);
+        _ = manager.StartTask(3, "other fresh user", "other fresh user", isSessionTask: true);
         Assert.Equal(0, counter.GetCount("claude", InjectionOutcomeCounter.MergedIntoQueue));
 
-        manager.StartTask(2, "merged user", "merged user", isSessionTask: true);
-        manager.StartTask(2, "relay", "relay", isSessionTask: true, source: TaskSource.Relay);
+        _ = manager.StartTask(2, "merged user", "merged user", isSessionTask: true);
+        _ = manager.StartTask(2, "relay", "relay", isSessionTask: true, source: TaskSource.Relay);
         Assert.Equal(1, counter.GetCount("claude", InjectionOutcomeCounter.MergedIntoQueue));
 
         executor.ReleaseAllTurns();

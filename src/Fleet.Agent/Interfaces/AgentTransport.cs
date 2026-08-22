@@ -1009,13 +1009,13 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         foreach (var emoji in added)
         {
             var text = $"{channelAnchor}\n[reaction: {emoji} on message_id={messageId} from user_id={userId}{contentSuffix}]";
-            _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
+            _ = _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
         }
 
         foreach (var emoji in removed)
         {
             var text = $"{channelAnchor}\n[reaction removed: {emoji} on message_id={messageId} from user_id={userId}{contentSuffix}]";
-            _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
+            _ = _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
         }
     }
 

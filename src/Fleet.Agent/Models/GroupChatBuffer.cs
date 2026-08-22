@@ -105,6 +105,20 @@ public sealed class GroupChatBuffer
     }
 
     /// <summary>
+    /// Advances the checked-up-to watermark to an explicit <paramref name="boundary"/>.
+    /// Used by the debounced-batch path so the watermark matches the snapshot taken
+    /// before dispatch, not the wall clock at commit time.
+    /// </summary>
+    public void MarkChecked(DateTimeOffset boundary)
+    {
+        lock (_lock)
+        {
+            if (boundary > _lastChecked)
+                _lastChecked = boundary;
+        }
+    }
+
+    /// <summary>
     /// Adds a tool-use event to the buffer (not included in normal conversation context).
     /// </summary>
     public void AddToolUse(string toolName, string description, DateTimeOffset timestamp)

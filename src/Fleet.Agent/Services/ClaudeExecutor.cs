@@ -460,8 +460,6 @@ public sealed class ClaudeExecutor : IAgentExecutor
     internal void SetProcessForTests(Process? process) => _process = process;
     internal void SetEventChannelForTests(System.Threading.Channels.Channel<ClaudeStreamEvent> channel) => _eventChannel = channel;
     internal void DrainStaleTurnEventsForTests() => DrainStaleTurnEvents();
-    // Mirrors the SendCommandAsync drain path (drain + discard preserved text).
-    internal void DrainForSendCommandForTests() { DrainStaleTurnEvents(); _preservedDrainedAnswerText = null; }
     internal string? PreservedDrainedAnswerTextForTests => _preservedDrainedAnswerText;
 
     // --- Stdout channel helpers ---

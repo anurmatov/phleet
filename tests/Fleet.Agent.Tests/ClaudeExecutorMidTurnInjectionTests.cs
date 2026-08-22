@@ -152,21 +152,74 @@ public class ClaudeExecutorMidTurnInjectionTests
     }
 
     [Fact]
-    public void DrainStaleTurnEvents_OnSendCommandPath_StaleAssistantTextIsDiscarded()
+    public async Task SendCommandAsync_DrainedAssistantText_DoesNotSurfaceInNextExecuteTurn()
     {
-        // SendCommandAsync calls DrainStaleTurnEvents then immediately clears
-        // _preservedDrainedAnswerText. Without this clear, stale conversational text
-        // would surface as a recovered_answer event in the next unrelated ExecuteAsync turn.
-        var executor = BuildExecutor();
-        var channel = Channel.CreateUnbounded<ClaudeStreamEvent>();
-        executor.SetEventChannelForTests(channel);
-        channel.Writer.TryWrite(TextOnlyAssistantEvent("stale conversational answer"));
+        // Drives SendCommandAsync for real, then a normal ExecuteAsync turn, and asserts
+        // at the sink (the yielded events a caller observes) that no recovered_answer
+        // surfaces. Removing _preservedDrainedAnswerText = null from SendCommandAsync
+        // makes this test fail: ExecuteAsync would then yield recovered_answer.
+        var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "/bin/cat",
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+        })!;
+        try
+        {
+            var executor = BuildExecutor();
+            executor.SetProcessForTests(process);
+            executor.SetStdinForTests(process.StandardInput);
 
-        // Simulate the /run drain path: drain (would store text) then discard.
-        executor.DrainForSendCommandForTests();
+            var channel = Channel.CreateUnbounded<ClaudeStreamEvent>();
+            executor.SetEventChannelForTests(channel);
 
-        // The preserved field must be null — no text leaks into the next turn.
-        Assert.Null(executor.PreservedDrainedAnswerTextForTests);
+            // Simulate the previous turn's final-answer event arriving late into the channel.
+            channel.Writer.TryWrite(TextOnlyAssistantEvent("stale text from /run path"));
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+            // --- /run turn ---
+            var sendTask = Task.Run(async () =>
+            {
+                var events = new List<AgentProgress>();
+                await foreach (var p in executor.SendCommandAsync("/run echo hello", cts.Token))
+                    events.Add(p);
+                return events;
+            });
+
+            // SendCommandAsync synchronously drains the stale event, clears
+            // _preservedDrainedAnswerText, writes to stdin, then blocks on ReadAsync.
+            // A brief delay is enough — the drain and stdin write are microsecond operations.
+            await Task.Delay(100, cts.Token);
+            channel.Writer.TryWrite(new ClaudeStreamEvent { Type = "result", Result = "run done" });
+            await sendTask;
+
+            // --- normal ExecuteAsync turn ---
+            var executeTask = Task.Run(async () =>
+            {
+                var events = new List<AgentProgress>();
+                await foreach (var p in executor.ExecuteAsync("next task", ct: cts.Token))
+                    events.Add(p);
+                return events;
+            });
+
+            // ExecuteAsync drains (empty channel), finds _preservedDrainedAnswerText null,
+            // writes to stdin, then blocks on ReadAsync.
+            await Task.Delay(100, cts.Token);
+            channel.Writer.TryWrite(new ClaudeStreamEvent { Type = "result", Result = "real answer" });
+            var executeEvents = await executeTask;
+
+            // Stale text from the /run drain MUST NOT surface in this conversational turn.
+            Assert.DoesNotContain(executeEvents, p => p.EventType == "recovered_answer");
+            // The real response from the new turn must arrive at the sink.
+            Assert.Contains(executeEvents, p => p.FinalResult == "real answer");
+        }
+        finally
+        {
+            process.Kill();
+            process.Dispose();
+        }
     }
 
     [Fact]

@@ -32,7 +32,7 @@ public class TaskFailureReportingTests
 
     private static TaskManager BuildManager(IAgentExecutor executor, IMessageSink sink)
     {
-        var options = Options.Create(new AgentOptions { Name = "test", Role = "test", WorkDir = "/tmp", MaxConcurrentTasks = 5 });
+        var options = Options.Create(new AgentOptions { Name = "test", Role = "test", WorkDir = "/tmp" });
         var tm = new TaskManager(options, executor, new SessionManager(), NullLogger<TaskManager>.Instance);
         tm.Sink = sink;
         return tm;

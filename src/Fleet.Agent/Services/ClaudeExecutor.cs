@@ -30,6 +30,11 @@ public sealed class ClaudeExecutor : IAgentExecutor
     private int _messageCount;
     private DateTimeOffset _lastActivity = DateTimeOffset.MinValue;
     private volatile bool _restartRequested;
+    private volatile bool _turnCommittedToFinalAnswer;
+    // Text extracted from a stale assistant event during DrainStaleTurnEvents so it
+    // can be delivered out-of-band at the start of the next turn without going through
+    // ParseAssistantEvent (which would set _turnCommittedToFinalAnswer prematurely).
+    private string? _preservedDrainedAnswerText;
     private ExecutionStats? _previousCumulativeStats;
 
     // Continuous background stdout reader — feeds all NDJSON events into this channel.
@@ -144,6 +149,24 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 // System events were already processed inline by the background reader.
                 DrainStaleTurnEvents();
 
+                // If the drain extracted a stale assistant answer (the previous turn's
+                // response that arrived after its read loop already exited), deliver it
+                // out-of-band before sending the new message so the answer is not lost.
+                if (_preservedDrainedAnswerText is string preserved)
+                {
+                    _preservedDrainedAnswerText = null;
+                    _logger.LogInformation(
+                        "Delivering {Length}-char preserved stale answer text out-of-band before new turn",
+                        preserved.Length);
+                    yield return new AgentProgress
+                    {
+                        IsSignificant = true,
+                        Summary = TruncateText(preserved, 500),
+                        EventType = "assistant",
+                        FinalResult = preserved,
+                    };
+                }
+
                 // Send message to stdin
                 try
                 {
@@ -153,6 +176,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                     if (messageBytes > 10_000)
                         _logger.LogWarning("Large input detected ({Size} bytes, message #{Num})",
                             messageBytes, _messageCount + 1);
+                    _turnCommittedToFinalAnswer = false;
                     await WriteStdinLineAsync(message, ct);
                 }
                 catch (IOException) when (attempt < 2)
@@ -281,6 +305,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
         IReadOnlyList<MessageDocument>? documents = null,
         CancellationToken ct = default)
     {
+        if (_turnCommittedToFinalAnswer)
+            return MidTurnInjectionResult.NoActiveTurn("Claude has already begun emitting its final answer for this turn.");
+
         if (_process is null || _process.HasExited || _stdin is null)
             return MidTurnInjectionResult.NoActiveTurn("Claude process is not running.");
 
@@ -429,15 +456,24 @@ public sealed class ClaudeExecutor : IAgentExecutor
     internal Task WriteStdinLineForTestsAsync(string message, bool useLock, CancellationToken ct = default) =>
         useLock ? WriteStdinLineAsync(message, ct) : WriteStdinLineUnlockedAsync(message, ct);
 
+    internal AgentProgress ParseProgressForTests(ClaudeStreamEvent evt) => ParseProgress(evt);
+    internal bool TurnCommittedToFinalAnswerForTests => _turnCommittedToFinalAnswer;
+    internal void SetProcessForTests(Process? process) => _process = process;
+    internal void SetEventChannelForTests(System.Threading.Channels.Channel<ClaudeStreamEvent> channel) => _eventChannel = channel;
+    internal void DrainStaleTurnEventsForTests() => DrainStaleTurnEvents();
+    internal string? PreservedDrainedAnswerTextForTests => _preservedDrainedAnswerText;
+
     // --- Stdout channel helpers ---
 
     /// <summary>
     /// Drain any events buffered in <see cref="_eventChannel"/> that arrived between
     /// turns (e.g. background subagent task_notification + result events emitted after
     /// the main turn completed). System events were already processed inline by the
-    /// background reader; non-system stale events — in particular stale "result" events
-    /// emitted when a background subtask completes — are discarded here so they cannot
-    /// terminate the next turn's read loop prematurely.
+    /// background reader; stale "result" events emitted when a background subtask completes
+    /// are discarded so they cannot terminate the next turn's read loop prematurely.
+    /// Stale "assistant" events are handled specially: their text is extracted into
+    /// <see cref="_preservedDrainedAnswerText"/> WITHOUT calling ParseAssistantEvent so
+    /// that <see cref="_turnCommittedToFinalAnswer"/> is not set during the drain phase.
     /// Must be called while holding <see cref="_sendLock"/>.
     /// </summary>
     private void DrainStaleTurnEvents()
@@ -446,11 +482,34 @@ public sealed class ClaudeExecutor : IAgentExecutor
         var discarded = 0;
         while (_eventChannel.Reader.TryRead(out var stale))
         {
-            if (stale.Type != "system")
+            if (stale.Type == "assistant")
+            {
+                // Extract text without going through ParseAssistantEvent so
+                // _turnCommittedToFinalAnswer is not set during the drain phase.
+                var blocks = stale.Message?.Content;
+                if (blocks is not null)
+                {
+                    var text = string.Join("\n", blocks
+                        .Where(b => b.Type == "text" && b.Text is not null)
+                        .Select(b => b.Text!));
+                    if (!string.IsNullOrEmpty(text))
+                    {
+                        _preservedDrainedAnswerText = text;
+                        _logger.LogInformation(
+                            "Preserved {Length}-char stale assistant answer text for out-of-band delivery",
+                            text.Length);
+                    }
+                }
+            }
+            else if (stale.Type != "system")
+            {
                 discarded++;
+            }
         }
         if (discarded > 0)
-            _logger.LogInformation("Drained {Count} stale non-system event(s) from stdout channel before new turn", discarded);
+            _logger.LogInformation(
+                "Drained {Count} stale non-system non-assistant event(s) from stdout channel before new turn",
+                discarded);
     }
 
     /// <summary>
@@ -907,20 +966,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
         {
             "assistant" => ParseAssistantEvent(this, evt),
 
-            "result" => new AgentProgress
-            {
-                IsSignificant = true,
-                Summary = !string.IsNullOrEmpty(evt.Result)
-                    ? TruncateText(evt.Result, 500)
-                    : "Task completed",
-                EventType = evt.Type,
-                FinalResult = evt.Result,
-                SessionId = evt.SessionId,
-                IsErrorResult = evt.IsError == true,
-                StructuredOutput = evt.StructuredOutput.HasValue
-                    ? evt.StructuredOutput.Value.GetRawText()
-                    : null,
-            },
+            "result" => HandleResultEvent(evt),
 
             _ => new AgentProgress
             {
@@ -956,10 +1002,11 @@ public sealed class ClaudeExecutor : IAgentExecutor
             };
         }
 
-        // Extract text blocks
+        // Extract text blocks — no tool_use means this is Claude's terminal answer for the turn.
         var text = string.Join("\n", blocks.Where(b => b.Type == "text" && b.Text is not null).Select(b => b.Text!));
         if (!string.IsNullOrEmpty(text))
         {
+            self._turnCommittedToFinalAnswer = true;
             return new AgentProgress
             {
                 IsSignificant = true,
@@ -970,6 +1017,30 @@ public sealed class ClaudeExecutor : IAgentExecutor
         }
 
         return new AgentProgress { IsSignificant = false, Summary = "Assistant event", EventType = evt.Type };
+    }
+
+    private AgentProgress HandleResultEvent(ClaudeStreamEvent evt)
+    {
+        // _turnCommittedToFinalAnswer is intentionally NOT reset here. Clearing it on the result
+        // event would open a window between result-parse and TaskManager.Closed=true (which includes
+        // sending the reply) during which TryInjectMessageAsync would pass all checks, write to the
+        // live process stdin, and return Injected — only for the injected message to be discarded by
+        // DrainStaleTurnEvents at the start of the next turn. The sticky flag is the correct gate.
+        // The flag is cleared at the start of the next turn via ExecuteAsync, before the next write.
+        return new AgentProgress
+        {
+            IsSignificant = true,
+            Summary = !string.IsNullOrEmpty(evt.Result)
+                ? TruncateText(evt.Result, 500)
+                : "Task completed",
+            EventType = evt.Type,
+            FinalResult = evt.Result,
+            SessionId = evt.SessionId,
+            IsErrorResult = evt.IsError == true,
+            StructuredOutput = evt.StructuredOutput.HasValue
+                ? evt.StructuredOutput.Value.GetRawText()
+                : null,
+        };
     }
 
     private static string DescribeToolUse(string name, Dictionary<string, object>? input)

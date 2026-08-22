@@ -14,7 +14,6 @@ public sealed class AgentOptions
     public string PermissionMode { get; set; } = "acceptEdits";
     public int MaxTurns { get; set; } = 50;
     public required string WorkDir { get; set; }
-    public int MaxConcurrentTasks { get; set; } = 1;
     public int ProactiveIntervalMinutes { get; set; } = 0;
     public string GroupListenMode { get; set; } = "mention";
     public int GroupDebounceSeconds { get; set; } = 15;

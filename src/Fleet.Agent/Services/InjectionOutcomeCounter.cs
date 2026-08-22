@@ -13,6 +13,7 @@ public sealed class InjectionOutcomeCounter
     public const string FailedThenQueued = "failed_then_queued";
     public const string DroppedAtQueueCap = "dropped_at_queue_cap";
     public const string PossibleDuplicateAfterResume = "possible_duplicate_after_resume";
+    public const string MergedIntoQueue = "merged_into_queue";
 
     private readonly ConcurrentDictionary<(string provider, string outcome), long> _counts = new();
 

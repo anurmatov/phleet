@@ -23,15 +23,30 @@ public sealed class TaskManager
 
     // Global FIFO queue for messages that arrive while the agent is at capacity.
     private readonly ConcurrentQueue<QueuedMessage> _messageQueue = new();
+    private readonly ConcurrentDictionary<long, QueuedMessage> _pendingQueueByChat = new();
+    private readonly object _pendingQueueIndexLock = new();
+    // MaxQueueDepth caps queue entries. MaxQueuedPartsPerEntry caps merged user messages
+    // inside one entry; overflowing the parts cap creates a new entry, not a drop.
     private const int MaxQueueDepth = 20;
+    private const int MaxQueuedPartsPerEntry = QueuedMessage.MaxParts;
 
     // user-level index: userId → list of (chatId, taskId) for cross-chat cancel
     private readonly ConcurrentDictionary<long, List<(long ChatId, int TaskId)>> _userTasks = new();
 
     private string _botUsername = "";
 
+    private enum PendingQueueResult
+    {
+        NoPending,
+        Merged,
+        EnqueueFresh,
+    }
+
     /// <summary>Set by AgentTransport after construction to break circular DI.</summary>
     public IMessageSink Sink { get; set; } = null!;
+
+    internal Action? QueueEntryClaimedForTest { get; set; }
+    internal Action? QueueEntryDequeuedForBridgeCancelForTest { get; set; }
 
     public TaskManager(
         IOptions<AgentOptions> agentConfig,
@@ -69,7 +84,18 @@ public sealed class TaskManager
         string? taskId = null,
         IReadOnlyList<MessageImage>? images = null,
         IReadOnlyList<MessageDocument>? documents = null,
-        long userId = 0)
+        long userId = 0) =>
+        StartTaskCore(chatId, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, skipPendingQueueCheck: false);
+
+    private void StartTaskCore(long chatId, string task, string displayText, bool isSessionTask,
+        TaskSource source = TaskSource.UserMessage,
+        string? relaySender = null,
+        string? correlationId = null,
+        string? taskId = null,
+        IReadOnlyList<MessageImage>? images = null,
+        IReadOnlyList<MessageDocument>? documents = null,
+        long userId = 0,
+        bool skipPendingQueueCheck = false)
     {
         var state = GetChatState(chatId);
 
@@ -104,8 +130,39 @@ public sealed class TaskManager
                 _logger.LogInformation("Not injecting {Source} task into running conversational turn for chat {ChatId}; using normal capacity path", source, chatId);
         }
 
-        var totalRunning = _chatTasks.Values.Sum(s => s.Count);
-        if (totalRunning >= _agentConfig.MaxConcurrentTasks)
+        var queuedPart = CreateQueuedPart(task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId);
+        if (!skipPendingQueueCheck)
+        {
+            var pendingResult = TryAppendToPendingQueue(chatId, queuedPart);
+            if (pendingResult == PendingQueueResult.Merged)
+            {
+                if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
+                _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.MergedIntoQueue);
+                OnStatusChanged?.Invoke();
+                return;
+            }
+
+            if (pendingResult == PendingQueueResult.EnqueueFresh)
+            {
+                if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
+                if (source == TaskSource.CheckIn)
+                {
+                    // Preserve the existing capacity behavior: check-ins that cannot
+                    // attach to a running turn are dropped, not queued behind user work.
+                    _logger.LogDebug("Check-in skipped — agent already has a pending queued entry for chat {ChatId}", chatId);
+                    return;
+                }
+                EnqueueFreshMessage(chatId, queuedPart, notifyUser: source != TaskSource.CheckIn, completeBridgeOnDrop: true);
+                return;
+            }
+        }
+
+        // Each agent has one persistent executor process and the executor's send lock is
+        // held for a full turn. A second "concurrent" turn would just block behind that
+        // lock while bypassing queue notices and coalescing, so the runtime is explicitly
+        // one-at-a-time until executors can actually interleave turns.
+        var hasRunningTask = _chatTasks.Values.Any(s => s.Count > 0);
+        if (hasRunningTask)
         {
             // Undo the taskId reservation — we're not actually running it yet
             if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
@@ -113,32 +170,11 @@ public sealed class TaskManager
             // Check-ins silently skip when at capacity instead of queuing
             if (source == TaskSource.CheckIn)
             {
-                _logger.LogDebug("Check-in skipped — max tasks reached globally ({Total}/{Max})", totalRunning, _agentConfig.MaxConcurrentTasks);
+                _logger.LogDebug("Check-in skipped — agent already has a running task");
                 return;
             }
 
-            // Enqueue the message for processing after the current task completes
-            if (_messageQueue.Count >= MaxQueueDepth)
-            {
-                _logger.LogWarning("Message queue full ({Max}) — dropping incoming task from chat {ChatId}", MaxQueueDepth, chatId);
-                _ = Sink.SendTextAsync(chatId, $"Queue is full ({MaxQueueDepth} messages waiting). Please wait for tasks to complete.");
-                if (source == TaskSource.Bridge && correlationId is not null)
-                    OnTaskCompleted?.Invoke(chatId, "[status: failed]\nagent queue full", "bridge", source, true, correlationId, taskId);
-                return;
-            }
-
-            var senderDisplay = relaySender ?? source.ToString().ToLowerInvariant();
-            _messageQueue.Enqueue(new QueuedMessage(
-                chatId, task, displayText, isSessionTask, source,
-                relaySender, correlationId, taskId,
-                images, documents, userId,
-                DateTimeOffset.UtcNow, senderDisplay));
-
-            var queuePos = _messageQueue.Count;
-            _logger.LogInformation("Message queued (position {Pos}) for chat {ChatId} — agent at capacity ({Total}/{Max})", queuePos, chatId, totalRunning, _agentConfig.MaxConcurrentTasks);
-            if (!(_agentConfig.SuppressToolMessages && chatId < 0))
-                _ = Sink.SendTextAsync(chatId, $"I'm busy right now — your message is queued (position {queuePos}). I'll get to it once my current task finishes.");
-            OnStatusChanged?.Invoke();
+            EnqueueFreshMessage(chatId, queuedPart, notifyUser: true, completeBridgeOnDrop: true);
             return;
         }
 
@@ -241,7 +277,7 @@ public sealed class TaskManager
         }
         else
         {
-            msg += $"\n\nRunning tasks ({totalCount}/{_agentConfig.MaxConcurrentTasks}):";
+            msg += $"\n\nRunning tasks ({totalCount}/1):";
             foreach (var (cid, tasks) in allChatTasks)
             {
                 var chatLabel = cid == chatId ? "this chat" : $"chat {cid}";
@@ -749,24 +785,111 @@ public sealed class TaskManager
 
     private bool EnqueueMessage(long chatId, MidTurnMessage message, bool notifyUser)
     {
+        var part = CreateQueuedPart(message.Task, message.DisplayText, message.IsSessionTask, message.Source,
+            message.RelaySender, message.CorrelationId, message.TaskId, message.Images, message.Documents, message.UserId,
+            message.ArrivedAt);
+
+        var pendingResult = TryAppendToPendingQueue(chatId, part);
+        if (pendingResult == PendingQueueResult.Merged)
+        {
+            _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.MergedIntoQueue);
+            OnStatusChanged?.Invoke();
+            return true;
+        }
+
+        return EnqueueFreshMessage(chatId, part, notifyUser, completeBridgeOnDrop: false);
+    }
+
+    private QueuedMessagePart CreateQueuedPart(string task, string displayText, bool isSessionTask, TaskSource source,
+        string? relaySender, string? correlationId, string? taskId, IReadOnlyList<MessageImage>? images,
+        IReadOnlyList<MessageDocument>? documents, long userId, DateTimeOffset? arrivedAt = null)
+    {
+        var senderDisplay = relaySender ?? source.ToString().ToLowerInvariant();
+        var arrival = arrivedAt?.ToLocalTime() ?? DateTimeOffset.Now;
+        return new QueuedMessagePart(task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
+            images, documents, userId, arrival, senderDisplay);
+    }
+
+    private PendingQueueResult TryAppendToPendingQueue(long chatId, QueuedMessagePart part)
+    {
+        QueuedMessage? pending;
+        lock (_pendingQueueIndexLock)
+        {
+            if (!_pendingQueueByChat.TryGetValue(chatId, out pending))
+                return PendingQueueResult.NoPending;
+        }
+
+        pending.QueueDispatchLock.Wait();
+        try
+        {
+            if (pending.Claimed)
+                return PendingQueueResult.EnqueueFresh;
+
+            if (!pending.TryAppendPart(part))
+                return PendingQueueResult.EnqueueFresh;
+
+            _logger.LogInformation("Merged queued message into pending entry for chat {ChatId} ({Count}/{MaxParts} parts)",
+                chatId, pending.PartCount, MaxQueuedPartsPerEntry);
+            return PendingQueueResult.Merged;
+        }
+        finally
+        {
+            pending.QueueDispatchLock.Release();
+        }
+    }
+
+    private bool EnqueueFreshMessage(long chatId, QueuedMessagePart part, bool notifyUser, bool completeBridgeOnDrop)
+    {
         if (_messageQueue.Count >= MaxQueueDepth)
         {
             _logger.LogWarning("Message queue full ({Max}) — dropping incoming task from chat {ChatId}", MaxQueueDepth, chatId);
             _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DroppedAtQueueCap);
             _ = Sink.SendTextAsync(chatId, $"Queue is full ({MaxQueueDepth} messages waiting). Please wait for tasks to complete.");
+            if (completeBridgeOnDrop && part.Source == TaskSource.Bridge && part.CorrelationId is not null)
+                OnTaskCompleted?.Invoke(chatId, "[status: failed]\nagent queue full", "bridge", part.Source, true, part.CorrelationId, part.TaskId);
             return false;
         }
 
-        var senderDisplay = message.RelaySender ?? message.Source.ToString().ToLowerInvariant();
-        _messageQueue.Enqueue(new QueuedMessage(chatId, message.Task, message.DisplayText, message.IsSessionTask, message.Source,
-            message.RelaySender, message.CorrelationId, message.TaskId, message.Images, message.Documents,
-            message.UserId, DateTimeOffset.UtcNow, senderDisplay));
+        var queued = new QueuedMessage(chatId, part);
+        _messageQueue.Enqueue(queued);
+        if (part.Source == TaskSource.UserMessage)
+        {
+            lock (_pendingQueueIndexLock)
+                _pendingQueueByChat[chatId] = queued;
+        }
 
         var queuePos = _messageQueue.Count;
+        _logger.LogInformation("Message queued (position {Pos}) for chat {ChatId}; queue entries={EntryCount}, max parts per entry={MaxParts}",
+            queuePos, chatId, _messageQueue.Count, MaxQueuedPartsPerEntry);
         if (notifyUser && !(_agentConfig.SuppressToolMessages && chatId < 0))
             _ = Sink.SendTextAsync(chatId, $"I'm busy right now — your message is queued (position {queuePos}). I'll get to it once my current task finishes.");
         OnStatusChanged?.Invoke();
         return true;
+    }
+
+    private void RemovePendingIndexIfCurrent(QueuedMessage queued)
+    {
+        lock (_pendingQueueIndexLock)
+        {
+            if (_pendingQueueByChat.TryGetValue(queued.ChatId, out var current) && ReferenceEquals(current, queued))
+                _pendingQueueByChat.TryRemove(queued.ChatId, out _);
+        }
+    }
+
+    private void RebuildPendingQueueIndex()
+    {
+        lock (_pendingQueueIndexLock)
+        {
+            // Rebuild is a rare cancellation cleanup. Holding the index lock makes it
+            // atomic against fresh enqueue/index writes; a concurrent merge that already
+            // captured an entry still completes under that entry's QueueDispatchLock.
+            _pendingQueueByChat.Clear();
+            foreach (var queued in _messageQueue)
+            {
+                if (queued.Source == TaskSource.UserMessage && !queued.Claimed)
+                    _pendingQueueByChat[queued.ChatId] = queued;
+            }
+        }
     }
 
     internal static string FormatInjectedMessage(string original) =>
@@ -853,15 +976,25 @@ public sealed class TaskManager
         {
             // Check the pending queue — drain and re-enqueue non-matching items
             var retained = new List<QueuedMessage>();
-            while (_messageQueue.TryDequeue(out var item))
+            try
             {
-                if (item.TaskId == bridgeTaskId)
-                    found = true;
-                else
+                while (_messageQueue.TryDequeue(out var item))
+                {
                     retained.Add(item);
+                    QueueEntryDequeuedForBridgeCancelForTest?.Invoke();
+                    if (item.ContainsTaskId(bridgeTaskId))
+                    {
+                        found = true;
+                        retained.RemoveAt(retained.Count - 1);
+                    }
+                }
             }
-            foreach (var item in retained)
-                _messageQueue.Enqueue(item);
+            finally
+            {
+                foreach (var item in retained)
+                    _messageQueue.Enqueue(item);
+                RebuildPendingQueueIndex();
+            }
         }
 
         if (found)
@@ -892,6 +1025,8 @@ public sealed class TaskManager
 
         // Clear the pending queue
         while (_messageQueue.TryDequeue(out _)) { }
+        lock (_pendingQueueIndexLock)
+            _pendingQueueByChat.Clear();
 
         _logger.LogInformation("CancelAll: all running tasks cancelled and queue cleared");
     }
@@ -902,14 +1037,32 @@ public sealed class TaskManager
         if (_messageQueue.IsEmpty) return;
         if (!_messageQueue.TryDequeue(out var queued)) return;
 
-        _logger.LogInformation("Draining queued message for chat {ChatId} (source={Source})", queued.ChatId, queued.Source);
+        queued.QueueDispatchLock.Wait();
+        try
+        {
+            if (queued.Claimed) return;
+            queued.Claimed = true;
+        }
+        finally
+        {
+            queued.QueueDispatchLock.Release();
+        }
+
+        QueueEntryClaimedForTest?.Invoke();
+
+        var payload = queued.BuildPayload(DateTimeOffset.Now);
+
+        _logger.LogInformation("Draining queued message for chat {ChatId} (source={Source}, parts={Parts})",
+            queued.ChatId, queued.Source, queued.PartCount);
         if (!(_agentConfig.SuppressToolMessages && queued.ChatId < 0))
             _ = Sink.SendTextAsync(queued.ChatId, "Now processing your queued message...");
         OnStatusChanged?.Invoke();
 
-        StartTask(queued.ChatId, queued.Task, queued.DisplayText, queued.IsSessionTask,
-            queued.Source, queued.RelaySender, queued.CorrelationId, queued.TaskId,
-            queued.Images, queued.Documents, queued.UserId);
+        StartTaskCore(queued.ChatId, payload.Task, payload.DisplayText, payload.IsSessionTask,
+            payload.Source, payload.RelaySender, payload.CorrelationId, payload.TaskId,
+            payload.Images, payload.Documents, payload.UserId, skipPendingQueueCheck: true);
+
+        RemovePendingIndexIfCurrent(queued);
     }
 
     /// <summary>Returns a snapshot of the current queue for heartbeat/status reporting.</summary>

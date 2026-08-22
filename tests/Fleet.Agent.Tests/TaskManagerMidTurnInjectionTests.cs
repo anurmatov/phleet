@@ -286,7 +286,7 @@ public class TaskManagerMidTurnInjectionTests
         var sink = Substitute.For<IMessageSink>();
         var manager = BuildManager(executor, sink, counter);
         var completed = new ConcurrentQueue<string?>();
-        manager.OnTaskCompleted += (_, _, _, _, _, correlationId, _) => completed.Enqueue(correlationId);
+        manager.OnTaskCompleted += (_, _, _, _, _, correlationId, _, _) => completed.Enqueue(correlationId);
 
         var idle = WaitForIdle(manager, 1);
         _ = manager.StartTask(1, "chat1 running", "chat1 running", isSessionTask: true);

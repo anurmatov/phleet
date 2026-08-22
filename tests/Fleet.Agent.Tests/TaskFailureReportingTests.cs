@@ -51,7 +51,7 @@ public class TaskFailureReportingTests
         var tm = BuildManager(executor, sink);
 
         var completed = new TaskCompletionSource<(string, bool)>();
-        tm.OnTaskCompleted += (_, text, _, _, err, _, _) => completed.TrySetResult((text, err));
+        tm.OnTaskCompleted += (_, text, _, _, err, _, _, _) => completed.TrySetResult((text, err));
 
         _ = tm.StartTask(chatId: chatId, task: "ping", displayText: "ping",
             isSessionTask: false, source: TaskSource.UserMessage);
@@ -82,7 +82,7 @@ public class TaskFailureReportingTests
         var tm = BuildManager(executor, sink);
 
         var completed = new TaskCompletionSource();
-        tm.OnTaskCompleted += (_, _, _, _, _, _, _) => completed.TrySetResult();
+        tm.OnTaskCompleted += (_, _, _, _, _, _, _, _) => completed.TrySetResult();
 
         _ = tm.StartTask(chatId: 102, task: "ping", displayText: "ping",
             isSessionTask: false, source: TaskSource.UserMessage);
@@ -117,7 +117,7 @@ public class TaskFailureReportingTests
         var tm = BuildManager(executor, sink);
 
         var completed = new TaskCompletionSource();
-        tm.OnTaskCompleted += (_, _, _, _, _, _, _) => completed.TrySetResult();
+        tm.OnTaskCompleted += (_, _, _, _, _, _, _, _) => completed.TrySetResult();
 
         _ = tm.StartTask(chatId: 104, task: "ping", displayText: "ping",
             isSessionTask: false, source: TaskSource.UserMessage);

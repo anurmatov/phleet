@@ -602,29 +602,36 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     private void OnToolUse(long chatId, string toolName, string description) =>
         _groupBehavior.BufferToolUse(chatId, toolName, description);
 
-    private void OnTaskCompleted(long chatId, string result, string? relaySender, TaskSource source, bool isPartial, string? correlationId, string? taskId)
+    private void OnTaskCompleted(long chatId, string result, string? relaySender, TaskSource source, bool isPartial, string? correlationId, string? taskId, CompletionKind kind)
     {
-        var lastSentId = _lastSentMessageIds.TryGetValue(chatId, out var id) ? id : 0L;
-        _groupBehavior.BufferBotResponse(chatId, result, telegramMessageId: lastSentId);
+        if (!string.IsNullOrEmpty(result))
+        {
+            var lastSentId = _lastSentMessageIds.TryGetValue(chatId, out var id) ? id : 0L;
+            _groupBehavior.BufferBotResponse(chatId, result, telegramMessageId: lastSentId);
+        }
 
         _ = Task.Run(async () =>
         {
             if (relaySender == "bridge" && correlationId is not null)
             {
-                await _relay.PublishToAgentAsync("bridge", chatId, result,
+                var bridgeResult = kind == CompletionKind.Idle ? "[status: idle]" : result;
+                await _relay.PublishToAgentAsync("bridge", chatId, bridgeResult,
                     type: RelayMessageType.BridgeResponse, correlationId: correlationId, taskId: taskId);
             }
             else if (relaySender is not null)
             {
                 var type = isPartial ? RelayMessageType.PartialResponse : RelayMessageType.Response;
-                var text = taskId is not null ? FormatTaskResponse(result, isPartial) : result;
+                var text = taskId is not null ? FormatTaskResponse(result, isPartial, kind) : result;
                 await _relay.PublishToAgentAsync(relaySender, chatId, text, type: type, taskId: taskId);
             }
         });
     }
 
-    private static string FormatTaskResponse(string result, bool isPartial)
+    private static string FormatTaskResponse(string result, bool isPartial, CompletionKind kind)
     {
+        if (kind == CompletionKind.Idle)
+            return "[status: idle]";
+
         // Detect voluntary failure marker: [TASK_FAILED: reason]
         // Agents can emit this to signal that they refused or cannot complete a delegated task.
         var taskFailedMatch = TaskFailedMarkerRegex.Match(result);

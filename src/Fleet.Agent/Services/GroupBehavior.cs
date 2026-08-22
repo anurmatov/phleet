@@ -716,8 +716,9 @@ public sealed class GroupBehavior
         if (outcome is TaskDispatchOutcome.Ran or TaskDispatchOutcome.Injected or TaskDispatchOutcome.Queued)
         {
             buffer.MarkChecked(batchTime);
-            if (pendingImages.Count > 0)
-                CommitPendingImages(chatId, batchTime);
+            // CommitPendingImages is unconditional: even when pendingImages is empty, committed
+            // entries with storedAt ≤ batchTime need cleanup (e.g. images that expired mid-batch).
+            CommitPendingImages(chatId, batchTime);
         }
         else
         {

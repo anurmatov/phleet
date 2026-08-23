@@ -24,6 +24,7 @@ using System.Text.Json.Serialization;
 [JsonDerivedType(typeof(SetAttributeStep), "set_attribute")]
 [JsonDerivedType(typeof(HttpRequestStep), "http_request")]
 [JsonDerivedType(typeof(CrossNamespaceStartStep), "cross_namespace_start")]
+[JsonDerivedType(typeof(SleepStep), "sleep")]
 public abstract record StepDefinition
 {
     /// <summary>Human-readable step name; also used as key when storing step output in vars.</summary>
@@ -91,6 +92,21 @@ public sealed record ContinueStep : StepDefinition { }
 
 /// <summary>Explicit no-op — does nothing and returns null. Clearer than {"type":"sequence","steps":[]}.</summary>
 public sealed record NoopStep : StepDefinition { }
+
+/// <summary>
+/// Pauses the workflow for a fixed number of seconds using a durable Temporal timer
+/// (Workflow.DelayAsync). Safe across worker restarts — replay picks up after the timer fires,
+/// not from before the sleep started.
+///
+/// Valid range: 1 ≤ seconds ≤ 2_592_000 (30 days). Missing, null, zero, negative,
+/// or over-ceiling values are rejected at step execution. Clamping is not applied — fix the definition.
+/// Uses seconds, not minutes, because the motivating use cases (rate-limit spacing, backoff)
+/// require sub-minute granularity that minutes cannot express.
+/// </summary>
+public sealed record SleepStep : StepDefinition
+{
+    public long? Seconds { get; init; }
+}
 
 // --- Agent delegation steps ---
 

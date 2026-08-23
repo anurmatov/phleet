@@ -105,6 +105,7 @@ public class UniversalWorkflow
                 SetAttributeStep s                                     => await ExecuteSetAttributeAsync(s),
                 HttpRequestStep s                                      => await ExecuteHttpRequestAsync(s),
                 CrossNamespaceStartStep s                              => await ExecuteCrossNamespaceStartAsync(s),
+                SleepStep s                                            => await ExecuteSleepAsync(s),
                 _                                                      => throw new InvalidOperationException(
                                                                               $"Unknown step type: {step.GetType().Name}")
             };
@@ -583,6 +584,24 @@ public class UniversalWorkflow
 
         if (step.OutputVar != null) SetVar(step.OutputVar, result);
         return result;
+    }
+
+    private async Task<object?> ExecuteSleepAsync(SleepStep step)
+    {
+        const long MinSeconds = 1;
+        const long MaxSeconds = 2_592_000; // 30 days
+
+        if (step.Seconds is not { } seconds || seconds < MinSeconds || seconds > MaxSeconds)
+        {
+            throw new InvalidOperationException(
+                $"sleep step '{step.Name ?? "(unnamed)"}': 'seconds' must be an integer in " +
+                $"[{MinSeconds}..{MaxSeconds}] (30 days), got {step.Seconds?.ToString() ?? "null"}. " +
+                "Clamping is not applied — fix the step definition. " +
+                "Hint: check for unit errors (e.g. milliseconds passed where seconds are expected).");
+        }
+
+        await Workflow.DelayAsync(TimeSpan.FromSeconds(seconds));
+        return null;
     }
 
     // -------------------------------------------------------------------------

@@ -11,7 +11,7 @@ const VALID_STEP_TYPES = new Set([
   'sequence', 'parallel', 'loop', 'branch', 'break', 'continue', 'noop',
   'delegate', 'delegate_with_escalation',
   'wait_for_signal', 'child_workflow', 'fire_and_forget', 'cross_namespace_start',
-  'set_variable', 'set_attribute', 'http_request',
+  'set_variable', 'set_attribute', 'http_request', 'sleep',
 ])
 
 const NS_COLOR_PALETTE = [

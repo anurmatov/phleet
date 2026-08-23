@@ -275,6 +275,86 @@ public class ClaudeExecutorMidTurnInjectionTests
         Assert.Equal("stale answer from prior turn", executor.PreservedDrainedAnswerTextForTests);
     }
 
+    [Fact]
+    public async Task ExecuteAsync_PreservedAnswerText_IsDeliveredOnFirstTurnNotSecond()
+    {
+        // Pin: _preservedDrainedAnswerText = null; at ~line 157 inside ExecuteAsync.
+        //
+        // If that line is removed, _preservedDrainedAnswerText retains the stale text
+        // after turn 1 delivers it.  Turn 2's DrainStaleTurnEvents finds nothing new but
+        // the field is still non-null, so the if-block fires again and yields
+        // recovered_answer a second time.  The test catches that re-delivery.
+        //
+        // It asserts at the sink (the IAsyncEnumerable a caller iterates) — no private
+        // field inspection.  Uses /bin/cat as the live process so stdin writes succeed.
+        var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "/bin/cat",
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+        })!;
+        try
+        {
+            var executor = BuildExecutor();
+            executor.SetProcessForTests(process);
+            executor.SetStdinForTests(process.StandardInput);
+
+            var channel = Channel.CreateUnbounded<ClaudeStreamEvent>();
+            executor.SetEventChannelForTests(channel);
+
+            // Plant a stale answer from a previous turn.  DrainStaleTurnEvents (called at
+            // the top of ExecuteAsync's turn loop) will consume it and store the text in
+            // _preservedDrainedAnswerText without calling ParseAssistantEvent, so the
+            // injection gate is not tripped.
+            channel.Writer.TryWrite(TextOnlyAssistantEvent("recovered stale answer"));
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+            // ── Turn 1 ──────────────────────────────────────────────────────────────
+            var turn1Events = new List<AgentProgress>();
+            var turn1 = Task.Run(async () =>
+            {
+                await foreach (var p in executor.ExecuteAsync("task 1", ct: cts.Token))
+                    turn1Events.Add(p);
+            });
+
+            // Drain + recovered_answer yield + stdin write are sub-millisecond; 150 ms
+            // is ample before we inject the result that terminates turn 1.
+            await Task.Delay(150, cts.Token);
+            channel.Writer.TryWrite(new ClaudeStreamEvent { Type = "result", Result = "turn 1 answer" });
+            await turn1;
+
+            // The recovered answer must surface exactly once in turn 1.
+            var recoveredInTurn1 = turn1Events.Where(p => p.EventType == "recovered_answer").ToList();
+            Assert.Single(recoveredInTurn1);
+            Assert.Equal("recovered stale answer", recoveredInTurn1[0].Summary);
+            Assert.Contains(turn1Events, p => p.FinalResult == "turn 1 answer");
+
+            // ── Turn 2 ──────────────────────────────────────────────────────────────
+            var turn2Events = new List<AgentProgress>();
+            var turn2 = Task.Run(async () =>
+            {
+                await foreach (var p in executor.ExecuteAsync("task 2", ct: cts.Token))
+                    turn2Events.Add(p);
+            });
+
+            await Task.Delay(150, cts.Token);
+            channel.Writer.TryWrite(new ClaudeStreamEvent { Type = "result", Result = "turn 2 answer" });
+            await turn2;
+
+            // _preservedDrainedAnswerText must have been cleared in turn 1 (line ~157).
+            // Turn 2's drain finds nothing; the if-block must not fire.
+            Assert.DoesNotContain(turn2Events, p => p.EventType == "recovered_answer");
+            Assert.Contains(turn2Events, p => p.FinalResult == "turn 2 answer");
+        }
+        finally
+        {
+            process.Kill();
+            process.Dispose();
+        }
+    }
+
     private static ClaudeExecutor BuildExecutor()
     {
         var options = Options.Create(new AgentOptions

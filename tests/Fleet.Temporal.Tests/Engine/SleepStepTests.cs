@@ -1,5 +1,8 @@
 using System.Text.Json;
 using Fleet.Temporal.Engine;
+using Temporalio.Activities;
+using Temporalio.Client;
+using Temporalio.Common;
 using Temporalio.Exceptions;
 using Temporalio.Testing;
 using Temporalio.Worker;
@@ -15,8 +18,8 @@ namespace Fleet.Temporal.Tests.Engine;
 /// 2. Durable-timer integration — verifies Workflow.DelayAsync is the primitive
 ///    (not Thread.Sleep / Task.Delay) by running a minimal workflow in a
 ///    time-skipping WorkflowEnvironment where a 300-second sleep finishes in milliseconds.
-/// 3. Validation expectations — verifies that invalid Seconds values produce
-///    the expected InvalidOperationException, tested through the same environment.
+/// 3. Validation — verifies that invalid Seconds values fail the workflow via the production
+///    ExecuteSleepAsync path inside UniversalWorkflow, not a copy-pasted mirror.
 /// </summary>
 public sealed class SleepStepTests
 {
@@ -104,7 +107,7 @@ public sealed class SleepStepTests
         {
             var handle = await env.Client.StartWorkflowAsync(
                 (SleepTimerWorkflow wf) => wf.RunAsync(300L),
-                new Temporalio.Client.WorkflowOptions(
+                new WorkflowOptions(
                     id: $"sleep-timer-{Guid.NewGuid():N}",
                     taskQueue: worker.Options.TaskQueue!));
 
@@ -118,9 +121,10 @@ public sealed class SleepStepTests
     }
 
     // -----------------------------------------------------------------------
-    // Validation — invalid Seconds values are rejected at step execution.
-    // Tested through the same time-skipping environment to verify the error
-    // propagates correctly from within the Temporal workflow context.
+    // Validation — invalid Seconds values are rejected by the production
+    // ExecuteSleepAsync inside UniversalWorkflow.  The test drives real
+    // production code via stub activities, so it would catch a regression
+    // in the production path even if the message or exception type changed.
     // -----------------------------------------------------------------------
 
     [Theory]
@@ -128,35 +132,50 @@ public sealed class SleepStepTests
     [InlineData(0L,           "0")]
     [InlineData(-1L,          "-1")]
     [InlineData(2_592_001L,   "2592001")] // one above ceiling
-    public async Task SleepStep_InvalidSeconds_WorkflowFails(long? seconds, string displayValue)
+    public async Task SleepStep_InvalidSeconds_ProductionWorkflowFails(long? seconds, string displayValue)
     {
+        // Build a workflow definition whose only step is a sleep with an invalid seconds value.
+        // SleepTestActivities stubs the LoadWorkflowDefinition activity so UniversalWorkflow
+        // receives this definition without needing the orchestrator REST endpoint.
+        var definition = new WorkflowDefinitionModel
+        {
+            Name      = "test-sleep",
+            Namespace = "default",
+            TaskQueue = "test",
+            Root      = new SleepStep { Seconds = seconds }
+        };
+
         await using var env = await WorkflowEnvironment.StartTimeSkippingAsync();
+        var taskQueue = $"sleep-invalid-{Guid.NewGuid():N}";
 
         using var worker = new TemporalWorker(
             env.Client,
-            new TemporalWorkerOptions($"sleep-invalid-{Guid.NewGuid():N}")
-                .AddWorkflow<SleepValidationWorkflow>());
+            new TemporalWorkerOptions(taskQueue)
+                .AddWorkflow<UniversalWorkflow>()
+                .AddAllActivities(new SleepTestActivities(definition)));
 
         await worker.ExecuteAsync(async () =>
         {
             var handle = await env.Client.StartWorkflowAsync(
-                (SleepValidationWorkflow wf) => wf.RunAsync(seconds),
-                new Temporalio.Client.WorkflowOptions(
+                "test-sleep",
+                Array.Empty<object?>(),
+                new WorkflowOptions(
                     id: $"sleep-invalid-{Guid.NewGuid():N}",
-                    taskQueue: worker.Options.TaskQueue!)
+                    taskQueue: taskQueue)
                 {
-                    // Prevent Temporal from retrying the workflow task after the validation
-                    // exception — without this, InvalidOperationException is non_retryable=false
-                    // and the time-skipping environment can hang waiting for retry exhaustion.
-                    RetryPolicy = new Temporalio.Common.RetryPolicy { MaximumAttempts = 1 }
+                    RetryPolicy = new RetryPolicy { MaximumAttempts = 1 }
                 });
 
             var ex = await Assert.ThrowsAsync<WorkflowFailedException>(
                 () => handle.GetResultAsync());
 
-            // Walk the cause chain to reach our ApplicationFailureException.
-            var cause = ex.InnerException;
-            Assert.IsType<ApplicationFailureException>(cause);
+            // The production ExecuteSleepAsync must throw ApplicationFailureException(nonRetryable: true).
+            // A plain InvalidOperationException would be wrapped with non_retryable=false, causing
+            // indefinite Temporal task retries — the time-skipping environment would hang.
+            var cause = Assert.IsType<ApplicationFailureException>(ex.InnerException);
+            Assert.True(cause.NonRetryable,
+                "ExecuteSleepAsync must throw ApplicationFailureException(nonRetryable: true). " +
+                "A non-retryable=false exception causes indefinite task retries and wedges the workflow.");
 
             Assert.Contains("seconds", cause.Message, StringComparison.OrdinalIgnoreCase);
             Assert.Contains(displayValue, cause.Message);
@@ -186,30 +205,14 @@ file sealed class SleepTimerWorkflow
 }
 
 /// <summary>
-/// Mirrors the validation logic of ExecuteSleepAsync to test the rejection path
-/// without requiring the full UniversalWorkflow dependency chain.
-///
-/// Throws ApplicationFailureException with nonRetryable=true so the time-skipping
-/// environment terminates the workflow immediately — regular InvalidOperationException
-/// is wrapped as non_retryable=false, causing indefinite task retries with backoff.
+/// Stub activities for the validation tests.  Returns a pre-baked WorkflowDefinitionModel
+/// containing the step under test so UniversalWorkflow can run without the orchestrator.
 /// </summary>
-[Workflow]
-file sealed class SleepValidationWorkflow
+file sealed class SleepTestActivities(WorkflowDefinitionModel definition)
 {
-    private const long MinSeconds = 1;
-    private const long MaxSeconds = 2_592_000;
+    [Activity("LoadWorkflowDefinition")]
+    public WorkflowDefinitionModel LoadDefinition(string _) => definition;
 
-    [WorkflowRun]
-    public async Task RunAsync(long? seconds)
-    {
-        if (seconds is not { } s || s < MinSeconds || s > MaxSeconds)
-        {
-            throw new ApplicationFailureException(
-                $"sleep step: 'seconds' must be an integer in [{MinSeconds}..{MaxSeconds}] (30 days), " +
-                $"got {seconds?.ToString() ?? "null"}.",
-                nonRetryable: true);
-        }
-
-        await Workflow.DelayAsync(TimeSpan.FromSeconds(s));
-    }
+    [Activity("LoadWorkflowConfig")]
+    public JsonElement LoadConfig() => JsonSerializer.SerializeToElement(new { });
 }

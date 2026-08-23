@@ -7,6 +7,7 @@ using Fleet.Temporal.Models;
 using Microsoft.Extensions.Logging;
 using Temporalio.Common;
 using Temporalio.Converters;
+using Temporalio.Exceptions;
 using Temporalio.Workflows;
 
 /// <summary>
@@ -593,11 +594,14 @@ public class UniversalWorkflow
 
         if (step.Seconds is not { } seconds || seconds < MinSeconds || seconds > MaxSeconds)
         {
-            throw new InvalidOperationException(
+            // Non-retryable: the step definition is invalid and retrying will not fix it.
+            // InvalidOperationException would cause indefinite Temporal task retries (non_retryable=false).
+            throw new ApplicationFailureException(
                 $"sleep step '{step.Name ?? "(unnamed)"}': 'seconds' must be an integer in " +
                 $"[{MinSeconds}..{MaxSeconds}] (30 days), got {step.Seconds?.ToString() ?? "null"}. " +
                 "Clamping is not applied — fix the step definition. " +
-                "Hint: check for unit errors (e.g. milliseconds passed where seconds are expected).");
+                "Hint: check for unit errors (e.g. milliseconds passed where seconds are expected).",
+                nonRetryable: true);
         }
 
         await Workflow.DelayAsync(TimeSpan.FromSeconds(seconds));

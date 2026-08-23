@@ -75,6 +75,11 @@ function validateStep(step: Record<string, unknown>, errors: ValidationError[], 
   if (type === 'http_request') {
     if (!step.url) errors.push({ message: `${path}: "url" is required`, blocking: true })
   }
+  if (type === 'sleep') {
+    const s = step.seconds
+    if (s === undefined || s === null || typeof s !== 'number' || !Number.isInteger(s) || s < 1 || s > 2592000)
+      errors.push({ message: `${path}: "seconds" must be an integer in 1..2592000 (30 days)`, blocking: true })
+  }
   if (type === 'branch') {
     if (!step.on) errors.push({ message: `${path}: "on" expression is required`, blocking: true })
     if (!step.cases || typeof step.cases !== 'object' || Object.keys(step.cases as object).length === 0) {

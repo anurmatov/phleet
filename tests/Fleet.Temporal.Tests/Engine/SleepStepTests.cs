@@ -1,12 +1,13 @@
+using System.Linq;
 using System.Text.Json;
 using Fleet.Temporal.Engine;
 using Temporalio.Activities;
+using Temporalio.Api.Enums.V1;
 using Temporalio.Client;
 using Temporalio.Common;
 using Temporalio.Exceptions;
 using Temporalio.Testing;
 using Temporalio.Worker;
-using Temporalio.Workflows;
 
 namespace Fleet.Temporal.Tests.Engine;
 
@@ -14,12 +15,13 @@ namespace Fleet.Temporal.Tests.Engine;
 /// Tests for the <see cref="SleepStep"/> step type.
 ///
 /// Three layers:
-/// 1. JSON deserialization — verifies [JsonDerivedType] registration and Seconds property.
-/// 2. Durable-timer integration — verifies Workflow.DelayAsync is the primitive
-///    (not Thread.Sleep / Task.Delay) by running a minimal workflow in a
-///    time-skipping WorkflowEnvironment where a 300-second sleep finishes in milliseconds.
-/// 3. Validation — verifies that invalid Seconds values fail the workflow via the production
-///    ExecuteSleepAsync path inside UniversalWorkflow, not a copy-pasted mirror.
+/// 1. JSON deserialization — verifies [JsonDerivedType] registration and Seconds property,
+///    including type-level rejection of strings and fractional numbers (M5).
+/// 2. Durable-timer integration — drives production ExecuteSleepAsync inside UniversalWorkflow
+///    via stub activities in a time-skipping WorkflowEnvironment; asserts that logical time
+///    advances by the declared seconds, catching unit errors (M4).
+/// 3. Validation — verifies that invalid Seconds values fail the workflow with a non-retryable
+///    ApplicationFailureException via the production ExecuteSleepAsync path.
 /// </summary>
 public sealed class SleepStepTests
 {
@@ -81,43 +83,114 @@ public sealed class SleepStepTests
     }
 
     // -----------------------------------------------------------------------
-    // Durable-timer integration — time-skipping WorkflowEnvironment
+    // JSON type-rejection — M5
     //
-    // Workflow.DelayAsync suspends the Temporal coroutine and records a timer
-    // in the event history; replay picks up after the timer fires, not from
-    // before the sleep started.  The time-skipping environment advances logical
-    // time instantly so a 300-second sleep completes in milliseconds of real time.
+    // JsonSerializerDefaults.Web enables AllowReadingFromString, which would
+    // silently coerce "seconds":"300" (string) into Seconds=300 and pass the
+    // range check.  [JsonNumberHandling(Strict)] on SleepStep.Seconds overrides
+    // this for the Seconds property, so type errors surface at definition load
+    // time rather than at step execution where ignoreFailure could suppress them.
     //
-    // If this test hangs it proves the implementation used Thread.Sleep or
-    // Task.Delay instead of Workflow.DelayAsync, because those primitives are
-    // not intercepted by the testing environment.
+    // Fractional seconds (1.5) throw JsonException at deserialization because
+    // long? cannot represent a fractional value; this behaviour predates the
+    // Strict fix but is documented here alongside the string case for clarity.
     // -----------------------------------------------------------------------
 
     [Fact]
-    public async Task SleepStep_DurableTimer_SkipsTimeInTestEnvironment()
+    public void SleepStep_StringSeconds_DeserializationFails()
     {
+        // "300" as a JSON string must be rejected even under Web defaults.
+        var json = """{"type":"sleep","seconds":"300"}""";
+
+        Assert.Throws<JsonException>(
+            () => JsonSerializer.Deserialize<StepDefinition>(json, WebOptions));
+    }
+
+    [Fact]
+    public void SleepStep_FractionalSeconds_DeserializationFails()
+    {
+        // 1.5 cannot be stored as long? — rejected at load time.
+        var json = """{"type":"sleep","seconds":1.5}""";
+
+        Assert.Throws<JsonException>(
+            () => JsonSerializer.Deserialize<StepDefinition>(json, WebOptions));
+    }
+
+    // -----------------------------------------------------------------------
+    // Durable-timer integration — M4
+    //
+    // Drives the actual Workflow.DelayAsync call in production ExecuteSleepAsync
+    // (UniversalWorkflow.cs:607) through SleepTestActivities stubs.
+    //
+    // The time-skipping WorkflowEnvironment advances logical time instantly when
+    // the workflow coroutine is suspended on a timer; Thread.Sleep and Task.Delay
+    // are not intercepted and would hang.  Measuring logical elapsed time with
+    // env.GetCurrentTimeAsync() before and after the run catches unit errors:
+    //   - below 300s → FromMilliseconds used instead of FromSeconds
+    //   - above 600s → FromMinutes used instead of FromSeconds
+    // -----------------------------------------------------------------------
+
+    [Fact]
+    public async Task SleepStep_ValidSeconds_ProductionTimerFires()
+    {
+        // Drives the actual Workflow.DelayAsync call in production ExecuteSleepAsync
+        // (UniversalWorkflow.cs:607) through the time-skipping environment.
+        //
+        // Assertion strategy: inspect the workflow history after completion.
+        // The single TimerStarted event in the history is produced by Workflow.DelayAsync;
+        // its StartToFireTimeout must be exactly 300 seconds.
+        //
+        // This catches the FromMinutes(seconds) mutation (would write "18000s" to history)
+        // and the FromMilliseconds(seconds) mutation (would write "0.3s").  Neither would
+        // pass the exact TimeSpan.FromSeconds(300) equality check.
+        //
+        // Why not use env.GetCurrentTimeAsync() for elapsed?
+        // Temporal's embedded test server registers a 10-year execution-timeout timer
+        // for the workflow when no explicit ExecutionTimeout is set.  The auto-time-skip
+        // fires that timer too, advancing logical time by 10 years — making "elapsed"
+        // appear as ~315 000 000 s regardless of the sleep duration.
+        var definition = new WorkflowDefinitionModel
+        {
+            Name      = "test-sleep",
+            Namespace = "default",
+            TaskQueue = "test",
+            Root      = new SleepStep { Seconds = 300L }
+        };
+
         await using var env = await WorkflowEnvironment.StartTimeSkippingAsync();
+        var taskQueue = $"sleep-valid-{Guid.NewGuid():N}";
+        var workflowId = $"sleep-valid-{Guid.NewGuid():N}";
 
         using var worker = new TemporalWorker(
             env.Client,
-            new TemporalWorkerOptions($"sleep-test-{Guid.NewGuid():N}")
-                .AddWorkflow<SleepTimerWorkflow>());
+            new TemporalWorkerOptions(taskQueue)
+                .AddWorkflow<UniversalWorkflow>()
+                .AddAllActivities(new SleepTestActivities(definition)));
 
         await worker.ExecuteAsync(async () =>
         {
             var handle = await env.Client.StartWorkflowAsync(
-                (SleepTimerWorkflow wf) => wf.RunAsync(300L),
-                new WorkflowOptions(
-                    id: $"sleep-timer-{Guid.NewGuid():N}",
-                    taskQueue: worker.Options.TaskQueue!));
+                "test-sleep",
+                Array.Empty<object?>(),
+                new WorkflowOptions(id: workflowId, taskQueue: taskQueue));
 
-            var elapsed = await handle.GetResultAsync();
-
-            // Logical time must have advanced by at least the requested duration.
-            Assert.True(elapsed >= 300L,
-                $"Expected logical elapsed seconds >= 300, got {elapsed}. " +
-                "This likely means Workflow.DelayAsync was not used.");
+            await handle.GetResultAsync();
         });
+
+        // Fetch history outside ExecuteAsync so the auto-time-skip is already done.
+        var handle = env.Client.GetWorkflowHandle(workflowId);
+        var history = await handle.FetchHistoryAsync();
+
+        // Only one TimerStarted event exists in the history; it is the one produced
+        // by Workflow.DelayAsync — activity timeouts use different event types.
+        var timerEvents = history.Events
+            .Where(e => e.EventType == EventType.TimerStarted)
+            .ToList();
+
+        Assert.Single(timerEvents);
+
+        var timerTimeout = timerEvents[0].TimerStartedEventAttributes.StartToFireTimeout.ToTimeSpan();
+        Assert.Equal(TimeSpan.FromSeconds(300), timerTimeout);
     }
 
     // -----------------------------------------------------------------------
@@ -184,25 +257,8 @@ public sealed class SleepStepTests
 }
 
 // ---------------------------------------------------------------------------
-// Inline test-only workflows (not registered in production)
+// Test-only activity stubs
 // ---------------------------------------------------------------------------
-
-/// <summary>
-/// Sleeps for the given number of seconds using Workflow.DelayAsync and returns
-/// the logical elapsed seconds measured inside the workflow — the same primitive
-/// used by ExecuteSleepAsync in UniversalWorkflow.
-/// </summary>
-[Workflow]
-file sealed class SleepTimerWorkflow
-{
-    [WorkflowRun]
-    public async Task<long> RunAsync(long seconds)
-    {
-        var before = Workflow.UtcNow;
-        await Workflow.DelayAsync(TimeSpan.FromSeconds(seconds));
-        return (long)(Workflow.UtcNow - before).TotalSeconds;
-    }
-}
 
 /// <summary>
 /// Stub activities for the validation tests.  Returns a pre-baked WorkflowDefinitionModel

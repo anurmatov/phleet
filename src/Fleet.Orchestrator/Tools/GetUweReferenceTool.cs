@@ -263,10 +263,14 @@ public sealed class GetUweReferenceTool
         ```json
         { "type": "sleep", "seconds": 300 }
         ```
-        - `seconds` (required): integer number of seconds to wait. Valid range: 1..2_592_000 (30 days).
-          Missing, null, zero, negative, or over-ceiling values are rejected — clamping is NOT applied.
+        - `seconds` (required): JSON integer literal — the number of seconds to wait. Valid range: 1..2_592_000 (30 days).
+          Type errors (string value such as `"300"`, fractional number such as `1.5`) are rejected at definition
+          load time by the deserializer and cannot be suppressed by `ignoreFailure`.
+          Semantic errors (missing, null, zero, negative, over-ceiling) are rejected at step execution through the
+          step-failure path — `ignoreFailure: true` suppresses them and advances to the next step.
+          Clamping is NOT applied — fix the step definition.
         - Uses seconds, not minutes: sub-minute granularity (rate-limit spacing, backoff) cannot be expressed in minutes.
-        - Returns null (same as noop). Use `ignoreFailure: true` to skip the step on validation errors.
+        - Returns null (same as noop). Use `ignoreFailure: true` to skip the step on semantic validation errors.
         - Example: pause 5 minutes between two delegate steps to respect a rate limit:
           ```json
           { "type": "sleep", "seconds": 300 }

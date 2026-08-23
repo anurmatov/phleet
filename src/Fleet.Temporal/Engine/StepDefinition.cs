@@ -98,13 +98,18 @@ public sealed record NoopStep : StepDefinition { }
 /// (Workflow.DelayAsync). Safe across worker restarts — replay picks up after the timer fires,
 /// not from before the sleep started.
 ///
-/// Valid range: 1 ≤ seconds ≤ 2_592_000 (30 days). Missing, null, zero, negative,
-/// or over-ceiling values are rejected at step execution. Clamping is not applied — fix the definition.
-/// Uses seconds, not minutes, because the motivating use cases (rate-limit spacing, backoff)
-/// require sub-minute granularity that minutes cannot express.
+/// Valid range: 1 ≤ seconds ≤ 2_592_000 (30 days).
+/// Semantic errors (missing, null, out-of-range) are rejected at step execution; `ignoreFailure`
+/// suppresses them. Type errors (string value, fractional number) are rejected at definition load
+/// time by STJ and cannot be suppressed by `ignoreFailure`. Clamping is not applied.
+/// Uses seconds, not minutes: sub-minute granularity (rate-limit spacing, backoff) needs seconds.
 /// </summary>
 public sealed record SleepStep : StepDefinition
 {
+    // Strict: reject string values ("300") even under JsonSerializerDefaults.Web, which normally
+    // enables AllowReadingFromString. Type errors surface at definition load time and are not
+    // suppressible by ignoreFailure. Semantic errors (range, null) are caught in ExecuteSleepAsync.
+    [JsonNumberHandling(JsonNumberHandling.Strict)]
     public long? Seconds { get; init; }
 }
 

@@ -618,8 +618,8 @@ public sealed class TaskManager
                             && !lastResult.Trim().Equals("IDLE", StringComparison.OrdinalIgnoreCase))
                         {
                             await SendWithStatsAsync($"{Prefix()}{lastResult}");
-                            lastResult = null;
                         }
+                        lastResult = null;
                         currentTask = nextMessage.Task;
                         currentImages = nextMessage.Images;
                         currentDocuments = nextMessage.Documents;

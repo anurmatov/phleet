@@ -134,6 +134,45 @@ public class TaskManagerMidTurnInjectionTests
         Assert.Equal(1, counter.GetCount("claude", expectedOutcome));
     }
 
+    // This test uses the actual final-answer error strings produced by ClaudeExecutor and
+    // CodexExecutor to verify the route (DegradedToQueue) while documenting the
+    // distinguishing property: unlike cap-exhaustion, the executor's TryInjectMessageAsync IS
+    // called.  Cap-exhaustion degrades before the executor is consulted; final-answer guard
+    // degrades AFTER the executor reports it is too late.  Both land in DegradedToQueue so the
+    // message is queued for turn-end delivery, but the error text in the log differs.
+    [Theory]
+    [InlineData("Claude has already begun emitting its final answer for this turn.")]
+    [InlineData("Codex turn has already begun its final answer (phase=final_answer); turn/steer would succeed but cannot change the answer.")]
+    public async Task StartTask_FinalAnswerNoActiveTurn_RoutesDegradedToQueueDistinctFromCapExhaustion(string errorText)
+    {
+        // The executor returns NoActiveTurn with the final-answer error string — simulating
+        // the guard added in ClaudeExecutor / CodexExecutor.
+        var executor = new ControllableExecutor
+        {
+            InjectionResult = MidTurnInjectionResult.NoActiveTurn(errorText),
+        };
+        var counter = new InjectionOutcomeCounter();
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink, counter);
+
+        var idle = WaitForIdle(manager, 123);
+        _ = manager.StartTask(123, "first", "first", isSessionTask: true);
+        await executor.WaitForExecuteCountAsync(1);
+
+        _ = manager.StartTask(123, "second", "second", isSessionTask: true);
+        await counter.WaitForCountAsync("claude", InjectionOutcomeCounter.DegradedToQueue, 1);
+
+        executor.ReleaseAllTurns();
+        await idle;
+
+        // Message queued and delivered at turn end — not lost.
+        Assert.Empty(executor.InjectedTasks);
+        Assert.Equal(["first", "second"], executor.ExecutedTasks);
+        Assert.Equal(1, counter.GetCount("claude", InjectionOutcomeCounter.DegradedToQueue));
+        // No Injected counter — the guard fired before the injection channel was used.
+        Assert.Equal(0, counter.GetCount("claude", InjectionOutcomeCounter.Injected));
+    }
+
     [Fact]
     public async Task StartTask_CheckInDuringRunningTurn_IsDeferredNotDropped()
     {

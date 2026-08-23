@@ -317,7 +317,138 @@ public class CodexExecutorTests
         Assert.Equal(expected, CodexExecutor.IsTurnSteerPreconditionFailureForTests(code, message));
     }
 
-    // BuildItemStartedProgress must emit a [codex tool_use:...] log line for every tool item,
+    // ── _turnHasFinalAnswerPhase gating ───────────────────────────────────────
+
+    [Fact]
+    public void BuildItemStartedProgress_AgentMessageFinalAnswer_SetsFinalAnswerFlag()
+    {
+        var executor = CreateExecutor();
+        Assert.False(executor.TurnHasFinalAnswerPhaseForTests);
+
+        var @params = new JsonObject
+        {
+            ["item"] = new JsonObject
+            {
+                ["type"] = "agentMessage",
+                ["phase"] = "final_answer",
+            },
+        };
+        executor.BuildItemStartedProgressForTests(@params);
+
+        Assert.True(executor.TurnHasFinalAnswerPhaseForTests);
+    }
+
+    [Fact]
+    public void BuildItemCompletedProgress_AgentMessageFinalAnswer_SetsFinalAnswerFlag()
+    {
+        var executor = CreateExecutor();
+        Assert.False(executor.TurnHasFinalAnswerPhaseForTests);
+
+        var @params = new JsonObject
+        {
+            ["item"] = new JsonObject
+            {
+                ["type"] = "agentMessage",
+                ["phase"] = "final_answer",
+                ["text"] = "Here is my answer.",
+            },
+        };
+        executor.BuildItemCompletedProgressForTests(@params);
+
+        Assert.True(executor.TurnHasFinalAnswerPhaseForTests);
+    }
+
+    [Fact]
+    public void BuildItemStartedProgress_AgentMessageCommentary_DoesNotSetFinalAnswerFlag()
+    {
+        // commentary = mid-turn narration that can still be followed by tool calls —
+        // must NOT block injection.
+        var executor = CreateExecutor();
+
+        var @params = new JsonObject
+        {
+            ["item"] = new JsonObject
+            {
+                ["type"] = "agentMessage",
+                ["phase"] = "commentary",
+            },
+        };
+        executor.BuildItemStartedProgressForTests(@params);
+
+        Assert.False(executor.TurnHasFinalAnswerPhaseForTests);
+    }
+
+    [Fact]
+    public void BuildItemStartedProgress_AgentMessageNoPhase_DoesNotSetFinalAnswerFlag()
+    {
+        // phase field absent → graceful degradation: flag never sets, today's behavior retained.
+        var executor = CreateExecutor();
+
+        var @params = new JsonObject
+        {
+            ["item"] = new JsonObject
+            {
+                ["type"] = "agentMessage",
+                // no "phase" key
+            },
+        };
+        executor.BuildItemStartedProgressForTests(@params);
+
+        Assert.False(executor.TurnHasFinalAnswerPhaseForTests);
+    }
+
+    [Fact]
+    public async Task TryInjectMessage_WhenFinalAnswerPhaseSet_ReturnsNoActiveTurn()
+    {
+        var executor = CreateExecutor();
+        executor.SetThreadStateForTests("t-1", "turn-1");
+
+        // Simulate the flag being set by the item/completed handler.
+        var @params = new JsonObject
+        {
+            ["item"] = new JsonObject
+            {
+                ["type"] = "agentMessage",
+                ["phase"] = "final_answer",
+                ["text"] = "answer text",
+            },
+        };
+        executor.BuildItemCompletedProgressForTests(@params);
+
+        var result = await executor.TryInjectMessageAsync("follow-up question");
+
+        Assert.Equal(MidTurnInjectionStatus.NoActiveTurn, result.Status);
+        Assert.Contains("final_answer", result.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task TryInjectMessage_WhenCommentaryPhase_DoesNotBlockOnFinalAnswerFlag()
+    {
+        // After a commentary-phase agentMessage the turn is still active — the flag must be
+        // clear so injection can proceed normally (process-not-running produces NoActiveTurn
+        // for a different, process-check reason, which is fine for this guard test).
+        var executor = CreateExecutor();
+        executor.SetThreadStateForTests("t-1", "turn-1");
+
+        var @params = new JsonObject
+        {
+            ["item"] = new JsonObject
+            {
+                ["type"] = "agentMessage",
+                ["phase"] = "commentary",
+            },
+        };
+        executor.BuildItemStartedProgressForTests(@params);
+
+        var result = await executor.TryInjectMessageAsync("follow-up");
+
+        // The flag must not have tripped — any NoActiveTurn here is from the process
+        // check, NOT the final-answer guard.
+        if (result.Status == MidTurnInjectionStatus.NoActiveTurn)
+            Assert.DoesNotContain("final_answer", result.Error ?? "", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ── BuildItemStartedProgress must emit a [codex tool_use:...] log line for every tool item,
     // mirroring ClaudeExecutor's tool-call logger for observability parity.
     [Fact]
     public void BuildItemStartedProgress_LogsToolUse()

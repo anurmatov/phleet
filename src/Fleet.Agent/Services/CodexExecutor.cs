@@ -36,6 +36,7 @@ public sealed class CodexExecutor : IAgentExecutor
 
     private string? _threadId;
     private string? _activeTurnId;
+    private volatile bool _turnHasFinalAnswerPhase;
     private ThreadTokenUsageSnapshot? _lastTurnUsage;
     private int _messageCount;
     // Accumulates assistant text from item/completed notifications of type "agentMessage".
@@ -140,6 +141,7 @@ public sealed class CodexExecutor : IAgentExecutor
                 var turn = response.RequireObject("turn");
                 turnId = turn.RequireString("id");
                 _activeTurnId = turnId;
+                _turnHasFinalAnswerPhase = false;
                 _lastTurnUsage = null;
                 _currentTurnAssistantText = "";
             }
@@ -191,6 +193,19 @@ public sealed class CodexExecutor : IAgentExecutor
         IReadOnlyList<MessageDocument>? documents = null,
         CancellationToken ct = default)
     {
+        // Guard: once the codex protocol has signalled phase=final_answer on the active
+        // agentMessage item, turn/steer would still return success (the RPC's only
+        // precondition is a matching expectedTurnId, not the message phase), but the
+        // steer input cannot change the answer that is already being streamed.  Degrade
+        // to the queue here — the message will be delivered at the start of the next turn.
+        // This is safe to read lock-free: if the race fires on the exact same event loop
+        // tick where the flag is being set, the worst case is one extra steer that lands
+        // too late (today's behavior), not a crash or a dropped message.
+        if (_turnHasFinalAnswerPhase)
+            return MidTurnInjectionResult.NoActiveTurn(
+                "Codex turn has already begun its final answer (phase=final_answer); " +
+                "turn/steer would succeed but cannot change the answer.");
+
         if (_threadId is null || _activeTurnId is null || _process is null || _process.HasExited)
             return MidTurnInjectionResult.NoActiveTurn("Codex has no active turn to steer.");
 
@@ -346,6 +361,9 @@ public sealed class CodexExecutor : IAgentExecutor
     }
 
     internal string? ActiveTurnIdForTests => _activeTurnId;
+    internal bool TurnHasFinalAnswerPhaseForTests => _turnHasFinalAnswerPhase;
+    internal AgentProgress? BuildItemCompletedProgressForTests(JsonObject @params) =>
+        BuildItemCompletedProgress(@params);
 
     internal SemaphoreSlim TurnLockForTests => _turnLock;
 
@@ -760,6 +778,7 @@ public sealed class CodexExecutor : IAgentExecutor
                 {
                     resolvedTurnId = startedTurnId;
                     _activeTurnId = resolvedTurnId;
+                    _turnHasFinalAnswerPhase = false;
                 }
 
                 if (startedTurnId == resolvedTurnId)
@@ -781,6 +800,7 @@ public sealed class CodexExecutor : IAgentExecutor
                 {
                     resolvedTurnId = discovered;
                     _activeTurnId = discovered;
+                    _turnHasFinalAnswerPhase = false;
                 }
             }
 
@@ -825,6 +845,19 @@ public sealed class CodexExecutor : IAgentExecutor
     {
         var item = @params["item"] as JsonObject;
         var itemType = item?["type"]?.GetValue<string>();
+
+        // Track the codex "phase" field on agentMessage items.  When phase==final_answer
+        // the codex protocol guarantees no further tool calls will follow — the message IS
+        // the terminal answer for this turn.  Gating turn/steer on this flag prevents
+        // injections that the RPC would accept but that cannot change the answer anymore.
+        // Guard: if phase is absent or "commentary", leave the flag unchanged so that
+        // normal mid-turn narration (which IS followed by more tool calls) never blocks
+        // live injection.  See finding 2/3 on issue #235.
+        if (itemType == "agentMessage"
+            && string.Equals(item?["phase"]?.GetValue<string>(), "final_answer", StringComparison.Ordinal))
+        {
+            _turnHasFinalAnswerPhase = true;
+        }
 
         AgentProgress? progress = itemType switch
         {
@@ -873,6 +906,11 @@ public sealed class CodexExecutor : IAgentExecutor
 
         if (itemType == "agentMessage")
         {
+            // Check phase in item/completed as well — whichever notification fires first
+            // (started or completed) sets the flag; the second is a harmless no-op.
+            if (string.Equals(item?["phase"]?.GetValue<string>(), "final_answer", StringComparison.Ordinal))
+                _turnHasFinalAnswerPhase = true;
+
             // Production codex app-server delivers the assistant's full reply text here —
             // NOT inside turn.items of the subsequent turn/completed notification.
             // Accumulate it so BuildTurnCompletedProgress can return the correct FinalResult.
@@ -1053,6 +1091,7 @@ public sealed class CodexExecutor : IAgentExecutor
         _notificationChannel = null;
         _threadId = null;
         _activeTurnId = null;
+        _turnHasFinalAnswerPhase = false;
         _lastTurnUsage = null;
         _currentTurnAssistantText = "";
         _messageCount = 0;

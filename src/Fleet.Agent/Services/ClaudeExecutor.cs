@@ -30,6 +30,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
     private int _messageCount;
     private DateTimeOffset _lastActivity = DateTimeOffset.MinValue;
     private volatile bool _restartRequested;
+    private volatile bool _turnCommittedToFinalAnswer;
     private ExecutionStats? _previousCumulativeStats;
 
     // Continuous background stdout reader — feeds all NDJSON events into this channel.
@@ -145,6 +146,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 DrainStaleTurnEvents();
 
                 // Send message to stdin
+                // Sending a new prompt starts a new tool-use loop — the final-answer flag
+                // from the previous event is no longer meaningful.
+                _turnCommittedToFinalAnswer = false;
                 try
                 {
                     var messageBytes = Encoding.UTF8.GetByteCount(message);
@@ -281,6 +285,19 @@ public sealed class ClaudeExecutor : IAgentExecutor
         IReadOnlyList<MessageDocument>? documents = null,
         CancellationToken ct = default)
     {
+        // Check before touching stdin: once the process has emitted a text-only assistant
+        // event (no tool_use), the turn is committed to its final answer.  Injecting now
+        // would still be accepted by the process but the input cannot change the response
+        // the user is already receiving — it lands a turn late.  Degrade to the queue so
+        // the message is delivered promptly at the start of the *next* turn instead.
+        // Residual race: the flag can only flip *after* the terminal JSON line is fully
+        // parsed, so a message arriving while the model is still generating that line still
+        // takes the live path and may land late.  That window is narrower than today's
+        // (entire turn) but not eliminable without a finer-grained Claude CLI signal.
+        if (_turnCommittedToFinalAnswer)
+            return MidTurnInjectionResult.NoActiveTurn(
+                "Claude has already begun emitting its final answer for this turn.");
+
         if (_process is null || _process.HasExited || _stdin is null)
             return MidTurnInjectionResult.NoActiveTurn("Claude process is not running.");
 
@@ -425,6 +442,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
     }
 
     internal void SetStdinForTests(TextWriter writer) => _stdin = writer;
+
+    internal bool TurnCommittedToFinalAnswerForTests => _turnCommittedToFinalAnswer;
+    internal void SetTurnCommittedToFinalAnswerForTests(bool value) => _turnCommittedToFinalAnswer = value;
 
     internal Task WriteStdinLineForTestsAsync(string message, bool useLock, CancellationToken ct = default) =>
         useLock ? WriteStdinLineAsync(message, ct) : WriteStdinLineUnlockedAsync(message, ct);
@@ -956,10 +976,13 @@ public sealed class ClaudeExecutor : IAgentExecutor
             };
         }
 
-        // Extract text blocks
+        // Extract text blocks — a text-only assistant message is the terminal answer.
+        // Set the flag so TryInjectMessageAsync knows this turn is committed to its final answer
+        // and live injection can no longer act on the message.
         var text = string.Join("\n", blocks.Where(b => b.Type == "text" && b.Text is not null).Select(b => b.Text!));
         if (!string.IsNullOrEmpty(text))
         {
+            self._turnCommittedToFinalAnswer = true;
             return new AgentProgress
             {
                 IsSignificant = true,

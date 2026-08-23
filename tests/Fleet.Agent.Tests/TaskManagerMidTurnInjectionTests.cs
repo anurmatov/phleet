@@ -134,6 +134,39 @@ public class TaskManagerMidTurnInjectionTests
         Assert.Equal(1, counter.GetCount("claude", expectedOutcome));
     }
 
+    // Late-injection (final-answer gate) returns NoActiveTurn("already begun…") —
+    // the same status as genuine no-active-turn so it maps to DegradedToQueue,
+    // but the error string distinguishes it in logs from a cap-exhaustion degradation.
+    [Fact]
+    public async Task StartTask_LateInjection_FinalAnswerGate_DegradesToQueue_WithDistinctErrorText()
+    {
+        const string lateError = "Claude has already begun emitting its final answer for this turn.";
+        var executor = new ControllableExecutor
+        {
+            InjectionResult = MidTurnInjectionResult.NoActiveTurn(lateError),
+        };
+        var counter = new InjectionOutcomeCounter();
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink, counter);
+
+        var idle = WaitForIdle(manager, 123);
+        _ = manager.StartTask(123, "first", "first", isSessionTask: true);
+        await executor.WaitForExecuteCountAsync(1);
+
+        _ = manager.StartTask(123, "late message", "late message", isSessionTask: true);
+        await counter.WaitForCountAsync("claude", InjectionOutcomeCounter.DegradedToQueue, 1);
+
+        executor.ReleaseAllTurns();
+        await idle;
+
+        // Message was queued and delivered as its own turn — not injected.
+        Assert.Empty(executor.InjectedTasks);
+        Assert.Equal(["first", "late message"], executor.ExecutedTasks);
+        Assert.Equal(1, counter.GetCount("claude", InjectionOutcomeCounter.DegradedToQueue));
+        // The distinct error text for the final-answer gate (vs. cap exhaustion) is verified in
+        // ClaudeExecutorMidTurnInjectionTests.CommittedFlag_BlocksInjection_WithExpectedErrorText.
+    }
+
     [Fact]
     public async Task StartTask_CheckInDuringRunningTurn_IsDeferredNotDropped()
     {
@@ -481,6 +514,215 @@ public class TaskManagerMidTurnInjectionTests
     }
 
 
+    [Fact]
+    public async Task ProcessTask_RecoveredAnswerEvent_IsDeliveredToSinkImmediately()
+    {
+        // When the executor emits a "recovered_answer" event (a stale answer preserved
+        // during DrainStaleTurnEvents), ProcessTask must send it directly to the sink
+        // so the user receives the prior turn's response that would otherwise be lost.
+        var executor = new ControllableExecutor { InjectionResult = MidTurnInjectionResult.Injected };
+        var counter = new InjectionOutcomeCounter();
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink, counter);
+
+        executor.PreambleEvents.Enqueue(new AgentProgress
+        {
+            EventType = "recovered_answer",
+            Summary = "stale text from prior turn",
+            IsSignificant = true,
+        });
+
+        var idle = WaitForIdle(manager, 123);
+        _ = manager.StartTask(123, "first", "first", isSessionTask: true);
+        await executor.WaitForExecuteCountAsync(1);
+        executor.ReleaseAllTurns();
+        await idle;
+
+        // The stale answer must have been sent to the sink immediately —
+        // not swallowed into lastResult where it would be overwritten by the real answer.
+        await sink.Received(1).SendTextAsync(123, "stale text from prior turn");
+    }
+
+    [Fact]
+    public async Task DeliverMidTurnMessage_FailedInjection_SendsBusyNotice()
+    {
+        // A Failed injection means the write to the process stdin broke. The user sent
+        // a message they expect a reply to, so they must be told the agent is busy.
+        var executor = new ControllableExecutor { InjectionResult = MidTurnInjectionResult.Failed("write error") };
+        var counter = new InjectionOutcomeCounter();
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink, counter);
+
+        var idle = WaitForIdle(manager, 123);
+        _ = manager.StartTask(123, "first", "first", isSessionTask: true);
+        await executor.WaitForExecuteCountAsync(1);
+
+        _ = manager.StartTask(123, "second", "second", isSessionTask: true);
+        await counter.WaitForCountAsync("claude", InjectionOutcomeCounter.FailedThenQueued, 1);
+
+        executor.ReleaseAllTurns();
+        await idle;
+
+        await sink.Received(1).SendTextAsync(123, Arg.Is<string>(s => s.Contains("busy")));
+    }
+
+    [Fact]
+    public async Task DeliverMidTurnMessage_NoActiveTurnInjection_DoesNotSendBusyNotice()
+    {
+        // NoActiveTurn means the turn already ended (race condition). The message was
+        // queued silently — no notice needed because the race is transparent to the user.
+        var executor = new ControllableExecutor { InjectionResult = MidTurnInjectionResult.NoActiveTurn("turn ended") };
+        var counter = new InjectionOutcomeCounter();
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink, counter);
+
+        var idle = WaitForIdle(manager, 123);
+        _ = manager.StartTask(123, "first", "first", isSessionTask: true);
+        await executor.WaitForExecuteCountAsync(1);
+
+        _ = manager.StartTask(123, "second", "second", isSessionTask: true);
+        await counter.WaitForCountAsync("claude", InjectionOutcomeCounter.DegradedToQueue, 1);
+
+        executor.ReleaseAllTurns();
+        await idle;
+
+        await sink.DidNotReceive().SendTextAsync(123, Arg.Is<string>(s => s.Contains("busy")));
+    }
+
+    [Fact]
+    public async Task DeliverMidTurnMessage_CapExhausted_DoesNotSendBusyNotice()
+    {
+        // When the cap (MaxMidTurnInjectionsPerTurn=3) is reached the message is silently
+        // queued for turn-end. No "busy" notice must be sent — the wait time is similar to
+        // the NoActiveTurn gate path, so a notice would be misleading and noisy.
+        // The DegradedToQueue counter must still increment so metrics are not suppressed.
+        var executor = new ControllableExecutor { InjectionResult = MidTurnInjectionResult.Injected };
+        var counter = new InjectionOutcomeCounter();
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink, counter);
+
+        var idle = WaitForIdle(manager, 123);
+        _ = manager.StartTask(123, "first", "first", isSessionTask: true);
+        await executor.WaitForExecuteCountAsync(1);
+
+        // Three messages inject successfully (InjectionCount 1→3).
+        _ = manager.StartTask(123, "inject1", "inject1", isSessionTask: true);
+        _ = manager.StartTask(123, "inject2", "inject2", isSessionTask: true);
+        _ = manager.StartTask(123, "inject3", "inject3", isSessionTask: true);
+        await executor.WaitForInjectionCountAsync(3);
+
+        // This one hits the cap.
+        _ = manager.StartTask(123, "capped", "capped", isSessionTask: true);
+        await counter.WaitForCountAsync("claude", InjectionOutcomeCounter.DegradedToQueue, 1);
+
+        executor.ReleaseAllTurns();
+        await idle;
+
+        // Counter must increment — suppressing the notice must never suppress the metric.
+        Assert.True(counter.GetCount("claude", InjectionOutcomeCounter.DegradedToQueue) >= 1);
+        // No busy notice for the cap path.
+        await sink.DidNotReceive().SendTextAsync(123, Arg.Is<string>(s => s.Contains("busy")));
+    }
+
+    [Fact]
+    public async Task ProcessTask_DrainedQueuedMessages_EachAnswerDeliveredToSink()
+    {
+        // When the fallback-inbox drain runs after a turn (inboxReader.TryRead succeeds),
+        // the completed turn's lastResult must be sent to the chat sink before the next
+        // turn starts — otherwise the first answer is silently lost when lastResult is
+        // overwritten by the second turn's result.
+        var executor = new ControllableExecutor
+        {
+            InjectionResult = MidTurnInjectionResult.NoActiveTurn("turn ended"),
+        };
+        var counter = new InjectionOutcomeCounter();
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink, counter);
+
+        var idle = WaitForIdle(manager, 123);
+        _ = manager.StartTask(123, "first question", "first question", isSessionTask: true);
+        await executor.WaitForExecuteCountAsync(1);
+
+        // Second message arrives while first is running; NoActiveTurn routes it to the inbox.
+        _ = manager.StartTask(123, "second question", "second question", isSessionTask: true);
+        await counter.WaitForCountAsync("claude", InjectionOutcomeCounter.DegradedToQueue, 1);
+
+        executor.ReleaseAllTurns();
+        await idle;
+
+        // Both answers must reach the sink — not just the last one.
+        await sink.Received(1).SendTextAsync(123, Arg.Is<string>(s => s.Contains("first question")));
+        await sink.Received(1).SendTextAsync(123, Arg.Is<string>(s => s.Contains("second question")));
+    }
+
+    [Fact]
+    public async Task ProcessTask_DrainedTurnErrored_DoesNotSendStaleTextAsCleanAnswer()
+    {
+        // Without the fix, lastResult="executor failed" stays populated after the drain
+        // because the send-condition is false (errorResult=true). errorResult is then reset
+        // to false. The next turn produces no text (FinalResult=null). Final delivery
+        // sends "executor failed" with no [incomplete] marker — stale and wrong.
+        // With the fix, lastResult is always cleared in the drain, so the stale text never
+        // reaches the sink.
+        var executor = new ControllableExecutor
+        {
+            InjectionResult = MidTurnInjectionResult.NoActiveTurn("turn ended"),
+        };
+        var counter = new InjectionOutcomeCounter();
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink, counter);
+
+        executor.ErrorResults.Enqueue(true);                   // turn 1 errors
+        executor.SuppressFinalResultQueue.Enqueue(false);      // turn 1 yields its (error) result
+        executor.SuppressFinalResultQueue.Enqueue(true);       // turn 2 produces no text
+
+        var idle = WaitForIdle(manager, 123);
+        _ = manager.StartTask(123, "q1", "q1", isSessionTask: true);
+        await executor.WaitForExecuteCountAsync(1);
+
+        _ = manager.StartTask(123, "q2", "q2", isSessionTask: true);
+        await counter.WaitForCountAsync("claude", InjectionOutcomeCounter.DegradedToQueue, 1);
+
+        executor.ReleaseAllTurns();
+        await idle;
+
+        // Stale "executor failed" from turn 1 must NOT reach the sink as a clean message.
+        await sink.DidNotReceive().SendTextAsync(123, Arg.Is<string>(s => s.Contains("executor failed")));
+    }
+
+    [Fact]
+    public async Task ProcessTask_DrainedTurnReturnedIdle_DoesNotSuppressLaterTurn()
+    {
+        // Without the fix, lastResult="IDLE" stays populated after the drain. The next turn
+        // produces no text (FinalResult=null). The IDLE check fires and suppresses all output —
+        // the later turn's completion is invisible to the sink, as if it were IDLE when it was not.
+        // With the fix, lastResult is always cleared in the drain, the IDLE check does not fire,
+        // and the later turn's completion reaches the sink.
+        var executor = new ControllableExecutor
+        {
+            InjectionResult = MidTurnInjectionResult.NoActiveTurn("turn ended"),
+        };
+        var counter = new InjectionOutcomeCounter();
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink, counter);
+
+        executor.SuppressFinalResultQueue.Enqueue(false);      // turn 1 yields "IDLE"
+        executor.SuppressFinalResultQueue.Enqueue(true);       // turn 2 produces no text
+
+        var idle = WaitForIdle(manager, 123);
+        _ = manager.StartTask(123, "IDLE", "IDLE", isSessionTask: true);
+        await executor.WaitForExecuteCountAsync(1);
+
+        _ = manager.StartTask(123, "q2", "q2", isSessionTask: true);
+        await counter.WaitForCountAsync("claude", InjectionOutcomeCounter.DegradedToQueue, 1);
+
+        executor.ReleaseAllTurns();
+        await idle;
+
+        // Turn 2's completion must reach the sink. The stale IDLE must not suppress it.
+        await sink.Received(1).SendTextAsync(123, Arg.Is<string>(s => s.Contains("Done!")));
+    }
+
     private static TaskManager BuildManager(IAgentExecutor executor, IMessageSink sink, InjectionOutcomeCounter counter)
     {
         var options = Options.Create(new AgentOptions
@@ -525,6 +767,8 @@ public class TaskManagerMidTurnInjectionTests
 
         public ConcurrentQueue<bool> ErrorResults { get; } = new();
         public ConcurrentQueue<bool> ProcessExitResults { get; } = new();
+        public ConcurrentQueue<bool> SuppressFinalResultQueue { get; } = new();
+        public ConcurrentQueue<AgentProgress> PreambleEvents { get; } = new();
         public MidTurnInjectionResult InjectionResult { get; init; } = MidTurnInjectionResult.Injected;
         public bool HoldInjection { get; init; }
         public IReadOnlyList<string> ExecutedTasks => _executedTasks.ToList();
@@ -545,16 +789,22 @@ public class TaskManagerMidTurnInjectionTests
             _executedImages.Enqueue(images ?? []);
             _executedDocuments.Enqueue(documents ?? []);
             await _releaseTurns.Task.WaitAsync(ct);
+            while (PreambleEvents.TryDequeue(out var preamble))
+                yield return preamble;
+            var suppressResult = SuppressFinalResultQueue.TryDequeue(out var sup) && sup;
             var isError = ErrorResults.TryDequeue(out var error) && error;
             var isProcessExit = ProcessExitResults.TryDequeue(out var processExit) && processExit;
-            yield return new AgentProgress
+            if (!suppressResult)
             {
-                EventType = "result",
-                Summary = isError ? "executor failed" : task,
-                FinalResult = isError ? "executor failed" : task,
-                IsErrorResult = isError,
-                IsProcessExit = isProcessExit,
-            };
+                yield return new AgentProgress
+                {
+                    EventType = "result",
+                    Summary = isError ? "executor failed" : task,
+                    FinalResult = isError ? "executor failed" : task,
+                    IsErrorResult = isError,
+                    IsProcessExit = isProcessExit,
+                };
+            }
         }
 
         public async Task<MidTurnInjectionResult> TryInjectMessageAsync(

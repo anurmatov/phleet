@@ -122,6 +122,9 @@ export default function StepConfigPanel({ root, selectedPath, onChange, workflow
       {step.type === 'http_request' && (
         <HttpRequestFields step={step} setField={setField} />
       )}
+      {step.type === 'sleep' && (
+        <SleepFields step={step} setField={setField} />
+      )}
     </div>
   )
 }
@@ -763,6 +766,27 @@ function HttpRequestFields({ step, setField }: FieldProps) {
       <div className="wfe-config-row">
         <label className="wfe-config-label">body</label>
         <ExprInput value={step.body ?? ''} onChange={v => setField('body', v || undefined)} rows={3} placeholder="JSON body or {{vars.payload}}" />
+      </div>
+    </div>
+  )
+}
+
+// ─── Sleep fields ─────────────────────────────────────────────────────────────
+
+function SleepFields({ step, setField }: FieldProps) {
+  return (
+    <div className="wfe-config-section">
+      <div className="wfe-config-row">
+        <label className="wfe-config-label">seconds *</label>
+        <input
+          className="config-input"
+          type="number"
+          min={1}
+          max={2592000}
+          value={step.seconds ?? 60}
+          onChange={e => setField('seconds', e.target.value ? Number(e.target.value) : undefined)}
+          placeholder="1..2592000"
+        />
       </div>
     </div>
   )

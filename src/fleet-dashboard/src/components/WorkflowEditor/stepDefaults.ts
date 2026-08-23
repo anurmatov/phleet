@@ -28,6 +28,8 @@ export function makeStep(type: StepType): AnyStep {
       return { ...base, attributes: [] }
     case 'http_request':
       return { ...base, url: '', method: 'GET', timeoutSeconds: 30 }
+    case 'sleep':
+      return { ...base, seconds: 60 }
     default:
       return base
   }

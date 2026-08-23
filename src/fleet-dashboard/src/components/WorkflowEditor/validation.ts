@@ -47,6 +47,12 @@ function validateStep(step: AnyStep, pathStr: string, errors: ValidationError[])
         validateStep(val as AnyStep, `${p}.cases.${key}`, errors))
       if (step.default) validateStep(step.default as AnyStep, `${p}.default`, errors)
       break
+    case 'sleep': {
+      const s = step.seconds
+      if (s === undefined || s === null || !Number.isInteger(s) || s < 1 || s > 2592000)
+        errors.push({ pathStr: p, message: '"seconds" must be an integer in 1..2592000 (30 days)', blocking: true })
+      break
+    }
     case 'break':
     case 'continue':
     case 'noop':
@@ -103,6 +109,8 @@ export function stepSummary(step: AnyStep): string {
       return step.vars ? Object.keys(step.vars).join(', ') : ''
     case 'set_attribute':
       return step.attributes?.map(a => a.name).join(', ') ?? ''
+    case 'sleep':
+      return step.seconds ? `${step.seconds}s` : ''
     default:
       return ''
   }

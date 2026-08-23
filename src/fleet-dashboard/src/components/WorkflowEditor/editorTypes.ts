@@ -7,6 +7,7 @@ export type StepType =
   | 'wait_for_signal'
   | 'child_workflow' | 'fire_and_forget' | 'cross_namespace_start'
   | 'set_variable' | 'set_attribute' | 'http_request'
+  | 'sleep'
 
 export const STEP_TYPES: StepType[] = [
   'sequence', 'parallel', 'loop', 'branch',
@@ -15,6 +16,7 @@ export const STEP_TYPES: StepType[] = [
   'wait_for_signal',
   'child_workflow', 'fire_and_forget', 'cross_namespace_start',
   'set_variable', 'set_attribute', 'http_request',
+  'sleep',
 ]
 
 export const STEP_COLORS: Record<string, string> = {
@@ -34,6 +36,7 @@ export const STEP_COLORS: Record<string, string> = {
   set_variable: '#fb923c',
   set_attribute: '#94a3b8',
   http_request: '#94a3b8',
+  sleep: '#94a3b8',
 }
 
 export const STEP_CATEGORIES = [
@@ -41,7 +44,7 @@ export const STEP_CATEGORIES = [
   { label: 'Agent', types: ['delegate', 'delegate_with_escalation'] as StepType[] },
   { label: 'Signal', types: ['wait_for_signal'] as StepType[] },
   { label: 'Workflow', types: ['child_workflow', 'fire_and_forget', 'cross_namespace_start'] as StepType[] },
-  { label: 'Utility', types: ['set_variable', 'set_attribute', 'http_request'] as StepType[] },
+  { label: 'Utility', types: ['set_variable', 'set_attribute', 'http_request', 'sleep'] as StepType[] },
 ]
 
 export const CONTAINER_TYPES = new Set<StepType>(['sequence', 'parallel', 'loop', 'branch'])
@@ -97,6 +100,8 @@ export interface AnyStep {
   body?: string
   timeoutSeconds?: number
   expectedStatusCodes?: number[]
+  // sleep
+  seconds?: number
 }
 
 /** Path segments are numeric (index in .steps[]) or string (branch case key) */

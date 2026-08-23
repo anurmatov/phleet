@@ -11,7 +11,7 @@ const VALID_STEP_TYPES = new Set([
   'sequence', 'parallel', 'loop', 'branch', 'break', 'continue', 'noop',
   'delegate', 'delegate_with_escalation',
   'wait_for_signal', 'child_workflow', 'fire_and_forget', 'cross_namespace_start',
-  'set_variable', 'set_attribute', 'http_request',
+  'set_variable', 'set_attribute', 'http_request', 'sleep',
 ])
 
 const NS_COLOR_PALETTE = [
@@ -74,6 +74,11 @@ function validateStep(step: Record<string, unknown>, errors: ValidationError[], 
   }
   if (type === 'http_request') {
     if (!step.url) errors.push({ message: `${path}: "url" is required`, blocking: true })
+  }
+  if (type === 'sleep') {
+    const s = step.seconds
+    if (s === undefined || s === null || typeof s !== 'number' || !Number.isInteger(s) || s < 1 || s > 2592000)
+      errors.push({ message: `${path}: "seconds" must be an integer in 1..2592000 (30 days)`, blocking: true })
   }
   if (type === 'branch') {
     if (!step.on) errors.push({ message: `${path}: "on" expression is required`, blocking: true })

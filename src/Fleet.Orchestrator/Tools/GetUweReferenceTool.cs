@@ -15,7 +15,7 @@ public sealed class GetUweReferenceTool
 
         ---
 
-        ## Step Types (16 total)
+        ## Step Types (17 total)
 
         All steps support these base fields (optional):
         - `name`: string — human label; also used as key when storing step output in vars
@@ -257,6 +257,25 @@ public sealed class GetUweReferenceTool
         - `expectedStatusCodes`: acceptable status codes (default [200]); step fails if response is not in list
         - Returns the response body as a string stored in `outputVar`
 
+        ### 17. sleep
+        Pauses the workflow for a fixed duration using a durable Temporal timer (Workflow.DelayAsync).
+        Safe across worker restarts — replay picks up after the timer fires, not from before it started.
+        ```json
+        { "type": "sleep", "seconds": 300 }
+        ```
+        - `seconds` (required): JSON integer literal — the number of seconds to wait. Valid range: 1..2_592_000 (30 days).
+          Type errors (string value such as `"300"`, fractional number such as `1.5`) are rejected at definition
+          load time by the deserializer and cannot be suppressed by `ignoreFailure`.
+          Semantic errors (missing, null, zero, negative, over-ceiling) are rejected at step execution through the
+          step-failure path — `ignoreFailure: true` suppresses them and advances to the next step.
+          Clamping is NOT applied — fix the step definition.
+        - Uses seconds, not minutes: sub-minute granularity (rate-limit spacing, backoff) cannot be expressed in minutes.
+        - Returns null (same as noop). Use `ignoreFailure: true` to skip the step on semantic validation errors.
+        - Example: pause 5 minutes between two delegate steps to respect a rate limit:
+          ```json
+          { "type": "sleep", "seconds": 300 }
+          ```
+
         ---
 
         ## Template Engine
@@ -360,6 +379,6 @@ public sealed class GetUweReferenceTool
         """;
 
     [McpServerTool(Name = "get_uwe_reference")]
-    [Description("Returns the full UWE (Universal Workflow Engine) reference: all 12 step types with exact JSON property names, template engine syntax, scopes, filters, config keys, and JSON conventions. Use this before designing or editing any UWE workflow definition.")]
+    [Description("Returns the full UWE (Universal Workflow Engine) reference: all 17 step types with exact JSON property names, template engine syntax, scopes, filters, config keys, and JSON conventions. Use this before designing or editing any UWE workflow definition.")]
     public string GetUweReference() => Reference;
 }

@@ -589,6 +589,72 @@ public class TaskManagerMidTurnInjectionTests
         await sink.DidNotReceive().SendTextAsync(123, Arg.Is<string>(s => s.Contains("busy")));
     }
 
+    [Fact]
+    public async Task DeliverMidTurnMessage_CapExhausted_DoesNotSendBusyNotice()
+    {
+        // When the cap (MaxMidTurnInjectionsPerTurn=3) is reached the message is silently
+        // queued for turn-end. No "busy" notice must be sent — the wait time is similar to
+        // the NoActiveTurn gate path, so a notice would be misleading and noisy.
+        // The DegradedToQueue counter must still increment so metrics are not suppressed.
+        var executor = new ControllableExecutor { InjectionResult = MidTurnInjectionResult.Injected };
+        var counter = new InjectionOutcomeCounter();
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink, counter);
+
+        var idle = WaitForIdle(manager, 123);
+        _ = manager.StartTask(123, "first", "first", isSessionTask: true);
+        await executor.WaitForExecuteCountAsync(1);
+
+        // Three messages inject successfully (InjectionCount 1→3).
+        _ = manager.StartTask(123, "inject1", "inject1", isSessionTask: true);
+        _ = manager.StartTask(123, "inject2", "inject2", isSessionTask: true);
+        _ = manager.StartTask(123, "inject3", "inject3", isSessionTask: true);
+        await executor.WaitForInjectionCountAsync(3);
+
+        // This one hits the cap.
+        _ = manager.StartTask(123, "capped", "capped", isSessionTask: true);
+        await counter.WaitForCountAsync("claude", InjectionOutcomeCounter.DegradedToQueue, 1);
+
+        executor.ReleaseAllTurns();
+        await idle;
+
+        // Counter must increment — suppressing the notice must never suppress the metric.
+        Assert.True(counter.GetCount("claude", InjectionOutcomeCounter.DegradedToQueue) >= 1);
+        // No busy notice for the cap path.
+        await sink.DidNotReceive().SendTextAsync(123, Arg.Is<string>(s => s.Contains("busy")));
+    }
+
+    [Fact]
+    public async Task ProcessTask_DrainedQueuedMessages_EachAnswerDeliveredToSink()
+    {
+        // When the fallback-inbox drain runs after a turn (inboxReader.TryRead succeeds),
+        // the completed turn's lastResult must be sent to the chat sink before the next
+        // turn starts — otherwise the first answer is silently lost when lastResult is
+        // overwritten by the second turn's result.
+        var executor = new ControllableExecutor
+        {
+            InjectionResult = MidTurnInjectionResult.NoActiveTurn("turn ended"),
+        };
+        var counter = new InjectionOutcomeCounter();
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink, counter);
+
+        var idle = WaitForIdle(manager, 123);
+        _ = manager.StartTask(123, "first question", "first question", isSessionTask: true);
+        await executor.WaitForExecuteCountAsync(1);
+
+        // Second message arrives while first is running; NoActiveTurn routes it to the inbox.
+        _ = manager.StartTask(123, "second question", "second question", isSessionTask: true);
+        await counter.WaitForCountAsync("claude", InjectionOutcomeCounter.DegradedToQueue, 1);
+
+        executor.ReleaseAllTurns();
+        await idle;
+
+        // Both answers must reach the sink — not just the last one.
+        await sink.Received(1).SendTextAsync(123, Arg.Is<string>(s => s.Contains("first question")));
+        await sink.Received(1).SendTextAsync(123, Arg.Is<string>(s => s.Contains("second question")));
+    }
+
     private static TaskManager BuildManager(IAgentExecutor executor, IMessageSink sink, InjectionOutcomeCounter counter)
     {
         var options = Options.Create(new AgentOptions

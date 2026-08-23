@@ -611,6 +611,15 @@ public sealed class TaskManager
                     if (inboxReader is not null && inboxReader.TryRead(out var nextMessage))
                     {
                         _logger.LogInformation("Task #{TaskId}: delivering queued mid-turn fallback message to executor", taskId);
+                        // Each drained message is a distinct user question. Deliver the
+                        // completed turn's result before starting the next turn so it
+                        // isn't silently discarded when lastResult is overwritten.
+                        if (lastResult is not null && !errorResult
+                            && !lastResult.Trim().Equals("IDLE", StringComparison.OrdinalIgnoreCase))
+                        {
+                            await SendWithStatsAsync($"{Prefix()}{lastResult}");
+                            lastResult = null;
+                        }
                         currentTask = nextMessage.Task;
                         currentImages = nextMessage.Images;
                         currentDocuments = nextMessage.Documents;
@@ -742,7 +751,7 @@ public sealed class TaskManager
             if (running.InjectionCount >= MaxMidTurnInjectionsPerTurn)
             {
                 _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DegradedToQueue);
-                return await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: true);
+                return await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: false);
             }
 
             var result = await _executor.TryInjectMessageAsync(FormatInjectedMessage(message.Task),

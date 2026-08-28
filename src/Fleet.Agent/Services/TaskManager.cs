@@ -605,24 +605,70 @@ public sealed class TaskManager
                         continue;
                     }
 
-                    // After turn completes, atomically check the fallback inbox before
+                    // After turn completes, atomically drain the fallback inbox before
                     // closing the live-delivery window. This prevents a message from
                     // being enqueued between TryRead(false) and Closed=true.
-                    if (inboxReader is not null && inboxReader.TryRead(out var nextMessage))
+                    // Consecutive compatible messages are coalesced into a single merged
+                    // turn so a burst that was refused by the final-answer gate doesn't
+                    // produce one reply per message.
+                    if (inboxReader is not null && inboxReader.TryRead(out var firstFallback))
                     {
-                        _logger.LogInformation("Task #{TaskId}: delivering queued mid-turn fallback message to executor", taskId);
-                        // Each drained message is a distinct user question. Deliver the
-                        // completed turn's result before starting the next turn so it
-                        // isn't silently discarded when lastResult is overwritten.
+                        _logger.LogInformation("Task #{TaskId}: coalescing inbox fallback messages into merged turn", taskId);
+
+                        // Drain all waiting messages so we can merge compatible ones.
+                        var drained = new List<MidTurnMessage> { firstFallback };
+                        while (inboxReader.TryRead(out var additional))
+                            drained.Add(additional);
+
+                        // Build the first merged group using the same CanMerge / MaxParts
+                        // semantics as the global chat-level queue coalescing path.
+                        var firstPart = CreateQueuedPart(drained[0].Task, drained[0].DisplayText, drained[0].IsSessionTask,
+                            drained[0].Source, drained[0].RelaySender, drained[0].CorrelationId, drained[0].TaskId,
+                            drained[0].Images, drained[0].Documents, drained[0].UserId, drained[0].ArrivedAt);
+                        var mergedEntry = new QueuedMessage(chatId, firstPart);
+
+                        // overflowStart marks where the first group ends; default to "all fit".
+                        var overflowStart = drained.Count;
+                        for (var i = 1; i < drained.Count; i++)
+                        {
+                            var part = CreateQueuedPart(drained[i].Task, drained[i].DisplayText, drained[i].IsSessionTask,
+                                drained[i].Source, drained[i].RelaySender, drained[i].CorrelationId, drained[i].TaskId,
+                                drained[i].Images, drained[i].Documents, drained[i].UserId, drained[i].ArrivedAt);
+                            if (!mergedEntry.TryAppendPart(part))
+                            {
+                                // This part doesn't fit in the first group (different source or
+                                // MaxParts reached). Everything from here is overflow for the next turn.
+                                overflowStart = i;
+                                break;
+                            }
+                            // N parts → N-1 increments, matching TryAppendToPendingQueue convention.
+                            _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.MergedIntoQueue);
+                        }
+
+                        // Write overflow back to the Inbox — not a local variable — so the
+                        // existing DrainInboxToGlobalQueue teardown recovers them if the task
+                        // is cancelled between merged turns. If the Inbox write fails (task
+                        // already closed) or completingTask is null, fall through to the global
+                        // queue — the same fallback the single-message sibling in
+                        // EnqueueForTurnEndAsync uses when its TryWrite returns false.
+                        for (var i = overflowStart; i < drained.Count; i++)
+                        {
+                            if (completingTask is null || !completingTask.Inbox.Writer.TryWrite(drained[i]))
+                                EnqueueMessage(chatId, drained[i], notifyUser: false);
+                        }
+
+                        // Deliver the completed turn's result before starting the next merged turn.
                         if (lastResult is not null && !errorResult
                             && !lastResult.Trim().Equals("IDLE", StringComparison.OrdinalIgnoreCase))
                         {
                             await SendWithStatsAsync($"{Prefix()}{lastResult}");
                         }
                         lastResult = null;
-                        currentTask = nextMessage.Task;
-                        currentImages = nextMessage.Images;
-                        currentDocuments = nextMessage.Documents;
+
+                        var payload = mergedEntry.BuildPayload(DateTimeOffset.Now);
+                        currentTask = payload.Task;
+                        currentImages = payload.Images;
+                        currentDocuments = payload.Documents;
                         if (completingTask is not null)
                         {
                             completingTask.InjectionCount = 0;
@@ -805,8 +851,22 @@ public sealed class TaskManager
         }
     }
 
-    private async Task<TaskDispatchOutcome> EnqueueForTurnEndAsync(long chatId, RunningTask running, MidTurnMessage message, bool notifyUser)
+    internal async Task<TaskDispatchOutcome> EnqueueForTurnEndAsync(long chatId, RunningTask running, MidTurnMessage message, bool notifyUser)
     {
+        // Relay/Bridge messages carry completion callbacks tied to their correlationId/taskId.
+        // The turn-continuation loop only threads Task/Images/Documents across turns; a
+        // Relay/Bridge merged into the Inbox would lose its callback and hang the caller.
+        // Route them directly to the chat-level queue, preserving completeBridgeOnDrop=true
+        // so the callback still fires if the queue is full.
+        if (message.Source is TaskSource.Relay or TaskSource.Bridge)
+        {
+            var relayPart = CreateQueuedPart(message.Task, message.DisplayText, message.IsSessionTask, message.Source,
+                message.RelaySender, message.CorrelationId, message.TaskId, message.Images, message.Documents,
+                message.UserId, message.ArrivedAt);
+            var enqueued = EnqueueFreshMessage(chatId, relayPart, notifyUser, completeBridgeOnDrop: true);
+            return enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull;
+        }
+
         if (!running.Inbox.Writer.TryWrite(message))
         {
             var enqueued = EnqueueMessage(chatId, message, notifyUser);

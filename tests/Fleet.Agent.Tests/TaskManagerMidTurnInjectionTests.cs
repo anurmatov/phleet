@@ -57,12 +57,15 @@ public class TaskManagerMidTurnInjectionTests
         await idle;
 
         Assert.Equal(3, executor.InjectedTasks.Count);
-        Assert.Equal(3, executor.ExecutedTasks.Count);
+        // The 2 inbox-queued messages are now coalesced into one merged turn (fix for #243),
+        // so the total is 2 (original turn + one merged continuation), not 3.
+        Assert.Equal(2, executor.ExecutedTasks.Count);
         for (var i = 1; i <= 5; i++)
         {
             var message = $"message {i}";
             Assert.True(
-                executor.ExecutedTasks.Contains(message) || executor.InjectedTasks.Any(t => t.Contains(message, StringComparison.Ordinal)),
+                executor.ExecutedTasks.Any(t => t.Contains(message, StringComparison.Ordinal)) ||
+                executor.InjectedTasks.Any(t => t.Contains(message, StringComparison.Ordinal)),
                 $"{message} was neither injected nor delivered from the fallback inbox");
         }
         Assert.Equal(3, counter.GetCount("claude", InjectionOutcomeCounter.Injected));

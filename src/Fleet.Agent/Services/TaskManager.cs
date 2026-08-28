@@ -647,9 +647,15 @@ public sealed class TaskManager
 
                         // Write overflow back to the Inbox — not a local variable — so the
                         // existing DrainInboxToGlobalQueue teardown recovers them if the task
-                        // is cancelled between merged turns.
+                        // is cancelled between merged turns. If the Inbox write fails (task
+                        // already closed) or completingTask is null, fall through to the global
+                        // queue — the same fallback the single-message sibling in
+                        // EnqueueForTurnEndAsync uses when its TryWrite returns false.
                         for (var i = overflowStart; i < drained.Count; i++)
-                            completingTask?.Inbox.Writer.TryWrite(drained[i]);
+                        {
+                            if (completingTask is null || !completingTask.Inbox.Writer.TryWrite(drained[i]))
+                                EnqueueMessage(chatId, drained[i], notifyUser: false);
+                        }
 
                         // Deliver the completed turn's result before starting the next merged turn.
                         if (lastResult is not null && !errorResult

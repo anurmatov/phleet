@@ -22,11 +22,14 @@ public class TaskManagerInboxCoalescingTests
     // ── end-to-end coalescing scenarios ──────────────────────────────────────────
 
     [Fact]
-    public async Task InboxCoalescing_ThreeUserMessages_MergedIntoSingleTurn()
+    public async Task InboxCoalescing_ThreeUserMessages_MergedIntoSingleTurn_ArrivalOrderPreserved()
     {
         // A burst of 3 same-chat UserMessage turns all land in the Inbox while the
-        // initial turn is running.  After the initial turn, the drain must merge them
-        // into ONE continuation turn instead of running three separate turns.
+        // initial turn is running.  After the initial turn, the drain must:
+        //   (a) merge them into ONE continuation turn,
+        //   (b) preserve arrival order (second → third → fourth),
+        //   (c) include per-part elapsed headers so a late correction is visible inside
+        //       the batch ("ADDITIONAL MESSAGE — sent Xs after the one above").
         var executor = new CoalescingTestExecutor();
         var counter = new InjectionOutcomeCounter();
         var sink = Substitute.For<IMessageSink>();
@@ -46,9 +49,24 @@ public class TaskManagerInboxCoalescingTests
 
         // Only two executor invocations: the original turn and one merged turn.
         Assert.Equal(2, executor.ExecutedTasks.Count);
-        Assert.Contains("second", executor.ExecutedTasks[1], StringComparison.Ordinal);
-        Assert.Contains("third",  executor.ExecutedTasks[1], StringComparison.Ordinal);
-        Assert.Contains("fourth", executor.ExecutedTasks[1], StringComparison.Ordinal);
+        var merged = executor.ExecutedTasks[1];
+
+        // (a) All three payloads are present in the merged task string.
+        Assert.Contains("second", merged, StringComparison.Ordinal);
+        Assert.Contains("third",  merged, StringComparison.Ordinal);
+        Assert.Contains("fourth", merged, StringComparison.Ordinal);
+
+        // (b) Relative position is correct — a merge that reversed parts would violate this.
+        var idxSecond = merged.IndexOf("second", StringComparison.Ordinal);
+        var idxThird  = merged.IndexOf("third",  StringComparison.Ordinal);
+        var idxFourth = merged.IndexOf("fourth", StringComparison.Ordinal);
+        Assert.True(idxSecond < idxThird,  "second must appear before third in the merged payload");
+        Assert.True(idxThird  < idxFourth, "third must appear before fourth in the merged payload");
+
+        // (c) N-1 elapsed headers appear, one per additional part.
+        var headerCount = CountOccurrences(merged, "[ADDITIONAL MESSAGE — sent ");
+        Assert.Equal(2, headerCount);
+
         // third and fourth were merged (2 MergedIntoQueue increments, not 3).
         Assert.Equal(2, counter.GetCount("claude", InjectionOutcomeCounter.MergedIntoQueue));
     }
@@ -265,10 +283,46 @@ public class TaskManagerInboxCoalescingTests
     }
 
     [Fact]
-    public async Task EnqueueForTurnEndAsync_RelaySource_QueueFull_CallbackFires()
+    public async Task EnqueueForTurnEndAsync_TwoRelayMessages_SameChatId_NotMerged()
     {
-        // When EnqueueFreshMessage drops a Relay message because the queue is full,
-        // the OnTaskCompleted callback must fire (completeBridgeOnDrop=true) so the
+        // CanMerge only accepts UserMessage source on both sides.  Two consecutive
+        // Relay messages arriving via EnqueueForTurnEndAsync must each land as an
+        // independent QueuedMessage entry, never coalesced.  Merging would silently
+        // drop the second callback, leaving the caller hung waiting for a reply.
+        var executor = new CoalescingTestExecutor();
+        var counter = new InjectionOutcomeCounter();
+        var sink = Substitute.For<IMessageSink>();
+        var manager = BuildManager(executor, sink, counter);
+
+        var running = new RunningTask
+        {
+            Id = 1, Description = "test", StartedAt = DateTimeOffset.UtcNow,
+            Cts = new CancellationTokenSource(), IsSessionTask = true,
+        };
+
+        for (var i = 0; i < 2; i++)
+        {
+            var msg = new MidTurnMessage(
+                Task: $"relay-{i}", DisplayText: $"relay-{i}", IsSessionTask: false,
+                Source: TaskSource.Relay, RelaySender: "sender", CorrelationId: null, TaskId: $"tid-{i}",
+                Images: null, Documents: null, UserId: 0L, ArrivedAt: DateTimeOffset.UtcNow);
+            await manager.EnqueueForTurnEndAsync(123L, running, msg, notifyUser: false);
+        }
+
+        var snapshot = manager.GetQueueSnapshot();
+        // Two separate entries — CanMerge blocks Relay+Relay.
+        Assert.Equal(2, snapshot.Count);
+        Assert.Equal(TaskSource.Relay, snapshot[0].Source);
+        Assert.Equal(TaskSource.Relay, snapshot[1].Source);
+    }
+
+    [Theory]
+    [InlineData(TaskSource.Relay)]
+    [InlineData(TaskSource.Bridge)]
+    public async Task EnqueueForTurnEndAsync_RelayOrBridgeSource_QueueFull_CallbackFires(TaskSource source)
+    {
+        // When EnqueueFreshMessage drops a Relay or Bridge message because the queue is
+        // full, the OnTaskCompleted callback must fire (completeBridgeOnDrop=true) so the
         // workflow can record a failure rather than hanging indefinitely.
         var executor = new CoalescingTestExecutor();
         var counter = new InjectionOutcomeCounter();
@@ -291,7 +345,7 @@ public class TaskManagerInboxCoalescingTests
         };
         var relayMsg = new MidTurnMessage(
             Task: "relay-task", DisplayText: "relay-display", IsSessionTask: false,
-            Source: TaskSource.Relay, RelaySender: "relay-sender", CorrelationId: null, TaskId: "relay-task-id",
+            Source: source, RelaySender: "relay-sender", CorrelationId: null, TaskId: "relay-task-id",
             Images: null, Documents: null, UserId: 0L, ArrivedAt: DateTimeOffset.UtcNow);
 
         string? firedText = null;
@@ -304,7 +358,7 @@ public class TaskManagerInboxCoalescingTests
 
         var outcome = await manager.EnqueueForTurnEndAsync(789L, running, relayMsg, notifyUser: false);
 
-        // Queue is full → Relay message dropped → callback fires.
+        // Queue is full → Relay/Bridge message dropped → callback fires.
         Assert.Equal(TaskDispatchOutcome.QueueFull, outcome);
         Assert.False(running.Inbox.Reader.TryRead(out _));
         Assert.Equal("agent queue full", firedText);
@@ -315,6 +369,17 @@ public class TaskManagerInboxCoalescingTests
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────────
+
+    private static int CountOccurrences(string text, string pattern)
+    {
+        int count = 0, index = 0;
+        while ((index = text.IndexOf(pattern, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += pattern.Length;
+        }
+        return count;
+    }
 
     private static TaskManager BuildManager(IAgentExecutor executor, IMessageSink sink, InjectionOutcomeCounter counter)
     {

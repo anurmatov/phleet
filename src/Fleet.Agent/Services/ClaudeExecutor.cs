@@ -35,6 +35,10 @@ public sealed class ClaudeExecutor : IAgentExecutor
     // can be delivered out-of-band at the start of the next turn without going through
     // ParseAssistantEvent (which would set _turnCommittedToFinalAnswer prematurely).
     private string? _preservedDrainedAnswerText;
+    // Top-level assistant text is buffered until the matching terminal result event. The
+    // result event is the only owner of AgentProgress.FinalResult, so TaskManager sees one
+    // completion per logical turn even though Claude emits both assistant and result events.
+    private string? _currentTurnAssistantText;
     private ExecutionStats? _previousCumulativeStats;
 
     // Continuous background stdout reader — feeds all NDJSON events into this channel.
@@ -176,6 +180,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                         _logger.LogWarning("Large input detected ({Size} bytes, message #{Num})",
                             messageBytes, _messageCount + 1);
                     _turnCommittedToFinalAnswer = false;
+                    _currentTurnAssistantText = null;
                     await WriteStdinLineAsync(message, ct);
                 }
                 catch (IOException) when (attempt < 2)
@@ -235,11 +240,12 @@ public sealed class ClaudeExecutor : IAgentExecutor
                     // because all mutations are idempotent (ConcurrentDictionary set/remove).
                     // We still call it here to get the AgentProgress value for yielding.
 
+                    var isCurrentTurnResult = IsCurrentTurnResult(evt);
                     var progress = ParseProgress(evt);
 
                     // Detect max-turns exhaustion: NumTurns == MaxTurns means
                     // Claude used all allocated turns and may have stopped mid-task
-                    if (evt.Type == "result" && !progress.IsErrorResult && evt.NumTurns >= _config.MaxTurns)
+                    if (isCurrentTurnResult && !progress.IsErrorResult && evt.NumTurns >= _config.MaxTurns)
                     {
                         progress = new AgentProgress
                         {
@@ -251,10 +257,12 @@ public sealed class ClaudeExecutor : IAgentExecutor
                             SessionId = progress.SessionId,
                             Stats = progress.Stats,
                             IsErrorResult = true,
+                            IsProcessExit = progress.IsProcessExit,
+                            StructuredOutput = progress.StructuredOutput,
                         };
                     }
 
-                    if (evt.Type == "result" && progress.IsErrorResult)
+                    if (isCurrentTurnResult && progress.IsErrorResult)
                     {
                         _logger.LogError("Claude result reported error: {Result}", progress.FinalResult ?? "(no message)");
                     }
@@ -262,7 +270,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                     yield return progress;
 
                     // "result" event means this response is complete — process stays alive
-                    if (evt.Type == "result")
+                    if (isCurrentTurnResult)
                     {
                         if (_restartRequested)
                         {
@@ -652,11 +660,12 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
     private async Task KillProcessAsync()
     {
-        if (_process is null) return;
-
         // Clear any preserved stale answer — text from one conversation must not surface
         // in a later unrelated conversation when the process is restarted.
         _preservedDrainedAnswerText = null;
+        _currentTurnAssistantText = null;
+
+        if (_process is null) return;
 
         // Cancel the background reader first so it stops reading from the pipe
         // before we close the process (avoids ObjectDisposedException races).
@@ -770,6 +779,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
             // answer it must be discarded here — not carried into the next ExecuteAsync turn
             // where it would surface as a recovered_answer event in an unrelated conversation.
             _preservedDrainedAnswerText = null;
+            _currentTurnAssistantText = null;
 
             // Wrap as a user message containing the slash command
             var message = JsonSerializer.Serialize(new
@@ -790,10 +800,11 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 catch (OperationCanceledException) { throw; }
                 catch (ChannelClosedException) { break; } // process died
 
+                var isCurrentTurnResult = IsCurrentTurnResult(evt);
                 var progress = ParseProgress(evt);
                 yield return progress;
 
-                if (evt.Type == "result")
+                if (isCurrentTurnResult)
                 {
                     _messageCount++;
                     var stats = ParseStats(evt);
@@ -1019,13 +1030,23 @@ public sealed class ClaudeExecutor : IAgentExecutor
         var text = string.Join("\n", blocks.Where(b => b.Type == "text" && b.Text is not null).Select(b => b.Text!));
         if (!string.IsNullOrEmpty(text))
         {
+            if (evt.ParentToolUseId is not null)
+            {
+                return new AgentProgress
+                {
+                    IsSignificant = false,
+                    Summary = "Subagent assistant progress",
+                    EventType = evt.Type,
+                };
+            }
+
             self._turnCommittedToFinalAnswer = true;
+            self._currentTurnAssistantText = text;
             return new AgentProgress
             {
                 IsSignificant = true,
                 Summary = TruncateText(text, 500),
                 EventType = evt.Type,
-                FinalResult = text,
             };
         }
 
@@ -1034,20 +1055,42 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
     private AgentProgress HandleResultEvent(ClaudeStreamEvent evt)
     {
+        if (!IsCurrentTurnResult(evt))
+        {
+            _logger.LogWarning(
+                "Skipping non-current Claude result event: origin_kind={OriginKind}, subtype={Subtype}, is_error={IsError}",
+                evt.Origin?.Kind ?? "(none)",
+                evt.Subtype ?? "(none)",
+                evt.IsError ?? false);
+
+            return new AgentProgress
+            {
+                IsSignificant = false,
+                Summary = $"Injected turn completed ({evt.Origin!.Kind})",
+                EventType = evt.Type,
+                SessionId = evt.SessionId,
+            };
+        }
+
         // _turnCommittedToFinalAnswer is intentionally NOT reset here. Clearing it on the result
         // event would open a window between result-parse and TaskManager.Closed=true (which includes
         // sending the reply) during which TryInjectMessageAsync would pass all checks, write to the
         // live process stdin, and return Injected — only for the injected message to be discarded by
         // DrainStaleTurnEvents at the start of the next turn. The sticky flag is the correct gate.
         // The flag is cleared at the start of the next turn via ExecuteAsync, before the next write.
+        var finalResult = !string.IsNullOrEmpty(evt.Result)
+            ? evt.Result
+            : _currentTurnAssistantText;
+        _currentTurnAssistantText = null;
+
         return new AgentProgress
         {
             IsSignificant = true,
-            Summary = !string.IsNullOrEmpty(evt.Result)
-                ? TruncateText(evt.Result, 500)
+            Summary = !string.IsNullOrEmpty(finalResult)
+                ? TruncateText(finalResult, 500)
                 : "Task completed",
             EventType = evt.Type,
-            FinalResult = evt.Result,
+            FinalResult = finalResult,
             SessionId = evt.SessionId,
             IsErrorResult = evt.IsError == true,
             StructuredOutput = evt.StructuredOutput.HasValue
@@ -1055,6 +1098,10 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 : null,
         };
     }
+
+    private static bool IsCurrentTurnResult(ClaudeStreamEvent evt) =>
+        evt.Type == "result"
+        && (evt.Origin is null || string.Equals(evt.Origin.Kind, "human", StringComparison.Ordinal));
 
     private static string DescribeToolUse(string name, Dictionary<string, object>? input)
     {

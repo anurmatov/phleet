@@ -26,4 +26,8 @@
     <ProjectReference Include="..\..\src\Fleet.Telegram\Fleet.Telegram.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="Fixtures\*.ndjson" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

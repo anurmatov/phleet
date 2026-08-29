@@ -279,7 +279,117 @@ public class VoiceTranscriptionMarkerTests
         Assert.Equal(1, CountOccurrences(continuation, Marker));
     }
 
+    // ── MessageRouter: the /new command path ─────────────────────────────────
+    // A voice DM whose transcript happens to start with "/new " is routed by a branch
+    // that returns before the regular-message assembly ever runs. That branch dropped
+    // the marker entirely, so the agent saw a transcript indistinguishable from typed
+    // text — the exact failure the marker exists to prevent. These drive the real
+    // MessageRouter rather than mirroring its predicate, so deleting the BuildDmTask
+    // hop turns them red.
+
+    [Fact]
+    public async Task NewCommand_VoiceDm_CarriesMarkerIntoTheAssembledPrompt()
+    {
+        var (router, executor) = BuildRouter();
+
+        await router.HandleAsync(VoiceDm("/new restart the worker"));
+        executor.ReleaseAllTurns();
+        await executor.WaitForExecuteCountAsync(1);
+
+        var prompt = executor.ExecutedTasks[0];
+        Assert.Contains(Marker, prompt, StringComparison.Ordinal);
+        Assert.Contains("restart the worker", prompt, StringComparison.Ordinal);
+        // The marker is metadata, not part of what the user said.
+        Assert.True(
+            prompt.IndexOf(Marker, StringComparison.Ordinal)
+                < prompt.IndexOf("restart the worker", StringComparison.Ordinal),
+            "marker must precede the spoken text");
+    }
+
+    [Fact]
+    public async Task NewCommand_TypedDm_EmitsNoMarker()
+    {
+        var (router, executor) = BuildRouter();
+
+        await router.HandleAsync(TypedDm("/new restart the worker"));
+        executor.ReleaseAllTurns();
+        await executor.WaitForExecuteCountAsync(1);
+
+        Assert.DoesNotContain("voice_transcription", executor.ExecutedTasks[0], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NewCommand_VoiceDm_KeepsTheCommandPrefixOutOfTheTaskText()
+    {
+        // "/new " is a routing instruction, not something the user dictated — stripping it
+        // is pre-existing behaviour that the added BuildDmTask hop must not disturb.
+        var (router, executor) = BuildRouter();
+
+        await router.HandleAsync(VoiceDm("/new restart the worker"));
+        executor.ReleaseAllTurns();
+        await executor.WaitForExecuteCountAsync(1);
+
+        Assert.DoesNotContain("/new", executor.ExecutedTasks[0], StringComparison.Ordinal);
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
+
+    private const long TestUserId = 100001L;
+
+    private static IncomingMessage TypedDm(string text) => new()
+    {
+        ChatId = TestUserId, UserId = TestUserId, Text = text, StrippedText = text,
+        Sender = "@user1", IsGroupChat = false, TelegramMessageId = 42,
+        ChatUsername = "user1",
+    };
+
+    private static IncomingMessage VoiceDm(string text) => new()
+    {
+        ChatId = TestUserId, UserId = TestUserId, Text = text, StrippedText = text,
+        Sender = "@user1", IsGroupChat = false, TelegramMessageId = 42,
+        ChatUsername = "user1", InputSource = MessageInputSource.VoiceTranscription,
+    };
+
+    private static (MessageRouter Router, BlockingTestExecutor Executor) BuildRouter()
+    {
+        var agentOpts = Options.Create(new AgentOptions
+        {
+            Name = "test-agent", Role = "test", WorkDir = Path.GetTempPath(),
+            GroupDebounceSeconds = 30, ShortName = "test", Provider = "claude",
+        });
+        var telegramOpts = Options.Create(new TelegramOptions
+        {
+            AllowedUserIds = [TestUserId],
+        });
+        var rabbitOpts = Options.Create(new RabbitMqOptions());
+
+        var executor = new BlockingTestExecutor();
+        var relay = new GroupRelayService(agentOpts, rabbitOpts, NullLogger<GroupRelayService>.Instance);
+        var taskManager = new TaskManager(agentOpts, executor, new SessionManager(),
+            NullLogger<TaskManager>.Instance, new InjectionOutcomeCounter())
+        {
+            Sink = Substitute.For<IMessageSink>(),
+        };
+        // CommandDispatcher has deep sealed deps; the /new branch returns before the
+        // dispatcher is reached, so an uninitialised instance is enough here.
+        var commands = (CommandDispatcher)RuntimeHelpers.GetUninitializedObject(typeof(CommandDispatcher));
+        var prompts = new PromptAssembler(executor);
+        var allowlist = new AllowlistHolder(telegramOpts);
+
+        var behavior = new GroupBehavior(agentOpts, telegramOpts, allowlist, executor, relay,
+            taskManager, commands, prompts, NullLogger<GroupBehavior>.Instance)
+        {
+            Sink = Substitute.For<IMessageSink>(),
+        };
+
+        var router = new MessageRouter(agentOpts, telegramOpts, allowlist, taskManager,
+            behavior, relay, commands, NullLogger<MessageRouter>.Instance)
+        {
+            Sink = Substitute.For<IMessageSink>(),
+        };
+
+        return (router, executor);
+    }
 
     private static int CountOccurrences(string haystack, string needle)
     {

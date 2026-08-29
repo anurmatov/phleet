@@ -132,9 +132,13 @@ public sealed class MessageRouter
                     await Sink.SendTextAsync(msg.ChatId, "Usage: /new <task description>");
                     return;
                 }
+                // displayText is captured from the pre-assembly text, so the prompt metadata
+                // added below (including the transcription marker) never reaches Telegram.
                 var displayText = task;
                 if (msg.IsGroupChat)
                     task = _groupBehavior.BuildGroupTask(msg.ChatId, msg.Sender, task, msg.ReplyToUsername, msg.ReplyToText, msg.TelegramMessageId, msg.ChatTitle, msg.IsVoiceTranscription);
+                else
+                    task = _groupBehavior.BuildDmTask(msg.ChatId, task, msg.ReplyToText, msg.TelegramMessageId, msg.ChatUsername, msg.ChatFirstName, msg.IsVoiceTranscription);
                 _ = _taskManager.StartTask(msg.ChatId, task, displayText, isSessionTask: false,
                     source: TaskSource.NewCommand, images: msg.Images.Count > 0 ? msg.Images : null,
                     documents: msg.Documents.Count > 0 ? msg.Documents : null);

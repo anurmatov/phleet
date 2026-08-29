@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services;
 
@@ -5,6 +6,20 @@ namespace Fleet.Agent.Tests;
 
 public class MediaGroupBufferTests
 {
+    /// <summary>
+    /// Polls until <paramref name="collection"/> holds <paramref name="expected"/> items or the
+    /// timeout elapses. A generous ceiling costs nothing on a healthy run (it returns as soon as
+    /// the condition holds) and removes the fixed-sleep flake on a loaded CI runner. Deliberately
+    /// returns rather than throwing on timeout — the caller's assertion reports the real count.
+    /// </summary>
+    private static async Task WaitForCountAsync<T>(
+        IReadOnlyCollection<T> collection, int expected, int timeoutMs = 15_000)
+    {
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        while (collection.Count < expected && DateTime.UtcNow < deadline)
+            await Task.Delay(25);
+    }
+
     private static IncomingMessage MakeTemplate(long chatId = 1) => new()
     {
         ChatId = chatId,
@@ -68,14 +83,18 @@ public class MediaGroupBufferTests
     public async Task TwoGroups_FlushIndependently()
     {
         var buffer = new MediaGroupBuffer(maxTotalMs: 10_000);
-        var received = new List<IncomingMessage>();
+        // Two groups debounce on independent timers, so the two flush callbacks run
+        // concurrently — List<T>.Add would be a data race, and a fixed 1700 ms sleep
+        // left only 200 ms of slack over the debounce, which CI scheduler slop
+        // exhausted. Collect thread-safely and poll for the expected count instead.
+        var received = new ConcurrentBag<IncomingMessage>();
 
         Func<IncomingMessage, Task> flush = m => { received.Add(m); return Task.CompletedTask; };
 
         await buffer.AddPhotoAsync("groupA", MakeImage(1), MakeTemplate(chatId: 1), flush);
         await buffer.AddPhotoAsync("groupB", MakeImage(2), MakeTemplate(chatId: 2), flush);
 
-        await Task.Delay(1700);
+        await WaitForCountAsync(received, 2);
 
         // Two independent flushes
         Assert.Equal(2, received.Count);

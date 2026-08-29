@@ -342,9 +342,9 @@ public static class TelegramFormatter
                 chunks.Add(remaining.ToString());
                 break;
             }
-            int cut = TelegramMaxLength;
-            // don't split a surrogate pair
-            if (char.IsLowSurrogate(remaining[cut]) && cut > 0) cut--;
+            // Surrogate-safe hard cut — one shared definition of "where may I cut"
+            // (Fleet.Shared/TextTruncation.cs), not a guard duplicated per call site.
+            int cut = TextTruncation.SafeCutIndex(remaining, TelegramMaxLength);
             // prefer newline boundary in the second half of the chunk
             int nl = remaining[..cut].LastIndexOf('\n');
             if (nl > cut / 2) cut = nl + 1;

@@ -1057,6 +1057,12 @@ public sealed class ClaudeExecutor : IAgentExecutor
     {
         if (!IsCurrentTurnResult(evt))
         {
+            _logger.LogWarning(
+                "Skipping non-current Claude result event: origin_kind={OriginKind}, subtype={Subtype}, is_error={IsError}",
+                evt.Origin?.Kind ?? "(none)",
+                evt.Subtype ?? "(none)",
+                evt.IsError ?? false);
+
             return new AgentProgress
             {
                 IsSignificant = false,

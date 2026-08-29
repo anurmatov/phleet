@@ -5,8 +5,10 @@ using System.Threading.Channels;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using NSubstitute;
 
 namespace Fleet.Agent.Tests;
 
@@ -49,6 +51,33 @@ public class ClaudeExecutorTerminalResultTests
             new ClaudeStreamEvent { Type = "result", Result = "", NumTurns = 1 });
 
         Assert.DoesNotContain(events, progress => progress.FinalResult is not null);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_SkippedResult_LogsSafeProvenanceWarning()
+    {
+        var logger = Substitute.For<ILogger<ClaudeExecutor>>();
+        using var harness = new ExecutorHarness(logger: logger);
+
+        await harness.RunTurnAsync(
+            new ClaudeStreamEvent
+            {
+                Type = "result",
+                Subtype = "success",
+                Result = "RESULT-TEXT-MUST-NOT-BE-LOGGED",
+                SessionId = "SESSION-ID-MUST-NOT-BE-LOGGED",
+                Origin = new ClaudeMessageOrigin { Kind = "unexpected-origin" },
+            },
+            new ClaudeStreamEvent { Type = "result", Result = "PARENT-FINAL", NumTurns = 1 });
+
+        var warning = Assert.Single(logger.ReceivedCalls(), call =>
+            call.GetMethodInfo().Name == nameof(ILogger.Log)
+            && call.GetArguments()[0] is LogLevel.Warning);
+        var message = warning.GetArguments()[2]?.ToString() ?? string.Empty;
+        Assert.Contains("unexpected-origin", message, StringComparison.Ordinal);
+        Assert.Contains("success", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("RESULT-TEXT-MUST-NOT-BE-LOGGED", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("SESSION-ID-MUST-NOT-BE-LOGGED", message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -179,7 +208,7 @@ public class ClaudeExecutorTerminalResultTests
         private readonly Channel<ClaudeStreamEvent> _events = Channel.CreateUnbounded<ClaudeStreamEvent>();
         private readonly SignalingTextWriter _stdin = new();
 
-        public ExecutorHarness(int maxTurns = 100)
+        public ExecutorHarness(int maxTurns = 100, ILogger<ClaudeExecutor>? logger = null)
         {
             _process = Process.Start(new ProcessStartInfo
             {
@@ -187,7 +216,7 @@ public class ClaudeExecutorTerminalResultTests
                 RedirectStandardInput = true,
                 UseShellExecute = false,
             })!;
-            _executor = BuildExecutor(maxTurns);
+            _executor = BuildExecutor(maxTurns, logger ?? NullLogger<ClaudeExecutor>.Instance);
             _executor.SetProcessForTests(_process);
             _executor.SetStdinForTests(_stdin);
             _executor.SetEventChannelForTests(_events);
@@ -234,7 +263,7 @@ public class ClaudeExecutorTerminalResultTests
             _writes.Reader.ReadAsync(cancellationToken).AsTask();
     }
 
-    private static ClaudeExecutor BuildExecutor(int maxTurns)
+    private static ClaudeExecutor BuildExecutor(int maxTurns, ILogger<ClaudeExecutor> logger)
     {
         var options = Options.Create(new AgentOptions
         {
@@ -245,6 +274,6 @@ public class ClaudeExecutorTerminalResultTests
             MaxTurns = maxTurns,
         });
         var promptBuilder = new PromptBuilder(options, NullLogger<PromptBuilder>.Instance);
-        return new ClaudeExecutor(options, NullLogger<ClaudeExecutor>.Instance, promptBuilder);
+        return new ClaudeExecutor(options, logger, promptBuilder);
     }
 }

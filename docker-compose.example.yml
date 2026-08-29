@@ -185,6 +185,7 @@ services:
     container_name: fleet-whisper
     environment:
       - WHISPER_MODEL=small
+      - WHISPER_HOTWORDS=${WHISPER_HOTWORDS:-}
     mem_limit: 4g
     restart: unless-stopped
     healthcheck:

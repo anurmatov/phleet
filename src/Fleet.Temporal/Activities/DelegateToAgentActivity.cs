@@ -197,6 +197,21 @@ public sealed class DelegateToAgentActivity
                 if (completed == tcs.Task)
                     return await tcs.Task;
 
+                // The delay lost the race, which means either the heartbeat interval elapsed or
+                // the token was cancelled. Task.WhenAny does NOT throw on a cancelled task, so
+                // this check is what distinguishes the two.
+                //
+                // Without it, a fired timeout leaves Task.Delay returning an already-cancelled
+                // task on every subsequent iteration and the loop spins with no delay at all —
+                // burning a core until the 5-minute re-publish branch below finally throws. The
+                // timeout was still reported eventually, so results stayed correct while a hot
+                // loop ran for up to five minutes per timed-out activity (issue #251).
+                //
+                // Throwing here routes into the existing catch chain: activity cancellation is
+                // caught by the ctx.CancellationToken filter, a bare timeout by the one after it
+                // that converts to TimeoutException.
+                timeoutCts.Token.ThrowIfCancellationRequested();
+
                 // Heartbeat so Temporal tracks activity liveness
                 ctx.Heartbeat($"waiting for agent {agentName} response (taskId={taskId})");
 

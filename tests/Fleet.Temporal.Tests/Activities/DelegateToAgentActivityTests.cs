@@ -134,7 +134,10 @@ public class DelegateToAgentActivityTests
     {
         // Temporal kills an activity that stops heartbeating past its HeartbeatTimeout, so a
         // silent regression here would surface as agents timing out mid-review.
-        var h = Build();
+        // The agent timeout must outlast the 31s wait below. At the default 30s the activity
+        // now times out first (correctly, since #251 was fixed) and cancels the registry entry —
+        // this test only passed before because the timeout did not fire promptly.
+        var h = Build(agentTimeoutSeconds: 120);
         var heartbeats = new List<object?[]>();
         var env = new ActivityEnvironment { Heartbeater = details => heartbeats.Add(details) };
 
@@ -175,22 +178,33 @@ public class DelegateToAgentActivityTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
     }
 
-    // ── Timeout ───────────────────────────────────────────────────────────────
-    //
-    // NOT COVERED, deliberately, and worth explaining rather than quietly omitting.
-    //
-    // Attempting it surfaced a PRE-EXISTING defect in WaitForResponseAsync that this PR does not
-    // touch and must not fix (its scope is ConsensusReviewWorkflow, its models, and the shared
-    // cut helper). When the agent timeout fires, `timeoutCts` cancels, and the loop's
-    // `Task.Delay(30s, timeoutCts.Token)` then returns an already-cancelled task on every
-    // iteration. `Task.WhenAny` does not throw on a cancelled task, so the loop heartbeats and
-    // spins — burning a core — until the 5-minute re-publish branch finally calls
-    // PublishDirectiveAsync with the cancelled token and throws. Only then is the
-    // OperationCanceledException converted into the TimeoutException the catch block intends.
-    //
-    // So the timeout is eventually reported, but after up to five minutes of a hot loop. A test
-    // asserting the documented behaviour hangs rather than failing, which is why it is absent
-    // here instead of quarantined green. Filed separately; see the PR description.
+    // ── Timeout (issue #251) ──────────────────────────────────────────────────
+
+    [Fact]
+    public async Task NoResponseWithinTheAgentTimeout_ThrowsPromptly()
+    {
+        // Regression test for #251. Before the fix this HUNG rather than failed: once the timeout
+        // cancelled the token, Task.Delay returned an already-cancelled task each iteration and
+        // Task.WhenAny does not throw on one, so the loop spun with no delay until the 5-minute
+        // re-publish branch finally threw.
+        //
+        // The bound is the assertion. A test that only checked "TimeoutException eventually" would
+        // have passed against the broken code too — it was five minutes of hot loop, not a hang.
+        var h = Build(agentTimeoutSeconds: 1);
+        var env = new ActivityEnvironment();
+        var started = Environment.TickCount64;
+
+        var ex = await Assert.ThrowsAsync<TimeoutException>(() =>
+            env.RunAsync(() =>
+                h.Activity.DelegateToAgentAsync(Agent, "do the thing", "wf/task-timeout")));
+
+        var elapsedMs = Environment.TickCount64 - started;
+        Assert.True(elapsedMs < 15_000,
+            $"timeout should surface promptly after the 1s agent timeout, took {elapsedMs}ms");
+
+        Assert.Contains(Agent, ex.Message);
+        Assert.Contains("wf/task-timeout", ex.Message);
+    }
 
     // ── Incomplete-response retry ─────────────────────────────────────────────
 

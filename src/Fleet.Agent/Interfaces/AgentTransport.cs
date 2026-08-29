@@ -677,6 +677,11 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         var isMediaAttachment = isPhoto || isVoice || isAudio || isVideo || isVideoNote || isDocument;
         var text = message.Text ?? message.Caption ?? "";
 
+        // Set only when speech-to-text actually returned a transcript. A voice message that
+        // failed to transcribe, or arrived while the service is disabled, must NOT be marked
+        // — a false marker would tell the agent to distrust text the user actually typed.
+        var inputSource = MessageInputSource.Typed;
+
         // Transcribe voice messages if the whisper service is configured
         if (isVoice && _voiceTranscription.IsEnabled)
         {
@@ -692,6 +697,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 if (transcribed is not null)
                 {
                     text = transcribed;
+                    inputSource = MessageInputSource.VoiceTranscription;
                     _logger.LogInformation("Voice message transcribed ({Chars} chars) from {Sender}",
                         text.Length, message.From?.Username ?? "unknown");
 
@@ -809,6 +815,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             IsNameMentioned = isNameMentioned,
             StrippedText = stripped,
             HasMediaAttachment = isMediaAttachment,
+            InputSource = inputSource,
             // Channel anchor fields — used by PromptAssembler to emit [channel: ...] tags
             ChatTitle = message.Chat.Title,
             ChatUsername = message.Chat.Username,

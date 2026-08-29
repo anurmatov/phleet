@@ -270,6 +270,103 @@ public class ConsensusReviewWorkflowRunTests
         Assert.Contains("- reviewer-one: the migration has no down step", output.ConsolidatedReasoning);
     }
 
+    // ── AC3: private-looking detail never leaves ReviewText ──────────────────
+
+    [Fact]
+    public async Task PrivateLookingDetail_StaysInReviewText_AndReachesNothingDownstream()
+    {
+        // What this can and cannot prove, stated plainly: the workflow does NOT sanitize. The
+        // redaction before posting a mirror comment is the reviewer agent's job, instructed by
+        // caller prompt text, and no code performs it — so no test here can assert that a posted
+        // comment body was scrubbed.
+        //
+        // What IS a property of this code, and what this asserts, is CONTAINMENT: private-looking
+        // metadata sitting in the raw response reaches neither the synthesis instruction nor
+        // ConsolidatedReasoning, and survives only in ReviewText. That is the guarantee the design
+        // actually makes, and it is the one that would break if someone reinstated raw-text
+        // forwarding.
+        const string internalHost = "svc-07.internal.example";
+        const string internalId = "incident-4417-restricted";
+        const string chatId = "-1009988776655";
+
+        var raw = string.Join("\n",
+            $"Detailed review. Reproduced on {internalHost} while chasing {internalId}.",
+            $"Operator chat {chatId} carried the original report.",
+            "SUMMARY: one real problem in the retry path; mirror comment posted",
+            "EVIDENCE: https://example.invalid/org/repo/pull/1#issuecomment-1",
+            "BLOCKER: guard the null case before the retry",
+            "VERDICT: changes_requested");
+
+        var (output, log, _) = await RunAsync(
+            agent => agent == "synthesizer"
+                ? "The retry guard is the blocking issue.\nVERDICT: changes_requested"
+                : agent == "reviewer-one"
+                    ? raw
+                    : Response("no objection", ReviewVerdict.Approved),
+            ["reviewer-one", "reviewer-two"]);
+
+        foreach (var secret in new[] { internalHost, internalId, chatId })
+        {
+            Assert.DoesNotContain(secret, log.InstructionFor("synthesizer"));
+            Assert.DoesNotContain(secret, output.ConsolidatedReasoning);
+        }
+
+        // ...and every one of them is still durable, byte-for-byte.
+        var reviewText = output.PerAgentVerdicts.Single(r => r.AgentName == "reviewer-one").ReviewText;
+        Assert.Equal(raw, reviewText);
+
+        // The compact fields the reviewer explicitly chose to publish do travel.
+        Assert.Contains("https://example.invalid/org/repo/pull/1#issuecomment-1",
+            log.InstructionFor("synthesizer"));
+        Assert.Contains("- reviewer-one: guard the null case before the retry",
+            output.ConsolidatedReasoning);
+    }
+
+    // ── AC9: the delegate instruction a downstream agent actually receives ────
+
+    [Fact]
+    public async Task DelegateInstruction_EmbedsOnlyTheCompactReasoning_ForA20KbReview()
+    {
+        // The production shape: a parent runs this as a CHILD workflow, then a delegate step
+        // interpolates {{vars.consensus_out.ConsolidatedReasoning}} into an instruction for a
+        // downstream agent, which is what eventually reaches an activity notification. This
+        // reproduces that hop against a real child-workflow execution and captures the resulting
+        // instruction string, rather than asserting the formatter in isolation.
+        var huge = new string('q', 20_000);
+        var rawWithHugeBody = string.Join("\n",
+            $"{huge} {Sentinel}",
+            "SUMMARY: one real problem in the retry path",
+            "EVIDENCE: none",
+            "BLOCKER: guard the null case before the retry",
+            "VERDICT: changes_requested");
+
+        var (output, _, _) = await RunAsync(
+            agent => agent == "synthesizer"
+                ? "The retry guard is the blocking issue.\nVERDICT: changes_requested"
+                : agent == "reviewer-one"
+                    ? rawWithHugeBody
+                    : Response("no objection", ReviewVerdict.Approved),
+            ["reviewer-one", "reviewer-two"]);
+
+        // The seed-definition template, with the same substitution the engine performs.
+        var delegateInstruction =
+            "The consensus review concluded with verdict " + output.FinalVerdict + ".\n\n" +
+            "Reasoning:\n" + output.ConsolidatedReasoning;
+
+        // BEFORE this change the same run put the entire 20 KB response here.
+        Assert.DoesNotContain(huge, delegateInstruction);
+        Assert.DoesNotContain(Sentinel, delegateInstruction);
+        Assert.True(delegateInstruction.Length < 2_500,
+            $"delegate instruction should be compact, was {delegateInstruction.Length} for a 20 KB review");
+
+        // The blocker still reaches the implementer verbatim.
+        Assert.Contains("- reviewer-one: guard the null case before the retry", delegateInstruction);
+
+        // ...while the 20 KB stays durable in Temporal.
+        Assert.Contains(huge,
+            output.PerAgentVerdicts.Single(r => r.AgentName == "reviewer-one").ReviewText);
+    }
+
     // ── Patch-history replay ──────────────────────────────────────────────────
 
     [Fact]

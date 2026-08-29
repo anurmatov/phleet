@@ -41,3 +41,8 @@ models/fleet-memory/*
 
 # Claude Code MCP config (may contain internal URLs)
 .mcp.json
+
+# Python bytecode (whisper service + its tests)
+__pycache__/
+*.py[cod]
+.pytest_cache/

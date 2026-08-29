@@ -232,6 +232,21 @@ The tracked repo root stays clean — only source, `.env.example`, `seed.example
 
 See `.env.example` for all required variables with descriptions.
 
+### Speech-to-text hotwords
+
+Voice messages are transcribed by the `fleet-whisper` service. If it keeps
+mis-hearing your project or product names, set `WHISPER_HOTWORDS` in
+`./fleet/.env` to a plain string of those terms and restart the service:
+
+```
+WHISPER_HOTWORDS=Acme Widgets, Foobar
+```
+
+Hotwords **bias** decoding toward the listed terms — they make the model more
+likely to produce them, but do not guarantee exact spelling. Leave the variable
+unset or empty to keep the default decode behaviour. The glossary is specific to
+your deployment, so keep it in `.env` rather than committing it.
+
 ### Agent config fields
 
 Each agent entry in `seed.json` (or created via the co-CTO's `create_agent` flow) has these key fields:

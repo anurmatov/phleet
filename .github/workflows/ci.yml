@@ -29,6 +29,31 @@ jobs:
       - name: Test
         run: dotnet test --no-build --configuration Release --logger "console;verbosity=normal"
 
+  whisper-tests:
+    name: Whisper service tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        # Mirrors whisper/Dockerfile, minus faster-whisper: the tests stub the
+        # model runtime so no real model is ever loaded.
+        run: |
+          pip install \
+            fastapi==0.115.6 \
+            python-multipart==0.0.20 \
+            pytest==8.3.4
+
+      - name: Test
+        run: pytest whisper/tests -v
+
   codex-schema-drift:
     name: Codex app-server schema drift (G10)
     runs-on: ubuntu-latest

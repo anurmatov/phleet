@@ -10,6 +10,24 @@ BEAM_SIZE = 5
 LANG_PROB_THRESHOLD = 0.5
 FORCED_LANGS = ["en", "ru"]
 
+
+def resolve_hotwords(raw):
+    """Normalize the operator-supplied glossary.
+
+    Missing, empty, and whitespace-only values all mean "no glossary" and
+    return None so decoding keeps its default behavior.
+    """
+    if raw is None:
+        return None
+    return raw.strip() or None
+
+
+HOTWORDS = resolve_hotwords(os.environ.get("WHISPER_HOTWORDS"))
+
+# Extra decode arguments shared by the automatic and forced-language passes.
+# Stays empty when no glossary is configured, so the decode call is unchanged.
+HOTWORD_KWARGS = {"hotwords": HOTWORDS} if HOTWORDS else {}
+
 model: WhisperModel = None
 
 
@@ -44,7 +62,7 @@ async def transcribe(audio: UploadFile = File(...)):
             capture_output=True,
         )
 
-        segments, info = model.transcribe(tmp_wav_path, beam_size=BEAM_SIZE)
+        segments, info = model.transcribe(tmp_wav_path, beam_size=BEAM_SIZE, **HOTWORD_KWARGS)
         segments = list(segments)
 
         if info.language_probability >= LANG_PROB_THRESHOLD:
@@ -56,7 +74,9 @@ async def transcribe(audio: UploadFile = File(...)):
         best_lang = FORCED_LANGS[0]
 
         for lang in FORCED_LANGS:
-            forced_segments, _ = model.transcribe(tmp_wav_path, beam_size=BEAM_SIZE, language=lang)
+            forced_segments, _ = model.transcribe(
+                tmp_wav_path, beam_size=BEAM_SIZE, language=lang, **HOTWORD_KWARGS
+            )
             forced_segments = list(forced_segments)
             if not forced_segments:
                 continue

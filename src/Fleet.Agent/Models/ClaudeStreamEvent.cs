@@ -22,6 +22,20 @@ public sealed class ClaudeStreamEvent
     [JsonPropertyName("message")]
     public ClaudeMessage? Message { get; set; }
 
+    /// <summary>
+    /// ID of the parent tool call for subagent messages. Null identifies the primary
+    /// conversation stream; non-null messages are nested progress, not parent answers.
+    /// </summary>
+    [JsonPropertyName("parent_tool_use_id")]
+    public string? ParentToolUseId { get; set; }
+
+    /// <summary>
+    /// Provenance of the prompt that produced a result event. Results for messages sent
+    /// by this client are unattributed or have kind "human"; injected turns use another kind.
+    /// </summary>
+    [JsonPropertyName("origin")]
+    public ClaudeMessageOrigin? Origin { get; set; }
+
     /// <summary>Session ID returned in system/result events.</summary>
     [JsonPropertyName("session_id")]
     public string? SessionId { get; set; }
@@ -63,6 +77,12 @@ public sealed class ClaudeStreamEvent
     /// <summary>Raw JSON for fields we don't explicitly model.</summary>
     [JsonExtensionData]
     public Dictionary<string, object>? ExtensionData { get; set; }
+}
+
+public sealed class ClaudeMessageOrigin
+{
+    [JsonPropertyName("kind")]
+    public string Kind { get; set; } = string.Empty;
 }
 
 public sealed class ClaudeMessage

@@ -1,0 +1,8 @@
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu-background","name":"Agent","input":{"description":"synthetic background task"}}]},"parent_tool_use_id":null}
+{"type":"system","subtype":"task_started","task_id":"task-fixture","task_type":"local_agent","description":"synthetic background task"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"BACKGROUND-PROGRESS-MUST-NOT-RELAY"}]},"parent_tool_use_id":"toolu-background"}
+{"type":"system","subtype":"task_progress","task_id":"task-fixture","summary":"synthetic progress"}
+{"type":"system","subtype":"task_notification","task_id":"task-fixture","status":"completed","summary":"synthetic completion"}
+{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"fixture-session","origin":{"kind":"task-notification"},"result":"BACKGROUND-PROGRESS-MUST-NOT-RELAY"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"PARENT-FINAL-OK"}]},"parent_tool_use_id":null}
+{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"fixture-session","result":"PARENT-FINAL-OK"}

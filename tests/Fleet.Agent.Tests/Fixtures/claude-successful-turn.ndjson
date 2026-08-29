@@ -1,0 +1,2 @@
+{"type":"assistant","message":{"content":[{"type":"text","text":"RELAY-PROBE-OK"}]},"parent_tool_use_id":null}
+{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"fixture-session","result":"RELAY-PROBE-OK"}

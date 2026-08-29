@@ -165,6 +165,8 @@ public class TaskManagerInboxCoalescingTests
         var counter = new InjectionOutcomeCounter();
         var sink = Substitute.For<IMessageSink>();
         var manager = BuildManager(executor, sink, counter);
+        var completed = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        manager.OnTaskCompleted += (_, text, _, _, _, _, _, _) => completed.TrySetResult(text);
 
         var idle = WaitForIdle(manager, 123L);
         _ = manager.StartTask(123L, "question-one", "question-one", isSessionTask: true);
@@ -179,6 +181,9 @@ public class TaskManagerInboxCoalescingTests
         // Both answers must reach the sink — not just the last one.
         await sink.Received(1).SendTextAsync(123L, Arg.Is<string>(s => s.Contains("question-one")));
         await sink.Received(1).SendTextAsync(123L, Arg.Is<string>(s => s.Contains("question-two")));
+
+        // The relay callback keeps both distinct logical turns once each and in order.
+        Assert.Equal("question-one\nquestion-two", await completed.Task.WaitAsync(TimeSpan.FromSeconds(5)));
     }
 
     [Fact]

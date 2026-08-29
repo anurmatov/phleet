@@ -728,17 +728,19 @@ public sealed class GroupBehavior
 
     public string BuildGroupTask(long chatId, string sender, string taskText,
         string? replyToUsername = null, string? replyToText = null, long telegramMessageId = 0,
-        string? chatTitle = null)
+        string? chatTitle = null, bool isVoiceTranscription = false)
     {
         var buffer = GetGroupBuffer(chatId);
         // Store title on first encounter (don't overwrite once set)
         if (chatTitle is not null && buffer.ChatTitle is null)
             buffer.ChatTitle = chatTitle;
-        return _prompts.ForGroupMessage(buffer, sender, taskText, replyToUsername, replyToText, telegramMessageId);
+        return _prompts.ForGroupMessage(buffer, sender, taskText, replyToUsername, replyToText,
+            telegramMessageId, isVoiceTranscription);
     }
 
     public string BuildDmTask(long chatId, string taskText, string? replyToText = null,
-        long telegramMessageId = 0, string? chatUsername = null, string? chatFirstName = null)
+        long telegramMessageId = 0, string? chatUsername = null, string? chatFirstName = null,
+        bool isVoiceTranscription = false)
     {
         var buffer = GetGroupBuffer(chatId);
         // Build and cache the DM label on first encounter
@@ -749,7 +751,7 @@ public sealed class GroupBehavior
             else if (chatFirstName is { Length: > 0 })
                 buffer.ChatLabel = $"name=\"{chatFirstName.Replace("\"", "\\\"")}\"";
         }
-        return _prompts.ForDm(buffer, taskText, replyToText, telegramMessageId);
+        return _prompts.ForDm(buffer, taskText, replyToText, telegramMessageId, isVoiceTranscription);
     }
 
     // --- Welcome DM on approval ---

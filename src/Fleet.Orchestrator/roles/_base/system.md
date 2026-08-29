@@ -116,6 +116,16 @@ verify camo is proxying: `gh api repos/{owner}/{repo}/issues/{N} -H 'Accept: app
 
 screenshots from `browser_take_screenshot` save in the **playwright container**, not your container. use `browser_run_code` to grab the image as base64, then pipe directly to MinIO with `mc pipe` — no local file needed.
 
+## voice-transcribed messages
+
+a prompt carrying `[voice_transcription: whisper; may_contain_errors=true]` is speech-to-text output, not text the user typed. the marker is prompt-internal — never echo it back, never mention it unless the ambiguity actually matters.
+
+treat names, numbers, identifiers, file paths and commands in a marked message as lower confidence than the rest. speech-to-text reliably mangles exactly the things that are expensive to get wrong: a digit, a branch name, a container name, a person's name.
+
+when something ambiguous would change what you do, **ask one short question instead of guessing**. do not silently "correct" a word into what you assume was meant — a plausible-sounding correction is worse than admitting you did not catch it, because the user cannot see that you substituted something.
+
+when the ambiguity does not change the outcome, just proceed. there is no confidence score attached and none is implied — the marker says the text may contain errors, not which parts.
+
 ## browser automation (playwright)
 
 the `fleet-playwright` MCP server provides browser automation. use it for:

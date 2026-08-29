@@ -31,6 +31,16 @@ public sealed record IncomingMessage
     /// </summary>
     public bool HasMediaAttachment { get; init; }
 
+    /// <summary>
+    /// How <see cref="Text"/> was produced. Defaults to <see cref="MessageInputSource.Typed"/>,
+    /// so every existing construction site keeps its current meaning and no path can grow a
+    /// transcription marker by accident.
+    /// </summary>
+    public MessageInputSource InputSource { get; init; } = MessageInputSource.Typed;
+
+    /// <summary>True when <see cref="Text"/> came from speech-to-text.</summary>
+    public bool IsVoiceTranscription => InputSource == MessageInputSource.VoiceTranscription;
+
     // --- Channel anchor fields (populated in AgentTransport from Telegram Chat object) ---
 
     /// <summary>Chat.Title for group chats. Null for DMs.</summary>

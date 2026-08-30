@@ -99,17 +99,18 @@ fi
 echo -n "$PRIMARY_TOKEN" > "$AUTH_STATE_DIR/.github-token-primary"
 echo "[gh-auth] Primary account: $PRIMARY_ACCOUNT"
 
-# Install a transparent gh wrapper (idempotent — only runs on first startup, not on cron refreshes).
+# Install or refresh a transparent gh wrapper.
 # The wrapper routes GH_TOKEN to the correct per-account token file based on --repo or git remote owner,
-# so all gh commands work across multiple accounts without any manual GH_TOKEN overrides.
+# and restores Git credential routing after gh commands that replace credential helpers.
 GH_BIN=$(command -v gh)
 GH_REAL="${GH_BIN%/*}/gh-real"
 if [ ! -f "$GH_REAL" ]; then
     mv "$GH_BIN" "$GH_REAL"
-    cat > "$GH_BIN" << 'GHWRAPPER'
+fi
+cat > "$GH_BIN" << 'GHWRAPPER'
 #!/bin/bash
 # Transparent gh wrapper — routes GH_TOKEN per repo owner so all GitHub App accounts work transparently.
-# Installed by gh-auth.sh on first startup. Real gh binary is at gh-real in the same directory.
+# Managed by gh-auth.sh. Real gh binary is at gh-real in the same directory.
 
 OWNER=""
 PREV=""
@@ -132,11 +133,20 @@ if [ -z "$OWNER" ] || [ ! -f "$TOKEN_FILE" ]; then
     TOKEN_FILE="$AUTH_STATE_DIR/.github-token-primary"
 fi
 
+# gh auth login and gh auth setup-git both replace the Git credential helper
+# list. Always restore per-owner routing after either command, even on failure.
+if [ "${1:-}" = "auth" ] && \
+    { [ "${2:-}" = "login" ] || [ "${2:-}" = "setup-git" ]; }; then
+    env GH_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)" "$(dirname "$0")/gh-real" "$@"
+    STATUS=$?
+    "$AUTH_STATE_DIR/.github-credential-configure.sh" || exit $?
+    exit "$STATUS"
+fi
+
 exec env GH_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)" "$(dirname "$0")/gh-real" "$@"
 GHWRAPPER
-    chmod +x "$GH_BIN"
-    echo "[gh-auth] Installed transparent gh wrapper at $GH_BIN"
-fi
+chmod +x "$GH_BIN"
+echo "[gh-auth] Installed transparent gh wrapper at $GH_BIN"
 
 # Write a credential helper that routes git HTTPS auth by repo owner.
 # Git passes protocol=https, host=github.com, path=owner/repo.git on stdin.
@@ -168,6 +178,22 @@ echo "password=$(cat "$TOKEN_FILE")"
 HELPER
 chmod +x "$HELPER_PATH"
 
+CONFIGURE_HELPER_PATH="$AUTH_STATE_DIR/.github-credential-configure.sh"
+cat > "$CONFIGURE_HELPER_PATH" << 'CONFIGURE_HELPER'
+#!/bin/bash
+set -euo pipefail
+
+AUTH_STATE_DIR="${GH_AUTH_STATE_DIR:-/tmp}"
+HELPER_PATH="$AUTH_STATE_DIR/.github-credential-helper.sh"
+
+# Scoped entries written by gh reset the general helper list, so remove them
+# before making the per-owner helper authoritative again.
+git config --global --unset-all credential.https://github.com.helper || true
+git config --global credential.useHttpPath true
+git config --global credential.helper "!$HELPER_PATH"
+CONFIGURE_HELPER
+chmod +x "$CONFIGURE_HELPER_PATH"
+
 # Auth gh CLI with the primary token — retry up to 3 times with 5s delay
 GH_AUTH_OK=0
 for attempt in 1 2 3; do
@@ -183,11 +209,7 @@ if [ "$GH_AUTH_OK" -eq 0 ]; then
     exit 1
 fi
 
-# gh auth login writes credential.https://github.com.helper entries that reset
-# the general helper list. Remove those scoped entries, then install per-owner
-# routing as the final authoritative Git configuration on startup and refresh.
-git config --global --unset-all credential.https://github.com.helper || true
-git config --global credential.useHttpPath true
-git config --global credential.helper "!$HELPER_PATH"
+# Make per-owner routing authoritative after startup and each scheduled refresh.
+"$CONFIGURE_HELPER_PATH"
 
 echo "[gh-auth] Authenticated, primary token expires $PRIMARY_EXPIRES"

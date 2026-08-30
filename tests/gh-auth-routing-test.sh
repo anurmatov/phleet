@@ -54,14 +54,17 @@ cat > "$TEST_ROOT/bin/gh" <<'GH_STUB'
 #!/bin/bash
 set -euo pipefail
 
-if [ "${1:-}" = "auth" ] && [ "${2:-}" = "login" ]; then
-    cat >/dev/null
-    # Reproduce the configuration written by gh auth login: the empty scoped
-    # helper resets the general helper list, then gh's helper becomes authoritative.
+if [ "${1:-}" = "auth" ] && \
+    { [ "${2:-}" = "login" ] || [ "${2:-}" = "setup-git" ]; }; then
+    if [ "${2:-}" = "login" ]; then
+        cat >/dev/null
+    fi
+    # Reproduce the configuration written by gh auth login/setup-git: the empty
+    # scoped helper resets the general list, then gh's helper becomes authoritative.
     git config --global --add credential.https://github.com.helper ''
     git config --global --add credential.https://github.com.helper \
         '!/usr/bin/gh-real auth git-credential'
-    echo "auth-login" >> "$GH_STUB_LOG"
+    echo "auth-${2:-}" >> "$GH_STUB_LOG"
     exit 0
 fi
 
@@ -117,20 +120,28 @@ assert_routing() {
 # First call models container startup.
 bash "$REPO_ROOT/gh-auth.sh" >"$TEST_ROOT/startup.log" 2>&1
 assert_routing 1
+gh auth setup-git >"$TEST_ROOT/setup-startup.log" 2>&1
+assert_routing 1
 
 # The cron refresh calls the same script. Tokens rotate, gh auth login writes the
 # scoped helpers again, and routing must still use the newly issued owner tokens.
 bash "$REPO_ROOT/gh-auth.sh" >"$TEST_ROOT/refresh.log" 2>&1
 assert_routing 2
+gh auth setup-git >"$TEST_ROOT/setup-refresh.log" 2>&1
+assert_routing 2
 
 [ "$(grep -c '^auth-login$' "$GH_STUB_LOG")" -eq 2 ] || \
     fail "gh auth login was not exercised on startup and refresh"
-[ "$(grep -c '^route-owner-a$' "$GH_STUB_LOG")" -eq 2 ] || \
+[ "$(grep -c '^auth-setup-git$' "$GH_STUB_LOG")" -eq 2 ] || \
+    fail "post-startup gh auth setup-git was not exercised"
+[ "$(grep -c '^route-owner-a$' "$GH_STUB_LOG")" -eq 4 ] || \
     fail "gh CLI owner A routing changed"
-[ "$(grep -c '^route-owner-b$' "$GH_STUB_LOG")" -eq 2 ] || \
+[ "$(grep -c '^route-owner-b$' "$GH_STUB_LOG")" -eq 4 ] || \
     fail "gh CLI owner B routing changed"
 
-if grep -Fq 'test-token-owner-' "$TEST_ROOT/startup.log" "$TEST_ROOT/refresh.log"; then
+if grep -Fq 'test-token-owner-' \
+    "$TEST_ROOT/startup.log" "$TEST_ROOT/setup-startup.log" \
+    "$TEST_ROOT/refresh.log" "$TEST_ROOT/setup-refresh.log"; then
     fail "a token value was printed in gh-auth output"
 fi
 

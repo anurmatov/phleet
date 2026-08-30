@@ -2,16 +2,18 @@
 set -euo pipefail
 
 APP_ID="${GITHUB_APP_ID_OVERRIDE:-${GITHUB_APP_ID:-}}"
+AUTH_STATE_DIR="${GH_AUTH_STATE_DIR:-/tmp}"
+mkdir -p "$AUTH_STATE_DIR"
+PEM_FILE="$AUTH_STATE_DIR/github-app-key.pem"
 
-# Ensure PEM is available at /tmp/github-app-key.pem (handles cron re-runs)
-if [ ! -f /tmp/github-app-key.pem ]; then
+# Ensure PEM is available in the auth state directory (handles cron re-runs)
+if [ ! -f "$PEM_FILE" ]; then
     PEM_B64="${GITHUB_APP_PEM_OVERRIDE:-${GITHUB_APP_PEM:-}}"
     if [ -n "$PEM_B64" ]; then
-        echo "$PEM_B64" | base64 -d > /tmp/github-app-key.pem
-        chmod 600 /tmp/github-app-key.pem
+        echo "$PEM_B64" | base64 -d > "$PEM_FILE"
+        chmod 600 "$PEM_FILE"
     fi
 fi
-PEM_FILE=/tmp/github-app-key.pem
 
 if [ -z "$APP_ID" ] || [ ! -f "$PEM_FILE" ]; then
     echo "[gh-auth] GitHub App credentials not found, skipping"
@@ -50,9 +52,9 @@ if [ -z "$INSTALLATIONS" ]; then
     exit 1
 fi
 
-# Get a token for each installation; store as /tmp/.github-token-{account_login}.
+# Get a token for each installation; store as $AUTH_STATE_DIR/.github-token-{account_login}.
 # First org token (or first personal if no org) becomes the primary for gh CLI.
-rm -f /tmp/.github-token-*
+rm -f "$AUTH_STATE_DIR"/.github-token-*
 PRIMARY_TOKEN=""
 PRIMARY_EXPIRES=""
 PRIMARY_ACCOUNT=""
@@ -74,7 +76,7 @@ while IFS=' ' read -r INSTALL_ID ACCOUNT_LOGIN ACCOUNT_TYPE; do
     echo "[gh-auth] Got token for $ACCOUNT_LOGIN ($ACCOUNT_TYPE, installation $INSTALL_ID, expires $EXPIRES)"
 
     # Store per-account token file
-    echo -n "$TOKEN" > "/tmp/.github-token-${ACCOUNT_LOGIN}"
+    echo -n "$TOKEN" > "$AUTH_STATE_DIR/.github-token-${ACCOUNT_LOGIN}"
 
     # Org token always becomes primary (overwrites personal if set first).
     # Personal token only sets primary if no token has been selected yet.
@@ -94,7 +96,7 @@ if [ -z "$PRIMARY_TOKEN" ]; then
     exit 1
 fi
 
-echo -n "$PRIMARY_TOKEN" > /tmp/.github-token-primary
+echo -n "$PRIMARY_TOKEN" > "$AUTH_STATE_DIR/.github-token-primary"
 echo "[gh-auth] Primary account: $PRIMARY_ACCOUNT"
 
 # Install a transparent gh wrapper (idempotent — only runs on first startup, not on cron refreshes).
@@ -124,9 +126,10 @@ if [ -z "$OWNER" ]; then
     OWNER=$(echo "$REMOTE" | sed -n 's|.*github\.com[:/]\([^/]*\)/.*|\1|p')
 fi
 
-TOKEN_FILE="/tmp/.github-token-${OWNER}"
+AUTH_STATE_DIR="${GH_AUTH_STATE_DIR:-/tmp}"
+TOKEN_FILE="$AUTH_STATE_DIR/.github-token-${OWNER}"
 if [ -z "$OWNER" ] || [ ! -f "$TOKEN_FILE" ]; then
-    TOKEN_FILE="/tmp/.github-token-primary"
+    TOKEN_FILE="$AUTH_STATE_DIR/.github-token-primary"
 fi
 
 exec env GH_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)" "$(dirname "$0")/gh-real" "$@"
@@ -137,11 +140,9 @@ fi
 
 # Write a credential helper that routes git HTTPS auth by repo owner.
 # Git passes protocol=https, host=github.com, path=owner/repo.git on stdin.
-# We look up /tmp/.github-token-{owner}; fall back to primary if not found.
-# Set up before gh auth login so git works even if gh CLI auth fails.
-git config --global credential.useHttpPath true
-
-cat > /tmp/.github-credential-helper.sh << 'HELPER'
+# We look up $AUTH_STATE_DIR/.github-token-{owner}; fall back to primary if not found.
+HELPER_PATH="$AUTH_STATE_DIR/.github-credential-helper.sh"
+cat > "$HELPER_PATH" << 'HELPER'
 #!/bin/bash
 # Called by git with the request on stdin: protocol=https, host=github.com, path=owner/repo.git
 while IFS='=' read -r key value; do
@@ -152,9 +153,10 @@ done
 
 # Extract owner from path (e.g. "your-org/your-repo.git" -> "your-org")
 OWNER=$(echo "${req_path:-}" | cut -d'/' -f1)
-TOKEN_FILE="/tmp/.github-token-${OWNER}"
+AUTH_STATE_DIR="${GH_AUTH_STATE_DIR:-/tmp}"
+TOKEN_FILE="$AUTH_STATE_DIR/.github-token-${OWNER}"
 if [ -z "$OWNER" ] || [ ! -f "$TOKEN_FILE" ]; then
-    TOKEN_FILE="/tmp/.github-token-primary"
+    TOKEN_FILE="$AUTH_STATE_DIR/.github-token-primary"
 fi
 
 if [ ! -f "$TOKEN_FILE" ]; then
@@ -164,9 +166,7 @@ fi
 echo "username=x-access-token"
 echo "password=$(cat "$TOKEN_FILE")"
 HELPER
-chmod +x /tmp/.github-credential-helper.sh
-
-git config --global credential.helper '!/tmp/.github-credential-helper.sh'
+chmod +x "$HELPER_PATH"
 
 # Auth gh CLI with the primary token — retry up to 3 times with 5s delay
 GH_AUTH_OK=0
@@ -182,5 +182,12 @@ if [ "$GH_AUTH_OK" -eq 0 ]; then
     echo "[gh-auth] ERROR: gh auth login failed after 3 attempts"
     exit 1
 fi
+
+# gh auth login writes credential.https://github.com.helper entries that reset
+# the general helper list. Remove those scoped entries, then install per-owner
+# routing as the final authoritative Git configuration on startup and refresh.
+git config --global --unset-all credential.https://github.com.helper || true
+git config --global credential.useHttpPath true
+git config --global credential.helper "!$HELPER_PATH"
 
 echo "[gh-auth] Authenticated, primary token expires $PRIMARY_EXPIRES"

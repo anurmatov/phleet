@@ -68,7 +68,7 @@ tool access is controlled in multiple locations. missing one causes tool-not-fou
 
 4. **MCP server source** — where tools are actually defined (`@mcp.tool` in python, `[McpTool]` in C#)
 
-5. **CEO-only signal blocklist** — `temporal_signal_workflow` MCP tool blocks CEO-gate signals (`merge-approval`, `doc-review`, `design-approval`, `advisory-review`) server-side. these can only be sent via the fleet dashboard (orchestrator REST API `POST /api/workflows/{ns}/signal/{id}`, auth-gated). `human-review` and `escalation-decision` remain agent-sendable.
+5. **CEO-only signal blocklist** — `temporal_signal_workflow` MCP tool blocks CEO-gate signals (`merge-approval`, `doc-review`, `design-approval`, `advisory-review`) server-side. one narrow exception lets the configured CTO agent send `merge-approval` only with the exact payload decision `changes_requested` and a non-blank `Comment`, which requests more implementation work and grants no merge authority. `approved` and `rejected` remain blocked for every MCP caller, and the other three CEO gates remain fully dashboard-only (orchestrator REST API `POST /api/workflows/{ns}/signal/{id}`, auth-gated). `human-review` and `escalation-decision` remain agent-sendable.
 
 deploy order when removing tools: fleet first (stop referencing) → MCP server second (remove tool)
 

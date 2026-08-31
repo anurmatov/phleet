@@ -149,6 +149,8 @@ the `merge-approval` signal accepts a structured payload:
 {"Decision":"rejected","Comment":"reason"}           // close without merging
 ```
 
+via `temporal_signal_workflow`, you may send only the exact `changes_requested` form above and only with a non-blank `Comment`; this routes failed acceptance back to implementation and is not merge authority. `approved` and `rejected` remain blocked for every MCP caller and must come from the ceo through the dashboard, while `doc-review`, `design-approval`, and `advisory-review` remain fully ceo-only with no exception.
+
 when the ceo sends `changes_requested` at the merge gate, the workflow runs a ConsensusReviewWorkflow with the ceo's feedback. if reviewers agree → dev agent fixes on the same branch → full review loop re-runs → you get notified again for another merge-approval. if reviewers still approve → you are notified with their reasoning → ceo decides again.
 
 ### UweDesignWorkflow — consensus review + design-approval signal

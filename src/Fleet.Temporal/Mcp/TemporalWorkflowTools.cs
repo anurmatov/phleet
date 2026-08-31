@@ -1,19 +1,27 @@
 using System.ComponentModel;
 using System.Text;
 using System.Text.Json;
+using Fleet.Temporal.Configuration;
 using ModelContextProtocol.Server;
 using Temporalio.Client;
 
 namespace Fleet.Temporal.Mcp;
 
 [McpServerToolType]
-public sealed class TemporalWorkflowTools(TemporalClientFactory clientFactory, WorkflowTypeRegistry registry)
+public sealed class TemporalWorkflowTools(
+    ITemporalClientFactory clientFactory,
+    WorkflowTypeRegistry registry,
+    CtoAgentConfigService ctoAgentConfig,
+    IHttpContextAccessor httpContextAccessor,
+    ILogger<TemporalWorkflowTools> logger)
 {
     private const string DefaultNamespace = "fleet";
+    private const string MergeApprovalSignal = "merge-approval";
+    private const string ChangesRequestedDecision = "changes_requested";
 
     /// <summary>
-    /// Signals that are exclusively for CEO approval and must never be sent by agents via the MCP tool.
-    /// These gates must go through the fleet dashboard (orchestrator REST API), which is auth-gated.
+    /// Signals that are exclusively for CEO approval, apart from the narrow CTO changes-requested exception.
+    /// All other uses of these gates must go through the fleet dashboard (orchestrator REST API), which is auth-gated.
     /// </summary>
     private static readonly HashSet<string> CeoOnlySignals = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -164,13 +172,82 @@ public sealed class TemporalWorkflowTools(TemporalClientFactory clientFactory, W
         "(2) 'escalation-decision' — {\"Decision\":\"retry|skip|continue\",\"UpdatedInstruction\":\"...\"}. " +
         "IMPORTANT — CEO-only signals are BLOCKED and cannot be sent via this tool: " +
         "'merge-approval', 'doc-review', 'design-approval', 'advisory-review'. " +
-        "These gates must be sent from the fleet dashboard by the CEO.")]
+        "The only exception is 'merge-approval' with Decision exactly 'changes_requested' and a nonblank Comment, sent by the currently configured CTO agent resolved from the MCP request. " +
+        "Approval and rejection decisions remain CEO-only. All other CEO-only gates must be sent from the fleet dashboard by the CEO.")]
     public async Task<string> SignalWorkflowAsync(
         [Description("Workflow ID to signal")] string workflow_id,
         [Description("Signal name (e.g. human-review, merge-approval)")] string signal_name,
-        [Description("Signal payload as a JSON object string. For 'human-review': {\"Decision\":\"approved\"} or {\"Decision\":\"changes_requested\",\"Comment\":\"your feedback\"}. For 'merge-approval': omit or pass null.")] string? args = null,
+        [Description("Signal payload as a JSON object string. For 'human-review': {\"Decision\":\"approved\"} or {\"Decision\":\"changes_requested\",\"Comment\":\"your feedback\"}. For the CTO 'merge-approval' exception: {\"Decision\":\"changes_requested\",\"Comment\":\"required feedback\"}.")] string? args = null,
         [Description("Temporal namespace. Default: fleet.")] string @namespace = DefaultNamespace)
     {
+        if (string.Equals(signal_name, MergeApprovalSignal, StringComparison.OrdinalIgnoreCase))
+        {
+            var caller = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+            var configuredCto = ctoAgentConfig.GetCtoAgent();
+            JsonElement? argsElement = null;
+
+            if (!string.IsNullOrWhiteSpace(args))
+            {
+                try
+                {
+                    argsElement = JsonSerializer.Deserialize<JsonElement>(args);
+                }
+                catch (JsonException ex)
+                {
+                    LogBlockedMergeApproval(workflow_id, signal_name, "unavailable", caller);
+                    return $"Error: invalid JSON in args — {ex.Message}";
+                }
+            }
+
+            var decision = GetStringProperty(argsElement, "Decision");
+            string? blockReason = null;
+
+            if (string.IsNullOrWhiteSpace(configuredCto))
+                blockReason = "the configured CTO agent is not configured";
+            else if (string.IsNullOrWhiteSpace(caller))
+                blockReason = "the caller identity is unresolved";
+            else if (!string.Equals(caller, configuredCto, StringComparison.OrdinalIgnoreCase))
+                blockReason = "the caller is not the configured CTO agent";
+            else if (argsElement is not { ValueKind: JsonValueKind.Object })
+                blockReason = "the payload must be a JSON object";
+            // This comparison is deliberately case-sensitive. Widening it would expand the CEO-only exception.
+            else if (!string.Equals(decision, ChangesRequestedDecision, StringComparison.Ordinal))
+                blockReason = $"Decision must be exactly '{ChangesRequestedDecision}'";
+            else if (string.IsNullOrWhiteSpace(GetStringProperty(argsElement, "Comment")))
+                blockReason = "Comment must be a nonblank string";
+
+            if (blockReason is not null)
+            {
+                LogBlockedMergeApproval(workflow_id, signal_name, decision, caller);
+                return $"Error: '{MergeApprovalSignal}' remains a CEO-only gate because {blockReason}. " +
+                       $"Only the configured CTO agent may send Decision '{ChangesRequestedDecision}' with a nonblank Comment via this tool.";
+            }
+
+            try
+            {
+                var client = await clientFactory.GetClientAsync(@namespace);
+                var handle = client.GetWorkflowHandle(workflow_id);
+                logger.LogInformation(
+                    "Allowed merge-approval signal for workflow {WorkflowId}; signal={Signal}; decision={Decision}; caller={Caller}",
+                    workflow_id,
+                    signal_name,
+                    decision,
+                    caller);
+                await handle.SignalAsync(MergeApprovalSignal, [argsElement.GetValueOrDefault()]);
+
+                return JsonSerializer.Serialize(new
+                {
+                    workflowId = workflow_id,
+                    signalName = MergeApprovalSignal,
+                    status = "signalled"
+                });
+            }
+            catch (Exception ex)
+            {
+                return $"Error signalling workflow: {ex.Message}";
+            }
+        }
+
         if (CeoOnlySignals.Contains(signal_name))
         {
             return $"Error: '{signal_name}' is a CEO-only gate and cannot be sent via the MCP tool. " +
@@ -209,6 +286,32 @@ public sealed class TemporalWorkflowTools(TemporalClientFactory clientFactory, W
         {
             return $"Error signalling workflow: {ex.Message}";
         }
+    }
+
+    private static string? GetStringProperty(JsonElement? element, string propertyName)
+    {
+        if (element is not { ValueKind: JsonValueKind.Object } value ||
+            !value.TryGetProperty(propertyName, out var property) ||
+            property.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return property.GetString();
+    }
+
+    private void LogBlockedMergeApproval(
+        string workflowId,
+        string signalName,
+        string? decision,
+        string? caller)
+    {
+        logger.LogWarning(
+            "Blocked merge-approval signal for workflow {WorkflowId}; signal={Signal}; decision={Decision}; caller={Caller}",
+            workflowId,
+            signalName,
+            decision ?? "unavailable",
+            string.IsNullOrWhiteSpace(caller) ? "unresolved" : caller);
     }
 
     [McpServerTool(Name = "temporal_cancel_workflow")]

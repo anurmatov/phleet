@@ -119,6 +119,31 @@ When bumping a provider CLI, change every occurrence of that version in the same
 - **ClaudeExecutor**: forwards all images as separate content blocks in the multi-modal Claude CLI JSON payload.
 - **CodexExecutor**: forwards images that have a persisted `FilePath` as `{type:"local_image",path}` blocks via `@openai/codex-sdk@0.118.0`'s `UserInput[]` form. Images without a `FilePath` (persistence disabled, size limit exceeded, or file swept before dispatch) are skipped with a per-batch warning. PDFs remain hint-only (`[document attachment: path]`).
 
+## Telegram Media Attachments
+
+Every Telegram message type backed by a downloadable Bot API file is persisted to
+`TelegramOptions.AttachmentDir` so agents can reach it with `Read`/Bash: photo, document,
+video, video note, audio, voice, animation, and static/animated/video stickers. Non-file
+events — locations, contacts, polls, venue shares — are not attachments.
+
+- **One pipeline**: `TelegramMediaMapper.TryMap` normalises every non-photo type to a
+  `TelegramMediaFile` descriptor, which `DocumentDownloadHelper.DownloadMediaAsync` runs
+  through the shared download, `MaxDocumentBytes` gate, safe-filename, and retention path.
+  Photos keep `DownloadPhotoAsync` because they also feed provider vision blocks.
+- **Forwarded == direct**: Telegram sends the same media payload plus `ForwardOrigin`
+  metadata, and nothing in the mapper inspects forward state, so both produce the same file.
+- **Extensions**: types with no filename (voice `.oga`, video note `.mp4`, sticker
+  `.webp`/`.tgs`/`.webm`) rely on the per-kind `DefaultExtension`. `Animation` is matched
+  before `Document` because the Bot API sets `document` alongside `animation`.
+- **Hints**: `[image attachment: …]` only for `.jpg`/`.jpeg`/`.png` (what the provider paths
+  consume); `[document attachment: …]` for `.pdf`; `[file attachment: …]` for everything else.
+- **Voice**: the file is persisted first and transcription reuses those bytes, so a voice
+  message is downloaded once. If transcription is disabled or fails, the message is still
+  delivered with the persisted file and a `(voice message)` placeholder.
+- **Failures are non-fatal**: persistence disabled, oversize, or a download error drops the
+  attachment only — the caption or placeholder still reaches the agent, and
+  `HasMediaAttachment` stays set so group media is not lost behind the mention gate.
+
 ## Code Conventions
 
 - .NET 10, C# latest features

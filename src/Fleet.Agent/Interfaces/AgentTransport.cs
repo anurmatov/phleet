@@ -46,6 +46,16 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     // that directly construct AgentTransport can substitute the helper.
     internal DocumentDownloadHelper DownloadHelper { get; set; } = null!;
 
+    /// <summary>
+    /// Allows tests to observe the <see cref="IncomingMessage"/> that OnMessage builds
+    /// without standing up the whole routing stack. Null in production, where every
+    /// message goes to <see cref="MessageRouter.HandleAsync"/>.
+    /// </summary>
+    internal Func<IncomingMessage, Task>? RouterHookForTesting { get; set; }
+
+    private Task RouteAsync(IncomingMessage msg)
+        => (RouterHookForTesting ?? _router.HandleAsync)(msg);
+
     private string _botUsername = "";
     private readonly MediaGroupBuffer _mediaGroupBuffer;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _groupSizeCapped = new();
@@ -142,12 +152,21 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     /// characters; falls back to ".bin" when no extension is present.
     /// </summary>
     internal static string ExtractSafeExtension(string? fileName)
+        => ExtractSafeExtension(fileName, ".bin");
+
+    /// <summary>
+    /// As <see cref="ExtractSafeExtension(string?)"/>, but falls back to
+    /// <paramref name="defaultExtension"/> instead of ".bin". Telegram types that carry no
+    /// filename at all — voice, video note, sticker — depend entirely on this fallback to
+    /// produce a file the agent can actually open.
+    /// </summary>
+    internal static string ExtractSafeExtension(string? fileName, string defaultExtension)
     {
         var safeName = (fileName ?? string.Empty).Replace('\\', '/');
         safeName = Path.GetFileName(safeName);
         safeName = new string(safeName.Where(c => c >= 0x20).ToArray());
         var ext = Path.GetExtension(safeName).ToLowerInvariant();
-        return string.IsNullOrEmpty(ext) || ext == "." ? ".bin" : ext;
+        return string.IsNullOrEmpty(ext) || ext == "." ? defaultExtension : ext;
     }
 
     /// <summary>
@@ -159,6 +178,16 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         ".pdf" => "application/pdf",
         ".jpg" or ".jpeg" => "image/jpeg",
         ".png" => "image/png",
+        ".gif" => "image/gif",
+        ".webp" => "image/webp",
+        ".mp4" => "video/mp4",
+        ".mov" => "video/quicktime",
+        ".webm" => "video/webm",
+        ".mp3" => "audio/mpeg",
+        ".m4a" => "audio/mp4",
+        ".oga" or ".ogg" => "audio/ogg",
+        ".wav" => "audio/wav",
+        ".tgs" => "application/gzip",
         _ => "application/octet-stream",
     };
 
@@ -663,74 +692,22 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         return $"[status: {status}]\n{result}";
     }
 
-    private async Task OnMessage(Message message, UpdateType type)
+    internal async Task OnMessage(Message message, UpdateType type)
     {
         if (type != UpdateType.Message) return;
 
-        // Support text messages and media messages (with optional caption)
+        // Support text messages and media messages (with optional caption).
+        // Every file-backed type except photo is normalised to a single descriptor so one
+        // download / size-gate / persist / retention path serves documents, video, video
+        // notes, audio, voice, animations and stickers. Forwarded messages carry the same
+        // media payload plus ForwardOrigin metadata, so they map identically to direct ones.
         var isPhoto = message.Photo is { Length: > 0 };
-        var isVoice = message.Voice is not null;
-        var isAudio = message.Audio is not null;
-        var isVideo = message.Video is not null;
-        var isVideoNote = message.VideoNote is not null;
-        var isDocument = message.Document is not null;
-        var isMediaAttachment = isPhoto || isVoice || isAudio || isVideo || isVideoNote || isDocument;
+        var media = TelegramMediaMapper.TryMap(message);
+        var isVoice = media?.Kind == TelegramMediaKind.Voice;
+        var isMediaAttachment = isPhoto || media is not null;
         var text = message.Text ?? message.Caption ?? "";
 
-        // Set only when speech-to-text actually returned a transcript. A voice message that
-        // failed to transcribe, or arrived while the service is disabled, must NOT be marked
-        // — a false marker would tell the agent to distrust text the user actually typed.
-        var inputSource = MessageInputSource.Typed;
-
-        // Transcribe voice messages if the whisper service is configured
-        if (isVoice && _voiceTranscription.IsEnabled)
-        {
-            // Immediate feedback — let user know we received the voice message
-            await _bot!.SendChatAction(message.Chat.Id, ChatAction.Typing);
-
-            try
-            {
-                using var ms = new System.IO.MemoryStream();
-                await _bot!.GetInfoAndDownloadFile(message.Voice!.FileId, ms);
-                var audioBytes = ms.ToArray();
-                var transcribed = await _voiceTranscription.TranscribeAsync(audioBytes, "voice.ogg");
-                if (transcribed is not null)
-                {
-                    text = transcribed;
-                    inputSource = MessageInputSource.VoiceTranscription;
-                    _logger.LogInformation("Voice message transcribed ({Chars} chars) from {Sender}",
-                        text.Length, message.From?.Username ?? "unknown");
-
-                    // Echo transcription back so user can verify whisper got it right
-                    await _bot!.SendMessage(
-                        message.Chat.Id,
-                        $"🎤 {transcribed}",
-                        replyParameters: new Telegram.Bot.Types.ReplyParameters { MessageId = message.MessageId });
-                }
-                else
-                {
-                    _logger.LogWarning("Voice transcription returned null for message from {Sender}", message.From?.Username);
-                    return;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to process voice message from {Sender}", message.From?.Username);
-                return;
-            }
-        }
-        else if (!isMediaAttachment && string.IsNullOrEmpty(message.Text)) return;
-
-        // For non-photo media with no caption, synthesize a readable placeholder so the
-        // agent receives a meaningful description of what was shared.
-        if (string.IsNullOrEmpty(text) && isMediaAttachment)
-        {
-            if (isAudio) text = "(audio message)";
-            else if (isVideoNote) text = "(video note)";
-            else if (isVideo) text = "(video message)";
-            else if (isDocument) text = message.Document!.FileName is { } fn ? $"(document: {fn})" : "(document)";
-            else if (isVoice) text = "(voice message)";
-        }
+        if (!isMediaAttachment && string.IsNullOrEmpty(message.Text)) return;
 
         // TTS trigger: /tts command as a reply to any message → synthesize and send replied-to message as voice
         if (_tts.IsEnabled && !isVoice
@@ -768,6 +745,82 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         var chatId = message.Chat.Id;
         var isGroupChat = message.Chat.Type is ChatType.Group or ChatType.Supergroup;
 
+        // Download photo if present (largest available size, with size check and one retry)
+        MessageImage? downloadedImage = null;
+        if (isPhoto)
+        {
+            var largest = message.Photo!.OrderByDescending(p => p.FileSize ?? 0).First();
+            downloadedImage = await DownloadPhotoAsync(largest, chatId, message.MessageId, photoIndex: 1);
+        }
+
+        // Download any file-backed media through the shared attachment pipeline. A null
+        // result (persistence off, oversize, or download failure) is never fatal — the
+        // message still reaches the agent with its caption or placeholder below.
+        MediaDownloadResult? downloadedMedia = null;
+        if (media is not null)
+            downloadedMedia = await DownloadHelper.DownloadMediaAsync(media, chatId, message.MessageId, index: 1);
+
+        var downloadedDocument = downloadedMedia?.Document;
+
+        // Set only when speech-to-text actually returned a transcript. A voice message that
+        // failed to transcribe, or arrived while the service is disabled, must NOT be marked
+        // — a false marker would tell the agent to distrust text the user actually typed.
+        var inputSource = MessageInputSource.Typed;
+
+        // Transcribe voice messages if the whisper service is configured
+        if (isVoice && _voiceTranscription.IsEnabled)
+        {
+            try
+            {
+                // Immediate feedback — let user know we received the voice message
+                await _bot!.SendChatAction(chatId, ChatAction.Typing);
+
+                // Reuse the bytes the attachment pipeline already fetched. Only fetch
+                // separately when persistence is off; a file the pipeline rejected as
+                // oversize or failed to download must not be re-fetched here.
+                var audioBytes = downloadedMedia?.Bytes;
+                if (audioBytes is null && !_telegramConfig.PersistAttachments)
+                {
+                    using var ms = new System.IO.MemoryStream();
+                    await _bot!.GetInfoAndDownloadFile(media!.FileId, ms);
+                    audioBytes = ms.ToArray();
+                }
+
+                var transcribed = audioBytes is null
+                    ? null
+                    : await _voiceTranscription.TranscribeAsync(audioBytes, "voice.ogg");
+
+                if (transcribed is not null)
+                {
+                    text = transcribed;
+                    inputSource = MessageInputSource.VoiceTranscription;
+                    _logger.LogInformation("Voice message transcribed ({Chars} chars) from {Sender}",
+                        text.Length, message.From?.Username ?? "unknown");
+
+                    // Echo transcription back so user can verify whisper got it right
+                    await _bot!.SendMessage(
+                        chatId,
+                        $"🎤 {transcribed}",
+                        replyParameters: new Telegram.Bot.Types.ReplyParameters { MessageId = message.MessageId });
+                }
+                else
+                {
+                    // Transcription unavailable — fall through so the persisted voice file
+                    // and a readable placeholder still reach the agent.
+                    _logger.LogWarning("Voice transcription returned no text for message from {Sender}", message.From?.Username);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to transcribe voice message from {Sender}", message.From?.Username);
+            }
+        }
+
+        // For non-photo media with no caption, synthesize a readable placeholder so the
+        // agent receives a meaningful description of what was shared.
+        if (string.IsNullOrEmpty(text) && media is not null)
+            text = TelegramMediaMapper.DescribePlaceholder(media, message.Sticker?.Emoji);
+
         var isMentioned = _botUsername.Length > 0
             && text.Contains($"@{_botUsername}", StringComparison.OrdinalIgnoreCase);
         var isReplyToMe = message.ReplyToMessage?.From?.Username is { } replyUser
@@ -782,21 +835,6 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         var sender = message.From?.Username is { } u ? $"@{u}" : message.From?.FirstName ?? "Unknown";
         var replyToUsername = message.ReplyToMessage?.From?.Username is { } ru ? $"@{ru}" : null;
         var replyToText = message.ReplyToMessage?.Text ?? message.ReplyToMessage?.Caption;
-
-        // Download photo if present (largest available size, with size check and one retry)
-        MessageImage? downloadedImage = null;
-        if (isPhoto)
-        {
-            var largest = message.Photo!.OrderByDescending(p => p.FileSize ?? 0).First();
-            downloadedImage = await DownloadPhotoAsync(largest, chatId, message.MessageId, photoIndex: 1);
-        }
-
-        // Download any document if present and persistence is enabled
-        MessageDocument? downloadedDocument = null;
-        if (isDocument)
-        {
-            downloadedDocument = await DownloadDocumentAsync(message.Document!, chatId, message.MessageId, docIndex: 1);
-        }
 
         // Build the base IncomingMessage (no images/documents yet — filled in below)
         var baseMsg = new IncomingMessage
@@ -837,7 +875,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                     var newStripped = flushedMsg.StrippedText.Length > 0 ? $"{flushedMsg.StrippedText}\n{groupHints}" : groupHints;
                     flushedMsg = flushedMsg with { Text = newText, StrippedText = newStripped };
                 }
-                await _router.HandleAsync(flushedMsg);
+                await RouteAsync(flushedMsg);
             };
 
             // TryAddPhotoWithCapAsync atomically checks and adds under the same lock.
@@ -872,7 +910,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 StrippedText = baseMsg.StrippedText.Length > 0 ? $"{baseMsg.StrippedText}\n{hints}" : hints,
             }
             : baseMsg with { Images = images, Documents = documents };
-        await _router.HandleAsync(msg);
+        await RouteAsync(msg);
     }
 
     /// <summary>
@@ -942,18 +980,6 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     }
 
 
-
-    /// <summary>
-    /// Download any Telegram document to memory (and optionally persist to disk).
-    /// Delegates to <see cref="DocumentDownloadHelper"/> which holds the
-    /// <see cref="IDocumentDownloader"/> abstraction; see that class for full details.
-    /// </summary>
-    private Task<MessageDocument?> DownloadDocumentAsync(
-        Telegram.Bot.Types.Document document,
-        long chatId,
-        long messageId,
-        int docIndex)
-        => DownloadHelper.DownloadAsync(document, chatId, messageId, docIndex);
 
     /// <summary>
     /// Dispatch wrapper used by <see cref="TelegramBotClientExtensions.StartReceiving"/> to route

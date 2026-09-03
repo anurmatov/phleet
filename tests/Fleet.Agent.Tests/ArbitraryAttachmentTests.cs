@@ -4,6 +4,7 @@ using Fleet.Agent.Interfaces;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services;
 using Microsoft.Extensions.Logging.Abstractions;
+using Telegram.Bot.Types;
 using TgDocument = Telegram.Bot.Types.Document;
 
 namespace Fleet.Agent.Tests;
@@ -241,7 +242,8 @@ public class ArbitraryAttachmentTests
             };
 
             // Exercise the download path — previously gated to PDF only
-            var result = await helper.DownloadAsync(telegramDoc, chatId: 100, messageId: 200, docIndex: 1);
+            var media = TelegramMediaMapper.TryMap(new Message { Document = telegramDoc })!;
+            var result = (await helper.DownloadMediaAsync(media, chatId: 100, messageId: 200, index: 1))?.Document;
 
             // File persisted with .json extension
             Assert.NotNull(result);
@@ -284,7 +286,8 @@ public class ArbitraryAttachmentTests
             FileSize = 101,
         };
 
-        var result = await helper.DownloadAsync(telegramDoc, chatId: 1, messageId: 1, docIndex: 1);
+        var media = TelegramMediaMapper.TryMap(new Message { Document = telegramDoc })!;
+        var result = await helper.DownloadMediaAsync(media, chatId: 1, messageId: 1, index: 1);
 
         Assert.Null(result);
         Assert.Single(sentMessages); // user got the "too large" chat message
@@ -318,7 +321,8 @@ public class ArbitraryAttachmentTests
                 FileSize = 3,
             };
 
-            var result = await helper.DownloadAsync(telegramDoc, 1, 1, 1);
+            var media = TelegramMediaMapper.TryMap(new Message { Document = telegramDoc })!;
+            var result = (await helper.DownloadMediaAsync(media, 1, 1, 1))?.Document;
 
             Assert.NotNull(result);
             // Null MIME must never resolve to "application/pdf" — would cause Anthropic 400

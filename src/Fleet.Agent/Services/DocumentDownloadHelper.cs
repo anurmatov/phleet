@@ -6,7 +6,13 @@ using Microsoft.Extensions.Logging;
 namespace Fleet.Agent.Services;
 
 /// <summary>
-/// Encapsulates the download-validate-persist logic for Telegram document attachments.
+/// The persisted attachment plus the bytes that were downloaded to produce it.
+/// Voice transcription reuses <see cref="Bytes"/> instead of fetching the same file twice.
+/// </summary>
+internal sealed record MediaDownloadResult(MessageDocument Document, byte[] Bytes);
+
+/// <summary>
+/// Encapsulates the download-validate-persist logic for Telegram file attachments.
 /// Extracted from <c>AgentTransport.DownloadDocumentAsync</c> so it can be unit-tested
 /// via a fake <see cref="IDocumentDownloader"/> without constructing the full transport.
 /// </summary>
@@ -30,41 +36,43 @@ internal sealed class DocumentDownloadHelper
     }
 
     /// <summary>
-    /// Downloads, validates, and persists a Telegram document to
-    /// <c>{AttachmentDir}/{chatId}-{messageId}-{docIndex}{ext}</c>.
-    /// Returns null when the kill switch is on, the file is oversized, or download fails.
+    /// Downloads, validates, and persists any file-backed Telegram media to
+    /// <c>{AttachmentDir}/{chatId}-{messageId}-{index}{ext}</c>, returning both the
+    /// attachment record and the downloaded bytes.
+    /// Returns null when the kill switch is on, the file is oversized, or download fails —
+    /// none of which is fatal: the caller still delivers the message's caption or placeholder.
     /// </summary>
-    internal async Task<MessageDocument?> DownloadAsync(
-        Telegram.Bot.Types.Document document,
+    internal async Task<MediaDownloadResult?> DownloadMediaAsync(
+        TelegramMediaFile media,
         long chatId,
         long messageId,
-        int docIndex,
+        int index,
         CancellationToken ct = default)
     {
         if (!_config.PersistAttachments)
             return null;
 
-        var ext = AgentTransport.ExtractSafeExtension(document.FileName);
-        var fileSize = document.FileSize ?? 0;
+        var ext = AgentTransport.ExtractSafeExtension(media.FileName, media.DefaultExtension);
+        var fileSize = media.FileSize;
 
         if (fileSize > _config.MaxDocumentBytes)
         {
             _logger.LogWarning(
-                "Document ({FileId}) pre-download size exceeds MaxDocumentBytes ({Size} > {Limit}), rejecting",
-                document.FileId, fileSize, _config.MaxDocumentBytes);
+                "{Kind} ({FileId}) pre-download size exceeds MaxDocumentBytes ({Size} > {Limit}), rejecting",
+                media.Kind, media.FileId, fileSize, _config.MaxDocumentBytes);
             await _sendText(chatId, FileTooLargeMessage(fileSize));
             return null;
         }
 
         try
         {
-            var bytes = await _downloader.DownloadAsync(document.FileId, ct);
+            var bytes = await _downloader.DownloadAsync(media.FileId, ct);
 
             if (bytes.Length > _config.MaxDocumentBytes)
             {
                 _logger.LogWarning(
-                    "Document ({FileId}) actual size exceeds MaxDocumentBytes ({Size} > {Limit}) after download, rejecting",
-                    document.FileId, bytes.Length, _config.MaxDocumentBytes);
+                    "{Kind} ({FileId}) actual size exceeds MaxDocumentBytes ({Size} > {Limit}) after download, rejecting",
+                    media.Kind, media.FileId, bytes.Length, _config.MaxDocumentBytes);
                 await _sendText(chatId, FileTooLargeMessage(bytes.Length));
                 return null;
             }
@@ -73,12 +81,12 @@ internal sealed class DocumentDownloadHelper
             try
             {
                 Directory.CreateDirectory(_config.AttachmentDir);
-                filePath = Path.Combine(_config.AttachmentDir, $"{chatId}-{messageId}-{docIndex}{ext}");
+                filePath = Path.Combine(_config.AttachmentDir, $"{chatId}-{messageId}-{index}{ext}");
                 await File.WriteAllBytesAsync(filePath, bytes, ct);
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Document #{Index}: failed to persist to disk, continuing without file path", docIndex);
+                _logger.LogWarning(ex, "{Kind} #{Index}: failed to persist to disk, continuing without file path", media.Kind, index);
                 filePath = null;
             }
 
@@ -87,18 +95,19 @@ internal sealed class DocumentDownloadHelper
 
             // Use extension-inferred MIME when Telegram omits or sends empty — never default to
             // "application/pdf" for unknown types (would cause Anthropic API 400 in ClaudeExecutor).
-            var mimeType = string.IsNullOrEmpty(document.MimeType)
+            var mimeType = string.IsNullOrEmpty(media.MimeType)
                 ? AgentTransport.InferMimeType(ext)
-                : document.MimeType;
+                : media.MimeType;
 
-            return new MessageDocument(document.FileId, mimeType, fileSize, document.FileName)
+            var document = new MessageDocument(media.FileId, mimeType, fileSize, media.FileName)
             {
                 FilePath = filePath,
             };
+            return new MediaDownloadResult(document, bytes);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Document ({FileId}) download failed, skipping", document.FileId);
+            _logger.LogWarning(ex, "{Kind} ({FileId}) download failed, skipping", media.Kind, media.FileId);
             await _sendText(chatId, "(File download failed — please try again.)");
             return null;
         }

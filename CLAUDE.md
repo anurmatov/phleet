@@ -105,7 +105,7 @@ See `docs/providers/gemini.md` for a full setup guide.
 
 The agent image pins every provider CLI explicitly in `Dockerfile`:
 
-- `@anthropic-ai/claude-code@2.1.231` — verified for stream-json mid-turn user-message delivery without a `priority` field. The Docker build checks `claude --version` and fails if npm resolves a different version.
+- `@anthropic-ai/claude-code@2.1.259` — verified for stream-json mid-turn user-message delivery without a `priority` field. The Docker build checks `claude --version` and fails if npm resolves a different version.
 - `@openai/codex@0.147.0` — must stay in lockstep with `.github/workflows/ci.yml`, which installs the same version before regenerating and diffing `protocols/codex-app-server-v2/`.
 - `@google/gemini-cli@0.40.1` — must stay in lockstep with `docs/providers/gemini.md`, which documents the host setup command and the verified headless flag set.
 

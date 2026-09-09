@@ -355,6 +355,24 @@ public sealed class GroupBehavior
             return;
         }
 
+        if (type == RelayMessageType.StatusCheck)
+        {
+            if (string.IsNullOrWhiteSpace(correlationId))
+            {
+                _logger.LogWarning("Status check from {Sender} rejected: correlationId is required", sender);
+                return;
+            }
+
+            var (status, _, _) = _taskManager.GetOrchestratorStatus();
+            _ = _relay.PublishToAgentAsync(
+                "bridge",
+                chatId,
+                status,
+                type: RelayMessageType.StatusResponse,
+                correlationId: correlationId);
+            return;
+        }
+
         if (type == RelayMessageType.BridgeRequest)
         {
             _logger.LogInformation("Bridge request from {Sender}, correlationId={CorrelationId}", sender, correlationId);

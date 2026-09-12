@@ -144,6 +144,23 @@ events — locations, contacts, polls, venue shares — are not attachments.
   attachment only — the caption or placeholder still reaches the agent, and
   `HasMediaAttachment` stays set so group media is not lost behind the mention gate.
 
+## Git and PR Output
+
+Agent-authored commit messages and PR descriptions default to **no automatic AI
+attribution** — no `Co-Authored-By` trailer naming an AI, no "generated with" footer,
+no Claude session link. Human co-authors, `Signed-off-by`, license notices, evidence
+links and existing history are untouched.
+
+Delivered two ways: a shared rule appended by `PromptBuilder.BuildSystemPrompt()` (all
+three providers, no seed or role-instruction change needed) and
+`attribution: { commit: "", pr: "", sessionUrl: false }` in the orchestrator-generated
+`settings.json` (claude provider). `sessionUrl: false` is defensive — the CLI scopes that
+link to web/Remote Control sessions. Deploy the updated orchestrator **and** agent image
+before reprovisioning agents; a plain restart does not rewrite generated settings, and the
+prompt rule takes effect at process/thread start.
+
+See `docs/no-ai-attribution.md` for scope, verification and rollout ordering.
+
 ## Code Conventions
 
 - .NET 10, C# latest features

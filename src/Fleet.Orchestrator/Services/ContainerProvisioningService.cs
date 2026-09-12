@@ -996,10 +996,12 @@ public sealed class ContainerProvisioningService(
 
         // Turn off Claude Code's native commit/PR attribution. The pinned CLI's settings
         // schema documents an empty string on `attribution.commit` / `attribution.pr` as
-        // "Empty string hides attribution", and `attribution.sessionUrl: false` as "omit
-        // the Claude-Session trailer and PR-body link" — the session link is a separate
-        // control from the attribution text, so both are needed to cover the issue's
-        // intent. `includeCoAuthoredBy` is marked deprecated by that same schema and is
+        // "Empty string hides attribution". `attribution.sessionUrl: false` omits the
+        // Claude-Session trailer and PR-body link, which is a control separate from the
+        // attribution text; that schema scopes the link to web and Remote Control
+        // sessions, so for headless agents it is defensive rather than required — it
+        // pins the behaviour regardless of how an agent is launched.
+        // `includeCoAuthoredBy` is marked deprecated by that same schema and is
         // deliberately not used.
         //
         // Only attribution is added here: `permissions.allow` above, including the

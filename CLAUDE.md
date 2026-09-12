@@ -154,8 +154,10 @@ links and existing history are untouched.
 Delivered two ways: a shared rule appended by `PromptBuilder.BuildSystemPrompt()` (all
 three providers, no seed or role-instruction change needed) and
 `attribution: { commit: "", pr: "", sessionUrl: false }` in the orchestrator-generated
-`settings.json` (claude provider). Deploy the orchestrator before reprovisioning agents —
-a plain restart does not rewrite generated settings.
+`settings.json` (claude provider). `sessionUrl: false` is defensive — the CLI scopes that
+link to web/Remote Control sessions. Deploy the updated orchestrator **and** agent image
+before reprovisioning agents; a plain restart does not rewrite generated settings, and the
+prompt rule takes effect at process/thread start.
 
 See `docs/no-ai-attribution.md` for scope, verification and rollout ordering.
 

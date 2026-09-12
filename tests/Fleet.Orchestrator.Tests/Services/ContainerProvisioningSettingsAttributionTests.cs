@@ -27,7 +27,7 @@ public class ContainerProvisioningSettingsAttributionTests
         Tools         = [.. tools.Select(t => new AgentTool { ToolName = t })],
     };
 
-    private static JsonElement Settings(Agent agent, string ctoAgentName = "acto") =>
+    private static JsonElement Settings(Agent agent, string ctoAgentName = "agent-cto") =>
         JsonDocument.Parse(ContainerProvisioningService.GenerateSettingsJson(agent, ctoAgentName))
             .RootElement.Clone();
 
@@ -40,7 +40,7 @@ public class ContainerProvisioningSettingsAttributionTests
     [Fact]
     public void GenerateSettingsJson_EmitsEmptyCommitAndPrAttribution()
     {
-        var attribution = Settings(AgentWithTools("adev", "Bash")).GetProperty("attribution");
+        var attribution = Settings(AgentWithTools("agent-one", "Bash")).GetProperty("attribution");
 
         Assert.Equal(string.Empty, attribution.GetProperty("commit").GetString());
         Assert.Equal(string.Empty, attribution.GetProperty("pr").GetString());
@@ -51,8 +51,10 @@ public class ContainerProvisioningSettingsAttributionTests
     {
         // Session links are a control separate from the commit/PR attribution text in the
         // pinned CLI's settings schema, so an empty commit/pr string alone would not cover
-        // the Claude-Session trailer or the PR-body session link.
-        var attribution = Settings(AgentWithTools("adev", "Bash")).GetProperty("attribution");
+        // the Claude-Session trailer or the PR-body session link. The schema scopes that
+        // link to web and Remote Control sessions, which headless agents are not, so this
+        // is defensive rather than required — it pins the behaviour regardless.
+        var attribution = Settings(AgentWithTools("agent-one", "Bash")).GetProperty("attribution");
 
         Assert.False(attribution.GetProperty("sessionUrl").GetBoolean());
     }
@@ -61,7 +63,7 @@ public class ContainerProvisioningSettingsAttributionTests
     public void GenerateSettingsJson_DoesNotUseDeprecatedIncludeCoAuthoredBy()
     {
         // `includeCoAuthoredBy` is marked deprecated in the pinned CLI's settings schema.
-        var settings = Settings(AgentWithTools("adev", "Bash"));
+        var settings = Settings(AgentWithTools("agent-one", "Bash"));
 
         Assert.False(settings.TryGetProperty("includeCoAuthoredBy", out _));
     }
@@ -71,7 +73,7 @@ public class ContainerProvisioningSettingsAttributionTests
     {
         // Round-trip through a typed shape: the file the agent container mounts must
         // deserialize cleanly, not merely contain the right substrings.
-        var json = ContainerProvisioningService.GenerateSettingsJson(AgentWithTools("adev", "Bash"), "acto");
+        var json = ContainerProvisioningService.GenerateSettingsJson(AgentWithTools("agent-one", "Bash"), "agent-cto");
 
         var parsed = JsonSerializer.Deserialize<SettingsShape>(
             json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
@@ -90,7 +92,7 @@ public class ContainerProvisioningSettingsAttributionTests
     [Fact]
     public void GenerateSettingsJson_PermissionContentsAndOrderingUnchanged()
     {
-        var agent = AgentWithTools("adev", "Write", "Bash", "Read");
+        var agent = AgentWithTools("agent-one", "Write", "Bash", "Read");
 
         var allow = Allow(Settings(agent));
 
@@ -110,7 +112,7 @@ public class ContainerProvisioningSettingsAttributionTests
     [Fact]
     public void GenerateSettingsJson_DisabledToolStillExcluded()
     {
-        var agent = AgentWithTools("adev", "Bash");
+        var agent = AgentWithTools("agent-one", "Bash");
         agent.Tools.Add(new AgentTool { ToolName = "Write", IsEnabled = false });
 
         Assert.DoesNotContain("Write", Allow(Settings(agent)));
@@ -120,7 +122,7 @@ public class ContainerProvisioningSettingsAttributionTests
     public void GenerateSettingsJson_CtoAgent_StillHasNoNotifyCtoAndGetsAttribution()
     {
         // The CTO self-loop guard and the attribution block are independent.
-        var settings = Settings(AgentWithTools("acto", "Bash"), "acto");
+        var settings = Settings(AgentWithTools("agent-cto", "Bash"), "agent-cto");
 
         Assert.DoesNotContain("mcp__fleet-temporal__notify_cto", Allow(settings));
         Assert.Equal(string.Empty, settings.GetProperty("attribution").GetProperty("commit").GetString());
@@ -129,7 +131,7 @@ public class ContainerProvisioningSettingsAttributionTests
     [Fact]
     public void GenerateSettingsJson_UnsetCtoAgent_SkipsNotifyCtoAndStillGetsAttribution()
     {
-        var settings = Settings(AgentWithTools("adev", "Bash"), ctoAgentName: "");
+        var settings = Settings(AgentWithTools("agent-one", "Bash"), ctoAgentName: "");
 
         Assert.DoesNotContain("mcp__fleet-temporal__notify_cto", Allow(settings));
         Assert.Equal(string.Empty, settings.GetProperty("attribution").GetProperty("pr").GetString());

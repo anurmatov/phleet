@@ -66,7 +66,9 @@ mounted read-only at `/root/.claude/settings.json`. It now emits:
   schema ("Empty string hides attribution").
 - `sessionUrl: false` — omits the `Claude-Session` trailer and the PR-body session link. This
   is a **separate control** from the attribution text, so empty `commit`/`pr` alone would not
-  cover session links.
+  cover session links. The schema scopes that link to sessions created from web or Remote
+  Control, which headless container agents are not, so this setting is **defensive rather
+  than required** — it pins the behaviour regardless of how an agent is launched.
 - `includeCoAuthoredBy` is marked deprecated by the same schema and is deliberately not used.
 
 `permissions.allow` is untouched: the same tools, the same `memory_get` / `notify_cto`
@@ -78,16 +80,21 @@ schema. If the pin moves, re-check the schema before assuming these keys still a
 
 ## Rollout ordering
 
-The two mechanisms deploy independently, and the order matters:
+The two mechanisms ship in two different artifacts, and **both must exist before an agent is
+reprovisioned** — otherwise the reprovision delivers only half the change:
 
-1. **Deploy the updated orchestrator first.** `settings.json` is written at provision time, so
-   only an orchestrator carrying this change generates the `attribution` block.
-2. **Then reprovision the affected agents.** A plain restart does not rewrite
-   `.generated/settings.json`. Rebuilding the agent image is *not* evidence that an agent's
-   generated settings changed.
-3. **Deploy the updated agent runtime** for the shared prompt rule. It ships in the agent
-   image and needs no reprovision to take effect on the next turn, but a reprovision is the
-   normal way both changes land together.
+1. **Deploy the updated orchestrator.** `settings.json` is written at provision time, so only
+   an orchestrator carrying this change generates the `attribution` block.
+2. **Build/deploy the updated agent image.** The shared prompt rule ships in the agent
+   runtime, not in generated config.
+3. **Only then reprovision the affected agents.** A plain restart does not rewrite
+   `.generated/settings.json`, and rebuilding the agent image is *not* evidence that an
+   agent's generated settings changed. Reprovision is what recreates the container on the new
+   image and regenerates the settings together.
+
+The prompt rule takes effect at **process/thread start** — `system-prompt.md` is written when
+the provider process or thread is started, not per turn — so an agent already running on an
+older image keeps its old prompt until it is recreated.
 
 Reprovisioning live agents is an operator action, separate from merging this change.
 

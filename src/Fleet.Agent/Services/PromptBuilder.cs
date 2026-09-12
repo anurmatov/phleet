@@ -148,7 +148,52 @@ public sealed class PromptBuilder(IOptions<AgentOptions> config, ILogger<PromptB
             sb.AppendLine("(mobile fences wrap rather than scroll, so long lines collapse into noise).");
         }
 
+        AppendGitAttributionPolicy(sb);
+
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Appends the shared no-AI-attribution default for new Git commit messages and
+    /// pull-request descriptions.
+    ///
+    /// It lives here — in the common prompt construction path — rather than in the
+    /// bundled <c>roles/_base/system.md</c> because role files are DB-managed and
+    /// regenerated per agent: an installation whose role file was generated before this
+    /// change would never receive the policy. Appending it unconditionally means every
+    /// agent gets it from the updated runtime, on every provider, with no seed change,
+    /// instruction assignment, project context or per-repository file.
+    ///
+    /// Delivery per provider (all three read this same assembled string):
+    ///   claude — <c>WriteSystemPromptFile()</c> → <c>--append-system-prompt-file</c>
+    ///   codex  — <c>WriteSystemPromptFile()</c> → read back → <c>thread/start.baseInstructions</c>
+    ///   gemini — <c>BuildSystemPrompt()</c> → <c>GEMINI_SYSTEM_MD</c> file
+    ///
+    /// This is a default for ordinary agent output, not an enforcement boundary: it
+    /// deliberately does not scrub generated text, and an explicit human instruction
+    /// still wins.
+    /// </summary>
+    private static void AppendGitAttributionPolicy(StringBuilder sb)
+    {
+        sb.AppendLine();
+        sb.AppendLine("## Git and Pull Request Output");
+        sb.AppendLine();
+        sb.AppendLine("New commit messages and pull request descriptions you write must not carry");
+        sb.AppendLine("automatic AI attribution. Do not add a `Co-Authored-By` trailer naming an AI");
+        sb.AppendLine("assistant or model, a \"generated with\"/\"created by\" AI footer or badge, or a");
+        sb.AppendLine("Claude session, conversation or transcript link — including in a PR body.");
+        sb.AppendLine();
+        sb.AppendLine("This is output hygiene, not concealment of provenance:");
+        sb.AppendLine();
+        sb.AppendLine("- Keep the normal Git author and committer identity. Never impersonate anyone");
+        sb.AppendLine("  or alter author metadata to disguise who made a change.");
+        sb.AppendLine("- Keep legitimate human co-authors, `Signed-off-by` trailers, license notices,");
+        sb.AppendLine("  and links to real evidence, issues, CI runs or documentation.");
+        sb.AppendLine("- Do not rewrite existing commits, edit historical pull requests, or change");
+        sb.AppendLine("  authorship acknowledgements in articles, papers or other documents.");
+        sb.AppendLine();
+        sb.AppendLine("If a human explicitly asks for attribution on a specific commit or PR, follow");
+        sb.AppendLine("that instruction. This is the default, not a prohibition.");
     }
 
     /// <summary>

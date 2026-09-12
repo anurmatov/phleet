@@ -968,7 +968,7 @@ public sealed class ContainerProvisioningService(
         return JsonSerializer.Serialize(new { mcpServers }, IndentedJson);
     }
 
-    private static string GenerateSettingsJson(Agent agent, string ctoAgentName)
+    internal static string GenerateSettingsJson(Agent agent, string ctoAgentName)
     {
         var allow = agent.Tools
             .Where(t => t.IsEnabled)
@@ -994,7 +994,24 @@ public sealed class ContainerProvisioningService(
 
         allow.Sort(StringComparer.OrdinalIgnoreCase);
 
-        return JsonSerializer.Serialize(new { permissions = new { allow } }, IndentedJson);
+        // Turn off Claude Code's native commit/PR attribution. The pinned CLI's settings
+        // schema documents an empty string on `attribution.commit` / `attribution.pr` as
+        // "Empty string hides attribution", and `attribution.sessionUrl: false` as "omit
+        // the Claude-Session trailer and PR-body link" — the session link is a separate
+        // control from the attribution text, so both are needed to cover the issue's
+        // intent. `includeCoAuthoredBy` is marked deprecated by that same schema and is
+        // deliberately not used.
+        //
+        // Only attribution is added here: `permissions.allow` above, including the
+        // memory_get and notify_cto auto-grants and the ordinal-ignore-case sort, is
+        // unchanged.
+        return JsonSerializer.Serialize(
+            new
+            {
+                permissions = new { allow },
+                attribution = new { commit = "", pr = "", sessionUrl = false },
+            },
+            IndentedJson);
     }
 
     private static string? ParseContainerPath(string bind)

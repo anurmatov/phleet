@@ -14,7 +14,16 @@ public sealed class PreviewAgentProvisionTool(ContainerProvisioningService provi
         [Description("Agent short name (e.g. my-agent)")] string agent_name)
     {
         var preview = await provisioning.PreviewAsync(agent_name);
+        return Render(preview);
+    }
 
+    /// <summary>
+    /// Renders a provision preview as markdown. Environment is rendered as key names only on
+    /// BOTH the desired and actual sides — desired specs carry resolved env-ref values (tokens,
+    /// private keys), and the return value of this tool is not a private channel.
+    /// </summary>
+    internal static string Render(ProvisionPreview preview)
+    {
         var sb = new StringBuilder();
         sb.AppendLine($"## Provision Preview: {preview.AgentName} ({preview.ContainerName})");
         sb.AppendLine();
@@ -23,8 +32,8 @@ public sealed class PreviewAgentProvisionTool(ContainerProvisioningService provi
         sb.AppendLine($"- Image: {preview.Desired.Image}");
         sb.AppendLine($"- Memory: {ContainerProvisioningService.FormatBytes(preview.Desired.MemoryBytes)}");
         sb.AppendLine($"- Networks: {string.Join(", ", preview.Desired.Networks)}");
-        sb.AppendLine("- Env:");
-        foreach (var e in preview.Desired.Env)
+        sb.AppendLine("- Env keys:");
+        foreach (var e in preview.Desired.Env.Select(ContainerProvisioningService.ParseEnvKey).Order())
             sb.AppendLine($"  - {e}");
         sb.AppendLine("- Binds:");
         foreach (var b in preview.Desired.Binds)

@@ -47,11 +47,21 @@ A mutation that fails to COMPILE has not been demonstrated: it tests the compile
 | M19 | Let `set_variable` shadow the `workflow` scope | T25 | RED |
 | M20 | Send a wakeup from a `changes_requested` branch case | T28 | RED |
 | M21 | Drop the waiter id from the chain workflow's child args | T28 chain test | RED |
+| M22 | Remove the load-time approver-gate check | reserved-signal load test | RED |
+| M23 | Remove the execution-time approver-gate check | templated-gate refusal test | RED |
+| M24 | Let `ignoreFailure` suppress the approver-gate refusal | not-suppressed test | RED |
+| M25 | Make the correlation comparison always report match | T12, driver stale-rejection test | RED |
+| M26 | Send the park notification again on resume | T1 | RED |
 
 ## Recorded run
 
-Every mutation above was applied, tested and reverted, one at a time. **19 of 21 turn the suite
-red**, and the two survivors are documented below rather than papered over. Baseline before and after: `dotnet test Fleet.sln -c Release` — all green, 0 failed,
+Every mutation above was applied, tested and reverted, one at a time. **24 of 26 turn the suite
+red**, and the two survivors are documented below rather than papered over.
+
+The five newest rows (M22–M26) cover the approver-only-gate guard and the driver fixture, and all
+five are red. M24 is the one worth singling out: it flips `ignoreFailure` back to suppressing the
+refusal, and the step type defaults that flag to TRUE — so without the exclusion the authorization
+check would be off by default and only a log line would be left behind. Baseline before and after: `dotnet test Fleet.sln -c Release` — all green, 0 failed,
 0 skipped.
 
 **Five mutations survived the first pass, and three of them were missing tests rather than missing

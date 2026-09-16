@@ -318,6 +318,13 @@ public sealed class GetUweReferenceTool
         - An empty or unresolved `workflowId` is a logged SKIP, not an error — so a run started
           without a waiter id behaves exactly as it did before the step was added.
         - Implemented as a workflow command, not an activity: deterministic and replay-safe.
+        - **Approver-only gates are refused.** `merge-approval`, `doc-review`, `design-approval` and
+          `advisory-review` resolve a human approval and may only be sent from the dashboard. A
+          definition naming one literally fails at definition LOAD; one that resolves to a reserved
+          name through a template fails the workflow at execution. The refusal is NOT suppressed by
+          `ignoreFailure` — an authorization check a definition can switch off with one flag is not
+          an authorization check. `human-review` and `escalation-decision` are not gates and stay
+          sendable.
 
         ---
 

@@ -195,6 +195,58 @@ public sealed class EscalationSignalBufferTests
     }
 
     /// <summary>
+    /// T21. A <c>retry</c> decision starts a fresh window: the epoch is re-read at the top of each
+    /// loop iteration, so a leftover reply from the PREVIOUS round cannot resolve the next
+    /// escalation.
+    ///
+    /// Without the per-iteration snapshot, one operator reply would silently answer every
+    /// subsequent failure of the same step — the step would appear to retry forever with a human
+    /// apparently approving each round, when nobody was asked after the first.
+    ///
+    /// Observable as: the second failure notifies AGAIN rather than resolving from the leftover.
+    /// </summary>
+    [Fact]
+    public async Task AfterARetry_ALeftoverReplyDoesNotResolveTheNextEscalation()
+    {
+        var definition = Definition(new DelegateWithEscalationStep
+        {
+            Name = "flaky_step",
+            Target = "example-agent",
+            Instruction = "do the thing",
+            OutputVar = "step_out",
+        });
+
+        await using var env = await StartEnvAsync();
+        var (taskQueue, workflowId) = Ids("escalation-retry-epoch");
+        var activities = new EscalationTestActivities(definition)
+        {
+            FailFirstAttempt = true,
+            FailingAttempts = 2,      // fail, retry, fail again
+        };
+
+        using var worker = Worker(env, taskQueue, activities);
+        await worker.ExecuteAsync(async () =>
+        {
+            var handle = await Start(env, taskQueue, workflowId);
+            await activities.DelegateStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            activities.ReleaseDelegate();
+
+            // Round 1: the escalation asks, the operator answers "retry".
+            await activities.EscalationNotified.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            await handle.SignalAsync(EscalationSignal, [Decision("retry")]);
+
+            // Round 2 fails too. If the round-1 reply were still consumable, it would resolve this
+            // escalation silently and the notification count would stay at one.
+            await activities.WaitForNotificationsAsync(2);
+            await handle.SignalAsync(EscalationSignal, [Decision("continue")]);
+
+            await handle.GetResultAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        });
+
+        Assert.Equal(2, activities.DelegateCalls.Count(name => name.Contains("escalation_notify")));
+    }
+
+    /// <summary>
     /// T23 / F20. The reply that lands while the escalation NOTIFICATION activity is still in
     /// flight still resolves that escalation — via the waiter, which is registered before the
     /// notification is sent. That ordering predates #280 and must stay: the epoch covers a
@@ -308,6 +360,9 @@ file sealed class EscalationTestActivities(WorkflowDefinitionModel definition)
     /// <summary>Fail the first non-warmup, non-notify delegate so the escalation branch runs.</summary>
     public bool FailFirstAttempt { get; init; }
 
+    /// <summary>How many attempts fail when <see cref="FailFirstAttempt"/> is set. Default 1.</summary>
+    public int FailingAttempts { get; init; } = 1;
+
     public bool HoldEscalationNotification { get; init; }
 
     public IReadOnlyList<string> DelegateCalls
@@ -316,6 +371,14 @@ file sealed class EscalationTestActivities(WorkflowDefinitionModel definition)
     }
 
     public void ReleaseDelegate() => _releaseDelegate.TrySetResult();
+
+    /// <summary>Waits until at least <paramref name="count"/> escalation notifications have run.</summary>
+    public async Task WaitForNotificationsAsync(int count)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        while (DelegateCalls.Count(n => n.Contains("escalation_notify")) < count)
+            await Task.Delay(25, cts.Token);
+    }
     public void ReleaseEscalationNotification() => _releaseNotification.TrySetResult();
 
     [Activity("LoadWorkflowDefinition")]
@@ -350,7 +413,7 @@ file sealed class EscalationTestActivities(WorkflowDefinitionModel definition)
         DelegateStarted.TrySetResult();
         await _releaseDelegate.Task.WaitAsync(TimeSpan.FromSeconds(30));
 
-        if (FailFirstAttempt && Interlocked.Increment(ref _attempts) == 1)
+        if (FailFirstAttempt && Interlocked.Increment(ref _attempts) <= FailingAttempts)
             throw new ApplicationException("step failed on purpose");
 
         return new AgentTaskResult("done", "completed");

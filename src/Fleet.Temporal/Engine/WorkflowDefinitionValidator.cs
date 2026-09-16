@@ -38,6 +38,19 @@ public static class WorkflowDefinitionValidator
                     "The correlation result is written to '{outputVar}_bindMatch', so outputVar is " +
                     "required whenever bindTo is present.");
             }
+
+            // An approver-only gate written as a literal is refused before the definition can ever
+            // run. The engine checks again at execution — a templated signal name is unknowable
+            // here — but catching the literal case at load means the answer arrives when someone
+            // publishes the definition rather than at 3am when the step is first reached.
+            if (step is SignalWorkflowStep signal && CeoGateSignals.IsReserved(signal.SignalName))
+            {
+                throw new InvalidOperationException(
+                    $"Workflow definition '{workflowTypeName}' is invalid: signal_workflow step " +
+                    $"'{signal.Name ?? signal.SignalName}' sends '{signal.SignalName}', which is an " +
+                    $"approver-only gate. These signals resolve a human approval and may only be sent " +
+                    $"from the dashboard: {CeoGateSignals.Joined}.");
+            }
         }
     }
 

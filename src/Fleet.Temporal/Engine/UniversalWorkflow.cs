@@ -42,6 +42,15 @@ public class UniversalWorkflow
     /// </summary>
     internal const string SignalBufferPatchId = "uwe-signal-buffer-v1";
 
+    /// <summary>
+    /// Error type stamped on the refusal to emit an approver-only gate signal.
+    ///
+    /// It exists so the refusal can be excluded from the <c>ignoreFailure</c> catch by TYPE rather
+    /// than by message matching. An authorization check a definition can switch off with one flag
+    /// is not an authorization check.
+    /// </summary>
+    internal const string ReservedSignalErrorType = "ReservedSignalName";
+
     /// <summary>A signal that arrived with no waiter registered, plus its arrival ordinal.</summary>
     private readonly record struct BufferedSignal(JsonElement Payload, long Seq);
 
@@ -155,6 +164,14 @@ public class UniversalWorkflow
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// True for a failure the engine raised as a REFUSAL rather than an error — currently only the
+    /// approver-only signal guard. Matched on the error type, not the message, so rewording the
+    /// message cannot quietly make it suppressible again.
+    /// </summary>
+    private static bool IsRefusal(Exception ex) =>
+        ex is ApplicationFailureException { ErrorType: ReservedSignalErrorType };
+
     private void BufferSignal(string signalName, JsonElement payload, long seq)
     {
         // Last write wins for a repeated signal name, and refreshes Seq with it. Eviction is
@@ -229,7 +246,10 @@ public class UniversalWorkflow
                                                                               $"Unknown step type: {step.GetType().Name}")
             };
         }
-        catch (Exception) when (step.IgnoreFailure)
+        // ignoreFailure suppresses FAILURES, not refusals. A step that was denied permission to do
+        // something must not be silenced by the definition that asked for it — otherwise the
+        // approver-only guard below would be one JSON flag away from being switched off (#280).
+        catch (Exception ex) when (step.IgnoreFailure && !IsRefusal(ex))
         {
             return null;
         }
@@ -677,6 +697,28 @@ public class UniversalWorkflow
     /// </summary>
     private async Task<object?> ExecuteSignalWorkflowAsync(SignalWorkflowStep step)
     {
+        var signalName = _template.ResolveString(step.SignalName);
+
+        // Authorization, checked here and not only at definition load, because the signal name can
+        // be a template: a definition passing load with "{{vars.gate}}" could still resolve to
+        // merge-approval at runtime. Definitions are agent-authored, so without this the new step
+        // would be a way to approve your own work by writing it into a workflow (#280).
+        //
+        // Deliberately BEFORE the empty-target skip: a definition that tries to send an
+        // approver-only gate is wrong whether or not it currently has somewhere to send it, and
+        // finding that out only once a waiter id happens to be present is the kind of latent
+        // authorization hole that ships.
+        if (CeoGateSignals.IsReserved(signalName))
+        {
+            throw new ApplicationFailureException(
+                $"signal_workflow step '{step.Name ?? "(unnamed)"}' attempted to send '{signalName}', " +
+                $"which is an approver-only gate. These signals resolve a human approval and may only " +
+                $"be sent from the dashboard: {CeoGateSignals.Joined}. " +
+                "This is refused regardless of ignoreFailure.",
+                errorType: ReservedSignalErrorType,
+                nonRetryable: true);
+        }
+
         var workflowId = _template.ResolveString(step.WorkflowId);
         if (string.IsNullOrWhiteSpace(workflowId))
         {
@@ -686,7 +728,6 @@ public class UniversalWorkflow
             return null;
         }
 
-        var signalName = _template.ResolveString(step.SignalName);
         var payload = ResolveArgs(step.Payload);
 
         var handle = Workflow.GetExternalWorkflowHandle(workflowId);

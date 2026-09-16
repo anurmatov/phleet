@@ -586,6 +586,149 @@ public sealed class SignalBufferTests
         });
     }
 
+    // ── approver-only gates, at execution ────────────────────────────────────
+
+    /// <summary>
+    /// The execution-side half of the authorization guard. Load validation catches a literal
+    /// signal name; this catches the one it cannot see — a TEMPLATED name that resolves to an
+    /// approver-only gate at runtime.
+    ///
+    /// The refusal fails the workflow rather than the workflow task: a task failure retries
+    /// forever, which would turn a definition mistake into a wedged workflow instead of a loud,
+    /// once-only error.
+    /// </summary>
+    [Fact]
+    public async Task SignalWorkflow_ResolvingToAnApproverGate_IsRefusedAtExecution()
+    {
+        var definition = Definition(new SequenceStep
+        {
+            Steps =
+            [
+                // Passes load validation: the name is a template, not a literal.
+                new SetVariableStep { Vars = new() { ["gate"] = "merge-approval" } },
+                new SignalWorkflowStep
+                {
+                    Name = "sneaky_approval",
+                    WorkflowId = "some-other-workflow",
+                    SignalName = "{{vars.gate}}",
+                    Payload = new() { ["Decision"] = "approved" },
+                },
+            ],
+        });
+
+        await using var env = await WorkflowEnvironment.StartTimeSkippingAsync();
+        var (taskQueue, workflowId) = Ids("gate-refused");
+        var activities = new EngineTestActivities(definition) { AutoReleaseDelegate = true };
+
+        using var worker = Worker(env, taskQueue, activities);
+        await worker.ExecuteAsync(async () =>
+        {
+            var handle = await env.Client.StartWorkflowAsync(
+                "example-workflow",
+                Array.Empty<object?>(),
+                new WorkflowOptions(id: workflowId, taskQueue: taskQueue)
+                {
+                    RetryPolicy = new() { MaximumAttempts = 1 },
+                });
+
+            var ex = await Assert.ThrowsAsync<Temporalio.Exceptions.WorkflowFailedException>(
+                () => handle.GetResultAsync().WaitAsync(TimeSpan.FromSeconds(30)));
+
+            var cause = Assert.IsType<Temporalio.Exceptions.ApplicationFailureException>(ex.InnerException);
+            Assert.True(cause.NonRetryable, "the refusal must not retry — the definition will not fix itself");
+            Assert.Contains("approver-only", cause.Message);
+        });
+
+        var history = await env.Client.GetWorkflowHandle(workflowId).FetchHistoryAsync();
+        Assert.DoesNotContain(history.Events,
+            e => e.EventType == EventType.SignalExternalWorkflowExecutionInitiated);
+    }
+
+    /// <summary>
+    /// And <c>ignoreFailure</c> cannot switch it off.
+    ///
+    /// This is the assertion that makes it an authorization check rather than a warning: the step
+    /// type defaults <c>ignoreFailure</c> to TRUE, so without the refusal being excluded from that
+    /// catch, the guard would be suppressed by default — the workflow would sail past it and only
+    /// a log line would remain.
+    /// </summary>
+    [Fact]
+    public async Task SignalWorkflow_ApproverGateRefusal_IsNotSuppressedByIgnoreFailure()
+    {
+        var definition = Definition(new SequenceStep
+        {
+            // ignoreFailure on the PARENT too, so this also covers a refusal being swallowed by an
+            // enclosing step rather than by the offending one.
+            IgnoreFailure = true,
+            Steps =
+            [
+                new SignalWorkflowStep
+                {
+                    Name = "sneaky_approval",
+                    WorkflowId = "some-other-workflow",
+                    SignalName = "doc-review",
+                    IgnoreFailure = true,
+                },
+            ],
+        });
+
+        await using var env = await WorkflowEnvironment.StartTimeSkippingAsync();
+        var (taskQueue, workflowId) = Ids("gate-refused-ignored");
+        var activities = new EngineTestActivities(definition) { AutoReleaseDelegate = true };
+
+        using var worker = Worker(env, taskQueue, activities);
+        await worker.ExecuteAsync(async () =>
+        {
+            var handle = await env.Client.StartWorkflowAsync(
+                "example-workflow",
+                Array.Empty<object?>(),
+                new WorkflowOptions(id: workflowId, taskQueue: taskQueue)
+                {
+                    RetryPolicy = new() { MaximumAttempts = 1 },
+                });
+
+            await Assert.ThrowsAsync<Temporalio.Exceptions.WorkflowFailedException>(
+                () => handle.GetResultAsync().WaitAsync(TimeSpan.FromSeconds(30)));
+        });
+    }
+
+    /// <summary>
+    /// The control: an ordinary signal with <c>ignoreFailure: true</c> still behaves exactly as
+    /// before. Without this, a guard that simply broke <c>ignoreFailure</c> for every step would
+    /// pass the two tests above.
+    /// </summary>
+    [Fact]
+    public async Task SignalWorkflow_OrdinarySignalFailure_IsStillSuppressedByIgnoreFailure()
+    {
+        var definition = Definition(new SequenceStep
+        {
+            Steps =
+            [
+                new SignalWorkflowStep
+                {
+                    Name = "wake_parked_waiter",
+                    WorkflowId = "no-such-workflow-" + Guid.NewGuid().ToString("N"),
+                    SignalName = SignalName,
+                },
+                new SetVariableStep { Vars = new() { ["_result"] = "SURVIVED" } },
+            ],
+        });
+
+        await using var env = await WorkflowEnvironment.StartTimeSkippingAsync();
+        var (taskQueue, workflowId) = Ids("gate-ordinary-failure");
+        var activities = new EngineTestActivities(definition) { AutoReleaseDelegate = true };
+
+        string? result = null;
+        using var worker = Worker(env, taskQueue, activities);
+        await worker.ExecuteAsync(async () =>
+        {
+            var handle = await Start(env, taskQueue, workflowId);
+            result = await handle.GetResultAsync<string>().WaitAsync(TimeSpan.FromSeconds(30));
+        });
+
+        Assert.Equal("SURVIVED", result);
+    }
+
     // ── T25: the workflow scope ──────────────────────────────────────────────
 
     /// <summary>

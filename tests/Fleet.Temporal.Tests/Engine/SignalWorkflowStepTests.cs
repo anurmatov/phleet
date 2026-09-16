@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Fleet.Temporal;
 using Fleet.Temporal.Engine;
 
 namespace Fleet.Temporal.Tests.Engine;
@@ -166,6 +167,83 @@ public sealed class SignalWorkflowStepTests
         var root = new WaitForSignalStep { SignalName = "human-review" };
 
         WorkflowDefinitionValidator.Validate(root, "ExampleWorkflow");
+    }
+
+    // ── approver-only gates ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// A definition may not send an approver-only gate signal, and it is refused at LOAD when the
+    /// name is written literally.
+    ///
+    /// The MCP signal tool already refuses these from agent callers. <c>signal_workflow</c> is a
+    /// second way to reach the same signals, and definitions are agent-authored — so without this
+    /// the new step would be a way to approve your own work by writing it into a workflow.
+    /// </summary>
+    [Theory]
+    [InlineData("merge-approval")]
+    [InlineData("doc-review")]
+    [InlineData("design-approval")]
+    [InlineData("advisory-review")]
+    [InlineData("MERGE-APPROVAL")]   // case is not a bypass
+    [InlineData("  doc-review  ")]   // nor is whitespace
+    public void Validate_SignalWorkflowSendingAnApproverGate_FailsToLoad(string signalName)
+    {
+        var root = new SequenceStep
+        {
+            Steps =
+            [
+                new SignalWorkflowStep
+                {
+                    Name = "sneaky_approval",
+                    WorkflowId = "{{input.WaiterWorkflowId}}",
+                    SignalName = signalName,
+                },
+            ],
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => WorkflowDefinitionValidator.Validate(root, "ExampleWorkflow"));
+
+        Assert.Contains("sneaky_approval", ex.Message);
+        Assert.Contains("approver-only", ex.Message);
+    }
+
+    /// <summary>
+    /// The signals agents ARE expected to send stay sendable. A guard that also blocked these would
+    /// break escalation and human-review routing, which are operational decisions rather than
+    /// approvals.
+    /// </summary>
+    [Theory]
+    [InlineData("human-review")]
+    [InlineData("escalation-decision")]
+    [InlineData("blocker-resolved")]
+    public void Validate_SignalWorkflowSendingANonGateSignal_Passes(string signalName)
+    {
+        var root = new SignalWorkflowStep
+        {
+            Name = "wake_parked_waiter",
+            WorkflowId = "{{input.WaiterWorkflowId}}",
+            SignalName = signalName,
+        };
+
+        WorkflowDefinitionValidator.Validate(root, "ExampleWorkflow");
+    }
+
+    /// <summary>
+    /// The reserved list has exactly one owner. Two copies of a security list is a list that
+    /// drifts, and the drift is silent until someone approves their own work through the half that
+    /// was not updated — so the engine and the MCP tool read the same names.
+    /// </summary>
+    [Fact]
+    public void TheReservedList_IsTheFourApproverGates()
+    {
+        Assert.Equal(
+            ["advisory-review", "design-approval", "doc-review", "merge-approval"],
+            CeoGateSignals.All.OrderBy(n => n, StringComparer.Ordinal).ToArray());
+
+        Assert.False(CeoGateSignals.IsReserved("human-review"));
+        Assert.False(CeoGateSignals.IsReserved("escalation-decision"));
+        Assert.False(CeoGateSignals.IsReserved(null));
     }
 
     /// <summary>

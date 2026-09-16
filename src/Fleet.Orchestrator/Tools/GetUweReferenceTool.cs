@@ -156,6 +156,26 @@ public sealed class GetUweReferenceTool
         - `maxReminders`: max reminder notifications (default 3)
         - `autoCompleteOnTimeout`: if true, returns `{"Decision":"timeout"}` instead of throwing
         - `notifyStep`: a delegate step executed before waiting and on each reminder tick
+        - `bindTo`: correlation value this wait expects in the resolving payload, resolved ONCE at wait
+          entry. Three-state, and OMITTED is not the same as empty:
+          - omitted → no correlation; `{outputVar}_bindMatch` is not written at all
+          - present but resolving to empty → always `"mismatch"` (an unknown target can never match)
+          - present and non-empty → ordinal comparison against `bindField`
+        - `bindField`: payload property compared against `bindTo` (default `blockerRef`)
+        - **`{outputVar}_bindMatch`** is written by the engine as a SIBLING variable — `"match"` or
+          `"mismatch"`. The payload is never modified. That name is RESERVED: a definition using it
+          for anything else will have it overwritten.
+          - The engine's own `autoCompleteOnTimeout` payload always scores `"match"` without
+            comparison, so a park's own timeout stays terminal instead of being read as a stale
+            wakeup and degraded to a resume.
+          - A non-object payload (a relayed signal arrives as a plain JSON string), a missing
+            `bindField`, or a non-string `bindField` scores `"mismatch"` — never an exception.
+            `mismatch` is the fail-safe direction: it still resumes, it only withholds permission
+            to act on a decision that may belong to something else.
+          - `bindTo` with no `outputVar` is a definition-LOAD error, not a runtime one.
+        - A signal that arrives while this workflow is busy elsewhere is buffered (16 entries,
+          oldest evicted with a warning) and consumed by the next matching wait, which then returns
+          immediately without parking or notifying.
 
         ### 11. child_workflow
         Starts a child workflow and waits for it to complete.
@@ -276,6 +296,36 @@ public sealed class GetUweReferenceTool
           { "type": "sleep", "seconds": 300 }
           ```
 
+        ### 18. signal_workflow
+        Sends a Temporal signal to ANOTHER workflow, by workflow id. Use it to tell a workflow that
+        is parked on `wait_for_signal` that the thing it was waiting for has resolved.
+        ```json
+        {
+          "type": "signal_workflow",
+          "workflowId": "{{input.WaiterWorkflowId | default: ''}}",
+          "signalName": "blocker-resolved",
+          "payload": { "decision": "approved", "blockerRef": "{{workflow.id}}" },
+          "ignoreFailure": true
+        }
+        ```
+        - `workflowId` (required): target workflow id — supports `{{template}}`. Targeting is by id
+          only, never run id, so the signal follows continue-as-new and retries.
+        - `signalName` (required): signal name — supports `{{template}}`
+        - `payload`: object sent as the signal argument; values support template expressions
+        - `ignoreFailure`: **defaults to `true` for this step type only.** The target may
+          legitimately have closed, and a courtesy wakeup must never fail the workflow that sent it.
+          Set `false` to make delivery failure fail the step.
+        - An empty or unresolved `workflowId` is a logged SKIP, not an error — so a run started
+          without a waiter id behaves exactly as it did before the step was added.
+        - Implemented as a workflow command, not an activity: deterministic and replay-safe.
+        - **Approver-only gates are refused.** `merge-approval`, `doc-review`, `design-approval` and
+          `advisory-review` resolve a human approval and may only be sent from the dashboard. A
+          definition naming one literally fails at definition LOAD; one that resolves to a reserved
+          name through a template fails the workflow at execution. The refusal is NOT suppressed by
+          `ignoreFailure` — an authorization check a definition can switch off with one flag is not
+          an authorization check. `human-review` and `escalation-decision` are not gates and stay
+          sendable.
+
         ---
 
         ## Template Engine
@@ -288,6 +338,7 @@ public sealed class GetUweReferenceTool
         | input.*  | Workflow input fields (e.g. `{{input.TargetAgent}}`)           |
         | vars.*   | Variables set by steps via `outputVar`                         |
         | config.* | FleetWorkflowOptions keys (e.g. `{{config.CtoAgent}}`)         |
+        | workflow.* | This execution's own identity: `{{workflow.id}}`, `{{workflow.runId}}`, `{{workflow.type}}`. Read-only — `set_variable` writes into `vars`, so it cannot be shadowed. |
 
         ### Filters (pipe syntax)
         | Filter               | Description                                                              |
@@ -379,6 +430,6 @@ public sealed class GetUweReferenceTool
         """;
 
     [McpServerTool(Name = "get_uwe_reference")]
-    [Description("Returns the full UWE (Universal Workflow Engine) reference: all 17 step types with exact JSON property names, template engine syntax, scopes, filters, config keys, and JSON conventions. Use this before designing or editing any UWE workflow definition.")]
+    [Description("Returns the full UWE (Universal Workflow Engine) reference: all 18 step types with exact JSON property names, template engine syntax, scopes, filters, config keys, and JSON conventions. Use this before designing or editing any UWE workflow definition.")]
     public string GetUweReference() => Reference;
 }

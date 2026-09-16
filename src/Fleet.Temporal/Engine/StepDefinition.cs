@@ -25,6 +25,7 @@ using System.Text.Json.Serialization;
 [JsonDerivedType(typeof(HttpRequestStep), "http_request")]
 [JsonDerivedType(typeof(CrossNamespaceStartStep), "cross_namespace_start")]
 [JsonDerivedType(typeof(SleepStep), "sleep")]
+[JsonDerivedType(typeof(SignalWorkflowStep), "signal_workflow")]
 public abstract record StepDefinition
 {
     /// <summary>Human-readable step name; also used as key when storing step output in vars.</summary>
@@ -33,8 +34,14 @@ public abstract record StepDefinition
     /// <summary>Variable name to store step output in vars scope. Always a literal string, never a template.</summary>
     public string? OutputVar { get; init; }
 
-    /// <summary>If true, exceptions from this step are swallowed and execution continues.</summary>
-    public bool IgnoreFailure { get; init; }
+    /// <summary>
+    /// If true, exceptions from this step are swallowed and execution continues.
+    ///
+    /// Virtual so a step type whose failure must never propagate can default it to true —
+    /// <see cref="SignalWorkflowStep"/> does, because a courtesy wakeup to a peer workflow must
+    /// not be able to fail the workflow that was only being polite (#280 MUST NOT 18).
+    /// </summary>
+    public virtual bool IgnoreFailure { get; init; }
 }
 
 // --- Control flow (used by loop/branch) ---
@@ -158,6 +165,61 @@ public sealed record WaitForSignalStep : StepDefinition
 
     /// <summary>Notification step executed before waiting and on each reminder tick.</summary>
     public DelegateStep? NotifyStep { get; init; }
+
+    /// <summary>
+    /// Correlation value this wait expects to see in the resolving payload, resolved ONCE at wait
+    /// entry (#280 D-6).
+    ///
+    /// Three-state, and absent is deliberately distinct from present-but-empty:
+    /// <list type="bullet">
+    /// <item><c>null</c> (field omitted) — no correlation; <c>{outputVar}_bindMatch</c> is not
+    /// written at all, which is what keeps every pre-#280 definition byte-identical.</item>
+    /// <item>present but resolving to empty — always <c>mismatch</c>. An unknown blocker can never
+    /// match, so an unbound park can be woken but never terminated by a stray decision.</item>
+    /// <item>present and non-empty — ordinal comparison against <see cref="BindField"/>.</item>
+    /// </list>
+    ///
+    /// The result is written to the SIBLING variable <c>{outputVar}_bindMatch</c>. The payload is
+    /// never touched: a relayed signal arrives as a JSON string with no properties to stamp, and
+    /// mutating it would break byte-identity for existing definitions (MUST NOT 3).
+    /// </summary>
+    public string? BindTo { get; init; }
+
+    /// <summary>Payload property compared against <see cref="BindTo"/>. Default <c>blockerRef</c>.</summary>
+    public string? BindField { get; init; }
+}
+
+/// <summary>
+/// Signals another workflow by id (#280 D-4) — how a gate owner tells a parked peer that its
+/// blocker cleared.
+///
+/// Implemented as a workflow COMMAND (<c>GetExternalWorkflowHandle(...).SignalAsync(...)</c>),
+/// never an activity: it is deterministic and replay-safe, and an activity would put a delivery
+/// guarantee behind a side-effecting retry policy (MUST NOT 17).
+/// </summary>
+public sealed record SignalWorkflowStep : StepDefinition
+{
+    /// <summary>
+    /// Target workflow id (supports {{template}}). Targeting is by id only, never run id, so the
+    /// signal follows continue-as-new and retries.
+    ///
+    /// Resolving to null, empty or whitespace is a logged SKIP, not an error — a gated run started
+    /// without a waiter must behave exactly as it did before (#280 D-8 fallback).
+    /// </summary>
+    public required string WorkflowId { get; init; }
+
+    /// <summary>Signal name (supports {{template}}).</summary>
+    public required string SignalName { get; init; }
+
+    /// <summary>Signal payload; values are template-resolved like child-workflow args.</summary>
+    public Dictionary<string, object?>? Payload { get; init; }
+
+    /// <summary>
+    /// Defaults to TRUE for this step type, unlike every other step. The waiter may legitimately
+    /// have closed, and a gate-resolution path must never fail because the peer it was being
+    /// polite to has left (#280 D-4, MUST NOT 18). Set <c>"ignoreFailure": false</c> to opt out.
+    /// </summary>
+    public override bool IgnoreFailure { get; init; } = true;
 }
 
 // --- Child workflow steps ---

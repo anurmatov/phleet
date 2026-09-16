@@ -41,6 +41,11 @@ public sealed class LoadWorkflowDefinitionActivity(IHttpClientFactory httpClient
             ?? throw new InvalidOperationException(
                 $"Failed to parse step tree for workflow '{workflowTypeName}'");
 
+        // Structural checks the deserializer cannot express, run here so a bad definition fails
+        // once, at load, with the step named — rather than days later inside a branch, where
+        // ignoreFailure could swallow it (#280).
+        WorkflowDefinitionValidator.Validate(root, workflowTypeName);
+
         return new WorkflowDefinitionModel
         {
             Name      = raw.Name,

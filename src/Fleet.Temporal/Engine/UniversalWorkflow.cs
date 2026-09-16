@@ -20,17 +20,68 @@ using Temporalio.Workflows;
 /// returns <c>_variables["_result"]</c> from <see cref="RunAsync"/>.
 ///
 /// Variable scopes available in template expressions:
-///   {{input.*}}   — workflow start arguments (JsonElement)
-///   {{vars.*}}    — step outputs keyed by output_var
-///   {{config.*}}  — FleetWorkflowOptions serialized as JsonElement
+///   {{input.*}}    — workflow start arguments (JsonElement)
+///   {{vars.*}}     — step outputs keyed by output_var
+///   {{config.*}}   — FleetWorkflowOptions serialized as JsonElement
+///   {{workflow.*}} — this execution's own identity: id, runId, type (#280 D-8). Read-only:
+///                    set_variable writes into vars, so a definition cannot shadow it and
+///                    redirect the wakeups it sends (MUST NOT 27).
 /// </summary>
 [Workflow(Dynamic = true)]
 public class UniversalWorkflow
 {
+    /// <summary>
+    /// Cap on buffered signals per execution. Unbounded workflow state is a memory and
+    /// history-size hazard; eviction is oldest-first, counted and logged, never silent (#280 D-2).
+    /// </summary>
+    internal const int MaxBufferedSignals = 16;
+
+    /// <summary>
+    /// Patch id gating the buffer FAST PATH — consuming a buffered entry, which changes the
+    /// command sequence. Buffering itself emits no command and is replay-neutral (#280 D-3).
+    /// </summary>
+    internal const string SignalBufferPatchId = "uwe-signal-buffer-v1";
+
+    /// <summary>
+    /// Error type stamped on the refusal to emit an approver-only gate signal.
+    ///
+    /// It exists so the refusal can be excluded from the <c>ignoreFailure</c> catch by TYPE rather
+    /// than by message matching. An authorization check a definition can switch off with one flag
+    /// is not an authorization check.
+    /// </summary>
+    internal const string ReservedSignalErrorType = "ReservedSignalName";
+
+    /// <summary>A signal that arrived with no waiter registered, plus its arrival ordinal.</summary>
+    private readonly record struct BufferedSignal(JsonElement Payload, long Seq);
+
     private readonly Dictionary<string, object?> _variables = new();
     private readonly Dictionary<string, TaskCompletionSource<JsonElement>> _signalWaiters = new();
+
+    /// <summary>
+    /// Signals accepted while no waiter was registered. At most one entry per signal name —
+    /// last write wins, and a refresh also refreshes <c>Seq</c>. Entries live until consumed by a
+    /// matching wait or until the workflow closes; they NEVER expire on a timer, because a timer
+    /// is a second, invisible way to lose a wakeup (#280 D-2).
+    /// </summary>
+    private readonly Dictionary<string, BufferedSignal> _pendingSignals = new();
+
+    /// <summary>
+    /// Arrival ordinal, incremented ONCE per signal arrival before the delivered-vs-buffered
+    /// decision. Delivered signals advance it too, so the value is a true arrival ordinal rather
+    /// than a buffer-write counter — which is what makes the escalation epoch comparison in D-10
+    /// mean anything (MUST NOT 9).
+    /// </summary>
+    private long _signalArrivalSeq;
+
     private TemplateEngine _template = null!;
     private bool _skipRemaining;
+
+    /// <summary>
+    /// Cached <see cref="Workflow.Patched"/> result, evaluated once in <see cref="RunAsync"/>.
+    /// Never evaluated from the signal handler, where the marker command would land at an
+    /// unpredictable point in history (#280 D-3, MUST NOT 13).
+    /// </summary>
+    private bool _signalBufferEnabled;
 
     [WorkflowRun]
     public async Task<object?> RunAsync(IRawValue[] args)
@@ -43,6 +94,17 @@ public class UniversalWorkflow
 
         // 2. Initialize vars scope before template engine (template engine holds a reference)
         _variables["vars"] = new Dictionary<string, object?>();
+
+        // The workflow's own identity as a template scope (#280 D-8). All three values are
+        // replay-stable. A definition needs this to hand a gated run the id to signal back, and
+        // before this scope existed the only alternative was an agent remembering it.
+        _variables["workflow"] = new Dictionary<string, object?>
+        {
+            ["id"]    = Workflow.Info.WorkflowId,
+            ["runId"] = Workflow.Info.RunId,
+            ["type"]  = Workflow.Info.WorkflowType,
+        };
+
         _template = new TemplateEngine(_variables);
 
         // 3. Load workflow definition from DB (determinism-safe — replayed from history)
@@ -57,24 +119,96 @@ public class UniversalWorkflow
             Array.Empty<object?>(),
             new ActivityOptions { StartToCloseTimeout = TimeSpan.FromSeconds(10) });
 
-        // 5. Execute the step tree
+        // 5. Decide once, before any step runs, whether the buffer fast path is available.
+        //    An execution that started before this shipped replays with false and keeps the old
+        //    command sequence exactly; a new execution gets the fix (#280 D-3).
+        _signalBufferEnabled = Workflow.Patched(SignalBufferPatchId);
+
+        // 6. Execute the step tree
         await ExecuteStepAsync(definition.Root);
 
         return _variables.GetValueOrDefault("_result");
     }
 
-    /// <summary>Dynamic signal handler — routes all signals to waiting TCS instances.</summary>
+    /// <summary>
+    /// Dynamic signal handler — routes all signals to waiting TCS instances, and buffers the rest.
+    ///
+    /// Before #280 this method had no <c>else</c>: a signal arriving while no waiter was
+    /// registered was accepted by Temporal, recorded in history, and then silently discarded. For
+    /// a driver workflow that window is most of its life, so the wakeup it was waiting for looked
+    /// delivered and simply never happened.
+    ///
+    /// Two losses are closed here. The missing <c>else</c>, and the discarded
+    /// <see cref="TaskCompletionSource{TResult}.TrySetResult"/> return value — <c>false</c> means
+    /// the waiter had already completed in this same workflow task, so that payload was dropped
+    /// too. Both now fall through to the buffer.
+    ///
+    /// Buffering emits no workflow command, so it is replay-neutral and runs unconditionally;
+    /// only CONSUMING an entry is patch-gated (#280 D-2, D-3).
+    /// </summary>
     [WorkflowSignal(Dynamic = true)]
     public Task HandleSignalAsync(string signalName, IRawValue[] args)
     {
+        // Incremented for EVERY arrival, before the deliver-vs-buffer decision, so the ordinal
+        // orders arrivals rather than buffer writes (#280 D-2, MUST NOT 9).
+        var seq = ++_signalArrivalSeq;
+
         var payload = args.Length > 0
             ? Workflow.PayloadConverter.ToValue<JsonElement>(args[0])
             : default;
 
-        if (_signalWaiters.TryGetValue(signalName, out var tcs))
-            tcs.TrySetResult(payload);
+        if (_signalWaiters.TryGetValue(signalName, out var tcs) && tcs.TrySetResult(payload))
+            return Task.CompletedTask;
 
+        BufferSignal(signalName, payload, seq);
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// True for a failure the engine raised as a REFUSAL rather than an error — currently only the
+    /// approver-only signal guard. Matched on the error type, not the message, so rewording the
+    /// message cannot quietly make it suppressible again.
+    /// </summary>
+    private static bool IsRefusal(Exception ex) =>
+        ex is ApplicationFailureException { ErrorType: ReservedSignalErrorType };
+
+    private void BufferSignal(string signalName, JsonElement payload, long seq)
+    {
+        // Last write wins for a repeated signal name, and refreshes Seq with it. Eviction is
+        // oldest-first by arrival ordinal — deterministic, unlike dictionary enumeration order.
+        if (!_pendingSignals.ContainsKey(signalName) && _pendingSignals.Count >= MaxBufferedSignals)
+        {
+            var oldest = _pendingSignals.OrderBy(e => e.Value.Seq).First();
+            _pendingSignals.Remove(oldest.Key);
+            Workflow.Logger.LogWarning(
+                "Signal buffer full ({Max}) — evicted oldest buffered signal '{Evicted}' (seq {Seq}) to make room for '{Incoming}'",
+                MaxBufferedSignals, oldest.Key, oldest.Value.Seq, signalName);
+        }
+
+        _pendingSignals[signalName] = new BufferedSignal(payload, seq);
+    }
+
+    /// <summary>
+    /// Takes a buffered signal if the fast path is enabled and an entry exists that arrived
+    /// strictly after <paramref name="afterSeq"/>.
+    ///
+    /// Strictly greater, never <c>&gt;=</c>: a snapshot taken after an arrival has
+    /// <c>epoch == thatEntry.Seq</c>, so <c>&gt;=</c> would accept the arrival that immediately
+    /// preceded it (#280 D-2, MUST NOT 9).
+    ///
+    /// A declined entry is LEFT IN THE BUFFER, never deleted. Deleting it here would be a silent
+    /// discard — the exact defect this whole mechanism exists to remove (MUST NOT 10).
+    /// </summary>
+    private bool TryTakeBufferedSignal(string signalName, long afterSeq, out JsonElement payload)
+    {
+        payload = default;
+        if (!_signalBufferEnabled) return false;
+        if (!_pendingSignals.TryGetValue(signalName, out var buffered)) return false;
+        if (buffered.Seq <= afterSeq) return false;
+
+        _pendingSignals.Remove(signalName);
+        payload = buffered.Payload;
+        return true;
     }
 
     // =========================================================================
@@ -107,11 +241,15 @@ public class UniversalWorkflow
                 HttpRequestStep s                                      => await ExecuteHttpRequestAsync(s),
                 CrossNamespaceStartStep s                              => await ExecuteCrossNamespaceStartAsync(s),
                 SleepStep s                                            => await ExecuteSleepAsync(s),
+                SignalWorkflowStep s                                   => await ExecuteSignalWorkflowAsync(s),
                 _                                                      => throw new InvalidOperationException(
                                                                               $"Unknown step type: {step.GetType().Name}")
             };
         }
-        catch (Exception) when (step.IgnoreFailure)
+        // ignoreFailure suppresses FAILURES, not refusals. A step that was denied permission to do
+        // something must not be silenced by the definition that asked for it — otherwise the
+        // approver-only guard below would be one JSON flag away from being switched off (#280).
+        catch (Exception ex) when (step.IgnoreFailure && !IsRefusal(ex))
         {
             return null;
         }
@@ -256,6 +394,18 @@ public class UniversalWorkflow
 
         while (true)
         {
+            // Epoch snapshot for the escalation buffer check (#280 D-10), taken BEFORE the attempt
+            // and once PER ITERATION. Both halves are load-bearing (MUST NOT 8):
+            //
+            //  - before the attempt, because the operator who resolves an escalation is almost
+            //    always reacting to the step already being in trouble, i.e. while the delegate is
+            //    still running. Snapshotting inside the catch would score that reply as stale and
+            //    decline the very signal it exists to accept.
+            //  - per iteration, because a `retry` decision starts a fresh window; snapshotting
+            //    once per step would let a leftover reply from the previous round resolve the next
+            //    escalation.
+            var attemptEpoch = _signalArrivalSeq;
+
             try
             {
                 return await ExecuteDelegateAsync(current);
@@ -269,36 +419,56 @@ public class UniversalWorkflow
                 try { UpsertPhaseAttribute("escalation"); }
                 catch { /* non-fatal */ }
 
-                // 2. Register signal waiter BEFORE sending notification so we don't miss
-                //    a signal that arrives while the notification activity is in-flight.
-                var tcs = new TaskCompletionSource<JsonElement>();
-                _signalWaiters["escalation-decision"] = tcs;
-
-                // 3. Best-effort notification to escalation target
-                var notifyStep = new DelegateStep
+                // 2. A reply that arrived during this attempt is already here. Consume it and skip
+                //    both the notification and the wait — this wait is INDEFINITE (there is no
+                //    timeout branch below), so without this a dropped escalation-decision hangs
+                //    the workflow forever rather than timing out (#280 D-10, F18).
+                JsonElement decision;
+                if (TryTakeBufferedSignal("escalation-decision", attemptEpoch, out var early))
                 {
-                    Name = $"{stepLabel}_escalation_notify",
-                    Target = escalationTarget,
-                    Instruction =
-                        $"[workflow escalation] step failed in workflow {Workflow.Info.WorkflowId}.\n" +
-                        $"step: {stepLabel}\nagent: {targetName}\nerror: {ex.Message}\n\n" +
-                        $"send signal 'escalation-decision' with JSON payload:\n" +
-                        $"  {{\"Decision\": \"retry\"}}   — retry the step\n" +
-                        $"  {{\"Decision\": \"retry\", \"UpdatedInstruction\": \"...\"}}   — retry with new instruction\n" +
-                        $"  {{\"Decision\": \"skip\"}}    — stop here\n" +
-                        $"  {{\"Decision\": \"continue\"}} — proceed despite failure",
-                    TimeoutMinutes = 10,
-                    IgnoreFailure = true
-                };
+                    Workflow.Logger.LogInformation(
+                        "escalation-decision for step '{Step}' arrived during the attempt — consuming without notifying",
+                        stepLabel);
+                    decision = early;
+                }
+                else
+                {
+                    // 3. Register signal waiter BEFORE sending notification so we don't miss
+                    //    a signal that arrives while the notification activity is in-flight.
+                    //    This ordering, not the epoch, is what covers a reply sent while the
+                    //    notification activity is still in flight (#280 F20).
+                    var tcs = new TaskCompletionSource<JsonElement>();
+                    _signalWaiters["escalation-decision"] = tcs;
 
-                try { await ExecuteDelegateAsync(notifyStep); }
-                catch { /* notification failure is non-fatal */ }
+                    // 4. Best-effort notification to escalation target
+                    var notifyStep = new DelegateStep
+                    {
+                        Name = $"{stepLabel}_escalation_notify",
+                        Target = escalationTarget,
+                        Instruction =
+                            $"[workflow escalation] step failed in workflow {Workflow.Info.WorkflowId}.\n" +
+                            $"step: {stepLabel}\nagent: {targetName}\nerror: {ex.Message}\n\n" +
+                            $"send signal 'escalation-decision' with JSON payload:\n" +
+                            $"  {{\"Decision\": \"retry\"}}   — retry the step\n" +
+                            $"  {{\"Decision\": \"retry\", \"UpdatedInstruction\": \"...\"}}   — retry with new instruction\n" +
+                            $"  {{\"Decision\": \"skip\"}}    — stop here\n" +
+                            $"  {{\"Decision\": \"continue\"}} — proceed despite failure",
+                        TimeoutMinutes = 10,
+                        IgnoreFailure = true
+                    };
 
-                // 4. Wait indefinitely for escalation-decision signal
-                await Workflow.WaitConditionAsync(() => tcs.Task.IsCompleted);
-                var decision = tcs.Task.Result;
-                _signalWaiters.Remove("escalation-decision");
+                    try { await ExecuteDelegateAsync(notifyStep); }
+                    catch { /* notification failure is non-fatal */ }
 
+                    // 5. Wait indefinitely for escalation-decision signal
+                    await Workflow.WaitConditionAsync(() => tcs.Task.IsCompleted);
+                    decision = tcs.Task.Result;
+                    _signalWaiters.Remove("escalation-decision");
+                }
+
+                // 6. Decision handling — unchanged, and deliberately shared by both paths above.
+                //    #280 fixes delivery, not escalation policy: the `continue` default for an
+                //    unknown decision stays exactly as it was (MUST NOT 22).
                 var decisionStr = decision.TryGetProperty("Decision", out var d)
                     ? d.GetString()?.ToLowerInvariant() : "continue";
                 var updatedInstruction = decision.TryGetProperty("UpdatedInstruction", out var ui)
@@ -340,6 +510,23 @@ public class UniversalWorkflow
     private async Task<object?> ExecuteWaitForSignalAsync(WaitForSignalStep step)
     {
         var signalName = _template.ResolveString(step.SignalName);
+
+        // Resolved ONCE, here at wait entry, so a later change to the variable it reads cannot
+        // move the target mid-wait (#280 D-6).
+        var bindTo = step.BindTo is null ? null : _template.ResolveString(step.BindTo);
+
+        // Buffer fast path, at the head: a wakeup that arrived while this workflow was mid-tick
+        // is already here, so there is nothing to park on. Deliberately BEFORE the Phase upsert
+        // and the notification — a park that never happens must not announce itself as parked or
+        // ask a human to act on something already resolved (#280 D-2, F1/F2).
+        if (TryTakeBufferedSignal(signalName, afterSeq: 0, out var bufferedPayload))
+        {
+            Workflow.Logger.LogInformation(
+                "Signal '{Signal}' was already buffered — resuming without parking", signalName);
+            WriteBindMatch(step, bindTo, bufferedPayload, engineTimeout: false);
+            if (step.OutputVar != null) SetVar(step.OutputVar, bufferedPayload);
+            return bufferedPayload;
+        }
 
         if (step.Phase != null)
         {
@@ -404,6 +591,11 @@ public class UniversalWorkflow
                 if (step.AutoCompleteOnTimeout)
                 {
                     var timeoutPayload = JsonSerializer.SerializeToElement(new { Decision = "timeout" });
+                    // The engine generated this payload, so it carries no correlation field and
+                    // cannot be stale or misaddressed. It is scored `match` WITHOUT comparison —
+                    // comparing it would score the park's own timeout as a mismatch, degrade it to
+                    // a resume, and re-park forever instead of terminating (#280 D-6 rule 1, F7).
+                    WriteBindMatch(step, bindTo, timeoutPayload, engineTimeout: true);
                     if (step.OutputVar != null) SetVar(step.OutputVar, timeoutPayload);
                     return timeoutPayload;
                 }
@@ -415,8 +607,135 @@ public class UniversalWorkflow
         var payload = tcs.Task.Result;
         _signalWaiters.Remove(signalName);
 
+        WriteBindMatch(step, bindTo, payload, engineTimeout: false);
         if (step.OutputVar != null) SetVar(step.OutputVar, payload);
         return payload;
+    }
+
+    /// <summary>
+    /// Writes <c>{outputVar}_bindMatch</c> — the correlation verdict for a resolved wait (#280 D-6).
+    ///
+    /// The payload is never modified. A relayed signal arrives as a JSON <em>string</em>
+    /// (<c>TemporalRelayListener</c> signals with the raw message text), and a
+    /// <see cref="JsonElement"/> is immutable in any case, so any design that stamps a field onto
+    /// the payload breaks on that path (MUST NOT 3).
+    ///
+    /// Mismatch is the fail-safe direction: it still resumes the waiting workflow, it only
+    /// withholds permission to TERMINATE on a decision that may belong to something else. So every
+    /// unparseable or unexpected shape lands there rather than throwing (MUST NOT 5, 15).
+    /// </summary>
+    private void WriteBindMatch(WaitForSignalStep step, string? bindTo, JsonElement payload, bool engineTimeout)
+    {
+        // Rule 2: the field was omitted, so this definition opted out of correlation entirely and
+        // its vars scope must stay exactly as it was before #280 (MUST NOT 4).
+        if (step.BindTo is null) return;
+
+        // Validation refuses this combination at definition load; belt-and-braces at runtime,
+        // because there is nowhere to write the verdict.
+        if (step.OutputVar is null) return;
+
+        string verdict;
+        if (engineTimeout)
+        {
+            verdict = "match";                                   // rule 1
+        }
+        else if (string.IsNullOrWhiteSpace(bindTo))
+        {
+            verdict = "mismatch";                                // rule 3 — an unbound park
+        }
+        else
+        {
+            var field = string.IsNullOrWhiteSpace(step.BindField) ? "blockerRef" : step.BindField!;
+            verdict = CompareBind(bindTo!, field, payload);      // rule 4
+        }
+
+        SetVar($"{step.OutputVar}_bindMatch", verdict);
+    }
+
+    private string CompareBind(string expected, string field, JsonElement payload)
+    {
+        if (payload.ValueKind != JsonValueKind.Object)
+        {
+            Workflow.Logger.LogInformation(
+                "Signal payload is {Kind}, not an object — cannot read '{Field}', scoring mismatch",
+                payload.ValueKind, field);
+            return "mismatch";
+        }
+
+        // Exact first, then case-insensitive, matching how the template engine navigates payloads:
+        // a gate owner writes camelCase, while a hand-sent signal may well be PascalCase.
+        if (!payload.TryGetProperty(field, out var value))
+        {
+            value = payload.EnumerateObject()
+                .Where(p => string.Equals(p.Name, field, StringComparison.OrdinalIgnoreCase))
+                .Select(p => p.Value)
+                .FirstOrDefault();
+        }
+
+        if (value.ValueKind != JsonValueKind.String)
+        {
+            Workflow.Logger.LogInformation(
+                "Signal payload has no string '{Field}' — scoring mismatch", field);
+            return "mismatch";
+        }
+
+        return string.Equals(value.GetString(), expected, StringComparison.Ordinal)
+            ? "match"
+            : "mismatch";
+    }
+
+    // -------------------------------------------------------------------------
+    // Signalling another workflow
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Sends a signal to another workflow by id (#280 D-4).
+    ///
+    /// An empty target is a SKIP, not a failure: a gated run started without a waiter id resolves
+    /// the template to empty and must then behave exactly as it did before this step existed
+    /// (MUST NOT 18, F15).
+    /// </summary>
+    private async Task<object?> ExecuteSignalWorkflowAsync(SignalWorkflowStep step)
+    {
+        var signalName = _template.ResolveString(step.SignalName);
+
+        // Authorization, checked here and not only at definition load, because the signal name can
+        // be a template: a definition passing load with "{{vars.gate}}" could still resolve to
+        // merge-approval at runtime. Definitions are agent-authored, so without this the new step
+        // would be a way to approve your own work by writing it into a workflow (#280).
+        //
+        // Deliberately BEFORE the empty-target skip: a definition that tries to send an
+        // approver-only gate is wrong whether or not it currently has somewhere to send it, and
+        // finding that out only once a waiter id happens to be present is the kind of latent
+        // authorization hole that ships.
+        if (CeoGateSignals.IsReserved(signalName))
+        {
+            throw new ApplicationFailureException(
+                $"signal_workflow step '{step.Name ?? "(unnamed)"}' attempted to send '{signalName}', " +
+                $"which is an approver-only gate. These signals resolve a human approval and may only " +
+                $"be sent from the dashboard: {CeoGateSignals.Joined}. " +
+                "This is refused regardless of ignoreFailure.",
+                errorType: ReservedSignalErrorType,
+                nonRetryable: true);
+        }
+
+        var workflowId = _template.ResolveString(step.WorkflowId);
+        if (string.IsNullOrWhiteSpace(workflowId))
+        {
+            Workflow.Logger.LogInformation(
+                "signal_workflow: no target workflow id resolved — skipping signal '{Signal}'",
+                step.SignalName);
+            return null;
+        }
+
+        var payload = ResolveArgs(step.Payload);
+
+        var handle = Workflow.GetExternalWorkflowHandle(workflowId);
+        await handle.SignalAsync(signalName, payload is not null ? [payload] : []);
+
+        Workflow.Logger.LogInformation(
+            "signal_workflow: sent '{Signal}' to {WorkflowId}", signalName, workflowId);
+        return null;
     }
 
     // -------------------------------------------------------------------------

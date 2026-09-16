@@ -22,14 +22,13 @@ public sealed class TemporalWorkflowTools(
     /// <summary>
     /// Signals that are exclusively for CEO approval, apart from the narrow CTO changes-requested exception.
     /// All other uses of these gates must go through the fleet dashboard (orchestrator REST API), which is auth-gated.
+    ///
+    /// The names live in <see cref="CeoGateSignals"/> because the workflow engine enforces the same
+    /// list against <c>signal_workflow</c> steps — two copies of a security list is a list that
+    /// drifts, and the drift would be silent until someone approved their own work through the
+    /// half that was not updated (#280).
     /// </summary>
-    private static readonly HashSet<string> CeoOnlySignals = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "merge-approval",
-        "doc-review",
-        "design-approval",
-        "advisory-review"
-    };
+    private static bool IsCeoOnlySignal(string signalName) => CeoGateSignals.IsReserved(signalName);
 
     [McpServerTool(Name = "temporal_start_workflow")]
     [Description("Start a new Temporal workflow execution. Returns workflowId and runId. IMPORTANT: use 'input' (not 'args') to pass workflow arguments — 'args' is for temporal_signal_workflow only.")]
@@ -248,11 +247,11 @@ public sealed class TemporalWorkflowTools(
             }
         }
 
-        if (CeoOnlySignals.Contains(signal_name))
+        if (IsCeoOnlySignal(signal_name))
         {
             return $"Error: '{signal_name}' is a CEO-only gate and cannot be sent via the MCP tool. " +
                    "Use the fleet dashboard to send this signal. " +
-                   "CEO-only signals: merge-approval, doc-review, design-approval, advisory-review.";
+                   $"CEO-only signals: {CeoGateSignals.Joined}.";
         }
 
         try

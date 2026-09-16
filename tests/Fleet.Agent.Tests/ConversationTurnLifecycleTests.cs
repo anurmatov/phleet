@@ -48,11 +48,11 @@ public class ConversationTurnLifecycleTests
         var bus = new ConversationEventBus(registry, counters, NullLogger<ConversationEventBus>.Instance);
         var options = Options.Create(new AgentOptions { Name = "test", Role = "test", WorkDir = "/tmp", Provider = "claude" });
 
+        sink ??= Substitute.For<IMessageSink>();
         var manager = new TaskManager(
             options, executor, new SessionManager(), NullLogger<TaskManager>.Instance,
-            injectionCounter: null, events: bus, telegramConfig: null, counters: counters);
-        sink ??= Substitute.For<IMessageSink>();
-        manager.Sink = sink;
+            injectionCounter: null, events: bus, telegramConfig: null, counters: counters,
+            sink: sink);
 
         return new Harness { Manager = manager, Bus = bus, Registry = registry, Counters = counters, Sink = sink };
     }

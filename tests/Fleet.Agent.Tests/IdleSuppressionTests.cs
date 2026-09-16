@@ -28,8 +28,7 @@ public class IdleSuppressionTests
     private static TaskManager BuildManager(IAgentExecutor executor, IMessageSink sink)
     {
         var options = Options.Create(new AgentOptions { Name = "test", Role = "test", WorkDir = "/tmp" });
-        var tm = new TaskManager(options, executor, new SessionManager(), NullLogger<TaskManager>.Instance);
-        tm.Sink = sink;
+        var tm = new TaskManager(options, executor, new SessionManager(), NullLogger<TaskManager>.Instance, sink: sink);
         return tm;
     }
 

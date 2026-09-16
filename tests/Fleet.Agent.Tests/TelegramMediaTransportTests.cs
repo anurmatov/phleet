@@ -97,7 +97,8 @@ public class TelegramMediaTransportTests
         var transport = new AgentTransport(
             agentOpts, telegramOpts, allowlist, relay, taskMgr,
             groupBhvr, router, cmdDisp, voice, tts, connState,
-            NullLogger<AgentTransport>.Instance);
+            NullLogger<AgentTransport>.Instance,
+            new MessageSinkHolder());
 
         var bot = new MediaFakeBot { FileBytes = fileBytes ?? [0x01, 0x02, 0x03] };
         transport.BotForTesting = bot;

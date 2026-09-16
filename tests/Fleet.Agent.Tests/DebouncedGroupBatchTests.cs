@@ -32,16 +32,14 @@ public class DebouncedGroupBatchTests
     private static TaskManager BuildSimpleManager(IAgentExecutor executor, IMessageSink sink)
     {
         var options = Options.Create(new AgentOptions { Name = "test", Role = "test", WorkDir = "/tmp", Provider = "claude" });
-        var manager = new TaskManager(options, executor, new SessionManager(), NullLogger<TaskManager>.Instance);
-        manager.Sink = sink;
+        var manager = new TaskManager(options, executor, new SessionManager(), NullLogger<TaskManager>.Instance, sink: sink);
         return manager;
     }
 
     private static TaskManager BuildManager(ControllableExecutor executor, IMessageSink sink, InjectionOutcomeCounter? counter = null)
     {
         var options = Options.Create(new AgentOptions { Name = "test", Role = "test", WorkDir = "/tmp", Provider = "claude" });
-        var manager = new TaskManager(options, executor, new SessionManager(), NullLogger<TaskManager>.Instance, counter ?? new InjectionOutcomeCounter());
-        manager.Sink = sink;
+        var manager = new TaskManager(options, executor, new SessionManager(), NullLogger<TaskManager>.Instance, counter ?? new InjectionOutcomeCounter(), sink: sink);
         return manager;
     }
 
@@ -598,12 +596,11 @@ public class DebouncedGroupBatchTests
         var allowlist = new AllowlistHolder(telegramOptions);
         // GroupRelayService constructor does not connect — connection is deferred to InitializeAsync.
         var relay = new GroupRelayService(agentOptions, rabbitOptions, NullLogger<GroupRelayService>.Instance);
-        var commands = new CommandDispatcher(manager, executor, agentOptions, NullLogger<CommandDispatcher>.Instance);
-        commands.Sink = sink;
+        var commands = new CommandDispatcher(manager, executor, agentOptions,
+            NullLogger<CommandDispatcher>.Instance, sink: sink);
         var prompts = new PromptAssembler(executor);
         var behavior = new GroupBehavior(agentOptions, telegramOptions, allowlist, executor, relay,
-            manager, commands, prompts, NullLogger<GroupBehavior>.Instance);
-        behavior.Sink = sink;
+            manager, commands, prompts, NullLogger<GroupBehavior>.Instance, sink: sink);
         return behavior;
     }
 

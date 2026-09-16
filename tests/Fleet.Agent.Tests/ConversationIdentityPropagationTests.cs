@@ -52,10 +52,7 @@ public class ConversationIdentityPropagationTests
 
         var manager = new TaskManager(options, executor, new SessionManager(),
             NullLogger<TaskManager>.Instance, injectionCounter: null, events: bus,
-            telegramConfig: null, counters: counters)
-        {
-            Sink = Substitute.For<IMessageSink>(),
-        };
+            telegramConfig: null, counters: counters, sink: Substitute.For<IMessageSink>());
 
         return new Harness { Manager = manager, Bus = bus, Registry = registry, Counters = counters };
     }
@@ -445,12 +442,13 @@ public class ConversationIdentityPropagationTests
         services.AddSingleton<IConversationRegistry>(sp => sp.GetRequiredService<ConversationRegistry>());
         services.AddSingleton<ConversationEventBus>();
         services.AddSingleton<IConversationEventPublisher>(sp => sp.GetRequiredService<ConversationEventBus>());
+        services.AddSingleton<MessageSinkHolder>();
+        services.AddSingleton<IMessageSink>(sp => sp.GetRequiredService<MessageSinkHolder>());
         services.AddSingleton<TaskManager>();
 
         using var provider = services.BuildServiceProvider();
 
         var manager = provider.GetRequiredService<TaskManager>();
-        manager.Sink = Substitute.For<IMessageSink>();
         var counters = provider.GetRequiredService<ConversationEventCounters>();
         var registry = provider.GetRequiredService<ConversationRegistry>();
 

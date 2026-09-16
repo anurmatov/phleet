@@ -366,10 +366,7 @@ public class VoiceTranscriptionMarkerTests
         var executor = new BlockingTestExecutor();
         var relay = new GroupRelayService(agentOpts, rabbitOpts, NullLogger<GroupRelayService>.Instance);
         var taskManager = new TaskManager(agentOpts, executor, new SessionManager(),
-            NullLogger<TaskManager>.Instance, new InjectionOutcomeCounter())
-        {
-            Sink = Substitute.For<IMessageSink>(),
-        };
+            NullLogger<TaskManager>.Instance, new InjectionOutcomeCounter(), sink: Substitute.For<IMessageSink>());
         // CommandDispatcher has deep sealed deps; the /new branch returns before the
         // dispatcher is reached, so an uninitialised instance is enough here.
         var commands = (CommandDispatcher)RuntimeHelpers.GetUninitializedObject(typeof(CommandDispatcher));
@@ -377,16 +374,10 @@ public class VoiceTranscriptionMarkerTests
         var allowlist = new AllowlistHolder(telegramOpts);
 
         var behavior = new GroupBehavior(agentOpts, telegramOpts, allowlist, executor, relay,
-            taskManager, commands, prompts, NullLogger<GroupBehavior>.Instance)
-        {
-            Sink = Substitute.For<IMessageSink>(),
-        };
+            taskManager, commands, prompts, NullLogger<GroupBehavior>.Instance, sink: Substitute.For<IMessageSink>());
 
         var router = new MessageRouter(agentOpts, telegramOpts, allowlist, taskManager,
-            behavior, relay, commands, NullLogger<MessageRouter>.Instance)
-        {
-            Sink = Substitute.For<IMessageSink>(),
-        };
+            behavior, relay, commands, NullLogger<MessageRouter>.Instance, sink: Substitute.For<IMessageSink>());
 
         return (router, executor);
     }
@@ -436,8 +427,7 @@ public class VoiceTranscriptionMarkerTests
             Name = "test", Role = "test", WorkDir = "/tmp", Provider = "claude",
         });
         var manager = new TaskManager(options, executor, new SessionManager(),
-            NullLogger<TaskManager>.Instance, new InjectionOutcomeCounter());
-        manager.Sink = Substitute.For<IMessageSink>();
+            NullLogger<TaskManager>.Instance, new InjectionOutcomeCounter(), sink: Substitute.For<IMessageSink>());
         return manager;
     }
 

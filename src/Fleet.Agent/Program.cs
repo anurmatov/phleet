@@ -53,7 +53,19 @@ if (isCliMode)
 else
 {
     // Daemon mode: Telegram transport + services
-    // AgentTransport injects itself as IMessageSink into these services
+    //
+    // --- Outbound sink seam (#277 D-1) ---------------------------------------------------
+    // The holder is dependency-free and IS the thing that breaks the circular DI
+    // (AgentTransport -> TaskManager -> sink) that the transport's four self-assignments used
+    // to work around. Consumers constructor-inject IMessageSink and get the holder; the
+    // transport attaches itself to it during its own construction. Until then — and forever in
+    // a host that never registers the transport (S4) — the holder serves NullMessageSink, so
+    // omitting Telegram is a counted no-op instead of a NullReferenceException.
+    builder.Services.AddSingleton<SinkSuppressionCounter>();
+    builder.Services.AddSingleton<RelayCompletionCounter>();
+    builder.Services.AddSingleton<MessageSinkHolder>();
+    builder.Services.AddSingleton<IMessageSink>(sp => sp.GetRequiredService<MessageSinkHolder>());
+
     // --- Conversation event seam ---------------------------------------------------------
     // Registered before TaskManager so the publisher is available to it, and before
     // AgentTransport so RuntimeWiringService starts first (see below).
@@ -71,13 +83,39 @@ else
     builder.Services.AddSingleton<MessageRouter>();
     builder.Services.AddSingleton<GroupBehavior>();
 
+    // --- Completion effects (#277 D-2) ----------------------------------------------------
+    // Both subscribe to TaskManager in their own constructors and must outlive the Telegram
+    // transport's absence: relay/bridge publication is what workflow delegations depend on, and
+    // context buffering is what a cold executor needs, on every channel.
+    //
+    // The AddSingleton + factory-AddHostedService pair on the publisher is load-bearing, not
+    // style. A bare AddHostedService<RelayCompletionPublisher>() registers the type ONLY as
+    // IHostedService, so RuntimeWiringService's constructor injection of the concrete type
+    // would fail to resolve — the guard meant to make a missing publisher loud would instead
+    // make the process refuse to start for an unrelated-looking reason. Resolving that SAME
+    // instance through the factory keeps one object: the one whose constructor subscribed and
+    // whose IsAttached the guard reads. Registering both forms independently would yield two
+    // instances, two subscriptions and two relay publications (#277 MUST NOT 16, MUST NOT 4).
+    builder.Services.AddSingleton<RelayCompletionPublisher>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<RelayCompletionPublisher>());
+    builder.Services.AddSingleton<CompletionContextBuffer>();
+
     // RuntimeWiringService is registered BEFORE AgentTransport on purpose. The host starts
-    // hosted services in registration order, and this one asserts that the completion handler
-    // is already attached (it is — AgentTransport attaches it in its constructor, and every
-    // constructor runs before any StartAsync).
+    // hosted services in registration order, and this one asserts that both completion handlers
+    // are already attached (they are — each subscribes in its constructor, and every constructor
+    // runs before any StartAsync).
     builder.Services.AddHostedService<RuntimeWiringService>();
     builder.Services.AddHostedService<ConversationEventPump>();
-    builder.Services.AddHostedService<AgentTransport>();
+    // Conditional (#277 S4). The transport is the Telegram adapter and nothing else depends on
+    // it being constructed: the sink falls back to the counted no-op, relay publication and
+    // context buffering have their own owners, and the startup guard checks those owners rather
+    // than this class. Keying off token presence rather than an explicit setting is the open
+    // question in #277 §11.1; either satisfies S4.
+    //
+    // A malformed token does NOT take this branch — the transport is registered and handles it
+    // internally (MUST NOT 17), so startup_telegram_state can distinguish absent from malformed.
+    if (!string.IsNullOrWhiteSpace(builder.Configuration[$"{TelegramOptions.Section}:{nameof(TelegramOptions.BotToken)}"]))
+        builder.Services.AddHostedService<AgentTransport>();
     builder.Services.AddHttpClient();
     builder.Services.AddHttpClient("whisper", client =>
     {

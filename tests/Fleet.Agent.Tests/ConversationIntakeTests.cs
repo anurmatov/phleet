@@ -82,15 +82,9 @@ public class ConversationIntakeTests : IDisposable
         var relay = new GroupRelayService(agentOpts, rabbitOpts, NullLogger<GroupRelayService>.Instance);
         var manager = new TaskManager(agentOpts, executor, new SessionManager(),
             NullLogger<TaskManager>.Instance, injectionCounter: null, events: bus,
-            telegramConfig: null, counters: counters)
-        {
-            Sink = Substitute.For<IMessageSink>(),
-        };
+            telegramConfig: null, counters: counters, sink: Substitute.For<IMessageSink>());
         var prompts = new PromptAssembler(executor);
-        var commands = new CommandDispatcher(manager, executor, agentOpts, NullLogger<CommandDispatcher>.Instance)
-        {
-            Sink = Substitute.For<IMessageSink>(),
-        };
+        var commands = new CommandDispatcher(manager, executor, agentOpts, NullLogger<CommandDispatcher>.Instance, sink: Substitute.For<IMessageSink>());
         var groupBehavior = new GroupBehavior(agentOpts, telegramOpts, allowlist, executor, relay,
             manager, commands, prompts, NullLogger<GroupBehavior>.Instance);
         var binder = new PrincipalBinder(clientOpts, agentOpts, allowlist);

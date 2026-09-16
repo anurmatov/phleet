@@ -43,8 +43,25 @@ public sealed class TaskManager
         EnqueueFresh,
     }
 
-    /// <summary>Set by AgentTransport after construction to break circular DI.</summary>
-    public IMessageSink Sink { get; set; } = null!;
+    /// <summary>
+    /// Outbound text destination. Constructor-injected via <see cref="MessageSinkHolder"/> rather
+    /// than assigned after construction by <c>AgentTransport</c>: as a settable property it was
+    /// <c>null!</c> until the transport existed, so omitting the transport turned every send into
+    /// a <see cref="NullReferenceException"/> (#277 D-1). Never null.
+    /// </summary>
+    private readonly IMessageSink _sink;
+
+    /// <summary>
+    /// Raises <see cref="OnTaskCompleted"/> directly. A C# event can only be raised by its
+    /// declaring type, and since #277 D-2 the subscribers are separate components, so a test that
+    /// wants to exercise one of them without standing up an executor turn needs this hook.
+    /// </summary>
+    internal void RaiseTaskCompletedForTest(
+        long chatId, string result, string? relaySender = null,
+        TaskSource source = TaskSource.UserMessage, bool isPartial = false,
+        string? correlationId = null, string? taskId = null,
+        CompletionKind kind = CompletionKind.Completed) =>
+        OnTaskCompleted?.Invoke(chatId, result, relaySender, source, isPartial, correlationId, taskId, kind);
 
     internal Action? QueueEntryClaimedForTest { get; set; }
     internal Action? QueueEntryDequeuedForBridgeCancelForTest { get; set; }
@@ -70,7 +87,8 @@ public sealed class TaskManager
         InjectionOutcomeCounter? injectionCounter = null,
         IConversationEventPublisher? events = null,
         IOptions<TelegramOptions>? telegramConfig = null,
-        ConversationEventCounters? counters = null)
+        ConversationEventCounters? counters = null,
+        IMessageSink? sink = null)
     {
         _agentConfig = agentConfig.Value;
         _executor = executor;
@@ -79,6 +97,7 @@ public sealed class TaskManager
         _injectionCounter = injectionCounter ?? new InjectionOutcomeCounter();
         _events = events;
         _telegramAttachmentDir = telegramConfig?.Value.AttachmentDir;
+        _sink = sink ?? NullMessageSink.Instance;
         // Constructor-injected rather than a settable property. As a property it was simply never
         // set anywhere in production, so conversation_submissions_total and
         // turn_outcome_unknown_total never incremented — the counters existed and measured nothing.
@@ -88,11 +107,11 @@ public sealed class TaskManager
     /// <summary>
     /// True when at least one handler is attached to <see cref="OnTaskCompleted"/>.
     ///
-    /// Read by the startup wiring guard. The completion handler is attached in
-    /// <c>AgentTransport</c>'s CONSTRUCTOR, and the host materializes every hosted service before
-    /// calling any <c>StartAsync</c>, so by wiring time it has already happened. This property
-    /// exists so the implementation does not silently DEPEND on that framework detail: if the
-    /// ordering assumption ever breaks, startup fails loudly instead of dropping relay answers.
+    /// NOT read by the startup wiring guard any more. Since #277 D-2 split the single handler
+    /// into <c>RelayCompletionPublisher</c> and <c>CompletionContextBuffer</c>, "any subscriber is
+    /// attached" is satisfied by the buffer alone while every relay answer vanishes, so
+    /// <c>RuntimeWiringService</c> checks each component by identity instead (#277 MUST NOT 21).
+    /// Retained as a diagnostic.
     /// </summary>
     public bool HasCompletionSubscriber => OnTaskCompleted is not null;
 
@@ -353,7 +372,7 @@ public sealed class TaskManager
 
         _sessions.ClearAllSessions();
         await _executor.StopProcessAsync();
-        await Sink.SendTextAsync(chatId, "halted");
+        await _sink.SendTextAsync(chatId, "halted");
     }
 
     public async Task HandleReset(long chatId)
@@ -361,13 +380,13 @@ public sealed class TaskManager
         var state = GetChatState(chatId);
         if (state.Count > 0)
         {
-            await Sink.SendTextAsync(chatId, "Can't reset while tasks are running. Use /cancel all first.");
+            await _sink.SendTextAsync(chatId, "Can't reset while tasks are running. Use /cancel all first.");
             return;
         }
 
         await _executor.StopProcessAsync();
         _sessions.ClearSession(chatId);
-        await Sink.SendTextAsync(chatId, "Session cleared. Send a new task to start fresh.");
+        await _sink.SendTextAsync(chatId, "Session cleared. Send a new task to start fresh.");
     }
 
     public async Task HandleStatus(long chatId)
@@ -410,7 +429,7 @@ public sealed class TaskManager
             }
         }
 
-        await Sink.SendTextAsync(chatId, msg);
+        await _sink.SendTextAsync(chatId, msg);
     }
 
     public async Task HandleCancel(long chatId, string arg, long userId = 0,
@@ -440,7 +459,7 @@ public sealed class TaskManager
 
                 if (crossChatTasks.Count == 0)
                 {
-                    await Sink.SendTextAsync(chatId, "No active tasks to cancel.");
+                    await _sink.SendTextAsync(chatId, "No active tasks to cancel.");
                     return;
                 }
 
@@ -449,9 +468,9 @@ public sealed class TaskManager
                     var (originChatId, _, t) = crossChatTasks[0];
                     Mark(t);
                     try { await t.Cts.CancelAsync(); } catch (ObjectDisposedException) { }
-                    await Sink.SendTextAsync(chatId, $"Cancelling task from chat {originChatId}...");
+                    await _sink.SendTextAsync(chatId, $"Cancelling task from chat {originChatId}...");
                     if (originChatId != chatId)
-                        await Sink.SendTextAsync(originChatId, "Task cancelled by user from another chat.");
+                        await _sink.SendTextAsync(originChatId, "Task cancelled by user from another chat.");
                     return;
                 }
 
@@ -462,9 +481,9 @@ public sealed class TaskManager
                         Mark(t);
                         try { await t.Cts.CancelAsync(); } catch (ObjectDisposedException) { }
                         if (originChatId != chatId)
-                            await Sink.SendTextAsync(originChatId, "Task cancelled by user from another chat.");
+                            await _sink.SendTextAsync(originChatId, "Task cancelled by user from another chat.");
                     }
-                    await Sink.SendTextAsync(chatId, $"Cancelling {crossChatTasks.Count} task(s) from other chats...");
+                    await _sink.SendTextAsync(chatId, $"Cancelling {crossChatTasks.Count} task(s) from other chats...");
                     return;
                 }
 
@@ -476,11 +495,11 @@ public sealed class TaskManager
                     crossChatList += $"  [chat {originChatId} #{tid}] {TruncateText(t.Description, 60)} ({(int)elapsed.TotalSeconds}s)\n";
                 }
                 crossChatList += "\nUse /cancel all to cancel all.";
-                await Sink.SendTextAsync(chatId, crossChatList);
+                await _sink.SendTextAsync(chatId, crossChatList);
                 return;
             }
 
-            await Sink.SendTextAsync(chatId, "No active tasks to cancel.");
+            await _sink.SendTextAsync(chatId, "No active tasks to cancel.");
             return;
         }
 
@@ -492,7 +511,7 @@ public sealed class TaskManager
                 try { await t.Cts.CancelAsync(); }
                 catch (ObjectDisposedException) { }
             }
-            await Sink.SendTextAsync(chatId, $"Cancelling all {tasks.Count} task(s)...");
+            await _sink.SendTextAsync(chatId, $"Cancelling all {tasks.Count} task(s)...");
             return;
         }
 
@@ -501,13 +520,13 @@ public sealed class TaskManager
             var task = state.Get(id);
             if (task is null)
             {
-                await Sink.SendTextAsync(chatId, $"No task with ID #{id}.");
+                await _sink.SendTextAsync(chatId, $"No task with ID #{id}.");
                 return;
             }
             Mark(task);
             try { await task.Cts.CancelAsync(); }
             catch (ObjectDisposedException) { }
-            await Sink.SendTextAsync(chatId, $"Cancelling task [#{id}]...");
+            await _sink.SendTextAsync(chatId, $"Cancelling task [#{id}]...");
             return;
         }
 
@@ -517,7 +536,7 @@ public sealed class TaskManager
             Mark(t);
             try { await t.Cts.CancelAsync(); }
             catch (ObjectDisposedException) { }
-            await Sink.SendTextAsync(chatId, "Cancelling the current task...");
+            await _sink.SendTextAsync(chatId, "Cancelling the current task...");
             return;
         }
 
@@ -528,7 +547,7 @@ public sealed class TaskManager
             list += $"  [#{t.Id}] {TruncateText(t.Description, 60)} ({(int)elapsed.TotalSeconds}s)\n";
         }
         list += "\nUse /cancel <id> or /cancel all";
-        await Sink.SendTextAsync(chatId, list);
+        await _sink.SendTextAsync(chatId, list);
     }
 
     // --- Conversation event seam (additive; never replaces a sink or callback call) ---
@@ -701,11 +720,11 @@ public sealed class TaskManager
                         var displayName = $"{char.ToUpperInvariant(_agentConfig.ShortName[0])}{_agentConfig.ShortName[1..]}";
                         htmlPrefix = $"<b>{displayName}:</b>\n";
                     }
-                    await Sink.SendHtmlTextAsync(chatId, $"{htmlPrefix}{encoded}{statsText}{toolBlock}");
+                    await _sink.SendHtmlTextAsync(chatId, $"{htmlPrefix}{encoded}{statsText}{toolBlock}");
                 }
                 else
                 {
-                    await Sink.SendTextAsync(chatId, $"{content}{statsText}");
+                    await _sink.SendTextAsync(chatId, $"{content}{statsText}");
                 }
             }
             catch (Exception ex)
@@ -751,7 +770,7 @@ public sealed class TaskManager
                     if (progress.EventType == "warning" && progress.IsSignificant)
                     {
                         // User-facing warning (e.g. provider capability notice) — deliver immediately
-                        await Sink.SendTextAsync(chatId, progress.Summary);
+                        await _sink.SendTextAsync(chatId, progress.Summary);
                         var (noticeText, noticeTruncated) = ProtocolSanitizer.SanitizeAndBound(
                             progress.Summary, ProtocolLimits.MaxNoticeTextChars, attachmentDir);
                         PublishEvent(chatId, ConversationEventKind.TurnNotice, identity,
@@ -761,7 +780,7 @@ public sealed class TaskManager
                     {
                         // Stale answer from the prior turn preserved during drain — deliver
                         // immediately so it reaches the user before the new turn's response.
-                        await Sink.SendTextAsync(chatId, progress.Summary);
+                        await _sink.SendTextAsync(chatId, progress.Summary);
                         var (recoveredText, recoveredTruncated) = ProtocolSanitizer.SanitizeAndBound(
                             progress.Summary, ProtocolLimits.MaxNoticeTextChars, attachmentDir);
                         PublishEvent(chatId, ConversationEventKind.TurnRecoveredAnswer, identity,
@@ -788,7 +807,7 @@ public sealed class TaskManager
                                 htmlPrefix = $"<b>{displayName}:</b>\n";
                             }
                             var encoded = System.Net.WebUtility.HtmlEncode($"{Prefix()}... {summaryText}");
-                            await Sink.SendHtmlTextAsync(chatId, $"{htmlPrefix}<blockquote expandable>{encoded}</blockquote>");
+                            await _sink.SendHtmlTextAsync(chatId, $"{htmlPrefix}<blockquote expandable>{encoded}</blockquote>");
                         }
                         OnToolUse?.Invoke(chatId, progress.ToolName, progress.Summary);
 
@@ -1241,7 +1260,7 @@ public sealed class TaskManager
         {
             try
             {
-                await Sink.SendTextAsync(chatId, "I'm busy right now — your message is queued. I'll get to it once my current turn finishes.");
+                await _sink.SendTextAsync(chatId, "I'm busy right now — your message is queued. I'll get to it once my current turn finishes.");
             }
             catch (Exception ex)
             {
@@ -1325,7 +1344,7 @@ public sealed class TaskManager
             _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DroppedAtQueueCap);
             // DebouncedGroupBatch drops silently — the notice is noise for automated checks.
             if (part.Source != TaskSource.DebouncedGroupBatch)
-                _ = Sink.SendTextAsync(chatId, $"Queue is full ({MaxQueueDepth} messages waiting). Please wait for tasks to complete.");
+                _ = _sink.SendTextAsync(chatId, $"Queue is full ({MaxQueueDepth} messages waiting). Please wait for tasks to complete.");
             // Production relay passes taskId but no correlationId — gate on either so relay
             // completions are not dead code when the source has only a taskId.
             if (completeBridgeOnDrop && part.Source is TaskSource.Bridge or TaskSource.Relay
@@ -1348,7 +1367,7 @@ public sealed class TaskManager
         _logger.LogInformation("Message queued (position {Pos}) for chat {ChatId}; queue entries={EntryCount}, max parts per entry={MaxParts}",
             queuePos, chatId, _messageQueue.Count, MaxQueuedPartsPerEntry);
         if (notifyUser && !(_agentConfig.SuppressToolMessages && chatId < 0))
-            _ = Sink.SendTextAsync(chatId, $"I'm busy right now — your message is queued (position {queuePos}). I'll get to it once my current task finishes.");
+            _ = _sink.SendTextAsync(chatId, $"I'm busy right now — your message is queued (position {queuePos}). I'll get to it once my current task finishes.");
         OnStatusChanged?.Invoke();
         return true;
     }
@@ -1392,7 +1411,7 @@ public sealed class TaskManager
         {
             while (!ct.IsCancellationRequested)
             {
-                await Sink.SendTypingAsync(chatId, ct);
+                await _sink.SendTypingAsync(chatId, ct);
                 PublishEvent(chatId, ConversationEventKind.TurnProgress, identity,
                     new TurnProgressPayload { Activity = ProgressActivity.Typing });
                 await Task.Delay(TimeSpan.FromSeconds(4), ct);
@@ -1563,7 +1582,7 @@ public sealed class TaskManager
         _logger.LogInformation("Draining queued message for chat {ChatId} (source={Source}, parts={Parts})",
             queued.ChatId, queued.Source, queued.PartCount);
         if (!(_agentConfig.SuppressToolMessages && queued.ChatId < 0))
-            _ = Sink.SendTextAsync(queued.ChatId, "Now processing your queued message...");
+            _ = _sink.SendTextAsync(queued.ChatId, "Now processing your queued message...");
         OnStatusChanged?.Invoke();
 
         // Identity and the merged-submission list must survive the queue. Without them the turn

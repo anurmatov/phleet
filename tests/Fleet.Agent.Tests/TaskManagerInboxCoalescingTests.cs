@@ -392,8 +392,7 @@ public class TaskManagerInboxCoalescingTests
         {
             Name = "test", Role = "test", WorkDir = "/tmp", Provider = "claude",
         });
-        var manager = new TaskManager(options, executor, new SessionManager(), NullLogger<TaskManager>.Instance, counter);
-        manager.Sink = sink;
+        var manager = new TaskManager(options, executor, new SessionManager(), NullLogger<TaskManager>.Instance, counter, sink: sink);
         return manager;
     }
 

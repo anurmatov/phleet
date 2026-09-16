@@ -13,15 +13,17 @@ namespace Fleet.Agent.Services;
 /// so an adapter started that way would look alive while every workflow answer silently vanished.
 ///
 /// This service owns ONLY the relay subscription, relay initialization and shutdown-token
-/// distribution. The completion handler is attached in the transport's constructor and stays
-/// there; see the comment at that site for why it is not moved.
+/// distribution. The completion effects are attached in the constructors of
+/// <see cref="RelayCompletionPublisher"/> and <see cref="CompletionContextBuffer"/> (#277 D-2);
+/// this service verifies both are attached before consumption starts.
 /// </summary>
 public sealed class RuntimeWiringService : IHostedService
 {
     private readonly GroupRelayService _relay;
     private readonly GroupBehavior _groupBehavior;
     private readonly MessageRouter _router;
-    private readonly TaskManager _taskManager;
+    private readonly RelayCompletionPublisher _relayCompletions;
+    private readonly CompletionContextBuffer _contextBuffer;
     private readonly IHostApplicationLifetime _lifetime;
     private readonly ILogger<RuntimeWiringService> _logger;
 
@@ -29,14 +31,16 @@ public sealed class RuntimeWiringService : IHostedService
         GroupRelayService relay,
         GroupBehavior groupBehavior,
         MessageRouter router,
-        TaskManager taskManager,
+        RelayCompletionPublisher relayCompletions,
+        CompletionContextBuffer contextBuffer,
         IHostApplicationLifetime lifetime,
         ILogger<RuntimeWiringService> logger)
     {
         _relay = relay;
         _groupBehavior = groupBehavior;
         _router = router;
-        _taskManager = taskManager;
+        _relayCompletions = relayCompletions;
+        _contextBuffer = contextBuffer;
         _lifetime = lifetime;
         _logger = logger;
     }
@@ -44,16 +48,28 @@ public sealed class RuntimeWiringService : IHostedService
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         // 1. Guard. The host materializes every IHostedService — running every constructor —
-        //    before calling any StartAsync, so the transport's constructor-time subscription has
-        //    already happened by now. This check exists so the implementation does not silently
-        //    DEPEND on that framework detail: if the ordering assumption ever breaks, startup
-        //    fails loudly instead of running a process that drops every relay answer.
-        if (!_taskManager.HasCompletionSubscriber)
+        //    before calling any StartAsync, so both components' constructor-time subscriptions
+        //    have already happened by now. This check exists so the implementation does not
+        //    silently DEPEND on that framework detail: if the ordering assumption ever breaks,
+        //    startup fails loudly instead of running a process that drops every relay answer.
+        //
+        //    It checks each component BY IDENTITY, not TaskManager.HasCompletionSubscriber. That
+        //    property is true when ANY handler is attached, and since #277 D-2 split the single
+        //    handler into two owners it would be satisfied by CompletionContextBuffer alone —
+        //    while every workflow answer vanished. A boolean "someone is listening" is the exact
+        //    silent-loss defect this guard was added to prevent (#277 MUST NOT 21).
+        //
+        //    Both are constructor-injected by concrete type, so a missing REGISTRATION fails at DI
+        //    resolution with the type name in it, before StartAsync; this check covers the
+        //    registered-but-unsubscribed case.
+        if (!_relayCompletions.IsAttached || !_contextBuffer.IsAttached)
         {
             throw new InvalidOperationException(
-                "RuntimeWiringService started before any completion handler was attached to " +
-                "TaskManager.OnTaskCompleted. Relay and bridge answers would be silently dropped. " +
-                "AgentTransport must be constructed before this service starts.");
+                "RuntimeWiringService started before the completion handlers were attached to " +
+                "TaskManager (RelayCompletionPublisher.IsAttached=" + _relayCompletions.IsAttached +
+                ", CompletionContextBuffer.IsAttached=" + _contextBuffer.IsAttached + "). " +
+                "Relay and bridge answers would be silently dropped. Both must be constructed " +
+                "before this service starts.");
         }
 
         // 2. Attach the relay subscriber BEFORE consumption starts.

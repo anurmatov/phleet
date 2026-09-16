@@ -1,7 +1,5 @@
 using Fleet.Agent.Abstractions;
 using Fleet.Agent.Configuration;
-using Fleet.Agent.Interfaces;
-using Fleet.Agent.Models;
 using Fleet.Agent.Services;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -12,7 +10,12 @@ namespace Fleet.Agent.Tests;
 
 /// <summary>
 /// AC18–21: the wiring that must happen with or without a bot token, the guard that refuses to
-/// start without a completion subscriber, and the shutdown token that actually fires on shutdown.
+/// start without the completion owners, and the shutdown token that actually fires on shutdown.
+///
+/// #277 D-2 split the single completion handler into two owners with disjoint effects, so the
+/// guard can no longer ask "does OnTaskCompleted have any subscriber" — see
+/// <see cref="StartAsync_ThrowsWhenOnlyTheContextBufferIsAttached"/>, which is the case that
+/// motivated the change.
 /// </summary>
 public class RuntimeWiringServiceTests
 {
@@ -28,84 +31,21 @@ public class RuntimeWiringServiceTests
         public void StopApplication() => _stopping.Cancel();
     }
 
-    private static (RuntimeWiringService wiring, TaskManager manager, GroupBehavior groupBehavior, FakeLifetime lifetime)
-        Build(bool botToken)
-    {
-        var agentOpts = Options.Create(new AgentOptions
-        {
-            Name = "fleet-agent1", Role = "r", WorkDir = Path.GetTempPath(), Provider = "claude",
-            GroupDebounceSeconds = 1,
-        });
-        var telegramOpts = Options.Create(new TelegramOptions
-        {
-            // A syntactically valid but fake token; the transport only creates a client from it.
-            BotToken = botToken ? "123456:AAFakeTokenForTestsOnly_0000000000000" : "",
-        });
-        var rabbitOpts = Options.Create(new RabbitMqOptions());
-        var whisperOpts = Options.Create(new WhisperOptions());
-        var ttsOpts = Options.Create(new TtsOptions());
-
-        var executor = Substitute.For<IAgentExecutor>();
-        var connState = Substitute.For<IFleetConnectionState>();
-        var httpFact = Substitute.For<IHttpClientFactory>();
-        var allowlist = new AllowlistHolder(telegramOpts);
-        var relay = new GroupRelayService(agentOpts, rabbitOpts, NullLogger<GroupRelayService>.Instance);
-        var manager = new TaskManager(agentOpts, executor, new SessionManager(), NullLogger<TaskManager>.Instance);
-        var prompts = new PromptAssembler(executor);
-        var commands = new CommandDispatcher(manager, executor, agentOpts, NullLogger<CommandDispatcher>.Instance);
-        var voice = new VoiceTranscriptionService(httpFact, whisperOpts, NullLogger<VoiceTranscriptionService>.Instance);
-        var tts = new TtsService(httpFact, ttsOpts, NullLogger<TtsService>.Instance);
-        var groupBehavior = new GroupBehavior(agentOpts, telegramOpts, allowlist, executor, relay,
-            manager, commands, prompts, NullLogger<GroupBehavior>.Instance);
-        var router = new MessageRouter(agentOpts, telegramOpts, allowlist, manager, groupBehavior,
-            relay, commands, NullLogger<MessageRouter>.Instance);
-
-        // Constructing the transport is what attaches the completion handler — the whole point of
-        // moving that subscription out of ExecuteAsync.
-        _ = new AgentTransport(
-            agentOpts, telegramOpts, allowlist, relay, manager, groupBehavior, router, commands,
-            voice, tts, connState, NullLogger<AgentTransport>.Instance, null);
-
-        var lifetime = new FakeLifetime();
-        var wiring = new RuntimeWiringService(relay, groupBehavior, router, manager, lifetime,
-            NullLogger<RuntimeWiringService>.Instance);
-
-        return (wiring, manager, groupBehavior, lifetime);
-    }
+    private sealed record Parts(
+        RuntimeWiringService Wiring,
+        TaskManager Manager,
+        GroupBehavior GroupBehavior,
+        FakeLifetime Lifetime,
+        RelayCompletionPublisher Publisher,
+        CompletionContextBuffer Buffer,
+        GroupRelayService Relay);
 
     /// <summary>
-    /// AC19. Exactly one subscriber, attached at CONSTRUCTION. Two subscribers would mean two
-    /// attachment moments and therefore a window in which one is attached and the other is not —
-    /// which is the exact class of bug this wiring exists to remove.
+    /// Builds the runtime WITHOUT an AgentTransport. That is the point of #277: no first-party
+    /// path may depend on the Telegram transport being constructed, so every test here runs in a
+    /// host that never creates one.
     /// </summary>
-    [Fact]
-    public void ConstructingTheTransport_AttachesTheCompletionHandler()
-    {
-        var (_, manager, _, _) = Build(botToken: true);
-
-        Assert.True(manager.HasCompletionSubscriber);
-    }
-
-    /// <summary>
-    /// AC18 and Constraint 12. The headline fix: with NO bot token the completion callback is
-    /// still wired. Before this, "headless" meant no Telegram AND no completion callback, so an
-    /// adapter started that way would look alive while every workflow answer silently vanished.
-    /// </summary>
-    [Fact]
-    public void WithNoBotToken_TheCompletionHandlerIsStillAttached()
-    {
-        var (_, manager, _, _) = Build(botToken: false);
-
-        Assert.True(manager.HasCompletionSubscriber);
-    }
-
-    /// <summary>
-    /// AC20. The guard is not decorative: it exists so the implementation does not silently
-    /// depend on the host's "all constructors run before any StartAsync" ordering. If that
-    /// assumption ever breaks, startup must fail loudly rather than drop relay answers.
-    /// </summary>
-    [Fact]
-    public async Task StartAsync_ThrowsWhenNoCompletionSubscriberIsAttached()
+    private static Parts Build()
     {
         var agentOpts = Options.Create(new AgentOptions
         {
@@ -113,29 +53,103 @@ public class RuntimeWiringServiceTests
         });
         var telegramOpts = Options.Create(new TelegramOptions());
         var rabbitOpts = Options.Create(new RabbitMqOptions());
+
         var executor = Substitute.For<IAgentExecutor>();
         var allowlist = new AllowlistHolder(telegramOpts);
         var relay = new GroupRelayService(agentOpts, rabbitOpts, NullLogger<GroupRelayService>.Instance);
-        var manager = new TaskManager(agentOpts, executor, new SessionManager(), NullLogger<TaskManager>.Instance);
+        var holder = new MessageSinkHolder();
+        var manager = new TaskManager(agentOpts, executor, new SessionManager(),
+            NullLogger<TaskManager>.Instance, sink: holder);
         var prompts = new PromptAssembler(executor);
-        var commands = new CommandDispatcher(manager, executor, agentOpts, NullLogger<CommandDispatcher>.Instance);
+        var commands = new CommandDispatcher(manager, executor, agentOpts,
+            NullLogger<CommandDispatcher>.Instance, sink: holder);
         var groupBehavior = new GroupBehavior(agentOpts, telegramOpts, allowlist, executor, relay,
-            manager, commands, prompts, NullLogger<GroupBehavior>.Instance);
+            manager, commands, prompts, NullLogger<GroupBehavior>.Instance, sink: holder);
         var router = new MessageRouter(agentOpts, telegramOpts, allowlist, manager, groupBehavior,
-            relay, commands, NullLogger<MessageRouter>.Instance);
+            relay, commands, NullLogger<MessageRouter>.Instance, sink: holder);
 
-        // NOTE: no AgentTransport is constructed, so nothing attached the handler.
-        Assert.False(manager.HasCompletionSubscriber);
+        // Constructing these is what attaches the completion effects — the whole point of moving
+        // them off the Telegram transport.
+        var publisher = new RelayCompletionPublisher(manager, relay,
+            NullLogger<RelayCompletionPublisher>.Instance);
+        var buffer = new CompletionContextBuffer(manager, groupBehavior, holder);
 
-        var wiring = new RuntimeWiringService(relay, groupBehavior, router, manager,
-            new FakeLifetime(), NullLogger<RuntimeWiringService>.Instance);
+        var lifetime = new FakeLifetime();
+        var wiring = new RuntimeWiringService(relay, groupBehavior, router, publisher, buffer,
+            lifetime, NullLogger<RuntimeWiringService>.Instance);
+
+        return new Parts(wiring, manager, groupBehavior, lifetime, publisher, buffer, relay);
+    }
+
+    /// <summary>
+    /// AC18/AC19 and #274 Constraint 12, restated for #277: the completion effects are attached
+    /// with NO Telegram transport in the process at all. Before, "headless" meant no Telegram AND
+    /// no completion callback, so an adapter started that way looked alive while every workflow
+    /// answer silently vanished.
+    /// </summary>
+    [Fact]
+    public void WithNoTransportConstructed_BothCompletionOwnersAreAttached()
+    {
+        var p = Build();
+
+        Assert.True(p.Publisher.IsAttached);
+        Assert.True(p.Buffer.IsAttached);
+        Assert.True(p.Manager.HasCompletionSubscriber);
+    }
+
+    /// <summary>
+    /// AC20. The guard is not decorative: it exists so the implementation does not silently depend
+    /// on the host's "all constructors run before any StartAsync" ordering.
+    /// </summary>
+    [Fact]
+    public async Task StartAsync_ThrowsWhenNoCompletionOwnerIsAttached()
+    {
+        var p = Build();
+        // Detach both, simulating the ordering assumption breaking.
+        p.Publisher.Dispose();
+        p.Buffer.Dispose();
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => wiring.StartAsync(CancellationToken.None));
+            () => p.Wiring.StartAsync(CancellationToken.None));
 
-        Assert.Contains("OnTaskCompleted", ex.Message);
-        // AC20: it threw BEFORE starting a consumer — no relay consumption began.
-        Assert.False(relay.IsEnabled && relay.IsInitializedForTesting);
+        Assert.Contains("RelayCompletionPublisher", ex.Message);
+        // It threw BEFORE starting a consumer — no relay consumption began.
+        Assert.False(p.Relay.IsEnabled && p.Relay.IsInitializedForTesting);
+    }
+
+    /// <summary>
+    /// #277 MUST NOT 21 — the reason the guard checks identity rather than a subscriber count.
+    ///
+    /// With the context buffer attached and the relay publisher detached, the old predicate
+    /// (<c>TaskManager.HasCompletionSubscriber</c>) is TRUE, so the process would start and then
+    /// drop every workflow answer. This test fails if the guard is ever reverted to that boolean.
+    /// </summary>
+    [Fact]
+    public async Task StartAsync_ThrowsWhenOnlyTheContextBufferIsAttached()
+    {
+        var p = Build();
+        p.Publisher.Dispose();
+
+        // The old, insufficient predicate still reports "someone is listening".
+        Assert.True(p.Manager.HasCompletionSubscriber);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => p.Wiring.StartAsync(CancellationToken.None));
+
+        Assert.Contains("RelayCompletionPublisher.IsAttached=False", ex.Message);
+    }
+
+    /// <summary>The mirror case: the publisher alone is not enough either.</summary>
+    [Fact]
+    public async Task StartAsync_ThrowsWhenOnlyTheRelayPublisherIsAttached()
+    {
+        var p = Build();
+        p.Buffer.Dispose();
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => p.Wiring.StartAsync(CancellationToken.None));
+
+        Assert.Contains("CompletionContextBuffer.IsAttached=False", ex.Message);
     }
 
     /// <summary>
@@ -146,13 +160,13 @@ public class RuntimeWiringServiceTests
     [Fact]
     public async Task ShutdownToken_ComesFromApplicationStoppingNotStartAsync()
     {
-        var (wiring, _, groupBehavior, lifetime) = Build(botToken: false);
+        var p = Build();
 
         // A token that would be passed if StartAsync's parameter were (wrongly) used.
         using var startupAbort = new CancellationTokenSource();
-        await wiring.StartAsync(startupAbort.Token);
+        await p.Wiring.StartAsync(startupAbort.Token);
 
-        var observed = groupBehavior.ShutdownTokenForTesting;
+        var observed = p.GroupBehavior.ShutdownTokenForTesting;
         Assert.False(observed.IsCancellationRequested);
 
         // Cancelling the STARTUP token must not fire it — that is the whole distinction.
@@ -160,18 +174,18 @@ public class RuntimeWiringServiceTests
         Assert.False(observed.IsCancellationRequested);
 
         // Stopping the application must.
-        lifetime.StopApplication();
+        p.Lifetime.StopApplication();
         Assert.True(observed.IsCancellationRequested);
     }
 
     [Fact]
     public async Task StopAsync_DetachesTheRelaySubscription()
     {
-        var (wiring, _, _, _) = Build(botToken: false);
+        var p = Build();
 
-        await wiring.StartAsync(CancellationToken.None);
-        await wiring.StopAsync(CancellationToken.None);
+        await p.Wiring.StartAsync(CancellationToken.None);
+        await p.Wiring.StopAsync(CancellationToken.None);
         // No exception, and the service is re-startable.
-        await wiring.StartAsync(CancellationToken.None);
+        await p.Wiring.StartAsync(CancellationToken.None);
     }
 }

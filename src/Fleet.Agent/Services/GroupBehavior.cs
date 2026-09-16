@@ -67,6 +67,13 @@ public sealed class GroupBehavior
 
     public void SetShutdownToken(CancellationToken ct) => _shutdownToken = ct;
 
+    /// <summary>
+    /// The shutdown token currently in force. Exposed so a test can prove it is the one that
+    /// fires on application STOP rather than the one that aborts startup — a distinction that is
+    /// invisible from the outside and easy to get wrong.
+    /// </summary>
+    internal CancellationToken ShutdownTokenForTesting => _shutdownToken;
+
     public GroupChatBuffer GetGroupBuffer(long chatId)
     {
         if (!_historyLoaded)
@@ -170,6 +177,15 @@ public sealed class GroupBehavior
             var data = new Dictionary<long, PersistedBuffer>();
             foreach (var (chatId, buffer) in _groupBuffers)
             {
+                // Client (non-Telegram) conversations are process-lifetime only and never reach
+                // disk. This filter is mandatory rather than belt-and-braces: BufferBotResponse
+                // calls SaveBuffers() on EVERY completion, so without it client text would be
+                // persisted through the completion path regardless of what the intake does.
+                // It also avoids accumulating orphaned on-disk buffers keyed to reserved runtime
+                // keys that will never be reused after a restart.
+                if (ConversationRegistry.IsReservedKey(chatId))
+                    continue;
+
                 // Normalize MinValue (never-checked buffer) to UtcNow so that on next
                 // load the existing entries are not treated as unread.
                 var lastChecked = buffer.GetLastChecked();

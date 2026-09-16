@@ -24,13 +24,26 @@ public sealed class GroupChatBuffer
     public string? ChatLabel { get; set; }
 
     /// <summary>
+    /// Channel anchor supplied by the conversation registry for a reserved-band (non-Telegram)
+    /// conversation. When set, <see cref="RenderHeader"/> returns it verbatim.
+    ///
+    /// This exists because reserved keys are positive, so they would otherwise render as a
+    /// Telegram DM anchor. Positive keys are deliberate — a negative band would have tripped the
+    /// <c>chatId &lt; 0</c> "this is a group" heuristics elsewhere in the runtime — and this
+    /// override is the one place that has to know the difference.
+    /// </summary>
+    public string? ChannelAnchorOverride { get; set; }
+
+    /// <summary>
     /// Returns the <c>[channel: ...]</c> header line for prompt injection,
     /// or <c>null</c> when <see cref="ChatId"/> is 0 (legacy / relay).
     /// Groups (chatId &lt; 0): <c>[channel: group chat_id=N title="X"]</c>
     /// DMs (chatId &gt; 0): <c>[channel: dm chat_id=N user=@X]</c> / <c>name="X"</c> / bare id.
+    /// A non-Telegram conversation returns <see cref="ChannelAnchorOverride"/> verbatim.
     /// </summary>
     public string? RenderHeader()
     {
+        if (ChannelAnchorOverride is { Length: > 0 }) return ChannelAnchorOverride;
         if (ChatId == 0) return null;
         if (ChatId < 0)
         {

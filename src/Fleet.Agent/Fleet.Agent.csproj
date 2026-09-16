@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Fleet.Shared\Fleet.Shared.csproj" />
+    <ProjectReference Include="..\Fleet.Protocol\Fleet.Protocol.csproj" />
   </ItemGroup>
 
   <ItemGroup>

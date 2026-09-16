@@ -1,3 +1,4 @@
+using Fleet.Agent.Abstractions;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Interfaces;
 using Fleet.Agent.Services;
@@ -17,6 +18,7 @@ builder.Services.Configure<TelegramOptions>(builder.Configuration.GetSection(Tel
 builder.Services.Configure<RabbitMqOptions>(builder.Configuration.GetSection(RabbitMqOptions.Section));
 builder.Services.Configure<WhisperOptions>(builder.Configuration.GetSection(WhisperOptions.Section));
 builder.Services.Configure<TtsOptions>(builder.Configuration.GetSection(TtsOptions.Section));
+builder.Services.Configure<ClientChannelOptions>(builder.Configuration.GetSection(ClientChannelOptions.Section));
 
 // Register services
 builder.Services.AddSingleton<PromptBuilder>();
@@ -52,11 +54,29 @@ else
 {
     // Daemon mode: Telegram transport + services
     // AgentTransport injects itself as IMessageSink into these services
+    // --- Conversation event seam ---------------------------------------------------------
+    // Registered before TaskManager so the publisher is available to it, and before
+    // AgentTransport so RuntimeWiringService starts first (see below).
+    builder.Services.AddSingleton<ConversationEventCounters>();
+    builder.Services.AddSingleton<ConversationRegistry>();
+    builder.Services.AddSingleton<IConversationRegistry>(sp => sp.GetRequiredService<ConversationRegistry>());
+    builder.Services.AddSingleton<ConversationEventBus>();
+    builder.Services.AddSingleton<IConversationEventPublisher>(sp => sp.GetRequiredService<ConversationEventBus>());
+    builder.Services.AddSingleton<PrincipalBinder>();
+    builder.Services.AddSingleton<ConversationIntake>();
+
     builder.Services.AddSingleton<TaskManager>();
     builder.Services.AddSingleton<CommandDispatcher>();
     builder.Services.AddSingleton<PromptAssembler>();
     builder.Services.AddSingleton<MessageRouter>();
     builder.Services.AddSingleton<GroupBehavior>();
+
+    // RuntimeWiringService is registered BEFORE AgentTransport on purpose. The host starts
+    // hosted services in registration order, and this one asserts that the completion handler
+    // is already attached (it is — AgentTransport attaches it in its constructor, and every
+    // constructor runs before any StartAsync).
+    builder.Services.AddHostedService<RuntimeWiringService>();
+    builder.Services.AddHostedService<ConversationEventPump>();
     builder.Services.AddHostedService<AgentTransport>();
     builder.Services.AddHttpClient();
     builder.Services.AddHttpClient("whisper", client =>

@@ -103,6 +103,23 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         _router.Sink = this;
         _commands.Sink = this;
 
+        // The completion handler is attached HERE, in the constructor, rather than in
+        // ExecuteAsync. Two things follow, both deliberate:
+        //
+        // 1. It survives a token-less process. ExecuteAsync returns early when no bot client
+        //    exists, and it used to return BEFORE this line — so "headless" meant no Telegram
+        //    AND no completion callback, and every workflow answer silently vanished.
+        // 2. There is exactly ONE subscriber, attached at construction, so there is no window in
+        //    which the relay consumer is running but the handler is not.
+        //
+        // The handler itself does NOT move. It reads the private _lastSentMessageIds map that
+        // SendTextAsync writes, and relocating that map would mean editing four lines inside the
+        // Telegram render path for the sake of one Telegram-only integer. Splitting the handler
+        // across two subscribers is equally wrong — two attachment moments reintroduce exactly
+        // the window this is removing.
+        _taskManager.OnTaskCompleted += OnTaskCompleted;
+        _taskManager.OnToolUse += OnToolUse;
+
         _mediaGroupBuffer = new MediaGroupBuffer(telegramConfig.Value.MaxGroupBufferMs);
 
         // Wire up the download helper with the real bot downloader.
@@ -198,6 +215,10 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         // chatId==0 means "headless workflow delegation" — no Telegram destination.
         // The result still flows back to the caller via the relay (see OnTaskCompleted).
         if (chatId == 0) return;
+        // Reserved-band keys belong to a non-Telegram conversation and have no Telegram
+        // destination. This is the ONLY permitted edit to the render path: a pure early
+        // return, before any formatting, splitting or bot call.
+        if (Services.ConversationRegistry.IsReservedKey(chatId)) return;
         if (_bot is null) return;
 
         // Extract and strip [reply_to: N] token from agent output (Feature 3b).
@@ -471,6 +492,10 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     public async Task SendHtmlTextAsync(long chatId, string htmlText, CancellationToken ct = default)
     {
         if (chatId == 0) return;
+        // Reserved-band keys belong to a non-Telegram conversation and have no Telegram
+        // destination. This is the ONLY permitted edit to the render path: a pure early
+        // return, before any formatting, splitting or bot call.
+        if (Services.ConversationRegistry.IsReservedKey(chatId)) return;
         if (_bot is null) return;
 
         // Telegram doesn't support <br>, <br/>, or <br /> — replace all variants with newline.
@@ -485,6 +510,10 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     public async Task SendPhotoAsync(long chatId, string filePath, string? caption, CancellationToken ct = default)
     {
         if (chatId == 0) return;
+        // Reserved-band keys belong to a non-Telegram conversation and have no Telegram
+        // destination. This is the ONLY permitted edit to the render path: a pure early
+        // return, before any formatting, splitting or bot call.
+        if (Services.ConversationRegistry.IsReservedKey(chatId)) return;
         if (_bot is null) return;
 
         if (!File.Exists(filePath))
@@ -510,9 +539,24 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         }
     }
 
+    /// <summary>
+    /// Detach the handlers attached in the constructor. Symmetric with that attachment, so a
+    /// disposed transport cannot keep buffering into a dead instance.
+    /// </summary>
+    public override void Dispose()
+    {
+        _taskManager.OnTaskCompleted -= OnTaskCompleted;
+        _taskManager.OnToolUse -= OnToolUse;
+        base.Dispose();
+    }
+
     public async Task SendTypingAsync(long chatId, CancellationToken ct = default)
     {
         if (chatId == 0) return;
+        // Reserved-band keys belong to a non-Telegram conversation and have no Telegram
+        // destination. This is the ONLY permitted edit to the render path: a pure early
+        // return, before any formatting, splitting or bot call.
+        if (Services.ConversationRegistry.IsReservedKey(chatId)) return;
         if (_bot is null) return;
         await _bot.SendChatAction(chatId, ChatAction.Typing, cancellationToken: ct);
     }
@@ -544,18 +588,10 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
 
         _connectionState.TelegramConnected = true;
 
-        // Propagate shutdown token for debounce cancellation
-        _groupBehavior.SetShutdownToken(stoppingToken);
-        _router.SetShutdownToken(stoppingToken);
-
-        // Initialize relay if configured
-        await _relay.InitializeAsync(stoppingToken);
-        if (_relay.IsEnabled)
-            _relay.MessageReceived += _groupBehavior.OnRelayMessage;
-
-        // Wire up task completion handler for group buffering and relay
-        _taskManager.OnTaskCompleted += OnTaskCompleted;
-        _taskManager.OnToolUse += OnToolUse;
+        // Relay initialization, the relay subscription and shutdown-token distribution now live
+        // in RuntimeWiringService, which runs regardless of whether a bot token is configured.
+        // The completion and tool-use handlers are attached in this class's constructor.
+        // ExecuteAsync's early return above therefore disables ONLY the poller.
 
         if (_telegramConfig.SendOnly)
         {

@@ -170,6 +170,15 @@ public sealed class GroupBehavior
             var data = new Dictionary<long, PersistedBuffer>();
             foreach (var (chatId, buffer) in _groupBuffers)
             {
+                // Client (non-Telegram) conversations are process-lifetime only and never reach
+                // disk. This filter is mandatory rather than belt-and-braces: BufferBotResponse
+                // calls SaveBuffers() on EVERY completion, so without it client text would be
+                // persisted through the completion path regardless of what the intake does.
+                // It also avoids accumulating orphaned on-disk buffers keyed to reserved runtime
+                // keys that will never be reused after a restart.
+                if (ConversationRegistry.IsReservedKey(chatId))
+                    continue;
+
                 // Normalize MinValue (never-checked buffer) to UtcNow so that on next
                 // load the existing entries are not treated as unread.
                 var lastChecked = buffer.GetLastChecked();

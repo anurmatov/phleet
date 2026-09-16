@@ -116,3 +116,31 @@ public sealed class TtsOptions
     /// <summary>Kokoro voice ID to use for synthesis. Default: af_nova.</summary>
     public string Voice { get; set; } = "af_nova";
 }
+
+/// <summary>
+/// Configuration for the channel-neutral client seam.
+///
+/// Both values must be set for client conversations to be accepted at all — there is
+/// deliberately NO default token, so an agent that has not been configured for a client channel
+/// rejects every <c>conversation.open</c> with <c>unauthorized</c>.
+///
+/// This is a BINDING, not authentication: a shared operator-set token exists so the owner check
+/// is deterministic rather than a guess. Real authentication is a separate issue.
+/// </summary>
+public sealed class ClientChannelOptions
+{
+    public const string Section = "ClientChannel";
+
+    /// <summary>
+    /// Opaque operator-set token the client presents in its principal binding. Empty or absent
+    /// disables client conversations entirely. Compared in fixed time, never logged, never echoed.
+    /// </summary>
+    public string OwnerPrincipalToken { get; set; } = "";
+
+    /// <summary>
+    /// The existing numeric owner this token binds to. Zero or absent disables client
+    /// conversations. Re-checked against the LIVE allowlist at open time, and never emitted in
+    /// any event.
+    /// </summary>
+    public long OwnerUserId { get; set; }
+}

@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Fleet.Protocol</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!--
+    D1: this project carries DTOs, enums, constants and serializer options ONLY, and has
+    ZERO dependencies beyond the BCL. A first-party client must be able to reference the
+    contracts without inheriting Telegram.Bot, RabbitMQ.Client or Microsoft.Extensions.*.
+    Adding a PackageReference or ProjectReference here fails ProtocolDependencyTests.
+  -->
+
+</Project>

@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using Fleet.Agent.Abstractions;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
+using Fleet.Protocol;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -48,19 +49,47 @@ public sealed class TaskManager
     internal Action? QueueEntryClaimedForTest { get; set; }
     internal Action? QueueEntryDequeuedForBridgeCancelForTest { get; set; }
 
+    /// <summary>
+    /// Publishes conversation events alongside — never instead of — the existing sink and
+    /// callback calls. Optional so every existing construction site (and every existing test)
+    /// compiles unchanged; when absent, publication is a no-op and behaviour is exactly as before.
+    /// </summary>
+    private readonly IConversationEventPublisher? _events;
+
+    /// <summary>
+    /// Configured attachment directory, redacted from every client-bound text field. Optional so
+    /// existing construction sites are unchanged; when absent, marker stripping still applies.
+    /// </summary>
+    private readonly string? _telegramAttachmentDir;
+
     public TaskManager(
         IOptions<AgentOptions> agentConfig,
         IAgentExecutor executor,
         SessionManager sessions,
         ILogger<TaskManager> logger,
-        InjectionOutcomeCounter? injectionCounter = null)
+        InjectionOutcomeCounter? injectionCounter = null,
+        IConversationEventPublisher? events = null,
+        IOptions<TelegramOptions>? telegramConfig = null)
     {
         _agentConfig = agentConfig.Value;
         _executor = executor;
         _sessions = sessions;
         _logger = logger;
         _injectionCounter = injectionCounter ?? new InjectionOutcomeCounter();
+        _events = events;
+        _telegramAttachmentDir = telegramConfig?.Value.AttachmentDir;
     }
+
+    /// <summary>
+    /// True when at least one handler is attached to <see cref="OnTaskCompleted"/>.
+    ///
+    /// Read by the startup wiring guard. The completion handler is attached in
+    /// <c>AgentTransport</c>'s CONSTRUCTOR, and the host materializes every hosted service before
+    /// calling any <c>StartAsync</c>, so by wiring time it has already happened. This property
+    /// exists so the implementation does not silently DEPEND on that framework detail: if the
+    /// ordering assumption ever breaks, startup fails loudly instead of dropping relay answers.
+    /// </summary>
+    public bool HasCompletionSubscriber => OnTaskCompleted is not null;
 
     /// <summary>Returns a snapshot of active background subagent tasks from the executor.</summary>
     public IReadOnlyCollection<Models.BackgroundTaskInfo> GetActiveBackgroundTasks() =>
@@ -84,8 +113,9 @@ public sealed class TaskManager
         string? taskId = null,
         IReadOnlyList<MessageImage>? images = null,
         IReadOnlyList<MessageDocument>? documents = null,
-        long userId = 0) =>
-        StartTaskCore(chatId, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, skipPendingQueueCheck: false);
+        long userId = 0,
+        ConversationIdentity? identity = null) =>
+        StartTaskCore(chatId, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, skipPendingQueueCheck: false, identity: identity);
 
     private async Task<TaskDispatchOutcome> StartTaskCore(long chatId, string task, string displayText, bool isSessionTask,
         TaskSource source = TaskSource.UserMessage,
@@ -96,8 +126,15 @@ public sealed class TaskManager
         IReadOnlyList<MessageDocument>? documents = null,
         long userId = 0,
         bool skipPendingQueueCheck = false,
-        bool skipDedupReservationAcquire = false)
+        bool skipDedupReservationAcquire = false,
+        ConversationIdentity? identity = null,
+        IReadOnlyList<string>? mergedSubmissionIds = null)
     {
+        // A null identity means a caller that predates the seam — synthesize one from the runtime
+        // key so every dispatch decision has something to report against, and every existing call
+        // site keeps compiling and behaving unchanged.
+        identity ??= SynthesizeIdentity(chatId, source);
+
         var state = GetChatState(chatId);
 
         // Dedup: ignore re-delivered bridge directives with the same taskId.
@@ -106,7 +143,7 @@ public sealed class TaskManager
         if (!skipDedupReservationAcquire && taskId is not null && !_activeTaskIds.TryAdd(taskId, true))
         {
             _logger.LogInformation("Duplicate taskId={TaskId} ignored (already in-flight)", taskId);
-            return TaskDispatchOutcome.Dropped;
+            return ReportDisposition(chatId, identity, TaskDispatchOutcome.Dropped);
         }
 
         if (TryGetRunningSessionTask(state, out var runningSession))
@@ -116,23 +153,23 @@ public sealed class TaskManager
             {
                 if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
                 var message = new MidTurnMessage(task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
-                    images, documents, userId, DateTimeOffset.UtcNow);
-                return await DeliverMidTurnMessageAsync(chatId, runningSession, message);
+                    images, documents, userId, DateTimeOffset.UtcNow, identity);
+                return ReportDisposition(chatId, identity, await DeliverMidTurnMessageAsync(chatId, runningSession, message));
             }
 
             if (source == TaskSource.CheckIn)
             {
                 if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
                 var message = new MidTurnMessage(task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
-                    images, documents, userId, DateTimeOffset.UtcNow);
-                return await DeferUntilTurnEndAsync(chatId, runningSession, message, notifyUser: false);
+                    images, documents, userId, DateTimeOffset.UtcNow, identity);
+                return ReportDisposition(chatId, identity, await DeferUntilTurnEndAsync(chatId, runningSession, message, notifyUser: false));
             }
 
             if (source is TaskSource.Relay or TaskSource.Bridge)
                 _logger.LogInformation("Not injecting {Source} task into running conversational turn for chat {ChatId}; using normal capacity path", source, chatId);
         }
 
-        var queuedPart = CreateQueuedPart(task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId);
+        var queuedPart = CreateQueuedPart(task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, identity: identity);
         if (!skipPendingQueueCheck)
         {
             var pendingResult = TryAppendToPendingQueue(chatId, queuedPart);
@@ -143,7 +180,7 @@ public sealed class TaskManager
                 // and the reservation is released by the finally block in Task.Run.
                 _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.MergedIntoQueue);
                 OnStatusChanged?.Invoke();
-                return TaskDispatchOutcome.Queued;
+                return ReportDisposition(chatId, identity, TaskDispatchOutcome.Queued);
             }
 
             if (pendingResult == PendingQueueResult.EnqueueFresh)
@@ -153,7 +190,7 @@ public sealed class TaskManager
                     // Check-ins are dropped rather than queued behind user work.
                     if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
                     _logger.LogDebug("Check-in skipped — agent already has a pending queued entry for chat {ChatId}", chatId);
-                    return TaskDispatchOutcome.Dropped;
+                    return ReportDisposition(chatId, identity, TaskDispatchOutcome.Dropped);
                 }
                 var enqueued = EnqueueFreshMessage(chatId, queuedPart,
                     notifyUser: source is not (TaskSource.CheckIn or TaskSource.DebouncedGroupBatch),
@@ -161,7 +198,7 @@ public sealed class TaskManager
                 // Release the reservation only when enqueue failed — a queued task keeps it.
                 if (!enqueued && taskId is not null)
                     _activeTaskIds.TryRemove(taskId, out _);
-                return enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull;
+                return ReportDisposition(chatId, identity, enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull);
             }
         }
 
@@ -177,7 +214,7 @@ public sealed class TaskManager
             {
                 if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
                 _logger.LogDebug("Check-in skipped — agent already has a running task");
-                return TaskDispatchOutcome.Dropped;
+                return ReportDisposition(chatId, identity, TaskDispatchOutcome.Dropped);
             }
 
             // DebouncedGroupBatch (different-chat) and all other sources go to the global FIFO.
@@ -190,7 +227,7 @@ public sealed class TaskManager
             // Release the reservation only when enqueue failed — a queued task keeps it.
             if (!enqueued && taskId is not null)
                 _activeTaskIds.TryRemove(taskId, out _);
-            return enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull;
+            return ReportDisposition(chatId, identity, enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull);
         }
 
         // Exception safety: if anything between here and Task.Run fires throws, release the
@@ -200,6 +237,19 @@ public sealed class TaskManager
         {
         var cts = new CancellationTokenSource();
         var running = state.Add(displayText, cts, isSessionTask, userId, bridgeTaskId: taskId);
+
+        // TurnId is minted ONCE, here at registration, and lives on the RunningTask. Every event
+        // this turn emits derives from this identity via `with` rather than rebuilding it.
+        var turnIdentity = identity.WithTurn(Guid.NewGuid().ToString("N"));
+        running.Identity = turnIdentity;
+        if (mergedSubmissionIds is { Count: > 0 })
+        {
+            // A coalesced entry is ONE turn answering SEVERAL submissions. Without this list the
+            // merged submissions would never terminate on the client.
+            running.MergedSubmissionIds.AddRange(
+                mergedSubmissionIds.Where(id => !string.Equals(id, identity.SubmissionId, StringComparison.Ordinal)));
+        }
+        PublishEvent(chatId, ConversationEventKind.TurnStarted, turnIdentity, new TurnStartedPayload());
 
         // Register in user-level index for cross-chat cancel
         if (userId != 0)
@@ -215,7 +265,7 @@ public sealed class TaskManager
         {
             try
             {
-                await ProcessTask(chatId, running.Id, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, cts.Token);
+                await ProcessTask(chatId, running.Id, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, turnIdentity, cts.Token);
             }
             catch (Exception ex)
             {
@@ -234,6 +284,27 @@ public sealed class TaskManager
                 {
                     running.TurnDispatchLock.Release();
                 }
+
+                // The reaper (D10.1). This finally already runs on every exit path — normal
+                // completion, cancellation and unhandled exception — so it is the one place that
+                // can guarantee a submission terminates.
+                //
+                // It fires ONLY on a genuine gap. Every terminal path sets TerminalPublished,
+                // including the idle and no-output branches, which is why those branches publish
+                // for Telegram-owned conversations too: without that, the most common no-op turn
+                // in the runtime — a Telegram idle check-in — would manufacture a
+                // turn_reaped event on every single tick.
+                //
+                // Publication here is a non-blocking TryWrite into the per-conversation terminal
+                // outbox, never the shared progress channel, so a full queue can neither block
+                // nor throw out of a turn's teardown.
+                if (!running.TerminalPublished && running.Identity is not null)
+                {
+                    _counters?.OutcomeUnknown(OutcomeUnknownReason.TurnReaped.ToString());
+                    PublishEvent(chatId, ConversationEventKind.TurnOutcomeUnknown, running.Identity,
+                        new TurnOutcomeUnknownPayload { Reason = OutcomeUnknownReason.TurnReaped });
+                    running.TerminalPublished = true;
+                }
                 // Release taskId dedup slot so the agent can accept a re-send of the same task
                 if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
                 // Remove from user-level index
@@ -249,7 +320,7 @@ public sealed class TaskManager
             }
         });
 
-        return TaskDispatchOutcome.Ran;
+        return ReportDisposition(chatId, turnIdentity, TaskDispatchOutcome.Ran);
         } // end exception-safety try
         catch
         {
@@ -337,10 +408,15 @@ public sealed class TaskManager
         await Sink.SendTextAsync(chatId, msg);
     }
 
-    public async Task HandleCancel(long chatId, string arg, long userId = 0)
+    public async Task HandleCancel(long chatId, string arg, long userId = 0,
+        TurnCancelReason reason = TurnCancelReason.User)
     {
         var state = GetChatState(chatId);
         var tasks = state.Snapshot();
+
+        // The reason is recorded on the RunningTask BEFORE Cts.Cancel(), because the catch block
+        // in ProcessTask is the only place that can report it and by then the canceller is gone.
+        void Mark(RunningTask t) => t.CancelReason = reason;
 
         if (tasks.Count == 0)
         {
@@ -366,6 +442,7 @@ public sealed class TaskManager
                 if (crossChatTasks.Count == 1 && (arg == "" || arg.Equals("all", StringComparison.OrdinalIgnoreCase)))
                 {
                     var (originChatId, _, t) = crossChatTasks[0];
+                    Mark(t);
                     try { await t.Cts.CancelAsync(); } catch (ObjectDisposedException) { }
                     await Sink.SendTextAsync(chatId, $"Cancelling task from chat {originChatId}...");
                     if (originChatId != chatId)
@@ -377,6 +454,7 @@ public sealed class TaskManager
                 {
                     foreach (var (originChatId, _, t) in crossChatTasks)
                     {
+                        Mark(t);
                         try { await t.Cts.CancelAsync(); } catch (ObjectDisposedException) { }
                         if (originChatId != chatId)
                             await Sink.SendTextAsync(originChatId, "Task cancelled by user from another chat.");
@@ -405,6 +483,7 @@ public sealed class TaskManager
         {
             foreach (var t in tasks)
             {
+                Mark(t);
                 try { await t.Cts.CancelAsync(); }
                 catch (ObjectDisposedException) { }
             }
@@ -420,6 +499,7 @@ public sealed class TaskManager
                 await Sink.SendTextAsync(chatId, $"No task with ID #{id}.");
                 return;
             }
+            Mark(task);
             try { await task.Cts.CancelAsync(); }
             catch (ObjectDisposedException) { }
             await Sink.SendTextAsync(chatId, $"Cancelling task [#{id}]...");
@@ -429,6 +509,7 @@ public sealed class TaskManager
         if (tasks.Count == 1)
         {
             var t = tasks[0];
+            Mark(t);
             try { await t.Cts.CancelAsync(); }
             catch (ObjectDisposedException) { }
             await Sink.SendTextAsync(chatId, "Cancelling the current task...");
@@ -445,13 +526,130 @@ public sealed class TaskManager
         await Sink.SendTextAsync(chatId, list);
     }
 
+    // --- Conversation event seam (additive; never replaces a sink or callback call) ---
+
+    /// <summary>
+    /// Build a routing identity for a caller that supplied none.
+    ///
+    /// Relay and bridge work is stamped with the <c>relay</c> channel so it can never be routed
+    /// to a client adapter; everything else is <c>telegram</c>. The conversation id is the runtime
+    /// key rendered as a string, which is what lets the bus reverse-resolve it.
+    /// </summary>
+    private static ConversationIdentity SynthesizeIdentity(long chatId, TaskSource source)
+    {
+        var channelId = source is TaskSource.Relay or TaskSource.Bridge
+            ? ChannelIds.Relay
+            : ChannelIds.Telegram;
+
+        return new ConversationIdentity
+        {
+            PrincipalId = "",
+            Role = PrincipalRole.Owner,
+            ChannelId = channelId,
+            ConversationId = chatId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            SubmissionId = Guid.NewGuid().ToString("N"),
+            Attempt = 1,
+        };
+    }
+
+    private void PublishEvent<TPayload>(long chatId, string kind, ConversationIdentity? identity, TPayload? payload)
+        where TPayload : class
+    {
+        if (_events is null || identity is null) return;
+        try
+        {
+            _events.Publish(chatId, kind, identity, payload);
+        }
+        catch (Exception ex)
+        {
+            // Publication must never reach a turn. The bus already swallows its own failures;
+            // this is the last line of defence against a contract defect faulting the executor.
+            _logger.LogWarning(ex, "Conversation event publish failed for kind={Kind}", kind);
+        }
+    }
+
+    /// <summary>
+    /// Publish a terminal event and record that the turn HAS terminated, so the reaper does not
+    /// also fire. <see cref="RunningTask.TerminalPublished"/> is set whether or not the event was
+    /// accepted into a queue: a dropped terminal event is already counted at the bus, and turning
+    /// that into a second, contradictory terminal event would be worse than the drop.
+    /// </summary>
+    private void PublishTerminal<TPayload>(long chatId, int taskId, string kind, ConversationIdentity? identity, TPayload? payload)
+        where TPayload : class
+    {
+        var running = GetChatState(chatId).Get(taskId);
+        if (running is not null)
+            running.TerminalPublished = true;
+
+        if (kind == ConversationEventKind.TurnOutcomeUnknown && payload is TurnOutcomeUnknownPayload unknown)
+            _counters?.OutcomeUnknown(unknown.Reason.ToString());
+
+        PublishEvent(chatId, kind, identity, payload);
+    }
+
+    /// <summary>
+    /// Publish a terminal error. The message is ALWAYS the fixed constant for the code — runtime
+    /// text, provider text and exception messages stay server-side (Constraint 4).
+    /// </summary>
+    private void PublishTerminalError(long chatId, int taskId, ConversationIdentity? identity, ProtocolErrorCode code) =>
+        PublishTerminal(chatId, taskId, ConversationEventKind.TurnError, identity,
+            new TurnErrorPayload { Code = code, Message = ProtocolErrors.MessageFor(code) });
+
+    private ConversationEventCounters? _counters;
+
+    /// <summary>Optional counter sink for submission dispositions and unknown outcomes (D20).</summary>
+    public ConversationEventCounters? Counters
+    {
+        get => _counters;
+        set => _counters = value;
+    }
+
+    private TaskDispatchOutcome ReportDisposition(long chatId, ConversationIdentity? identity, TaskDispatchOutcome outcome, int? queuePosition = null)
+    {
+        _counters?.Submission(outcome.ToString());
+        PublishEvent(chatId, ConversationEventKind.SubmissionAccepted, identity,
+            new SubmissionAcceptedPayload
+            {
+                Disposition = MapDisposition(outcome),
+                QueuePosition = queuePosition,
+            });
+        return outcome;
+    }
+
+    private static SubmissionDisposition MapDisposition(TaskDispatchOutcome outcome) => outcome switch
+    {
+        TaskDispatchOutcome.Ran => SubmissionDisposition.Ran,
+        TaskDispatchOutcome.Injected => SubmissionDisposition.Injected,
+        TaskDispatchOutcome.Queued => SubmissionDisposition.Queued,
+        TaskDispatchOutcome.QueueFull => SubmissionDisposition.QueueFull,
+        _ => SubmissionDisposition.Dropped,
+    };
+
+    private static TurnCompletion MapCompletion(CompletionKind kind) => kind switch
+    {
+        CompletionKind.Completed => TurnCompletion.Completed,
+        CompletionKind.Incomplete => TurnCompletion.Incomplete,
+        CompletionKind.Idle => TurnCompletion.Idle,
+        _ => TurnCompletion.Failed,
+    };
+
     // --- Private ---
 
     private async Task ProcessTask(long chatId, int taskId, string task, string displayText,
         bool isSessionTask, TaskSource source, string? relaySender, string? correlationId, string? relayTaskId,
-        IReadOnlyList<MessageImage>? images, IReadOnlyList<MessageDocument>? documents, CancellationToken ct)
+        IReadOnlyList<MessageImage>? images, IReadOnlyList<MessageDocument>? documents,
+        ConversationIdentity identity, CancellationToken ct)
     {
         var state = GetChatState(chatId);
+
+        // Every submission this turn answers: its own, plus anything coalesced or injected into it.
+        IReadOnlyList<string> MergedIds()
+        {
+            var running = state.Get(taskId);
+            return running is null ? [] : [identity.SubmissionId, .. running.MergedSubmissionIds];
+        }
+
+        var attachmentDir = _telegramAttachmentDir;
         string Prefix() => state.Count > 1 ? $"[#{taskId}] " : "";
 
         string? lastResult = null;
@@ -464,7 +662,7 @@ public sealed class TaskManager
         var toolCalls = new List<(string Name, string Args)>();
 
         using var typingCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var typingTask = RunTypingLoopAsync(chatId, typingCts.Token);
+        var typingTask = RunTypingLoopAsync(chatId, typingCts.Token, identity);
 
         string StatsSuffix()
         {
@@ -544,12 +742,20 @@ public sealed class TaskManager
                     {
                         // User-facing warning (e.g. provider capability notice) — deliver immediately
                         await Sink.SendTextAsync(chatId, progress.Summary);
+                        var (noticeText, noticeTruncated) = ProtocolSanitizer.SanitizeAndBound(
+                            progress.Summary, ProtocolLimits.MaxNoticeTextChars, attachmentDir);
+                        PublishEvent(chatId, ConversationEventKind.TurnNotice, identity,
+                            new TurnNoticePayload { Text = noticeText, Truncated = noticeTruncated ? true : null });
                     }
                     else if (progress.EventType == "recovered_answer")
                     {
                         // Stale answer from the prior turn preserved during drain — deliver
                         // immediately so it reaches the user before the new turn's response.
                         await Sink.SendTextAsync(chatId, progress.Summary);
+                        var (recoveredText, recoveredTruncated) = ProtocolSanitizer.SanitizeAndBound(
+                            progress.Summary, ProtocolLimits.MaxNoticeTextChars, attachmentDir);
+                        PublishEvent(chatId, ConversationEventKind.TurnRecoveredAnswer, identity,
+                            new TurnRecoveredAnswerPayload { Text = recoveredText, Truncated = recoveredTruncated ? true : null });
                     }
                     else if (progress.IsSignificant && progress.ToolName is not null)
                     {
@@ -575,6 +781,17 @@ public sealed class TaskManager
                             await Sink.SendHtmlTextAsync(chatId, $"{htmlPrefix}<blockquote expandable>{encoded}</blockquote>");
                         }
                         OnToolUse?.Invoke(chatId, progress.ToolName, progress.Summary);
+
+                        // Only the tool NAME leaves the runtime. The Telegram string built a few
+                        // lines above appends truncated tool ARGUMENTS, and reusing it here is
+                        // specifically prohibited — arguments routinely carry absolute paths and
+                        // secret-shaped values.
+                        PublishEvent(chatId, ConversationEventKind.TurnProgress, identity,
+                            new TurnProgressPayload
+                            {
+                                Activity = ProgressActivity.Tool,
+                                ToolName = ProtocolSanitizer.BoundToolName(progress.ToolName),
+                            });
                     }
                 }
 
@@ -624,7 +841,8 @@ public sealed class TaskManager
                         // semantics as the global chat-level queue coalescing path.
                         var firstPart = CreateQueuedPart(drained[0].Task, drained[0].DisplayText, drained[0].IsSessionTask,
                             drained[0].Source, drained[0].RelaySender, drained[0].CorrelationId, drained[0].TaskId,
-                            drained[0].Images, drained[0].Documents, drained[0].UserId, drained[0].ArrivedAt);
+                            drained[0].Images, drained[0].Documents, drained[0].UserId, drained[0].ArrivedAt,
+                            drained[0].Identity);
                         var mergedEntry = new QueuedMessage(chatId, firstPart);
 
                         // overflowStart marks where the first group ends; default to "all fit".
@@ -633,7 +851,8 @@ public sealed class TaskManager
                         {
                             var part = CreateQueuedPart(drained[i].Task, drained[i].DisplayText, drained[i].IsSessionTask,
                                 drained[i].Source, drained[i].RelaySender, drained[i].CorrelationId, drained[i].TaskId,
-                                drained[i].Images, drained[i].Documents, drained[i].UserId, drained[i].ArrivedAt);
+                                drained[i].Images, drained[i].Documents, drained[i].UserId, drained[i].ArrivedAt,
+                                drained[i].Identity);
                             if (!mergedEntry.TryAppendPart(part))
                             {
                                 // This part doesn't fit in the first group (different source or
@@ -704,6 +923,24 @@ public sealed class TaskManager
                 // CompletionKind.Idle so the workflow can advance instead of hanging to retry exhaustion.
                 if (source is TaskSource.Relay or TaskSource.Bridge)
                     OnTaskCompleted?.Invoke(chatId, "", relaySender, source, false, correlationId, relayTaskId, CompletionKind.Idle);
+
+                // Publish for EVERY conversation, not only client-owned ones. This is not
+                // cosmetic: the terminal event is what sets TerminalPublished, and without it the
+                // reaper would emit turn_reaped on every Telegram idle check-in — a fabricated
+                // failure signal on the single most common no-op path in the runtime.
+                //
+                // Nothing a Telegram user sees changes: the chat output stays suppressed, the
+                // relay callback keeps its existing Idle behaviour, and the published event is
+                // simply counted as not_routed. The literal string "IDLE" never reaches text.
+                PublishTerminal(chatId, taskId, ConversationEventKind.TurnFinal, identity,
+                    new TurnFinalPayload
+                    {
+                        Text = "",
+                        Completion = TurnCompletion.Idle,
+                        IsPartial = false,
+                        Truncated = false,
+                        MergedSubmissionIds = MergedIds(),
+                    });
                 return;
             }
 
@@ -711,6 +948,17 @@ public sealed class TaskManager
             if (source is TaskSource.CheckIn or TaskSource.DebouncedGroupBatch && lastResult is null)
             {
                 _logger.LogInformation("{Source}: no output, suppressing for chat {ChatId}", source, chatId);
+                // Same reasoning as the IDLE branch above — a no-output DebouncedGroupBatch is the
+                // other path that would otherwise reach the reaper with nothing published.
+                PublishTerminal(chatId, taskId, ConversationEventKind.TurnFinal, identity,
+                    new TurnFinalPayload
+                    {
+                        Text = "",
+                        Completion = TurnCompletion.Idle,
+                        IsPartial = false,
+                        Truncated = false,
+                        MergedSubmissionIds = MergedIds(),
+                    });
                 return;
             }
 
@@ -728,6 +976,22 @@ public sealed class TaskManager
                 // errorResult covers max-turns exhaustion (IsErrorResult from executor) — use
                 // Incomplete so the workflow continuation loop can retry, not Failed which abandons.
                 OnTaskCompleted?.Invoke(chatId, fullText, relaySender, source, errorResult, correlationId, relayTaskId, errorResult ? CompletionKind.Incomplete : CompletionKind.Completed);
+
+                // turn.final carries the CHAT-VISIBLE text (lastResult), matching what the main
+                // reply path delivers. The concatenated all-texts form above stays exclusive to
+                // the relay callback — the two genuinely differ, and collapsing them into one
+                // canonical string would silently change one of the two consumers.
+                var (finalText, finalTruncated) = ProtocolSanitizer.SanitizeAndBound(
+                    lastResult, ProtocolLimits.MaxFinalTextChars, attachmentDir);
+                PublishTerminal(chatId, taskId, ConversationEventKind.TurnFinal, identity,
+                    new TurnFinalPayload
+                    {
+                        Text = finalText,
+                        Completion = errorResult ? TurnCompletion.Incomplete : TurnCompletion.Completed,
+                        IsPartial = errorResult,
+                        Truncated = finalTruncated,
+                        MergedSubmissionIds = MergedIds(),
+                    });
             }
             else if (lastError is not null)
             {
@@ -736,6 +1000,12 @@ public sealed class TaskManager
                 var errorMsg = $"Task failed: {lastError}";
                 await SendWithStatsAsync($"{Prefix()}{errorMsg}");
                 OnTaskCompleted?.Invoke(chatId, errorMsg, relaySender, source, true, correlationId, relayTaskId, CompletionKind.Failed);
+
+                // The client event carries the FIXED message for the code, never lastError.
+                // Provider text and executor output routinely contain absolute paths, session ids
+                // and credentials. Telegram still shows the raw string — that is the owner's own
+                // channel and is unchanged.
+                PublishTerminalError(chatId, taskId, identity, ProtocolErrorCode.ExecutorError);
             }
             else if (errorResult)
             {
@@ -746,11 +1016,21 @@ public sealed class TaskManager
                 _logger.LogError("Task #{TaskId} for chat {ChatId}: {Error}", taskId, chatId, errorMsg);
                 await SendWithStatsAsync($"{Prefix()}{errorMsg}");
                 OnTaskCompleted?.Invoke(chatId, errorMsg, relaySender, source, true, correlationId, relayTaskId, CompletionKind.Failed);
+                PublishTerminalError(chatId, taskId, identity, ProtocolErrorCode.ExecutorError);
             }
             else
             {
                 await SendWithStatsAsync($"{Prefix()}Done! (no text output)");
                 OnTaskCompleted?.Invoke(chatId, "Done! (no text output)", relaySender, source, false, correlationId, relayTaskId, CompletionKind.Completed);
+                PublishTerminal(chatId, taskId, ConversationEventKind.TurnFinal, identity,
+                    new TurnFinalPayload
+                    {
+                        Text = "",
+                        Completion = TurnCompletion.Completed,
+                        IsPartial = false,
+                        Truncated = false,
+                        MergedSubmissionIds = MergedIds(),
+                    });
             }
         }
         catch (OperationCanceledException)
@@ -758,6 +1038,12 @@ public sealed class TaskManager
             _logger.LogInformation("Task #{TaskId} cancelled for chat {ChatId}", taskId, chatId);
             await SendWithStatsAsync($"{Prefix()}Task cancelled.");
             OnTaskCompleted?.Invoke(chatId, "Task cancelled.", relaySender, source, false, correlationId, relayTaskId, CompletionKind.Failed);
+
+            // The chat-visible string and the callback payload are unchanged; only the reason is
+            // new, and it was recorded by the canceller before Cts.Cancel().
+            var cancelReason = state.Get(taskId)?.CancelReason ?? TurnCancelReason.Unknown;
+            PublishTerminal(chatId, taskId, ConversationEventKind.TurnCanceled, identity,
+                new TurnCanceledPayload { Reason = cancelReason, MergedSubmissionIds = MergedIds() });
         }
         catch (Exception ex)
         {
@@ -767,6 +1053,9 @@ public sealed class TaskManager
             if (isSessionTask)
                 _sessions.ClearSession(chatId);
             OnTaskCompleted?.Invoke(chatId, errorMsg, relaySender, source, true, correlationId, relayTaskId, CompletionKind.Failed);
+
+            // `internal` in particular must never carry the exception message.
+            PublishTerminalError(chatId, taskId, identity, ProtocolErrorCode.Internal);
         }
         finally
         {
@@ -916,12 +1205,13 @@ public sealed class TaskManager
 
     private QueuedMessagePart CreateQueuedPart(string task, string displayText, bool isSessionTask, TaskSource source,
         string? relaySender, string? correlationId, string? taskId, IReadOnlyList<MessageImage>? images,
-        IReadOnlyList<MessageDocument>? documents, long userId, DateTimeOffset? arrivedAt = null)
+        IReadOnlyList<MessageDocument>? documents, long userId, DateTimeOffset? arrivedAt = null,
+        ConversationIdentity? identity = null)
     {
         var senderDisplay = relaySender ?? source.ToString().ToLowerInvariant();
         var arrival = arrivedAt?.ToLocalTime() ?? DateTimeOffset.Now;
         return new QueuedMessagePart(task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
-            images, documents, userId, arrival, senderDisplay);
+            images, documents, userId, arrival, senderDisplay, identity);
     }
 
     private PendingQueueResult TryAppendToPendingQueue(long chatId, QueuedMessagePart part)
@@ -1021,13 +1311,15 @@ public sealed class TaskManager
 
         """ + original;
 
-    private async Task RunTypingLoopAsync(long chatId, CancellationToken ct)
+    private async Task RunTypingLoopAsync(long chatId, CancellationToken ct, ConversationIdentity? identity = null)
     {
         try
         {
             while (!ct.IsCancellationRequested)
             {
                 await Sink.SendTypingAsync(chatId, ct);
+                PublishEvent(chatId, ConversationEventKind.TurnProgress, identity,
+                    new TurnProgressPayload { Activity = ProgressActivity.Typing });
                 await Task.Delay(TimeSpan.FromSeconds(4), ct);
             }
         }
@@ -1086,6 +1378,7 @@ public sealed class TaskManager
             {
                 if (t.BridgeTaskId == bridgeTaskId)
                 {
+                    t.CancelReason = TurnCancelReason.Bridge;
                     try { await t.Cts.CancelAsync(); }
                     catch (ObjectDisposedException) { }
                     found = true;
@@ -1153,10 +1446,16 @@ public sealed class TaskManager
 
         // Cancel all running tasks (their finally blocks will call DrainQueue, which now finds
         // an empty queue and returns immediately).
+        //
+        // Reason is `operator`: this method's only caller is the operator HTTP cancel endpoint.
+        // Host stop does NOT reach here — ProcessTask runs on the per-task CancellationTokenSource
+        // created at registration, which is linked to no host token — which is exactly why there
+        // is no `shutdown` cancel reason to ship.
         foreach (var (_, state) in _chatTasks)
         {
             foreach (var t in state.Snapshot())
             {
+                t.CancelReason = TurnCancelReason.Operator;
                 try { await t.Cts.CancelAsync(); }
                 catch (ObjectDisposedException) { }
             }

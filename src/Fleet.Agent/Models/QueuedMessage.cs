@@ -1,8 +1,14 @@
+using Fleet.Protocol;
+
 namespace Fleet.Agent.Models;
 
 /// <summary>
 /// One ordered part of a queued conversational entry. Task is already fully
 /// formatted by PromptAssembler and must not be rebuilt from raw user text.
+///
+/// <see cref="Identity"/> is optional and trailing so existing construction sites are unchanged.
+/// Each part keeps its OWN identity — a coalesced entry is one turn but several submissions, and
+/// each part needs its own submission id so the client can correlate its acceptance event.
 /// </summary>
 public sealed record QueuedMessagePart(
     string Task,
@@ -16,7 +22,8 @@ public sealed record QueuedMessagePart(
     IReadOnlyList<MessageDocument>? Documents,
     long UserId,
     DateTimeOffset ArrivedAt,
-    string SenderDisplay);
+    string SenderDisplay,
+    ConversationIdentity? Identity = null);
 
 /// <summary>
 /// A pending FIFO queue entry. User-message entries may accumulate several
@@ -87,6 +94,19 @@ public sealed class QueuedMessage
         }
     }
 
+    /// <summary>
+    /// The identity the turn runs under: the FIRST part's. The remaining parts' submission ids
+    /// travel separately in <see cref="QueuedMessagePayload.MergedSubmissionIds"/>.
+    /// </summary>
+    public ConversationIdentity? Identity => FirstPart.Identity;
+
+    /// <summary>
+    /// Every submission id this entry will answer, in part order. The single terminal event
+    /// carries this list — without it, merged submissions would never terminate on the client.
+    /// </summary>
+    public IReadOnlyList<string> MergedSubmissionIds =>
+        [.. _parts.Select(p => p.Identity?.SubmissionId).Where(id => !string.IsNullOrEmpty(id)).Select(id => id!)];
+
     public QueuedMessagePayload BuildPayload(DateTimeOffset startedAt) =>
         new(
             Task: BuildCombinedTask(startedAt),
@@ -98,7 +118,9 @@ public sealed class QueuedMessage
             TaskId: TaskId,
             Images: _parts.SelectMany(part => part.Images ?? []).ToList(),
             Documents: _parts.SelectMany(part => part.Documents ?? []).ToList(),
-            UserId: UserId);
+            UserId: UserId,
+            Identity: Identity,
+            MergedSubmissionIds: MergedSubmissionIds);
 
     private string BuildCombinedTask(DateTimeOffset startedAt)
     {
@@ -146,4 +168,6 @@ public sealed record QueuedMessagePayload(
     string? TaskId,
     IReadOnlyList<MessageImage>? Images,
     IReadOnlyList<MessageDocument>? Documents,
-    long UserId);
+    long UserId,
+    ConversationIdentity? Identity = null,
+    IReadOnlyList<string>? MergedSubmissionIds = null);

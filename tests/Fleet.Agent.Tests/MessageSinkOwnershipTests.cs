@@ -208,6 +208,31 @@ public class MessageSinkOwnershipTests
         finally { TryDelete(rt.WorkDir); }
     }
 
+    /// <summary>
+    /// T8b, the zero case — and the one that matters more than the happy path.
+    ///
+    /// #277 §10 requires this run against a chat with a prior send (non-zero id) AND one with none.
+    /// A Telegram-free host, and a Telegram chat that has not been sent to yet, must both buffer
+    /// with <c>0</c>: that is what makes the claim "Telegram context is byte-identical across the
+    /// move" true rather than merely true-on-the-path-someone-tested. The listed mutation — giving
+    /// <c>NullMessageSink</c> a non-zero id — fails here and nowhere else.
+    /// </summary>
+    [Fact]
+    public void WithNoSinkAttached_ContextBuffersWithZeroMessageId()
+    {
+        var rt = BuildRuntime();
+        try
+        {
+            using var buffer = new CompletionContextBuffer(rt.Manager, rt.Behavior, rt.Holder);
+            rt.Manager.RaiseTaskCompletedForTest(chatId: 503, result: "answer");
+
+            Assert.False(rt.Holder.IsAttached);
+            var entry = Assert.Single(rt.Behavior.GetGroupBuffer(503).GetEntries());
+            Assert.Equal(0L, entry.TelegramMessageId);
+        }
+        finally { TryDelete(rt.WorkDir); }
+    }
+
     /// <summary>An empty result must not create a buffer entry — unchanged from the original site.</summary>
     [Fact]
     public void EmptyResult_IsNotBuffered()

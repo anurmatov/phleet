@@ -96,8 +96,9 @@ public class ConversationEventBusTests
     [Fact]
     public void TelegramOwnedConversation_CountsAsNotRoutedNotDropped()
     {
-        var (bus, registry, counters) = Build();
-        registry.RegisterTelegram(12345L, "p_owner");
+        var (bus, _, counters) = Build();
+        // Deliberately NOT registered: Telegram conversations never are in production. The bus
+        // must resolve "runtime-owned" from the event's own ChannelId.
         var identity = new ConversationIdentity
         {
             PrincipalId = "p_owner",

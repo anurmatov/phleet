@@ -112,18 +112,6 @@ public sealed class ConversationRegistry : IConversationRegistry
         return true;
     }
 
-    /// <summary>
-    /// Register an existing Telegram chat id under the well-known <c>telegram</c> channel so
-    /// publishers can reverse-resolve it. Idempotent.
-    /// </summary>
-    public long RegisterTelegram(long chatId, string principalId)
-    {
-        var reference = new ConversationRef(ChannelIds.Telegram, chatId.ToString(System.Globalization.CultureInfo.InvariantCulture), principalId);
-        _keysByRef[reference] = chatId;
-        _refsByKey[chatId] = reference;
-        return chatId;
-    }
-
     private static bool TryParseTelegramKey(ConversationRef reference, out long key)
     {
         key = 0;

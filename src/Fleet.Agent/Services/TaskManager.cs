@@ -69,7 +69,8 @@ public sealed class TaskManager
         ILogger<TaskManager> logger,
         InjectionOutcomeCounter? injectionCounter = null,
         IConversationEventPublisher? events = null,
-        IOptions<TelegramOptions>? telegramConfig = null)
+        IOptions<TelegramOptions>? telegramConfig = null,
+        ConversationEventCounters? counters = null)
     {
         _agentConfig = agentConfig.Value;
         _executor = executor;
@@ -78,6 +79,10 @@ public sealed class TaskManager
         _injectionCounter = injectionCounter ?? new InjectionOutcomeCounter();
         _events = events;
         _telegramAttachmentDir = telegramConfig?.Value.AttachmentDir;
+        // Constructor-injected rather than a settable property. As a property it was simply never
+        // set anywhere in production, so conversation_submissions_total and
+        // turn_outcome_unknown_total never incremented — the counters existed and measured nothing.
+        _counters = counters;
     }
 
     /// <summary>
@@ -595,14 +600,8 @@ public sealed class TaskManager
         PublishTerminal(chatId, taskId, ConversationEventKind.TurnError, identity,
             new TurnErrorPayload { Code = code, Message = ProtocolErrors.MessageFor(code) });
 
-    private ConversationEventCounters? _counters;
-
-    /// <summary>Optional counter sink for submission dispositions and unknown outcomes (D20).</summary>
-    public ConversationEventCounters? Counters
-    {
-        get => _counters;
-        set => _counters = value;
-    }
+    /// <summary>Counter sink for submission dispositions and unknown outcomes (D20).</summary>
+    private readonly ConversationEventCounters? _counters;
 
     private TaskDispatchOutcome ReportDisposition(long chatId, ConversationIdentity? identity, TaskDispatchOutcome outcome, int? queuePosition = null)
     {
@@ -812,6 +811,16 @@ public sealed class TaskManager
                         foreach (var injected in redeliver.Skip(1))
                             completingTask.Inbox.Writer.TryWrite(injected);
 
+                        // A redelivery keeps the conversation and increments the attempt — this is
+                        // the ONLY producer of attempt > 1, and it is in-process only. Nothing here
+                        // claims durable replay.
+                        identity = (firstRedelivery.Identity ?? identity)
+                            .WithTurn(Guid.NewGuid().ToString("N"))
+                            .WithAttempt(identity.Attempt + 1);
+                        completingTask.Identity = identity;
+                        completingTask.TerminalPublished = false;
+                        PublishEvent(chatId, ConversationEventKind.TurnStarted, identity, new TurnStartedPayload());
+
                         completingTask.InjectionCount = 0;
                         currentTask = firstRedelivery.Task;
                         currentImages = firstRedelivery.Images;
@@ -882,12 +891,52 @@ public sealed class TaskManager
                         {
                             await SendWithStatsAsync($"{Prefix()}{lastResult}");
                         }
+
+                        // ...and terminate it on the event path too, under the OUTGOING identity,
+                        // before the new turn is minted below. This turn really did finish and
+                        // really did answer its submissions; without this the client sees
+                        // submission.accepted for them and then nothing, because the next terminal
+                        // event belongs to a different turn and lists a different submission set.
+                        if (!ProtocolSanitizer.IsIdleMarker(lastResult))
+                        {
+                            var (continuationText, continuationTruncated) = ProtocolSanitizer.SanitizeAndBound(
+                                lastResult ?? "", ProtocolLimits.MaxFinalTextChars, attachmentDir);
+                            PublishTerminal(chatId, taskId, ConversationEventKind.TurnFinal, identity,
+                                new TurnFinalPayload
+                                {
+                                    Text = continuationText,
+                                    Completion = errorResult ? TurnCompletion.Incomplete : TurnCompletion.Completed,
+                                    IsPartial = errorResult,
+                                    Truncated = continuationTruncated,
+                                    MergedSubmissionIds = MergedIds(),
+                                });
+                        }
                         lastResult = null;
 
                         var payload = mergedEntry.BuildPayload(DateTimeOffset.Now);
                         currentTask = payload.Task;
                         currentImages = payload.Images;
                         currentDocuments = payload.Documents;
+
+                        // A continuation is a NEW turn answering a NEW set of submissions: mint a
+                        // fresh TurnId, keep the conversation, and adopt the merged entry's
+                        // submission ids so each coalesced part terminates on the client.
+                        identity = (payload.Identity ?? identity).WithTurn(Guid.NewGuid().ToString("N"));
+                        if (completingTask is not null)
+                        {
+                            completingTask.Identity = identity;
+                            completingTask.MergedSubmissionIds.Clear();
+                            foreach (var mergedId in payload.MergedSubmissionIds ?? [])
+                            {
+                                if (!string.Equals(mergedId, identity.SubmissionId, StringComparison.Ordinal))
+                                    completingTask.MergedSubmissionIds.Add(mergedId);
+                            }
+                            // A continuation turn has not published its terminal event yet, so the
+                            // reaper must be armed again for it.
+                            completingTask.TerminalPublished = false;
+                        }
+                        PublishEvent(chatId, ConversationEventKind.TurnStarted, identity, new TurnStartedPayload());
+
                         if (completingTask is not null)
                         {
                             completingTask.InjectionCount = 0;
@@ -1096,6 +1145,14 @@ public sealed class TaskManager
             {
                 running.InjectionCount++;
                 running.InjectedMessagesForResume.Add(message);
+                // The injected message's answer arrives inside THIS turn's terminal event, so its
+                // submission id has to ride along in mergedSubmissionIds — otherwise the client
+                // sees submission.accepted{injected} and then nothing, forever.
+                if (message.Identity is { } injectedIdentity
+                    && !running.MergedSubmissionIds.Contains(injectedIdentity.SubmissionId))
+                {
+                    running.MergedSubmissionIds.Add(injectedIdentity.SubmissionId);
+                }
                 _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.Injected);
                 _logger.LogInformation("Injected mid-turn message into running task #{TaskId} for chat {ChatId}", running.Id, chatId);
                 return TaskDispatchOutcome.Injected;
@@ -1491,10 +1548,14 @@ public sealed class TaskManager
             _ = Sink.SendTextAsync(queued.ChatId, "Now processing your queued message...");
         OnStatusChanged?.Invoke();
 
+        // Identity and the merged-submission list must survive the queue. Without them the turn
+        // runs under a freshly synthesized identity, so the submission that produced
+        // submission.accepted{queued} never receives a terminal event and a client waits forever.
         _ = StartTaskCore(queued.ChatId, payload.Task, payload.DisplayText, payload.IsSessionTask,
             payload.Source, payload.RelaySender, payload.CorrelationId, payload.TaskId,
             payload.Images, payload.Documents, payload.UserId,
-            skipPendingQueueCheck: true, skipDedupReservationAcquire: true);
+            skipPendingQueueCheck: true, skipDedupReservationAcquire: true,
+            identity: payload.Identity, mergedSubmissionIds: payload.MergedSubmissionIds);
 
         RemovePendingIndexIfCurrent(queued);
     }

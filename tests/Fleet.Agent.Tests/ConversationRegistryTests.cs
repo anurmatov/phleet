@@ -111,18 +111,6 @@ public class ConversationRegistryTests
         Assert.NotEqual(key, registry.Resolve(reference));
     }
 
-    [Fact]
-    public void RegisterTelegram_IsReverseResolvable()
-    {
-        var registry = new ConversationRegistry();
-        registry.RegisterTelegram(12345L, "p_owner");
-
-        var reference = registry.Lookup(12345L);
-
-        Assert.NotNull(reference);
-        Assert.Equal(ChannelIds.Telegram, reference!.ChannelId);
-    }
-
     [Theory]
     [InlineData("telegram")]
     [InlineData("relay")]

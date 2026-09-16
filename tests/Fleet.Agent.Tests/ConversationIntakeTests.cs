@@ -81,10 +81,10 @@ public class ConversationIntakeTests : IDisposable
         var allowlist = new AllowlistHolder(telegramOpts);
         var relay = new GroupRelayService(agentOpts, rabbitOpts, NullLogger<GroupRelayService>.Instance);
         var manager = new TaskManager(agentOpts, executor, new SessionManager(),
-            NullLogger<TaskManager>.Instance, injectionCounter: null, events: bus)
+            NullLogger<TaskManager>.Instance, injectionCounter: null, events: bus,
+            telegramConfig: null, counters: counters)
         {
             Sink = Substitute.For<IMessageSink>(),
-            Counters = counters,
         };
         var prompts = new PromptAssembler(executor);
         var commands = new CommandDispatcher(manager, executor, agentOpts, NullLogger<CommandDispatcher>.Instance)

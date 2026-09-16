@@ -99,8 +99,8 @@ public class ConversationEventPumpTests
     public async Task TelegramConversation_ReachesNoAdapter()
     {
         var adapter = new RecordingAdapter();
-        var (bus, registry, counters, pump) = Build(adapter);
-        registry.RegisterTelegram(555L, "p_owner");
+        var (bus, _, counters, pump) = Build(adapter);
+        // Unregistered, exactly as in production.
 
         bus.Publish(555L, ConversationEventKind.TurnFinal, new ConversationIdentity
         {

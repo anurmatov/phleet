@@ -122,6 +122,19 @@ public sealed class ConversationEventBus : IConversationEventPublisher
 
     private bool PublishCore(long runtimeKey, ConversationEvent evt)
     {
+        // Runtime-owned channels are resolved from the EVENT's own ChannelId, before any registry
+        // lookup. Telegram and relay conversations are never registered — nothing in the runtime
+        // opens them, because they predate the registry entirely — so a lookup-first order counted
+        // every single Telegram event as dropped{unknown_conversation}. That is the drop counter
+        // becoming the dominant production metric, which is the exact failure the
+        // not_routed/dropped split exists to prevent.
+        if (ChannelIds.IsRuntimeOwned(evt.Identity.ChannelId))
+        {
+            _counters.Published(evt.Identity.ChannelId, evt.Kind);
+            _counters.NotRouted(evt.Identity.ChannelId);
+            return true;
+        }
+
         var reference = _registry.Lookup(runtimeKey);
         var channelId = reference?.ChannelId;
 
@@ -165,8 +178,9 @@ public sealed class ConversationEventBus : IConversationEventPublisher
 
         _counters.Published(channelId, evt.Kind);
 
-        // Runtime-owned channels have no adapter by design. This is EXPECTED traffic — counted
-        // separately from drops so the drop counter stays a real signal (D15, D20).
+        // Defence in depth: a conversation explicitly REGISTERED under a runtime-owned channel
+        // short-circuits here too. The identity check above already covers every event the
+        // runtime stamps itself.
         if (ChannelIds.IsRuntimeOwned(channelId))
         {
             _counters.NotRouted(channelId);

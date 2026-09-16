@@ -50,10 +50,7 @@ public class ConversationTurnLifecycleTests
 
         var manager = new TaskManager(
             options, executor, new SessionManager(), NullLogger<TaskManager>.Instance,
-            injectionCounter: null, events: bus)
-        {
-            Counters = counters,
-        };
+            injectionCounter: null, events: bus, telegramConfig: null, counters: counters);
         sink ??= Substitute.For<IMessageSink>();
         manager.Sink = sink;
 
@@ -194,7 +191,6 @@ public class ConversationTurnLifecycleTests
     public async Task ATelegramIdleCheckIn_ProducesNoOutcomeUnknown()
     {
         var harness = Build(ExecutorYielding(() => Yield("IDLE")));
-        harness.Registry.RegisterTelegram(4242L, "p_owner");
 
         await harness.Manager.StartTask(4242L, "check in", "display", isSessionTask: false,
             source: TaskSource.CheckIn);
@@ -211,7 +207,6 @@ public class ConversationTurnLifecycleTests
     public async Task ATelegramNoOutputBatch_ProducesNoOutcomeUnknown()
     {
         var harness = Build(ExecutorYielding(() => Yield(null)));
-        harness.Registry.RegisterTelegram(-1001234567890L, "p_owner");
 
         await harness.Manager.StartTask(-1001234567890L, "batch", "display", isSessionTask: false,
             source: TaskSource.DebouncedGroupBatch);
@@ -339,7 +334,6 @@ public class ConversationTurnLifecycleTests
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var executor = ExecutorBlockingUntilCancelled(gate);
         var harness = Build(executor);
-        harness.Registry.RegisterTelegram(77L, "p_owner");
 
         await harness.Manager.StartTask(77L, "task", "display", isSessionTask: true,
             source: TaskSource.Bridge, taskId: "wf/step");
@@ -372,7 +366,6 @@ public class ConversationTurnLifecycleTests
 
         const long telegramChat = 555L;
         const long ownerUserId = 4242L;
-        harness.Registry.RegisterTelegram(telegramChat, "p_owner");
 
         // A Telegram turn is running for the owner, indexed under their real userId.
         await harness.Manager.StartTask(telegramChat, "telegram task", "display", isSessionTask: true,
@@ -414,7 +407,6 @@ public class ConversationTurnLifecycleTests
 
         const long telegramChat = 555L;
         const long ownerUserId = 4242L;
-        harness.Registry.RegisterTelegram(telegramChat, "p_owner");
 
         // The owner types /cancel in a Telegram chat that has no running task of its own.
         await harness.Manager.HandleCancel(telegramChat, "", userId: ownerUserId);

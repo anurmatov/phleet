@@ -642,10 +642,21 @@ public sealed class TaskManager
         var state = GetChatState(chatId);
 
         // Every submission this turn answers: its own, plus anything coalesced or injected into it.
+        // Deduplicated, because a submission that appears twice is as wrong as one that is missing —
+        // a client correlating terminal events would count the same answer twice.
         IReadOnlyList<string> MergedIds()
         {
             var running = state.Get(taskId);
-            return running is null ? [] : [identity.SubmissionId, .. running.MergedSubmissionIds];
+            if (running is null) return [];
+
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var ids = new List<string>();
+            foreach (var id in ((string[])[identity.SubmissionId, .. running.MergedSubmissionIds]))
+            {
+                if (!string.IsNullOrEmpty(id) && seen.Add(id))
+                    ids.Add(id);
+            }
+            return ids;
         }
 
         var attachmentDir = _telegramAttachmentDir;
@@ -814,7 +825,14 @@ public sealed class TaskManager
                         // A redelivery keeps the conversation and increments the attempt — this is
                         // the ONLY producer of attempt > 1, and it is in-process only. Nothing here
                         // claims durable replay.
-                        identity = (firstRedelivery.Identity ?? identity)
+                        //
+                        // The identity deliberately stays the ORIGINAL submission's, with only
+                        // TurnId and Attempt moving. Re-pointing it at firstRedelivery.Identity
+                        // would drop the original submission from the turn entirely — it would
+                        // never terminate — while duplicating the injected id, which the injection
+                        // accept site already recorded in MergedSubmissionIds. The resumed turn
+                        // answers both submissions, so it must carry both exactly once.
+                        identity = identity
                             .WithTurn(Guid.NewGuid().ToString("N"))
                             .WithAttempt(identity.Attempt + 1);
                         completingTask.Identity = identity;

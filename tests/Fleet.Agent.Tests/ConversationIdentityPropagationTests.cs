@@ -139,6 +139,124 @@ public class ConversationIdentityPropagationTests
     }
 
     /// <summary>
+    /// Yields a process-exit result on the first turn, then a normal answer on the second.
+    /// Models an executor that dies mid-turn after a message was injected into it.
+    /// </summary>
+    private sealed class ProcessExitThenAnswerExecutor : IAgentExecutor
+    {
+        private readonly TaskCompletionSource _firstTurnStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _turns;
+
+        public Task FirstTurnStarted => _firstTurnStarted.Task;
+        public void Release() => _release.TrySetResult();
+
+        public async IAsyncEnumerable<AgentProgress> ExecuteAsync(
+            string task, IReadOnlyList<MessageImage>? images = null,
+            IReadOnlyList<MessageDocument>? documents = null,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+        {
+            var turn = Interlocked.Increment(ref _turns);
+            if (turn == 1)
+            {
+                _firstTurnStarted.TrySetResult();
+                await _release.Task.WaitAsync(ct);
+                // The executor process died. InjectedMessagesForResume is non-empty by now, so
+                // the runtime takes the resume branch rather than completing the turn.
+                yield return new AgentProgress
+                {
+                    Summary = "process exited", EventType = "result", IsProcessExit = true,
+                };
+                yield break;
+            }
+            yield return new AgentProgress
+            {
+                Summary = "r", EventType = "result", FinalResult = "answer after resume",
+            };
+        }
+
+        public Task<MidTurnInjectionResult> TryInjectMessageAsync(
+            string message, IReadOnlyList<MessageImage>? images = null,
+            IReadOnlyList<MessageDocument>? documents = null, CancellationToken ct = default) =>
+            Task.FromResult(MidTurnInjectionResult.Injected);
+
+        public string? LastSessionId => "session";
+        public DateTimeOffset LastActivity => DateTimeOffset.UtcNow;
+        public bool IsProcessWarm => true;
+        public IReadOnlyCollection<BackgroundTaskInfo> GetActiveBackgroundTasks() => [];
+        public Task<bool> CancelBackgroundTaskAsync(string taskId, CancellationToken ct = default) =>
+            Task.FromResult(false);
+        public Task StopProcessAsync() => Task.CompletedTask;
+        public Task<bool> TryStopProcessAsync() => Task.FromResult(true);
+        public void RequestRestart() { }
+        public async IAsyncEnumerable<AgentProgress> SendCommandAsync(
+            string command,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    /// <summary>
+    /// AC10. A process-exit resume mints a new TurnId, keeps the conversation, and sets
+    /// <c>Attempt = 2</c> — and, critically, the resumed turn still answers BOTH submissions.
+    ///
+    /// The bug this pins: the resume branch used to re-point the identity at the redelivered
+    /// (injected) message's identity. That silently dropped the ORIGINAL submission from the turn —
+    /// it could never terminate — while duplicating the injected id, which the injection accept
+    /// site had already recorded. Both halves are asserted here.
+    /// </summary>
+    [Fact]
+    public async Task AProcessExitResume_MintsANewTurnBumpsAttemptAndTerminatesBothSubmissions()
+    {
+        var executor = new ProcessExitThenAnswerExecutor();
+        var harness = Build(executor);
+        var (key, original) = Open(harness, "s_original");
+        var injected = original with { SubmissionId = "s_injected" };
+
+        await harness.Manager.StartTask(key, "original", "original", isSessionTask: true, identity: original);
+        await executor.FirstTurnStarted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var outcome = await harness.Manager.StartTask(key, "injected", "injected",
+            isSessionTask: true, identity: injected);
+        Assert.Equal(TaskDispatchOutcome.Injected, outcome);
+
+        executor.Release();
+        await WaitUntilIdleAsync(harness.Manager, key);
+
+        var events = harness.Drain();
+
+        // The resumed turn announced itself with a NEW TurnId and Attempt == 2.
+        var starts = events.Where(e => e.Kind == ConversationEventKind.TurnStarted).ToList();
+        Assert.Equal(2, starts.Count);
+        var resumed = starts.Single(e => e.Identity.Attempt == 2);
+        Assert.NotEqual(starts.Single(e => e.Identity.Attempt == 1).Identity.TurnId, resumed.Identity.TurnId);
+        Assert.False(string.IsNullOrEmpty(resumed.Identity.TurnId));
+        // Same conversation throughout — a resume is not a new conversation.
+        Assert.All(events, e => Assert.Equal("c_1", e.Identity.ConversationId));
+
+        // The terminal covers BOTH submissions, each exactly once.
+        //
+        // mergedSubmissionIds is the COMPLETE list of submissions the turn answered, including the
+        // turn's own — so the terminal's identity.SubmissionId is expected to appear in it, and
+        // the no-duplicates check is on that list rather than on a union with it.
+        var final = Assert.Single(events, e => e.Kind == ConversationEventKind.TurnFinal);
+        var merged = final.PayloadAs<TurnFinalPayload>()!.MergedSubmissionIds;
+
+        Assert.Contains("s_original", merged);
+        Assert.Contains("s_injected", merged);
+        Assert.Equal(merged.Count, merged.Distinct(StringComparer.Ordinal).Count());
+
+        // The turn still belongs to the ORIGINAL submission — re-pointing it at the redelivered
+        // message was the defect.
+        Assert.Equal("s_original", final.Identity.SubmissionId);
+        Assert.Contains(final.Identity.SubmissionId, merged);
+        Assert.Equal(2, final.Identity.Attempt);
+    }
+
+    /// <summary>
     /// AC9. An injected submission is answered inside the RUNNING turn, so its submission id must
     /// appear in that turn's terminal event. Without it the client sees
     /// submission.accepted{injected} and then silence forever.

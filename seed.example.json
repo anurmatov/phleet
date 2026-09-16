@@ -137,7 +137,8 @@
               "TargetAgent": "{{input.DesignAgent}}",
               "ConsensusAgents": "{{input.ConsensusAgents}}",
               "MaxConsensusRounds": "{{input.MaxConsensusRounds | default: '3'}}",
-              "ExistingIssueNumber": "{{input.ExistingIssueNumber | default: ''}}"
+              "ExistingIssueNumber": "{{input.ExistingIssueNumber | default: ''}}",
+              "WaiterWorkflowId": "{{input.WaiterWorkflowId | default: ''}}"
             },
             "name": "design_phase",
             "type": "child_workflow",
@@ -196,7 +197,8 @@
               "Repo": "{{input.Repo}}",
               "IssueNumber": "{{vars.issue_number}}",
               "TargetAgent": "{{input.ImplementAgent}}",
-              "ConsensusAgents": "{{input.ConsensusAgents}}"
+              "ConsensusAgents": "{{input.ConsensusAgents}}",
+              "WaiterWorkflowId": "{{input.WaiterWorkflowId | default: ''}}"
             },
             "name": "start_implementation",
             "type": "fire_and_forget",
@@ -566,6 +568,52 @@
               }
             ],
             "maxIterations": 20
+          },
+          {
+            "name": "resolve_terminal_kind",
+            "type": "set_variable",
+            "vars": {
+              "terminal_kind": "{{vars.workflow_result | extract: '^([A-Z]+)' | default: 'ERROR'}}"
+            }
+          },
+          {
+            "name": "map_terminal_decision",
+            "type": "branch",
+            "on": "{{vars.terminal_kind}}",
+            "cases": {
+              "APPROVED": {
+                "name": "decision_approved",
+                "type": "set_variable",
+                "vars": {
+                  "terminal_decision": "approved"
+                }
+              },
+              "REJECTED": {
+                "name": "decision_rejected",
+                "type": "set_variable",
+                "vars": {
+                  "terminal_decision": "rejected"
+                }
+              }
+            },
+            "default": {
+              "name": "decision_cancelled",
+              "type": "set_variable",
+              "vars": {
+                "terminal_decision": "cancelled"
+              }
+            }
+          },
+          {
+            "name": "wake_parked_waiter",
+            "type": "signal_workflow",
+            "workflowId": "{{input.WaiterWorkflowId | default: ''}}",
+            "signalName": "blocker-resolved",
+            "payload": {
+              "decision": "{{vars.terminal_decision}}",
+              "blockerRef": "{{workflow.id}}"
+            },
+            "ignoreFailure": true
           }
         ]
       }
@@ -598,10 +646,22 @@
             "type": "branch",
             "cases": {
               "NO_DOC_UPDATES_NEEDED": {
-                "type": "set_attribute",
-                "attributes": {
-                  "Phase": "complete-no-updates"
-                }
+                "type": "sequence",
+                "steps": [
+                  {
+                    "type": "set_attribute",
+                    "attributes": {
+                      "Phase": "complete-no-updates"
+                    }
+                  },
+                  {
+                    "name": "decision_no_updates",
+                    "type": "set_variable",
+                    "vars": {
+                      "terminal_decision": "approved"
+                    }
+                  }
+                ]
               }
             },
             "default": {
@@ -643,10 +703,22 @@
                   "type": "branch",
                   "cases": {
                     "timeout": {
-                      "type": "set_attribute",
-                      "attributes": {
-                        "Phase": "complete-timeout-r1"
-                      }
+                      "type": "sequence",
+                      "steps": [
+                        {
+                          "type": "set_attribute",
+                          "attributes": {
+                            "Phase": "complete-timeout-r1"
+                          }
+                        },
+                        {
+                          "name": "decision_timeout",
+                          "type": "set_variable",
+                          "vars": {
+                            "terminal_decision": "cancelled"
+                          }
+                        }
+                      ]
                     },
                     "approved": {
                       "type": "sequence",
@@ -663,6 +735,13 @@
                           "type": "set_attribute",
                           "attributes": {
                             "Phase": "complete-approved"
+                          }
+                        },
+                        {
+                          "name": "decision_approved",
+                          "type": "set_variable",
+                          "vars": {
+                            "terminal_decision": "approved"
                           }
                         }
                       ]
@@ -682,6 +761,13 @@
                           "type": "set_attribute",
                           "attributes": {
                             "Phase": "complete-rejected"
+                          }
+                        },
+                        {
+                          "name": "decision_rejected",
+                          "type": "set_variable",
+                          "vars": {
+                            "terminal_decision": "rejected"
                           }
                         }
                       ]
@@ -734,6 +820,13 @@
                                 "attributes": {
                                   "Phase": "complete-approved"
                                 }
+                              },
+                              {
+                                "name": "decision_approved",
+                                "type": "set_variable",
+                                "vars": {
+                                  "terminal_decision": "approved"
+                                }
                               }
                             ]
                           },
@@ -752,6 +845,13 @@
                                 "type": "set_attribute",
                                 "attributes": {
                                   "Phase": "complete-rejected"
+                                }
+                              },
+                              {
+                                "name": "decision_rejected",
+                                "type": "set_variable",
+                                "vars": {
+                                  "terminal_decision": "rejected"
                                 }
                               }
                             ]
@@ -773,6 +873,13 @@
                               "attributes": {
                                 "Phase": "complete-max-rounds"
                               }
+                            },
+                            {
+                              "name": "decision_max_rounds",
+                              "type": "set_variable",
+                              "vars": {
+                                "terminal_decision": "cancelled"
+                              }
                             }
                           ]
                         }
@@ -782,6 +889,17 @@
                 }
               ]
             }
+          },
+          {
+            "name": "wake_parked_waiter",
+            "type": "signal_workflow",
+            "workflowId": "{{input.WaiterWorkflowId | default: ''}}",
+            "signalName": "blocker-resolved",
+            "payload": {
+              "decision": "{{vars.terminal_decision}}",
+              "blockerRef": "{{workflow.id}}"
+            },
+            "ignoreFailure": true
           }
         ]
       }
@@ -1359,6 +1477,59 @@
                 ]
               }
             }
+          },
+          {
+            "name": "map_terminal_decision",
+            "type": "branch",
+            "on": "{{vars.outer_done | extract: '(APPROVED|REJECTED|FAILED|TIMEOUT)' | default: ''}}",
+            "cases": {
+              "APPROVED": {
+                "name": "decision_approved",
+                "type": "set_variable",
+                "vars": {
+                  "terminal_decision": "approved"
+                }
+              },
+              "REJECTED": {
+                "name": "decision_rejected",
+                "type": "set_variable",
+                "vars": {
+                  "terminal_decision": "rejected"
+                }
+              },
+              "FAILED": {
+                "name": "decision_failed",
+                "type": "set_variable",
+                "vars": {
+                  "terminal_decision": "rejected"
+                }
+              },
+              "TIMEOUT": {
+                "name": "decision_timeout",
+                "type": "set_variable",
+                "vars": {
+                  "terminal_decision": "cancelled"
+                }
+              }
+            },
+            "default": {
+              "name": "decision_exhausted",
+              "type": "set_variable",
+              "vars": {
+                "terminal_decision": "cancelled"
+              }
+            }
+          },
+          {
+            "name": "wake_parked_waiter",
+            "type": "signal_workflow",
+            "workflowId": "{{input.WaiterWorkflowId | default: ''}}",
+            "signalName": "blocker-resolved",
+            "payload": {
+              "decision": "{{vars.terminal_decision}}",
+              "blockerRef": "{{workflow.id}}"
+            },
+            "ignoreFailure": true
           }
         ]
       }

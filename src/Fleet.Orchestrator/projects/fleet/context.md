@@ -107,8 +107,8 @@ fleet supports multiple Temporal namespaces. each has its own task queue. worker
 
 UniversalWorkflow — `[Workflow(Dynamic = true)]` handler registered on namespace workers. catches any workflow type name without a statically-compiled handler. loads JSON step tree from orchestrator DB at runtime via `LoadWorkflowDefinition` activity, then interprets it.
 
-- 17 step types: sequence, parallel, loop, branch, break, continue, noop, set_variable, delegate, delegate_with_escalation, wait_for_signal, child_workflow, fire_and_forget, cross_namespace_start, set_attribute, http_request, sleep
-- template engine: `{{expr}}` interpolation with scopes (input, vars, config) and filters (`| default`, `| extract`, `| json`)
+- 18 step types: sequence, parallel, loop, branch, break, continue, noop, set_variable, delegate, delegate_with_escalation, wait_for_signal, child_workflow, fire_and_forget, cross_namespace_start, set_attribute, http_request, sleep, signal_workflow
+- template engine: `{{expr}}` interpolation with scopes (input, vars, config, workflow) and filters (`| default`, `| extract`, `| json`)
 - 2 determinism-safe activities: `LoadWorkflowDefinition`, `LoadWorkflowConfig` (loaded once per execution, replayed from history)
 - `WorkflowTypeRegistry` lazy-merges DB-defined types into `temporal_list_workflow_types` with 5-min background refresh
 - `break` and `continue` are proper step types used inside branch cases for loop control flow (e.g. `"APPROVED": {"type": "break"}`)

@@ -285,14 +285,38 @@ future schemes are additive.
 
 ---
 
+## Runtime ownership and optional Telegram
+
+The conversation seam and the existing chat path share one `TaskManager`, executor and model
+context, but outbound and completion effects no longer depend on the Telegram transport:
+
+- `MessageSinkHolder` is the dependency-free outbound seam. It forwards to `AgentTransport` when
+  Telegram is configured and otherwise serves a counted `NullMessageSink`.
+- `CompletionContextBuffer` owns tool-use and final-response buffering for every channel. It reads
+  the last Telegram message id through the sink seam; a Telegram-free host receives `0`, matching
+  the existing no-prior-send value.
+- `RelayCompletionPublisher` alone publishes relay and bridge completions. Its lifetime is
+  independent of Telegram, so workflow callbacks still work when no bot token exists.
+- `RuntimeWiringService` verifies both completion subscribers are attached, subscribes the relay
+  handler, and only then starts broker consumption. Missing wiring therefore fails startup instead
+  of silently losing callbacks.
+- `AgentTransport` remains the Telegram adapter and owns Telegram polling, formatting, message-id
+  tracking and chat delivery. Its daemon registration is conditional on a non-empty bot token;
+  malformed configured tokens disable Telegram without disabling the rest of the runtime.
+
+This split does **not** create another agent or another model session. Telegram and a future
+first-party adapter are two front doors to the same runtime and shared model context.
+
+---
+
 ## Constraints
 
 Things that must stay true; several encode defects that have already cost real outages.
 
 1. **The existing chat render path is not altered.** Chunk sizes, prefix format, parse-mode
-   selection, the formatting fallback ladder, reply-parameter fallback and marker extraction are
-   untouched. The only edits to the transport are four reserved-band guard lines and the wiring
-   extraction. If an existing chat test needs editing to pass, the approach is wrong.
+   selection, the formatting fallback ladder, reply-parameter fallback, marker extraction and
+   Telegram message-id map remain transport-owned. Send consumers reach that transport through
+   `MessageSinkHolder`; completion buffering reads its last message id through the same seam.
 2. **Runtime conversation keys for new channels are positive.** Several live sites treat a negative
    key as "this is a group" — the channel anchor renders `group` instead of `dm`, and queue-notice
    suppression keys off the sign. The reserved band is `[2^56, 2^56 + 2^32)`, above the 52
@@ -315,9 +339,11 @@ Things that must stay true; several encode defects that have already cost real o
 11. **Injection eligibility, the final-answer gate, queue ordering, the merge-part cap, the
     queue-depth cap and silent-queue behaviour are unchanged** — including not adding a
     user-facing notice on a path that is currently silent.
-12. **A missing bot token is not how you run an adapter.** That path also skipped relay
-    initialization and completion wiring, so an adapter started that way would look alive while
-    every workflow callback silently vanished.
+12. **Telegram is an optional transport, not a runtime dependency.** A daemon with no bot token
+    omits `AgentTransport` and uses the counted null sink, while relay consumption, relay and bridge
+    completion publication, shared-context buffering and conversation events remain active. A
+    malformed configured token disables Telegram only; it must not take those runtime services
+    down.
 13. **Relay handlers attach before consumption starts.** The consumer dispatches under auto-ack, so
     a directive arriving before the subscriber exists is acknowledged and dropped.
 14. **No durable delivery, replay or at-least-once semantics are claimed.** There is no store;
@@ -341,6 +367,9 @@ Things that must stay true; several encode defects that have already cost real o
 | `channel_adapter_delivery_failures_total{channelId,reason}` | `threw`, `timeout` |
 | `conversation_submissions_total{disposition}` | mirrors the dispatch outcome |
 | `turn_outcome_unknown_total{reason}` | |
+| `sink_suppressed_total{reason}` | Counted null-sink sends; `null_sink` is expected in a Telegram-free host but suspicious when Telegram is configured |
+| `startup_telegram_state` | `configured` or `malformed` when the transport is constructed; unset means the transport was omitted because no token was configured |
+| `relay_completions_published_total{type}` | Relay/bridge completions published by the transport-independent owner |
 
 The `not_routed` / `dropped` split is load-bearing. Every existing-channel turn publishes events
 that no adapter owns — that is the expected steady state, not a fault. Counting it as a drop would

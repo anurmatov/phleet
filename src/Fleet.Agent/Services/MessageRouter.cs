@@ -17,8 +17,11 @@ public sealed class MessageRouter
     private readonly CommandDispatcher _commands;
     private readonly ILogger<MessageRouter> _logger;
 
-    /// <summary>Set by AgentTransport after construction to break circular DI.</summary>
-    public IMessageSink Sink { get; set; } = null!;
+    /// <summary>
+    /// Outbound text destination. Constructor-injected via <see cref="MessageSinkHolder"/>
+    /// instead of assigned by <c>AgentTransport</c> after construction (#277 D-1). Never null.
+    /// </summary>
+    private readonly IMessageSink _sink;
 
     public MessageRouter(
         IOptions<AgentOptions> agentConfig,
@@ -28,7 +31,8 @@ public sealed class MessageRouter
         GroupBehavior groupBehavior,
         GroupRelayService relay,
         CommandDispatcher commands,
-        ILogger<MessageRouter> logger)
+        ILogger<MessageRouter> logger,
+        IMessageSink? sink = null)
     {
         _agentConfig = agentConfig.Value;
         _telegramConfig = telegramConfig.Value;
@@ -38,6 +42,7 @@ public sealed class MessageRouter
         _relay = relay;
         _commands = commands;
         _logger = logger;
+        _sink = sink ?? NullMessageSink.Instance;
     }
 
     public async Task HandleAsync(IncomingMessage msg)
@@ -129,7 +134,7 @@ public sealed class MessageRouter
                 var task = trimmed[5..].Trim();
                 if (string.IsNullOrEmpty(task))
                 {
-                    await Sink.SendTextAsync(msg.ChatId, "Usage: /new <task description>");
+                    await _sink.SendTextAsync(msg.ChatId, "Usage: /new <task description>");
                     return;
                 }
                 // displayText is captured from the pre-assembly text, so the prompt metadata
@@ -147,7 +152,7 @@ public sealed class MessageRouter
 
             if (trimmed.Equals("/new", StringComparison.OrdinalIgnoreCase))
             {
-                await Sink.SendTextAsync(msg.ChatId, "Usage: /new <task description>");
+                await _sink.SendTextAsync(msg.ChatId, "Usage: /new <task description>");
                 return;
             }
 
@@ -220,17 +225,16 @@ public sealed class MessageRouter
         // Agent containers do NOT have FLEET_CTO_AGENT; routing is the orchestrator's responsibility.
         await _relay.PublishAccessRequestAsync(payload);
 
-        // Optionally reply to the requesting user
-        if (Sink is not null)
+        // Reply to the requesting user. The sink is constructor-injected and never null (#277
+        // D-1); in a Telegram-free host it is the counted no-op, so the guard this used to need is
+        // gone rather than reworded.
+        var reply = string.IsNullOrWhiteSpace(_telegramConfig.RequestReceivedMessage)
+            ? "Your request has been received and is awaiting approval."
+            : _telegramConfig.RequestReceivedMessage;
+        try { await _sink.SendTextAsync(msg.ChatId, reply); }
+        catch (Exception ex)
         {
-            var reply = string.IsNullOrWhiteSpace(_telegramConfig.RequestReceivedMessage)
-                ? "Your request has been received and is awaiting approval."
-                : _telegramConfig.RequestReceivedMessage;
-            try { await Sink.SendTextAsync(msg.ChatId, reply); }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to send access-request acknowledgement to user {UserId}", msg.UserId);
-            }
+            _logger.LogWarning(ex, "Failed to send access-request acknowledgement to user {UserId}", msg.UserId);
         }
     }
 }

@@ -58,7 +58,7 @@ public class ReservedKeyGuardTests
         var transport = new AgentTransport(
             agentOpts, telegramOpts, allowlist, relay, taskMgr,
             groupBhvr, router, cmdDisp, voice, tts, connState,
-            NullLogger<AgentTransport>.Instance, null);
+            NullLogger<AgentTransport>.Instance, new MessageSinkHolder(), null);
 
         var bot = new RecordingBot();
         transport.BotForTesting = bot;

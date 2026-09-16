@@ -65,6 +65,7 @@ public class AgentTransportSendTextTests
             agentOpts, telegramOpts, allowlist, relay, taskMgr,
             groupBhvr, router, cmdDisp, voice, tts, connState,
             logger ?? NullLogger<AgentTransport>.Instance,
+            new MessageSinkHolder(),
             counter);
 
         var fakeBot = new FakeAgentBot();

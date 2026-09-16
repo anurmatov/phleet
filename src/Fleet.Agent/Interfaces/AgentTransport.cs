@@ -61,7 +61,9 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _groupSizeCapped = new();
 
     // Tracks the last Telegram message_id sent per chatId (updated in SendTextAsync).
-    // Consumed by OnTaskCompleted so BufferBotResponse can persist the outbound message_id.
+    // Published to CompletionContextBuffer through GetLastSentMessageId so BufferBotResponse can
+    // persist the outbound message_id. The map stays HERE: its seven writers are render-path
+    // sites that #274 Constraint 1 freezes (#277 MUST NOT 19).
     private readonly System.Collections.Concurrent.ConcurrentDictionary<long, long> _lastSentMessageIds = new();
 
     public AgentTransport(
@@ -77,7 +79,9 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         TtsService tts,
         IFleetConnectionState connectionState,
         ILogger<AgentTransport> logger,
-        RichFallbackCounter? richFallbackCounter = null)
+        MessageSinkHolder sinkHolder,
+        RichFallbackCounter? richFallbackCounter = null,
+        SinkSuppressionCounter? sinkCounter = null)
     {
         _agentConfig = agentConfig.Value;
         _telegramConfig = telegramConfig.Value;
@@ -94,31 +98,55 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         _richFallbackCounter = richFallbackCounter ?? new RichFallbackCounter();
 
         // Only create the bot client when a token is available.
+        //
+        // The try/catch is required, not defensive: the whitespace check above accepts any
+        // non-blank string, and Telegram.Bot validates token FORMAT in the constructor. A
+        // syntactically invalid token therefore threw out of this constructor, which the host
+        // surfaces as a startup failure — taking relay, workflow completion and the first-party
+        // adapter down with it. That is the same total-outage shape #277 §2 exists to remove,
+        // arriving through configuration instead of registration (#277 MUST NOT 17, S2).
+        //
+        // A malformed token leaves _bot null, which is exactly the absent-token state: the poller
+        // is disabled and everything else runs.
         if (!string.IsNullOrWhiteSpace(telegramConfig.Value.BotToken))
-            _bot = new TelegramBotClient(telegramConfig.Value.BotToken);
+        {
+            try
+            {
+                _bot = new TelegramBotClient(telegramConfig.Value.BotToken);
+                sinkCounter?.SetStartupTelegramState(SinkSuppressionCounter.TelegramConfigured);
+            }
+            catch (Exception ex)
+            {
+                // Never log the token or any part of it.
+                _logger.LogWarning(ex,
+                    "TELEGRAM_BOT_TOKEN is present but malformed — Telegram poller disabled. " +
+                    "Relay, workflow completion and non-Telegram adapters are unaffected.");
+                _bot = null;
+                sinkCounter?.SetStartupTelegramState(SinkSuppressionCounter.TelegramMalformed);
+            }
+        }
+        else
+        {
+            sinkCounter?.SetStartupTelegramState(SinkSuppressionCounter.TelegramAbsent);
+        }
 
-        // Inject self as IMessageSink to break circular DI
-        _taskManager.Sink = this;
-        _groupBehavior.Sink = this;
-        _router.Sink = this;
-        _commands.Sink = this;
+        // Attach self as the real IMessageSink.
+        //
+        // This replaces four assignments into already-constructed services, which existed to break
+        // the circular DI AgentTransport -> TaskManager -> sink. The holder is dependency-free and
+        // is what actually breaks that cycle, so consumers now constructor-inject IMessageSink and
+        // nothing reaches backwards into a built object graph (#277 D-1).
+        sinkHolder.Attach(this);
 
-        // The completion handler is attached HERE, in the constructor, rather than in
-        // ExecuteAsync. Two things follow, both deliberate:
+        // The completion and tool-use effects used to be attached here. They now live in
+        // RelayCompletionPublisher and CompletionContextBuffer, which subscribe in their own
+        // constructors — the same host-ordering property this class relied on, now verified by
+        // RuntimeWiringService instead of assumed (#277 D-2, D-2a).
         //
-        // 1. It survives a token-less process. ExecuteAsync returns early when no bot client
-        //    exists, and it used to return BEFORE this line — so "headless" meant no Telegram
-        //    AND no completion callback, and every workflow answer silently vanished.
-        // 2. There is exactly ONE subscriber, attached at construction, so there is no window in
-        //    which the relay consumer is running but the handler is not.
-        //
-        // The handler itself does NOT move. It reads the private _lastSentMessageIds map that
-        // SendTextAsync writes, and relocating that map would mean editing four lines inside the
-        // Telegram render path for the sake of one Telegram-only integer. Splitting the handler
-        // across two subscribers is equally wrong — two attachment moments reintroduce exactly
-        // the window this is removing.
-        _taskManager.OnTaskCompleted += OnTaskCompleted;
-        _taskManager.OnToolUse += OnToolUse;
+        // _lastSentMessageIds deliberately did NOT move with them. It is written by seven sites
+        // inside the Telegram render path that #274 Constraint 1 freezes, and it holds a Telegram
+        // message id that nothing else in the process can know. The value is published through the
+        // IMessageSink.GetLastSentMessageId override below instead (#277 MUST NOT 19, MUST NOT 20).
 
         _mediaGroupBuffer = new MediaGroupBuffer(telegramConfig.Value.MaxGroupBufferMs);
 
@@ -158,7 +186,6 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     }
 
     private static readonly Regex ImageMarkerRegex = new(@"\[IMAGE:(.+?)\]", RegexOptions.Compiled);
-    private static readonly Regex TaskFailedMarkerRegex = new(@"^\[TASK_FAILED:\s*([^\]]+)\]\s*", RegexOptions.Compiled);
     private static readonly Regex ReplyToTokenRegex = new(@"\[reply_to:\s*(-?\d+)\]", RegexOptions.Compiled);
 
     // ── document download helpers (internal for testability) ─────────────────
@@ -539,17 +566,6 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         }
     }
 
-    /// <summary>
-    /// Detach the handlers attached in the constructor. Symmetric with that attachment, so a
-    /// disposed transport cannot keep buffering into a dead instance.
-    /// </summary>
-    public override void Dispose()
-    {
-        _taskManager.OnTaskCompleted -= OnTaskCompleted;
-        _taskManager.OnToolUse -= OnToolUse;
-        base.Dispose();
-    }
-
     public async Task SendTypingAsync(long chatId, CancellationToken ct = default)
     {
         if (chatId == 0) return;
@@ -644,8 +660,6 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         }
         finally
         {
-            _taskManager.OnTaskCompleted -= OnTaskCompleted;
-            _taskManager.OnToolUse -= OnToolUse;
             if (_relay.IsEnabled)
                 _relay.MessageReceived -= _groupBehavior.OnRelayMessage;
             _groupBehavior.CancelAllDebounce();
@@ -664,69 +678,15 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         catch (OperationCanceledException) { }
     }
 
-    private void OnToolUse(long chatId, string toolName, string description) =>
-        _groupBehavior.BufferToolUse(chatId, toolName, description);
-
-    private void OnTaskCompleted(long chatId, string result, string? relaySender, TaskSource source, bool isPartial, string? correlationId, string? taskId, CompletionKind kind)
-    {
-        if (!string.IsNullOrEmpty(result))
-        {
-            var lastSentId = _lastSentMessageIds.TryGetValue(chatId, out var id) ? id : 0L;
-            _groupBehavior.BufferBotResponse(chatId, result, telegramMessageId: lastSentId);
-        }
-
-        _ = Task.Run(async () =>
-        {
-            if (relaySender == "bridge" && correlationId is not null)
-            {
-                var bridgeResult = kind switch
-                {
-                    CompletionKind.Idle => "[status: idle]",
-                    CompletionKind.Failed => $"[status: failed]\n{result}",
-                    CompletionKind.Incomplete => $"[status: incomplete]\n{result}",
-                    _ => result,
-                };
-                await _relay.PublishToAgentAsync("bridge", chatId, bridgeResult,
-                    type: RelayMessageType.BridgeResponse, correlationId: correlationId, taskId: taskId);
-            }
-            else if (relaySender is not null)
-            {
-                var type = isPartial ? RelayMessageType.PartialResponse : RelayMessageType.Response;
-                var text = taskId is not null ? FormatTaskResponse(result, isPartial, kind) : result;
-                await _relay.PublishToAgentAsync(relaySender, chatId, text, type: type, taskId: taskId);
-            }
-        });
-    }
-
-    private static string FormatTaskResponse(string result, bool isPartial, CompletionKind kind)
-    {
-        if (kind == CompletionKind.Idle)
-            return "[status: idle]";
-
-        if (kind == CompletionKind.Failed)
-            return $"[status: failed]\n{result}";
-
-        // Detect voluntary failure marker: [TASK_FAILED: reason]
-        // Agents can emit this to signal that they refused or cannot complete a delegated task.
-        var taskFailedMatch = TaskFailedMarkerRegex.Match(result);
-        if (taskFailedMatch.Success)
-        {
-            var reason = taskFailedMatch.Groups[1].Value.Trim();
-            var body = result[taskFailedMatch.Length..].TrimStart('\n', '\r');
-            var text = string.IsNullOrEmpty(body) ? $"Task failed: {reason}" : $"Task failed: {reason}\n{body}";
-            return $"[status: failed]\n{text}";
-        }
-
-        // Determine status from result content and isPartial flag
-        var status = isPartial
-            ? (result.StartsWith("Error:", StringComparison.OrdinalIgnoreCase)
-               || result.StartsWith("Task failed:", StringComparison.OrdinalIgnoreCase)
-               ? "failed"
-               : "incomplete")
-            : "completed";
-
-        return $"[status: {status}]\n{result}";
-    }
+    /// <summary>
+    /// Publishes the id of the last message this transport sent to <paramref name="chatId"/> so
+    /// CompletionContextBuffer can persist it without _lastSentMessageIds moving anywhere.
+    ///
+    /// This is the same expression the completion handler used to evaluate inline. The map and its
+    /// seven render-path writers stay here, untouched (#277 D-2a, MUST NOT 19).
+    /// </summary>
+    public long GetLastSentMessageId(long chatId) =>
+        _lastSentMessageIds.TryGetValue(chatId, out var id) ? id : 0L;
 
     internal async Task OnMessage(Message message, UpdateType type)
     {

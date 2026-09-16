@@ -16,19 +16,24 @@ public sealed class CommandDispatcher
     private readonly AgentOptions _agentConfig;
     private readonly ILogger<CommandDispatcher> _logger;
 
-    /// <summary>Set by AgentTransport after construction to break circular DI.</summary>
-    public IMessageSink Sink { get; set; } = null!;
+    /// <summary>
+    /// Outbound text destination. Constructor-injected via <see cref="MessageSinkHolder"/>
+    /// instead of assigned by <c>AgentTransport</c> after construction (#277 D-1). Never null.
+    /// </summary>
+    private readonly IMessageSink _sink;
 
     public CommandDispatcher(
         TaskManager taskManager,
         IAgentExecutor executor,
         IOptions<AgentOptions> agentConfig,
-        ILogger<CommandDispatcher> logger)
+        ILogger<CommandDispatcher> logger,
+        IMessageSink? sink = null)
     {
         _taskManager = taskManager;
         _executor = executor;
         _agentConfig = agentConfig.Value;
         _logger = logger;
+        _sink = sink ?? NullMessageSink.Instance;
     }
 
     /// <summary>
@@ -77,7 +82,7 @@ public sealed class CommandDispatcher
             var command = text[5..].Trim();
             if (string.IsNullOrEmpty(command))
             {
-                await Sink.SendTextAsync(chatId, "Usage: /run <command> (e.g. /run /compact)");
+                await _sink.SendTextAsync(chatId, "Usage: /run <command> (e.g. /run /compact)");
                 return true;
             }
 
@@ -96,7 +101,7 @@ public sealed class CommandDispatcher
             var tasks = _taskManager.GetActiveBackgroundTasks();
             if (tasks.Count == 0)
             {
-                await Sink.SendTextAsync(chatId, "No active background tasks.");
+                await _sink.SendTextAsync(chatId, "No active background tasks.");
                 return;
             }
 
@@ -107,16 +112,16 @@ public sealed class CommandDispatcher
                 msg += $"  [{t.TaskType}] {t.TaskId}{summary} ({t.ElapsedSeconds}s)\n";
             }
             msg += "\nUse /cancel_bg <taskId> to cancel a specific task.";
-            await Sink.SendTextAsync(chatId, msg);
+            await _sink.SendTextAsync(chatId, msg);
             return;
         }
 
         // Arg provided — cancel by task ID
         var cancelled = await _taskManager.CancelBackgroundTaskAsync(arg);
         if (cancelled)
-            await Sink.SendTextAsync(chatId, $"Cancel requested for background task '{arg}'.");
+            await _sink.SendTextAsync(chatId, $"Cancel requested for background task '{arg}'.");
         else
-            await Sink.SendTextAsync(chatId, $"Background task '{arg}' not found. Use /cancel_bg to list active tasks.");
+            await _sink.SendTextAsync(chatId, $"Background task '{arg}' not found. Use /cancel_bg to list active tasks.");
     }
 
     private async Task HandleRunCommand(long chatId, string command)
@@ -134,7 +139,7 @@ public sealed class CommandDispatcher
                 stats = progress.Stats;
             if (progress.EventType == "error")
             {
-                await Sink.SendTextAsync(chatId, progress.Summary);
+                await _sink.SendTextAsync(chatId, progress.Summary);
                 return;
             }
         }
@@ -143,6 +148,6 @@ public sealed class CommandDispatcher
         var response = lastResult is not null
             ? $"{lastResult}{statsSuffix}"
             : $"Command completed (no output).{statsSuffix}";
-        await Sink.SendTextAsync(chatId, response);
+        await _sink.SendTextAsync(chatId, response);
     }
 }

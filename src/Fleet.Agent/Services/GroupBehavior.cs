@@ -36,8 +36,15 @@ public sealed class GroupBehavior
 
     private string _botUsername = "";
 
-    /// <summary>Set by AgentTransport after construction to break circular DI.</summary>
-    public IMessageSink Sink { get; set; } = null!;
+    /// <summary>
+    /// Outbound text destination. Constructor-injected via <see cref="MessageSinkHolder"/>
+    /// instead of assigned by <c>AgentTransport</c> after construction (#277 D-1). Never null.
+    ///
+    /// GroupBehavior currently calls no send path of its own — every outbound message it causes
+    /// goes through TaskManager or CommandDispatcher. It is wired anyway so the four sink
+    /// consumers share one shape and a future send site cannot reintroduce the settable property.
+    /// </summary>
+    private readonly IMessageSink _sink;
 
     public GroupBehavior(
         IOptions<AgentOptions> agentConfig,
@@ -48,7 +55,8 @@ public sealed class GroupBehavior
         TaskManager taskManager,
         CommandDispatcher commands,
         PromptAssembler prompts,
-        ILogger<GroupBehavior> logger)
+        ILogger<GroupBehavior> logger,
+        IMessageSink? sink = null)
     {
         _agentConfig = agentConfig.Value;
         _telegramConfig = telegramConfig.Value;
@@ -59,6 +67,7 @@ public sealed class GroupBehavior
         _commands = commands;
         _prompts = prompts;
         _logger = logger;
+        _sink = sink ?? NullMessageSink.Instance;
 
         _historyPath = Path.Combine(_agentConfig.WorkDir, ".fleet", "chat-history.json");
     }

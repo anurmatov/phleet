@@ -129,7 +129,7 @@ public class GroupBehaviorStatusTests
     public async Task OnRelayMessage_BridgeRequestCompletion_PreservesAnswerAndCorrelation()
     {
         await using var harness = new Harness(finalResult: "original answer");
-        harness.AttachTransportCompletionHandler();
+        harness.AttachRelayCompletionPublisher();
 
         harness.Behavior.OnRelayMessage(ChatId, "bridge", "ordinary request",
             RelayMessageType.BridgeRequest, correlationId: "bridge-correlation", taskId: "bridge-task");
@@ -171,8 +171,7 @@ public class GroupBehaviorStatusTests
     private sealed class Harness : IAsyncDisposable
     {
         private readonly GroupRelayService _relay;
-        private readonly Action<long, string, string?, TaskSource, bool, string?, string?, CompletionKind>?
-            _completionHandler;
+        private RelayCompletionPublisher? _relayCompletions;
 
         public Harness(string? finalResult = null)
         {
@@ -203,38 +202,13 @@ public class GroupBehaviorStatusTests
             var allowlist = new AllowlistHolder(telegramOptions);
             _relay = BuildCapturingRelay(agentOptions, rabbitOptions, Published);
             TaskManager = new TaskManager(agentOptions, Executor, new SessionManager(),
-                NullLogger<TaskManager>.Instance)
-            { Sink = Sink };
+                NullLogger<TaskManager>.Instance, sink: Sink);
             var prompts = new PromptAssembler(Executor);
             var commands = new CommandDispatcher(TaskManager, Executor, agentOptions,
-                NullLogger<CommandDispatcher>.Instance)
-            { Sink = Sink };
+                NullLogger<CommandDispatcher>.Instance, sink: Sink);
             Behavior = new GroupBehavior(agentOptions, telegramOptions, allowlist, Executor, _relay,
-                TaskManager, commands, prompts, NullLogger<GroupBehavior>.Instance)
-            { Sink = Sink };
+                TaskManager, commands, prompts, NullLogger<GroupBehavior>.Instance, sink: Sink);
 
-            if (finalResult is not null)
-            {
-                var httpClientFactory = Substitute.For<IHttpClientFactory>();
-                var voice = new VoiceTranscriptionService(httpClientFactory, Options.Create(new WhisperOptions()),
-                    NullLogger<VoiceTranscriptionService>.Instance);
-                var tts = new TtsService(httpClientFactory, Options.Create(new TtsOptions()),
-                    NullLogger<TtsService>.Instance);
-                var router = new MessageRouter(agentOptions, telegramOptions, allowlist, TaskManager,
-                    Behavior, _relay, commands, NullLogger<MessageRouter>.Instance)
-                { Sink = Sink };
-                var transport = new AgentTransport(agentOptions, telegramOptions, allowlist, _relay, TaskManager,
-                    Behavior, router, commands, voice, tts, Substitute.For<IFleetConnectionState>(),
-                    NullLogger<AgentTransport>.Instance);
-
-                var method = typeof(AgentTransport).GetMethod("OnTaskCompleted",
-                    BindingFlags.Instance | BindingFlags.NonPublic)!;
-                _completionHandler =
-                    (Action<long, string, string?, TaskSource, bool, string?, string?, CompletionKind>)
-                    method.CreateDelegate(
-                        typeof(Action<long, string, string?, TaskSource, bool, string?, string?, CompletionKind>),
-                        transport);
-            }
         }
 
         public string WorkDir { get; }
@@ -244,10 +218,15 @@ public class GroupBehaviorStatusTests
         public GroupBehavior Behavior { get; }
         public PublishedMessages Published { get; } = new();
 
-        public void AttachTransportCompletionHandler()
+        /// <summary>
+        /// Attaches the production relay-completion owner. Before #277 D-2 this reflected a
+        /// private method off AgentTransport; the effect now has its own singleton, which
+        /// subscribes in its constructor, so the test exercises the real path instead.
+        /// </summary>
+        public void AttachRelayCompletionPublisher()
         {
-            Assert.NotNull(_completionHandler);
-            TaskManager.OnTaskCompleted += _completionHandler;
+            _relayCompletions = new RelayCompletionPublisher(TaskManager, _relay,
+                NullLogger<RelayCompletionPublisher>.Instance);
         }
 
         public bool HasDebounceTimer(long chatId)
@@ -268,8 +247,7 @@ public class GroupBehaviorStatusTests
 
         public async ValueTask DisposeAsync()
         {
-            if (_completionHandler is not null)
-                TaskManager.OnTaskCompleted -= _completionHandler;
+            _relayCompletions?.Dispose();
             Behavior.CancelAllDebounce();
             await TaskManager.CancelAllAsync();
             await _relay.DisposeAsync();

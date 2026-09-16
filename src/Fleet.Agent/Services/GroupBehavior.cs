@@ -67,6 +67,13 @@ public sealed class GroupBehavior
 
     public void SetShutdownToken(CancellationToken ct) => _shutdownToken = ct;
 
+    /// <summary>
+    /// The shutdown token currently in force. Exposed so a test can prove it is the one that
+    /// fires on application STOP rather than the one that aborts startup — a distinction that is
+    /// invisible from the outside and easy to get wrong.
+    /// </summary>
+    internal CancellationToken ShutdownTokenForTesting => _shutdownToken;
+
     public GroupChatBuffer GetGroupBuffer(long chatId)
     {
         if (!_historyLoaded)

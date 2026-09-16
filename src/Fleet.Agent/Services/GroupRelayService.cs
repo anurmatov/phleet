@@ -53,6 +53,9 @@ public sealed class GroupRelayService : IAsyncDisposable
 
     public bool IsEnabled => _rabbitConfig.Host.Length > 0;
 
+    /// <summary>True once a consumer has been started. Used by the wiring-order tests.</summary>
+    internal bool IsInitializedForTesting => _initialized;
+
     public async Task InitializeAsync(CancellationToken ct)
     {
         if (!IsEnabled || _initialized)

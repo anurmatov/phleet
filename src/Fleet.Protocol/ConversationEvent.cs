@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 
 namespace Fleet.Protocol;
 
@@ -33,7 +34,12 @@ public sealed record ConversationEvent
     /// </summary>
     public JsonNode? Payload { get; init; }
 
-    /// <summary>True for the four terminal kinds (D11).</summary>
+    /// <summary>
+    /// True for the four terminal kinds (D11). Routing metadata for the bus, NOT wire surface —
+    /// without the JsonIgnore this computed property serializes as an extra envelope field that
+    /// is outside the allowlist.
+    /// </summary>
+    [JsonIgnore]
     public bool IsTerminal => ConversationEventKind.Terminal.Contains(Kind);
 
     /// <summary>

@@ -23,7 +23,10 @@ namespace Fleet.Agent.Services;
 /// </summary>
 public sealed class ConversationEventBus : IConversationEventPublisher
 {
-    /// <summary>Shared progress capacity. Oldest-wins is wrong here; a dropped write is counted.</summary>
+    /// <summary>
+    /// Shared progress capacity. Writes are always TryWrite, so publication is non-blocking
+    /// regardless of the channel's full mode; a refused write is counted, never silently lost.
+    /// </summary>
     public const int ProgressChannelCapacity = 256;
 
     /// <summary>
@@ -38,10 +41,14 @@ public sealed class ConversationEventBus : IConversationEventPublisher
     private readonly ILogger<ConversationEventBus> _logger;
     private readonly TimeProvider _timeProvider;
 
+    // FullMode.Wait, NOT DropWrite. This channel is only ever written with TryWrite, which never
+    // blocks under either mode — but under DropWrite TryWrite returns TRUE while silently
+    // discarding the event, so an overflow would be invisible and uncounted. Wait makes TryWrite
+    // return false when full, which is what lets the drop be counted and logged.
     private readonly Channel<PendingEvent> _progress = Channel.CreateBounded<PendingEvent>(
         new BoundedChannelOptions(ProgressChannelCapacity)
         {
-            FullMode = BoundedChannelFullMode.DropWrite,
+            FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
         });
 
@@ -188,10 +195,12 @@ public sealed class ConversationEventBus : IConversationEventPublisher
 
     private bool WriteTerminal(long runtimeKey, ConversationEvent evt)
     {
+        // FullMode.Wait for the same reason as the progress channel: TryWrite must be able to
+        // REPORT the overflow. A dropped terminal event is a defect that has to reach the logs.
         var outbox = _terminalOutboxes.GetOrAdd(runtimeKey, _ => Channel.CreateBounded<PendingEvent>(
             new BoundedChannelOptions(TerminalOutboxCapacity)
             {
-                FullMode = BoundedChannelFullMode.DropWrite,
+                FullMode = BoundedChannelFullMode.Wait,
                 SingleReader = true,
             }));
 

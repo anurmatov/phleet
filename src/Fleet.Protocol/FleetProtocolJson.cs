@@ -32,7 +32,10 @@ public static class FleetProtocolJson
             PropertyNameCaseInsensitive = true,
         };
         options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower));
-        options.MakeReadOnly();
+        // populateMissingResolver: true installs the default reflection resolver. Freezing the
+        // instance is what makes "the only supported configuration" enforceable rather than
+        // advisory — a caller cannot mutate the shared options out from under everyone else.
+        options.MakeReadOnly(populateMissingResolver: true);
         return options;
     }
 

@@ -1,0 +1,4 @@
+{"type":"init","session_id":"s_1","model":"gemini-2.5-flash"}
+{"type":"tool_call","name":"read_file","args":{"path":"/workspace/example/notes.txt"}}
+{"type":"tool_result","callId":"t_1","content":"synthetic tool output"}
+{"type":"result","status":"success","stats":{}}

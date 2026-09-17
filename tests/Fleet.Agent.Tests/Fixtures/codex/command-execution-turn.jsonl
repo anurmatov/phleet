@@ -1,0 +1,5 @@
+{"method":"turn/started","params":{"turn":{"id":"t_1"}}}
+{"method":"item/started","params":{"turnId":"t_1","item":{"type":"commandExecution","command":"grep -rn --include=*.cs \"synthetic-marker\" /workspace/example/src /workspace/example/tests","args":{}}}}
+{"method":"item/completed","params":{"turnId":"t_1","item":{"type":"commandExecution","command":"grep -rn --include=*.cs \"synthetic-marker\" /workspace/example/src /workspace/example/tests","aggregatedOutput":"synthetic tool output"}}}
+{"method":"item/completed","params":{"turnId":"t_1","item":{"type":"agentMessage","phase":"final_answer","text":"Synthetic answer A."}}}
+{"method":"turn/completed","params":{"turnId":"t_1","turn":{"id":"t_1","status":"completed","durationMs":12}}}

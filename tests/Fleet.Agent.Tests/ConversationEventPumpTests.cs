@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Fleet.Agent.Abstractions;
 using Fleet.Agent.Services;
+using Fleet.Agent.Tests.Harness;
 using Fleet.Protocol;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -12,21 +13,6 @@ namespace Fleet.Agent.Tests;
 /// </summary>
 public class ConversationEventPumpTests
 {
-    private sealed class RecordingAdapter : IChannelAdapter
-    {
-        public RecordingAdapter(string channelId = "example-adapter") => ChannelId = channelId;
-        public string ChannelId { get; }
-        public readonly List<ConversationEvent> Delivered = [];
-        public Func<ConversationEvent, CancellationToken, Task>? Behaviour { get; set; }
-
-        public Task DeliverAsync(ConversationEvent evt, CancellationToken ct)
-        {
-            if (Behaviour is not null) return Behaviour(evt, ct);
-            Delivered.Add(evt);
-            return Task.CompletedTask;
-        }
-    }
-
     private static (ConversationEventBus bus, ConversationRegistry registry, ConversationEventCounters counters, ConversationEventPump pump)
         Build(params IChannelAdapter[] adapters)
     {
@@ -59,7 +45,7 @@ public class ConversationEventPumpTests
     public void DuplicateChannelId_FailsStartup()
     {
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            Build(new RecordingAdapter("dup"), new RecordingAdapter("dup")));
+            Build(new LoopbackChannelAdapter("dup"), new LoopbackChannelAdapter("dup")));
 
         Assert.Contains("dup", ex.Message);
     }
@@ -69,19 +55,19 @@ public class ConversationEventPumpTests
     [InlineData("relay")]
     public void AdapterClaimingAReservedChannelId_FailsStartup(string channelId)
     {
-        var ex = Assert.Throws<InvalidOperationException>(() => Build(new RecordingAdapter(channelId)));
+        var ex = Assert.Throws<InvalidOperationException>(() => Build(new LoopbackChannelAdapter(channelId)));
         Assert.Contains(channelId, ex.Message);
     }
 
     [Fact]
     public void AdapterWithAnEmptyChannelId_FailsStartup() =>
-        Assert.Throws<InvalidOperationException>(() => Build(new RecordingAdapter("")));
+        Assert.Throws<InvalidOperationException>(() => Build(new LoopbackChannelAdapter("")));
 
     [Fact]
     public async Task EventsAreDeliveredToTheAdapterOwningTheConversation()
     {
-        var owner = new RecordingAdapter("owner-channel");
-        var other = new RecordingAdapter("other-channel");
+        var owner = new LoopbackChannelAdapter("owner-channel");
+        var other = new LoopbackChannelAdapter("other-channel");
         var (bus, registry, _, pump) = Build(owner, other);
 
         var reference = new ConversationRef("owner-channel", "c_1", "p_1");
@@ -98,7 +84,7 @@ public class ConversationEventPumpTests
     [Fact]
     public async Task TelegramConversation_ReachesNoAdapter()
     {
-        var adapter = new RecordingAdapter();
+        var adapter = new LoopbackChannelAdapter();
         var (bus, _, counters, pump) = Build(adapter);
         // Unregistered, exactly as in production.
 
@@ -124,7 +110,7 @@ public class ConversationEventPumpTests
     [Fact]
     public async Task AThrowingAdapter_IsCountedAndDoesNotPropagate()
     {
-        var adapter = new RecordingAdapter { Behaviour = (_, _) => throw new InvalidOperationException("boom") };
+        var adapter = new LoopbackChannelAdapter { Behaviour = (_, _) => throw new InvalidOperationException("boom") };
         var (bus, registry, counters, pump) = Build(adapter);
 
         var reference = new ConversationRef("example-adapter", "c_1", "p_1");
@@ -144,11 +130,11 @@ public class ConversationEventPumpTests
     [Fact]
     public async Task AHungAdapter_IsAbandonedAtTheTimeoutAndThePumpContinues()
     {
-        var hung = new RecordingAdapter("hung-channel")
+        var hung = new LoopbackChannelAdapter("hung-channel")
         {
             Behaviour = async (_, ct) => await Task.Delay(TimeSpan.FromMinutes(5), ct),
         };
-        var healthy = new RecordingAdapter("healthy-channel");
+        var healthy = new LoopbackChannelAdapter("healthy-channel");
         var (bus, registry, counters, pump) = Build(hung, healthy);
 
         var hungRef = new ConversationRef("hung-channel", "c_hung", "p_1");
@@ -177,7 +163,7 @@ public class ConversationEventPumpTests
     [Fact]
     public void Publish_CompletesSynchronouslyEvenWhenTheAdapterBlocks()
     {
-        var blocking = new RecordingAdapter
+        var blocking = new LoopbackChannelAdapter
         {
             Behaviour = async (_, ct) => await Task.Delay(TimeSpan.FromSeconds(10), ct),
         };
@@ -198,7 +184,7 @@ public class ConversationEventPumpTests
     public async Task AnAdapterRegisteredAfterPublication_SeesNothingAlreadyEmitted()
     {
         // The conversation's events are published while only this adapter exists...
-        var late = new RecordingAdapter("late-channel");
+        var late = new LoopbackChannelAdapter("late-channel");
         var (bus, registry, counters, pump) = Build(late);
 
         var reference = new ConversationRef("never-registered-channel", "c_1", "p_1");
@@ -219,7 +205,7 @@ public class ConversationEventPumpTests
     [Fact]
     public async Task TerminalEventsDrainBeforeProgressEvents()
     {
-        var adapter = new RecordingAdapter();
+        var adapter = new LoopbackChannelAdapter();
         var (bus, registry, _, pump) = Build(adapter);
 
         var reference = new ConversationRef("example-adapter", "c_1", "p_1");

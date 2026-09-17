@@ -3,6 +3,7 @@ using Fleet.Agent.Abstractions;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services;
+using Fleet.Agent.Tests.Harness;
 using Fleet.Protocol;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -21,56 +22,14 @@ public class ConversationTurnLifecycleTests
 
     // ── harness ───────────────────────────────────────────────────────────────
 
-    private sealed class Harness
-    {
-        public required TaskManager Manager { get; init; }
-        public required ConversationEventBus Bus { get; init; }
-        public required ConversationRegistry Registry { get; init; }
-        public required ConversationEventCounters Counters { get; init; }
-        public required IMessageSink Sink { get; init; }
+    // Extracted to Harness/ConversationHarness.cs so the real-adapter spike and this file share one
+    // wiring of the projection path. WorkDir stays "/tmp" so the refactor is behaviour-preserving.
+    private static ConversationHarness Build(IAgentExecutor executor, IMessageSink? sink = null) =>
+        ConversationHarness.Build(executor, sink, workDir: "/tmp"); // hygiene-ok: OS temp root
 
-        public List<ConversationEvent> Drain()
-        {
-            var events = new List<ConversationEvent>();
-            foreach (var reader in Bus.TerminalReaders.ToList())
-                while (reader.TryRead(out var pending))
-                    events.Add(pending.Event);
-            while (Bus.ProgressReader.TryRead(out var pending))
-                events.Add(pending.Event);
-            return events;
-        }
-    }
-
-    private static Harness Build(IAgentExecutor executor, IMessageSink? sink = null)
-    {
-        var registry = new ConversationRegistry();
-        var counters = new ConversationEventCounters();
-        var bus = new ConversationEventBus(registry, counters, NullLogger<ConversationEventBus>.Instance);
-        var options = Options.Create(new AgentOptions { Name = "test", Role = "test", WorkDir = "/tmp", Provider = "claude" });
-
-        sink ??= Substitute.For<IMessageSink>();
-        var manager = new TaskManager(
-            options, executor, new SessionManager(), NullLogger<TaskManager>.Instance,
-            injectionCounter: null, events: bus, telegramConfig: null, counters: counters,
-            sink: sink);
-
-        return new Harness { Manager = manager, Bus = bus, Registry = registry, Counters = counters, Sink = sink };
-    }
-
-    private static (long key, ConversationIdentity identity) OpenClientConversation(Harness harness, string conversationId = "c_1")
-    {
-        var reference = new ConversationRef(ClientChannel, conversationId, "p_owner");
-        var key = harness.Registry.Resolve(reference);
-        return (key, new ConversationIdentity
-        {
-            PrincipalId = "p_owner",
-            Role = PrincipalRole.Owner,
-            ChannelId = ClientChannel,
-            ConversationId = conversationId,
-            SubmissionId = "s_1",
-            Attempt = 1,
-        });
-    }
+    private static (long key, ConversationIdentity identity) OpenClientConversation(
+        ConversationHarness harness, string conversationId = "c_1") =>
+        harness.OpenClientConversation(conversationId);
 
     private static async IAsyncEnumerable<AgentProgress> Yield(string? finalResult, bool isError = false)
     {

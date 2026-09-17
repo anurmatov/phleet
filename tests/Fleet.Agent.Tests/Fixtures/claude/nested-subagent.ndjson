@@ -1,0 +1,6 @@
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_nested","name":"Agent","input":{"description":"synthetic nested task"}}]},"parent_tool_use_id":null}
+{"type":"system","subtype":"task_started","task_id":"t_1","task_type":"local_agent","description":"synthetic nested task"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Nested progress, never a parent answer."}]},"parent_tool_use_id":"toolu_nested"}
+{"type":"system","subtype":"task_notification","task_id":"t_1","status":"completed","summary":"synthetic completion"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Synthetic answer A."}]},"parent_tool_use_id":null}
+{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"s_1","result":"Synthetic answer A."}

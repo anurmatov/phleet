@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"s_1"}
+{"type":"result","subtype":"error","is_error":true,"num_turns":1,"session_id":"s_1","result":"Synthetic provider failure."}

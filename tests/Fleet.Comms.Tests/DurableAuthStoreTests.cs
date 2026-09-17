@@ -29,6 +29,7 @@ namespace Fleet.Comms.Tests;
 /// test needs a "restart", it disposes the store and opens a new one over the same file, which is
 /// what a container restart does to it.</para>
 /// </summary>
+[Collection("auth-store-path")]
 public sealed class DurableAuthStoreTests : IDisposable
 {
     private readonly string _directory =
@@ -55,7 +56,7 @@ public sealed class DurableAuthStoreTests : IDisposable
     {
         string deviceId, deviceSecret;
 
-        using (var store = new SqliteAuthStore(DatabasePath))
+        using (var store = new SqliteAuthStore(DatabasePath, allowCreate: true))
         {
             var auth = Service(store);
             var code = await auth.IssueEnrollmentCodeAsync("p_owner");
@@ -64,7 +65,7 @@ public sealed class DurableAuthStoreTests : IDisposable
         }
 
         // A new process, over the same file, with no memory of anything.
-        using (var restarted = new SqliteAuthStore(DatabasePath))
+        using (var restarted = new SqliteAuthStore(DatabasePath, allowCreate: true))
         {
             var auth = Service(restarted);
 
@@ -82,7 +83,7 @@ public sealed class DurableAuthStoreTests : IDisposable
     {
         string deviceId, deviceSecret, token;
 
-        using (var store = new SqliteAuthStore(DatabasePath))
+        using (var store = new SqliteAuthStore(DatabasePath, allowCreate: true))
         {
             var auth = Service(store);
             var device = (await auth.RegisterDeviceAsync(
@@ -94,7 +95,7 @@ public sealed class DurableAuthStoreTests : IDisposable
             Assert.True((await auth.RevokeSelfAsync(principal, deviceId)).Succeeded);
         }
 
-        using (var restarted = new SqliteAuthStore(DatabasePath))
+        using (var restarted = new SqliteAuthStore(DatabasePath, allowCreate: true))
         {
             var auth = Service(restarted);
 
@@ -110,7 +111,7 @@ public sealed class DurableAuthStoreTests : IDisposable
     {
         string code;
 
-        using (var store = new SqliteAuthStore(DatabasePath))
+        using (var store = new SqliteAuthStore(DatabasePath, allowCreate: true))
         {
             var auth = Service(store);
             code = await auth.IssueEnrollmentCodeAsync("p_owner");
@@ -118,7 +119,7 @@ public sealed class DurableAuthStoreTests : IDisposable
             await auth.MintTokenAsync(device.DeviceId, device.DeviceSecret);
         }
 
-        using (var restarted = new SqliteAuthStore(DatabasePath))
+        using (var restarted = new SqliteAuthStore(DatabasePath, allowCreate: true))
         {
             // The recovery window closed on the first mint, and the mint is in the file.
             Assert.False((await Service(restarted).RegisterDeviceAsync(code)).Succeeded);
@@ -131,7 +132,7 @@ public sealed class DurableAuthStoreTests : IDisposable
         var time = new TestTimeProvider();
         string token;
 
-        using (var store = new SqliteAuthStore(DatabasePath))
+        using (var store = new SqliteAuthStore(DatabasePath, allowCreate: true))
         {
             var auth = Service(store, time);
             var device = (await auth.RegisterDeviceAsync(
@@ -145,7 +146,7 @@ public sealed class DurableAuthStoreTests : IDisposable
         // The restart is the case the monotonic clock cannot cover — it has to re-anchor to
         // whatever the host says, and here the host says the token has not expired yet. The burn
         // written during the refusal is what still refuses it.
-        using (var restarted = new SqliteAuthStore(DatabasePath))
+        using (var restarted = new SqliteAuthStore(DatabasePath, allowCreate: true))
         {
             var rewound = new TestTimeProvider();
             Assert.False((await Service(restarted, rewound).AuthenticateAsync(token)).Succeeded);
@@ -164,7 +165,7 @@ public sealed class DurableAuthStoreTests : IDisposable
     [Fact]
     public async Task ConcurrentRegistrationsProduceExactlyOneActiveDevice()
     {
-        using var store = new SqliteAuthStore(DatabasePath);
+        using var store = new SqliteAuthStore(DatabasePath, allowCreate: true);
         var auth = Service(store);
 
         var codes = new List<string>();
@@ -189,7 +190,7 @@ public sealed class DurableAuthStoreTests : IDisposable
     [Fact]
     public async Task AFailedTransactionRollsBackEveryWriteInIt()
     {
-        using var store = new SqliteAuthStore(DatabasePath);
+        using var store = new SqliteAuthStore(DatabasePath, allowCreate: true);
         var auth = Service(store);
         var code = await auth.IssueEnrollmentCodeAsync("p_owner");
         var enrollmentId = code.Split('.')[0];
@@ -232,7 +233,7 @@ public sealed class DurableAuthStoreTests : IDisposable
         var blocked = Path.Combine(_directory, "not-a-file");
         Directory.CreateDirectory(blocked);
 
-        using var store = new SqliteAuthStore(blocked);
+        using var store = new SqliteAuthStore(blocked, allowCreate: true);
 
         await Assert.ThrowsAsync<AuthStoreUnavailableException>(() =>
             store.InTransactionAsync<int>((_, _) => Task.FromResult(0), CancellationToken.None));
@@ -244,7 +245,7 @@ public sealed class DurableAuthStoreTests : IDisposable
         var blocked = Path.Combine(_directory, "secret-looking-name");
         Directory.CreateDirectory(blocked);
 
-        using var store = new SqliteAuthStore(blocked);
+        using var store = new SqliteAuthStore(blocked, allowCreate: true);
 
         var thrown = await Assert.ThrowsAsync<AuthStoreUnavailableException>(() =>
             store.InTransactionAsync<int>((_, _) => Task.FromResult(0), CancellationToken.None));
@@ -266,6 +267,11 @@ public sealed class DurableAuthStoreTests : IDisposable
     public async Task TheDeployableDefaultStoreIsDurableAcrossAnApplicationRestart()
     {
         string deviceId, deviceSecret;
+
+        // The service opens the store read-write and will not create it; `store init` is the
+        // deliberate first-use step, which setup.sh performs once.
+        using (var seed = new SqliteAuthStore(DatabasePath, allowCreate: true))
+            await seed.InTransactionAsync((tx, ct) => tx.CountActiveDevicesAsync("", ct), default);
 
         await using (var app = BuildDeployableApp())
         {
@@ -353,7 +359,7 @@ public sealed class DurableAuthStoreTests : IDisposable
     public async Task AFullDatabaseIsStoreUnavailable_NotAnUnhandledFault()
     {
         string deviceId, deviceSecret;
-        using (var store = new SqliteAuthStore(DatabasePath))
+        using (var store = new SqliteAuthStore(DatabasePath, allowCreate: true))
         {
             var auth = Service(store);
             var device = (await auth.RegisterDeviceAsync(
@@ -383,7 +389,7 @@ public sealed class DurableAuthStoreTests : IDisposable
 
         // Rollback: the failed transaction left nothing behind, and the store works again once the
         // constraint is lifted — so the failure was capacity, not a corrupted file or lost device.
-        using var released = new SqliteAuthStore(DatabasePath);
+        using var released = new SqliteAuthStore(DatabasePath, allowCreate: true);
         Assert.True((await Service(released).MintTokenAsync(deviceId, deviceSecret)).Succeeded);
     }
 
@@ -392,7 +398,7 @@ public sealed class DurableAuthStoreTests : IDisposable
     public async Task AFullDatabaseReturns503OverHttp_Not500()
     {
         string deviceId, deviceSecret;
-        using (var store = new SqliteAuthStore(DatabasePath))
+        using (var store = new SqliteAuthStore(DatabasePath, allowCreate: true))
         {
             var auth = Service(store);
             var device = (await auth.RegisterDeviceAsync(
@@ -439,6 +445,244 @@ public sealed class DurableAuthStoreTests : IDisposable
         var pages = Convert.ToInt64(command.ExecuteScalar());
 
         return $"PRAGMA max_page_count={pages};";
+    }
+
+    /// <summary>
+    /// The CLI and the host must resolve the same store, including when the deployment moves the
+    /// content root. Reading the working directory alone was not sharing — it left a subcommand
+    /// looking at a different `appsettings` than the service, which is how an operator issues a
+    /// code the running service rejects.
+    /// </summary>
+    [Fact]
+    public async Task TheCliAndTheHostResolveTheSameStoreUnderAContentRootOverride()
+    {
+        var contentRoot = Path.Combine(_directory, "elsewhere");
+        Directory.CreateDirectory(contentRoot);
+        var expected = Path.Combine(contentRoot, "from-content-root.db");
+        var settings = "{\"Comms\":{\"AuthStorePath\":"
+            + System.Text.Json.JsonSerializer.Serialize(expected) + "}}";
+        await File.WriteAllTextAsync(Path.Combine(contentRoot, "appsettings.json"), settings);
+
+        Environment.SetEnvironmentVariable("ASPNETCORE_CONTENTROOT", contentRoot);
+        try
+        {
+            var cli = Fleet.Comms.Configuration.CommsConfiguration.Resolve().AuthStorePath;
+
+            // The host built the way Program builds it — from the environment, with no explicit
+            // ContentRootPath. Passing the path in would have tested that two values I supplied are
+            // equal, which is not the question.
+            var builder = WebApplication.CreateBuilder();
+            builder.WebHost.UseTestServer();
+            builder.Logging.ClearProviders();
+            var host = builder.Configuration.GetSection("Comms")["AuthStorePath"];
+
+            Assert.Equal(expected, cli);
+            Assert.Equal(expected, host);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ASPNETCORE_CONTENTROOT", null);
+        }
+    }
+
+    /// <summary>
+    /// The host's precedence, and the surprise in it: <c>--contentRoot</c> beats
+    /// <c>DOTNET_CONTENTROOT</c>, which beats <c>ASPNETCORE_CONTENTROOT</c>.
+    ///
+    /// <para>The prefix-layering order suggests <c>ASPNETCORE_</c> wins, and an earlier version of
+    /// the resolver assumed exactly that. Probing a real <c>WebApplication.CreateBuilder</c> says
+    /// otherwise. Having the two backwards is worse than not checking them: a deployment setting
+    /// both would have had its service and its operator commands on different <c>appsettings</c>
+    /// files while the shared resolver claimed that could not happen.</para>
+    /// </summary>
+    [Fact]
+    public void ContentRootPrecedenceMatchesTheHost()
+    {
+        var fromCommandLine = Path.Combine(_directory, "cli");
+        var fromAspNetCore = Path.Combine(_directory, "aspnetcore");
+        var fromDotnet = Path.Combine(_directory, "dotnet");
+
+        Environment.SetEnvironmentVariable("ASPNETCORE_CONTENTROOT", fromAspNetCore);
+        Environment.SetEnvironmentVariable("DOTNET_CONTENTROOT", null);
+        try
+        {
+            Assert.Equal(fromAspNetCore,
+                Fleet.Comms.Configuration.CommsConfiguration.ResolveContentRoot([]));
+
+            // DOTNET_ wins over ASPNETCORE_ — measured against the host, not assumed.
+            Environment.SetEnvironmentVariable("DOTNET_CONTENTROOT", fromDotnet);
+            Assert.Equal(fromDotnet,
+                Fleet.Comms.Configuration.CommsConfiguration.ResolveContentRoot([]));
+
+            // And the command line wins over both, in both spellings the host accepts.
+            Assert.Equal(fromCommandLine, Fleet.Comms.Configuration.CommsConfiguration
+                .ResolveContentRoot(["--contentRoot", fromCommandLine]));
+            Assert.Equal(fromCommandLine, Fleet.Comms.Configuration.CommsConfiguration
+                .ResolveContentRoot([$"--contentRoot={fromCommandLine}"]));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DOTNET_CONTENTROOT", null);
+            Environment.SetEnvironmentVariable("ASPNETCORE_CONTENTROOT", null);
+        }
+    }
+
+    /// <summary>
+    /// The same question asked of BOTH executable entry points, by running the real binary.
+    ///
+    /// <para>Calling the resolver directly proves the resolver. What has to be true is that the
+    /// process started as a service and the process started as a subcommand read the same
+    /// <c>appsettings</c> — so this launches <c>Fleet.Comms.dll</c> twice, once each way, with a
+    /// content root that is not the working directory, and compares what each actually used.</para>
+    /// </summary>
+    [Fact]
+    public async Task BothEntryPointsResolveTheSameStoreUnderAContentRootOverride()
+    {
+        var contentRoot = Path.Combine(_directory, "override-root");
+        Directory.CreateDirectory(contentRoot);
+        var expected = Path.Combine(contentRoot, "entrypoint.db");
+        await File.WriteAllTextAsync(Path.Combine(contentRoot, "appsettings.json"),
+            "{\"Comms\":{\"AuthStorePath\":"
+            + System.Text.Json.JsonSerializer.Serialize(expected) + "}}");
+
+        var assembly = Path.Combine(AppContext.BaseDirectory, "Fleet.Comms.dll");
+        Assert.True(File.Exists(assembly), $"expected the service assembly beside the tests: {assembly}");
+
+        // ENTRY POINT 1 — the CLI. `store init` names the path it created.
+        var cli = await RunProcessAsync(assembly, ["store", "init"], contentRoot);
+        Assert.Equal(0, cli.Exit);
+        Assert.Contains(expected, cli.Stdout, StringComparison.Ordinal);
+        Assert.True(File.Exists(expected));
+
+        // ENTRY POINT 2 — the service. It resolves the same store, so /ready answers 200 against
+        // the database the CLI just created, while the working directory holds no store at all.
+        var port = 34000 + Random.Shared.Next(1000);
+        var service = StartProcess(assembly, [], contentRoot, new Dictionary<string, string>
+        {
+            ["ASPNETCORE_URLS"] = $"http://127.0.0.1:{port + 1}",
+            ["Comms__OpsUrl"] = $"http://127.0.0.1:{port}",
+        });
+
+        try
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            HttpResponseMessage? ready = null;
+            for (var attempt = 0; attempt < 60 && ready is null; attempt++)
+            {
+                try
+                {
+                    ready = await client.GetAsync($"http://127.0.0.1:{port}/ready");
+                }
+                catch (HttpRequestException)
+                {
+                    await Task.Delay(250);
+                }
+            }
+
+            Assert.NotNull(ready);
+            Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
+        }
+        finally
+        {
+            if (!service.HasExited)
+                service.Kill(entireProcessTree: true);
+            service.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// A configuration rejection must be a process that STOPS, promptly, with a non-zero code.
+    ///
+    /// <para>Container acceptance found the opposite on a previous head: with the store path
+    /// absent, the exception was written, no listener was bound, and the process then sat at ~99%
+    /// CPU indefinitely. Docker sees that as `running`, so `restart: unless-stopped` never fires
+    /// and a deployment that can serve nothing looks alive.</para>
+    ///
+    /// <para>Bounded is the assertion, not merely non-zero — "eventually exits" is what the failure
+    /// did not do. Launching the real binary, because the defect was in how the process terminates,
+    /// which no in-process test can observe.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task AMissingOrBlankStorePathExitsNonZeroPromptly(string? storePath)
+    {
+        var assembly = Path.Combine(AppContext.BaseDirectory, "Fleet.Comms.dll");
+        Assert.True(File.Exists(assembly), $"expected the service assembly beside the tests: {assembly}");
+
+        var empty = Path.Combine(_directory, "no-config");
+        Directory.CreateDirectory(empty);
+
+        var info = new System.Diagnostics.ProcessStartInfo("dotnet")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            WorkingDirectory = empty,
+        };
+        info.ArgumentList.Add(assembly);
+        info.Environment["DOTNET_CONTENTROOT"] = empty;
+        info.Environment["ASPNETCORE_URLS"] = "http://127.0.0.1:0";
+        if (storePath is null)
+            info.Environment.Remove("Comms__AuthStorePath");
+        else
+            info.Environment["Comms__AuthStorePath"] = storePath;
+
+        using var process = System.Diagnostics.Process.Start(info)!;
+        var stderr = process.StandardError.ReadToEndAsync();
+
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try
+        {
+            await process.WaitForExitAsync(deadline.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            process.Kill(entireProcessTree: true);
+            Assert.Fail("The process did not exit — a misconfigured deployment must not look alive.");
+        }
+
+        Assert.NotEqual(0, process.ExitCode);
+
+        // A clean exit, not a crash: an abort is what the runtime's unhandled path produces, and it
+        // is the path whose dump/abort machinery the hang depended on.
+        Assert.True(process.ExitCode is > 0 and < 128,
+            $"expected a clean non-zero exit, got {process.ExitCode} (128+ is a signal).");
+
+        Assert.Contains("AuthStorePath", await stderr, StringComparison.Ordinal);
+    }
+
+    private static System.Diagnostics.Process StartProcess(
+        string assembly, string[] args, string contentRoot, Dictionary<string, string>? env = null)
+    {
+        var info = new System.Diagnostics.ProcessStartInfo("dotnet")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            // Deliberately NOT the content root: the point is that the override moves the lookup
+            // away from the working directory, for both entry points.
+            WorkingDirectory = Path.GetTempPath(),
+        };
+
+        info.ArgumentList.Add(assembly);
+        foreach (var argument in args)
+            info.ArgumentList.Add(argument);
+
+        info.Environment["DOTNET_CONTENTROOT"] = contentRoot;
+        foreach (var (key, value) in env ?? [])
+            info.Environment[key] = value;
+
+        return System.Diagnostics.Process.Start(info)!;
+    }
+
+    private static async Task<(int Exit, string Stdout, string Stderr)> RunProcessAsync(
+        string assembly, string[] args, string contentRoot)
+    {
+        using var process = StartProcess(assembly, args, contentRoot);
+        var stdout = await process.StandardOutput.ReadToEndAsync();
+        var stderr = await process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        return (process.ExitCode, stdout, stderr);
     }
 
     private WebApplication BuildDeployableApp(string? storePath = null, IAuthStore? store = null)

@@ -316,6 +316,17 @@ Telegram allows only one long-poller per bot token. If two or more agents share 
 
 `temporal_list_workflow_types` populates lazily on first call after `fleet-temporal-bridge` starts. Immediately after a restart it may return only the hardcoded built-ins and none of the seeded UWE workflow definitions. Wait a few seconds and call it again, or start any workflow once to warm the cache.
 
+## Fleet.Comms — first-party client API (optional)
+
+An HTTPS boundary a native client can enroll a device against and authenticate to. **Auth and
+session only** — device enrollment, token mint, self-revocation and session discovery. No chat, no
+WebSocket, no conversation history, no push notifications; an enrolled device holds a valid token
+and has nothing to talk to yet.
+
+Off by default, behind a Compose profile, published on loopback so it sits behind your own TLS
+reverse proxy. See **[docs/comms-deployment.md](docs/comms-deployment.md)** to run it, and
+[docs/first-party-api.md](docs/first-party-api.md) for the wire contract.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

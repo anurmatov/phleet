@@ -31,6 +31,53 @@ public sealed class CommsOptions
     /// process that will not start rather than one that quietly forgets.</para>
     /// </summary>
     public string AuthStorePath { get; set; } = "";
+
+    /// <summary>
+    /// Where the operations listener binds. <b>Loopback only, and separate from the north
+    /// listener.</b>
+    ///
+    /// <para>`/health` and `/ready` live here and nowhere else. Adding them to the north listener
+    /// would make it a five-route surface and break the published contract; filtering them by
+    /// `Host` on a single listener would be worse, because `Host` is client-supplied and a north
+    /// caller could reach the readiness oracle through the public port by sending the right one.
+    /// So this is a genuinely separate <c>WebApplication</c> on its own address.</para>
+    ///
+    /// <para>The default is loopback deliberately: `/ready` reports whether the auth store is
+    /// answering, which on a public address is an availability oracle. It is reachable by the
+    /// container's own healthcheck and by nothing else — not the host, not another container on
+    /// the same network, not the internet. It must never be proxied.</para>
+    /// </summary>
+    public string OpsUrl { get; set; } = "http://127.0.0.1:8081";
+
+    /// <summary>
+    /// Whether to trust `X-Forwarded-*` from the immediate peer. <b>Off by default.</b>
+    ///
+    /// <para>The rate limiter partitions on the caller's address. Behind a reverse proxy that is
+    /// the proxy for every caller, collapsing the limiter to one shared bucket — degraded, but
+    /// bounded, and never wrong in the dangerous direction.</para>
+    ///
+    /// <para>Turning this on fixes that <b>only if a proxy is actually in front</b> and replaces
+    /// `X-Forwarded-For` rather than appending to it. On a port reachable without a proxy it does
+    /// the opposite: it hands every caller the limiter's partition key, so anyone can mint a fresh
+    /// budget by changing a header. That asymmetry is why the default is off and why the
+    /// deployment document explains the condition in the same paragraph as the switch.</para>
+    ///
+    /// <para>One hop is consumed, never more. Each additional hop is one more position a caller
+    /// can forge from.</para>
+    /// </summary>
+    public bool TrustForwardedHeaders { get; set; }
+
+    /// <summary>
+    /// Set by the deployment once the auth store has been initialised. <b>Lives outside the
+    /// volume</b>, which is the entire point.
+    ///
+    /// <para>The in-volume marker catches a deleted database. It cannot catch a deleted volume,
+    /// because it goes with it — and a wiped volume then looks exactly like a first install, which
+    /// is the loss where silently creating empty state is worst. This flag is in the deployment's
+    /// environment, so it survives the volume and makes that case explicit: recovery must be
+    /// asked for.</para>
+    /// </summary>
+    public bool StoreProvisioned { get; set; }
 }
 
 /// <summary>

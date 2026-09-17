@@ -318,6 +318,143 @@ public sealed class AuthService(
         }, ct);
     }
 
+    // ── operator path ────────────────────────────────────────────────────────
+    //
+    // Reachable only from the CLI subcommands, never from a route (docs/first-party-api.md §5.5).
+    // They live here rather than in the command so the credential format, the Argon2id parameters
+    // and the transaction boundaries stay in exactly one place — a second implementation of any of
+    // those is the defect that fails silently, permanently, and only for real users.
+
+    /// <summary>
+    /// Issue an enrollment code, refusing when the principal already holds an active device.
+    ///
+    /// <para>Returns null rather than throwing: "already has a device" is an answer the operator
+    /// asked for, and the command turns it into an actionable non-zero exit. The check and the
+    /// insert share one transaction, so a refusal leaves no enrollment row behind and a race
+    /// cannot slip a second code past a concurrent registration.</para>
+    ///
+    /// <para>This does not replace the registration-time limit — that one still rejects a second
+    /// device with <c>409 device_limit</c>, and remains the guard against a code issued before a
+    /// device existed being presented after one does.</para>
+    /// </summary>
+    public async Task<string?> IssueEnrollmentCodeForOperatorAsync(
+        string principalId, CancellationToken ct = default)
+    {
+        var enrollmentId = Credentials.NewRecordId();
+        var secret = Credentials.NewSecret();
+        var now = clock.GetUtcNow();
+
+        var issued = await store.InTransactionAsync(async (tx, token) =>
+        {
+            if (await tx.CountActiveDevicesAsync(principalId, token) > 0)
+                return false;
+
+            await tx.SaveEnrollmentAsync(new EnrollmentRecord
+            {
+                EnrollmentId = enrollmentId,
+                CodeHash = hasher.Hash(secret),
+                PrincipalId = principalId,
+                ExpiresAt = now + EnrollmentCodeTtl,
+            }, token);
+            return true;
+        }, ct);
+
+        if (!issued)
+        {
+            logger.LogInformation("Enrollment refused: the principal already has an active device");
+            return null;
+        }
+
+        logger.LogInformation("Enrollment code issued for a principal");
+        return Credentials.Compose(enrollmentId, secret);
+    }
+
+    /// <summary>
+    /// Every device the operator may need to act on, optionally narrowed to one principal.
+    ///
+    /// <para>Revoked devices are included. The operator is either choosing a device to revoke or
+    /// checking that a revocation took, and a list that hid revoked rows would answer the second
+    /// question with silence — the same output as a device that never existed.</para>
+    /// </summary>
+    public Task<IReadOnlyList<DeviceRecord>> ListDevicesAsync(
+        string? principalId = null, CancellationToken ct = default) =>
+        store.InTransactionAsync((tx, token) => tx.ListDevicesAsync(principalId, token), ct);
+
+    /// <summary>
+    /// Revoke a device the operator names, without authenticating as it — the lost, stolen or
+    /// bricked phone (§5.5, and the row <c>docs/first-party-api.md</c> defers to "the deployment's
+    /// own administrative path").
+    ///
+    /// <para><b>This is why it is not an HTTP route.</b> The owner has exactly one active device,
+    /// so an unauthenticated revoke endpoint would be a one-request denial of service against the
+    /// only way in. As a subcommand the authorisation is possession of the store itself, which is
+    /// the same thing as being the operator.</para>
+    ///
+    /// <para>Returns false for an unknown device — not an exception, because "there is no such
+    /// device" is an answer the operator asked for, and the command turns it into a clear non-zero
+    /// exit. Revoking an already-revoked device succeeds: the operator's intent is a state, not a
+    /// transition, and the alternative is a scary error for the safest possible retry.</para>
+    /// </summary>
+    public Task<bool> RevokeDeviceAsync(string deviceId, CancellationToken ct = default) =>
+        store.InTransactionAsync(async (tx, token) =>
+        {
+            var device = await tx.FindDeviceAsync(deviceId, token);
+            if (device is null)
+                return false;
+
+            var now = clock.GetUtcNow();
+            if (device.IsActive)
+                await tx.SaveDeviceAsync(device with { RevokedAt = now }, token);
+
+            // Same transaction as the device itself, exactly as RevokeSelfAsync does: a device
+            // marked revoked while its tokens still authenticate is not a revocation.
+            await tx.RevokeTokensForDeviceAsync(deviceId, now, token);
+
+            logger.LogInformation("Device revoked by the operator");
+            return true;
+        }, ct);
+
+    /// <summary>
+    /// Revoke every device and every token the store holds, in one transaction.
+    ///
+    /// <para>For the disaster-restore path. A restore reinstates whatever credentials the snapshot
+    /// contained, including devices revoked after it was taken, and a device secret is long-lived —
+    /// so expiring the restored access tokens is not enough, the restored device can mint more.
+    /// Revoking device by device after the service is reachable leaves a window; this closes all of
+    /// them before ingress reopens.</para>
+    ///
+    /// <para>Returns how many devices were still active and how many unconsumed enrollment codes
+    /// were burned, so the operator sees what the snapshot actually brought back rather than a bare
+    /// success.</para>
+    /// </summary>
+    public Task<(int Devices, int Enrollments)> RevokeAllDevicesAsync(CancellationToken ct = default) =>
+        store.InTransactionAsync(async (tx, token) =>
+        {
+            var now = clock.GetUtcNow();
+            var revoked = 0;
+
+            foreach (var device in await tx.ListDevicesAsync(null, token))
+            {
+                if (device.IsActive)
+                {
+                    await tx.SaveDeviceAsync(device with { RevokedAt = now }, token);
+                    revoked++;
+                }
+
+                // Tokens for every device, active or already revoked: a device revoked before the
+                // snapshot still has its tokens restored alongside it.
+                await tx.RevokeTokensForDeviceAsync(device.DeviceId, now, token);
+            }
+
+            // Unconsumed enrollment codes too. A snapshot restores those alongside devices, and an
+            // unconsumed code registers a device for the rest of its TTL — closing the front door
+            // while restoring a key to the back one is not invalidation.
+            var burned = await tx.RevokeAllEnrollmentsAsync(now, token);
+
+            logger.LogInformation("All devices and enrollment codes revoked by the operator");
+            return (revoked, burned);
+        }, ct);
+
     /// <summary>
     /// Record that a credential has passed a deadline, then refuse it like any other failure.
     ///

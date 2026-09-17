@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Threading.RateLimiting;
 using Fleet.Comms.Auth;
 using Fleet.Comms.Configuration;
@@ -7,6 +8,7 @@ using Fleet.Comms.Contracts;
 using Fleet.Protocol;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -108,11 +110,96 @@ public static class CommsApp
             }
         });
 
+        // Before the limiter, because the limiter partitions on the address this rewrites. After
+        // it, the header would be read too late to matter and the switch would look like it worked.
+        //
+        // Opt-in: see CommsOptions.TrustForwardedHeaders for why the default is off. One hop only —
+        // each extra hop is another position a caller can forge from.
+        if (app.Services.GetRequiredService<IOptions<CommsOptions>>().Value.TrustForwardedHeaders)
+        {
+            var forwarded = new ForwardedHeadersOptions
+            {
+                ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
+                ForwardLimit = 1,
+            };
+
+            // CLEARED, with calls. `KnownNetworks = { }` in an object initialiser is a collection
+            // initialiser adding nothing — it leaves the defaults (loopback) in place, so a proxy
+            // reaching the container over a bridge address was silently untrusted and every client
+            // still shared one budget. The switch looked like it worked and did not.
+            //
+            // `KnownIPNetworks`, not the obsolete `KnownNetworks`: the latter emits ASPDEPR005.
+            forwarded.KnownIPNetworks.Clear();
+            forwarded.KnownProxies.Clear();
+
+            // Trusting any peer is the deliberate consequence of opting in: the operator's proxy
+            // address is unknown to this repository, and pinning a guess would fail closed in a way
+            // they could not diagnose. What bounds it is the one-hop limit plus the proxy REPLACING
+            // the header — both stated in docs/comms-deployment.md, in the paragraph that explains
+            // when to turn this on.
+            app.UseForwardedHeaders(forwarded);
+        }
+
         // Before the endpoints, and that placement is the whole point: a throttled request must be
         // refused without spending an Argon2id evaluation or taking a store transaction.
         app.UseRateLimiter();
 
         app.MapNorthApi();
+        return app;
+    }
+
+    /// <summary>
+    /// The operations application: `/health` and `/ready`, on their own listener.
+    ///
+    /// <para><b>A second <c>WebApplication</c>, not a filtered route on the north one.</b> The
+    /// alternative — one application whose ops endpoints are gated on <c>RequireHost</c> or the
+    /// <c>Host</c> header — looks equivalent and is not: <c>Host</c> is client-supplied, so a caller
+    /// on the public port can reach the readiness oracle by sending the ops listener's host and
+    /// port. A test that asks the north listener for `/ready` without that header passes under both
+    /// designs, which is exactly why the design has to be the safe one rather than the tested
+    /// one.</para>
+    ///
+    /// <para>The north application's addresses come from <c>ASPNETCORE_URLS</c> alone; this one's
+    /// come from <see cref="CommsOptions.OpsUrl"/>. Neither inherits the other's.</para>
+    /// </summary>
+    public static WebApplication BuildOpsApp(WebApplicationBuilder builder, IAuthStore store)
+    {
+        builder.Services.AddSingleton(store);
+        var app = builder.Build();
+
+        // Liveness: the process is running and can answer. Deliberately says nothing about the
+        // store — that is /ready's job, and conflating them makes a restart loop out of a
+        // recoverable dependency failure.
+        app.MapGet("/health", () => Results.Json(new { status = "ok" }, FleetProtocolJson.Options));
+
+        // Readiness: one trivial transaction against the real store.
+        //
+        // This is the probe that separates "started and permanently broken" from "healthy". The
+        // store initialises lazily and a bad path — unwritable, wrong owner, read-only mount, no
+        // volume mounted — is not detected at construction by design, so a probe that did not
+        // touch the store would report a service that 503s every request as ready.
+        //
+        // The transaction is a read, but SqliteAuthStore opens every transaction BEGIN IMMEDIATE,
+        // so this acquires the write lock and surfaces a read-only mount too, not only a missing
+        // file.
+        app.MapGet("/ready", async (IAuthStore authStore, CancellationToken ct) =>
+        {
+            try
+            {
+                await authStore.InTransactionAsync(
+                    (tx, token) => tx.CountActiveDevicesAsync("", token), ct);
+                return Results.Json(new { status = "ready" }, FleetProtocolJson.Options);
+            }
+            catch (AuthStoreUnavailableException)
+            {
+                // The same fixed body every other store failure produces. A readiness endpoint is
+                // not a debugging surface, and on a misconfigured deployment it is the one thing
+                // reachable before anything else works.
+                return Results.Json(ErrorResponse.For(ProtocolErrorCode.Internal),
+                    FleetProtocolJson.Options, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+        });
+
         return app;
     }
 

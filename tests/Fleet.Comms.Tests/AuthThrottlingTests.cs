@@ -109,6 +109,55 @@ public class AuthThrottlingTests
         Assert.Equal(costBefore, hasher.Verifications);
     }
 
+    // ── proxy trust ──────────────────────────────────────────────────────────
+    //
+    // Carried as a finding since round 2: the switch had no test at all, on either setting. The
+    // failure it guards is asymmetric — off behind a proxy is one shared bucket, which is degraded
+    // but bounded; ON without a proxy hands every caller the partition key, which is no limit at
+    // all for anyone who reads the documentation.
+
+    [Fact]
+    public async Task WithTrustOff_AForwardedHeaderDoesNotCreateANewBudget()
+    {
+        await using var host = await NorthTestHost.StartAsync(trustForwardedHeaders: false);
+
+        // Exhaust the budget while claiming to be one client...
+        await ExhaustAsync(host, forwardedFor: "203.0.113.10");
+
+        // ...then claim to be a different one. The header is ignored, so the budget is still spent.
+        var response = await host.SessionAsync("a.b", forwardedFor: "203.0.113.99");
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task WithTrustOn_DistinctForwardedClientsGetIndependentBudgets()
+    {
+        await using var host = await NorthTestHost.StartAsync(trustForwardedHeaders: true);
+
+        await ExhaustAsync(host, forwardedFor: "203.0.113.10");
+
+        // A different client behind the same proxy must not inherit the throttle.
+        var other = await host.SessionAsync("a.b", forwardedFor: "203.0.113.99");
+        Assert.Equal(HttpStatusCode.Unauthorized, other.StatusCode);
+
+        // And the throttled one stays throttled — a forged header must not reset a budget either.
+        var throttled = await host.SessionAsync("a.b", forwardedFor: "203.0.113.10");
+        Assert.Equal(HttpStatusCode.TooManyRequests, throttled.StatusCode);
+    }
+
+    private static async Task ExhaustAsync(NorthTestHost host, string forwardedFor)
+    {
+        for (var attempt = 0; attempt < AuthRateLimits.PermitsPerWindow * 2; attempt++)
+        {
+            var response = await host.SessionAsync("a.b", forwardedFor);
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                return;
+        }
+
+        Assert.Fail("the budget was never exhausted");
+    }
+
     /// <summary>
     /// The limit has to be above what the owner actually does, or the mitigation becomes the
     /// outage. An ordinary day is one enrollment and a token refresh every fifteen minutes; this

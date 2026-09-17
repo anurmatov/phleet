@@ -9,6 +9,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FLEET_BASE_DIR="$SCRIPT_DIR/fleet"
 ENV_FILE="$FLEET_BASE_DIR/.env"
+
+# Compose lets a value exported in the invoking shell win over the same name in
+# `--env-file`, so a stale `export FLEET_COMMS_BIND=...` from an earlier session
+# would silently override the choice saved in .env — and the operator would see
+# a service on an address they did not configure, with .env saying otherwise.
+# Unset them here: .env is the record of the decision.
+unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY \
+      FLEET_COMMS_AGENT_LABEL FLEET_COMMS_STORE_PROVISIONED
+
 COMPOSE_EXAMPLE="$SCRIPT_DIR/docker-compose.example.yml"
 COMPOSE_FILE="$FLEET_BASE_DIR/docker-compose.yml"
 COMPOSE_PROJECT="fleet"
@@ -56,8 +65,22 @@ read_env_var() {
 
 # ── Stop services ────────────────────────────────────────────────────────────
 section "[1/4] Stopping services..."
+# Resolved BEFORE any lifecycle operation. Building the flag after shutdown meant `down` ran
+# without the profile, so a running fleet-comms was never stopped — and disabling the service left
+# it running indefinitely. The volume is preserved either way: `down` without -v keeps it.
+COMMS_ENABLED=$(read_env_var "$ENV_FILE" "FLEET_COMMS_ENABLED")
+COMMS_PROFILE_ARGS=()
+[[ "$COMMS_ENABLED" == "true" ]] && COMMS_PROFILE_ARGS=(--profile comms)
+
 if docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" ps --quiet 2>/dev/null | head -1 | grep -q .; then
-  (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" down)
+  # `--profile comms` on down too, so an enabled service is actually stopped. When disabling, the
+  # explicit stop below catches a service the profile no longer selects.
+  (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" "${COMMS_PROFILE_ARGS[@]}" down)
+  if [[ "$COMMS_ENABLED" != "true" ]]; then
+    # Disabling: stop and remove the container, keep fleet_comms_auth. Never -v.
+    (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" \
+      --profile comms --profile comms-ops rm -sf fleet-comms fleet-comms-ops 2>/dev/null) || true
+  fi
   ok "Services stopped"
 else
   ok "No running services"
@@ -102,6 +125,12 @@ build_image "fleet:telegram"        "$SCRIPT_DIR/src/Fleet.Telegram/Dockerfile" 
 build_image "fleet:dashboard"       "$SCRIPT_DIR/src/fleet-dashboard/Dockerfile"    "$SCRIPT_DIR" \
   "--build-arg VITE_AUTH_TOKEN=$VITE_TOKEN --build-arg VITE_CONFIG_TOKEN=$CONFIG_TOKEN"
 
+# Only when the user opted in. Someone who never enabled Fleet.Comms should not pay its build
+# time on every upgrade, and an image built for a service that never starts is pure cost.
+if [[ "$COMMS_ENABLED" == "true" ]]; then
+  build_image "fleet:comms"         "$SCRIPT_DIR/src/Fleet.Comms/Dockerfile"        "$SCRIPT_DIR"
+fi
+
 ok "All images built"
 
 # ── Restart services ─────────────────────────────────────────────────────────
@@ -110,8 +139,56 @@ section "[4/4] Starting services..."
 if $SKIP_RESTART; then
   warn "Skipping restart (--skip-restart)"
 else
-  (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env up -d)
+  # `docker compose down` above removes containers, NOT named volumes — `fleet_comms_auth`
+  # survives an upgrade, which is what keeps enrolled devices enrolled across one. Never add -v.
+  # Before `up`, every time. The documented enable-on-an-existing-install path is an .env edit
+  # followed by ./upgrade.sh, which never ran `store init` — so the service came up against a
+  # database that did not exist and 503'd permanently. `store init` is idempotent, so running it on
+  # every enabled upgrade costs one short-lived container and closes that hole.
+  if [[ "$COMMS_ENABLED" == "true" ]]; then
+    (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env \
+      run --rm fleet-comms-ops store init) \
+      || { fail "Could not initialise the Fleet.Comms auth store — see docs/comms-deployment.md"; exit 1; }
+
+    # Outside the volume, so a later volume loss is recognisable as loss. See setup.sh.
+    #
+    # Newline-safe and idempotent. A bare `>>` appends to whatever the last line is, and .env files
+    # written by hand routinely lack a trailing newline — so the key would have been glued onto the
+    # end of the previous value, corrupting that setting and never taking effect itself.
+    write_comms_env_var() {
+      local key="$1" value="$2"
+      if grep -qE "^${key}=" "$ENV_FILE"; then
+        # Replace in place, so repeated upgrades do not accumulate duplicate keys.
+        sed -i.bak -E "s|^${key}=.*|${key}=${value}|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+      else
+        [[ -s "$ENV_FILE" && -n "$(tail -c 1 "$ENV_FILE")" ]] && printf '\n' >> "$ENV_FILE"
+        printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+      fi
+    }
+    write_comms_env_var "FLEET_COMMS_STORE_PROVISIONED" "true"
+  fi
+
+  (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env "${COMMS_PROFILE_ARGS[@]}" up -d)
   ok "Services started"
+
+  # Bounded wait for readiness. "Upgrade completed" while the auth boundary is 503-ing every
+  # request is a success message about a broken service.
+  if [[ "$COMMS_ENABLED" == "true" ]]; then
+    echo -n "  Waiting for fleet-comms ... "
+    for _ in $(seq 1 40); do
+      state=$(docker inspect -f '{{.State.Health.Status}}' fleet-comms 2>/dev/null || echo starting)
+      [[ "$state" == "healthy" ]] && { ok "healthy"; break; }
+      [[ "$state" == "unhealthy" ]] && { echo; fail "fleet-comms is unhealthy — check: docker logs fleet-comms"; exit 1; }
+      sleep 3
+    done
+    # Fatal, not a warning. "Upgrade completed" over an auth boundary that is 503-ing every
+    # request is a success message about a broken service, and the exit code is what a script or a
+    # human in a hurry actually reads.
+    [[ "$state" == "healthy" ]] || {
+      fail "fleet-comms did not become healthy — check /ready, the store mount, and docker logs fleet-comms"
+      exit 1
+    }
+  fi
 fi
 
 echo

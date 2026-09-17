@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"s_1"}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/workspace/example/notes.txt"}}]},"parent_tool_use_id":null}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"synthetic tool output"}]},"parent_tool_use_id":null}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Synthetic answer A."}]},"parent_tool_use_id":null}
+{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"s_1","result":"Synthetic answer A."}

@@ -387,3 +387,24 @@ Durable storage, outbox and consumer-claim; client authentication and device reg
 delivery; object storage and capability URLs for attachments; routing out-of-process MCP sends back
 through the runtime; voice and WebRTC; client UI; multi-human context isolation. Each of those
 consumes the contracts defined here; none is designed here.
+
+## Known per-provider gaps
+
+The contract above says what the runtime emits. It does not say what each provider can actually
+produce, and the three executors are not uniform. That was measured rather than assumed:
+**`docs/spikes/real-adapter-capability-matrix.md`** records, per provider and per scenario, the exact
+ordered client event sequence, or an explicit `unsupported` / `inferred` / `leaky` verdict with its
+reason. `docs/spikes/session-continuity-scenarios.md` is the scoping table behind it.
+
+Three gaps apply to every provider and are worth knowing before building a client against this
+contract:
+
+- **Tool completion is invisible.** A client sees a tool start and never a tool finish, so a
+  per-tool spinner has no event that clears it.
+- **There is no incremental assistant-text event.** `ConversationEventKind` has no delta kind, so a
+  client cannot begin rendering — or speaking — before the whole answer exists.
+- **An executor-reported failure arrives as `turn.final` with `completion: incomplete`, not as
+  `turn.error`.** A client that watches only `turn.error` will miss the most common provider failure.
+
+This section is a pointer. Nothing in the contract changes because of it, and each gap is tracked as
+its own issue.

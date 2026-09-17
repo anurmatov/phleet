@@ -1,0 +1,6 @@
+{"method":"turn/started","params":{"turn":{"id":"t_1"}}}
+{"method":"item/agentMessage/delta","params":{"turnId":"t_1","delta":"Synthetic "}}
+{"method":"item/agentMessage/delta","params":{"turnId":"t_1","delta":"answer "}}
+{"method":"item/agentMessage/delta","params":{"turnId":"t_1","delta":"A."}}
+{"method":"item/completed","params":{"turnId":"t_1","item":{"type":"agentMessage","phase":"final_answer","text":"Synthetic answer A."}}}
+{"method":"turn/completed","params":{"turnId":"t_1","turn":{"id":"t_1","status":"completed","durationMs":11}}}

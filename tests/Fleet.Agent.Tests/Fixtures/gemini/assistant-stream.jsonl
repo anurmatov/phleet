@@ -1,0 +1,5 @@
+{"type":"init","session_id":"s_1","model":"gemini-2.5-flash"}
+{"type":"message","role":"assistant","content":"Synthetic ","delta":true}
+{"type":"message","role":"assistant","content":"answer ","delta":true}
+{"type":"message","role":"assistant","content":"A.","delta":true}
+{"type":"result","status":"success","stats":{}}

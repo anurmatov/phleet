@@ -3,6 +3,7 @@ using System.Threading.Channels;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services;
+using Fleet.Agent.Tests.Harness;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -424,12 +425,8 @@ public class CodexExecutorTests
     {
         // After a commentary-phase (or absent-phase) agentMessage, the final-answer flag must NOT
         // be set, so TryInjectMessageAsync must proceed to turn/steer and return Injected.
-        var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-        {
-            FileName = "/bin/cat",
-            RedirectStandardInput = true,
-            UseShellExecute = false,
-        })!;
+        using var standIn = new StandInProcess();
+        var process = standIn.Process;
         try
         {
             var executor = CreateExecutor();

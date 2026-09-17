@@ -1,0 +1,2 @@
+{"method":"turn/started","params":{"turn":{"id":"t_1"}}}
+{"method":"turn/completed","params":{"turnId":"t_1","turn":{"id":"t_1","status":"failed","durationMs":7,"error":{"message":"Synthetic provider failure."}}}}

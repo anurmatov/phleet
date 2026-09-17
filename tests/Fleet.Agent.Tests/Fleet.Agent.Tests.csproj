@@ -27,7 +27,14 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="Fixtures\*.ndjson" CopyToOutputDirectory="PreserveNewest" />
+    <!--
+      Recursive on purpose. The per-provider corpus lives in Fixtures\claude, Fixtures\codex and
+      Fixtures\gemini; with the old Fixtures\*.ndjson item those subdirectories are absent at
+      runtime and every fixture-backed test passes vacuously against an empty corpus.
+      FixtureHygieneTests asserts a non-zero file count per provider directory so that absence
+      fails loudly instead of looking green.
+    -->
+    <None Update="Fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

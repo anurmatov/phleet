@@ -5,6 +5,7 @@ using System.Threading.Channels;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services;
+using Fleet.Agent.Tests.Harness;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -203,21 +204,16 @@ public class ClaudeExecutorTerminalResultTests
 
     private sealed class ExecutorHarness : IDisposable
     {
-        private readonly Process _process;
+        private readonly StandInProcess _standIn;
         private readonly ClaudeExecutor _executor;
         private readonly Channel<ClaudeStreamEvent> _events = Channel.CreateUnbounded<ClaudeStreamEvent>();
         private readonly SignalingTextWriter _stdin = new();
 
         public ExecutorHarness(int maxTurns = 100, ILogger<ClaudeExecutor>? logger = null)
         {
-            _process = Process.Start(new ProcessStartInfo
-            {
-                FileName = "/bin/cat",
-                RedirectStandardInput = true,
-                UseShellExecute = false,
-            })!;
+            _standIn = new StandInProcess();
             _executor = BuildExecutor(maxTurns, logger ?? NullLogger<ClaudeExecutor>.Instance);
-            _executor.SetProcessForTests(_process);
+            _executor.SetProcessForTests(_standIn.Process);
             _executor.SetStdinForTests(_stdin);
             _executor.SetEventChannelForTests(_events);
         }
@@ -243,7 +239,7 @@ public class ClaudeExecutorTerminalResultTests
         public void Dispose()
         {
             _executor.DisposeAsync().AsTask().GetAwaiter().GetResult();
-            _process.Dispose();
+            _standIn.Dispose();
         }
     }
 

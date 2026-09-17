@@ -933,7 +933,42 @@ Enrollment, registration, token issue/refresh/revoke, `GET /v1/session`.
 - Revocation closes an open WebSocket with `4401` within 30 seconds.
 - Enrollment failure, unknown device, bad secret, expired token and revoked token produce
   byte-identical `401` responses.
-- With the token store unavailable, an authenticated request returns `503` and never succeeds.
+- Every one of those rejections spends the **same** Argon2id evaluation, including the ones where no
+  record was found — byte-identical bodies with different elapsed times are still an existence
+  oracle for a `deviceId`, an enrollment id or a token id.
+- An expired token, an expired unused code and a closed recovery window stay refused across a
+  **backward wall-clock step**, and across a restart. Storing an absolute deadline is necessary and
+  not sufficient: the deadline is fixed but the value it is compared against is not, so comparison
+  runs against a monotonic reading and the record is burned in the store the first time it is seen
+  past its deadline.
+- A burst of credential attempts is refused with `429 rate_limited` and an integer `Retry-After`
+  **before** the request reaches the hasher or takes a store transaction.
+- A request with a non-JSON content type, an unsupported `charset` parameter, or no body, is
+  `400 unsupported_kind` — a client error, not a `500`. Request bodies are UTF-8; a declared charset
+  is either absent or `utf-8`, per RFC 8259 §8.1. **`charset="utf-8"` is accepted**: RFC 9110 §5.6.6
+  permits a quoted-string parameter value, so both spellings reach credential validation.
+- With the token store unavailable, an authenticated request returns `503` and never succeeds —
+  including when the engine itself fails mid-transaction, such as a database out of space. `500` is
+  reserved for a fault in the boundary, because §5.2 tells a client the two mean different things.
+
+#### The store this slice ships
+
+The deployable's default store is **file-backed and durable**, with real transactions; device
+registrations, enrollment consumption and revocation survive a restart, and the acceptance points
+above are asserted against that engine rather than against a substitute.
+
+There is also an **in-process store, which is a test fixture and is restart-unsafe**: it loses every
+device registration when the process exits, so the owner would have to re-enroll with a fresh code
+after each restart. It must never be what a deployment runs.
+
+**The store path is required and has no default.** It is validated when the application is built, so
+a deployment that has not set it fails to start rather than coming up healthy and losing every device
+registration at the next restart. That is deliberately a different failure from a store that is
+configured and temporarily unreachable, which is the `503` a client retries.
+
+A deployment wanting these records in a networked engine implements `IAuthStore` against it —
+tracked as [phleet#294](https://github.com/anurmatov/phleet/issues/294), with the same restart,
+concurrency, rollback and revocation acceptance points as the shipped implementation.
 
 ### Slice 2 — Conversation open and catch-up
 

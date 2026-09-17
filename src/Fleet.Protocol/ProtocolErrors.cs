@@ -23,6 +23,7 @@ public static class ProtocolErrors
     public const string ExecutorError = "The turn failed.";
     public const string Canceled = "The turn was canceled.";
     public const string Internal = "An internal error occurred.";
+    public const string DeviceLimit = "A device is already registered for this principal.";
 
     /// <summary>Look up the fixed message for a code. Never returns runtime-derived text.</summary>
     public static string MessageFor(ProtocolErrorCode code) => code switch
@@ -38,6 +39,7 @@ public static class ProtocolErrors
         ProtocolErrorCode.RuntimeBusy => RuntimeBusy,
         ProtocolErrorCode.ExecutorError => ExecutorError,
         ProtocolErrorCode.Canceled => Canceled,
+        ProtocolErrorCode.DeviceLimit => DeviceLimit,
         _ => Internal,
     };
 }

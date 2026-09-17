@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Primitives;
 using Microsoft.Net.Http.Headers;
 
 namespace Fleet.Comms.Routes;
@@ -171,7 +172,7 @@ public static class NorthEndpoints
         if (!http.Request.HasJsonContentType())
             return null;
 
-        if (!HasSupportedCharset(http.Request.ContentType))
+        if (!TryNormalizeCharset(http.Request))
             return null;
 
         // An explicitly empty body would deserialize to null anyway; short-circuiting keeps that
@@ -202,15 +203,46 @@ public static class NorthEndpoints
     /// <para>Absent or UTF-8 only. RFC 8259 §8.1 requires UTF-8 for JSON exchanged between
     /// systems, so anything else is a client error rather than a capability worth carrying: one
     /// accepted encoding means one decoder and no argument about which byte order mark wins.</para>
+    ///
+    /// <para><b>The value is unquoted, and then the header is rewritten.</b> RFC 9110 §5.6.6 lets a
+    /// parameter value be either a token or a quoted-string, so <c>charset="utf-8"</c> is exactly as
+    /// legal as <c>charset=utf-8</c> and clients do send it. Two separate things had to change for
+    /// that to work:</para>
+    ///
+    /// <list type="number">
+    ///   <item><description><c>MediaTypeHeaderValue.Charset</c> returns the raw segment with the
+    ///     quotes still attached, so comparing it directly rejected the quoted form — a validation
+    ///     meant to catch a client mistake inventing one instead.</description></item>
+    ///   <item><description><c>ReadFromJsonAsync</c> does not unquote it either: it resolves the
+    ///     charset to an <see cref="System.Text.Encoding"/> and throws for <c>"utf-8"</c> with the
+    ///     quotes, which is a non-<c>JsonException</c> and so came back as `500`. Accepting the
+    ///     header at the gate is therefore not enough on its own — the reader has to be handed a
+    ///     value it can parse.</description></item>
+    /// </list>
+    ///
+    /// <para>So an accepted charset is rewritten to its canonical unquoted form before the read.
+    /// The media type is preserved rather than hard-coded, because <c>HasJsonContentType()</c> also
+    /// admits the <c>+json</c> structured suffix.</para>
+    ///
+    /// <para>Rejecting a legal header is the worse of the two failures available here: an
+    /// unsupported charset is something the client chose and can change, but a client sending a
+    /// spelling the RFC permits has no way to discover which one this server wanted.</para>
     /// </summary>
-    private static bool HasSupportedCharset(string? contentType)
+    private static bool TryNormalizeCharset(HttpRequest request)
     {
-        if (!MediaTypeHeaderValue.TryParse(contentType, out var parsed))
+        if (!MediaTypeHeaderValue.TryParse(request.ContentType, out var parsed))
             return false;
 
-        var charset = parsed.Charset.Value;
-        return string.IsNullOrEmpty(charset)
-            || string.Equals(charset, "utf-8", StringComparison.OrdinalIgnoreCase);
+        var charset = HeaderUtilities.RemoveQuotes(parsed.Charset);
+        if (!StringSegment.IsNullOrEmpty(charset)
+            && !charset.Equals("utf-8", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        request.ContentType = new MediaTypeHeaderValue(parsed.MediaType) { Charset = "utf-8" }
+            .ToString();
+        return true;
     }
 
     private static IResult Unauthorized() =>

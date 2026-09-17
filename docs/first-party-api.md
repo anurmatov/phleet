@@ -945,7 +945,8 @@ Enrollment, registration, token issue/refresh/revoke, `GET /v1/session`.
   **before** the request reaches the hasher or takes a store transaction.
 - A request with a non-JSON content type, an unsupported `charset` parameter, or no body, is
   `400 unsupported_kind` — a client error, not a `500`. Request bodies are UTF-8; a declared charset
-  is either absent or `utf-8`, per RFC 8259 §8.1.
+  is either absent or `utf-8`, per RFC 8259 §8.1. **`charset="utf-8"` is accepted**: RFC 9110 §5.6.6
+  permits a quoted-string parameter value, so both spellings reach credential validation.
 - With the token store unavailable, an authenticated request returns `503` and never succeeds —
   including when the engine itself fails mid-transaction, such as a database out of space. `500` is
   reserved for a fault in the boundary, because §5.2 tells a client the two mean different things.

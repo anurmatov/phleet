@@ -132,7 +132,13 @@ public class NorthSerializationTests
             // got past it and then failed inside the JSON reader with a non-JsonException —
             // reaching the client as `500 internal` over a parameter the client chose. The body
             // here is valid JSON; only the charset is wrong.
-            foreach (var charset in new[] { "not-a-real-encoding", "iso-8859-1", "utf-32" })
+            foreach (var charset in new[]
+                     {
+                         "not-a-real-encoding", "iso-8859-1", "utf-32",
+                         // Quoted too: a bogus value is no more acceptable for being quoted, and
+                         // unquoting must not turn the rejection into an acceptance.
+                         "\"not-a-real-encoding\"", "\"utf-32\"",
+                     })
             {
                 var badCharset = await host.Client.PostAsync(route,
                     Raw("""{"protocol":"fleet.conversation.v1"}""", $"application/json; charset={charset}"));
@@ -140,14 +146,6 @@ public class NorthSerializationTests
                 Assert.Equal("unsupported_kind", await CodeOf(badCharset));
             }
         }
-
-        // The one charset that is accepted, stated explicitly so narrowing this further is a
-        // deliberate act rather than a side effect. RFC 8259 §8.1 requires UTF-8 for JSON exchanged
-        // between systems, and one accepted encoding means one decoder.
-        var utf8Declared = await host.Client.PostAsync("/v1/auth/token",
-            Raw("""{"protocol":"fleet.conversation.v1","deviceId":"d","deviceSecret":"s"}""",
-                "application/json; charset=utf-8"));
-        Assert.Equal(HttpStatusCode.Unauthorized, utf8Declared.StatusCode);
 
         // unauthorized -> 401
         var unauthorized = await host.SessionAsync(null);
@@ -159,6 +157,46 @@ public class NorthSerializationTests
         var conflict = await host.RegisterAsync(await host.IssueEnrollmentCodeAsync());
         Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
         Assert.Equal("device_limit", await CodeOf(conflict));
+    }
+
+    /// <summary>
+    /// Every spelling of UTF-8 a legal client may send must reach credential validation.
+    ///
+    /// <para>RFC 9110 §5.6.6 lets a parameter value be a token <b>or</b> a quoted-string, so
+    /// <c>charset="utf-8"</c> is exactly as legal as <c>charset=utf-8</c>. Comparing
+    /// <c>MediaTypeHeaderValue.Charset</c> directly kept the quotes and rejected the quoted form —
+    /// a validation meant to catch a client mistake inventing one instead, with no way for the
+    /// client to discover which spelling the server wanted.</para>
+    ///
+    /// <para>`401` is the pass condition: it means the request got past the reader and was judged on
+    /// its credentials, which is the whole point. A `400` here means it never got that far.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("/v1/auth/token", "application/json")]
+    [InlineData("/v1/auth/token", "application/json; charset=utf-8")]
+    [InlineData("/v1/auth/token", "application/json; charset=\"utf-8\"")]
+    [InlineData("/v1/auth/token", "application/json; charset=UTF-8")]
+    [InlineData("/v1/auth/token", "application/json; charset=\"UTF-8\"")]
+    [InlineData("/v1/auth/token", "application/json;charset=\"utf-8\"")]
+    [InlineData("/v1/auth/devices", "application/json")]
+    [InlineData("/v1/auth/devices", "application/json; charset=utf-8")]
+    [InlineData("/v1/auth/devices", "application/json; charset=\"utf-8\"")]
+    [InlineData("/v1/auth/devices", "application/json; charset=UTF-8")]
+    [InlineData("/v1/auth/devices", "application/json; charset=\"UTF-8\"")]
+    [InlineData("/v1/auth/devices", "application/json;charset=\"utf-8\"")]
+    public async Task EverySpellingOfUtf8ReachesCredentialValidation(string route, string contentType)
+    {
+        await using var host = await NorthTestHost.StartAsync();
+
+        var response = await host.Client.PostAsync(route, Raw(
+            """
+            {"protocol":"fleet.conversation.v1","deviceId":"d","deviceSecret":"s",
+             "enrollmentCode":"nosuchid.nosuchsecret"}
+            """,
+            contentType));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal("unauthorized", await CodeOf(response));
     }
 
     /// <summary>

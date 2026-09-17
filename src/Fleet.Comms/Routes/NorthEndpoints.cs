@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Options;
+using Microsoft.Net.Http.Headers;
 
 namespace Fleet.Comms.Routes;
 
@@ -170,6 +171,9 @@ public static class NorthEndpoints
         if (!http.Request.HasJsonContentType())
             return null;
 
+        if (!HasSupportedCharset(http.Request.ContentType))
+            return null;
+
         // An explicitly empty body would deserialize to null anyway; short-circuiting keeps that
         // answer a client error rather than depending on which exception the reader picks.
         if (http.Request.ContentLength == 0)
@@ -185,6 +189,28 @@ public static class NorthEndpoints
             // whose message could reach the client.
             return null;
         }
+    }
+
+    /// <summary>
+    /// Whether the declared charset is one this boundary reads.
+    ///
+    /// <para><c>HasJsonContentType()</c> checks the media type and <b>ignores the charset</b>, so
+    /// `application/json; charset=not-a-real-encoding` passed it and then failed inside the JSON
+    /// reader with a non-<c>JsonException</c> — reaching the client as `500 internal`, which tells
+    /// them the server is broken over a parameter they chose.</para>
+    ///
+    /// <para>Absent or UTF-8 only. RFC 8259 §8.1 requires UTF-8 for JSON exchanged between
+    /// systems, so anything else is a client error rather than a capability worth carrying: one
+    /// accepted encoding means one decoder and no argument about which byte order mark wins.</para>
+    /// </summary>
+    private static bool HasSupportedCharset(string? contentType)
+    {
+        if (!MediaTypeHeaderValue.TryParse(contentType, out var parsed))
+            return false;
+
+        var charset = parsed.Charset.Value;
+        return string.IsNullOrEmpty(charset)
+            || string.Equals(charset, "utf-8", StringComparison.OrdinalIgnoreCase);
     }
 
     private static IResult Unauthorized() =>

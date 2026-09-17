@@ -18,14 +18,19 @@ public sealed class CommsOptions
     public string AgentLabel { get; set; } = "assistant";
 
     /// <summary>
-    /// Filesystem path of the durable auth database.
+    /// Filesystem path of the durable auth database. <b>Required, with no default.</b>
     ///
     /// <para>A path, not a credential — the file itself is the deployment's, and the deployment is
-    /// responsible for putting it somewhere that survives a container restart. Blank is rejected at
-    /// startup rather than silently falling back to an in-process store: "the owner has to
-    /// re-enroll after every deploy" is not a failure mode worth reaching by omission.</para>
+    /// responsible for putting it somewhere that survives a container restart.</para>
+    ///
+    /// <para><b>There is deliberately no fallback value.</b> A default such as <c>auth.db</c> is
+    /// worse than nothing here: it is relative, so it resolves against whatever the working
+    /// directory happens to be, and a deployment that never set the key would come up healthy,
+    /// serve traffic, and lose every device registration on the next container recreation — with
+    /// no error at any point. Blank is refused when the application is built, so the failure is a
+    /// process that will not start rather than one that quietly forgets.</para>
     /// </summary>
-    public string AuthStorePath { get; set; } = "auth.db";
+    public string AuthStorePath { get; set; } = "";
 }
 
 /// <summary>

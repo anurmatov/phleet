@@ -214,6 +214,64 @@ public class AuthLifecycleTests
         Assert.Equal(HttpStatusCode.Unauthorized, (await host.SessionAsync(token)).StatusCode);
     }
 
+    // ── forward correction, then rollback: all three deadlines ───────────────
+    //
+    // The sequence that froze effective time: correct the host FORWARD (wall only), issue or
+    // consume the credential, then roll back and let real time pass. The clock adopted the forward
+    // jump without moving the point elapsed time was measured from, so afterwards the projection
+    // trailed by the size of the jump and effective time advanced at zero — every deadline below
+    // simply stopped arriving. Each credential window gets its own test because each is compared in
+    // a different method, and one of them being right proves nothing about the other two.
+
+    [Fact]
+    public async Task AccessTokenExpiry_SurvivesAForwardCorrectionFollowedByARollback()
+    {
+        await using var host = await NorthTestHost.StartAsync();
+
+        host.Time.SetForward(TimeSpan.FromHours(3));
+        var (_, _, token) = await host.EnrolledDeviceAsync();
+
+        host.Time.SetBackwards(TimeSpan.FromHours(3));
+        host.Time.Advance(AuthService.AccessTokenTtl + TimeSpan.FromMinutes(1));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SessionAsync(token)).StatusCode);
+    }
+
+    [Fact]
+    public async Task UnusedEnrollmentCodeExpiry_SurvivesAForwardCorrectionFollowedByARollback()
+    {
+        await using var host = await NorthTestHost.StartAsync();
+
+        host.Time.SetForward(TimeSpan.FromHours(3));
+        var code = await host.IssueEnrollmentCodeAsync();
+
+        host.Time.SetBackwards(TimeSpan.FromHours(3));
+        host.Time.Advance(AuthService.EnrollmentCodeTtl + TimeSpan.FromMinutes(1));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.RegisterAsync(code)).StatusCode);
+        Assert.Empty(host.Store.Devices);
+    }
+
+    [Fact]
+    public async Task RecoveryWindowExpiry_SurvivesAForwardCorrectionFollowedByARollback()
+    {
+        await using var host = await NorthTestHost.StartAsync();
+
+        host.Time.SetForward(TimeSpan.FromHours(3));
+        var code = await host.IssueEnrollmentCodeAsync();
+        var first = await Body<NorthTestHost.RegisterDeviceBody>(await host.RegisterAsync(code));
+
+        host.Time.SetBackwards(TimeSpan.FromHours(3));
+        host.Time.Advance(AuthService.RegistrationRecoveryWindow + TimeSpan.FromMinutes(1));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.RegisterAsync(code)).StatusCode);
+
+        // The device registered before the correction keeps working: the window closed, it was not
+        // reopened and the secret was not rotated out from under a client still holding it.
+        Assert.Equal(HttpStatusCode.OK,
+            (await host.TokenAsync(first.DeviceId, first.DeviceSecret)).StatusCode);
+    }
+
     /// <summary>
     /// The burn is what carries the refusal across a restart, after which the monotonic clock has
     /// no choice but to re-anchor to whatever the host says. Asserted on the stored record, since

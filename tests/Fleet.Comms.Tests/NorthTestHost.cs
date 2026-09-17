@@ -168,6 +168,16 @@ internal sealed class TestTimeProvider(DateTimeOffset? start = null) : TimeProvi
     /// exist.
     /// </summary>
     public void SetBackwards(TimeSpan delta) => _now -= delta;
+
+    /// <summary>
+    /// A <b>forward</b> wall-clock jump, and not the same thing as <see cref="Advance"/>.
+    ///
+    /// <para><c>Advance</c> is time passing: both readings move. This is the host being corrected
+    /// forward — an NTP step, a resumed VM — so only the wall reading moves. The distinction is not
+    /// pedantry: a forward correction followed by a rollback is the sequence that froze effective
+    /// time, and a test written with <c>Advance</c> cannot express it.</para>
+    /// </summary>
+    public void SetForward(TimeSpan delta) => _now += delta;
 }
 
 /// <summary>

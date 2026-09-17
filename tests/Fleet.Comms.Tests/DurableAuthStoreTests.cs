@@ -2,7 +2,9 @@ using System.Net;
 using System.Net.Http.Json;
 using Fleet.Comms;
 using Fleet.Comms.Auth;
+using Fleet.Comms.Configuration;
 using Fleet.Protocol;
+using Microsoft.Data.Sqlite;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
@@ -305,16 +307,141 @@ public sealed class DurableAuthStoreTests : IDisposable
         }
     }
 
-    [Fact]
-    public void ABlankStorePathIsRefusedRatherThanFallingBackToMemory()
+    /// <summary>
+    /// A missing store path fails when the application is <b>built</b>, not on the first request
+    /// that needs it.
+    ///
+    /// <para>The two failures are not interchangeable. An unreachable store is temporary and is a
+    /// `503` a client retries; an unset path is an operator mistake that will never resolve itself,
+    /// and deferring it to the first request means the deployment comes up, reports healthy, and
+    /// only announces the problem to whoever first tries to enroll a device.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void AMissingStorePathFailsAtStartup_NotOnTheFirstRequest(string path)
     {
-        Assert.Throws<ArgumentException>(() => new SqliteAuthStore("   "));
+        var thrown = Assert.Throws<InvalidOperationException>(() => BuildDeployableApp(storePath: path));
 
-        using var app = BuildDeployableApp(storePath: "");
-        Assert.Throws<InvalidOperationException>(() => app.Services.GetRequiredService<IAuthStore>());
+        Assert.Contains(nameof(CommsOptions.AuthStorePath), thrown.Message, StringComparison.Ordinal);
     }
 
-    private WebApplication BuildDeployableApp(string? storePath = null)
+    [Fact]
+    public void ThereIsNoBakedInStorePathToFallBackOn()
+    {
+        // A default such as "auth.db" is relative, resolves against the working directory, and lets
+        // a deployment that never set the key come up healthy and lose every registration on the
+        // next container recreation. The absence of a default is the guard.
+        Assert.Equal("", new CommsOptions().AuthStorePath);
+
+        Assert.Throws<ArgumentException>(() => new SqliteAuthStore("   "));
+    }
+
+    // ── engine failures inside the transaction body ──────────────────────────
+
+    /// <summary>
+    /// A real <c>SQLITE_FULL</c>, produced by capping the isolated test database with
+    /// <c>PRAGMA max_page_count</c> rather than by manufacturing an exception — so this exercises
+    /// the mapping, not the catch block.
+    ///
+    /// <para>Opening, beginning and committing a transaction already translated engine errors. The
+    /// statements the store issues <i>inside</i> the body did not, so a database out of space
+    /// surfaced as `500 internal` — which per §5.2 tells the client the server is broken and to
+    /// stop retrying, when the correct answer is `503` and retry with backoff.</para>
+    /// </summary>
+    [Fact]
+    public async Task AFullDatabaseIsStoreUnavailable_NotAnUnhandledFault()
+    {
+        string deviceId, deviceSecret;
+        using (var store = new SqliteAuthStore(DatabasePath))
+        {
+            var auth = Service(store);
+            var device = (await auth.RegisterDeviceAsync(
+                await auth.IssueEnrollmentCodeAsync("p_owner"))).Value!;
+            (deviceId, deviceSecret) = (device.DeviceId, device.DeviceSecret);
+        }
+
+        // Scoped, and disposed before the store below is opened. `max_page_count` lives on the
+        // connection, connections are pooled, and the pool is keyed on the connection string — which
+        // the session pragma is deliberately not part of. Without disposing first, the "released"
+        // store below draws a still-capped connection out of the pool and the cap appears permanent.
+        using (var capped = new SqliteAuthStore(DatabasePath, SessionPragmaCappingGrowth()))
+        {
+            var cappedAuth = Service(capped);
+
+            // Mint until the engine runs out of pages. The cap is the file's current size, so any
+            // growth fails; how many rows fit in existing free space is an implementation detail.
+            var thrown = await Assert.ThrowsAsync<AuthStoreUnavailableException>(async () =>
+            {
+                for (var attempt = 0; attempt < 500; attempt++)
+                    await cappedAuth.MintTokenAsync(deviceId, deviceSecret);
+            });
+
+            // The message must not carry the engine's own text — §13, same rule as the path check.
+            Assert.DoesNotContain(_directory, thrown.ToString(), StringComparison.Ordinal);
+        }
+
+        // Rollback: the failed transaction left nothing behind, and the store works again once the
+        // constraint is lifted — so the failure was capacity, not a corrupted file or lost device.
+        using var released = new SqliteAuthStore(DatabasePath);
+        Assert.True((await Service(released).MintTokenAsync(deviceId, deviceSecret)).Succeeded);
+    }
+
+    /// <summary>The same failure over HTTP, where the status code is what a client actually sees.</summary>
+    [Fact]
+    public async Task AFullDatabaseReturns503OverHttp_Not500()
+    {
+        string deviceId, deviceSecret;
+        using (var store = new SqliteAuthStore(DatabasePath))
+        {
+            var auth = Service(store);
+            var device = (await auth.RegisterDeviceAsync(
+                await auth.IssueEnrollmentCodeAsync("p_owner"))).Value!;
+            (deviceId, deviceSecret) = (device.DeviceId, device.DeviceSecret);
+        }
+
+        using var capped = new SqliteAuthStore(DatabasePath, SessionPragmaCappingGrowth());
+        await using var app = BuildDeployableApp(store: capped);
+        await app.StartAsync();
+        var client = app.GetTestClient();
+
+        HttpResponseMessage? response = null;
+        for (var attempt = 0; attempt < 500; attempt++)
+        {
+            response = await client.PostAsJsonAsync("/v1/auth/token",
+                new { protocol = ProtocolVersion.Current, deviceId, deviceSecret });
+            if (response.StatusCode != HttpStatusCode.OK)
+                break;
+        }
+
+        Assert.NotNull(response);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+
+        var body = await AuthLifecycleTests.Body<AuthLifecycleTests.ErrorBody>(response);
+        Assert.Equal("internal", body.Code);
+        Assert.Equal(ProtocolErrors.Internal, body.Message);
+
+        await app.StopAsync();
+    }
+
+    /// <summary>
+    /// Pin the database at its current size so any growth is `SQLITE_FULL`. Read on a throwaway
+    /// connection because `max_page_count` is per-connection, which is exactly why the store needs
+    /// a session-pragma seam to be testable this way at all.
+    /// </summary>
+    private string SessionPragmaCappingGrowth()
+    {
+        using var connection = new SqliteConnection(
+            new SqliteConnectionStringBuilder { DataSource = DatabasePath }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA page_count;";
+        var pages = Convert.ToInt64(command.ExecuteScalar());
+
+        return $"PRAGMA max_page_count={pages};";
+    }
+
+    private WebApplication BuildDeployableApp(string? storePath = null, IAuthStore? store = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -324,7 +451,11 @@ public sealed class DurableAuthStoreTests : IDisposable
             ["Comms:AuthStorePath"] = storePath ?? DatabasePath,
         });
 
-        // Nothing substituted: this is the graph Program builds.
+        // `store` is used only by the fault-injection tests, which need a store constructed with a
+        // session pragma. Left null, nothing is substituted and this is the graph Program builds.
+        if (store is not null)
+            builder.Services.AddSingleton(store);
+
         return CommsApp.BuildNorthApp(builder);
     }
 

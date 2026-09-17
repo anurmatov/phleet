@@ -69,8 +69,58 @@ public class MonotonicClockTests
         var clock = new MonotonicClock(time);
         var start = clock.GetUtcNow();
 
-        time.Advance(TimeSpan.FromHours(3));
+        time.SetForward(TimeSpan.FromHours(3));
 
         Assert.Equal(start + TimeSpan.FromHours(3), clock.GetUtcNow());
+    }
+
+    /// <summary>
+    /// A forward correction and then a rollback. This is the sequence that froze the clock, and it
+    /// is not reachable with <c>Advance</c> — which moves both readings and so models time passing,
+    /// not a host being corrected.
+    ///
+    /// <para>Adopting a forward jump without re-anchoring leaves elapsed time still measured from
+    /// construction. After the rollback the projection trails by the size of the jump, the
+    /// high-water mark holds the result still, and <b>effective time advances at zero</b> until the
+    /// projection catches up — for three hours, here. Every deadline compared against it simply
+    /// stops arriving.</para>
+    /// </summary>
+    [Fact]
+    public void AForwardCorrectionThenARollbackDoesNotFreezeTime()
+    {
+        var time = new TestTimeProvider();
+        var clock = new MonotonicClock(time);
+
+        time.SetForward(TimeSpan.FromHours(3));
+        var corrected = clock.GetUtcNow();
+
+        time.SetBackwards(TimeSpan.FromHours(3));
+        time.Advance(TimeSpan.FromMinutes(16));
+
+        // Sixteen minutes of real time elapsed, so sixteen minutes must show — not zero, and not
+        // the three-hour catch-up the unfixed version would need first.
+        Assert.Equal(corrected + TimeSpan.FromMinutes(16), clock.GetUtcNow());
+    }
+
+    /// <summary>
+    /// The same shape repeated, because a single re-anchor is easy to get right by accident. Each
+    /// correction must move the anchor, or the second one reintroduces the freeze.
+    /// </summary>
+    [Fact]
+    public void RepeatedCorrectionsEachReAnchor()
+    {
+        var time = new TestTimeProvider();
+        var clock = new MonotonicClock(time);
+
+        for (var round = 0; round < 3; round++)
+        {
+            time.SetForward(TimeSpan.FromHours(1));
+            var corrected = clock.GetUtcNow();
+
+            time.SetBackwards(TimeSpan.FromHours(1));
+            time.Advance(TimeSpan.FromMinutes(5));
+
+            Assert.Equal(corrected + TimeSpan.FromMinutes(5), clock.GetUtcNow());
+        }
     }
 }

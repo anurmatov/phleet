@@ -29,10 +29,15 @@ namespace Fleet.Comms.Auth;
 public sealed class MonotonicClock
 {
     private readonly TimeProvider _time;
-    private readonly DateTimeOffset _anchorWall;
-    private readonly long _anchorTimestamp;
     private readonly Lock _gate = new();
 
+    // The anchor MOVES. Keeping it at construction forever is what froze this clock: a forward
+    // correction would raise the returned value without moving the point elapsed time is measured
+    // from, so a later rollback left the projection trailing hours behind and the high-water mark
+    // held the result still until it caught up. Effective time then advanced at zero, and every
+    // deadline measured against it stopped arriving.
+    private DateTimeOffset _anchorWall;
+    private long _anchorTimestamp;
     private DateTimeOffset _highWater;
 
     public MonotonicClock(TimeProvider time)
@@ -46,14 +51,28 @@ public sealed class MonotonicClock
     /// <summary>The current time, guaranteed never to be earlier than any value already returned.</summary>
     public DateTimeOffset GetUtcNow()
     {
-        var projected = _anchorWall + _time.GetElapsedTime(_anchorTimestamp);
-        var wall = _time.GetUtcNow();
-        var candidate = wall > projected ? wall : projected;
-
         lock (_gate)
         {
-            if (candidate > _highWater)
-                _highWater = candidate;
+            var timestamp = _time.GetTimestamp();
+            var projected = _anchorWall + _time.GetElapsedTime(_anchorTimestamp, timestamp);
+            var wall = _time.GetUtcNow();
+
+            if (wall > projected)
+            {
+                // A forward correction. Adopt it AND re-anchor, so elapsed time from here on is
+                // measured from the corrected reading. Adopting the value without re-anchoring is
+                // the freeze described above.
+                _anchorWall = wall;
+                _anchorTimestamp = timestamp;
+                projected = wall;
+            }
+
+            // Redundant while the timestamp source is genuinely monotonic, which is the contract of
+            // GetTimestamp. Kept because the cost is a comparison and the failure it guards — a
+            // clock that goes backwards — is the one this class exists to make impossible.
+            if (projected > _highWater)
+                _highWater = projected;
+
             return _highWater;
         }
     }

@@ -943,9 +943,12 @@ Enrollment, registration, token issue/refresh/revoke, `GET /v1/session`.
   past its deadline.
 - A burst of credential attempts is refused with `429 rate_limited` and an integer `Retry-After`
   **before** the request reaches the hasher or takes a store transaction.
-- A request with a non-JSON content type, or no body, is `400 unsupported_kind` — a client error,
-  not a `500`.
-- With the token store unavailable, an authenticated request returns `503` and never succeeds.
+- A request with a non-JSON content type, an unsupported `charset` parameter, or no body, is
+  `400 unsupported_kind` — a client error, not a `500`. Request bodies are UTF-8; a declared charset
+  is either absent or `utf-8`, per RFC 8259 §8.1.
+- With the token store unavailable, an authenticated request returns `503` and never succeeds —
+  including when the engine itself fails mid-transaction, such as a database out of space. `500` is
+  reserved for a fault in the boundary, because §5.2 tells a client the two mean different things.
 
 #### The store this slice ships
 
@@ -955,8 +958,12 @@ above are asserted against that engine rather than against a substitute.
 
 There is also an **in-process store, which is a test fixture and is restart-unsafe**: it loses every
 device registration when the process exits, so the owner would have to re-enroll with a fresh code
-after each restart. It must never be what a deployment runs. A blank store path is refused at
-startup rather than silently falling back to it.
+after each restart. It must never be what a deployment runs.
+
+**The store path is required and has no default.** It is validated when the application is built, so
+a deployment that has not set it fails to start rather than coming up healthy and losing every device
+registration at the next restart. That is deliberately a different failure from a store that is
+configured and temporarily unreachable, which is the `503` a client retries.
 
 A deployment wanting these records in a networked engine implements `IAuthStore` against it —
 tracked as [phleet#294](https://github.com/anurmatov/phleet/issues/294), with the same restart,

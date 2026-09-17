@@ -62,13 +62,28 @@ public sealed class SqliteAuthStore : IAuthStore, IDisposable
 
     private readonly string _connectionString;
     private readonly SemaphoreSlim _initGate = new(1, 1);
+    private readonly string? _sessionPragmas;
     private bool _initialized;
 
-    public SqliteAuthStore(string databasePath)
+    public SqliteAuthStore(string databasePath) : this(databasePath, sessionPragmas: null)
+    {
+    }
+
+    /// <summary>
+    /// Fault-injection seam for tests, <c>internal</c> so it is not part of the public surface.
+    ///
+    /// <para><paramref name="sessionPragmas"/> runs on every connection this store opens. It exists
+    /// because the failure that matters here — the engine refusing a write because it is out of
+    /// space — cannot be provoked from outside a connection, and <c>PRAGMA max_page_count</c> is
+    /// per-connection. Injecting a fake exception instead would test the catch block rather than
+    /// the mapping, and would not have caught the real <c>SQLITE_FULL</c> escaping as a 500.</para>
+    /// </summary>
+    internal SqliteAuthStore(string databasePath, string? sessionPragmas)
     {
         if (string.IsNullOrWhiteSpace(databasePath))
             throw new ArgumentException("An auth store path is required.", nameof(databasePath));
 
+        _sessionPragmas = sessionPragmas;
         _connectionString = new SqliteConnectionStringBuilder
         {
             DataSource = Path.GetFullPath(databasePath),
@@ -91,6 +106,7 @@ public sealed class SqliteAuthStore : IAuthStore, IDisposable
         {
             connection = new SqliteConnection(_connectionString);
             await connection.OpenAsync(ct);
+            await ApplySessionPragmasAsync(connection, ct);
         }
         catch (Exception e) when (IsStoreFailure(e))
         {
@@ -173,6 +189,16 @@ public sealed class SqliteAuthStore : IAuthStore, IDisposable
         {
             _initGate.Release();
         }
+    }
+
+    private async Task ApplySessionPragmasAsync(SqliteConnection connection, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(_sessionPragmas))
+            return;
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = _sessionPragmas;
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     private static bool IsStoreFailure(Exception e) => e is SqliteException or IOException;
@@ -272,7 +298,7 @@ public sealed class SqliteAuthStore : IAuthStore, IDisposable
             await using var command = Command(
                 "SELECT COUNT(*) FROM devices WHERE principal_id = $p AND revoked_at IS NULL",
                 [("$p", principalId)]);
-            return Convert.ToInt32(await command.ExecuteScalarAsync(ct));
+            return Convert.ToInt32(await Guarded(() => command.ExecuteScalarAsync(ct)));
         }
 
         public Task<TokenRecord?> FindTokenAsync(string tokenId, CancellationToken ct) =>
@@ -326,7 +352,7 @@ public sealed class SqliteAuthStore : IAuthStore, IDisposable
             string sql, (string Name, object? Value)[] parameters, CancellationToken ct)
         {
             await using var command = Command(sql, parameters);
-            await command.ExecuteNonQueryAsync(ct);
+            await Guarded(() => command.ExecuteNonQueryAsync(ct));
         }
 
         private async Task<T?> ReadOneAsync<T>(
@@ -334,8 +360,34 @@ public sealed class SqliteAuthStore : IAuthStore, IDisposable
             Func<SqliteDataReader, T> map, CancellationToken ct) where T : class
         {
             await using var command = Command(sql, parameters);
-            await using var reader = await command.ExecuteReaderAsync(ct);
-            return await reader.ReadAsync(ct) ? map(reader) : null;
+            await using var reader = await Guarded(() => command.ExecuteReaderAsync(ct));
+            return await Guarded(() => reader.ReadAsync(ct)) ? map(reader) : null;
+        }
+
+        /// <summary>
+        /// Run one statement and turn an <b>engine</b> failure into
+        /// <see cref="AuthStoreUnavailableException"/>, so it reaches the client as `503` rather
+        /// than `500`.
+        ///
+        /// <para>Opening, beginning and committing were already mapped; these were not, and the
+        /// difference is not cosmetic. §5.2 tells a client that `500` means "the server is broken,
+        /// report this" and `503` means "something it needs is unavailable, retry with backoff" —
+        /// so a database that is out of space was telling the owner's client to stop retrying and
+        /// file a bug. Demonstrated with a real `SQLITE_FULL`, not a manufactured exception.</para>
+        ///
+        /// <para>Deliberately narrow: it wraps statements this class issues, so an exception raised
+        /// by the caller's transaction body still propagates untouched.</para>
+        /// </summary>
+        private static async Task<TResult> Guarded<TResult>(Func<Task<TResult>> statement)
+        {
+            try
+            {
+                return await statement();
+            }
+            catch (Exception e) when (IsStoreFailure(e))
+            {
+                throw Unavailable(e);
+            }
         }
 
         /// <summary>

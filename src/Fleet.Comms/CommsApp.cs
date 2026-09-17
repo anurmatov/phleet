@@ -38,7 +38,8 @@ public static class CommsApp
             var path = provider.GetRequiredService<IOptions<CommsOptions>>().Value.AuthStorePath;
             if (string.IsNullOrWhiteSpace(path))
                 throw new InvalidOperationException(
-                    $"{CommsOptions.SectionName}:{nameof(CommsOptions.AuthStorePath)} is required.");
+                    $"{CommsOptions.SectionName}:{nameof(CommsOptions.AuthStorePath)} is required " +
+                    "and has no default. Point it at a path on storage that survives a restart.");
             return new SqliteAuthStore(path);
         });
         services.TryAddSingleton<ISecretHasher, Argon2idSecretHasher>();
@@ -71,6 +72,18 @@ public static class CommsApp
         builder.Services.AddNorthBoundary();
 
         var app = builder.Build();
+
+        // Resolve the store NOW, during construction.
+        //
+        // Configuration that is missing is not the same failure as a store that is unreachable, and
+        // they must not arrive the same way. A missing or blank path is an operator mistake that
+        // cannot resolve itself, so it is a process that refuses to start; `503` is reserved for a
+        // store that was configured and is temporarily not answering, which is what a client is
+        // told to retry (§5.2, §16). Deferring this to the first request would present the first
+        // one as the second, and the deployment would look healthy until someone tried to enroll.
+        //
+        // A host that registered its own IAuthStore keeps it — this resolves whatever is wired.
+        _ = app.Services.GetRequiredService<IAuthStore>();
 
         // Fail closed, at the edge. An auth-store outage is a 503 with the fixed Internal body and
         // is NEVER a pass (§16, MUST NOT 18); anything else unhandled is a 500 with the same body,

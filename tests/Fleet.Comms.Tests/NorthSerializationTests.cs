@@ -127,7 +127,27 @@ public class NorthSerializationTests
             var jsonNull = await host.Client.PostAsync(route, JsonContent("null"));
             Assert.Equal(HttpStatusCode.BadRequest, jsonNull.StatusCode);
             Assert.Equal("unsupported_kind", await CodeOf(jsonNull));
+
+            // `HasJsonContentType()` checks the media type and IGNORES the charset, so a bogus one
+            // got past it and then failed inside the JSON reader with a non-JsonException —
+            // reaching the client as `500 internal` over a parameter the client chose. The body
+            // here is valid JSON; only the charset is wrong.
+            foreach (var charset in new[] { "not-a-real-encoding", "iso-8859-1", "utf-32" })
+            {
+                var badCharset = await host.Client.PostAsync(route,
+                    Raw("""{"protocol":"fleet.conversation.v1"}""", $"application/json; charset={charset}"));
+                Assert.Equal(HttpStatusCode.BadRequest, badCharset.StatusCode);
+                Assert.Equal("unsupported_kind", await CodeOf(badCharset));
+            }
         }
+
+        // The one charset that is accepted, stated explicitly so narrowing this further is a
+        // deliberate act rather than a side effect. RFC 8259 §8.1 requires UTF-8 for JSON exchanged
+        // between systems, and one accepted encoding means one decoder.
+        var utf8Declared = await host.Client.PostAsync("/v1/auth/token",
+            Raw("""{"protocol":"fleet.conversation.v1","deviceId":"d","deviceSecret":"s"}""",
+                "application/json; charset=utf-8"));
+        Assert.Equal(HttpStatusCode.Unauthorized, utf8Declared.StatusCode);
 
         // unauthorized -> 401
         var unauthorized = await host.SessionAsync(null);
@@ -159,6 +179,17 @@ public class NorthSerializationTests
 
     private static StringContent JsonContent(string raw) =>
         new(raw, System.Text.Encoding.UTF8, "application/json");
+
+    /// <summary>
+    /// A body with the Content-Type set verbatim. <see cref="StringContent"/> appends its own
+    /// charset, which would overwrite the one under test.
+    /// </summary>
+    private static ByteArrayContent Raw(string body, string contentType)
+    {
+        var content = new ByteArrayContent(System.Text.Encoding.UTF8.GetBytes(body));
+        content.Headers.TryAddWithoutValidation("Content-Type", contentType);
+        return content;
+    }
 
     private static async Task<string?> CodeOf(HttpResponseMessage response)
     {

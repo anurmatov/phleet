@@ -1,0 +1,148 @@
+using System.Net;
+using System.Text.Json;
+using Fleet.Comms.Auth;
+using Fleet.Comms.Contracts;
+using Fleet.Protocol;
+
+namespace Fleet.Comms.Tests;
+
+/// <summary>
+/// Pins the public wire shapes of docs/first-party-api.md §5.1 and the status mapping of §5.2.
+///
+/// <para>Field NAMES and the field SET are the contract — a client parses them. Asserting a
+/// deserialized object would pass while the wire form drifted, so these assert the JSON.</para>
+/// </summary>
+public class NorthSerializationTests
+{
+    [Fact]
+    public async Task RegisterDeviceResponse_HasExactlyTheContractFields()
+    {
+        await using var host = await NorthTestHost.StartAsync();
+
+        var response = await host.RegisterAsync(await host.IssueEnrollmentCodeAsync());
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        AssertFieldSet(await response.Content.ReadAsStringAsync(),
+            "protocol", "deviceId", "deviceSecret");
+    }
+
+    [Fact]
+    public async Task TokenResponse_HasExactlyTheContractFields_AndNoRefreshToken()
+    {
+        await using var host = await NorthTestHost.StartAsync();
+        var (deviceId, secret, _) = await host.EnrolledDeviceAsync();
+
+        var body = await (await host.TokenAsync(deviceId, secret)).Content.ReadAsStringAsync();
+
+        AssertFieldSet(body, "protocol", "accessToken", "expiresInSeconds");
+    }
+
+    [Fact]
+    public async Task SessionResponse_HasExactlyTheContractFields()
+    {
+        await using var host = await NorthTestHost.StartAsync();
+        var (_, _, token) = await host.EnrolledDeviceAsync();
+
+        var body = await (await host.SessionAsync(token)).Content.ReadAsStringAsync();
+
+        AssertFieldSet(body, "protocol", "principalId", "agentLabel", "limits");
+        using var document = JsonDocument.Parse(body);
+        AssertFieldSet(document.RootElement.GetProperty("limits").GetRawText(),
+            "inboundTextBytes", "catchUpLimitDefault", "catchUpLimitMax",
+            "identifierMaxLength", "outboundBufferEvents");
+    }
+
+    [Fact]
+    public async Task RevokeResponse_HasExactlyTheContractFields()
+    {
+        await using var host = await NorthTestHost.StartAsync();
+        var (deviceId, _, token) = await host.EnrolledDeviceAsync();
+
+        var body = await (await host.RevokeAsync(deviceId, token)).Content.ReadAsStringAsync();
+
+        AssertFieldSet(body, "protocol", "revoked");
+    }
+
+    [Fact]
+    public async Task EveryErrorBody_IsProtocolCodeMessage_WithTheFixedMessage()
+    {
+        await using var host = await NorthTestHost.StartAsync();
+        await host.RegisterAsync(await host.IssueEnrollmentCodeAsync());
+
+        var conflict = await host.RegisterAsync(await host.IssueEnrollmentCodeAsync());
+        var body = await conflict.Content.ReadAsStringAsync();
+
+        AssertFieldSet(body, "protocol", "code", "message");
+        using var document = JsonDocument.Parse(body);
+        Assert.Equal(ProtocolVersion.Current, document.RootElement.GetProperty("protocol").GetString());
+
+        // The wire value is the protocol's snake_case form, not the C# member name.
+        Assert.Equal("device_limit", document.RootElement.GetProperty("code").GetString());
+        Assert.Equal(ProtocolErrors.DeviceLimit, document.RootElement.GetProperty("message").GetString());
+    }
+
+    /// <summary>
+    /// §5.2 status mapping for the codes this slice can produce. A code with the right body and the
+    /// wrong status is still a contract break — the status line is what a client branches on.
+    /// </summary>
+    [Fact]
+    public async Task StatusMappingMatchesTheContract()
+    {
+        await using var host = await NorthTestHost.StartAsync();
+
+        // unsupported_protocol -> 400
+        var wrongProtocol = await host.Client.PostAsync("/v1/auth/token",
+            JsonContent("""{"protocol":"fleet.conversation.v2","deviceId":"d","deviceSecret":"s"}"""));
+        Assert.Equal(HttpStatusCode.BadRequest, wrongProtocol.StatusCode);
+        Assert.Equal("unsupported_protocol", await CodeOf(wrongProtocol));
+
+        // unsupported_kind -> 400 (malformed body)
+        var malformed = await host.Client.PostAsync("/v1/auth/token", JsonContent("{not json"));
+        Assert.Equal(HttpStatusCode.BadRequest, malformed.StatusCode);
+        Assert.Equal("unsupported_kind", await CodeOf(malformed));
+
+        // unauthorized -> 401
+        var unauthorized = await host.SessionAsync(null);
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
+        Assert.Equal("unauthorized", await CodeOf(unauthorized));
+
+        // device_limit -> 409
+        await host.RegisterAsync(await host.IssueEnrollmentCodeAsync());
+        var conflict = await host.RegisterAsync(await host.IssueEnrollmentCodeAsync());
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+        Assert.Equal("device_limit", await CodeOf(conflict));
+    }
+
+    /// <summary>
+    /// `DeviceLimit` is the additive protocol amendment this slice lands (§17 A1). Append-only
+    /// means it is LAST — inserting it would renumber every member after it, and the wire form of
+    /// an enum member is its name, so a client keying on `device_limit` must keep working.
+    /// </summary>
+    [Fact]
+    public void DeviceLimit_IsAppendedLastAndHasAFixedMessage()
+    {
+        var members = Enum.GetValues<ProtocolErrorCode>();
+
+        Assert.Equal(ProtocolErrorCode.DeviceLimit, members[^1]);
+        Assert.Equal(ProtocolErrors.DeviceLimit, ProtocolErrors.MessageFor(ProtocolErrorCode.DeviceLimit));
+        Assert.Equal("\"device_limit\"",
+            JsonSerializer.Serialize(ProtocolErrorCode.DeviceLimit, FleetProtocolJson.Options));
+    }
+
+    private static StringContent JsonContent(string raw) =>
+        new(raw, System.Text.Encoding.UTF8, "application/json");
+
+    private static async Task<string?> CodeOf(HttpResponseMessage response)
+    {
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        return document.RootElement.GetProperty("code").GetString();
+    }
+
+    private static void AssertFieldSet(string json, params string[] expected)
+    {
+        using var document = JsonDocument.Parse(json);
+        var actual = document.RootElement.EnumerateObject().Select(p => p.Name).ToList();
+        Assert.Equal(expected.OrderBy(x => x, StringComparer.Ordinal).ToList(),
+            actual.OrderBy(x => x, StringComparer.Ordinal).ToList());
+    }
+}

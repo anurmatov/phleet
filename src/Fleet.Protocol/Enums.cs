@@ -97,6 +97,14 @@ public enum ProtocolErrorCode
     ExecutorError,
     Canceled,
     Internal,
+
+    /// <summary>
+    /// The owner already has an active device (docs/first-party-api.md §3, §5.2).
+    ///
+    /// <para>Appended, never inserted: enum values are append-only (D-versioning), and a deployed
+    /// client keys behaviour on the wire value.</para>
+    /// </summary>
+    DeviceLimit,
 }
 
 /// <summary>Coarse attachment classification (D14). Metadata only — no bytes, no URL.</summary>

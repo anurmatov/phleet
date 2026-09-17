@@ -158,6 +158,8 @@ If you run Phleet on Windows, on a Linux host, or with Codex or Gemini as the pr
 4. Temporal workflows orchestrate multi-step, multi-agent tasks.
 5. Fleet Memory provides shared semantic memory across all agents (search, store, retrieve).
 
+Client-facing contracts are documented separately: [`docs/conversation-protocol.md`](docs/conversation-protocol.md) defines the channel-neutral event contract, and [`docs/first-party-api.md`](docs/first-party-api.md) defines the authenticated HTTPS and WebSocket boundary a first-party client speaks.
+
 ### How a task flows
 
 <p align="center">

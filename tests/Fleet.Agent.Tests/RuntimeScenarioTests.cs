@@ -8,7 +8,8 @@ using Fleet.Protocol;
 namespace Fleet.Agent.Tests;
 
 /// <summary>
-/// The runtime-only scenarios of D4: S7, S8, S11, S12 and S15.
+/// The runtime-only scenarios of D4 — S7, S8, S11, S12 and S15 — plus S17, added during
+/// implementation to restore coverage of a thrown executor (see the method for why).
 ///
 /// <para>These exercise <c>TaskManager</c> and <c>ConversationEventBus</c> behaviour that is
 /// identical regardless of which executor produced the progress. Running them per provider would
@@ -25,7 +26,7 @@ public class RuntimeScenarioTests
     private static readonly TimeSpan Budget = TimeSpan.FromSeconds(60);
 
     /// <summary>The runtime-only ids. Named here so the uniqueness check has something to check.</summary>
-    public static readonly IReadOnlyList<string> RuntimeOnlyScenarios = ["S7", "S8", "S11", "S12", "S15"];
+    public static readonly IReadOnlyList<string> RuntimeOnlyScenarios = ["S7", "S8", "S11", "S12", "S15", "S17"];
 
     // ── S7: cancel with a running task ───────────────────────────────────────
 
@@ -226,6 +227,69 @@ public class RuntimeScenarioTests
         Assert.True(harness.Counters.NotRoutedCount(channelId) > 0);
         Assert.Equal(0, harness.Counters.DroppedCount(ConversationEventCounters.ReasonUnknownConversation));
         Assert.Equal(0, harness.Counters.TotalDropped());
+
+        AssertNoTerminalOutboxOverflow(harness);
+    }
+
+    // ── S17: the executor throws mid-turn ────────────────────────────────────
+
+    /// <summary>
+    /// S17 is an ADDITION made during implementation, not a scenario from the original set.
+    ///
+    /// <para>The design's S9 was "executor throws mid-turn", with the Claude seam named as
+    /// "event channel faulted". That seam turned out to be unusable from a public test — faulting
+    /// the channel drives <c>ClaudeExecutor</c> into its process-restart path, which would start a
+    /// real provider CLI — so S9 became "executor failure surfaced mid-turn" and replays each
+    /// provider's real failure FRAME instead. That left the actual throw uncovered, which is what
+    /// this scenario restores. It is runtime-only because a thrown enumerator is caught by
+    /// <c>TaskManager</c> and never reaches provider-specific code.</para>
+    ///
+    /// <para>The two cases produce DIFFERENT error codes, and the difference matters to a client:
+    /// a thrown executor is <c>internal</c>, while an executor that REPORTS an error through an
+    /// <c>error</c>-typed progress event is <c>executor_error</c>. Both carry the fixed constant
+    /// from <see cref="ProtocolErrors"/> — never the exception message, never provider text.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(true, ProtocolErrorCode.Internal)]
+    [InlineData(false, ProtocolErrorCode.ExecutorError)]
+    public async Task S17_ExecutorFailsMidTurn_PublishesOneFixedMessageTurnError(
+        bool thrown, ProtocolErrorCode expectedCode)
+    {
+        const string secret = "EXCEPTION-TEXT-MUST-NOT-REACH-A-CLIENT";
+        using var cts = new CancellationTokenSource(Budget);
+
+        var executor = thrown
+            ? new ScriptedExecutor { ThrowAfterScript = new InvalidOperationException(secret) }
+            : new ScriptedExecutor([
+                new AgentProgress { EventType = "error", Summary = secret, IsSignificant = true },
+            ]);
+
+        var harness = ConversationHarness.Build(executor);
+        var (key, identity) = harness.OpenClientConversation();
+
+        await harness.Manager.StartTask(key, "task", "task", isSessionTask: true, identity: identity);
+        var delivered = await harness.PumpUntilTerminalAsync(cts.Token);
+        MatrixCells.AssertDeliveryOrderIsLawful(delivered);
+
+        // Exactly one terminal, and it is a turn.error.
+        var terminal = Assert.Single(delivered, e => e.IsTerminal);
+        Assert.Equal(ConversationEventKind.TurnError, terminal.Kind);
+
+        var payload = terminal.PayloadAs<TurnErrorPayload>()!;
+        Assert.Equal(expectedCode, payload.Code);
+
+        // The message is ALWAYS the fixed constant for the code. The runtime's own error string
+        // carries provider text, executor stdout and exception messages, any of which can contain
+        // filesystem paths, session ids or credentials — those stay server-side.
+        Assert.Equal(ProtocolErrors.MessageFor(expectedCode), payload.Message);
+
+        // Nothing anywhere in the delivered stream leaks the exception text, including the
+        // envelope and every non-terminal event.
+        foreach (var evt in delivered)
+        {
+            Assert.DoesNotContain(
+                secret, FleetProtocolJson.Serialize(evt), StringComparison.Ordinal);
+        }
 
         AssertNoTerminalOutboxOverflow(harness);
     }

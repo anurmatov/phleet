@@ -399,12 +399,27 @@ reason. `docs/spikes/session-continuity-scenarios.md` is the scoping table behin
 Three gaps apply to every provider and are worth knowing before building a client against this
 contract:
 
-- **Tool completion is invisible.** A client sees a tool start and never a tool finish, so a
+- **Tool completion is invisible** (#285). A client sees a tool start and never a tool finish, so a
   per-tool spinner has no event that clears it.
-- **There is no incremental assistant-text event.** `ConversationEventKind` has no delta kind, so a
-  client cannot begin rendering — or speaking — before the whole answer exists.
+- **There is no incremental assistant-text event** (#286). `ConversationEventKind` has no delta kind,
+  so a client cannot begin rendering — or speaking — before the whole answer exists.
 - **An executor-reported failure arrives as `turn.final` with `completion: incomplete`, not as
   `turn.error`.** A client that watches only `turn.error` will miss the most common provider failure.
+  `turn.error` is reserved for a thrown executor (`internal`) and for an executor that reports an
+  error through an `error`-typed progress event (`executor_error`).
 
-This section is a pointer. Nothing in the contract changes because of it, and each gap is tracked as
-its own issue.
+Two ordering facts a client must not assume away, both measured:
+
+- **Arrival order is not emission order.** `seq` is assigned inside `Publish` and the channel write
+  happens afterwards, so concurrent publishers can interleave. Separately, terminal outboxes drain
+  ahead of the shared progress channel by design. What the runtime does guarantee is that `seq` is
+  unique per conversation, each event is delivered at most once, and a turn's terminal is sequenced
+  after that turn's own `turn.started`.
+- **`control.ack` and `turn.canceled` race.** The ack is published by the intake on the caller's
+  thread; the terminal by the turn's own catch block on the turn's thread. Read the ack as "the
+  request was accepted", and use `ControlAckPayload.HadRunningTask` to decide whether a
+  `turn.canceled` is coming at all.
+
+This section is a pointer. Nothing in the contract changes because of it. One further gap —
+`GeminiExecutor` having no test seam below `ExecuteAsync`, so its start and terminal events cannot
+be verified — is tracked in #288, and the Codex `ToolName` leak in #287.

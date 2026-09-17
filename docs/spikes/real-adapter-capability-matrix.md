@@ -130,15 +130,17 @@ late.
 required the harness to **confirm or refute** rather than discover by accident. All three were
 confirmed:
 
-- **G1 — tool completion is invisible to clients on every provider.** Confirmed.
+- **G1 — tool completion is invisible to clients on every provider.** Confirmed. Tracked as #285.
 - **G2 — there is no incremental assistant-text event in v1.** Confirmed. This is a structural
   input to the voice stop/go decision, not a tuning problem: a voice client cannot begin speaking
-  before the entire answer exists.
-- **G3 — Codex's `ToolName` is not a tool name.** Confirmed, and pinned byte-for-byte.
+  before the entire answer exists. Tracked as #286.
+- **G3 — Codex's `ToolName` is not a tool name.** Confirmed, and pinned byte-for-byte. Tracked as
+  #287.
 
 None of the three is fixed here. Each is a behaviour change with its own client-visible
 consequences and its own review; the rows exist so a later fix flips a red test rather than
-silently changing behaviour.
+silently changing behaviour. The fourth follow-up — a `GeminiExecutor` seam that would let its
+start and terminal rows be observed at L1 instead of `inferred` — is #288.
 
 ## What is NOT in this file
 

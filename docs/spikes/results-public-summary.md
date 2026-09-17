@@ -16,13 +16,16 @@ the test suite. The headline findings:
 
 | Finding | Status |
 |---|---|
-| Tool completion is invisible to clients on every provider | Confirmed |
-| There is no incremental assistant-text event in v1 | Confirmed |
-| Codex's `ToolName` for `commandExecution` is the shell command | Confirmed, pinned byte-for-byte |
+| Tool completion is invisible to clients on every provider | Confirmed — follow-up #285 |
+| There is no incremental assistant-text event in v1 | Confirmed — follow-up #286 |
+| Codex's `ToolName` for `commandExecution` is the shell command | Confirmed, pinned byte-for-byte — follow-up #287 |
+| Gemini's turn-start and terminal cannot be observed below `ExecuteAsync` | Confirmed; all such rows `inferred` — follow-up #288 |
 | An executor-reported failure arrives as `turn.final(incomplete)`, never `turn.error` | New — found by this spike |
+| A thrown executor is `turn.error(internal)`; a reported error is `turn.error(executor_error)` | New — found by this spike |
 | `turn.started` is delivered before `submission.accepted` | New — found by this spike |
-| A terminal event can overtake queued progress; `seq` is the only defence | New — found by this spike |
-| Gemini's turn-start and terminal cannot be observed below `ExecuteAsync` | Confirmed; all such rows `inferred` |
+| A terminal event can overtake queued progress | New — found by this spike |
+| Concurrent publishers interleave, so arrival order is not emission order even within one kind | New — found by this spike, on CI |
+| `control.ack` and `turn.canceled` race; neither order is a contract | New — found by this spike |
 
 ### L3 capture
 

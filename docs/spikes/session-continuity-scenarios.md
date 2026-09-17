@@ -23,6 +23,14 @@ table is the wrong home for a result that has no provider in it.
 | S11 | Turn leaves its loop without a terminal | L2 | `ScriptedExecutor` yielding nothing | `turn.final(completed)` — see the finding below |
 | S12 | Terminal exceeds the 128 KiB serialized cap | L2 | `ScriptedExecutor` with non-ASCII final text | `turn.outcome_unknown(terminal_event_oversize)` |
 | S15 | Telegram / relay / bridge conversation | L2 | `ScriptedExecutor`, runtime-owned channel id | **zero** adapter events; counted `not_routed` |
+| S17 | Executor throws mid-turn, and executor reports an error | L2 | `ScriptedExecutor.ThrowAfterScript`, and an `error`-typed progress event | `turn.error(internal)` and `turn.error(executor_error)` respectively, each with the fixed message |
+
+**S17 is an addition made during implementation**, not a scenario from the original set. S9 was
+specified as "executor throws mid-turn" through a faulted event channel; that seam proved unusable
+in a public test (see the S9 finding below), so S9 became "executor failure surfaced mid-turn" and
+replays each provider's real failure frame. S17 restores coverage of the actual throw. It is
+runtime-only because a thrown enumerator is caught by `TaskManager` and never reaches
+provider-specific code.
 
 ### Per-provider
 
@@ -92,13 +100,28 @@ turn's thread. Either can win.
 
 The pump drains every terminal outbox before the shared progress channel on every pass, by design.
 Across a multi-turn scenario a second turn's `turn.final` was observed arriving **ahead of** that
-same turn's `turn.started`. `seq` is what makes this detectable. The matrix records emission order
-and asserts delivery order is lawful; a client must not assume delivery order equals emission order.
+same turn's `turn.started`.
+
+### Concurrent publishers interleave, so arrival order is not emission order even within one kind
+
+Sharper than the point above, and it invalidated an assertion in the first revision of this work.
+`seq` is assigned inside `Publish`, the channel write happens afterwards, and the two are not one
+atomic step. Three independent publishers are in play — the caller thread reporting a dispatch
+disposition, the turn thread emitting progress, and the four-second typing loop — so they can take
+`seq` 5 and 6 and then write 6 before 5.
+
+The first revision asserted that delivered non-terminals were in `seq` order among themselves. It
+passed four consecutive local runs and **failed on the CI runner**, which is exactly what a test
+that pins a race rather than a contract looks like.
+
+> What the bus actually guarantees, and all this suite asserts: `seq` is unique per conversation,
+> each event is delivered at most once, and a turn's terminal is sequenced after that turn's own
+> `turn.started`. A client must not assume anything further about arrival order.
 
 ## What is deliberately not here
 
 - No `turn.delta` / incremental assistant text. The spike **recommends** it (see
-  `voice-feasibility-protocol.md`); adding it is a separate protocol change.
-- No seam on `GeminiExecutor`. Opening one is a `src/` change, tracked as a follow-up.
-- No fix for tool completion, the Codex `ToolName` leak, or the missing incremental-text event.
-  Each is pinned by a test so a later fix is a visible, deliberate change.
+  `voice-feasibility-protocol.md`); adding it is a separate protocol change, tracked as **#286**.
+- No seam on `GeminiExecutor`. Opening one is a `src/` change, tracked as **#288**.
+- No fix for tool completion (**#285**) or the Codex `ToolName` leak (**#287**). Each is pinned by a
+  test so a later fix is a visible, deliberate change.

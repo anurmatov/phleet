@@ -259,6 +259,31 @@ has already been a shipped bug once.
 
 ---
 
+## Transports
+
+This document defines the event contract. It does not define how that contract reaches a client
+that is not in the process.
+
+**[`docs/first-party-api.md`](first-party-api.md)** defines the authenticated north boundary: the
+HTTPS routes and WebSocket framing a first-party client speaks, its credential lifecycle, the
+resume case table, backpressure and close codes. It carries this contract without inventing a
+second conversation model — an event delivered over that boundary's stream is byte-identical to the
+same event delivered by its catch-up route, and both are the envelope defined above.
+
+Three facts from that boundary's inherited set belong here, because a client author reading only
+this document would otherwise get them wrong. All three are owned by the durability design, not by
+the transport:
+
+- **`seq` is allocated at durable append, not at publish.** The value does not exist until the event
+  is durable.
+- **`submission.accepted` does not necessarily precede `turn.started`.** On the `Ran` path
+  `turn.started` is emitted first and takes the lower `seq`. A client that waits for `accepted`
+  before rendering a running turn will hang.
+- **`turn.progress` and `turn.notice` are prunable.** A missing `seq` for one of those is **not** a
+  gap, and a `seq` jump on a live stream is not proof of loss.
+
+---
+
 ## Principal binding is not authentication
 
 `conversation.open` carries `{ "scheme": "legacy-owner", "value": "<opaque token>" }`, resolved

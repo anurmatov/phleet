@@ -132,6 +132,22 @@ emits — including its terminal.
 > **`submission.accepted` is not a checkpoint.** Correlate on `submissionId`; treat the disposition
 > as metadata about dispatch, never as a position in the stream.
 
+### The typing heartbeat is not bounded by the terminal either
+
+Third instance of the same class, found while fixing the second. `TaskManager` cancels the typing
+loop in `ProcessTask`'s `finally`, which runs **after** every terminal publish — so a heartbeat
+landing in that window legitimately takes a later `seq` than the terminal it appears to follow.
+
+An assertion requiring every heartbeat to precede the final terminal has been removed. Unlike the
+first two, this one was never observed failing — it was found by reading `TaskManager` while
+chasing a different red run, and removed because it is unsound whether or not it has fired yet.
+What remains is the causal fact: the typing loop starts inside `ProcessTask`, which only runs after
+registration published `turn.started`, so no heartbeat can precede that.
+
+The pattern across all three is worth naming: **every ordering claim in this suite that spanned two
+independent publishers turned out to be false.** The runtime's only cross-publisher guarantees are
+`seq` uniqueness, at-most-once delivery, and a turn's terminal following its own `turn.started`.
+
 The capability matrix's `client events` cell reflects this directly: dispositions and turn events are
 two groups separated by ` ‖ `, and ordering across that separator is explicitly not claimed.
 

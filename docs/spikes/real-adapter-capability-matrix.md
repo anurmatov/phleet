@@ -46,17 +46,50 @@ the exact CLI version, and the parser rejects any other shape.
 
 Both were found by running the harness, and both are recorded here rather than quietly absorbed.
 
-**1. `client events` records EMISSION order (`seq`), not delivery order.** The design specified
-delivery order. Delivery order is not deterministic for any scenario spanning more than one turn:
-the pump drains every terminal outbox **before** the shared progress channel on every pass, by
-design (`ConversationEventPump.DrainOnceAsync`), so a terminal event can overtake still-queued
-progress. A second turn's `turn.final` was observed arriving ahead of that same turn's
-`turn.started`. That is a real client-visible hazard — `ConversationEventBus` documents it, and
-`seq` exists precisely to make it detectable — so pinning the cell to delivery order would have
-pinned a race rather than a contract. Each scenario additionally asserts that the observed delivery
-order is **lawful**: `seq` unique, non-terminals ascending among themselves, terminals ascending
-among themselves. That assertion catches a genuine reordering defect; a literal delivery-order cell
-would have gone red on timing long before it went red on a bug.
+**1. `client events` is TWO independently-ordered groups, not one sequence.** The design specified
+delivery order. That turned out to be undeliverable, and it took two CI failures to find the
+bottom of it.
+
+*Terminals overtake progress.* The pump drains every terminal outbox **before** the shared
+progress channel on every pass, by design (`ConversationEventPump.DrainOnceAsync`). A second
+turn's `turn.final` was observed arriving ahead of that same turn's `turn.started`.
+
+*Concurrent publishers interleave.* `seq` is assigned inside `Publish` and the channel write
+happens afterwards, and the two are not one atomic step. The caller thread, the turn thread and
+the four-second typing loop publish independently, so they can take `seq` 5 and 6 and then write
+6 before 5. Weakening the cell from delivery order to emission order did not fix this, and an
+assertion that delivered non-terminals ascend among themselves — and terminals likewise — passed
+four local runs and then failed on the CI runner. That assertion has been removed; it described a
+guarantee the bus does not make.
+
+*A disposition is not ordered against the turn it dispatched.* CI failed a second time, on
+`codex/S9`, with `turn.final` holding a **lower** `seq` than the `submission.accepted` for the
+very submission it answered. `TaskManager.StartTaskCore` publishes `turn.started`, hands the turn
+to `Task.Run`, and only **then** calls `ReportDisposition`, so a short turn can finish before the
+caller thread reports its own dispatch. Ordering by `seq` cannot repair that, because the `seq`
+values themselves are assigned in that order.
+
+> **A client must not use `submission.accepted` as a checkpoint.** It can arrive after the
+> `turn.final` that answers it. Correlate on `submissionId` and treat the disposition as metadata
+> about dispatch, not as a position in the stream.
+
+So the cell stops pretending there is one sequence. Dispositions and turn events are separated by
+` ‖ `; each group is internally ordered and genuinely deterministic — dispositions by sequential
+dispatch, turn events by the single turn thread, with `turn.started` ahead of them because it is
+published before `Task.Run` — and the separator marks where ordering stops being a claim.
+
+Each scenario then asserts exactly the three properties the bus does guarantee, and nothing more:
+
+1. **`seq` is unique per conversation.** Assignment goes through an atomic per-conversation
+   counter, so a duplicate would mean two events claiming one slot.
+2. **Every event is delivered at most once.** A repeated `eventId` would be a double delivery,
+   which no client dedupe could tell apart from a redelivery.
+3. **A turn's terminal is sequenced after that turn's own `turn.started`.** Per turn id, not
+   globally. This one is causal rather than racy, because the turn thread only begins after
+   registration has published `turn.started`, and it is the only cross-kind ordering fact the
+   runtime really does promise.
+
+`MatrixCells.AssertDeliveryOrderIsLawful` is those three properties and nothing else.
 
 **2. The periodic typing heartbeat is excluded from the cell.** `turn.progress(typing)` is emitted
 at turn start and then every four seconds for as long as the turn runs

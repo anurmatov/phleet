@@ -40,13 +40,19 @@ public class RealAdapterMappingTests
         Assert.Equal(row.ProviderFrames, observed.Frames);
         Assert.Equal(row.AgentProgress, observed.Progress);
 
-        // Ordered, not membership. A terminal delivered before its own turn.started, or a
-        // turn.final before the submission.accepted it answers, is unrecoverable on the client and
-        // invisible to a set-based assertion.
+        // Ordered WITHIN each group, not membership. A terminal ahead of its own turn.started is
+        // unrecoverable on the client and invisible to a set-based assertion.
+        //
+        // Deliberately NOT an example of that: a turn.final ahead of the submission.accepted it
+        // answers. That looks like the same defect and is in fact normal — the disposition is
+        // reported after the turn is dispatched — which is exactly why the cell separates the two
+        // groups rather than pinning one sequence across them.
         Assert.Equal(row.ClientEvents, observed.ClientEvents);
 
-        // ...and the delivery order the adapter actually saw must be lawful under the runtime's
-        // own guarantee, which is weaker than "equals emission order" and stronger than "any".
+        // ...and the delivery order the adapter actually saw must satisfy the three properties the
+        // bus really guarantees: seq unique, each event delivered once, and a turn's terminal
+        // sequenced after its own turn.started. Nothing beyond that is asserted, because nothing
+        // beyond that is promised.
         MatrixCells.AssertDeliveryOrderIsLawful(observed.RawEvents);
 
         // Every row carries an evidence cell, and this issue builds L1+L2 only, so it can only be
@@ -59,13 +65,24 @@ public class RealAdapterMappingTests
 
     /// <summary>
     /// The heartbeat is excluded from the ordered cell because its COUNT is time-driven. Its
-    /// PRESENCE is not: a running turn always emits at least one, and it never appears outside the
-    /// turn window. Asserted here rather than in the cell so no row becomes a timing assertion.
+    /// PRESENCE is not: a running turn always emits at least one. Asserted here rather than in the
+    /// cell so no row becomes a timing assertion.
+    ///
+    /// <para><b>What is deliberately NOT asserted, and why.</b> An earlier revision also required
+    /// every heartbeat to be sequenced BEFORE the final terminal. That is not true.
+    /// <c>TaskManager</c> cancels the typing loop in <c>ProcessTask</c>'s <c>finally</c>, which
+    /// runs after every terminal publish, so a heartbeat landing in that window legitimately takes
+    /// a later <c>seq</c> than the terminal. It is unsound by construction — found by reading
+    /// <c>TaskManager</c> rather than by watching it fail — and it is the same defect class as the
+    /// two ordering claims already removed from this suite: an assertion about two independent
+    /// publishers that the runtime never promised.</para>
     /// </summary>
     private static void AssertTypingHeartbeatIsWellPlaced(ScenarioObservation observed)
     {
-        var ranATurn = observed.RawEvents.Any(e => e.Kind == ConversationEventKind.TurnStarted);
-        if (!ranATurn)
+        var ordered = observed.RawEvents.OrderBy(e => e.Seq).ToList();
+        var firstStart = ordered.FirstOrDefault(e => e.Kind == ConversationEventKind.TurnStarted);
+
+        if (firstStart is null)
         {
             Assert.Equal(0, observed.TypingHeartbeats);
             return;
@@ -73,15 +90,14 @@ public class RealAdapterMappingTests
 
         Assert.True(observed.TypingHeartbeats > 0);
 
-        var kinds = observed.RawEvents.OrderBy(e => e.Seq).Select(e => e.Kind).ToList();
-        var firstStart = kinds.IndexOf(ConversationEventKind.TurnStarted);
-        var lastTerminal = observed.RawEvents.OrderBy(e => e.Seq).ToList().FindLastIndex(e => e.IsTerminal);
-
-        foreach (var (evt, index) in observed.RawEvents.OrderBy(e => e.Seq).Select((e, i) => (e, i)))
+        // The one ordering fact here that IS causal: the typing loop is started inside ProcessTask,
+        // which only runs after registration has published turn.started, so no heartbeat can
+        // precede it.
+        foreach (var heartbeat in ordered.Where(MatrixCells.IsTypingHeartbeat))
         {
-            if (!MatrixCells.IsTypingHeartbeat(evt)) continue;
-            Assert.True(index > firstStart, "A typing heartbeat preceded turn.started.");
-            Assert.True(index < lastTerminal, "A typing heartbeat followed the final terminal event.");
+            Assert.True(
+                heartbeat.Seq > firstStart.Seq,
+                $"A typing heartbeat took seq {heartbeat.Seq}, ahead of turn.started at {firstStart.Seq}.");
         }
     }
 

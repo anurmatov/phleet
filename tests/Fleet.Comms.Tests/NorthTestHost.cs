@@ -43,7 +43,7 @@ internal sealed class NorthTestHost : IAsyncDisposable
     /// <summary>The running app's services, so a test can inspect the real registration graph.</summary>
     public IServiceProvider Services => _app.Services;
 
-    public static async Task<NorthTestHost> StartAsync(Argon2idSecretHasher? hasher = null)
+    public static async Task<NorthTestHost> StartAsync(ISecretHasher? hasher = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -55,7 +55,7 @@ internal sealed class NorthTestHost : IAsyncDisposable
         builder.Services.AddSingleton<IAuthStore>(store);
         builder.Services.AddSingleton<TimeProvider>(time);
         if (hasher is not null)
-            builder.Services.AddSingleton<ISecretHasher>(hasher);
+            builder.Services.AddSingleton(hasher);
 
         var app = CommsApp.BuildNorthApp(builder);
 
@@ -134,23 +134,64 @@ internal sealed class NorthTestHost : IAsyncDisposable
 }
 
 /// <summary>
-/// A clock the test moves by hand. Every TTL on this boundary is an absolute timestamp stored at
-/// issue, so a test that could not move time could not prove expiry at all — and a sleep-based one
-/// would take fifteen minutes.
+/// A clock the test moves by hand, with a wall reading and a monotonic counter that move
+/// independently — because that is the only way to write the test that matters.
+///
+/// <para><see cref="Advance"/> moves both, as real time passing does. <see cref="SetBackwards"/>
+/// moves <b>only the wall reading</b>, which is exactly what an NTP step or a restored snapshot
+/// does to a host: the monotonic counter is, by definition, unaffected. A fake that moved both
+/// together could not distinguish "time passed" from "someone changed the clock", and would
+/// therefore pass whether or not the code under test handles a rollback at all.</para>
 /// </summary>
 internal sealed class TestTimeProvider(DateTimeOffset? start = null) : TimeProvider
 {
     private DateTimeOffset _now = start ?? new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+    private long _timestamp;
 
     public override DateTimeOffset GetUtcNow() => _now;
+
+    public override long GetTimestamp() => _timestamp;
+
+    public override long TimestampFrequency => TimeSpan.TicksPerSecond;
 
     public void Advance(TimeSpan delta)
     {
         if (delta < TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(delta), "Use SetBackwards for a clock jump.");
         _now += delta;
+        _timestamp += delta.Ticks;
     }
 
-    /// <summary>A backward clock jump, for the fail-closed expiry test.</summary>
+    /// <summary>
+    /// A backward wall-clock jump. The monotonic counter deliberately does not move — no clock
+    /// change can rewind it, and a test that rewound it would be testing a machine that cannot
+    /// exist.
+    /// </summary>
     public void SetBackwards(TimeSpan delta) => _now -= delta;
+}
+
+/// <summary>
+/// Wraps a real hasher and counts verifications, so the "every rejection costs the same" property
+/// can be asserted as an exact call count rather than as a wall-clock measurement. A timing
+/// assertion on a shared CI runner is a flake waiting to be muted; a count is not.
+/// </summary>
+internal sealed class CountingSecretHasher(ISecretHasher inner) : ISecretHasher
+{
+    private int _verifications;
+
+    public int Verifications => Volatile.Read(ref _verifications);
+
+    public string Hash(string secret) => inner.Hash(secret);
+
+    public bool Verify(string secret, string encodedHash)
+    {
+        Interlocked.Increment(ref _verifications);
+        return inner.Verify(secret, encodedHash);
+    }
+
+    public bool VerifyOrDummy(string secret, string? encodedHash)
+    {
+        Interlocked.Increment(ref _verifications);
+        return inner.VerifyOrDummy(secret, encodedHash);
+    }
 }

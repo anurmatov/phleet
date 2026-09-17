@@ -164,7 +164,7 @@ public class AuthLifecycleTests
     }
 
     [Fact]
-    public async Task AnExpiredToken_IsRefused_AndExpiryIsAbsoluteRatherThanRecomputed()
+    public async Task AnExpiredToken_IsRefused_AndABackwardClockJumpDoesNotResurrectIt()
     {
         await using var host = await NorthTestHost.StartAsync();
         var (_, _, token) = await host.EnrolledDeviceAsync();
@@ -172,10 +172,101 @@ public class AuthLifecycleTests
         host.Time.Advance(AuthService.AccessTokenTtl);
         Assert.Equal(HttpStatusCode.Unauthorized, (await host.SessionAsync(token)).StatusCode);
 
-        // A backward clock jump must not resurrect it: expiry was stored at issue, not computed
-        // from a TTL at check time.
+        // Storing an absolute deadline is necessary and NOT sufficient: the deadline is fixed, but
+        // the value it is compared against is wall time, and wall time moves backwards. A refused
+        // credential that authenticates again after an NTP step is the one direction this boundary
+        // must never move, so the comparison runs against MonotonicClock and the token is burned
+        // in the store the first time it is seen expired.
         host.Time.SetBackwards(TimeSpan.FromMinutes(10));
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SessionAsync(token)).StatusCode);
+
+        // Far enough back that the original issue instant is in the future, which is the shape a
+        // restored snapshot produces.
+        host.Time.SetBackwards(TimeSpan.FromHours(1));
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SessionAsync(token)).StatusCode);
+    }
+
+    /// <summary>
+    /// The other half of the rollback problem, and the half the burn cannot reach: a credential
+    /// that has <b>not yet</b> been observed expired.
+    ///
+    /// <para>Fifteen real minutes pass, but the host's clock is stepped back in the middle of them,
+    /// so by wall time the token looks five minutes old. Compared against wall time it authenticates
+    /// — a stolen token whose life an attacker can extend by however far the clock moves. Only the
+    /// monotonic reading refuses it, because only the monotonic reading knows time actually passed.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task ABackwardClockJumpDoesNotExtendTheLifeOfAStillValidToken()
+    {
+        await using var host = await NorthTestHost.StartAsync();
+        var (_, _, token) = await host.EnrolledDeviceAsync();
+
+        host.Time.Advance(TimeSpan.FromMinutes(10));
         Assert.Equal(HttpStatusCode.OK, (await host.SessionAsync(token)).StatusCode);
+
+        // The clock is corrected ten minutes backwards, then five more real minutes pass.
+        host.Time.SetBackwards(TimeSpan.FromMinutes(10));
+        host.Time.Advance(TimeSpan.FromMinutes(5) + TimeSpan.FromSeconds(1));
+
+        // Wall time says the token is five minutes old. Fifteen minutes and a second of real time
+        // have elapsed since it was issued.
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SessionAsync(token)).StatusCode);
+    }
+
+    /// <summary>
+    /// The burn is what carries the refusal across a restart, after which the monotonic clock has
+    /// no choice but to re-anchor to whatever the host says. Asserted on the stored record, since
+    /// that is the only part of the decision that outlives the process.
+    /// </summary>
+    [Fact]
+    public async Task AnExpiredTokenIsBurnedInTheStore_NotMerelyRefused()
+    {
+        await using var host = await NorthTestHost.StartAsync();
+        var (_, _, token) = await host.EnrolledDeviceAsync();
+
+        Assert.All(host.Store.Tokens, t => Assert.Null(t.RevokedAt));
+
+        host.Time.Advance(AuthService.AccessTokenTtl);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SessionAsync(token)).StatusCode);
+
+        Assert.All(host.Store.Tokens, t => Assert.NotNull(t.RevokedAt));
+    }
+
+    [Fact]
+    public async Task AnExpiredEnrollmentCode_IsNotResurrectedByABackwardClockJump()
+    {
+        await using var host = await NorthTestHost.StartAsync();
+        var code = await host.IssueEnrollmentCodeAsync();
+
+        host.Time.Advance(AuthService.EnrollmentCodeTtl);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.RegisterAsync(code)).StatusCode);
+
+        host.Time.SetBackwards(AuthService.EnrollmentCodeTtl);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.RegisterAsync(code)).StatusCode);
+        Assert.Empty(host.Store.Devices);
+
+        // Burned, so the refusal is a fact in the store rather than an opinion of the clock.
+        Assert.All(host.Store.Enrollments, e => Assert.NotNull(e.RevokedAt));
+    }
+
+    [Fact]
+    public async Task AnExpiredRecoveryWindow_IsNotResurrectedByABackwardClockJump()
+    {
+        await using var host = await NorthTestHost.StartAsync();
+        var code = await host.IssueEnrollmentCodeAsync();
+        var first = await Body<NorthTestHost.RegisterDeviceBody>(await host.RegisterAsync(code));
+
+        host.Time.Advance(AuthService.RegistrationRecoveryWindow);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.RegisterAsync(code)).StatusCode);
+
+        host.Time.SetBackwards(AuthService.RegistrationRecoveryWindow);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.RegisterAsync(code)).StatusCode);
+
+        // And the device that was registered keeps the secret it already had — a re-opened window
+        // would have rotated it out from under a client that is still using it.
+        Assert.Equal(HttpStatusCode.OK,
+            (await host.TokenAsync(first.DeviceId, first.DeviceSecret)).StatusCode);
     }
 
     // ── revocation ───────────────────────────────────────────────────────────

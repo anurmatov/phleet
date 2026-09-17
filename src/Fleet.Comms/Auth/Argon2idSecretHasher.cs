@@ -12,6 +12,16 @@ public interface ISecretHasher
 
     /// <summary>Constant-time verification against a stored encoded hash.</summary>
     bool Verify(string secret, string encodedHash);
+
+    /// <summary>
+    /// Verify against <paramref name="encodedHash"/>, or — when there is no record to verify
+    /// against — do the <b>same work</b> against a fixed placeholder and return <c>false</c>.
+    ///
+    /// <para>This is what makes "no such record" and "record exists, wrong secret" cost the same.
+    /// Without it the two answers are byte-identical but not time-identical, and a deliberately
+    /// slow KDF turns that gap into an existence oracle for a device, enrollment or token id.</para>
+    /// </summary>
+    bool VerifyOrDummy(string secret, string? encodedHash);
 }
 
 /// <summary>
@@ -42,11 +52,19 @@ public sealed class Argon2idSecretHasher : ISecretHasher
     private readonly int _iterations;
     private readonly int _parallelism;
 
+    /// <summary>
+    /// A hash of a value nobody holds, used only to spend the same work on a lookup that found
+    /// nothing. Derived with this instance's parameters so the placeholder and the real thing cost
+    /// the same; a hard-coded constant would drift the moment the parameters were raised.
+    /// </summary>
+    private readonly string _dummyHash;
+
     public Argon2idSecretHasher(int memoryKib = 19456, int iterations = 2, int parallelism = 1)
     {
         _memoryKib = memoryKib;
         _iterations = iterations;
         _parallelism = parallelism;
+        _dummyHash = Hash(Base64Url.Encode(RandomNumberGenerator.GetBytes(Credentials.SecretBytes)));
     }
 
     public string Hash(string secret)
@@ -69,6 +87,15 @@ public sealed class Argon2idSecretHasher : ISecretHasher
         // Fixed-time comparison. The values being compared are derived rather than presented, so
         // a timing leak here is a narrow one — but a narrow leak in an auth path is still a leak.
         return CryptographicOperations.FixedTimeEquals(actual, expected);
+    }
+
+    public bool VerifyOrDummy(string secret, string? encodedHash)
+    {
+        // The `false` is discarded by the caller either way; the point of the call is the elapsed
+        // time, not the answer. Written as one branch rather than an `if` at each call site so a
+        // future path cannot forget it.
+        var result = Verify(secret, encodedHash ?? _dummyHash);
+        return encodedHash is not null && result;
     }
 
     private static byte[] Derive(string secret, byte[] salt, int memoryKib, int iterations, int parallelism)

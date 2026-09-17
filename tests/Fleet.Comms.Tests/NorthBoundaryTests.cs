@@ -95,14 +95,23 @@ public class NorthBoundaryTests
         var badSecret = await host.TokenAsync(deviceId, Credentials.NewSecret());
         bodies.Add(("bad secret", await badSecret.Content.ReadAsStringAsync(), badSecret.StatusCode));
 
-        host.Time.Advance(AuthService.AccessTokenTtl);
-        var expiredToken = await host.SessionAsync(token);
-        bodies.Add(("expired token", await expiredToken.Content.ReadAsStringAsync(), expiredToken.StatusCode));
-        host.Time.SetBackwards(AuthService.AccessTokenTtl);
-
         await host.RevokeAsync(deviceId, token);
         var revokedToken = await host.SessionAsync(token);
         bodies.Add(("revoked token", await revokedToken.Content.ReadAsStringAsync(), revokedToken.StatusCode));
+
+        // The expired case needs a token that is still valid when the clock moves, so it uses a
+        // fresh device — the first one is revoked by now, which is also what makes a second
+        // registration legal here. Rolling the clock BACKWARDS to reuse the first device, as this
+        // test once did, is no longer possible and never should have been: expiry is irreversible,
+        // and a test that depended on reversing it was asserting the bug.
+        var replacement = await AuthLifecycleTests.Body<NorthTestHost.RegisterDeviceBody>(
+            await host.RegisterAsync(await host.IssueEnrollmentCodeAsync()));
+        var replacementToken = await AuthLifecycleTests.Body<NorthTestHost.TokenBody>(
+            await host.TokenAsync(replacement.DeviceId, replacement.DeviceSecret));
+
+        host.Time.Advance(AuthService.AccessTokenTtl);
+        var expiredToken = await host.SessionAsync(replacementToken.AccessToken);
+        bodies.Add(("expired token", await expiredToken.Content.ReadAsStringAsync(), expiredToken.StatusCode));
 
         Assert.All(bodies, b => Assert.Equal(HttpStatusCode.Unauthorized, b.Status));
         Assert.Single(bodies.Select(b => b.Body).Distinct(StringComparer.Ordinal));

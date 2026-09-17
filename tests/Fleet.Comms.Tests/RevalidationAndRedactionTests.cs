@@ -22,12 +22,33 @@ public class RevalidationAndRedactionTests
     [Fact]
     public void RevalidationIsDueAtThirtySecondsAndNotBefore()
     {
-        var validated = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
-
         Assert.Equal(TimeSpan.FromSeconds(30), CredentialRevalidator.Interval);
-        Assert.False(CredentialRevalidator.IsDue(validated, validated + TimeSpan.FromSeconds(29.999)));
-        Assert.True(CredentialRevalidator.IsDue(validated, validated + TimeSpan.FromSeconds(30)));
-        Assert.True(CredentialRevalidator.IsDue(validated, validated + TimeSpan.FromSeconds(31)));
+        Assert.False(CredentialRevalidator.IsDue(TimeSpan.FromSeconds(29.999)));
+        Assert.True(CredentialRevalidator.IsDue(TimeSpan.FromSeconds(30)));
+        Assert.True(CredentialRevalidator.IsDue(TimeSpan.FromSeconds(31)));
+    }
+
+    /// <summary>
+    /// The bound is on <b>elapsed</b> time, not on the difference between two wall-clock readings.
+    ///
+    /// <para>This is the case that breaks the naive version: the host's clock steps five minutes
+    /// backwards, then thirty real seconds pass. A wall-clock subtraction says minus four and a
+    /// half minutes and the next check never comes due — so a revoked device keeps its socket for
+    /// as long as the skew lasts, on the one mechanism an operator is told they can rely on.</para>
+    /// </summary>
+    [Fact]
+    public async Task ABackwardWallClockJumpDoesNotDelayTheNextRevalidation()
+    {
+        await using var host = await NorthTestHost.StartAsync();
+        var revalidator = host.Services.GetRequiredService<CredentialRevalidator>();
+
+        var openedAt = revalidator.Stamp();
+
+        host.Time.SetBackwards(TimeSpan.FromMinutes(5));
+        Assert.False(revalidator.IsDue(openedAt));
+
+        host.Time.Advance(CredentialRevalidator.Interval);
+        Assert.True(revalidator.IsDue(openedAt));
     }
 
     /// <summary>
@@ -43,7 +64,7 @@ public class RevalidationAndRedactionTests
         var revalidator = host.Services.GetRequiredService<CredentialRevalidator>();
 
         // Upgrade-time check: good.
-        var openedAt = host.Time.GetUtcNow();
+        var openedAt = revalidator.Stamp();
         Assert.Equal(RevalidationOutcome.Valid, await revalidator.RevalidateAsync(token));
 
         await host.RevokeAsync(deviceId, token);
@@ -99,7 +120,7 @@ public class RevalidationAndRedactionTests
         var logger = new CapturingLogger<AuthService>();
         var store = new InMemoryAuthStore();
         var time = new TestTimeProvider();
-        var auth = new AuthService(store, new Argon2idSecretHasher(), time, logger);
+        var auth = new AuthService(store, new Argon2idSecretHasher(), new MonotonicClock(time), logger);
 
         var code = await auth.IssueEnrollmentCodeAsync("p_owner");
         var registration = await auth.RegisterDeviceAsync(code);

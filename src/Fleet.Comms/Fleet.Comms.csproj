@@ -18,6 +18,17 @@
       dependency in the slice.
     -->
     <PackageReference Include="Konscious.Security.Cryptography.Argon2" Version="1.3.1" />
+
+    <!--
+      The durable auth store. A file-backed engine with real transactions, so registrations,
+      enrollment consumption and revocation survive a restart and are exercised by the ordinary
+      test run rather than behind a conditional skip.
+
+      10.0.12, not 10.0.5 like the sibling Microsoft.* pins: 10.0.5 resolves
+      SQLitePCLRaw.lib.e_sqlite3 2.1.11, which carries GHSA-2m69-gcr7-jv3q (high). 10.0.12 brings
+      2.1.12, and a transitive vulnerability scan of this project reports clean.
+    -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
   </ItemGroup>
 
   <ItemGroup>

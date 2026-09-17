@@ -101,6 +101,34 @@ public class NorthSerializationTests
         Assert.Equal(HttpStatusCode.BadRequest, malformed.StatusCode);
         Assert.Equal("unsupported_kind", await CodeOf(malformed));
 
+        // unsupported_kind -> 400 for bad request METADATA too, on BOTH auth POST routes.
+        //
+        // These used to be 500. `ReadFromJsonAsync` throws InvalidOperationException — not
+        // JsonException — for an unsupported or absent media type, so the catch missed it and the
+        // edge handler answered `internal`. §5.2 tells a client 500 means "the server is broken,
+        // report this", which is the wrong instruction for a request the client got wrong, and it
+        // hides a client bug behind an operator alert.
+        foreach (var route in new[] { "/v1/auth/token", "/v1/auth/devices" })
+        {
+            var wrongContentType = await host.Client.PostAsync(route,
+                new StringContent("""{"protocol":"fleet.conversation.v1"}""",
+                    System.Text.Encoding.UTF8, "text/plain"));
+            Assert.Equal(HttpStatusCode.BadRequest, wrongContentType.StatusCode);
+            Assert.Equal("unsupported_kind", await CodeOf(wrongContentType));
+
+            var noBody = await host.Client.PostAsync(route, new StringContent(""));
+            Assert.Equal(HttpStatusCode.BadRequest, noBody.StatusCode);
+            Assert.Equal("unsupported_kind", await CodeOf(noBody));
+
+            var emptyJson = await host.Client.PostAsync(route, JsonContent(""));
+            Assert.Equal(HttpStatusCode.BadRequest, emptyJson.StatusCode);
+            Assert.Equal("unsupported_kind", await CodeOf(emptyJson));
+
+            var jsonNull = await host.Client.PostAsync(route, JsonContent("null"));
+            Assert.Equal(HttpStatusCode.BadRequest, jsonNull.StatusCode);
+            Assert.Equal("unsupported_kind", await CodeOf(jsonNull));
+        }
+
         // unauthorized -> 401
         var unauthorized = await host.SessionAsync(null);
         Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);

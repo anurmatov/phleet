@@ -31,15 +31,23 @@ public static class NorthEndpoints
 
     public static IEndpointRouteBuilder MapNorthApi(this IEndpointRouteBuilder app)
     {
-        app.MapPost("/v1/auth/devices", RegisterDeviceAsync);
-        app.MapPost("/v1/auth/token", MintTokenAsync);
+        // Every route here verifies a credential, and every verification costs one Argon2id
+        // evaluation — including the ones that fail. So the limiter goes on all four, not only on
+        // the two that take a secret in the body: a bogus bearer on `GET /v1/session` buys exactly
+        // the same work as a bogus secret on `POST /v1/auth/token`.
+        app.MapPost("/v1/auth/devices", RegisterDeviceAsync)
+            .RequireRateLimiting(AuthRateLimits.PolicyName);
+        app.MapPost("/v1/auth/token", MintTokenAsync)
+            .RequireRateLimiting(AuthRateLimits.PolicyName);
 
         // `:revoke` is a literal suffix on the id segment, matching §5. Self-revoke only: the
         // lost-device path is operator-side and out of band, because an unauthenticated revoke
         // route would be a one-request denial of service against the owner's only device.
-        app.MapPost("/v1/auth/devices/{deviceId}:revoke", RevokeDeviceAsync);
+        app.MapPost("/v1/auth/devices/{deviceId}:revoke", RevokeDeviceAsync)
+            .RequireRateLimiting(AuthRateLimits.PolicyName);
 
-        app.MapGet("/v1/session", GetSessionAsync);
+        app.MapGet("/v1/session", GetSessionAsync)
+            .RequireRateLimiting(AuthRateLimits.PolicyName);
         return app;
     }
 
@@ -147,8 +155,26 @@ public static class NorthEndpoints
         return result.Succeeded ? result.Value : null;
     }
 
+    /// <summary>
+    /// Read a request body, or return null so the caller answers `400 unsupported_kind`.
+    ///
+    /// <para><b>The content-type check has to be here rather than left to
+    /// <c>ReadFromJsonAsync</c>.</b> That method throws <see cref="InvalidOperationException"/> —
+    /// not <see cref="System.Text.Json.JsonException"/> — for an unsupported or absent media type,
+    /// so a `text/plain` body or a bodiless POST fell through to the edge handler and came back as
+    /// `500 internal`. §5.2 tells a client that 500 means "the server is broken, report this",
+    /// which is precisely the wrong instruction for a request the client got wrong.</para>
+    /// </summary>
     private static async Task<T?> ReadAsync<T>(HttpContext http, CancellationToken ct) where T : class
     {
+        if (!http.Request.HasJsonContentType())
+            return null;
+
+        // An explicitly empty body would deserialize to null anyway; short-circuiting keeps that
+        // answer a client error rather than depending on which exception the reader picks.
+        if (http.Request.ContentLength == 0)
+            return null;
+
         try
         {
             return await http.Request.ReadFromJsonAsync<T>(FleetProtocolJson.Options, ct);

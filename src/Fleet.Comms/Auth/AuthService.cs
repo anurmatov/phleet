@@ -24,11 +24,24 @@ public sealed record AuthenticatedPrincipal(string PrincipalId, string DeviceId,
 ///
 /// <para>Policy lives here rather than in the store so that a durable store implementation has to
 /// satisfy an interface about records, not about rules.</para>
+///
+/// <para><b>Two properties are structural here and easy to break by rearranging a method.</b></para>
+///
+/// <para><i>Every credential lookup spends exactly one KDF evaluation.</i> The verify call comes
+/// immediately after the lookup and before any state test, so "no such record", "revoked",
+/// "expired" and "wrong secret" all cost the same. Moving a cheap state test above the verify
+/// re-opens a timing oracle for record existence (§12: "no oracle to grind against"), which the
+/// byte-identical bodies alone do not close.</para>
+///
+/// <para><i>Expiry is irreversible.</i> Deadlines are compared against <see cref="MonotonicClock"/>
+/// rather than raw wall time, and a credential observed past its deadline is burned in the store on
+/// the spot. The clock covers a backward step while the process lives; the burn covers the restart
+/// after which the clock must re-anchor to the host.</para>
 /// </summary>
 public sealed class AuthService(
     IAuthStore store,
     ISecretHasher hasher,
-    TimeProvider time,
+    MonotonicClock clock,
     ILogger<AuthService> logger)
 {
     /// <summary>Enrollment-code absolute TTL from issue (§3).</summary>
@@ -54,7 +67,7 @@ public sealed class AuthService(
     {
         var enrollmentId = Credentials.NewRecordId();
         var secret = Credentials.NewSecret();
-        var now = time.GetUtcNow();
+        var now = clock.GetUtcNow();
 
         await store.InTransactionAsync<object?>(async (tx, token) =>
         {
@@ -85,19 +98,31 @@ public sealed class AuthService(
         {
             // Malformed is answered exactly as unknown: a caller must not learn that its value was
             // the wrong *shape* rather than the wrong *value*.
+            //
+            // No dummy verify here, unlike the lookup paths below. The equalisation exists to hide
+            // whether a *record* exists; whether the caller's own input parsed is something the
+            // caller already knows, and spending a KDF on unparseable junk would only hand an
+            // unauthenticated caller a cheap way to buy server work.
             return Reject<RegisteredDevice>("enrollment_code_malformed");
         }
 
         return store.InTransactionAsync(async (tx, token) =>
         {
             var enrollment = await tx.FindEnrollmentAsync(enrollmentId, token);
+
+            // One KDF evaluation, always, before anything branches on what was found.
+            var verified = hasher.VerifyOrDummy(presentedSecret, enrollment?.CodeHash);
+
             if (enrollment is null)
                 return Rejected<RegisteredDevice>("enrollment_unknown");
 
-            if (!hasher.Verify(presentedSecret, enrollment.CodeHash))
+            if (!verified)
                 return Rejected<RegisteredDevice>("enrollment_secret_mismatch");
 
-            var now = time.GetUtcNow();
+            if (!enrollment.IsUsable)
+                return Rejected<RegisteredDevice>("enrollment_burned");
+
+            var now = clock.GetUtcNow();
 
             return enrollment.ConsumedAt is null
                 ? await FirstRegistrationAsync(tx, enrollment, now, token)
@@ -110,7 +135,7 @@ public sealed class AuthService(
     {
         // The issue TTL bounds how long an UNUSED code may sit around.
         if (now >= enrollment.ExpiresAt)
-            return Rejected<RegisteredDevice>("enrollment_expired");
+            return await BurnAsync(tx, enrollment, now, "enrollment_expired", ct);
 
         // Owner-only: exactly one active device. Rotation is revoke-then-enroll, never an implicit
         // replacement — an implicit one would let a stolen code silently displace a working device.
@@ -157,7 +182,7 @@ public sealed class AuthService(
             return Rejected<RegisteredDevice>("recovery_window_closed_by_token_mint");
 
         if (now >= enrollment.ConsumedAt!.Value + RegistrationRecoveryWindow)
-            return Rejected<RegisteredDevice>("recovery_window_expired");
+            return await BurnAsync(tx, enrollment, now, "recovery_window_expired", ct);
 
         var rotated = Credentials.NewSecret();
         await tx.SaveDeviceAsync(device with { SecretHash = hasher.Hash(rotated) }, ct);
@@ -180,16 +205,21 @@ public sealed class AuthService(
         return store.InTransactionAsync(async (tx, token) =>
         {
             var device = await tx.FindDeviceAsync(deviceId, token);
+
+            // Before the IsActive test, not after: a revoked device that answered faster than a
+            // live one with a bad secret would say "this id is real" just as loudly as a 200.
+            var verified = hasher.VerifyOrDummy(deviceSecret, device?.SecretHash);
+
             if (device is null)
                 return Rejected<MintedToken>("device_unknown");
+
+            if (!verified)
+                return Rejected<MintedToken>("device_secret_mismatch");
 
             if (!device.IsActive)
                 return Rejected<MintedToken>("device_revoked");
 
-            if (!hasher.Verify(deviceSecret, device.SecretHash))
-                return Rejected<MintedToken>("device_secret_mismatch");
-
-            var now = time.GetUtcNow();
+            var now = clock.GetUtcNow();
             var tokenId = Credentials.NewRecordId();
             var secret = Credentials.NewSecret();
 
@@ -198,8 +228,8 @@ public sealed class AuthService(
                 TokenId = tokenId,
                 TokenHash = hasher.Hash(secret),
                 DeviceId = device.DeviceId,
-                // Absolute, stored at issue time. A backward clock jump therefore cannot extend a
-                // token's life, because nothing recomputes this at check time.
+                // Absolute, stored at issue time, and read back against the monotonic clock — so
+                // neither recomputation nor a backward clock step can extend a token's life.
                 ExpiresAt = now + AccessTokenTtl,
             }, token);
 
@@ -225,17 +255,25 @@ public sealed class AuthService(
         return store.InTransactionAsync(async (tx, ctx) =>
         {
             var record = await tx.FindTokenAsync(tokenId, ctx);
+            var verified = hasher.VerifyOrDummy(secret, record?.TokenHash);
+
             if (record is null)
                 return Rejected<AuthenticatedPrincipal>("token_unknown");
+
+            if (!verified)
+                return Rejected<AuthenticatedPrincipal>("token_secret_mismatch");
 
             if (record.RevokedAt is not null)
                 return Rejected<AuthenticatedPrincipal>("token_revoked");
 
-            if (time.GetUtcNow() >= record.ExpiresAt)
+            var now = clock.GetUtcNow();
+            if (now >= record.ExpiresAt)
+            {
+                // Burned, not merely refused. Without this, a restart re-anchors the clock and an
+                // already-refused token could authenticate again on a host whose time moved back.
+                await tx.SaveTokenAsync(record with { RevokedAt = now }, ctx);
                 return Rejected<AuthenticatedPrincipal>("token_expired");
-
-            if (!hasher.Verify(secret, record.TokenHash))
-                return Rejected<AuthenticatedPrincipal>("token_secret_mismatch");
+            }
 
             var device = await tx.FindDeviceAsync(record.DeviceId, ctx);
             if (device is null || !device.IsActive)
@@ -269,7 +307,7 @@ public sealed class AuthService(
             if (device is null)
                 return Rejected<bool>("revoke_device_unknown");
 
-            var now = time.GetUtcNow();
+            var now = clock.GetUtcNow();
             if (device.IsActive)
                 await tx.SaveDeviceAsync(device with { RevokedAt = now }, token);
 
@@ -278,6 +316,20 @@ public sealed class AuthService(
             logger.LogInformation("Device self-revoked");
             return AuthResult<bool>.Ok(true);
         }, ct);
+    }
+
+    /// <summary>
+    /// Record that a credential has passed a deadline, then refuse it like any other failure.
+    ///
+    /// <para>The write is the point. A refusal that leaves the record untouched is only as durable
+    /// as the clock that produced it.</para>
+    /// </summary>
+    private async Task<AuthResult<RegisteredDevice>> BurnAsync(
+        IAuthStoreTransaction tx, EnrollmentRecord enrollment, DateTimeOffset now,
+        string reason, CancellationToken ct)
+    {
+        await tx.SaveEnrollmentAsync(enrollment with { RevokedAt = now }, ct);
+        return Rejected<RegisteredDevice>(reason);
     }
 
     /// <summary>

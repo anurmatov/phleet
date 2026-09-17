@@ -1,17 +1,18 @@
 namespace Fleet.Comms.Auth;
 
 /// <summary>
-/// The Slice-1 <see cref="IAuthStore"/> implementation: in-process, serialized, and durable only
-/// for the lifetime of the process.
+/// A <b>test fixture</b> <see cref="IAuthStore"/>: in-process, serialized, and durable only for the
+/// lifetime of the process. <see cref="SqliteAuthStore"/> is what the deployable runs.
 ///
-/// <para><b>This is a deliberate scope boundary, and it is a real limitation.</b> A restart loses
-/// device registrations, so the owner must re-enroll. It is here rather than a MySQL layer for one
-/// reason: the deployable that owns a database credential is settled by #277 D-4 and the schema
-/// that goes with it is not in this slice, so a persistence layer written now could not be
-/// exercised against a real engine in this repository's CI. Untested persistence that looks
-/// finished is worse than an honest in-process store with the port drawn correctly — the port is
-/// the part that has to be right, because it is what a durable implementation will have to
-/// satisfy.</para>
+/// <para><b>This must never be what a deployment gets.</b> A restart loses every device
+/// registration, and the owner's recovery from that is re-enrolling with a fresh code they do not
+/// have — which is why <c>CommsApp</c> refuses a blank store path at startup rather than quietly
+/// falling back here.</para>
+///
+/// <para>What it is genuinely good for is the two failure paths a real engine will not produce on
+/// demand: <see cref="FailEveryOperation"/> and <see cref="FailOnCommit"/> let the fail-closed and
+/// no-half-spent-state tests drive the real request path through an outage and a lost commit,
+/// rather than asserting them against a mock.</para>
 ///
 /// <para>The single semaphore is what makes <see cref="InTransactionAsync{T}"/> atomic. It is not
 /// a performance design and does not need to be: this boundary serves one owner with one device,

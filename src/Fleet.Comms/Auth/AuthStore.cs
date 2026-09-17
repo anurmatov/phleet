@@ -15,6 +15,16 @@ public sealed record EnrollmentRecord
 
     /// <summary>The device this code produced. Null until consumed.</summary>
     public string? DeviceId { get; init; }
+
+    /// <summary>
+    /// Set the first time this code is observed past a deadline — its issue TTL, or the end of the
+    /// registration recovery window. Persisting the observation is what makes expiry survive a
+    /// process restart, after which <see cref="MonotonicClock"/> necessarily re-anchors to whatever
+    /// the host clock then says.
+    /// </summary>
+    public DateTimeOffset? RevokedAt { get; init; }
+
+    public bool IsUsable => RevokedAt is null;
 }
 
 /// <summary>A registered device. The secret itself is never stored, only its salted hash.</summary>
@@ -44,7 +54,11 @@ public sealed record TokenRecord
     public required string TokenHash { get; init; }
     public required string DeviceId { get; init; }
 
-    /// <summary>Absolute, stored at issue time (§3). A backward clock jump therefore fails closed.</summary>
+    /// <summary>
+    /// Absolute, stored at issue time (§3). Compared against <see cref="MonotonicClock"/> rather
+    /// than raw wall time, and burned into <see cref="RevokedAt"/> the first time it is observed
+    /// past — so neither a backward clock step nor a restart can make it valid again.
+    /// </summary>
     public required DateTimeOffset ExpiresAt { get; init; }
 
     public DateTimeOffset? RevokedAt { get; init; }

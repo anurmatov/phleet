@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Threading.RateLimiting;
 using Fleet.Comms.Auth;
 using Fleet.Comms.Configuration;
 using Fleet.Comms.Routes;
@@ -5,8 +7,10 @@ using Fleet.Comms.Contracts;
 using Fleet.Protocol;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
 
 namespace Fleet.Comms;
 
@@ -26,15 +30,28 @@ public static class CommsApp
         // this keeps it. With Add, the last registration wins and the substitute is silently
         // discarded — which would have made every TTL assertion run against the system clock and
         // pass vacuously.
-        services.TryAddSingleton<IAuthStore, InMemoryAuthStore>();
+        services.TryAddSingleton<IAuthStore>(provider =>
+        {
+            // The deployable's default is the durable store. An in-process one is a test fixture
+            // and is registered by the test host ahead of this call; it must never be what a
+            // deployment gets by omission.
+            var path = provider.GetRequiredService<IOptions<CommsOptions>>().Value.AuthStorePath;
+            if (string.IsNullOrWhiteSpace(path))
+                throw new InvalidOperationException(
+                    $"{CommsOptions.SectionName}:{nameof(CommsOptions.AuthStorePath)} is required.");
+            return new SqliteAuthStore(path);
+        });
         services.TryAddSingleton<ISecretHasher, Argon2idSecretHasher>();
         services.TryAddSingleton(TimeProvider.System);
+        services.TryAddSingleton<MonotonicClock>();
         services.TryAddSingleton<AuthService>();
 
         // Registered so the stream slice can take it as a dependency without re-deciding the
         // 30-second bound. Nothing resolves it in a request pipeline yet — this slice ships the
         // component, not the socket.
         services.TryAddSingleton<CredentialRevalidator>();
+
+        services.AddRateLimiter(ConfigureAuthRateLimiter);
         return services;
     }
 
@@ -60,6 +77,8 @@ public static class CommsApp
         // so no exception message can reach a client (§13). Both statuses carry identical bytes —
         // the distinction is the status line, and a client must not parse the body to tell them
         // apart (§5.2).
+        //
+        // Outermost, so it also covers a fault inside the limiter below.
         app.Use(async (context, next) =>
         {
             try
@@ -76,8 +95,54 @@ public static class CommsApp
             }
         });
 
+        // Before the endpoints, and that placement is the whole point: a throttled request must be
+        // refused without spending an Argon2id evaluation or taking a store transaction.
+        app.UseRateLimiter();
+
         app.MapNorthApi();
         return app;
+    }
+
+    private static void ConfigureAuthRateLimiter(RateLimiterOptions options)
+    {
+        options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+        options.AddPolicy(AuthRateLimits.PolicyName, context =>
+            RateLimitPartition.GetFixedWindowLimiter(
+                // Per caller address. A deployment terminating TLS in front of this process is
+                // responsible for presenting the real client address; if every request arrives
+                // from one hop the partition collapses to a global bound, which is degraded but
+                // still bounded — the failure mode is a stricter limit, never an unbounded one.
+                context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = AuthRateLimits.PermitsPerWindow,
+                    Window = TimeSpan.FromSeconds(AuthRateLimits.WindowSeconds),
+                    QueueLimit = AuthRateLimits.QueueLimit,
+                    AutoReplenishment = true,
+                }));
+
+        options.OnRejected = async (context, cancellationToken) =>
+        {
+            var response = context.HttpContext.Response;
+            if (response.HasStarted)
+                return;
+
+            response.StatusCode = StatusCodes.Status429TooManyRequests;
+
+            // §5.4: seconds, as a non-negative integer, and never the HTTP-date form. Rounded up
+            // and floored at one — a retry the caller is told to make immediately is a retry that
+            // will be rejected again, which is the storm the contract warns about.
+            var seconds = context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter)
+                ? (int)Math.Ceiling(retryAfter.TotalSeconds)
+                : AuthRateLimits.WindowSeconds;
+            response.Headers.RetryAfter =
+                Math.Max(1, seconds).ToString(CultureInfo.InvariantCulture);
+
+            await response.WriteAsJsonAsync(
+                ErrorResponse.For(ProtocolErrorCode.RateLimited), FleetProtocolJson.Options,
+                cancellationToken: cancellationToken);
+        };
     }
 
     private static Task WriteFixedError(HttpContext context, int status)

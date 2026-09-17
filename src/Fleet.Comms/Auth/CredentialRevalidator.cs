@@ -25,6 +25,13 @@ public enum RevalidationOutcome
 /// explicitly forbids fabricating the Slice-4 stream or exposing a placeholder route — so there is
 /// no endpoint here, and nothing registers this in a request pipeline yet.</para>
 ///
+/// <para><b>The deadline is monotonic elapsed time, not wall time.</b> A connection records the
+/// <see cref="TimeProvider.GetTimestamp"/> value of its last check, and the next check is due once
+/// <see cref="TimeProvider.GetElapsedTime(long)"/> reaches the interval. Subtracting two
+/// wall-clock readings would let a backward clock step push the next check minutes into the future
+/// — silently turning the promised upper bound into no bound at all, on the one mechanism an
+/// operator is told to rely on when revoking a stolen device.</para>
+///
 /// <para>Time is injected and the due-check is pure, so the 30-second bound is asserted by
 /// arithmetic rather than by sleeping. A timer-based test of this would be slow and flaky, and
 /// would get muted rather than fixed.</para>
@@ -35,14 +42,19 @@ public sealed class CredentialRevalidator(AuthService auth, TimeProvider time)
     public static readonly TimeSpan Interval = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// Whether a connection last validated at <paramref name="lastValidatedAt"/> is due for another
-    /// check. Pure, so the bound is testable without a clock.
+    /// Whether a connection whose last check was <paramref name="sinceLastValidation"/> ago is due
+    /// for another. Pure, so the bound is testable without a clock.
     /// </summary>
-    public static bool IsDue(DateTimeOffset lastValidatedAt, DateTimeOffset now) =>
-        now - lastValidatedAt >= Interval;
+    public static bool IsDue(TimeSpan sinceLastValidation) => sinceLastValidation >= Interval;
+
+    /// <summary>
+    /// A monotonic stamp to record when a connection was last validated. The caller keeps this
+    /// opaque value, not a <see cref="DateTimeOffset"/>.
+    /// </summary>
+    public long Stamp() => time.GetTimestamp();
 
     /// <summary>Whether this connection is due for a check right now.</summary>
-    public bool IsDue(DateTimeOffset lastValidatedAt) => IsDue(lastValidatedAt, time.GetUtcNow());
+    public bool IsDue(long lastValidatedStamp) => IsDue(time.GetElapsedTime(lastValidatedStamp));
 
     /// <summary>
     /// Re-validate the credential a connection was opened with.

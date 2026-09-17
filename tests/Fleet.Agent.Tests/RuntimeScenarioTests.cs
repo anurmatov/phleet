@@ -47,32 +47,30 @@ public class RuntimeScenarioTests
         var delivered = await harness.PumpUntilTerminalAsync(cts.Token);
         MatrixCells.AssertDeliveryOrderIsLawful(delivered);
 
-        var ordered = delivered.OrderBy(e => e.Seq).Where(e => !MatrixCells.IsTypingHeartbeat(e)).ToList();
+        var ordered = delivered.Where(e => !MatrixCells.IsTypingHeartbeat(e)).ToList();
 
-        // The turn's start and its dispatch disposition are deterministic and come first.
-        Assert.Equal(
-            "turn.started → submission.accepted(ran)",
-            MatrixCells.ClientEvents(ordered.Take(2)));
+        // ⚠️ THREE publishers, three threads, and only one ordering fact among them. The
+        // disposition is published by the caller thread after Task.Run hands off the turn; the ack
+        // by ConversationIntake on the cancelling thread; the terminal by the turn's own catch
+        // block. None of those orderings is a contract, so this scenario pins none of them — it
+        // asserts the composition and the one causal fact that IS guaranteed.
+        Assert.Equal(4, ordered.Count);
+        var started = Assert.Single(ordered, e => e.Kind == ConversationEventKind.TurnStarted);
+        Assert.Single(ordered, e => e.Kind == ConversationEventKind.SubmissionAccepted
+                                    && e.PayloadAs<SubmissionAcceptedPayload>()!.Disposition == SubmissionDisposition.Ran);
+        var ack = Assert.Single(ordered, e => e.Kind == ConversationEventKind.ControlAck);
+        var canceled = Assert.Single(ordered, e => e.Kind == ConversationEventKind.TurnCanceled);
 
-        // ⚠️ `control.ack` and `turn.canceled` RACE, and the race is real rather than a harness
-        // artifact: the ack is published by ConversationIntake on the caller's thread after
-        // HandleCancel returns, while the terminal is published by the turn's own catch block on
-        // the turn's thread. Either can win, so the emission order between them is not a contract
-        // and this scenario deliberately does not pin one. A client must treat the ack as
-        // "the request was accepted", never as "the terminal has not arrived yet".
-        Assert.Equal(2, ordered.Count - 2);
-        Assert.Single(ordered, e => e.Kind == ConversationEventKind.ControlAck);
-        Assert.Single(ordered, e => e.Kind == ConversationEventKind.TurnCanceled);
+        // turn.started is published before Task.Run, so it always precedes its own turn's terminal.
+        Assert.True(canceled.Seq > started.Seq);
 
-        var canceled = ordered.Single(e => e.Kind == ConversationEventKind.TurnCanceled);
         Assert.Equal(TurnCancelReason.User, canceled.PayloadAs<TurnCanceledPayload>()!.Reason);
 
         // `accepted` means the REQUEST was accepted, not that the turn stopped. The authoritative
-        // outcome is the turn.canceled that follows, and it carries the reason the canceller
-        // recorded — not a default.
-        var ack = ordered.Single(e => e.Kind == ConversationEventKind.ControlAck).PayloadAs<ControlAckPayload>()!;
-        Assert.True(ack.Accepted);
-        Assert.True(ack.HadRunningTask);
+        // outcome is the turn.canceled, and HadRunningTask is what says whether one is coming.
+        var ackPayload = ack.PayloadAs<ControlAckPayload>()!;
+        Assert.True(ackPayload.Accepted);
+        Assert.True(ackPayload.HadRunningTask);
 
         AssertNoTerminalOutboxOverflow(harness);
     }

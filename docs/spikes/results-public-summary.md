@@ -25,6 +25,7 @@ the test suite. The headline findings:
 | `turn.started` is delivered before `submission.accepted` | New — found by this spike |
 | A terminal event can overtake queued progress | New — found by this spike |
 | Concurrent publishers interleave, so arrival order is not emission order even within one kind | New — found by this spike, on CI |
+| A dispatch disposition is not ordered against the turn it dispatched; `submission.accepted` can arrive after the `turn.final` that answers it | New — found by this spike, on CI |
 | `control.ack` and `turn.canceled` race; neither order is a contract | New — found by this spike |
 
 ### L3 capture

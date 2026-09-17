@@ -415,6 +415,10 @@ Two ordering facts a client must not assume away, both measured:
   ahead of the shared progress channel by design. What the runtime does guarantee is that `seq` is
   unique per conversation, each event is delivered at most once, and a turn's terminal is sequenced
   after that turn's own `turn.started`.
+- **`submission.accepted` is not a checkpoint.** The disposition is reported by the caller thread
+  *after* the turn has been dispatched, so it can arrive — and be sequenced — after the `turn.final`
+  that answers it. Correlate on `submissionId` and treat the disposition as metadata about dispatch,
+  never as a position in the stream.
 - **`control.ack` and `turn.canceled` race.** The ack is published by the intake on the caller's
   thread; the terminal by the turn's own catch block on the turn's thread. Read the ack as "the
   request was accepted", and use `ControlAckPayload.HadRunningTask` to decide whether a

@@ -48,43 +48,51 @@ internal static class MatrixCells
     }
 
     /// <summary>
-    /// <c>→</c>-joined <see cref="ConversationEventKind"/> wire values in EMISSION order (the
-    /// envelope's own <c>seq</c>), each optionally suffixed with a parenthesised payload
-    /// discriminator drawn from the enum's own wire values.
+    /// Separates the two independently-ordered groups of a <c>client events</c> cell.
+    /// </summary>
+    public const string GroupSeparator = " ‖ ";
+
+    /// <summary>
+    /// The cell is TWO independently-ordered groups, separated by <see cref="GroupSeparator"/>:
+    /// the dispatch dispositions, then the turn's own events. Within each group the order is
+    /// <c>→</c>-joined <see cref="ConversationEventKind"/> wire values with payload discriminators
+    /// drawn from the enum's own wire values.
     ///
-    /// <para><b>Measured correction to D6, which specified delivery order.</b> Delivery order is
-    /// not deterministic, for TWO independent reasons.</para>
+    /// <para><b>Why two groups, measured the hard way.</b> D6 specified delivery order; the first
+    /// revision weakened that to emission order (<c>seq</c>); CI then failed on <c>codex/S9</c>
+    /// with <c>turn.final</c> holding a LOWER <c>seq</c> than the <c>submission.accepted</c> for
+    /// the very submission it answered. The cause is structural: <c>StartTaskCore</c> publishes
+    /// <c>turn.started</c>, hands the turn to <c>Task.Run</c>, and only THEN reports the dispatch
+    /// disposition — so the turn thread can run to completion before the caller thread gets back
+    /// to <c>ReportDisposition</c>. <b>A disposition is not ordered against the turn it
+    /// dispatched</b>, and no amount of ordering by <c>seq</c> changes that.</para>
     ///
-    /// <para>First, the pump drains every terminal outbox BEFORE the shared progress channel on
-    /// every pass (D11), deliberately, so a terminal event can and does overtake still-queued
-    /// progress — a second turn's <c>turn.final</c> was observed arriving ahead of that same turn's
-    /// <c>turn.started</c>.</para>
+    /// <para>So the cell stops pretending there is one sequence. Each group IS internally ordered
+    /// and deterministic — dispositions by sequential dispatch, turn events by the single turn
+    /// thread, with <c>turn.started</c> ahead of them because it is published before
+    /// <c>Task.Run</c>. The cell teaches the hazard instead of encoding a race.</para>
     ///
-    /// <para>Second, and more fundamentally, <c>seq</c> assignment and the channel write are not
-    /// one atomic step, so CONCURRENT PUBLISHERS can interleave: the caller thread reporting a
-    /// disposition, the turn thread emitting progress and the typing loop can take <c>seq</c> 5 and
-    /// 6 and then write 6 before 5. Even within a single kind, arrival order is not emission order.</para>
-    ///
-    /// <para>Both are real client-visible hazards rather than harness artifacts, and <c>seq</c>
-    /// exists precisely to make them detectable. Pinning a cell to delivery order would have pinned
-    /// a race — so the cell records emission order, and each scenario separately asserts the
-    /// narrower guarantee the bus actually offers via
-    /// <see cref="AssertDeliveryOrderIsLawful"/>.</para>
-    ///
-    /// <para><b>The periodic typing heartbeat is excluded.</b> <c>turn.progress(typing)</c> is
-    /// emitted immediately at turn start and then every four seconds for as long as the turn runs
-    /// (<c>TaskManager.RunTypingLoopAsync</c>), so its multiplicity is a function of elapsed time,
-    /// not of provider behaviour. Including it would make every ordered cell a timing assertion.
-    /// Each scenario asserts it separately.</para>
+    /// <para><b>The periodic typing heartbeat is excluded entirely.</b> It is emitted at turn start
+    /// and then every four seconds for as long as the turn runs, so its multiplicity is a function
+    /// of elapsed time, not of provider behaviour. Each scenario asserts it separately.</para>
     /// </summary>
     public static string ClientEvents(IEnumerable<ConversationEvent> events)
     {
-        var rendered = events
-            .Where(e => !IsTypingHeartbeat(e))
-            .OrderBy(e => e.Seq)
+        var ordered = events.Where(e => !IsTypingHeartbeat(e)).OrderBy(e => e.Seq).ToList();
+
+        var dispositions = ordered
+            .Where(e => e.Kind == ConversationEventKind.SubmissionAccepted)
             .Select(RenderEvent)
             .ToList();
-        return rendered.Count == 0 ? Empty : string.Join(" → ", rendered);
+        var turnEvents = ordered
+            .Where(e => e.Kind != ConversationEventKind.SubmissionAccepted)
+            .Select(RenderEvent)
+            .ToList();
+
+        if (dispositions.Count == 0 && turnEvents.Count == 0) return Empty;
+        if (dispositions.Count == 0) return string.Join(" → ", turnEvents);
+        if (turnEvents.Count == 0) return string.Join(" → ", dispositions);
+        return string.Join(" → ", dispositions) + GroupSeparator + string.Join(" → ", turnEvents);
     }
 
     /// <summary>

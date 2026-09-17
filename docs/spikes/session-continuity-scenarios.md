@@ -18,7 +18,7 @@ table is the wrong home for a result that has no provider in it.
 
 | ID | Scenario | Layer | Driver | Observed |
 |---|---|---|---|---|
-| S7 | Cancel with a running task | L2 | `ScriptedExecutor` blocking until cancelled | `turn.started → submission.accepted(ran)`, then `control.ack(cancel)` and `turn.canceled(user)` **in either order** |
+| S7 | Cancel with a running task | L2 | `ScriptedExecutor` blocking until cancelled | exactly `turn.started`, `submission.accepted(ran)`, `control.ack(cancel)`, `turn.canceled(user)` — three publishers on three threads, so only `turn.started` before `turn.canceled` is ordered |
 | S8 | Cancel with no running task | L2 | none (intake only) | `control.ack(cancel)` with `hadRunningTask: false`, and **nothing follows** |
 | S11 | Turn leaves its loop without a terminal | L2 | `ScriptedExecutor` yielding nothing | `turn.final(completed)` — see the finding below |
 | S12 | Terminal exceeds the 128 KiB serialized cap | L2 | `ScriptedExecutor` with non-ASCII final text | `turn.outcome_unknown(terminal_event_oversize)` |
@@ -117,6 +117,23 @@ that pins a race rather than a contract looks like.
 > What the bus actually guarantees, and all this suite asserts: `seq` is unique per conversation,
 > each event is delivered at most once, and a turn's terminal is sequenced after that turn's own
 > `turn.started`. A client must not assume anything further about arrival order.
+
+### A dispatch disposition is not ordered against the turn it dispatched
+
+The sharpest form of the same problem, and CI caught it a second time after the first fix. `codex/S9`
+failed with `turn.final` holding a **lower** `seq` than the `submission.accepted` for the very
+submission it answered.
+
+`TaskManager.StartTaskCore` publishes `turn.started`, hands the turn to `Task.Run`, and only **then**
+calls `ReportDisposition`. A short turn runs to completion before the caller thread gets back to
+reporting its own dispatch, so the disposition is genuinely unordered against everything that turn
+emits — including its terminal.
+
+> **`submission.accepted` is not a checkpoint.** Correlate on `submissionId`; treat the disposition
+> as metadata about dispatch, never as a position in the stream.
+
+The capability matrix's `client events` cell reflects this directly: dispositions and turn events are
+two groups separated by ` ‖ `, and ordering across that separator is explicitly not claimed.
 
 ## What is deliberately not here
 

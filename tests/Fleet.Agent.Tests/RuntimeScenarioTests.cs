@@ -47,19 +47,21 @@ public class RuntimeScenarioTests
         var delivered = await harness.PumpUntilTerminalAsync(cts.Token);
         MatrixCells.AssertDeliveryOrderIsLawful(delivered);
 
-        var ordered = delivered.Where(e => !MatrixCells.IsTypingHeartbeat(e)).ToList();
+        // Not sorted, and deliberately not named as if it were: this scenario asserts
+        // composition, and the only ordering fact it checks is the causal one below.
+        var substantive = delivered.Where(e => !MatrixCells.IsTypingHeartbeat(e)).ToList();
 
         // ⚠️ THREE publishers, three threads, and only one ordering fact among them. The
         // disposition is published by the caller thread after Task.Run hands off the turn; the ack
         // by ConversationIntake on the cancelling thread; the terminal by the turn's own catch
         // block. None of those orderings is a contract, so this scenario pins none of them — it
         // asserts the composition and the one causal fact that IS guaranteed.
-        Assert.Equal(4, ordered.Count);
-        var started = Assert.Single(ordered, e => e.Kind == ConversationEventKind.TurnStarted);
-        Assert.Single(ordered, e => e.Kind == ConversationEventKind.SubmissionAccepted
+        Assert.Equal(4, substantive.Count);
+        var started = Assert.Single(substantive, e => e.Kind == ConversationEventKind.TurnStarted);
+        Assert.Single(substantive, e => e.Kind == ConversationEventKind.SubmissionAccepted
                                     && e.PayloadAs<SubmissionAcceptedPayload>()!.Disposition == SubmissionDisposition.Ran);
-        var ack = Assert.Single(ordered, e => e.Kind == ConversationEventKind.ControlAck);
-        var canceled = Assert.Single(ordered, e => e.Kind == ConversationEventKind.TurnCanceled);
+        var ack = Assert.Single(substantive, e => e.Kind == ConversationEventKind.ControlAck);
+        var canceled = Assert.Single(substantive, e => e.Kind == ConversationEventKind.TurnCanceled);
 
         // turn.started is published before Task.Run, so it always precedes its own turn's terminal.
         Assert.True(canceled.Seq > started.Seq);

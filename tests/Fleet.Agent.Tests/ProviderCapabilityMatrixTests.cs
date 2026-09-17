@@ -1,4 +1,5 @@
 using Fleet.Agent.Tests.Harness;
+using Fleet.Protocol;
 
 namespace Fleet.Agent.Tests;
 
@@ -14,6 +15,14 @@ public class ProviderCapabilityMatrixTests
 {
     private const string GoodRow =
         "| S1 | `system/init` | `result`(sig,final) | turn.started → turn.final(completed) | supported | fixture-only |  |";
+
+    /// <summary>
+    /// A row whose client-events cell carries BOTH groups, so the two-group grammar is exercised
+    /// rather than assumed. Every real row in the committed matrix has this shape.
+    /// </summary>
+    private const string TwoGroupRow =
+        "| S1 | `system/init` | `result`(sig,final) | submission.accepted(ran) → submission.accepted(queued)"
+        + " ‖ turn.started → turn.final(completed) | supported | fixture-only |  |";
 
     private static string Document(params string[] rows) =>
         """
@@ -133,6 +142,64 @@ public class ProviderCapabilityMatrixTests
         var broken = CapabilityMatrix.Parse(Document(reordered)).Row(CapabilityMatrix.Claude, "S1");
 
         Assert.NotEqual(correct.ClientEvents, broken.ClientEvents);
+    }
+
+    /// <summary>
+    /// Mode 3, on the two-group cell. Reordering WITHIN a group is a different value, because the
+    /// order inside a group is a real claim. This is the case the single-group row above could not
+    /// reach.
+    /// </summary>
+    [Fact]
+    public void ParserRejects_ReorderingWithinAGroupOfATwoGroupCell()
+    {
+        var reordered = TwoGroupRow.Replace(
+            "turn.started → turn.final(completed)",
+            "turn.final(completed) → turn.started");
+
+        var correct = CapabilityMatrix.Parse(Document(TwoGroupRow)).Row(CapabilityMatrix.Claude, "S1");
+        var broken = CapabilityMatrix.Parse(Document(reordered)).Row(CapabilityMatrix.Claude, "S1");
+
+        Assert.Contains(MatrixCells.GroupSeparator, correct.ClientEvents);
+        Assert.NotEqual(correct.ClientEvents, broken.ClientEvents);
+    }
+
+    /// <summary>
+    /// The other half of the two-group grammar, and the one that actually matters: ordering ACROSS
+    /// the separator is not a claim, so the renderer must normalise it away. A disposition emitted
+    /// AFTER the terminal it dispatched — which is what the runtime really does — still renders in
+    /// the first group, so the cell is stable while the race is not.
+    ///
+    /// <para>Without this, the grammar's central promise is only documented, never demonstrated.</para>
+    /// </summary>
+    [Fact]
+    public void ClientEventsCell_NormalisesTheDispositionRaceAcrossTheSeparator()
+    {
+        var identity = new ConversationIdentity
+        {
+            PrincipalId = "p", Role = PrincipalRole.Owner, ChannelId = "example-adapter",
+            ConversationId = "c_1", SubmissionId = "s_1", Attempt = 1, TurnId = "t_1",
+        };
+
+        ConversationEvent At(long seq, string kind, object payload) =>
+            ConversationEvent.Create(kind, identity, $"e{seq}", seq, DateTimeOffset.UnixEpoch, payload);
+
+        // seq order: turn.started, turn.final, THEN the disposition — the observed production
+        // ordering, because ReportDisposition runs after Task.Run has handed off the turn.
+        var raced = new[]
+        {
+            At(1, ConversationEventKind.TurnStarted, new TurnStartedPayload()),
+            At(2, ConversationEventKind.TurnFinal, new TurnFinalPayload
+            {
+                Text = "", Completion = TurnCompletion.Completed, IsPartial = false,
+                Truncated = false, MergedSubmissionIds = [],
+            }),
+            At(3, ConversationEventKind.SubmissionAccepted,
+               new SubmissionAcceptedPayload { Disposition = SubmissionDisposition.Ran }),
+        };
+
+        Assert.Equal(
+            "submission.accepted(ran) ‖ turn.started → turn.final(completed)",
+            MatrixCells.ClientEvents(raced));
     }
 
     /// <summary>Mode 4 — a malformed <c>verified</c> evidence cell.</summary>

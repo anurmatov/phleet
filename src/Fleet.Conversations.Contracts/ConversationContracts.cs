@@ -2,29 +2,14 @@ using Fleet.Protocol;
 
 namespace Fleet.Conversations.Contracts;
 
-/// <summary>What the agent decided to do with a command it was handed (#276 §6).</summary>
-/// <remarks>
-/// <para><see cref="QueueFull"/> and <see cref="Dropped"/> are dispositions on a submission that is
-/// ALREADY DURABLE, not errors. Reporting either as an HTTP failure would tell a client that a
-/// committed submission had failed, and a client that retried would create a second one.</para>
-/// </remarks>
-public enum SubmissionDisposition
-{
-    /// <summary>A turn started for it immediately.</summary>
-    Ran,
-
-    /// <summary>Merged into a turn already running; it has no turn of its own.</summary>
-    Injected,
-
-    /// <summary>Accepted and waiting behind a running turn. Its turn starts later, same attempt.</summary>
-    Queued,
-
-    /// <summary>Refused for want of queue capacity. Terminal on arrival; no turn ever starts.</summary>
-    QueueFull,
-
-    /// <summary>Discarded by the agent's dispatch. Terminal on arrival; no turn ever starts.</summary>
-    Dropped,
-}
+// SubmissionDisposition is NOT redefined here. Fleet.Protocol already owns it as a wire enum
+// governed by the append-only rule, and a second copy in this assembly would be a second thing to
+// keep in step — with the drift showing up as a value that serializes correctly and means something
+// else. `using Fleet.Protocol;` above brings it in.
+//
+// QueueFull and Dropped are dispositions on a submission that is ALREADY DURABLE, not errors:
+// reporting either as an HTTP failure would tell a client a committed submission had failed, and a
+// client that retried would create a second one.
 
 /// <summary>Lifecycle state of a submission as the store records it (#276 §6).</summary>
 public enum SubmissionState
@@ -84,6 +69,30 @@ public sealed record AcceptSubmissionRequest
     public required string ExternalSubmissionId { get; init; }
     public required string PayloadFingerprint { get; init; }
     public string? IdempotencyKey { get; init; }
+
+    /// <summary>
+    /// <c>submission.create</c> or <c>submission.steer</c> — the command this submission dispatches
+    /// as.
+    /// </summary>
+    /// <remarks>
+    /// There is no second route and no second code path for a steer: inject-versus-queue is decided
+    /// by the agent's ordinary dispatch, and the client learns which happened from the disposition.
+    /// </remarks>
+    public required string CommandKind { get; init; }
+
+    /// <summary>
+    /// The serialized command envelope, written to the command outbox IN THIS TRANSACTION.
+    /// </summary>
+    /// <remarks>
+    /// <para>Carries the server-derived <c>principalId</c>, never a caller-supplied binding token:
+    /// under device authentication the server has already authenticated the caller, so putting a
+    /// shared secret into a durable broker queue would add a credential to a new surface and buy
+    /// nothing.</para>
+    /// <para>It carries no <c>attemptId</c>. Publishing one before anyone owns it would hand a
+    /// redelivery an identifier another process is mid-way through using; the claim returns it,
+    /// which is where ownership actually transfers.</para>
+    /// </remarks>
+    public required string CommandPayloadJson { get; init; }
 }
 
 /// <summary>Which of #276 §7's four accept outcomes occurred.</summary>
@@ -260,10 +269,40 @@ public sealed record StartTurnResult
     public required bool Replayed { get; init; }
 }
 
+/// <summary>
+/// An event the caller wants appended, WITHOUT a seq.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Deliberately not a <see cref="ConversationEvent"/>. That envelope carries a required
+/// <c>Seq</c> whose own documentation says it is assigned at publish — but under the durable
+/// design <b>seq is allocated at durable append and does not exist before the row commits</b>.
+/// A caller handing in a full envelope would have to invent a number the store then ignores and
+/// replaces, and the invented one is exactly what would leak onto the wire if anyone ever read it
+/// back from the request instead of the result.
+/// </para>
+/// <para>
+/// The envelope is rebuilt on the way out, with the allocated seq.
+/// </para>
+/// </remarks>
+public sealed record EventDescriptor
+{
+    public required string Kind { get; init; }
+
+    /// <summary>Receivers dedupe on this; an append is idempotent on it.</summary>
+    public required string EventId { get; init; }
+
+    /// <summary>
+    /// Serialized payload, already restricted to the protocol allowlist. The store adds no field to
+    /// any payload and never inspects it beyond storing it.
+    /// </summary>
+    public string? PayloadJson { get; init; }
+}
+
 public sealed record CommitTerminalRequest
 {
     public required string AttemptId { get; init; }
-    public required ConversationEvent TerminalEvent { get; init; }
+    public required EventDescriptor TerminalEvent { get; init; }
     public IReadOnlyList<string>? MergedSubmissionIds { get; init; }
     public required string Epoch { get; init; }
     public required ulong Ordinal { get; init; }
@@ -293,7 +332,7 @@ public sealed record AppendBatchRequest
 
 public sealed record StagedEvent
 {
-    public required ConversationEvent Event { get; init; }
+    public required EventDescriptor Event { get; init; }
     public required ulong Ordinal { get; init; }
     public string? SubmissionId { get; init; }
     public string? AttemptId { get; init; }

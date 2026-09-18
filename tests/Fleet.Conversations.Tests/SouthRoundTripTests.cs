@@ -272,16 +272,34 @@ public sealed class SouthRoundTripTests(
         // only thing that resolves the attempt.
         Assert.NotEqual(0u, await broker.DepthAsync(Queue));
 
+        // The REAL maintenance loop resolves it, not a hand-driven Reconciler.
+        //
+        // ⚠️ A bare ScanOnceAsync here abandons nothing, and reads as a broken consumer rather than
+        // as a mis-driven test. The scan's grace check measures the gap since the service last
+        // stamped `service_health`, and the only thing that stamps it is this loop's tick. Nothing
+        // in this suite had ever stamped it, so the gap was "since the migration ran", every scan
+        // held off inside its grace, and the assertion below failed on an empty collection. That is
+        // exactly the shape Reconciler's own remarks warn about: a grace period that passes unit
+        // tests which set the stamp by hand, and never fires in a deployment.
         var timings = FastTimings();
-        var reconciler = new Reconciler(
-            mysql.ConnectionString, timings, NullLogger<Reconciler>.Instance);
 
-        await Task.Delay(timings.LeaseDuration + timings.ReconcilerScanInterval
-            + timings.ReconcilerGraceAfterRecovery + TimeSpan.FromSeconds(2));
+        using var maintenance = new ConversationMaintenanceService(
+            new Reconciler(mysql.ConnectionString, timings, _loggers.CreateLogger<Reconciler>()),
+            new GarbageCollector(mysql.ConnectionString, timings, NullLogger<GarbageCollector>.Instance),
+            timings,
+            _loggers.CreateLogger<ConversationMaintenanceService>());
 
-        await reconciler.ScanOnceAsync(CancellationToken.None);
+        // Its first tick sees a long silence and deliberately holds off — production behaviour after
+        // a restart — so the loop has to run, not tick once.
+        await maintenance.StartAsync(CancellationToken.None);
 
-        var events = await ReadAsync(conversation);
+        var events = await WaitForKindAsync(
+            conversation, ConversationEventKind.TurnOutcomeUnknown,
+            timeout: timings.LeaseDuration + timings.ReconcilerScanInterval
+                + timings.ReconcilerGraceAfterRecovery + TimeSpan.FromSeconds(20));
+
+        await maintenance.StopAsync(CancellationToken.None);
+
         var unknown = events.Where(e => e.Kind == ConversationEventKind.TurnOutcomeUnknown).ToList();
 
         Assert.Single(unknown);
@@ -360,7 +378,7 @@ public sealed class SouthRoundTripTests(
         Assert.Equal(2, events.Count(e => e.Kind == ConversationEventKind.SubmissionAccepted));
 
         var childState = await mysql.ScalarRowAsync(
-            $"SELECT state FROM submissions WHERE external_id = '{second}'");
+            $"SELECT state FROM submissions WHERE external_ref = '{second}'");
         Assert.Equal("terminal", childState);
 
         // Nothing was abandoned: the child was answered, so it must not be reported as unknown.
@@ -388,7 +406,7 @@ public sealed class SouthRoundTripTests(
         await WaitForQueueDrainAsync();
 
         var state = await mysql.ScalarRowAsync(
-            $"SELECT state FROM submissions WHERE external_id = '{submission}'");
+            $"SELECT state FROM submissions WHERE external_ref = '{submission}'");
         Assert.Equal("terminal", state);
 
         var events = await ReadAsync(conversation);

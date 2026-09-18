@@ -79,8 +79,8 @@ public sealed class ConversationSouthRegistrationTests
     // ── AC5: disabled is byte-identical ──────────────────────────────────────
 
     /// <summary>
-    /// With no <c>SouthBaseUrl</c>, NOTHING is registered. Not the adapter, not the consumer, not the
-    /// heartbeat, not an HTTP client, not even the counters.
+    /// With no <c>SouthBearerToken</c>, NOTHING is registered. Not the adapter, not the consumer,
+    /// not the heartbeat, not an HTTP client, not even the counters.
     /// </summary>
     /// <remarks>
     /// This is the whole blast-radius argument. An agent that has not enabled the feature must be
@@ -89,20 +89,65 @@ public sealed class ConversationSouthRegistrationTests
     /// a code path that can be entered by a configuration change nobody reviewed.
     /// </remarks>
     [Fact]
-    public void WithNoSouthBaseUrlNothingIsRegistered()
+    public void WithNoSouthBearerTokenNothingIsRegistered()
     {
-        var services = Register(Config((nameof(ConversationsOptions.SouthBaseUrl), null)));
+        var services = Register(Config((nameof(ConversationsOptions.SouthBearerToken), null)));
 
         Assert.Empty(services);
     }
 
     /// <summary>A whitespace-only value is absent, not present-and-blank.</summary>
     [Fact]
-    public void AWhitespaceSouthBaseUrlIsTreatedAsAbsent()
+    public void AWhitespaceSouthBearerTokenIsTreatedAsAbsent()
     {
-        var services = Register(Config((nameof(ConversationsOptions.SouthBaseUrl), "   ")));
+        var services = Register(Config((nameof(ConversationsOptions.SouthBearerToken), "   ")));
 
         Assert.Empty(services);
+    }
+
+    /// <summary>
+    /// The DEFAULTED base URL does not enable anything on its own.
+    /// </summary>
+    /// <remarks>
+    /// The regression this pins: once <c>SouthBaseUrl</c> carries a working default it is always
+    /// set, so a gate keyed on it would enable the seam in every deployment — including every one
+    /// that never deployed the service. Supplying the URL explicitly and nothing else must still
+    /// leave the graph empty.
+    /// </remarks>
+    [Fact]
+    public void ADefaultedOrExplicitBaseUrlAloneEnablesNothing()
+    {
+        Assert.Empty(Register(Config((nameof(ConversationsOptions.SouthBaseUrl), ValidUrl))));
+        Assert.Empty(Register(Config((nameof(ConversationsOptions.SouthBaseUrl), null))));
+    }
+
+    /// <summary>
+    /// Enabled, the seam needs the bearer and nothing else — the address, identity and broker are
+    /// already there.
+    /// </summary>
+    /// <remarks>
+    /// This is the "zero per-agent configuration" claim, asserted rather than argued: an agent that
+    /// is provisioned normally (it has a <c>ShortName</c> and a broker) and is handed a bearer
+    /// reaches a fully registered seam without a base URL being set anywhere.
+    /// </remarks>
+    [Fact]
+    public void TheBearerAloneIsEnoughOnAnOrdinarilyProvisionedAgent()
+    {
+        var services = Register(Config(
+            (nameof(ConversationsOptions.SouthBearerToken), "a-token"),
+            (ShortNameKey, "example-agent"),
+            (BrokerHostKey, "broker.invalid")));
+
+        Assert.Contains(services, d => d.ServiceType == typeof(ConversationSouthConsumer));
+    }
+
+    /// <summary>The default is the service's own address, not a placeholder.</summary>
+    [Fact]
+    public void TheDefaultBaseUrlIsAnAbsoluteHttpUri()
+    {
+        Assert.True(Uri.TryCreate(ConversationsOptions.DefaultSouthBaseUrl, UriKind.Absolute, out var uri));
+        Assert.Equal(Uri.UriSchemeHttp, uri!.Scheme);
+        Assert.Equal(ConversationsOptions.DefaultSouthBaseUrl, new ConversationsOptions().SouthBaseUrl);
     }
 
     /// <summary>
@@ -112,7 +157,7 @@ public sealed class ConversationSouthRegistrationTests
     [Fact]
     public void TheDisabledGraphContainsNoneOfTheNewServiceTypes()
     {
-        var services = Register(Config((nameof(ConversationsOptions.SouthBaseUrl), null)));
+        var services = Register(Config((nameof(ConversationsOptions.SouthBearerToken), null)));
 
         foreach (var type in new[]
                  {
@@ -175,19 +220,20 @@ public sealed class ConversationSouthRegistrationTests
             && d.ImplementationType == typeof(ConversationSouthConsumer));
     }
 
-    // ── AC7: the six startup validations ─────────────────────────────────────
+    // ── AC7: the five startup validations ────────────────────────────────────
 
     /// <summary>
-    /// Validation 1 — a present <c>SouthBaseUrl</c> with any other required key missing or blank
-    /// fails startup, naming the key.
+    /// Validation 1 — an ENABLED seam with a borrowed value missing or blank fails startup, naming
+    /// the key.
     /// </summary>
     /// <remarks>
-    /// It must NOT silently degrade to disabled. An operator who configured half of it would
-    /// otherwise see a healthy process beside a queue nobody drains, which is the exact state #303
-    /// exists to end — and the one a "be lenient" reading of this branch would reintroduce.
+    /// It must NOT silently degrade to disabled. An operator who enabled it on an agent with no
+    /// short name or no broker would otherwise see a healthy process beside a queue nobody drains,
+    /// which is the exact state #303 exists to end — and the one a "be lenient" reading of this
+    /// branch would reintroduce. The bearer is not in this list because it is the gate: blank means
+    /// disabled, which the AC5 tests above cover.
     /// </remarks>
     [Theory]
-    [InlineData(nameof(ConversationsOptions.SouthBearerToken))]
     [InlineData("Agent:ShortName")]
     [InlineData("RabbitMq:Host")]
     public void AMissingRequiredKeyFailsStartupAndNamesTheKey(string key)
@@ -199,7 +245,6 @@ public sealed class ConversationSouthRegistrationTests
     }
 
     [Theory]
-    [InlineData(nameof(ConversationsOptions.SouthBearerToken))]
     [InlineData("Agent:ShortName")]
     [InlineData("RabbitMq:Host")]
     public void ABlankRequiredKeyFailsStartupToo(string key)

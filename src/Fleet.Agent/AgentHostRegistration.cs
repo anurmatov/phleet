@@ -174,12 +174,21 @@ public static class AgentHostRegistration
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The gate is <c>Conversations:SouthBaseUrl</c>, keyed off configuration in the same
+    /// The gate is <c>Conversations:SouthBearerToken</c>, keyed off configuration in the same
     /// conditional-registration shape the Telegram transport uses above. Absent, <b>nothing</b>
     /// here is constructed: no adapter, no consumer, no hosted service, no HTTP client. That is the
     /// whole blast-radius argument — a host that has not enabled the feature is byte-identical to
     /// one built before it existed, and <c>ConversationSouthRegistrationTests</c> asserts it by
     /// inspecting the registration graph rather than by reading this comment.
+    /// </para>
+    /// <para>
+    /// ⚠️ <b>It is the credential, not the address, precisely because the address has a default.</b>
+    /// Every other value this seam needs can be right without an operator saying anything — the URL
+    /// defaults to the service's container name, the identity is the agent's own <c>ShortName</c>,
+    /// the broker is the one it already holds — so gating on any of them would enable the feature in
+    /// every deployment, including the ones that never deployed the service. The bearer cannot be
+    /// defaulted or guessed, which makes its presence the only honest answer to "should this agent
+    /// talk to that service".
     /// </para>
     /// <para>
     /// Present but incomplete <b>fails startup</b>, with the offending key named. It must not
@@ -190,9 +199,9 @@ public static class AgentHostRegistration
     internal static void AddConversationSouthSeam(IServiceCollection services, IConfiguration configuration)
     {
         var section = configuration.GetSection(ConversationsOptions.Section);
-        var baseUrl = section[nameof(ConversationsOptions.SouthBaseUrl)];
+        var bearer = section[nameof(ConversationsOptions.SouthBearerToken)];
 
-        if (string.IsNullOrWhiteSpace(baseUrl))
+        if (string.IsNullOrWhiteSpace(bearer))
             return;
 
         var options = new ConversationsOptions();
@@ -229,18 +238,22 @@ public static class AgentHostRegistration
     }
 
     /// <summary>
-    /// The six startup validations (#303 Feature gate). Each throws, naming the offending key.
+    /// The five startup validations (#303 Feature gate). Each throws, naming the offending key.
     /// </summary>
     /// <remarks>
-    /// Two of them are about keys this section does NOT own. The seam borrows the agent's identity
-    /// and the agent's broker rather than restating either, so the thing that can be wrong is the
-    /// borrowed value — and a check is not a second field.
+    /// <para>
+    /// The bearer is not among them: it is the gate, so by the time this runs it is present by
+    /// definition. What is checked is everything that can be wrong once the feature is ON.
+    /// </para>
+    /// <para>
+    /// Two of the five are about keys this section does NOT own. The seam borrows the agent's
+    /// identity and the agent's broker rather than restating either, so the thing that can be wrong
+    /// is the borrowed value — and a check is not a second field.
+    /// </para>
     /// </remarks>
     internal static void ValidateConversationsOptions(
         ConversationsOptions options, string? shortName = null, string? brokerHost = null)
     {
-        Required(options.SouthBearerToken, nameof(ConversationsOptions.SouthBearerToken));
-
         // Absolute AND http(s). "Absolute" alone is not enough: `Uri.TryCreate` accepts
         // `south:8082` as a URI whose scheme is "south", and on a Unix host it accepts a bare path
         // as a file URI. Both would satisfy an absoluteness check, reach `HttpClient.BaseAddress`,
@@ -250,7 +263,8 @@ public static class AgentHostRegistration
         {
             throw new InvalidOperationException(
                 $"{ConversationsOptions.Section}:{nameof(ConversationsOptions.SouthBaseUrl)} must be an "
-                + "absolute http or https URI.");
+                + $"absolute http or https URI. It defaults to {ConversationsOptions.DefaultSouthBaseUrl}, "
+                + "so this is a value someone set — or cleared.");
         }
 
         // The agent's OWN short name, against the SAME pattern the service enforces on its side.
@@ -265,7 +279,7 @@ public static class AgentHostRegistration
             throw new InvalidOperationException(
                 $"{AgentOptions.Section}:{nameof(AgentOptions.ShortName)} must match "
                 + $"{ConversationsOptions.AgentNamePattern} when "
-                + $"{ConversationsOptions.Section}:{nameof(ConversationsOptions.SouthBaseUrl)} is set. "
+                + $"{ConversationsOptions.Section}:{nameof(ConversationsOptions.SouthBearerToken)} is set. "
                 + "It is this agent's queue segment on the broker, not a display name.");
         }
 
@@ -276,7 +290,7 @@ public static class AgentHostRegistration
         {
             throw new InvalidOperationException(
                 $"{RabbitMqOptions.Section}:{nameof(RabbitMqOptions.Host)} is required when "
-                + $"{ConversationsOptions.Section}:{nameof(ConversationsOptions.SouthBaseUrl)} is set. "
+                + $"{ConversationsOptions.Section}:{nameof(ConversationsOptions.SouthBearerToken)} is set. "
                 + "The inbound queue is consumed on the connection the agent already holds.");
         }
 
@@ -304,17 +318,6 @@ public static class AgentHostRegistration
                 $"{ConversationsOptions.Section}:{nameof(ConversationsOptions.Prefetch)} must be at least 2. "
                 + "A delivery is not acknowledged until its terminal commits, so a prefetch of one stops a "
                 + "second submission ever being delivered while the first turn runs.");
-        }
-
-        static void Required(string value, string key)
-        {
-            if (string.IsNullOrWhiteSpace(value))
-            {
-                throw new InvalidOperationException(
-                    $"{ConversationsOptions.Section}:{key} is required when "
-                    + $"{ConversationsOptions.Section}:{nameof(ConversationsOptions.SouthBaseUrl)} is set. "
-                    + "Half a configuration would leave a healthy process beside a queue nobody drains.");
-            }
         }
     }
 }

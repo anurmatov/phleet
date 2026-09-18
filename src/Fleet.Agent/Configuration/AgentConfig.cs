@@ -150,9 +150,16 @@ public sealed class ClientChannelOptions
 /// </summary>
 /// <remarks>
 /// <para>
-/// <see cref="SouthBaseUrl"/> is the ENABLING key. Absent, the agent registers no consumer, no
+/// <see cref="SouthBearerToken"/> is the ENABLING key. Absent, the agent registers no consumer, no
 /// hosted service and no HTTP client, and every existing path is byte-identical to an agent that
 /// never heard of this feature.
+/// </para>
+/// <para>
+/// <b>It is the gate because it is the one value that cannot be defaulted.</b> The address has a
+/// working default, the identity is the agent's own <c>ShortName</c> and the broker is the one it
+/// already holds — so everything else here can be right without anyone saying anything, and gating
+/// on any of them would turn the seam on in a deployment that never deployed the service. A
+/// credential can only come from a deployment that did.
 /// </para>
 /// <para>
 /// Present but incomplete is a STARTUP FAILURE, never a silent degrade to disabled. An operator who
@@ -160,8 +167,8 @@ public sealed class ClientChannelOptions
 /// is the exact state #303 exists to end.
 /// </para>
 /// <para>
-/// ⚠️ <see cref="SouthBearerToken"/> and <see cref="BrokerConnectionString"/> are credentials. They
-/// are never logged, never echoed and never included in a counter label (MUST NOT 19).
+/// ⚠️ <see cref="SouthBearerToken"/> is a credential. It is never logged, never echoed and never
+/// included in a counter label (MUST NOT 19).
 /// </para>
 /// </remarks>
 public sealed class ConversationsOptions
@@ -184,10 +191,35 @@ public sealed class ConversationsOptions
     /// </remarks>
     public const string AgentNamePattern = "^[A-Za-z0-9_-]{1,128}$";
 
-    /// <summary>Base URL of the south listener. Absent disables the whole feature.</summary>
-    public string SouthBaseUrl { get; set; } = "";
+    /// <summary>
+    /// Where the conversation service listens, on the network the agent is already on.
+    /// </summary>
+    /// <remarks>
+    /// Defaulted so an ordinary deployment sets nothing. The service's container name and south port
+    /// are fixed by the same compose file that deploys it, so an operator who changed neither has
+    /// nothing to say here — and a key every provisioned agent must be given is a key some agent
+    /// will eventually be given wrongly.
+    /// <para>
+    /// ⚠️ <b>This is NOT the enabling key.</b> It has a default, so it is always set, and gating on
+    /// it would turn the seam on in every deployment — including ones that never deployed the
+    /// service. <see cref="SouthBearerToken"/> is the gate.
+    /// </para>
+    /// </remarks>
+    public string SouthBaseUrl { get; set; } = DefaultSouthBaseUrl;
 
-    /// <summary>Bearer credential for the south listener. Required when enabled.</summary>
+    /// <summary>The conversation service's address inside its own compose network.</summary>
+    public const string DefaultSouthBaseUrl = "http://fleet-comms:8082";
+
+    /// <summary>
+    /// Bearer credential for the south listener. <b>Absent disables the whole feature.</b>
+    /// </summary>
+    /// <remarks>
+    /// The enabling key, and the only one an agent must be given. That is not a convenience: a
+    /// credential is the one value that cannot be defaulted, cannot be guessed, and can only come
+    /// from a deployment that actually runs the service — so its presence is exactly the question
+    /// "should this agent talk to that service", and its absence is byte-identical to an agent built
+    /// before the feature existed.
+    /// </remarks>
     public string SouthBearerToken { get; set; } = "";
 
     /// <summary>

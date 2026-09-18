@@ -42,6 +42,18 @@ internal sealed class SouthTestHost : IAsyncDisposable
     /// <summary>A client carrying NO credential. Every authorised call goes through the helpers.</summary>
     public HttpClient Client { get; }
 
+    /// <summary>
+    /// A fresh handler onto the same in-process listener.
+    /// </summary>
+    /// <remarks>
+    /// The agent's typed south client owns its own <see cref="HttpClient"/> — it sets a base address
+    /// and an Authorization header — so it needs a handler rather than a configured client. Handing
+    /// it this one is what lets the round-trip suite exercise the agent against the REAL listener,
+    /// bearer check included, instead of against a stub that would agree with whatever the agent
+    /// sent.
+    /// </remarks>
+    public HttpMessageHandler CreateHandler() => _app.GetTestServer().CreateHandler();
+
     public static async Task<SouthTestHost> StartAsync(IConversationStore store)
     {
         var builder = WebApplication.CreateBuilder();

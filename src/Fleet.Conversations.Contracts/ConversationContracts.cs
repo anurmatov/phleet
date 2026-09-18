@@ -11,6 +11,37 @@ namespace Fleet.Conversations.Contracts;
 // reporting either as an HTTP failure would tell a client a committed submission had failed, and a
 // client that retried would create a second one.
 
+/// <summary>
+/// Lease timings both sides of the south seam have to agree on.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The agent cannot read the service's configured lease at runtime — there is no endpoint that
+/// reports it, and adding one would make a config value a network dependency. So the bound lives
+/// HERE, in the one assembly both sides already reference, rather than as a literal duplicated on
+/// each side. A duplicated literal drifts silently, and the symptom of the drift is
+/// <c>attempt_abandoned</c> on healthy turns, which reads as a store fault rather than as a
+/// configuration error.
+/// </para>
+/// <para>
+/// ⚠️ An operator who lowers the SERVICE-side lease below twice the agent's heartbeat re-opens the
+/// same failure through a door the agent cannot see. That is documented in
+/// <c>docs/comms-deployment.md</c> rather than guarded, because nothing the agent can read would
+/// reveal it.
+/// </para>
+/// </remarks>
+public static class ConversationLeaseDefaults
+{
+    /// <summary>How long an attempt's lease is good for without a heartbeat.</summary>
+    public static readonly TimeSpan LeaseDuration = TimeSpan.FromSeconds(120);
+
+    /// <summary>
+    /// The largest heartbeat interval that still gives an owner room to renew: half the lease, so a
+    /// single lost renewal is survivable.
+    /// </summary>
+    public static readonly TimeSpan MaxHeartbeatInterval = TimeSpan.FromTicks(LeaseDuration.Ticks / 2);
+}
+
 /// <summary>Lifecycle state of a submission as the store records it (#276 §6).</summary>
 public enum SubmissionState
 {

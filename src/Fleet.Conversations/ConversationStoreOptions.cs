@@ -1,3 +1,5 @@
+using Fleet.Conversations.Contracts;
+
 namespace Fleet.Conversations;
 
 /// <summary>
@@ -8,8 +10,15 @@ namespace Fleet.Conversations;
 /// </remarks>
 public sealed class ConversationStoreOptions
 {
-    /// <summary>How long an attempt's lease is good for without a heartbeat.</summary>
-    public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromSeconds(120);
+    /// <summary>
+    /// How long an attempt's lease is good for without a heartbeat.
+    /// </summary>
+    /// <remarks>
+    /// Initialised from <see cref="ConversationLeaseDefaults.LeaseDuration"/> rather than from a
+    /// literal, because the agent validates its own heartbeat interval against that same constant
+    /// and two literals would drift.
+    /// </remarks>
+    public TimeSpan LeaseDuration { get; set; } = ConversationLeaseDefaults.LeaseDuration;
 
     /// <summary>How often the owner is expected to renew. Four renewals per lease.</summary>
     public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(30);

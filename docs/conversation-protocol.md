@@ -364,6 +364,70 @@ first-party adapter are two front doors to the same runtime and shared model con
 
 ---
 
+## The south adapter — where durable conversations join the seam
+
+The seam above is in-process. The durable half lives in the conversation service, and the agent
+reaches it through the **south adapter**: `ConversationSouthConsumer` drains the per-agent inbound
+queue, and `ConversationSouthAdapter` is the `IChannelAdapter` registered for the `client` channel.
+Together they close the loop a client submission travels.
+
+```
+north API → store (TX1a) → command outbox → broker
+          → ConversationSouthConsumer  (claim, disposition, dispatch)
+          → ConversationIntake → TaskManager → executor
+          → ConversationEventBus → pump → ConversationSouthAdapter
+          → ConversationSouthConsumer  (turn start, appends, terminal commit, ack)
+```
+
+**The split between the two is load-bearing, not organisational.** `ConversationEventPump` wraps
+every adapter call in a five-second timeout and swallows every exception, so an adapter can never
+fault a turn. That is right for delivery and wrong for durability: a bounded retry written inside
+`DeliverAsync` is cancelled mid-retry and its failure discarded, while the turn is counted as
+delivered. So the adapter **translates only** — no HTTP, no retry, no blocking, no ordinal — and the
+consumer owns every south call, all backoff, the terminal commit and the broker acknowledgement.
+
+Four properties are worth knowing before changing anything here:
+
+- **The ack follows the commit, never the other way round.** An ack-then-commit ordering loses a
+  turn's outcome permanently on a crash in the window and nothing detects it. Commit-then-ack can at
+  worst redeliver, and a redelivery meets a `done` claim and becomes a no-op.
+- **Ordinals are allocated at the send site, in the consumer.** The bus drains terminal outboxes
+  before the shared progress channel, so a terminal legitimately reaches the adapter ahead of
+  progress published earlier. Allocating when an event is created would give that terminal the higher
+  ordinal, transmit it first, and trip the store's fence with a reordering that was purely ours.
+  Every south call for one conversation goes through a single in-order sender.
+- **`submission.accepted` and `turn.started` are suppressed by the adapter.** Their endpoints already
+  write them, and append idempotency keys on `eventId` — so forwarding the runtime's copy writes a
+  second row rather than deduplicating.
+- **Terminal kinds go to `/turns:commit`, never `/events:append`.** Appending one would write the
+  event without closing the attempt, and the reconciler would later abandon an attempt that had
+  already answered.
+
+### The feature gate
+
+The whole seam is conditional on `Conversations__SouthBaseUrl`. Absent, nothing is registered — no
+adapter, no consumer, no hosted service, no HTTP client — and every existing path is byte-identical
+to an agent built before the feature existed. Present but incomplete **fails startup** with the
+offending key named, because an operator who configured half of it would otherwise see a healthy
+process beside a queue nobody drains.
+
+### Cancel is claimed and terminated, not executed
+
+`submission.cancel` arrives on the same queue as any other submission, with its own submission id and
+its own attempt. This slice does **not** execute it: the consumer claims the delivery, completes it
+with `dropped`, and acknowledges. Ignoring it is not an option — an unclaimed or undispositioned
+cancel leaves a held claim and a live lease, which the reconciler turns into
+`turn.outcome_unknown { attempt_abandoned }` against a client that is still waiting.
+
+**The user-visible consequence, stated plainly:** the north cancel route still returns `200` and the
+client receives `submission.accepted { dropped }` and **no `control.ack`**. Cancel execution — and
+the open question of what closes a cancel submission's attempt, given that `control.ack` is not one
+of the four terminal kinds — is a separate issue and must land before a client ships a cancel
+affordance. An envelope whose `kind` the consumer does not recognise takes the identical path, for
+the identical reason; requeuing it would be an infinite broker loop.
+
+---
+
 ## Constraints
 
 Things that must stay true; several encode defects that have already cost real outages.

@@ -1025,6 +1025,40 @@ Upgrade, `hello`, event frames, ping/pong, close codes.
 - A missing `pong` within 10 seconds closes with `4408`.
 - No client→server frame other than `pong` is accepted.
 
+### Slice 4a — The agent-side south adapter
+
+The half that makes the four slices above visible to a user: the agent consumes the per-agent
+inbound queue, claims the delivery, runs the turn through the existing runtime seam, appends the
+events and commits a terminal. Until it exists the queue has depth and no consumer, and every
+submission resolves as `turn.outcome_unknown { attempt_abandoned }` when its lease expires.
+
+- One full round trip: claimed, dispositioned, started, appended, committed — with strictly
+  increasing store-assigned `seq` and one identity on every event.
+- The same broker message delivered twice yields exactly one turn; the second claim is
+  `DuplicateDone`.
+- A turn longer than one lease period is not abandoned — heartbeats renew every owned attempt, the
+  queued ones included.
+- A consumer that stops between turn start and terminal commit leaves exactly one
+  `turn.outcome_unknown { attempt_abandoned }`, and the redelivery is a no-op rather than a second
+  turn.
+- Exactly one `submission.accepted` per submission: the disposition endpoint is its only producer,
+  and the runtime's own copy is dropped rather than forwarded.
+- With no `Conversations__SouthBaseUrl` the agent registers no consumer, declares nothing, binds
+  nothing, and behaves byte-identically to one built before the feature existed.
+
+**Two limitations a client author needs before building against this.**
+
+**Cancel is accepted and not executed.** `POST /v1/conversations/{id}:cancel` still returns `200`,
+and the submission still travels the outbox and the queue — but the agent claims it, completes it
+with `dropped`, and acknowledges. The client therefore sees `submission.accepted { dropped }` and
+**never a `control.ack`**, and a running turn is not stopped. §10's cancel semantics describe the
+intended end state, not what this slice does. A cancel affordance must not ship until cancel
+execution does; the open store-contract question behind it is that `control.ack` is not one of the
+four terminal kinds, so nothing in the current contract closes a cancel submission's attempt.
+
+**`turn.progress` and `turn.notice` are ephemeral and may be pruned.** Their absence at a seq is not
+a gap. Every other kind the runtime emits to a client is durable, `protocol.rejected` included.
+
 ### Slice 5 — Observability and redaction
 
 - Under a deliberately adversarial payload — text containing token-shaped and path-shaped values —

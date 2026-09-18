@@ -58,6 +58,20 @@ jobs:
           --health-timeout=5s
           --health-retries=20
 
+      # The south round trip (#303) needs a real broker for the same reason it needs a real
+      # database: the half being proven is that the loop CLOSES — publish, claim, disposition,
+      # commit, ack — and every one of those steps is a property of the infrastructure rather than
+      # of the code that calls it. RabbitMqFixture FAILS when this is absent; it never skips.
+      rabbitmq:
+        image: rabbitmq:4
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd="rabbitmq-diagnostics -q ping"
+          --health-interval=5s
+          --health-timeout=10s
+          --health-retries=20
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -90,6 +104,7 @@ jobs:
         env:
           FLEET_CONVERSATIONS_MIGRATION_CONNECTION: "Server=127.0.0.1;Port=3306;User ID=comms_ddl;Password=ci-ddl;AllowPublicKeyRetrieval=true;"
           FLEET_CONVERSATIONS_CONNECTION: "Server=127.0.0.1;Port=3306;User ID=comms_runtime;Password=ci-runtime;AllowPublicKeyRetrieval=true;"
+          FLEET_CONVERSATIONS_BROKER: "amqp://guest:guest@127.0.0.1:5672/"
         run: >
           dotnet test tests/Fleet.Conversations.Tests --configuration Release
           --logger "console;verbosity=normal"

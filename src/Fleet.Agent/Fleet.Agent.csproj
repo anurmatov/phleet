@@ -11,6 +11,16 @@
   <ItemGroup>
     <ProjectReference Include="..\Fleet.Shared\Fleet.Shared.csproj" />
     <ProjectReference Include="..\Fleet.Protocol\Fleet.Protocol.csproj" />
+    <!--
+      Contracts ONLY, never Fleet.Conversations (#303 D1, MUST NOT 14).
+
+      Fleet.Conversations carries the MySQL driver. Referencing it here would make "the agent holds
+      no database credential" decorative while every assertion in the suite still passed — the agent
+      would be one `new MySqlConversationStore(...)` away from the store it is supposed to reach only
+      through the south endpoints. Fleet.Conversations.Contracts is BCL + Fleet.Protocol only, and
+      ContractsDependencyTests keeps it that way.
+    -->
+    <ProjectReference Include="..\Fleet.Conversations.Contracts\Fleet.Conversations.Contracts.csproj" />
   </ItemGroup>
 
   <ItemGroup>

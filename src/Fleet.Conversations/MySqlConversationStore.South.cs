@@ -184,6 +184,26 @@ public sealed partial class MySqlConversationStore
     public async Task<ClaimDeliveryResult> ClaimDeliveryAsync(
         ClaimDeliveryRequest request, CancellationToken ct = default)
     {
+        var result = await ClaimDeliveryCoreAsync(request, ct);
+
+        // Tagged by OUTCOME only. `held_elsewhere` rising is a redelivery meeting a live claim, and
+        // `duplicate_done` rising is the guard working — a redelivered command that started no
+        // second turn. The message id is deliberately not a label: it is per-request, so it would be
+        // both a cardinality explosion and a durable record of who submitted what.
+        ConversationMetrics.ClaimOutcomes.Add(1, new KeyValuePair<string, object?>(
+            "outcome", result.Outcome switch
+            {
+                ClaimOutcome.Claimed => "claimed",
+                ClaimOutcome.DuplicateDone => "duplicate_done",
+                _ => "held_elsewhere",
+            }));
+
+        return result;
+    }
+
+    private async Task<ClaimDeliveryResult> ClaimDeliveryCoreAsync(
+        ClaimDeliveryRequest request, CancellationToken ct)
+    {
         var key = "inbound:" + request.MessageId;
 
         await using var connection = await OpenAsync(ct);

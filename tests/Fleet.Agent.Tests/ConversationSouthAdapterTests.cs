@@ -288,6 +288,75 @@ public sealed class ConversationSouthAdapterTests
         Assert.Equal(1, counters.TerminalDroppedCount);
     }
 
+    // ── the event id is a storage key ────────────────────────────────────────
+
+    /// <summary>
+    /// Every event id the bus mints is storable by the durable store.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>event_id</c> is <c>CHAR(26) ascii_bin</c> and it is the append's idempotency key, so the
+    /// adapter forwards it verbatim — minting a fresh one per call would make a retried append write
+    /// a second row instead of returning the first one's seq. A 32-character GUID is rejected by the
+    /// column outright, and the rejection surfaces as a raw <c>MySqlException</c> from
+    /// <c>/events:append</c> and <c>/turns:commit</c> while the disposition, which mints its id
+    /// server-side, succeeds beside it — so the symptom points at the store rather than at the id.
+    /// </para>
+    /// <para>
+    /// Asserted through the real publish path rather than on the minting method: what matters is the
+    /// id that reaches the adapter, which is the one that reaches the column.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task EveryEventIdTheBusMintsFitsTheStoresColumn()
+    {
+        var (adapter, handoff, _) = Build();
+
+        var registry = new ConversationRegistry();
+        var reference = new ConversationRef(
+            ConversationSouthAdapter.ClientChannel, ConversationId, "p_1");
+        var runtimeKey = registry.Resolve(reference);
+
+        var bus = new ConversationEventBus(
+            registry, new ConversationEventCounters(), NullLogger<ConversationEventBus>.Instance);
+
+        var identity = new ConversationIdentity
+        {
+            PrincipalId = "p_1",
+            Role = PrincipalRole.Owner,
+            ChannelId = ConversationSouthAdapter.ClientChannel,
+            ConversationId = ConversationId,
+            SubmissionId = "s_1",
+            Attempt = 1,
+        };
+
+        for (var i = 0; i < 20; i++)
+        {
+            Assert.True(bus.Publish(
+                runtimeKey, ConversationEventKind.TurnProgress, identity, new TurnStartedPayload()));
+        }
+
+        var pump = new ConversationEventPump(
+            bus, registry, new ConversationEventCounters(), [adapter],
+            NullLogger<ConversationEventPump>.Instance);
+
+        await pump.DrainOnceAsync(CancellationToken.None);
+
+        var reader = handoff.Reader(ConversationId);
+        var seen = 0;
+
+        while (reader.TryRead(out var item))
+        {
+            seen++;
+            Assert.True(
+                Ulid.IsValid(item.Event.EventId),
+                $"event id '{item.Event.EventId}' ({item.Event.EventId.Length} chars) "
+                + "does not fit the store's CHAR(26) ascii_bin column");
+        }
+
+        Assert.Equal(20, seen);
+    }
+
     // ── AC12's structural half (MUST NOT 9) ──────────────────────────────────
 
     /// <summary>

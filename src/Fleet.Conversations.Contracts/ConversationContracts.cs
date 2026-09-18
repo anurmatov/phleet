@@ -381,6 +381,19 @@ public sealed record StoredEvent
     public string? PayloadJson { get; init; }
     public required bool IsTerminal { get; init; }
     public required EventRetentionClass RetentionClass { get; init; }
+
+    /// <summary>
+    /// The submission this event is about, when it is about one.
+    /// </summary>
+    /// <remarks>
+    /// Needed to rebuild the protocol envelope on the way out: <c>ConversationIdentity</c> carries
+    /// it and a catch-up response is the same envelope a stream frame is. Null only for an event
+    /// that belongs to the conversation rather than to a submission.
+    /// </remarks>
+    public string? SubmissionId { get; init; }
+
+    /// <summary>The attempt this event was emitted under, when it was emitted under one.</summary>
+    public string? AttemptId { get; init; }
 }
 
 public sealed record AckCursorRequest

@@ -145,7 +145,7 @@ public static class NorthEndpoints
     /// access log and in a crash report, and this boundary has no code path that reads one from
     /// there (§3.7, MUST NOT 2).</para>
     /// </summary>
-    private static async Task<AuthenticatedPrincipal?> AuthenticateAsync(
+    internal static async Task<AuthenticatedPrincipal?> AuthenticateAsync(
         HttpContext http, AuthService auth, CancellationToken ct)
     {
         var header = http.Request.Headers.Authorization.ToString();
@@ -167,6 +167,9 @@ public static class NorthEndpoints
     /// `500 internal`. §5.2 tells a client that 500 means "the server is broken, report this",
     /// which is precisely the wrong instruction for a request the client got wrong.</para>
     /// </summary>
+    internal static Task<T?> ReadBodyAsync<T>(HttpContext http, CancellationToken ct) where T : class =>
+        ReadAsync<T>(http, ct);
+
     private static async Task<T?> ReadAsync<T>(HttpContext http, CancellationToken ct) where T : class
     {
         if (!http.Request.HasJsonContentType())

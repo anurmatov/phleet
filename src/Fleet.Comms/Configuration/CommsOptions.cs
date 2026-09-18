@@ -212,6 +212,26 @@ public static class AuthRateLimits
 /// configuration — a client that asked the server and got a different answer than the document
 /// states would have no way to tell which one to believe.</para>
 /// </summary>
+public static class ConversationRateLimits
+{
+    /// <summary>The named policy the conversation routes and the stream upgrade opt into.</summary>
+    public const string PolicyName = "conversation";
+
+    /// <summary>
+    /// Requests admitted per partition per window.
+    /// </summary>
+    /// <remarks>
+    /// Larger than the auth budget because these routes are the ordinary working surface — a client
+    /// catching up after a reconnect issues a page request per 200 events — and because they do not
+    /// spend an Argon2id evaluation per call the way the auth routes do.
+    /// </remarks>
+    public const int PermitsPerWindow = 300;
+
+    public const int WindowSeconds = 60;
+
+    public const int QueueLimit = 0;
+}
+
 public static class CommsLimits
 {
     /// <summary>§5.1 catch-up default page size.</summary>

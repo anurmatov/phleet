@@ -427,7 +427,8 @@ public sealed partial class MySqlConversationStore : IConversationStore
 
         await using (var command = Command(
             """
-            SELECT seq, event_id, kind, emitted_at, payload_json, is_terminal, retention_class
+            SELECT seq, event_id, kind, emitted_at, payload_json, is_terminal, retention_class,
+                   submission_id, attempt_id
             FROM conversation_events
             WHERE conversation_id = @conv AND seq >= @from
             ORDER BY seq
@@ -452,6 +453,8 @@ public sealed partial class MySqlConversationStore : IConversationStore
                     PayloadJson = reader.IsDBNull(4) ? null : reader.GetString(4),
                     IsTerminal = reader.GetBoolean(5),
                     RetentionClass = ParseRetention(reader.GetString(6)),
+                    SubmissionId = reader.IsDBNull(7) ? null : reader.GetString(7),
+                    AttemptId = reader.IsDBNull(8) ? null : reader.GetString(8),
                 });
             }
         }

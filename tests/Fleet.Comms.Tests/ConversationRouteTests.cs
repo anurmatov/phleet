@@ -1,6 +1,8 @@
 using System.Net;
+using System.Net.Http.Json;
 using System.Net.Http.Headers;
 using System.Text;
+using Fleet.Comms.Configuration;
 using Fleet.Comms.Contracts;
 using Fleet.Comms.Routes;
 using Fleet.Conversations.Contracts;
@@ -440,6 +442,68 @@ public class ConversationRouteTests
             $"/v1/conversations/{store.ConversationId}/stream?clientInstanceId=inst_a1&access_token={token}"));
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    // ── AC16a: budgets are per credential, not per address ───────────────────
+
+    /// <summary>
+    /// Two devices arriving from the same address have INDEPENDENT budgets on the conversation
+    /// routes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every request in this test comes from the same in-process peer, which is the situation a
+    /// household NAT, a corporate egress or a proxy that does not forward produces. Partitioning on
+    /// the address there means one client's catch-up storm throttles the other's — and catch-up
+    /// after a reconnect is exactly when a client issues a burst.
+    /// </para>
+    /// <para>
+    /// Driven by actually exhausting a budget rather than by inspecting the partition key, because
+    /// the key is an implementation detail and the independence is the contract.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task Two_devices_at_one_address_do_not_share_a_conversation_budget()
+    {
+        var store = new FakeConversationStore();
+        await using var host = await NorthTestHost.StartAsync(conversations: store);
+
+        var first = await AuthorizeAsync(host);
+
+        // A second device for a second principal. One principal may hold one device, so a second
+        // device means a second principal — which is also the only shape this deployment can
+        // produce.
+        var secondCode = await host.IssueEnrollmentCodeAsync("p_second");
+        var registration = await host.RegisterAsync(secondCode);
+        var device = await registration.Content.ReadFromJsonAsync<NorthTestHost.RegisterDeviceBody>(
+            FleetProtocolJson.Options);
+        var minted = await host.TokenAsync(device!.DeviceId, device.DeviceSecret);
+        var second = (await minted.Content.ReadFromJsonAsync<NorthTestHost.TokenBody>(
+            FleetProtocolJson.Options))!.AccessToken;
+
+        // Spend the first device's whole window.
+        HttpStatusCode last = HttpStatusCode.OK;
+        for (var i = 0; i <= ConversationRateLimits.PermitsPerWindow; i++)
+        {
+            var response = await host.Client.SendAsync(
+                Get($"/v1/conversations/{store.ConversationId}/events?afterSeq=0", first));
+            last = response.StatusCode;
+            if (last == HttpStatusCode.TooManyRequests) break;
+        }
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, last);
+
+        // The second device, from the same address, is unaffected.
+        //
+        // Asserted as "not throttled" rather than as `200`: one principal may hold one device, so a
+        // second device is necessarily a second principal — and a second principal reading the
+        // first's conversation is a `404` by design. What matters here is that the request reached
+        // the handler at all, which is the thing a shared budget would have prevented.
+        var other = await host.Client.SendAsync(
+            Get($"/v1/conversations/{store.ConversationId}/events?afterSeq=0", second));
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, other.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, other.StatusCode);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

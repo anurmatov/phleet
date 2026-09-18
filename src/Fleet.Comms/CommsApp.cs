@@ -115,6 +115,53 @@ public static class CommsApp
 
         builder.Services.AddNorthBoundary();
 
+        // The background sweeps and the outbox drain, registered only when the feature is
+        // configured. Read straight from configuration because options are not resolvable until
+        // after Build(), and a hosted service has to be registered before it.
+        //
+        // ⚠️ Two DISTINCT types, deliberately. `AddHostedService` registers through
+        // `TryAddEnumerable`, which dedupes on (ServiceType, ImplementationType) — so two
+        // registrations of one type through differently-written factories silently keep only the
+        // first, with no exception and no log line.
+        var conversationSection = builder.Configuration.GetSection(CommsOptions.SectionName);
+        var conversationConnection =
+            conversationSection[nameof(CommsOptions.ConversationConnectionString)];
+        var brokerConnection = conversationSection[nameof(CommsOptions.BrokerConnectionString)];
+        var agentName = conversationSection[nameof(CommsOptions.AgentName)];
+
+        if (!string.IsNullOrWhiteSpace(conversationConnection))
+        {
+            builder.Services.AddHostedService(provider => new ConversationMaintenanceService(
+                new Reconciler(
+                    conversationConnection,
+                    provider.GetRequiredService<IOptions<ConversationStoreOptions>>().Value,
+                    provider.GetRequiredService<ILogger<Reconciler>>()),
+                new GarbageCollector(
+                    conversationConnection,
+                    provider.GetRequiredService<IOptions<ConversationStoreOptions>>().Value,
+                    provider.GetRequiredService<ILogger<GarbageCollector>>()),
+                provider.GetRequiredService<IOptions<ConversationStoreOptions>>().Value,
+                provider.GetRequiredService<ILogger<ConversationMaintenanceService>>()));
+
+            // The drain needs a broker. Without one the outboxes still accumulate correctly and the
+            // client is unaffected — its submission is already durable — so a missing broker is a
+            // logged degradation rather than a refusal to start.
+            if (!string.IsNullOrWhiteSpace(brokerConnection) && !string.IsNullOrWhiteSpace(agentName))
+            {
+                builder.Services.AddHostedService(provider => new OutboxDrainService(
+                    new RabbitMqOutboxTransport(
+                        brokerConnection, ConversationBroker.CommandExchange,
+                        provider.GetRequiredService<ILogger<OutboxDrainService>>()),
+                    new RabbitMqOutboxTransport(
+                        brokerConnection, ConversationBroker.EventExchange,
+                        provider.GetRequiredService<ILogger<OutboxDrainService>>()),
+                    conversationConnection,
+                    agentName,
+                    provider.GetRequiredService<IOptions<ConversationStoreOptions>>().Value,
+                    provider.GetRequiredService<ILogger<OutboxDrainService>>()));
+            }
+        }
+
         var app = builder.Build();
 
         // Resolve the store NOW, during construction.

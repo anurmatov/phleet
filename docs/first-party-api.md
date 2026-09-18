@@ -1043,12 +1043,10 @@ submission resolves as `turn.outcome_unknown { attempt_abandoned }` when its lea
   turn.
 - Exactly one `submission.accepted` per submission: the disposition endpoint is its only producer,
   and the runtime's own copy is dropped rather than forwarded.
-- With no `Conversations__SouthBearerToken` the agent registers no consumer, declares nothing, binds
-  nothing, and behaves byte-identically to one built before the feature existed. The bearer is the
-  gate because it is the only value that cannot be defaulted: the base URL defaults to the service's
-  container address, the queue segment is the agent's existing `Agent:ShortName`, and the inbound
-  queue is consumed on the broker connection it already holds — so an enabled agent needs the bearer
-  and nothing else.
+- With no `Conversations__SouthBaseUrl` the agent registers no consumer, declares nothing, binds
+  nothing, and behaves byte-identically to one built before the feature existed. Enabled, it adds
+  one more setting — the bearer — and nothing else: the queue segment is the agent's existing
+  `Agent:ShortName` and the inbound queue is consumed on the broker connection it already holds.
 
 **Two limitations a client author needs before building against this.**
 

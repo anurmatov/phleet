@@ -415,29 +415,21 @@ Five properties are worth knowing before changing anything here:
 
 ### The feature gate
 
-The whole seam is conditional on `Conversations__SouthBearerToken`. Absent, nothing is registered —
-no adapter, no consumer, no hosted service, no HTTP client — and every existing path is
-byte-identical to an agent built before the feature existed. Present but incomplete **fails startup**
-with the offending key named, because an operator who enabled it on an agent with no short name or no
-broker would otherwise see a healthy process beside a queue nobody drains.
+The whole seam is conditional on `Conversations__SouthBaseUrl`. Absent, nothing is registered — no
+adapter, no consumer, no hosted service, no HTTP client — and every existing path is byte-identical
+to an agent built before the feature existed. Present but incomplete **fails startup** with the
+offending key named, because an operator who configured half of it would otherwise see a healthy
+process beside a queue nobody drains.
 
-**The gate is the credential, and that is not arbitrary.** Everything else this seam needs can be
-right without anyone saying anything: `Conversations__SouthBaseUrl` defaults to the service's own
-container address, the queue segment is the agent's existing `Agent:ShortName`, and the inbound queue
-is consumed on the connection the agent already holds (`RabbitMq:Host`). A gate keyed on any of those
-would therefore be satisfied in *every* deployment, including the ones that never deployed the
-service — which is precisely the byte-identical-when-absent guarantee this paragraph makes. A bearer
-cannot be defaulted or guessed; it can only come from a deployment that runs the service, so its
-presence is the only honest answer to "should this agent talk to that service". It is the one value a
-provisioned agent must be given, and it is injected the way any other auto-granted credential is.
-
-The section therefore holds the bearer, the base URL, the heartbeat interval and the prefetch — and
-deliberately **no agent name and no broker connection string**. A second field for one identity is a
-value that can drift, and a second connection string to one broker is a credential rotation with two
-places to land and one to miss. Both borrowed values are *validated* at startup — `ShortName` against
-the pattern the service enforces, the broker host for presence — because a check is not a second
-field. The retry base, retry ceiling and request timeout are constants for the same reason: they were
-knobs with no operator who would turn them.
+The section holds two settings — the base URL and the bearer — plus the heartbeat interval and the
+prefetch. It deliberately holds **no agent name and no broker connection string**. The agent already
+has an identity on this broker (`Agent:ShortName`, which `GroupRelayService` builds
+`fleet.agent.{shortName}` from) and already holds a connection to it (`RabbitMq:Host`); a second
+field for one identity is a value that can drift, and a second connection string to one broker is a
+credential rotation with two places to land and one to miss. Both are *validated* at startup —
+`ShortName` against the pattern the service enforces, the broker host for presence — because a check
+is not a second field. The retry base, retry ceiling and request timeout are constants for the same
+reason: they were knobs with no operator who would turn them.
 
 ### Cancel is claimed and terminated, not executed
 

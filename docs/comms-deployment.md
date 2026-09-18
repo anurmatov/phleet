@@ -144,11 +144,9 @@ number with different schemas. Add a new forward-only script instead.
 
 ### The agent side, and the one relationship no process can check for you
 
-The consumer of the queue this service publishes to is the agent, and it should need **nothing said
-about it**. `Conversations__SouthBearerToken` is the enabling key and the only value an agent must be
-given; `Conversations__SouthBaseUrl` defaults to `http://fleet-comms:8082` — this service's container
-name and south port in the compose file that deploys it — so an ordinary deployment sets no address
-at all. Set it only if you renamed the service or moved the port. **It carries no agent name and no broker connection string** — the agent already has
+The consumer of the queue this service publishes to is the agent. Its section is deliberately small:
+`Conversations__SouthBaseUrl` is the enabling key and `Conversations__SouthBearerToken` is required
+once it is set. **It carries no agent name and no broker connection string** — the agent already has
 both, and a second copy of either is a value that can drift or a credential a rotation can miss. The
 queue segment is the agent's own `Agent__ShortName`, and the inbound queue is consumed on the
 RabbitMQ connection the agent already holds for the task, relay and orchestrator exchanges

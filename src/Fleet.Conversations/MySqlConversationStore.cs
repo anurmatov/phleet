@@ -427,7 +427,8 @@ public sealed partial class MySqlConversationStore : IConversationStore
 
         await using (var command = Command(
             """
-            SELECT seq, event_id, kind, emitted_at, payload_json, is_terminal, retention_class
+            SELECT seq, event_id, kind, emitted_at, payload_json, is_terminal, retention_class,
+                   submission_id, attempt_id
             FROM conversation_events
             WHERE conversation_id = @conv AND seq >= @from
             ORDER BY seq
@@ -452,6 +453,8 @@ public sealed partial class MySqlConversationStore : IConversationStore
                     PayloadJson = reader.IsDBNull(4) ? null : reader.GetString(4),
                     IsTerminal = reader.GetBoolean(5),
                     RetentionClass = ParseRetention(reader.GetString(6)),
+                    SubmissionId = reader.IsDBNull(7) ? null : reader.GetString(7),
+                    AttemptId = reader.IsDBNull(8) ? null : reader.GetString(8),
                 });
             }
         }
@@ -465,8 +468,17 @@ public sealed partial class MySqlConversationStore : IConversationStore
         {
             Gap = gap,
             Events = events,
+
+            // The cursor the CLIENT should send next. It is the last seq delivered, not next_seq:
+            // `afterSeq` means "processed up to and including", so handing back next_seq would skip
+            // whatever is appended between this read and the next one.
             NextAfterSeq = events.Count > 0 ? events[^1].Seq : request.AfterSeq,
             HasMore = hasMore,
+
+            // Both read from the conversation row inside THIS transaction, so they cannot disagree
+            // with the page they arrived with.
+            NextSeq = conversation.NextSeq,
+            RetainedFloorSeq = conversation.RetainedFloorSeq,
         };
     }
 

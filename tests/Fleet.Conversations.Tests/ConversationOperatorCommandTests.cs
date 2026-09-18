@@ -57,8 +57,13 @@ public sealed class ConversationOperatorCommandTests(MySqlFixture fixture) : IDi
         var first = await RunAsync("conversations", "migrate");
 
         Assert.Equal(0, first.Exit);
-        Assert.Contains($"applied version(s): {MigrationRunner.ExpectedVersion}", first.Stdout,
-            StringComparison.Ordinal);
+
+        // Every version this binary carries, in order — the command reports what it applied, and
+        // applying from empty applies all of them.
+        Assert.Contains(
+            "applied version(s): "
+            + string.Join(", ", MigrationRunner.Scripts.Select(script => script.Version)),
+            first.Stdout, StringComparison.Ordinal);
 
         var second = await RunAsync("conversations", "migrate");
 

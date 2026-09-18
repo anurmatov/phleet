@@ -2,6 +2,7 @@ using Fleet.Comms;
 using Fleet.Comms.Auth;
 using Fleet.Comms.Configuration;
 using Fleet.Conversations;
+using Fleet.Conversations.Contracts;
 using Microsoft.Extensions.Logging;
 using Fleet.Comms.Operations;
 using System.Runtime.InteropServices;
@@ -72,7 +73,24 @@ static async Task<int> RunServiceAsync(string[] args)
     var opsBuilder = WebApplication.CreateBuilder();
     opsBuilder.WebHost.UseSetting(WebHostDefaults.ServerUrlsKey, string.Empty);
     opsBuilder.WebHost.UseUrls(opsUrl);
-    var opsApp = CommsApp.BuildOpsApp(opsBuilder, northApp.Services.GetRequiredService<IAuthStore>());
+    // Readiness sees the conversation store only when the feature is enabled, so a disabled install
+    // probes exactly what it probed before — same transaction, same connections, same timing.
+    var conversationOptions = northApp.Services
+        .GetRequiredService<Microsoft.Extensions.Options.IOptions<CommsOptions>>().Value;
+
+    var opsApp = CommsApp.BuildOpsApp(
+        opsBuilder,
+        northApp.Services.GetRequiredService<IAuthStore>(),
+        conversationOptions.ConversationsEnabled
+            ? northApp.Services.GetRequiredService<IConversationStore>()
+            : null,
+
+        // The schema version is read through whichever credential is configured. The runtime account
+        // can read `schema_migrations` — it is a SELECT — and a deployment that keeps the DDL
+        // credential off the running container must still be able to report what schema it is on.
+        conversationOptions.ConversationsEnabled
+            ? conversationOptions.ConversationConnectionString
+            : null);
 
     // ── The south listener, only when the conversation feature is configured ─────────
     //
@@ -95,10 +113,11 @@ static async Task<int> RunServiceAsync(string[] args)
 
     if (options.ConversationsEnabled)
     {
-        var store = new MySqlConversationStore(
-            options.ConversationConnectionString,
-            new ConversationStoreOptions(),
-            northApp.Services.GetRequiredService<ILogger<MySqlConversationStore>>());
+        // The SAME instance the north routes use, resolved from the north app's container rather
+        // than constructed again here. Two stores would be two connection pools, two sets of
+        // options and two answers to "is the schema current?" — and the readiness probe would be
+        // reporting on whichever one it happened to hold.
+        var store = northApp.Services.GetRequiredService<IConversationStore>();
 
         var southBuilder = WebApplication.CreateBuilder();
         southBuilder.WebHost.UseSetting(WebHostDefaults.ServerUrlsKey, string.Empty);

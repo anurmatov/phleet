@@ -36,6 +36,15 @@
     a refusal rather than a silent divergence would be checking the wrong bytes.
   -->
   <ItemGroup>
+    <!--
+      The maintenance loop's tick is internal and takes `now` as a parameter, so its sequencing —
+      measure, arm, stamp, scan — is testable without waiting out a two-minute grace window. The
+      order of those steps is the mechanism, and it was wrong once already.
+    -->
+    <InternalsVisibleTo Include="Fleet.Conversations.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <EmbeddedResource Include="Migrations\*.sql" />
   </ItemGroup>
 

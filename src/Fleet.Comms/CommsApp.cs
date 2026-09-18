@@ -5,7 +5,9 @@ using Fleet.Comms.Auth;
 using Fleet.Comms.Configuration;
 using Fleet.Comms.Routes;
 using Fleet.Comms.Contracts;
+using Fleet.Conversations;
 using Fleet.Conversations.Contracts;
+using Microsoft.Extensions.Logging;
 using Fleet.Protocol;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -26,6 +28,12 @@ namespace Fleet.Comms;
 /// </summary>
 public static class CommsApp
 {
+    /// <summary>
+    /// Configuration sub-section holding the store's retention, lease and GC values — so the
+    /// environment key is <c>Comms__Conversations__DeliveryClaimRetention</c> and the rest.
+    /// </summary>
+    public const string ConversationStoreSection = "Conversations";
+
     /// <summary>Register everything the north boundary needs. No south service is registered here.</summary>
     public static IServiceCollection AddNorthBoundary(this IServiceCollection services)
     {
@@ -45,6 +53,30 @@ public static class CommsApp
                     "and has no default. Point it at a path on storage that survives a restart.");
             return new SqliteAuthStore(path);
         });
+        // The conversation store, registered LAZILY.
+        //
+        // A factory rather than an instance, so an install that has not enabled the feature never
+        // constructs it and never attempts a connection — which is the property that makes the
+        // disabled path byte-identical to the auth slice rather than merely quiet.
+        services.TryAddSingleton<IConversationStore>(provider =>
+        {
+            var options = provider.GetRequiredService<IOptions<CommsOptions>>().Value;
+
+            if (!options.ConversationsEnabled)
+            {
+                throw new InvalidOperationException(
+                    $"{CommsOptions.SectionName}:{nameof(CommsOptions.ConversationConnectionString)} "
+                    + "is not configured, so there is no conversation store to resolve. Reaching "
+                    + "this means a conversation route was mapped on an install that did not enable "
+                    + "the feature.");
+            }
+
+            return new MySqlConversationStore(
+                options.ConversationConnectionString,
+                provider.GetRequiredService<IOptions<ConversationStoreOptions>>().Value,
+                provider.GetRequiredService<ILogger<MySqlConversationStore>>());
+        });
+
         services.TryAddSingleton<ISecretHasher, Argon2idSecretHasher>();
         services.TryAddSingleton(TimeProvider.System);
         services.TryAddSingleton<MonotonicClock>();
@@ -72,7 +104,63 @@ public static class CommsApp
     {
         builder.Services.Configure<CommsOptions>(
             builder.Configuration.GetSection(CommsOptions.SectionName));
+
+        // Bound from configuration rather than defaulted in code. The retention, lease and
+        // garbage-collection values are operator settings — the claim retention in particular has to
+        // exceed the broker's redelivery horizon, which only the deployment knows — and a value that
+        // can only be changed by a rebuild is not an operator setting.
+        builder.Services.Configure<ConversationStoreOptions>(
+            builder.Configuration.GetSection(
+                $"{CommsOptions.SectionName}:{ConversationStoreSection}"));
+
         builder.Services.AddNorthBoundary();
+
+        // The background sweeps and the outbox drain, registered only when the feature is
+        // configured. Read straight from configuration because options are not resolvable until
+        // after Build(), and a hosted service has to be registered before it.
+        //
+        // ⚠️ Two DISTINCT types, deliberately. `AddHostedService` registers through
+        // `TryAddEnumerable`, which dedupes on (ServiceType, ImplementationType) — so two
+        // registrations of one type through differently-written factories silently keep only the
+        // first, with no exception and no log line.
+        var conversationSection = builder.Configuration.GetSection(CommsOptions.SectionName);
+        var conversationConnection =
+            conversationSection[nameof(CommsOptions.ConversationConnectionString)];
+        var brokerConnection = conversationSection[nameof(CommsOptions.BrokerConnectionString)];
+        var agentName = conversationSection[nameof(CommsOptions.AgentName)];
+
+        if (!string.IsNullOrWhiteSpace(conversationConnection))
+        {
+            builder.Services.AddHostedService(provider => new ConversationMaintenanceService(
+                new Reconciler(
+                    conversationConnection,
+                    provider.GetRequiredService<IOptions<ConversationStoreOptions>>().Value,
+                    provider.GetRequiredService<ILogger<Reconciler>>()),
+                new GarbageCollector(
+                    conversationConnection,
+                    provider.GetRequiredService<IOptions<ConversationStoreOptions>>().Value,
+                    provider.GetRequiredService<ILogger<GarbageCollector>>()),
+                provider.GetRequiredService<IOptions<ConversationStoreOptions>>().Value,
+                provider.GetRequiredService<ILogger<ConversationMaintenanceService>>()));
+
+            // The drain needs a broker. Without one the outboxes still accumulate correctly and the
+            // client is unaffected — its submission is already durable — so a missing broker is a
+            // logged degradation rather than a refusal to start.
+            if (!string.IsNullOrWhiteSpace(brokerConnection) && !string.IsNullOrWhiteSpace(agentName))
+            {
+                builder.Services.AddHostedService(provider => new OutboxDrainService(
+                    new RabbitMqOutboxTransport(
+                        brokerConnection, ConversationBroker.CommandExchange,
+                        provider.GetRequiredService<ILogger<OutboxDrainService>>()),
+                    new RabbitMqOutboxTransport(
+                        brokerConnection, ConversationBroker.EventExchange,
+                        provider.GetRequiredService<ILogger<OutboxDrainService>>()),
+                    conversationConnection,
+                    agentName,
+                    provider.GetRequiredService<IOptions<ConversationStoreOptions>>().Value,
+                    provider.GetRequiredService<ILogger<OutboxDrainService>>()));
+            }
+        }
 
         var app = builder.Build();
 
@@ -146,6 +234,21 @@ public static class CommsApp
         app.UseRateLimiter();
 
         app.MapNorthApi();
+
+        // The conversation surface, only when it is configured.
+        //
+        // An install that has not configured it is byte-identical to the one the auth slice ships:
+        // no conversation route is mapped, every conversation path is a 404 from the router rather
+        // than a handler that decided to refuse, no WebSocket middleware is in the pipeline, and no
+        // database connection is attempted. That is what makes this an opt-in feature rather than
+        // one that merely defaults to off.
+        if (app.Services.GetRequiredService<IOptions<CommsOptions>>().Value.ConversationsEnabled)
+        {
+            // Only reached on the enabled path, so a disabled install adds no middleware at all.
+            app.UseWebSockets();
+            app.MapConversationApi();
+        }
+
         return app;
     }
 
@@ -163,7 +266,9 @@ public static class CommsApp
     /// <para>The north application's addresses come from <c>ASPNETCORE_URLS</c> alone; this one's
     /// come from <see cref="CommsOptions.OpsUrl"/>. Neither inherits the other's.</para>
     /// </summary>
-    public static WebApplication BuildOpsApp(WebApplicationBuilder builder, IAuthStore store)
+    public static WebApplication BuildOpsApp(
+        WebApplicationBuilder builder, IAuthStore store,
+        IConversationStore? conversations = null, string? migrationStatusConnectionString = null)
     {
         builder.Services.AddSingleton(store);
         var app = builder.Build();
@@ -189,6 +294,50 @@ public static class CommsApp
             {
                 await authStore.InTransactionAsync(
                     (tx, token) => tx.CountActiveDevicesAsync("", token), ct);
+
+                // The conversation store too, when the feature is enabled — and the SCHEMA VERSION
+                // as well as reachability.
+                //
+                // A wrong credential or a database that is up but carrying the wrong schema would
+                // otherwise be reported ready, and every conversation route would then 503 while the
+                // probe said the service was healthy. An applied version AHEAD of this binary is as
+                // unhealthy as one behind it: that is the rollback-after-migration case, where the
+                // binary would write rows a newer schema wrote differently.
+                if (conversations is not null)
+                {
+                    try
+                    {
+                        await conversations.ReadAsync(new ReadConversationRequest
+                        {
+                            ConversationId = ReadinessProbeConversationId,
+                            AfterSeq = 0,
+                            Limit = 1,
+                            PrincipalId = ReadinessProbePrincipalId,
+                        }, ct);
+                    }
+                    catch (ConversationNotFoundException)
+                    {
+                        // The SUCCESSFUL outcome. The probe names no real conversation, so
+                        // not-found means the query reached the database, ran and answered — which
+                        // is the whole question. A transport or credential failure throws something
+                        // else and is caught below.
+                    }
+
+                    if (migrationStatusConnectionString is { Length: > 0 })
+                    {
+                        var schema = await new MigrationRunner(migrationStatusConnectionString)
+                            .GetStatusAsync(ct);
+
+                        if (!schema.Matches)
+                        {
+                            return Results.Json(
+                                new { status = "unhealthy", schema = schema.Describe() },
+                                FleetProtocolJson.Options,
+                                statusCode: StatusCodes.Status503ServiceUnavailable);
+                        }
+                    }
+                }
+
                 return Results.Json(new { status = "ready" }, FleetProtocolJson.Options);
             }
             catch (AuthStoreUnavailableException)
@@ -199,10 +348,27 @@ public static class CommsApp
                 return Results.Json(ErrorResponse.For(ProtocolErrorCode.Internal),
                     FleetProtocolJson.Options, statusCode: StatusCodes.Status503ServiceUnavailable);
             }
+            catch (Exception)
+            {
+                // The conversation database is unreachable, mid-failover, or answering with a
+                // rejected credential. Same fixed body: a readiness endpoint is not a debugging
+                // surface, and on a misconfigured deployment it is the one thing reachable before
+                // anything else works.
+                return Results.Json(ErrorResponse.For(ProtocolErrorCode.Internal),
+                    FleetProtocolJson.Options, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
         });
 
         return app;
     }
+
+    /// <summary>
+    /// Identifiers the readiness probe reads with. They belong to no principal and name no
+    /// conversation, so the probe is a real query that can only ever answer not-found.
+    /// </summary>
+    private const string ReadinessProbeConversationId = "00000000000000000000000000";
+
+    private const string ReadinessProbePrincipalId = "p_readiness_probe";
 
     /// <summary>
     /// Build the south application: the agent-facing store surface, on its own listener.
@@ -226,6 +392,28 @@ public static class CommsApp
     /// into an irreversible change, and the runtime account has no DDL grant to do it with.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// The conversation limiter's partition key: the hashed bearer when one is presented, and the
+    /// caller's address otherwise.
+    /// </summary>
+    /// <remarks>
+    /// The address fallback matters: an upgrade or a route call arriving with no credential at all
+    /// must not land in one shared "anonymous" partition, because that turns every unauthenticated
+    /// caller into a denial of service against every other one.
+    /// </remarks>
+    private static string ConversationPartitionKey(HttpContext context)
+    {
+        var header = context.Request.Headers.Authorization.ToString();
+
+        if (!header.StartsWith("Bearer ", StringComparison.Ordinal))
+            return $"addr:{context.Connection.RemoteIpAddress?.ToString() ?? "unknown"}";
+
+        var hash = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(header["Bearer ".Length..]));
+
+        return $"cred:{Convert.ToHexStringLower(hash)}";
+    }
+
     public static WebApplication BuildSouthApp(
         WebApplicationBuilder builder, IConversationStore store, CommsOptions options)
     {
@@ -244,6 +432,28 @@ public static class CommsApp
     private static void ConfigureAuthRateLimiter(RateLimiterOptions options)
     {
         options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+        // The conversation routes partition on the CREDENTIAL, not the address.
+        //
+        // Every one of them is authenticated, and two devices behind one forwarded address — a
+        // household NAT, a corporate egress, a reverse proxy that does not forward — would otherwise
+        // share a budget, so one client's catch-up storm would throttle the other's.
+        //
+        // The key is a hash of the presented bearer, never the bearer: a rate-limiter partition key
+        // reaches metrics and diagnostics, and a token there is a token in a log. It is also not
+        // validated at this point, because admission runs before the endpoint — which is the whole
+        // reason it is cheap. A caller inventing tokens therefore mints partitions, each still
+        // bounded, and every one of those requests then fails authentication at the route.
+        options.AddPolicy(ConversationRateLimits.PolicyName, context =>
+            RateLimitPartition.GetFixedWindowLimiter(
+                ConversationPartitionKey(context),
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = ConversationRateLimits.PermitsPerWindow,
+                    Window = TimeSpan.FromSeconds(ConversationRateLimits.WindowSeconds),
+                    QueueLimit = ConversationRateLimits.QueueLimit,
+                    AutoReplenishment = true,
+                }));
 
         options.AddPolicy(AuthRateLimits.PolicyName, context =>
             RateLimitPartition.GetFixedWindowLimiter(

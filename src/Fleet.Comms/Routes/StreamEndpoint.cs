@@ -130,11 +130,14 @@ public static class StreamEndpoint
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
         // Supersede before accepting, so the old socket is already closing while the new one opens.
+        //
+        // ⚠️ CANCEL ONLY — never dispose. The previous connection's own `using` owns that token
+        // source and is still reading it: disposing it here makes the older pump throw
+        // ObjectDisposedException out of its `finally`, which skips the close handshake entirely.
+        // The superseded socket then stayed OPEN, which is the opposite of what superseding means,
+        // and no other assertion in this repository would have noticed.
         if (Live.TryRemove(key, out var previous))
-        {
             await previous.CancelAsync();
-            previous.Dispose();
-        }
 
         Live[key] = lifetime;
 
@@ -272,7 +275,18 @@ public static class StreamEndpoint
         }
         finally
         {
-            await lifetime.CancelAsync();
+            // Defensive: the token source may already have been cancelled by a superseding
+            // connection, and the close handshake must run regardless. Losing it is how a socket
+            // stays open after the server has decided it should not.
+            try
+            {
+                await lifetime.CancelAsync();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Already torn down; nothing left to cancel.
+            }
+
             await CloseAsync(socket, closeCode, closeReason);
             await Task.WhenAll(reader, tail);
         }

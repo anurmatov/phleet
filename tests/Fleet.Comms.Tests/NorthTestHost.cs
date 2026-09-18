@@ -44,6 +44,15 @@ internal sealed class NorthTestHost : IAsyncDisposable
     /// <summary>The running app's services, so a test can inspect the real registration graph.</summary>
     public IServiceProvider Services => _app.Services;
 
+    /// <summary>
+    /// A WebSocket client against the same in-process server, for the stream tests.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="TestServer"/> speaks the real upgrade handshake, so the frames a test reads here
+    /// are the frames the endpoint wrote — not a shortcut around the socket.
+    /// </remarks>
+    public WebSocketClient WebSocketClient() => _app.GetTestServer().CreateWebSocketClient();
+
     public static async Task<NorthTestHost> StartAsync(
         ISecretHasher? hasher = null, IAuthStore? store = null, bool? trustForwardedHeaders = null,
         Fleet.Conversations.Contracts.IConversationStore? conversations = null)

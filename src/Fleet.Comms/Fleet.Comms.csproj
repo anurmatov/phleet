@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Fleet.Protocol\Fleet.Protocol.csproj" />
+    <ProjectReference Include="..\Fleet.Conversations\Fleet.Conversations.csproj" />
   </ItemGroup>
 
   <ItemGroup>

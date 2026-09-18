@@ -1,3 +1,4 @@
+using Fleet.Conversations;
 using Fleet.Comms.Auth;
 using Fleet.Comms.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -51,6 +52,8 @@ public static class OperatorCommands
                 ("store", "init") => await InitAsync(args, output, ct),
                 ("store", "verify") => await VerifyAsync(args, output, error, ct),
                 ("store", "backup") => await BackupAsync(args, output, ct),
+                ("conversations", "migrate") => await ConversationsMigrateAsync(output, error, ct),
+                ("conversations", "status") => await ConversationsStatusAsync(output, ct),
                 ("--help", _) or ("-h", _) or ("help", _) => Write(output, Usage, 0),
                 _ => Write(error, $"Unknown command: {string.Join(' ', args)}\n\n{Usage}", 2),
             };
@@ -353,6 +356,83 @@ public static class OperatorCommands
         if (index + 1 >= args.Length || args[index + 1].StartsWith('-'))
             throw new OperatorCommandException($"{name} needs a value.");
         return args[index + 1];
+    }
+
+
+    // ── conversations ───────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Applies the forward-only conversation migrations, using the DDL connection string.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the ONLY path that applies a migration. Starting the process never does: a service
+    /// that migrated on boot would turn a deployment mistake into an irreversible schema change and
+    /// remove the operator's chance to take a backup first.
+    /// </para>
+    /// <para>
+    /// It uses the separate DDL connection string, which the running service does not have. Run with
+    /// the runtime credential it fails at the database, because that account holds no DDL grants —
+    /// the intended outcome, not a misconfiguration to work around.
+    /// </para>
+    /// </remarks>
+    private static async Task<int> ConversationsMigrateAsync(
+        TextWriter output, TextWriter error, CancellationToken ct)
+    {
+        var options = CommsConfiguration.Resolve();
+
+        if (string.IsNullOrWhiteSpace(options.ConversationMigrationConnectionString))
+            throw new OperatorCommandException(
+                "Comms__ConversationMigrationConnectionString is not set.\n\n"
+                + "  Migrations use a SEPARATE DDL account from the one the service runs as. The\n"
+                + "  runtime account deliberately holds no DDL grants, so it cannot be used here.");
+
+        try
+        {
+            var applied = await new MigrationRunner(options.ConversationMigrationConnectionString)
+                .MigrateAsync(message => output.WriteLine(message), ct);
+
+            output.WriteLine(applied.Count == 0
+                ? "schema already up to date"
+                : $"applied version(s): {string.Join(", ", applied)}");
+
+            return 0;
+        }
+        catch (MigrationException e)
+        {
+            error.WriteLine(e.Message);
+            return 1;
+        }
+    }
+
+    /// <summary>
+    /// Reports the applied schema version, the version this binary expects, and whether they agree.
+    /// </summary>
+    /// <remarks>
+    /// An applied version AHEAD of the binary is as unhealthy as one behind it — that is the
+    /// rollback-after-migration case — so the two are reported distinguishably rather than both as
+    /// "mismatch".
+    /// </remarks>
+    private static async Task<int> ConversationsStatusAsync(TextWriter output, CancellationToken ct)
+    {
+        var options = CommsConfiguration.Resolve();
+
+        var connection = !string.IsNullOrWhiteSpace(options.ConversationMigrationConnectionString)
+            ? options.ConversationMigrationConnectionString
+            : options.ConversationConnectionString;
+
+        if (string.IsNullOrWhiteSpace(connection))
+            throw new OperatorCommandException(
+                "No conversation connection string is configured, so there is no schema to report on.");
+
+        var status = await new MigrationRunner(connection).GetStatusAsync(ct);
+
+        output.WriteLine($"applied:  {status.AppliedVersion?.ToString() ?? "none"}");
+        output.WriteLine($"expected: {status.ExpectedVersion}");
+        output.WriteLine($"matches:  {status.Matches}");
+        output.WriteLine(status.Describe());
+
+        return status.Matches ? 0 : 1;
     }
 
     private static int Write(TextWriter writer, string message, int exitCode)

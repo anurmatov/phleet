@@ -30,13 +30,28 @@ namespace Fleet.Agent.Tests;
 public sealed class ConversationSouthRegistrationTests
 {
     private const string ValidUrl = "http://south.invalid:8082";
-    private const string ValidBroker = "amqp://user:pass@broker.invalid:5672/";
+
+    /// <summary>The agent's own short name — the seam's identity, borrowed rather than restated.</summary>
+    private static readonly string ShortNameKey =
+        $"{AgentOptions.Section}:{nameof(AgentOptions.ShortName)}";
+
+    /// <summary>The broker the agent already talks to. No second connection string exists.</summary>
+    private static readonly string BrokerHostKey =
+        $"{RabbitMqOptions.Section}:{nameof(RabbitMqOptions.Host)}";
 
     private static IConfiguration Config(params (string Key, string? Value)[] pairs) =>
         new ConfigurationBuilder()
             .AddInMemoryCollection(pairs.Select(p =>
-                new KeyValuePair<string, string?>($"{ConversationsOptions.Section}:{p.Key}", p.Value)))
+                new KeyValuePair<string, string?>(Qualify(p.Key), p.Value)))
             .Build();
+
+    /// <summary>
+    /// Bare names belong to the <c>Conversations</c> section; anything already carrying a section
+    /// prefix is passed through, so a test can drive <c>Agent:ShortName</c> and <c>RabbitMq:Host</c>
+    /// through the same helper.
+    /// </summary>
+    private static string Qualify(string key) =>
+        key.Contains(':', StringComparison.Ordinal) ? key : $"{ConversationsOptions.Section}:{key}";
 
     private static IConfiguration FullyConfigured(params (string Key, string? Value)[] overrides)
     {
@@ -44,8 +59,8 @@ public sealed class ConversationSouthRegistrationTests
         {
             [nameof(ConversationsOptions.SouthBaseUrl)] = ValidUrl,
             [nameof(ConversationsOptions.SouthBearerToken)] = "a-token",
-            [nameof(ConversationsOptions.AgentName)] = "example-agent",
-            [nameof(ConversationsOptions.BrokerConnectionString)] = ValidBroker,
+            [ShortNameKey] = "example-agent",
+            [BrokerHostKey] = "broker.invalid",
         };
 
         foreach (var (key, value) in overrides)
@@ -160,7 +175,7 @@ public sealed class ConversationSouthRegistrationTests
             && d.ImplementationType == typeof(ConversationSouthConsumer));
     }
 
-    // ── AC7: the five startup validations ────────────────────────────────────
+    // ── AC7: the six startup validations ─────────────────────────────────────
 
     /// <summary>
     /// Validation 1 — a present <c>SouthBaseUrl</c> with any other required key missing or blank
@@ -173,27 +188,29 @@ public sealed class ConversationSouthRegistrationTests
     /// </remarks>
     [Theory]
     [InlineData(nameof(ConversationsOptions.SouthBearerToken))]
-    [InlineData(nameof(ConversationsOptions.AgentName))]
-    [InlineData(nameof(ConversationsOptions.BrokerConnectionString))]
+    [InlineData("Agent:ShortName")]
+    [InlineData("RabbitMq:Host")]
     public void AMissingRequiredKeyFailsStartupAndNamesTheKey(string key)
     {
         var error = Assert.Throws<InvalidOperationException>(
             () => Register(FullyConfigured((key, null))));
 
-        Assert.Contains(key, error.Message, StringComparison.Ordinal);
+        Assert.Contains(LeafOf(key), error.Message, StringComparison.Ordinal);
     }
 
     [Theory]
     [InlineData(nameof(ConversationsOptions.SouthBearerToken))]
-    [InlineData(nameof(ConversationsOptions.AgentName))]
-    [InlineData(nameof(ConversationsOptions.BrokerConnectionString))]
+    [InlineData("Agent:ShortName")]
+    [InlineData("RabbitMq:Host")]
     public void ABlankRequiredKeyFailsStartupToo(string key)
     {
         var error = Assert.Throws<InvalidOperationException>(
             () => Register(FullyConfigured((key, "   "))));
 
-        Assert.Contains(key, error.Message, StringComparison.Ordinal);
+        Assert.Contains(LeafOf(key), error.Message, StringComparison.Ordinal);
     }
+
+    private static string LeafOf(string key) => key.Split(':')[^1];
 
     /// <summary>Validation 2 — the base URL must be absolute.</summary>
     [Theory]
@@ -209,24 +226,26 @@ public sealed class ConversationSouthRegistrationTests
     }
 
     /// <summary>
-    /// Validation 3 — <c>AgentName</c> must match the pattern the SERVICE enforces on its side.
+    /// Validation 3 — the agent's own <c>ShortName</c> must match the pattern the SERVICE enforces.
     /// </summary>
     /// <remarks>
-    /// The name is both the routing key and a queue-name segment. A value the two sides read
-    /// differently means this agent binds and drains a queue nobody publishes to while the real one
-    /// grows — with no error anywhere, which is the worst shape a configuration fault can take.
+    /// It is both the routing key and a queue-name segment. A value the two sides read differently
+    /// means this agent binds and drains a queue nobody publishes to while the real one grows — with
+    /// no error anywhere, which is the worst shape a configuration fault can take. Checked here and
+    /// carried nowhere: the seam borrows the identity the agent already has rather than taking a
+    /// second field for it, which is the divergence this check is about.
     /// </remarks>
     [Theory]
     [InlineData("has space")]
     [InlineData("has.dot")]
     [InlineData("has/slash")]
     [InlineData("ünïcode")]
-    public void AnAgentNameOutsideThePatternFailsStartup(string value)
+    public void AShortNameOutsideThePatternFailsStartup(string value)
     {
         var error = Assert.Throws<InvalidOperationException>(
-            () => Register(FullyConfigured((nameof(ConversationsOptions.AgentName), value))));
+            () => Register(FullyConfigured((ShortNameKey, value))));
 
-        Assert.Contains(nameof(ConversationsOptions.AgentName), error.Message, StringComparison.Ordinal);
+        Assert.Contains(nameof(AgentOptions.ShortName), error.Message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -234,8 +253,8 @@ public sealed class ConversationSouthRegistrationTests
     [InlineData("agent-1")]
     [InlineData("agent_1")]
     [InlineData("A0")]
-    public void AnAgentNameInsideThePatternStarts(string value) =>
-        Register(FullyConfigured((nameof(ConversationsOptions.AgentName), value)));
+    public void AShortNameInsideThePatternStarts(string value) =>
+        Register(FullyConfigured((ShortNameKey, value)));
 
     /// <summary>Validation 4 — a non-positive heartbeat interval fails startup.</summary>
     [Theory]

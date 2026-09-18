@@ -104,11 +104,23 @@ public sealed class ConversationSouthConsumerTests
     {
         SouthBaseUrl = "http://south.invalid",
         SouthBearerToken = "token",
-        AgentName = "example-agent",
-        BrokerConnectionString = "amqp://broker.invalid",
-        RetryBaseDelay = TimeSpan.FromMilliseconds(1),
-        RetryMaxDelay = TimeSpan.FromMilliseconds(4),
     };
+
+    /// <summary>The agent's own identity — the seam borrows it rather than carrying its own.</summary>
+    private static IOptions<AgentOptions> AgentIdentity() =>
+        Microsoft.Extensions.Options.Options.Create(new AgentOptions
+        {
+            Name = "example-agent",
+            Role = "example",
+            WorkDir = "/tmp",
+            ShortName = "example-agent",
+        });
+
+    /// <summary>No connection: these tests never attach, they drive the drain loop directly.</summary>
+    private sealed class NoBrokerConnection : IAgentBrokerConnection
+    {
+        public IConnection? Connection => null;
+    }
 
     private static (ConversationSouthConsumer Consumer, ConversationSouthHandoff Handoff,
         ConversationSouthCounters Counters, ConversationOrdinalAllocator Allocator)
@@ -116,15 +128,20 @@ public sealed class ConversationSouthConsumerTests
     {
         var options = Microsoft.Extensions.Options.Options.Create(SouthOptions());
         var client = new ConversationSouthClient(
-            new HttpClient(south), options, NullLogger<ConversationSouthClient>.Instance);
+            new HttpClient(south), options, NullLogger<ConversationSouthClient>.Instance)
+        {
+            // The retry schedule is a constant in production; compressed here so an exhausted-retry
+            // test does not sit through 30 seconds of real backoff.
+            RetryScheduleOverride = TimeSpan.FromMilliseconds(1),
+        };
 
         var handoff = new ConversationSouthHandoff();
         var counters = new ConversationSouthCounters();
         var allocator = new ConversationOrdinalAllocator();
 
         var consumer = new ConversationSouthConsumer(
-            options, client, handoff, allocator, intake!, counters,
-            NullLogger<ConversationSouthConsumer>.Instance);
+            options, AgentIdentity(), new NoBrokerConnection(), client, handoff, allocator, intake!,
+            counters, NullLogger<ConversationSouthConsumer>.Instance);
 
         return (consumer, handoff, counters, allocator);
     }

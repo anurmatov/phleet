@@ -14,7 +14,7 @@ namespace Fleet.Agent.Services;
 /// Publishes directed messages to other agents and consumes messages routed to this agent via RabbitMQ direct exchange.
 /// Bridges the Telegram bot-to-bot gap where bots cannot see each other's messages.
 /// </summary>
-public sealed class GroupRelayService : IAsyncDisposable
+public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
 {
     private readonly AgentOptions _agentConfig;
     private readonly RabbitMqOptions _rabbitConfig;
@@ -52,6 +52,17 @@ public sealed class GroupRelayService : IAsyncDisposable
     }
 
     public bool IsEnabled => _rabbitConfig.Host.Length > 0;
+
+    /// <summary>
+    /// The agent's broker connection, for anything that needs a channel on it (<see
+    /// cref="IAgentBrokerConnection"/>).
+    /// </summary>
+    /// <remarks>
+    /// Exposed rather than duplicated. This class is where the agent's one connection to this broker
+    /// is made, so a second consumer of the same broker takes a channel here instead of carrying its
+    /// own connection string. Nothing outside closes it: its lifetime is this service's.
+    /// </remarks>
+    public IConnection? Connection => _connection;
 
     /// <summary>True once a consumer has been started. Used by the wiring-order tests.</summary>
     internal bool IsInitializedForTesting => _initialized;

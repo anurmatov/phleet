@@ -197,7 +197,16 @@ public static class AgentHostRegistration
 
         var options = new ConversationsOptions();
         section.Bind(options);
-        ValidateConversationsOptions(options);
+
+        ValidateConversationsOptions(
+            options,
+            shortName: configuration[$"{AgentOptions.Section}:{nameof(AgentOptions.ShortName)}"],
+            brokerHost: configuration[$"{RabbitMqOptions.Section}:{nameof(RabbitMqOptions.Host)}"]);
+
+        // The agent's ONE connection to this broker, exposed through the service that owns it. The
+        // conversation consumer takes a channel on it rather than carrying a second connection
+        // string — a credential that exists twice is one a rotation can miss.
+        services.AddSingleton<IAgentBrokerConnection>(sp => sp.GetRequiredService<GroupRelayService>());
 
         services.AddSingleton<ConversationSouthCounters>();
         services.AddSingleton<ConversationOrdinalAllocator>();
@@ -220,13 +229,17 @@ public static class AgentHostRegistration
     }
 
     /// <summary>
-    /// The five startup validations (#303 Feature gate). Each throws, naming the offending key.
+    /// The six startup validations (#303 Feature gate). Each throws, naming the offending key.
     /// </summary>
-    internal static void ValidateConversationsOptions(ConversationsOptions options)
+    /// <remarks>
+    /// Two of them are about keys this section does NOT own. The seam borrows the agent's identity
+    /// and the agent's broker rather than restating either, so the thing that can be wrong is the
+    /// borrowed value — and a check is not a second field.
+    /// </remarks>
+    internal static void ValidateConversationsOptions(
+        ConversationsOptions options, string? shortName = null, string? brokerHost = null)
     {
         Required(options.SouthBearerToken, nameof(ConversationsOptions.SouthBearerToken));
-        Required(options.AgentName, nameof(ConversationsOptions.AgentName));
-        Required(options.BrokerConnectionString, nameof(ConversationsOptions.BrokerConnectionString));
 
         // Absolute AND http(s). "Absolute" alone is not enough: `Uri.TryCreate` accepts
         // `south:8082` as a URI whose scheme is "south", and on a Unix host it accepts a bare path
@@ -240,15 +253,31 @@ public static class AgentHostRegistration
                 + "absolute http or https URI.");
         }
 
-        // The SAME pattern the service enforces on its side. The name is both the routing key and a
-        // queue-name segment, so a value the two sides read differently means this agent binds and
-        // drains a queue nobody publishes to while the real one grows — with no error anywhere.
-        if (!System.Text.RegularExpressions.Regex.IsMatch(
-                options.AgentName, ConversationsOptions.AgentNamePattern))
+        // The agent's OWN short name, against the SAME pattern the service enforces on its side.
+        // It is both the routing key and a queue-name segment, so a value the two sides read
+        // differently means this agent binds and drains a queue nobody publishes to while the real
+        // one grows — with no error anywhere. Checked here, carried nowhere: a second field for one
+        // identity is what this replaced.
+        if (string.IsNullOrWhiteSpace(shortName)
+            || !System.Text.RegularExpressions.Regex.IsMatch(
+                shortName, ConversationsOptions.AgentNamePattern))
         {
             throw new InvalidOperationException(
-                $"{ConversationsOptions.Section}:{nameof(ConversationsOptions.AgentName)} must match "
-                + $"{ConversationsOptions.AgentNamePattern}.");
+                $"{AgentOptions.Section}:{nameof(AgentOptions.ShortName)} must match "
+                + $"{ConversationsOptions.AgentNamePattern} when "
+                + $"{ConversationsOptions.Section}:{nameof(ConversationsOptions.SouthBaseUrl)} is set. "
+                + "It is this agent's queue segment on the broker, not a display name.");
+        }
+
+        // The inbound queue is consumed on the agent's existing connection, so the broker it already
+        // talks to has to be configured. Absent, the feature would sit retrying an attach forever
+        // against a host that was never set.
+        if (string.IsNullOrWhiteSpace(brokerHost))
+        {
+            throw new InvalidOperationException(
+                $"{RabbitMqOptions.Section}:{nameof(RabbitMqOptions.Host)} is required when "
+                + $"{ConversationsOptions.Section}:{nameof(ConversationsOptions.SouthBaseUrl)} is set. "
+                + "The inbound queue is consumed on the connection the agent already holds.");
         }
 
         if (options.HeartbeatInterval <= TimeSpan.Zero)

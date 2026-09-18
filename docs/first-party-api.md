@@ -1044,7 +1044,9 @@ submission resolves as `turn.outcome_unknown { attempt_abandoned }` when its lea
 - Exactly one `submission.accepted` per submission: the disposition endpoint is its only producer,
   and the runtime's own copy is dropped rather than forwarded.
 - With no `Conversations__SouthBaseUrl` the agent registers no consumer, declares nothing, binds
-  nothing, and behaves byte-identically to one built before the feature existed.
+  nothing, and behaves byte-identically to one built before the feature existed. Enabled, it adds
+  one more setting — the bearer — and nothing else: the queue segment is the agent's existing
+  `Agent:ShortName` and the inbound queue is consumed on the broker connection it already holds.
 
 **Two limitations a client author needs before building against this.**
 

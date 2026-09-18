@@ -10,6 +10,7 @@ using Fleet.Protocol;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using RabbitMQ.Client;
 
 namespace Fleet.Conversations.Tests;
 
@@ -678,16 +679,26 @@ public sealed class SouthRoundTripTests(
             // The base address is nominal: the handler below routes to the in-process listener.
             SouthBaseUrl = "http://south.test",
             SouthBearerToken = SouthTestHost.Token,
-            AgentName = _agentName,
-            BrokerConnectionString = broker.ConnectionString,
 
             // Paired with the shortened lease by hand. The agent validates its interval against the
             // shared CONSTANT, not against the store's configured lease, so a shortened lease here
             // has to be matched deliberately — which is the operator error the deployment doc names.
             HeartbeatInterval = TimeSpan.FromSeconds(1),
-            RetryBaseDelay = TimeSpan.FromMilliseconds(50),
-            RetryMaxDelay = TimeSpan.FromSeconds(1),
         });
+
+        // The seam carries no identity and no connection string of its own: the queue segment is the
+        // agent's ShortName, and the inbound queue is consumed on the connection the agent already
+        // holds. This harness therefore has to supply both the way an agent does.
+        var identity = Options.Create(new AgentOptions
+        {
+            Name = _agentName,
+            Role = "round-trip",
+            WorkDir = "/tmp",
+            ShortName = _agentName,
+        });
+
+        var connection = await new ConnectionFactory { Uri = new Uri(broker.ConnectionString) }
+            .CreateConnectionAsync();
 
         var client = new ConversationSouthClient(
             new HttpClient(south.CreateHandler()), options, _loggers.CreateLogger<ConversationSouthClient>());
@@ -701,8 +712,8 @@ public sealed class SouthRoundTripTests(
             new ConversationSouthAdapter(handoff, counters, _loggers.CreateLogger<ConversationSouthAdapter>()));
 
         var consumer = new ConversationSouthConsumer(
-            options, client, handoff, allocator, runtime.Intake, counters,
-            _loggers.CreateLogger<ConversationSouthConsumer>());
+            options, identity, new HarnessBrokerConnection(connection), client, handoff, allocator,
+            runtime.Intake, counters, _loggers.CreateLogger<ConversationSouthConsumer>());
 
         var heartbeat = new ConversationLeaseHeartbeat(
             consumer, client, counters, options, _loggers.CreateLogger<ConversationLeaseHeartbeat>());
@@ -710,7 +721,19 @@ public sealed class SouthRoundTripTests(
         await consumer.StartAsync(CancellationToken.None);
         await heartbeat.StartAsync(CancellationToken.None);
 
-        return new AgentUnderTest(south, consumer, heartbeat, runtime, counters);
+        return new AgentUnderTest(south, consumer, heartbeat, runtime, counters, connection);
+    }
+
+    /// <summary>
+    /// Stands in for <c>GroupRelayService</c>, which owns the connection in a real agent.
+    /// </summary>
+    /// <remarks>
+    /// The consumer takes a CHANNEL on this and never closes it — the harness owns its lifetime,
+    /// exactly as the relay service owns it in production.
+    /// </remarks>
+    private sealed class HarnessBrokerConnection(IConnection connection) : IAgentBrokerConnection
+    {
+        public IConnection? Connection => connection;
     }
 
     private sealed record AgentUnderTest(
@@ -718,7 +741,8 @@ public sealed class SouthRoundTripTests(
         ConversationSouthConsumer Consumer,
         ConversationLeaseHeartbeat Heartbeat,
         AgentRuntime Runtime,
-        ConversationSouthCounters Counters) : IAsyncDisposable
+        ConversationSouthCounters Counters,
+        IConnection Connection) : IAsyncDisposable
     {
         public async ValueTask DisposeAsync()
         {
@@ -727,6 +751,10 @@ public sealed class SouthRoundTripTests(
             try { await Consumer.StopAsync(stop.Token); } catch (Exception) { /* stopping */ }
             await Runtime.DisposeAsync();
             await South.DisposeAsync();
+
+            // The harness owns the connection, not the consumer — which is the point of the seam.
+            try { await Connection.CloseAsync(); } catch (Exception) { /* stopping */ }
+            await Connection.DisposeAsync();
         }
     }
 

@@ -47,7 +47,7 @@ public sealed class ConversationSouthClient
         _http = http;
 
         _http.BaseAddress = new Uri(_options.SouthBaseUrl, UriKind.Absolute);
-        _http.Timeout = _options.RequestTimeout;
+        _http.Timeout = ConversationsOptions.RequestTimeout;
         _http.DefaultRequestHeaders.Authorization =
             new AuthenticationHeaderValue("Bearer", _options.SouthBearerToken);
     }
@@ -85,7 +85,7 @@ public sealed class ConversationSouthClient
     public async Task<T> ExecuteWithRetryAsync<T>(
         Func<CancellationToken, Task<T>> call, string label, int attempts, CancellationToken ct)
     {
-        var delay = _options.RetryBaseDelay;
+        var delay = BackoffBase;
 
         for (var attempt = 1; ; attempt++)
         {
@@ -117,11 +117,30 @@ public sealed class ConversationSouthClient
     public TimeSpan Backoff(TimeSpan current)
     {
         var doubled = current + current;
-        return doubled > _options.RetryMaxDelay ? _options.RetryMaxDelay : doubled;
+        var ceiling = BackoffCeiling;
+        return doubled > ceiling ? ceiling : doubled;
     }
 
-    /// <summary>The first backoff step.</summary>
-    public TimeSpan InitialBackoff => _options.RetryBaseDelay;
+    /// <summary>The first backoff step. The consumer's own requeue backoff starts here too.</summary>
+    public TimeSpan InitialBackoff => BackoffBase;
+
+    /// <summary>
+    /// Test-only compression of the retry schedule. Never set outside tests.
+    /// </summary>
+    /// <remarks>
+    /// The schedule is a constant because no operator will ever tune it — but a test that exercises
+    /// an exhausted retry would otherwise sit through the real one, and a suite slow enough to be
+    /// skipped is a suite that stops catching things. This is a seam, not a knob: nothing reads
+    /// configuration for it, and production always runs the constants.
+    /// </remarks>
+    internal TimeSpan? RetryScheduleOverride { get; set; }
+
+    private TimeSpan BackoffBase => RetryScheduleOverride ?? ConversationsOptions.RetryBaseDelay;
+
+    private TimeSpan BackoffCeiling =>
+        RetryScheduleOverride is { } compressed
+            ? compressed + compressed + compressed + compressed
+            : ConversationsOptions.RetryMaxDelay;
 
     private static string Describe(Exception e) =>
         e is SouthCallException south ? $"{south.GetType().Name}({(int)south.Status})" : e.GetType().Name;

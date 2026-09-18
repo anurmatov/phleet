@@ -144,14 +144,19 @@ number with different schemas. Add a new forward-only script instead.
 
 ### The agent side, and the one relationship no process can check for you
 
-The consumer of the queue this service publishes to is the agent, configured with its own
-`Conversations__*` section. `Conversations__SouthBaseUrl` is its enabling key; the rest —
-`SouthBearerToken`, `AgentName`, `BrokerConnectionString` — are required once it is set, and a
-half-configured agent **fails to start** rather than coming up healthy beside a queue nobody drains.
+The consumer of the queue this service publishes to is the agent. Its section is deliberately small:
+`Conversations__SouthBaseUrl` is the enabling key and `Conversations__SouthBearerToken` is required
+once it is set. **It carries no agent name and no broker connection string** — the agent already has
+both, and a second copy of either is a value that can drift or a credential a rotation can miss. The
+queue segment is the agent's own `Agent__ShortName`, and the inbound queue is consumed on the
+RabbitMQ connection the agent already holds for the task, relay and orchestrator exchanges
+(`RabbitMq__Host`). A half-configured agent **fails to start** rather than coming up healthy beside a
+queue nobody drains, and that includes a `ShortName` outside the pattern or a missing broker host.
 
-**`Conversations__AgentName` must match `FLEET_COMMS_AGENT_NAME` exactly.** It is the routing key on
-one side and the queue-name segment on the other. A value the two sides read differently produces no
-error anywhere: the agent binds and drains a queue nobody publishes to, while the real one grows.
+**The agent's `Agent__ShortName` must match `FLEET_COMMS_AGENT_NAME` exactly** — including case. It
+is the routing key on one side and the queue-name segment on the other, and it is used verbatim here
+even though the relay path lowercases its own copy. A value the two sides read differently produces
+no error anywhere: the agent binds and drains a queue nobody publishes to, while the real one grows.
 Both sides validate the same `^[A-Za-z0-9_-]{1,128}$` pattern, which catches a malformed name but
 cannot catch a well-formed *different* one.
 

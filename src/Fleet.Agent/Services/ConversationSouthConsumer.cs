@@ -63,6 +63,8 @@ public sealed class ConversationSouthConsumer : BackgroundService
     public static readonly TimeSpan ShutdownDrainBudget = TimeSpan.FromSeconds(15);
 
     private readonly ConversationsOptions _options;
+    private readonly string _agentShortName;
+    private readonly IAgentBrokerConnection _broker;
     private readonly ConversationSouthClient _client;
     private readonly ConversationSouthHandoff _handoff;
     private readonly ConversationOrdinalAllocator _allocator;
@@ -74,12 +76,13 @@ public sealed class ConversationSouthConsumer : BackgroundService
     private readonly ConcurrentDictionary<string, byte> _attempts = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ConversationState> _conversations = new(StringComparer.Ordinal);
 
-    private IConnection? _connection;
     private IChannel? _channel;
     private string? _consumerTag;
 
     public ConversationSouthConsumer(
         IOptions<ConversationsOptions> options,
+        IOptions<AgentOptions> agent,
+        IAgentBrokerConnection broker,
         ConversationSouthClient client,
         ConversationSouthHandoff handoff,
         ConversationOrdinalAllocator allocator,
@@ -88,6 +91,12 @@ public sealed class ConversationSouthConsumer : BackgroundService
         ILogger<ConversationSouthConsumer> logger)
     {
         _options = options.Value;
+
+        // Verbatim, NOT lowercased. GroupRelayService lowercases for its own routing key; this
+        // segment has to match the name the SERVICE published under, and a case fold applied on one
+        // side only is exactly the divergence the pattern check exists to prevent.
+        _agentShortName = agent.Value.ShortName;
+        _broker = broker;
         _client = client;
         _handoff = handoff;
         _allocator = allocator;
@@ -105,7 +114,7 @@ public sealed class ConversationSouthConsumer : BackgroundService
     /// ULID minted at construction, so it separates them without inventing a second identity. It is
     /// an identity, never a credential.
     /// </remarks>
-    public string Owner => $"{_options.AgentName}:{_allocator.Epoch}";
+    public string Owner => $"{_agentShortName}:{_allocator.Epoch}";
 
     /// <summary>
     /// Every attempt this process owns and has not committed — running and
@@ -154,15 +163,14 @@ public sealed class ConversationSouthConsumer : BackgroundService
 
     private async Task AttachAsync(CancellationToken ct)
     {
-        var factory = new ConnectionFactory
-        {
-            Uri = new Uri(_options.BrokerConnectionString),
-            ClientProvidedName = $"{_options.AgentName}-conversations",
-            AutomaticRecoveryEnabled = true,
-        };
+        // The agent's own connection, with a channel of our own on it. Null means its owner has
+        // not connected yet — this throws into the caller's bounded-backoff retry rather than
+        // waiting here, because nothing in this loop may block host startup.
+        var connection = _broker.Connection
+            ?? throw new InvalidOperationException(
+                "the agent's broker connection is not open yet");
 
-        _connection = await factory.CreateConnectionAsync(ct);
-        _channel = await _connection.CreateChannelAsync(cancellationToken: ct);
+        _channel = await connection.CreateChannelAsync(cancellationToken: ct);
 
         // Prefetch must be greater than one. A delivery is not acked until its terminal commits, so
         // a prefetch of one would stop a second submission ever being delivered while the first turn
@@ -192,7 +200,7 @@ public sealed class ConversationSouthConsumer : BackgroundService
     }
 
     /// <summary>The per-agent inbound queue. Declared and bound by the publishing service.</summary>
-    private string QueueName => $"fleet.conversations.inbound.{_options.AgentName}";
+    private string QueueName => $"fleet.conversations.inbound.{_agentShortName}";
 
     // ── one delivery ─────────────────────────────────────────────────────────
 
@@ -893,8 +901,9 @@ public sealed class ConversationSouthConsumer : BackgroundService
 
         await base.StopAsync(cancellationToken);
 
+        // The CHANNEL only. The connection is the agent's, shared with relay traffic, and disposing
+        // it here would take that down on a south shutdown.
         if (channel is not null) await channel.DisposeAsync();
-        if (_connection is not null) await _connection.DisposeAsync();
     }
 
     // ── envelope ─────────────────────────────────────────────────────────────

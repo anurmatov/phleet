@@ -174,6 +174,13 @@ public sealed class ConversationsOptions
     /// assemblies with no common home for it. The name is both the routing key and a queue-name
     /// segment, so a value the two sides read differently means the agent binds and drains a queue
     /// nobody publishes to while the real one grows.
+    /// <para>
+    /// It is validated against <see cref="AgentOptions.ShortName"/> at startup. There is deliberately
+    /// no agent-name field here: <c>ShortName</c> is already this agent's identity on this broker —
+    /// <c>GroupRelayService</c> builds <c>fleet.agent.{shortName}</c> from it and binds it as a
+    /// routing key — and a second field for one identity is the divergence this pattern exists to
+    /// catch, installed as a feature.
+    /// </para>
     /// </remarks>
     public const string AgentNamePattern = "^[A-Za-z0-9_-]{1,128}$";
 
@@ -182,12 +189,6 @@ public sealed class ConversationsOptions
 
     /// <summary>Bearer credential for the south listener. Required when enabled.</summary>
     public string SouthBearerToken { get; set; } = "";
-
-    /// <summary>Routing key and inbound queue suffix. Required when enabled.</summary>
-    public string AgentName { get; set; } = "";
-
-    /// <summary>Broker connection string for the inbound queue. Required when enabled.</summary>
-    public string BrokerConnectionString { get; set; } = "";
 
     /// <summary>
     /// Lease renewal cadence. Must be at most half
@@ -207,11 +208,20 @@ public sealed class ConversationsOptions
     public ushort Prefetch { get; set; } = 8;
 
     /// <summary>Base delay for the bounded backoff on a retried south call or a requeue.</summary>
-    public TimeSpan RetryBaseDelay { get; set; } = TimeSpan.FromMilliseconds(250);
+    /// <remarks>
+    /// These three are constants, not settings. They were knobs with no operator who would turn
+    /// them, and every additional key is one more thing a provisioned agent has to be given. Promote
+    /// one to configuration when something concrete demands it — not in advance.
+    /// <para>
+    /// <c>static readonly</c> rather than <c>const</c> only because C# has no constant
+    /// <see cref="TimeSpan"/>; they are compile-time values in every sense that matters here.
+    /// </para>
+    /// </remarks>
+    public static readonly TimeSpan RetryBaseDelay = TimeSpan.FromMilliseconds(250);
 
     /// <summary>Ceiling for the bounded backoff.</summary>
-    public TimeSpan RetryMaxDelay { get; set; } = TimeSpan.FromSeconds(30);
+    public static readonly TimeSpan RetryMaxDelay = TimeSpan.FromSeconds(30);
 
     /// <summary>Per-request timeout for a south call.</summary>
-    public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(15);
+    public static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
 }

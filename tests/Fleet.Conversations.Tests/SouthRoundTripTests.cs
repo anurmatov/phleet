@@ -1,3 +1,4 @@
+using Xunit.Abstractions;
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
@@ -6,6 +7,7 @@ using Fleet.Agent.Models;
 using Fleet.Agent.Services;
 using Fleet.Conversations.Contracts;
 using Fleet.Protocol;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
@@ -42,8 +44,21 @@ namespace Fleet.Conversations.Tests;
 /// </para>
 /// </remarks>
 [Collection("south-round-trip")]
-public sealed class SouthRoundTripTests(MySqlFixture mysql, RabbitMqFixture broker) : IAsyncLifetime
+public sealed class SouthRoundTripTests(
+    MySqlFixture mysql, RabbitMqFixture broker, ITestOutputHelper output) : IAsyncLifetime
 {
+    /// <summary>
+    /// Real loggers, routed to the test output.
+    /// </summary>
+    /// <remarks>
+    /// Null loggers here would be a false economy. Every failure mode in this loop — a claim that
+    /// 401s, a queue nothing publishes to, a disposition the store refuses — is silent by design at
+    /// the assertion level: all of them present as "no events after the timeout". The log line is the
+    /// only thing that says which.
+    /// </remarks>
+    private readonly ILoggerFactory _loggers =
+        LoggerFactory.Create(b => b.AddProvider(new TestOutputLoggerProvider(output)).SetMinimumLevel(LogLevel.Debug));
+
     private const string ChannelId = "client";
     private const string PrincipalId = "p_round_trip";
     private const string Answer = "the answer";
@@ -71,11 +86,11 @@ public sealed class SouthRoundTripTests(MySqlFixture mysql, RabbitMqFixture brok
     public async Task InitializeAsync()
     {
         _store = new MySqlConversationStore(
-            mysql.ConnectionString, FastTimings(), NullLogger<MySqlConversationStore>.Instance,
+            mysql.ConnectionString, FastTimings(), _loggers.CreateLogger<MySqlConversationStore>(),
             serviceOwner: "fleet-comms:round-trip");
 
         _transport = new RabbitMqOutboxTransport(
-            broker.ConnectionString, ConversationBroker.CommandExchange, NullLogger.Instance);
+            broker.ConnectionString, ConversationBroker.CommandExchange, _loggers.CreateLogger("transport"));
 
         // The PRODUCER declares and binds — deliberately, so a submission published before the agent
         // ever attached is still there when it first does. The agent declares nothing (AC5).
@@ -83,7 +98,7 @@ public sealed class SouthRoundTripTests(MySqlFixture mysql, RabbitMqFixture brok
 
         _publisher = new OutboxPublisher(
             mysql.ConnectionString, OutboxPublisher.CommandTable, _transport,
-            FastTimings(), NullLogger.Instance);
+            FastTimings(), _loggers.CreateLogger("outbox"));
     }
 
     public async Task DisposeAsync()
@@ -215,7 +230,7 @@ public sealed class SouthRoundTripTests(MySqlFixture mysql, RabbitMqFixture brok
         var conversation = await OpenAsync();
         await SubmitAsync(conversation, "take your time");
 
-        var events = await WaitForTerminalAsync(conversation, timeout: TimeSpan.FromSeconds(60));
+        var events = await WaitForTerminalAsync(conversation, timeout: TimeSpan.FromSeconds(40));
 
         Assert.Contains(events, e => e.Kind == ConversationEventKind.TurnFinal);
         Assert.DoesNotContain(events, e => e.Kind == ConversationEventKind.TurnOutcomeUnknown);
@@ -339,7 +354,7 @@ public sealed class SouthRoundTripTests(MySqlFixture mysql, RabbitMqFixture brok
 
         var second = await SubmitAsync(conversation, "second, mid-turn");
 
-        var events = await WaitForTerminalAsync(conversation, timeout: TimeSpan.FromSeconds(60));
+        var events = await WaitForTerminalAsync(conversation, timeout: TimeSpan.FromSeconds(40));
 
         // Both submissions were dispositioned — neither was left unclaimed (MUST NOT 11).
         Assert.Equal(2, events.Count(e => e.Kind == ConversationEventKind.SubmissionAccepted));
@@ -467,7 +482,9 @@ public sealed class SouthRoundTripTests(MySqlFixture mysql, RabbitMqFixture brok
                 ConversationEventKind.SubmissionCreate, conversationId, submissionId, text),
         });
 
-        await _publisher.DrainOnceAsync(_agentName);
+        var published = await _publisher.DrainOnceAsync(_agentName);
+        Assert.True(published > 0, "the command outbox published nothing — the agent will never see it");
+
         return submissionId;
     }
 
@@ -486,7 +503,9 @@ public sealed class SouthRoundTripTests(MySqlFixture mysql, RabbitMqFixture brok
                 ConversationEventKind.SubmissionCancel, conversationId, submissionId, text: null),
         });
 
-        await _publisher.DrainOnceAsync(_agentName);
+        var published = await _publisher.DrainOnceAsync(_agentName);
+        Assert.True(published > 0, "the command outbox published nothing — the agent will never see it");
+
         return submissionId;
     }
 
@@ -494,7 +513,8 @@ public sealed class SouthRoundTripTests(MySqlFixture mysql, RabbitMqFixture brok
     private async Task RepublishAsync(string submissionId)
     {
         await mysql.ExecuteAsync(
-            $"UPDATE command_outbox SET published_at = NULL WHERE dedupe_id LIKE '%{submissionId}%'");
+            "UPDATE command_outbox SET state = 'pending', next_attempt_at = UTC_TIMESTAMP(6) "
+            + $"WHERE message_id IS NOT NULL AND payload_json LIKE '%{submissionId}%'");
 
         await _publisher.DrainOnceAsync(_agentName);
     }
@@ -539,7 +559,7 @@ public sealed class SouthRoundTripTests(MySqlFixture mysql, RabbitMqFixture brok
     private async Task<IReadOnlyList<StoredEvent>> WaitAsync(
         string conversationId, Func<IReadOnlyList<StoredEvent>, bool> done, TimeSpan? timeout)
     {
-        var deadline = DateTimeOffset.UtcNow + (timeout ?? TimeSpan.FromSeconds(30));
+        var deadline = DateTimeOffset.UtcNow + (timeout ?? TimeSpan.FromSeconds(20));
 
         while (DateTimeOffset.UtcNow < deadline)
         {
@@ -553,7 +573,7 @@ public sealed class SouthRoundTripTests(MySqlFixture mysql, RabbitMqFixture brok
 
     private async Task WaitForQueueDrainAsync()
     {
-        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(30);
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(20);
 
         while (DateTimeOffset.UtcNow < deadline)
         {
@@ -584,7 +604,7 @@ public sealed class SouthRoundTripTests(MySqlFixture mysql, RabbitMqFixture brok
         });
 
         var client = new ConversationSouthClient(
-            new HttpClient(south.CreateHandler()), options, NullLogger<ConversationSouthClient>.Instance);
+            new HttpClient(south.CreateHandler()), options, _loggers.CreateLogger<ConversationSouthClient>());
 
         var handoff = new ConversationSouthHandoff();
         var counters = new ConversationSouthCounters();
@@ -592,14 +612,14 @@ public sealed class SouthRoundTripTests(MySqlFixture mysql, RabbitMqFixture brok
 
         var runtime = AgentRuntime.Start(
             new StubExecutor(Answer, turnDuration ?? TimeSpan.Zero, progressEvents),
-            new ConversationSouthAdapter(handoff, counters, NullLogger<ConversationSouthAdapter>.Instance));
+            new ConversationSouthAdapter(handoff, counters, _loggers.CreateLogger<ConversationSouthAdapter>()));
 
         var consumer = new ConversationSouthConsumer(
             options, client, handoff, allocator, runtime.Intake, counters,
-            NullLogger<ConversationSouthConsumer>.Instance);
+            _loggers.CreateLogger<ConversationSouthConsumer>());
 
         var heartbeat = new ConversationLeaseHeartbeat(
-            consumer, client, counters, options, NullLogger<ConversationLeaseHeartbeat>.Instance);
+            consumer, client, counters, options, _loggers.CreateLogger<ConversationLeaseHeartbeat>());
 
         await consumer.StartAsync(CancellationToken.None);
         await heartbeat.StartAsync(CancellationToken.None);

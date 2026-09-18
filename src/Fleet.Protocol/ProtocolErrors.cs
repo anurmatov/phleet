@@ -24,6 +24,8 @@ public static class ProtocolErrors
     public const string Canceled = "The turn was canceled.";
     public const string Internal = "An internal error occurred.";
     public const string DeviceLimit = "A device is already registered for this principal.";
+    public const string IdempotencyConflict = "The idempotency key was reused with a different payload.";
+    public const string InvalidCursor = "The cursor is not a valid position in this conversation.";
 
     /// <summary>Look up the fixed message for a code. Never returns runtime-derived text.</summary>
     public static string MessageFor(ProtocolErrorCode code) => code switch
@@ -40,6 +42,8 @@ public static class ProtocolErrors
         ProtocolErrorCode.ExecutorError => ExecutorError,
         ProtocolErrorCode.Canceled => Canceled,
         ProtocolErrorCode.DeviceLimit => DeviceLimit,
+        ProtocolErrorCode.IdempotencyConflict => IdempotencyConflict,
+        ProtocolErrorCode.InvalidCursor => InvalidCursor,
         _ => Internal,
     };
 }

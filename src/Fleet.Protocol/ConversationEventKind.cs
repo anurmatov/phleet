@@ -64,6 +64,32 @@ public static class ConversationEventKind
     public const string SubmissionCancel = "submission.cancel";
 
     /// <summary>
+    /// Request the durable suffix after a cursor (#276 §4.8). Carries <c>afterSeq</c> and an
+    /// optional <c>limit</c>.
+    /// </summary>
+    public const string ConversationCatchup = "conversation.catchup";
+
+    /// <summary>
+    /// Advance this client instance's durable cursor (#276 §4.10). Carries <c>deliveredSeq</c> and
+    /// an optional <c>readSeq</c>. Cursors are monotonic and never move backwards.
+    /// </summary>
+    public const string ConversationAck = "conversation.ack";
+
+    /// <summary>
+    /// Announces durable history the client will never receive because garbage collection passed
+    /// its cursor (#276 §4.8).
+    ///
+    /// <para>SYNTHETIC AND NEVER STORED, and it carries <c>seq: null</c> rather than a number. It is
+    /// computed per request from the reader's cursor and the conversation's retained floor, so
+    /// sequencing it would give it the NEWEST seq and sort it after the very suffix it announces —
+    /// and would write per-client-instance state into a log every other instance reads.</para>
+    ///
+    /// <para><c>null</c>, not <c>0</c>: seq 0 never reaches a client, and the distinction is
+    /// asserted rather than assumed.</para>
+    /// </summary>
+    public const string ConversationReplayGap = "conversation.replay_gap";
+
+    /// <summary>
     /// Terminal kinds. These route through the per-conversation terminal outbox rather than the
     /// shared progress channel, so a chatty progress stream can never evict one (D11).
     /// </summary>
@@ -89,6 +115,7 @@ public static class ConversationEventKind
         TurnCanceled,
         TurnOutcomeUnknown,
         ControlAck,
+        ConversationReplayGap,
     };
 
     /// <summary>Every kind a client may send in v1. This is the complete Phase-0 command set.</summary>
@@ -98,6 +125,8 @@ public static class ConversationEventKind
         SubmissionCreate,
         SubmissionSteer,
         SubmissionCancel,
+        ConversationCatchup,
+        ConversationAck,
     };
 
     /// <summary>True when the runtime recognises the inbound kind (D17).</summary>

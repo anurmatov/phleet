@@ -70,6 +70,18 @@ public enum OutcomeUnknownReason
     TurnReaped,
     /// <summary>The terminal event exceeded the hard serialized cap even after truncation.</summary>
     TerminalEventOversize,
+
+    /// <summary>
+    /// The attempt's lease expired, or the grace period after service recovery elapsed, and the
+    /// reconciler terminated it without ever seeing a terminal.
+    ///
+    /// <para>Produced by the reconciler and by nothing else. <see cref="TurnReaped"/> belongs to the
+    /// agent's own run loop and is stored verbatim when it arrives; producing it here would make two
+    /// components answerable for the same reason and neither answerable for its own.</para>
+    ///
+    /// <para>Appended, never inserted.</para>
+    /// </summary>
+    AttemptAbandoned,
 }
 
 /// <summary>What a <c>control.ack</c> acknowledges. v1 acknowledges cancels only (D5, D8).</summary>
@@ -105,6 +117,22 @@ public enum ProtocolErrorCode
     /// client keys behaviour on the wire value.</para>
     /// </summary>
     DeviceLimit,
+
+    /// <summary>
+    /// The same idempotency key was presented with a different payload fingerprint
+    /// (#276 §7). The original submission is untouched.
+    /// </summary>
+    IdempotencyConflict,
+
+    /// <summary>
+    /// A cursor that is negative, non-integral, out of range, at or beyond <c>nextSeq</c>, or
+    /// otherwise not a position this conversation can be read from (#276 §4.8, §4.10).
+    ///
+    /// <para>Never a clamp: a cursor ahead of the server means client corruption or a restored
+    /// backup, and silently clamping it hands back partial history the client believes is
+    /// complete.</para>
+    /// </summary>
+    InvalidCursor,
 }
 
 /// <summary>Coarse attachment classification (D14). Metadata only — no bytes, no URL.</summary>

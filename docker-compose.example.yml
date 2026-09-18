@@ -440,6 +440,100 @@ services:
     networks:
       - fleet-net
 
+  # ── Fleet.Comms — first-party client API (OPT-IN) ──────────────────────────
+  #
+  # Auth and session only: device enrollment, token mint, self-revocation and session discovery.
+  # There is no chat, no WebSocket, no conversation history and no push. An enrolled device holds
+  # a valid token and has nothing to talk to yet.
+  #
+  # Behind a `comms` profile, so it does not start unless you ask for it. Most phleet installs run
+  # Telegram agents and want no public client API; shipping an auth boundary to them by default is
+  # the wrong direction for a security decision.
+  #
+  # The published port defaults to LOOPBACK, unlike temporal-ui or fleet-memory. Those are
+  # developer surfaces; this one takes credentials. A host reverse proxy terminates TLS and reaches
+  # it here — see docs/comms-deployment.md. rabbitmq, fleet-mysql and fleet-minio bind loopback for
+  # the same reason, so this follows an existing precedent rather than inventing one.
+  fleet-comms:
+    profiles: ["comms"]
+    build:
+      context: .
+      dockerfile: src/Fleet.Comms/Dockerfile
+    image: fleet:comms
+    pull_policy: never
+    container_name: fleet-comms
+    ports:
+      - "${FLEET_COMMS_BIND:-127.0.0.1:3500}:8080"
+    environment:
+      # North listener. The ops listener is loopback-only inside the container and is NOT published:
+      # /ready reports whether the auth store answers, which on a reachable address is an
+      # availability oracle.
+      - ASPNETCORE_URLS=http://0.0.0.0:8080
+      - Comms__OpsUrl=http://127.0.0.1:8081
+      # Named volume, not a bind mount: SqliteAuthStore runs PRAGMA journal_mode=WAL, and a bind
+      # mount onto a macOS or Windows host goes through a virtualised filesystem where SQLite file
+      # locking is not dependable. A named volume behaves the same on every platform, and
+      # `docker compose down` without -v preserves it — which is what makes upgrade.sh safe.
+      - Comms__AuthStorePath=/var/lib/fleet-comms/auth.db
+      - Comms__AgentLabel=${FLEET_COMMS_AGENT_LABEL:-assistant}
+      # Off unless a reverse proxy is actually in front AND replaces X-Forwarded-For. On a port
+      # reachable without one, this hands every caller the rate limiter's partition key.
+      - Comms__TrustForwardedHeaders=${FLEET_COMMS_TRUST_PROXY:-false}
+      # Set by setup.sh/upgrade.sh after the first successful `store init`. Lives here, not in the
+      # volume, so a deleted volume is still recognisable as loss rather than a fresh install.
+      - Comms__StoreProvisioned=${FLEET_COMMS_STORE_PROVISIONED:-false}
+    volumes:
+      - fleet_comms_auth:/var/lib/fleet-comms
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      # /ready, not /health: the store initialises lazily, so a liveness probe would report a
+      # service that 503s every request as healthy.
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8081/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fleet-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # The operator path, as a one-shot container with logging DISABLED.
+  #
+  # `enroll issue` prints a bearer credential to stdout, and `docker compose run` creates the
+  # one-shot container from its service definition — INCLUDING its logging driver. Running it on
+  # fleet-comms would write the code into the engine's json-file log on the host before `--rm`
+  # removed the container: `docker logs` would show it, and removal does not un-write the file.
+  #
+  # Same image, same entrypoint, `logging: none`, no ports, no restart. The API service keeps its
+  # rotation; only the operator path opts out of persistence, which is the one place a secret
+  # crosses stdout.
+  # Its OWN profile, deliberately, and one that is never passed to `up`.
+  #
+  # Under `profiles: ["comms"]` this service was started by `docker compose --profile comms up -d`
+  # as a second long-running Fleet.Comms process against the same database — a writer nobody asked
+  # for. `docker compose run` enables the profile of the service it targets, so the operator
+  # commands keep working without ever handing this profile to `up`.
+  fleet-comms-ops:
+    profiles: ["comms-ops"]
+    build:
+      context: .
+      dockerfile: src/Fleet.Comms/Dockerfile
+    image: fleet:comms
+    pull_policy: never
+    environment:
+      - Comms__AuthStorePath=/var/lib/fleet-comms/auth.db
+      - Comms__StoreProvisioned=${FLEET_COMMS_STORE_PROVISIONED:-false}
+    volumes:
+      - fleet_comms_auth:/var/lib/fleet-comms
+    networks:
+      - fleet-net
+    logging:
+      driver: "none"
+
   fleet-dashboard:
     build:
       context: .
@@ -461,6 +555,9 @@ services:
 
 volumes:
   qdrant_data:
+  # Device registrations, enrollment state and tokens. Losing this volume locks the owner out of
+  # their own client with no self-service recovery — restore from a `store backup` file.
+  fleet_comms_auth:
   temporal_pg_data:
   fleet_mysql_data:
   minio_data:

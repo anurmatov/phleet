@@ -519,6 +519,12 @@ The administrative mechanism itself is deployment detail and is not specified he
 specified: that it exists, that it is the only lost-device path, and that it is **not reachable from
 the north listener**.
 
+For the self-hosted deployment this repository ships, that path is a set of operator subcommands of
+the `Fleet.Comms` assembly — `enroll issue`, `devices list`, `devices revoke`, `store backup` — run
+as one-shot processes against the store and binding no listener at all. See
+[`docs/comms-deployment.md`](comms-deployment.md). **The four-route north contract above is
+unchanged**; nothing in that operator path is reachable over HTTP, on either listener.
+
 ---
 
 ## 6. WebSocket framing (D6)

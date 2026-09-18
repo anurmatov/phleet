@@ -62,10 +62,27 @@ public sealed class SqliteAuthStore : IAuthStore, IDisposable
 
     private readonly string _connectionString;
     private readonly SemaphoreSlim _initGate = new(1, 1);
+
+    /// <summary>The one shape a backup temporary may have; see EnumerateOwnedTemporaries.</summary>
+    private const string TemporarySuffix = ".tmp-";
+
+    private const int TemporaryTokenLength = 12;
+
+    /// <summary>The resolved absolute path, logged once at startup and used to reject self-backup.</summary>
+    public string DatabasePath { get; } = "";
     private readonly string? _sessionPragmas;
+    private readonly bool _allowCreate;
     private bool _initialized;
 
-    public SqliteAuthStore(string databasePath) : this(databasePath, sessionPragmas: null)
+    /// <summary>
+    /// Invoked between validating the written backup and publishing it, so a test can interrupt at
+    /// the one point where an incomplete file could reach the destination. <c>internal</c>: this is
+    /// a seam, not behaviour, and the alternative — killing a process mid-rename — is a flake.
+    /// </summary>
+    internal Action? OnBeforePublish { get; set; }
+
+    public SqliteAuthStore(string databasePath, bool allowCreate = false)
+        : this(databasePath, sessionPragmas: null, allowCreate)
     {
     }
 
@@ -78,16 +95,26 @@ public sealed class SqliteAuthStore : IAuthStore, IDisposable
     /// per-connection. Injecting a fake exception instead would test the catch block rather than
     /// the mapping, and would not have caught the real <c>SQLITE_FULL</c> escaping as a 500.</para>
     /// </summary>
-    internal SqliteAuthStore(string databasePath, string? sessionPragmas)
+    internal SqliteAuthStore(string databasePath, string? sessionPragmas, bool allowCreate = false)
     {
         if (string.IsNullOrWhiteSpace(databasePath))
             throw new ArgumentException("An auth store path is required.", nameof(databasePath));
 
         _sessionPragmas = sessionPragmas;
+        _allowCreate = allowCreate;
+        DatabasePath = Path.GetFullPath(databasePath);
+
+        // ReadWrite, NOT ReadWriteCreate, unless an operator explicitly asked to create it.
+        //
+        // Opening with Create meant a deleted-and-recreated volume silently became a brand new
+        // empty database: /ready went green, the service reported healthy, and it had forgotten
+        // every device. That is the one failure the deployment document promises cannot happen
+        // ("restore required, never silent re-enrollment"), and lazy schema creation was quietly
+        // providing it. Creation is now `store init`, run once and on purpose.
         _connectionString = new SqliteConnectionStringBuilder
         {
-            DataSource = Path.GetFullPath(databasePath),
-            Mode = SqliteOpenMode.ReadWriteCreate,
+            DataSource = DatabasePath,
+            Mode = allowCreate ? SqliteOpenMode.ReadWriteCreate : SqliteOpenMode.ReadWrite,
             Pooling = true,
             // Microsoft.Data.Sqlite retries a busy database for this long before surfacing an
             // error, which is what lets a second concurrent registration wait for the first to
@@ -147,6 +174,173 @@ public sealed class SqliteAuthStore : IAuthStore, IDisposable
         }
     }
 
+    /// <summary>
+    /// `VACUUM INTO`, which is SQLite's own online-backup path: it takes a read transaction, writes
+    /// a fresh defragmented database, and is safe while the service is serving.
+    ///
+    /// <para>The destination must not already exist — SQLite refuses rather than overwriting, and
+    /// that refusal is worth keeping: silently replacing yesterday's good backup with today's is
+    /// how a corrupt store propagates into the only copy that could have restored it.</para>
+    /// </summary>
+    public async Task BackupToAsync(string destinationPath, CancellationToken ct)
+    {
+        await EnsureInitializedAsync(ct);
+
+        var destination = Path.GetFullPath(destinationPath);
+
+        if (string.Equals(destination, DatabasePath, StringComparison.Ordinal))
+            throw new BackupRefusedException("Refusing to back the auth store up over itself.");
+
+        if (File.Exists(destination))
+            throw new BackupRefusedException($"Refusing to overwrite an existing backup: {destinationPath}");
+
+        // A CLAIM FILE, beside the destination — not the destination itself.
+        //
+        // Two properties are needed at once and they pull in opposite directions. Exactly one
+        // concurrent winner needs an atomic exclusive create, and `File.Move(src, dst, overwrite:
+        // false)` does not provide one: it tests and then renames, and a 64-way race produces two
+        // winners (measured, not assumed). But claiming the DESTINATION with `FileMode.CreateNew`
+        // publishes a zero-byte file the moment the claim is taken, so an interrupted backup leaves
+        // an empty file under the name a restore would later trust.
+        //
+        // Claiming a sibling gives both: `CreateNew` is O_EXCL so exactly one caller proceeds, and
+        // the destination does not exist until a complete, validated database is renamed onto it.
+        // An interruption leaves a claim and a temporary, never a backup.
+        var claimPath = destination + ".claim";
+        var temporary = destination + TemporarySuffix + Guid.NewGuid().ToString("n")[..TemporaryTokenLength];
+
+        FileStream claim;
+        try
+        {
+            claim = new FileStream(claimPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        }
+        catch (IOException e)
+        {
+            throw new BackupRefusedException(
+                $"Another backup is already writing to {destinationPath}. If no backup is running, " +
+                $"a previous one was interrupted — remove {Path.GetFileName(claimPath)} and any " +
+                $"{Path.GetFileName(destination)}.tmp-* files beside it, then retry.", e);
+        }
+
+        try
+        {
+            await using (var connection = new SqliteConnection(_connectionString))
+            {
+                await connection.OpenAsync(ct);
+                await ApplySessionPragmasAsync(connection, ct);
+
+                await using var command = connection.CreateCommand();
+                // Parameterised: a destination path is operator input, and concatenating it into
+                // SQL would make a path containing a quote a syntax error at best.
+                command.CommandText = "VACUUM INTO $destination";
+                command.Parameters.AddWithValue("$destination", temporary);
+                await command.ExecuteNonQueryAsync(ct);
+            }
+
+            // VALIDATED before it is published. `VACUUM INTO` either writes a complete database or
+            // fails, but "the engine returned success" is not the same statement as "this file is
+            // an auth store", and the whole value of a backup is what happens months later when
+            // someone restores it under pressure.
+            using (var written = new SqliteAuthStore(temporary))
+            {
+                if (!await written.IsUsableAsync(ct))
+                {
+                    throw new BackupRefusedException(
+                        "The backup that was written is not a usable auth store; nothing was published.");
+                }
+            }
+
+            OnBeforePublish?.Invoke();
+
+            File.Move(temporary, destination, overwrite: false);
+
+            // Sweep temporaries an earlier interrupted run left for THIS destination. They are the
+            // full size of the database, so on a real store they are not a tidiness problem — and
+            // the operator who was told to remove a claim file has no reason to expect a second
+            // artifact beside it.
+            //
+            // MATCHED LITERALLY, never as a search pattern. `*` and `?` are ordinary characters in
+            // a Linux filename, so passing the operator's destination name to
+            // `Directory.EnumerateFiles` as a glob made a backup written to `audit-*.db` delete a
+            // completed, verified backup of `audit-one.db` sitting beside it. Deleting a file the
+            // operator never named — and that a restore may depend on — is the worst thing this
+            // method could do, and it was doing it while cleaning up after itself.
+            foreach (var stale in EnumerateOwnedTemporaries(destination))
+            {
+                TryDelete(stale);
+                TryDelete(stale + "-wal");
+                TryDelete(stale + "-shm");
+            }
+        }
+        catch (Exception e) when (IsStoreFailure(e))
+        {
+            TryDelete(temporary);
+            TryDelete(temporary + "-wal");
+            TryDelete(temporary + "-shm");
+            throw Unavailable(e);
+        }
+        catch
+        {
+            // The destination is never touched on failure: it does not exist yet.
+            TryDelete(temporary);
+            TryDelete(temporary + "-wal");
+            TryDelete(temporary + "-shm");
+            throw;
+        }
+        finally
+        {
+            claim.Dispose();
+            TryDelete(claimPath);
+        }
+    }
+
+    /// <summary>
+    /// The temporaries this destination owns, identified by an exact prefix rather than a glob.
+    ///
+    /// <para>The namespace is <c>&lt;destination&gt;.tmp-&lt;12 hex&gt;</c>, and membership is
+    /// decided by <see cref="string.StartsWith(string, StringComparison)"/> on the file name — so a
+    /// destination whose own name contains <c>*</c> or <c>?</c> cannot reach outside itself, and a
+    /// neighbouring backup with a longer name cannot be mistaken for one of ours.</para>
+    /// </summary>
+    private static IEnumerable<string> EnumerateOwnedTemporaries(string destination)
+    {
+        var directory = Path.GetDirectoryName(destination);
+        if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
+            yield break;
+
+        var prefix = Path.GetFileName(destination) + TemporarySuffix;
+
+        // "*" is the only pattern passed to the filesystem, so nothing in the operator's filename
+        // is ever interpreted. Every decision below is ordinal string comparison.
+        foreach (var candidate in Directory.EnumerateFiles(directory, "*"))
+        {
+            var name = Path.GetFileName(candidate);
+            if (!name.StartsWith(prefix, StringComparison.Ordinal))
+                continue;
+
+            // Exactly our shape: the suffix, then the token, and nothing after it. This keeps the
+            // WAL sidecars out of the enumeration — they are deleted explicitly by the caller,
+            // which is where the intent is visible.
+            var token = name[prefix.Length..];
+            if (token.Length == TemporaryTokenLength && token.All(char.IsAsciiHexDigitLower))
+                yield return candidate;
+        }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+        catch (IOException)
+        {
+            // Best effort. The caller is already failing; a leftover file is reported by the
+            // command's own non-zero exit rather than masked by a second exception here.
+        }
+    }
+
     public void Dispose()
     {
         // Returns pooled connections to the OS so a later instance over the same file — a restart,
@@ -170,12 +364,31 @@ public sealed class SqliteAuthStore : IAuthStore, IDisposable
             await using var connection = new SqliteConnection(_connectionString);
             await connection.OpenAsync(ct);
 
-            await using var command = connection.CreateCommand();
-            // WAL so a reader is never blocked by the writer, and so a crash between statements
-            // leaves a recoverable log rather than a torn page.
-            command.CommandText = "PRAGMA journal_mode=WAL;\nPRAGMA foreign_keys=ON;\n" + Schema;
-            await command.ExecuteNonQueryAsync(ct);
+            // VERIFY BEFORE MUTATING, on the non-create path. `PRAGMA journal_mode=WAL` is a
+            // persistent change to the file, and running it first meant pointing the service at
+            // someone else's database rewrote its journal mode before deciding it was not ours.
+            if (!_allowCreate)
+                await VerifySchemaAsync(connection, ct);
 
+            await using (var pragmas = connection.CreateCommand())
+            {
+                // WAL so a reader is never blocked by the writer, and so a crash between statements
+                // leaves a recoverable log rather than a torn page.
+                pragmas.CommandText = "PRAGMA journal_mode=WAL;\nPRAGMA foreign_keys=ON;";
+                await pragmas.ExecuteNonQueryAsync(ct);
+            }
+
+            if (_allowCreate)
+            {
+                // The ONLY path that may create schema, reached only from `store init`. A normal
+                // open verifies above and never creates: `CREATE TABLE IF NOT EXISTS` running on
+                // every open quietly undid the point of opening ReadWrite rather than
+                // ReadWriteCreate, handing a zero-byte leftover or an unrelated file a full schema
+                // and turning it into a working store with no devices.
+                await using var create = connection.CreateCommand();
+                create.CommandText = Schema;
+                await create.ExecuteNonQueryAsync(ct);
+            }
             _initialized = true;
         }
         catch (Exception e) when (IsStoreFailure(e))
@@ -199,6 +412,117 @@ public sealed class SqliteAuthStore : IAuthStore, IDisposable
         await using var command = connection.CreateCommand();
         command.CommandText = _sessionPragmas;
         await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// The tables a usable auth store has, and the columns each read and write depends on.
+    ///
+    /// <para>Table names alone were not enough: a file can carry all three names and none of the
+    /// columns — a partial restore, a hand-edited database, or a schema from a future version
+    /// rolled back — and it would have opened cleanly and then failed one request at a time with
+    /// an unhandled engine error instead of a clean `503`.</para>
+    /// </summary>
+    private static readonly (string Table, string[] Columns)[] RequiredSchema =
+    [
+        ("enrollments",
+            ["enrollment_id", "code_hash", "principal_id", "expires_at", "consumed_at", "device_id",
+             "revoked_at"]),
+        ("devices",
+            ["device_id", "principal_id", "secret_hash", "enrollment_id", "registered_at",
+             "first_token_minted_at", "revoked_at"]),
+        ("tokens", ["token_id", "token_hash", "device_id", "expires_at", "revoked_at"]),
+    ];
+
+    /// <summary>
+    /// Confirm this file is an auth store, not merely a file SQLite could open.
+    ///
+    /// <para>Anything missing raises <see cref="AuthStoreUnavailableException"/>, so <c>/ready</c>
+    /// answers `503` and the container never reports healthy — an operator sees a service that
+    /// refuses to serve rather than one that serves an empty universe.</para>
+    /// </summary>
+    private static async Task VerifySchemaAsync(SqliteConnection connection, CancellationToken ct)
+    {
+        // ENGINE INTEGRITY FIRST. A schema check reads sqlite_master and PRAGMA table_info, both of
+        // which live on their own pages — so a file whose enrollments pages are corrupted passes a
+        // pure schema check completely, opens as a healthy store, and then fails on whichever
+        // request happens to touch the damaged page. `quick_check` walks the b-trees and finds
+        // that; it is a page-level check rather than the full row-by-row one, which is the right
+        // trade for something on every open of a store holding a handful of rows.
+        await using (var integrity = connection.CreateCommand())
+        {
+            integrity.CommandText = "PRAGMA quick_check(1)";
+            var result = await integrity.ExecuteScalarAsync(ct) as string;
+
+            if (!string.Equals(result, "ok", StringComparison.Ordinal))
+            {
+                // The engine's own message can name pages and tables; §13 keeps it out of the
+                // response. What the operator needs is that this file is damaged.
+                throw new AuthStoreUnavailableException(
+                    "The auth store failed an integrity check — the file is damaged. " +
+                    "Restore from a backup; do not keep serving from it.");
+            }
+        }
+
+        foreach (var (table, columns) in RequiredSchema)
+        {
+            await using var command = connection.CreateCommand();
+            // `PRAGMA table_info` returns nothing at all for a table that does not exist, so one
+            // query answers both "is the table there?" and "does it have the columns?".
+            command.CommandText = $"PRAGMA table_info({table})";
+
+            var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            await using (var reader = await command.ExecuteReaderAsync(ct))
+            {
+                while (await reader.ReadAsync(ct))
+                    found.Add(reader.GetString(1));
+            }
+
+            if (!columns.All(found.Contains))
+            {
+                // No path and no column names in the message: §13, and the operator already knows
+                // which store they pointed this at. What they need is that it is not one.
+                throw new AuthStoreUnavailableException(
+                    "The auth store schema is incomplete. Run `store init` on a new volume, " +
+                    "or restore from a backup.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether the file at this path is a usable auth store. Used by <c>store init</c> so a second
+    /// run validates what is there rather than trusting that bytes exist.
+    /// </summary>
+    /// <summary>
+    /// Whether the file at this path is a usable auth store.
+    ///
+    /// <para><paramref name="thorough"/> runs the full row-by-row <c>integrity_check</c> instead of
+    /// the page-level <c>quick_check</c> an ordinary open uses. `store verify` asks for it, because
+    /// the whole value of a backup is what happens months later when someone restores it under
+    /// pressure, and that is worth more than the milliseconds.</para>
+    /// </summary>
+    public async Task<bool> IsUsableAsync(CancellationToken ct = default, bool thorough = false)
+    {
+        try
+        {
+            await EnsureInitializedAsync(ct);
+
+            if (thorough)
+            {
+                await using var connection = new SqliteConnection(_connectionString);
+                await connection.OpenAsync(ct);
+                await using var command = connection.CreateCommand();
+                command.CommandText = "PRAGMA integrity_check";
+                if (await command.ExecuteScalarAsync(ct) as string != "ok")
+                    return false;
+            }
+
+            await InTransactionAsync((tx, token) => tx.CountActiveDevicesAsync("", token), ct);
+            return true;
+        }
+        catch (AuthStoreUnavailableException)
+        {
+            return false;
+        }
     }
 
     private static bool IsStoreFailure(Exception e) => e is SqliteException or IOException;
@@ -301,6 +625,35 @@ public sealed class SqliteAuthStore : IAuthStore, IDisposable
             return Convert.ToInt32(await Guarded(() => command.ExecuteScalarAsync(ct)));
         }
 
+        public async Task<IReadOnlyList<DeviceRecord>> ListDevicesAsync(
+            string? principalId, CancellationToken ct)
+        {
+            var filter = principalId is null ? "" : " WHERE principal_id = $p";
+            await using var command = Command(
+                "SELECT device_id, principal_id, secret_hash, enrollment_id, registered_at, " +
+                "first_token_minted_at, revoked_at FROM devices" + filter +
+                " ORDER BY registered_at, device_id",
+                principalId is null ? [] : [("$p", (object?)principalId)]);
+
+            var devices = new List<DeviceRecord>();
+            await using var reader = await Guarded(() => command.ExecuteReaderAsync(ct));
+            while (await Guarded(() => reader.ReadAsync(ct)))
+            {
+                devices.Add(new DeviceRecord
+                {
+                    DeviceId = reader.GetString(0),
+                    PrincipalId = reader.GetString(1),
+                    SecretHash = reader.GetString(2),
+                    EnrollmentId = reader.GetString(3),
+                    RegisteredAt = ReadInstant(reader, 4)!.Value,
+                    FirstTokenMintedAt = ReadInstant(reader, 5),
+                    RevokedAt = ReadInstant(reader, 6),
+                });
+            }
+
+            return devices;
+        }
+
         public Task<TokenRecord?> FindTokenAsync(string tokenId, CancellationToken ct) =>
             ReadOneAsync(
                 "SELECT token_hash, device_id, expires_at, revoked_at FROM tokens WHERE token_id = $id",
@@ -332,6 +685,14 @@ public sealed class SqliteAuthStore : IAuthStore, IDisposable
                     ("$expires", Instant(record.ExpiresAt)),
                     ("$revoked", Instant(record.RevokedAt)),
                 ], ct);
+
+        public async Task<int> RevokeAllEnrollmentsAsync(DateTimeOffset at, CancellationToken ct)
+        {
+            await using var command = Command(
+                "UPDATE enrollments SET revoked_at = $at WHERE revoked_at IS NULL",
+                [("$at", Instant(at))]);
+            return await Guarded(() => command.ExecuteNonQueryAsync(ct));
+        }
 
         public Task RevokeTokensForDeviceAsync(string deviceId, DateTimeOffset at, CancellationToken ct) =>
             ExecuteAsync(

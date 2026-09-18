@@ -38,6 +38,14 @@ public sealed class InMemoryAuthStore : IAuthStore
     /// </summary>
     public bool FailOnCommit { get; set; }
 
+    /// <summary>
+    /// Not supported: this fixture has no file to copy, and a no-op that returned success would be
+    /// worse than an error — it is exactly the shape of a backup nobody discovers is empty.
+    /// </summary>
+    public Task BackupToAsync(string destinationPath, CancellationToken ct) =>
+        throw new NotSupportedException(
+            "The in-process store has nothing to back up; it is a test fixture, not a durable store.");
+
     public async Task<T> InTransactionAsync<T>(
         Func<IAuthStoreTransaction, CancellationToken, Task<T>> body, CancellationToken ct)
     {
@@ -105,6 +113,15 @@ public sealed class InMemoryAuthStore : IAuthStore
             Task.FromResult(_devices.Values.Count(d =>
                 d.IsActive && string.Equals(d.PrincipalId, principalId, StringComparison.Ordinal)));
 
+        public Task<IReadOnlyList<DeviceRecord>> ListDevicesAsync(
+            string? principalId, CancellationToken ct) =>
+            Task.FromResult<IReadOnlyList<DeviceRecord>>(_devices.Values
+                .Where(d => principalId is null
+                            || string.Equals(d.PrincipalId, principalId, StringComparison.Ordinal))
+                .OrderBy(d => d.RegisteredAt)
+                .ThenBy(d => d.DeviceId, StringComparer.Ordinal)
+                .ToList());
+
         public Task<TokenRecord?> FindTokenAsync(string tokenId, CancellationToken ct) =>
             Task.FromResult(_tokens.GetValueOrDefault(tokenId));
 
@@ -112,6 +129,18 @@ public sealed class InMemoryAuthStore : IAuthStore
         {
             _tokens[record.TokenId] = record;
             return Task.CompletedTask;
+        }
+
+        public Task<int> RevokeAllEnrollmentsAsync(DateTimeOffset at, CancellationToken ct)
+        {
+            var burned = 0;
+            foreach (var enrollment in _enrollments.Values.Where(e => e.RevokedAt is null).ToList())
+            {
+                _enrollments[enrollment.EnrollmentId] = enrollment with { RevokedAt = at };
+                burned++;
+            }
+
+            return Task.FromResult(burned);
         }
 
         public Task RevokeTokensForDeviceAsync(string deviceId, DateTimeOffset at, CancellationToken ct)

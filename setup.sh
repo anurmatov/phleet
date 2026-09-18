@@ -63,6 +63,15 @@ unset FLEET_BASE_DIR FLEET_CTO_AGENT FLEET_GROUP_CHAT_ID \
 # workspaces, memories, credentials) lives here, keeping the repo root pristine.
 FLEET_BASE_DIR="$SCRIPT_DIR/fleet"
 ENV_FILE="$FLEET_BASE_DIR/.env"
+
+# Compose lets a value exported in the invoking shell win over the same name in
+# `--env-file`, so a stale `export FLEET_COMMS_BIND=...` from an earlier session
+# would silently override the choice saved in .env — and the operator would see
+# a service on an address they did not configure, with .env saying otherwise.
+# Unset them here: .env is the record of the decision.
+unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY \
+      FLEET_COMMS_AGENT_LABEL FLEET_COMMS_STORE_PROVISIONED
+
 ENV_EXAMPLE="$SCRIPT_DIR/.env.example"
 COMPOSE_EXAMPLE="$SCRIPT_DIR/docker-compose.example.yml"
 COMPOSE_FILE="$FLEET_BASE_DIR/docker-compose.yml"
@@ -444,6 +453,50 @@ echo
 # {{config.CtoAgent}} at runtime. Must be set BEFORE services start.
 # Write 'phleet' as a default placeholder; the real name is chosen when the
 # user provisions their first agent from the dashboard.
+# ── Fleet.Comms — first-party client API (opt-in) ────────────────────────────
+#
+# Off unless asked for. Declining must leave the installation byte-for-byte
+# equivalent to one where this prompt did not exist: no image build, no
+# container, no health poll, no required .env key.
+#
+# The profile is applied with an explicit `--profile comms` flag rather than
+# COMPOSE_PROFILES in .env. Compose reads COMPOSE_PROFILES from the process
+# environment; whether it also honours it from `--env-file` was not verified
+# here, and shipping a variable that silently does nothing is worse than a
+# flag that obviously works.
+COMMS_PROFILE_ARGS=()
+_comms_enabled=$(read_env_var "$ENV_FILE" "FLEET_COMMS_ENABLED")
+if [[ -z "$_comms_enabled" ]]; then
+  echo
+  echo -e "  ${BOLD}Fleet.Comms — first-party client API${NC}"
+  echo "  Device enrollment, tokens and session discovery for a native client."
+  echo "  Auth only: no chat, no conversation history, no push notifications."
+  echo "  Requires your own TLS reverse proxy for anything beyond localhost."
+  echo "  See docs/comms-deployment.md."
+  read -r -p "  Enable Fleet.Comms? [y/N] " _comms_answer
+  case "$_comms_answer" in
+    [yY]*) _comms_enabled=true ;;
+    *)     _comms_enabled=false ;;
+  esac
+  $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_ENABLED" "$_comms_enabled"
+fi
+
+if [[ "$_comms_enabled" == "true" ]]; then
+  COMMS_PROFILE_ARGS=(--profile comms)
+
+  # Loopback by default: a host reverse proxy reaches it, nothing else does.
+  # Change this only once TLS terminates in front of it.
+  prompt_field "$ENV_FILE" "FLEET_COMMS_BIND" "Fleet.Comms bind address" \
+    "host:port for the client API. Keep the loopback default unless a TLS reverse proxy is in front." \
+    n n "127.0.0.1:3500"
+
+  # Off by default. Turning it on while the port is reachable without a proxy
+  # hands every caller the rate limiter's partition key.
+  prompt_field "$ENV_FILE" "FLEET_COMMS_TRUST_PROXY" "Trust X-Forwarded-For from the proxy" \
+    "true only if a reverse proxy is in front AND replaces X-Forwarded-For (never appends). Otherwise false." \
+    n n "false"
+fi
+
 _cto_val=$(read_env_var "$ENV_FILE" "FLEET_CTO_AGENT")
 if [[ -z "$_cto_val" || "$_cto_val" == "changeme" || "$_cto_val" == "phleet" ]]; then
   if ! $DRY_RUN; then
@@ -798,7 +851,20 @@ if $SKIP_SERVICES; then
   warn "Skipping services (--skip-services)"
 else
   if ! $DRY_RUN; then
-    (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env up -d)
+    # The auth store is created BEFORE the service starts. It opens the database read-write and
+    # will not create it, so starting first means a container that 503s until someone notices.
+    if [[ "$_comms_enabled" == "true" ]]; then
+      (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env \
+        run --rm fleet-comms-ops store init) \
+        || { fail "Could not initialise the Fleet.Comms auth store"; exit 1; }
+
+      # Recorded on the HOST, outside the volume. If the volume is later deleted the marker inside
+      # it goes too, and a wiped volume would otherwise look exactly like a first install; this is
+      # what makes `store init` demand --recover instead of silently starting over empty.
+      write_env_var "$ENV_FILE" "FLEET_COMMS_STORE_PROVISIONED" "true"
+    fi
+
+    (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env "${COMMS_PROFILE_ARGS[@]}" up -d)
 
     poll_health "fleet-mysql"           30  "fleet-mysql"
     poll_health "rabbitmq"              30  "rabbitmq"
@@ -815,6 +881,11 @@ else
     # Optional AI services — warn on timeout but don't fail setup (model downloads can be slow on first run)
     poll_health "fleet-whisper"         120 "fleet-whisper" false || warn "fleet-whisper not ready yet — it may still be downloading the model. Check: docker logs fleet-whisper"
     # fleet-kokoro-tts has no healthcheck endpoint; compose starts it alongside other services
+    # Only when the user opted in — polling a service nobody enabled would fail an install that
+    # is working exactly as asked.
+    if [[ "$_comms_enabled" == "true" ]]; then
+      poll_health "fleet-comms" 60 "fleet-comms"
+    fi
   else
     echo -e "  ${YELLOW}[dry-run]${NC} Would run: docker compose -p $COMPOSE_PROJECT -f $COMPOSE_FILE --env-file .env up -d"
     echo -e "  ${YELLOW}[dry-run]${NC} Would poll health for core services"

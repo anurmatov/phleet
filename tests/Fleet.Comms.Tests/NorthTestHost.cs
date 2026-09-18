@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -43,16 +44,28 @@ internal sealed class NorthTestHost : IAsyncDisposable
     /// <summary>The running app's services, so a test can inspect the real registration graph.</summary>
     public IServiceProvider Services => _app.Services;
 
-    public static async Task<NorthTestHost> StartAsync(ISecretHasher? hasher = null)
+    public static async Task<NorthTestHost> StartAsync(
+        ISecretHasher? hasher = null, IAuthStore? store = null, bool? trustForwardedHeaders = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Logging.ClearProviders();
 
-        var store = new InMemoryAuthStore();
+        if (trustForwardedHeaders is not null)
+        {
+            builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Comms:TrustForwardedHeaders"] = trustForwardedHeaders.Value ? "true" : "false",
+            });
+        }
+
+        // `store` lets a test drive the real routes against a durable store — the operator-command
+        // tests need the CLI and the routes to be looking at the same file. Left null, the
+        // in-process fixture is used and `Store` below is the one the test can poke at.
+        var inMemory = new InMemoryAuthStore();
         var time = new TestTimeProvider();
 
-        builder.Services.AddSingleton<IAuthStore>(store);
+        builder.Services.AddSingleton(store ?? inMemory);
         builder.Services.AddSingleton<TimeProvider>(time);
         if (hasher is not null)
             builder.Services.AddSingleton(hasher);
@@ -68,7 +81,7 @@ internal sealed class NorthTestHost : IAsyncDisposable
             throw new InvalidOperationException("The test clock was not the resolved TimeProvider.");
 
         var client = app.GetTestClient();
-        return new NorthTestHost(app, store, time,
+        return new NorthTestHost(app, inMemory, time,
             app.Services.GetRequiredService<AuthService>(), client);
     }
 
@@ -91,11 +104,13 @@ internal sealed class NorthTestHost : IAsyncDisposable
             deviceSecret,
         });
 
-    public Task<HttpResponseMessage> SessionAsync(string? bearer)
+    public Task<HttpResponseMessage> SessionAsync(string? bearer, string? forwardedFor = null)
     {
         var request = new HttpRequestMessage(HttpMethod.Get, "/v1/session");
         if (bearer is not null)
             request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {bearer}");
+        if (forwardedFor is not null)
+            request.Headers.TryAddWithoutValidation("X-Forwarded-For", forwardedFor);
         return Client.SendAsync(request);
     }
 

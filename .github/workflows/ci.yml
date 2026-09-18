@@ -113,3 +113,94 @@ jobs:
             exit 1
           fi
           echo "Schema matches pinned @openai/codex@0.153.4 (key-order insensitive)"
+
+  comms-image:
+    name: Fleet.Comms image build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # A green `dotnet build` on a full checkout proves nothing about whether the IMAGE builds:
+      # the container has a different build tree. A project reference that escapes the project
+      # directory resolves fine on a full checkout and not at all inside a narrower Docker context,
+      # so a full test suite can pass on a commit whose image cannot build. This job runs the real
+      # build from the real repository root.
+      - name: Build the image
+        run: docker build -f src/Fleet.Comms/Dockerfile -t fleet:comms-ci .
+
+      # The Dockerfile installs curl for the container healthcheck. Asserting it from the image
+      # rather than from the Dockerfile text: a healthcheck whose binary is missing is a probe that
+      # can never pass, and a gate that can never pass teaches everyone to ignore the signal.
+      - name: curl is present in the image
+        run: docker run --rm --entrypoint curl fleet:comms-ci --version
+
+      # The auth store directory must NOT exist in the image. If it did, a missing volume would be
+      # served silently from container storage and every device would be forgotten on the next
+      # recreation, instead of failing loudly through /ready.
+      # Asserted INSIDE the container, with the container invocation itself required to succeed.
+      # An `if docker run ... '[ -d ... ]'` treats every non-zero exit as proof of absence, so a
+      # daemon that failed to launch the container at all would print "absent" and pass — a launch
+      # failure is not an observation of the image filesystem.
+      - name: The auth store directory is absent from the image
+        run: |
+          docker run --rm --entrypoint sh fleet:comms-ci -c \
+            'test ! -d /var/lib/fleet-comms || { echo "ERROR: /var/lib/fleet-comms exists in the image."; exit 1; }'
+          echo "absent, as required (container ran and reported it)"
+
+      # A configuration rejection must STOP the container, promptly, with a non-zero code.
+      #
+      # Container acceptance on an earlier head found the opposite: with the store path absent the
+      # process wrote its message, bound no listener, and then sat at ~99% CPU indefinitely. Docker
+      # reports that as `running`, so `restart: unless-stopped` never fires and a deployment that
+      # can serve nothing looks alive. This is the container-level regression for it, and it belongs
+      # here because this is the only job with a daemon.
+      - name: A missing or blank store path exits non-zero, promptly
+        run: |
+          set -euo pipefail
+          for value in "MISSING" "" "   "; do
+            if [ "$value" = "MISSING" ]; then
+              args=()
+              label="missing"
+            else
+              args=(-e "Comms__AuthStorePath=$value")
+              label="blank('"'"'$value'"'"')"
+            fi
+
+            start=$(date +%s)
+            set +e
+            # --stop-timeout guards the hang: if the process does not exit, `timeout` kills the
+            # client and the container is removed below, and the assertion fails.
+            timeout 60 docker run --rm "${args[@]}" fleet:comms-ci >/tmp/out 2>&1
+            status=$?
+            set -e
+            elapsed=$(( $(date +%s) - start ))
+
+            echo "--- $label: exit=$status after ${elapsed}s"
+            head -3 /tmp/out || true
+
+            if [ "$status" -eq 124 ]; then
+              echo "ERROR: the container did not exit — a misconfigured deployment must not look alive."
+              exit 1
+            fi
+            if [ "$status" -eq 0 ]; then
+              echo "ERROR: a missing/blank store path must not be a successful start."
+              exit 1
+            fi
+            if [ "$status" -ge 128 ]; then
+              echo "ERROR: exited on signal $status; configuration rejection must be a clean exit."
+              exit 1
+            fi
+            if [ "$elapsed" -gt 30 ]; then
+              echo "ERROR: took ${elapsed}s to exit; it must fail fast."
+              exit 1
+            fi
+            grep -q "AuthStorePath" /tmp/out || {
+              echo "ERROR: the log does not name the missing key."; exit 1; }
+          done
+          echo "missing and blank both exit non-zero, cleanly and promptly"
+
+      - name: Clean up
+        if: always()
+        run: docker image rm -f fleet:comms-ci || true

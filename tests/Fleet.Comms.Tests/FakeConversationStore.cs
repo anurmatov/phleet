@@ -85,6 +85,8 @@ internal sealed class FakeConversationStore : IConversationStore
             Events = Events,
             NextAfterSeq = Events.Count > 0 ? Events[^1].Seq : request.AfterSeq,
             HasMore = false,
+            NextSeq = NextSeq,
+            RetainedFloorSeq = RetainedFloorSeq,
         });
     }
 

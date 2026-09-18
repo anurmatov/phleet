@@ -38,7 +38,10 @@ public sealed class MigrationRunnerTests(MySqlFixture fixture)
         var first = new List<string>();
         var applied = await runner.MigrateAsync(first.Add);
 
-        Assert.Equal([MigrationRunner.ExpectedVersion], applied);
+        // EVERY script, not just the newest. Asserting a single version encoded "this binary carries
+        // one migration" as a fact about the runner, and the second script it ever gained broke a
+        // test that was not about script count.
+        Assert.Equal(MigrationRunner.Scripts.Select(script => script.Version).ToArray(), applied);
 
         var second = new List<string>();
         var again = await runner.MigrateAsync(second.Add);
@@ -107,9 +110,12 @@ public sealed class MigrationRunnerTests(MySqlFixture fixture)
             StringComparison.Ordinal);
 
         // And it refused rather than half-applied: the tampered row is exactly as it was left.
-        Assert.StartsWith($"{MigrationRunner.ExpectedVersion}|{new string('0', 64)}",
+        // Scoped to the version that was tampered with — reading whichever row came first was only
+        // ever correct while there was one.
+        Assert.Equal($"{MigrationRunner.ExpectedVersion}|{new string('0', 64)}",
             await MySqlFixture.ScalarRowOnAsync(scratch.ConnectionString,
-                "SELECT version, checksum FROM schema_migrations"), StringComparison.Ordinal);
+                "SELECT version, checksum FROM schema_migrations "
+                + $"WHERE version = {MigrationRunner.ExpectedVersion}"));
     }
 
     /// <summary>

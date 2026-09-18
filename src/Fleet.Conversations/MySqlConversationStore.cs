@@ -468,8 +468,17 @@ public sealed partial class MySqlConversationStore : IConversationStore
         {
             Gap = gap,
             Events = events,
+
+            // The cursor the CLIENT should send next. It is the last seq delivered, not next_seq:
+            // `afterSeq` means "processed up to and including", so handing back next_seq would skip
+            // whatever is appended between this read and the next one.
             NextAfterSeq = events.Count > 0 ? events[^1].Seq : request.AfterSeq,
             HasMore = hasMore,
+
+            // Both read from the conversation row inside THIS transaction, so they cannot disagree
+            // with the page they arrived with.
+            NextSeq = conversation.NextSeq,
+            RetainedFloorSeq = conversation.RetainedFloorSeq,
         };
     }
 

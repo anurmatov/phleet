@@ -44,6 +44,29 @@ public sealed class Reconciler(
         public required bool WithinGrace { get; init; }
     }
 
+    /// <summary>
+    /// How long it has been since this service last recorded that it was alive.
+    /// </summary>
+    /// <remarks>
+    /// ⚠️ <b>Read BEFORE stamping, or the answer is always zero.</b> The maintenance loop stamps on
+    /// every tick, so a caller that stamped first and asked afterwards would measure its own write
+    /// and conclude the service had never been away — which is exactly how a grace period that
+    /// exists in the code never fires in the deployment.
+    /// </remarks>
+    public async Task<TimeSpan> ReadHealthGapAsync(CancellationToken ct = default)
+    {
+        await using var connection = await OpenAsync(ct);
+        await using var command = new MySqlCommand(
+            "SELECT TIMESTAMPDIFF(MICROSECOND, last_healthy_at, UTC_TIMESTAMP(6)) FROM service_health WHERE id = 1",
+            connection);
+
+        var raw = await command.ExecuteScalarAsync(ct);
+
+        return raw is null or DBNull
+            ? TimeSpan.Zero
+            : TimeSpan.FromMicroseconds(Convert.ToDouble(raw));
+    }
+
     /// <summary>Records that this service is alive, so the grace window can be measured.</summary>
     public async Task RecordHealthyAsync(CancellationToken ct = default)
     {

@@ -539,6 +539,11 @@ services:
     environment:
       - MYSQL_ROOT_PASSWORD=${FLEET_COMMS_MYSQL_ROOT_PASSWORD:-}
       - MYSQL_DATABASE=${FLEET_COMMS_MYSQL_DATABASE:-comms}
+      # Read by the init script on first start. They are NOT in any tracked file: a password in a
+      # public repository is a password every checkout has, and a placeholder in one is a password
+      # every deployment that did not notice it has.
+      - FLEET_COMMS_MYSQL_DDL_PASSWORD=${FLEET_COMMS_MYSQL_DDL_PASSWORD:-}
+      - FLEET_COMMS_MYSQL_RUNTIME_PASSWORD=${FLEET_COMMS_MYSQL_RUNTIME_PASSWORD:-}
     volumes:
       - comms_mysql_data:/var/lib/mysql
       # Provisions the TWO accounts on first start: a DDL one for migrations and a DDL-LESS runtime

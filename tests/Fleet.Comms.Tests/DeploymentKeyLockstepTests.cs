@@ -36,6 +36,8 @@ public class DeploymentKeyLockstepTests
         "FLEET_COMMS_AGENT_NAME",
         "FLEET_COMMS_BROKER",
         "FLEET_COMMS_CLAIM_RETENTION",
+        "FLEET_COMMS_MYSQL_DDL_PASSWORD",
+        "FLEET_COMMS_MYSQL_RUNTIME_PASSWORD",
     ];
 
     [Theory]
@@ -124,6 +126,47 @@ public class DeploymentKeyLockstepTests
     }
 
     /// <summary>
+    /// The account-provisioning script contains no literal password.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// It reads them from the container's environment. A password in a tracked file is a password
+    /// every checkout holds — and a <i>placeholder</i> in one is worse, because an operator who does
+    /// not notice it ships a database whose accounts have the value this repository published.
+    /// </para>
+    /// <para>
+    /// Asserted on the shape rather than on a denylist of known-bad strings: every
+    /// <c>IDENTIFIED BY</c> must interpolate a variable, so a literal of any value fails whether or
+    /// not anyone thought to add it to a list.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void The_account_script_carries_no_literal_password()
+    {
+        var script = Read(Path.Combine("deploy", "comms-mysql-init", "01-accounts.sh"));
+
+        var identifiedBy = Regex.Matches(script, @"IDENTIFIED BY\s+'([^']*)'")
+            .Select(m => m.Groups[1].Value)
+            .ToArray();
+
+        // Both accounts, and no more — a third would be an account nothing else here knows about.
+        Assert.Equal(2, identifiedBy.Length);
+
+        foreach (var value in identifiedBy)
+        {
+            Assert.StartsWith("${", value, StringComparison.Ordinal);
+            Assert.EndsWith("}", value, StringComparison.Ordinal);
+        }
+
+        // And the old .sql form is gone rather than sitting beside the new one, where a stale copy
+        // in the same directory would still be executed by the entrypoint.
+        Assert.False(
+            File.Exists(Path.Combine(
+                RepositoryRoot().FullName, "deploy", "comms-mysql-init", "01-accounts.sql")),
+            "the superseded .sql init file is still present and would still be run");
+    }
+
+    /// <summary>
     /// The runtime account is provisioned WITHOUT DDL grants.
     /// </summary>
     /// <remarks>
@@ -135,7 +178,7 @@ public class DeploymentKeyLockstepTests
     [Fact]
     public void The_provisioned_runtime_account_holds_no_ddl_grant()
     {
-        var sql = Read(Path.Combine("deploy", "comms-mysql-init", "01-accounts.sql"));
+        var sql = Read(Path.Combine("deploy", "comms-mysql-init", "01-accounts.sh"));
 
         var runtimeGrant = sql.Split('\n')
             .Single(line => line.Contains("TO 'comms_runtime'@", StringComparison.Ordinal));

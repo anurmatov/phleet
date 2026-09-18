@@ -72,7 +72,8 @@ ENV_FILE="$FLEET_BASE_DIR/.env"
 unset FLEET_COMMS_CONVERSATIONS_ENABLED FLEET_COMMS_CONVERSATION_DB \
       FLEET_COMMS_CONVERSATION_MIGRATION_DB FLEET_COMMS_SOUTH_TOKEN \
       FLEET_COMMS_SOUTH_BIND FLEET_COMMS_AGENT_NAME FLEET_COMMS_BROKER \
-      FLEET_COMMS_MYSQL_ROOT_PASSWORD FLEET_COMMS_CLAIM_RETENTION
+      FLEET_COMMS_MYSQL_ROOT_PASSWORD FLEET_COMMS_CLAIM_RETENTION \
+      FLEET_COMMS_MYSQL_DDL_PASSWORD FLEET_COMMS_MYSQL_RUNTIME_PASSWORD
 unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY \
       FLEET_COMMS_AGENT_LABEL FLEET_COMMS_STORE_PROVISIONED
 
@@ -526,6 +527,15 @@ if [[ "$_comms_enabled" == "true" ]]; then
     # database rather than by the code being careful.
     prompt_field "$ENV_FILE" "FLEET_COMMS_MYSQL_ROOT_PASSWORD" "Conversation MySQL root password" \
       "Used once, to provision the two accounts. Generate one: openssl rand -base64 24" y y
+
+    # The two account passwords, read by the init script on the database's first start. Asked for
+    # rather than defaulted, and never written to a tracked file: a password in the repository is a
+    # password every checkout has.
+    prompt_field "$ENV_FILE" "FLEET_COMMS_MYSQL_DDL_PASSWORD" "Conversation MySQL DDL account password" \
+      "The account 'conversations migrate' runs as. Must match the migration connection string. Generate one: openssl rand -base64 24" y y
+
+    prompt_field "$ENV_FILE" "FLEET_COMMS_MYSQL_RUNTIME_PASSWORD" "Conversation MySQL runtime account password" \
+      "The account the service runs as, with no DDL grants. Must match the runtime connection string. Generate one: openssl rand -base64 24" y y
 
     prompt_field "$ENV_FILE" "FLEET_COMMS_CONVERSATION_DB" "Conversation runtime connection string" \
       "The account the SERVICE uses. It must hold SELECT/INSERT/UPDATE/DELETE and no DDL grants." y y

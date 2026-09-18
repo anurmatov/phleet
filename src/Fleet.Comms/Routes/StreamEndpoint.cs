@@ -198,11 +198,18 @@ public static class StreamEndpoint
             }
         });
 
+        // The conversation's REAL head, read from its row rather than derived from the page.
+        //
+        // These were `NextAfterSeq + 1` and `Gap?.RetainedFloorSeq ?? 0`, and both were wrong in the
+        // ordinary case: the first is the last delivered seq plus one, which is only next_seq when
+        // the probe page happened to reach the tail, and the second reports a floor of 0 — a
+        // position that does not exist — whenever no gap was produced, which is almost always. A
+        // client sizing its catch-up from either would ask for the wrong range.
         await SendAsync(socket, FleetProtocolJson.Serialize(new StreamHello
         {
             ConversationId = conversationId,
-            NextSeq = head.NextAfterSeq + 1,
-            RetainedFloorSeq = head.Gap?.RetainedFloorSeq ?? 0,
+            NextSeq = head.NextSeq,
+            RetainedFloorSeq = head.RetainedFloorSeq,
             Limits = SessionLimitsSnapshot,
         }), lifetime.Token);
 

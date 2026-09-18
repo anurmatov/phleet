@@ -370,6 +370,27 @@ public sealed record ReadConversationResult
     public required IReadOnlyList<StoredEvent> Events { get; init; }
     public required ulong NextAfterSeq { get; init; }
     public required bool HasMore { get; init; }
+
+    /// <summary>
+    /// The conversation's <c>next_seq</c>: the seq the next appended event will take.
+    /// </summary>
+    /// <remarks>
+    /// Read from the conversation row inside the same transaction as the events, so it cannot
+    /// disagree with the page it came with. A caller that needed it — the stream's <c>hello</c>
+    /// frame does — would otherwise have to derive it from the last event returned, which is wrong
+    /// for an empty page and wrong again whenever the page is not the tail.
+    /// </remarks>
+    public required ulong NextSeq { get; init; }
+
+    /// <summary>
+    /// The conversation's <c>retained_floor_seq</c>: the lowest seq still readable.
+    /// </summary>
+    /// <remarks>
+    /// Always present, not only when a gap was produced. <see cref="Gap"/> is emitted only when the
+    /// reader's own cursor fell beneath the floor; a client that inferred the floor from the gap's
+    /// absence would conclude there was none.
+    /// </remarks>
+    public required ulong RetainedFloorSeq { get; init; }
 }
 
 public sealed record StoredEvent

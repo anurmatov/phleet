@@ -67,19 +67,25 @@ public static class StreamEndpoint
     {
         var logger = loggerFactory.CreateLogger(typeof(StreamEndpoint).FullName!);
 
-        if (!http.WebSockets.IsWebSocketRequest)
-        {
-            http.Response.StatusCode = StatusCodes.Status400BadRequest;
-            return;
-        }
-
-        // Header only, before the upgrade. A token in a query string is a token in every
-        // intermediary's access log and in every crash report — and because the refusal happens
-        // here, the value is never read, never bound and never logged.
+        // Authentication FIRST, before the upgrade shape is even considered.
+        //
+        // Header only. A token in a query string is a token in every intermediary's access log and
+        // in every crash report, and there is no code path here that reads one from there — so a
+        // caller who put it there is unauthenticated, full stop.
+        //
+        // The ordering matters for a second reason: checking `IsWebSocketRequest` first would answer
+        // an unauthenticated caller `400` for a malformed upgrade and `401` for a well-formed one,
+        // which tells them the difference without a credential.
         var caller = await NorthEndpoints.AuthenticateAsync(http, auth, ct);
         if (caller is null)
         {
             http.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return;
+        }
+
+        if (!http.WebSockets.IsWebSocketRequest)
+        {
+            http.Response.StatusCode = StatusCodes.Status400BadRequest;
             return;
         }
 

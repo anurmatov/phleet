@@ -45,7 +45,8 @@ internal sealed class NorthTestHost : IAsyncDisposable
     public IServiceProvider Services => _app.Services;
 
     public static async Task<NorthTestHost> StartAsync(
-        ISecretHasher? hasher = null, IAuthStore? store = null, bool? trustForwardedHeaders = null)
+        ISecretHasher? hasher = null, IAuthStore? store = null, bool? trustForwardedHeaders = null,
+        Fleet.Conversations.Contracts.IConversationStore? conversations = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -57,6 +58,22 @@ internal sealed class NorthTestHost : IAsyncDisposable
             {
                 ["Comms:TrustForwardedHeaders"] = trustForwardedHeaders.Value ? "true" : "false",
             });
+        }
+
+        // Enabling the feature is a CONFIGURATION fact, not a registration one: the composition
+        // decides from `ConversationConnectionString` alone, so a test that registered a store
+        // without setting it would prove nothing about how a deployment turns this on.
+        //
+        // The substitute is registered FIRST, so TryAddSingleton keeps it and no connection is ever
+        // attempted — the value below is never dialled.
+        if (conversations is not null)
+        {
+            builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Comms:ConversationConnectionString"] = "Server=unused-by-this-test;",
+            });
+
+            builder.Services.AddSingleton(conversations);
         }
 
         // `store` lets a test drive the real routes against a durable store — the operator-command

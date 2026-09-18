@@ -69,6 +69,10 @@ ENV_FILE="$FLEET_BASE_DIR/.env"
 # would silently override the choice saved in .env — and the operator would see
 # a service on an address they did not configure, with .env saying otherwise.
 # Unset them here: .env is the record of the decision.
+unset FLEET_COMMS_CONVERSATIONS_ENABLED FLEET_COMMS_CONVERSATION_DB \
+      FLEET_COMMS_CONVERSATION_MIGRATION_DB FLEET_COMMS_SOUTH_TOKEN \
+      FLEET_COMMS_SOUTH_BIND FLEET_COMMS_AGENT_NAME FLEET_COMMS_BROKER \
+      FLEET_COMMS_MYSQL_ROOT_PASSWORD FLEET_COMMS_CLAIM_RETENTION
 unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY \
       FLEET_COMMS_AGENT_LABEL FLEET_COMMS_STORE_PROVISIONED
 
@@ -495,6 +499,51 @@ if [[ "$_comms_enabled" == "true" ]]; then
   prompt_field "$ENV_FILE" "FLEET_COMMS_TRUST_PROXY" "Trust X-Forwarded-For from the proxy" \
     "true only if a reverse proxy is in front AND replaces X-Forwarded-For (never appends). Otherwise false." \
     n n "false"
+
+  # Durable conversations, asked ONCE and only inside the comms branch. Declining
+  # leaves the install exactly as the auth-only one: the keys stay absent, the six
+  # routes are never mapped, and no database connection is attempted.
+  _conversations_enabled=$(read_env_var "$ENV_FILE" "FLEET_COMMS_CONVERSATIONS_ENABLED")
+  if [[ -z "$_conversations_enabled" ]]; then
+    echo
+    echo -e "  ${BOLD}Fleet.Comms — durable conversations${NC}"
+    echo "  Conversation history, submissions, catch-up and a WebSocket stream."
+    echo "  Adds a MySQL database (its own container, no published port) and uses"
+    echo "  the broker you already run. Migrations are an operator command with"
+    echo "  their own credential; the service itself can never apply one."
+    echo "  See docs/comms-deployment.md."
+    read -r -p "  Enable durable conversations? [y/N] " _conversations_answer
+    case "$_conversations_answer" in
+      [yY]*) _conversations_enabled=true ;;
+      *)     _conversations_enabled=false ;;
+    esac
+    $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_CONVERSATIONS_ENABLED" "$_conversations_enabled"
+  fi
+
+  if [[ "$_conversations_enabled" == "true" ]]; then
+    # TWO accounts, and the split is the point: the service runs with no DDL
+    # grants, so "the service never migrates on startup" is enforced by the
+    # database rather than by the code being careful.
+    prompt_field "$ENV_FILE" "FLEET_COMMS_MYSQL_ROOT_PASSWORD" "Conversation MySQL root password" \
+      "Used once, to provision the two accounts. Generate one: openssl rand -base64 24" y y
+
+    prompt_field "$ENV_FILE" "FLEET_COMMS_CONVERSATION_DB" "Conversation runtime connection string" \
+      "The account the SERVICE uses. It must hold SELECT/INSERT/UPDATE/DELETE and no DDL grants." y y
+
+    prompt_field "$ENV_FILE" "FLEET_COMMS_CONVERSATION_MIGRATION_DB" "Conversation migration connection string" \
+      "The DDL account, used only by 'conversations migrate'. Never give this one to the running container." y y
+
+    # No default, deliberately: the south listener carries an administrative
+    # surface and a shipped default credential is a credential everyone has.
+    prompt_field "$ENV_FILE" "FLEET_COMMS_SOUTH_TOKEN" "South listener bearer credential" \
+      "Generate one per deployment: openssl rand -base64 32. Startup fails without it." y y
+
+    prompt_field "$ENV_FILE" "FLEET_COMMS_AGENT_NAME" "Agent name for command routing" \
+      "Becomes a routing key and a queue-name segment: [A-Za-z0-9_-], 1-128 characters. A dot or a slash produces a queue name the consumer cannot address." y n
+
+    prompt_field "$ENV_FILE" "FLEET_COMMS_BROKER" "Broker connection for the outboxes" \
+      "AMQP URI. Without it the outboxes still accumulate correctly and nothing is lost, but nothing is dispatched." n n "amqp://guest:guest@rabbitmq:5672/"
+  fi
 fi
 
 _cto_val=$(read_env_var "$ENV_FILE" "FLEET_CTO_AGENT")
@@ -862,6 +911,26 @@ else
       # it goes too, and a wiped volume would otherwise look exactly like a first install; this is
       # what makes `store init` demand --recover instead of silently starting over empty.
       write_env_var "$ENV_FILE" "FLEET_COMMS_STORE_PROVISIONED" "true"
+
+      # The conversation schema, applied BEFORE the service starts, and only ever from here.
+      #
+      # The service refuses conversation routes until the applied version matches the one it
+      # expects, so starting first means a container that reports unhealthy until someone runs
+      # this by hand. It uses the DDL credential; the runtime account would be refused by the
+      # database, which is the intended outcome rather than a misconfiguration to work around.
+      if [[ "$_conversations_enabled" == "true" ]]; then
+        (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env \
+          up -d comms-mysql) || { fail "Could not start the conversation database"; exit 1; }
+
+        # The database has to be accepting connections before a migration can be applied. Polled
+        # rather than slept: a fixed sleep is either too short on a slow host or wasted on a fast
+        # one, and the failure it produces is an unmigrated schema that looks like a broken build.
+        poll_health "comms-mysql" 60 "comms-mysql"
+
+        (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env \
+          run --rm fleet-comms-ops conversations migrate) \
+          || { fail "Could not apply the conversation migrations — see docs/comms-deployment.md"; exit 1; }
+      fi
     fi
 
     (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env "${COMMS_PROFILE_ARGS[@]}" up -d)

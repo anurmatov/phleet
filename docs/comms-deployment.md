@@ -54,19 +54,100 @@ at the loopback address and terminates TLS; nothing on your LAN or the internet 
 **A half-finished install must not leave an internet-reachable auth boundary behind.** That is the
 whole reason for the default. Widen it only when TLS is genuinely in front.
 
-## The four routes
+## The routes
 
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/v1/auth/devices` | register a device with an enrollment code |
-| `POST` | `/v1/auth/token` | mint or refresh an access token |
-| `POST` | `/v1/auth/devices/{deviceId}:revoke` | self-revoke, authenticated as that device |
-| `GET` | `/v1/session` | session and server limits |
+Four with conversations off, ten with them on. The surface grows deliberately and visibly: the
+"exactly four routes" statement was true of the auth-only slice and is not a permanent contract.
 
-That is the entire public surface. `/health`, `/ready`, `/metrics` and `/` all return `404` here —
+| Method | Path | Purpose | Needs conversations |
+|---|---|---|---|
+| `POST` | `/v1/auth/devices` | register a device with an enrollment code | |
+| `POST` | `/v1/auth/token` | mint or refresh an access token | |
+| `POST` | `/v1/auth/devices/{deviceId}:revoke` | self-revoke, authenticated as that device | |
+| `GET` | `/v1/session` | session and server limits | |
+| `POST` | `/v1/conversations` | open or resume by `externalRef` | yes |
+| `GET` | `/v1/conversations/{id}/events` | catch-up | yes |
+| `POST` | `/v1/conversations/{id}/submissions` | create **or** steer | yes |
+| `POST` | `/v1/conversations/{id}:cancel` | request cancellation | yes |
+| `POST` | `/v1/conversations/{id}/cursor` | advance the durable cursor | yes |
+| `GET` | `/v1/conversations/{id}/stream` | WebSocket upgrade | yes |
+
+With conversations off, the six are **not mapped** — a `404` from the router, not a handler that
+authenticated and then refused. `/health`, `/ready`, `/metrics` and `/` all return `404` here too;
 see [readiness](#readiness-and-what-a-503-means) for where the probes actually live.
 
 Full request and response shapes: [`docs/first-party-api.md`](first-party-api.md).
+
+## Durable conversations
+
+Off unless configured, and an install that leaves it off is byte-identical to the auth-only one: no
+conversation route, no database connection attempted, no background loop.
+
+### What it needs
+
+A MySQL 8.0 database and a broker. The example compose ships a `comms-mysql` service under the same
+`comms` profile, with **no published host port** and its own named volume.
+
+**Two database accounts, and the split is the point.** The service runs as an account holding
+`SELECT`, `INSERT`, `UPDATE`, `DELETE` and **no DDL grants**. Migrations use a separate account that
+has them, and the running container is never given it. That is what makes "the service never
+migrates on startup" a property of the deployment rather than of the code being careful — a process
+that tried would be refused by the database.
+
+| Key | What it is |
+|---|---|
+| `FLEET_COMMS_CONVERSATION_DB` | runtime connection string. **Its presence enables the feature** |
+| `FLEET_COMMS_CONVERSATION_MIGRATION_DB` | DDL connection string, for `conversations migrate` only |
+| `FLEET_COMMS_SOUTH_BIND` | the agent-facing listener. Default `http://0.0.0.0:8082` |
+| `FLEET_COMMS_SOUTH_TOKEN` | bearer credential for that listener. **No default; startup fails without it** |
+| `FLEET_COMMS_AGENT_NAME` | routing key and queue-name segment, `[A-Za-z0-9_-]{1,128}` |
+| `FLEET_COMMS_BROKER` | AMQP connection for the two outboxes |
+| `FLEET_COMMS_CLAIM_RETENTION` | ⚠️ see below |
+
+### ⚠️ The south listener is never published
+
+It carries an administrative surface: a caller who reached `/turns:commit` could write a terminal for
+someone else's turn. It is reached by a peer container on the Docker network and by nothing else —
+**never in a `ports:` block, never behind the public proxy.**
+
+Its binding rule is the *opposite* of the ops listener's, and the difference is deliberate. Ops is
+loopback-bound because only this container's own healthcheck calls it. The south caller is a
+different container, so a loopback bind would make the surface unreachable by construction.
+
+### ⚠️ Claim retention is a guard, not housekeeping
+
+`FLEET_COMMS_CLAIM_RETENTION` must exceed **both** the broker's redelivery horizon **and** the
+longest a submission can legitimately wait behind a running turn.
+
+A `done` delivery claim inside its retention is the **only** thing standing between a redelivered
+command and a duplicate turn. The attempt state machine refuses a *second* start of a running
+attempt; it does not refuse a *first* one, and a queued attempt is pending for as long as it waits.
+Shortening this removes the guard rather than tightening it.
+
+### Migrations
+
+`conversations migrate` is an operator command, run through the ops service, and it is the **only**
+thing that applies a migration:
+
+```bash
+docker compose run --rm fleet-comms-ops conversations migrate
+docker compose run --rm fleet-comms-ops conversations status
+```
+
+`status` prints the applied version, the version the binary expects, and whether they agree; it exits
+non-zero when they do not. An applied version **ahead** of the binary is as unhealthy as one behind
+— that is the rollback-after-migration case — and the two produce distinguishable messages.
+
+An edited migration is refused by name rather than re-applied: an edited script is a different
+migration, and applying the difference silently is how two deployments end up at the same version
+number with different schemas. Add a new forward-only script instead.
+
+### Retention is a garbage-collection horizon, not deletion
+
+Nothing here serves a request to erase anything. Rows age out; ephemeral events are pruned without
+announcing a gap, because their absence is not a loss, and durable events are pruned with the
+retained floor advanced in the same transaction so a reader is told exactly what it can no longer
+have.
 
 ## TLS and the reverse proxy
 
@@ -132,6 +213,14 @@ Set it to `true` only when a proxy is actually in front and uses the replace for
 mode of getting this wrong is not a smaller limit — it is no limit at all, for anyone who reads this
 document. Exactly one hop is consumed, and that is not configurable: each additional hop is another
 position a caller can forge from.
+
+**The conversation routes partition differently, on purpose.** They are all authenticated, so their
+key is a hash of the presented bearer rather than the address — two devices behind one NAT, one
+corporate egress or a proxy that does not forward would otherwise share a budget, and one client's
+catch-up storm would throttle the other's. The unauthenticated auth routes keep the address
+partition described above. Their budget is 300 requests per 60 seconds, higher because catch-up
+after a reconnect issues a page request per 200 events and because these routes do not spend an
+Argon2id evaluation per call.
 
 ## The operator path — enrollment and a lost device
 
@@ -206,7 +295,12 @@ your auth store is answering, which on a public address is an availability oracl
 | Path | Meaning |
 |---|---|
 | `GET /health` | the process is running |
-| `GET /ready` | one real transaction against the auth store succeeded |
+| `GET /ready` | one real transaction against the auth store succeeded — **and, with conversations enabled, against the conversation database, plus a schema-version check** |
+
+With conversations on, `/ready` also fails when the applied schema version does not match the one
+the binary expects. Both directions: **behind** means a migration has not been run, **ahead** means
+a binary was rolled back after one, and the body says which. A database that is up but carrying the
+wrong schema would otherwise report ready while every conversation route answered `503`.
 
 The container's healthcheck targets `/ready`, not `/health`, and the difference matters. The store
 initialises lazily, so a broken store path — unwritable, wrong owner, read-only mount, volume not
@@ -226,6 +320,23 @@ So:
 
 Recovery from the first needs no recreation: fix the permission or mount, and `/ready` goes green on
 its next probe.
+
+## The two stores are independent
+
+⚠️ **They are separate engines with separate backups, and they are not transactionally linked.**
+Restoring one without the other has a defined outcome, and an operator under pressure will otherwise
+assume the two restores are one:
+
+| Restored | Not restored | What a client sees |
+|---|---|---|
+| auth store | conversation database | a device that authenticates and a conversation that answers `conversation_not_found` |
+| conversation database | auth store | a conversation whose principal no longer has a registered device — also `conversation_not_found`, since the token cannot be minted |
+| conversation database rolled back | auth store current | a lower `nextSeq` with an explicit gap rather than silent truncation |
+
+The SQLite auth store keeps `store backup` and the procedure below. The conversation database is
+backed up with ordinary MySQL tooling (`mysqldump`, a filesystem snapshot of its volume, or your
+provider's mechanism) — nothing in this repository wraps it, because nothing in this repository
+would add anything to it.
 
 ## Backup and restore
 

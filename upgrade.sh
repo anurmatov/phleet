@@ -166,6 +166,25 @@ else
       fi
     }
     write_comms_env_var "FLEET_COMMS_STORE_PROVISIONED" "true"
+
+    # The conversation schema, on every enabled upgrade, for the same reason `store init` runs on
+    # every one: the documented enable-on-an-existing-install path is an .env edit followed by
+    # ./upgrade.sh, and a service started against an unmigrated schema refuses every conversation
+    # route and reports unhealthy until somebody runs this by hand.
+    #
+    # Idempotent — a second run applies nothing and reports the version — so running it always costs
+    # one short-lived container. It uses the DDL credential; the runtime account has no DDL grants
+    # and would be refused by the database, which is the intended outcome rather than a
+    # misconfiguration to work around.
+    if [[ -n "$(read_env_var "$ENV_FILE" "FLEET_COMMS_CONVERSATION_MIGRATION_DB")" ]]; then
+      (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env \
+        up -d comms-mysql) \
+        || { fail "Could not start the conversation database — see docs/comms-deployment.md"; exit 1; }
+
+      (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env \
+        run --rm fleet-comms-ops conversations migrate) \
+        || { fail "Could not apply the conversation migrations — see docs/comms-deployment.md"; exit 1; }
+    fi
   fi
 
   (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env "${COMMS_PROFILE_ARGS[@]}" up -d)

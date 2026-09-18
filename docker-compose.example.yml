@@ -482,6 +482,29 @@ services:
       # Set by setup.sh/upgrade.sh after the first successful `store init`. Lives here, not in the
       # volume, so a deleted volume is still recognisable as loss rather than a fresh install.
       - Comms__StoreProvisioned=${FLEET_COMMS_STORE_PROVISIONED:-false}
+      # ── Durable conversations (opt-in) ──────────────────────────────────────
+      # The presence of the RUNTIME connection string is what enables the feature. Leave it empty
+      # and this service is byte-identical to the auth-only deployment: no conversation route, no
+      # database connection, no background loop.
+      #
+      # The runtime account holds SELECT/INSERT/UPDATE/DELETE and NO DDL grants. The migration
+      # account is deliberately NOT given to this container — `conversations migrate` is an
+      # operator command, run through fleet-comms-ops.
+      - Comms__ConversationConnectionString=${FLEET_COMMS_CONVERSATION_DB:-}
+      # The SOUTH listener. Container-internal, on the Docker network, and NEVER in the `ports:`
+      # block below — a caller who reached /turns:commit could write a terminal for someone else's
+      # turn. Its binding rule is the opposite of the ops listener's for a reason: the south caller
+      # is a DIFFERENT container, so a loopback bind would make it unreachable by construction.
+      - Comms__SouthUrl=${FLEET_COMMS_SOUTH_BIND:-http://0.0.0.0:8082}
+      - Comms__SouthBearerToken=${FLEET_COMMS_SOUTH_TOKEN:-}
+      - Comms__AgentName=${FLEET_COMMS_AGENT_NAME:-}
+      - Comms__BrokerConnectionString=${FLEET_COMMS_BROKER:-}
+      # ⚠️ Claim retention must exceed the broker's redelivery horizon AND the longest a submission
+      # can wait behind a running turn. See .env.example for why shortening it removes a guard.
+      - Comms__Conversations__DeliveryClaimRetention=${FLEET_COMMS_CLAIM_RETENTION:-7.00:00:00}
+      - Comms__Conversations__EphemeralEventRetention=${FLEET_COMMS_EPHEMERAL_RETENTION:-1.00:00:00}
+      - Comms__Conversations__DurableEventRetention=${FLEET_COMMS_DURABLE_RETENTION:-30.00:00:00}
+      - Comms__Conversations__OutboxRetention=${FLEET_COMMS_OUTBOX_RETENTION:-1.00:00:00}
     volumes:
       - fleet_comms_auth:/var/lib/fleet-comms
     mem_limit: 512m
@@ -493,6 +516,42 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
+    networks:
+      - fleet-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # The conversation database.
+  #
+  # ITS OWN MySQL, not a schema on a shared one. The credentials, the blast radius and the backup
+  # schedule are separate, and a comms-only install does not necessarily run anything else — a
+  # restore of the conversation database must never be entangled with an unrelated service's.
+  #
+  # ⚠️ NO PUBLISHED HOST PORT. It is reached by fleet-comms over the Docker network and by nothing
+  # else. Publishing it would put a database holding conversation history on a host interface.
+  comms-mysql:
+    profiles: ["comms"]
+    image: mysql:8.0
+    container_name: comms-mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=${FLEET_COMMS_MYSQL_ROOT_PASSWORD:-}
+      - MYSQL_DATABASE=${FLEET_COMMS_MYSQL_DATABASE:-comms}
+    volumes:
+      - comms_mysql_data:/var/lib/mysql
+      # Provisions the TWO accounts on first start: a DDL one for migrations and a DDL-LESS runtime
+      # one. The split is what makes "the service never migrates on startup" a property of the
+      # deployment rather than of the code being careful.
+      - ./deploy/comms-mysql-init:/docker-entrypoint-initdb.d:ro
+    mem_limit: 1g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p${FLEET_COMMS_MYSQL_ROOT_PASSWORD:-}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     networks:
       - fleet-net
     logging:
@@ -527,6 +586,17 @@ services:
     environment:
       - Comms__AuthStorePath=/var/lib/fleet-comms/auth.db
       - Comms__StoreProvisioned=${FLEET_COMMS_STORE_PROVISIONED:-false}
+      # The DDL credential lives HERE and on no long-running service.
+      #
+      # `conversations migrate` is the only thing that applies a migration, and this one-shot
+      # operator container is the only place it runs. Putting this string on fleet-comms would give
+      # the running service the ability to alter its own schema, which is exactly the guard the
+      # two-account split exists to provide.
+      - Comms__ConversationMigrationConnectionString=${FLEET_COMMS_CONVERSATION_MIGRATION_DB:-}
+      # `conversations status` falls back to the runtime string when no DDL one is set, and reading
+      # the applied version is a SELECT the runtime account can do — so both are here and the
+      # command picks the right one.
+      - Comms__ConversationConnectionString=${FLEET_COMMS_CONVERSATION_DB:-}
     volumes:
       - fleet_comms_auth:/var/lib/fleet-comms
     networks:
@@ -557,6 +627,7 @@ volumes:
   qdrant_data:
   # Device registrations, enrollment state and tokens. Losing this volume locks the owner out of
   # their own client with no self-service recovery — restore from a `store backup` file.
+  comms_mysql_data:
   fleet_comms_auth:
   temporal_pg_data:
   fleet_mysql_data:

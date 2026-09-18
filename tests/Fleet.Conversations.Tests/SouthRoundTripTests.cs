@@ -459,7 +459,9 @@ public sealed class SouthRoundTripTests(MySqlFixture mysql, RabbitMqFixture brok
         {
             ConversationId = conversationId,
             ExternalSubmissionId = submissionId,
-            PayloadFingerprint = $"fp-{submissionId}",
+            // The store validates this: 64 hex characters, computed the way the north route
+            // computes it. A literal placeholder is rejected at accept time.
+            PayloadFingerprint = PayloadFingerprint.Compute(text, null, conversationId),
             CommandKind = ConversationEventKind.SubmissionCreate,
             CommandPayloadJson = Envelope(
                 ConversationEventKind.SubmissionCreate, conversationId, submissionId, text),
@@ -477,7 +479,8 @@ public sealed class SouthRoundTripTests(MySqlFixture mysql, RabbitMqFixture brok
         {
             ConversationId = conversationId,
             ExternalSubmissionId = submissionId,
-            PayloadFingerprint = $"fp-{submissionId}",
+            // Mirrors the north cancel route, which fingerprints the scope rather than a body.
+            PayloadFingerprint = PayloadFingerprint.Compute("all", null, conversationId),
             CommandKind = ConversationEventKind.SubmissionCancel,
             CommandPayloadJson = Envelope(
                 ConversationEventKind.SubmissionCancel, conversationId, submissionId, text: null),

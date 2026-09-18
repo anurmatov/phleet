@@ -726,12 +726,17 @@ public sealed class ConversationStoreTests(MySqlFixture fixture)
     /// staged. Two guards covering each other means neither is pinned — this pins the lock, and
     /// <see cref="The_idempotency_constraint_is_unique"/> pins the index.
     /// </para>
+    /// <para>
+    /// ⚠️ The held lock is SHARED. An exclusive one blocks the accept regardless, through the
+    /// foreign-key check on the insert — so the first version of this test passed with the store's
+    /// lock removed and proved nothing.
+    /// </para>
     /// </remarks>
     [Fact]
     public async Task Accepting_a_submission_takes_the_conversation_row_lock()
     {
         var conversation = await OpenAsync();
-        await using var held = await fixture.HoldConversationLockAsync(conversation.ConversationId);
+        await using var held = await fixture.HoldSharedConversationLockAsync(conversation.ConversationId);
 
         var accept = Task.Run(() => AcceptAsync(conversation.ConversationId));
 

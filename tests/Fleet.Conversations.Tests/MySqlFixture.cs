@@ -225,13 +225,22 @@ public sealed class MySqlFixture : IAsyncLifetime
     }
 
     /// <summary>
-    /// Opens a connection and holds the conversation row's write lock until disposed.
+    /// Opens a connection and holds a SHARED lock on the conversation row until disposed.
     /// </summary>
     /// <remarks>
-    /// Used to assert that TX1a takes that lock. Without a second holder the property is
-    /// unobservable from outside, and #276's accept floor depends on it.
+    /// <para>
+    /// Shared, not exclusive, and that is the whole point. An exclusive lock blocks the accept
+    /// whether or not TX1a asks for one, because inserting a submission takes a shared lock on its
+    /// parent row for the foreign key — so a test built on <c>FOR UPDATE</c> passes with the
+    /// store's own lock removed, which is exactly what the first version of it did.
+    /// </para>
+    /// <para>
+    /// A shared lock is compatible with that foreign-key check and incompatible with
+    /// <c>SELECT … FOR UPDATE</c>, so it blocks the accept if and only if TX1a really asks for the
+    /// row exclusively.
+    /// </para>
     /// </remarks>
-    public async Task<HeldRowLock> HoldConversationLockAsync(string conversationId)
+    public async Task<HeldRowLock> HoldSharedConversationLockAsync(string conversationId)
     {
         var connection = new MySqlConnection(ConnectionString);
         await connection.OpenAsync();
@@ -239,7 +248,7 @@ public sealed class MySqlFixture : IAsyncLifetime
         var transaction = await connection.BeginTransactionAsync();
 
         await using var command = new MySqlCommand(
-            "SELECT id FROM conversations WHERE id = @id FOR UPDATE", connection, transaction);
+            "SELECT id FROM conversations WHERE id = @id LOCK IN SHARE MODE", connection, transaction);
         command.Parameters.AddWithValue("@id", conversationId);
         await command.ExecuteScalarAsync();
 

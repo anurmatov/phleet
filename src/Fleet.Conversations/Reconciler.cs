@@ -59,7 +59,12 @@ public sealed class Reconciler(
         await using var connection = await OpenAsync(ct);
 
         if (await WithinGraceAsync(connection, ct))
+        {
+            ConversationMetrics.ReconcilerActions.Add(1, new KeyValuePair<string, object?>(
+                "outcome", "held_within_grace"));
+
             return new ScanResult { Abandoned = 0, WithinGrace = true };
+        }
 
         // `pending` and `running` only. A `merged` attempt belongs to its host turn and a
         // `committed` one is finished; abandoning either would append a terminal for work that
@@ -90,7 +95,22 @@ public sealed class Reconciler(
         foreach (var (attemptId, submissionId, conversationId) in expired)
         {
             if (await AbandonAsync(connection, attemptId, submissionId, conversationId, ct))
+            {
                 abandoned++;
+
+                ConversationMetrics.ReconcilerActions.Add(1, new KeyValuePair<string, object?>(
+                    "outcome", "abandoned"));
+
+                ConversationMetrics.OutcomeUnknown.Add(1, new KeyValuePair<string, object?>(
+                    "reason", "attempt_abandoned"));
+            }
+            else
+            {
+                // Someone finished it first. Counted, because a sustained stream of these means the
+                // scan is racing agents rather than cleaning up after them.
+                ConversationMetrics.ReconcilerActions.Add(1, new KeyValuePair<string, object?>(
+                    "outcome", "skipped"));
+            }
         }
 
         if (abandoned > 0)

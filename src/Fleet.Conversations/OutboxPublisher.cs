@@ -123,7 +123,12 @@ public sealed class OutboxPublisher(
         var unconfirmed = batch.Where(m => !confirmed.Contains(m.Id)).ToList();
 
         if (confirmed.Count > 0)
+        {
             await MarkPublishedAsync(connection, transaction, confirmed, ct);
+
+            ConversationMetrics.OutboxPublished.Add(
+                confirmed.Count, new KeyValuePair<string, object?>("outbox", table));
+        }
 
         if (unconfirmed.Count > 0)
         {
@@ -133,6 +138,9 @@ public sealed class OutboxPublisher(
             logger.LogInformation(
                 "{Count} outbox row(s) to {Exchange} were not confirmed and will be retried",
                 unconfirmed.Count, transport.Exchange);
+
+            ConversationMetrics.OutboxUnconfirmed.Add(
+                unconfirmed.Count, new KeyValuePair<string, object?>("outbox", table));
 
             await BackoffAsync(connection, transaction, unconfirmed, ct);
         }

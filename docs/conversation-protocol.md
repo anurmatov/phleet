@@ -257,6 +257,36 @@ has already been a shipped bug once.
 - An unknown inbound `kind` yields `protocol.rejected { code: "unsupported_kind" }`, never a
   connection drop.
 
+### Additions the durable-store slice ships
+
+All additive, all appended, and `protocol` stays `fleet.conversation.v1`.
+
+| Addition | |
+|---|---|
+| `OutcomeUnknownReason.attempt_abandoned` | the reconciler's reason, and **its only producer**. `turn_reaped` belongs to the agent's own run loop and is stored verbatim rather than produced here |
+| `ProtocolErrorCode.idempotency_conflict` | the same key presented with a different payload fingerprint |
+| `ProtocolErrorCode.invalid_cursor` | a cursor that is negative, non-integral, out of range, or at or beyond `nextSeq` |
+| kind `conversation.replay_gap` | owed durable history, **synthetic and never stored** — it carries `seq: null` |
+| kinds `conversation.catchup`, `conversation.ack` | the client's catch-up request and cursor advance |
+| optional `idempotencyKey` on `submission.create` | |
+| optional `clientInstanceId` on `conversation.open` | opaque bookkeeping for cursors; **not a credential and not device identity** |
+
+### Three amendments the durable store makes
+
+**`seq` is allocated at durable append.** It does not exist before the row commits. Anything that
+handed a caller a `seq` before the append would be handing back a number the store then replaced —
+and the invented one is what would reach the wire if it were ever read back from the request.
+
+**⚠️ `submission.accepted` and `turn.started` may arrive in EITHER order, and a client must not
+assume one.** The in-process path emits `started` first; the durable path records the disposition
+first, because the agent reports what it decided to do before it starts doing it. Both orders are
+correct, and a client that keys behaviour on seeing one before the other breaks against the other
+transport.
+
+**Progress and notice events are prunable.** They are `ephemeral`, and their absence at a seq is
+**not** a gap — only a missing *durable* event beneath the retained floor is. A client that treated
+a hole in the seq sequence as a loss would report one on every reconnect after a day.
+
 ---
 
 ## Transports

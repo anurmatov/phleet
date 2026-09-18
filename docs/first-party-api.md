@@ -403,6 +403,23 @@ Authorization: Bearer <token>
 { "protocol": "fleet.conversation.v1", "submissionId": "s_9Qw1Ez", "acceptedSeq": 41 }
 ```
 
+**`acceptedSeq` is a catch-up floor.** It is the conversation's `next_seq` as read inside the accept
+transaction: **the first `seq` that any event about this submission can occupy**. The accept appends
+no event, so there is no event seq to return; this is the position the first one will take.
+
+The same value is returned by every response about that submission — the first `201`, an idempotent
+replay, and the `201` for a submission abandoned before its disposition — so a replay is
+byte-identical to the response it replays.
+
+⚠️ **A client catching up on the whole lifecycle requests `afterSeq = acceptedSeq - 1`**, because
+`afterSeq` means "I have processed up to and including this seq" while `acceptedSeq` is the seq the
+first event will take. That off-by-one is stated here so two implementers do not resolve it
+differently.
+
+It is **not** the store's internal `accepted_seq` column, and the names are close enough to be a
+trap: that column is the seq of the `submission.accepted` event and is `NULL` until the disposition.
+Returning it here produces a `null` on every first accept.
+
 **Cancel.**
 
 ```http

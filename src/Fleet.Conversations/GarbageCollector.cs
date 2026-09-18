@@ -53,6 +53,11 @@ public sealed class GarbageCollector(
                 ephemeral, durable, outbox, claims);
         }
 
+        Count("ephemeral_event", ephemeral);
+        Count("durable_event", durable);
+        Count("outbox_row", outbox);
+        Count("delivery_claim", claims);
+
         return new SweepResult
         {
             EphemeralEvents = ephemeral,
@@ -253,6 +258,12 @@ public sealed class GarbageCollector(
         command.Parameters.AddWithValue("@batch", options.OutboxBatchSize);
 
         return await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static void Count(string kind, int removed)
+    {
+        if (removed > 0)
+            ConversationMetrics.Collected.Add(removed, new KeyValuePair<string, object?>("kind", kind));
     }
 
     private async Task<MySqlConnection> OpenAsync(CancellationToken ct)

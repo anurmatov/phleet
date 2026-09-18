@@ -468,6 +468,80 @@ public sealed class ConversationSouthConsumerTests
     }
 
     /// <summary>
+    /// A terminal that overtakes its own <c>turn.started</c> starts the turn before committing it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>ConversationEventPump</c> drains the per-conversation terminal outboxes before the shared
+    /// progress channel, every iteration, and <c>turn.started</c> travels on the progress side — so
+    /// a terminal reaching the adapter first is ordinary, not exceptional.
+    /// </para>
+    /// <para>
+    /// Committing straight through leaves the attempt <c>pending</c>, because <c>/turns:commit</c>
+    /// only moves an attempt out of <c>running</c>; the <c>turn.started</c> that follows is then
+    /// dropped with a null seq because the submission is already terminal. The conversation ends up
+    /// reading <c>submission.accepted, turn.final</c> with no start, and the reconciler reports an
+    /// answered turn as <c>attempt_abandoned</c>. Observed in CI against a real store.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ATerminalThatOvertakesItsOwnStartStartsTheTurnFirst()
+    {
+        var south = new RecordingSouth();
+        var (consumer, handoff, counters, _) = Build(south);
+
+        consumer.TrackForTesting(
+            new ConversationSouthConsumer.OwnedDelivery(MessageId, SubmissionId, AttemptId, ConversationId, 1));
+
+        handoff.TryEnqueue(Item(SouthOutboundAction.Commit, ConversationEventKind.TurnFinal, turnId: "t-1"));
+
+        await DrainAsync(consumer, south, expected: 2);
+
+        Assert.Equal(["/turns:start", "/turns:commit"], south.Calls.Select(c => c.Path).ToList());
+        Assert.Equal(1, counters.TurnStartedFromTerminalCount);
+        Assert.Equal(1, counters.CommitCount);
+    }
+
+    /// <summary>
+    /// The <c>turn.started</c> that arrives after its attempt was already started sends nothing.
+    /// </summary>
+    /// <remarks>
+    /// Not a cosmetic suppression. A second <c>/turns:start</c> reaches an attempt that is no longer
+    /// <c>pending</c>, which is the store's lost-attempt branch — and that branch ABANDONS the merged
+    /// children of the turn, so the late duplicate would destroy the outcome of submissions the turn
+    /// had already answered.
+    /// </remarks>
+    [Fact]
+    public async Task ATurnStartedThatArrivesAfterItsTerminalSendsNothing()
+    {
+        var south = new RecordingSouth();
+        var (consumer, handoff, counters, _) = Build(south);
+
+        consumer.TrackForTesting(
+            new ConversationSouthConsumer.OwnedDelivery(MessageId, SubmissionId, AttemptId, ConversationId, 1));
+
+        // The order the pump actually hands them over when the terminal wins.
+        handoff.TryEnqueue(Item(SouthOutboundAction.Commit, ConversationEventKind.TurnFinal, turnId: "t-1"));
+        handoff.TryEnqueue(Item(SouthOutboundAction.StartTurn, ConversationEventKind.TurnStarted, turnId: "t-1"));
+
+        // Drained until the SUPPRESSION lands rather than until a call count: the whole point is
+        // that the second item produces no call, so a call-count gate would stop the loop before it
+        // was ever read.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var state = consumer.Conversation(ConversationId);
+        var loop = Task.Run(() => consumer.DrainConversationAsync(state, cts.Token), CancellationToken.None);
+
+        while (counters.TurnStartSuppressedCount == 0 && !cts.IsCancellationRequested)
+            await Task.Delay(5, CancellationToken.None);
+
+        await cts.CancelAsync();
+        await loop;
+
+        Assert.Equal(1, counters.TurnStartSuppressedCount);
+        Assert.Equal(["/turns:start", "/turns:commit"], south.Calls.Select(c => c.Path).ToList());
+    }
+
+    /// <summary>
     /// A commit that fails after its retries leaves the message UNACKED.
     /// </summary>
     /// <remarks>

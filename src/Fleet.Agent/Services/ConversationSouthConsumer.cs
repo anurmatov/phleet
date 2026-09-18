@@ -502,6 +502,22 @@ public sealed class ConversationSouthConsumer : BackgroundService
     private async Task StartTurnAsync(ConversationState state, SouthOutboundItem item, CancellationToken ct)
     {
         if (item.SubmissionId is null || item.TurnId is null) return;
+
+        // Already started — either this submission's terminal overtook its `turn.started` and started
+        // it (see CommitAsync), or the same start arrived twice. Sending a second /turns:start is not
+        // harmless: the attempt is no longer `pending`, so the store takes its lost-attempt branch
+        // and ABANDONS the merged children of a turn that is running or has already answered.
+        //
+        // Checked BEFORE the ownership lookup on purpose. A committed delivery is forgotten, so the
+        // lookup below would also swallow the late start — but only as a side effect of the ack
+        // having already happened, which leaves the window between commit and ack uncovered and says
+        // nothing in the counters about a duplicate that did arrive.
+        if (state.TurnStarted(item.SubmissionId))
+        {
+            _counters.TurnStartSuppressed();
+            return;
+        }
+
         if (!_owned.TryGetValue(item.SubmissionId, out var owned)) return;
 
         // Submissions queued for this conversation BEFORE the turn began are coalesced into it by
@@ -536,6 +552,10 @@ public sealed class ConversationSouthConsumer : BackgroundService
             _logger.LogWarning(
                 "south turn start refused as a conflict: attemptId={AttemptId} turnId={TurnId}",
                 owned.AttemptId, item.TurnId);
+
+            // The attempt IS running, just under another turn id, so a later duplicate start must
+            // not fire either.
+            state.NoteStarted(item.SubmissionId);
 
             // The merged set still belongs to the running turn, or it would never be closed.
             state.RestoreMerged(merged);
@@ -600,6 +620,39 @@ public sealed class ConversationSouthConsumer : BackgroundService
     {
         if (item.SubmissionId is null) return;
         if (!_owned.TryGetValue(item.SubmissionId, out var owned)) return;
+
+        // ⚠️ The terminal can legitimately arrive BEFORE its own turn.started.
+        //
+        // `ConversationEventPump` drains the per-conversation terminal outboxes first, every
+        // iteration, ahead of the shared progress channel — deliberately, and `turn.started` travels
+        // on the progress side. The store requires the start first: /turns:commit only moves an
+        // attempt out of `running`, so a commit on a `pending` attempt appends the terminal, leaves
+        // the attempt open for the reconciler to abandon, and the turn.started that follows is
+        // dropped with a null seq because the submission is already terminal. The conversation then
+        // reads `submission.accepted, turn.final` with no turn.started, and an answered turn is
+        // reported to the client as turn.outcome_unknown { attempt_abandoned } when the lease runs
+        // out. Observed in CI on a run where the terminal won; AC1 and AC2 both saw it.
+        //
+        // The terminal carries the same identity.turnId as the start it overtook, so the start can
+        // be made here from the terminal itself rather than waiting for an event that is behind us.
+        if (!state.TurnStarted(item.SubmissionId) && item.TurnId is not null)
+        {
+            try
+            {
+                await StartTurnAsync(state, item, ct);
+                _counters.TurnStartedFromTerminal();
+            }
+            catch (Exception e)
+            {
+                // Same rule as a failed commit: leave the message unacked rather than record a
+                // terminal against an attempt the store never saw start.
+                _logger.LogError(
+                    "south turn start ahead of its terminal failed; the message stays unacked: "
+                    + "attemptId={AttemptId} error={Error}",
+                    owned.AttemptId, e.GetType().Name);
+                return;
+            }
+        }
 
         var merged = state.EndTurn(item.SubmissionId);
 
@@ -903,6 +956,7 @@ internal sealed class ConversationState(string conversationId)
     private readonly object _lock = new();
     private readonly List<string> _queued = [];
     private readonly HashSet<string> _stoppedAttempts = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _startedSubmissions = new(StringComparer.Ordinal);
     private RunningTurn? _turn;
     private long _runtimeKey;
     private Task? _drain;
@@ -967,7 +1021,30 @@ internal sealed class ConversationState(string conversationId)
 
     public void BeginTurn(string turnId, string attemptId, string submissionId, IReadOnlyList<string> merged)
     {
-        lock (_lock) _turn = new RunningTurn(turnId, attemptId, submissionId, [.. merged]);
+        lock (_lock)
+        {
+            _turn = new RunningTurn(turnId, attemptId, submissionId, [.. merged]);
+            _startedSubmissions.Add(submissionId);
+        }
+    }
+
+    /// <summary>
+    /// True once <c>/turns:start</c> has been transmitted for this submission by this process.
+    /// </summary>
+    /// <remarks>
+    /// Never cleared by <see cref="EndTurn"/>: the question a late <c>turn.started</c> asks is "has
+    /// this submission's turn ever been started", not "is a turn running now", and those differ for
+    /// exactly the ordering this exists to survive.
+    /// </remarks>
+    public bool TurnStarted(string submissionId)
+    {
+        lock (_lock) return _startedSubmissions.Contains(submissionId);
+    }
+
+    /// <summary>Record a submission's turn as started without owning a running turn for it.</summary>
+    public void NoteStarted(string submissionId)
+    {
+        lock (_lock) _startedSubmissions.Add(submissionId);
     }
 
     /// <summary>The submissions this turn answered besides its own. Clears the running turn.</summary>

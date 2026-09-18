@@ -60,6 +60,18 @@ public sealed class ConversationSouthCounters
     /// <summary>A <c>/turns:start</c> refused with 409 — a different turn on a running attempt.</summary>
     public void TurnStartConflict() => Add(_simple, "turn_start_conflicts", 1);
 
+    /// <summary>
+    /// Turns started from their own terminal because the terminal reached the adapter first.
+    /// </summary>
+    /// <remarks>
+    /// Expected, not an error — the bus drains terminal outboxes before progress by design — but a
+    /// count that rises on every turn means the start is never winning, which is worth seeing.
+    /// </remarks>
+    public void TurnStartedFromTerminal() => Add(_simple, "turn_starts_from_terminal", 1);
+
+    /// <summary>A <c>turn.started</c> that arrived after its own attempt was already started.</summary>
+    public void TurnStartSuppressed() => Add(_simple, "turn_starts_suppressed", 1);
+
     /// <summary>Heartbeat round trips that failed. The turn keeps running regardless.</summary>
     public void HeartbeatFailure() => Add(_simple, "heartbeat_failures", 1);
 
@@ -101,6 +113,8 @@ public sealed class ConversationSouthCounters
     public long RecoveredAnswerCount => Read(_simple, "recovered_answers");
     public long TurnStartedCount => Read(_simple, "turn_starts");
     public long TurnStartConflictCount => Read(_simple, "turn_start_conflicts");
+    public long TurnStartedFromTerminalCount => Read(_simple, "turn_starts_from_terminal");
+    public long TurnStartSuppressedCount => Read(_simple, "turn_starts_suppressed");
     public long HeartbeatFailureCount => Read(_simple, "heartbeat_failures");
     public long HeartbeatNotOwnedCount => Read(_simple, "heartbeat_not_owned");
     public long NackCount => Read(_simple, "nacks");

@@ -200,19 +200,71 @@ public class NorthSerializationTests
     }
 
     /// <summary>
-    /// `DeviceLimit` is the additive protocol amendment this slice lands (§17 A1). Append-only
-    /// means it is LAST — inserting it would renumber every member after it, and the wire form of
-    /// an enum member is its name, so a client keying on `device_limit` must keep working.
+    /// Error codes are APPEND-ONLY: existing members keep their position and their wire name, and a
+    /// new one may only be added at the end.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This used to assert that <c>DeviceLimit</c> was <i>last</i>. That was a proxy for the real
+    /// rule and it aged badly the moment a later slice appended anything — the conversation slice
+    /// added <c>IdempotencyConflict</c> and <c>InvalidCursor</c>, which is a perfectly legal append,
+    /// and the test failed for it.
+    /// </para>
+    /// <para>
+    /// Pinning the whole ordered list instead catches what actually matters — an INSERTION or a
+    /// REORDER, either of which renumbers every member after it — while a legitimate append stays a
+    /// deliberate, visible one-line edit here rather than a silent one.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ProtocolErrorCodes_AreAppendOnly()
+    {
+        Assert.Equal(
+            [
+                ProtocolErrorCode.Unauthorized,
+                ProtocolErrorCode.UnsupportedProtocol,
+                ProtocolErrorCode.UnsupportedKind,
+                ProtocolErrorCode.UnsupportedRole,
+                ProtocolErrorCode.UnsupportedAttachments,
+                ProtocolErrorCode.PayloadTooLarge,
+                ProtocolErrorCode.ConversationNotFound,
+                ProtocolErrorCode.RateLimited,
+                ProtocolErrorCode.RuntimeBusy,
+                ProtocolErrorCode.ExecutorError,
+                ProtocolErrorCode.Canceled,
+                ProtocolErrorCode.Internal,
+                ProtocolErrorCode.DeviceLimit,
+                ProtocolErrorCode.IdempotencyConflict,
+                ProtocolErrorCode.InvalidCursor,
+            ],
+            Enum.GetValues<ProtocolErrorCode>());
+    }
+
+    /// <summary>
+    /// The additive amendment the auth slice landed (§17 A1) keeps its fixed message and wire form.
     /// </summary>
     [Fact]
-    public void DeviceLimit_IsAppendedLastAndHasAFixedMessage()
+    public void DeviceLimit_HasAFixedMessageAndWireForm()
     {
-        var members = Enum.GetValues<ProtocolErrorCode>();
-
-        Assert.Equal(ProtocolErrorCode.DeviceLimit, members[^1]);
         Assert.Equal(ProtocolErrors.DeviceLimit, ProtocolErrors.MessageFor(ProtocolErrorCode.DeviceLimit));
         Assert.Equal("\"device_limit\"",
             JsonSerializer.Serialize(ProtocolErrorCode.DeviceLimit, FleetProtocolJson.Options));
+    }
+
+    /// <summary>
+    /// The two codes the conversation slice appends, each with a fixed message and the snake_case
+    /// wire form a deployed client keys on.
+    /// </summary>
+    [Theory]
+    [InlineData(ProtocolErrorCode.IdempotencyConflict, "\"idempotency_conflict\"")]
+    [InlineData(ProtocolErrorCode.InvalidCursor, "\"invalid_cursor\"")]
+    public void ConversationErrorCodes_HaveFixedMessagesAndWireForms(ProtocolErrorCode code, string wire)
+    {
+        Assert.Equal(wire, JsonSerializer.Serialize(code, FleetProtocolJson.Options));
+
+        var message = ProtocolErrors.MessageFor(code);
+        Assert.NotEqual(ProtocolErrors.Internal, message);
+        Assert.False(string.IsNullOrWhiteSpace(message));
     }
 
     private static StringContent JsonContent(string raw) =>

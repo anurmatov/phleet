@@ -195,18 +195,35 @@ public sealed class SouthRoundTripTests(
         var conversation = await OpenAsync();
         var submission = await SubmitAsync(conversation, "asked once");
 
-        await WaitForTerminalAsync(conversation);
+        // The first turn must be COMPLETE before the duplicate goes out, or the duplicate races the
+        // original rather than a finished attempt — which is not what AC2 is about. `turn.final`
+        // rather than "any terminal": a submission terminated on arrival is also terminal, and
+        // waiting on that would let a dropped envelope pass for a completed turn.
+        var first = await WaitForKindAsync(conversation, ConversationEventKind.TurnFinal);
+
+        Assert.True(
+            first.Count(e => e.Kind == ConversationEventKind.TurnStarted) == 1,
+            $"the first submission did not produce exactly one turn; stored: {Describe(first)}");
 
         // Republish the SAME command row: the outbox's dedupe id is the message id, so the broker
         // carries the identical MessageId and the claim key is unchanged.
         await RepublishAsync(submission);
 
+        // The duplicate is acked, not consumed into a turn — so the evidence that it was handled is
+        // the queue going empty and STAYING empty, with the event list unchanged underneath it.
         await WaitForQueueDrainAsync();
+        await Task.Delay(TimeSpan.FromSeconds(2));
 
         var events = await ReadAsync(conversation);
 
-        Assert.Single(events.Where(e => e.Kind == ConversationEventKind.TurnStarted));
-        Assert.Single(events.Where(e => e.IsTerminal));
+        Assert.True(
+            events.Count(e => e.Kind == ConversationEventKind.TurnStarted) == 1,
+            $"expected exactly one turn.started after the redelivery; stored: {Describe(events)}");
+
+        Assert.True(
+            events.Count(e => e.IsTerminal) == 1,
+            $"expected exactly one terminal after the redelivery; stored: {Describe(events)}");
+
         Assert.Equal(0u, await broker.DepthAsync(Queue));
     }
 
@@ -403,10 +420,10 @@ public sealed class SouthRoundTripTests(
         var conversation = await OpenAsync();
         var submission = await SubmitCancelAsync(conversation);
 
-        await WaitForQueueDrainAsync();
-
-        var state = await mysql.ScalarRowAsync(
-            $"SELECT state FROM submissions WHERE external_ref = '{submission}'");
+        // Gate on the submission reaching terminal, NOT on the queue draining: an in-flight
+        // delivery leaves MessageCount at zero while the consumer has not claimed it yet.
+        var state = await WaitForRowAsync(
+            $"SELECT state FROM submissions WHERE external_ref = '{submission}'", "terminal");
         Assert.Equal("terminal", state);
 
         var events = await ReadAsync(conversation);
@@ -415,10 +432,13 @@ public sealed class SouthRoundTripTests(
 
         // The claim is done, not held — a held claim plus a live lease is how a delivery nobody
         // handled turns into attempt_abandoned against a client that is still waiting.
-        var claim = await mysql.ScalarRowAsync(
-            "SELECT state FROM delivery_claims ORDER BY claimed_at DESC LIMIT 1");
+        var claim = await WaitForRowAsync(
+            "SELECT state FROM delivery_claims ORDER BY claimed_at DESC LIMIT 1", "done");
         Assert.Equal("done", claim);
 
+        // Only now is the depth meaningful: the ack follows the completion, so a queue that is
+        // empty AFTER the terminal has landed is evidence the message was acked and not requeued.
+        await WaitForQueueDrainAsync();
         Assert.Equal(0u, await broker.DepthAsync(Queue));
     }
 
@@ -589,6 +609,22 @@ public sealed class SouthRoundTripTests(
         return await ReadAsync(conversationId);
     }
 
+    /// <summary>
+    /// Waits until the queue is empty.
+    /// </summary>
+    /// <remarks>
+    /// ⚠️ <b>This is NOT a completion gate, and must never be used as one.</b>
+    /// <see cref="RabbitMqFixture.DepthAsync"/> reports <c>MessageCount</c>, which EXCLUDES
+    /// delivered-but-unacked messages — so it reads zero the instant the consumer takes a delivery
+    /// in flight, long before the claim, the disposition or the ack. A test that asserts stored
+    /// state straight after this call is asserting against a consumer that has not started work,
+    /// which is how <c>ACancelEnvelopeLeavesNoHeldClaimAndStartsNoTurn</c> read
+    /// <c>pending_dispatch</c> 37ms in and reported a defect that was not there.
+    /// <para>
+    /// Gate on the state under test — <see cref="WaitForRowAsync"/> or <see cref="WaitAsync"/> —
+    /// and use this only to assert afterwards that the ack really happened.
+    /// </para>
+    /// </remarks>
     private async Task WaitForQueueDrainAsync()
     {
         var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(20);
@@ -599,6 +635,38 @@ public sealed class SouthRoundTripTests(
             await Task.Delay(100);
         }
     }
+
+    /// <summary>Polls a single-value query until it reads <paramref name="expected"/>.</summary>
+    /// <remarks>
+    /// Returns the last value read rather than asserting, so the caller's own
+    /// <c>Assert.Equal</c> reports what it actually found on a timeout.
+    /// </remarks>
+    private async Task<string> WaitForRowAsync(string sql, string expected, TimeSpan? timeout = null)
+    {
+        var deadline = DateTimeOffset.UtcNow + (timeout ?? TimeSpan.FromSeconds(20));
+        var value = string.Empty;
+
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            value = await mysql.ScalarRowAsync(sql);
+            if (value == expected) return value;
+            await Task.Delay(100);
+        }
+
+        return value;
+    }
+
+    /// <summary>
+    /// Every event as <c>seq:kind</c>, terminals marked, for assertion messages.
+    /// </summary>
+    /// <remarks>
+    /// Every failure mode in this loop presents identically at the assertion level — "the collection
+    /// was empty" says nothing about whether the turn was dropped on arrival, refused by the intake,
+    /// or simply not there yet. The kinds that WERE stored say which.
+    /// </remarks>
+    private static string Describe(IEnumerable<StoredEvent> events) =>
+        string.Join(", ", events.Select(e => $"{e.Seq}:{e.Kind}{(e.IsTerminal ? "(terminal)" : "")}"))
+            is { Length: > 0 } rendered ? rendered : "<no events>";
 
     private async Task<AgentUnderTest> StartAgentAsync(
         TimeSpan? turnDuration = null, int progressEvents = 0)

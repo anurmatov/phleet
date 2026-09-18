@@ -386,7 +386,7 @@ fault a turn. That is right for delivery and wrong for durability: a bounded ret
 delivered. So the adapter **translates only** — no HTTP, no retry, no blocking, no ordinal — and the
 consumer owns every south call, all backoff, the terminal commit and the broker acknowledgement.
 
-Four properties are worth knowing before changing anything here:
+Five properties are worth knowing before changing anything here:
 
 - **The ack follows the commit, never the other way round.** An ack-then-commit ordering loses a
   turn's outcome permanently on a crash in the window and nothing detects it. Commit-then-ack can at
@@ -396,9 +396,19 @@ Four properties are worth knowing before changing anything here:
   progress published earlier. Allocating when an event is created would give that terminal the higher
   ordinal, transmit it first, and trip the store's fence with a reordering that was purely ours.
   Every south call for one conversation goes through a single in-order sender.
-- **`submission.accepted` and `turn.started` are suppressed by the adapter.** Their endpoints already
-  write them, and append idempotency keys on `eventId` — so forwarding the runtime's copy writes a
-  second row rather than deduplicating.
+- **`submission.accepted` is suppressed by the adapter.** The disposition endpoint already writes it,
+  and append idempotency keys on `eventId` — so forwarding the runtime's copy writes a second row
+  rather than deduplicating. `turn.started` is not suppressed: it is what drives `/turns:start`, and
+  that endpoint writes the stored event.
+- **A terminal that overtakes its own `turn.started` starts the turn before committing it.** Because
+  terminal outboxes drain first, this is ordinary rather than exceptional. The store requires the
+  start: `/turns:commit` only moves an attempt out of `running`, so committing a `pending` attempt
+  appends the terminal, leaves the attempt open for the reconciler, and the `turn.started` that
+  follows is dropped with a null seq because the submission is already terminal — an answered turn
+  reported to the client as `turn.outcome_unknown { attempt_abandoned }`. The terminal carries the
+  same `identity.turnId`, so the consumer starts the turn from it. A `turn.started` arriving
+  afterwards is then suppressed, because a second `/turns:start` on a non-`pending` attempt takes the
+  store's lost-attempt branch and abandons the turn's merged children.
 - **Terminal kinds go to `/turns:commit`, never `/events:append`.** Appending one would write the
   event without closing the attempt, and the reconciler would later abandon an attempt that had
   already answered.

@@ -93,13 +93,57 @@ jobs:
         run: >
           dotnet test tests/Fleet.Conversations.Tests --configuration Release
           --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=conversations.trx"
+          --results-directory ${{ github.workspace }}/testresults
 
-      # Evidence is "N passed, 0 skipped", read from the run log. A suite that skipped for want of a
-      # connection string is indistinguishable from a passing one in a summary, which is how a gate
-      # that never executed gets shipped as proof that it did.
+      # Evidence is "N executed, 0 not executed", READ FROM THE RESULT FILE and enforced.
+      #
+      # This step used to be an `echo`. A guard that cannot fail is not a guard: it asks a human to
+      # read counts nobody reads, and it goes green on a run that executed nothing — which is
+      # exactly the failure the whole fail-rather-than-skip design exists to prevent, arriving
+      # through the step meant to catch it.
       - name: Refuse a run that skipped anything
         if: always()
-        run: echo "read the counts above — this job is evidence only at 0 skipped"
+        run: |
+          set -euo pipefail
+          trx="${{ github.workspace }}/testresults/conversations.trx"
+
+          # A missing result file is a failure, not an absence of evidence: it means the suite did
+          # not run at all, which is the strongest version of "skipped".
+          if [ ! -f "$trx" ]; then
+            echo "ERROR: no test result file at $trx — the suite did not run."
+            exit 1
+          fi
+
+          counters=$(grep -o '<Counters[^>]*>' "$trx" | head -1)
+          echo "$counters"
+
+          read_count() {
+            echo "$counters" | grep -o "$1=\"[0-9]*\"" | grep -o '[0-9]*' || echo ""
+          }
+
+          executed=$(read_count executed)
+          notExecuted=$(read_count notExecuted)
+          passed=$(read_count passed)
+
+          if [ -z "$executed" ] || [ -z "$notExecuted" ] || [ -z "$passed" ]; then
+            echo "ERROR: could not read the counters out of $trx."
+            exit 1
+          fi
+
+          if [ "$notExecuted" -ne 0 ]; then
+            echo "ERROR: $notExecuted test(s) did not execute. A skipped integration suite is"
+            echo "indistinguishable from a passing one in a summary; this job is evidence only at 0."
+            exit 1
+          fi
+
+          if [ "$executed" -eq 0 ] || [ "$passed" -ne "$executed" ]; then
+            echo "ERROR: executed=$executed passed=$passed — this job is evidence only when every"
+            echo "test ran and passed against the real database."
+            exit 1
+          fi
+
+          echo "$passed test(s) executed against mysql:8.0, 0 skipped."
 
   whisper-tests:
     name: Whisper service tests

@@ -638,11 +638,45 @@ public sealed class ConversationStoreTests(MySqlFixture fixture)
     /// The value returned at first accept and on an idempotent replay are IDENTICAL, and both are
     /// the stored floor rather than the internal column.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠️ An event is appended between the accept and the disposition <b>on purpose</b>, so that the
+    /// floor and <c>accepted_seq</c> are DIFFERENT NUMBERS.
+    /// </para>
+    /// <para>
+    /// Without it they coincide — in a fresh conversation the first accept's floor is 1 and the
+    /// <c>submission.accepted</c> that follows also lands at 1 — and returning the internal column
+    /// here, which is the mistake this test is named for, passes. Measured: swapping
+    /// <c>AcceptFloorSeq</c> for <c>AcceptedSeq</c> in <c>ResolveReplay</c> left the whole suite
+    /// green before this line existed.
+    /// </para>
+    /// </remarks>
     [Fact]
     public async Task Accepted_seq_means_one_thing_everywhere()
     {
         var conversation = await OpenAsync();
         var first = await AcceptAsync(conversation.ConversationId, "hello", key: "idem-same");
+
+        // Advance the log so the floor and the accepted_seq cannot be the same number.
+        await _store.AppendBatchAsync(new AppendBatchRequest
+        {
+            ConversationId = conversation.ConversationId,
+            Epoch = Ulid.NewUlid(),
+            Events =
+            [
+                new StagedEvent
+                {
+                    Event = new EventDescriptor
+                    {
+                        Kind = ConversationEventKind.TurnNotice,
+                        EventId = Ulid.NewUlid(),
+                        PayloadJson = """{"text":"between"}""",
+                    },
+                    Ordinal = 1,
+                    RetentionClass = EventRetentionClass.Ephemeral,
+                },
+            ],
+        });
 
         // Before a disposition there is nothing to replay, so a same-key retry is 202.
         var pending = await AcceptAsync(conversation.ConversationId, "hello", key: "idem-same");
@@ -663,9 +697,84 @@ public sealed class ConversationStoreTests(MySqlFixture fixture)
         Assert.Equal(AcceptOutcome.Replay, replay.Outcome);
         Assert.Equal(first.AcceptedSeq, replay.AcceptedSeq);
 
-        // And it is ≤ the seq of that submission's submission.accepted event.
+        // STRICTLY below the seq of that submission's submission.accepted event, which is what the
+        // intervening append bought: `<=` is satisfied by equality, and equality is exactly the
+        // state in which returning the wrong column is invisible.
         var acceptedSeq = ulong.Parse(await fixture.ScalarRowAsync(
             $"SELECT accepted_seq FROM submissions WHERE id = '{first.SubmissionId}'"));
-        Assert.True(replay.AcceptedSeq <= acceptedSeq);
+
+        Assert.True(replay.AcceptedSeq < acceptedSeq,
+            $"floor {replay.AcceptedSeq} should be below accepted_seq {acceptedSeq}");
+    }
+
+    // ───────────────────────────────────────────────── the guards, asserted directly
+
+    /// <summary>
+    /// TX1a takes the conversation row's write lock.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// #276 §4.1 does not say it does; it has to. The accept floor is <c>next_seq</c> as read inside
+    /// the accept transaction, and reading it unlocked lets an append land between the read and the
+    /// insert, leaving the stored floor pointing past the submission's own first event.
+    /// </para>
+    /// <para>
+    /// Asserted by holding the row from a second connection and watching the accept fail to
+    /// complete. The property is otherwise unobservable from outside: removing <c>FOR UPDATE</c>
+    /// left all eighty-eight tests green, because the unique index on
+    /// <c>(conversation_id, idempotency_key)</c> independently catches the one race the suite
+    /// staged. Two guards covering each other means neither is pinned — this pins the lock, and
+    /// <see cref="The_idempotency_constraint_is_unique"/> pins the index.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task Accepting_a_submission_takes_the_conversation_row_lock()
+    {
+        var conversation = await OpenAsync();
+        await using var held = await fixture.HoldConversationLockAsync(conversation.ConversationId);
+
+        var accept = Task.Run(() => AcceptAsync(conversation.ConversationId));
+
+        // Blocked. The lock wait defaults to fifty seconds, so this is not racing a timeout.
+        var early = await Task.WhenAny(accept, Task.Delay(TimeSpan.FromMilliseconds(750)));
+        Assert.NotSame(accept, early);
+
+        await held.DisposeAsync();
+
+        var result = await accept.WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.Equal(AcceptOutcome.Accepted, result.Outcome);
+    }
+
+    /// <summary>
+    /// The idempotency index really is UNIQUE in the applied schema.
+    /// </summary>
+    /// <remarks>
+    /// The schema calls this index the thing standing between fifty concurrent same-key submissions
+    /// and fifty rows. Measured, that is not quite true — the row lock alone also holds the line, so
+    /// downgrading the index to an ordinary key left every test green. It is a real second line of
+    /// defence for any future writer that does not take the lock, and a defence nothing asserts is
+    /// one somebody deletes during a refactor with a green build.
+    /// </remarks>
+    [Fact]
+    public async Task The_idempotency_constraint_is_unique()
+    {
+        var nonUnique = await fixture.ScalarRowAsync(
+            """
+            SELECT COUNT(*) FROM information_schema.statistics
+             WHERE table_schema = DATABASE() AND table_name = 'submissions'
+               AND index_name = 'ux_sub_idem' AND non_unique = 1
+            """);
+
+        Assert.Equal("0", nonUnique);
+
+        var columns = await fixture.ScalarRowAsync(
+            """
+            SELECT GROUP_CONCAT(column_name ORDER BY seq_in_index)
+              FROM information_schema.statistics
+             WHERE table_schema = DATABASE() AND table_name = 'submissions'
+               AND index_name = 'ux_sub_idem'
+            """);
+
+        Assert.Equal("conversation_id,idempotency_key", columns);
     }
 }

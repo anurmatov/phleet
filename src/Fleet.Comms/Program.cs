@@ -1,7 +1,6 @@
 using Fleet.Comms;
 using Fleet.Comms.Auth;
 using Fleet.Comms.Configuration;
-using Fleet.Comms.Routes;
 using Fleet.Conversations;
 using Microsoft.Extensions.Logging;
 using Fleet.Comms.Operations;
@@ -105,8 +104,8 @@ static async Task<int> RunServiceAsync(string[] args)
         southBuilder.WebHost.UseSetting(WebHostDefaults.ServerUrlsKey, string.Empty);
         southBuilder.WebHost.UseUrls(options.SouthUrl);
 
-        southApp = southBuilder.Build();
-        SouthEndpoints.Map(southApp, store, options);
+        // Composed by CommsApp, not here, so the south suite drives the same graph this line does.
+        southApp = CommsApp.BuildSouthApp(southBuilder, store, options);
     }
 
     // Both or neither. If either listener cannot bind — port already in use, address unavailable — the

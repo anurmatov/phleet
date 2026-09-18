@@ -7,7 +7,6 @@ using Fleet.Conversations.Contracts;
 using Fleet.Protocol;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Routing;
 
 namespace Fleet.Comms.Routes;
 
@@ -28,20 +27,37 @@ namespace Fleet.Comms.Routes;
 /// </remarks>
 public static class SouthEndpoints
 {
-    public static void Map(IEndpointRouteBuilder routes, IConversationStore store, CommsOptions options)
+    public static void Map(WebApplication app, IConversationStore store, CommsOptions options)
     {
         var expected = Encoding.UTF8.GetBytes(options.SouthBearerToken);
 
-        // Authorization is a filter on the group rather than a check inside each handler, so a new
-        // endpoint added later cannot be unauthenticated by omission.
-        var group = routes.MapGroup(string.Empty).AddEndpointFilter(
-            async (context, next) =>
-                Authorized(context.HttpContext, expected)
-                    ? await next(context)
-                    : Results.Json(
-                        ErrorResponse.For(ProtocolErrorCode.Unauthorized),
-                        FleetProtocolJson.Options,
-                        statusCode: StatusCodes.Status401Unauthorized));
+        // MIDDLEWARE, not an endpoint filter, and the difference is not stylistic.
+        //
+        // An endpoint filter runs AFTER argument binding. An unauthenticated caller whose body did
+        // not parse therefore got the framework's empty-bodied 400 and never reached this check at
+        // all — so the "absent and wrong are indistinguishable" property held only for requests that
+        // happened to deserialize, and an anonymous caller could probe body shapes by watching 400
+        // turn into 401. Measured, not reasoned about: it is what the two disposition endpoints did
+        // before this suite sent a request at them.
+        //
+        // As middleware the credential is checked before routing resolves anything and before a
+        // single byte of body is parsed, on EVERY path — including one that matches no endpoint, so
+        // the surface does not answer "that route exists" either.
+        app.Use(async (context, next) =>
+        {
+            if (Authorized(context, expected))
+            {
+                await next(context);
+                return;
+            }
+
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            context.Response.ContentType = "application/json";
+            await context.Response.WriteAsync(
+                FleetProtocolJson.Serialize(ErrorResponse.For(ProtocolErrorCode.Unauthorized)));
+        });
+
+        var group = app.MapGroup(string.Empty);
 
         group.MapPost("/deliveries:claim", async Task<IResult> (ClaimDeliveryRequest request, CancellationToken ct) =>
             Results.Json(await store.ClaimDeliveryAsync(request, ct), FleetProtocolJson.Options));

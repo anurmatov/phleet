@@ -122,6 +122,177 @@ public sealed class MySqlFixture : IAsyncLifetime
         await using var command = new MySqlCommand(sql, connection);
         await command.ExecuteNonQueryAsync();
     }
+
+    // ── scratch databases and accounts, for the migration and operator suites ────────
+
+    /// <summary>
+    /// An additional empty, UNMIGRATED database. The class fixture's own schema is migrated during
+    /// setup, which proves apply-from-empty and nothing else; every question about what the runner
+    /// does on a fresh store, or refuses to do, needs a database it has not touched.
+    /// </summary>
+    public async Task<ScratchDatabase> CreateScratchDatabaseAsync()
+    {
+        var name = $"comms_scratch_{Ulid.NewUlid().ToLowerInvariant()}";
+
+        await using (var connection = new MySqlConnection(ServerConnectionString()))
+        {
+            await connection.OpenAsync();
+            await using var create = new MySqlCommand(
+                $"CREATE DATABASE `{name}` CHARACTER SET utf8mb4", connection);
+            await create.ExecuteNonQueryAsync();
+        }
+
+        return new ScratchDatabase(name, WithDatabase(_adminConnectionString, name), this);
+    }
+
+    /// <summary>
+    /// A DML-only account on <paramref name="database"/> — SELECT/INSERT/UPDATE/DELETE and no DDL
+    /// grant at all, which is what the deployment's runtime account is.
+    /// </summary>
+    /// <remarks>
+    /// Created here rather than taken from <c>FLEET_CONVERSATIONS_CONNECTION</c> so the property is
+    /// asserted in every environment. CI provisions exactly this split and runs the whole store
+    /// suite through it; a local run without that variable would otherwise fall back to the DDL
+    /// account and the assertion would pass by testing nothing.
+    /// </remarks>
+    public async Task<RestrictedAccount> CreateDmlOnlyAccountAsync(string database)
+    {
+        var user = $"c_dml_{Ulid.NewUlid()[..16].ToLowerInvariant()}";
+        const string password = "dml-only-test";
+
+        await using (var connection = new MySqlConnection(ServerConnectionString()))
+        {
+            await connection.OpenAsync();
+
+            foreach (var sql in new[]
+            {
+                $"CREATE USER '{user}'@'%' IDENTIFIED BY '{password}'",
+                $"GRANT SELECT, INSERT, UPDATE, DELETE ON `{database}`.* TO '{user}'@'%'",
+                "FLUSH PRIVILEGES",
+            })
+            {
+                await using var command = new MySqlCommand(sql, connection);
+                await command.ExecuteNonQueryAsync();
+            }
+        }
+
+        var builder = new MySqlConnectionStringBuilder(_adminConnectionString)
+        {
+            Database = database,
+            UserID = user,
+            Password = password,
+        };
+
+        return new RestrictedAccount(user, builder.ConnectionString, this);
+    }
+
+    internal async Task DropDatabaseAsync(string name)
+    {
+        await using var connection = new MySqlConnection(ServerConnectionString());
+        await connection.OpenAsync();
+        await using var drop = new MySqlCommand($"DROP DATABASE IF EXISTS `{name}`", connection);
+        await drop.ExecuteNonQueryAsync();
+    }
+
+    internal async Task DropAccountAsync(string user)
+    {
+        await using var connection = new MySqlConnection(ServerConnectionString());
+        await connection.OpenAsync();
+        await using var drop = new MySqlCommand($"DROP USER IF EXISTS '{user}'@'%'", connection);
+        await drop.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>Reads one row from an arbitrary database, for asserting on a scratch schema.</summary>
+    public static async Task<string> ScalarRowOnAsync(string connectionString, string sql)
+    {
+        await using var connection = new MySqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new MySqlCommand(sql, connection);
+        await using var reader = await command.ExecuteReaderAsync();
+
+        if (!await reader.ReadAsync()) return string.Empty;
+
+        return string.Join("|", Enumerable.Range(0, reader.FieldCount)
+            .Select(i => reader.IsDBNull(i) ? "NULL" : reader.GetValue(i).ToString()));
+    }
+
+    public static async Task ExecuteOnAsync(string connectionString, string sql)
+    {
+        await using var connection = new MySqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new MySqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Opens a connection and holds the conversation row's write lock until disposed.
+    /// </summary>
+    /// <remarks>
+    /// Used to assert that TX1a takes that lock. Without a second holder the property is
+    /// unobservable from outside, and #276's accept floor depends on it.
+    /// </remarks>
+    public async Task<HeldRowLock> HoldConversationLockAsync(string conversationId)
+    {
+        var connection = new MySqlConnection(ConnectionString);
+        await connection.OpenAsync();
+
+        var transaction = await connection.BeginTransactionAsync();
+
+        await using var command = new MySqlCommand(
+            "SELECT id FROM conversations WHERE id = @id FOR UPDATE", connection, transaction);
+        command.Parameters.AddWithValue("@id", conversationId);
+        await command.ExecuteScalarAsync();
+
+        return new HeldRowLock(connection, transaction);
+    }
+
+    private string ServerConnectionString() =>
+        new MySqlConnectionStringBuilder(_adminConnectionString) { Database = string.Empty }
+            .ConnectionString;
+
+    private static string WithDatabase(string connectionString, string database) =>
+        new MySqlConnectionStringBuilder(connectionString) { Database = database }.ConnectionString;
+}
+
+/// <summary>An empty database that drops itself.</summary>
+public sealed class ScratchDatabase(string name, string connectionString, MySqlFixture fixture)
+    : IAsyncDisposable
+{
+    public string Name { get; } = name;
+
+    /// <summary>DDL-capable connection string, scoped to this database.</summary>
+    public string ConnectionString { get; } = connectionString;
+
+    public ValueTask DisposeAsync() => new(fixture.DropDatabaseAsync(Name));
+}
+
+/// <summary>A DML-only account that drops itself.</summary>
+public sealed class RestrictedAccount(string user, string connectionString, MySqlFixture fixture)
+    : IAsyncDisposable
+{
+    public string User { get; } = user;
+
+    public string ConnectionString { get; } = connectionString;
+
+    public ValueTask DisposeAsync() => new(fixture.DropAccountAsync(User));
+}
+
+/// <summary>A conversation row lock held by a second connection, released on disposal.</summary>
+public sealed class HeldRowLock(MySqlConnection connection, MySqlTransaction transaction)
+    : IAsyncDisposable
+{
+    private bool _released;
+
+    /// <summary>Idempotent: a test releases the lock explicitly, then <c>await using</c> runs too.</summary>
+    public async ValueTask DisposeAsync()
+    {
+        if (_released) return;
+        _released = true;
+
+        await transaction.RollbackAsync();
+        await transaction.DisposeAsync();
+        await connection.DisposeAsync();
+    }
 }
 
 [CollectionDefinition("mysql")]

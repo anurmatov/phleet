@@ -192,13 +192,22 @@ public sealed class OutboxPublisherTests(MySqlFixture fixture)
         var transport = new FakeTransport();
         var confirmed = await EventPublisher(transport).DrainOnceAsync(routingKey: "unused");
 
-        Assert.Equal(3, confirmed);
+        // Scoped to THIS conversation. The drain takes whatever is pending in the database, and the
+        // class shares one with every other class in this collection — so a global count is a
+        // function of which test ran first, not of what this test is about. That was the third
+        // instance of the same mistake in this file; the batch bound (100) is far above what any
+        // one class leaves behind, so the three are present whatever else is.
+        var mine = transport.Published
+            .Where(m => m.RoutingKey == conversation.ConversationId)
+            .ToArray();
+
+        Assert.Equal(3, mine.Length);
+        Assert.True(confirmed >= mine.Length);
 
         // Routed per conversation, and in id order, which is seq order for a single writer.
-        Assert.All(transport.Published, m => Assert.Equal(conversation.ConversationId, m.RoutingKey));
         Assert.Equal(
-            transport.Published.Select(m => m.Id).Order().ToArray(),
-            transport.Published.Select(m => m.Id).ToArray());
+            mine.Select(m => m.Id).Order().ToArray(),
+            mine.Select(m => m.Id).ToArray());
 
         static StagedEvent Staged(string text, ulong ordinal) => new()
         {

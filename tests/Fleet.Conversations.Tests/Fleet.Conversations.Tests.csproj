@@ -8,6 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" Version="10.0.5" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.5" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
@@ -20,6 +21,14 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Fleet.Conversations\Fleet.Conversations.csproj" />
+    <!--
+      The south listener and the `conversations` subcommands live in Fleet.Comms, and both need a
+      real database to say anything: the south surface is the store's HTTP face, and a migration
+      command with nothing to migrate against proves only that it parsed its arguments. So they are
+      exercised HERE, in the one suite that has MySQL beside it, rather than in Fleet.Comms.Tests —
+      which must keep running without a database.
+    -->
+    <ProjectReference Include="..\..\src\Fleet.Comms\Fleet.Comms.csproj" />
   </ItemGroup>
 
 </Project>

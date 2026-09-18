@@ -32,6 +32,14 @@ public class NorthBoundaryTests
         { "POST", "/cursors" },
         { "GET", "/conversations/c_1/events" },
         { "GET", "/conversations/c_1/tail" },
+
+        // The three the durable slice added. The list predated them, so for one slice the south
+        // surface grew and the boundary probe did not — including `/submissions:disposition` and
+        // `/deliveries:complete`, either of which on a device-reachable listener lets a client
+        // resolve someone else's submission and append `submission.accepted` for it.
+        { "POST", "/deliveries:claim" },
+        { "POST", "/submissions:disposition" },
+        { "POST", "/deliveries:complete" },
     };
 
     [Theory]

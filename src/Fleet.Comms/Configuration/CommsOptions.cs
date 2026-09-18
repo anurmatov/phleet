@@ -78,6 +78,99 @@ public sealed class CommsOptions
     /// asked for.</para>
     /// </summary>
     public bool StoreProvisioned { get; set; }
+
+    // ── Durable conversations (opt-in) ───────────────────────────────────────────────
+
+    /// <summary>
+    /// Runtime connection string for the conversation database. <b>No default.</b>
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Its presence is what ENABLES the conversation feature. An install that leaves it empty is
+    /// byte-identical to the one the auth slice shipped: no conversation route is mapped, readiness
+    /// checks only the auth store, and <b>no database connection is attempted</b>.
+    /// </para>
+    /// <para>
+    /// This account holds SELECT/INSERT/UPDATE/DELETE and <b>no DDL grants</b>. That is what makes
+    /// "migrations are never a startup side effect" assertable rather than assumed — a process that
+    /// tried would be refused by the database.
+    /// </para>
+    /// </remarks>
+    public string ConversationConnectionString { get; set; } = "";
+
+    /// <summary>
+    /// Separate DDL connection string, used ONLY by <c>conversations migrate</c>. <b>No default.</b>
+    /// </summary>
+    /// <remarks>
+    /// The running service does not have this one. A runtime account that could alter the schema
+    /// turns a bug into a migration, and removes the guard that would have caught it.
+    /// </remarks>
+    public string ConversationMigrationConnectionString { get; set; } = "";
+
+    /// <summary>True when the conversation feature is configured at all.</summary>
+    public bool ConversationsEnabled => !string.IsNullOrWhiteSpace(ConversationConnectionString);
+
+    /// <summary>
+    /// The agent-facing store listener. Container-internal; <b>never published as a host port and
+    /// never proxied.</b>
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A DIFFERENT rule from the ops listener's, and the difference matters. Ops is loopback-bound
+    /// because only the container's own healthcheck calls it. The south caller is a <i>different
+    /// container</i>, so a loopback bind would make this surface unreachable by construction —
+    /// it binds all interfaces on the container network and is kept private by not being published.
+    /// </para>
+    /// </remarks>
+    public string SouthUrl { get; set; } = "http://0.0.0.0:8082";
+
+    /// <summary>
+    /// Bearer credential the south listener requires. <b>No default</b>; startup fails without it
+    /// when conversations are enabled.
+    /// </summary>
+    /// <remarks>
+    /// Compared in fixed time, and a wrong credential is indistinguishable from an absent one.
+    /// </remarks>
+    public string SouthBearerToken { get; set; } = "";
+
+    /// <summary>
+    /// The agent commands are routed to. <b>No default</b>; a blank value fails startup.
+    /// </summary>
+    /// <remarks>
+    /// It becomes a routing key AND a queue-name segment, so it is validated rather than trusted: a
+    /// value carrying a dot or a slash would produce a queue name the consumer cannot address.
+    /// </remarks>
+    public string AgentName { get; set; } = "";
+
+    /// <summary>Broker connection for the two outbox publishers.</summary>
+    public string BrokerConnectionString { get; set; } = "";
+
+    /// <summary>
+    /// Fails fast on a configuration that cannot work, naming the missing key.
+    /// </summary>
+    public void ValidateConversations()
+    {
+        if (!ConversationsEnabled) return;
+
+        if (string.IsNullOrWhiteSpace(SouthBearerToken))
+            throw new InvalidOperationException(
+                "Comms__SouthBearerToken is required when the conversation feature is enabled. "
+                + "The south listener carries an administrative surface and has no default credential.");
+
+        if (string.IsNullOrWhiteSpace(AgentName))
+            throw new InvalidOperationException(
+                "Comms__AgentName is required when the conversation feature is enabled. "
+                + "It is the command routing key and a queue-name segment; there is no default.");
+
+        if (!AgentNamePattern.IsMatch(AgentName))
+            throw new InvalidOperationException(
+                $"Comms__AgentName '{AgentName}' is not usable as a routing key and queue-name "
+                + "segment. Allowed: 1-128 characters of [A-Za-z0-9_-]. A dot or a slash would "
+                + "produce a queue name the consumer cannot address.");
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex AgentNamePattern =
+        new("^[A-Za-z0-9_-]{1,128}$", System.Text.RegularExpressions.RegexOptions.Compiled);
 }
 
 /// <summary>

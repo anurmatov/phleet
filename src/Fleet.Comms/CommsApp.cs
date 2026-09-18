@@ -5,6 +5,7 @@ using Fleet.Comms.Auth;
 using Fleet.Comms.Configuration;
 using Fleet.Comms.Routes;
 using Fleet.Comms.Contracts;
+using Fleet.Conversations.Contracts;
 using Fleet.Protocol;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -200,6 +201,43 @@ public static class CommsApp
             }
         });
 
+        return app;
+    }
+
+    /// <summary>
+    /// Build the south application: the agent-facing store surface, on its own listener.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A THIRD application, for the same reason the ops listener is a second one. The north surface
+    /// is a client contract and this is an administrative one; a client that could reach
+    /// <c>/turns:commit</c> could write a terminal for someone else's turn, so the two are separated
+    /// by address rather than by a path prefix or a header check.
+    /// </para>
+    /// <para>
+    /// Extracted from <c>Program</c> so a test drives the composition production runs rather than a
+    /// hand-wired approximation of it — the same reason <see cref="BuildNorthApp"/> exists. A test
+    /// host that maps the endpoints itself would prove the endpoints can be mapped, which is not
+    /// the question.
+    /// </para>
+    /// <para>
+    /// ⚠️ It never migrates. The store is handed in already constructed and nothing here touches the
+    /// migration runner: a process that advanced the schema on boot would turn a deployment mistake
+    /// into an irreversible change, and the runtime account has no DDL grant to do it with.
+    /// </para>
+    /// </remarks>
+    public static WebApplication BuildSouthApp(
+        WebApplicationBuilder builder, IConversationStore store, CommsOptions options)
+    {
+        // Request BINDING, not just response writing. The framework's web defaults carry no enum
+        // converter, so a body carrying the protocol's own `"disposition":"ran"` failed to bind and
+        // the caller got an empty-bodied 400 — on the two endpoints that carry a disposition, which
+        // is to say on the ones that make the surface work at all. Found by sending a request.
+        builder.Services.ConfigureHttpJsonOptions(
+            jsonOptions => FleetProtocolJson.ApplyTo(jsonOptions.SerializerOptions));
+
+        var app = builder.Build();
+        SouthEndpoints.Map(app, store, options);
         return app;
     }
 

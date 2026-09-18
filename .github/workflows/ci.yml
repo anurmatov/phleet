@@ -26,8 +26,124 @@ jobs:
       - name: Build
         run: dotnet build --no-restore --configuration Release
 
+      # Fleet.Conversations.Tests is excluded HERE and runs in `conversations-tests` below, which
+      # is the job that has a real mysql:8.0 beside it.
+      #
+      # The exclusion is a filter rather than a project-level opt-out, because that suite FAILS
+      # (never skips) without a database — which is the property that makes it evidence. Running it
+      # here would fail this job for want of a service container it was never given, and "fix" that
+      # by making it skip would put us back where a green summary proves nothing.
       - name: Test
-        run: dotnet test --no-build --configuration Release --logger "console;verbosity=normal"
+        run: >
+          dotnet test --no-build --configuration Release
+          --filter "FullyQualifiedName!~Fleet.Conversations.Tests"
+          --logger "console;verbosity=normal"
+
+  conversations-tests:
+    name: Conversations store (MySQL)
+    runs-on: ubuntu-latest
+
+    # A SERVICE CONTAINER rather than Testcontainers: the runner provides it declaratively, so a
+    # missing database fails the job at startup instead of surfacing as a skip halfway through.
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: conversations-ci
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -p$MYSQL_ROOT_PASSWORD"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # The deployment runs as a DDL-LESS account and migrates with a separate one. Provisioning
+      # both here means the suite exercises the same split, so a store method that quietly needed
+      # DDL would fail in CI rather than in production.
+      - name: Provision the migration and runtime accounts
+        run: |
+          mysql -h 127.0.0.1 -P 3306 -u root -pconversations-ci <<'SQL'
+          CREATE USER 'comms_ddl'@'%' IDENTIFIED BY 'ci-ddl';
+          CREATE USER 'comms_runtime'@'%' IDENTIFIED BY 'ci-runtime';
+          GRANT ALL PRIVILEGES ON *.* TO 'comms_ddl'@'%' WITH GRANT OPTION;
+          GRANT SELECT, INSERT, UPDATE, DELETE ON *.* TO 'comms_runtime'@'%';
+          FLUSH PRIVILEGES;
+          SQL
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build Fleet.Conversations (Release)
+        run: dotnet build src/Fleet.Conversations/Fleet.Conversations.csproj --no-restore --configuration Release
+
+      - name: Run the conversation store suite
+        env:
+          FLEET_CONVERSATIONS_MIGRATION_CONNECTION: "Server=127.0.0.1;Port=3306;User ID=comms_ddl;Password=ci-ddl;AllowPublicKeyRetrieval=true;"
+          FLEET_CONVERSATIONS_CONNECTION: "Server=127.0.0.1;Port=3306;User ID=comms_runtime;Password=ci-runtime;AllowPublicKeyRetrieval=true;"
+        run: >
+          dotnet test tests/Fleet.Conversations.Tests --configuration Release
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=conversations.trx"
+          --results-directory ${{ github.workspace }}/testresults
+
+      # Evidence is "N executed, 0 not executed", READ FROM THE RESULT FILE and enforced.
+      #
+      # This step used to be an `echo`. A guard that cannot fail is not a guard: it asks a human to
+      # read counts nobody reads, and it goes green on a run that executed nothing — which is
+      # exactly the failure the whole fail-rather-than-skip design exists to prevent, arriving
+      # through the step meant to catch it.
+      - name: Refuse a run that skipped anything
+        if: always()
+        run: |
+          set -euo pipefail
+          trx="${{ github.workspace }}/testresults/conversations.trx"
+
+          # A missing result file is a failure, not an absence of evidence: it means the suite did
+          # not run at all, which is the strongest version of "skipped".
+          if [ ! -f "$trx" ]; then
+            echo "ERROR: no test result file at $trx — the suite did not run."
+            exit 1
+          fi
+
+          counters=$(grep -o '<Counters[^>]*>' "$trx" | head -1)
+          echo "$counters"
+
+          read_count() {
+            echo "$counters" | grep -o "$1=\"[0-9]*\"" | grep -o '[0-9]*' || echo ""
+          }
+
+          executed=$(read_count executed)
+          notExecuted=$(read_count notExecuted)
+          passed=$(read_count passed)
+
+          if [ -z "$executed" ] || [ -z "$notExecuted" ] || [ -z "$passed" ]; then
+            echo "ERROR: could not read the counters out of $trx."
+            exit 1
+          fi
+
+          if [ "$notExecuted" -ne 0 ]; then
+            echo "ERROR: $notExecuted test(s) did not execute. A skipped integration suite is"
+            echo "indistinguishable from a passing one in a summary; this job is evidence only at 0."
+            exit 1
+          fi
+
+          if [ "$executed" -eq 0 ] || [ "$passed" -ne "$executed" ]; then
+            echo "ERROR: executed=$executed passed=$passed — this job is evidence only when every"
+            echo "test ran and passed against the real database."
+            exit 1
+          fi
+
+          echo "$passed test(s) executed against mysql:8.0, 0 skipped."
 
   whisper-tests:
     name: Whisper service tests

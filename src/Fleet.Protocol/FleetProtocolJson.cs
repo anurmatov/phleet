@@ -39,6 +39,36 @@ public static class FleetProtocolJson
         return options;
     }
 
+    /// <summary>
+    /// Copy the supported configuration onto a mutable options instance owned by someone else —
+    /// ASP.NET's <c>JsonOptions.SerializerOptions</c>, which is get-only and cannot be replaced.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A host that does not do this deserializes request bodies with the framework's web defaults,
+    /// which carry <b>no enum converter at all</b>. A body written in this protocol's own wire
+    /// vocabulary — <c>"disposition":"ran"</c> — then fails to bind, and the caller gets a framework
+    /// 400 with an empty body before the endpoint, or its authorisation, is ever reached. That is
+    /// not hypothetical: it is what the south listener did until the first HTTP request was sent at
+    /// it.
+    /// </para>
+    /// <para>
+    /// Copied from <see cref="Options"/> member by member rather than restated, so there remains one
+    /// definition of the wire shape. A second literal configuration is a second thing to keep in
+    /// step, and the drift shows up as a value that serializes correctly and means something else.
+    /// </para>
+    /// </remarks>
+    public static void ApplyTo(JsonSerializerOptions target)
+    {
+        target.PropertyNamingPolicy = Options.PropertyNamingPolicy;
+        target.DefaultIgnoreCondition = Options.DefaultIgnoreCondition;
+        target.UnmappedMemberHandling = Options.UnmappedMemberHandling;
+        target.PropertyNameCaseInsensitive = Options.PropertyNameCaseInsensitive;
+
+        foreach (var converter in Options.Converters)
+            target.Converters.Add(converter);
+    }
+
     /// <summary>Serialize with the supported options.</summary>
     public static string Serialize<T>(T value) => JsonSerializer.Serialize(value, Options);
 

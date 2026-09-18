@@ -120,6 +120,16 @@ public sealed record ConversationOpenPayload
     public required PrincipalBinding PrincipalBinding { get; init; }
     public PrincipalRole? Role { get; init; }
     public string? ExternalConversationRef { get; init; }
+
+    /// <summary>
+    /// Opaque, owner-scoped bookkeeping label identifying this client installation, so a durable
+    /// cursor can be attributed to it (#276 §4.10).
+    ///
+    /// <para>NOT a credential, NOT device identity, and it confers no authorization. Two
+    /// installations of the same owner have different values and independent cursors; presenting
+    /// someone else's buys nothing, because the principal is established by the bearer token.</para>
+    /// </summary>
+    public string? ClientInstanceId { get; init; }
 }
 
 /// <summary>
@@ -132,6 +142,20 @@ public sealed record SubmissionCreatePayload
     public required string Text { get; init; }
     public string? ReplyToEventId { get; init; }
     public IReadOnlyList<AttachmentDescriptor>? Attachments { get; init; }
+
+    /// <summary>
+    /// Client-chosen key making a retry of this submission safe (#276 §7). At most 128 characters.
+    ///
+    /// <para>The key is bound to a fingerprint of the payload: the same key with the same payload
+    /// replays the original result, and the same key with a DIFFERENT payload is
+    /// <see cref="ProtocolErrorCode.IdempotencyConflict"/> rather than a silent second
+    /// submission.</para>
+    ///
+    /// <para>Its honest upper bound is the garbage-collection horizon — once the submission row is
+    /// collected the key means nothing, and client-facing copy says so rather than implying
+    /// forever.</para>
+    /// </summary>
+    public string? IdempotencyKey { get; init; }
 }
 
 /// <summary>
@@ -168,4 +192,52 @@ public sealed record AttachmentDescriptor
     public string? ContentType { get; init; }
     public long? ByteSize { get; init; }
     public string? FileName { get; init; }
+}
+
+/// <summary>
+/// Request the durable suffix after a cursor (#276 §4.8).
+/// </summary>
+public sealed record ConversationCatchupPayload
+{
+    /// <summary>"I have processed up to and including this seq." The reply starts at the next one.</summary>
+    public required ulong AfterSeq { get; init; }
+
+    /// <summary>
+    /// Page size. Defaults to 200 and is REJECTED above 1000 rather than clamped: a client that
+    /// asked for 5000 and silently received 1000 would believe it held the whole suffix.
+    /// </summary>
+    public int? Limit { get; init; }
+}
+
+/// <summary>
+/// Advance this client instance's durable cursor (#276 §4.10). Monotonic: both values move forward
+/// or not at all, and a lower value is not an error, it is simply not a move.
+/// </summary>
+public sealed record ConversationAckPayload
+{
+    public required ulong DeliveredSeq { get; init; }
+    public ulong? ReadSeq { get; init; }
+}
+
+/// <summary>
+/// Durable history the reader will never receive, because garbage collection passed its cursor
+/// (#276 §4.8).
+///
+/// <para>Synthetic: it is computed per request and NEVER stored, and its envelope carries
+/// <c>seq: null</c>. Sequencing it would give it the newest seq and sort it after the suffix it
+/// announces.</para>
+///
+/// <para>A pruned EPHEMERAL event is not a gap. Only durable events beneath the floor are — which
+/// is why the floor is computed from the durable tier alone.</para>
+/// </summary>
+public sealed record ConversationReplayGapPayload
+{
+    /// <summary>First seq that is missing — the reader's cursor plus one.</summary>
+    public required ulong FromSeq { get; init; }
+
+    /// <summary>Last seq that is missing — the retained floor minus one.</summary>
+    public required ulong ToSeq { get; init; }
+
+    /// <summary>The lowest surviving durable seq; the suffix that follows starts here.</summary>
+    public required ulong RetainedFloorSeq { get; init; }
 }

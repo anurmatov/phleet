@@ -1,6 +1,8 @@
 using Fleet.Comms;
 using Fleet.Comms.Auth;
 using Fleet.Comms.Configuration;
+using Fleet.Conversations;
+using Microsoft.Extensions.Logging;
 using Fleet.Comms.Operations;
 using System.Runtime.InteropServices;
 using Microsoft.AspNetCore.Builder;
@@ -45,8 +47,8 @@ catch (Exception e)
 
 static async Task<int> RunServiceAsync(string[] args)
 {
-    // The north listener. The south surface is a separate listener and is not part of this slice;
-    // nothing here maps a south route, and nothing here exposes a placeholder for one.
+    // The north listener. The south surface is a SEPARATE listener, built below when the
+    // conversation feature is configured; nothing here maps a south route.
     //
     // Listener addresses, certificates and any credential come from the host environment at run time.
     // None of them is in this repository.
@@ -72,6 +74,40 @@ static async Task<int> RunServiceAsync(string[] args)
     opsBuilder.WebHost.UseUrls(opsUrl);
     var opsApp = CommsApp.BuildOpsApp(opsBuilder, northApp.Services.GetRequiredService<IAuthStore>());
 
+    // ── The south listener, only when the conversation feature is configured ─────────
+    //
+    // An install that has not configured it is byte-identical to the auth slice: no third host is
+    // built, no south route exists, and no database connection is attempted. That is asserted
+    // rather than assumed — it is the difference between an opt-in feature and one that merely
+    // defaults to off.
+    //
+    // Its binding rule is the OPPOSITE of the ops listener's, and deliberately so. Ops is
+    // loopback-only because only this container's healthcheck calls it. The south caller is a
+    // DIFFERENT container, so a loopback bind would make the surface unreachable by construction;
+    // it binds the container network and is kept private by never being published as a host port
+    // and never being proxied.
+    var options = northApp.Services
+        .GetRequiredService<Microsoft.Extensions.Options.IOptions<CommsOptions>>().Value;
+
+    options.ValidateConversations();
+
+    WebApplication? southApp = null;
+
+    if (options.ConversationsEnabled)
+    {
+        var store = new MySqlConversationStore(
+            options.ConversationConnectionString,
+            new ConversationStoreOptions(),
+            northApp.Services.GetRequiredService<ILogger<MySqlConversationStore>>());
+
+        var southBuilder = WebApplication.CreateBuilder();
+        southBuilder.WebHost.UseSetting(WebHostDefaults.ServerUrlsKey, string.Empty);
+        southBuilder.WebHost.UseUrls(options.SouthUrl);
+
+        // Composed by CommsApp, not here, so the south suite drives the same graph this line does.
+        southApp = CommsApp.BuildSouthApp(southBuilder, store, options);
+    }
+
     // Both or neither. If either listener cannot bind — port already in use, address unavailable — the
     // process fails rather than coming up half-configured: a north listener with no readiness path is
     // the state an operator cannot diagnose, and a readiness path with no north listener is a service
@@ -87,10 +123,16 @@ static async Task<int> RunServiceAsync(string[] args)
     using var sigterm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, _ => shutdownRequested = true);
     using var sigint = PosixSignalRegistration.Create(PosixSignal.SIGINT, _ => shutdownRequested = true);
 
-    await Task.WhenAll(northApp.StartAsync(), opsApp.StartAsync());
+    // Every configured listener, or none. A process serving two of three is the state an operator
+    // cannot diagnose from the outside.
+    var hosts = southApp is null
+        ? new[] { northApp, opsApp }
+        : [northApp, opsApp, southApp];
 
-    await Task.WhenAny(northApp.WaitForShutdownAsync(), opsApp.WaitForShutdownAsync());
-    await Task.WhenAll(northApp.StopAsync(), opsApp.StopAsync());
+    await Task.WhenAll(hosts.Select(h => h.StartAsync()));
+
+    await Task.WhenAny(hosts.Select(h => h.WaitForShutdownAsync()));
+    await Task.WhenAll(hosts.Select(h => h.StopAsync()));
     return shutdownRequested ? 0 : 1;
 }
 

@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Fleet.Conversations.Contracts</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!--
+    BCL + Fleet.Protocol ONLY. This project carries IConversationStore, its request and response
+    DTOs, and nothing else.
+
+    It MUST NOT acquire a database dependency, directly or transitively (#298 MUST NOT 3). The
+    credential boundary this slice is built on — the agent holds no database credential and reaches
+    the store only through the south endpoints — becomes decorative the moment a future agent-side
+    client can reach a driver by referencing the contract, and every assertion in the suite would
+    still pass while it did. ContractsDependencyTests fails on any PackageReference here and on any
+    ProjectReference other than Fleet.Protocol.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\Fleet.Protocol\Fleet.Protocol.csproj" />
+  </ItemGroup>
+
+</Project>

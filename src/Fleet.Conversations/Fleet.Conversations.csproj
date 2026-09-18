@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Fleet.Conversations</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!--
+    MySqlConnector and explicit SQL, NOT EF Core.
+
+    Two independent reasons, either sufficient. The #276 transactions depend on
+    `SELECT … FOR UPDATE`, `FOR UPDATE SKIP LOCKED` and `ON DUPLICATE KEY UPDATE … GREATEST(…)`,
+    which are expressed directly here rather than through a provider's translation of them. And the
+    target framework settles it anyway: this assembly targets net10.0, while the EF MySQL provider
+    this repository pins is an EF Core 9 release with no EF Core 10 counterpart.
+  -->
+  <ItemGroup>
+    <PackageReference Include="MySqlConnector" Version="2.4.0" />
+    <PackageReference Include="RabbitMQ.Client" Version="7.1.2" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.5" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.5" />
+    <PackageReference Include="Microsoft.Extensions.Options" Version="10.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Fleet.Conversations.Contracts\Fleet.Conversations.Contracts.csproj" />
+    <ProjectReference Include="..\Fleet.Protocol\Fleet.Protocol.csproj" />
+    <ProjectReference Include="..\Fleet.Shared\Fleet.Shared.csproj" />
+  </ItemGroup>
+
+  <!--
+    The migration scripts ship INSIDE the assembly. A runner that read them off disk would apply
+    whatever happened to be beside the binary, and the checksum guard that makes an edited migration
+    a refusal rather than a silent divergence would be checking the wrong bytes.
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="Migrations\*.sql" />
+  </ItemGroup>
+
+</Project>

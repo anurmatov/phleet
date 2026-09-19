@@ -240,6 +240,11 @@ public static class ConversationEndpoints
                 CommandPayloadJson = CommandPayload(
                     kind, caller, id, body.SubmissionId!, body.IdempotencyKey, body.Text,
                     body.ReplyToEventId),
+
+                // #305. Every refusal above returns before this point, so a submission that is not
+                // durable has no transcript entry — an over-cap 413, an idempotency 409 and a
+                // malformed 400 all leave the conversation exactly as they found it.
+                TranscriptText = body.Text,
             }, ct);
 
             return result.Outcome switch
@@ -287,6 +292,9 @@ public static class ConversationEndpoints
             // the agent through the same outbox, in the same transaction, with the same durability.
             // Its own identifier is derived rather than client-supplied, because a client does not
             // name a cancel.
+            //
+            // It carries NO TranscriptText (#305): a cancel is a control action, not something the
+            // user said, and an entry for it would put a button press into the transcript.
             var submissionId = Ulid.NewUlid();
 
             await store.AcceptSubmissionAsync(new AcceptSubmissionRequest

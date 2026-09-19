@@ -225,10 +225,36 @@ public sealed partial class MySqlConversationStore : IConversationStore
     /// would let an append land between the read and the insert, and the floor would then point past
     /// the submission's own first event.
     /// </para>
+    /// <para>
+    /// <b>#305 — the transcript entry is appended HERE</b>, when the submission becomes durable,
+    /// and it takes exactly that floor. Two consequences worth stating, because both are easy to
+    /// lose in a later refactor:
+    /// </para>
+    /// <list type="bullet">
+    ///   <item>The floor is now a seq that exists rather than one that is predicted, so
+    ///   <c>acceptedSeq</c> names a real event on every path.</item>
+    ///   <item>Two accepts on one conversation serialize on the row lock and now consume a seq
+    ///   each, so an earlier submission's entry always sorts before a later one's. Before, neither
+    ///   accept advanced <c>next_seq</c> and both stored the SAME floor.</item>
+    /// </list>
     /// </remarks>
     public async Task<AcceptSubmissionResult> AcceptSubmissionAsync(
         AcceptSubmissionRequest request, CancellationToken ct = default)
     {
+        // The route enforces this before anything becomes durable, so reaching it here is a
+        // programming error rather than a client one. Checked anyway: the transcript's "never
+        // truncated" property is what lets a client render a stored message as the whole message,
+        // and an unenforced property is a comment.
+        if (request.TranscriptText is { } text
+            && System.Text.Encoding.UTF8.GetByteCount(text) > ProtocolLimits.MaxInboundTextBytes)
+        {
+            throw new ArgumentException(
+                $"transcript text exceeds {ProtocolLimits.MaxInboundTextBytes} bytes; the caller must "
+                + "reject an over-cap submission before it becomes durable, because the transcript "
+                + "entry is never truncated.",
+                nameof(request));
+        }
+
         await using var connection = await OpenAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
 
@@ -303,6 +329,35 @@ public sealed partial class MySqlConversationStore : IConversationStore
             return winner is null
                 ? throw new InvalidOperationException("duplicate key on ux_sub_idem but no winning row could be read")
                 : ResolveReplay(winner, request.PayloadFingerprint);
+        }
+
+        // #305. Outside the catch above on purpose: that filter exists to recognise a lost race on
+        // ux_sub_idem, and a duplicate key from ux_event_id reaching it would be read as one.
+        //
+        // Null for a cancel, which goes through this transaction but is not something the user said.
+        if (request.TranscriptText is { } transcript)
+        {
+            // Unfenced: this is the accept path, not the agent's append stream. The conversation row
+            // is locked, which is what actually serializes next_seq.
+            var appended = await WriteEventAsync(
+                connection, transaction, conversation,
+                eventId: Ulid.NewUlid(),
+                kind: ConversationEventKind.SubmissionText,
+                payloadJson: FleetProtocolJson.Serialize(new SubmissionTextPayload { Text = transcript }),
+                submissionId: submissionId,
+                attemptId: null,
+                retentionClass: EventRetentionClass.Durable,
+                isTerminal: false,
+                ordinal: null,
+                ct);
+
+            // The floor was read from the same locked row a few statements ago, so this cannot
+            // disagree unless someone appends between them without the lock — which is the one thing
+            // that would silently break `afterSeq = acceptedSeq - 1` for every client.
+            if (appended != acceptFloorSeq)
+                throw new InvalidOperationException(
+                    $"submission.text took seq {appended} but the stored accept floor is "
+                    + $"{acceptFloorSeq}; an append landed inside the accept transaction.");
         }
 
         await WriteCommandOutboxAsync(

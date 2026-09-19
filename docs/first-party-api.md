@@ -404,8 +404,9 @@ Authorization: Bearer <token>
 ```
 
 **`acceptedSeq` is a catch-up floor.** It is the conversation's `next_seq` as read inside the accept
-transaction: **the first `seq` that any event about this submission can occupy**. The accept appends
-no event, so there is no event seq to return; this is the position the first one will take.
+transaction: **the first `seq` that any event about this submission can occupy**. Since #305 that is
+also the `seq` of a real event — the accept appends `submission.text`, the transcript entry carrying
+what the client just sent — so the floor names a position that exists rather than predicting one.
 
 The same value is returned by every response about that submission — the first `201`, an idempotent
 replay, and the `201` for a submission abandoned before its disposition — so a replay is
@@ -634,6 +635,7 @@ Cursors are monotonic and never move backwards. `readSeq > deliveredSeq`, or eit
 | State | How the client knows | Retryable? |
 |---|---|---|
 | **Accepted (durable)** | `201` from the submissions route. TX1a has committed | No — retry with the same `idempotencyKey` replays |
+| **In the transcript** | `submission.text { text }` at `acceptedSeq` — the client's own message, readable by catch-up with no local persistence | — |
 | **Accept pending** | `202` with the submission ref; TX1b has not landed | Yes, same key; never starts a second turn (`ReplayPending`) |
 | **Dispatched** | `submission.accepted { disposition }` event | — |
 | **Started** | `turn.started` — **may arrive before `submission.accepted`** | — |
@@ -1043,6 +1045,10 @@ submission resolves as `turn.outcome_unknown { attempt_abandoned }` when its lea
   turn.
 - Exactly one `submission.accepted` per submission: the disposition endpoint is its only producer,
   and the runtime's own copy is dropped rather than forwarded.
+- Exactly one `submission.text` per submission that carries text, appended by the accept transaction
+  at `acceptedSeq` and by nothing else. A cancel carries none. A client that force-quits and catches
+  up from its cursor therefore renders its own messages, in the server's order, with no local
+  persistence involved (#305).
 - With no `Conversations__SouthBaseUrl` the agent registers no consumer, declares nothing, binds
   nothing, and behaves byte-identically to one built before the feature existed. Enabled, it adds
   one more setting — the bearer — and nothing else: the queue segment is the agent's existing

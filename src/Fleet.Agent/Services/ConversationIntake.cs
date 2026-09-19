@@ -78,13 +78,70 @@ public sealed class ConversationIntake
     }
 
     /// <summary>
+    /// Open (or re-resolve) a conversation whose caller the SERVICE already authenticated
+    /// (#303 D8, D9a).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="PrincipalBinder"/> is deliberately not on this path. It derives a principal id
+    /// from the operator token plus the agent name, which is a <b>different value</b> from the
+    /// server-derived <c>principalId</c> the command envelope carries — re-binding would attach one
+    /// principal to the events and another to the stored conversation, for the same human.
+    /// </para>
+    /// <para>
+    /// The south path is authenticated by the service before the message is published, by a
+    /// credential this process never sees. <c>ClientChannelOptions.OwnerPrincipalToken</c> is
+    /// therefore not required here, and its absence must not disable this path (MUST NOT 13).
+    /// </para>
+    /// <para>
+    /// The runtime key comes from the existing <see cref="ConversationRegistry"/> and no second
+    /// cache is introduced. <see cref="ConversationRegistry.Resolve"/> is idempotent, so a
+    /// redelivery, a resume and a second submission in the same conversation land on the same key,
+    /// the same buffer and the same model context. Nothing on this path ever calls
+    /// <c>Unregister</c> (MUST NOT 15): the key also anchors the conversation's buffered context,
+    /// and evicting a conversation a client may return to would silently drop its history.
+    /// </para>
+    /// </remarks>
+    /// <returns>The resolved runtime key.</returns>
+    public ConversationOpenResult OpenAuthorized(string channelId, string conversationId, string principalId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(channelId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(conversationId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(principalId);
+
+        if (ChannelIds.IsRuntimeOwned(channelId))
+        {
+            // Same refusal as the client-facing open, for the same reason: 'telegram' and 'relay'
+            // are owned by the existing runtime paths.
+            return Reject(channelId, ProtocolErrorCode.Unauthorized);
+        }
+
+        var reference = new ConversationRef(channelId, conversationId, principalId);
+        var runtimeKey = _registry.Resolve(reference);
+
+        _groupBehavior.GetGroupBuffer(runtimeKey).ChannelAnchorOverride =
+            $"[channel: {channelId} conversation={conversationId}]";
+
+        _logger.LogInformation(
+            "South conversation resolved: channelId={ChannelId} runtimeKey={RuntimeKey}", channelId, runtimeKey);
+
+        return new ConversationOpenResult(true, runtimeKey, conversationId, principalId, null);
+    }
+
+    /// <summary>
     /// Submit conversation content. <c>submission.create</c> and <c>submission.steer</c> take the
     /// SAME path: steering is not a separate code path, and inject-vs-queue is decided by the
     /// task manager's dispatch exactly as it is for Telegram.
     /// </summary>
+    /// <param name="submissionId">
+    /// The store's submission id, when the caller has one (#303 D9). It must appear on every event
+    /// so each one routes to the right submission and attempt in <c>StagedEvent</c>. Null keeps the
+    /// pre-existing behaviour of minting one locally, which is correct for a caller that is itself
+    /// the origin of the submission.
+    /// </param>
     public async Task<TaskDispatchOutcome?> SubmitAsync(
         long runtimeKey, string text, IReadOnlyList<AttachmentDescriptor>? attachments = null,
-        string? replyToEventId = null)
+        string? replyToEventId = null, string? submissionId = null)
     {
         var reference = _registry.Lookup(runtimeKey);
         if (reference is null)
@@ -93,7 +150,7 @@ public sealed class ConversationIntake
             return null;
         }
 
-        var identity = NewSubmissionIdentity(reference, replyToEventId);
+        var identity = NewSubmissionIdentity(reference, replyToEventId, submissionId);
 
         // Attachments are rejected OUTRIGHT. The submission must not silently proceed as
         // text-only — a client that attached a file and got a text-only answer has been lied to.
@@ -187,13 +244,16 @@ public sealed class ConversationIntake
     public void RejectUnsupportedProtocol(long runtimeKey, string channelId) =>
         PublishRejection(ConversationIdentity.ForChannel(channelId), ProtocolErrorCode.UnsupportedProtocol, runtimeKey);
 
-    private ConversationIdentity NewSubmissionIdentity(ConversationRef reference, string? replyToEventId) => new()
+    private ConversationIdentity NewSubmissionIdentity(
+        ConversationRef reference, string? replyToEventId, string? submissionId = null) => new()
     {
         PrincipalId = reference.PrincipalId,
         Role = PrincipalRole.Owner,
         ChannelId = reference.ChannelId,
         ConversationId = reference.ConversationId,
-        SubmissionId = Guid.NewGuid().ToString("N"),
+        // An externally-supplied id wins. The store already has a row under it, and an event
+        // carrying a locally-minted id would route to a submission that does not exist.
+        SubmissionId = string.IsNullOrWhiteSpace(submissionId) ? Guid.NewGuid().ToString("N") : submissionId,
         Attempt = 1,
         ReplyToEventId = replyToEventId,
     };

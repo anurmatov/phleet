@@ -144,3 +144,84 @@ public sealed class ClientChannelOptions
     /// </summary>
     public long OwnerUserId { get; set; }
 }
+
+/// <summary>
+/// The agent's half of the durable conversation seam (#303).
+/// </summary>
+/// <remarks>
+/// <para>
+/// <see cref="SouthBaseUrl"/> is the ENABLING key. Absent, the agent registers no consumer, no
+/// hosted service and no HTTP client, and every existing path is byte-identical to an agent that
+/// never heard of this feature.
+/// </para>
+/// <para>
+/// Present but incomplete is a STARTUP FAILURE, never a silent degrade to disabled. An operator who
+/// configured half of it would otherwise see a healthy process beside a queue nobody drains — which
+/// is the exact state #303 exists to end.
+/// </para>
+/// <para>
+/// ⚠️ <see cref="SouthBearerToken"/> and <see cref="BrokerConnectionString"/> are credentials. They
+/// are never logged, never echoed and never included in a counter label (MUST NOT 19).
+/// </para>
+/// </remarks>
+public sealed class ConversationsOptions
+{
+    public const string Section = "Conversations";
+
+    /// <summary>The agent name pattern the SERVICE already enforces on its side.</summary>
+    /// <remarks>
+    /// Duplicated as a pattern rather than shared as code because the two sides are different
+    /// assemblies with no common home for it. The name is both the routing key and a queue-name
+    /// segment, so a value the two sides read differently means the agent binds and drains a queue
+    /// nobody publishes to while the real one grows.
+    /// <para>
+    /// It is validated against <see cref="AgentOptions.ShortName"/> at startup. There is deliberately
+    /// no agent-name field here: <c>ShortName</c> is already this agent's identity on this broker —
+    /// <c>GroupRelayService</c> builds <c>fleet.agent.{shortName}</c> from it and binds it as a
+    /// routing key — and a second field for one identity is the divergence this pattern exists to
+    /// catch, installed as a feature.
+    /// </para>
+    /// </remarks>
+    public const string AgentNamePattern = "^[A-Za-z0-9_-]{1,128}$";
+
+    /// <summary>Base URL of the south listener. Absent disables the whole feature.</summary>
+    public string SouthBaseUrl { get; set; } = "";
+
+    /// <summary>Bearer credential for the south listener. Required when enabled.</summary>
+    public string SouthBearerToken { get; set; } = "";
+
+    /// <summary>
+    /// Lease renewal cadence. Must be at most half
+    /// <see cref="Fleet.Conversations.Contracts.ConversationLeaseDefaults.LeaseDuration"/>.
+    /// </summary>
+    public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How many deliveries may be in flight at once.
+    /// </summary>
+    /// <remarks>
+    /// MUST be greater than one. A delivery is not acknowledged until its terminal is committed, so
+    /// a prefetch of one would stop a second submission from ever being delivered while the first
+    /// turn ran — and injection and queueing, the two dispositions this seam exists to report, could
+    /// then never occur.
+    /// </remarks>
+    public ushort Prefetch { get; set; } = 8;
+
+    /// <summary>Base delay for the bounded backoff on a retried south call or a requeue.</summary>
+    /// <remarks>
+    /// These three are constants, not settings. They were knobs with no operator who would turn
+    /// them, and every additional key is one more thing a provisioned agent has to be given. Promote
+    /// one to configuration when something concrete demands it — not in advance.
+    /// <para>
+    /// <c>static readonly</c> rather than <c>const</c> only because C# has no constant
+    /// <see cref="TimeSpan"/>; they are compile-time values in every sense that matters here.
+    /// </para>
+    /// </remarks>
+    public static readonly TimeSpan RetryBaseDelay = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>Ceiling for the bounded backoff.</summary>
+    public static readonly TimeSpan RetryMaxDelay = TimeSpan.FromSeconds(30);
+
+    /// <summary>Per-request timeout for a south call.</summary>
+    public static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
+}

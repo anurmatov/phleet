@@ -252,5 +252,23 @@ public sealed class ConversationEventBus : IConversationEventPublisher
     private long NextSeq(string conversationId) =>
         _seqByConversation.AddOrUpdate(conversationId, 1L, (_, current) => current + 1L);
 
-    private static string NewEventId() => Guid.NewGuid().ToString("N");
+    /// <summary>
+    /// A ULID, not a GUID — because this id is a STORAGE KEY once the south adapter exists.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The durable store's <c>event_id</c> column is <c>CHAR(26) ascii_bin</c>, and
+    /// <c>eventId</c> is the append's idempotency key: the adapter has to forward this value
+    /// verbatim, because minting a fresh one per call would make a retried append write a second row
+    /// instead of returning the first one's seq. A 32-character GUID is rejected by the column
+    /// outright — found when every `/events:append` and `/turns:commit` in the round-trip suite came
+    /// back as a raw <c>MySqlException</c> while the disposition, which mints its id server-side,
+    /// succeeded beside it.
+    /// </para>
+    /// <para>
+    /// The value stays opaque on the wire, which is all the protocol promises of it. It gains the
+    /// property the store relies on everywhere else: lexicographic order is time order.
+    /// </para>
+    /// </remarks>
+    private static string NewEventId() => Ulid.NewUlid();
 }

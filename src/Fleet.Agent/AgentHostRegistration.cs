@@ -1,6 +1,7 @@
 using Fleet.Agent.Abstractions;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Interfaces;
+using Fleet.Conversations.Contracts;
 using Fleet.Agent.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -45,6 +46,7 @@ public static class AgentHostRegistration
         services.Configure<WhisperOptions>(configuration.GetSection(WhisperOptions.Section));
         services.Configure<TtsOptions>(configuration.GetSection(TtsOptions.Section));
         services.Configure<ClientChannelOptions>(configuration.GetSection(ClientChannelOptions.Section));
+        services.Configure<ConversationsOptions>(configuration.GetSection(ConversationsOptions.Section));
 
         // Register services
         services.AddSingleton<PromptBuilder>();
@@ -161,6 +163,158 @@ public static class AgentHostRegistration
         services.AddHostedService<WarmupService>();
         services.AddHostedService<OrchestratorHeartbeatService>();
 
+        AddConversationSouthSeam(services, configuration);
+
         return services;
+    }
+
+    /// <summary>
+    /// The agent half of the durable conversation seam (#303), registered only when it is
+    /// configured.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The gate is <c>Conversations:SouthBaseUrl</c>, keyed off configuration in the same
+    /// conditional-registration shape the Telegram transport uses above. Absent, <b>nothing</b>
+    /// here is constructed: no adapter, no consumer, no hosted service, no HTTP client. That is the
+    /// whole blast-radius argument — a host that has not enabled the feature is byte-identical to
+    /// one built before it existed, and <c>ConversationSouthRegistrationTests</c> asserts it by
+    /// inspecting the registration graph rather than by reading this comment.
+    /// </para>
+    /// <para>
+    /// Present but incomplete <b>fails startup</b>, with the offending key named. It must not
+    /// silently degrade to disabled: an operator who configured half of it would otherwise see a
+    /// healthy process beside a queue nobody drains, which is the exact state #303 exists to end.
+    /// </para>
+    /// </remarks>
+    internal static void AddConversationSouthSeam(IServiceCollection services, IConfiguration configuration)
+    {
+        var section = configuration.GetSection(ConversationsOptions.Section);
+        var baseUrl = section[nameof(ConversationsOptions.SouthBaseUrl)];
+
+        if (string.IsNullOrWhiteSpace(baseUrl))
+            return;
+
+        var options = new ConversationsOptions();
+        section.Bind(options);
+
+        ValidateConversationsOptions(
+            options,
+            shortName: configuration[$"{AgentOptions.Section}:{nameof(AgentOptions.ShortName)}"],
+            brokerHost: configuration[$"{RabbitMqOptions.Section}:{nameof(RabbitMqOptions.Host)}"]);
+
+        // The agent's ONE connection to this broker, exposed through the service that owns it. The
+        // conversation consumer takes a channel on it rather than carrying a second connection
+        // string — a credential that exists twice is one a rotation can miss.
+        services.AddSingleton<IAgentBrokerConnection>(sp => sp.GetRequiredService<GroupRelayService>());
+
+        services.AddSingleton<ConversationSouthCounters>();
+        services.AddSingleton<ConversationOrdinalAllocator>();
+        services.AddSingleton<ConversationSouthHandoff>();
+
+        services.AddHttpClient<ConversationSouthClient>();
+
+        // The adapter is registered as IChannelAdapter only. The pump resolves adapters by their
+        // ChannelId, and registering two under one id is a startup failure by design.
+        services.AddSingleton<IChannelAdapter, ConversationSouthAdapter>();
+
+        // AddSingleton + factory-AddHostedService, the same load-bearing pair the relay completion
+        // publisher uses. A bare AddHostedService<T>() registers the type only as IHostedService, so
+        // the heartbeat's constructor injection of the concrete consumer would fail to resolve;
+        // registering both forms independently would yield two consumers, two broker subscriptions
+        // and two claims for every delivery.
+        services.AddSingleton<ConversationSouthConsumer>();
+        services.AddHostedService(sp => sp.GetRequiredService<ConversationSouthConsumer>());
+        services.AddHostedService<ConversationLeaseHeartbeat>();
+    }
+
+    /// <summary>
+    /// The six startup validations (#303 Feature gate). Each throws, naming the offending key.
+    /// </summary>
+    /// <remarks>
+    /// Two of them are about keys this section does NOT own. The seam borrows the agent's identity
+    /// and the agent's broker rather than restating either, so the thing that can be wrong is the
+    /// borrowed value — and a check is not a second field.
+    /// </remarks>
+    internal static void ValidateConversationsOptions(
+        ConversationsOptions options, string? shortName = null, string? brokerHost = null)
+    {
+        Required(options.SouthBearerToken, nameof(ConversationsOptions.SouthBearerToken));
+
+        // Absolute AND http(s). "Absolute" alone is not enough: `Uri.TryCreate` accepts
+        // `south:8082` as a URI whose scheme is "south", and on a Unix host it accepts a bare path
+        // as a file URI. Both would satisfy an absoluteness check, reach `HttpClient.BaseAddress`,
+        // and fail later as an unroutable request rather than at startup with the key named.
+        if (!Uri.TryCreate(options.SouthBaseUrl, UriKind.Absolute, out var southUri)
+            || (southUri.Scheme != Uri.UriSchemeHttp && southUri.Scheme != Uri.UriSchemeHttps))
+        {
+            throw new InvalidOperationException(
+                $"{ConversationsOptions.Section}:{nameof(ConversationsOptions.SouthBaseUrl)} must be an "
+                + "absolute http or https URI.");
+        }
+
+        // The agent's OWN short name, against the SAME pattern the service enforces on its side.
+        // It is both the routing key and a queue-name segment, so a value the two sides read
+        // differently means this agent binds and drains a queue nobody publishes to while the real
+        // one grows — with no error anywhere. Checked here, carried nowhere: a second field for one
+        // identity is what this replaced.
+        if (string.IsNullOrWhiteSpace(shortName)
+            || !System.Text.RegularExpressions.Regex.IsMatch(
+                shortName, ConversationsOptions.AgentNamePattern))
+        {
+            throw new InvalidOperationException(
+                $"{AgentOptions.Section}:{nameof(AgentOptions.ShortName)} must match "
+                + $"{ConversationsOptions.AgentNamePattern} when "
+                + $"{ConversationsOptions.Section}:{nameof(ConversationsOptions.SouthBaseUrl)} is set. "
+                + "It is this agent's queue segment on the broker, not a display name.");
+        }
+
+        // The inbound queue is consumed on the agent's existing connection, so the broker it already
+        // talks to has to be configured. Absent, the feature would sit retrying an attach forever
+        // against a host that was never set.
+        if (string.IsNullOrWhiteSpace(brokerHost))
+        {
+            throw new InvalidOperationException(
+                $"{RabbitMqOptions.Section}:{nameof(RabbitMqOptions.Host)} is required when "
+                + $"{ConversationsOptions.Section}:{nameof(ConversationsOptions.SouthBaseUrl)} is set. "
+                + "The inbound queue is consumed on the connection the agent already holds.");
+        }
+
+        if (options.HeartbeatInterval <= TimeSpan.Zero)
+        {
+            throw new InvalidOperationException(
+                $"{ConversationsOptions.Section}:{nameof(ConversationsOptions.HeartbeatInterval)} must be "
+                + "positive.");
+        }
+
+        // Validated against the SHARED constant, never a literal. A heartbeat at or above the lease
+        // guarantees abandonment of every turn that outlives one lease period, and the symptom —
+        // attempt_abandoned on healthy turns — reads as a store fault rather than a config error.
+        if (options.HeartbeatInterval > ConversationLeaseDefaults.MaxHeartbeatInterval)
+        {
+            throw new InvalidOperationException(
+                $"{ConversationsOptions.Section}:{nameof(ConversationsOptions.HeartbeatInterval)} must be at "
+                + $"most {ConversationLeaseDefaults.MaxHeartbeatInterval} — half the store's "
+                + $"{ConversationLeaseDefaults.LeaseDuration} lease.");
+        }
+
+        if (options.Prefetch < 2)
+        {
+            throw new InvalidOperationException(
+                $"{ConversationsOptions.Section}:{nameof(ConversationsOptions.Prefetch)} must be at least 2. "
+                + "A delivery is not acknowledged until its terminal commits, so a prefetch of one stops a "
+                + "second submission ever being delivered while the first turn runs.");
+        }
+
+        static void Required(string value, string key)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                throw new InvalidOperationException(
+                    $"{ConversationsOptions.Section}:{key} is required when "
+                    + $"{ConversationsOptions.Section}:{nameof(ConversationsOptions.SouthBaseUrl)} is set. "
+                    + "Half a configuration would leave a healthy process beside a queue nobody drains.");
+            }
+        }
     }
 }

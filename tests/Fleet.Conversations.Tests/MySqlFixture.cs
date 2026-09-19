@@ -1,3 +1,4 @@
+using Fleet.Protocol;
 using Fleet.Conversations;
 using Microsoft.Extensions.Logging.Abstractions;
 using MySqlConnector;

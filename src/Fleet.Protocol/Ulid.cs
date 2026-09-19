@@ -1,6 +1,6 @@
 using System.Security.Cryptography;
 
-namespace Fleet.Conversations;
+namespace Fleet.Protocol;
 
 /// <summary>
 /// A 26-character Crockford base32 ULID: 48 bits of millisecond timestamp followed by 80 bits of

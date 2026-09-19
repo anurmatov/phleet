@@ -142,6 +142,48 @@ An edited migration is refused by name rather than re-applied: an edited script 
 migration, and applying the difference silently is how two deployments end up at the same version
 number with different schemas. Add a new forward-only script instead.
 
+### The agent side, and the one relationship no process can check for you
+
+The consumer of the queue this service publishes to is the agent. Its section is deliberately small:
+`Conversations__SouthBaseUrl` is the enabling key and `Conversations__SouthBearerToken` is required
+once it is set. **It carries no agent name and no broker connection string** — the agent already has
+both, and a second copy of either is a value that can drift or a credential a rotation can miss. The
+queue segment is the agent's own `Agent__ShortName`, and the inbound queue is consumed on the
+RabbitMQ connection the agent already holds for the task, relay and orchestrator exchanges
+(`RabbitMq__Host`). A half-configured agent **fails to start** rather than coming up healthy beside a
+queue nobody drains, and that includes a `ShortName` outside the pattern or a missing broker host.
+
+**The agent's `Agent__ShortName` must match `FLEET_COMMS_AGENT_NAME` exactly** — including case. It
+is the routing key on one side and the queue-name segment on the other, and it is used verbatim here
+even though the relay path lowercases its own copy. A value the two sides read differently produces
+no error anywhere: the agent binds and drains a queue nobody publishes to, while the real one grows.
+Both sides validate the same `^[A-Za-z0-9_-]{1,128}$` pattern, which catches a malformed name but
+cannot catch a well-formed *different* one.
+
+#### ⚠️ Heartbeat and lease
+
+The store's lease is **120 seconds** and the agent renews every **30** by default — four renewals per
+lease, so a lost renewal is survivable. The agent refuses to start with a heartbeat above **half**
+the lease, and it validates against a constant both assemblies compile from rather than a literal
+each side keeps its own copy of.
+
+**The gap that constant cannot close:** the agent cannot read *your* configured lease at runtime.
+There is no endpoint that reports it, and adding one would make a configuration value a network
+dependency. So if you lower `LeaseDuration` on the service below twice the agent's heartbeat, the
+agent will start happily and the store will abandon attempts on healthy turns.
+
+The symptom is the misleading part. It arrives as `turn.outcome_unknown { attempt_abandoned }` on
+turns that actually answered, which reads as a store fault or a broker problem — and the thing to
+check is neither. **If you shorten the lease, shorten the agent's `Conversations__HeartbeatInterval`
+in the same change.**
+
+#### Cancel is accepted, not executed
+
+`POST /v1/conversations/{id}:cancel` returns `200` and the command reaches the agent, which claims it,
+completes it as `dropped`, and acknowledges. It does **not** stop a running turn, and the client
+receives no `control.ack`. Nothing here is broken; cancel execution is a later slice. Do not enable a
+cancel affordance in a client against this build.
+
 ### Retention is a garbage-collection horizon, not deletion
 
 Nothing here serves a request to erase anything. Rows age out; ephemeral events are pruned without

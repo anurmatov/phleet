@@ -29,6 +29,13 @@
       which must keep running without a database.
     -->
     <ProjectReference Include="..\..\src\Fleet.Comms\Fleet.Comms.csproj" />
+    <!--
+      The round-trip suite (#303) is the one place where the agent half and the service half meet,
+      and it needs both plus a real broker and a real database. It lives here rather than in
+      Fleet.Agent.Tests because this is the project CI gives infrastructure to — and because a
+      round trip asserted against a stubbed store is not a round trip.
+    -->
+    <ProjectReference Include="..\..\src\Fleet.Agent\Fleet.Agent.csproj" />
   </ItemGroup>
 
 </Project>

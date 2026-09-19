@@ -151,6 +151,14 @@ public sealed class ContainerProvisioningService(
         if (agent.MountDockerSock)
             binds.Add("/var/run/docker.sock:/var/run/docker.sock");
 
+        // Output styles resolve as a PROJECT-level directory beside the user-level settings.json
+        // above — that is the combination provisioning produces and the one that was verified on
+        // the pinned CLI. Claude only: the other providers get the same text in their prompt and
+        // have nothing that would read this. Absent for a styleless agent, so its container config
+        // is unchanged.
+        if (HasStyleFile(agent))
+            binds.Add($"./workspaces/{containerName}/.generated/output-styles:/workspace/.claude/output-styles:ro");
+
         if (agent.Provider == "gemini")
         {
             // Mount gemini OAuth credentials writable — the CLI's google-auth-library refreshes
@@ -682,13 +690,66 @@ public sealed class ContainerProvisioningService(
             agent.PermissionMode);
 
         var fleetMemoryMcpUrl = NormalizeFleetMemoryMcpUrl(config["FleetMemory:McpUrl"]);
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName));
+
+        // The style file is written BEFORE settings.json, so "settings.json names a style that
+        // exists on disk" is a fact about the order rather than a hope. GenerateSettingsJson
+        // refuses the reference outright when the row is missing.
+        var style = await ResolveOutputStyleAsync(agent);
+        await WriteOutputStyleFileAsync(agent, generatedDir, style);
+
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName, style));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl));
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent, ctoAgentName));
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent, ctoAgentName, style));
 
         logger.LogInformation(
             "Generated config files for '{Agent}' in {Dir}",
             agent.Name, generatedDir);
+    }
+
+    // ── output styles ──────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Whether this agent resolves its style as a Claude Code style FILE, as opposed to having the
+    /// same text inlined into its prompt.
+    /// </summary>
+    /// <remarks>
+    /// Output styles are a Claude Code feature: only a claude agent has anything that reads the
+    /// file or the <c>settings.json</c> key. Codex and gemini carry the identical text in
+    /// <c>Agent.OutputStyleBody</c> instead — see <see cref="GenerateAppsettingsJson"/>. The split
+    /// is here, in one predicate, so no path can give a provider the file and forget the prompt.
+    /// </remarks>
+    internal static bool HasStyleFile(Agent agent) =>
+        !string.IsNullOrWhiteSpace(agent.OutputStyle) &&
+        string.Equals(agent.Provider, "claude", StringComparison.OrdinalIgnoreCase);
+
+    private async Task<OutputStyle?> ResolveOutputStyleAsync(Agent agent)
+    {
+        if (string.IsNullOrWhiteSpace(agent.OutputStyle)) return null;
+
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        return await db.OutputStyles.AsNoTracking()
+            .FirstOrDefaultAsync(s => s.Name == agent.OutputStyle);
+    }
+
+    private async Task WriteOutputStyleFileAsync(Agent agent, string generatedDir, OutputStyle? style)
+    {
+        var dir = Path.Combine(generatedDir, "output-styles");
+
+        if (!HasStyleFile(agent) || style is null)
+        {
+            // A stale file from a previous provision would still be mounted and discoverable, so
+            // clearing the style has to remove it rather than merely stop naming it.
+            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+            return;
+        }
+
+        Directory.CreateDirectory(dir);
+        await File.WriteAllTextAsync(
+            Path.Combine(dir, $"{style.Name}.md"), OutputStyleRenderer.ForStyleFile(style));
+
+        logger.LogInformation(
+            "Wrote output style '{Style}' for '{Agent}' to {Dir}", style.Name, agent.Name, dir);
     }
 
     /// <summary>
@@ -857,8 +918,13 @@ public sealed class ContainerProvisioningService(
             agent.Name, projectsDir, agent.Projects.Count);
     }
 
-    internal static string GenerateAppsettingsJson(Agent agent, string ctoAgentName)
+    internal static string GenerateAppsettingsJson(Agent agent, string ctoAgentName, OutputStyle? style = null)
     {
+        if (!string.IsNullOrWhiteSpace(agent.OutputStyle) && style is null)
+            throw new InvalidOperationException(
+                $"Agent '{agent.Name}' names output style '{agent.OutputStyle}', which has no row in " +
+                "output_styles — refusing to generate config that drops the style silently.");
+
         var tools = agent.Tools.Where(t => t.IsEnabled).OrderBy(t => t.ToolName).Select(t => t.ToolName).ToList();
 
         // Codex derives config.toml enabled_tools from AllowedTools (entrypoint.sh).
@@ -929,7 +995,19 @@ public sealed class ContainerProvisioningService(
             },
         };
 
-        return JsonSerializer.Serialize(obj, IndentedJson);
+        var json = JsonSerializer.Serialize(obj, IndentedJson);
+
+        // Inlined for codex and gemini only. Claude reads the style file instead, and putting the
+        // text in both places would assert the same rules twice with nothing to gain.
+        //
+        // Added by editing the serialized document rather than by a nullable property on the
+        // anonymous type above, because a null property still SERIALIZES — and an agent with no
+        // style must produce the same bytes it produced before this existed.
+        if (style is null || HasStyleFile(agent)) return json;
+
+        var node = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+        node["Agent"]!.AsObject()["OutputStyleBody"] = OutputStyleRenderer.ForPrompt(style);
+        return node.ToJsonString(IndentedJson);
     }
 
     /// <summary>
@@ -1011,8 +1089,23 @@ public sealed class ContainerProvisioningService(
         return JsonSerializer.Serialize(new { mcpServers }, IndentedJson);
     }
 
-    private static string GenerateSettingsJson(Agent agent, string ctoAgentName)
+    /// <summary>
+    /// The user-level <c>~/.claude/settings.json</c>. Carries <c>outputStyle</c> only for an agent
+    /// that has one; a styleless agent's file is byte-identical to what it was before styles
+    /// existed, which is what makes the column a per-agent rollout switch and a one-write rollback.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// The agent names a style with no row, so no file was generated for it. Refusing here is the
+    /// point: naming an unresolvable style would leave the agent silently on <c>default</c> with
+    /// nothing to show for it, which is indistinguishable from the style not working.
+    /// </exception>
+    internal static string GenerateSettingsJson(Agent agent, string ctoAgentName, OutputStyle? style = null)
     {
+        if (!string.IsNullOrWhiteSpace(agent.OutputStyle) && style is null)
+            throw new InvalidOperationException(
+                $"Agent '{agent.Name}' names output style '{agent.OutputStyle}', which has no row in " +
+                "output_styles — refusing to write settings.json with an unresolvable reference.");
+
         var allow = agent.Tools
             .Where(t => t.IsEnabled)
             .OrderBy(t => t.ToolName)
@@ -1037,7 +1130,12 @@ public sealed class ContainerProvisioningService(
 
         allow.Sort(StringComparer.OrdinalIgnoreCase);
 
-        return JsonSerializer.Serialize(new { permissions = new { allow } }, IndentedJson);
+        // Two shapes rather than one with a null: the key must be ABSENT, not null, for an agent
+        // with no style — Claude Code would resolve a null to nothing useful and the byte-identity
+        // guarantee would be gone either way.
+        return HasStyleFile(agent) && style is not null
+            ? JsonSerializer.Serialize(new { permissions = new { allow }, outputStyle = style.Name }, IndentedJson)
+            : JsonSerializer.Serialize(new { permissions = new { allow } }, IndentedJson);
     }
 
     private static string? ParseContainerPath(string bind)

@@ -36,6 +36,19 @@ public class Agent
     [MaxLength(30)]
     public string? CodexSandboxMode { get; set; }
 
+    /// <summary>
+    /// Name of the <see cref="Data.OutputStyle"/> row this agent runs with, or <c>null</c> for none.
+    /// </summary>
+    /// <remarks>
+    /// <c>null</c> is the rollout switch and the rollback: an agent with no style is provisioned
+    /// byte-for-byte as it was before styles existed — no <c>outputStyle</c> key in
+    /// <c>settings.json</c>, no mount, no change to the assembled prompt. Deliberately NOT a
+    /// foreign key: a name with no row must be reachable so provisioning can refuse it loudly
+    /// rather than emit an unresolvable reference.
+    /// </remarks>
+    [MaxLength(100)]
+    public string? OutputStyle { get; set; }
+
     public List<AgentTool> Tools { get; set; } = [];
     public List<AgentProject> Projects { get; set; } = [];
     public List<AgentMcpEndpoint> McpEndpoints { get; set; } = [];
@@ -329,6 +342,43 @@ public static class AgentProjectAccessSource
 
     /// <summary>Created by an operator; never removed by the assignment hook.</summary>
     public const string Manual = "manual";
+}
+
+// ─── Output Styles ────────────────────────────────────────────────────────────
+
+/// <summary>
+/// A named Claude Code output style, stored once and rendered per provider.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Tone and register carried in the appended system prompt lose to Claude Code's own
+/// <c>Tone and style</c> and <c>Text output</c> guidance, because the model picks arbitrarily
+/// between two rules that contradict. An output style is re-asserted during the conversation,
+/// near the point of generation, which is why the identical text wins from here and loses from
+/// there.
+/// </para>
+/// <para>
+/// Styles are a Claude Code feature, so this row is the single source for every provider:
+/// claude resolves it as a style file, codex and gemini get the same text inlined into their
+/// prompt. A style that applied to one provider and vanished for the others would be worse than
+/// no style at all.
+/// </para>
+/// </remarks>
+public class OutputStyle
+{
+    /// <summary>Style name — the value an agent's <see cref="Agent.OutputStyle"/> holds.</summary>
+    [MaxLength(100)]
+    public required string Name { get; set; }
+
+    /// <summary>
+    /// The full style file, YAML frontmatter included. Written verbatim for claude; the
+    /// frontmatter is stripped before the body is inlined for the other providers.
+    /// </summary>
+    public required string Body { get; set; }
+
+    /// <summary>One line describing what the style is for. Operator-facing only.</summary>
+    [MaxLength(500)]
+    public string? Description { get; set; }
 }
 
 // ─── Credentials Audit ────────────────────────────────────────────────────────

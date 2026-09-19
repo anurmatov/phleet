@@ -41,7 +41,8 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         [Description("Codex sandbox mode (danger-full-access, workspace-write, read-only). Pass empty string to clear. Omit to keep current. Only applies to codex agents.")] string? codex_sandbox_mode = null,
         [Description("Enable access-request flow for unknown DMs (CanReceiveChatRequests). When true, unknown DMs are forwarded to the CTO agent (FLEET_CTO_AGENT) instead of being silently dropped. Omit to keep current.")] bool? can_receive_chat_requests = null,
         [Description("Message sent to requesting user when their access request is queued. Pass empty string to use the built-in default. Max 500 characters. Omit to keep current.")] string? request_received_message = null,
-        [Description("Mount /var/run/docker.sock into the container (grants host-root; leave off unless agent manages containers). Omit to keep current.")] bool? mount_docker_sock = null)
+        [Description("Mount /var/run/docker.sock into the container (grants host-root; leave off unless agent manages containers). Omit to keep current.")] bool? mount_docker_sock = null,
+        [Description("Name of an output_styles row this agent runs with — its chat tone and register. Pass empty string to clear (no style). Omit to keep current. Takes effect on the next reprovision.")] string? output_style = null)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
@@ -257,6 +258,22 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         {
             changes.AppendLine($"- mount_docker_sock: {agent.MountDockerSock} → {mount_docker_sock}");
             agent.MountDockerSock = mount_docker_sock.Value;
+        }
+
+        if (output_style is not null && output_style.Trim() != (agent.OutputStyle ?? ""))
+        {
+            // Checked against output_styles here rather than at provision time: an unresolvable
+            // name makes provisioning refuse outright, and finding that out at the next reprovision
+            // is finding out far from the edit that caused it.
+            var styleName = output_style.Trim();
+            if (styleName.Length > 0 && !await db.OutputStyles.AnyAsync(s => s.Name == styleName))
+            {
+                var known = await db.OutputStyles.Select(s => s.Name).OrderBy(n => n).ToListAsync();
+                return $"Output style '{styleName}' does not exist. Known styles: "
+                     + (known.Count > 0 ? string.Join(", ", known) : "(none)");
+            }
+            changes.AppendLine($"- output_style: {agent.OutputStyle ?? "(none)"} → {(styleName.Length == 0 ? "(none)" : styleName)}");
+            agent.OutputStyle = styleName.Length == 0 ? null : styleName;
         }
 
         if (changes.Length == 0)

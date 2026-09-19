@@ -38,6 +38,9 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
     // Agent Project Access (memory ACL)
     public DbSet<AgentProjectAccess> AgentProjectAccess => Set<AgentProjectAccess>();
 
+    // Named output styles (per-agent tone/register, rendered per provider)
+    public DbSet<OutputStyle> OutputStyles => Set<OutputStyle>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<Agent>(e =>
@@ -58,6 +61,8 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.Property(x => x.Image).HasMaxLength(200);
             e.Property(x => x.Effort).HasMaxLength(20);
             e.Property(x => x.CodexSandboxMode).HasMaxLength(30);
+            // Not a relationship on purpose — see Agent.OutputStyle.
+            e.Property(x => x.OutputStyle).HasMaxLength(100);
             e.Property(x => x.AutoMemoryEnabled).HasDefaultValue(true);
             e.Property(x => x.CanReceiveChatRequests).HasDefaultValue(false);
             e.Property(x => x.RequestReceivedMessage).HasMaxLength(500);
@@ -302,6 +307,15 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.Property(x => x.Source).HasMaxLength(20).IsRequired()
                 .HasDefaultValue(AgentProjectAccessSource.Manual);
             e.HasIndex(x => x.AgentName);
+        });
+
+        modelBuilder.Entity<OutputStyle>(e =>
+        {
+            e.ToTable("output_styles");
+            e.HasKey(x => x.Name);
+            e.Property(x => x.Name).HasMaxLength(100).IsRequired();
+            e.Property(x => x.Body).HasColumnType("longtext").IsRequired();
+            e.Property(x => x.Description).HasMaxLength(500);
         });
 
     }

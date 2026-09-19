@@ -334,6 +334,7 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         agent.AutoMemoryEnabled,
         agent.Provider,
         agent.CodexSandboxMode,
+        agent.OutputStyle,
         agent.CanReceiveChatRequests,
         agent.RequestReceivedMessage,
         agent.MountDockerSock,
@@ -421,6 +422,16 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
         agent.RequestReceivedMessage = body.RequestReceivedMessage == "" ? null : body.RequestReceivedMessage;
     }
     if (body.MountDockerSock is not null) agent.MountDockerSock = body.MountDockerSock.Value;
+    if (body.OutputStyle is not null)
+    {
+        // Empty string clears, matching effort and codex_sandbox_mode. A name is checked against
+        // output_styles HERE rather than at provision time, so the operator finds out while they
+        // are still looking at the agent instead of at a failed reprovision.
+        var styleName = body.OutputStyle.Trim();
+        if (styleName.Length > 0 && !await db.OutputStyles.AnyAsync(s => s.Name == styleName))
+            return Results.BadRequest(new { error = $"Output style '{styleName}' does not exist." });
+        agent.OutputStyle = styleName.Length == 0 ? null : styleName;
+    }
 
     // Replace-all for related tables (omit field = keep current)
     if (body.Tools is not null)
@@ -557,6 +568,25 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
 });
 
 // REST: list all instructions with version summary
+// REST: list the named output styles an agent can be switched to.
+// Read-only and unauthenticated like the other GET /api/* reads — the dashboard populates its
+// output-style select from this, and a select with nothing in it is the same as no control.
+app.MapGet("/api/output-styles", async (IServiceScopeFactory scopeFactory, CancellationToken ct) =>
+{
+    using var scope = scopeFactory.CreateScope();
+    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
+    if (db is null)
+        return Results.Problem("Database is not configured on this orchestrator");
+
+    var styles = await db.OutputStyles
+        .AsNoTracking()
+        .OrderBy(s => s.Name)
+        .Select(s => new { s.Name, s.Description })
+        .ToListAsync(ct);
+
+    return Results.Ok(styles);
+});
+
 app.MapGet("/api/instructions", async (IServiceScopeFactory scopeFactory) =>
 {
     using var scope = scopeFactory.CreateScope();
@@ -2758,7 +2788,8 @@ record AgentConfigUpdateRequest(
     InstructionAssignmentEntry[]? Instructions,
     bool? CanReceiveChatRequests,
     string? RequestReceivedMessage,
-    bool? MountDockerSock);
+    bool? MountDockerSock,
+    string? OutputStyle);
 
 record McpEndpointEntry(string McpName, string Url, string TransportType);
 record InstructionAssignmentEntry(string InstructionName, int LoadOrder);

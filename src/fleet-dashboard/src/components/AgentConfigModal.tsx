@@ -64,6 +64,10 @@ export default function AgentConfigModal({
     ? countCustomized(configEdits as unknown as Record<string, unknown>)
     : 0
 
+  // The row behind the current selection, when there is one — the link and the description below
+  // the select both describe the style the operator is actually about to assign.
+  const selectedStyle = outputStyles.find(s => s.name === configEdits?.outputStyle) ?? null
+
   const provider = configEdits?.provider ?? configData?.provider ?? 'claude'
   const isClaude = provider === 'claude'
   const isCodex = provider === 'codex'
@@ -193,8 +197,26 @@ export default function AgentConfigModal({
                 </select>
               </div>
               <div className="config-field">
-                <label className="config-label">Output Style</label>
+                <label className="config-label">
+                  Output Style
+                  {/* Opens in a new tab on purpose: reading what you are about to impose on every
+                      message this agent sends should not cost the unsaved edits in this modal. */}
+                  <a
+                    className="setup-helper-link"
+                    href="#output-styles"
+                    target="_blank"
+                    rel="noreferrer"
+                    title="Open the Output Styles page to read or edit the style body"
+                  >
+                    {selectedStyle
+                      ? `read "${selectedStyle.name}" ↗`
+                      : 'browse styles ↗'}
+                  </a>
+                </label>
                 <FieldHint>Chat tone and register. Claude resolves it as a style file; Codex and Gemini get the same text inlined into their prompt. <strong>Needs a reprovision, not a restart</strong> — the value lands in the generated <code>settings.json</code> at provision time.</FieldHint>
+                {selectedStyle?.description && (
+                  <FieldHint>{selectedStyle.description}</FieldHint>
+                )}
                 <select
                   value={configEdits.outputStyle}
                   onChange={e => onEditsChange({ outputStyle: e.target.value })}

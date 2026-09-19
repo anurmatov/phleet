@@ -51,6 +51,7 @@ import StartWorkflowModal from './components/StartWorkflowModal'
 import SchedulesView from './components/SchedulesView'
 import NamespacesView from './components/NamespacesView'
 import RepositoriesView from './components/RepositoriesView'
+import OutputStylesView from './components/OutputStylesView'
 import CredentialsView from './components/CredentialsView'
 import MemoryView from './components/MemoryView'
 import { MemoryIdCacheProvider } from './context/MemoryIdCacheContext'
@@ -226,7 +227,7 @@ export default function App() {
   const [deleteMsg, setDeleteMsg] = useState<Record<string, string>>({})
 
   // Navigation state — synced with URL hash
-  const VALID_VIEWS: ActiveView[] = ['agents', 'workflows', 'instructions', 'project-contexts', 'wf-definitions', 'alerts', 'schedules', 'namespaces', 'repositories', 'credentials']
+  const VALID_VIEWS: ActiveView[] = ['agents', 'workflows', 'instructions', 'project-contexts', 'output-styles', 'wf-definitions', 'alerts', 'schedules', 'namespaces', 'repositories', 'credentials']
   const [activeView, setActiveViewState] = useState<ActiveView>(() => {
     const hash = window.location.hash.slice(1) as ActiveView
     return VALID_VIEWS.includes(hash) ? hash : 'agents'
@@ -396,6 +397,15 @@ export default function App() {
       .finally(() => setInstructionsLoading(false))
   }
 
+  // Populates the output-style select and the sidenav count. On failure the list stays empty and
+  // the select still offers "none", so a styled agent can always be switched back off.
+  function loadOutputStyles() {
+    apiFetch('/api/output-styles')
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then((list: OutputStyleSummary[]) => setOutputStyles(list))
+      .catch(() => setOutputStyles([]))
+  }
+
   function loadProjectContexts() {
     setProjectContextsLoading(true)
     apiFetch('/api/project-contexts')
@@ -435,6 +445,7 @@ export default function App() {
 
     loadInstructions()
     loadProjectContexts()
+    loadOutputStyles()
     fetchCompleted()
 
     apiFetch('/api/setup/status')
@@ -749,12 +760,8 @@ export default function App() {
       .then((data: { projects: string[] }) => setProjectAccess(data.projects))
       .catch(() => setProjectAccess([]))
       .finally(() => setProjectAccessLoading(false))
-    // Populates the output-style select. On failure the list stays empty and the select still
-    // offers "none", so a styled agent can always be switched back off.
-    apiFetch('/api/output-styles')
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
-      .then((list: OutputStyleSummary[]) => setOutputStyles(list))
-      .catch(() => setOutputStyles([]))
+    // Refresh in case a style was added or removed since the page loaded.
+    loadOutputStyles()
     apiFetch(`/api/agents/${encodeURIComponent(agentName)}/config`)
       .then(r => r.ok ? r.json() : Promise.reject(r.status))
       .then((cfg: AgentConfig) => {
@@ -1713,6 +1720,7 @@ export default function App() {
         attentionWorkflowCount={workflows.filter(wf => getSignalDefs(wf).length > 0).length}
         instructionCount={instructions.length}
         projectContextCount={projectContexts.length}
+        outputStyleCount={outputStyles.length}
         wfDefinitionCount={wfDefs.length}
         namespaceCount={apiNamespaces.length}
         unreadAlertCount={unreadAlerts.length}
@@ -2002,6 +2010,10 @@ export default function App() {
             workflowTypes={workflowTypes}
             schedulesLoading={schedulesLoading}
           />
+        )}
+
+        {activeView === 'output-styles' && (
+          <OutputStylesView />
         )}
 
         {activeView === 'repositories' && (

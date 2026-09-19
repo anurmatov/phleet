@@ -568,6 +568,25 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
 });
 
 // REST: list all instructions with version summary
+// REST: list the named output styles an agent can be switched to.
+// Read-only and unauthenticated like the other GET /api/* reads — the dashboard populates its
+// output-style select from this, and a select with nothing in it is the same as no control.
+app.MapGet("/api/output-styles", async (IServiceScopeFactory scopeFactory, CancellationToken ct) =>
+{
+    using var scope = scopeFactory.CreateScope();
+    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
+    if (db is null)
+        return Results.Problem("Database is not configured on this orchestrator");
+
+    var styles = await db.OutputStyles
+        .AsNoTracking()
+        .OrderBy(s => s.Name)
+        .Select(s => new { s.Name, s.Description })
+        .ToListAsync(ct);
+
+    return Results.Ok(styles);
+});
+
 app.MapGet("/api/instructions", async (IServiceScopeFactory scopeFactory) =>
 {
     using var scope = scopeFactory.CreateScope();

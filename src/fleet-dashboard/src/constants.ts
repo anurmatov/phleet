@@ -76,6 +76,7 @@ export const ADVANCED_DEFAULTS: Record<string, string | number | boolean | null>
   jsonSchema: null,
   agentsJson: null,
   autoMemoryEnabled: true,
+  outputStyle: null,
 }
 
 export function countCustomized(config: Record<string, unknown>): number {

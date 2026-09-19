@@ -150,6 +150,49 @@ public class ShippedOutputStyleTests
         Assert.Contains("Negative control", text, StringComparison.Ordinal);
     }
 
+    // ── the dashboard control ────────────────────────────────────────────────
+
+    /// <summary>
+    /// The select exists, is styled, and counts toward the customised-field badge.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A field with no control is a field that does not get used — provisioning is done through the
+    /// dashboard by preference, so the rollout this switch exists to enable would stall at the first
+    /// agent. And a control that renders unstyled reads as broken while signalling the feature is
+    /// live when it is not: the formatting-mode select shipped once with <c>config-select</c>, a
+    /// class the stylesheet does not define.
+    /// </para>
+    /// <para>
+    /// Asserted from the orchestrator suite because the dashboard has no test runner of its own.
+    /// Crude, but it fails on the exact edit that caused the earlier incident, which an eyeballed
+    /// review did not.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheDashboardExposesTheSwitch()
+    {
+        var modal = File.ReadAllText(System.IO.Path.Combine(
+            RepoRoot(), "src", "fleet-dashboard", "src", "components", "AgentConfigModal.tsx"));
+        var constants = File.ReadAllText(System.IO.Path.Combine(
+            RepoRoot(), "src", "fleet-dashboard", "src", "constants.ts"));
+        var css = File.ReadAllText(System.IO.Path.Combine(
+            RepoRoot(), "src", "fleet-dashboard", "src", "index.css"));
+
+        Assert.Contains("Output Style", modal, StringComparison.Ordinal);
+        // An explicit "none" option — clearing has to be reachable, not just not-setting.
+        Assert.Contains("<option value=\"\">none</option>", modal, StringComparison.Ordinal);
+        // Reprovision, not restart: the value lands in settings.json at provision time.
+        Assert.Contains("Needs a reprovision, not a restart", modal, StringComparison.Ordinal);
+        // Counted by the customised-field badge, like every other advanced field.
+        Assert.Contains("outputStyle: null", constants, StringComparison.Ordinal);
+
+        // Every class the new field uses must actually be defined.
+        foreach (var cssClass in new[] { "config-field", "config-label", "config-input" })
+            Assert.Contains($".{cssClass}", css, StringComparison.Ordinal);
+        Assert.DoesNotContain("config-select", modal, StringComparison.Ordinal);
+    }
+
     private static string RepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);

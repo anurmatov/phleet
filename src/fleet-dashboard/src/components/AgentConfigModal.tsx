@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { AgentConfig, ConfigEdits, ConfigSaveState, InstructionSummary, McpEndpointEntry } from '../types'
+import type { AgentConfig, ConfigEdits, ConfigSaveState, InstructionSummary, McpEndpointEntry, OutputStyleSummary } from '../types'
 import { ADVANCED_DEFAULTS, countCustomized, PROVIDER_DEFAULT_MODEL, CLAUDE_PERMISSION_MODES, CODEX_SANDBOX_MODES } from '../constants'
 import ModelSelector from './ModelSelector'
 import FieldHint from './FieldHint'
@@ -16,6 +16,7 @@ interface AgentConfigModalProps {
   configLoading: boolean
   configReprovisionConfirm: boolean
   allInstructions: InstructionSummary[]
+  outputStyles: OutputStyleSummary[]
   projectAccess: string[] | null
   projectAccessLoading: boolean
   onEditsChange: (patch: Partial<ConfigEdits>) => void
@@ -36,6 +37,7 @@ export default function AgentConfigModal({
   configLoading,
   configReprovisionConfirm,
   allInstructions,
+  outputStyles,
   projectAccess,
   projectAccessLoading,
   onEditsChange,
@@ -188,6 +190,23 @@ export default function AgentConfigModal({
                   <option value={0}>PlainText</option>
                   <option value={1}>LegacyHtml</option>
                   <option value={2}>Rich</option>
+                </select>
+              </div>
+              <div className="config-field">
+                <label className="config-label">Output Style</label>
+                <FieldHint>Chat tone and register. Claude resolves it as a style file; Codex and Gemini get the same text inlined into their prompt. <strong>Needs a reprovision, not a restart</strong> — the value lands in the generated <code>settings.json</code> at provision time.</FieldHint>
+                <select
+                  value={configEdits.outputStyle}
+                  onChange={e => onEditsChange({ outputStyle: e.target.value })}
+                  className="config-input"
+                >
+                  <option value="">none</option>
+                  {outputStyles.map(s => (
+                    <option key={s.name} value={s.name}>{s.name}</option>
+                  ))}
+                  {configEdits.outputStyle !== '' && !outputStyles.some(s => s.name === configEdits.outputStyle) && (
+                    <option value={configEdits.outputStyle}>{configEdits.outputStyle} (not found)</option>
+                  )}
                 </select>
               </div>
               <div className="config-field">

@@ -29,6 +29,7 @@ import type {
   WorkflowDefinitionDetail,
   WorkflowTypeInfo,
   ScheduleSummary,
+  OutputStyleSummary,
 } from './types'
 import { apiFetch, heartbeatAge } from './utils'
 import { PROVIDER_DEFAULT_MODEL } from './constants'
@@ -142,6 +143,7 @@ export default function App() {
   const [reprovisionAllMsg, setReprovisionAllMsg] = useState('')
 
   const [instructions, setInstructions] = useState<InstructionSummary[]>([])
+  const [outputStyles, setOutputStyles] = useState<OutputStyleSummary[]>([])
   const [instructionsLoading, setInstructionsLoading] = useState(false)
   const [expandedInstruction, setExpandedInstruction] = useState<string | null>(null)
   const [instructionDetail, setInstructionDetail] = useState<Record<string, InstructionDetail>>({})
@@ -747,6 +749,12 @@ export default function App() {
       .then((data: { projects: string[] }) => setProjectAccess(data.projects))
       .catch(() => setProjectAccess([]))
       .finally(() => setProjectAccessLoading(false))
+    // Populates the output-style select. On failure the list stays empty and the select still
+    // offers "none", so a styled agent can always be switched back off.
+    apiFetch('/api/output-styles')
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then((list: OutputStyleSummary[]) => setOutputStyles(list))
+      .catch(() => setOutputStyles([]))
     apiFetch(`/api/agents/${encodeURIComponent(agentName)}/config`)
       .then(r => r.ok ? r.json() : Promise.reject(r.status))
       .then((cfg: AgentConfig) => {
@@ -786,6 +794,7 @@ export default function App() {
           canReceiveChatRequests: cfg.canReceiveChatRequests ?? false,
           requestReceivedMessage: cfg.requestReceivedMessage ?? '',
           mountDockerSock: cfg.mountDockerSock ?? false,
+          outputStyle: cfg.outputStyle ?? '',
           instructions: cfg.instructions ?? [],
         })
       })
@@ -880,6 +889,7 @@ export default function App() {
         canReceiveChatRequests: configEdits.canReceiveChatRequests,
         requestReceivedMessage: configEdits.requestReceivedMessage || undefined,
         mountDockerSock: configEdits.mountDockerSock,
+        outputStyle: configEdits.outputStyle,
         tools, projects, mcpEndpoints: configEdits.mcpEndpoints, networks, envRefs,
         instructions: configEdits.instructions.map(i => ({ instructionName: i.name, loadOrder: i.loadOrder })),
       }),
@@ -2096,6 +2106,7 @@ export default function App() {
           configLoading={configLoading}
           configReprovisionConfirm={configReprovisionConfirm}
           allInstructions={instructions}
+          outputStyles={outputStyles}
           projectAccess={projectAccess}
           projectAccessLoading={projectAccessLoading}
           onEditsChange={patch => setConfigEdits(prev => prev ? { ...prev, ...patch } : prev)}

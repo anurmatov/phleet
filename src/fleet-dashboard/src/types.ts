@@ -171,6 +171,7 @@ export interface AgentConfig {
   telegramSendOnly: boolean
   provider: string
   codexSandboxMode: string | null
+  outputStyle: string | null
   tools: { toolName: string; isEnabled: boolean }[]
   projects: string[]
   mcpEndpoints: McpEndpointEntry[]
@@ -219,6 +220,8 @@ export interface ConfigEdits {
   canReceiveChatRequests: boolean
   requestReceivedMessage: string
   mountDockerSock: boolean
+  /** Name of an output_styles row, or '' for none — the sentinel the API clears on. */
+  outputStyle: string
   instructions: { name: string; loadOrder: number }[]
 }
 
@@ -229,6 +232,11 @@ export interface AgentTemplateSummary {
   defaultModel: string
   toolCount: number
   mcpCount: number
+}
+
+export interface OutputStyleSummary {
+  name: string
+  description: string | null
 }
 
 export interface InstructionSummary {

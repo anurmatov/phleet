@@ -122,4 +122,64 @@ public interface IConversationStore
     /// </remarks>
     IAsyncEnumerable<StoredEvent> TailAsync(
         string conversationId, ulong afterSeq, CancellationToken ct = default);
+
+    // ── Attachments (#308) ───────────────────────────────────────────────────────────
+    //
+    // Metadata only. Not one of these methods reads or writes a byte: the bytes live on a volume
+    // behind AttachmentStore, and keeping the two apart is what lets the nightly database dump stay
+    // the size of a transcript rather than the size of a photo album.
+
+    /// <summary>
+    /// <b>awaited</b> — reserve a slot. The per-conversation cap is summed INSIDE the reservation
+    /// transaction, under the same conversation row lock the accept path takes, so concurrent
+    /// reserves serialize and the committed total never exceeds it.
+    /// </summary>
+    /// <remarks>
+    /// Live bytes are <c>reserved</c> + <c>sealed</c> + <c>bound</c>, excluding <c>failed</c> —
+    /// at the declared size while reserved and the actual size after. Counting only <c>sealed</c>
+    /// would make both caps unenforceable by construction: N concurrent reservations would each read
+    /// the same under-cap total and collectively pass it.
+    /// </remarks>
+    Task<ReserveAttachmentResult> ReserveAttachmentAsync(
+        ReserveAttachmentRequest request, CancellationToken ct = default);
+
+    /// <summary>
+    /// <b>awaited</b> — mark a reservation sealed once its bytes have been verified.
+    /// </summary>
+    /// <returns>False when the row was not <c>reserved</c> — a second PUT, or an expired window.</returns>
+    Task<bool> SealAttachmentAsync(SealAttachmentRequest request, CancellationToken ct = default);
+
+    /// <summary>
+    /// <b>awaited</b> — mark a reservation failed. Verification failed, or the volume refused the
+    /// write.
+    /// </summary>
+    Task<bool> FailAttachmentAsync(string attachmentId, CancellationToken ct = default);
+
+    /// <summary>
+    /// <b>awaited</b> — the row, or null. <b>The row is authoritative</b>: a missing byte file is a
+    /// gone state decided by the caller, never a null here and never a 500.
+    /// </summary>
+    Task<AttachmentMetadata?> GetAttachmentAsync(
+        string attachmentId, CancellationToken ct = default);
+
+    /// <summary>
+    /// <b>awaited</b> — the row, restricted to a conversation owned by this principal.
+    /// </summary>
+    /// <remarks>
+    /// Null for a nonexistent id AND for one belonging to someone else, so the two are
+    /// indistinguishable to a caller.
+    /// </remarks>
+    Task<AttachmentMetadata?> GetAttachmentForPrincipalAsync(
+        string attachmentId, string principalId, CancellationToken ct = default);
+
+    /// <summary>
+    /// <b>awaited</b> — the descriptors bound to a submission, in binding order. Used to rebuild the
+    /// transcript payload and to populate the dispatched command.
+    /// </summary>
+    Task<IReadOnlyList<AttachmentMetadata>> GetSubmissionAttachmentsAsync(
+        string submissionId, CancellationToken ct = default);
+
+    // The four orphan sweeps deliberately do NOT live here. They are garbage collection, they run in
+    // the existing maintenance loop, and they need the byte store — which this interface must never
+    // acquire. Putting them on the store would give it two owners for one decision.
 }

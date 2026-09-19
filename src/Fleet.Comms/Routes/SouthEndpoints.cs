@@ -27,7 +27,13 @@ namespace Fleet.Comms.Routes;
 /// </remarks>
 public static class SouthEndpoints
 {
-    public static void Map(WebApplication app, IConversationStore store, CommsOptions options)
+    /// <param name="attachments">
+    /// The byte store, when attachments are configured. Null leaves <c>/attachments/…</c> unmapped,
+    /// so an install without a root answers 404 from the router rather than from a handler.
+    /// </param>
+    public static void Map(
+        WebApplication app, IConversationStore store, CommsOptions options,
+        AttachmentStore? attachments = null)
     {
         var expected = Encoding.UTF8.GetBytes(options.SouthBearerToken);
 
@@ -110,6 +116,45 @@ public static class SouthEndpoints
 
         group.MapPost("/leases:heartbeat", async Task<IResult> (HeartbeatRequest request, CancellationToken ct) =>
             Results.Json(await store.HeartbeatAsync(request, ct), FleetProtocolJson.Options));
+
+        // ── attachment bytes, for the agent (#308 D7) ────────────────────────
+        //
+        // SOUTH and not north, and that is the whole reason this route exists here rather than being
+        // reused from the client surface: the agent must never hold a device session bearer. Giving
+        // it one inverts the boundary the entire design rests on (MUST NOT 10).
+        //
+        // It sits inside the pre-routing middleware above, so it inherits the indistinguishable 401
+        // for free — an unauthenticated caller cannot even learn that the route exists.
+        //
+        // The south bearer is already an administrative credential that can write a terminal outcome
+        // for any turn. Adding a byte-read to it widens nothing.
+        if (attachments is not null)
+        {
+            group.MapGet("/attachments/{attachmentId}/content",
+                async Task<IResult> (string attachmentId, CancellationToken ct) =>
+                {
+                    if (!AttachmentStore.IsSafeId(attachmentId))
+                        return Error(ProtocolErrorCode.AttachmentNotFound, StatusCodes.Status404NotFound);
+
+                    var row = await store.GetAttachmentAsync(attachmentId, ct);
+
+                    // Only rows with verified bytes. A reserved or failed row has none, and reports
+                    // the same not-found an unknown id does.
+                    if (row is null || row.State is not (AttachmentState.Sealed or AttachmentState.Bound))
+                        return Error(ProtocolErrorCode.AttachmentNotFound, StatusCodes.Status404NotFound);
+
+                    var bytes = attachments.OpenRead(attachmentId);
+
+                    // The row is authoritative; the volume disagreeing with it is the gone state, not
+                    // a 500 (MUST NOT 11). The agent turns this into a turn.notice naming the
+                    // unavailable image rather than answering as though none was sent.
+                    if (bytes is null)
+                        return Error(ProtocolErrorCode.AttachmentGone, StatusCodes.Status410Gone);
+
+                    // The SNIFFED type from the row. There is no other type in this system.
+                    return Results.Stream(bytes, row.ContentType);
+                });
+        }
     }
 
     private static IResult Error(ProtocolErrorCode code, int status) =>

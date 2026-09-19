@@ -44,10 +44,24 @@ public static class ConversationEndpoints
         "GET /v1/conversations/{id}/stream",
     ];
 
+    /// <summary>
+    /// The one route attachments add to THIS class's table. The two byte-moving routes live in
+    /// <see cref="AttachmentEndpoints"/>, because they are the pair whose credentials must stay
+    /// textually apart.
+    /// </summary>
+    public static readonly IReadOnlyList<string> AttachmentRoutes =
+    [
+        "POST /v1/conversations/{id}/attachments",
+    ];
+
     /// <summary>The channel every client conversation belongs to. Fixed; there is no fan-out.</summary>
     public const string ClientChannelId = "client";
 
-    public static IEndpointRouteBuilder MapConversationApi(this IEndpointRouteBuilder app)
+    /// <param name="attachmentsEnabled">
+    /// Whether an attachment root is configured. False leaves the three attachment routes unmapped.
+    /// </param>
+    public static IEndpointRouteBuilder MapConversationApi(
+        this IEndpointRouteBuilder app, bool attachmentsEnabled = false)
     {
         // The conversation limiter, not the auth one. Authenticated routes partition on the caller's
         // credential rather than its address, so two devices behind one forwarded address cannot
@@ -71,6 +85,18 @@ public static class ConversationEndpoints
 
         app.MapGet("/v1/conversations/{id}/stream", StreamEndpoint.HandleAsync)
             .RequireRateLimiting(ConversationRateLimits.PolicyName);
+
+        // Attachments are a SEPARATE opt-in from conversations (#308). Without an attachment root
+        // these three routes are not mapped at all, so every attachment path is a 404 from the router
+        // rather than a handler that decided to refuse — and a non-empty `attachments` array on a
+        // submission is refused exactly as it was before this change (AC-27).
+        if (attachmentsEnabled)
+        {
+            app.MapPost("/v1/conversations/{id}/attachments", ReserveAttachmentAsync)
+                .RequireRateLimiting(ConversationRateLimits.PolicyName);
+
+            app.MapAttachmentApi();
+        }
 
         return app;
     }
@@ -194,7 +220,7 @@ public static class ConversationEndpoints
 
     private static async Task<IResult> SubmitAsync(
         HttpContext http, string id, AuthService auth, IConversationStore store,
-        CancellationToken ct)
+        IOptions<CommsOptions> options, CancellationToken ct)
     {
         var caller = await NorthEndpoints.AuthenticateAsync(http, auth, ct);
         if (caller is null) return Unauthorized();
@@ -205,10 +231,37 @@ public static class ConversationEndpoints
         if (!ProtocolVersion.IsSupported(body.Protocol))
             return Error(ProtocolErrorCode.UnsupportedProtocol, StatusCodes.Status400BadRequest);
 
-        // Refused explicitly rather than ignored. A silently dropped attachment array is a client
-        // that believes it sent something the agent will never see.
-        if (body.Attachments is { Count: > 0 })
-            return Error(ProtocolErrorCode.UnsupportedAttachments, StatusCodes.Status400BadRequest);
+        // An explicit `[]` means the same thing omitting the key means, so it takes the text-only
+        // path rather than being an error (#308 AC-26).
+        var attachmentIds = new List<string>();
+
+        if (body.Attachments is { Count: > 0 } references)
+        {
+            // Refused explicitly rather than ignored, exactly as before #308 when the feature did not
+            // exist at all. A silently dropped attachment array is a client that believes it sent
+            // something the agent will never see.
+            if (!options.Value.AttachmentsEnabled)
+                return Error(ProtocolErrorCode.UnsupportedAttachments, StatusCodes.Status400BadRequest);
+
+            if (references.Count > ProtocolLimits.MaxAttachmentsPerSubmission)
+                return Error(ProtocolErrorCode.AttachmentLimit, StatusCodes.Status400BadRequest);
+
+            foreach (var reference in references)
+            {
+                // A ULID, and nothing else. This is the value that reaches an `IN` list and,
+                // downstream, a filesystem path.
+                if (!AttachmentStore.IsSafeId(reference.AttachmentId))
+                    return Error(ProtocolErrorCode.AttachmentNotFound, StatusCodes.Status400BadRequest);
+
+                attachmentIds.Add(reference.AttachmentId!);
+            }
+
+            // A list naming the same id twice is MALFORMED, not a missing attachment — so it is
+            // refused here, before the transaction, rather than reaching the store and being read as
+            // a shortfall. The store compares against the distinct count as defence in depth.
+            if (attachmentIds.Distinct(StringComparer.Ordinal).Count() != attachmentIds.Count)
+                return Error(ProtocolErrorCode.AttachmentLimit, StatusCodes.Status400BadRequest);
+        }
 
         var kind = body.Type switch
         {
@@ -234,12 +287,17 @@ public static class ConversationEndpoints
             {
                 ConversationId = id,
                 ExternalSubmissionId = body.SubmissionId!,
-                PayloadFingerprint = PayloadFingerprint.Compute(body.Text, body.ReplyToEventId, id),
+                // The ordered attachment ids are part of the fingerprint (#308 D2). Without them the
+                // same key with a DIFFERENT photo replays the first submission's result and the
+                // client believes the second image was delivered.
+                PayloadFingerprint = PayloadFingerprint.Compute(
+                    body.Text, body.ReplyToEventId, id, attachmentIds),
                 IdempotencyKey = body.IdempotencyKey,
                 CommandKind = kind,
                 CommandPayloadJson = CommandPayload(
                     kind, caller, id, body.SubmissionId!, body.IdempotencyKey, body.Text,
-                    body.ReplyToEventId),
+                    body.ReplyToEventId, attachmentIds),
+                AttachmentIds = attachmentIds.Count > 0 ? attachmentIds : null,
 
                 // #305. Every refusal above returns before this point, so a submission that is not
                 // durable has no transcript entry — an over-cap 413, an idempotency 409 and a
@@ -267,6 +325,124 @@ public static class ConversationEndpoints
             };
         });
     }
+
+    // ── reserve an attachment ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Reserve a slot and issue the one-time upload capability (#308 D2).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Reserve-then-PUT rather than multipart on the submission</b>, for three reasons that all
+    /// point the same way: a failed 8 MiB upload must not cost the text, a retry must not re-send it,
+    /// and the submission body stays small JSON so the idempotency fingerprint keeps covering the
+    /// whole payload cheaply rather than hashing megabytes. It also lets the client show upload
+    /// progress separately from send, which is the difference between a usable and an unusable phone
+    /// UI.
+    /// </para>
+    /// <para>
+    /// ⚠️ The capability's plaintext is generated here and returned once. Only its SHA-256 is stored,
+    /// so nothing — not this process, not the database, not a log — can produce it again.
+    /// </para>
+    /// </remarks>
+    private static async Task<IResult> ReserveAttachmentAsync(
+        HttpContext http, string id, AuthService auth, IConversationStore store,
+        ILoggerFactory loggers, CancellationToken ct)
+    {
+        var caller = await NorthEndpoints.AuthenticateAsync(http, auth, ct);
+        if (caller is null) return Unauthorized();
+
+        var body = await NorthEndpoints.ReadBodyAsync<ReserveAttachmentBody>(http, ct);
+        if (body is null) return Error(ProtocolErrorCode.UnsupportedKind, StatusCodes.Status400BadRequest);
+
+        if (!ProtocolVersion.IsSupported(body.Protocol))
+            return Error(ProtocolErrorCode.UnsupportedProtocol, StatusCodes.Status400BadRequest);
+
+        if (body.ContentType is null || body.ByteSize is null || body.Sha256 is null)
+            return Error(ProtocolErrorCode.UnsupportedKind, StatusCodes.Status400BadRequest);
+
+        // 64 lowercase hex, checked here so a malformed digest is a client error rather than an
+        // ArgumentException the store throws and the guard reports as 503.
+        if (!IsLowerHexDigest(body.Sha256))
+            return Error(ProtocolErrorCode.UnsupportedKind, StatusCodes.Status400BadRequest);
+
+        // v1 carries images only. A `document` reservation would reserve bytes nothing downstream
+        // can render, so it is refused with the same code an unaccepted image type gets.
+        if (body.Kind is not (null or "image"))
+            return Error(ProtocolErrorCode.UnsupportedMediaType, StatusCodes.Status415UnsupportedMediaType);
+
+        // 32 CSPRNG bytes, base64url. The one moment this value exists outside the client.
+        var uploadToken = Base64UrlSecret();
+
+        return await GuardAsync(async () =>
+        {
+            var result = await store.ReserveAttachmentAsync(new ReserveAttachmentRequest
+            {
+                ConversationId = id,
+
+                // Derived from the device record, never from the body — the same rule every other
+                // authenticated route here follows.
+                PrincipalId = caller.PrincipalId,
+                Kind = AttachmentKind.Image,
+                ContentType = body.ContentType,
+                ByteSize = body.ByteSize.Value,
+                Sha256 = body.Sha256.ToLowerInvariant(),
+                FileName = body.FileName,
+                UploadTokenSha256 = Convert.ToHexStringLower(
+                    System.Security.Cryptography.SHA256.HashData(
+                        System.Text.Encoding.UTF8.GetBytes(uploadToken))),
+            }, ct);
+
+            switch (result.Outcome)
+            {
+                case ReserveOutcome.TooLarge:
+                    Count("too_large");
+                    return Error(ProtocolErrorCode.PayloadTooLarge, StatusCodes.Status413PayloadTooLarge);
+
+                case ReserveOutcome.UnsupportedType:
+                    Count("unsupported_type");
+                    return Error(
+                        ProtocolErrorCode.UnsupportedMediaType,
+                        StatusCodes.Status415UnsupportedMediaType);
+
+                case ReserveOutcome.QuotaExceeded:
+                    Count(result.DeploymentCap ? "quota_deployment" : "quota_conversation");
+
+                    if (result.DeploymentCap)
+                    {
+                        // The one refusal here that is an OPERATOR condition rather than a client
+                        // one: the volume is filling and nobody has noticed. Same status to the
+                        // client, a warning and a distinct counter to whoever runs this.
+                        loggers.CreateLogger(typeof(ConversationEndpoints)).LogWarning(
+                            "attachment reservation refused: the per-deployment live-byte cap is "
+                            + "reached. Attachment storage needs an operator.");
+                    }
+
+                    return Error(ProtocolErrorCode.AttachmentLimit, StatusCodes.Status409Conflict);
+
+                default:
+                    return Json(new ReserveAttachmentResponse
+                    {
+                        AttachmentId = result.AttachmentId!,
+                        UploadUrl = AttachmentEndpoints.UploadUrlFor(result.AttachmentId!),
+                        UploadToken = uploadToken,
+                        ExpiresAt = result.ExpiresAt!.Value,
+                        MaxBytes = ProtocolLimits.MaxAttachmentBytes,
+                    }, StatusCodes.Status201Created);
+            }
+        });
+
+        static void Count(string result) => ConversationMetrics.AttachmentReserve.Add(
+            1, new KeyValuePair<string, object?>("result", result));
+    }
+
+    /// <summary>32 CSPRNG bytes, base64url, unpadded. Never derived from anything.</summary>
+    private static string Base64UrlSecret() =>
+        Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32))
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    private static bool IsLowerHexDigest(string value) =>
+        value.Length == 64 && value.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     // ── cancel ───────────────────────────────────────────────────────────────
 
@@ -388,6 +564,13 @@ public static class ConversationEndpoints
         {
             return Error(ProtocolErrorCode.InvalidCursor, StatusCodes.Status400BadRequest);
         }
+        catch (AttachmentNotBindableException)
+        {
+            // The accept transaction rolled back whole: no submission row, no transcript entry, no
+            // command. One indistinguishable answer for unknown, foreign, unsealed, expired and
+            // already-bound, so the route is not an existence oracle (#308 D2, MUST NOT 3).
+            return Error(ProtocolErrorCode.AttachmentNotFound, StatusCodes.Status400BadRequest);
+        }
         catch (Exception)
         {
             return Error(ProtocolErrorCode.Internal, StatusCodes.Status503ServiceUnavailable);
@@ -406,7 +589,8 @@ public static class ConversationEndpoints
     /// </remarks>
     private static string CommandPayload(
         string kind, AuthenticatedPrincipal caller, string conversationId, string submissionId,
-        string? idempotencyKey, string text, string? replyToEventId) =>
+        string? idempotencyKey, string text, string? replyToEventId,
+        IReadOnlyList<string> attachmentIds) =>
         JsonSerializer.Serialize(new
         {
             kind,
@@ -415,7 +599,19 @@ public static class ConversationEndpoints
             conversationId,
             submissionId,
             idempotencyKey,
-            payload = new { text, replyToEventId },
+
+            // ATTACHMENT IDS ONLY — never bytes and never a path (#308 D7, protocol Constraints 4
+            // and 5). The agent fetches the bytes over the SOUTH listener it already talks to, with
+            // the south bearer; it must never hold a device session bearer.
+            //
+            // Null when there are none, so a text-only command is byte-identical to the pre-#308
+            // envelope and an agent built before this change binds it unchanged.
+            payload = new
+            {
+                text,
+                replyToEventId,
+                attachments = attachmentIds.Count > 0 ? attachmentIds : null,
+            },
         }, FleetProtocolJson.Options);
 
     private static string CancelPayload(

@@ -74,6 +74,73 @@ public sealed class ConversationSouthClient
         PostAsync<HeartbeatRequest, HeartbeatResult>("/leases:heartbeat", request, ct);
 
     /// <summary>
+    /// Fetch one attachment's bytes over the south listener (#308 D7).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The ONLY byte-returning call on this client, and the only one that is not JSON. It goes south
+    /// because the agent must never hold a device session bearer — the north download route exists
+    /// for the client and requires one (MUST NOT 10).
+    /// </para>
+    /// <para>
+    /// <b>Null means "not coming", and it is not an error.</b> A 404 (unknown, unsealed, or swept)
+    /// and a 410 (the row survives, the bytes do not) both return null so the caller runs the turn
+    /// on its text and names the missing image in a notice. Every other status throws and is
+    /// retried by the ordinary policy.
+    /// </para>
+    /// <para>
+    /// The response is bounded by the same cap the service enforces on upload, so a compromised or
+    /// misbehaving origin cannot make this allocate without limit.
+    /// </para>
+    /// </remarks>
+    public async Task<(byte[] Bytes, string ContentType)?> FetchAttachmentAsync(
+        string attachmentId, CancellationToken ct)
+    {
+        var path = $"/attachments/{attachmentId}/content";
+
+        using var message = new HttpRequestMessage(HttpMethod.Get, path);
+        using var response = await _http.SendAsync(
+            message, HttpCompletionOption.ResponseHeadersRead, ct);
+
+        if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Gone) return null;
+
+        if (!response.IsSuccessStatusCode) throw new SouthCallException(path, response.StatusCode);
+
+        // Declared length checked before reading, then the read itself is bounded — a truthful
+        // header is not something to depend on.
+        if (response.Content.Headers.ContentLength is { } declared
+            && declared > ProtocolLimits.MaxAttachmentBytes)
+        {
+            _logger.LogWarning("south attachment exceeded the accepted size; dropping it");
+            return null;
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var buffer = new MemoryStream();
+
+        var chunk = new byte[64 * 1024];
+
+        while (true)
+        {
+            var read = await stream.ReadAsync(chunk, ct);
+            if (read == 0) break;
+
+            if (buffer.Length + read > ProtocolLimits.MaxAttachmentBytes)
+            {
+                _logger.LogWarning("south attachment exceeded the accepted size mid-stream; dropping it");
+                return null;
+            }
+
+            buffer.Write(chunk, 0, read);
+        }
+
+        // The type the SERVICE sniffed. Nothing here re-decides it.
+        var contentType = response.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
+
+        return (buffer.ToArray(), contentType);
+    }
+
+    /// <summary>
     /// Bounded exponential backoff. Returns the first success; rethrows the last failure when the
     /// budget is exhausted or the token is cancelled.
     /// </summary>

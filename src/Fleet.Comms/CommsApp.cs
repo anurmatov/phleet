@@ -77,6 +77,25 @@ public static class CommsApp
                 provider.GetRequiredService<ILogger<MySqlConversationStore>>());
         });
 
+        // The byte store, also LAZY and also for the same reason: an install without an attachment
+        // root never constructs it and never creates a directory.
+        services.TryAddSingleton(provider =>
+        {
+            var options = provider.GetRequiredService<IOptions<CommsOptions>>().Value;
+
+            if (!options.AttachmentsEnabled)
+            {
+                throw new InvalidOperationException(
+                    $"{CommsOptions.SectionName}:{nameof(CommsOptions.AttachmentRootPath)} is not "
+                    + "configured, so there is no attachment store to resolve. Reaching this means "
+                    + "an attachment route was mapped on an install that did not enable the feature.");
+            }
+
+            return new AttachmentStore(
+                options.AttachmentRootPath,
+                provider.GetRequiredService<ILogger<AttachmentStore>>());
+        });
+
         services.TryAddSingleton<ISecretHasher, Argon2idSecretHasher>();
         services.TryAddSingleton(TimeProvider.System);
         services.TryAddSingleton<MonotonicClock>();
@@ -128,6 +147,7 @@ public static class CommsApp
             conversationSection[nameof(CommsOptions.ConversationConnectionString)];
         var brokerConnection = conversationSection[nameof(CommsOptions.BrokerConnectionString)];
         var agentName = conversationSection[nameof(CommsOptions.AgentName)];
+        var attachmentRoot = conversationSection[nameof(CommsOptions.AttachmentRootPath)];
 
         if (!string.IsNullOrWhiteSpace(conversationConnection))
         {
@@ -139,7 +159,16 @@ public static class CommsApp
                 new GarbageCollector(
                     conversationConnection,
                     provider.GetRequiredService<IOptions<ConversationStoreOptions>>().Value,
-                    provider.GetRequiredService<ILogger<GarbageCollector>>()),
+                    provider.GetRequiredService<ILogger<GarbageCollector>>(),
+
+                    // The attachment sweeps are folded into the EXISTING maintenance loop rather
+                    // than given a hosted service of their own (#308 D3). Null when no root is
+                    // configured, which leaves every attachment path in the collector inert.
+                    string.IsNullOrWhiteSpace(attachmentRoot)
+                        ? null
+                        : new AttachmentStore(
+                            attachmentRoot,
+                            provider.GetRequiredService<ILogger<AttachmentStore>>())),
                 provider.GetRequiredService<IOptions<ConversationStoreOptions>>().Value,
                 provider.GetRequiredService<ILogger<ConversationMaintenanceService>>()));
 
@@ -242,11 +271,13 @@ public static class CommsApp
         // than a handler that decided to refuse, no WebSocket middleware is in the pipeline, and no
         // database connection is attempted. That is what makes this an opt-in feature rather than
         // one that merely defaults to off.
-        if (app.Services.GetRequiredService<IOptions<CommsOptions>>().Value.ConversationsEnabled)
+        var commsOptions = app.Services.GetRequiredService<IOptions<CommsOptions>>().Value;
+
+        if (commsOptions.ConversationsEnabled)
         {
             // Only reached on the enabled path, so a disabled install adds no middleware at all.
             app.UseWebSockets();
-            app.MapConversationApi();
+            app.MapConversationApi(commsOptions.AttachmentsEnabled);
         }
 
         return app;
@@ -414,8 +445,12 @@ public static class CommsApp
         return $"cred:{Convert.ToHexStringLower(hash)}";
     }
 
+    /// <param name="attachments">
+    /// The byte store, when configured. Null leaves the south attachment route unmapped.
+    /// </param>
     public static WebApplication BuildSouthApp(
-        WebApplicationBuilder builder, IConversationStore store, CommsOptions options)
+        WebApplicationBuilder builder, IConversationStore store, CommsOptions options,
+        AttachmentStore? attachments = null)
     {
         // Request BINDING, not just response writing. The framework's web defaults carry no enum
         // converter, so a body carrying the protocol's own `"disposition":"ran"` failed to bind and
@@ -425,7 +460,7 @@ public static class CommsApp
             jsonOptions => FleetProtocolJson.ApplyTo(jsonOptions.SerializerOptions));
 
         var app = builder.Build();
-        SouthEndpoints.Map(app, store, options);
+        SouthEndpoints.Map(app, store, options, attachments);
         return app;
     }
 

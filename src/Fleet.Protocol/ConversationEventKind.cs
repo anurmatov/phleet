@@ -3,11 +3,19 @@ namespace Fleet.Protocol;
 /// <summary>
 /// The v1 wire values of the envelope's <c>kind</c> field (D5).
 ///
-/// Every kind listed here has a real producer in the runtime. Two kinds that revision 1 of the
-/// design carried — <c>conversation.notification</c> and <c>attachment.offered</c> — are
-/// deliberately absent: the MCP send path is out-of-process and invisible to the runtime, and
-/// there is no outbound attachment producer. Shipping a kind with no producer is forbidden by
-/// Constraint 15. They are named in the docs so a later phase can add them additively.
+/// Every kind listed here has a real producer in the runtime. One kind revision 1 of the design
+/// carried — <c>conversation.notification</c> — is deliberately absent: the MCP send path is
+/// out-of-process and invisible to the runtime. Shipping a kind with no producer is forbidden by
+/// Constraint 15. It is named in the docs so a later phase can add it additively.
+///
+/// <para>
+/// ⚠️ <c>attachment.offered</c> was also reserved here and is now <b>deleted rather than left
+/// dangling</b> (#308 D1). It was held for an outbound attachment producer; that producer is a field
+/// on the terminal event, so the kind would ship with no producer of its own — forbidden by the same
+/// constraint that kept it out in the first place. Inbound attachments ride
+/// <see cref="SubmissionText"/>; outbound ones will ride <c>turn.final</c> when slice 2 lands with
+/// its producer.
+/// </para>
 /// </summary>
 public static class ConversationEventKind
 {

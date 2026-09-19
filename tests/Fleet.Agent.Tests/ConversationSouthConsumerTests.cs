@@ -141,7 +141,8 @@ public sealed class ConversationSouthConsumerTests
 
         var consumer = new ConversationSouthConsumer(
             options, AgentIdentity(), new NoBrokerConnection(), client, handoff, allocator, intake!,
-            counters, NullLogger<ConversationSouthConsumer>.Instance);
+            counters,
+            NullLogger<ConversationSouthConsumer>.Instance);
 
         return (consumer, handoff, counters, allocator);
     }

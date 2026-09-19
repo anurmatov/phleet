@@ -95,4 +95,49 @@ public static class ConversationMetrics
     /// <summary>Rows removed by garbage collection, tagged by what they were.</summary>
     public static readonly Counter<long> Collected =
         Meter.CreateCounter<long>("fleet.conversations.gc.collected", "rows");
+
+    // ── attachments (#308) ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Reservation outcomes: <c>reserved</c>, <c>too_large</c>, <c>unsupported_type</c>,
+    /// <c>quota_conversation</c>, <c>quota_deployment</c>.
+    /// </summary>
+    /// <remarks>
+    /// <c>quota_deployment</c> is split from <c>quota_conversation</c> on purpose. The first is an
+    /// operator condition — the volume is filling and nobody has noticed — and the second is one
+    /// conversation doing something ordinary. Aggregating them hides the one that needs a human.
+    /// </remarks>
+    public static readonly Counter<long> AttachmentReserve =
+        Meter.CreateCounter<long>("fleet.conversations.attachment.reserve", "reservations");
+
+    /// <summary>
+    /// Seal outcomes: <c>sealed</c>, <c>refused</c>, <c>failed</c>, <c>digest_mismatch</c>,
+    /// <c>type_mismatch</c>, <c>too_many_pixels</c>, <c>overflow</c>, <c>volume_unavailable</c>.
+    /// </summary>
+    /// <remarks>
+    /// This is the counter that separates "a client is uploading broken files" from "the volume is
+    /// full", and the two have completely different responses.
+    /// </remarks>
+    public static readonly Counter<long> AttachmentSeal =
+        Meter.CreateCounter<long>("fleet.conversations.attachment.seal", "attachments");
+
+    /// <summary>
+    /// Fetch outcomes: <c>served</c>, <c>not_found</c>, <c>gone</c>.
+    /// </summary>
+    /// <remarks>
+    /// <c>gone</c> rising is the signal that the volume and the database have diverged — a restored
+    /// dump without its volume, or bytes deleted out of band. Nothing else produces it.
+    /// </remarks>
+    public static readonly Counter<long> AttachmentFetch =
+        Meter.CreateCounter<long>("fleet.conversations.attachment.fetch", "fetches");
+
+    /// <summary>Files on the volume with no row, removed by the sweep.</summary>
+    public static readonly Counter<long> AttachmentOrphanFiles =
+        Meter.CreateCounter<long>("fleet.conversations.attachment.orphan_files_swept", "files");
+
+    /// <summary>
+    /// Live attachment bytes, observed. The number the per-deployment cap is measured against.
+    /// </summary>
+    public static void ObserveAttachmentBytes(Func<IEnumerable<Measurement<long>>> liveBytes) =>
+        Meter.CreateObservableGauge("fleet.conversations.attachment.live_bytes", liveBytes, "By");
 }

@@ -252,6 +252,13 @@ Clients render it as **indeterminate, never as success**.
 | Live attachment bytes per conversation | 256 MiB | `attachment_limit` at reserve |
 | Live attachment bytes per deployment | 2 GiB | `attachment_limit` at reserve, plus a warning |
 | Attachment pixels (header-declared) | 50 MP | `422` at seal, bytes discarded |
+
+⚠️ **The pixel bound reads a header; it never decodes an image.** PNG, GIF and WebP declare their
+dimensions in the first few dozen bytes. JPEG's `SOF` marker sits past a segment chain — a single
+EXIF block can push it 64 KiB in — so it is found by seeking that chain, stopping at the scan and
+after 64 segments. A file whose frame header is unreachable, or whose header lies, passes the pixel
+bound and is held by the **8 MiB byte cap alone**. That residual is the deliberate price of not
+putting an image decoder in the process that holds the transcript and the auth store.
 | Attachment upload window, from `created_at` | 15 min | `attachment_not_found`; row swept |
 | Attachment submit window, from `sealed_at` | 60 min | `attachment_not_found`; row and bytes swept |
 | Outbound `turn.final.text` | 64 KiB | truncate, `truncated: true` |

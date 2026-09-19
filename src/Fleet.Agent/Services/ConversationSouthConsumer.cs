@@ -394,7 +394,6 @@ public sealed class ConversationSouthConsumer : BackgroundService
                 var dispatch = await _intake.SubmitAsync(
                     open.RuntimeKey,
                     envelope.Payload?.Text ?? string.Empty,
-                    attachments: null,
                     replyToEventId: envelope.Payload?.ReplyToEventId,
                     submissionId: owned.SubmissionId,
                     images: fetched.Images);
@@ -402,6 +401,10 @@ public sealed class ConversationSouthConsumer : BackgroundService
                 // A notice, not a failure, and emitted through the intake — which already owns the
                 // event publisher and the identity plumbing. A second publish path here would be a
                 // second answer to "which identity does a client event carry".
+                //
+                // Fires for a PARTIAL failure and for a total one alike: the turn runs on its text
+                // either way (AC-29). Refusing the submission when nothing could be fetched would be
+                // a lie about a message the service already made durable.
                 if (fetched.Unavailable > 0 && dispatch is not null)
                     _intake.PublishAttachmentNotice(open.RuntimeKey, fetched.Unavailable);
 

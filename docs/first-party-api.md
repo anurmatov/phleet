@@ -505,6 +505,13 @@ way: a failed 8 MiB upload must not cost the text, a retry must not re-send it, 
 body stays small JSON so the idempotency fingerprint keeps covering the whole payload cheaply rather
 than hashing megabytes. It also lets a phone show upload progress separately from send.
 
+**The 50 MP pixel bound is a header read, never a decode.** PNG, GIF and WebP declare their
+dimensions in the first few dozen bytes; JPEG's `SOF` marker is found by seeking its segment chain,
+stopping at the scan and after 64 segments. ⚠️ A JPEG whose frame header is unreachable — truncated,
+or past that bound — is **held by the 8 MiB byte cap alone**, as is any file whose header lies about
+its size. That residual is the deliberate price of keeping an image decoder out of the process that
+holds the transcript and the auth store.
+
 **The declared content type is never trusted.** What is recorded, enforced and served is the type
 sniffed from the container's magic bytes at seal; a declared/sniffed disagreement fails the seal with
 `422` and the bytes are discarded. **HEIC and HEIF are refused at reserve** — the four accepted types

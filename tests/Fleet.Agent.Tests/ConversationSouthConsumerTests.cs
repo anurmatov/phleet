@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
+using Fleet.Agent.Abstractions;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services;
@@ -8,6 +9,7 @@ using Fleet.Conversations.Contracts;
 using Fleet.Protocol;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using NSubstitute;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 
@@ -142,9 +144,207 @@ public sealed class ConversationSouthConsumerTests
         var consumer = new ConversationSouthConsumer(
             options, AgentIdentity(), new NoBrokerConnection(), client, handoff, allocator, intake!,
             counters,
-            NullLogger<ConversationSouthConsumer>.Instance);
+            NullLogger<ConversationSouthConsumer>.Instance,
+
+            // Wired only when a real intake is, because only the dispatch path uses it. The
+            // transmission tests pass `intake: null` on purpose and must not acquire a runtime
+            // dependency through this argument either.
+            attachments: intake is null
+                ? null
+                : new ConversationAttachmentFetcher(
+                    client,
+                    Microsoft.Extensions.Options.Options.Create(new TelegramOptions
+                    {
+                        // No directory, so nothing is persisted and nothing needs cleaning up. What
+                        // these tests are about is the FETCH, not the write.
+                        AttachmentDir = "",
+                    }),
+                    NullLogger<ConversationAttachmentFetcher>.Instance));
 
         return (consumer, handoff, counters, allocator);
+    }
+
+    /// <summary>
+    /// A real <see cref="ConversationIntake"/> over a stub executor, for the dispatch-path tests.
+    /// </summary>
+    /// <remarks>
+    /// Real, not a substitute. The question these tests ask is whether a turn RUNS when every
+    /// attachment fetch failed, and a mocked intake would answer whatever it was told.
+    /// </remarks>
+    private sealed record DispatchHarness(
+        ConversationIntake Intake, ConversationEventBus Bus, IAgentExecutor Executor, string WorkDir)
+    {
+        public List<ConversationEvent> Drain()
+        {
+            var events = new List<ConversationEvent>();
+            foreach (var reader in Bus.TerminalReaders.ToList())
+                while (reader.TryRead(out var pending))
+                    events.Add(pending.Event);
+            while (Bus.ProgressReader.TryRead(out var pending))
+                events.Add(pending.Event);
+            return events;
+        }
+    }
+
+    private static DispatchHarness BuildIntake()
+    {
+        var workDir = Path.Combine(Path.GetTempPath(), $"fleet-consumer-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workDir);
+
+        var agentOpts = Microsoft.Extensions.Options.Options.Create(new AgentOptions
+        {
+            Name = "example-agent", Role = "example", WorkDir = workDir, Provider = "claude",
+            ShortName = "example-agent",
+        });
+        var telegramOpts = Microsoft.Extensions.Options.Options.Create(new TelegramOptions());
+        var clientOpts = Microsoft.Extensions.Options.Options.Create(new ClientChannelOptions
+        {
+            OwnerPrincipalToken = "owner-token", OwnerUserId = 42,
+        });
+
+        var executor = Substitute.For<IAgentExecutor>();
+        executor
+            .ExecuteAsync(Arg.Any<string>(),
+                Arg.Any<IReadOnlyList<MessageImage>?>(),
+                Arg.Any<IReadOnlyList<MessageDocument>?>(),
+                Arg.Any<CancellationToken>())
+            .Returns(_ => Answer());
+
+        var registry = new ConversationRegistry();
+        var counters = new ConversationEventCounters();
+        var bus = new ConversationEventBus(registry, counters, NullLogger<ConversationEventBus>.Instance);
+        var allowlist = new AllowlistHolder(telegramOpts);
+        var relay = new GroupRelayService(
+            agentOpts, Microsoft.Extensions.Options.Options.Create(new RabbitMqOptions()),
+            NullLogger<GroupRelayService>.Instance);
+        var manager = new TaskManager(agentOpts, executor, new SessionManager(),
+            NullLogger<TaskManager>.Instance, injectionCounter: null, events: bus,
+            telegramConfig: null, counters: counters,
+            sink: Substitute.For<IMessageSink>());
+        var prompts = new PromptAssembler(executor);
+        var commands = new CommandDispatcher(manager, executor, agentOpts,
+            NullLogger<CommandDispatcher>.Instance,
+            sink: Substitute.For<IMessageSink>());
+        var groupBehavior = new GroupBehavior(agentOpts, telegramOpts, allowlist, executor, relay,
+            manager, commands, prompts, NullLogger<GroupBehavior>.Instance);
+        var binder = new PrincipalBinder(clientOpts, agentOpts, allowlist);
+
+        return new DispatchHarness(
+            new ConversationIntake(registry, binder, manager, groupBehavior, bus,
+                NullLogger<ConversationIntake>.Instance),
+            bus, executor, workDir);
+    }
+
+    private static async IAsyncEnumerable<AgentProgress> Answer()
+    {
+        yield return new AgentProgress { Summary = "r", EventType = "result", FinalResult = "answer" };
+        await Task.CompletedTask;
+    }
+
+    // ── #308: the all-attachments-failed dispatch path ───────────────────────
+
+    /// <summary>
+    /// AC-29. Every attachment fetch fails, and the turn STILL RUNS on its text with a notice naming
+    /// what is missing.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Driven through <c>HandleDeliveryAsync</c> with a real command envelope, because the defect
+    /// this closes is a wiring one: an earlier revision passed <c>attachments: null</c> into the
+    /// intake, so the refusal branch it also carried could never fire and only a unit test calling
+    /// the intake in a shape nothing produced exercised it.
+    /// </para>
+    /// <para>
+    /// The assertion that matters is that the executor was reached. Refusing the submission here
+    /// would be a lie about a message the service has already made durable — the client's text WAS
+    /// accepted; only its image failed to arrive.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ADeliveryWhoseAttachmentsAllFailToFetch_StillRunsTheTurnAndNoticesTheLoss()
+    {
+        var harness = BuildIntake();
+
+        // Everything about the attachment routes 404s; every other south call succeeds.
+        var south = new RecordingSouth(status: path =>
+            path.StartsWith("/attachments/", StringComparison.Ordinal)
+                ? HttpStatusCode.NotFound
+                : HttpStatusCode.OK);
+
+        var (consumer, _, _, _) = Build(south, harness.Intake);
+        consumer.AckHook = _ => Task.CompletedTask;
+
+        await consumer.HandleDeliveryAsync(
+            DeliveryWithAttachments("01JATTACHMENTA10000000000", "01JATTACHMENTA20000000000"),
+            CancellationToken.None);
+
+        // Both were attempted over SOUTH, with the south bearer — never the north route, which
+        // requires a device session bearer the agent must not hold (MUST NOT 10).
+        var fetches = south.Calls
+            .Where(c => c.Path.StartsWith("/attachments/", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.Equal(2, fetches.Count);
+        Assert.Contains(fetches, c => c.Path == "/attachments/01JATTACHMENTA10000000000/content");
+        Assert.Contains(fetches, c => c.Path == "/attachments/01JATTACHMENTA20000000000/content");
+
+        // The turn ran. This is the assertion the dead branch would have failed.
+        Assert.Contains(south.Calls, c => c.Path == "/submissions:disposition");
+
+        var notice = Assert.Single(
+            harness.Drain(), e => e.Kind == ConversationEventKind.TurnNotice);
+
+        var text = notice.PayloadAs<TurnNoticePayload>()!.Text;
+        Assert.Contains("2 images", text, StringComparison.Ordinal);
+
+        // A count and nothing else — no id, no path, no transport reason (Constraints 4 and 5).
+        Assert.DoesNotContain("01JATTACHMENT", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("/", text, StringComparison.Ordinal);
+
+        Directory.Delete(harness.WorkDir, recursive: true);
+    }
+
+    /// <summary>A text-only delivery fetches nothing and notices nothing.</summary>
+    [Fact]
+    public async Task ADeliveryWithNoAttachments_MakesNoFetchAndNoNotice()
+    {
+        var harness = BuildIntake();
+        var south = new RecordingSouth();
+
+        var (consumer, _, _, _) = Build(south, harness.Intake);
+        consumer.AckHook = _ => Task.CompletedTask;
+
+        await consumer.HandleDeliveryAsync(
+            Delivery(ConversationEventKind.SubmissionCreate), CancellationToken.None);
+
+        Assert.DoesNotContain(
+            south.Calls, c => c.Path.StartsWith("/attachments/", StringComparison.Ordinal));
+
+        Assert.DoesNotContain(harness.Drain(), e => e.Kind == ConversationEventKind.TurnNotice);
+
+        Directory.Delete(harness.WorkDir, recursive: true);
+    }
+
+    /// <summary>A delivery whose command names attachments, so dispatch really does fetch.</summary>
+    private static BasicDeliverEventArgs DeliveryWithAttachments(params string[] attachmentIds)
+    {
+        var properties = new BasicProperties { MessageId = MessageId };
+        var ids = string.Join(",", attachmentIds.Select(id => "\"" + id + "\""));
+
+        var body = Encoding.UTF8.GetBytes(
+            """
+            {"kind":"submission.create","principalId":"p_1","channelId":"client",
+             "conversationId":"@CONV@","submissionId":"@SUB@",
+             "payload":{"text":"what is this?","replyToEventId":null,"attachments":[@IDS@]}}
+            """
+            .Replace("@CONV@", ConversationId)
+            .Replace("@SUB@", SubmissionId)
+            .Replace("@IDS@", ids));
+
+        return new BasicDeliverEventArgs(
+            consumerTag: "ct", deliveryTag: 1, redelivered: false,
+            exchange: "fleet.conversations", routingKey: "example-agent",
+            properties: properties, body: body);
     }
 
     private static BasicDeliverEventArgs Delivery(string? kind, string? messageId = MessageId)

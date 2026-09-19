@@ -166,9 +166,17 @@ public sealed class AttachmentStoreTests(MySqlFixture fixture)
     }
 
     /// <summary>
-    /// AC-10: the same key with a DIFFERENT attachment is a conflict, and an identical replay binds
-    /// nothing further.
+    /// AC-10: the same key with a DIFFERENT attachment is a conflict, and an identical replay returns
+    /// the original <c>acceptedSeq</c> and binds nothing further.
     /// </summary>
+    /// <remarks>
+    /// ⚠️ <b>The replay is taken after the submission has a disposition, and that is not incidental.</b>
+    /// A same-key retry arriving while the disposition transaction is still outstanding is
+    /// <see cref="AcceptOutcome.ReplayPending"/> by #298's own contract — there is no disposition to
+    /// report yet, so the client gets a 202 carrying no seq. An earlier revision of this test replayed
+    /// immediately after the accept and asserted <c>Replay</c>, which asserted the wrong half of that
+    /// contract and failed against a real database. The AC-10 guarantee is about the RESOLVED replay.
+    /// </remarks>
     [Fact]
     public async Task The_idempotency_key_is_bound_to_the_attachment_ids()
     {
@@ -191,7 +199,16 @@ public sealed class AttachmentStoreTests(MySqlFixture fixture)
             await fixture.ScalarRowAsync(
                 $"SELECT state FROM conversation_attachments WHERE id = '{second}'"));
 
-        // An identical replay returns the original seq and binds nothing further.
+        // Mid-disposition, the same key and the same payload is ReplayPending carrying no seq —
+        // there is nothing to report yet. Asserted rather than skipped past, because it is the state
+        // the earlier revision of this test mistook for the resolved one.
+        var pending = await AcceptAsync(conversation.ConversationId, "look", [first], key);
+        Assert.Equal(AcceptOutcome.ReplayPending, pending.Outcome);
+        Assert.Null(pending.AcceptedSeq);
+
+        await DispositionAsync(accepted.SubmissionId!);
+
+        // Resolved: an identical replay returns the ORIGINAL acceptedSeq and binds nothing further.
         var replay = await AcceptAsync(conversation.ConversationId, "look", [first], key);
         Assert.Equal(AcceptOutcome.Replay, replay.Outcome);
         Assert.Equal(accepted.AcceptedSeq, replay.AcceptedSeq);
@@ -424,9 +441,22 @@ public sealed class AttachmentStoreTests(MySqlFixture fixture)
         var collector = new GarbageCollector(
             fixture.ConnectionString, fixture.Options, NullLogger.Instance, files);
 
-        var swept = await collector.SweepOnceAsync();
+        var before = await AttachmentCountAsync(conversation.ConversationId);
+        Assert.Equal("5", before);
 
-        Assert.Equal(3, swept.StrandedAttachments);
+        await collector.SweepOnceAsync();
+
+        // ⚠️ Scoped to THIS conversation, never to the collector's global count.
+        //
+        // Garbage collection is database-wide by design and every test in this class shares one
+        // schema, so other tests' stranded rows are swept by the same pass. An exact assertion on
+        // `swept.StrandedAttachments` therefore depends on execution order — it read 3 in isolation
+        // and 4 in CI, which is a test-isolation defect rather than a sweep one.
+        //
+        // What this test actually owns is which of ITS OWN five rows survive, and that is both
+        // isolation-proof and the stronger assertion: it pins the two windows apart and would fail
+        // for a sweep that collected everything.
+        Assert.Equal("2", await AttachmentCountAsync(conversation.ConversationId));
 
         foreach (var id in new[] { expired, abandoned, failed })
         {
@@ -595,6 +625,37 @@ public sealed class AttachmentStoreTests(MySqlFixture fixture)
                    JOIN submissions s ON s.id = a.submission_id
                   WHERE s.conversation_id = '{conversationId}'
                  """));
+
+    /// <summary>
+    /// Claim and disposition a submission, as the agent would — enough for a same-key replay to be
+    /// resolved rather than pending.
+    /// </summary>
+    private async Task DispositionAsync(string submissionId)
+    {
+        var messageId = await fixture.ScalarRowAsync(
+            $"SELECT message_id FROM command_outbox WHERE submission_id = '{submissionId}'");
+
+        var claim = await _store.ClaimDeliveryAsync(new ClaimDeliveryRequest
+        {
+            MessageId = messageId,
+            Owner = "agent-1",
+        });
+
+        await _store.RecordDispositionAsync(new RecordDispositionRequest
+        {
+            MessageId = messageId,
+            SubmissionId = claim.SubmissionId!,
+            AttemptId = claim.AttemptId!,
+            Disposition = SubmissionDisposition.Ran,
+            Epoch = Ulid.NewUlid(),
+            Ordinal = 1,
+            Owner = "agent-1",
+        });
+    }
+
+    private Task<string> AttachmentCountAsync(string conversationId) =>
+        fixture.ScalarRowAsync(
+            $"SELECT COUNT(*) FROM conversation_attachments WHERE conversation_id = '{conversationId}'");
 
     private Task AgeReservationsAsync(string conversationId, TimeSpan by) =>
         fixture.ExecuteAsync(

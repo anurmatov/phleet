@@ -11,7 +11,14 @@ namespace Fleet.Conversations;
 /// ⚠️ <b>Magic bytes and header fields only — this never decodes an image</b> (MUST NOT 16). A full
 /// decode is a parser attack surface in a process that holds the transcript and the auth store, and
 /// the only questions here are "which of four containers is this" and "is the declared pixel count
-/// within the bound". Both are answerable from a fixed-size prefix.
+/// within the bound". Both are answerable from header fields alone.
+/// </para>
+/// <para>
+/// PNG, GIF and WebP declare their dimensions within the first few dozen bytes, so
+/// <see cref="Sniff"/> reads them from the same prefix it identifies the container with. JPEG does
+/// not — its <c>SOF</c> marker sits past a chain of segments that a single EXIF block can push 64 KiB
+/// in — so <see cref="TryReadJpegPixels"/> reads it by seeking the written file. Both are header
+/// reads; neither touches a scan.
 /// </para>
 /// <para>
 /// The consequence is that the pixel check trusts the header's own numbers. That is deliberate and
@@ -49,9 +56,9 @@ public static class ImageSniffer
     /// </remarks>
     public static Sniffed Sniff(ReadOnlySpan<byte> prefix)
     {
-        // JPEG: FF D8 FF. Dimensions live in a SOF marker an arbitrary distance in, past segments
-        // this deliberately does not walk — so JPEG reports no pixel count and is bounded by bytes
-        // alone. Walking a segment chain is the beginning of parsing the file.
+        // JPEG: FF D8 FF. Its dimensions live in a SOF marker an arbitrary distance in — past the
+        // fixed prefix — so they are read separately by TryReadJpegPixels, which seeks the segment
+        // chain on the written file rather than buffering it.
         if (prefix.Length >= 3 && prefix[0] == 0xFF && prefix[1] == 0xD8 && prefix[2] == 0xFF)
             return new Sniffed { ContentType = "image/jpeg" };
 
@@ -82,6 +89,126 @@ public static class ImageSniffer
         }
 
         return new Sniffed();
+    }
+
+    /// <summary>
+    /// How many JPEG segment headers are walked before giving up. Sixty-four is far past what any
+    /// real file needs and bounds a hostile one.
+    /// </summary>
+    private const int MaxJpegSegments = 64;
+
+    /// <summary>
+    /// Read a JPEG's declared dimensions by walking its segment chain, or null when they are not
+    /// reachable.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠️ <b>This walks segment HEADERS; it never decodes a scan.</b> Each step reads a two-byte
+    /// marker and a two-byte length and then <i>seeks</i> past the payload — so the work is a handful
+    /// of four-byte reads regardless of file size, and no image data is ever parsed (MUST NOT 16).
+    /// It stops at <c>SOS</c>, because entropy-coded data follows and there is no length to trust
+    /// after it.
+    /// </para>
+    /// <para>
+    /// Why a stream rather than the fixed prefix <see cref="Sniff"/> uses: a single EXIF
+    /// <c>APP1</c> segment may be 64 KiB on its own, so a prefix large enough to be reliable would
+    /// have to be buffered in memory for every concurrent upload. Seeking costs nothing and is exact.
+    /// </para>
+    /// <para>
+    /// <b>Null is not "within the bound".</b> A truncated file, a chain that ends at <c>SOS</c>
+    /// without a <c>SOF</c>, or more than <see cref="MaxJpegSegments"/> segments all return null, and
+    /// the caller treats that as "no pixel count available" — the attachment is then bounded by the
+    /// byte cap alone. That residual is documented in the limits table rather than hidden.
+    /// </para>
+    /// </remarks>
+    public static long? TryReadJpegPixels(Stream stream)
+    {
+        if (!stream.CanSeek) return null;
+
+        try
+        {
+            stream.Position = 0;
+
+            Span<byte> header = stackalloc byte[4];
+
+            // SOI.
+            if (!ReadExactly(stream, header[..2]) || header[0] != 0xFF || header[1] != 0xD8)
+                return null;
+
+            for (var segment = 0; segment < MaxJpegSegments; segment++)
+            {
+                // Markers may be preceded by any number of 0xFF fill bytes.
+                int marker;
+                do
+                {
+                    if (!ReadExactly(stream, header[..1])) return null;
+                }
+                while (header[0] != 0xFF);
+
+                do
+                {
+                    if (!ReadExactly(stream, header[..1])) return null;
+                    marker = header[0];
+                }
+                while (marker == 0xFF);
+
+                // Standalone markers carry no length: RSTn, SOI, EOI, TEM.
+                if (marker is >= 0xD0 and <= 0xD9 or 0x01) continue;
+
+                // Start of scan — entropy-coded data follows and the chain is no longer walkable.
+                if (marker == 0xDA) return null;
+
+                if (!ReadExactly(stream, header[..2])) return null;
+                var length = (header[0] << 8) | header[1];
+                if (length < 2) return null;
+
+                if (IsStartOfFrame(marker))
+                {
+                    // [precision:1][height:2][width:2][components:1]
+                    Span<byte> frame = stackalloc byte[5];
+                    if (!ReadExactly(stream, frame)) return null;
+
+                    long height = (frame[1] << 8) | frame[2];
+                    long width = (frame[3] << 8) | frame[4];
+
+                    return height > 0 && width > 0 ? height * width : null;
+                }
+
+                stream.Position += length - 2;
+            }
+
+            return null;
+        }
+        catch (Exception e) when (e is IOException or NotSupportedException or ObjectDisposedException)
+        {
+            // A pixel count that cannot be read is not a verification failure. The byte cap still
+            // applies, and failing the seal here would reject a valid image over a read error.
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The SOF markers that carry dimensions.
+    /// </summary>
+    /// <remarks>
+    /// <c>C0–CF</c> minus the three that are not frame headers: <c>C4</c> (DHT), <c>C8</c> (JPG
+    /// extension) and <c>CC</c> (DAC). Reading a length field out of one of those would produce a
+    /// number that looks like a resolution and is not.
+    /// </remarks>
+    private static bool IsStartOfFrame(int marker) =>
+        marker is >= 0xC0 and <= 0xCF && marker is not (0xC4 or 0xC8 or 0xCC);
+
+    private static bool ReadExactly(Stream stream, Span<byte> buffer)
+    {
+        var read = 0;
+        while (read < buffer.Length)
+        {
+            var got = stream.Read(buffer[read..]);
+            if (got == 0) return false;
+            read += got;
+        }
+
+        return true;
     }
 
     private static long? WebpPixels(ReadOnlySpan<byte> prefix)

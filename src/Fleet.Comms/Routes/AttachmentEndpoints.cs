@@ -152,7 +152,13 @@ public static class AttachmentEndpoints
         if (sniffed.ContentType is null || !string.Equals(sniffed.ContentType, row.ContentType, StringComparison.Ordinal))
             return await RejectAndDelete(store, files, attachmentId, "type_mismatch", ct);
 
-        if (sniffed.Pixels is { } pixels && pixels > ProtocolLimits.MaxAttachmentPixels)
+        // PNG, GIF and WebP declare their dimensions in the fixed prefix. JPEG does not — its SOF
+        // marker sits past any prefix worth buffering — so it is read here by seeking the written
+        // file's segment chain. Without this the 50 MP bound would never fire for the one type the
+        // client is instructed to produce.
+        var pixels = sniffed.Pixels ?? ReadJpegPixels(files, attachmentId, sniffed.ContentType);
+
+        if (pixels is { } declared && declared > ProtocolLimits.MaxAttachmentPixels)
             return await RejectAndDelete(store, files, attachmentId, "too_many_pixels", ct);
 
         var sealed_ = await store.SealAttachmentAsync(new SealAttachmentRequest
@@ -249,6 +255,24 @@ public static class AttachmentEndpoints
     }
 
     // ── shared ───────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The JPEG dimension read, on the file that was just written.
+    /// </summary>
+    /// <remarks>
+    /// Null for every other type, and null when the chain is not walkable — a truncated file, or a
+    /// <c>SOS</c> reached without a <c>SOF</c>. A null is "no pixel count available", not "within the
+    /// bound": the attachment is then held by the 8 MiB byte cap alone, which the limits table says
+    /// explicitly rather than leaving it to be discovered.
+    /// </remarks>
+    private static long? ReadJpegPixels(
+        AttachmentStore files, string attachmentId, string? contentType)
+    {
+        if (contentType != "image/jpeg") return null;
+
+        using var bytes = files.OpenRead(attachmentId);
+        return bytes is null ? null : ImageSniffer.TryReadJpegPixels(bytes);
+    }
 
     private static async Task<IResult> Reject(
         IConversationStore store, string attachmentId, string reason, CancellationToken ct)

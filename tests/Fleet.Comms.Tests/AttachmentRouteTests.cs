@@ -208,6 +208,49 @@ public sealed class AttachmentRouteTests : IAsyncDisposable
         Assert.False(File.Exists(PathFor(id)));
     }
 
+    /// <summary>
+    /// AC-13, the pixel bound — and specifically for JPEG, the type the client is instructed to
+    /// produce.
+    /// </summary>
+    /// <remarks>
+    /// The positive control for a gap an earlier revision had: the sniffer reported no pixel count
+    /// for JPEG, so the 50 MP bound never fired for it and every test stayed green. This drives the
+    /// real route, with a frame header sitting past a 60 KiB EXIF segment.
+    /// </remarks>
+    [Fact]
+    public async Task Upload_AJpegOverThePixelBound_FailsTheSeal()
+    {
+        var store = new FakeConversationStore();
+        await using var host = await StartAsync(store);
+        var (_, _, token) = await host.EnrolledDeviceAsync();
+
+        var jpeg = Jpeg(10_000, 5_001, leadingSegmentBytes: 60 * 1024);
+        var (id, uploadToken) = await ReserveFor(host, store, jpeg, token, "image/jpeg");
+
+        var upload = await UploadAsync(host, id, uploadToken, jpeg);
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, upload.StatusCode);
+        Assert.Contains(id, store.Failed);
+        Assert.False(File.Exists(PathFor(id)));
+    }
+
+    /// <summary>The boundary itself passes, so the check is a bound rather than a blanket refusal.</summary>
+    [Fact]
+    public async Task Upload_AJpegExactlyAtThePixelBound_Seals()
+    {
+        var store = new FakeConversationStore();
+        await using var host = await StartAsync(store);
+        var (_, _, token) = await host.EnrolledDeviceAsync();
+
+        var jpeg = Jpeg(10_000, 5_000, leadingSegmentBytes: 60 * 1024);
+        var (id, uploadToken) = await ReserveFor(host, store, jpeg, token, "image/jpeg");
+
+        var upload = await UploadAsync(host, id, uploadToken, jpeg);
+
+        Assert.Equal(HttpStatusCode.Created, upload.StatusCode);
+        Assert.Equal("image/jpeg", (await ReadAsync(upload)).GetProperty("contentType").GetString());
+    }
+
     /// <summary>AC-18 — the capability is single-use.</summary>
     [Fact]
     public async Task Upload_ASecondTime_IsRefusedAndLeavesTheSealedBytes()
@@ -699,6 +742,31 @@ public sealed class AttachmentRouteTests : IAsyncDisposable
         response.Content.Headers.TryGetValues(name, out var content) ? content.FirstOrDefault()
         : response.Headers.TryGetValues(name, out var headers) ? headers.FirstOrDefault()
         : null;
+
+    /// <summary>
+    /// A structurally real JPEG whose frame header sits past a leading segment, so the route has to
+    /// walk the chain to find it.
+    /// </summary>
+    private static byte[] Jpeg(int width, int height, int leadingSegmentBytes)
+    {
+        var bytes = new List<byte> { 0xFF, 0xD8 };
+
+        var length = leadingSegmentBytes + 2;
+        bytes.AddRange([0xFF, 0xE1, (byte)(length >> 8), (byte)(length & 0xFF)]);
+        bytes.AddRange(new byte[leadingSegmentBytes]);
+
+        bytes.AddRange(
+        [
+            0xFF, 0xC0,
+            0x00, 0x0B,
+            0x08,
+            (byte)(height >> 8), (byte)(height & 0xFF),
+            (byte)(width >> 8), (byte)(width & 0xFF),
+            0x01, 0x00,
+        ]);
+
+        return bytes.ToArray();
+    }
 
     /// <summary>A real PNG header: the 8-byte signature plus an IHDR carrying the dimensions.</summary>
     private static byte[] Png(uint width, uint height)

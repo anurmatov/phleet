@@ -275,43 +275,29 @@ public class ConversationIntakeTests : IDisposable
     // ── AC46 / Constraint 9: attachments ──────────────────────────────────────
 
     /// <summary>
-    /// AC46, as amended by #308. A submission carrying attachments for which NOTHING was fetched is
-    /// rejected outright — it must not silently proceed as text-only, because a client that attached
-    /// a photo and got a text-only answer has been lied to.
+    /// AC46, as amended by #308: attachments no longer make a submission a refusal at this seam.
     /// </summary>
     /// <remarks>
-    /// Before #308 this was every attachment array. Now the caller fetches the bytes and hands them
-    /// in as <c>images</c>; an array with nothing behind it is the case that remains a refusal. A
-    /// PARTIAL fetch is a different thing and is reported as a notice, because only the caller knows
-    /// how many were asked for.
+    /// <para>
+    /// Before #308 every attachment array was rejected outright. The bytes now travel as
+    /// <c>images</c>, and an attachment that could not be fetched is reported as a
+    /// <c>turn.notice</c> by the caller rather than refused here — AC-29 requires the turn to run on
+    /// its text either way, and a refusal would be a lie about a submission the service already made
+    /// durable.
+    /// </para>
+    /// <para>
+    /// The all-attachments-failed path is exercised where it actually occurs, in
+    /// <c>ConversationSouthConsumerTests</c>, against a real command envelope. A test here would
+    /// have to call this method in a shape no production caller produces.
+    /// </para>
     /// </remarks>
     [Fact]
-    public async Task SubmissionWithAttachmentsAndNoBytes_IsRejectedAndCreatesNoTurn()
+    public async Task SubmissionWithNoImages_Proceeds()
     {
         var harness = Build();
         var open = harness.Intake.Open(OpenPayload());
 
-        var outcome = await harness.Intake.SubmitAsync(open.RuntimeKey, "see attached", attachments:
-        [
-            new AttachmentDescriptor { AttachmentId = "a_1", Kind = AttachmentKind.Image },
-        ]);
-
-        Assert.Null(outcome);
-        var rejected = Assert.Single(harness.Drain(), e => e.Kind == ConversationEventKind.ProtocolRejected);
-        Assert.Equal(ProtocolErrorCode.UnsupportedAttachments,
-            rejected.PayloadAs<ProtocolRejectedPayload>()!.Code);
-        Assert.Empty(harness.Executor.ReceivedCalls()
-            .Where(c => c.GetMethodInfo().Name == nameof(IAgentExecutor.ExecuteAsync)));
-    }
-
-    /// <summary>An empty attachments array is not an attachment, so it proceeds normally.</summary>
-    [Fact]
-    public async Task SubmissionWithAnEmptyAttachmentsArray_Proceeds()
-    {
-        var harness = Build();
-        var open = harness.Intake.Open(OpenPayload());
-
-        var outcome = await harness.Intake.SubmitAsync(open.RuntimeKey, "hello", attachments: []);
+        var outcome = await harness.Intake.SubmitAsync(open.RuntimeKey, "hello", images: []);
 
         Assert.Equal(TaskDispatchOutcome.Ran, outcome);
     }
@@ -334,9 +320,7 @@ public class ConversationIntakeTests : IDisposable
         var image = new MessageImage([1, 2, 3], "image/png") { FilePath = "/workspace/attachments/x.png" };
 
         var outcome = await harness.Intake.SubmitAsync(
-            open.RuntimeKey, "what is this?",
-            attachments: [new AttachmentDescriptor { AttachmentId = "a_1", Kind = AttachmentKind.Image }],
-            images: [image]);
+            open.RuntimeKey, "what is this?", images: [image]);
 
         Assert.Equal(TaskDispatchOutcome.Ran, outcome);
 

@@ -144,8 +144,28 @@ public sealed class ConversationIntake
     /// fetching, because it owns the south client and the failure policy; this seam only routes what
     /// it is handed.
     /// </param>
+    /// <remarks>
+    /// <para>
+    /// ⚠️ <b>There is deliberately no <c>attachments</c> parameter and no refusal path for an
+    /// attachment that could not be fetched.</b> An earlier revision of #308 had both: a descriptor
+    /// list alongside the bytes, and a rejection when the list was non-empty and nothing had been
+    /// fetched.
+    /// </para>
+    /// <para>
+    /// That branch contradicted AC-29, which says a failed fetch <i>still runs the turn</i> with its
+    /// text and a <c>turn.notice</c> naming what is missing. It was also dead: the only production
+    /// caller never populated the list, so the only thing exercising it was a unit test calling this
+    /// method in a shape nothing produced. A rejection here would additionally be a lie about a
+    /// submission the service has already made durable — the client's message WAS accepted; only its
+    /// image failed to reach the executor.
+    /// </para>
+    /// <para>
+    /// So the honest reporting lives in exactly one place: the caller counts what it could not fetch
+    /// and calls <see cref="PublishAttachmentNotice"/>. Do not reintroduce a refusal here.
+    /// </para>
+    /// </remarks>
     public async Task<TaskDispatchOutcome?> SubmitAsync(
-        long runtimeKey, string text, IReadOnlyList<AttachmentDescriptor>? attachments = null,
+        long runtimeKey, string text,
         string? replyToEventId = null, string? submissionId = null,
         IReadOnlyList<MessageImage>? images = null)
     {
@@ -157,19 +177,6 @@ public sealed class ConversationIntake
         }
 
         var identity = NewSubmissionIdentity(reference, replyToEventId, submissionId);
-
-        // #308: an attachment array is no longer refused outright — it is carried, as `images`,
-        // through the parameter every provider is already wired for.
-        //
-        // What is still refused is an attachment array with NOTHING fetched for it. The submission
-        // must never silently proceed as text-only: a client that attached a photo and got a
-        // text-only answer has been lied to (MUST NOT 1). A PARTIAL fetch is a different case and is
-        // the caller's to report, because only it knows how many were asked for.
-        if (attachments is { Count: > 0 } && images is not { Count: > 0 })
-        {
-            PublishRejection(identity, ProtocolErrorCode.UnsupportedAttachments, runtimeKey);
-            return null;
-        }
 
         if (text is null || Encoding.UTF8.GetByteCount(text) > ProtocolLimits.MaxInboundTextBytes)
         {

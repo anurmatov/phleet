@@ -228,18 +228,31 @@ export default function App() {
 
   // Navigation state — synced with URL hash
   const VALID_VIEWS: ActiveView[] = ['agents', 'workflows', 'instructions', 'project-contexts', 'output-styles', 'wf-definitions', 'alerts', 'schedules', 'namespaces', 'repositories', 'credentials']
-  const [activeView, setActiveViewState] = useState<ActiveView>(() => {
-    const hash = window.location.hash.slice(1) as ActiveView
-    return VALID_VIEWS.includes(hash) ? hash : 'agents'
-  })
+  // `#view` or `#view/param`. The second segment exists so a link can name a row rather than
+  // only a page — without it `#output-styles/alpha` matches no view and silently lands on agents.
+  // `#view` or `#view/param`. The second segment exists so a link can name a row rather than
+  // only a page — without it `#output-styles/alpha` matches no view and silently lands on agents.
+  // Null for anything unrecognised, which leaves the current view alone exactly as before.
+  function parseHash(): { view: ActiveView; param: string } | null {
+    const raw = window.location.hash.slice(1)
+    const slash = raw.indexOf('/')
+    const head = (slash === -1 ? raw : raw.slice(0, slash)) as ActiveView
+    if (!VALID_VIEWS.includes(head)) return null
+    return { view: head, param: slash === -1 ? '' : decodeURIComponent(raw.slice(slash + 1)) }
+  }
+  const [activeView, setActiveViewState] = useState<ActiveView>(() => parseHash()?.view ?? 'agents')
+  const [viewParam, setViewParam] = useState<string>(() => parseHash()?.param ?? '')
   const setActiveView = useCallback((view: ActiveView) => {
     setActiveViewState(view)
+    setViewParam('')
     window.history.replaceState(null, '', `#${view}`)
   }, [])
   useEffect(() => {
     function onHashChange() {
-      const hash = window.location.hash.slice(1) as ActiveView
-      if (VALID_VIEWS.includes(hash)) setActiveViewState(hash)
+      const parsed = parseHash()
+      if (!parsed) return
+      setActiveViewState(parsed.view)
+      setViewParam(parsed.param)
     }
     window.addEventListener('hashchange', onHashChange)
     return () => window.removeEventListener('hashchange', onHashChange)
@@ -2013,7 +2026,12 @@ export default function App() {
         )}
 
         {activeView === 'output-styles' && (
-          <OutputStylesView />
+          <OutputStylesView
+            initialStyle={viewParam}
+            // The sidenav badge and the agent config select both read App's copy of the list, so a
+            // create or delete on this page has to say so or they stay at the count from mount.
+            onStylesChanged={loadOutputStyles}
+          />
         )}
 
         {activeView === 'repositories' && (

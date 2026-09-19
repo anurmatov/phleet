@@ -5,8 +5,22 @@ import FieldHint from './FieldHint'
 
 type ActionState = 'idle' | 'pending' | 'success' | 'error'
 
-const NEW_STYLE_TEMPLATE = `---
-name: my-style
+/** Stands in for the name until one is typed. */
+const NEW_STYLE_PLACEHOLDER_NAME = 'my-style'
+
+/**
+ * The starting point for a new style, with its frontmatter `name:` already matching the name the
+ * operator typed.
+ *
+ * Not cosmetic: the validator refuses a body whose frontmatter name disagrees with the row name,
+ * because Claude Code matches on the frontmatter name and a mismatch is a style that silently does
+ * not load. A fixed `name: my-style` in the template therefore means the FIRST save of every style
+ * anyone actually names is rejected. Pre-filling here is client-side only — the save path still
+ * sends the body exactly as typed.
+ */
+function newStyleTemplate(name: string): string {
+  return `---
+name: ${name.trim() || NEW_STYLE_PLACEHOLDER_NAME}
 description: One line describing what this style is for.
 keep-coding-instructions: true
 ---
@@ -14,8 +28,16 @@ keep-coding-instructions: true
 # Register
 
 `
+}
 
-export default function OutputStylesView() {
+interface OutputStylesViewProps {
+  /** Style to open on arrival, from `#output-styles/<name>`. Empty opens nothing. */
+  initialStyle?: string
+  /** Called after a create, delete or save, so the sidenav badge and the agent picker refresh. */
+  onStylesChanged?: () => void
+}
+
+export default function OutputStylesView({ initialStyle = '', onStylesChanged }: OutputStylesViewProps) {
   const [styles, setStyles] = useState<OutputStyleDetail[]>([])
   const [loading, setLoading] = useState(true)
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -30,15 +52,23 @@ export default function OutputStylesView() {
   const [deleteState, setDeleteState] = useState<Record<string, ActionState>>({})
   const [deleteMsg, setDeleteMsg] = useState<Record<string, string>>({})
   const confirmTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+  const deleteResetTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
 
   const [reprovState, setReprovState] = useState<Record<string, ActionState>>({})
   const [reprovMsg, setReprovMsg] = useState<Record<string, string>>({})
 
   const [showNewForm, setShowNewForm] = useState(false)
   const [newName, setNewName] = useState('')
-  const [newBody, setNewBody] = useState(NEW_STYLE_TEMPLATE)
+  const [newBody, setNewBody] = useState(() => newStyleTemplate(''))
   const [newFormState, setNewFormState] = useState<ActionState>('idle')
   const [newFormMsg, setNewFormMsg] = useState('')
+
+  // Keeps the template's frontmatter name in step with the Name field for as long as the body is
+  // untouched. Once the operator edits the body it is theirs, and nothing here rewrites it.
+  function handleNewNameChange(value: string) {
+    setNewBody(prev => (prev === newStyleTemplate(newName) ? newStyleTemplate(value) : prev))
+    setNewName(value)
+  }
 
   function load() {
     setLoading(true)
@@ -52,14 +82,35 @@ export default function OutputStylesView() {
   useEffect(() => { load() }, [])
   useEffect(() => () => {
     Object.values(confirmTimers.current).forEach(clearTimeout)
+    Object.values(deleteResetTimers.current).forEach(clearTimeout)
   }, [])
 
-  function toggle(name: string) {
-    if (expanded === name) { setExpanded(null); return }
+  // Arriving from the agent picker's "read <name>" link. The row is opened and scrolled to once
+  // the list has loaded — landing on a collapsed list would be the same as landing on the page,
+  // which is what the link was supposed to improve on.
+  const openedInitial = useRef(false)
+  useEffect(() => {
+    if (openedInitial.current || !initialStyle || styles.length === 0) return
+    if (!styles.some(s => s.name === initialStyle)) return
+    openedInitial.current = true
+    open(initialStyle)
+    requestAnimationFrame(() => {
+      document.getElementById(`output-style-${initialStyle}`)
+        ?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    })
+  }, [initialStyle, styles])
+
+  /** Expands a style, seeding its editor buffer from the row on first open. */
+  function open(name: string) {
     setExpanded(name)
     setEdits(prev => (name in prev
       ? prev
       : { ...prev, [name]: styles.find(s => s.name === name)?.body ?? '' }))
+  }
+
+  function toggle(name: string) {
+    if (expanded === name) { setExpanded(null); return }
+    open(name)
   }
 
   // The server derives `description` from the body's frontmatter, so the error text it returns is
@@ -87,6 +138,9 @@ export default function OutputStylesView() {
       setSaveState(prev => ({ ...prev, [name]: 'success' }))
       setSaveMsg(prev => ({ ...prev, [name]: data?.message ?? 'Saved' }))
       load()
+      // The description shown in the agent picker is derived from the body, so a save can change
+      // it — App's copy would otherwise keep showing the pre-edit line.
+      onStylesChanged?.()
       setTimeout(() => setSaveState(prev => ({ ...prev, [name]: 'idle' })), 4000)
     } catch (e) {
       setSaveState(prev => ({ ...prev, [name]: 'error' }))
@@ -116,9 +170,16 @@ export default function OutputStylesView() {
       setDeleteMsg(prev => ({ ...prev, [name]: 'Deleted' }))
       if (expanded === name) setExpanded(null)
       load()
+      onStylesChanged?.()
     } catch (e) {
       setDeleteState(prev => ({ ...prev, [name]: 'error' }))
       setDeleteMsg(prev => ({ ...prev, [name]: e instanceof Error ? e.message : String(e) }))
+      // Back to idle so the row regains its Delete button. A 409 here is the guard refusing while
+      // an agent is still assigned — the operator clears the style on those agents and tries
+      // again, and without this reset the row has no button left to try with until a Refresh.
+      clearTimeout(deleteResetTimers.current[name])
+      deleteResetTimers.current[name] = setTimeout(
+        () => setDeleteState(prev => ({ ...prev, [name]: 'idle' })), 8000)
     }
   }
 
@@ -153,9 +214,10 @@ export default function OutputStylesView() {
       setNewFormState('success')
       setNewFormMsg('Created')
       setNewName('')
-      setNewBody(NEW_STYLE_TEMPLATE)
+      setNewBody(newStyleTemplate(''))
       setShowNewForm(false)
       load()
+      onStylesChanged?.()
       setTimeout(() => setNewFormState('idle'), 2000)
     } catch (e) {
       setNewFormState('error')
@@ -203,7 +265,7 @@ export default function OutputStylesView() {
                 className="config-input"
                 placeholder="e.g. my-style"
                 value={newName}
-                onChange={e => setNewName(e.target.value)}
+                onChange={e => handleNewNameChange(e.target.value)}
               />
               {newName && !nameValid && (
                 <div className="wfd-field-error">No spaces or special characters except - _</div>

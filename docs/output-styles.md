@@ -133,6 +133,21 @@ name — the silent degrade at the top of this document. The `409` names the age
 `manage_output_styles` with `action` ∈ `list | get | create | update | delete`, same shape as the
 `manage_agent_*` tools. Operator-agent only.
 
+⚠️ **The tool does not reach an agent by being merged.** Two steps are needed on a deployment that
+already exists, neither of which any deploy performs:
+
+1. **Grant it.** `manage_output_styles` needs an `agent_tools` row for the operator agent, then a
+   reprovision — a tool with no grant is absent from the generated `settings.json` allow-list.
+2. **Push the operator instruction text.** The `## output styles` section in the `co-cto` role file
+   only reaches a *fresh* database. `DbSeeder.UpsertInstructionAsync` is named for an upsert but
+   is create-if-absent — it logs `already exists, skipping` and returns — so a redeploy never
+   updates an instruction row that is already there. Edit the row through the instructions API or
+   the dashboard instead.
+
+That second one is the same frozen-row property this page documents for styles, one file over. It
+is deliberate in both places for the same reason — an operator edit must survive a redeploy — and
+it means repo text is a starting point for a new install, never a way to update a live one.
+
 ### Dashboard
 
 **Output Styles** in the sidenav: the list on the left, the style file in an editor on the right,

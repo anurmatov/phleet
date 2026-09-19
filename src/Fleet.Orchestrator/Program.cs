@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Threading.RateLimiting;
 using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Endpoints;
 using Fleet.Orchestrator.Helpers;
 using Fleet.Orchestrator.Services;
 using Microsoft.AspNetCore.RateLimiting;
@@ -120,14 +121,10 @@ if (!string.IsNullOrWhiteSpace(orchestratorAuthToken))
         var method = context.Request.Method;
         var path   = context.Request.Path.Value ?? "";
 
-        // Only protect mutating HTTP methods; skip GETs, WebSocket upgrades, /health, /mcp
-        var isReadOnly   = HttpMethods.IsGet(method) || HttpMethods.IsHead(method) || HttpMethods.IsOptions(method);
-        var isExemptPath = path.StartsWith("/ws", StringComparison.OrdinalIgnoreCase)
-                        || path.StartsWith("/mcp", StringComparison.OrdinalIgnoreCase)
-                        || path.StartsWith("/api/config", StringComparison.OrdinalIgnoreCase)
-                        || path.Equals("/health", StringComparison.OrdinalIgnoreCase);
-
-        if (isReadOnly || isExemptPath)
+        // Only protect mutating HTTP methods; skip GETs, WebSocket upgrades, /health, /mcp.
+        // The rule lives in OrchestratorAuth so the endpoint tests can gate a host on the same
+        // predicate rather than a copy of it.
+        if (!OrchestratorAuth.RequiresBearerToken(method, path))
         {
             await next(context);
             return;
@@ -567,167 +564,10 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     return Results.Ok(new { message = $"Agent '{name}' config updated" });
 });
 
-// REST: list the named output styles an agent can be switched to, with their bodies.
-// Read-only and unauthenticated like the other GET /api/* reads — the dashboard populates its
-// output-style select from this, and a select with nothing in it is the same as no control.
-//
-// `agents` is the reverse of the picker's link: anyone editing a style is about to change the
-// voice of every agent on it, and that is the first thing they need to know.
-app.MapGet("/api/output-styles", async (IServiceScopeFactory scopeFactory, CancellationToken ct) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
-
-    var styles = await db.OutputStyles
-        .AsNoTracking()
-        .OrderBy(s => s.Name)
-        .Select(s => new { s.Name, s.Description, s.Body })
-        .ToListAsync(ct);
-
-    var usage = await OutputStyleUsage.ByStyleAsync(db, ct);
-
-    return Results.Ok(styles.Select(s => new
-    {
-        s.Name,
-        s.Description,
-        s.Body,
-        Agents = OutputStyleUsage.For(usage, s.Name),
-    }));
-});
-
-// REST: one style with its full body — what the operator is about to impose on every message the
-// assigned agents send.
-app.MapGet("/api/output-styles/{name}", async (string name, IServiceScopeFactory scopeFactory, CancellationToken ct) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
-
-    var style = await db.OutputStyles.AsNoTracking().FirstOrDefaultAsync(s => s.Name == name, ct);
-    if (style is null)
-        return Results.NotFound(new { error = $"Output style '{name}' not found" });
-
-    var usage = await OutputStyleUsage.ByStyleAsync(db, ct);
-
-    return Results.Ok(new
-    {
-        style.Name,
-        style.Description,
-        style.Body,
-        Agents = OutputStyleUsage.For(usage, style.Name),
-    });
-});
-
-// REST: create a style. Bearer-gated by the mutating-method middleware like every other non-GET.
-//
-// Description is DERIVED from the frontmatter rather than accepted as its own field: two places
-// to say what a style is for is two places to disagree, and the one the operator reads in the
-// list would not be the one Claude Code obeys.
-app.MapPost("/api/output-styles", async (OutputStyleCreateRequest? body, IServiceScopeFactory scopeFactory, CancellationToken ct) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
-
-    var name = body?.Name?.Trim() ?? "";
-    var error = OutputStyleValidator.Validate(name, body?.Body);
-    if (error is not null)
-        return Results.BadRequest(new { error });
-
-    if (await db.OutputStyles.AnyAsync(s => s.Name == name, ct))
-        return Results.Conflict(new { error = $"Output style '{name}' already exists" });
-
-    var style = new OutputStyle
-    {
-        Name        = name,
-        Body        = body!.Body!,
-        Description = OutputStyleRenderer.ReadDescription(body.Body!),
-    };
-    db.OutputStyles.Add(style);
-    await db.SaveChangesAsync(ct);
-
-    return Results.Created($"/api/output-styles/{name}", new
-    {
-        message = $"Output style '{name}' created",
-        style.Name,
-        style.Description,
-    });
-});
-
-// REST: replace a style's body. The name is NOT editable — it is the value agents.OutputStyle
-// holds, and renaming the row orphans every agent pointing at it. Rename is create + reassign +
-// delete.
-app.MapPut("/api/output-styles/{name}", async (string name, OutputStyleUpdateRequest? body, IServiceScopeFactory scopeFactory, CancellationToken ct) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
-
-    var style = await db.OutputStyles.FirstOrDefaultAsync(s => s.Name == name, ct);
-    if (style is null)
-        return Results.NotFound(new { error = $"Output style '{name}' not found" });
-
-    var error = OutputStyleValidator.ValidateBody(style.Name, body?.Body);
-    if (error is not null)
-        return Results.BadRequest(new { error });
-
-    style.Body        = body!.Body!;
-    style.Description = OutputStyleRenderer.ReadDescription(body.Body!);
-    await db.SaveChangesAsync(ct);
-
-    var usage = await OutputStyleUsage.ByStyleAsync(db, ct);
-    var assigned = OutputStyleUsage.For(usage, style.Name);
-
-    return Results.Ok(new
-    {
-        // The body reaches an agent at provision time and no sooner, so say so rather than
-        // letting a green save imply a live edit took effect.
-        message = assigned.Count == 0
-            ? $"Output style '{name}' updated. No agent is assigned to it."
-            : $"Output style '{name}' updated. Reprovision to apply: {string.Join(", ", assigned)}",
-        style.Name,
-        style.Description,
-        Agents = assigned,
-    });
-});
-
-// REST: delete a style, refusing while any agent still names it.
-//
-// A cascade would leave those agents writing an `outputStyle` into settings.json that resolves to
-// nothing, and Claude Code then reports the configured name in system/init while running on the
-// default — a silent degrade. Refuse and name the agents instead.
-app.MapDelete("/api/output-styles/{name}", async (string name, IServiceScopeFactory scopeFactory, CancellationToken ct) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
-
-    var style = await db.OutputStyles.FirstOrDefaultAsync(s => s.Name == name, ct);
-    if (style is null)
-        return Results.NotFound(new { error = $"Output style '{name}' not found" });
-
-    var assigned = await OutputStyleUsage.AgentsUsingAsync(db, style.Name, ct);
-    if (assigned.Count > 0)
-    {
-        return Results.Conflict(new
-        {
-            error = $"Output style '{name}' is in use by {assigned.Count} agent(s): {string.Join(", ", assigned)}. "
-                  + "Clear the style on those agents first.",
-            agents = assigned,
-        });
-    }
-
-    db.OutputStyles.Remove(style);
-    await db.SaveChangesAsync(ct);
-
-    return Results.Ok(new { message = $"Output style '{name}' deleted" });
-});
+// REST: the /api/output-styles surface (#317) — list, read, create, update and delete.
+// Mapped from Endpoints/OutputStyleEndpoints.cs so the endpoint tests exercise the same
+// handlers a live orchestrator serves rather than a copy of them.
+app.MapOutputStyleEndpoints();
 
 // REST: list all instructions with version summary
 app.MapGet("/api/instructions", async (IServiceScopeFactory scopeFactory) =>
@@ -2942,8 +2782,6 @@ record InstructionUpdateRequest(string Content, string? Reason, string? CreatedB
 
 // No Description field on either: it is read out of the body's frontmatter on write, so it cannot
 // drift from what the style actually says.
-record OutputStyleCreateRequest(string? Name, string? Body);
-record OutputStyleUpdateRequest(string? Body);
 
 record ProjectContextCreateRequest(string Name, string Content, string? CreatedBy);
 record ProjectContextUpdateRequest(string Content, string? Reason, string? CreatedBy);

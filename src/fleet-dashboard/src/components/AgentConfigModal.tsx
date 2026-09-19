@@ -203,7 +203,11 @@ export default function AgentConfigModal({
                       message this agent sends should not cost the unsaved edits in this modal. */}
                   <a
                     className="setup-helper-link"
-                    href="#output-styles"
+                    // Naming the style in the hash is what makes "read <name>" land on that style
+                    // open rather than on a list with it collapsed.
+                    href={selectedStyle
+                      ? `#output-styles/${encodeURIComponent(selectedStyle.name)}`
+                      : '#output-styles'}
                     target="_blank"
                     rel="noreferrer"
                     title="Open the Output Styles page to read or edit the style body"

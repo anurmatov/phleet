@@ -239,6 +239,12 @@ export interface OutputStyleSummary {
   description: string | null
 }
 
+/** A style row with its full body and the agents assigned to it — what GET /api/output-styles returns. */
+export interface OutputStyleDetail extends OutputStyleSummary {
+  body: string
+  agents: string[]
+}
+
 export interface InstructionSummary {
   name: string
   currentVersion: number
@@ -268,7 +274,7 @@ export type StopStartState = 'idle' | 'confirming' | 'pending' | 'success' | 'er
 export type WfActionState = 'idle' | 'confirming-cancel' | 'confirming-restart' | 'confirming-terminate' | 'pending' | 'success' | 'error'
 export type CancelState = 'idle' | 'confirming' | 'cancelling' | 'success' | 'error'
 export type ConfigSaveState = 'idle' | 'saving' | 'success' | 'error'
-export type ActiveView = 'agents' | 'workflows' | 'instructions' | 'project-contexts' | 'wf-definitions' | 'alerts' | 'schedules' | 'namespaces' | 'repositories' | 'credentials' | 'memory'
+export type ActiveView = 'agents' | 'workflows' | 'instructions' | 'project-contexts' | 'output-styles' | 'wf-definitions' | 'alerts' | 'schedules' | 'namespaces' | 'repositories' | 'credentials' | 'memory'
 
 // ── Memory types ──────────────────────────────────────────────────────────────
 

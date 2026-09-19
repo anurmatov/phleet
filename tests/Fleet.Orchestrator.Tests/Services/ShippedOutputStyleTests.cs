@@ -122,6 +122,27 @@ public class ShippedOutputStyleTests
             new OutputStyle { Name = "fleet-messaging", Body = Body() }), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Both shipped styles survive the write-time gate the API applies (#317).
+    /// </summary>
+    /// <remarks>
+    /// Seeding writes these files straight into the table, bypassing validation. If a shipped
+    /// style would be refused by the validator, the first operator to open it in the dashboard and
+    /// save an edit is refused on content we ship — and would reasonably conclude the editor is
+    /// broken rather than the file.
+    /// </remarks>
+    [Theory]
+    [InlineData("fleet-messaging")]
+    [InlineData("output-style-probe")]
+    public void ShippedStylesPassTheWriteTimeValidator(string name)
+    {
+        var path = System.IO.Path.Combine(AppContext.BaseDirectory, "OutputStyles", $"{name}.md");
+
+        var error = OutputStyleValidator.Validate(name, File.ReadAllText(path));
+
+        Assert.True(error is null, $"shipped style '{name}' would be refused on save: {error}");
+    }
+
     /// <summary>The probe says loudly what it is, so nobody assigns it to a production agent.</summary>
     [Fact]
     public void TheProbeIsMarkedAsAProbe()

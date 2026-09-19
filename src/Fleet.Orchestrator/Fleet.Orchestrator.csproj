@@ -20,6 +20,9 @@
 
   <ItemGroup>
     <Content Include="roles\**\*" CopyToPublishDirectory="PreserveNewest" />
+    <!-- Built-in output styles are product content shipped in the image, unlike roles/, which the
+         operator supplies. They are seeded into output_styles on startup. -->
+    <Content Include="OutputStyles\**\*.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Update="credentials-registry.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 

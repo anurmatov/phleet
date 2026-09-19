@@ -19,13 +19,18 @@ public static class DbSeeder
         string? seedFilePath = null,
         ILogger? logger = null,
         TemporalClientRegistry? temporal = null,
-        string? projectsDir = null)
+        string? projectsDir = null,
+        string? outputStylesDir = null)
     {
         logger?.LogInformation("Running database migrations...");
         await db.Database.MigrateAsync();
 
         logger?.LogInformation("Seeding instructions from {RolesDir}...", rolesDir);
         await SeedInstructionsAsync(db, rolesDir, logger);
+
+        outputStylesDir ??= Path.Combine(AppContext.BaseDirectory, "OutputStyles");
+        logger?.LogInformation("Seeding output styles from {StylesDir}...", outputStylesDir);
+        await SeedOutputStylesAsync(db, outputStylesDir, logger);
 
         if (projectsDir != null)
         {
@@ -306,6 +311,43 @@ public static class DbSeeder
         await db.SaveChangesAsync();
 
         logger?.LogInformation("Seeded project context '{Name}'", name);
+    }
+
+    /// <summary>
+    /// Seeds the built-in output styles shipped in the image, one row per <c>*.md</c> file.
+    /// </summary>
+    /// <remarks>
+    /// Create-if-absent, matching <see cref="UpsertInstructionAsync"/>: an operator who has edited
+    /// a style keeps their edit across restarts. The style name is the file name without its
+    /// extension, and the whole file — YAML frontmatter included — is the row body.
+    /// </remarks>
+    private static async Task SeedOutputStylesAsync(OrchestratorDbContext db, string stylesDir, ILogger? logger)
+    {
+        if (!Directory.Exists(stylesDir))
+        {
+            logger?.LogWarning("Output styles directory not found: {Dir}", stylesDir);
+            return;
+        }
+
+        foreach (var path in Directory.GetFiles(stylesDir, "*.md").OrderBy(f => f, StringComparer.Ordinal))
+        {
+            var name = Path.GetFileNameWithoutExtension(path);
+
+            if (await db.OutputStyles.AnyAsync(s => s.Name == name))
+            {
+                logger?.LogDebug("Output style '{Name}' already exists, skipping", name);
+                continue;
+            }
+
+            db.OutputStyles.Add(new OutputStyle
+            {
+                Name = name,
+                Body = await File.ReadAllTextAsync(path),
+                Description = OutputStyleRenderer.ReadDescription(await File.ReadAllTextAsync(path)),
+            });
+            await db.SaveChangesAsync();
+            logger?.LogInformation("Seeded output style '{Name}'", name);
+        }
     }
 
     private static async Task SeedInstructionsAsync(OrchestratorDbContext db, string rolesDir, ILogger? logger)

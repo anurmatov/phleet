@@ -137,6 +137,18 @@ public sealed class PromptBuilder(IOptions<AgentOptions> config, ILogger<PromptB
             sb.AppendLine("that search alone might miss.");
         }
 
+        // The output style, for providers that have no output-style mechanism (#314). Claude reads
+        // the identical text as a style file, so the orchestrator leaves this empty for it.
+        //
+        // Placed BEFORE the formatting block on purpose: the style carries register and length, and
+        // the per-agent formatting mode still decides structure. Whatever the block below says about
+        // markup is the last word on it.
+        if (!string.IsNullOrWhiteSpace(_config.OutputStyleBody))
+        {
+            sb.AppendLine();
+            sb.AppendLine(_config.OutputStyleBody);
+        }
+
         // Inject Rich-mode formatting guidance. PlainText and LegacyHtml keep
         // the base instruction's guidance verbatim — Rich overrides the caution
         // against headers, lists, and tables that is correct for the other tiers

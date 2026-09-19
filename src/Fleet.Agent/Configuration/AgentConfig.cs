@@ -57,6 +57,26 @@ public sealed class AgentOptions
     /// </para>
     /// </remarks>
     public List<string> InstructionOrder { get; set; } = [];
+
+    /// <summary>
+    /// The agent's output style, already stripped of its YAML frontmatter, for providers that have
+    /// no output-style mechanism of their own (#314). Empty for claude and for every agent with no
+    /// style.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Output styles are a Claude Code feature. A claude agent resolves the same text as a style
+    /// file named in <c>settings.json</c>, so it is deliberately NOT sent here — carrying it in
+    /// both places would state the same rules twice. Codex and gemini have no such mechanism, and
+    /// a style that applied to one provider and vanished for the others would be worse than none.
+    /// </para>
+    /// <para>
+    /// <b>Empty is the normal case</b> and means exactly "no style": the orchestrator omits the key
+    /// entirely, and <see cref="Services.PromptBuilder"/> then assembles byte for byte what it
+    /// assembled before styles existed.
+    /// </para>
+    /// </remarks>
+    public string OutputStyleBody { get; set; } = "";
 }
 
 public sealed class TelegramOptions

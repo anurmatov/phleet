@@ -231,6 +231,165 @@ public sealed class SubmissionTranscriptTests(MySqlFixture fixture)
             second.Events.Select(e => (e.Seq, e.EventId, TextOf(e))));
     }
 
+    // ── steered and coalesced: one entry each, never merged away ─────────────
+
+    /// <summary>
+    /// A steer gets its own entry, at its own seq, exactly like a create.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A steer is a submission the user sent while a turn was already running — a correction typed
+    /// in a hurry, which is precisely the message a transcript most needs to keep. It reaches the
+    /// store through the same accept transaction with a different <c>CommandKind</c>, and nothing
+    /// in that transaction branches on the kind.
+    /// </para>
+    /// <para>
+    /// "Nothing branches on it" is the kind of claim that is true until someone adds a branch, so
+    /// it is pinned here rather than left to the reader of <c>AcceptSubmissionAsync</c>.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task A_steer_gets_its_own_entry_at_its_own_seq()
+    {
+        var conversation = await OpenAsync();
+
+        var create = await AcceptAsync(conversation.ConversationId, "what is open?");
+        var steer = await AcceptAsync(
+            conversation.ConversationId, "actually, just the blockers",
+            commandKind: ConversationEventKind.SubmissionSteer);
+
+        Assert.NotEqual(create.AcceptedSeq, steer.AcceptedSeq);
+
+        var page = await ReadFromAsync(conversation.ConversationId, 0);
+
+        Assert.Equal(
+            ["what is open?", "actually, just the blockers"],
+            page.Events.Select(TextOf).ToArray());
+
+        // The steer's own entry is at the seq its own accept reported — the same contract a create
+        // gets, so a client replays a steer from `acceptedSeq - 1` without a special case.
+        var steerEntry = page.Events.Single(e => e.SubmissionId == steer.SubmissionId);
+        Assert.Equal(ConversationEventKind.SubmissionText, steerEntry.Kind);
+        Assert.Equal(steer.AcceptedSeq!.Value, steerEntry.Seq);
+
+        // The command really did dispatch as a steer — otherwise this test would pass while
+        // asserting nothing about steers at all.
+        Assert.Equal(
+            ConversationEventKind.SubmissionSteer,
+            await fixture.ScalarRowAsync(
+                $"SELECT kind FROM command_outbox WHERE submission_id = '{steer.SubmissionId}'"));
+    }
+
+    /// <summary>
+    /// Two submissions coalesced into one turn keep both entries, at distinct seqs.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Coalescing is what the agent does when a second message arrives mid-turn: it folds it into
+    /// the running turn and answers both at once, so ONE terminal closes TWO submissions through
+    /// <c>MergedSubmissionIds</c>. The turn-level events collapse by design — that is the point of
+    /// coalescing — and the transcript entries must not, or the visible conversation silently loses
+    /// exactly the messages the user sent in a hurry.
+    /// </para>
+    /// <para>
+    /// The sequence below is the real one, not a convenient one: the host is dispositioned and
+    /// started before the child arrives, because a child that arrived earlier would have been
+    /// queued rather than merged.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task Two_submissions_coalesced_into_one_turn_keep_both_entries()
+    {
+        var conversation = await OpenAsync();
+
+        var host = await AcceptAsync(conversation.ConversationId, "summarise the open PRs");
+
+        var hostClaim = await ClaimAsync(host.SubmissionId!);
+        var epoch = Ulid.NewUlid();
+
+        await _store.RecordDispositionAsync(new RecordDispositionRequest
+        {
+            MessageId = await MessageIdAsync(host.SubmissionId!),
+            SubmissionId = hostClaim.SubmissionId!,
+            AttemptId = hostClaim.AttemptId!,
+            Disposition = SubmissionDisposition.Ran,
+            Epoch = epoch,
+            Ordinal = 1,
+            Owner = "agent-1",
+        });
+
+        await _store.StartTurnAsync(new StartTurnRequest
+        {
+            AttemptId = hostClaim.AttemptId!,
+            TurnId = "t-" + Ulid.NewUlid(),
+            Epoch = epoch,
+            Ordinal = 2,
+        });
+
+        // The child arrives while that turn is running, and is injected into it.
+        var child = await AcceptAsync(conversation.ConversationId, "and only the blocked ones");
+        var childClaim = await ClaimAsync(child.SubmissionId!);
+
+        await _store.RecordDispositionAsync(new RecordDispositionRequest
+        {
+            MessageId = await MessageIdAsync(child.SubmissionId!),
+            SubmissionId = childClaim.SubmissionId!,
+            AttemptId = childClaim.AttemptId!,
+            Disposition = SubmissionDisposition.Injected,
+            Epoch = epoch,
+            Ordinal = 3,
+            Owner = "agent-1",
+        });
+
+        // ONE terminal answers BOTH.
+        await _store.CommitTerminalAsync(new CommitTerminalRequest
+        {
+            AttemptId = hostClaim.AttemptId!,
+            TerminalEvent = new EventDescriptor
+            {
+                Kind = ConversationEventKind.TurnFinal,
+                EventId = Ulid.NewUlid(),
+                PayloadJson = FleetProtocolJson.Serialize(new TurnFinalPayload
+                {
+                    Text = "two of them are blocked",
+                    Completion = TurnCompletion.Completed,
+                    IsPartial = false,
+                    Truncated = false,
+                    MergedSubmissionIds = [hostClaim.SubmissionId!, childClaim.SubmissionId!],
+                }),
+            },
+            MergedSubmissionIds = [childClaim.SubmissionId!],
+            Epoch = epoch,
+            Ordinal = 4,
+        });
+
+        var page = await ReadFromAsync(conversation.ConversationId, 0);
+
+        var entries = page.Events
+            .Where(e => e.Kind == ConversationEventKind.SubmissionText)
+            .ToArray();
+
+        // Both messages survive the coalescing, in the order they were sent.
+        Assert.Equal(
+            ["summarise the open PRs", "and only the blocked ones"],
+            entries.Select(TextOf).ToArray());
+
+        // Distinct seqs, and each attributed to its own submission — two entries sharing a seq, or
+        // one entry standing in for both, is the loss this asserts against.
+        Assert.Equal(2, entries.Select(e => e.Seq).Distinct().Count());
+        Assert.Equal(
+            [host.SubmissionId!, child.SubmissionId!],
+            entries.Select(e => e.SubmissionId ?? string.Empty).ToArray());
+
+        // The turn events really did collapse — one terminal, not two — so the entries above
+        // survived a genuine coalesce rather than two independent turns.
+        Assert.Single(page.Events, e => e.IsTerminal);
+
+        // And both submissions are closed by that single terminal, so neither is left waiting.
+        Assert.Equal("terminal", await fixture.ScalarRowAsync(
+            $"SELECT state FROM submissions WHERE id = '{child.SubmissionId}'"));
+    }
+
     // ── the case that motivated the change ───────────────────────────────────
 
     /// <summary>
@@ -501,17 +660,34 @@ public sealed class SubmissionTranscriptTests(MySqlFixture fixture)
             PrincipalId = Owner,
         });
 
+    /// <param name="commandKind">
+    /// <c>submission.create</c> or <c>submission.steer</c>. Both reach the store through the same
+    /// transaction — there is no second accept path for a steer — so this is the only difference
+    /// between the two in a test.
+    /// </param>
     private Task<AcceptSubmissionResult> AcceptAsync(
-        string conversationId, string text, string? key = null) =>
+        string conversationId, string text, string? key = null,
+        string commandKind = ConversationEventKind.SubmissionCreate) =>
         _store.AcceptSubmissionAsync(new AcceptSubmissionRequest
         {
             ConversationId = conversationId,
             ExternalSubmissionId = Ulid.NewUlid(),
             PayloadFingerprint = PayloadFingerprint.Compute(text, null, conversationId),
             IdempotencyKey = key,
-            CommandKind = ConversationEventKind.SubmissionCreate,
+            CommandKind = commandKind,
             CommandPayloadJson = FleetProtocolJson.Serialize(new { payload = new { text } }),
             TranscriptText = text,
+        });
+
+    private Task<string> MessageIdAsync(string submissionId) =>
+        fixture.ScalarRowAsync(
+            $"SELECT message_id FROM command_outbox WHERE submission_id = '{submissionId}'");
+
+    private async Task<ClaimDeliveryResult> ClaimAsync(string submissionId, string owner = "agent-1") =>
+        await _store.ClaimDeliveryAsync(new ClaimDeliveryRequest
+        {
+            MessageId = await MessageIdAsync(submissionId),
+            Owner = owner,
         });
 
     private Task<ReadConversationResult> ReadFromAsync(string conversationId, ulong afterSeq) =>

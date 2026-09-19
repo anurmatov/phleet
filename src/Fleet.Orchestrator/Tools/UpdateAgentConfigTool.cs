@@ -1,13 +1,14 @@
 using System.ComponentModel;
 using System.Text;
 using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Services;
 using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol.Server;
 
 namespace Fleet.Orchestrator.Tools;
 
 [McpServerToolType]
-public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory)
+public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAclChangeNotifier aclNotifier)
 {
     [McpServerTool(Name = "update_agent_config")]
     [Description("Update agent configuration in the DB. All fields are optional — only provided fields are changed. Does NOT restart the agent; restart separately after updating.")]
@@ -262,6 +263,14 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory)
             return $"No changes specified for agent '{agent_name}'.";
 
         await db.SaveChangesAsync();
+
+        // Project assignment IS the memory-ACL grant. Sync after the save so the hook sees the
+        // committed assignment list, and only when the caller actually touched projects.
+        if (projects is not null)
+        {
+            await AgentProjectAccessSync.SyncAndBroadcastAsync(
+                db, aclNotifier, agent.Name, agent.Projects.Select(p => p.ProjectName));
+        }
 
         return $"Agent '{agent_name}' updated:\n{changes}Note: restart the agent container for changes to take effect.";
     }

@@ -311,6 +311,24 @@ public class AgentProjectAccess
 {
     public required string AgentName { get; set; }
     public required string Project { get; set; }
+
+    /// <summary>
+    /// Provenance of this grant. <see cref="AgentProjectAccessSource.Assignment"/> rows are owned by
+    /// the project-assignment hook and are the only rows it may remove;
+    /// <see cref="AgentProjectAccessSource.Manual"/> rows were created by an operator and survive
+    /// unassignment. See <see cref="Services.AgentProjectAccessSync"/>.
+    /// </summary>
+    public string Source { get; set; } = AgentProjectAccessSource.Manual;
+}
+
+/// <summary>Valid values for <see cref="AgentProjectAccess.Source"/>.</summary>
+public static class AgentProjectAccessSource
+{
+    /// <summary>Written and removed by the project-assignment hook.</summary>
+    public const string Assignment = "assignment";
+
+    /// <summary>Created by an operator; never removed by the assignment hook.</summary>
+    public const string Manual = "manual";
 }
 
 // ─── Credentials Audit ────────────────────────────────────────────────────────

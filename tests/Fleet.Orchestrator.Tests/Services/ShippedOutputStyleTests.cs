@@ -17,6 +17,9 @@ public class ShippedOutputStyleTests
     private static readonly string Path_ =
         System.IO.Path.Combine(AppContext.BaseDirectory, "OutputStyles", "fleet-messaging.md");
 
+    private static readonly string ProbePath =
+        System.IO.Path.Combine(AppContext.BaseDirectory, "OutputStyles", "output-style-probe.md");
+
     private static string Body() => File.ReadAllText(Path_);
 
     [Fact]
@@ -81,5 +84,77 @@ public class ShippedOutputStyleTests
         Assert.DoesNotContain("\ndescription:", inlined, StringComparison.Ordinal);
 
         Assert.NotNull(OutputStyleRenderer.ReadDescription(Body()));
+    }
+
+    // ── the verification probe ───────────────────────────────────────────────
+
+    /// <summary>
+    /// The probe style is the only thing that can tell whether a style actually RESOLVED.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>system/init</c>'s <c>output_style</c> echoes the name configured in <c>settings.json</c>
+    /// and reports it whether or not Claude Code found a file behind it — measured on 2.1.259 with
+    /// the style file moved to a wrong path: the field still named the style and the reply did not
+    /// follow it. So resolution has to be observed in the reply, and the probe is what makes the
+    /// reply observable.
+    /// </para>
+    /// <para>
+    /// Pinned here because the forcing sentence is the entire mechanism. Softened to a suggestion,
+    /// or with the token changed to something a real answer might contain, the probe still looks
+    /// like a check and can no longer go red — which is the failure mode it exists to close.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheProbeForcesAnObservableToken()
+    {
+        Assert.True(File.Exists(ProbePath), $"expected the verification probe at {ProbePath}");
+        var body = File.ReadAllText(ProbePath);
+
+        // Verbatim the body that was run against a real container, so the shipped probe and the
+        // evidence are the same check.
+        Assert.Contains(
+            "You MUST begin every single reply with the exact token ZEBRA7 and nothing before it.",
+            body, StringComparison.Ordinal);
+
+        // A token a genuine answer could produce would make a passing run meaningless.
+        Assert.DoesNotContain("ZEBRA7", OutputStyleRenderer.ForPrompt(
+            new OutputStyle { Name = "fleet-messaging", Body = Body() }), StringComparison.Ordinal);
+    }
+
+    /// <summary>The probe says loudly what it is, so nobody assigns it to a production agent.</summary>
+    [Fact]
+    public void TheProbeIsMarkedAsAProbe()
+    {
+        var description = OutputStyleRenderer.ReadDescription(File.ReadAllText(ProbePath));
+
+        Assert.NotNull(description);
+        Assert.Contains("probe", description, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("never", description, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The trap is documented where the next person will look, not only in a PR comment.
+    /// </summary>
+    [Fact]
+    public void TheConfigurationEchoIsDocumented()
+    {
+        var docs = System.IO.Path.Combine(RepoRoot(), "docs", "output-styles.md");
+        Assert.True(File.Exists(docs), $"expected {docs}");
+
+        var text = File.ReadAllText(docs);
+        Assert.Contains("configuration echo", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ZEBRA7", text, StringComparison.Ordinal);
+        // Both controls, because only the pair shows the check can go red.
+        Assert.Contains("Positive control", text, StringComparison.Ordinal);
+        Assert.Contains("Negative control", text, StringComparison.Ordinal);
+    }
+
+    private static string RepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !Directory.Exists(System.IO.Path.Combine(dir.FullName, ".git")))
+            dir = dir.Parent;
+        return dir?.FullName ?? throw new InvalidOperationException("repo root not found");
     }
 }

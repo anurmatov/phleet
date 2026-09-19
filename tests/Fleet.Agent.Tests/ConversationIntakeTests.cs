@@ -275,12 +275,18 @@ public class ConversationIntakeTests : IDisposable
     // ── AC46 / Constraint 9: attachments ──────────────────────────────────────
 
     /// <summary>
-    /// AC46. A submission carrying attachments is rejected OUTRIGHT — it must not silently
-    /// proceed as text-only. A client that attached a file and got a text-only answer has been
-    /// lied to.
+    /// AC46, as amended by #308. A submission carrying attachments for which NOTHING was fetched is
+    /// rejected outright — it must not silently proceed as text-only, because a client that attached
+    /// a photo and got a text-only answer has been lied to.
     /// </summary>
+    /// <remarks>
+    /// Before #308 this was every attachment array. Now the caller fetches the bytes and hands them
+    /// in as <c>images</c>; an array with nothing behind it is the case that remains a refusal. A
+    /// PARTIAL fetch is a different thing and is reported as a notice, because only the caller knows
+    /// how many were asked for.
+    /// </remarks>
     [Fact]
-    public async Task SubmissionWithAttachments_IsRejectedAndCreatesNoTurn()
+    public async Task SubmissionWithAttachmentsAndNoBytes_IsRejectedAndCreatesNoTurn()
     {
         var harness = Build();
         var open = harness.Intake.Open(OpenPayload());
@@ -308,6 +314,80 @@ public class ConversationIntakeTests : IDisposable
         var outcome = await harness.Intake.SubmitAsync(open.RuntimeKey, "hello", attachments: []);
 
         Assert.Equal(TaskDispatchOutcome.Ran, outcome);
+    }
+
+    /// <summary>
+    /// #308: a submission whose attachments WERE fetched reaches the executor, and the bytes travel
+    /// through the <c>images</c> parameter every provider is already wired for.
+    /// </summary>
+    /// <remarks>
+    /// This is the assertion that makes "no executor changes" true rather than asserted: the image
+    /// arrives on the same argument a Telegram photo does, so the Claude content-block path, the
+    /// Codex <c>local_image</c> path and the Gemini <c>@path</c> resolver all pick it up unmodified.
+    /// </remarks>
+    [Fact]
+    public async Task SubmissionWithFetchedBytes_ReachesTheExecutorAsAnImage()
+    {
+        var harness = Build();
+        var open = harness.Intake.Open(OpenPayload());
+
+        var image = new MessageImage([1, 2, 3], "image/png") { FilePath = "/workspace/attachments/x.png" };
+
+        var outcome = await harness.Intake.SubmitAsync(
+            open.RuntimeKey, "what is this?",
+            attachments: [new AttachmentDescriptor { AttachmentId = "a_1", Kind = AttachmentKind.Image }],
+            images: [image]);
+
+        Assert.Equal(TaskDispatchOutcome.Ran, outcome);
+
+        await WaitForPromptAsync(harness);
+
+        var call = harness.Executor.ReceivedCalls()
+            .First(c => c.GetMethodInfo().Name == nameof(IAgentExecutor.ExecuteAsync));
+
+        var images = call.GetArguments()
+            .OfType<IReadOnlyList<MessageImage>>()
+            .SingleOrDefault();
+
+        Assert.NotNull(images);
+        Assert.Same(image, Assert.Single(images!));
+    }
+
+    /// <summary>
+    /// #308 AC-29: an image that could not be fetched becomes a notice naming a COUNT — never a
+    /// path, never an id, never a transport reason.
+    /// </summary>
+    /// <remarks>
+    /// The turn is not the subject here; the notice is. An image must never abandon a turn, and it
+    /// must equally never be dropped in silence, because a silent drop produces an answer that reads
+    /// as though no image was sent.
+    /// </remarks>
+    [Fact]
+    public void AnUnavailableAttachment_PublishesANoticeCarryingNoIdentifier()
+    {
+        var harness = Build();
+        var open = harness.Intake.Open(OpenPayload());
+
+        harness.Intake.PublishAttachmentNotice(open.RuntimeKey, unavailable: 2);
+
+        var notice = Assert.Single(harness.Drain(), e => e.Kind == ConversationEventKind.TurnNotice);
+        var text = notice.PayloadAs<TurnNoticePayload>()!.Text;
+
+        Assert.Contains("2 images", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("/", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("attachment_", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>Nothing unavailable is nothing to say.</summary>
+    [Fact]
+    public void AnAttachmentNoticeForZeroUnavailable_PublishesNothing()
+    {
+        var harness = Build();
+        var open = harness.Intake.Open(OpenPayload());
+
+        harness.Intake.PublishAttachmentNotice(open.RuntimeKey, unavailable: 0);
+
+        Assert.Empty(harness.Drain());
     }
 
     // ── AC54: inbound bound ───────────────────────────────────────────────────

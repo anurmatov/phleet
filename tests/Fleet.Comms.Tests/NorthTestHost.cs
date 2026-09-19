@@ -55,7 +55,8 @@ internal sealed class NorthTestHost : IAsyncDisposable
 
     public static async Task<NorthTestHost> StartAsync(
         ISecretHasher? hasher = null, IAuthStore? store = null, bool? trustForwardedHeaders = null,
-        Fleet.Conversations.Contracts.IConversationStore? conversations = null)
+        Fleet.Conversations.Contracts.IConversationStore? conversations = null,
+        string? attachmentRoot = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -83,6 +84,17 @@ internal sealed class NorthTestHost : IAsyncDisposable
             });
 
             builder.Services.AddSingleton(conversations);
+        }
+
+        // Attachments are a SEPARATE configuration fact from conversations (#308), so a test that
+        // wants the three attachment routes has to set the root — exactly as a deployment does.
+        // Without it the routes are not mapped and every attachment path is a router 404.
+        if (attachmentRoot is not null)
+        {
+            builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Comms:AttachmentRootPath"] = attachmentRoot,
+            });
         }
 
         // `store` lets a test drive the real routes against a durable store — the operator-command

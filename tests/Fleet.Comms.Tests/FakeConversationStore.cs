@@ -139,7 +139,7 @@ internal sealed class FakeConversationStore : IConversationStore
     public ReserveAttachmentResult NextReserve { get; set; } = new()
     {
         Outcome = ReserveOutcome.Reserved,
-        AttachmentId = "01JATTACHMENT000000000001",
+        AttachmentId = "01JATTACHMENTA10000000000",
         ExpiresAt = new DateTimeOffset(2026, 1, 1, 0, 15, 0, TimeSpan.Zero),
     };
 
@@ -169,16 +169,47 @@ internal sealed class FakeConversationStore : IConversationStore
         return Task.FromResult(NextReserve);
     }
 
+    /// <summary>
+    /// Seals the row, conditionally on it being <c>reserved</c> — the same predicate the real
+    /// store's UPDATE carries.
+    /// </summary>
+    /// <remarks>
+    /// The transition is performed rather than merely recorded, because the single-use property is
+    /// exactly what the route tests ask about: a fake that always returned true would let a second
+    /// PUT succeed here while the real store refused it.
+    /// </remarks>
     public Task<bool> SealAttachmentAsync(
         SealAttachmentRequest request, CancellationToken ct = default)
     {
         Seals.Add(request);
-        return Task.FromResult(Attachments.ContainsKey(request.AttachmentId));
+
+        if (!Attachments.TryGetValue(request.AttachmentId, out var row)
+            || row.State != AttachmentState.Reserved)
+        {
+            return Task.FromResult(false);
+        }
+
+        Attachments[request.AttachmentId] = row with
+        {
+            State = AttachmentState.Sealed,
+            ContentType = request.SniffedContentType,
+            ByteSize = request.ByteSize,
+            SealedAt = DateTimeOffset.UtcNow,
+        };
+
+        return Task.FromResult(true);
     }
 
     public Task<bool> FailAttachmentAsync(string attachmentId, CancellationToken ct = default)
     {
         Failed.Add(attachmentId);
+
+        if (Attachments.TryGetValue(attachmentId, out var row)
+            && row.State == AttachmentState.Reserved)
+        {
+            Attachments[attachmentId] = row with { State = AttachmentState.Failed };
+        }
+
         return Task.FromResult(true);
     }
 

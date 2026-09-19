@@ -81,11 +81,16 @@ is never client-visible.
 
 ## Event taxonomy
 
-Every kind listed here has a real producer in the runtime. Two kinds an earlier draft carried —
-`conversation.notification` and `attachment.offered` — are deliberately **absent**: the MCP send
-path is out-of-process and invisible to the runtime, and there is no outbound attachment producer.
-Shipping a kind with no producer is forbidden, so they are named here only so a later phase can add
-them additively.
+Every kind listed here has a real producer in the runtime. One kind an earlier draft carried —
+`conversation.notification` — is deliberately **absent**: the MCP send path is out-of-process and
+invisible to the runtime. Shipping a kind with no producer is forbidden, so it is named here only so
+a later phase can add it additively.
+
+`attachment.offered` was reserved here too, and #308 **deletes it rather than leaving it dangling**.
+It was held for an outbound attachment producer; that producer is now a field on the terminal event,
+so the kind would ship with no producer of its own — forbidden by the same rule that kept it out
+originally. Inbound attachments ride `submission.text`; outbound ones will ride `turn.final` when
+they land with their producer.
 
 ### Runtime → client
 
@@ -122,6 +127,11 @@ marker and never appears in `text`.
 | `conversation.open` | `channelId`, `principalBinding`, `role?`, `externalConversationRef?` |
 | `submission.create` | `text`, `replyToEventId?`, `attachments?` |
 | `submission.steer` | `text`, `attachments?` |
+
+`attachments` is an array of `AttachmentDescriptor`, each naming a `sealed`, still-unbound
+attachment of the caller's own conversation (#308). Bytes never travel on this path — they are moved
+by the reserve/PUT pair in `docs/first-party-api.md` before the submission is sent. An explicit `[]`
+means the same thing omitting the key means.
 | `submission.cancel` | `scope` ∈ `current`\|`all` |
 
 That is the complete Phase-0 client command set. There is **no** client equivalent of `/new`,
@@ -236,7 +246,14 @@ Clients render it as **indeterminate, never as success**.
 | Bound | Value | On exceed |
 |---|---|---|
 | Inbound `text` | 32 KiB | `protocol.rejected { code: "payload_too_large" }` |
-| Inbound `attachments` | any non-empty | `protocol.rejected { code: "unsupported_attachments" }` |
+| Inbound `attachments` | 4 per submission | `attachment_limit` |
+| Inbound `attachments`, feature unconfigured | any non-empty | `unsupported_attachments` |
+| One attachment | 8 MiB | `payload_too_large` at reserve |
+| Live attachment bytes per conversation | 256 MiB | `attachment_limit` at reserve |
+| Live attachment bytes per deployment | 2 GiB | `attachment_limit` at reserve, plus a warning |
+| Attachment pixels (header-declared) | 50 MP | `422` at seal, bytes discarded |
+| Attachment upload window, from `created_at` | 15 min | `attachment_not_found`; row swept |
+| Attachment submit window, from `sealed_at` | 60 min | `attachment_not_found`; row and bytes swept |
 | Outbound `turn.final.text` | 64 KiB | truncate, `truncated: true` |
 | Outbound notice / recovered-answer text | 4 KiB | truncate, `truncated: true` |
 | Outbound `toolName` | 64 chars | truncate silently |
@@ -517,8 +534,12 @@ Things that must stay true; several encode defects that have already cost real o
 8. **The command surface is not exposed to clients.** It includes a global kill switch and a raw
    executor passthrough; neither may be reachable from a channel that cannot authenticate its
    caller. Slash-prefixed submission text is conversation content, verbatim.
-9. **Attachment bytes, storage references and URLs are not accepted.** A submission carrying
-   attachments is rejected outright and must not silently proceed as text-only.
+9. **Attachment bytes and URLs never travel on the event stream, and a submission whose
+   attachments cannot be resolved is refused whole** (#308). Bytes move over the dedicated
+   reserve/PUT/GET routes; an event carries a descriptor and never a path or a capability. A
+   submission must never silently proceed as text-only — accepting the text without its image shows
+   the owner a sent message whose photo never arrived. Where the feature is not configured, a
+   non-empty array is refused exactly as it was before.
 10. **One turn at a time.** No second concurrent turn, no bypass of the per-turn executor lock, no
     path reaching the executor without passing through the normal dispatch decision.
 11. **Injection eligibility, the final-answer gate, queue ordering, the merge-part cap, the
@@ -569,9 +590,10 @@ payload text.
 ## Out of scope
 
 Durable storage, outbox and consumer-claim; client authentication and device registration; push
-delivery; object storage and capability URLs for attachments; routing out-of-process MCP sends back
-through the runtime; voice and WebRTC; client UI; multi-human context isolation. Each of those
-consumes the contracts defined here; none is designed here.
+delivery; object storage and download capability URLs for attachments; outbound (agent-produced)
+attachments; voice, video and arbitrary documents; routing out-of-process MCP sends back through the
+runtime; WebRTC; client UI; multi-human context isolation. Each of those consumes the contracts
+defined here; none is designed here.
 
 ## Known per-provider gaps
 

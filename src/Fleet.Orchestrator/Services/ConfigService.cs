@@ -15,7 +15,7 @@ namespace Fleet.Orchestrator.Services;
 ///
 /// Replaces the registry-driven CredentialsService propagation model (issue #69).
 /// </summary>
-public sealed class ConfigService : IConfigWriter
+public sealed class ConfigService : IConfigWriter, IAclChangeNotifier
 {
     // ── Denylist ──────────────────────────────────────────────────────────────
 
@@ -352,6 +352,26 @@ public sealed class ConfigService : IConfigWriter
     // ── RabbitMQ publish ──────────────────────────────────────────────────────
 
     /// <summary>
+    /// The synthetic <c>config.changed</c> key published when <c>agent_project_access</c> rows are
+    /// written or removed. No peer subscribes to it by name: fleet-memory refreshes its ACL cache
+    /// on <em>any</em> config.changed event, and every <see cref="Fleet.Shared.PeerConfigClient"/>
+    /// peer filters on its own declared keys and ignores this one.
+    /// </summary>
+    public const string AclChangedKey = "AGENT_PROJECT_ACCESS";
+
+    /// <summary>
+    /// Broadcasts <c>config.changed</c> unconditionally so fleet-memory invalidates its ACL cache
+    /// immediately.
+    ///
+    /// This is deliberately NOT <see cref="ReloadAsync"/>: that diffs the .env file and publishes
+    /// nothing when the file is unchanged, which is exactly the case for an ACL write. Callers that
+    /// used it were relying on a broadcast that never fired, leaving fleet-memory's five-minute
+    /// timer as the only path to visibility.
+    /// </summary>
+    public Task PublishAclChangedAsync(CancellationToken ct = default)
+        => PublishConfigChangedAsync([AclChangedKey], ct);
+
+    /// <summary>
     /// Publishes config.changed using a persistent channel (L1). On any error the channel is
     /// torn down and set to null so the next call re-initializes it — failure is always logged
     /// but never propagates to the caller.
@@ -459,4 +479,15 @@ public interface IConfigWriter
 {
     HashSet<string> GetExistingKeys(IEnumerable<string> keys);
     Task<List<string>> PutValuesAsync(Dictionary<string, string> kvs, CancellationToken ct = default);
+}
+
+/// <summary>
+/// The one thing <see cref="AgentProjectAccessSync"/> needs from <see cref="ConfigService"/>.
+/// Narrow on purpose: it makes "the broadcast fired on this write" something a test can assert
+/// rather than something a reviewer has to read for, and the broadcast is what the five-second
+/// visibility requirement rests on.
+/// </summary>
+public interface IAclChangeNotifier
+{
+    Task PublishAclChangedAsync(CancellationToken ct = default);
 }

@@ -299,6 +299,8 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.HasKey(x => new { x.AgentName, x.Project });
             e.Property(x => x.AgentName).HasMaxLength(100).IsRequired();
             e.Property(x => x.Project).HasMaxLength(100).IsRequired();
+            e.Property(x => x.Source).HasMaxLength(20).IsRequired()
+                .HasDefaultValue(AgentProjectAccessSource.Manual);
             e.HasIndex(x => x.AgentName);
         });
 

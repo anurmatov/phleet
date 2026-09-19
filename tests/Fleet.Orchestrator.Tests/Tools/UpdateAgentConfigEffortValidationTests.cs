@@ -1,4 +1,5 @@
 using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Services;
 using Fleet.Orchestrator.Tools;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -43,6 +44,15 @@ public class UpdateAgentConfigEffortValidationTests
         return agent;
     }
 
+    /// <summary>
+    /// These tests never touch projects, so the ACL broadcast is not exercised here — see
+    /// AgentProjectAccessSyncTests for that.
+    /// </summary>
+    private sealed class NoOpAclChangeNotifier : IAclChangeNotifier
+    {
+        public Task PublishAclChangedAsync(CancellationToken ct = default) => Task.CompletedTask;
+    }
+
     // ── Claude valid tiers ────────────────────────────────────────────────────
 
     [Theory]
@@ -55,7 +65,7 @@ public class UpdateAgentConfigEffortValidationTests
     {
         var db = CreateDb($"claude-valid-{effort}");
         SeedAgent(db, "agent1", "claude");
-        var tool = new UpdateAgentConfigTool(BuildScopeFactory(db));
+        var tool = new UpdateAgentConfigTool(BuildScopeFactory(db), new NoOpAclChangeNotifier());
 
         var result = await tool.UpdateAgentConfigAsync("agent1", effort: effort);
 
@@ -72,7 +82,7 @@ public class UpdateAgentConfigEffortValidationTests
     {
         var db = CreateDb($"claude-invalid-{effort}");
         SeedAgent(db, "agent1", "claude");
-        var tool = new UpdateAgentConfigTool(BuildScopeFactory(db));
+        var tool = new UpdateAgentConfigTool(BuildScopeFactory(db), new NoOpAclChangeNotifier());
 
         var result = await tool.UpdateAgentConfigAsync("agent1", effort: effort);
 
@@ -93,7 +103,7 @@ public class UpdateAgentConfigEffortValidationTests
     {
         var db = CreateDb($"codex-valid-{effort}");
         SeedAgent(db, "agent1", "codex");
-        var tool = new UpdateAgentConfigTool(BuildScopeFactory(db));
+        var tool = new UpdateAgentConfigTool(BuildScopeFactory(db), new NoOpAclChangeNotifier());
 
         var result = await tool.UpdateAgentConfigAsync("agent1", effort: effort);
 
@@ -108,7 +118,7 @@ public class UpdateAgentConfigEffortValidationTests
     {
         var db = CreateDb($"codex-invalid-{effort}");
         SeedAgent(db, "agent1", "codex");
-        var tool = new UpdateAgentConfigTool(BuildScopeFactory(db));
+        var tool = new UpdateAgentConfigTool(BuildScopeFactory(db), new NoOpAclChangeNotifier());
 
         var result = await tool.UpdateAgentConfigAsync("agent1", effort: effort);
 
@@ -126,7 +136,7 @@ public class UpdateAgentConfigEffortValidationTests
     {
         var db = CreateDb($"gemini-{effort}");
         SeedAgent(db, "agent1", "gemini");
-        var tool = new UpdateAgentConfigTool(BuildScopeFactory(db));
+        var tool = new UpdateAgentConfigTool(BuildScopeFactory(db), new NoOpAclChangeNotifier());
 
         var result = await tool.UpdateAgentConfigAsync("agent1", effort: effort);
 
@@ -145,7 +155,7 @@ public class UpdateAgentConfigEffortValidationTests
         var agent = SeedAgent(db, "agent1", provider);
         agent.Effort = "high";
         db.SaveChanges();
-        var tool = new UpdateAgentConfigTool(BuildScopeFactory(db));
+        var tool = new UpdateAgentConfigTool(BuildScopeFactory(db), new NoOpAclChangeNotifier());
 
         var result = await tool.UpdateAgentConfigAsync("agent1", effort: "");
 
@@ -162,7 +172,7 @@ public class UpdateAgentConfigEffortValidationTests
         // (none is valid for codex but not claude — must validate against codex)
         var db = CreateDb("provider-switch-effort");
         SeedAgent(db, "agent1", "claude");
-        var tool = new UpdateAgentConfigTool(BuildScopeFactory(db));
+        var tool = new UpdateAgentConfigTool(BuildScopeFactory(db), new NoOpAclChangeNotifier());
 
         var result = await tool.UpdateAgentConfigAsync("agent1", provider: "codex", effort: "none");
 

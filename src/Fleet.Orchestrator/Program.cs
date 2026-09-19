@@ -36,6 +36,7 @@ builder.Services.AddSingleton<SetupService>();
 builder.Services.AddSingleton<ICredentialsReader, EnvFileCredentialsReader>();
 builder.Services.AddSingleton<ConfigService>();
 builder.Services.AddSingleton<IConfigWriter>(sp => sp.GetRequiredService<ConfigService>());
+builder.Services.AddSingleton<IAclChangeNotifier>(sp => sp.GetRequiredService<ConfigService>());
 builder.Services.AddSingleton<MemoryProxyService>();
 builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(5));
 
@@ -348,7 +349,7 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
 });
 
 // REST: update agent DB config (all scalar fields + replace-all for related tables)
-app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, AgentRegistry registry, SetupService setupService, AgentConfigPublisherService publisher) =>
+app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, AgentRegistry registry, SetupService setupService, AgentConfigPublisherService publisher, IAclChangeNotifier aclNotifier) =>
 {
     using var scope = scopeFactory.CreateScope();
     var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
@@ -529,6 +530,14 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     }
 
     await db.SaveChangesAsync();
+
+    // Project assignment IS the memory-ACL grant. Sync after the save so the hook sees the
+    // committed assignment list, and only when the caller actually touched projects.
+    if (body.Projects is not null)
+    {
+        await AgentProjectAccessSync.SyncAndBroadcastAsync(
+            db, aclNotifier, agent.Name, agent.Projects.Select(p => p.ProjectName));
+    }
 
     // Publish live allowlist diff so running agents update without reprovision.
     var newUserIds  = new HashSet<long>(agent.TelegramUsers.Select(u => u.UserId));
@@ -1256,6 +1265,14 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
 
     await db.SaveChangesAsync();
 
+    // A new agent's projects are assignments too — grant them now so its first memory read works
+    // without a second manual step.
+    if (body.Projects is not null)
+    {
+        await AgentProjectAccessSync.SyncAndBroadcastAsync(
+            db, configService, agent.Name, body.Projects);
+    }
+
     // Immediately register the new agent in the in-memory registry so it's visible in GET /api/agents
     // and list_agents even before provisioning or first heartbeat.
     registry.PreloadFromDbConfig(agent);
@@ -1334,7 +1351,7 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
 });
 
 // REST: delete an agent (deprovision container + remove DB records)
-app.MapDelete("/api/agents/{name}", async (string name, IServiceScopeFactory scopeFactory, ContainerProvisioningService provisioning, AgentRegistry registry) =>
+app.MapDelete("/api/agents/{name}", async (string name, IServiceScopeFactory scopeFactory, ContainerProvisioningService provisioning, AgentRegistry registry, IAclChangeNotifier aclNotifier) =>
 {
     using var scope = scopeFactory.CreateScope();
     var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
@@ -1361,6 +1378,11 @@ app.MapDelete("/api/agents/{name}", async (string name, IServiceScopeFactory sco
 
     db.Agents.Remove(agent);
     await db.SaveChangesAsync();
+
+    // agent_project_access is keyed by name, not by a foreign key, so deleting the agent leaves its
+    // rows behind. Deleting an agent unassigns every project, so the same hook applies: the rows it
+    // created go, an operator's manual rows and any wildcard stay.
+    await AgentProjectAccessSync.SyncAndBroadcastAsync(db, aclNotifier, agent.Name, []);
 
     // Remove from in-memory registry so the agent doesn't persist as a ghost in the dashboard.
     registry.Remove(name);
@@ -2441,10 +2463,17 @@ app.MapPut("/api/agents/{name}/project-access", async (string name, HttpRequest 
 
     var existing = await db.AgentProjectAccess.Where(x => x.AgentName == agentName).ToListAsync(ct);
     db.AgentProjectAccess.RemoveRange(existing);
-    db.AgentProjectAccess.AddRange(normalized.Select(p => new AgentProjectAccess { AgentName = agentName, Project = p }));
+    // An explicit full-list PUT is an operator grant, so every row it writes is manual and the
+    // assignment hook will not later revoke it.
+    db.AgentProjectAccess.AddRange(normalized.Select(p => new AgentProjectAccess
+    {
+        AgentName = agentName,
+        Project = p,
+        Source = AgentProjectAccessSource.Manual,
+    }));
     await db.SaveChangesAsync(ct);
 
-    await configService.ReloadAsync(ct);
+    await configService.PublishAclChangedAsync(ct);
     return Results.Ok(new { agent = agentName, projects = normalized });
 });
 
@@ -2465,9 +2494,14 @@ app.MapPost("/api/agents/{name}/project-access", async (string name, HttpRequest
     var alreadyExists = await db.AgentProjectAccess.AnyAsync(x => x.AgentName == agentName && x.Project == project, ct);
     if (!alreadyExists)
     {
-        db.AgentProjectAccess.Add(new AgentProjectAccess { AgentName = agentName, Project = project });
+        db.AgentProjectAccess.Add(new AgentProjectAccess
+        {
+            AgentName = agentName,
+            Project = project,
+            Source = AgentProjectAccessSource.Manual,
+        });
         await db.SaveChangesAsync(ct);
-        await configService.ReloadAsync(ct);
+        await configService.PublishAclChangedAsync(ct);
     }
 
     var rows = await db.AgentProjectAccess.Where(x => x.AgentName == agentName).Select(x => x.Project).ToListAsync(ct);
@@ -2486,7 +2520,7 @@ app.MapDelete("/api/agents/{name}/project-access/{project}", async (string name,
 
     db.AgentProjectAccess.Remove(row);
     await db.SaveChangesAsync(ct);
-    await configService.ReloadAsync(ct);
+    await configService.PublishAclChangedAsync(ct);
     return Results.NoContent();
 });
 

@@ -151,6 +151,12 @@ public static class DbSeeder
             await db.SaveChangesAsync();
             await LinkInstructionsAsync(db, agent, def.Role, logger);
 
+            // Grant memory read access for the seeded assignments. No config.changed broadcast
+            // here: seeding runs before any agent or fleet-memory consumer exists, and each of
+            // them reads the table on its own startup.
+            if (await AgentProjectAccessSync.StageAssignmentsAsync(db, agent.Name, def.Projects))
+                await db.SaveChangesAsync();
+
             logger?.LogInformation("Seeded agent '{Name}'", def.Name);
         }
     }

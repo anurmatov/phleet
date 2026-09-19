@@ -29,17 +29,20 @@ public sealed class ManageAgentProjectAccessTool(IServiceScopeFactory scopeFacto
         {
             case "list":
             {
-                var rows = await db.AgentProjectAccess
+                var entries = await db.AgentProjectAccess
                     .Where(x => x.AgentName == agentName)
-                    .Select(x => x.Project)
-                    .OrderBy(p => p)
+                    .OrderBy(x => x.Project)
+                    .Select(x => new { x.Project, x.Source })
                     .ToListAsync();
 
-                if (rows.Count == 0)
+                if (entries.Count == 0)
                     return $"Agent '{agentName}' has no memory project access entries.";
 
+                var rows = entries.Select(e => e.Project).ToList();
                 var isWildcard = rows.Contains("*");
-                var projects = string.Join(", ", rows);
+                // Provenance decides whether a row survives an unassignment, so show it: an
+                // 'assignment' row disappears when the project is unassigned, a 'manual' one does not.
+                var projects = string.Join(", ", entries.Select(e => $"{e.Project} ({e.Source})"));
                 return isWildcard
                     ? $"Agent '{agentName}' has wildcard access (*) — can read all memory projects. Rows: {projects}"
                     : $"Agent '{agentName}' project access: {projects}";
@@ -56,9 +59,14 @@ public sealed class ManageAgentProjectAccessTool(IServiceScopeFactory scopeFacto
                 if (exists)
                     return $"Agent '{agentName}' already has access to project '{proj}'.";
 
-                db.AgentProjectAccess.Add(new AgentProjectAccess { AgentName = agentName, Project = proj });
+                db.AgentProjectAccess.Add(new AgentProjectAccess
+                {
+                    AgentName = agentName,
+                    Project = proj,
+                    Source = AgentProjectAccessSource.Manual,
+                });
                 await db.SaveChangesAsync();
-                await configService.ReloadAsync();
+                await configService.PublishAclChangedAsync();
 
                 var all = await db.AgentProjectAccess
                     .Where(x => x.AgentName == agentName)
@@ -81,7 +89,7 @@ public sealed class ManageAgentProjectAccessTool(IServiceScopeFactory scopeFacto
 
                 db.AgentProjectAccess.Remove(row);
                 await db.SaveChangesAsync();
-                await configService.ReloadAsync();
+                await configService.PublishAclChangedAsync();
 
                 var all = await db.AgentProjectAccess
                     .Where(x => x.AgentName == agentName)
@@ -98,9 +106,14 @@ public sealed class ManageAgentProjectAccessTool(IServiceScopeFactory scopeFacto
                     .AnyAsync(x => x.AgentName == agentName && x.Project == "*");
                 if (!exists)
                 {
-                    db.AgentProjectAccess.Add(new AgentProjectAccess { AgentName = agentName, Project = "*" });
+                    db.AgentProjectAccess.Add(new AgentProjectAccess
+                    {
+                        AgentName = agentName,
+                        Project = "*",
+                        Source = AgentProjectAccessSource.Manual,
+                    });
                     await db.SaveChangesAsync();
-                    await configService.ReloadAsync();
+                    await configService.PublishAclChangedAsync();
                 }
                 return $"Agent '{agentName}' now has wildcard access (*) — can read all memory projects.";
             }
@@ -114,7 +127,7 @@ public sealed class ManageAgentProjectAccessTool(IServiceScopeFactory scopeFacto
 
                 db.AgentProjectAccess.Remove(row);
                 await db.SaveChangesAsync();
-                await configService.ReloadAsync();
+                await configService.PublishAclChangedAsync();
 
                 var remaining = await db.AgentProjectAccess
                     .Where(x => x.AgentName == agentName)

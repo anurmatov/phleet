@@ -1,6 +1,7 @@
 using System.Text;
 using Fleet.Shared;
 using Fleet.Temporal.Activities;
+using Fleet.Temporal.Configuration;
 using Fleet.Temporal.Models;
 using Temporalio.Workflows;
 
@@ -58,6 +59,30 @@ public class ConsensusReviewWorkflow
     /// </summary>
     internal const string CompactPatchId = "consensus-review-compact-v1";
 
+    /// <summary>
+    /// Patch marker gating the agent-budget contract.
+    ///
+    /// Separate from <see cref="CompactPatchId"/> because an execution started after the compact
+    /// change but before this one has a history that already carries the compact marker. This
+    /// change adds a config-loading activity BEFORE the reviewer fan-out, so the command sequence
+    /// genuinely diverges and a gate is the only thing that keeps such a history replayable.
+    /// </summary>
+    internal const string AgentBudgetPatchId = "consensus-review-agent-budget-v1";
+
+    /// <summary>
+    /// The pre-budget StartToCloseTimeout. FROZEN: it exists only so an execution started before
+    /// <see cref="AgentBudgetPatchId"/> keeps scheduling what it scheduled. It is not a default,
+    /// it is not kept in step with anything, and changing it fixes nothing — new executions derive
+    /// their timeout from the agent budget instead.
+    /// </summary>
+    private static readonly TimeSpan LegacyStartToCloseTimeout = TimeSpan.FromMinutes(15);
+
+    /// <summary>Heartbeat cadence expected of the delegate activity. Unchanged by the budget work.</summary>
+    private static readonly TimeSpan DelegateHeartbeatTimeout = TimeSpan.FromSeconds(90);
+
+    /// <summary>Bound on the config read itself — a local options lookup, not agent work.</summary>
+    private static readonly TimeSpan BudgetLookupTimeout = TimeSpan.FromSeconds(10);
+
     /// <summary>Maximum stored Summary length, including any truncation suffix.</summary>
     internal const int SummaryMaxLength = 500;
 
@@ -96,6 +121,20 @@ public class ConsensusReviewWorkflow
         // precede it.
         var compact = Workflow.Patched(CompactPatchId);
 
+        // ── One value decides both timers ────────────────────────────────────────
+        // The agent's budget and the activity's container are derived from the same number here,
+        // and DelegateToAgentActivity re-checks the ordering when it starts. Before this, the
+        // container was a hard-coded 15 minutes while the activity enforced a deployment config
+        // of up to 90 — so Temporal killed every review that ran past a quarter of an hour, and
+        // with no RetryPolicy it did so forever (issue #321).
+        var budgeted = Workflow.Patched(AgentBudgetPatchId);
+        var agentBudgetSeconds = budgeted ? await ResolveAgentBudgetSecondsAsync(input) : 0;
+
+        var reviewOptions = BuildDelegateOptions(
+            budgeted, agentBudgetSeconds, ActivityCancellationType.WaitCancellationCompleted);
+        var synthesisOptions = BuildDelegateOptions(
+            budgeted, agentBudgetSeconds, ActivityCancellationType.TryCancel);
+
         var instructionSuffix = compact ? BuildReviewEnvelopeInstruction() : BuildLegacyVerdictInstruction();
 
         // ── Fan out: all agents review in parallel ────────────────────────────────
@@ -111,20 +150,18 @@ public class ConsensusReviewWorkflow
                     (DelegateToAgentActivity a) => a.DelegateToAgentAsync(
                         agent,
                         instruction,
-                        $"{workflowId}/review-{agent}"),
-                    new ActivityOptions
-                    {
-                        StartToCloseTimeout = TimeSpan.FromMinutes(15),
-                        HeartbeatTimeout = TimeSpan.FromSeconds(90),
-                        CancellationType = ActivityCancellationType.WaitCancellationCompleted,
-                    });
+                        $"{workflowId}/review-{agent}",
+                        true,
+                        3,
+                        agentBudgetSeconds),
+                    reviewOptions);
             })
             .ToArray();
 
         await Workflow.WhenAllAsync(reviewTasks);
 
         if (!compact)
-            return await RunLegacyAsync(input, reviewers, reviewTasks, synthesizer, workflowId);
+            return await RunLegacyAsync(input, reviewers, reviewTasks, synthesizer, workflowId, synthesisOptions, agentBudgetSeconds);
 
         var agentReviews = reviewers
             .Zip(reviewTasks, (agent, task) => ParseReview(agent, task.Result.Text))
@@ -167,12 +204,11 @@ public class ConsensusReviewWorkflow
             (DelegateToAgentActivity a) => a.DelegateToAgentAsync(
                 synthesizer,
                 BuildSynthesisInstruction(input, agentReviews),
-                $"{workflowId}/synthesis"),
-            new ActivityOptions
-            {
-                StartToCloseTimeout = TimeSpan.FromMinutes(15),
-                HeartbeatTimeout = TimeSpan.FromSeconds(90),
-            });
+                $"{workflowId}/synthesis",
+                true,
+                3,
+                agentBudgetSeconds),
+            synthesisOptions);
 
         return ComposeOutput(
             agentReviews,
@@ -180,21 +216,72 @@ public class ConsensusReviewWorkflow
             synthesisResult.Text);
     }
 
+    // ── Timer ordering ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The agent budget for this execution: the caller's explicit value when given, otherwise the
+    /// deployment's <c>TemporalBridge:AgentTimeoutSeconds</c>, read through an activity because
+    /// workflow code cannot see <c>IOptions</c> and a replay must reuse the value recorded in
+    /// history rather than whatever the host is configured with today.
+    /// </summary>
+    private static async Task<int> ResolveAgentBudgetSecondsAsync(ConsensusReviewInput input)
+    {
+        if (input.AgentBudgetSeconds is > 0) return input.AgentBudgetSeconds.Value;
+
+        return await Workflow.ExecuteActivityAsync(
+            (LoadAgentBudgetActivity a) => a.Load(),
+            new ActivityOptions
+            {
+                StartToCloseTimeout = BudgetLookupTimeout,
+                RetryPolicy = new() { MaximumAttempts = 3 },
+            });
+    }
+
+    /// <summary>
+    /// Options for every delegate in this workflow.
+    ///
+    /// <para><c>MaximumAttempts = 1</c> matches every other delegate site in the codebase
+    /// (<c>UniversalWorkflow</c>, <c>NotifyCtoWorkflow</c>). This workflow previously had no
+    /// RetryPolicy at all, so a killed attempt retried without bound — which is what turned one
+    /// bad kill into a review that could never finish.</para>
+    ///
+    /// <para>The unbudgeted branch exists solely for executions started before
+    /// <see cref="AgentBudgetPatchId"/>; it keeps the frozen 15-minute container so their
+    /// histories stay replayable.</para>
+    /// </summary>
+    private static ActivityOptions BuildDelegateOptions(
+        bool budgeted, int agentBudgetSeconds, ActivityCancellationType cancellationType) => new()
+        {
+            StartToCloseTimeout = budgeted
+                ? AgentDelegationBudget.StartToCloseFor(TimeSpan.FromSeconds(agentBudgetSeconds))
+                : LegacyStartToCloseTimeout,
+            HeartbeatTimeout = DelegateHeartbeatTimeout,
+            CancellationType = cancellationType,
+            RetryPolicy = new() { MaximumAttempts = 1 },
+        };
+
     // ── Legacy path ───────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// The pre-patch behaviour, preserved byte-for-byte in activity inputs and ordering so an
+    /// The pre-patch behaviour, preserving the instruction text and the activity ordering so an
     /// in-flight history started on the old code replays without a nondeterminism error.
     ///
     /// The new additive AgentReview fields are populated with compatibility values only —
     /// nothing here parses markers.
+    ///
+    /// Activity OPTIONS are not frozen: Temporal's replay check compares the command sequence and
+    /// the activity's identity, not its timeouts or retry policy. A pre-patch execution that is
+    /// still running therefore picks up <c>MaximumAttempts = 1</c> on its remaining delegates,
+    /// which is the point — unbounded retry is half the defect.
     /// </summary>
     private static async Task<ConsensusReviewOutput> RunLegacyAsync(
         ConsensusReviewInput input,
         string[] reviewers,
         Task<AgentTaskResult>[] reviewTasks,
         string synthesizer,
-        string workflowId)
+        string workflowId,
+        ActivityOptions synthesisOptions,
+        int agentBudgetSeconds)
     {
         var agentReviews = reviewers
             .Zip(reviewTasks, (agent, task) =>
@@ -243,12 +330,11 @@ public class ConsensusReviewWorkflow
             (DelegateToAgentActivity a) => a.DelegateToAgentAsync(
                 synthesizer,
                 synthesisInstruction,
-                $"{workflowId}/synthesis"),
-            new ActivityOptions
-            {
-                StartToCloseTimeout = TimeSpan.FromMinutes(15),
-                HeartbeatTimeout = TimeSpan.FromSeconds(90),
-            });
+                $"{workflowId}/synthesis",
+                true,
+                3,
+                agentBudgetSeconds),
+            synthesisOptions);
 
         return new ConsensusReviewOutput(
             FinalVerdict: ParseVerdict(synthesisResult.Text),

@@ -1,3 +1,4 @@
+using Fleet.Temporal.Configuration;
 using Fleet.Temporal.Models;
 using Fleet.Temporal.Workflows.Fleet;
 using Temporalio.Activities;
@@ -26,20 +27,32 @@ public class ConsensusReviewWorkflowRunTests
 {
     private const string TaskQueue = "consensus-review-tests";
     private const string ActivityName = "DelegateToAgent";
+    private const string BudgetActivityName = "LoadAgentBudgetSeconds";
     private const string Sentinel = "ZZQ-RAW-ONLY-SENTINEL-7413";
+
+    /// <summary>The budget the stubbed config activity reports unless a test says otherwise.</summary>
+    private const int DefaultTestBudgetSeconds = 5400;   // the deployed host's 90 minutes
+
+    /// <summary>
+    /// One delegation, as the ACTIVITY saw it. StartToClose and Attempt come from
+    /// <c>ActivityExecutionContext.Current.Info</c> — the SDK reporting what Temporal actually
+    /// scheduled, not a copy of what the workflow meant to ask for.
+    /// </summary>
+    private sealed record Delegation(
+        string Agent, string Instruction, TimeSpan? StartToCloseTimeout, int Attempt, int BudgetSeconds);
 
     /// <summary>Records every delegation the workflow makes, in order.</summary>
     private sealed class Delegations
     {
-        private readonly List<(string Agent, string Instruction)> _calls = [];
+        private readonly List<Delegation> _calls = [];
         private readonly Lock _gate = new();
 
-        public void Record(string agent, string instruction)
+        public void Record(Delegation call)
         {
-            lock (_gate) _calls.Add((agent, instruction));
+            lock (_gate) _calls.Add(call);
         }
 
-        public IReadOnlyList<(string Agent, string Instruction)> Calls
+        public IReadOnlyList<Delegation> Calls
         {
             get { lock (_gate) return [.. _calls]; }
         }
@@ -58,20 +71,35 @@ public class ConsensusReviewWorkflowRunTests
         ActivityDefinition.Create(
             ActivityName,
             typeof(AgentTaskResult),
-            [typeof(string), typeof(string), typeof(string), typeof(bool), typeof(int)],
-            3,   // retryOnIncomplete and maxIncompleteRetries are optional at the call site
+            [typeof(string), typeof(string), typeof(string), typeof(bool), typeof(int), typeof(int)],
+            3,   // everything after taskId is optional at the call site
             args =>
             {
+                var info = ActivityExecutionContext.Current.Info;
                 var agent = (string)args[0]!;
-                var instruction = (string)args[1]!;
-                log.Record(agent, instruction);
+                log.Record(new Delegation(
+                    Agent: agent,
+                    Instruction: (string)args[1]!,
+                    StartToCloseTimeout: info.StartToCloseTimeout,
+                    Attempt: info.Attempt,
+                    BudgetSeconds: args.Length > 5 ? (int)args[5]! : 0));
                 return new AgentTaskResult(responseFor(agent), "completed");
             });
+
+    /// <summary>
+    /// Stub for the config read the workflow uses to discover the deployment's agent budget.
+    /// Registering it here is not scaffolding — without it the workflow cannot resolve a budget at
+    /// all, which is itself the assertion that the lookup is on the live path.
+    /// </summary>
+    private static ActivityDefinition BuildBudgetStub(int budgetSeconds) =>
+        ActivityDefinition.Create(
+            BudgetActivityName, typeof(int), [], 0, _ => budgetSeconds);
 
     private static async Task<(ConsensusReviewOutput Output, Delegations Log, string WorkflowId)>
         RunAsync(
             Func<string, string> responseFor,
-            string[] reviewers)
+            string[] reviewers,
+            int budgetSeconds = DefaultTestBudgetSeconds)
     {
         await using var env = await WorkflowEnvironment.StartTimeSkippingAsync();
         var log = new Delegations();
@@ -80,6 +108,7 @@ public class ConsensusReviewWorkflowRunTests
             env.Client,
             new TemporalWorkerOptions(TaskQueue)
                 .AddActivity(BuildStub(log, responseFor))
+                .AddActivity(BuildBudgetStub(budgetSeconds))
                 .AddWorkflow<ConsensusReviewWorkflow>());
 
         ConsensusReviewOutput output = null!;
@@ -146,6 +175,7 @@ public class ConsensusReviewWorkflowRunTests
             env.Client,
             new TemporalWorkerOptions(TaskQueue)
                 .AddActivity(BuildStub(log, _ => Response("fine", ReviewVerdict.Approved)))
+                .AddActivity(BuildBudgetStub(DefaultTestBudgetSeconds))
                 .AddWorkflow<ConsensusReviewWorkflow>());
 
         await worker.ExecuteAsync(async () =>
@@ -164,6 +194,79 @@ public class ConsensusReviewWorkflowRunTests
         Assert.Contains("base prompt", instruction);
         Assert.Contains("Your perspective: security.", instruction);
         Assert.Contains("SUMMARY:", instruction);
+    }
+
+    // ── The two timers are ordered, and one bad kill cannot loop (issue #321) ──
+
+    [Fact]
+    public async Task EveryDelegate_IsScheduledInsideAContainerThatOutlastsTheAgentBudget()
+    {
+        // Red before this change: the workflow hard-coded StartToCloseTimeout = 15 minutes while
+        // the activity enforced a 90-minute budget, so Temporal killed a working reviewer at
+        // exactly 15 minutes and the activity never reached its own timeout path.
+        //
+        // The value asserted is the one the SDK reports from Info, i.e. what Temporal actually
+        // scheduled — not a re-reading of the ActivityOptions the test itself supplied.
+        const int budgetSeconds = 5400;
+        var (_, log, _) = await RunAsync(
+            agent => agent == "synthesizer"
+                ? "The flag naming is the blocking issue.\nVERDICT: changes_requested"
+                : agent == "reviewer-one"
+                    ? Response("one real problem", ReviewVerdict.ChangesRequested, blockers: ["rename the flag"])
+                    : Response("no objection", ReviewVerdict.Approved),
+            ["reviewer-one", "reviewer-two"],
+            budgetSeconds);
+
+        var budget = TimeSpan.FromSeconds(budgetSeconds);
+        var required = AgentDelegationBudget.StartToCloseFor(budget);
+
+        // Reviewers AND the synthesizer — all three delegate sites, not just the fan-out.
+        Assert.Equal(3, log.Calls.Count);
+        foreach (var call in log.Calls)
+        {
+            Assert.True(call.StartToCloseTimeout >= required,
+                $"{call.Agent}: StartToClose {call.StartToCloseTimeout} must be at least " +
+                $"{required} (budget {budget} + margin)");
+
+            // MaximumAttempts = 1. Before this change these sites carried no RetryPolicy at all,
+            // so a killed attempt retried without bound and the review could never finish.
+            Assert.Equal(1, call.Attempt);
+
+            // ...and the same number reaches the activity, so the guard inside it compares the
+            // container against the budget the workflow actually sized it for.
+            Assert.Equal(budgetSeconds, call.BudgetSeconds);
+        }
+    }
+
+    [Fact]
+    public async Task AnExplicitInputBudget_IsUsedInsteadOfTheDeploymentConfig()
+    {
+        // One review may override the deployment-wide value without redeploying the bridge. The
+        // stubbed config activity reports something else entirely, so a pass here cannot come
+        // from the config path.
+        await using var env = await WorkflowEnvironment.StartTimeSkippingAsync();
+        var log = new Delegations();
+
+        using var worker = new TemporalWorker(
+            env.Client,
+            new TemporalWorkerOptions(TaskQueue)
+                .AddActivity(BuildStub(log, _ => Response("fine", ReviewVerdict.Approved)))
+                .AddActivity(BuildBudgetStub(60))     // config says one minute
+                .AddWorkflow<ConsensusReviewWorkflow>());
+
+        await worker.ExecuteAsync(async () =>
+        {
+            var wfInput = new ConsensusReviewInput(
+                "subject", "review it", new[] { "reviewer-one" }, null, "synthesizer",
+                AgentBudgetSeconds: 7200);        // ...this review says two hours
+            await env.Client.ExecuteWorkflowAsync(
+                (ConsensusReviewWorkflow wf) => wf.RunAsync(wfInput),
+                new WorkflowOptions($"consensus-{Guid.NewGuid():N}", TaskQueue));
+        });
+
+        var call = Assert.Single(log.Calls);
+        Assert.Equal(7200, call.BudgetSeconds);
+        Assert.True(call.StartToCloseTimeout >= AgentDelegationBudget.StartToCloseFor(TimeSpan.FromHours(2)));
     }
 
     // ── The synthesizer is genuinely not scheduled on the short-circuit paths ─
@@ -380,6 +483,7 @@ public class ConsensusReviewWorkflowRunTests
             env.Client,
             new TemporalWorkerOptions(TaskQueue)
                 .AddActivity(BuildStub(log, _ => Response("fine", ReviewVerdict.Approved)))
+                .AddActivity(BuildBudgetStub(DefaultTestBudgetSeconds))
                 .AddWorkflow<ConsensusReviewWorkflow>());
 
         await worker.ExecuteAsync(async () =>
@@ -459,6 +563,116 @@ public class ConsensusReviewWorkflowRunTests
         var replayer = new WorkflowReplayer(
             new WorkflowReplayerOptions().AddWorkflow<ConsensusReviewWorkflow>());
         await replayer.ReplayWorkflowAsync(history);
+    }
+
+    [Fact]
+    public async Task CompactButUnbudgetedHistory_KeepsTheOldTimers_AndReplaysWithoutNondeterminism()
+    {
+        // The history shape this change actually has to survive: an execution started AFTER the
+        // compact change and BEFORE the budget one. Its history already carries a core_patch
+        // marker, so the compact gate alone cannot tell it apart from a current execution — and
+        // the budget change adds a config activity BEFORE the reviewer fan-out, which is a real
+        // divergence in the command sequence.
+        //
+        // Delete AgentBudgetPatchId and this test goes red with a nondeterminism error: the
+        // replay would try to schedule LoadAgentBudgetSeconds where the history has a reviewer.
+        await using var env = await WorkflowEnvironment.StartTimeSkippingAsync();
+        var log = new Delegations();
+        var workflowId = $"consensus-unbudgeted-{Guid.NewGuid():N}";
+
+        using var priorWorker = new TemporalWorker(
+            env.Client,
+            new TemporalWorkerOptions(TaskQueue)
+                .AddActivity(BuildStub(log, agent => agent == "synthesizer"
+                    ? "The flag naming is the blocking issue.\nVERDICT: changes_requested"
+                    : Response("one real problem", ReviewVerdict.ChangesRequested,
+                        blockers: ["rename the flag"])))
+                .AddActivity(BuildBudgetStub(DefaultTestBudgetSeconds))
+                .AddWorkflow<CompactUnbudgetedConsensusReviewWorkflowDouble>());
+
+        await priorWorker.ExecuteAsync(async () =>
+        {
+            var wfInput = new ConsensusReviewInput(
+                "subject", "review it", new[] { "reviewer-one" }, null, "synthesizer");
+            await env.Client.ExecuteWorkflowAsync(
+                (CompactUnbudgetedConsensusReviewWorkflowDouble wf) => wf.RunAsync(wfInput),
+                new WorkflowOptions(workflowId, TaskQueue));
+        });
+
+        var history = await env.Client.GetWorkflowHandle(workflowId).FetchHistoryAsync();
+
+        // It took the compact path — the envelope reached the reviewer...
+        Assert.Contains("SUMMARY:", log.InstructionFor("reviewer-one"));
+        // ...and it never read a budget, so its delegates kept the frozen 15-minute container.
+        Assert.DoesNotContain(log.Calls, c => c.BudgetSeconds != 0);
+        Assert.All(log.Calls, c => Assert.Equal(TimeSpan.FromMinutes(15), c.StartToCloseTimeout));
+
+        var replayer = new WorkflowReplayer(
+            new WorkflowReplayerOptions().AddWorkflow<ConsensusReviewWorkflow>());
+        await replayer.ReplayWorkflowAsync(history);
+    }
+}
+
+/// <summary>
+/// The intermediate deployment: code that had the compact contract but not the agent budget.
+///
+/// It records the compact patch marker and takes the compact command sequence, so the history it
+/// produces is indistinguishable from one written by the previously deployed bridge. That is the
+/// only history shape the new <c>AgentBudgetPatchId</c> gate exists to protect, and the only one
+/// that can prove the gate is positioned correctly.
+///
+/// Do not give it a budget lookup or share the production body with it — either change makes it
+/// stop producing the history the replay test needs, silently.
+/// </summary>
+[Workflow("ConsensusReviewWorkflow")]
+public class CompactUnbudgetedConsensusReviewWorkflowDouble
+{
+    [WorkflowRun]
+    public async Task<ConsensusReviewOutput> RunAsync(ConsensusReviewInput input)
+    {
+        var reviewers = input.ReviewerAgents!;
+        var synthesizer = input.Synthesizer!;
+        var workflowId = Workflow.Info.WorkflowId;
+
+        // Recorded exactly where production recorded it, and with nothing after it.
+        var compact = Workflow.Patched(ConsensusReviewWorkflow.CompactPatchId);
+        var suffix = compact
+            ? ConsensusReviewWorkflow.BuildReviewEnvelopeInstruction()
+            : "";
+
+        var options = new ActivityOptions
+        {
+            StartToCloseTimeout = TimeSpan.FromMinutes(15),
+            HeartbeatTimeout = TimeSpan.FromSeconds(90),
+            CancellationType = ActivityCancellationType.WaitCancellationCompleted,
+        };
+
+        var reviewTasks = reviewers
+            .Select(agent => Workflow.ExecuteActivityAsync<AgentTaskResult>(
+                "DelegateToAgent",
+                [agent, input.ReviewPrompt + suffix, $"{workflowId}/review-{agent}", true, 3],
+                options))
+            .ToArray();
+
+        await Workflow.WhenAllAsync(reviewTasks);
+
+        var agentReviews = reviewers
+            .Zip(reviewTasks, (agent, task) => ConsensusReviewWorkflow.ParseReview(agent, task.Result.Text))
+            .ToArray();
+
+        var synthesis = await Workflow.ExecuteActivityAsync<AgentTaskResult>(
+            "DelegateToAgent",
+            [synthesizer, "synthesis instruction", $"{workflowId}/synthesis", true, 3],
+            new ActivityOptions
+            {
+                StartToCloseTimeout = TimeSpan.FromMinutes(15),
+                HeartbeatTimeout = TimeSpan.FromSeconds(90),
+            });
+
+        return ConsensusReviewWorkflow.ComposeOutput(
+            agentReviews,
+            ConsensusReviewWorkflow.ParseSynthesizerVerdict(synthesis.Text),
+            synthesis.Text);
     }
 }
 

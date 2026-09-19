@@ -42,9 +42,28 @@ public static class PayloadFingerprint
     }
 
     /// <summary>
-    /// <c>SHA256( canonical(text) ‖ 0x1F ‖ replyToEventId ?? "" ‖ 0x1F ‖ conversationId )</c>.
+    /// <c>SHA256( canonical(text) ‖ 0x1F ‖ replyToEventId ?? "" ‖ 0x1F ‖ conversationId
+    /// [‖ 0x1F ‖ attachmentIds…] )</c>.
     /// </summary>
-    public static string Compute(string text, string? replyToEventId, string conversationId)
+    /// <remarks>
+    /// <para>
+    /// <b>The attachment ids are part of the payload</b> (#308 D2). Without them the same
+    /// idempotency key with a different photo replays the first submission's result, and the client
+    /// believes the second image was delivered — a silent loss with a 201 on it.
+    /// </para>
+    /// <para>
+    /// <b>Ordered, not sorted.</b> The client chose the order and it is the order the descriptors
+    /// appear in; sorting would make two differently-ordered submissions collide, which is the same
+    /// class of mistake as folding with NFKC above.
+    /// </para>
+    /// <para>
+    /// A null or empty list appends nothing at all, so a text-only submission's fingerprint is
+    /// byte-identical to the pre-#308 one and an in-flight idempotency key survives the deployment.
+    /// </para>
+    /// </remarks>
+    public static string Compute(
+        string text, string? replyToEventId, string conversationId,
+        IReadOnlyList<string>? attachmentIds = null)
     {
         ArgumentNullException.ThrowIfNull(conversationId);
 
@@ -53,10 +72,16 @@ public static class PayloadFingerprint
             .Append(Separator)
             .Append(replyToEventId ?? string.Empty)
             .Append(Separator)
-            .Append(conversationId)
-            .ToString();
+            .Append(conversationId);
 
-        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(material)));
+        if (attachmentIds is { Count: > 0 })
+        {
+            foreach (var id in attachmentIds)
+                material.Append(Separator).Append(id);
+        }
+
+        return Convert.ToHexStringLower(
+            SHA256.HashData(Encoding.UTF8.GetBytes(material.ToString())));
     }
 
     /// <summary>

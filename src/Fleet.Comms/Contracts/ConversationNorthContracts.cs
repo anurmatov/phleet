@@ -65,10 +65,89 @@ public sealed record SubmitBody
     public string? ReplyToEventId { get; init; }
 
     /// <summary>
-    /// Always refused when non-empty. Attachments are not accepted on this channel in this phase,
-    /// and the refusal is explicit rather than a silently ignored field.
+    /// Attachments this submission references (#308 D2). Each names a <c>sealed</c>, still-unbound
+    /// attachment of this same conversation.
     /// </summary>
-    public IReadOnlyList<object>? Attachments { get; init; }
+    /// <remarks>
+    /// <para>
+    /// Refused as a whole when the feature is not configured — explicitly, never as a silently
+    /// ignored field, because a client that attached a photo and got a text-only answer has been
+    /// lied to.
+    /// </para>
+    /// <para>
+    /// An explicit <c>[]</c> is treated as absent rather than as an error: it says the same thing
+    /// omitting the key says, and refusing it would make a perfectly clear request an error.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<SubmitAttachmentRef>? Attachments { get; init; }
+}
+
+/// <summary>
+/// One attachment reference on a submission. Only the id is load-bearing.
+/// </summary>
+/// <remarks>
+/// <c>kind</c> is accepted because the protocol descriptor carries it, and is deliberately NOT
+/// trusted: the stored row's kind is what the transcript entry reports. A client cannot relabel an
+/// attachment by re-declaring it at submit time.
+/// </remarks>
+public sealed record SubmitAttachmentRef
+{
+    public string? AttachmentId { get; init; }
+    public string? Kind { get; init; }
+}
+
+/// <summary>`POST /v1/conversations/{id}/attachments` request — reserve, before any byte moves.</summary>
+/// <remarks>
+/// Every field here is a CLAIM about bytes that do not exist yet. <see cref="ByteSize"/> and
+/// <see cref="Sha256"/> are recorded so the seal can check what actually arrives against them;
+/// <see cref="ContentType"/> is checked against the accepted set here and then decided again, from
+/// the bytes themselves, at seal.
+/// </remarks>
+public sealed record ReserveAttachmentBody
+{
+    public string? Protocol { get; init; }
+
+    /// <summary>`image` in v1. The four accepted container types are all images.</summary>
+    public string? Kind { get; init; }
+
+    public string? ContentType { get; init; }
+    public long? ByteSize { get; init; }
+
+    /// <summary>64 lowercase hex characters. The digest the uploaded bytes must produce.</summary>
+    public string? Sha256 { get; init; }
+
+    /// <summary>A label. Stored and echoed; never used to build a path.</summary>
+    public string? FileName { get; init; }
+}
+
+/// <summary>`201` — the slot is reserved and the capability is issued.</summary>
+/// <remarks>
+/// ⚠️ <see cref="UploadToken"/> is the <b>only</b> time the capability's plaintext exists anywhere.
+/// The store holds its SHA-256 and nothing else, so it cannot be recovered, re-issued or logged
+/// (#308 D6, AC-20).
+/// </remarks>
+public sealed record ReserveAttachmentResponse
+{
+    public string Protocol { get; init; } = ProtocolVersion.Current;
+    public required string AttachmentId { get; init; }
+    public required string UploadUrl { get; init; }
+    public required string UploadToken { get; init; }
+    public required DateTimeOffset ExpiresAt { get; init; }
+    public required long MaxBytes { get; init; }
+}
+
+/// <summary>`201` — the bytes were verified and the attachment is now referenceable.</summary>
+/// <remarks>
+/// <see cref="ContentType"/> is the SNIFFED type, which may differ from the declared one only by
+/// being the truth — a mismatch fails the seal rather than being reported here.
+/// </remarks>
+public sealed record SealAttachmentResponse
+{
+    public string Protocol { get; init; } = ProtocolVersion.Current;
+    public required string AttachmentId { get; init; }
+    public string State { get; init; } = "sealed";
+    public required string ContentType { get; init; }
+    public required long ByteSize { get; init; }
 }
 
 /// <summary>`201` — the submission is durable and dispatched.</summary>

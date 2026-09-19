@@ -38,6 +38,31 @@ public sealed record ProtocolRejectedPayload
 public sealed record SubmissionTextPayload
 {
     public required string Text { get; init; }
+
+    /// <summary>
+    /// Attachments the user sent with this message (#308 D1). A field on the transcript entry, not a
+    /// sibling kind.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Nullable and omitted, never an empty array.</b> <see cref="FleetProtocolJson"/> omits nulls,
+    /// so a text-only submission serializes byte-identically to the pre-#308 payload and no deployed
+    /// client sees a shape change. A non-nullable property defaulting to <c>[]</c> would emit
+    /// <c>"attachments":[]</c> on every message ever sent.
+    /// </para>
+    /// <para>
+    /// The invariant <i>one accepted submission produces exactly one transcript entry</i> is what
+    /// decides this. A sibling kind per attachment would produce N+1 entries for one submission; a
+    /// separate attachment record referenced by id would put the reference and the text on different
+    /// events with different retention, so a pruned text and a live image could disagree.
+    /// </para>
+    /// <para>
+    /// This differs from #305's own "new kind, not a field" reasoning, and the difference is the
+    /// point: there the alternative host had a DIFFERENT LIFETIME. <c>submission.text</c> has exactly
+    /// the lifetime an attachment reference needs, because it <b>is</b> the user's message.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<AttachmentDescriptor>? Attachments { get; init; }
 }
 
 /// <summary>What dispatch did with the submission (D5).</summary>
@@ -203,9 +228,21 @@ public enum CancelScope
 }
 
 /// <summary>
-/// Attachment metadata (D14). No bytes, no URL, no storage reference. <see cref="AttachmentId"/>
-/// is opaque and reserved for a later phase that actually has object storage.
+/// Attachment metadata (D14, #308 D1). No bytes and no URL — <see cref="AttachmentId"/> is a real,
+/// resolvable identifier, and bytes are moved over the dedicated attachment routes.
 /// </summary>
+/// <remarks>
+/// <para>
+/// Inbound it names a <c>sealed</c>, still-unbound attachment of the caller's own conversation.
+/// Outbound, on a <c>submission.text</c>, it names the bytes
+/// <c>GET /v1/attachments/{id}/content</c> serves to that conversation's principal.
+/// </para>
+/// <para>
+/// ⚠️ <see cref="ContentType"/> on an outbound descriptor is the <b>sniffed</b> type recorded at
+/// seal, never the one the uploader declared. <see cref="FileName"/> is a client-supplied label and
+/// is never used as a path (#308 D3, MUST NOT 8).
+/// </para>
+/// </remarks>
 public sealed record AttachmentDescriptor
 {
     public required string AttachmentId { get; init; }

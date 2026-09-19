@@ -133,6 +133,46 @@ public enum ProtocolErrorCode
     /// complete.</para>
     /// </summary>
     InvalidCursor,
+
+    /// <summary>
+    /// The attachment cannot be resolved for this caller (#308 D2, D6).
+    /// </summary>
+    /// <remarks>
+    /// <b>One code for every negative case, deliberately.</b> An id that never existed, one belonging
+    /// to another conversation, one still <c>reserved</c>, one that <c>failed</c> its seal, one past
+    /// its window, and one already bound to an earlier submission are all reported identically — so
+    /// the route is not an existence oracle. The upload capability presented on the download route
+    /// gets <see cref="Unauthorized"/> instead, and a session bearer presented on the upload route
+    /// gets this.
+    /// </remarks>
+    AttachmentNotFound,
+
+    /// <summary>
+    /// An attachment bound was exceeded (#308 D4): too many per submission, a duplicate id within one
+    /// submission, or the per-conversation or per-deployment live-byte cap.
+    /// </summary>
+    AttachmentLimit,
+
+    /// <summary>
+    /// The declared or sniffed media type is not one of the four accepted image types (#308 D4).
+    /// </summary>
+    /// <remarks>
+    /// HEIC and HEIF are refused here, at reserve, before a byte moves. The four accepted types are
+    /// exactly the four the provider vision APIs accept, so no server-side transcode is ever needed —
+    /// the client converts.
+    /// </remarks>
+    UnsupportedMediaType,
+
+    /// <summary>
+    /// The attachment existed and its bytes are permanently gone (#308 D5, MUST NOT 11).
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="AttachmentNotFound"/> and from a transient 5xx, because the client
+    /// renders three different things: a permanent placeholder, a message that never had that
+    /// attachment, and a retryable load failure. A missing byte file is never a 500 and never an
+    /// empty 200.
+    /// </remarks>
+    AttachmentGone,
 }
 
 /// <summary>Coarse attachment classification (D14). Metadata only — no bytes, no URL.</summary>

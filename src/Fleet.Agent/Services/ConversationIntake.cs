@@ -139,9 +139,35 @@ public sealed class ConversationIntake
     /// pre-existing behaviour of minting one locally, which is correct for a caller that is itself
     /// the origin of the submission.
     /// </param>
+    /// <param name="images">
+    /// Bytes already fetched for this submission's attachments (#308 D7). The caller does the
+    /// fetching, because it owns the south client and the failure policy; this seam only routes what
+    /// it is handed.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// ⚠️ <b>There is deliberately no <c>attachments</c> parameter and no refusal path for an
+    /// attachment that could not be fetched.</b> An earlier revision of #308 had both: a descriptor
+    /// list alongside the bytes, and a rejection when the list was non-empty and nothing had been
+    /// fetched.
+    /// </para>
+    /// <para>
+    /// That branch contradicted AC-29, which says a failed fetch <i>still runs the turn</i> with its
+    /// text and a <c>turn.notice</c> naming what is missing. It was also dead: the only production
+    /// caller never populated the list, so the only thing exercising it was a unit test calling this
+    /// method in a shape nothing produced. A rejection here would additionally be a lie about a
+    /// submission the service has already made durable — the client's message WAS accepted; only its
+    /// image failed to reach the executor.
+    /// </para>
+    /// <para>
+    /// So the honest reporting lives in exactly one place: the caller counts what it could not fetch
+    /// and calls <see cref="PublishAttachmentNotice"/>. Do not reintroduce a refusal here.
+    /// </para>
+    /// </remarks>
     public async Task<TaskDispatchOutcome?> SubmitAsync(
-        long runtimeKey, string text, IReadOnlyList<AttachmentDescriptor>? attachments = null,
-        string? replyToEventId = null, string? submissionId = null)
+        long runtimeKey, string text,
+        string? replyToEventId = null, string? submissionId = null,
+        IReadOnlyList<MessageImage>? images = null)
     {
         var reference = _registry.Lookup(runtimeKey);
         if (reference is null)
@@ -151,14 +177,6 @@ public sealed class ConversationIntake
         }
 
         var identity = NewSubmissionIdentity(reference, replyToEventId, submissionId);
-
-        // Attachments are rejected OUTRIGHT. The submission must not silently proceed as
-        // text-only — a client that attached a file and got a text-only answer has been lied to.
-        if (attachments is { Count: > 0 })
-        {
-            PublishRejection(identity, ProtocolErrorCode.UnsupportedAttachments, runtimeKey);
-            return null;
-        }
 
         if (text is null || Encoding.UTF8.GetByteCount(text) > ProtocolLimits.MaxInboundTextBytes)
         {
@@ -189,9 +207,46 @@ public sealed class ConversationIntake
         // userId: 0 is a SAFETY BOUNDARY, not a default. StartTaskCore indexes a task into the
         // cross-chat user index only when userId != 0, so a client turn never enters that index
         // and a Telegram /cancel can never reach it. See CancelAsync for the other direction.
+        // `images` reaches the executor through the parameter the Telegram photo path already uses,
+        // so Claude gets native content blocks, Codex gets `local_image` blocks from the persisted
+        // path, and Gemini gets an `@<path>` reference — with no executor change at all (#308 D7).
         return await _taskManager.StartTask(
             runtimeKey, prompt, Display(text), isSessionTask: true,
-            source: TaskSource.UserMessage, userId: 0, identity: identity);
+            source: TaskSource.UserMessage, images: images, userId: 0, identity: identity);
+    }
+
+    /// <summary>
+    /// Tell the client that one or more of its images did not reach the executor (#308, AC-29).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The turn still runs, on its text.</b> An image is never allowed to abandon a turn — but the
+    /// client must not receive an answer that reads as though no image was sent, which is the silent
+    /// version of the same failure.
+    /// </para>
+    /// <para>
+    /// The text names a COUNT and nothing else: no attachment id, no filesystem path, no transport
+    /// reason. A notice is a client event, and client events carry none of those (protocol
+    /// Constraints 4 and 5).
+    /// </para>
+    /// </remarks>
+    public void PublishAttachmentNotice(long runtimeKey, int unavailable)
+    {
+        if (unavailable <= 0) return;
+
+        var reference = _registry.Lookup(runtimeKey);
+        if (reference is null) return;
+
+        _events.Publish(
+            runtimeKey, ConversationEventKind.TurnNotice,
+            NewSubmissionIdentity(reference, null),
+            new TurnNoticePayload
+            {
+                Text = unavailable == 1
+                    ? "An image sent with this message is unavailable and was not included."
+                    : $"{unavailable} images sent with this message are unavailable and were not "
+                      + "included.",
+            });
     }
 
     /// <summary>

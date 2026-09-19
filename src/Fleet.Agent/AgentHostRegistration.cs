@@ -214,6 +214,15 @@ public static class AgentHostRegistration
 
         services.AddHttpClient<ConversationSouthClient>();
 
+        // #308. Registered whenever the south seam is — there is no separate agent-side switch,
+        // because whether attachments exist is the SERVICE's decision: a command simply arrives with
+        // an `attachments` array or without one. An agent that added its own flag would be a second
+        // place for the answer to live, and the two would drift.
+        //
+        // ⚠️ It reads Telegram:AttachmentDir for the directory but NOT Telegram:PersistAttachments.
+        // The directory is shared; the switch is not (MUST NOT 15).
+        services.AddSingleton<ConversationAttachmentFetcher>();
+
         // The adapter is registered as IChannelAdapter only. The pump resolves adapters by their
         // ChannelId, and registering two under one id is a startup failure by design.
         services.AddSingleton<IChannelAdapter, ConversationSouthAdapter>();

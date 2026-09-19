@@ -78,6 +78,7 @@ inherited is re-decided by this document.
 | Adapter failure never faults a turn | #274 D11 |
 | `control.ack` acknowledges the request, not the stop | #274 D8 |
 | Attachments rejected outright, never silently dropped | #274 D14 |
+| Inbound image attachments: reserve → PUT → seal → submit; one transcript entry per submission | #308 |
 | `seq` allocated at durable append, not at publish | #276 D-3 |
 | `submission.accepted` does not necessarily precede `turn.started` | #276 §4.1 |
 | `turn.progress` and `turn.notice` are prunable | #276 D-11 |
@@ -284,6 +285,21 @@ All routes are under `/v1/`. Every request and response body carries
 | `POST` | `/v1/conversations/{id}:cancel` | `scope: "current" \| "all"` |
 | `POST` | `/v1/conversations/{id}/cursor` | `conversation.ack { deliveredSeq, readSeq? }` |
 | `GET` | `/v1/conversations/{id}/stream` | WebSocket upgrade |
+| `POST` | `/v1/conversations/{id}/attachments` | Reserve an attachment slot (#308) |
+| `PUT` | `/v1/attachments/{attachmentId}/content` | Upload bytes — **upload capability, single-use** |
+| `GET` | `/v1/attachments/{attachmentId}/content` | Download bytes — **session bearer** |
+
+The last three are mapped only when an attachment root is configured. Without one they are absent
+from the router entirely, and a non-empty `attachments` array on a submission is refused with
+`unsupported_attachments` exactly as it was before #308.
+
+**Two different credentials on the attachment pair, deliberately.** `PUT` takes the short-lived,
+single-use upload capability issued by the reservation and **never** calls the session
+authenticator; `GET` takes the ordinary session bearer and **never** reads the upload digest.
+Neither handler consults the other's credential, so a session bearer on the `PUT` is
+`404 attachment_not_found` and an upload token on the `GET` is `401 unauthorized`. There is no
+download capability URL: a second credential type is a second leak surface, and its only advantage —
+an `<img src>` without a header — is worthless to a native client that fetches authenticated anyway.
 
 **One submissions route, two types.** Create and steer both produce a submission and both run the
 ordinary inject-or-queue dispatch (#274 D5). Two routes would imply two code paths and invite a
@@ -421,6 +437,102 @@ It is **not** the store's internal `accepted_seq` column, and the names are clos
 trap: that column is the seq of the `submission.accepted` event and is `NULL` until the disposition.
 Returning it here produces a `null` on every first accept.
 
+**Send an image (#308).** Three steps, each independently retryable, and the submission itself is
+unchanged apart from one array.
+
+```http
+POST /v1/conversations/c_4Jd8Ls2w/attachments
+Authorization: Bearer <token>
+
+{
+  "protocol": "fleet.conversation.v1",
+  "kind": "image",
+  "contentType": "image/jpeg",
+  "byteSize": 2481216,
+  "sha256": "<64 lowercase hex>",
+  "fileName": "photo.jpg"
+}
+```
+
+```json
+{
+  "protocol": "fleet.conversation.v1",
+  "attachmentId": "01JATTACHMENT…",
+  "uploadUrl": "/v1/attachments/01JATTACHMENT…/content",
+  "uploadToken": "<opaque>",
+  "expiresAt": "2026-09-19T12:15:00Z",
+  "maxBytes": 8388608
+}
+```
+
+```http
+PUT /v1/attachments/01JATTACHMENT…/content
+Authorization: Bearer <uploadToken>
+Content-Type: image/jpeg
+
+<raw bytes>
+```
+
+```json
+{
+  "protocol": "fleet.conversation.v1",
+  "attachmentId": "01JATTACHMENT…",
+  "state": "sealed",
+  "contentType": "image/jpeg",
+  "byteSize": 2481216
+}
+```
+
+```http
+POST /v1/conversations/c_4Jd8Ls2w/submissions
+Authorization: Bearer <token>
+
+{
+  "protocol": "fleet.conversation.v1",
+  "type": "create",
+  "submissionId": "s_9Qw1Ez",
+  "text": "what is this?",
+  "attachments": [ { "attachmentId": "01JATTACHMENT…", "kind": "image" } ]
+}
+```
+
+⚠️ **`uploadToken` is the only time that value exists anywhere.** The server keeps its SHA-256 and
+nothing else, so it cannot be recovered, re-issued or found in a log. Losing it means reserving
+again.
+
+**Reserve-then-PUT rather than multipart on the submission**, for three reasons that point the same
+way: a failed 8 MiB upload must not cost the text, a retry must not re-send it, and the submission
+body stays small JSON so the idempotency fingerprint keeps covering the whole payload cheaply rather
+than hashing megabytes. It also lets a phone show upload progress separately from send.
+
+**The 50 MP pixel bound is a header read, never a decode.** PNG, GIF and WebP declare their
+dimensions in the first few dozen bytes; JPEG's `SOF` marker is found by seeking its segment chain,
+stopping at the scan and after 64 segments. ⚠️ A JPEG whose frame header is unreachable — truncated,
+or past that bound — is **held by the 8 MiB byte cap alone**, as is any file whose header lies about
+its size. That residual is the deliberate price of keeping an image decoder out of the process that
+holds the transcript and the auth store.
+
+**The declared content type is never trusted.** What is recorded, enforced and served is the type
+sniffed from the container's magic bytes at seal; a declared/sniffed disagreement fails the seal with
+`422` and the bytes are discarded. **HEIC and HEIF are refused at reserve** — the four accepted types
+are exactly the four the provider vision APIs accept, so no server-side transcode is ever needed and
+no image decoder enters the service. **The client converts to JPEG before upload**, which iOS does
+natively and cheaply.
+
+**One attachment binds to at most one submission.** A second submission naming the same id is
+`attachment_not_found`, and the first submission is untouched. That is not a detail: it is what makes
+"an attachment cannot be pruned while still referenced" true, because exactly one event can hold the
+reference and therefore exactly one retention clock governs the bytes.
+
+**The idempotency fingerprint covers the ordered attachment ids.** The same key with a different
+photo is `idempotency_conflict`, never a replay of the first — otherwise the client would believe
+the second image was delivered.
+
+**The transcript entry carries the descriptors.** `submission.text` gains an optional `attachments`
+array; a text-only submission **omits the key entirely**, so its payload is byte-identical to the
+pre-#308 shape. A client that reconnects renders its own sent image by downloading it, not from a
+local copy.
+
 **Cancel.**
 
 ```http
@@ -455,7 +567,11 @@ appear inside a terminal event payload and have no status at all.
 | `unsupported_role` | **403** | `conversation.open` |
 | `unsupported_protocol` | **400** | any route |
 | `unsupported_kind` | **400** | malformed body, bad identifier, `limit` above max |
-| `unsupported_attachments` | **400** | submissions with a non-empty attachment array |
+| `unsupported_attachments` | **400** | non-empty attachment array where the feature is unconfigured |
+| `attachment_not_found` § | **400** on submit, **404** on `PUT`/`GET` | unknown, foreign, unsealed, expired or already-bound attachment; also a failed seal (**422**) |
+| `attachment_limit` § | **400** on submit, **409** on reserve | over 4 per submission, a duplicate id, or a live-byte cap |
+| `unsupported_media_type` § | **415** | a reservation declaring anything but the four accepted image types |
+| `attachment_gone` § | **410** | the row survives and its bytes do not |
 | `invalid_cursor` † | **400** | catch-up, cursor write |
 | `conversation_not_found` | **404** | every conversation-scoped route |
 | `idempotency_conflict` † | **409** | submissions |
@@ -468,10 +584,18 @@ appear inside a terminal event payload and have no status at all.
 | `canceled` | *(none)* | **event-only** — terminal payloads |
 
 † Added to `ProtocolErrorCode` by the #276 implementation (§9). ‡ Proposed by this document; see
-[Proposed amendments](#proposed-amendments-to-274276277).
+[Proposed amendments](#proposed-amendments-to-274276277). § Appended by #308.
 
-That table covers every member of `ProtocolErrorCode` as it exists at `69ed86f`, plus the three
-inbound members, and marks the two event-only codes as having no status.
+That table covers every member of `ProtocolErrorCode`, plus the three inbound members, and marks the
+two event-only codes as having no status.
+
+**`attachment_not_found` is one code for every negative attachment case, deliberately.** An id that
+never existed, one belonging to another conversation, one still `reserved`, one that failed its
+seal, one past its window, and one already bound to an earlier submission are all reported
+identically — so the route is not an existence oracle. `attachment_gone` is the one attachment
+outcome that is *not* folded in, because a client renders it differently: the message really did
+carry that image and its bytes are permanently unavailable, which is a placeholder rather than a
+retry.
 
 **`internal` carries two statuses, and the split is not cosmetic.**
 
@@ -1103,6 +1227,7 @@ The two sections with **no required-decision number** are **D1** (listener separ
 
 ## 20. Out of scope
 
-Multi-human tenancy and per-principal context isolation; attachments and object storage; push
-notifications; browser-client ticket exchange; approval gates; voice; the `Fleet.Comms` deployment
-itself; and the #276/#277 implementations this document depends on but does not perform.
+Multi-human tenancy and per-principal context isolation; object storage; outbound (agent-produced)
+attachments; voice, video and arbitrary documents; push notifications; browser-client ticket
+exchange; approval gates; the `Fleet.Comms` deployment itself; and the #276/#277 implementations
+this document depends on but does not perform.

@@ -331,6 +331,29 @@ public sealed partial class MySqlConversationStore : IConversationStore
                 : ResolveReplay(winner, request.PayloadFingerprint);
         }
 
+        // #308. BETWEEN the submissions INSERT and the submission.text append, and both halves of
+        // that sentence matter.
+        //
+        // After the INSERT, because the bind stamps `submission_id`. Before the append, because the
+        // descriptors go ON that event and `event_seq` is the floor the event is about to take.
+        //
+        // And inside this transaction rather than after it: a crash between accept and a later bind
+        // would leave a submission.text referencing an unbound row the sweep is entitled to collect
+        // as "sealed, never submitted" — a transcript entry whose image a background job deletes
+        // minutes later (MUST NOT 4).
+        //
+        // A shortfall throws, and `await using` rolls the whole transaction back: no submission row,
+        // no transcript entry, no command outbox row. Accepting the text without its image is the
+        // lie MUST NOT 1 forbids.
+        IReadOnlyList<AttachmentDescriptor>? descriptors = null;
+
+        if (request.AttachmentIds is { Count: > 0 } attachmentIds)
+        {
+            descriptors = Describe(await BindAttachmentsAsync(
+                connection, transaction, request.ConversationId, submissionId,
+                eventSeq: acceptFloorSeq, attachmentIds, ct));
+        }
+
         // #305. Outside the catch above on purpose: that filter exists to recognise a lost race on
         // ux_sub_idem, and a duplicate key from ux_event_id reaching it would be read as one.
         //
@@ -343,7 +366,11 @@ public sealed partial class MySqlConversationStore : IConversationStore
                 connection, transaction, conversation,
                 eventId: Ulid.NewUlid(),
                 kind: ConversationEventKind.SubmissionText,
-                payloadJson: FleetProtocolJson.Serialize(new SubmissionTextPayload { Text = transcript }),
+                // `descriptors` is null for a text-only submission, and WhenWritingNull then omits
+                // the key entirely — so the stored payload is byte-identical to the pre-#308 one and
+                // no deployed client sees a shape change (AC-4, AC-26).
+                payloadJson: FleetProtocolJson.Serialize(
+                    new SubmissionTextPayload { Text = transcript, Attachments = descriptors }),
                 submissionId: submissionId,
                 attemptId: null,
                 retentionClass: EventRetentionClass.Durable,

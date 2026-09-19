@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using Fleet.Conversations;
 using Fleet.Conversations.Contracts;
 using Fleet.Protocol;
 
@@ -131,6 +132,127 @@ internal sealed class FakeConversationStore : IConversationStore
 
     public Task MarkExternalEffectAsync(string attemptId, CancellationToken ct = default) =>
         throw new NotSupportedException();
+
+    // ── attachments (#308) ───────────────────────────────────────────────────────
+
+    /// <summary>What the next reservation returns. Set per test.</summary>
+    public ReserveAttachmentResult NextReserve { get; set; } = new()
+    {
+        Outcome = ReserveOutcome.Reserved,
+        AttachmentId = "01JATTACHMENTA10000000000",
+        ExpiresAt = new DateTimeOffset(2026, 1, 1, 0, 15, 0, TimeSpan.Zero),
+    };
+
+    /// <summary>Rows this fake knows about, by id. Empty means every lookup is not-found.</summary>
+    public Dictionary<string, AttachmentMetadata> Attachments { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>Reservations this store was asked for, in order.</summary>
+    public List<ReserveAttachmentRequest> Reservations { get; } = [];
+
+    /// <summary>Seals this store was asked for, in order.</summary>
+    public List<SealAttachmentRequest> Seals { get; } = [];
+
+    /// <summary>Ids marked failed, in order.</summary>
+    public List<string> Failed { get; } = [];
+
+    public Task<ReserveAttachmentResult> ReserveAttachmentAsync(
+        ReserveAttachmentRequest request, CancellationToken ct = default)
+    {
+        Reservations.Add(request);
+
+        if (!string.Equals(request.ConversationId, ConversationId, StringComparison.Ordinal)
+            || !string.Equals(request.PrincipalId, OwnerPrincipalId, StringComparison.Ordinal))
+        {
+            throw new ConversationNotFoundException();
+        }
+
+        return Task.FromResult(NextReserve);
+    }
+
+    /// <summary>
+    /// Seals the row, conditionally on it being <c>reserved</c> — the same predicate the real
+    /// store's UPDATE carries.
+    /// </summary>
+    /// <remarks>
+    /// The transition is performed rather than merely recorded, because the single-use property is
+    /// exactly what the route tests ask about: a fake that always returned true would let a second
+    /// PUT succeed here while the real store refused it.
+    /// </remarks>
+    public Task<bool> SealAttachmentAsync(
+        SealAttachmentRequest request, CancellationToken ct = default)
+    {
+        Seals.Add(request);
+
+        if (!Attachments.TryGetValue(request.AttachmentId, out var row)
+            || row.State != AttachmentState.Reserved)
+        {
+            return Task.FromResult(false);
+        }
+
+        Attachments[request.AttachmentId] = row with
+        {
+            State = AttachmentState.Sealed,
+            ContentType = request.SniffedContentType,
+            ByteSize = request.ByteSize,
+            SealedAt = DateTimeOffset.UtcNow,
+        };
+
+        return Task.FromResult(true);
+    }
+
+    public Task<bool> FailAttachmentAsync(string attachmentId, CancellationToken ct = default)
+    {
+        Failed.Add(attachmentId);
+
+        if (Attachments.TryGetValue(attachmentId, out var row)
+            && row.State == AttachmentState.Reserved)
+        {
+            Attachments[attachmentId] = row with { State = AttachmentState.Failed };
+        }
+
+        return Task.FromResult(true);
+    }
+
+    public Task<AttachmentMetadata?> GetAttachmentAsync(
+        string attachmentId, CancellationToken ct = default) =>
+        Task.FromResult(Attachments.GetValueOrDefault(attachmentId));
+
+    /// <summary>
+    /// A foreign principal is not-found, byte-identically to an id that never existed — the same
+    /// rule the real store enforces with a JOIN predicate.
+    /// </summary>
+    public Task<AttachmentMetadata?> GetAttachmentForPrincipalAsync(
+        string attachmentId, string principalId, CancellationToken ct = default) =>
+        Task.FromResult(
+            string.Equals(principalId, OwnerPrincipalId, StringComparison.Ordinal)
+                ? Attachments.GetValueOrDefault(attachmentId)
+                : null);
+
+    public Task<IReadOnlyList<AttachmentMetadata>> GetSubmissionAttachmentsAsync(
+        string submissionId, CancellationToken ct = default) =>
+        Task.FromResult<IReadOnlyList<AttachmentMetadata>>([]);
+
+    /// <summary>A row with the fields these tests care about and defaults for the rest.</summary>
+    public static AttachmentMetadata Attachment(
+        string id, AttachmentState state = AttachmentState.Sealed,
+        string contentType = "image/png", long byteSize = 4,
+        string? sha256 = null, string? uploadTokenSha256 = null,
+        DateTimeOffset? createdAt = null) =>
+        new()
+        {
+            AttachmentId = id,
+            ConversationId = "01JCONVERSATION00000000001",
+            State = state,
+            Kind = AttachmentKind.Image,
+            ContentType = contentType,
+            ByteSize = byteSize,
+            Sha256 = sha256 ?? new string('a', 64),
+            UploadTokenSha256 = uploadTokenSha256 ?? new string('b', 64),
+            CreatedAt = createdAt ?? DateTimeOffset.UtcNow,
+            SealedAt = state is AttachmentState.Sealed or AttachmentState.Bound
+                ? DateTimeOffset.UtcNow
+                : null,
+        };
 
     /// <summary>A stored event with the fields these tests care about and defaults for the rest.</summary>
     public static StoredEvent Stored(ulong seq, string kind = ConversationEventKind.TurnStarted) =>

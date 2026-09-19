@@ -123,8 +123,15 @@ static async Task<int> RunServiceAsync(string[] args)
         southBuilder.WebHost.UseSetting(WebHostDefaults.ServerUrlsKey, string.Empty);
         southBuilder.WebHost.UseUrls(options.SouthUrl);
 
+        // The SAME byte store the north routes use, for the same reason: two would be two roots and
+        // two answers to "where does this attachment live". Null when no root is configured, which
+        // leaves the south attachment route unmapped.
+        var attachments = options.AttachmentsEnabled
+            ? northApp.Services.GetRequiredService<Fleet.Conversations.AttachmentStore>()
+            : null;
+
         // Composed by CommsApp, not here, so the south suite drives the same graph this line does.
-        southApp = CommsApp.BuildSouthApp(southBuilder, store, options);
+        southApp = CommsApp.BuildSouthApp(southBuilder, store, options, attachments);
     }
 
     // Both or neither. If either listener cannot bind — port already in use, address unavailable — the

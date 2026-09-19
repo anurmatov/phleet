@@ -236,6 +236,13 @@ public class NorthSerializationTests
                 ProtocolErrorCode.DeviceLimit,
                 ProtocolErrorCode.IdempotencyConflict,
                 ProtocolErrorCode.InvalidCursor,
+
+                // #308, appended at the end so every deployed client's mapping of the earlier
+                // values is unchanged.
+                ProtocolErrorCode.AttachmentNotFound,
+                ProtocolErrorCode.AttachmentLimit,
+                ProtocolErrorCode.UnsupportedMediaType,
+                ProtocolErrorCode.AttachmentGone,
             ],
             Enum.GetValues<ProtocolErrorCode>());
     }
@@ -252,12 +259,16 @@ public class NorthSerializationTests
     }
 
     /// <summary>
-    /// The two codes the conversation slice appends, each with a fixed message and the snake_case
-    /// wire form a deployed client keys on.
+    /// The codes the conversation and attachment slices append, each with a fixed message and the
+    /// snake_case wire form a deployed client keys on.
     /// </summary>
     [Theory]
     [InlineData(ProtocolErrorCode.IdempotencyConflict, "\"idempotency_conflict\"")]
     [InlineData(ProtocolErrorCode.InvalidCursor, "\"invalid_cursor\"")]
+    [InlineData(ProtocolErrorCode.AttachmentNotFound, "\"attachment_not_found\"")]
+    [InlineData(ProtocolErrorCode.AttachmentLimit, "\"attachment_limit\"")]
+    [InlineData(ProtocolErrorCode.UnsupportedMediaType, "\"unsupported_media_type\"")]
+    [InlineData(ProtocolErrorCode.AttachmentGone, "\"attachment_gone\"")]
     public void ConversationErrorCodes_HaveFixedMessagesAndWireForms(ProtocolErrorCode code, string wire)
     {
         Assert.Equal(wire, JsonSerializer.Serialize(code, FleetProtocolJson.Options));

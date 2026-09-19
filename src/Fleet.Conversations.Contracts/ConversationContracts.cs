@@ -147,7 +147,45 @@ public sealed record AcceptSubmissionRequest
     /// </para>
     /// </remarks>
     public string? TranscriptText { get; init; }
+
+    /// <summary>
+    /// Attachment ids this submission references, in client order (#308 D3).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Bound INSIDE the accept transaction, after the <c>submissions</c> INSERT and before the
+    /// <c>submission.text</c> append, by one conditional UPDATE. Binding after the transaction would
+    /// leave a window in which the row is <c>sealed</c>-but-unreferenced and the sweep is entitled to
+    /// collect it as "uploaded, never submitted" — deleting the image out from under a transcript
+    /// entry minutes later.
+    /// </para>
+    /// <para>
+    /// <b>A shortfall aborts the whole accept.</b> If the UPDATE affects fewer rows than there are
+    /// distinct ids, at least one was unknown, foreign, unsealed or already bound, and the
+    /// transaction rolls back: no submission row, no transcript entry, no command. Dropping the
+    /// attachment and accepting the text would show the owner a sent message whose photo never
+    /// arrived (MUST NOT 1, MUST NOT 3).
+    /// </para>
+    /// <para>
+    /// Neither idempotent-replay path reaches the bind. A key whose submission already exists returns
+    /// before it, which is correct — the attachments were bound on the original accept. Because the
+    /// fingerprint covers the ordered id list, the same key with a DIFFERENT image is a conflict
+    /// rather than a silent replay of the old one.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<string>? AttachmentIds { get; init; }
 }
+
+/// <summary>
+/// At least one referenced attachment could not be bound, so the accept was rolled back whole.
+/// </summary>
+/// <remarks>
+/// Deliberately one exception for every negative case — unknown, foreign, unsealed, expired, or
+/// already bound — so the route answers with the single indistinguishable
+/// <c>attachment_not_found</c> and is not an existence oracle (#308 D2).
+/// </remarks>
+public sealed class AttachmentNotBindableException()
+    : Exception("One or more attachments could not be bound to this submission.");
 
 /// <summary>Which of #276 §7's four accept outcomes occurred.</summary>
 public enum AcceptOutcome

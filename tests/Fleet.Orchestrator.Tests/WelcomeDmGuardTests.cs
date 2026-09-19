@@ -169,13 +169,28 @@ public class WelcomeDmGuardTests
         int workflowStartCount = 0;
         var agent = new Agent { Name = "cto", DisplayName = "CTO", Role = "co-cto", Model = "claude-sonnet-4-6", ContainerName = "fleet-cto" };
 
+        // Signalled rather than slept on. `TriggerAsync` starts the workflow on a fire-and-forget
+        // `Task.Run`, so a fixed delay is a race against the scheduler — it held locally and lost on
+        // a loaded CI runner, reading as `expected 1, actual 0` in a suite nobody had touched.
+        using var started = new SemaphoreSlim(0, 1);
+
         await WelcomeDmHelper.TriggerAsync(
             agent,
             saveWelcomeSentAt: () => Task.CompletedTask,
-            startWorkflow: () => { workflowStartCount++; return Task.CompletedTask; },
+            startWorkflow: () =>
+            {
+                workflowStartCount++;
+                started.Release();
+                return Task.CompletedTask;
+            },
             NullLogger.Instance);
 
-        await Task.Delay(100);
+        Assert.True(
+            await started.WaitAsync(TimeSpan.FromSeconds(10)),
+            "the fire-and-forget workflow start never ran");
+
+        // A second one would release nothing and leave the count above 1, so the wait above does not
+        // weaken the assertion it replaced.
         Assert.Equal(1, workflowStartCount);
     }
 }

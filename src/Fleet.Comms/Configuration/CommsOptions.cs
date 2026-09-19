@@ -145,6 +145,40 @@ public sealed class CommsOptions
     /// <summary>Broker connection for the two outbox publishers.</summary>
     public string BrokerConnectionString { get; set; } = "";
 
+    // ── Attachments (opt-in, #308) ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Directory holding attachment bytes. <b>Its presence is what enables attachments.</b>
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Unset means the feature is off: a non-empty <c>attachments</c> array on a submission is
+    /// refused exactly as it was before #308, the three attachment routes are not mapped at all, and
+    /// every other conversation route behaves byte-identically. That is a separate switch from
+    /// <see cref="ConversationConnectionString"/> on purpose — a deployment can run conversations
+    /// without provisioning a volume, and it should not have to pretend otherwise.
+    /// </para>
+    /// <para>
+    /// ⚠️ <b>The bytes here are NOT in the nightly database dump.</b> Their durability is this
+    /// volume's, and backing it up is a deployment decision. A restore of the database alone yields a
+    /// transcript whose images serve <c>410 attachment_gone</c> — correct, rendered deliberately by
+    /// the client, and not silent.
+    /// </para>
+    /// <para>
+    /// No default, for the same reason <see cref="AuthStorePath"/> has none: a relative fallback
+    /// resolves against whatever the working directory happens to be, and a deployment that never set
+    /// the key would come up healthy and lose every image on the next container recreation.
+    /// </para>
+    /// </remarks>
+    public string AttachmentRootPath { get; set; } = "";
+
+    /// <summary>
+    /// True when attachments are configured. Requires the conversation feature — there is nothing to
+    /// attach an image to without a transcript.
+    /// </summary>
+    public bool AttachmentsEnabled =>
+        ConversationsEnabled && !string.IsNullOrWhiteSpace(AttachmentRootPath);
+
     /// <summary>
     /// Fails fast on a configuration that cannot work, naming the missing key.
     /// </summary>

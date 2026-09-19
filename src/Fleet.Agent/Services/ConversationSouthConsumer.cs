@@ -69,6 +69,13 @@ public sealed class ConversationSouthConsumer : BackgroundService
     private readonly ConversationSouthHandoff _handoff;
     private readonly ConversationOrdinalAllocator _allocator;
     private readonly ConversationIntake _intake;
+
+    /// <summary>
+    /// Null when attachments are not configured, which leaves every attachment path here inert and a
+    /// command carrying ids behaving exactly as a text-only one (#308).
+    /// </summary>
+    private readonly ConversationAttachmentFetcher? _attachments;
+
     private readonly ConversationSouthCounters _counters;
     private readonly ILogger<ConversationSouthConsumer> _logger;
 
@@ -88,7 +95,8 @@ public sealed class ConversationSouthConsumer : BackgroundService
         ConversationOrdinalAllocator allocator,
         ConversationIntake intake,
         ConversationSouthCounters counters,
-        ILogger<ConversationSouthConsumer> logger)
+        ILogger<ConversationSouthConsumer> logger,
+        ConversationAttachmentFetcher? attachments = null)
     {
         _options = options.Value;
 
@@ -101,6 +109,7 @@ public sealed class ConversationSouthConsumer : BackgroundService
         _handoff = handoff;
         _allocator = allocator;
         _intake = intake;
+        _attachments = attachments;
         _counters = counters;
         _logger = logger;
     }
@@ -371,12 +380,33 @@ public sealed class ConversationSouthConsumer : BackgroundService
                     state.StartDrain(this, ct);
                 }
 
+                // Bytes are fetched BEFORE dispatch (#308 D7), because the executor takes them as a
+                // turn input and there is no way to hand it an image once the turn is running.
+                //
+                // A fetch that fails never abandons the turn: the turn runs with its text and the
+                // client is told which image did not arrive, rather than receiving an answer that
+                // reads as though none was sent (AC-29).
+                var requested = envelope.Payload?.Attachments ?? [];
+                var fetched = _attachments is null || requested.Count == 0
+                    ? ConversationAttachmentFetcher.Fetched.None
+                    : await _attachments.FetchAsync(requested, ct);
+
                 var dispatch = await _intake.SubmitAsync(
                     open.RuntimeKey,
                     envelope.Payload?.Text ?? string.Empty,
-                    attachments: null,
                     replyToEventId: envelope.Payload?.ReplyToEventId,
-                    submissionId: owned.SubmissionId);
+                    submissionId: owned.SubmissionId,
+                    images: fetched.Images);
+
+                // A notice, not a failure, and emitted through the intake — which already owns the
+                // event publisher and the identity plumbing. A second publish path here would be a
+                // second answer to "which identity does a client event carry".
+                //
+                // Fires for a PARTIAL failure and for a total one alike: the turn runs on its text
+                // either way (AC-29). Refusing the submission when nothing could be fetched would be
+                // a lie about a message the service already made durable.
+                if (fetched.Unavailable > 0 && dispatch is not null)
+                    _intake.PublishAttachmentNotice(open.RuntimeKey, fetched.Unavailable);
 
                 if (dispatch is null)
                 {
@@ -944,6 +974,15 @@ public sealed class ConversationSouthConsumer : BackgroundService
     {
         [JsonPropertyName("text")] public string? Text { get; init; }
         [JsonPropertyName("replyToEventId")] public string? ReplyToEventId { get; init; }
+
+        /// <summary>
+        /// Attachment ids this submission bound (#308 D7). <b>Descriptors only, never bytes and
+        /// never a path</b> — the bytes are fetched over the south listener.
+        /// </summary>
+        /// <remarks>
+        /// Absent on a text-only command, so an envelope written before #308 binds unchanged.
+        /// </remarks>
+        [JsonPropertyName("attachments")] public IReadOnlyList<string>? Attachments { get; init; }
     }
 
     /// <summary>One claimed delivery this process owns until its terminal is committed.</summary>

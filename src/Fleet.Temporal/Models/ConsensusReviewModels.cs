@@ -27,7 +27,18 @@ public sealed record ConsensusReviewInput(
     Dictionary<string, string>? AgentPerspectives = null,
 
     /// <summary>Agent responsible for synthesizing divergent reviews. Required — ConsensusReviewWorkflow will throw ArgumentException if null or empty.</summary>
-    string? Synthesizer = null);
+    string? Synthesizer = null,
+
+    /// <summary>
+    /// How long each reviewer (and the synthesizer) may take, in seconds. Optional: when null or
+    /// non-positive the workflow reads the deployment's <c>TemporalBridge:AgentTimeoutSeconds</c>
+    /// through an activity instead, so the same number drives both the agent's own budget and the
+    /// activity's StartToCloseTimeout.
+    ///
+    /// Set this only to override a deployment-wide value for one review. Raising it does not make
+    /// reviewers faster; it stops a slow-but-working review from being killed mid-turn.
+    /// </summary>
+    int? AgentBudgetSeconds = null);
 
 /// <summary>Output produced by the ConsensusReviewWorkflow.</summary>
 public sealed record ConsensusReviewOutput(

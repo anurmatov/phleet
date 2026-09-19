@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Fleet.Temporal.Configuration;
@@ -7,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
 using Temporalio.Activities;
+using Temporalio.Exceptions;
 
 namespace Fleet.Temporal.Activities;
 
@@ -68,20 +70,39 @@ public sealed class DelegateToAgentActivity
     ///   Text is the concatenation of all partial responses.
     /// </param>
     /// <param name="maxIncompleteRetries">Maximum continuation attempts (default 3).</param>
+    /// <param name="agentBudgetSeconds">
+    ///   How long the agent may take, in seconds. When greater than zero this is the authoritative
+    ///   budget AND the activity verifies at start that it was scheduled with a
+    ///   <c>StartToCloseTimeout</c> of at least budget + <see cref="AgentDelegationBudget.StartToCloseMargin"/>,
+    ///   failing non-retryably if not.
+    ///
+    ///   Zero (the default) keeps the historical behaviour for callers that do not supply one:
+    ///   the budget comes from <c>TemporalBridge:AgentTimeoutSeconds</c> and no ordering check is
+    ///   made. Those callers — notably UWE delegate steps, which size StartToClose from their own
+    ///   per-step <c>timeoutMinutes</c> — would otherwise be failed by a guard comparing their
+    ///   container against a deployment-wide constant they never asked for.
+    /// </param>
     [Activity]
     public async Task<AgentTaskResult> DelegateToAgentAsync(
         string agentName,
         string instruction,
         string taskId,
         bool retryOnIncomplete = true,
-        int maxIncompleteRetries = 3)
+        int maxIncompleteRetries = 3,
+        int agentBudgetSeconds = 0)
     {
         var ctx = ActivityExecutionContext.Current;
         _logger.LogInformation(
-            "DelegateToAgent: agent={Agent}, taskId={TaskId}, workflowId={WorkflowId}",
-            agentName, taskId, ctx.Info.WorkflowId);
+            "DelegateToAgent: agent={Agent}, taskId={TaskId}, workflowId={WorkflowId}, budgetSeconds={Budget}",
+            agentName, taskId, ctx.Info.WorkflowId, agentBudgetSeconds);
 
-        var timeout = TimeSpan.FromSeconds(_bridgeConfig.AgentTimeoutSeconds);
+        var budgetIsExplicit = agentBudgetSeconds > 0;
+        var timeout = budgetIsExplicit
+            ? TimeSpan.FromSeconds(agentBudgetSeconds)
+            : TimeSpan.FromSeconds(_bridgeConfig.AgentTimeoutSeconds);
+
+        if (budgetIsExplicit)
+            GuardTimerOrdering(ctx, timeout, agentName, taskId);
 
         // Register before publishing — avoids a race where response arrives before TCS is registered
         var tcs = _registry.Register(taskId);
@@ -92,7 +113,7 @@ public sealed class DelegateToAgentActivity
         }
         catch (Exception ex)
         {
-            _registry.TryCancel(taskId);
+            _registry.TryCancel(taskId, tcs);
             _logger.LogError(ex, "Failed to publish directive to agent {Agent}", agentName);
             throw;
         }
@@ -128,7 +149,7 @@ public sealed class DelegateToAgentActivity
                 }
                 catch (Exception ex)
                 {
-                    _registry.TryCancel(retryTaskId);
+                    _registry.TryCancel(retryTaskId, retryTcs);
                     _logger.LogError(ex, "Failed to publish continuation directive to agent {Agent} (attempt {Attempt})", agentName, attempt);
                     throw;
                 }
@@ -151,20 +172,57 @@ public sealed class DelegateToAgentActivity
             await TrySendCancelAsync(agentName, taskId);
             throw;
         }
-        catch (TimeoutException)
+        catch (TimeoutException ex)
         {
-            var msg = $"Agent {agentName} did not respond within {(int)timeout.TotalMinutes} minutes (taskId={taskId}, workflowId={ctx.Info.WorkflowId})";
-            _logger.LogWarning("{Message}", msg);
-            await TryReportTimeoutToActoAsync(agentName, taskId, ctx.Info.WorkflowId, timeout);
-            throw new TimeoutException(msg);
+            // The message is built where the elapsed time is actually measured, so the number
+            // reported is a measurement rather than a restatement of the configured budget.
+            _logger.LogWarning("{Message}", ex.Message);
+            await TryReportTimeoutToActoAsync(agentName, taskId, ex.Message);
+            throw;
         }
     }
 
     /// <summary>
+    /// Fails non-retryably when the activity was scheduled inside a container shorter than the
+    /// budget it is being asked to enforce.
+    ///
+    /// Without this, the two timers can be ordered backwards — Temporal kills the attempt while
+    /// the agent is still working, the activity never reaches its own timeout path, and nothing
+    /// in the failure says why. A grep over workflow files would not catch a JSON-defined caller;
+    /// checking the container the SDK actually reports does.
+    /// </summary>
+    private void GuardTimerOrdering(ActivityExecutionContext ctx, TimeSpan budget, string agentName, string taskId)
+    {
+        var required = AgentDelegationBudget.StartToCloseFor(budget);
+        var scheduled = ctx.Info.StartToCloseTimeout;
+
+        if (scheduled is null)
+        {
+            // Only ScheduleToClose was set. Nothing to compare against, and refusing would break a
+            // legitimate caller, so record it and continue.
+            _logger.LogWarning(
+                "DelegateToAgent scheduled without a StartToCloseTimeout (agent={Agent}, taskId={TaskId}) — cannot verify it outlasts the {Budget} agent budget",
+                agentName, taskId, budget);
+            return;
+        }
+
+        if (scheduled >= required) return;
+
+        throw new ApplicationFailureException(
+            $"DelegateToAgent for agent {agentName} was scheduled with StartToCloseTimeout {scheduled.Value} " +
+            $"but was given a {budget} agent budget, which needs at least {required} " +
+            $"(budget + {AgentDelegationBudget.StartToCloseMargin} margin). Temporal would kill this attempt " +
+            $"while the agent is still working. Fix the caller's ActivityOptions, not this budget. " +
+            $"(taskId={taskId}, workflowId={ctx.Info.WorkflowId})",
+            errorType: "MisorderedAgentTimeouts",
+            nonRetryable: true);
+    }
+
+    /// <summary>
     /// Waits for an agent response with heartbeating and periodic re-publication.
-    /// Throws <see cref="TimeoutException"/> if the configured timeout elapses.
-    /// Does NOT call TryReportTimeoutToActoAsync — that is the caller's responsibility
-    /// so notification fires only once after all retries are exhausted.
+    /// Throws <see cref="TimeoutException"/> if the agent budget elapses, carrying the MEASURED
+    /// elapsed time. Does NOT call TryReportTimeoutToActoAsync — that is the caller's
+    /// responsibility so notification fires only once after all retries are exhausted.
     /// </summary>
     private async Task<AgentTaskResult> WaitForResponseAsync(
         string agentName,
@@ -174,6 +232,8 @@ public sealed class DelegateToAgentActivity
         TimeSpan timeout,
         string instruction)
     {
+        var started = Stopwatch.StartNew();
+
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ctx.CancellationToken);
         timeoutCts.CancelAfter(timeout);
 
@@ -240,29 +300,58 @@ public sealed class DelegateToAgentActivity
         }
         catch (OperationCanceledException) when (ctx.CancellationToken.IsCancellationRequested)
         {
-            _registry.TryCancel(taskId);
+            _registry.TryCancel(taskId, tcs);
             throw; // activity cancellation — caller sends /cancel to the agent
+        }
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+        {
+            // Our own budget elapsed — convert to TimeoutException so the caller can notify the
+            // escalation target once. The elapsed value is measured here; the budget is labelled
+            // as a budget so the two can never be read as the same thing.
+            _registry.TryCancel(taskId, tcs);
+            throw new TimeoutException(
+                $"Agent {agentName} did not respond — elapsed {Format(started.Elapsed)} " +
+                $"(budget {Format(timeout)}, taskId={taskId}, workflowId={ctx.Info.WorkflowId})");
         }
         catch (OperationCanceledException)
         {
-            // Timeout CTS fired — convert to TimeoutException so the caller can notify the escalation target once
-            _registry.TryCancel(taskId);
-            throw new TimeoutException($"Agent {agentName} timed out (taskId={taskId})");
+            // Neither this activity's cancellation nor its own budget: the completion source was
+            // cancelled by something else — registry shutdown, or (before compare-and-remove
+            // landed) a stale attempt's cleanup taking down its successor. Reporting a timeout
+            // here is what produced "did not respond within 90 minutes" about thirty seconds into
+            // an attempt, and sent the first investigation of #321 the wrong way.
+            _registry.TryCancel(taskId, tcs);
+            throw new ApplicationFailureException(
+                $"Delegation to agent {agentName} was aborted before any response — elapsed " +
+                $"{Format(started.Elapsed)}, well inside its {Format(timeout)} budget. This is not a " +
+                $"timeout: the pending registration was cancelled by something other than this " +
+                $"activity. (taskId={taskId}, workflowId={ctx.Info.WorkflowId})",
+                errorType: "DelegationAborted");
         }
     }
+
+    /// <summary>Compact, honest duration rendering — sub-minute values keep their seconds.</summary>
+    private static string Format(TimeSpan span) =>
+        span.TotalMinutes >= 1
+            ? $"{span.TotalMinutes:0.0}m"
+            : $"{span.TotalSeconds:0.0}s";
 
     /// <summary>
     /// Best-effort: notifies the escalation target in the group chat that an agent timed out.
     /// Uses a fresh CancellationToken since the activity's own token is already cancelled.
     /// Swallows exceptions — this is fire-and-forget visibility only.
     /// </summary>
-    private async Task TryReportTimeoutToActoAsync(string agentName, string taskId, string workflowId, TimeSpan timeout)
+    /// <param name="detail">
+    /// The timeout exception's own message, so the elapsed time the escalation target reads is
+    /// the same measured number the workflow failure carries.
+    /// </param>
+    private async Task TryReportTimeoutToActoAsync(string agentName, string taskId, string detail)
     {
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             var escalationTarget = FleetWorkflowConfig.Instance.EscalationTarget;
-            var report = $"[temporal] activity timeout: agent={agentName} did not respond within {(int)timeout.TotalMinutes}m. taskId={taskId}, workflowId={workflowId}. the workflow will fail this activity.";
+            var report = $"[temporal] activity timeout: {detail}. the workflow will fail this activity.";
             await PublishDirectiveAsync(escalationTarget, report, taskId + "/timeout-report", EffectiveGroupChatId, cts.Token);
             _logger.LogInformation("Timeout report sent to {EscalationTarget} for agent {Agent}, taskId={TaskId}", escalationTarget, agentName, taskId);
         }

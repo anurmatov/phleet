@@ -692,7 +692,41 @@ public sealed class ContainerProvisioningService(
     }
 
     /// <summary>
-    /// Generates roles/_base/system.md and roles/{role}/system.md from DB instruction content
+    /// The agent's assigned instructions in load order, with the tiebreak applied.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠️ <b>One definition, used by both generators.</b> The files under <c>.generated/roles/</c>
+    /// and the <c>InstructionOrder</c> list in <c>appsettings.json</c> describe the same set, and
+    /// the agent inlines the files in the order that list gives. Two sort expressions would be two
+    /// answers to one question, and the disagreement would surface as an instruction that is on
+    /// disk and never assembled — which is the defect #309 exists to close.
+    /// </para>
+    /// <para>
+    /// <c>LoadOrder</c> is not unique, so it is not a total order on its own. The name is the
+    /// tiebreak, ordinal, so two instructions sharing a load order have a defined position rather
+    /// than whatever the database happened to return.
+    /// </para>
+    /// </remarks>
+    internal static List<AgentInstruction> OrderedInstructions(Agent agent) =>
+        agent.Instructions
+            .OrderBy(ai => ai.LoadOrder)
+            .ThenBy(ai => ai.Instruction.Name, StringComparer.Ordinal)
+            .ToList();
+
+    /// <summary>
+    /// The <c>roles/</c> subdirectory an instruction is written to.
+    /// </summary>
+    /// <remarks>
+    /// The <c>base</c> → <c>_base</c> rename lives here and nowhere else. The agent is handed the
+    /// resulting directory names rather than the instruction names, so it never has to re-implement
+    /// this mapping — a second copy of it is a second thing that can drift.
+    /// </remarks>
+    internal static string InstructionDirectoryName(string instructionName) =>
+        instructionName == "base" ? "_base" : instructionName;
+
+    /// <summary>
+    /// Generates roles/_base/system.md and roles/{name}/system.md from DB instruction content
     /// into the agent's .generated/roles/ workspace directory before the container is started.
     /// </summary>
     private async Task GenerateInstructionFilesAsync(
@@ -702,9 +736,7 @@ public sealed class ContainerProvisioningService(
     {
         var rolesDir = Path.Combine(baseDir, "workspaces", agent.ContainerName, ".generated", "roles");
 
-        var instructions = agent.Instructions
-            .OrderBy(ai => ai.LoadOrder)
-            .ToList();
+        var instructions = OrderedInstructions(agent);
 
         if (instructions.Count == 0)
         {
@@ -747,7 +779,7 @@ public sealed class ContainerProvisioningService(
             }
 
             // "base" → _base/system.md, anything else → {name}/system.md
-            var subDir = instruction.Name == "base" ? "_base" : instruction.Name;
+            var subDir = InstructionDirectoryName(instruction.Name);
             var dir    = Path.Combine(rolesDir, subDir);
             Directory.CreateDirectory(dir);
 
@@ -875,6 +907,17 @@ public sealed class ContainerProvisioningService(
                 agent.JsonSchema,
                 agent.AgentsJson,
                 agent.CodexSandboxMode,
+
+                // #309. Every assigned instruction, as roles/ directory names, in load order.
+                //
+                // Before this the agent read two fixed paths — roles/_base and roles/{Role} — so
+                // every other assigned instruction was written to disk and never read, with no
+                // error and no log line. The agent cannot derive this list itself: a directory
+                // listing has no load order, and it cannot distinguish an assigned instruction
+                // from a stale directory left by one that was unassigned.
+                InstructionOrder = OrderedInstructions(agent)
+                    .Select(ai => InstructionDirectoryName(ai.Instruction.Name))
+                    .ToList(),
             },
             Telegram = new
             {

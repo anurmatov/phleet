@@ -38,6 +38,25 @@ public sealed class AgentOptions
     public int ToolArgsTruncateLength { get; set; } = 300;
     public string Provider { get; set; } = "claude";
     public string? CodexSandboxMode { get; set; }
+
+    /// <summary>
+    /// Every instruction assigned to this agent, as <c>roles/</c> directory names, already in the
+    /// orchestrator's load order (#309).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The agent reads instructions off the filesystem, where a directory listing carries names and
+    /// nothing else — no <c>load_order</c>, and no way to tell an assigned instruction from one that
+    /// was unassigned and left a stale directory behind. So the order is <b>supplied</b>, not
+    /// inferred: the orchestrator already knows both, and it writes the answer here.
+    /// </para>
+    /// <para>
+    /// <b>Empty means "config generated before #309".</b> An agent that has not been reprovisioned
+    /// has no such key, and <see cref="Services.PromptBuilder"/> falls back to exactly the two files
+    /// it read before — so an existing agent's prompt does not change until it is reprovisioned.
+    /// </para>
+    /// </remarks>
+    public List<string> InstructionOrder { get; set; } = [];
 }
 
 public sealed class TelegramOptions

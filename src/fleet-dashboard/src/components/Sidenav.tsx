@@ -8,6 +8,7 @@ interface SidenavProps {
   attentionWorkflowCount: number
   instructionCount: number
   projectContextCount: number
+  outputStyleCount: number
   wfDefinitionCount: number
   namespaceCount: number
   unreadAlertCount: number
@@ -23,7 +24,7 @@ interface SidenavProps {
 
 export default function Sidenav({
   activeView, onNavigate,
-  agentCount, activeWorkflowCount, attentionWorkflowCount, instructionCount, projectContextCount, wfDefinitionCount, namespaceCount, unreadAlertCount,
+  agentCount, activeWorkflowCount, attentionWorkflowCount, instructionCount, projectContextCount, outputStyleCount, wfDefinitionCount, namespaceCount, unreadAlertCount,
   reprovisionAllState, reprovisionAllMsg,
   onReprovisionAll, onReprovisionAllConfirm, onReprovisionAllCancel,
   onNewAgent,
@@ -74,6 +75,14 @@ export default function Sidenav({
         >
           <span className="sidenav-item-label">Project Contexts</span>
           <span className="sidenav-badge">{projectContextCount}</span>
+        </button>
+
+        <button
+          className={`sidenav-item${activeView === 'output-styles' ? ' active' : ''}`}
+          onClick={() => { onNavigate('output-styles'); onNavClose() }}
+        >
+          <span className="sidenav-item-label">Output Styles</span>
+          <span className="sidenav-badge">{outputStyleCount}</span>
         </button>
 
         <button

@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Threading.RateLimiting;
 using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Endpoints;
 using Fleet.Orchestrator.Helpers;
 using Fleet.Orchestrator.Services;
 using Microsoft.AspNetCore.RateLimiting;
@@ -120,14 +121,10 @@ if (!string.IsNullOrWhiteSpace(orchestratorAuthToken))
         var method = context.Request.Method;
         var path   = context.Request.Path.Value ?? "";
 
-        // Only protect mutating HTTP methods; skip GETs, WebSocket upgrades, /health, /mcp
-        var isReadOnly   = HttpMethods.IsGet(method) || HttpMethods.IsHead(method) || HttpMethods.IsOptions(method);
-        var isExemptPath = path.StartsWith("/ws", StringComparison.OrdinalIgnoreCase)
-                        || path.StartsWith("/mcp", StringComparison.OrdinalIgnoreCase)
-                        || path.StartsWith("/api/config", StringComparison.OrdinalIgnoreCase)
-                        || path.Equals("/health", StringComparison.OrdinalIgnoreCase);
-
-        if (isReadOnly || isExemptPath)
+        // Only protect mutating HTTP methods; skip GETs, WebSocket upgrades, /health, /mcp.
+        // The rule lives in OrchestratorAuth so the endpoint tests can gate a host on the same
+        // predicate rather than a copy of it.
+        if (!OrchestratorAuth.RequiresBearerToken(method, path))
         {
             await next(context);
             return;
@@ -567,26 +564,12 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     return Results.Ok(new { message = $"Agent '{name}' config updated" });
 });
 
+// REST: the /api/output-styles surface (#317) — list, read, create, update and delete.
+// Mapped from Endpoints/OutputStyleEndpoints.cs so the endpoint tests exercise the same
+// handlers a live orchestrator serves rather than a copy of them.
+app.MapOutputStyleEndpoints();
+
 // REST: list all instructions with version summary
-// REST: list the named output styles an agent can be switched to.
-// Read-only and unauthenticated like the other GET /api/* reads — the dashboard populates its
-// output-style select from this, and a select with nothing in it is the same as no control.
-app.MapGet("/api/output-styles", async (IServiceScopeFactory scopeFactory, CancellationToken ct) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
-
-    var styles = await db.OutputStyles
-        .AsNoTracking()
-        .OrderBy(s => s.Name)
-        .Select(s => new { s.Name, s.Description })
-        .ToListAsync(ct);
-
-    return Results.Ok(styles);
-});
-
 app.MapGet("/api/instructions", async (IServiceScopeFactory scopeFactory) =>
 {
     using var scope = scopeFactory.CreateScope();
@@ -2796,6 +2779,9 @@ record InstructionAssignmentEntry(string InstructionName, int LoadOrder);
 
 record InstructionCreateRequest(string Name, string Content, string? Reason, string? CreatedBy);
 record InstructionUpdateRequest(string Content, string? Reason, string? CreatedBy);
+
+// No Description field on either: it is read out of the body's frontmatter on write, so it cannot
+// drift from what the style actually says.
 
 record ProjectContextCreateRequest(string Name, string Content, string? CreatedBy);
 record ProjectContextUpdateRequest(string Content, string? Reason, string? CreatedBy);

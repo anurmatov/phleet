@@ -51,6 +51,7 @@ import StartWorkflowModal from './components/StartWorkflowModal'
 import SchedulesView from './components/SchedulesView'
 import NamespacesView from './components/NamespacesView'
 import RepositoriesView from './components/RepositoriesView'
+import OutputStylesView from './components/OutputStylesView'
 import CredentialsView from './components/CredentialsView'
 import MemoryView from './components/MemoryView'
 import { MemoryIdCacheProvider } from './context/MemoryIdCacheContext'
@@ -226,19 +227,32 @@ export default function App() {
   const [deleteMsg, setDeleteMsg] = useState<Record<string, string>>({})
 
   // Navigation state — synced with URL hash
-  const VALID_VIEWS: ActiveView[] = ['agents', 'workflows', 'instructions', 'project-contexts', 'wf-definitions', 'alerts', 'schedules', 'namespaces', 'repositories', 'credentials']
-  const [activeView, setActiveViewState] = useState<ActiveView>(() => {
-    const hash = window.location.hash.slice(1) as ActiveView
-    return VALID_VIEWS.includes(hash) ? hash : 'agents'
-  })
+  const VALID_VIEWS: ActiveView[] = ['agents', 'workflows', 'instructions', 'project-contexts', 'output-styles', 'wf-definitions', 'alerts', 'schedules', 'namespaces', 'repositories', 'credentials']
+  // `#view` or `#view/param`. The second segment exists so a link can name a row rather than
+  // only a page — without it `#output-styles/alpha` matches no view and silently lands on agents.
+  // `#view` or `#view/param`. The second segment exists so a link can name a row rather than
+  // only a page — without it `#output-styles/alpha` matches no view and silently lands on agents.
+  // Null for anything unrecognised, which leaves the current view alone exactly as before.
+  function parseHash(): { view: ActiveView; param: string } | null {
+    const raw = window.location.hash.slice(1)
+    const slash = raw.indexOf('/')
+    const head = (slash === -1 ? raw : raw.slice(0, slash)) as ActiveView
+    if (!VALID_VIEWS.includes(head)) return null
+    return { view: head, param: slash === -1 ? '' : decodeURIComponent(raw.slice(slash + 1)) }
+  }
+  const [activeView, setActiveViewState] = useState<ActiveView>(() => parseHash()?.view ?? 'agents')
+  const [viewParam, setViewParam] = useState<string>(() => parseHash()?.param ?? '')
   const setActiveView = useCallback((view: ActiveView) => {
     setActiveViewState(view)
+    setViewParam('')
     window.history.replaceState(null, '', `#${view}`)
   }, [])
   useEffect(() => {
     function onHashChange() {
-      const hash = window.location.hash.slice(1) as ActiveView
-      if (VALID_VIEWS.includes(hash)) setActiveViewState(hash)
+      const parsed = parseHash()
+      if (!parsed) return
+      setActiveViewState(parsed.view)
+      setViewParam(parsed.param)
     }
     window.addEventListener('hashchange', onHashChange)
     return () => window.removeEventListener('hashchange', onHashChange)
@@ -396,6 +410,15 @@ export default function App() {
       .finally(() => setInstructionsLoading(false))
   }
 
+  // Populates the output-style select and the sidenav count. On failure the list stays empty and
+  // the select still offers "none", so a styled agent can always be switched back off.
+  function loadOutputStyles() {
+    apiFetch('/api/output-styles')
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then((list: OutputStyleSummary[]) => setOutputStyles(list))
+      .catch(() => setOutputStyles([]))
+  }
+
   function loadProjectContexts() {
     setProjectContextsLoading(true)
     apiFetch('/api/project-contexts')
@@ -435,6 +458,7 @@ export default function App() {
 
     loadInstructions()
     loadProjectContexts()
+    loadOutputStyles()
     fetchCompleted()
 
     apiFetch('/api/setup/status')
@@ -749,12 +773,8 @@ export default function App() {
       .then((data: { projects: string[] }) => setProjectAccess(data.projects))
       .catch(() => setProjectAccess([]))
       .finally(() => setProjectAccessLoading(false))
-    // Populates the output-style select. On failure the list stays empty and the select still
-    // offers "none", so a styled agent can always be switched back off.
-    apiFetch('/api/output-styles')
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
-      .then((list: OutputStyleSummary[]) => setOutputStyles(list))
-      .catch(() => setOutputStyles([]))
+    // Refresh in case a style was added or removed since the page loaded.
+    loadOutputStyles()
     apiFetch(`/api/agents/${encodeURIComponent(agentName)}/config`)
       .then(r => r.ok ? r.json() : Promise.reject(r.status))
       .then((cfg: AgentConfig) => {
@@ -1713,6 +1733,7 @@ export default function App() {
         attentionWorkflowCount={workflows.filter(wf => getSignalDefs(wf).length > 0).length}
         instructionCount={instructions.length}
         projectContextCount={projectContexts.length}
+        outputStyleCount={outputStyles.length}
         wfDefinitionCount={wfDefs.length}
         namespaceCount={apiNamespaces.length}
         unreadAlertCount={unreadAlerts.length}
@@ -2001,6 +2022,15 @@ export default function App() {
             schedules={schedules}
             workflowTypes={workflowTypes}
             schedulesLoading={schedulesLoading}
+          />
+        )}
+
+        {activeView === 'output-styles' && (
+          <OutputStylesView
+            initialStyle={viewParam}
+            // The sidenav badge and the agent config select both read App's copy of the list, so a
+            // create or delete on this page has to say so or they stay at the count from mount.
+            onStylesChanged={loadOutputStyles}
           />
         )}
 

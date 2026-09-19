@@ -97,3 +97,78 @@ Two rules the shipped `fleet-messaging` style follows and a new one should too:
 
 A name with no row makes provisioning refuse outright rather than emit an unresolvable reference,
 so a typo fails at the edit or at the reprovision — not silently at runtime.
+
+## Reading and editing a style
+
+Seeding is create-if-absent, which is what lets an operator edit survive a redeploy — and it also
+means **the API is the only way an existing row ever changes.** Editing the `.md` in the repo and
+redeploying does nothing once the row exists.
+
+### REST
+
+| Method | Route | |
+|---|---|---|
+| `GET` | `/api/output-styles` | every style with its body and the agents assigned to it |
+| `GET` | `/api/output-styles/{name}` | one style |
+| `POST` | `/api/output-styles` | create — `{ "name": …, "body": … }` |
+| `PUT` | `/api/output-styles/{name}` | replace the body |
+| `DELETE` | `/api/output-styles/{name}` | refused with `409` while any agent names the style |
+
+`GET` is unauthenticated like the other `/api/*` reads; the writes go through the bearer
+middleware.
+
+**`description` is derived from the body's frontmatter, never sent as its own field.** Two places
+to say what a style is for is two places to disagree, and the one the operator reads in the list
+would not be the one Claude Code obeys.
+
+**The name is not editable.** It is the value `agents.OutputStyle` holds, so renaming the row
+orphans every agent pointing at it. Rename is create + reassign + delete.
+
+**Delete refuses rather than cascades.** An agent whose style is missing writes an `outputStyle`
+into `settings.json` that resolves to nothing, and `system/init` keeps reporting the configured
+name — the silent degrade at the top of this document. The `409` names the agents to clear first.
+
+### MCP
+
+`manage_output_styles` with `action` ∈ `list | get | create | update | delete`, same shape as the
+`manage_agent_*` tools. Operator-agent only.
+
+⚠️ **The tool does not reach an agent by being merged.** Two steps are needed on a deployment that
+already exists, neither of which any deploy performs:
+
+1. **Grant it.** `manage_output_styles` needs an `agent_tools` row for the operator agent, then a
+   reprovision — a tool with no grant is absent from the generated `settings.json` allow-list.
+2. **Push the operator instruction text.** The `## output styles` section in the `co-cto` role file
+   only reaches a *fresh* database. `DbSeeder.UpsertInstructionAsync` is named for an upsert but
+   is create-if-absent — it logs `already exists, skipping` and returns — so a redeploy never
+   updates an instruction row that is already there. Edit the row through the instructions API or
+   the dashboard instead.
+
+That second one is the same frozen-row property this page documents for styles, one file over. It
+is deliberate in both places for the same reason — an operator edit must survive a redeploy — and
+it means repo text is a starting point for a new install, never a way to update a live one.
+
+### Dashboard
+
+**Output Styles** in the sidenav: the list on the left, the style file in an editor on the right,
+and the agents on each style beside it with a reprovision button each. The agent config modal's
+Output Style select links through to it.
+
+### What a write refuses
+
+Claude Code reports the configured style name in `system/init` whether or not the file behind it
+resolved, so nothing downstream can catch a malformed style — the write is the only place. A body
+is refused when:
+
+- it has no closed YAML frontmatter block,
+- its frontmatter `name:` is not byte-identical to the style name (Claude Code matches on the
+  frontmatter name, so a disagreement is a style that silently does not load),
+- `description:` is absent,
+- there is nothing after the frontmatter,
+- `keep-coding-instructions` carries anything other than `true` or `false`.
+
+### After an edit
+
+**A style reaches an agent at provision time and no sooner.** Saving changes no running agent —
+reprovision each one listed against the style. A warm session can also keep the register it
+started with, so verify against a fresh one.

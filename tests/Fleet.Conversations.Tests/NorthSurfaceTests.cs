@@ -202,6 +202,94 @@ public sealed class NorthSurfaceTests(MySqlFixture fixture)
             $"SELECT COUNT(*) FROM submissions WHERE conversation_id = '{conversation.ConversationId}'"));
     }
 
+    /// <summary>
+    /// #305. A client that kept nothing locally and catches up from its cursor gets its OWN
+    /// messages back, in the server's order, through the real routes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the reported defect, end to end: the owner relaunched the client and every reply was
+    /// still there while everything he had sent was gone. Nothing here persists a sent message —
+    /// the text is POSTed and then only ever read back out of <c>GET …/events</c>, which is what
+    /// makes the assertion about the server's transcript rather than about a local echo.
+    /// </para>
+    /// <para>
+    /// Over HTTP and against the real store, because the two halves that could each be wrong alone
+    /// are the route (does it forward the text at all?) and the store (does the entry land where
+    /// the response said it would?). A fake answers the first and agrees with itself on the second.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task Catching_up_from_a_cursor_returns_the_clients_own_messages_in_order()
+    {
+        var store = fixture.CreateStore();
+
+        var conversation = await store.OpenConversationAsync(new OpenConversationRequest
+        {
+            ChannelId = "client",
+            ExternalRef = "conv-" + Ulid.NewUlid(),
+            PrincipalId = OwnerPrincipal,
+        });
+
+        await using var host = await NorthHost.StartAsync(store);
+        var token = await host.EnrolledTokenAsync();
+
+        async Task<ulong> SubmitAsync(string text)
+        {
+            var response = await host.PostAsync(
+                $"/v1/conversations/{conversation.ConversationId}/submissions", token,
+                new
+                {
+                    protocol = ProtocolVersion.Current,
+                    type = "create",
+                    submissionId = Guid.NewGuid().ToString("n"),
+                    text,
+                });
+
+            Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+
+            var accepted = await response.Content.ReadFromJsonAsync<AcceptedSubmission>(
+                FleetProtocolJson.Options);
+
+            return accepted!.AcceptedSeq;
+        }
+
+        var firstSeq = await SubmitAsync("what is open?");
+        await SubmitAsync("and what closed yesterday?");
+
+        // The relaunch. The whole conversation is replayed from the floor the FIRST submission
+        // reported, using the documented `afterSeq = acceptedSeq - 1` arithmetic and nothing else.
+        var page = await host.GetAsync(
+            $"/v1/conversations/{conversation.ConversationId}/events?afterSeq={firstSeq - 1}", token);
+
+        Assert.Equal(HttpStatusCode.OK, page.StatusCode);
+
+        var body = await page.Content.ReadFromJsonAsync<CatchUpPage>(FleetProtocolJson.Options);
+
+        Assert.NotNull(body);
+
+        var sent = body!.Events
+            .Where(e => e.Kind == ConversationEventKind.SubmissionText)
+            .Select(e => e.PayloadAs<SubmissionTextPayload>()!.Text)
+            .ToArray();
+
+        Assert.Equal(["what is open?", "and what closed yesterday?"], sent);
+
+        // Ordered by the SERVER's sequence, not by arrival or by a client clock — which is the
+        // reason this is one log rather than a client-side merge of two sources.
+        var seqs = body.Events
+            .Where(e => e.Kind == ConversationEventKind.SubmissionText)
+            .Select(e => e.Seq)
+            .ToArray();
+
+        Assert.Equal((long)firstSeq, seqs[0]);
+        Assert.True(seqs[1] > seqs[0]);
+    }
+
+    private sealed record AcceptedSubmission(string SubmissionId, ulong AcceptedSeq);
+
+    private sealed record CatchUpPage(IReadOnlyList<ConversationEvent> Events);
+
     private const string OwnerPrincipal = "p_owner";
 
     /// <summary>
@@ -286,6 +374,13 @@ public sealed class NorthSurfaceTests(MySqlFixture fixture)
                 Content = new StringContent(
                     FleetProtocolJson.Serialize(body), Encoding.UTF8, "application/json"),
             };
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            return Client.SendAsync(request);
+        }
+
+        public Task<HttpResponseMessage> GetAsync(string path, string token)
+        {
+            var request = new HttpRequestMessage(HttpMethod.Get, path);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             return Client.SendAsync(request);
         }

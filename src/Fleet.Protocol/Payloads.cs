@@ -19,6 +19,27 @@ public sealed record ProtocolRejectedPayload
     public required string Message { get; init; }
 }
 
+/// <summary>
+/// The transcript entry for an accepted submission: the text the user sent (#305).
+/// </summary>
+/// <remarks>
+/// <para>
+/// One field, deliberately. Whether the submission was a <c>create</c> or a <c>steer</c> is already
+/// on the wire as <c>submission.accepted { disposition }</c> — <c>injected</c> is precisely a steer
+/// folded into a running turn — and a second encoding of the same fact is a second thing to keep in
+/// step.
+/// </para>
+/// <para>
+/// There is no <c>truncated</c> flag because this text is never truncated. The inbound cap
+/// (<see cref="ProtocolLimits.MaxInboundTextBytes"/>) is enforced BEFORE the submission becomes
+/// durable, so an over-cap submission has no transcript entry rather than a shortened one.
+/// </para>
+/// </remarks>
+public sealed record SubmissionTextPayload
+{
+    public required string Text { get; init; }
+}
+
 /// <summary>What dispatch did with the submission (D5).</summary>
 public sealed record SubmissionAcceptedPayload
 {

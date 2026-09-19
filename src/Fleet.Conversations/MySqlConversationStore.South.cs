@@ -107,16 +107,62 @@ public sealed partial class MySqlConversationStore
             }
         }
 
+        return await WriteEventAsync(
+            connection, transaction, conversation,
+            eventId, kind, payloadJson, submissionId, attemptId,
+            retentionClass, isTerminal, ordinal, ct);
+    }
+
+    /// <summary>
+    /// Allocates a <c>seq</c> and writes the event row and its outbox row. No fence, no idempotency
+    /// check, no terminal check — the caller owns all three.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Split out of <see cref="AppendEventAsync"/> so the accept transaction can append without
+    /// entering the appender fence. The fence orders the AGENT's append stream against itself:
+    /// <c>appender_epoch</c> and <c>last_ordinal</c> are that stream's bookkeeping, and an
+    /// independent writer passing its own epoch through it would either be refused as stale or reset
+    /// the agent's ordinal counter out from under it.
+    /// </para>
+    /// <para>
+    /// <paramref name="ordinal"/> is therefore nullable: <c>null</c> leaves <c>last_ordinal</c>
+    /// untouched, which is correct for a writer that is not part of that stream. It is safe only
+    /// because every caller already holds the conversation row lock, which is the real serialization
+    /// point for <c>next_seq</c>.
+    /// </para>
+    /// </remarks>
+    private static async Task<ulong> WriteEventAsync(
+        MySqlConnection connection,
+        MySqlTransaction transaction,
+        ConversationRow conversation,
+        string eventId,
+        string kind,
+        string? payloadJson,
+        string? submissionId,
+        string? attemptId,
+        EventRetentionClass retentionClass,
+        bool isTerminal,
+        ulong? ordinal,
+        CancellationToken ct)
+    {
         var allocated = conversation.NextSeq;
 
         await using (var bump = Command(
-            """
-            UPDATE conversations
-               SET next_seq = next_seq + 1, last_ordinal = @ordinal, last_activity_at = UTC_TIMESTAMP(6)
-             WHERE id = @id
-            """, connection, transaction))
+            ordinal is null
+                ? """
+                  UPDATE conversations
+                     SET next_seq = next_seq + 1, last_activity_at = UTC_TIMESTAMP(6)
+                   WHERE id = @id
+                  """
+                : """
+                  UPDATE conversations
+                     SET next_seq = next_seq + 1, last_ordinal = @ordinal,
+                         last_activity_at = UTC_TIMESTAMP(6)
+                   WHERE id = @id
+                  """, connection, transaction))
         {
-            bump.Parameters.AddWithValue("@ordinal", ordinal);
+            if (ordinal is { } value) bump.Parameters.AddWithValue("@ordinal", value);
             bump.Parameters.AddWithValue("@id", conversation.Id);
             await bump.ExecuteNonQueryAsync(ct);
         }

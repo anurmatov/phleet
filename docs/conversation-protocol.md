@@ -92,6 +92,7 @@ them additively.
 | `kind` | Payload |
 |---|---|
 | `protocol.rejected` | `code`, `message` — intake refusal, before any turn exists |
+| `submission.text` | `text` — the transcript entry: what the user actually sent |
 | `submission.accepted` | `disposition` ∈ `ran`\|`injected`\|`queued`\|`queue_full`\|`dropped`, `queuePosition?` |
 | `turn.started` | — |
 | `turn.progress` | `activity` ∈ `typing`\|`tool`, `toolName?` |
@@ -266,10 +267,55 @@ All additive, all appended, and `protocol` stays `fleet.conversation.v1`.
 | `OutcomeUnknownReason.attempt_abandoned` | the reconciler's reason, and **its only producer**. `turn_reaped` belongs to the agent's own run loop and is stored verbatim rather than produced here |
 | `ProtocolErrorCode.idempotency_conflict` | the same key presented with a different payload fingerprint |
 | `ProtocolErrorCode.invalid_cursor` | a cursor that is negative, non-integral, out of range, or at or beyond `nextSeq` |
+| kind `submission.text` | the transcript entry, appended in the accept transaction (#305) — see below |
 | kind `conversation.replay_gap` | owed durable history, **synthetic and never stored** — it carries `seq: null` |
 | kinds `conversation.catchup`, `conversation.ack` | the client's catch-up request and cursor advance |
 | optional `idempotencyKey` on `submission.create` | |
 | optional `clientInstanceId` on `conversation.open` | opaque bookkeeping for cursors; **not a credential and not device identity** |
+
+### `submission.text` — the user's own messages are part of the log (#305)
+
+Before this, no event kind carried the text a client had sent. A client that relaunched and caught
+up from its cursor got the agent's events and nothing of its own: answers with no questions.
+
+**The entry is appended in the accept transaction**, under the conversation row lock that
+transaction already holds, and it takes the very `seq` the accept reports as `acceptedSeq`. Four
+consequences, each of which is the reason for a decision rather than a restatement of it:
+
+- **It sorts before everything its turn produces.** `submission.accepted`, `turn.started` and the
+  terminal are all appended later and take higher seqs.
+- **It cannot interleave ahead of an earlier submission.** Concurrent accepts serialize on the row
+  lock and now consume a seq each. *(Before, no accept advanced `next_seq`, so two accepts on one
+  conversation both stored the same floor.)*
+- **`acceptedSeq` now names an event that exists** rather than predicting one. The documented
+  `afterSeq = acceptedSeq - 1` arithmetic is unchanged and now replays the user's own message first.
+- **It is `durable`**, on the existing `DurableEventRetention` horizon — this change adds no second
+  retention knob. Collecting it advances the retained floor in the same transaction as the delete,
+  so a client that catches up from beneath the floor is told by `conversation.replay_gap` rather
+  than handed a transcript quietly missing its own messages.
+
+**A separate kind, not a field on `submission.accepted`.** That event is written at the agent's
+*disposition* and is never written at all when the agent never claims the command — so a field on it
+would be missing in exactly the accepted-but-never-answered case, which is the one that matters most
+and the one a local client-side echo renders most misleadingly. It is also a kind deployed clients
+already parse; a new kind is additive, widening an existing one is not.
+
+**Exactly one per submission, and only for speech.** Every submission passes the accept transaction
+once, so a steer gets its own entry and coalescing — which happens later, in the agent — cannot
+merge two messages into one. A `submission.cancel` goes through the same transaction and gets **no**
+entry: it is a control action, not something the user said.
+
+**Nothing rejected leaves a trace.** An over-cap `413`, an idempotency `409` and a malformed `400`
+all return before the submission is durable, so there is no entry and no partial one. The stored
+text is therefore never truncated, which is why the payload has no `truncated` flag.
+
+**Older clients are unaffected.** The envelope contract already requires a receiver to ignore an
+unknown `kind`. A conversation that predates this change simply has no `submission.text` rows, and a
+newer client renders what it receives rather than inventing entries that were never stored.
+
+⚠️ **Its only producer is the accept transaction**, so it appears on the durable path and not on the
+in-process seam — which has no accept transaction and no store. The worked example above is the
+in-process path and is correct without it.
 
 ### Three amendments the durable store makes
 

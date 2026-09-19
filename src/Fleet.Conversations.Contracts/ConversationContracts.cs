@@ -124,6 +124,29 @@ public sealed record AcceptSubmissionRequest
     /// which is where ownership actually transfers.</para>
     /// </remarks>
     public required string CommandPayloadJson { get; init; }
+
+    /// <summary>
+    /// The user-visible text this submission carries, appended as a durable <c>submission.text</c>
+    /// event in the accept transaction (#305).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Deliberately separate from <see cref="CommandPayloadJson"/>, which is the agent's command
+    /// envelope and carries routing fields a client must never be handed. The store does not parse
+    /// the command envelope to find the text; it is given the text it is meant to store.
+    /// </para>
+    /// <para>
+    /// <b>Null means no transcript entry</b>, which is what a <c>submission.cancel</c> is: a cancel
+    /// is a submission through the same transaction but it is not something the user said, and an
+    /// entry for it would put a control action into the conversation as if it were a message.
+    /// </para>
+    /// <para>
+    /// The caller has already enforced <c>ProtocolLimits.MaxInboundTextBytes</c>, so what arrives
+    /// here is stored whole. The store re-checks rather than trusting it, because "never truncated"
+    /// is a property the transcript depends on and an unchecked one is a comment.
+    /// </para>
+    /// </remarks>
+    public string? TranscriptText { get; init; }
 }
 
 /// <summary>Which of #276 §7's four accept outcomes occurred.</summary>

@@ -16,6 +16,26 @@ public static class ConversationEventKind
     /// <summary>Intake refused the inbound event, before any turn exists (D7).</summary>
     public const string ProtocolRejected = "protocol.rejected";
 
+    /// <summary>
+    /// The transcript entry for an accepted submission: the text the user actually sent (#305).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A SEPARATE kind from <see cref="SubmissionAccepted"/>, not a field added to it, for two
+    /// reasons. <c>submission.accepted</c> is appended at the agent's DISPOSITION and is never
+    /// appended at all when the agent never claims the command — so a field on it would lose
+    /// exactly the accepted-but-never-answered case, which is the one that matters most. And it is
+    /// a kind deployed clients already parse; widening its meaning is a change to something in use,
+    /// while a new kind is additive.
+    /// </para>
+    /// <para>
+    /// Appended inside the accept transaction, so it takes the seq the accept already reports as
+    /// <c>acceptedSeq</c> and sorts before every event the resulting turn produces. Durable: it is
+    /// the transcript, and its absence beneath the retained floor IS a gap.
+    /// </para>
+    /// </remarks>
+    public const string SubmissionText = "submission.text";
+
     /// <summary>What dispatch did with a submission.</summary>
     public const string SubmissionAccepted = "submission.accepted";
 
@@ -105,6 +125,7 @@ public static class ConversationEventKind
     public static readonly IReadOnlySet<string> Outbound = new HashSet<string>(StringComparer.Ordinal)
     {
         ProtocolRejected,
+        SubmissionText,
         SubmissionAccepted,
         TurnStarted,
         TurnProgress,

@@ -49,6 +49,7 @@ public class ProtocolContractTests
     public static TheoryData<string, object?> EveryOutboundKind() => new()
     {
         { ConversationEventKind.ProtocolRejected, new ProtocolRejectedPayload { Code = ProtocolErrorCode.Unauthorized, Message = ProtocolErrors.Unauthorized } },
+        { ConversationEventKind.SubmissionText, new SubmissionTextPayload { Text = "what is open?" } },
         { ConversationEventKind.SubmissionAccepted, new SubmissionAcceptedPayload { Disposition = SubmissionDisposition.QueueFull, QueuePosition = 3 } },
         { ConversationEventKind.TurnStarted, new TurnStartedPayload() },
         { ConversationEventKind.TurnProgress, new TurnProgressPayload { Activity = ProgressActivity.Tool, ToolName = "Read" } },
@@ -160,6 +161,46 @@ public class ProtocolContractTests
             .Select(f => (string)f.GetValue(null)!);
 
         Assert.DoesNotContain(kind, declared);
+    }
+
+    /// <summary>
+    /// #305. <c>submission.text</c> is runtime → client, is not terminal, and is not something a
+    /// client sends: the server writes the transcript entry from what it accepted, and a client that
+    /// could write one could put words into its own transcript that were never submitted.
+    /// </summary>
+    [Fact]
+    public void SubmissionText_IsAnOutboundNonTerminalKind()
+    {
+        Assert.Contains(ConversationEventKind.SubmissionText, ConversationEventKind.Outbound);
+        Assert.DoesNotContain(ConversationEventKind.SubmissionText, ConversationEventKind.Inbound);
+        Assert.DoesNotContain(ConversationEventKind.SubmissionText, ConversationEventKind.Terminal);
+
+        // A separate kind, not a field bolted onto the disposition event.
+        Assert.NotEqual(ConversationEventKind.SubmissionAccepted, ConversationEventKind.SubmissionText);
+    }
+
+    /// <summary>
+    /// #305 backward compatibility: a client built before this kind existed parses the envelope and
+    /// ignores it, exactly as the envelope contract already requires of any unknown kind.
+    /// </summary>
+    /// <remarks>
+    /// The assertion is that nothing throws and the envelope is intact — a reader that treated an
+    /// unrecognised kind as fatal would break on the first message the owner sent after the upgrade.
+    /// </remarks>
+    [Fact]
+    public void SubmissionText_IsIgnorableByAClientThatDoesNotKnowIt()
+    {
+        var evt = ConversationEvent.Create(
+            ConversationEventKind.SubmissionText, SampleIdentity, "e_1", 7,
+            DateTimeOffset.UnixEpoch, new SubmissionTextPayload { Text = "what is open?" });
+
+        var back = FleetProtocolJson.Deserialize<ConversationEvent>(FleetProtocolJson.Serialize(evt));
+
+        Assert.NotNull(back);
+        Assert.Equal("submission.text", back!.Kind);
+        Assert.Equal(7, back.Seq);
+        Assert.False(back.IsTerminal);
+        Assert.Equal("what is open?", back.PayloadAs<SubmissionTextPayload>()!.Text);
     }
 
     /// <summary>The four terminal kinds are exactly the ones that route through the outbox.</summary>

@@ -55,7 +55,7 @@ public sealed class CodexExecutor : IAgentExecutor
     private readonly Func<ProcessStartInfo, Process?> _processStarter;
 
     private const string CodexBin = "codex";
-    private const string OssBaseUrlEnvVar = "CODEX_OSS_BASE_URL";
+    internal const string OssBaseUrlEnvVar = "CODEX_OSS_BASE_URL";
     private const string InitializedMethod = "initialized";
     private const string ThreadShellCommandMethod = "thread/shellCommand";
     private const string ClientName = "phleet";
@@ -137,6 +137,28 @@ public sealed class CodexExecutor : IAgentExecutor
             p => string.Equals(p, prefix, StringComparison.OrdinalIgnoreCase));
 
         return provider is null ? (null, model) : (provider, model[(slash + 1)..]);
+    }
+
+    /// <summary>
+    /// Describes the configuration fault in a codex agent whose model names a local provider but
+    /// has no <c>CODEX_OSS_BASE_URL</c> to reach it, or null when the pair is sound.
+    /// </summary>
+    /// <remarks>
+    /// Shared by the host-start check in <c>Program.cs</c> — which refuses to start the host, so
+    /// the container is visibly down rather than up and unable to answer — and by
+    /// <see cref="EnsureProcessReadyAsync"/>, which backstops the CLI and test paths.
+    /// </remarks>
+    internal static string? DescribeLocalModelFault(string model, string? ossBaseUrl)
+    {
+        var (provider, _) = SplitLocalModel(model);
+        if (provider is null || !string.IsNullOrWhiteSpace(ossBaseUrl))
+            return null;
+
+        return $"Model '{model}' selects the local codex provider '{provider}', but "
+             + $"{OssBaseUrlEnvVar} is unset or blank. Set it to the inference server's "
+             + "OpenAI-compatible base URL, e.g. http://host.docker.internal:11434/v1. There is "
+             + "no default: codex would resolve localhost, which inside a container is the "
+             + "container itself.";
     }
 
     public async IAsyncEnumerable<AgentProgress> ExecuteAsync(
@@ -524,19 +546,12 @@ public sealed class CodexExecutor : IAgentExecutor
 
     private async Task EnsureProcessReadyAsync(CancellationToken ct)
     {
-        // A local provider with no base URL is a configuration fault, not a transient start
-        // failure, so it fails before the retry budget is touched and before codex is spawned.
-        // There is deliberately no fallback to codex's own default: that default is localhost,
-        // which inside an agent container is the container itself, and an agent pointed at
-        // nothing must not come up healthy.
-        if (_localModelProvider is not null && string.IsNullOrWhiteSpace(_ossBaseUrl))
-        {
-            throw new InvalidOperationException(
-                $"CodexExecutor: model '{_config.Model}' selects the local codex provider "
-                + $"'{_localModelProvider}', but {OssBaseUrlEnvVar} is unset or blank. Set it to the "
-                + "inference server's OpenAI-compatible base URL, e.g. "
-                + "http://host.docker.internal:11434/v1.");
-        }
+        // Backstop only — the daemon and CLI hosts refuse to start on this fault, so in a
+        // container it is already unreachable. It stays for the paths that construct an executor
+        // without going through the host, and it fails before the retry budget is touched and
+        // before codex is spawned: a configuration fault is not a transient start failure.
+        if (DescribeLocalModelFault(_config.Model, _ossBaseUrl) is { } fault)
+            throw new InvalidOperationException($"CodexExecutor: {fault}");
 
         Exception? lastError = null;
 

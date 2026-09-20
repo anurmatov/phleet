@@ -110,8 +110,13 @@ recognised — codex reserves them, and any other prefix (`owl/t-lite`) passes t
 an unprefixed model produces exactly the payload it always did.
 
 A prefixed model requires `CODEX_OSS_BASE_URL` (e.g. `http://host.docker.internal:11434/v1`) as a
-provision-time env var on the agent. If it is unset or blank the executor **fails startup** rather
-than falling back to codex's `localhost` default, which inside a container is the container itself.
+provision-time env var on the agent. If it is unset or blank, **the host refuses to start** —
+`AgentHostRegistration.ValidateStartupConfiguration` throws before `app.Run()`, so the container
+exits rather than coming up with `/health` answering ok. There is no fallback to codex's
+`localhost` default, which inside a container is the container itself.
+
+⚠️ A wedged local inference server takes the whole agent down, not one turn: `CodexExecutor` holds
+`_turnLock` for the turn and a chat-driven turn has no deadline, so everything queues behind it.
 See `docs/providers/codex-local-models.md`.
 
 ## Provider CLI Pins

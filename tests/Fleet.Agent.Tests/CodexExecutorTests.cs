@@ -448,6 +448,32 @@ public class CodexExecutorTests
         Assert.Equal(expectedModel, model);
     }
 
+    [Theory]
+    // Prefixed model, nothing to reach it with — the fault the host-start gate exists for.
+    [InlineData("ollama/gpt-oss:20b", null, true)]
+    [InlineData("ollama/gpt-oss:20b", "", true)]
+    [InlineData("ollama/gpt-oss:20b", "   ", true)]
+    [InlineData("lmstudio/qwen3-coder", null, true)]
+    // Configured, or not opted in at all.
+    [InlineData("ollama/gpt-oss:20b", "http://host.docker.internal:11434/v1", false)]
+    [InlineData("gpt-5", null, false)]
+    [InlineData("owl/t-lite", null, false)]
+    public void DescribeLocalModelFault_FlagsOnlyPrefixedModelsWithNoBaseUrl(
+        string model, string? ossBaseUrl, bool expectFault)
+    {
+        var fault = CodexExecutor.DescribeLocalModelFault(model, ossBaseUrl);
+
+        if (!expectFault)
+        {
+            Assert.Null(fault);
+            return;
+        }
+
+        Assert.NotNull(fault);
+        Assert.Contains("CODEX_OSS_BASE_URL", fault);
+        Assert.Contains(model, fault);
+    }
+
     [Fact]
     public async Task EnsureProcessReady_LocalProviderWithoutBaseUrl_FailsFastBeforeSpawningCodex()
     {

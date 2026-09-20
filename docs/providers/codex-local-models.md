@@ -46,12 +46,19 @@ From inside a container the host's inference port is reachable on
 CODEX_OSS_BASE_URL=http://host.docker.internal:11434/v1
 ```
 
-If the model carries a prefix and this value is missing or blank, the executor
-**fails startup with a named error** before spawning codex, and does not spend its
-crash-loop retry budget. There is no fallback to codex's built-in default: that
-default is `localhost`, which inside a container is the container itself. A
-half-configured agent must not come up healthy. The resolved provider, model and
-base URL are logged at `Information` on every process start.
+If the model carries a prefix and this value is missing or blank, **the agent host
+refuses to start**: `AgentHostRegistration.ValidateStartupConfiguration` runs before
+`app.Run()`, logs the fault at `Critical` and throws, so the process exits and the
+container is visibly down. That placement is the point — `/health` answers `ok`
+unconditionally and `WarmupService` catches executor startup failures as a warning,
+so a check any later would leave the container up, reported healthy, and unable to
+answer a single turn.
+
+There is no fallback to codex's built-in default: that default is `localhost`, which
+inside a container is the container itself. The executor keeps the same check as a
+backstop for the paths that construct it without a host. On a sound configuration the
+resolved provider, model and base URL are logged at `Information` on every process
+start.
 
 ## Choosing a model
 
@@ -84,12 +91,23 @@ exceeds the context window is out of reach regardless of tool-call quality.
   already exist on the inference host.
 - **Gate the first load on headroom.** Resident VRAM plus the new model's footprint
   must fit the reported total.
-- **No wedge-mode guard.** A `stream_idle_timeout_ms` override on `thread/start`
-  would be the natural protection against a server that accepts a request and never
-  answers, but it is not available on codex 0.153.4: `model_providers.ollama.*`
-  is refused outright (`reserved built-in provider IDs … cannot be overridden`), and
-  an unrecognised top-level config key is silently dropped. A hung stream is
-  therefore still bounded only by the caller's own turn timeout.
+- **No wedge-mode guard, and the failure is agent-wide.** A `stream_idle_timeout_ms`
+  override on `thread/start` would be the natural protection against a server that
+  accepts a request and never answers, but it is not available on codex 0.153.4:
+  `model_providers.ollama.*` is refused outright (`reserved built-in provider IDs …
+  cannot be overridden`), and an unrecognised top-level config key is silently
+  dropped.
+
+  Nothing else bounds it. `CodexExecutor.ExecuteAsync` takes `_turnLock` for the
+  whole turn, and a chat-driven turn carries no deadline — `TaskManager` builds its
+  per-task `CancellationTokenSource` with no `CancelAfter`. So a wedged inference
+  server does not merely stall one reply: the turn never completes, the lock is never
+  released, and **every subsequent task queues behind it — the agent stops answering
+  anything**. Only a delegated turn has a deadline of its own, from the caller's
+  activity budget. Recovery is `/cancel` (or `/cancel_bg`), or restarting the
+  container. Treat an agent on a local model that has gone silent as a wedged
+  inference server until proven otherwise, and probe the server's `/api/embed` or
+  `/v1` path directly rather than the agent.
 
 ## Rollback
 

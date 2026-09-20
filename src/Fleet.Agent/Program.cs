@@ -23,6 +23,9 @@ else
 
 var app = builder.Build();
 
+// Refuses to start a misconfigured agent, before /health can answer ok for it.
+AgentHostRegistration.ValidateStartupConfiguration(app.Services);
+
 if (!isCliMode)
 {
     // One-shot startup sweep: clean up attachment files left over from prior runs.

@@ -321,7 +321,7 @@ internal static class ScenarioRunner
                 });
                 Assert.False(executor.TurnHasFinalAnswerPhaseForTests);
 
-                var resolve = executor.WaitAndCompleteNextPendingSteerForTests(
+                var resolve = executor.WaitAndCompleteNextPendingRequestForTests(
                     new JsonObject { ["turnId"] = "t_1" }, ct);
                 var inject = executor.TryInjectMessageAsync("steer", ct: ct);
                 await Task.WhenAll(resolve, inject);

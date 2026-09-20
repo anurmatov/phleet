@@ -101,6 +101,19 @@ For gemini setup: run `gemini auth` once on the host, then `./setup.sh` (choose 
 No GEMINI_API_KEY needed — authentication is OAuth only.
 See `docs/providers/gemini.md` for a full setup guide.
 
+### Codex local models
+
+A codex agent's `Model` may carry an `ollama/` or `lmstudio/` prefix (e.g. `ollama/gpt-oss:20b`).
+`CodexExecutor` splits it and sends `modelProvider` alongside the bare model id in `thread/start`,
+routing the thread to a local OpenAI-compatible inference server. Only those two ids are
+recognised — codex reserves them, and any other prefix (`owl/t-lite`) passes through untouched, so
+an unprefixed model produces exactly the payload it always did.
+
+A prefixed model requires `CODEX_OSS_BASE_URL` (e.g. `http://host.docker.internal:11434/v1`) as a
+provision-time env var on the agent. If it is unset or blank the executor **fails startup** rather
+than falling back to codex's `localhost` default, which inside a container is the container itself.
+See `docs/providers/codex-local-models.md`.
+
 ## Provider CLI Pins
 
 The agent image pins every provider CLI explicitly in `Dockerfile`:

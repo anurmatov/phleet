@@ -55,15 +55,30 @@ and `WarmupService` catches executor startup failures as a warning, so a check a
 later would leave the container up, reported healthy, and unable to answer a single
 turn.
 
-⚠️ **The explicit exit is load-bearing — do not reduce this to a `throw`.** By the
-time the gate runs, `builder.Build()` holds a foreground thread, and .NET tears a
-process down on an unhandled main-thread exception only once none remain. Booted on
-the real image, the throw-only version never served `/health` (correct) but never
-exited either: no listeners in `/proc/net/tcp`, `dotnet` as PID 1 at ~101% CPU across
-three samples, and `docker ps` reporting `Up`. `restart: unless-stopped` never acts
-on that, so the container is never reclaimed — it holds a core until someone
-notices. The acceptance evidence for this gate is `docker inspect` showing
-`status=exited` with a non-zero `ExitCode` — never a code read.
+⚠️ **The explicit exit is load-bearing — do not reduce this to a `throw`.** A throw
+alone did not terminate reliably, and what it did instead **differed by platform**:
+
+| platform | throw-only behaviour |
+|---|---|
+| arm64 (the real image) | never served `/health` — correct — but never exited either: no listeners in `/proc/net/tcp`, `dotnet` as PID 1 at ~101% CPU across three samples, `docker ps` reporting `Up`, which `restart: unless-stopped` never acts on |
+| x86-64 | aborted with SIGABRT (exit 134), writing a ~154 MB core per attempt |
+
+**Why they differed was never established.** The obvious explanation — a foreground
+thread started by `builder.Build()` blocking teardown — was tested directly with a
+minimal repro and falsified, so it is not recorded here and should not be inferred.
+`Environment.Exit(1)` is used precisely because it sidesteps the question: it
+terminates the process outright and does not depend on unhandled-exception
+propagation at all.
+
+With the exit in place and `restart: unless-stopped`, a misconfigured agent loops
+visibly — measured over 60s: `status=restarting`, `ExitCode` 1, 10 restarts, **zero
+core files**, writable layer 0 B, and `docker ps` showing `Restarting (1)` rather
+than `Up`. That loop is the intended outcome: a container that cannot start should
+be conspicuous. What made the throw-only loop harmful was the core dump each
+iteration, not the looping.
+
+The acceptance evidence for this gate is `docker inspect` — a non-zero `ExitCode`
+and no core file — never a code read.
 
 There is no fallback to codex's built-in default: that default is `localhost`, which
 inside a container is the container itself. The executor keeps the same check as a

@@ -25,15 +25,19 @@ var app = builder.Build();
 
 // Refuses to start a misconfigured agent, before /health can answer ok for it.
 //
-// The throw alone does NOT end the process, and reasoning that it does is how this shipped wrong
-// once already: builder.Build() has started a foreground thread by now, and .NET only tears a
-// process down on an unhandled main-thread exception once no foreground threads remain. Booting
-// the real image measured the result — Kestrel never listened, and the host sat at ~101% CPU
-// while `docker ps` reported "Up", which `restart: unless-stopped` never acts on. A wedged
-// container that still reports healthy is worse than the lazy check this replaced — nothing
-// upstream reclaims it. Exiting is therefore the call site's job, and it must stay here.
+// A throw alone does NOT reliably end the process, and reasoning about why is how this shipped
+// wrong once already. What was actually measured: on the arm64 image the throw-only version never
+// served /health (Kestrel never listened) but stayed resident at ~101% CPU with `docker ps`
+// reporting "Up", which `restart: unless-stopped` never acts on; on x86-64 the same build aborted
+// with SIGABRT (134) and wrote a core instead. The cause of the arm64 spin was never established —
+// the obvious "a foreground thread from builder.Build() blocks teardown" explanation was tested
+// directly and falsified, so it is not recorded here as fact.
 //
-// Exit(1) over FailFast: same non-zero status, without the crash dump FailFast writes.
+// Exit(1) is therefore the point, not a detail: it terminates the process outright and does not
+// depend on unhandled-exception propagation, so it is not subject to whatever differed between
+// those platforms. Exiting is the call site's job and must stay here. Exit over FailFast: same
+// non-zero status, without the crash dump — and that dump was the expensive part, a core per
+// restart under a restart policy.
 try
 {
     AgentHostRegistration.ValidateStartupConfiguration(app.Services);

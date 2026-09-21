@@ -85,13 +85,14 @@ public static class AgentHostRegistration
     /// </para>
     /// <para>
     /// ⚠️ Throwing is not, by itself, enough to stop the host, and the call site owns the
-    /// difference. By the time this runs, <c>builder.Build()</c> holds a foreground thread, so an
-    /// unhandled main-thread exception leaves the process resident at ~100% CPU with <c>docker
-    /// ps</c> reporting <c>Up</c> — measured on the real image, not inferred. <c>Program.cs</c>
-    /// therefore catches and calls <c>Environment.Exit(1)</c>. Keep that catch: without it this
-    /// method degrades from a gate into a wedge. The throw stays so the behaviour is assertable
-    /// from a test, which <c>Environment.Exit</c> inside this method would not be — it would end
-    /// the test host.
+    /// difference. Measured on the throw-only version: the arm64 image stayed resident at ~100%
+    /// CPU with <c>docker ps</c> reporting <c>Up</c>, while x86-64 aborted with SIGABRT (134) and
+    /// wrote a core. Why they differed was never established, so no mechanism is claimed here.
+    /// <c>Program.cs</c> therefore catches and calls <c>Environment.Exit(1)</c>, which terminates
+    /// outright rather than relying on unhandled-exception propagation. Keep that catch: without
+    /// it this method degrades from a gate into a wedge. The throw stays so the behaviour is
+    /// assertable from a test, which <c>Environment.Exit</c> inside this method would not be — it
+    /// would end the test host.
     /// </para>
     /// <para>
     /// The only fault it catches today is a codex agent whose model names a local provider

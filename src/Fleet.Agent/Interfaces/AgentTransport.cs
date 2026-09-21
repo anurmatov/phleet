@@ -699,14 +699,22 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         // media payload plus ForwardOrigin metadata, so they map identically to direct ones.
         var isPhoto = message.Photo is { Length: > 0 };
         var media = TelegramMediaMapper.TryMap(message);
-        var isVoice = media?.Kind == TelegramMediaKind.Voice;
+        // Voice messages and round video notes are both spoken bubbles, so both are
+        // transcribed (#327). The whisper service writes the upload to a temp file and lets
+        // ffmpeg decode it, so the container does not matter to it. Nothing else is
+        // transcribed: Video and Audio have different size and intent characteristics.
+        var isSpokenMessage = media?.Kind is TelegramMediaKind.Voice or TelegramMediaKind.VideoNote;
         var isMediaAttachment = isPhoto || media is not null;
         var text = message.Text ?? message.Caption ?? "";
 
         if (!isMediaAttachment && string.IsNullOrEmpty(message.Text)) return;
 
-        // TTS trigger: /tts command as a reply to any message → synthesize and send replied-to message as voice
-        if (_tts.IsEnabled && !isVoice
+        // TTS trigger: /tts command as a reply to any message → synthesize and send replied-to message as voice.
+        // A spoken bubble is content, not a command — and this branch returns, so letting one
+        // in here would swallow the message before transcription ever runs. Video notes carry
+        // no caption today, so including them changes nothing now and keeps it that way if
+        // that ever changes.
+        if (_tts.IsEnabled && !isSpokenMessage
             && text.Equals("/tts", StringComparison.OrdinalIgnoreCase)
             && message.ReplyToMessage is { } replied)
         {
@@ -758,17 +766,17 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
 
         var downloadedDocument = downloadedMedia?.Document;
 
-        // Set only when speech-to-text actually returned a transcript. A voice message that
+        // Set only when speech-to-text actually returned a transcript. A spoken message that
         // failed to transcribe, or arrived while the service is disabled, must NOT be marked
         // — a false marker would tell the agent to distrust text the user actually typed.
         var inputSource = MessageInputSource.Typed;
 
-        // Transcribe voice messages if the whisper service is configured
-        if (isVoice && _voiceTranscription.IsEnabled)
+        // Transcribe voice messages and video notes if the whisper service is configured
+        if (isSpokenMessage && _voiceTranscription.IsEnabled)
         {
             try
             {
-                // Immediate feedback — let user know we received the voice message
+                // Immediate feedback — let user know we received the spoken message
                 await _bot!.SendChatAction(chatId, ChatAction.Typing);
 
                 // Reuse the bytes the attachment pipeline already fetched. Only fetch
@@ -782,16 +790,24 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                     audioBytes = ms.ToArray();
                 }
 
+                // The receiving end is suffix-agnostic, but mislabelling an MP4 as audio/ogg
+                // is a lie the next reader of this code would have to unpick.
+                var isVideoNote = media!.Kind == TelegramMediaKind.VideoNote;
+                var uploadName = isVideoNote ? "video.mp4" : "voice.ogg";
+                var uploadType = isVideoNote ? "video/mp4" : "audio/ogg";
+
                 var transcribed = audioBytes is null
                     ? null
-                    : await _voiceTranscription.TranscribeAsync(audioBytes, "voice.ogg");
+                    : await _voiceTranscription.TranscribeAsync(audioBytes, uploadName, uploadType);
 
                 if (transcribed is not null)
                 {
                     text = transcribed;
+                    // A video-note transcript carries the same speech-to-text risk as a voice
+                    // one, so it carries the same marker.
                     inputSource = MessageInputSource.VoiceTranscription;
-                    _logger.LogInformation("Voice message transcribed ({Chars} chars) from {Sender}",
-                        text.Length, message.From?.Username ?? "unknown");
+                    _logger.LogInformation("{Kind} transcribed ({Chars} chars) from {Sender}",
+                        media.Kind, text.Length, message.From?.Username ?? "unknown");
 
                     // Echo transcription back so user can verify whisper got it right
                     await _bot!.SendMessage(
@@ -801,14 +817,16 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 }
                 else
                 {
-                    // Transcription unavailable — fall through so the persisted voice file
+                    // Transcription unavailable — fall through so the persisted file
                     // and a readable placeholder still reach the agent.
-                    _logger.LogWarning("Voice transcription returned no text for message from {Sender}", message.From?.Username);
+                    _logger.LogWarning("Transcription returned no text for {Kind} message from {Sender}",
+                        media!.Kind, message.From?.Username);
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to transcribe voice message from {Sender}", message.From?.Username);
+                _logger.LogWarning(ex, "Failed to transcribe {Kind} message from {Sender}",
+                    media!.Kind, message.From?.Username);
             }
         }
 

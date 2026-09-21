@@ -137,9 +137,14 @@ events — locations, contacts, polls, venue shares — are not attachments.
   before `Document` because the Bot API sets `document` alongside `animation`.
 - **Hints**: `[image attachment: …]` only for `.jpg`/`.jpeg`/`.png` (what the provider paths
   consume); `[document attachment: …]` for `.pdf`; `[file attachment: …]` for everything else.
-- **Voice**: the file is persisted first and transcription reuses those bytes, so a voice
-  message is downloaded once. If transcription is disabled or fails, the message is still
-  delivered with the persisted file and a `(voice message)` placeholder.
+- **Voice and video notes** are both transcribed through the whisper service — they are the
+  two spoken-bubble types, and the service decodes whatever container ffmpeg understands.
+  The file is persisted first and transcription reuses those bytes, so each is downloaded
+  once. A successful transcript replaces the text, is echoed back as `🎤 …`, and sets
+  `MessageInputSource.VoiceTranscription` so the agent gets the `voice_transcription`
+  marker. If transcription is disabled or fails, the message is still delivered with the
+  persisted file and its `(voice message)` / `(video note)` placeholder — and is **not**
+  marked. `Video` and `Audio` are deliberately not transcribed.
 - **Failures are non-fatal**: persistence disabled, oversize, or a download error drops the
   attachment only — the caption or placeholder still reaches the agent, and
   `HasMediaAttachment` stays set so group media is not lost behind the mention gate.

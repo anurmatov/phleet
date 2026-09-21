@@ -61,9 +61,9 @@ process down on an unhandled main-thread exception only once none remain. Booted
 the real image, the throw-only version never served `/health` (correct) but never
 exited either: no listeners in `/proc/net/tcp`, `dotnet` as PID 1 at ~101% CPU across
 three samples, and `docker ps` reporting `Up`. `restart: unless-stopped` never acts
-on that, so it is the wedge signature that took ~15 agents offline on 2026-08-13. The
-acceptance evidence for this gate is `docker inspect` showing `status=exited` with a
-non-zero `ExitCode` — never a code read.
+on that, so the container is never reclaimed — it holds a core until someone
+notices. The acceptance evidence for this gate is `docker inspect` showing
+`status=exited` with a non-zero `ExitCode` — never a code read.
 
 There is no fallback to codex's built-in default: that default is `localhost`, which
 inside a container is the container itself. The executor keeps the same check as a

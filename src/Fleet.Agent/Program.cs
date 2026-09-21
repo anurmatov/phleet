@@ -29,9 +29,9 @@ var app = builder.Build();
 // once already: builder.Build() has started a foreground thread by now, and .NET only tears a
 // process down on an unhandled main-thread exception once no foreground threads remain. Booting
 // the real image measured the result — Kestrel never listened, and the host sat at ~101% CPU
-// while `docker ps` reported "Up", which `restart: unless-stopped` never acts on. That is the
-// wedge signature that took ~15 agents offline on 2026-08-13; it is worse than the lazy check it
-// replaced. Exiting is therefore the call site's job, and it must stay here.
+// while `docker ps` reported "Up", which `restart: unless-stopped` never acts on. A wedged
+// container that still reports healthy is worse than the lazy check this replaced — nothing
+// upstream reclaims it. Exiting is therefore the call site's job, and it must stay here.
 //
 // Exit(1) over FailFast: same non-zero status, without the crash dump FailFast writes.
 try

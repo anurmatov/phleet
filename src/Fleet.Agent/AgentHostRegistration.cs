@@ -84,6 +84,16 @@ public static class AgentHostRegistration
     /// copy is correct and says nothing about the process that ships.
     /// </para>
     /// <para>
+    /// ⚠️ Throwing is not, by itself, enough to stop the host, and the call site owns the
+    /// difference. By the time this runs, <c>builder.Build()</c> holds a foreground thread, so an
+    /// unhandled main-thread exception leaves the process resident at ~100% CPU with <c>docker
+    /// ps</c> reporting <c>Up</c> — measured on the real image, not inferred. <c>Program.cs</c>
+    /// therefore catches and calls <c>Environment.Exit(1)</c>. Keep that catch: without it this
+    /// method degrades from a gate into a wedge. The throw stays so the behaviour is assertable
+    /// from a test, which <c>Environment.Exit</c> inside this method would not be — it would end
+    /// the test host.
+    /// </para>
+    /// <para>
     /// The only fault it catches today is a codex agent whose model names a local provider
     /// (<c>ollama/…</c>, <c>lmstudio/…</c>) with no <c>CODEX_OSS_BASE_URL</c> to reach it. That is
     /// misconfiguration, not degradation — there is no endpoint. It has to stop the host, because

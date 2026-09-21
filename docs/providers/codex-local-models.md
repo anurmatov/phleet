@@ -48,11 +48,22 @@ CODEX_OSS_BASE_URL=http://host.docker.internal:11434/v1
 
 If the model carries a prefix and this value is missing or blank, **the agent host
 refuses to start**: `AgentHostRegistration.ValidateStartupConfiguration` runs before
-`app.Run()`, logs the fault at `Critical` and throws, so the process exits and the
-container is visibly down. That placement is the point — `/health` answers `ok`
-unconditionally and `WarmupService` catches executor startup failures as a warning,
-so a check any later would leave the container up, reported healthy, and unable to
-answer a single turn.
+`app.Run()` and logs the fault at `Critical`; `Program.cs` catches and calls
+`Environment.Exit(1)`, so the process ends with exit code 1 and the container is
+visibly down. That placement is the point — `/health` answers `ok` unconditionally
+and `WarmupService` catches executor startup failures as a warning, so a check any
+later would leave the container up, reported healthy, and unable to answer a single
+turn.
+
+⚠️ **The explicit exit is load-bearing — do not reduce this to a `throw`.** By the
+time the gate runs, `builder.Build()` holds a foreground thread, and .NET tears a
+process down on an unhandled main-thread exception only once none remain. Booted on
+the real image, the throw-only version never served `/health` (correct) but never
+exited either: no listeners in `/proc/net/tcp`, `dotnet` as PID 1 at ~101% CPU across
+three samples, and `docker ps` reporting `Up`. `restart: unless-stopped` never acts
+on that, so it is the wedge signature that took ~15 agents offline on 2026-08-13. The
+acceptance evidence for this gate is `docker inspect` showing `status=exited` with a
+non-zero `ExitCode` — never a code read.
 
 There is no fallback to codex's built-in default: that default is `localhost`, which
 inside a container is the container itself. The executor keeps the same check as a

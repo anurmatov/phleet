@@ -24,7 +24,29 @@ else
 var app = builder.Build();
 
 // Refuses to start a misconfigured agent, before /health can answer ok for it.
-AgentHostRegistration.ValidateStartupConfiguration(app.Services);
+//
+// The throw alone does NOT end the process, and reasoning that it does is how this shipped wrong
+// once already: builder.Build() has started a foreground thread by now, and .NET only tears a
+// process down on an unhandled main-thread exception once no foreground threads remain. Booting
+// the real image measured the result — Kestrel never listened, and the host sat at ~101% CPU
+// while `docker ps` reported "Up", which `restart: unless-stopped` never acts on. That is the
+// wedge signature that took ~15 agents offline on 2026-08-13; it is worse than the lazy check it
+// replaced. Exiting is therefore the call site's job, and it must stay here.
+//
+// Exit(1) over FailFast: same non-zero status, without the crash dump FailFast writes.
+try
+{
+    AgentHostRegistration.ValidateStartupConfiguration(app.Services);
+}
+catch (Exception ex)
+{
+    // The validator already logged the cause at Critical. Console.Error, not the logger, because
+    // this path must not depend on DI resolving anything — a throw in here would hang the process
+    // in exactly the way the exit exists to prevent. Catching Exception rather than the validator's
+    // InvalidOperationException for the same reason: no exception type may reach the run loop.
+    Console.Error.WriteLine($"Fleet.Agent startup aborted, exiting 1: {ex.Message}");
+    Environment.Exit(1);
+}
 
 if (!isCliMode)
 {

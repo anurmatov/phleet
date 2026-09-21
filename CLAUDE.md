@@ -111,9 +111,12 @@ an unprefixed model produces exactly the payload it always did.
 
 A prefixed model requires `CODEX_OSS_BASE_URL` (e.g. `http://host.docker.internal:11434/v1`) as a
 provision-time env var on the agent. If it is unset or blank, **the host refuses to start** —
-`AgentHostRegistration.ValidateStartupConfiguration` throws before `app.Run()`, so the container
-exits rather than coming up with `/health` answering ok. There is no fallback to codex's
-`localhost` default, which inside a container is the container itself.
+`AgentHostRegistration.ValidateStartupConfiguration` throws before `app.Run()` and `Program.cs`
+logs at `Critical` and calls `Environment.Exit(1)`, so the container exits non-zero rather than
+coming up with `/health` answering ok. The exit is not optional: after `builder.Build()` a
+foreground thread is already running, so the throw on its own leaves the process spinning at ~100%
+CPU while `docker ps` still reports `Up`. There is no fallback to codex's `localhost` default,
+which inside a container is the container itself.
 
 ⚠️ A wedged local inference server takes the whole agent down, not one turn: `CodexExecutor` holds
 `_turnLock` for the turn and a chat-driven turn has no deadline, so everything queues behind it.

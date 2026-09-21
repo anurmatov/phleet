@@ -18,10 +18,19 @@ public sealed class VoiceTranscriptionService(
     public bool IsEnabled => !string.IsNullOrWhiteSpace(_opts.ServiceUrl);
 
     /// <summary>
-    /// Transcribes the given audio bytes (OGG or any ffmpeg-supported format).
+    /// Transcribes the given audio or video bytes (OGG, MP4, or any ffmpeg-supported format).
     /// Returns the transcribed text, or null on failure.
     /// </summary>
-    public async Task<string?> TranscribeAsync(byte[] audioBytes, string fileName = "voice.ogg", CancellationToken ct = default)
+    /// <param name="contentType">
+    /// Content type of the uploaded part. The service decodes by content rather than by
+    /// suffix, so this does not change what it does — it just stops the payload being
+    /// labelled as something it is not.
+    /// </param>
+    public async Task<string?> TranscribeAsync(
+        byte[] audioBytes,
+        string fileName = "voice.ogg",
+        string contentType = "audio/ogg",
+        CancellationToken ct = default)
     {
         if (!IsEnabled)
             return null;
@@ -31,7 +40,7 @@ public sealed class VoiceTranscriptionService(
             var client = httpClientFactory.CreateClient("whisper");
             using var content = new MultipartFormDataContent();
             using var audioContent = new ByteArrayContent(audioBytes);
-            audioContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("audio/ogg");
+            audioContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
             content.Add(audioContent, "audio", fileName);
 
             var response = await client.PostAsync($"{_opts.ServiceUrl.TrimEnd('/')}/transcribe", content, ct);
@@ -44,7 +53,7 @@ public sealed class VoiceTranscriptionService(
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Voice transcription failed — dropping voice message");
+            logger.LogWarning(ex, "Transcription failed for {FileName} — no transcript", fileName);
             return null;
         }
     }

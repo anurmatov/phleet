@@ -37,6 +37,7 @@ public class TelegramMediaTransportTests
         public required AgentTransport Transport { get; init; }
         public required MediaFakeBot Bot { get; init; }
         public required CountingDownloader Downloader { get; init; }
+        public required WhisperRequestLog Whisper { get; init; }
         public required string AttachmentDir { get; init; }
         public readonly List<IncomingMessage> Captured = [];
 
@@ -80,9 +81,10 @@ public class TelegramMediaTransportTests
         var sessions = new SessionManager();
         var connState = Substitute.For<IFleetConnectionState>();
 
+        var whisperLog = new WhisperRequestLog();
         var httpFact = Substitute.For<IHttpClientFactory>();
         httpFact.CreateClient(Arg.Any<string>())
-            .Returns(_ => new HttpClient(new StubWhisperHandler(whisperStatus, whisperBody)));
+            .Returns(_ => new HttpClient(new StubWhisperHandler(whisperStatus, whisperBody, whisperLog)));
 
         var allowlist = new AllowlistHolder(telegramOpts);
         var relay = new GroupRelayService(agentOpts, rabbitOpts, NullLogger<GroupRelayService>.Instance);
@@ -112,6 +114,7 @@ public class TelegramMediaTransportTests
             Transport = transport,
             Bot = bot,
             Downloader = downloader,
+            Whisper = whisperLog,
             AttachmentDir = dir,
         };
         transport.RouterHookForTesting = msg => { harness.Captured.Add(msg); return Task.CompletedTask; };
@@ -337,6 +340,175 @@ public class TelegramMediaTransportTests
         Assert.Equal(1, h.Bot.FileDownloadCount);
     }
 
+    // ── Video notes transcribe exactly like voice (issue #327) ───────────────
+    // A video note arrived as a bare .mp4 with no transcript, so the agent had nothing to
+    // read and asked the sender to resend. These pin the gate, the marker, and the three
+    // degraded paths that must behave identically to voice.
+
+    /// <summary>
+    /// Acceptance 4: the transcription gate covers spoken bubbles and nothing else.
+    /// Video and Audio are deliberately out — different size and intent characteristics.
+    /// </summary>
+    [Theory]
+    [InlineData("voice", true)]
+    [InlineData("videoNote", true)]
+    [InlineData("video", false)]
+    [InlineData("audio", false)]
+    [InlineData("animation", false)]
+    [InlineData("document", false)]
+    [InlineData("stickerStatic", false)]
+    public async Task TranscriptionGate_CoversVoiceAndVideoNoteOnly(string family, bool shouldTranscribe)
+    {
+        using var h = BuildHarness(whisperUrl: "http://whisper.test");
+
+        await DeliverAsync(h, BuildFamily(family, forwarded: false));
+
+        var msg = Assert.Single(h.Captured);
+        if (shouldTranscribe)
+        {
+            Assert.StartsWith("transcribed words", msg.Text);
+            Assert.Equal(MessageInputSource.VoiceTranscription, msg.InputSource);
+            Assert.Equal(1, h.Whisper.Calls);
+        }
+        else
+        {
+            Assert.DoesNotContain("transcribed words", msg.Text);
+            Assert.Equal(MessageInputSource.Typed, msg.InputSource);
+            Assert.Equal(0, h.Whisper.Calls);
+        }
+    }
+
+    [Fact]
+    public async Task VideoNote_TranscriptionSucceeds_KeepsFileAndMarksTranscription()
+    {
+        using var h = BuildHarness(whisperUrl: "http://whisper.test");
+
+        await DeliverAsync(h, BuildFamily("videoNote", forwarded: false));
+
+        var msg = Assert.Single(h.Captured);
+        Assert.StartsWith("transcribed words", msg.Text);
+        // Acceptance 2: the same speech-to-text risk, so the same marker.
+        Assert.Equal(MessageInputSource.VoiceTranscription, msg.InputSource);
+        var doc = Assert.Single(msg.Documents);
+        Assert.EndsWith(".mp4", doc.FilePath, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(doc.FilePath));
+        Assert.Contains(doc.FilePath!, msg.Text);
+        AssertSingleDownload(h);
+    }
+
+    [Fact]
+    public async Task VideoNote_UploadIsLabelledAsVideo()
+    {
+        using var h = BuildHarness(whisperUrl: "http://whisper.test");
+
+        await DeliverAsync(h, BuildFamily("videoNote", forwarded: false));
+
+        Assert.Equal("video/mp4", h.Whisper.ContentType);
+        Assert.Equal("video.mp4", h.Whisper.FileName);
+    }
+
+    [Fact]
+    public async Task Voice_UploadIsStillLabelledAsAudio()
+    {
+        using var h = BuildHarness(whisperUrl: "http://whisper.test");
+
+        await DeliverAsync(h, BuildFamily("voice", forwarded: false));
+
+        Assert.Equal("audio/ogg", h.Whisper.ContentType);
+        Assert.Equal("voice.ogg", h.Whisper.FileName);
+    }
+
+    [Fact]
+    public async Task VideoNote_TranscriptIsEchoedBackToTheSender()
+    {
+        // The whole issue exists because the failure was invisible from the sender's side.
+        using var h = BuildHarness(whisperUrl: "http://whisper.test");
+
+        await DeliverAsync(h, BuildFamily("videoNote", forwarded: false));
+
+        Assert.Contains(h.Bot.Requests.OfType<SendMessageRequest>(),
+            r => r.Text.Contains("transcribed words", StringComparison.Ordinal)
+                 && r.Text.StartsWith("🎤", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task VideoNote_TranscriptionDisabled_StillDeliversFileAndPlaceholder()
+    {
+        using var h = BuildHarness(whisperUrl: "");
+
+        await DeliverAsync(h, BuildFamily("videoNote", forwarded: false));
+
+        var msg = Assert.Single(h.Captured);
+        Assert.StartsWith("(video note)", msg.Text);
+        Assert.Equal(MessageInputSource.Typed, msg.InputSource);
+        Assert.True(File.Exists(Assert.Single(msg.Documents).FilePath));
+        AssertSingleDownload(h);
+    }
+
+    [Fact]
+    public async Task VideoNote_TranscriptionFails_MessageIsNotDroppedAndIsNotMarked()
+    {
+        using var h = BuildHarness(whisperUrl: "http://whisper.test",
+            whisperStatus: HttpStatusCode.InternalServerError, whisperBody: "boom");
+
+        await DeliverAsync(h, BuildFamily("videoNote", forwarded: false));
+
+        var msg = Assert.Single(h.Captured);
+        Assert.StartsWith("(video note)", msg.Text);
+        // A false marker would tell the agent to distrust text the user actually typed.
+        Assert.Equal(MessageInputSource.Typed, msg.InputSource);
+        Assert.True(File.Exists(Assert.Single(msg.Documents).FilePath));
+        AssertSingleDownload(h);
+    }
+
+    [Fact]
+    public async Task ForwardedVideoNote_BehavesLikeDirectVideoNote()
+    {
+        using var h = BuildHarness(whisperUrl: "http://whisper.test");
+
+        await DeliverAsync(h, BuildFamily("videoNote", forwarded: true));
+
+        var msg = Assert.Single(h.Captured);
+        Assert.StartsWith("transcribed words", msg.Text);
+        Assert.Equal(MessageInputSource.VoiceTranscription, msg.InputSource);
+        AssertSingleDownload(h);
+    }
+
+    [Fact]
+    public async Task VideoNote_PersistenceDisabled_TranscribesViaSingleDirectDownload()
+    {
+        using var h = BuildHarness(persistAttachments: false, whisperUrl: "http://whisper.test");
+
+        await DeliverAsync(h, BuildFamily("videoNote", forwarded: false));
+
+        var msg = Assert.Single(h.Captured);
+        Assert.StartsWith("transcribed words", msg.Text);
+        Assert.Empty(msg.Documents);
+        Assert.Equal(0, h.Downloader.CallCount);
+        Assert.Equal(1, h.Bot.FileDownloadCount);
+    }
+
+    [Fact]
+    public async Task OversizeVideoNote_IsRejectedBeforeTheUploadAndIsNotRefetched()
+    {
+        // Video notes run to ~11 MB. The size gate sits in the attachment pipeline, so an
+        // oversize one must never reach whisper — and must not be fetched a second time
+        // to get there.
+        using var h = BuildHarness(whisperUrl: "http://whisper.test");
+        var message = TelegramMediaAttachmentTests.WithVideoNote();
+        message.VideoNote!.FileSize = 11 * 1024 * 1024;
+
+        await DeliverAsync(h, message);
+
+        var msg = Assert.Single(h.Captured);
+        Assert.StartsWith("(video note)", msg.Text);
+        Assert.Equal(MessageInputSource.Typed, msg.InputSource);
+        Assert.Empty(msg.Documents);
+        Assert.Equal(0, h.Whisper.Calls);
+        Assert.Equal(0, h.Downloader.CallCount);
+        Assert.Equal(0, h.Bot.FileDownloadCount);
+    }
+
     // The pipeline downloads once and transcription reuses those bytes —
     // the bot-level fetch must never fire as a second copy of the same file.
     private static void AssertSingleDownload(Harness h)
@@ -436,10 +608,30 @@ public class TelegramMediaTransportTests
         }
     }
 
-    private sealed class StubWhisperHandler(HttpStatusCode status, string body) : HttpMessageHandler
+    /// <summary>What the transport actually uploaded to the whisper service.</summary>
+    internal sealed class WhisperRequestLog
+    {
+        internal int Calls { get; set; }
+        internal string? FileName { get; set; }
+        internal string? ContentType { get; set; }
+    }
+
+    private sealed class StubWhisperHandler(HttpStatusCode status, string body, WhisperRequestLog log) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-            => Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") });
+        {
+            log.Calls++;
+            if (request.Content is MultipartFormDataContent multipart)
+            {
+                foreach (var part in multipart)
+                {
+                    log.ContentType = part.Headers.ContentType?.MediaType;
+                    log.FileName = part.Headers.ContentDisposition?.FileName?.Trim('"');
+                }
+            }
+
+            return Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") });
+        }
     }
 
     /// <summary>

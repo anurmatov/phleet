@@ -34,6 +34,12 @@ public sealed class CodexExecutor : IAgentExecutor
     private CancellationTokenSource? _readerCts;
     private long _nextRequestId;
 
+    // Resolved once from AgentOptions.Model and the environment — see SplitLocalModel.
+    // Null provider means a frontier model, which is every agent that does not opt in.
+    private readonly string? _localModelProvider;
+    private readonly string _threadModel;
+    private readonly string? _ossBaseUrl;
+
     private string? _threadId;
     private string? _activeTurnId;
     private ThreadTokenUsageSnapshot? _lastTurnUsage;
@@ -49,6 +55,7 @@ public sealed class CodexExecutor : IAgentExecutor
     private readonly Func<ProcessStartInfo, Process?> _processStarter;
 
     private const string CodexBin = "codex";
+    internal const string OssBaseUrlEnvVar = "CODEX_OSS_BASE_URL";
     private const string InitializedMethod = "initialized";
     private const string ThreadShellCommandMethod = "thread/shellCommand";
     private const string ClientName = "phleet";
@@ -56,6 +63,13 @@ public sealed class CodexExecutor : IAgentExecutor
     private const int StartupRetryBudget = 3;
     private static readonly TimeSpan InterruptDrainTimeout = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan TurnSteerTimeout = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// The codex built-in <c>modelProvider</c> ids that point at a local OpenAI-compatible
+    /// inference server. Both are reserved inside codex, so only these two spellings are accepted
+    /// — an invented id would be rejected by the app-server at <c>thread/start</c>.
+    /// </summary>
+    private static readonly string[] LocalModelProviders = ["ollama", "lmstudio"];
 
     public string? LastSessionId => _threadId;
     public DateTimeOffset LastActivity => _lastActivity;
@@ -87,13 +101,64 @@ public sealed class CodexExecutor : IAgentExecutor
         IOptions<TelegramOptions> telegramConfig,
         PromptBuilder promptBuilder,
         ILogger<CodexExecutor> logger,
-        Func<ProcessStartInfo, Process?> processStarter)
+        Func<ProcessStartInfo, Process?> processStarter,
+        Func<string, string?>? environmentReader = null)
     {
         _config = config.Value;
         _promptBuilder = promptBuilder;
         _logger = logger;
         _normalizedAttachmentDir = Path.GetFullPath(telegramConfig.Value.AttachmentDir);
         _processStarter = processStarter;
+
+        // Resolved here and validated in EnsureProcessReadyAsync rather than thrown from the
+        // constructor, so a misconfigured model surfaces as a named startup failure instead of a
+        // DI resolution error with no agent name in it.
+        (_localModelProvider, _threadModel) = SplitLocalModel(_config.Model);
+        _ossBaseUrl = (environmentReader ?? Environment.GetEnvironmentVariable)(OssBaseUrlEnvVar);
+    }
+
+    /// <summary>
+    /// Splits an <c>ollama/…</c> or <c>lmstudio/…</c> model string into the codex
+    /// <c>modelProvider</c> id and the bare model id it names.
+    /// </summary>
+    /// <remarks>
+    /// Any other string — including one that merely contains a slash, such as <c>owl/t-lite</c> —
+    /// comes back unchanged with a null provider. That is deliberate: an unprefixed model must
+    /// produce exactly the <c>thread/start</c> payload it produced before this existed.
+    /// </remarks>
+    internal static (string? Provider, string Model) SplitLocalModel(string model)
+    {
+        var slash = model.IndexOf('/');
+        if (slash <= 0 || slash == model.Length - 1)
+            return (null, model);
+
+        var prefix = model[..slash];
+        var provider = LocalModelProviders.FirstOrDefault(
+            p => string.Equals(p, prefix, StringComparison.OrdinalIgnoreCase));
+
+        return provider is null ? (null, model) : (provider, model[(slash + 1)..]);
+    }
+
+    /// <summary>
+    /// Describes the configuration fault in a codex agent whose model names a local provider but
+    /// has no <c>CODEX_OSS_BASE_URL</c> to reach it, or null when the pair is sound.
+    /// </summary>
+    /// <remarks>
+    /// Shared by the host-start check in <c>Program.cs</c> — which refuses to start the host, so
+    /// the container is visibly down rather than up and unable to answer — and by
+    /// <see cref="EnsureProcessReadyAsync"/>, which backstops the CLI and test paths.
+    /// </remarks>
+    internal static string? DescribeLocalModelFault(string model, string? ossBaseUrl)
+    {
+        var (provider, _) = SplitLocalModel(model);
+        if (provider is null || !string.IsNullOrWhiteSpace(ossBaseUrl))
+            return null;
+
+        return $"Model '{model}' selects the local codex provider '{provider}', but "
+             + $"{OssBaseUrlEnvVar} is unset or blank. Set it to the inference server's "
+             + "OpenAI-compatible base URL, e.g. http://host.docker.internal:11434/v1. There is "
+             + "no default: codex would resolve localhost, which inside a container is the "
+             + "container itself.";
     }
 
     public async IAsyncEnumerable<AgentProgress> ExecuteAsync(
@@ -367,8 +432,9 @@ public sealed class CodexExecutor : IAgentExecutor
     internal void SetStdinForTests(StreamWriter writer) => _stdin = writer;
 
     // Polls _pendingRequests until a TCS appears, resolves it with the given result, and returns.
-    // Use in tests alongside TryInjectMessageAsync to simulate a codex app-server responding to turn/steer.
-    internal async Task<bool> WaitAndCompleteNextPendingSteerForTests(JsonObject result, CancellationToken ct = default)
+    // Use in tests to stand in for a codex app-server answering one JSON-RPC request — turn/steer
+    // for the injection tests, initialize and thread/start for the startup ones.
+    internal async Task<bool> WaitAndCompleteNextPendingRequestForTests(JsonObject result, CancellationToken ct = default)
     {
         while (!ct.IsCancellationRequested)
         {
@@ -480,6 +546,13 @@ public sealed class CodexExecutor : IAgentExecutor
 
     private async Task EnsureProcessReadyAsync(CancellationToken ct)
     {
+        // Backstop only — the daemon and CLI hosts refuse to start on this fault, so in a
+        // container it is already unreachable. It stays for the paths that construct an executor
+        // without going through the host, and it fails before the retry budget is touched and
+        // before codex is spawned: a configuration fault is not a transient start failure.
+        if (DescribeLocalModelFault(_config.Model, _ossBaseUrl) is { } fault)
+            throw new InvalidOperationException($"CodexExecutor: {fault}");
+
         Exception? lastError = null;
 
         // 3-strike budget is in-memory and resets on each call (not on container restart).
@@ -545,6 +618,14 @@ public sealed class CodexExecutor : IAgentExecutor
         _lastTurnUsage = null;
         _messageCount = 0;
         _logger.LogInformation("CodexExecutor: app-server started (pid {Pid})", _process.Id);
+
+        if (_localModelProvider is not null)
+        {
+            _logger.LogInformation(
+                "CodexExecutor: local inference — provider {Provider}, model {Model}, {EnvVar}={BaseUrl}",
+                _localModelProvider, _threadModel, OssBaseUrlEnvVar, _ossBaseUrl);
+        }
+
         return Task.CompletedTask;
     }
 
@@ -576,16 +657,24 @@ public sealed class CodexExecutor : IAgentExecutor
         var baseInstructions = await File.ReadAllTextAsync(systemPromptPath, ct);
         var sandboxMode = NormalizeSandboxMode(_config.CodexSandboxMode);
 
-        var threadResponse = await SendRequestAsync("thread/start", new JsonObject
+        var startParams = new JsonObject
         {
-            ["model"] = _config.Model,
-            ["cwd"] = _config.WorkDir,
-            ["approvalPolicy"] = "never",
-            ["sandbox"] = sandboxMode,
-            ["serviceName"] = ClientName,
-            ["baseInstructions"] = baseInstructions,
-            ["ephemeral"] = true,
-        }, ct);
+            ["model"] = _threadModel,
+        };
+
+        // The only difference from the frontier payload. codex resolves the provider's base URL
+        // from CODEX_OSS_BASE_URL in this process's environment, which the app-server inherits.
+        if (_localModelProvider is not null)
+            startParams["modelProvider"] = _localModelProvider;
+
+        startParams["cwd"] = _config.WorkDir;
+        startParams["approvalPolicy"] = "never";
+        startParams["sandbox"] = sandboxMode;
+        startParams["serviceName"] = ClientName;
+        startParams["baseInstructions"] = baseInstructions;
+        startParams["ephemeral"] = true;
+
+        var threadResponse = await SendRequestAsync("thread/start", startParams, ct);
 
         var thread = threadResponse.RequireObject("thread");
         _threadId = thread.RequireString("id");

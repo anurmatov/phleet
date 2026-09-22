@@ -5,6 +5,7 @@ using Fleet.Conversations.Contracts;
 using Fleet.Agent.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace Fleet.Agent;
@@ -71,6 +72,59 @@ public static class AgentHostRegistration
         services.AddSingleton<AllowlistHolder>();
 
         return services;
+    }
+
+    /// <summary>
+    /// Startup configuration gate, run by <c>Program.cs</c> against the built host before
+    /// <c>app.Run()</c>. Throws rather than let a misconfigured agent reach the run loop.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Lives here for the same reason the registrations do: a gate re-typed in a test proves the
+    /// copy is correct and says nothing about the process that ships.
+    /// </para>
+    /// <para>
+    /// ⚠️ Throwing is not, by itself, enough to stop the host, and the call site owns the
+    /// difference. Measured on the throw-only version: the arm64 image stayed resident at ~100%
+    /// CPU with <c>docker ps</c> reporting <c>Up</c>, while x86-64 aborted with SIGABRT (134) and
+    /// wrote a core. Why they differed was never established, so no mechanism is claimed here.
+    /// <c>Program.cs</c> therefore catches and calls <c>Environment.Exit(1)</c>, which terminates
+    /// outright rather than relying on unhandled-exception propagation. Keep that catch: without
+    /// it this method degrades from a gate into a wedge. The throw stays so the behaviour is
+    /// assertable from a test, which <c>Environment.Exit</c> inside this method would not be — it
+    /// would end the test host.
+    /// </para>
+    /// <para>
+    /// The only fault it catches today is a codex agent whose model names a local provider
+    /// (<c>ollama/…</c>, <c>lmstudio/…</c>) with no <c>CODEX_OSS_BASE_URL</c> to reach it. That is
+    /// misconfiguration, not degradation — there is no endpoint. It has to stop the host, because
+    /// nothing downstream will: <c>/health</c> answers ok unconditionally and
+    /// <see cref="Services.WarmupService"/> swallows executor startup failures as a warning, so a
+    /// lazy check leaves the container up, reported healthy, and unable to answer a single turn.
+    /// </para>
+    /// </remarks>
+    public static void ValidateStartupConfiguration(
+        IServiceProvider services, Func<string, string?>? environmentReader = null)
+    {
+        var agent = services.GetRequiredService<IOptions<AgentOptions>>().Value;
+
+        if (agent.Provider != "codex")
+            return;
+
+        var readEnv = environmentReader ?? Environment.GetEnvironmentVariable;
+        if (CodexExecutor.DescribeLocalModelFault(
+                agent.Model, readEnv(CodexExecutor.OssBaseUrlEnvVar)) is not { } fault)
+        {
+            return;
+        }
+
+        // Logged before the throw so the container's last line names the cause, rather than an
+        // unhandled-exception stack the operator has to read to the bottom of.
+        services.GetRequiredService<ILoggerFactory>()
+            .CreateLogger(typeof(AgentHostRegistration).FullName!)
+            .LogCritical("Agent '{Agent}' cannot start: {Fault}", agent.Name, fault);
+
+        throw new InvalidOperationException(fault);
     }
 
     /// <summary>CLI mode: run a single task and exit.</summary>

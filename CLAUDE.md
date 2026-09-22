@@ -101,6 +101,30 @@ For gemini setup: run `gemini auth` once on the host, then `./setup.sh` (choose 
 No GEMINI_API_KEY needed — authentication is OAuth only.
 See `docs/providers/gemini.md` for a full setup guide.
 
+### Codex local models
+
+A codex agent's `Model` may carry an `ollama/` or `lmstudio/` prefix (e.g. `ollama/gpt-oss:20b`).
+`CodexExecutor` splits it and sends `modelProvider` alongside the bare model id in `thread/start`,
+routing the thread to a local OpenAI-compatible inference server. Only those two ids are
+recognised — codex reserves them, and any other prefix (`owl/t-lite`) passes through untouched, so
+an unprefixed model produces exactly the payload it always did.
+
+A prefixed model requires `CODEX_OSS_BASE_URL` (e.g. `http://host.docker.internal:11434/v1`) as a
+provision-time env var on the agent. If it is unset or blank, **the host refuses to start** —
+`AgentHostRegistration.ValidateStartupConfiguration` throws before `app.Run()` and `Program.cs`
+logs at `Critical` and calls `Environment.Exit(1)`, so the container exits non-zero rather than
+coming up with `/health` answering ok. The explicit exit is not optional: **a throw alone did not
+terminate reliably, and what it did instead varied by platform** — on the arm64 image the process
+stayed resident at ~100% CPU with `docker ps` reporting `Up`, while on x86-64 it aborted with
+SIGABRT (134) and wrote a core. The cause of the arm64 spin was never established, so do not
+reason from a mechanism here; `Environment.Exit(1)` is used precisely because it does not depend
+on unhandled-exception propagation at all. There is no fallback to codex's `localhost` default,
+which inside a container is the container itself.
+
+⚠️ A wedged local inference server takes the whole agent down, not one turn: `CodexExecutor` holds
+`_turnLock` for the turn and a chat-driven turn has no deadline, so everything queues behind it.
+See `docs/providers/codex-local-models.md`.
+
 ## Provider CLI Pins
 
 The agent image pins every provider CLI explicitly in `Dockerfile`:

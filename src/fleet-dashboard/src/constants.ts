@@ -15,6 +15,9 @@ export const PROVIDER_MODELS: Record<string, string[]> = {
     'gpt-5.4-mini',
     'gpt-5.3-codex',
     'codex-mini-latest',
+    // An `ollama/` or `lmstudio/` prefix routes the thread to a local inference server.
+    // Requires CODEX_OSS_BASE_URL on the agent — see docs/providers/codex-local-models.md.
+    'ollama/gpt-oss:20b',
   ],
   gemini: [
     'gemini-3-pro-preview',

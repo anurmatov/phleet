@@ -15,23 +15,30 @@ public class CodexExecutorTests
     private static CodexExecutor CreateExecutor(
         string attachmentDir = "/workspace/attachments",
         Func<System.Diagnostics.ProcessStartInfo, System.Diagnostics.Process?>? processStarter = null,
-        ILogger<CodexExecutor>? logger = null)
+        ILogger<CodexExecutor>? logger = null,
+        string? model = null,
+        string workDir = "/workspace",
+        Func<string, string?>? environmentReader = null)
     {
         var agentOptions = Options.Create(new AgentOptions
         {
             Name = "test",
             Role = "test",
-            WorkDir = "/workspace",
+            WorkDir = workDir,
         });
+        if (model is not null)
+            agentOptions.Value.Model = model;
         var telegramOptions = Options.Create(new TelegramOptions
         {
             AttachmentDir = attachmentDir,
         });
         var promptBuilder = new PromptBuilder(agentOptions, NullLogger<PromptBuilder>.Instance);
         var resolvedLogger = logger ?? NullLogger<CodexExecutor>.Instance;
-        return processStarter is null
+        return processStarter is null && environmentReader is null
             ? new CodexExecutor(agentOptions, telegramOptions, promptBuilder, resolvedLogger)
-            : new CodexExecutor(agentOptions, telegramOptions, promptBuilder, resolvedLogger, processStarter);
+            : new CodexExecutor(
+                agentOptions, telegramOptions, promptBuilder, resolvedLogger,
+                processStarter ?? System.Diagnostics.Process.Start, environmentReader);
     }
 
     /// <summary>Captures log messages for assertion in tests.</summary>
@@ -420,6 +427,248 @@ public class CodexExecutorTests
         Assert.Contains("final_answer", result.Error ?? "");
     }
 
+    // ── Local model providers (#325) ──────────────────────────────────────────────────────────
+
+    [Theory]
+    // Both built-in local providers, matched case-insensitively.
+    [InlineData("ollama/gpt-oss:20b", "ollama", "gpt-oss:20b")]
+    [InlineData("OLLAMA/gpt-oss:20b", "ollama", "gpt-oss:20b")]
+    [InlineData("lmstudio/qwen3-coder", "lmstudio", "qwen3-coder")]
+    // A slash alone is not a provider prefix — these must pass through untouched.
+    [InlineData("gpt-5", null, "gpt-5")]
+    [InlineData("owl/t-lite", null, "owl/t-lite")]
+    [InlineData("/gpt-oss:20b", null, "/gpt-oss:20b")]
+    [InlineData("ollama/", null, "ollama/")]
+    public void SplitLocalModel_RecognisesOnlyBuiltInProviderPrefixes(
+        string configured, string? expectedProvider, string expectedModel)
+    {
+        var (provider, model) = CodexExecutor.SplitLocalModel(configured);
+
+        Assert.Equal(expectedProvider, provider);
+        Assert.Equal(expectedModel, model);
+    }
+
+    [Theory]
+    // Prefixed model, nothing to reach it with — the fault the host-start gate exists for.
+    [InlineData("ollama/gpt-oss:20b", null, true)]
+    [InlineData("ollama/gpt-oss:20b", "", true)]
+    [InlineData("ollama/gpt-oss:20b", "   ", true)]
+    [InlineData("lmstudio/qwen3-coder", null, true)]
+    // Configured, or not opted in at all.
+    [InlineData("ollama/gpt-oss:20b", "http://host.docker.internal:11434/v1", false)]
+    [InlineData("gpt-5", null, false)]
+    [InlineData("owl/t-lite", null, false)]
+    public void DescribeLocalModelFault_FlagsOnlyPrefixedModelsWithNoBaseUrl(
+        string model, string? ossBaseUrl, bool expectFault)
+    {
+        var fault = CodexExecutor.DescribeLocalModelFault(model, ossBaseUrl);
+
+        if (!expectFault)
+        {
+            Assert.Null(fault);
+            return;
+        }
+
+        Assert.NotNull(fault);
+        Assert.Contains("CODEX_OSS_BASE_URL", fault);
+        Assert.Contains(model, fault);
+    }
+
+    [Fact]
+    public async Task EnsureProcessReady_LocalProviderWithoutBaseUrl_FailsFastBeforeSpawningCodex()
+    {
+        var starts = 0;
+        var executor = CreateExecutor(
+            model: "ollama/gpt-oss:20b",
+            environmentReader: _ => null,
+            processStarter: _ => { starts++; return null; });
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => executor.EnsureProcessReadyForTestsAsync());
+
+        Assert.Contains("CODEX_OSS_BASE_URL", ex.Message);
+        Assert.Contains("ollama/gpt-oss:20b", ex.Message);
+        // A configuration fault must not spend the crash-loop budget, and must never leave a
+        // codex process running against codex's own localhost default.
+        Assert.Equal(0, starts);
+        Assert.DoesNotContain("3 attempts", ex.Message);
+    }
+
+    [Fact]
+    public async Task EnsureProcessReady_LocalProviderWithBlankBaseUrl_FailsFast()
+    {
+        var executor = CreateExecutor(
+            model: "ollama/gpt-oss:20b",
+            environmentReader: _ => "   ",
+            processStarter: _ => null);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => executor.EnsureProcessReadyForTestsAsync());
+
+        Assert.Contains("CODEX_OSS_BASE_URL", ex.Message);
+    }
+
+    [Fact]
+    public async Task ThreadStart_PrefixedModel_SendsSplitModelAndModelProvider()
+    {
+        using var capture = new ThreadStartCapture();
+        using var workspace = new TempWorkspace();
+        var executor = CreateExecutor(
+            model: "ollama/gpt-oss:20b",
+            workDir: workspace.Path,
+            environmentReader: key =>
+                key == "CODEX_OSS_BASE_URL" ? "http://host.docker.internal:11434/v1" : null,
+            processStarter: capture.Start);
+
+        var startParams = await DriveThreadStartAsync(executor, capture);
+
+        Assert.Equal(
+            ["model", "modelProvider", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"],
+            startParams.Select(kv => kv.Key));
+        Assert.Equal("gpt-oss:20b", (string?)startParams["model"]);
+        Assert.Equal("ollama", (string?)startParams["modelProvider"]);
+        Assert.Equal(workspace.Path, (string?)startParams["cwd"]);
+        Assert.Equal("never", (string?)startParams["approvalPolicy"]);
+        Assert.Equal("danger-full-access", (string?)startParams["sandbox"]);
+        Assert.Equal("phleet", (string?)startParams["serviceName"]);
+        Assert.True((bool?)startParams["ephemeral"]);
+    }
+
+    // The regression that matters most: an agent that did not opt in must send the payload it
+    // always sent, key for key and in the same order — no modelProvider key at all.
+    [Fact]
+    public async Task ThreadStart_UnprefixedModel_SendsPayloadUnchanged()
+    {
+        using var capture = new ThreadStartCapture();
+        using var workspace = new TempWorkspace();
+        var executor = CreateExecutor(
+            model: "gpt-5",
+            workDir: workspace.Path,
+            environmentReader: _ => null,
+            processStarter: capture.Start);
+
+        var startParams = await DriveThreadStartAsync(executor, capture);
+
+        Assert.Equal(
+            ["model", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"],
+            startParams.Select(kv => kv.Key));
+        Assert.Equal("gpt-5", (string?)startParams["model"]);
+        Assert.Equal(workspace.Path, (string?)startParams["cwd"]);
+        Assert.Equal("never", (string?)startParams["approvalPolicy"]);
+        Assert.Equal("danger-full-access", (string?)startParams["sandbox"]);
+        Assert.Equal("phleet", (string?)startParams["serviceName"]);
+        Assert.True((bool?)startParams["ephemeral"]);
+    }
+
+    /// <summary>
+    /// Runs the real startup handshake against the stand-in app-server and returns the
+    /// <c>thread/start</c> params exactly as they went over the wire.
+    /// </summary>
+    private static async Task<JsonObject> DriveThreadStartAsync(CodexExecutor executor, ThreadStartCapture capture)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        // The stand-in writes nothing to stdout, so the responder below is the only thing that can
+        // complete a request — no echo can race it.
+        var responder = Task.Run(async () =>
+        {
+            await executor.WaitAndCompleteNextPendingRequestForTests(new JsonObject(), cts.Token);
+            await executor.WaitAndCompleteNextPendingRequestForTests(new JsonObject
+            {
+                ["thread"] = new JsonObject { ["id"] = "thread-1", ["ephemeral"] = true },
+            }, cts.Token);
+        }, cts.Token);
+
+        await executor.EnsureProcessReadyForTestsAsync(cts.Token);
+        await responder;
+
+        return capture.ReadThreadStartParams();
+    }
+
+    /// <summary>A throwaway <c>WorkDir</c>, because startup writes <c>system-prompt.md</c> into it.</summary>
+    private sealed class TempWorkspace : IDisposable
+    {
+        public TempWorkspace() => Directory.CreateDirectory(Path);
+
+        public string Path { get; } =
+            System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"codex-ws-{Guid.NewGuid():N}");
+
+        public void Dispose()
+        {
+            try { Directory.Delete(Path, recursive: true); } catch { /* teardown only */ }
+        }
+    }
+
+    /// <summary>
+    /// A stand-in codex app-server: <c>cat</c> redirected into a file, so it swallows every frame
+    /// the executor writes and answers nothing. The frames stay on disk to be asserted, and the
+    /// test — not an echo of its own request — decides each JSON-RPC response.
+    /// </summary>
+    /// <remarks>
+    /// POSIX-only, like <see cref="StandInProcess"/>: the suite already hard-depends on
+    /// <c>/bin/cat</c>, and a skipped provider test is an unmeasured provider reported as green.
+    /// </remarks>
+    private sealed class ThreadStartCapture : IDisposable
+    {
+        private const string ShellPath = "/bin/sh"; // hygiene-ok: OS stand-in binary, not provider data
+
+        private readonly string _capturePath =
+            System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"codex-rpc-{Guid.NewGuid():N}.jsonl");
+
+        private System.Diagnostics.Process? _process;
+
+        public System.Diagnostics.Process Start(System.Diagnostics.ProcessStartInfo _)
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = ShellPath,
+                UseShellExecute = false,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            psi.ArgumentList.Add("-c");
+            psi.ArgumentList.Add($"cat > '{_capturePath}'");
+
+            _process = System.Diagnostics.Process.Start(psi)
+                ?? throw new InvalidOperationException($"Failed to start the stand-in app-server '{ShellPath}'.");
+            return _process;
+        }
+
+        public JsonObject ReadThreadStartParams()
+        {
+            // Closing the executor's stdin lets cat drain and exit, so the capture file is complete.
+            _process!.StandardInput.BaseStream.Close();
+            _process.WaitForExit(milliseconds: 5000);
+
+            foreach (var line in File.ReadAllLines(_capturePath))
+            {
+                if (JsonNode.Parse(line) is JsonObject frame &&
+                    (string?)frame["method"] == "thread/start" &&
+                    frame["params"] is JsonObject startParams)
+                {
+                    return startParams;
+                }
+            }
+
+            throw new InvalidOperationException($"No thread/start frame was captured in {_capturePath}.");
+        }
+
+        public void Dispose()
+        {
+            try
+            {
+                if (_process is { HasExited: false })
+                    _process.Kill(entireProcessTree: true);
+            }
+            catch { /* teardown only */ }
+
+            _process?.Dispose();
+            try { File.Delete(_capturePath); } catch { /* teardown only */ }
+        }
+    }
+
     [Fact]
     public async Task AfterCommentaryPhase_InjectionStillSucceeds()
     {
@@ -439,7 +688,7 @@ public class CodexExecutorTests
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             // WaitAndCompleteNextPendingSteerForTests polls _pendingRequests until the turn/steer
             // RPC is registered, then resolves it with a successful response.
-            var resolveTask = executor.WaitAndCompleteNextPendingSteerForTests(
+            var resolveTask = executor.WaitAndCompleteNextPendingRequestForTests(
                 new JsonObject { ["turnId"] = "turn-1" }, cts.Token);
             var injectTask = executor.TryInjectMessageAsync("mid-turn injection", null, null, cts.Token);
             await Task.WhenAll(resolveTask, injectTask);

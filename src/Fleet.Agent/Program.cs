@@ -23,6 +23,35 @@ else
 
 var app = builder.Build();
 
+// Refuses to start a misconfigured agent, before /health can answer ok for it.
+//
+// A throw alone does NOT reliably end the process, and reasoning about why is how this shipped
+// wrong once already. What was actually measured: on the arm64 image the throw-only version never
+// served /health (Kestrel never listened) but stayed resident at ~101% CPU with `docker ps`
+// reporting "Up", which `restart: unless-stopped` never acts on; on x86-64 the same build aborted
+// with SIGABRT (134) and wrote a core instead. The cause of the arm64 spin was never established —
+// the obvious "a foreground thread from builder.Build() blocks teardown" explanation was tested
+// directly and falsified, so it is not recorded here as fact.
+//
+// Exit(1) is therefore the point, not a detail: it terminates the process outright and does not
+// depend on unhandled-exception propagation, so it is not subject to whatever differed between
+// those platforms. Exiting is the call site's job and must stay here. Exit over FailFast: same
+// non-zero status, without the crash dump — and that dump was the expensive part, a core per
+// restart under a restart policy.
+try
+{
+    AgentHostRegistration.ValidateStartupConfiguration(app.Services);
+}
+catch (Exception ex)
+{
+    // The validator already logged the cause at Critical. Console.Error, not the logger, because
+    // this path must not depend on DI resolving anything — a throw in here would hang the process
+    // in exactly the way the exit exists to prevent. Catching Exception rather than the validator's
+    // InvalidOperationException for the same reason: no exception type may reach the run loop.
+    Console.Error.WriteLine($"Fleet.Agent startup aborted, exiting 1: {ex.Message}");
+    Environment.Exit(1);
+}
+
 if (!isCliMode)
 {
     // One-shot startup sweep: clean up attachment files left over from prior runs.

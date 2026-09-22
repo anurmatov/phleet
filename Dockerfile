@@ -42,9 +42,11 @@ RUN curl -fsSL https://download.docker.com/linux/static/stable/$(uname -m)/docke
     | tar xz --strip-components=1 -C /usr/local/bin docker/docker
 
 # MinIO client for file sharing via fleet-minio
-RUN ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
-    curl -fsSL "https://dl.min.io/client/mc/release/linux-${ARCH}/mc" -o /usr/local/bin/mc && \
-    chmod +x /usr/local/bin/mc
+# dl.min.io returns 410 Gone since 2026-09 (#330); the client is taken from the
+# official quay.io image instead. COPY --from resolves per build platform, so no
+# hand-rolled arch mapping. Pin the dated tag, never :latest.
+COPY --from=quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z /usr/bin/mc /usr/local/bin/mc
+RUN chmod +x /usr/local/bin/mc
 
 ARG GIT_COMMIT=unknown
 ENV FLEET_BUILD_COMMIT=$GIT_COMMIT

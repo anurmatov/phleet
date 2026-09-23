@@ -7,6 +7,8 @@ using System.Text.Json.Nodes;
 using System.Threading.Channels;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
+using Fleet.Agent.Services.HostedProviders;
+using Fleet.Shared;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -39,6 +41,12 @@ public sealed class CodexExecutor : IAgentExecutor
     private readonly string? _localModelProvider;
     private readonly string _threadModel;
     private readonly string? _ossBaseUrl;
+
+    // Hosted provider (#335), resolved once from AgentOptions.Model. Null for every agent that
+    // does not name a hosted prefix, and then nothing below differs from before.
+    private readonly HostedModelProvider? _hostedProvider;
+    private readonly HostedProviderAdapterHost? _adapterHost;
+    private bool _effortWarningLogged;
 
     private string? _threadId;
     private string? _activeTurnId;
@@ -91,8 +99,9 @@ public sealed class CodexExecutor : IAgentExecutor
         IOptions<AgentOptions> config,
         IOptions<TelegramOptions> telegramConfig,
         PromptBuilder promptBuilder,
-        ILogger<CodexExecutor> logger)
-        : this(config, telegramConfig, promptBuilder, logger, Process.Start)
+        ILogger<CodexExecutor> logger,
+        HostedProviderAdapterHost? adapterHost = null)
+        : this(config, telegramConfig, promptBuilder, logger, Process.Start, adapterHost: adapterHost)
     {
     }
 
@@ -102,7 +111,8 @@ public sealed class CodexExecutor : IAgentExecutor
         PromptBuilder promptBuilder,
         ILogger<CodexExecutor> logger,
         Func<ProcessStartInfo, Process?> processStarter,
-        Func<string, string?>? environmentReader = null)
+        Func<string, string?>? environmentReader = null,
+        HostedProviderAdapterHost? adapterHost = null)
     {
         _config = config.Value;
         _promptBuilder = promptBuilder;
@@ -115,6 +125,14 @@ public sealed class CodexExecutor : IAgentExecutor
         // DI resolution error with no agent name in it.
         (_localModelProvider, _threadModel) = SplitLocalModel(_config.Model);
         _ossBaseUrl = (environmentReader ?? Environment.GetEnvironmentVariable)(OssBaseUrlEnvVar);
+
+        // The hosted prefixes never overlap the local ones, so at most one of the two is set.
+        if (HostedModelProviders.TryResolve("codex", _config.Model, out var hosted, out var bareModel))
+        {
+            _hostedProvider = hosted;
+            _threadModel = bareModel;
+        }
+        _adapterHost = adapterHost;
     }
 
     /// <summary>
@@ -197,7 +215,7 @@ public sealed class CodexExecutor : IAgentExecutor
                     ["threadId"] = _threadId!,
                     ["input"] = BuildUserInputs(task, forwardedPaths),
                 };
-                var codexEffort = MapEffortToCodex(_config.Effort);
+                var codexEffort = FilterEffortForProvider(MapEffortToCodex(_config.Effort));
                 if (codexEffort is not null)
                     startParams["effort"] = codexEffort;
 
@@ -521,6 +539,46 @@ public sealed class CodexExecutor : IAgentExecutor
             _        => null,
         };
 
+    /// <summary>
+    /// D7: a hosted provider receives <c>effort</c> only when the value is in its forwarded set.
+    /// Otherwise the field is omitted — never remapped — and one Warning names the value.
+    /// </summary>
+    private string? FilterEffortForProvider(string? codexEffort)
+    {
+        if (codexEffort is null || _hostedProvider is null || _hostedProvider.ForwardsEffort(codexEffort))
+            return codexEffort;
+
+        if (!_effortWarningLogged)
+        {
+            _effortWarningLogged = true;
+            _logger.LogWarning(
+                "CodexExecutor: effort '{Effort}' is not forwarded to hosted provider {Prefix}; "
+                + "sending no effort, so the provider default applies",
+                codexEffort, _hostedProvider.Prefix);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The <c>thread/start</c> <c>config</c> overrides that define a hosted provider for this thread
+    /// only (D3). Codex gets no <c>env_key</c>: the adapter holds the key.
+    /// </summary>
+    internal static JsonObject BuildHostedProviderConfig(HostedModelProvider provider, Uri adapterBase)
+    {
+        var prefix = $"model_providers.{provider.CodexProviderId}.";
+        return new JsonObject
+        {
+            [prefix + "name"] = provider.DisplayName,
+            [prefix + "base_url"] = $"{adapterBase.GetLeftPart(UriPartial.Authority)}/{provider.Prefix}",
+            [prefix + "wire_api"] = "responses",
+            [prefix + "requires_openai_auth"] = false,
+            [prefix + "supports_websockets"] = false,
+            [prefix + "stream_idle_timeout_ms"] = 300000,
+            [prefix + "request_max_retries"] = 2,
+            [prefix + "stream_max_retries"] = 2,
+        };
+    }
+
     internal static JsonArray BuildUserInputs(string task, IReadOnlyList<string> imagePaths)
     {
         var inputs = new JsonArray();
@@ -602,6 +660,12 @@ public sealed class CodexExecutor : IAgentExecutor
             CreateNoWindow = true,
         };
 
+        // D5.5, for every model: codex runs a root shell for the model, so a key in its
+        // environment is one `env` call from the transcript. entrypoint.sh already unset these
+        // before exec; this is the belt to that brace.
+        foreach (var keyEnvVar in HostedModelProviders.KeyEnvVars)
+            psi.Environment.Remove(keyEnvVar);
+
         _process = _processStarter(psi) ?? throw new InvalidOperationException("Failed to start codex app-server");
         _stdin = new StreamWriter(_process.StandardInput.BaseStream, new UTF8Encoding(false)) { AutoFlush = true };
         _notificationChannel = Channel.CreateUnbounded<JsonObject>(new UnboundedChannelOptions
@@ -667,6 +731,18 @@ public sealed class CodexExecutor : IAgentExecutor
         if (_localModelProvider is not null)
             startParams["modelProvider"] = _localModelProvider;
 
+        // Hosted provider (#335 D3): defined per thread through config overrides, pointed at the
+        // loopback adapter. No config.toml is written.
+        if (_hostedProvider is not null)
+        {
+            var adapterBase = await (_adapterHost?.BaseAddress ?? throw new InvalidOperationException(
+                $"CodexExecutor: model '{_config.Model}' selects hosted provider '{_hostedProvider.Prefix}', "
+                + "but no loopback adapter is registered (Agent:HostedProvider is false)."))
+                .WaitAsync(ct);
+            startParams["modelProvider"] = _hostedProvider.CodexProviderId;
+            startParams["config"] = BuildHostedProviderConfig(_hostedProvider, adapterBase);
+        }
+
         startParams["cwd"] = _config.WorkDir;
         startParams["approvalPolicy"] = "never";
         startParams["sandbox"] = sandboxMode;
@@ -675,6 +751,17 @@ public sealed class CodexExecutor : IAgentExecutor
         startParams["ephemeral"] = true;
 
         var threadResponse = await SendRequestAsync("thread/start", startParams, ct);
+
+        // A codex that ignored the config overrides would silently run the thread on its default
+        // provider — with an OpenAI credential this container does not hold. Fail instead.
+        if (_hostedProvider is not null)
+        {
+            var echoed = threadResponse["modelProvider"] is JsonValue v && v.TryGetValue<string>(out var p) ? p : null;
+            if (!string.Equals(echoed, _hostedProvider.CodexProviderId, StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    $"CodexExecutor: thread/start did not echo modelProvider '{_hostedProvider.CodexProviderId}' "
+                    + $"(got '{echoed ?? "<none>"}'); codex did not accept the hosted provider definition.");
+        }
 
         var thread = threadResponse.RequireObject("thread");
         _threadId = thread.RequireString("id");

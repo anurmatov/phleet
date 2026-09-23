@@ -18,6 +18,10 @@ export const PROVIDER_MODELS: Record<string, string[]> = {
     // An `ollama/` or `lmstudio/` prefix routes the thread to a local inference server.
     // Requires CODEX_OSS_BASE_URL on the agent — see docs/providers/codex-local-models.md.
     'ollama/gpt-oss:20b',
+    // Hosted prefixes route through the agent's loopback adapter. Each needs its key as an Env
+    // Ref: DEEPSEEK_API_KEY / OPENROUTER_API_KEY — see docs/providers/codex-hosted-models.md.
+    'deepseek/deepseek-v4-pro',
+    'openrouter/z-ai/glm-5.3',
   ],
   gemini: [
     'gemini-3-pro-preview',

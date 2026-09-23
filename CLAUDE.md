@@ -125,6 +125,32 @@ which inside a container is the container itself.
 `_turnLock` for the turn and a chat-driven turn has no deadline, so everything queues behind it.
 See `docs/providers/codex-local-models.md`.
 
+### Codex hosted models
+
+A codex agent's `Model` may carry a `deepseek/` or `openrouter/` prefix (e.g.
+`deepseek/deepseek-v4-pro`, `openrouter/z-ai/glm-5.3` for GLM). `HostedModelProviders`
+(`src/Fleet.Shared/`) is the one registry the agent and orchestrator both read. `CodexExecutor`
+defines a `phleet_deepseek` / `phleet_openrouter` provider per thread through `thread/start`
+`config` overrides and points it at `HostedProviderAdapterHost`, a nested loopback-only web app
+(`127.0.0.1:0`) that exists only when `Agent.HostedProvider` is true. The adapter
+(`ResponsesNamespaceAdapter`) flattens Codex's MCP `namespace` tools into `function` tools, applies
+a per-vendor field allowlist, and restores `namespace` + `name` on returned calls by exact match only.
+
+Key isolation is the load-bearing part. The orchestrator emits `Agent.HostedProvider` and
+`Agent.HostedProviderKeyEnv`. `entrypoint.sh` moves that key into `/run/phleet-hosted-key` (0400),
+then **unconditionally unsets `DEEPSEEK_API_KEY` and `OPENROUTER_API_KEY` on every agent** before
+`exec dotnet`. The agent reads the file once and deletes it, and `CodexExecutor` strips both names
+from codex's environment. A hosted agent gets no `.codex-credentials.json` bind, has `auth.json`
+removed, and ignores codex token broadcasts. At startup the agent checks the orchestrator's flags
+against its own registry (parity) and exits 1 on a mismatch or an unusable key.
+
+| Env var | Where | Purpose |
+|---|---|---|
+| `DEEPSEEK_API_KEY` | `.env` + agent Env Ref | Key for `deepseek/` models. Reserved name |
+| `OPENROUTER_API_KEY` | `.env` + agent Env Ref | Key for `openrouter/` models. Reserved name |
+
+See `docs/providers/codex-hosted-models.md`.
+
 ## Provider CLI Pins
 
 The agent image pins every provider CLI explicitly in `Dockerfile`:

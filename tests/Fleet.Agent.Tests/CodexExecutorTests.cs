@@ -3,7 +3,9 @@ using System.Threading.Channels;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services;
+using Fleet.Agent.Services.HostedProviders;
 using Fleet.Agent.Tests.Harness;
+using Fleet.Shared;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -18,7 +20,9 @@ public class CodexExecutorTests
         ILogger<CodexExecutor>? logger = null,
         string? model = null,
         string workDir = "/workspace",
-        Func<string, string?>? environmentReader = null)
+        Func<string, string?>? environmentReader = null,
+        HostedProviderAdapterHost? adapterHost = null,
+        string? effort = null)
     {
         var agentOptions = Options.Create(new AgentOptions
         {
@@ -28,6 +32,7 @@ public class CodexExecutorTests
         });
         if (model is not null)
             agentOptions.Value.Model = model;
+        agentOptions.Value.Effort = effort;
         var telegramOptions = Options.Create(new TelegramOptions
         {
             AttachmentDir = attachmentDir,
@@ -35,10 +40,10 @@ public class CodexExecutorTests
         var promptBuilder = new PromptBuilder(agentOptions, NullLogger<PromptBuilder>.Instance);
         var resolvedLogger = logger ?? NullLogger<CodexExecutor>.Instance;
         return processStarter is null && environmentReader is null
-            ? new CodexExecutor(agentOptions, telegramOptions, promptBuilder, resolvedLogger)
+            ? new CodexExecutor(agentOptions, telegramOptions, promptBuilder, resolvedLogger, adapterHost)
             : new CodexExecutor(
                 agentOptions, telegramOptions, promptBuilder, resolvedLogger,
-                processStarter ?? System.Diagnostics.Process.Start, environmentReader);
+                processStarter ?? System.Diagnostics.Process.Start, environmentReader, adapterHost);
     }
 
     /// <summary>Captures log messages for assertion in tests.</summary>
@@ -560,11 +565,218 @@ public class CodexExecutorTests
         Assert.True((bool?)startParams["ephemeral"]);
     }
 
+    // ── #335: hosted providers ──────────────────────────────────────────────
+
+    /// <summary>A real loopback adapter host, so the executor awaits a genuine bound address.</summary>
+    private static async Task<HostedProviderAdapterHost> StartAdapterHostAsync(string model)
+    {
+        var options = Options.Create(new AgentOptions
+        {
+            Name = "test", Role = "test", WorkDir = "/workspace", Provider = "codex", Model = model,
+            HostedProvider = true,
+        });
+        var keyStore = new HostedProviderKeyStore(System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"unused-{Guid.NewGuid():N}"));
+        var host = new HostedProviderAdapterHost(options, keyStore, NullLoggerFactory.Instance);
+        await host.StartAsync(CancellationToken.None);
+        return host;
+    }
+
+    [Fact]
+    public async Task ThreadStart_DeepSeek_SendsTheExactD3Payload()
+    {
+        using var capture = new ThreadStartCapture();
+        using var workspace = new TempWorkspace();
+        await using var adapter = await StartAdapterHostAsync("deepseek/deepseek-v4-pro");
+        var port = (await adapter.BaseAddress).Port;
+        var executor = CreateExecutor(
+            model: "deepseek/deepseek-v4-pro",
+            workDir: workspace.Path,
+            environmentReader: _ => null,
+            processStarter: capture.Start,
+            adapterHost: adapter);
+
+        var startParams = await DriveThreadStartAsync(executor, capture, echoedProvider: "phleet_deepseek");
+
+        Assert.Equal(
+            ["model", "modelProvider", "config", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"],
+            startParams.Select(kv => kv.Key));
+        Assert.Equal("deepseek-v4-pro", (string?)startParams["model"]);
+        Assert.Equal("phleet_deepseek", (string?)startParams["modelProvider"]);
+
+        var expectedConfig = new JsonObject
+        {
+            ["model_providers.phleet_deepseek.name"] = "DeepSeek (phleet)",
+            ["model_providers.phleet_deepseek.base_url"] = $"http://127.0.0.1:{port}/deepseek",
+            ["model_providers.phleet_deepseek.wire_api"] = "responses",
+            ["model_providers.phleet_deepseek.requires_openai_auth"] = false,
+            ["model_providers.phleet_deepseek.supports_websockets"] = false,
+            ["model_providers.phleet_deepseek.stream_idle_timeout_ms"] = 300000,
+            ["model_providers.phleet_deepseek.request_max_retries"] = 2,
+            ["model_providers.phleet_deepseek.stream_max_retries"] = 2,
+        };
+        Assert.Equal(expectedConfig.ToJsonString(), startParams["config"]!.ToJsonString());
+        Assert.DoesNotContain("env_key", startParams["config"]!.ToJsonString());
+
+        Assert.Equal(workspace.Path, (string?)startParams["cwd"]);
+        Assert.Equal("never", (string?)startParams["approvalPolicy"]);
+        Assert.Equal("phleet", (string?)startParams["serviceName"]);
+        Assert.True((bool?)startParams["ephemeral"]);
+    }
+
+    [Fact]
+    public async Task ThreadStart_OpenRouterGlm_SendsBareModelAndPhleetProvider()
+    {
+        using var capture = new ThreadStartCapture();
+        using var workspace = new TempWorkspace();
+        await using var adapter = await StartAdapterHostAsync("openrouter/z-ai/glm-5.3");
+        var executor = CreateExecutor(
+            model: "openrouter/z-ai/glm-5.3",
+            workDir: workspace.Path,
+            environmentReader: _ => null,
+            processStarter: capture.Start,
+            adapterHost: adapter);
+
+        var startParams = await DriveThreadStartAsync(executor, capture, echoedProvider: "phleet_openrouter");
+
+        Assert.Equal("z-ai/glm-5.3", (string?)startParams["model"]);
+        Assert.Equal("phleet_openrouter", (string?)startParams["modelProvider"]);
+        Assert.EndsWith("/openrouter", (string?)startParams["config"]!["model_providers.phleet_openrouter.base_url"]);
+    }
+
+    [Fact]
+    public async Task ThreadStart_HostedProviderNotEchoed_FailsStartup()
+    {
+        using var capture = new ThreadStartCapture();
+        using var workspace = new TempWorkspace();
+        await using var adapter = await StartAdapterHostAsync("deepseek/deepseek-v4-pro");
+        var executor = CreateExecutor(
+            model: "deepseek/deepseek-v4-pro",
+            workDir: workspace.Path,
+            environmentReader: _ => null,
+            processStarter: capture.Start,
+            adapterHost: adapter);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        // Answers every request — initialize and thread/start, on every retry — with a codex that
+        // ran the thread on its default provider.
+        var responder = Task.Run(async () =>
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                await executor.WaitAndCompleteNextPendingRequestForTests(new JsonObject
+                {
+                    ["thread"] = new JsonObject { ["id"] = "thread-1", ["ephemeral"] = true },
+                    ["modelProvider"] = "openai",
+                }, cts.Token);
+            }
+        }, cts.Token);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => executor.EnsureProcessReadyForTestsAsync(cts.Token));
+        cts.Cancel();
+
+        Assert.Contains("did not echo modelProvider 'phleet_deepseek'", ex.Message);
+    }
+
+    [Fact]
+    public async Task HostedModelWithNoAdapterRegistered_FailsStartup()
+    {
+        using var capture = new ThreadStartCapture();
+        using var workspace = new TempWorkspace();
+        var executor = CreateExecutor(
+            model: "deepseek/deepseek-v4-pro",
+            workDir: workspace.Path,
+            environmentReader: _ => null,
+            processStarter: capture.Start);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var responder = Task.Run(async () =>
+        {
+            while (!cts.IsCancellationRequested)
+                await executor.WaitAndCompleteNextPendingRequestForTests(new JsonObject(), cts.Token);
+        }, cts.Token);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => executor.EnsureProcessReadyForTestsAsync(cts.Token));
+        cts.Cancel();
+
+        Assert.Contains("no loopback adapter is registered", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("deepseek/deepseek-v4-pro", "xhigh", "xhigh")]
+    [InlineData("deepseek/deepseek-v4-pro", "medium", "medium")]
+    [InlineData("openrouter/z-ai/glm-5.3", "xhigh", null)]
+    [InlineData("openrouter/z-ai/glm-5.3", "high", "high")]
+    [InlineData("gpt-5", "xhigh", "xhigh")]
+    public void Effort_IsForwardedOnlyWhenTheProviderAcceptsIt(string model, string codexEffort, string? expected)
+    {
+        var logger = new CapturingLogger<CodexExecutor>();
+        var executor = CreateExecutor(model: model, logger: logger);
+
+        Assert.Equal(expected, executor.FilterEffortForProvider(codexEffort));
+        Assert.Equal(expected is null ? 1 : 0, logger.Messages.Count(m => m.Contains($"effort '{codexEffort}' is not forwarded")));
+    }
+
+    [Fact]
+    public void Effort_OmittedWarningIsLoggedOnce()
+    {
+        var logger = new CapturingLogger<CodexExecutor>();
+        var executor = CreateExecutor(model: "openrouter/z-ai/glm-5.3", logger: logger);
+
+        executor.FilterEffortForProvider("xhigh");
+        executor.FilterEffortForProvider("xhigh");
+
+        Assert.Single(logger.Messages, m => m.Contains("is not forwarded"));
+    }
+
+    /// <summary>
+    /// AC3: whatever the model, the codex process is started with neither key in its environment,
+    /// even when the parent process has both.
+    /// </summary>
+    [Theory]
+    [InlineData("gpt-5")]
+    [InlineData("ollama/gpt-oss:20b")]
+    [InlineData("deepseek/deepseek-v4-pro")]
+    public async Task StartProcess_StripsEveryHostedKeyFromCodexEnvironment(string model)
+    {
+        using var capture = new ThreadStartCapture();
+        using var workspace = new TempWorkspace();
+        await using var adapter = await StartAdapterHostAsync("deepseek/deepseek-v4-pro");
+        var previous = HostedModelProviders.KeyEnvVars.ToDictionary(k => k, Environment.GetEnvironmentVariable);
+        try
+        {
+            foreach (var key in HostedModelProviders.KeyEnvVars)
+                Environment.SetEnvironmentVariable(key, "parent-process-value");
+
+            var executor = CreateExecutor(
+                model: model,
+                workDir: workspace.Path,
+                environmentReader: key => key == "CODEX_OSS_BASE_URL" ? "http://127.0.0.1:11434/v1" : null,
+                processStarter: capture.Start,
+                adapterHost: model.StartsWith("deepseek/") ? adapter : null);
+
+            await DriveThreadStartAsync(executor, capture, echoedProvider: model.StartsWith("deepseek/") ? "phleet_deepseek" : null);
+
+            var psi = capture.LastStartInfo!;
+            foreach (var key in HostedModelProviders.KeyEnvVars)
+                Assert.False(psi.Environment.ContainsKey(key), $"{key} reached the codex environment");
+            // The rest of the environment is still inherited.
+            Assert.True(psi.Environment.ContainsKey("PATH"));
+        }
+        finally
+        {
+            foreach (var (key, value) in previous)
+                Environment.SetEnvironmentVariable(key, value);
+        }
+    }
+
     /// <summary>
     /// Runs the real startup handshake against the stand-in app-server and returns the
     /// <c>thread/start</c> params exactly as they went over the wire.
     /// </summary>
-    private static async Task<JsonObject> DriveThreadStartAsync(CodexExecutor executor, ThreadStartCapture capture)
+    private static async Task<JsonObject> DriveThreadStartAsync(
+        CodexExecutor executor, ThreadStartCapture capture, string? echoedProvider = null)
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 
@@ -573,10 +785,13 @@ public class CodexExecutorTests
         var responder = Task.Run(async () =>
         {
             await executor.WaitAndCompleteNextPendingRequestForTests(new JsonObject(), cts.Token);
-            await executor.WaitAndCompleteNextPendingRequestForTests(new JsonObject
+            var threadStart = new JsonObject
             {
                 ["thread"] = new JsonObject { ["id"] = "thread-1", ["ephemeral"] = true },
-            }, cts.Token);
+            };
+            if (echoedProvider is not null)
+                threadStart["modelProvider"] = echoedProvider;
+            await executor.WaitAndCompleteNextPendingRequestForTests(threadStart, cts.Token);
         }, cts.Token);
 
         await executor.EnsureProcessReadyForTestsAsync(cts.Token);
@@ -617,8 +832,12 @@ public class CodexExecutorTests
 
         private System.Diagnostics.Process? _process;
 
-        public System.Diagnostics.Process Start(System.Diagnostics.ProcessStartInfo _)
+        /// <summary>The start info the executor built, as it would have launched codex.</summary>
+        public System.Diagnostics.ProcessStartInfo? LastStartInfo { get; private set; }
+
+        public System.Diagnostics.Process Start(System.Diagnostics.ProcessStartInfo executorStartInfo)
         {
+            LastStartInfo = executorStartInfo;
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = ShellPath,

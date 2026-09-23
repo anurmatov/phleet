@@ -543,7 +543,7 @@ public sealed class CodexExecutor : IAgentExecutor
     /// D7: a hosted provider receives <c>effort</c> only when the value is in its forwarded set.
     /// Otherwise the field is omitted — never remapped — and one Warning names the value.
     /// </summary>
-    private string? FilterEffortForProvider(string? codexEffort)
+    internal string? FilterEffortForProvider(string? codexEffort)
     {
         if (codexEffort is null || _hostedProvider is null || _hostedProvider.ForwardsEffort(codexEffort))
             return codexEffort;

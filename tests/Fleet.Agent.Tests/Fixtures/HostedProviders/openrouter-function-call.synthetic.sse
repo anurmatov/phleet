@@ -1,0 +1,12 @@
+data: {"type":"response.created","response":{"id":"resp_2","status":"in_progress","output":[]}}
+
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"mcp__memory__memory_get","arguments":""}}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"mcp__memory__memory_get","arguments":"{\"id\":\"abc\"}"}}
+
+data: {"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc_3","call_id":"call_3","name":"mcp__memory.memory_get","arguments":"{}"}}
+
+data: {"type":"response.completed","response":{"id":"resp_2","status":"completed","output":[{"type":"function_call","id":"fc_2","call_id":"call_2","name":"mcp__memory__memory_get","arguments":"{\"id\":\"abc\"}"}]}}
+
+data: [DONE]
+

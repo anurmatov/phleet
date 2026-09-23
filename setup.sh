@@ -453,6 +453,17 @@ echo
 echo "  Fill in required configuration (press Enter to keep existing values):"
 echo
 
+# Hosted codex models (#335) — optional. A codex agent whose Model is prefixed deepseek/ or
+# openrouter/ needs the matching key attached as an Env Ref. Empty input skips; an existing value
+# is kept. See docs/providers/codex-hosted-models.md before enabling: prompts, tool results and MCP
+# output go to the vendor.
+if $USE_CODEX; then
+  prompt_field "$ENV_FILE" "DEEPSEEK_API_KEY" "DeepSeek API key" \
+    "Only for codex agents with a deepseek/ model. Press Enter to skip." n y
+  prompt_field "$ENV_FILE" "OPENROUTER_API_KEY" "OpenRouter API key" \
+    "Only for codex agents with an openrouter/ model (GLM). Press Enter to skip." n y
+fi
+
 # CTO agent name — used by docker-compose to wire FleetWorkflows__CtoAgent
 # into fleet-temporal-bridge and fleet-bridge so seed workflows can resolve
 # {{config.CtoAgent}} at runtime. Must be set BEFORE services start.

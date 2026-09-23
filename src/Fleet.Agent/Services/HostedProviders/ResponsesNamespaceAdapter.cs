@@ -544,6 +544,9 @@ public sealed partial class ResponsesNamespaceAdapter
     {
         var flat = new List<JsonNode>();
         var names = new List<string>();
+        // A namespace entry is an MCP server's tools. One that cannot be flattened is an MCP tool
+        // the model would silently never see, so it fails the request instead (MUST NOT 9).
+        var unflattenable = new List<string>();
 
         foreach (var node in tools)
         {
@@ -569,14 +572,18 @@ public sealed partial class ResponsesNamespaceAdapter
                 {
                     var ns = StringOrEmpty(tool["name"]);
                     if (tool["tools"] is not JsonArray members)
+                    {
+                        unflattenable.Add($"{ns} (no tools array)");
                         break;
+                    }
 
                     foreach (var memberNode in members)
                     {
                         if (memberNode is not JsonObject member || !IsType(member, "function"))
                         {
-                            stats.DroppedToolTypes.Add(
-                                memberNode is JsonObject m ? $"namespace.{StringOrEmpty(m["type"])}" : "namespace.non-object");
+                            unflattenable.Add(memberNode is JsonObject m
+                                ? $"{ns}.{StringOrEmpty(m["name"])} (type {StringOrEmpty(m["type"])})"
+                                : $"{ns} (non-object member)");
                             continue;
                         }
 
@@ -602,9 +609,11 @@ public sealed partial class ResponsesNamespaceAdapter
         var invalid = names.Where(n => n.Length == 0 || n.Length > provider.ToolNameMaxLength || !ToolNamePattern.IsMatch(n))
             .Distinct(StringComparer.Ordinal).ToList();
 
-        if (collisions.Count > 0 || invalid.Count > 0)
+        if (collisions.Count > 0 || invalid.Count > 0 || unflattenable.Count > 0)
         {
             var parts = new List<string>();
+            if (unflattenable.Count > 0)
+                parts.Add($"namespace entries that cannot be flattened to function tools: {string.Join(", ", unflattenable)}");
             if (collisions.Count > 0)
                 parts.Add($"name collision after flattening: {string.Join(", ", collisions)}");
             if (invalid.Count > 0)

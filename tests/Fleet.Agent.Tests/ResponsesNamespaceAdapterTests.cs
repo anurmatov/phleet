@@ -367,6 +367,38 @@ public class ResponsesNamespaceAdapterTests
     }
 
     [Fact]
+    public async Task NamespaceMemberThatIsNotAFunction_Returns400NamingIt()
+    {
+        var body = CodexRequest();
+        var ns = Namespace("mcp__patch");
+        ns["tools"]!.AsArray().Add(new JsonObject { ["type"] = "custom", ["name"] = "apply_patch", ["description"] = "d" });
+        body["tools"]!.AsArray().Add(ns);
+        var upstream = new RecordingHandler((_, _) => throw new InvalidOperationException("must not be called"));
+
+        var context = NewContext("/deepseek/responses", body);
+        await NewAdapter(HostedModelProviders.DeepSeek, upstream).HandleAsync(context);
+
+        Assert.Equal(400, context.Response.StatusCode);
+        Assert.Contains("mcp__patch.apply_patch (type custom)", ReadBody(context));
+        Assert.Equal(0, upstream.Calls);
+    }
+
+    [Fact]
+    public async Task NamespaceWithNoToolsArray_Returns400NamingIt()
+    {
+        var body = CodexRequest();
+        body["tools"]!.AsArray().Add(new JsonObject { ["type"] = "namespace", ["name"] = "mcp__empty", ["description"] = "d" });
+        var upstream = new RecordingHandler((_, _) => throw new InvalidOperationException("must not be called"));
+
+        var context = NewContext("/openrouter/responses", body);
+        await NewAdapter(HostedModelProviders.OpenRouter, upstream).HandleAsync(context);
+
+        Assert.Equal(400, context.Response.StatusCode);
+        Assert.Contains("mcp__empty (no tools array)", ReadBody(context));
+        Assert.Equal(0, upstream.Calls);
+    }
+
+    [Fact]
     public async Task OpenRouterStoreTrue_Returns400WithZeroUpstreamCalls()
     {
         var body = CodexRequest();

@@ -55,8 +55,10 @@ For each request it:
 1. Expands every `namespace` entry into `function` tools, using codex's own join rule
    (`mcp__memory` + `memory_get` becomes `mcp__memory__memory_get`). Other tool types
    (`web_search`, `custom`, …) are removed and logged.
-2. Returns 400 before any upstream call if two names collide after flattening, or a name fails
-   `^[A-Za-z0-9_-]+$` or exceeds the vendor limit (DeepSeek 128, OpenRouter 64).
+2. Returns 400 before any upstream call, naming the tools, if two names collide after flattening,
+   a name fails `^[A-Za-z0-9_-]+$` or exceeds the vendor limit (DeepSeek 128, OpenRouter 64), or a
+   `namespace` entry cannot be flattened (a member that is not a `function`, or no `tools` array).
+   A namespace entry is an MCP server's tools, so it is never dropped silently.
 3. Applies the top-level field allowlist:
 
    | Field | DeepSeek | OpenRouter |
@@ -142,7 +144,7 @@ line, or `unmatchedCalls>0`, which means the model called a tool name that was n
 | Startup failure `thread/start did not echo modelProvider` | Codex did not accept the per-thread provider definition | Check the codex CLI pin; do not work around it |
 | Turn fails with `phleet adapter: upstream deepseek unreachable: <Type>` (502) | DNS, TLS or connect failure | Check outbound network. Codex retries twice |
 | Turn fails with the vendor's 401 / 429 / 400 message | Bad key, rate limit, or a request the vendor rejects | Fix the key, or read the vendor message |
-| Turn fails with `phleet adapter: rejected tools …` (400) | Tool name collision or an over-long name | Rename the tool at its MCP server |
+| Turn fails with `phleet adapter: rejected tools …` (400) | Tool name collision, an over-long name, or a namespace member that is not a function | Rename or fix the tool at its MCP server |
 | Turn hangs, then fails after about 5 minutes | Upstream stream went silent | Codex's `stream_idle_timeout_ms` (300 s) fires, then the turn fails |
 
 ## 6. Rollback

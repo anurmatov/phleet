@@ -129,11 +129,15 @@ See `docs/providers/codex-local-models.md`.
 
 The agent image pins every provider CLI explicitly in `Dockerfile`:
 
-- `@anthropic-ai/claude-code@2.1.259` — verified for stream-json mid-turn user-message delivery without a `priority` field. The Docker build checks `claude --version` and fails if npm resolves a different version.
+- `@anthropic-ai/claude-code@2.1.280` — the lowest version that accepts `claude-opus-5-5`. On `2.1.259` the same request returns `[claude-code:unrecognized_model]` and a 400 (*"does not support this model; version 2.1.280 or newer is required"*), which is a failed warmup, not a degraded turn. Re-verified on this pin for stream-json mid-turn user-message delivery without a `priority` field. The Docker build checks `claude --version` and fails if npm resolves a different version.
 - `@openai/codex@0.153.4` — must stay in lockstep with `.github/workflows/ci.yml`, which installs the same version before regenerating and diffing `protocols/codex-app-server-v2/`.
 - `@google/gemini-cli@0.40.1` — must stay in lockstep with `docs/providers/gemini.md`, which documents the host setup command and the verified headless flag set.
 
-When bumping a provider CLI, change every occurrence of that version in the same commit and rerun the provider-specific verification that depends on its wire protocol or flags. For Codex bumps, regenerate `protocols/codex-app-server-v2/` with the new pinned CLI before committing.
+⚠️ **The `2.1.280` pin moves the `opus` alias, so some agents change model without any config edit.** `ClaudeExecutor.BuildArgs` passes `Agent.Model` to `--model` verbatim, so an agent configured with an alias rather than an explicit ID follows whatever the CLI resolves it to. Measured on the two pins with identical flags: `--model opus` resolved to `claude-opus-5` on `2.1.259` and resolves to `claude-opus-5-5` on `2.1.280` — a different context window and different pricing, taking effect on that agent's next reprovision. `opus` is the only alias that moves; `sonnet` (`claude-sonnet-5`) and `haiku` (`claude-haiku-4-5-20251001`) resolve identically on both pins. Whether alias agents should follow the CLI default or be pinned to explicit IDs is an owner decision; this pin does not settle it.
+
+Read the resolved model from the stream-json `init` event's `model` field. For an alias it reports what the alias resolved to; for an explicit ID it echoes the ID back, so `init` alone does not tell you the model was accepted — a rejected explicit ID still inits and then fails at `result` with `is_error: true`.
+
+When bumping a provider CLI, change every occurrence of that version in the same commit and rerun the provider-specific verification that depends on its wire protocol or flags. For Codex bumps, regenerate `protocols/codex-app-server-v2/` with the new pinned CLI before committing. For Claude bumps, also diff the resolved model for every alias in use — a bump can move an alias silently, and the version assertion in `Dockerfile` does not catch it.
 
 ## Telegram Image Handling
 

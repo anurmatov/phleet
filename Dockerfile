@@ -8,7 +8,7 @@ RUN dotnet publish src/Fleet.Agent/Fleet.Agent.csproj -c Release -o /app
 FROM mcr.microsoft.com/dotnet/sdk:10.0
 WORKDIR /app
 
-ARG CLAUDE_CODE_VERSION=2.1.259
+ARG CLAUDE_CODE_VERSION=2.1.280
 ARG CODEX_CLI_VERSION=0.153.4
 ARG GEMINI_CLI_VERSION=0.40.1
 

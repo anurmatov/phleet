@@ -32,7 +32,7 @@ the test suite. The headline findings:
 
 | Provider | Pinned CLI | L3 capture date | Shape diff vs public corpus |
 |---|---|---|---|
-| claude | `claude-code@2.1.259` | pending — private run not yet executed | pending — private run not yet executed |
+| claude | `claude-code@2.1.280` | pending — private run not yet executed | pending — private run not yet executed |
 | codex | `@openai/codex@0.153.4` | pending — private run not yet executed | pending — private run not yet executed |
 | gemini | `@google/gemini-cli@0.40.1` | pending — private run not yet executed | pending — private run not yet executed |
 

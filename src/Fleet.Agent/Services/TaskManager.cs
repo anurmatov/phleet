@@ -79,6 +79,14 @@ public sealed class TaskManager
     /// </summary>
     private readonly string? _telegramAttachmentDir;
 
+    /// <summary>
+    /// Renders routed project contexts at delivery and owns the attachment ledger (#347). Optional
+    /// so every existing construction site is unchanged; when absent — or when a message carries no
+    /// requests, which is every message of an agent without a routing block — the executor input is
+    /// exactly the text it was before cards existed.
+    /// </summary>
+    private readonly ProjectContextAttacher? _contextAttacher;
+
     public TaskManager(
         IOptions<AgentOptions> agentConfig,
         IAgentExecutor executor,
@@ -88,8 +96,10 @@ public sealed class TaskManager
         IConversationEventPublisher? events = null,
         IOptions<TelegramOptions>? telegramConfig = null,
         ConversationEventCounters? counters = null,
-        IMessageSink? sink = null)
+        IMessageSink? sink = null,
+        ProjectContextAttacher? contextAttacher = null)
     {
+        _contextAttacher = contextAttacher;
         _agentConfig = agentConfig.Value;
         _executor = executor;
         _sessions = sessions;
@@ -130,6 +140,11 @@ public sealed class TaskManager
 
     public bool HasRunningTasks(long chatId) => GetChatState(chatId).Count > 0;
 
+    /// <param name="contextRequests">
+    /// Project contexts routed to this message at intake (#347). Carried, never rendered here: the
+    /// attachment is rendered only where text reaches the executor, and never enters
+    /// <paramref name="displayText"/>.
+    /// </param>
     public Task<TaskDispatchOutcome> StartTask(long chatId, string task, string displayText, bool isSessionTask,
         TaskSource source = TaskSource.UserMessage,
         string? relaySender = null,
@@ -138,8 +153,10 @@ public sealed class TaskManager
         IReadOnlyList<MessageImage>? images = null,
         IReadOnlyList<MessageDocument>? documents = null,
         long userId = 0,
-        ConversationIdentity? identity = null) =>
-        StartTaskCore(chatId, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, skipPendingQueueCheck: false, identity: identity);
+        ConversationIdentity? identity = null,
+        IReadOnlyList<ContextAttachmentRequest>? contextRequests = null) =>
+        StartTaskCore(chatId, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, skipPendingQueueCheck: false, identity: identity,
+            contextRequests: NullIfEmpty(contextRequests));
 
     private async Task<TaskDispatchOutcome> StartTaskCore(long chatId, string task, string displayText, bool isSessionTask,
         TaskSource source = TaskSource.UserMessage,
@@ -152,7 +169,9 @@ public sealed class TaskManager
         bool skipPendingQueueCheck = false,
         bool skipDedupReservationAcquire = false,
         ConversationIdentity? identity = null,
-        IReadOnlyList<string>? mergedSubmissionIds = null)
+        IReadOnlyList<string>? mergedSubmissionIds = null,
+        IReadOnlyList<ContextAttachmentRequest>? contextRequests = null,
+        string deliveryPath = ProjectContextAttacher.PathTurn)
     {
         // A null identity means a caller that predates the seam — synthesize one from the runtime
         // key so every dispatch decision has something to report against, and every existing call
@@ -177,7 +196,7 @@ public sealed class TaskManager
             {
                 if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
                 var message = new MidTurnMessage(task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
-                    images, documents, userId, DateTimeOffset.UtcNow, identity);
+                    images, documents, userId, DateTimeOffset.UtcNow, identity, contextRequests);
                 return ReportDisposition(chatId, identity, await DeliverMidTurnMessageAsync(chatId, runningSession, message));
             }
 
@@ -185,7 +204,7 @@ public sealed class TaskManager
             {
                 if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
                 var message = new MidTurnMessage(task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
-                    images, documents, userId, DateTimeOffset.UtcNow, identity);
+                    images, documents, userId, DateTimeOffset.UtcNow, identity, contextRequests);
                 return ReportDisposition(chatId, identity, await DeferUntilTurnEndAsync(chatId, runningSession, message, notifyUser: false));
             }
 
@@ -193,7 +212,8 @@ public sealed class TaskManager
                 _logger.LogInformation("Not injecting {Source} task into running conversational turn for chat {ChatId}; using normal capacity path", source, chatId);
         }
 
-        var queuedPart = CreateQueuedPart(task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, identity: identity);
+        var queuedPart = CreateQueuedPart(task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, identity: identity,
+            contextRequests: contextRequests);
         if (!skipPendingQueueCheck)
         {
             var pendingResult = TryAppendToPendingQueue(chatId, queuedPart);
@@ -289,7 +309,8 @@ public sealed class TaskManager
         {
             try
             {
-                await ProcessTask(chatId, running.Id, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, turnIdentity, cts.Token);
+                await ProcessTask(chatId, running.Id, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, turnIdentity,
+                    contextRequests, deliveryPath, cts.Token);
             }
             catch (Exception ex)
             {
@@ -656,7 +677,8 @@ public sealed class TaskManager
     private async Task ProcessTask(long chatId, int taskId, string task, string displayText,
         bool isSessionTask, TaskSource source, string? relaySender, string? correlationId, string? relayTaskId,
         IReadOnlyList<MessageImage>? images, IReadOnlyList<MessageDocument>? documents,
-        ConversationIdentity identity, CancellationToken ct)
+        ConversationIdentity identity, IReadOnlyList<ContextAttachmentRequest>? contextRequests,
+        string deliveryPath, CancellationToken ct)
     {
         var state = GetChatState(chatId);
 
@@ -741,87 +763,119 @@ public sealed class TaskManager
             var currentTask = task;
             IReadOnlyList<MessageImage>? currentImages = images;
             IReadOnlyList<MessageDocument>? currentDocuments = documents;
+            // #347: the requests and delivery path of the text about to reach the executor. Each
+            // iteration of the loop below is one delivery — the first turn, a process-exit resume
+            // or an Inbox continuation — and renders its own attachment against the ledger.
+            var currentRequests = contextRequests;
+            var currentPath = deliveryPath;
 
             while (true)
             {
-                await foreach (var progress in _executor.ExecuteAsync(currentTask, currentImages, currentDocuments, ct))
+                // Rendered HERE and nowhere earlier: the prefix exists only in the executor input.
+                // currentTask, displayText and everything the user sees stay the original text.
+                var contextRender = _contextAttacher?.Render(currentRequests) ?? ProjectContextRender.Empty;
+                var promptAccepted = false;
+                try
                 {
-                    if (isSessionTask && progress.SessionId is not null)
-                        _sessions.SetSession(chatId, progress.SessionId);
-
-                    if (progress.FinalResult is not null)
+                    await foreach (var progress in _executor.ExecuteAsync(contextRender.Apply(currentTask), currentImages, currentDocuments, ct))
                     {
-                        lastResult = progress.FinalResult;
-                        allAssistantTexts.Add(progress.FinalResult);
-                    }
-
-                    if (progress.Stats is not null)
-                        stats = progress.Stats;
-
-                    if (progress.EventType == "error")
-                        lastError = progress.Summary;
-
-                    if (progress.IsErrorResult)
-                        errorResult = true;
-
-                    if (progress.IsProcessExit)
-                        processExitResult = true;
-
-                    if (progress.EventType == "warning" && progress.IsSignificant)
-                    {
-                        // User-facing warning (e.g. provider capability notice) — deliver immediately
-                        await _sink.SendTextAsync(chatId, progress.Summary);
-                        var (noticeText, noticeTruncated) = ProtocolSanitizer.SanitizeAndBound(
-                            progress.Summary, ProtocolLimits.MaxNoticeTextChars, attachmentDir);
-                        PublishEvent(chatId, ConversationEventKind.TurnNotice, identity,
-                            new TurnNoticePayload { Text = noticeText, Truncated = noticeTruncated ? true : null });
-                    }
-                    else if (progress.EventType == "recovered_answer")
-                    {
-                        // Stale answer from the prior turn preserved during drain — deliver
-                        // immediately so it reaches the user before the new turn's response.
-                        await _sink.SendTextAsync(chatId, progress.Summary);
-                        var (recoveredText, recoveredTruncated) = ProtocolSanitizer.SanitizeAndBound(
-                            progress.Summary, ProtocolLimits.MaxNoticeTextChars, attachmentDir);
-                        PublishEvent(chatId, ConversationEventKind.TurnRecoveredAnswer, identity,
-                            new TurnRecoveredAnswerPayload { Text = recoveredText, Truncated = recoveredTruncated ? true : null });
-                    }
-                    else if (progress.IsSignificant && progress.ToolName is not null)
-                    {
-                        significantUpdates++;
-                        toolCalls.Add((ShortenToolName(progress.ToolName), TruncateArgs(progress.ToolArgs ?? "{}", _agentConfig.ToolArgsTruncateLength)));
-                        // Suppress progress messages for check-ins — they may end up IDLE
-                        // Also suppress when SuppressToolMessages is configured (e.g. for non-technical users)
-                        if (!_agentConfig.SuppressToolMessages && source is not (TaskSource.CheckIn or TaskSource.DebouncedGroupBatch) && significantUpdates % 5 == 1)
+                        // Consumed, never forwarded: prompt_accepted is ledger bookkeeping, not output
+                        // for a sink, Telegram or the conversation event projection. It marks at once
+                        // so a routed injection later in this same turn is suppressed.
+                        if (progress.EventType == AgentProgress.PromptAcceptedEventType)
                         {
-                            var summaryText = progress.Summary;
-                            if (progress.Summary.StartsWith("Using") && progress.ToolArgs is { } rawArgs)
+                            if (!promptAccepted)
                             {
-                                var argsSnippet = TruncateArgs(rawArgs, _agentConfig.ToolArgsTruncateLength);
-                                summaryText = $"{progress.Summary}({argsSnippet})";
+                                promptAccepted = true;
+                                _contextAttacher?.MarkAccepted(contextRender);
                             }
-                            var htmlPrefix = "";
-                            if (_agentConfig.PrefixMessages && _agentConfig.ShortName.Length > 0)
-                            {
-                                var displayName = $"{char.ToUpperInvariant(_agentConfig.ShortName[0])}{_agentConfig.ShortName[1..]}";
-                                htmlPrefix = $"<b>{displayName}:</b>\n";
-                            }
-                            var encoded = System.Net.WebUtility.HtmlEncode($"{Prefix()}... {summaryText}");
-                            await _sink.SendHtmlTextAsync(chatId, $"{htmlPrefix}<blockquote expandable>{encoded}</blockquote>");
+                            continue;
                         }
-                        OnToolUse?.Invoke(chatId, progress.ToolName, progress.Summary);
 
-                        // Only the tool NAME leaves the runtime. The Telegram string built a few
-                        // lines above appends truncated tool ARGUMENTS, and reusing it here is
-                        // specifically prohibited — arguments routinely carry absolute paths and
-                        // secret-shaped values.
-                        PublishEvent(chatId, ConversationEventKind.TurnProgress, identity,
-                            new TurnProgressPayload
+                        if (isSessionTask && progress.SessionId is not null)
+                            _sessions.SetSession(chatId, progress.SessionId);
+
+                        if (progress.FinalResult is not null)
+                        {
+                            lastResult = progress.FinalResult;
+                            allAssistantTexts.Add(progress.FinalResult);
+                        }
+
+                        if (progress.Stats is not null)
+                            stats = progress.Stats;
+
+                        if (progress.EventType == "error")
+                            lastError = progress.Summary;
+
+                        if (progress.IsErrorResult)
+                            errorResult = true;
+
+                        if (progress.IsProcessExit)
+                            processExitResult = true;
+
+                        if (progress.EventType == "warning" && progress.IsSignificant)
+                        {
+                            // User-facing warning (e.g. provider capability notice) — deliver immediately
+                            await _sink.SendTextAsync(chatId, progress.Summary);
+                            var (noticeText, noticeTruncated) = ProtocolSanitizer.SanitizeAndBound(
+                                progress.Summary, ProtocolLimits.MaxNoticeTextChars, attachmentDir);
+                            PublishEvent(chatId, ConversationEventKind.TurnNotice, identity,
+                                new TurnNoticePayload { Text = noticeText, Truncated = noticeTruncated ? true : null });
+                        }
+                        else if (progress.EventType == "recovered_answer")
+                        {
+                            // Stale answer from the prior turn preserved during drain — deliver
+                            // immediately so it reaches the user before the new turn's response.
+                            await _sink.SendTextAsync(chatId, progress.Summary);
+                            var (recoveredText, recoveredTruncated) = ProtocolSanitizer.SanitizeAndBound(
+                                progress.Summary, ProtocolLimits.MaxNoticeTextChars, attachmentDir);
+                            PublishEvent(chatId, ConversationEventKind.TurnRecoveredAnswer, identity,
+                                new TurnRecoveredAnswerPayload { Text = recoveredText, Truncated = recoveredTruncated ? true : null });
+                        }
+                        else if (progress.IsSignificant && progress.ToolName is not null)
+                        {
+                            significantUpdates++;
+                            toolCalls.Add((ShortenToolName(progress.ToolName), TruncateArgs(progress.ToolArgs ?? "{}", _agentConfig.ToolArgsTruncateLength)));
+                            // Suppress progress messages for check-ins — they may end up IDLE
+                            // Also suppress when SuppressToolMessages is configured (e.g. for non-technical users)
+                            if (!_agentConfig.SuppressToolMessages && source is not (TaskSource.CheckIn or TaskSource.DebouncedGroupBatch) && significantUpdates % 5 == 1)
                             {
-                                Activity = ProgressActivity.Tool,
-                                ToolName = ProtocolSanitizer.BoundToolName(progress.ToolName),
-                            });
+                                var summaryText = progress.Summary;
+                                if (progress.Summary.StartsWith("Using") && progress.ToolArgs is { } rawArgs)
+                                {
+                                    var argsSnippet = TruncateArgs(rawArgs, _agentConfig.ToolArgsTruncateLength);
+                                    summaryText = $"{progress.Summary}({argsSnippet})";
+                                }
+                                var htmlPrefix = "";
+                                if (_agentConfig.PrefixMessages && _agentConfig.ShortName.Length > 0)
+                                {
+                                    var displayName = $"{char.ToUpperInvariant(_agentConfig.ShortName[0])}{_agentConfig.ShortName[1..]}";
+                                    htmlPrefix = $"<b>{displayName}:</b>\n";
+                                }
+                                var encoded = System.Net.WebUtility.HtmlEncode($"{Prefix()}... {summaryText}");
+                                await _sink.SendHtmlTextAsync(chatId, $"{htmlPrefix}<blockquote expandable>{encoded}</blockquote>");
+                            }
+                            OnToolUse?.Invoke(chatId, progress.ToolName, progress.Summary);
+
+                            // Only the tool NAME leaves the runtime. The Telegram string built a few
+                            // lines above appends truncated tool ARGUMENTS, and reusing it here is
+                            // specifically prohibited — arguments routinely carry absolute paths and
+                            // secret-shaped values.
+                            PublishEvent(chatId, ConversationEventKind.TurnProgress, identity,
+                                new TurnProgressPayload
+                                {
+                                    Activity = ProgressActivity.Tool,
+                                    ToolName = ProtocolSanitizer.BoundToolName(progress.ToolName),
+                                });
+                        }
                     }
+                }
+                finally
+                {
+                    // Every exit — clean end, executor throw, cancel, timeout — logs the delivery
+                    // once. A throw before prompt_accepted leaves the keys unmarked; a cancel after
+                    // it keeps them, because the text is already in the transcript.
+                    _contextAttacher?.LogDelivery(contextRender, currentPath, promptAccepted);
                 }
 
                 var completingTask = state.Get(taskId);
@@ -862,6 +916,11 @@ public sealed class TaskManager
                         currentTask = firstRedelivery.Task;
                         currentImages = firstRedelivery.Images;
                         currentDocuments = firstRedelivery.Documents;
+                        // The stored message is the ORIGINAL text plus its requests, so the resume
+                        // re-renders against a ledger the dead process already reset (cold) rather
+                        // than replaying the prefix the injection carried.
+                        currentRequests = firstRedelivery.ContextRequests;
+                        currentPath = ProjectContextAttacher.PathResume;
                         lastError = null;
                         errorResult = false;
                         processExitResult = false;
@@ -888,7 +947,7 @@ public sealed class TaskManager
                         var firstPart = CreateQueuedPart(drained[0].Task, drained[0].DisplayText, drained[0].IsSessionTask,
                             drained[0].Source, drained[0].RelaySender, drained[0].CorrelationId, drained[0].TaskId,
                             drained[0].Images, drained[0].Documents, drained[0].UserId, drained[0].ArrivedAt,
-                            drained[0].Identity);
+                            drained[0].Identity, drained[0].ContextRequests);
                         var mergedEntry = new QueuedMessage(chatId, firstPart);
 
                         // overflowStart marks where the first group ends; default to "all fit".
@@ -898,7 +957,7 @@ public sealed class TaskManager
                             var part = CreateQueuedPart(drained[i].Task, drained[i].DisplayText, drained[i].IsSessionTask,
                                 drained[i].Source, drained[i].RelaySender, drained[i].CorrelationId, drained[i].TaskId,
                                 drained[i].Images, drained[i].Documents, drained[i].UserId, drained[i].ArrivedAt,
-                                drained[i].Identity);
+                                drained[i].Identity, drained[i].ContextRequests);
                             if (!mergedEntry.TryAppendPart(part))
                             {
                                 // This part doesn't fit in the first group (different source or
@@ -954,6 +1013,10 @@ public sealed class TaskManager
                         currentTask = payload.Task;
                         currentImages = payload.Images;
                         currentDocuments = payload.Documents;
+                        // The union of the merged messages' requests, rendered ONCE for the
+                        // continuation — overflow written back to the Inbox keeps its own.
+                        currentRequests = payload.ContextRequests;
+                        currentPath = ProjectContextAttacher.PathInbox;
 
                         // A continuation is a NEW turn answering a NEW set of submissions: mint a
                         // fresh TurnId, keep the conversation, and adopt the merged entry's
@@ -1160,6 +1223,9 @@ public sealed class TaskManager
     private async Task<TaskDispatchOutcome> DeliverMidTurnMessageAsync(long chatId, RunningTask running, MidTurnMessage message)
     {
         await running.TurnDispatchLock.WaitAsync();
+        // #347: set only while TryInjectMessageAsync is in flight, so a throw from it is logged as
+        // an unaccepted injection exactly once.
+        ProjectContextRender? inFlightRender = null;
         try
         {
             if (running.Closed)
@@ -1175,10 +1241,25 @@ public sealed class TaskManager
                 return await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: false);
             }
 
-            var result = await _executor.TryInjectMessageAsync(FormatInjectedMessage(message.Task),
+            // #347: rendered only once an injection is actually attempted — closed and capped
+            // messages go to the queue/Inbox with their requests and render at THAT delivery. The
+            // prefix goes in front of the injection header, in the same frame, so the routed full
+            // context arrives with the message it was routed for. InjectedMessagesForResume below
+            // stores the ORIGINAL message, never this text.
+            var contextRender = _contextAttacher?.Render(message.ContextRequests) ?? ProjectContextRender.Empty;
+            inFlightRender = contextRender;
+            var result = await _executor.TryInjectMessageAsync(contextRender.Apply(FormatInjectedMessage(message.Task)),
                 message.Images, message.Documents, running.Cts.Token);
+            inFlightRender = null;
 
-            if (result.Status == MidTurnInjectionStatus.Injected)
+            // Injected is the acceptance for this path. Failed / NoActiveTurn / Unsupported mark
+            // nothing, and the message keeps its requests into the queue or Inbox below.
+            var injected = result.Status == MidTurnInjectionStatus.Injected;
+            if (injected)
+                _contextAttacher?.MarkAccepted(contextRender);
+            _contextAttacher?.LogDelivery(contextRender, ProjectContextAttacher.PathInject, injected);
+
+            if (injected)
             {
                 running.InjectionCount++;
                 running.InjectedMessagesForResume.Add(message);
@@ -1207,6 +1288,10 @@ public sealed class TaskManager
         {
             _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.FailedThenQueued);
             _logger.LogWarning(ex, "Mid-turn injection failed for chat {ChatId}; queued for turn-end delivery", chatId);
+            // A throw from the injection is a failed delivery: nothing marked, and the requests ride
+            // on into the Inbox.
+            if (inFlightRender is not null)
+                _contextAttacher?.LogDelivery(inFlightRender, ProjectContextAttacher.PathInject, accepted: false);
             return await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: true);
         }
         finally
@@ -1245,7 +1330,7 @@ public sealed class TaskManager
         {
             var relayPart = CreateQueuedPart(message.Task, message.DisplayText, message.IsSessionTask, message.Source,
                 message.RelaySender, message.CorrelationId, message.TaskId, message.Images, message.Documents,
-                message.UserId, message.ArrivedAt);
+                message.UserId, message.ArrivedAt, contextRequests: message.ContextRequests);
             var enqueued = EnqueueFreshMessage(chatId, relayPart, notifyUser, completeBridgeOnDrop: true);
             return enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull;
         }
@@ -1284,7 +1369,7 @@ public sealed class TaskManager
     {
         var part = CreateQueuedPart(message.Task, message.DisplayText, message.IsSessionTask, message.Source,
             message.RelaySender, message.CorrelationId, message.TaskId, message.Images, message.Documents, message.UserId,
-            message.ArrivedAt);
+            message.ArrivedAt, contextRequests: message.ContextRequests);
 
         var pendingResult = TryAppendToPendingQueue(chatId, part);
         if (pendingResult == PendingQueueResult.Merged)
@@ -1300,13 +1385,16 @@ public sealed class TaskManager
     private QueuedMessagePart CreateQueuedPart(string task, string displayText, bool isSessionTask, TaskSource source,
         string? relaySender, string? correlationId, string? taskId, IReadOnlyList<MessageImage>? images,
         IReadOnlyList<MessageDocument>? documents, long userId, DateTimeOffset? arrivedAt = null,
-        ConversationIdentity? identity = null)
+        ConversationIdentity? identity = null, IReadOnlyList<ContextAttachmentRequest>? contextRequests = null)
     {
         var senderDisplay = relaySender ?? source.ToString().ToLowerInvariant();
         var arrival = arrivedAt?.ToLocalTime() ?? DateTimeOffset.Now;
         return new QueuedMessagePart(task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
-            images, documents, userId, arrival, senderDisplay, identity);
+            images, documents, userId, arrival, senderDisplay, identity, contextRequests);
     }
+
+    private static IReadOnlyList<ContextAttachmentRequest>? NullIfEmpty(IReadOnlyList<ContextAttachmentRequest>? requests) =>
+        requests is { Count: > 0 } ? requests : null;
 
     private PendingQueueResult TryAppendToPendingQueue(long chatId, QueuedMessagePart part)
     {
@@ -1588,11 +1676,15 @@ public sealed class TaskManager
         // Identity and the merged-submission list must survive the queue. Without them the turn
         // runs under a freshly synthesized identity, so the submission that produced
         // submission.accepted{queued} never receives a terminal event and a client waits forever.
+        //
+        // The payload's requests are the union of every part's, rendered once for the merged turn
+        // when ProcessTask hands it to the executor — never per part (#347).
         _ = StartTaskCore(queued.ChatId, payload.Task, payload.DisplayText, payload.IsSessionTask,
             payload.Source, payload.RelaySender, payload.CorrelationId, payload.TaskId,
             payload.Images, payload.Documents, payload.UserId,
             skipPendingQueueCheck: true, skipDedupReservationAcquire: true,
-            identity: payload.Identity, mergedSubmissionIds: payload.MergedSubmissionIds);
+            identity: payload.Identity, mergedSubmissionIds: payload.MergedSubmissionIds,
+            contextRequests: payload.ContextRequests, deliveryPath: ProjectContextAttacher.PathQueue);
 
         RemovePendingIndexIfCurrent(queued);
     }

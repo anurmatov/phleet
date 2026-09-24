@@ -1,4 +1,5 @@
 using Fleet.Temporal.Activities;
+using Fleet.Temporal.Models;
 using Microsoft.Extensions.Logging;
 using Temporalio.Workflows;
 
@@ -30,13 +31,21 @@ public class NotifyCtoWorkflow
 
         try
         {
-            await Workflow.ExecuteActivityAsync(
-                (DelegateToAgentActivity a) => a.DelegateToAgentAsync(
+            // Scheduled by name with the argument list spelled out: an expression-tree call has
+            // the compiler append every optional parameter's default, so adding one to the
+            // activity (#347 repo) would silently change this workflow's input. These six are
+            // exactly what the expression form scheduled.
+            await Workflow.ExecuteActivityAsync<AgentTaskResult>(
+                DelegateToAgentActivity.ActivityName,
+                new object?[]
+                {
                     input.TargetAgent,
                     input.TaskDescription,
                     taskId,
                     true,  // retryOnIncomplete
-                    3),    // maxIncompleteRetries
+                    3,     // maxIncompleteRetries
+                    0,     // agentBudgetSeconds (the default)
+                },
                 DelegateOptions);
         }
         catch (Exception)

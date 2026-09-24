@@ -83,6 +83,12 @@ public sealed class CodexExecutor : IAgentExecutor
     public DateTimeOffset LastActivity => _lastActivity;
     public bool IsProcessWarm => _process is not null && !_process.HasExited && _messageCount > 0;
 
+    // #347: bumped on every thread compaction. See ObserveCompaction for the sources.
+    private int _compactionEpoch;
+
+    /// <inheritdoc />
+    public int CompactionEpoch => Volatile.Read(ref _compactionEpoch);
+
     /// <summary>
     /// Always returns empty for codex-provider agents. The codex app-server v2 protocol's
     /// <c>item/started</c>/<c>item/completed</c> notifications do not map to Claude's
@@ -246,6 +252,10 @@ public sealed class CodexExecutor : IAgentExecutor
                 yield return BuildRpcErrorProgress((RpcErrorException)startupError);
                 yield break;
             }
+
+            // turn/start returned a turn id: the app-server has the prompt (#347 D5). An RPC error,
+            // a startup failure or a missing id never reaches this line.
+            yield return AgentProgress.PromptAccepted();
 
             if (skippedCount > 0)
             {
@@ -954,6 +964,9 @@ public sealed class CodexExecutor : IAgentExecutor
             if (method is null || @params is null)
                 continue;
 
+            // Thread-scoped, so observed before the per-turn filter below.
+            ObserveCompaction(method, @params);
+
             if (method == "thread/tokenUsage/updated")
             {
                 var turnId = @params["turnId"]?.GetValue<string>();
@@ -1007,6 +1020,47 @@ public sealed class CodexExecutor : IAgentExecutor
                     yield break;
             }
         }
+    }
+
+    /// <summary>
+    /// #347 compaction sources for the project-context ledger, from the pinned
+    /// <c>@openai/codex@0.153.4</c> app-server v2 schema (<c>protocols/codex-app-server-v2/</c>):
+    /// <list type="bullet">
+    /// <item>notification <c>thread/compacted</c> — <c>v2/ContextCompactedNotification.json</c>
+    /// (<c>{threadId, turnId}</c>), marked "Deprecated: Use <c>ContextCompaction</c> item type
+    /// instead" but still in the pinned schema;</item>
+    /// <item>a <c>contextCompaction</c> thread item — <c>ContextCompactionThreadItem</c>
+    /// (<c>{id, type:"contextCompaction"}</c>) in <c>codex_app_server_protocol.v2.schemas.json</c>,
+    /// counted on <c>item/completed</c> (the compaction is done) and not on <c>item/started</c>.</item>
+    /// </list>
+    /// Both may arrive for one compaction; the ledger only asks whether the epoch moved, so a
+    /// double increment costs nothing.
+    /// </summary>
+    private void ObserveCompaction(string method, JsonObject @params)
+    {
+        string source;
+        if (method == "thread/compacted")
+        {
+            source = "thread/compacted";
+        }
+        else if (method == "item/completed"
+                 && (@params["item"] as JsonObject)?["type"] is JsonValue type
+                 && type.TryGetValue<string>(out var itemType)
+                 && itemType == "contextCompaction")
+        {
+            source = "contextCompaction";
+        }
+        else
+        {
+            return;
+        }
+
+        var threadId = @params["threadId"] is JsonValue t && t.TryGetValue<string>(out var id) ? id : null;
+        if (threadId is not null && _threadId is not null && !string.Equals(threadId, _threadId, StringComparison.Ordinal))
+            return;
+
+        var epoch = Interlocked.Increment(ref _compactionEpoch);
+        _logger.LogInformation("compaction_epoch provider=codex epoch={Epoch} source={Source}", epoch, source);
     }
 
     private AgentProgress? MapNotification(string method, JsonObject @params, string turnId)
@@ -1222,6 +1276,8 @@ public sealed class CodexExecutor : IAgentExecutor
                 var @params = notification["params"] as JsonObject;
                 if (method is null || @params is null)
                     continue;
+
+                ObserveCompaction(method, @params);
 
                 if (method == "thread/tokenUsage/updated")
                 {

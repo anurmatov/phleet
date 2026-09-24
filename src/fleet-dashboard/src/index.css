@@ -2463,6 +2463,62 @@ body {
   text-overflow: ellipsis;
 }
 
+/* ── Project context cards and routes (#347) ────────────────────────────── */
+
+.ctx-card-badge {
+  font-size: 11px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  color: var(--text);
+}
+
+.ctx-stale-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-weight: 600;
+  background: rgba(251, 191, 36, 0.12);
+  color: var(--yellow);
+}
+
+.ctx-warn {
+  font-size: 11px;
+  color: var(--yellow);
+}
+
+.ctx-panel {
+  margin-top: 16px;
+}
+
+.ctx-rejection {
+  border: 1px solid var(--red);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--red);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ctx-route-kind {
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--accent);
+  width: 110px;
+  flex-shrink: 0;
+}
+
+.ctx-route-value {
+  font-family: monospace;
+  font-size: 12px;
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .instr-diff {
   border-top: 1px solid var(--border);
   padding-top: 8px;

@@ -81,11 +81,11 @@ builder.Services.AddSingleton<WorkflowStore>();
 builder.Services.AddSingleton<TemporalClientRegistry>();
 builder.Services.AddHostedService<TemporalPollerService>();
 
-// MCP server (HTTP transport — same port as REST, path /mcp)
-builder.Services
-    .AddMcpServer()
-    .WithHttpTransport()
-    .WithToolsFromAssembly();
+// MCP server (HTTP transport — same port as REST): admin /mcp, plus /mcp/context whose sessions hold
+// only get_project_context and are bound to one agent (#347 D6). The transport options, the
+// session-options filter and the guard's registry live in FleetMcpRegistration so the route tests
+// run this exact wiring.
+builder.Services.AddFleetMcpServer();
 
 var app = builder.Build();
 
@@ -185,8 +185,9 @@ app.Use(async (context, next) =>
     await next(context);
 });
 
-// MCP endpoint — explicitly mapped to /mcp so the auth middleware exemption matches
-app.MapMcp("/mcp");
+// MCP endpoints — the session guard, then /mcp/context and /mcp. Both sit under the bearer
+// middleware's /mcp prefix exemption (OrchestratorAuth); the guard is what separates them.
+app.MapFleetMcp();
 
 // Health check
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "fleet-orchestrator" }));
@@ -338,6 +339,8 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         agent.MountDockerSock,
         Tools = agent.Tools.Select(t => new { t.ToolName, t.IsEnabled }),
         Projects = agent.Projects.Select(p => p.ProjectName),
+        // #347: per-assignment context mode, keyed by the assignment name exactly as stored.
+        ProjectModes = agent.Projects.ToDictionary(p => p.ProjectName, p => p.ContextMode),
         McpEndpoints = agent.McpEndpoints.Select(e => new { e.McpName, e.Url, e.TransportType }),
         Networks = agent.Networks.Select(n => n.NetworkName),
         EnvRefs = agent.EnvRefs.Select(r => r.EnvKeyName),
@@ -449,14 +452,12 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
             .ToList();
     }
 
-    if (body.Projects is not null)
-    {
-        db.AgentProjects.RemoveRange(agent.Projects);
-        agent.Projects = body.Projects
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Select(p => new AgentProject { AgentId = agent.Id, ProjectName = p })
-            .ToList();
-    }
+    // #347: the projects replace-all PRESERVES ContextMode for every name that remains
+    // (case-insensitive); new names start full. projectModes then applies to the RESULTING
+    // assignments; a key outside them, a bad value, or card on a project without a card is a 400
+    // returned before SaveChanges, so nothing from this request is saved.
+    if (await AgentProjectModes.UpdateAssignmentsAsync(db, agent, body.Projects, body.ProjectModes) is { } projectsError)
+        return Results.BadRequest(new { error = projectsError });
 
     if (body.McpEndpoints is not null)
     {
@@ -547,7 +548,9 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     await db.SaveChangesAsync();
 
     // Project assignment IS the memory-ACL grant. Sync after the save so the hook sees the
-    // committed assignment list, and only when the caller actually touched projects.
+    // committed assignment list, and only when the caller actually touched projects. A mode change
+    // is not an ACL change: projectModes alone never reaches the hook, and a mode change sent with
+    // the same projects list passes the same name set, which stages nothing and publishes nothing.
     if (body.Projects is not null)
     {
         await AgentProjectAccessSync.SyncAndBroadcastAsync(
@@ -766,210 +769,11 @@ app.MapPost("/api/instructions/{name}/toggle-active", async (string name, Toggle
     return Results.Ok(new { instr.Name, instr.IsActive });
 });
 
-// REST: list all project contexts with version summary + agent assignments
-app.MapGet("/api/project-contexts", async (IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
-
-    var contexts = await db.ProjectContexts
-        .AsNoTracking()
-        .OrderBy(p => p.Name)
-        .Select(p => new
-        {
-            p.Name,
-            p.CurrentVersion,
-            p.IsActive,
-            TotalVersions = db.ProjectContextVersions.Count(v => v.ProjectContextId == p.Id),
-        })
-        .ToListAsync();
-
-    // Agent assignments via agent_projects (name-keyed join)
-    var agents = await db.Agents
-        .Include(a => a.Projects)
-        .AsNoTracking()
-        .ToListAsync();
-
-    return Results.Ok(contexts.Select(p => new
-    {
-        p.Name,
-        p.CurrentVersion,
-        p.IsActive,
-        p.TotalVersions,
-        Agents = agents
-            .Where(a => a.Projects.Any(pr => pr.ProjectName.Equals(p.Name, StringComparison.OrdinalIgnoreCase)))
-            .Select(a => a.Name)
-            .OrderBy(n => n),
-    }));
-});
-
-// REST: get full project context with all versions and content
-app.MapGet("/api/project-contexts/{name}", async (string name, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
-
-    var ctx = await db.ProjectContexts
-        .Include(p => p.Versions.OrderByDescending(v => v.VersionNumber))
-        .AsNoTracking()
-        .FirstOrDefaultAsync(p => p.Name == name);
-
-    if (ctx is null)
-        return Results.NotFound(new { error = $"Project context '{name}' not found" });
-
-    return Results.Ok(new
-    {
-        ctx.Name,
-        ctx.CurrentVersion,
-        Versions = ctx.Versions.Select(v => new
-        {
-            v.VersionNumber,
-            v.Content,
-            CreatedAt = v.CreatedAt.ToString("yyyy-MM-dd HH:mm:ss"),
-            v.CreatedBy,
-            v.Reason,
-        }),
-    });
-});
-
-// REST: create new project context with initial v1 content
-app.MapPost("/api/project-contexts", async (HttpRequest request, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
-
-    var body = await request.ReadFromJsonAsync<ProjectContextCreateRequest>();
-    if (body is null || string.IsNullOrWhiteSpace(body.Name) || string.IsNullOrWhiteSpace(body.Content))
-        return Results.BadRequest(new { error = "name and content are required" });
-
-    if (!System.Text.RegularExpressions.Regex.IsMatch(body.Name, @"^[a-zA-Z0-9_-]+$"))
-        return Results.BadRequest(new { error = "name must contain only letters, digits, hyphens, or underscores" });
-
-    var exists = await db.ProjectContexts.AnyAsync(p => p.Name == body.Name);
-    if (exists)
-        return Results.Conflict(new { error = $"Project context '{body.Name}' already exists" });
-
-    var ctx = new ProjectContext { Name = body.Name, CurrentVersion = 1 };
-    db.ProjectContexts.Add(ctx);
-    await db.SaveChangesAsync();
-
-    db.ProjectContextVersions.Add(new ProjectContextVersion
-    {
-        ProjectContextId = ctx.Id,
-        VersionNumber    = 1,
-        Content          = body.Content,
-        CreatedAt        = DateTime.UtcNow,
-        CreatedBy        = body.CreatedBy ?? "dashboard",
-        Reason           = "Initial creation",
-    });
-    await db.SaveChangesAsync();
-
-    return Results.Ok(new { message = $"Project context '{body.Name}' created at v1" });
-});
-
-// REST: create new version of a project context
-app.MapPost("/api/project-contexts/{name}/versions", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
-
-    var body = await request.ReadFromJsonAsync<ProjectContextUpdateRequest>();
-    if (body is null || string.IsNullOrWhiteSpace(body.Content))
-        return Results.BadRequest(new { error = "content is required" });
-
-    const int MaxVersions = 20;
-
-    var ctx = await db.ProjectContexts
-        .Include(p => p.Versions.OrderBy(v => v.VersionNumber))
-        .FirstOrDefaultAsync(p => p.Name == name);
-
-    if (ctx is null)
-        return Results.NotFound(new { error = $"Project context '{name}' not found" });
-
-    var newVersion = ctx.CurrentVersion + 1;
-    ctx.Versions.Add(new ProjectContextVersion
-    {
-        ProjectContextId = ctx.Id,
-        VersionNumber    = newVersion,
-        Content          = body.Content,
-        CreatedAt        = DateTime.UtcNow,
-        CreatedBy        = body.CreatedBy ?? "dashboard",
-        Reason           = body.Reason,
-    });
-    ctx.CurrentVersion = newVersion;
-    ctx.UpdatedAt = DateTime.UtcNow;
-
-    var excess = ctx.Versions.Count - MaxVersions;
-    if (excess > 0)
-        db.ProjectContextVersions.RemoveRange(ctx.Versions.OrderBy(v => v.VersionNumber).Take(excess));
-
-    await db.SaveChangesAsync();
-    return Results.Ok(new { message = $"Project context '{name}' updated to v{newVersion}", version = newVersion });
-});
-
-// REST: rollback project context to a prior version (creates new version with old content)
-app.MapPost("/api/project-contexts/{name}/rollback/{targetVersion:int}", async (string name, int targetVersion, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
-
-    const int MaxVersions = 20;
-
-    var ctx = await db.ProjectContexts
-        .Include(p => p.Versions.OrderBy(v => v.VersionNumber))
-        .FirstOrDefaultAsync(p => p.Name == name);
-
-    if (ctx is null)
-        return Results.NotFound(new { error = $"Project context '{name}' not found" });
-
-    var target = ctx.Versions.FirstOrDefault(v => v.VersionNumber == targetVersion);
-    if (target is null)
-        return Results.NotFound(new { error = $"Version {targetVersion} not found" });
-
-    var newVersion = ctx.CurrentVersion + 1;
-    ctx.Versions.Add(new ProjectContextVersion
-    {
-        ProjectContextId = ctx.Id,
-        VersionNumber    = newVersion,
-        Content          = target.Content,
-        CreatedAt        = DateTime.UtcNow,
-        CreatedBy        = "rollback",
-        Reason           = $"rollback to v{targetVersion}",
-    });
-    ctx.CurrentVersion = newVersion;
-    ctx.UpdatedAt = DateTime.UtcNow;
-
-    var excess = ctx.Versions.Count - MaxVersions;
-    if (excess > 0)
-        db.ProjectContextVersions.RemoveRange(ctx.Versions.OrderBy(v => v.VersionNumber).Take(excess));
-
-    await db.SaveChangesAsync();
-    return Results.Ok(new { message = $"Rolled back '{name}' to v{targetVersion} content — saved as v{newVersion}", version = newVersion });
-});
-
-// REST: toggle active/inactive on a project context
-app.MapPost("/api/project-contexts/{name}/toggle-active", async (string name, ToggleActiveRequest req, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null) return Results.Problem("Database is not configured");
-    var ctx = await db.ProjectContexts.FirstOrDefaultAsync(p => p.Name == name);
-    if (ctx is null) return Results.NotFound(new { error = $"Project context '{name}' not found" });
-    ctx.IsActive = req.IsActive;
-    ctx.UpdatedAt = DateTime.UtcNow;
-    await db.SaveChangesAsync();
-    return Results.Ok(new { ctx.Name, ctx.IsActive });
-});
+// REST: the /api/project-contexts surface — full contexts (list, detail, create, new version,
+// rollback, toggle-active), then the #347 card and route writes. Mapped from Endpoints/ so the
+// endpoint tests exercise the same handlers a live orchestrator serves rather than a copy of them.
+app.MapProjectContextEndpoints();
+app.MapProjectCardEndpoints();
 
 // REST: active workflows across all Temporal namespaces
 app.MapGet("/api/workflows", (WorkflowStore workflows) =>
@@ -1246,9 +1050,10 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         foreach (var t in body.Tools.Distinct(StringComparer.OrdinalIgnoreCase))
             db.AgentTools.Add(new AgentTool { AgentId = agent.Id, ToolName = t, IsEnabled = true });
 
+    // New assignments are always full (#347); a card mode is set afterwards, per assignment.
     if (body.Projects is not null)
         foreach (var p in body.Projects.Distinct(StringComparer.OrdinalIgnoreCase))
-            db.AgentProjects.Add(new AgentProject { AgentId = agent.Id, ProjectName = p });
+            db.AgentProjects.Add(new AgentProject { AgentId = agent.Id, ProjectName = p, ContextMode = ProjectContextMode.Full });
 
     if (body.McpEndpoints is not null)
         foreach (var e in body.McpEndpoints.DistinctBy(x => x.McpName, StringComparer.OrdinalIgnoreCase))
@@ -2780,7 +2585,8 @@ record AgentConfigUpdateRequest(
     string? RequestReceivedMessage,
     bool? MountDockerSock,
     string? OutputStyle,
-    string? AnthropicBaseUrl);
+    string? AnthropicBaseUrl,
+    Dictionary<string, string>? ProjectModes = null);
 
 record McpEndpointEntry(string McpName, string Url, string TransportType);
 record InstructionAssignmentEntry(string InstructionName, int LoadOrder);
@@ -2791,8 +2597,8 @@ record InstructionUpdateRequest(string Content, string? Reason, string? CreatedB
 // No Description field on either: it is read out of the body's frontmatter on write, so it cannot
 // drift from what the style actually says.
 
-record ProjectContextCreateRequest(string Name, string Content, string? CreatedBy);
-record ProjectContextUpdateRequest(string Content, string? Reason, string? CreatedBy);
+// ProjectContextCreateRequest / ProjectContextUpdateRequest live with their handlers in
+// Endpoints/ProjectContextEndpoints.cs.
 
 record RepositoryRequest(string? Name, string? FullName);
 

@@ -20,6 +20,8 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
     // Project Contexts
     public DbSet<ProjectContext> ProjectContexts => Set<ProjectContext>();
     public DbSet<ProjectContextVersion> ProjectContextVersions => Set<ProjectContextVersion>();
+    public DbSet<ProjectContextCardVersion> ProjectContextCardVersions => Set<ProjectContextCardVersion>();
+    public DbSet<ProjectContextRoute> ProjectContextRoutes => Set<ProjectContextRoute>();
 
     // Repositories
     public DbSet<Repository> Repositories => Set<Repository>();
@@ -122,6 +124,8 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.ToTable("agent_projects");
             e.HasKey(x => x.Id);
             e.Property(x => x.ProjectName).HasMaxLength(200).IsRequired();
+            e.Property(x => x.ContextMode).HasMaxLength(8).IsRequired()
+                .HasDefaultValue(ProjectContextMode.Full);
             e.HasIndex(x => new { x.AgentId, x.ProjectName }).IsUnique();
             e.HasOne(x => x.Agent)
              .WithMany(a => a.Projects)
@@ -214,6 +218,34 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.HasIndex(x => x.CreatedAt);
             e.HasOne(x => x.ProjectContext)
              .WithMany(p => p.Versions)
+             .HasForeignKey(x => x.ProjectContextId)
+             .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ProjectContextCardVersion>(e =>
+        {
+            e.ToTable("project_context_card_versions");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Content).HasColumnType("longtext").IsRequired();
+            e.Property(x => x.CreatedBy).HasMaxLength(100);
+            e.Property(x => x.Reason).HasMaxLength(500);
+            e.HasIndex(x => new { x.ProjectContextId, x.VersionNumber }).IsUnique();
+            e.HasOne(x => x.ProjectContext)
+             .WithMany(p => p.CardVersions)
+             .HasForeignKey(x => x.ProjectContextId)
+             .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ProjectContextRoute>(e =>
+        {
+            e.ToTable("project_context_routes");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.SignalKind).HasMaxLength(16).IsRequired();
+            e.Property(x => x.SignalValue).HasMaxLength(RouteSignalKind.MaxValueLength).IsRequired();
+            e.Property(x => x.CreatedBy).HasMaxLength(100);
+            e.HasIndex(x => new { x.SignalKind, x.SignalValue, x.ProjectContextId }).IsUnique();
+            e.HasOne(x => x.ProjectContext)
+             .WithMany(p => p.Routes)
              .HasForeignKey(x => x.ProjectContextId)
              .OnDelete(DeleteBehavior.Cascade);
         });

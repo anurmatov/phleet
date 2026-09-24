@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Fleet.Temporal.Configuration;
 using Fleet.Temporal.Models;
 using Fleet.Temporal.Services;
@@ -20,10 +21,25 @@ namespace Fleet.Temporal.Activities;
 public sealed class DelegateToAgentActivity
 {
     /// <summary>
+    /// The activity type name. Workflows that schedule this activity by name use it so the
+    /// argument list they send is spelled out rather than filled in by the compiler (see
+    /// <see cref="DelegateToAgentAsync"/>'s <c>repo</c> parameter).
+    /// </summary>
+    public const string ActivityName = "DelegateToAgent";
+
+    /// <summary>
     /// The Sender field used in directive RelayMessages published by this bridge.
     /// Agents reply to "temporal-bridge" routing key which maps to our listener queue.
     /// </summary>
     private const string BridgeSender = "temporal-bridge";
+
+    /// <summary>
+    /// <c>owner/name</c>, the same rule the orchestrator applies to <c>repo</c> routes (#347).
+    /// Matched against the trimmed value, so the <c>$</c>-before-final-newline quirk cannot let a
+    /// trailing line break through.
+    /// </summary>
+    private static readonly Regex RepoPattern = new(
+        "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", RegexOptions.CultureInvariant);
 
     private readonly RabbitMqOptions _rabbitConfig;
     private readonly TemporalBridgeOptions _bridgeConfig;
@@ -82,19 +98,34 @@ public sealed class DelegateToAgentActivity
     ///   per-step <c>timeoutMinutes</c> — would otherwise be failed by a guard comparing their
     ///   container against a deployment-wide constant they never asked for.
     /// </param>
-    [Activity]
+    /// <param name="repo">
+    ///   Optional <c>owner/name</c> of the repository this delegation is about (#347). It is put on
+    ///   every directive of this delegation — the first publish, re-sends and continuation retries —
+    ///   as <see cref="RelayMessage.Repo"/>, so the agent can route project context by it. Blank
+    ///   means "no repo signal". A value that is not <c>owner/name</c> is dropped with a Warning and
+    ///   the delegation still goes out: a typo in a definition must not fail the step.
+    ///
+    ///   Only UWE <c>delegate</c> steps that set <c>repo</c> pass it, and they append it (after an
+    ///   explicit <c>agentBudgetSeconds</c> of 0) only when it resolves non-empty. Every other
+    ///   caller schedules by name with an explicit argument list, because an expression-tree call
+    ///   would have the compiler append this parameter's default and change the activity input of
+    ///   workflows that never asked for it.
+    /// </param>
+    [Activity(ActivityName)]
     public async Task<AgentTaskResult> DelegateToAgentAsync(
         string agentName,
         string instruction,
         string taskId,
         bool retryOnIncomplete = true,
         int maxIncompleteRetries = 3,
-        int agentBudgetSeconds = 0)
+        int agentBudgetSeconds = 0,
+        string? repo = null)
     {
         var ctx = ActivityExecutionContext.Current;
+        repo = ValidateRepo(repo, agentName, taskId);
         _logger.LogInformation(
-            "DelegateToAgent: agent={Agent}, taskId={TaskId}, workflowId={WorkflowId}, budgetSeconds={Budget}",
-            agentName, taskId, ctx.Info.WorkflowId, agentBudgetSeconds);
+            "DelegateToAgent: agent={Agent}, taskId={TaskId}, workflowId={WorkflowId}, budgetSeconds={Budget}, repo={Repo}",
+            agentName, taskId, ctx.Info.WorkflowId, agentBudgetSeconds, repo ?? "-");
 
         var budgetIsExplicit = agentBudgetSeconds > 0;
         var timeout = budgetIsExplicit
@@ -109,7 +140,7 @@ public sealed class DelegateToAgentActivity
 
         try
         {
-            await PublishDirectiveAsync(agentName, instruction, taskId, EffectiveGroupChatId, ctx.CancellationToken);
+            await PublishDirectiveAsync(agentName, instruction, taskId, EffectiveGroupChatId, repo, ctx.CancellationToken);
         }
         catch (Exception ex)
         {
@@ -122,7 +153,7 @@ public sealed class DelegateToAgentActivity
 
         try
         {
-            var result = await WaitForResponseAsync(agentName, tcs, taskId, ctx, timeout, instruction);
+            var result = await WaitForResponseAsync(agentName, tcs, taskId, ctx, timeout, instruction, repo);
 
             if (!retryOnIncomplete || !result.IsIncomplete)
                 return result;
@@ -145,7 +176,7 @@ public sealed class DelegateToAgentActivity
 
                 try
                 {
-                    await PublishDirectiveAsync(agentName, continuationInstruction, retryTaskId, EffectiveGroupChatId, ctx.CancellationToken);
+                    await PublishDirectiveAsync(agentName, continuationInstruction, retryTaskId, EffectiveGroupChatId, repo, ctx.CancellationToken);
                 }
                 catch (Exception ex)
                 {
@@ -154,7 +185,7 @@ public sealed class DelegateToAgentActivity
                     throw;
                 }
 
-                result = await WaitForResponseAsync(agentName, retryTcs, retryTaskId, ctx, timeout, continuationInstruction);
+                result = await WaitForResponseAsync(agentName, retryTcs, retryTaskId, ctx, timeout, continuationInstruction, repo);
                 accumulatedText += "\n" + result.Text;
 
                 if (!result.IsIncomplete)
@@ -180,6 +211,23 @@ public sealed class DelegateToAgentActivity
             await TryReportTimeoutToActoAsync(agentName, taskId, ex.Message);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Returns the repo to put on the relay message, or null. Blank is simply "no repo signal"
+    /// and stays silent; anything else that is not <c>owner/name</c> is dropped with a Warning.
+    /// </summary>
+    private string? ValidateRepo(string? repo, string agentName, string taskId)
+    {
+        if (string.IsNullOrWhiteSpace(repo)) return null;
+
+        var trimmed = repo.Trim();
+        if (RepoPattern.IsMatch(trimmed)) return trimmed;
+
+        _logger.LogWarning(
+            "DelegateToAgent: ignoring malformed repo {Repo} (expected owner/name) — the directive goes out without a repo signal. agent={Agent}, taskId={TaskId}",
+            trimmed.Length > 80 ? trimmed[..80] : trimmed, agentName, taskId);
+        return null;
     }
 
     /// <summary>
@@ -230,7 +278,8 @@ public sealed class DelegateToAgentActivity
         string taskId,
         ActivityExecutionContext ctx,
         TimeSpan timeout,
-        string instruction)
+        string instruction,
+        string? repo)
     {
         var started = Stopwatch.StartNew();
 
@@ -284,7 +333,7 @@ public sealed class DelegateToAgentActivity
                         agentName, taskId);
                     try
                     {
-                        await PublishDirectiveAsync(agentName, instruction, taskId, EffectiveGroupChatId, timeoutCts.Token);
+                        await PublishDirectiveAsync(agentName, instruction, taskId, EffectiveGroupChatId, repo, timeoutCts.Token);
                         lastPublished = DateTimeOffset.UtcNow;
                     }
                     catch (OperationCanceledException)
@@ -352,7 +401,7 @@ public sealed class DelegateToAgentActivity
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             var escalationTarget = FleetWorkflowConfig.Instance.EscalationTarget;
             var report = $"[temporal] activity timeout: {detail}. the workflow will fail this activity.";
-            await PublishDirectiveAsync(escalationTarget, report, taskId + "/timeout-report", EffectiveGroupChatId, cts.Token);
+            await PublishDirectiveAsync(escalationTarget, report, taskId + "/timeout-report", EffectiveGroupChatId, repo: null, cts.Token);
             _logger.LogInformation("Timeout report sent to {EscalationTarget} for agent {Agent}, taskId={TaskId}", escalationTarget, agentName, taskId);
         }
         catch (Exception ex)
@@ -398,7 +447,7 @@ public sealed class DelegateToAgentActivity
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            await PublishDirectiveAsync(agentName, "/cancel all", taskId + "/cancel", EffectiveGroupChatId, cts.Token);
+            await PublishDirectiveAsync(agentName, "/cancel all", taskId + "/cancel", EffectiveGroupChatId, repo: null, cts.Token);
             _logger.LogInformation("Fallback cancel broadcast sent to agent {Agent} for taskId={TaskId}", agentName, taskId);
         }
         catch (Exception ex)
@@ -407,7 +456,12 @@ public sealed class DelegateToAgentActivity
         }
     }
 
-    private async Task PublishDirectiveAsync(string agentName, string instruction, string taskId, long chatId, CancellationToken ct)
+    /// <param name="repo">
+    /// Already validated by <see cref="ValidateRepo"/>. Only the delegation's own directives carry
+    /// it; the timeout report and the cancel fallback are not about the repository and pass null.
+    /// </param>
+    private async Task PublishDirectiveAsync(
+        string agentName, string instruction, string taskId, long chatId, string? repo, CancellationToken ct)
     {
         // Prepend the workflow context tag so agents can verify this is a real Temporal delegation.
         // Applied here (rather than in DelegateToAgentAsync) so every publish — initial, re-send,
@@ -434,7 +488,8 @@ public sealed class DelegateToAgentActivity
             Text: instruction,
             Timestamp: DateTimeOffset.UtcNow,
             Type: RelayMessageType.Directive,
-            TaskId: taskId);
+            TaskId: taskId,
+            Repo: repo);
 
         var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
         var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };

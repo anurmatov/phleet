@@ -45,7 +45,8 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         [Description("Message sent to requesting user when their access request is queued. Pass empty string to use the built-in default. Max 500 characters. Omit to keep current.")] string? request_received_message = null,
         [Description("Mount /var/run/docker.sock into the container (grants host-root; leave off unless agent manages containers). Omit to keep current.")] bool? mount_docker_sock = null,
         [Description("Name of an output_styles row this agent runs with — its chat tone and register. Pass empty string to clear (no style). Omit to keep current. Takes effect on the next reprovision.")] string? output_style = null,
-        [Description("Claude agents only: origin of a local Anthropic-compatible server (e.g. Ollama), e.g. http://<server-address>:11434 — origin only, never …/v1. Set, the agent runs Claude Code against that server with no Claude credential mounted; model must be the server's model tag and effort off/low/medium/xhigh (empty = model default, sent as xhigh). Stored canonical. Pass empty string to clear (back to Anthropic). Omit to keep current. Takes effect on the next reprovision.")] string? anthropic_base_url = null)
+        [Description("Claude agents only: origin of a local Anthropic-compatible server (e.g. Ollama), e.g. http://<server-address>:11434 — origin only, never …/v1. Set, the agent runs Claude Code against that server with no Claude credential mounted; model must be the server's model tag and effort off/low/medium/xhigh (empty = model default, sent as xhigh). Stored canonical. Pass empty string to clear (back to Anthropic). Omit to keep current. Takes effect on the next reprovision.")] string? anthropic_base_url = null,
+        [Description("Per-assignment project context mode, comma-separated name=mode pairs, e.g. 'project-a=card,project-b=full'. full = the full project context is resident (default); card = the project's compact card is resident and the full context is attached to routed turns. Names must be in the agent's projects after this call; card requires the project to have a card. Unlisted assignments keep their mode (a projects replace preserves modes; new projects start full). Omit to keep current. Takes effect on the next reprovision.")] string? project_modes = null)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
@@ -241,17 +242,28 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
             changes.AppendLine($"- tools replaced ({newTools.Count} tools)");
         }
 
-        if (projects is not null)
-        {
-            var newProjects = projects
-                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
+        var newProjects = projects?
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
-            db.AgentProjects.RemoveRange(agent.Projects);
-            agent.Projects = newProjects.Select(p => new AgentProject { AgentId = agent.Id, ProjectName = p }).ToList();
+        Dictionary<string, string>? modes = null;
+        if (project_modes is not null && !AgentProjectModes.TryParse(project_modes, out modes, out var parseError))
+            return $"Invalid project_modes: {parseError?.TrimEnd('.')}. Nothing was saved.";
+
+        // #347: the projects replace-all PRESERVES ContextMode for every name that remains
+        // (case-insensitive); new names start full. project_modes then applies to the RESULTING
+        // assignments. Returning here skips SaveChanges, so an invalid key, value, or card mode on a
+        // project without a card persists nothing — the same step the REST PUT runs.
+        var modeChanges = new List<string>();
+        if (await AgentProjectModes.UpdateAssignmentsAsync(db, agent, newProjects, modes, modeChanges) is { } modeError)
+            return $"Invalid project_modes: {modeError.TrimEnd('.')}. Nothing was saved.";
+
+        if (newProjects is not null)
             changes.AppendLine($"- projects replaced ({newProjects.Count} projects)");
-        }
+        foreach (var change in modeChanges)
+            changes.AppendLine($"- project mode {change}");
+        var modesChanged = modeChanges.Count > 0;
 
         if (can_receive_chat_requests is not null && can_receive_chat_requests != agent.CanReceiveChatRequests)
         {
@@ -307,13 +319,18 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         await db.SaveChangesAsync();
 
         // Project assignment IS the memory-ACL grant. Sync after the save so the hook sees the
-        // committed assignment list, and only when the caller actually touched projects.
+        // committed assignment list, and only when the caller actually touched projects. A mode change
+        // is not an ACL change: project_modes alone never reaches the hook, and one sent with the same
+        // projects list passes the same name set, which stages nothing and publishes nothing.
         if (projects is not null)
         {
             await AgentProjectAccessSync.SyncAndBroadcastAsync(
                 db, aclNotifier, agent.Name, agent.Projects.Select(p => p.ProjectName));
         }
 
-        return $"Agent '{agent_name}' updated:\n{changes}Note: restart the agent container for changes to take effect.";
+        var note = modesChanged
+            ? "Note: reprovision the agent for project mode changes to take effect; restart it for the rest."
+            : "Note: restart the agent container for changes to take effect.";
+        return $"Agent '{agent_name}' updated:\n{changes}{note}";
     }
 }

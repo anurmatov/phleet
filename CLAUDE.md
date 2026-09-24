@@ -183,6 +183,24 @@ broadcasts are ignored, and its queue is not bound to `fleet.relay` (a stale bin
 separate channel). No startup reachability probe: an inference-host reboot must not restart-loop
 agents. Enable and rollback both take effect on reprovision. See `docs/providers/claude-local-models.md`.
 
+## Project context cards
+
+`agent_projects.ContextMode` is `full` (default: full context resident, as before) or `card` (the
+project's card plus a generated footer is resident; the full context is attached at delivery to
+turns routed to the project). Provisioning keys everything on the **effective** mode: a card missing
+a keep marker of the current full context renders as full (`card_fallback_full`), and an agent with
+no effective card assignment is provisioned byte for byte as before. Keep markers are parsed only
+by `KeepMarkerParser`. Routes (`repo` > `workflow` > `chat`, no merging across levels) are resolved
+at intake; the attachment is rendered only where text reaches the executor and marked in the ledger
+only on `prompt_accepted` / `Injected`. The relay `Repo` comes from a UWE delegate step's optional
+`repo`, appended to the activity input only when non-empty so existing definitions keep their exact
+five-argument input.
+
+Card agents get MCP server `fleet-context` → `Provisioning:ContextMcpUrl` (default
+`http://fleet-orchestrator:3600/mcp/context`) `?agent=<name>`, with only
+`mcp__fleet-context__get_project_context` granted; sessions there are bound to the route and the
+agent. The admin `/mcp` is never auto-granted. See `docs/project-context-cards.md`.
+
 ## Provider CLI Pins
 
 The agent image pins every provider CLI explicitly in `Dockerfile`:

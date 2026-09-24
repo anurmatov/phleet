@@ -70,7 +70,8 @@ function CardPanel({ name, detail, cardAssignments, edit, onEdit, onChanged }: C
           // The gate's rejection. The editor keeps the text so the author can add what is missing.
           const b: ProjectCardRejection = await r.json().catch(() => ({ error: `Error ${r.status}` }))
           setRejection(b)
-          throw new Error(b.error ?? `Error ${r.status}`)
+          // The full reason is in the rejection block above the save row; say it only once.
+          throw new Error('Card not saved — see above')
         }
         if (!r.ok) throw new Error(await errorText(r))
         return r.json() as Promise<{ message: string; version: number }>

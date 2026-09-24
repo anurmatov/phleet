@@ -73,9 +73,12 @@ resolve_conf() {
 }
 
 start_stub() { # start_stub <A|B|C> — $RUN-orch-<x> with the shared alias
+  # STUB_NAME keeps its case (assertions match "instance":"A"), but the
+  # container name is lowercased so every later rm/inspect/cleanup reference
+  # agrees; docker names are case-sensitive.
   local letter="$1"
   infra "start stub orchestrator $letter" docker run -d \
-    --name "$RUN-orch-$letter" \
+    --name "$RUN-orch-${letter,,}" \
     --network "$RUN-net" \
     --network-alias fleet-orchestrator \
     -e "STUB_NAME=$letter" \

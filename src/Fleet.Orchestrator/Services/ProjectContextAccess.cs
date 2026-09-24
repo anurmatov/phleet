@@ -38,6 +38,14 @@ public sealed class ProjectContextAccess(
         assignedProjects.Any(p => string.Equals(p, project, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
+    /// The loaded row named <paramref name="name"/>, ignoring case — an exact ordinal match first, so
+    /// a (hand-made) case-variant duplicate can never shadow the row the name actually spells.
+    /// </summary>
+    public static T? MatchByName<T>(IReadOnlyCollection<T> rows, string name, Func<T, string> nameOf) where T : class =>
+        rows.FirstOrDefault(r => string.Equals(nameOf(r), name, StringComparison.Ordinal))
+        ?? rows.FirstOrDefault(r => string.Equals(nameOf(r), name, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
     /// Serves one fallback read for the request in <paramref name="http"/>, which must be on the
     /// context route. Identity is re-read from THIS request — the path, <c>?agent=</c> and
     /// <c>Mcp-Session-Id</c> — never from the session's origin.
@@ -79,8 +87,7 @@ public sealed class ProjectContextAccess(
             var contexts = await db.ProjectContexts.AsNoTracking()
                 .Select(p => new { p.Id, p.Name, p.CurrentVersion })
                 .ToListAsync(ct);
-            var ctx = contexts.FirstOrDefault(p => string.Equals(p.Name, project, StringComparison.Ordinal))
-                   ?? contexts.FirstOrDefault(p => string.Equals(p.Name, project, StringComparison.OrdinalIgnoreCase));
+            var ctx = MatchByName(contexts, project, p => p.Name);
             if (ctx is null)
                 return Deny(agent, project, "nonexistent");
 

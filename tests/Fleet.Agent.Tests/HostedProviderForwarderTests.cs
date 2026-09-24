@@ -20,10 +20,11 @@ namespace Fleet.Agent.Tests;
 /// </summary>
 /// <remarks>
 /// The <c>zai-*.sse</c> fixtures under <c>Fixtures/HostedProviders/</c> are scrubbed Phase 0
-/// captures: Z.ai's real answers to real Codex 0.153.4 requests relayed by this forwarder. Scrubbing
-/// replaced the request ids and changed nothing else. Both are <c>response.failed</c> streams (an
-/// unfunded quota and an unsupported effort); successful captures are added when the probe can run
-/// on an active plan. The forwarder copies bytes, so the assertions do not depend on which.
+/// captures: Z.ai's real answers to real Codex 0.153.4 requests relayed by this forwarder.
+/// <c>zai-function-call.sse</c> returns an MCP call as <c>namespace</c> + <c>name</c>, and
+/// <c>zai-follow-up-message.sse</c> is the answer after the tool result; the two
+/// <c>response.failed</c> captures came from before the plan was active. Scrubbing replaced ids,
+/// the cache key and the echoed instructions, and changed nothing else.
 /// </remarks>
 public sealed class HostedProviderForwarderTests : IDisposable
 {
@@ -42,6 +43,8 @@ public sealed class HostedProviderForwarderTests : IDisposable
     // ── AC5: transparency ───────────────────────────────────────────────────
 
     [Theory]
+    [InlineData("zai-function-call.sse")]
+    [InlineData("zai-follow-up-message.sse")]
     [InlineData("zai-response-failed-insufficient-quota.sse")]
     [InlineData("zai-response-failed-unsupported-effort.sse")]
     public async Task Forwards_BytesFramingAndHeadersUnchanged_ExceptAuthorizationAndToken(string fixture)
@@ -411,7 +414,7 @@ public sealed class HostedProviderForwarderTests : IDisposable
         using var loggerFactory = LoggerFactory.Create(b => b.AddProvider(logger).SetMinimumLevel(LogLevel.Trace));
         var upstream = new RecordingHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = SseContent(HostedProviderFixtureBytes("zai-response-failed-unsupported-effort.sse")),
+            Content = SseContent(HostedProviderFixtureBytes("zai-follow-up-message.sse")),
         }));
         await using var host = await StartHostAsync(upstream, loggerFactory);
         var endpoint = await host.Endpoint;

@@ -1,0 +1,23 @@
+event: response.created
+data: {"response":{"created_at":1790232143,"id":"resp_2026092400000000000000000001","model":"glm-5.3","object":"response","output":[],"prompt_cache_key":"00000000-0000-0000-0000-000000000000","status":"in_progress"},"sequence_number":0,"type":"response.created"}
+
+event: response.in_progress
+data: {"response":{"created_at":1790232143,"id":"resp_2026092400000000000000000001","model":"glm-5.3","object":"response","output":[],"prompt_cache_key":"00000000-0000-0000-0000-000000000000","status":"in_progress"},"sequence_number":1,"type":"response.in_progress"}
+
+event: response.output_item.added
+data: {"item":{"arguments":"","call_id":"call_000000000000000000000001","id":"fc_call_000000000000000000000001","name":"get_probe_value","namespace":"mcp__probe","status":"in_progress","type":"function_call"},"output_index":0,"sequence_number":2,"type":"response.output_item.added"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"{}","item_id":"fc_call_000000000000000000000001","output_index":0,"sequence_number":3,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.done
+data: {"arguments":"{}","item_id":"fc_call_000000000000000000000001","name":"get_probe_value","output_index":0,"sequence_number":4,"type":"response.function_call_arguments.done"}
+
+event: response.output_item.done
+data: {"item":{"arguments":"{}","call_id":"call_000000000000000000000001","id":"fc_call_000000000000000000000001","name":"get_probe_value","namespace":"mcp__probe","status":"completed","type":"function_call"},"output_index":0,"sequence_number":5,"type":"response.output_item.done"}
+
+event: response.completed
+data: {"response":{"conversation_id":"","created_at":1790232143,"error":null,"id":"resp_2026092400000000000000000001","incomplete_details":null,"instructions":"<scrubbed: the Codex base instructions echoed back>","metadata":null,"model":"glm-5.3","object":"response","output":[{"arguments":"{}","call_id":"call_000000000000000000000001","id":"fc_call_000000000000000000000001","name":"get_probe_value","namespace":"mcp__probe","status":"completed","type":"function_call"}],"parallel_tool_calls":true,"previous_response_id":"","prompt_cache_key":"00000000-0000-0000-0000-000000000000","status":"completed","usage":{"input_tokens":4652,"input_tokens_details":{"cached_tokens":3520},"output_tokens":12,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":4664}},"sequence_number":6,"type":"response.completed"}
+
+data: [DONE]
+

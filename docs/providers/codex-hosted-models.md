@@ -122,11 +122,13 @@ property.
 ## 5. Limits
 
 - **Text only.** GLM on this route takes no image input; an image turn fails with Z.ai's message.
-- **Effort: set `low` or `high`.** Only those two are forwarded. Z.ai rejects `medium` and `xhigh`
-  (`invalid_request`: "This model always engages in thinking and cannot be disabled; please use low,
-  high, or max"), so any other Phleet effort is omitted, never remapped, with one Warning. Codex then
-  sends no effort. Z.ai accepts that, but its default is undocumented, and its own Codex catalog
-  defaults to `max`, the deepest, slowest and most quota-hungry setting. Codex has no `max`.
+- **Effort: set `low` or `high`.** Only those two are forwarded; any other Phleet effort is omitted,
+  never remapped, with one Warning. Z.ai documents `low`, `high` and `max` for Codex, and its
+  handling of other values is undocumented and has changed: on 2026-09-24, before the plan was
+  active, it rejected `medium` and `xhigh` (`invalid_request`: "please use low, high, or max"); after
+  activation the same day it accepted them. When codex sends no effort, Z.ai answers normally, but it
+  does not echo which effort it used, and its own Codex catalog defaults to `max`, the deepest,
+  slowest and most quota-hungry setting. Codex has no `max`.
 - **Context window.** Codex does not know the `glm-5.3` slug. It falls back to a 272K window and no
   default effort. If a thread outgrows the model's real window, Z.ai's error ends the turn. Restart
   the agent to start a fresh thread.

@@ -42,7 +42,23 @@ jobs:
       # #341: proves the dashboard nginx re-resolves fleet-orchestrator per request
       # (Docker DNS) instead of caching one container address at config load.
       - name: Dashboard proxy re-resolves the orchestrator
-        run: bash tests/dashboard-proxy/run.sh
+        run: |
+          bash tests/dashboard-proxy/run.sh
+
+          # Negative control (issue AC3): main's startup-resolved conf must fail
+          # at P2 (the recreate), proving the harness still reproduces the bug.
+          git fetch origin main --depth=1
+          git show origin/main:src/fleet-dashboard/nginx.conf > /tmp/main-nginx.conf
+          set +e
+          NGINX_CONF=/tmp/main-nginx.conf bash tests/dashboard-proxy/run.sh
+          NEGATIVE_RC=$?
+          set -e
+          echo "negative control exit=$NEGATIVE_RC (expected 1, failing at P2)"
+          [ "$NEGATIVE_RC" -eq 1 ]
+
+          # Built-image run (issue AC4): the dashboard image itself, no mounts.
+          docker build -f src/fleet-dashboard/Dockerfile -t dashproxy-test:pr .
+          DASHBOARD_IMAGE=dashproxy-test:pr bash tests/dashboard-proxy/run.sh
 
   conversations-tests:
     name: Conversations store (MySQL)

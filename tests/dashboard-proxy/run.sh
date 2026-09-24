@@ -35,7 +35,16 @@ cleanup() {
   for name in "$RUN-dash" "$RUN-dash2" "$RUN-client" "$RUN-orch-a" "$RUN-orch-b" "$RUN-orch-c"; do
     docker rm -f "$name" >/dev/null 2>&1 || echo "WARN: cleanup could not remove $name"
   done
-  docker network rm "$RUN-net" >/dev/null 2>&1 || echo "WARN: cleanup could not remove network $RUN-net"
+  # docker rm -f can return before the last endpoint detaches; give the
+  # network a bounded moment to become removable instead of leaking it.
+  if ! docker network rm "$RUN-net" >/dev/null 2>&1; then
+    local removed=0 attempt
+    for attempt in 1 2 3 4 5; do
+      sleep 2
+      if docker network rm "$RUN-net" >/dev/null 2>&1; then removed=1; break; fi
+    done
+    [ "$removed" = "1" ] || echo "WARN: cleanup could not remove network $RUN-net"
+  fi
   if [ -n "$STATIC_DIR" ]; then rm -rf "$STATIC_DIR"; fi
   exit "$rc"
 }
@@ -151,6 +160,9 @@ NGINX_CONF="$(resolve_conf "$NGINX_CONF")"
 docker info >/dev/null 2>&1 || fail_infra "docker daemon unreachable"
 STATIC_DIR="$(mktemp -d)"
 printf '<!doctype html><title>dashproxy</title>ok\n' > "$STATIC_DIR/index.html"
+# mktemp -d is 0700/root; the nginx worker (uid 101) must traverse and read it.
+chmod 0755 "$STATIC_DIR"
+chmod 0644 "$STATIC_DIR/index.html"
 
 infra "create network $RUN-net" docker network create "$RUN-net"
 

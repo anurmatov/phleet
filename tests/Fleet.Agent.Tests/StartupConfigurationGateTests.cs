@@ -21,7 +21,7 @@ public class StartupConfigurationGateTests
 {
     private static ServiceProvider BuildServices(
         string provider, string model, bool? hostedProvider = null, string? hostedKeyEnv = null,
-        string? keyFilePath = null)
+        string? keyFilePath = null, string? anthropicBaseUrl = null, string? effort = null)
     {
         // DisableDefaults-equivalent: nothing ambient, only the values the gate reads.
         var values = new Dictionary<string, string?>
@@ -36,6 +36,10 @@ public class StartupConfigurationGateTests
             values["Agent:HostedProvider"] = hostedProvider.Value ? "true" : "false";
         if (hostedKeyEnv is not null)
             values["Agent:HostedProviderKeyEnv"] = hostedKeyEnv;
+        if (anthropicBaseUrl is not null)
+            values["Agent:AnthropicBaseUrl"] = anthropicBaseUrl;
+        if (effort is not null)
+            values["Agent:Effort"] = effort;
 
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(values).Build();
 
@@ -164,5 +168,90 @@ public class StartupConfigurationGateTests
         using var services = BuildServices(provider, model);
 
         AgentHostRegistration.ValidateStartupConfiguration(services, _ => null);
+    }
+
+    // ── #340: Claude local model mode ────────────────────────────────────────
+
+    private const string LocalUrl = "http://inference-host:11434";
+    private const string LocalTag = "qwen3.8:27b-agent";
+    private static readonly Func<string, bool> NoFiles = _ => false;
+
+    [Fact]
+    public void ClaudeLocalModel_ValidAndNoCredentialFile_Passes()
+    {
+        using var services = BuildServices("claude", LocalTag, anthropicBaseUrl: LocalUrl);
+        var probed = new List<string>();
+
+        AgentHostRegistration.ValidateStartupConfiguration(
+            services, _ => null, path => { probed.Add(path); return false; });
+
+        Assert.Equal(["/root/.claude/.credentials.json", "/root/.claude-host/.credentials.json"], probed);
+    }
+
+    [Theory]
+    // V1
+    [InlineData("codex", LocalTag, LocalUrl, null, "applies only to provider claude")]
+    [InlineData("gemini", LocalTag, LocalUrl, null, "applies only to provider claude")]
+    // V2 (whitespace-only is a fault, never off)
+    [InlineData("claude", LocalTag, "   ", null, "has surrounding whitespace")]
+    [InlineData("claude", LocalTag, "http://inference-host:11434/v1", null, "has a path")]
+    // V3
+    [InlineData("claude", LocalTag, "http://localhost:11434", null, "is the container")]
+    // V4
+    [InlineData("claude", "qwen 27b", LocalUrl, null, "not allowed in a CLI argument")]
+    // V5
+    [InlineData("claude", "claude-opus-5-5", LocalUrl, null, "is a Claude model id")]
+    // V6
+    [InlineData("claude", "ollama/qwen3:8b", LocalUrl, null, "selects the codex path")]
+    // V7
+    [InlineData("claude", LocalTag, LocalUrl, "high", "Effort is not supported")]
+    public void ClaudeLocalModel_EachFault_Throws(
+        string provider, string model, string baseUrl, string? effort, string expected)
+    {
+        using var services = BuildServices(provider, model, anthropicBaseUrl: baseUrl, effort: effort);
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => AgentHostRegistration.ValidateStartupConfiguration(services, _ => null, NoFiles));
+
+        Assert.Contains(expected, ex.Message);
+    }
+
+    [Theory]
+    [InlineData("http://inference-host:11434/")]
+    [InlineData("HTTP://Inference-Host:11434")]
+    public void ClaudeLocalModel_NonCanonicalBaseUrl_Throws(string baseUrl)
+    {
+        using var services = BuildServices("claude", LocalTag, anthropicBaseUrl: baseUrl);
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => AgentHostRegistration.ValidateStartupConfiguration(services, _ => null, NoFiles));
+
+        Assert.Contains("canonical", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("/root/.claude/.credentials.json")]
+    [InlineData("/root/.claude-host/.credentials.json")]
+    public void ClaudeLocalModel_CredentialFilePresent_Throws(string present)
+    {
+        using var services = BuildServices("claude", LocalTag, anthropicBaseUrl: LocalUrl);
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => AgentHostRegistration.ValidateStartupConfiguration(services, _ => null, path => path == present));
+
+        Assert.Contains(present, ex.Message);
+    }
+
+    [Theory]
+    [InlineData("claude", "claude-opus-5-5", "high")]
+    [InlineData("claude", "opus", null)]
+    [InlineData("codex", "gpt-5", "low")]
+    public void ClaudeLocalModel_Off_NeitherValidatesNorProbesFiles(string provider, string model, string? effort)
+    {
+        using var services = BuildServices(provider, model, effort: effort);
+
+        // A present credential file is the normal case for an off claude agent.
+        AgentHostRegistration.ValidateStartupConfiguration(
+            services, _ => null, _ => throw new InvalidOperationException("file probe must not run when off"));
     }
 }

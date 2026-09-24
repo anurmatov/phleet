@@ -184,6 +184,11 @@ public sealed class ContainerProvisioningService(
         }
         else
         {
+            // A local-model agent must hold no Claude credential (#340 D3): its model is served by a
+            // local Anthropic-compatible server, which must never receive a real OAuth token.
+            if (ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl))
+                return AppendCredentialMounts(agent, binds);
+
             // Mount orchestrator-stored Claude credentials for seeding new containers (entrypoint.sh reads this)
             var tokenStorePath = Path.Combine(baseDir, ".claude-credentials.json");
             if (File.Exists(tokenStorePath))
@@ -203,6 +208,31 @@ public sealed class ContainerProvisioningService(
         }
 
         return binds;
+    }
+
+    /// <summary>
+    /// The Claude local-model fault that must stop provisioning (#340 D1 point 2), or null: V1–V7,
+    /// or a local agent carrying a credential mount into <c>/root/.claude*</c>, which would hand
+    /// it the Claude credential the bind skip above withholds.
+    /// </summary>
+    internal static string? DescribeClaudeLocalModelFault(Agent agent)
+    {
+        if (ClaudeLocalModel.DescribeConfigFault(agent.Provider, agent.AnthropicBaseUrl, agent.Model, agent.Effort)
+            is { } fault)
+        {
+            return fault;
+        }
+
+        if (!ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl))
+            return null;
+
+        // "/root/.claude" also covers /root/.claude-host and /root/.claude.json.
+        var claudeMount = agent.CredentialMounts.FirstOrDefault(
+            m => m.MountPath.StartsWith("/root/.claude", StringComparison.Ordinal));
+        return claudeMount is null
+            ? null
+            : $"Claude local model mode forbids a credential mount into /root/.claude*, but one targets "
+            + $"{claudeMount.MountPath}. Remove it, then reprovision.";
     }
 
     /// <summary>True when this agent's model routes to a hosted provider (#335 D1).</summary>
@@ -941,6 +971,11 @@ public sealed class ContainerProvisioningService(
                 $"Agent '{agent.Name}' names output style '{agent.OutputStyle}', which has no row in " +
                 "output_styles — refusing to generate config that drops the style silently.");
 
+        // #340 D1 point 2: a row edited by hand into an invalid state stops here, and reprovision
+        // leaves the agent down with the named fault instead of starting it misconfigured.
+        if (DescribeClaudeLocalModelFault(agent) is { } localFault)
+            throw new InvalidOperationException($"Agent '{agent.Name}' cannot be provisioned: {localFault}");
+
         var tools = agent.Tools.Where(t => t.IsEnabled).OrderBy(t => t.ToolName).Select(t => t.ToolName).ToList();
 
         // Codex derives config.toml enabled_tools from AllowedTools (entrypoint.sh).
@@ -995,6 +1030,12 @@ public sealed class ContainerProvisioningService(
                 // handoff without a prefix list of its own, and the agent can check parity (D8).
                 HostedProvider       = hosted,
                 HostedProviderKeyEnv = hosted ? hostedProvider.KeyEnvVar : null,
+
+                // #340. Always canonical, so the agent's startup gate can treat any other form as
+                // version skew or a hand edit. null for every agent not in local mode.
+                AnthropicBaseUrl = ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl)
+                    ? ClaudeLocalModel.CanonicalizeBaseUrl(agent.AnthropicBaseUrl!)
+                    : null,
 
                 // #309. Every assigned instruction, as roles/ directory names, in load order.
                 //

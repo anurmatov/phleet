@@ -114,6 +114,11 @@ public static class AgentHostRegistration
     /// or <c>&lt;secret&gt;</c> key, or on a file that cannot be deleted.
     /// </para>
     /// <para>
+    /// For every provider it then checks Claude local model mode (#340): an invalid or
+    /// non-canonical <c>AnthropicBaseUrl</c> setup, or a Claude credential file present in local
+    /// mode. <paramref name="fileExists"/> is the file probe, injectable for tests.
+    /// </para>
+    /// <para>
     /// It also catches a codex agent whose model names a local provider
     /// (<c>ollama/…</c>, <c>lmstudio/…</c>) with no <c>CODEX_OSS_BASE_URL</c> to reach it. That is
     /// misconfiguration, not degradation — there is no endpoint. It has to stop the host, because
@@ -123,12 +128,16 @@ public static class AgentHostRegistration
     /// </para>
     /// </remarks>
     public static void ValidateStartupConfiguration(
-        IServiceProvider services, Func<string, string?>? environmentReader = null)
+        IServiceProvider services, Func<string, string?>? environmentReader = null,
+        Func<string, bool>? fileExists = null)
     {
         var agent = services.GetRequiredService<IOptions<AgentOptions>>().Value;
 
         if (DescribeHostedProviderFault(services, agent) is { } hostedFault)
             Fail(hostedFault);
+
+        if (DescribeClaudeLocalModelFault(agent, fileExists ?? File.Exists) is { } localFault)
+            Fail(localFault);
 
         if (agent.Provider != "codex")
             return;
@@ -150,6 +159,47 @@ public static class AgentHostRegistration
 
             throw new InvalidOperationException(fault);
         }
+    }
+
+    /// <summary>Claude credential files that must not exist in local model mode (#340 D3).</summary>
+    internal static readonly string[] ClaudeCredentialFiles =
+    [
+        "/root/.claude/.credentials.json",
+        "/root/.claude-host/.credentials.json",
+    ];
+
+    /// <summary>
+    /// Claude local model mode (#340 D1 point 3): V1–V7, the canonical form, and no Claude
+    /// credential file in the container. Returns the fault text, or null.
+    /// </summary>
+    /// <remarks>
+    /// The orchestrator always emits the canonical form, so a non-canonical value means version
+    /// skew or a hand-edited <c>appsettings.json</c>. The file check backstops <c>entrypoint.sh</c>,
+    /// which removes a stale credential file and exits when it cannot.
+    /// </remarks>
+    private static string? DescribeClaudeLocalModelFault(AgentOptions agent, Func<string, bool> fileExists)
+    {
+        if (ClaudeLocalModel.DescribeConfigFault(agent.Provider, agent.AnthropicBaseUrl, agent.Model, agent.Effort)
+            is { } fault)
+        {
+            return fault;
+        }
+
+        if (!ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl))
+            return null;
+
+        if (ClaudeLocalModel.CanonicalizeBaseUrl(agent.AnthropicBaseUrl!) != agent.AnthropicBaseUrl)
+            return "AnthropicBaseUrl is not in canonical form (scheme://host[:port], lowercase, no trailing "
+                 + "slash). The orchestrator always emits it canonical; redeploy both images and reprovision.";
+
+        foreach (var path in ClaudeCredentialFiles)
+        {
+            if (fileExists(path))
+                return $"Claude local model mode forbids a Claude credential file, but {path} exists. "
+                     + "Remove the mount or file, then reprovision.";
+        }
+
+        return null;
     }
 
     /// <summary>

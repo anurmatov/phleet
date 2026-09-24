@@ -74,10 +74,10 @@ public sealed class CodexExecutor : IAgentExecutor
 
     /// <summary>
     /// The codex built-in <c>modelProvider</c> ids that point at a local OpenAI-compatible
-    /// inference server. Both are reserved inside codex, so only these two spellings are accepted
-    /// — an invented id would be rejected by the app-server at <c>thread/start</c>.
+    /// inference server. Lives in <see cref="CodexLocalModelProviders"/> so the claude local-model
+    /// validation reads the same list (#340 V6).
     /// </summary>
-    private static readonly string[] LocalModelProviders = ["ollama", "lmstudio"];
+    private static IReadOnlyList<string> LocalModelProviders => CodexLocalModelProviders.Ids;
 
     public string? LastSessionId => _threadId;
     public DateTimeOffset LastActivity => _lastActivity;

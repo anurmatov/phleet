@@ -815,6 +815,7 @@ export default function App() {
           requestReceivedMessage: cfg.requestReceivedMessage ?? '',
           mountDockerSock: cfg.mountDockerSock ?? false,
           outputStyle: cfg.outputStyle ?? '',
+          anthropicBaseUrl: cfg.anthropicBaseUrl ?? '',
           instructions: cfg.instructions ?? [],
         })
       })
@@ -910,6 +911,7 @@ export default function App() {
         requestReceivedMessage: configEdits.requestReceivedMessage || undefined,
         mountDockerSock: configEdits.mountDockerSock,
         outputStyle: configEdits.outputStyle,
+        anthropicBaseUrl: configEdits.anthropicBaseUrl,
         tools, projects, mcpEndpoints: configEdits.mcpEndpoints, networks, envRefs,
         instructions: configEdits.instructions.map(i => ({ instructionName: i.name, loadOrder: i.loadOrder })),
       }),

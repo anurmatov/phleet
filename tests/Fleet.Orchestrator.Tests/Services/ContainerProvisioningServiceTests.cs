@@ -305,4 +305,206 @@ public class ContainerProvisioningServiceTests
 
         Assert.DoesNotContain("/var/run/docker.sock:/var/run/docker.sock", binds);
     }
+
+    // ── #340: Claude local model mode ────────────────────────────────────────
+
+    private const string LocalUrl = "http://inference-host:11434";
+
+    private static Agent LocalAgent(string? baseUrl = LocalUrl)
+    {
+        var agent = MinimalAgent("alocal", "claude");
+        agent.Model = "qwen3.8:27b-agent";
+        agent.AnthropicBaseUrl = baseUrl;
+        return agent;
+    }
+
+    private static List<string> BindsWithAllHostCredentialFiles(Agent agent)
+    {
+        var baseDir = Path.Combine(Path.GetTempPath(), $"prov-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(baseDir);
+        try
+        {
+            foreach (var file in new[] { ".claude-credentials.json", ".codex-credentials.json", ".gemini-credentials.json" })
+                File.WriteAllText(Path.Combine(baseDir, file), "{}");
+            return ContainerProvisioningService.BuildBinds(agent, baseDir);
+        }
+        finally
+        {
+            Directory.Delete(baseDir, recursive: true);
+        }
+    }
+
+    // The binds main produced for MinimalAgent("agolden", provider) with every host credential file
+    // present, captured from main at 9a2b6cc.
+    private static string[] MainBinds(string credentialBind) =>
+    [
+        "./workspaces/fleet-agolden:/workspace",
+        "./workspaces/fleet-agolden/.generated/projects:/app/projects:ro",
+        "./workspaces/fleet-agolden/.generated/appsettings.json:/app/appsettings.json:ro",
+        "./workspaces/fleet-agolden/claude:/root/.claude",
+        "./workspaces/fleet-agolden/.generated/settings.json:/root/.claude/settings.json:ro",
+        "./workspaces/fleet-agolden/codex:/root/.codex",
+        "./workspaces/fleet-agolden/.generated/.mcp.json:/workspace/.mcp.json:ro",
+        "./workspaces/fleet-agolden/.generated/roles:/app/roles:ro",
+        credentialBind,
+    ];
+
+    [Fact]
+    public void BuildBinds_LocalClaudeAgent_GetsNoClaudeCredentialBind_EvenWhenTheHostFileExists()
+    {
+        var binds = BindsWithAllHostCredentialFiles(LocalAgent());
+
+        Assert.DoesNotContain(binds, b => b.Contains(".claude-credentials.json", StringComparison.Ordinal));
+        Assert.DoesNotContain(binds, b => b.Contains("/root/.claude-host", StringComparison.Ordinal));
+        // Everything else a claude agent needs is still mounted.
+        Assert.Contains(binds, b => b.EndsWith(":/root/.claude", StringComparison.Ordinal));
+        Assert.Contains(binds, b => b.EndsWith(":/root/.claude/settings.json:ro", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("claude", "./.claude-credentials.json:/root/.claude-host/.credentials.json:ro")]
+    [InlineData("codex", "./.codex-credentials.json:/root/.codex-host/auth.json:ro")]
+    [InlineData("gemini", "./.gemini-credentials.json:/root/.gemini/oauth_creds.json:rw")]
+    public void BuildBinds_AgentsWithoutTheField_EqualMain(string provider, string credentialBind)
+    {
+        var binds = BindsWithAllHostCredentialFiles(MinimalAgent("agolden", provider));
+
+        Assert.Equal(MainBinds(credentialBind), binds);
+    }
+
+    // GenerateAppsettingsJson for MinimalAgent("agolden", "claude") on main at 9a2b6cc, verbatim.
+    private const string MainClaudeAppsettings = """
+        {
+          "Agent": {
+            "Name": "agolden",
+            "ContainerName": "fleet-agolden",
+            "Role": "test",
+            "Model": "test-model",
+            "Provider": "claude",
+            "Projects": [],
+            "AllowedTools": [],
+            "PermissionMode": "acceptEdits",
+            "MaxTurns": 50,
+            "WorkDir": "/workspace",
+            "ProactiveIntervalMinutes": 0,
+            "GroupListenMode": "mention",
+            "GroupDebounceSeconds": 15,
+            "ShortName": "",
+            "ShowStats": true,
+            "PrefixMessages": false,
+            "FormattingMode": 0,
+            "SuppressToolMessages": false,
+            "Effort": null,
+            "JsonSchema": null,
+            "AgentsJson": null,
+            "CodexSandboxMode": null,
+            "HostedProvider": false,
+            "HostedProviderKeyEnv": null,
+            "InstructionOrder": []
+          },
+          "Telegram": {
+            "AllowedUserIds": [],
+            "AllowedGroupIds": [],
+            "SendOnly": false,
+            "CanReceiveChatRequests": false,
+            "RequestReceivedMessage": null
+          }
+        }
+        """;
+
+    [Theory]
+    [InlineData("claude")]
+    [InlineData("codex")]
+    [InlineData("gemini")]
+    public void GenerateAppsettingsJson_AgentsWithoutTheField_DifferFromMainOnlyByOneNullLine(string provider)
+    {
+        const string addedLine = "    \"AnthropicBaseUrl\": null,\n";
+        var expectedMain = MainClaudeAppsettings.Replace("\"Provider\": \"claude\"", $"\"Provider\": \"{provider}\"");
+        if (provider == "codex")
+            expectedMain = expectedMain.Replace("\"AllowedTools\": [],",
+                "\"AllowedTools\": [\n      \"mcp__fleet-memory__memory_get\",\n      \"mcp__fleet-temporal__notify_cto\"\n    ],");
+
+        var json = ContainerProvisioningService.GenerateAppsettingsJson(MinimalAgent("agolden", provider), "acto")
+            .ReplaceLineEndings("\n");
+
+        Assert.Equal(1, json.Split(addedLine).Length - 1);
+        Assert.Equal(expectedMain.ReplaceLineEndings("\n"), json.Replace(addedLine, ""));
+    }
+
+    [Theory]
+    [InlineData("http://inference-host:11434", "http://inference-host:11434")]
+    [InlineData("HTTP://Inference-Host:11434/", "http://inference-host:11434")]
+    public void GenerateAppsettingsJson_LocalAgent_EmitsTheCanonicalBaseUrl(string stored, string emitted)
+    {
+        var doc = JsonDocument.Parse(ContainerProvisioningService.GenerateAppsettingsJson(LocalAgent(stored), "acto"));
+
+        Assert.Equal(emitted, doc.RootElement.GetProperty("Agent").GetProperty("AnthropicBaseUrl").GetString());
+    }
+
+    [Fact]
+    public void GenerateAppsettingsJson_LocalAgent_NeverCarriesThePlaceholderToken()
+    {
+        var json = ContainerProvisioningService.GenerateAppsettingsJson(LocalAgent(), "acto");
+
+        Assert.DoesNotContain(Fleet.Shared.ClaudeLocalModel.PlaceholderAuthToken, json);
+    }
+
+    [Theory]
+    // V1 — a hand-edited row: the field left behind on a provider change.
+    [InlineData("codex", "qwen3.8:27b-agent", LocalUrl, null, "applies only to provider claude")]
+    // V2, V3
+    [InlineData("claude", "qwen3.8:27b-agent", "http://inference-host:11434/v1", null, "has a path")]
+    [InlineData("claude", "qwen3.8:27b-agent", "  ", null, "has surrounding whitespace")]
+    [InlineData("claude", "qwen3.8:27b-agent", "http://127.0.0.1:11434", null, "is the container")]
+    // V4–V7
+    [InlineData("claude", "qwen 27b", LocalUrl, null, "not allowed in a CLI argument")]
+    [InlineData("claude", "sonnet", LocalUrl, null, "is a Claude model id")]
+    [InlineData("claude", "lmstudio/qwen3", LocalUrl, null, "selects the codex path")]
+    [InlineData("claude", "qwen3.8:27b-agent", LocalUrl, "high", "Effort is not supported")]
+    public void GenerateAppsettingsJson_RefusesAnInvalidLocalConfig(
+        string provider, string model, string baseUrl, string? effort, string expected)
+    {
+        var agent = MinimalAgent("alocal", provider);
+        agent.Model = model;
+        agent.AnthropicBaseUrl = baseUrl;
+        agent.Effort = effort;
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => ContainerProvisioningService.GenerateAppsettingsJson(agent, "acto"));
+
+        Assert.Contains("alocal", ex.Message);
+        Assert.Contains(expected, ex.Message);
+    }
+
+    [Theory]
+    [InlineData("/root/.claude/.credentials.json")]
+    [InlineData("/root/.claude-host/.credentials.json")]
+    [InlineData("/root/.claude.json")]
+    public void GenerateAppsettingsJson_LocalAgent_RefusesAClaudeCredentialMount(string mountPath)
+    {
+        var agent = LocalAgent();
+        agent.CredentialMounts.Add(new AgentCredentialMount
+        {
+            MountPath = mountPath,
+            CredentialFile = new CredentialFile { Name = "c", FileName = "c", FilePath = "/tmp/c" },
+        });
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => ContainerProvisioningService.GenerateAppsettingsJson(agent, "acto"));
+
+        Assert.Contains(mountPath, ex.Message);
+    }
+
+    [Fact]
+    public void GenerateAppsettingsJson_LocalAgent_AllowsAnUnrelatedCredentialMount()
+    {
+        var agent = LocalAgent();
+        agent.CredentialMounts.Add(new AgentCredentialMount
+        {
+            MountPath = "/workspace/.ssh/server.key",
+            CredentialFile = new CredentialFile { Name = "k", FileName = "k", FilePath = "/tmp/k" },
+        });
+
+        ContainerProvisioningService.GenerateAppsettingsJson(agent, "acto");
+    }
 }

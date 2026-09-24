@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Threading.Channels;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
+using Fleet.Shared;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -622,6 +623,13 @@ public sealed class ClaudeExecutor : IAgentExecutor
             CreateNoWindow = true,
         };
 
+        // #340 D2. Off, psi.Environment is never touched, so the child inherits exactly as before.
+        if (ConfigureLocalModelEnvironment(() => psi.Environment, _config))
+        {
+            _logger.LogInformation("Claude local model mode: base URL {BaseUrl}, model {Model}",
+                _config.AnthropicBaseUrl, _config.Model);
+        }
+
         _process = Process.Start(psi)
             ?? throw new InvalidOperationException("Failed to start claude process");
 
@@ -656,6 +664,34 @@ public sealed class ClaudeExecutor : IAgentExecutor
             _logger.LogInformation("Restarted claude process with --resume {SessionId} (PID {Pid})", resumeId, _process.Id);
         else
             _logger.LogInformation("Started new claude process (PID {Pid})", _process.Id);
+    }
+
+    /// <summary>
+    /// Applies the local-model environment when local mode is on, and returns whether it did.
+    /// Off, <paramref name="environment"/> is never called, so the start info's environment is
+    /// never materialised (#340 D4).
+    /// </summary>
+    internal static bool ConfigureLocalModelEnvironment(
+        Func<IDictionary<string, string?>> environment, AgentOptions cfg)
+    {
+        if (!ClaudeLocalModel.IsEnabled(cfg.Provider, cfg.AnthropicBaseUrl))
+            return false;
+
+        ApplyLocalModelEnvironment(environment(), cfg);
+        return true;
+    }
+
+    /// <summary>
+    /// The only place <c>ANTHROPIC_*</c> is set: the claude child's own environment, never this
+    /// process or the container (#340 D2).
+    /// </summary>
+    internal static void ApplyLocalModelEnvironment(IDictionary<string, string?> env, AgentOptions cfg)
+    {
+        foreach (var name in ClaudeLocalModel.RemovedEnvVars)
+            env.Remove(name);
+
+        foreach (var (name, value) in ClaudeLocalModel.BuildEnvironment(cfg.AnthropicBaseUrl!, cfg.Model))
+            env[name] = value;
     }
 
     private async Task KillProcessAsync()

@@ -50,6 +50,12 @@ public sealed class AgentOptions
     public string? HostedProviderKeyEnv { get; set; }
 
     /// <summary>
+    /// Origin of a local Anthropic-compatible server (#340), already canonical, or null. Set on a
+    /// claude agent, it turns on local model mode: see <see cref="ClaudeLocalModel"/>.
+    /// </summary>
+    public string? AnthropicBaseUrl { get; set; }
+
+    /// <summary>
     /// Every instruction assigned to this agent, as <c>roles/</c> directory names, already in the
     /// orchestrator's load order (#309).
     /// </summary>

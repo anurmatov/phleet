@@ -116,12 +116,22 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             await _consumeChannel.QueueBindAsync(queueName, _rabbitConfig.Exchange, routingKey: shortName,
                 cancellationToken: ct);
 
-            // Also bind to fleet.relay fanout so agents receive broadcast token updates
-            await _consumeChannel.ExchangeDeclareAsync(
-                "fleet.relay", ExchangeType.Fanout, durable: true, autoDelete: false,
-                cancellationToken: ct);
-            await _consumeChannel.QueueBindAsync(queueName, "fleet.relay", routingKey: "",
-                cancellationToken: ct);
+            if (ClaudeLocalModel.IsEnabled(_agentConfig.Provider, _agentConfig.AnthropicBaseUrl))
+            {
+                // #340 D3: fleet.relay carries only OAuth token broadcasts, and a local-model agent
+                // holds none. Never bound, not even transiently; a binding from an earlier life is
+                // removed. Runs after the QueueDeclare above: unbinding an undeclared queue is a 404.
+                await UnbindTokenBroadcastsAsync(queueName, ct);
+            }
+            else
+            {
+                // Also bind to fleet.relay fanout so agents receive broadcast token updates
+                await _consumeChannel.ExchangeDeclareAsync(
+                    "fleet.relay", ExchangeType.Fanout, durable: true, autoDelete: false,
+                    cancellationToken: ct);
+                await _consumeChannel.QueueBindAsync(queueName, "fleet.relay", routingKey: "",
+                    cancellationToken: ct);
+            }
 
             // Start consuming
             var consumer = new AsyncEventingBasicConsumer(_consumeChannel);
@@ -137,6 +147,38 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to initialize GroupRelayService — relay disabled");
+        }
+    }
+
+    /// <summary>
+    /// Removes a durable <c>fleet.relay</c> → <paramref name="queueName"/> binding, idempotently.
+    /// </summary>
+    /// <remarks>
+    /// On its own short-lived channel: a broker error closes the channel it happens on, and on the
+    /// consume channel that would stop all relay delivery to this agent. A failure is a warning,
+    /// not a startup failure — the token-update handler ignores claude broadcasts in local mode.
+    /// </remarks>
+    private async Task UnbindTokenBroadcastsAsync(string queueName, CancellationToken ct)
+    {
+        try
+        {
+            await using var channel = await _connection!.CreateChannelAsync(cancellationToken: ct);
+            // Declared first so the unbind cannot 404 on a broker that has never seen the exchange.
+            await channel.ExchangeDeclareAsync(
+                "fleet.relay", ExchangeType.Fanout, durable: true, autoDelete: false,
+                cancellationToken: ct);
+            await channel.QueueUnbindAsync(queueName, "fleet.relay", routingKey: "",
+                cancellationToken: ct);
+            await channel.CloseAsync(ct);
+
+            _logger.LogInformation(
+                "Claude local model mode: {Queue} is not bound to fleet.relay (token broadcasts)", queueName);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Claude local model mode: could not remove a fleet.relay binding from {Queue}; "
+                + "claude token broadcasts are still ignored by the handler", queueName);
         }
     }
 

@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text;
 using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Helpers;
 using Fleet.Orchestrator.Services;
 using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol.Server;
@@ -37,12 +38,13 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         [Description("JSON string for --agents flag (inline subagents). Pass empty string to clear. Omit to keep current.")] string? agents_json = null,
         [Description("Host port for the agent's HTTP API (used by orchestrator cancel proxy via 127.0.0.1:{host_port}). Pass 0 to clear. Omit to keep current.")] int? host_port = null,
         [Description("Enable Claude's built-in auto-memory. Set to false for agents using fleet-memory (disables CLAUDE_CODE_DISABLE_AUTO_MEMORY). Omit to keep current.")] bool? auto_memory_enabled = null,
-        [Description("LLM provider: claude or codex. Omit to keep current.")] string? provider = null,
+        [Description("LLM provider: claude or codex. Omit to keep current. A claude agent with anthropic_base_url set must have it cleared before changing provider.")] string? provider = null,
         [Description("Codex sandbox mode (danger-full-access, workspace-write, read-only). Pass empty string to clear. Omit to keep current. Only applies to codex agents.")] string? codex_sandbox_mode = null,
         [Description("Enable access-request flow for unknown DMs (CanReceiveChatRequests). When true, unknown DMs are forwarded to the CTO agent (FLEET_CTO_AGENT) instead of being silently dropped. Omit to keep current.")] bool? can_receive_chat_requests = null,
         [Description("Message sent to requesting user when their access request is queued. Pass empty string to use the built-in default. Max 500 characters. Omit to keep current.")] string? request_received_message = null,
         [Description("Mount /var/run/docker.sock into the container (grants host-root; leave off unless agent manages containers). Omit to keep current.")] bool? mount_docker_sock = null,
-        [Description("Name of an output_styles row this agent runs with — its chat tone and register. Pass empty string to clear (no style). Omit to keep current. Takes effect on the next reprovision.")] string? output_style = null)
+        [Description("Name of an output_styles row this agent runs with — its chat tone and register. Pass empty string to clear (no style). Omit to keep current. Takes effect on the next reprovision.")] string? output_style = null,
+        [Description("Claude agents only: origin of a local Anthropic-compatible server (e.g. Ollama), e.g. http://<server-address>:11434 — origin only, never …/v1. Set, the agent runs Claude Code against that server with no Claude credential mounted; model must be the server's model tag and effort empty. Stored canonical. Pass empty string to clear (back to Anthropic). Omit to keep current. Takes effect on the next reprovision.")] string? anthropic_base_url = null)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
@@ -275,6 +277,18 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
             changes.AppendLine($"- output_style: {agent.OutputStyle ?? "(none)"} → {(styleName.Length == 0 ? "(none)" : styleName)}");
             agent.OutputStyle = styleName.Length == 0 ? null : styleName;
         }
+
+        var previousBaseUrl = agent.AnthropicBaseUrl;
+        if (anthropic_base_url is not null)
+            agent.AnthropicBaseUrl = anthropic_base_url == "" ? null : anthropic_base_url;
+
+        // #340: the agent's resulting state, after every field above is applied. Returning here
+        // skips SaveChanges, so nothing from this request is persisted.
+        if (AgentPatchHelpers.FinalizeClaudeLocalModel(agent) is { } localFault)
+            return $"Invalid Claude local model configuration: {localFault}";
+
+        if (agent.AnthropicBaseUrl != previousBaseUrl)
+            changes.AppendLine($"- anthropic_base_url: {previousBaseUrl ?? "(none)"} → {agent.AnthropicBaseUrl ?? "(none)"}");
 
         if (changes.Length == 0)
             return $"No changes specified for agent '{agent_name}'.";

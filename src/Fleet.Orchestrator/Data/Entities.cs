@@ -49,6 +49,14 @@ public class Agent
     [MaxLength(100)]
     public string? OutputStyle { get; set; }
 
+    /// <summary>
+    /// Origin of a local Anthropic-compatible server, stored canonical, or <c>null</c> (#340). Set on
+    /// a claude agent, it runs Claude Code against that server with no Claude credential mounted —
+    /// see <see cref="ClaudeLocalModel"/>. <c>null</c> is the rollout switch and the rollback.
+    /// </summary>
+    [MaxLength(500)]
+    public string? AnthropicBaseUrl { get; set; }
+
     public List<AgentTool> Tools { get; set; } = [];
     public List<AgentProject> Projects { get; set; } = [];
     public List<AgentMcpEndpoint> McpEndpoints { get; set; } = [];

@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using Fleet.Agent.Abstractions;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
+using Fleet.Shared;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -460,6 +461,9 @@ public sealed class GroupBehavior
     /// <summary>Where a codex token broadcast writes. Settable so tests do not touch the real home.</summary>
     internal string CodexAuthPath { get; set; } = "/root/.codex/auth.json";
 
+    /// <summary>Where a claude token broadcast writes. Settable so tests do not touch the real home.</summary>
+    internal string ClaudeCredentialsPath { get; set; } = "/root/.claude/.credentials.json";
+
     private async Task ApplyTokenUpdateAsync(string tokenJson)
     {
         var shared = JsonNode.Parse(tokenJson);
@@ -502,6 +506,14 @@ public sealed class GroupBehavior
         }
         else
         {
+            // A local-model agent holds no Claude credential (#340 D3), and this broadcast would
+            // create one in the persisted /root/.claude. Nothing to restart either.
+            if (ClaudeLocalModel.IsEnabled(_agentConfig.Provider, _agentConfig.AnthropicBaseUrl))
+            {
+                _logger.LogInformation("Claude token update ignored — local model mode");
+                return;
+            }
+
             await ApplyClaudeTokenUpdateAsync(newAccessToken, newRefreshToken, newExpiresAt.Value);
         }
 
@@ -511,7 +523,7 @@ public sealed class GroupBehavior
 
     private async Task ApplyClaudeTokenUpdateAsync(string newAccessToken, string? newRefreshToken, long newExpiresAt)
     {
-        const string credsPath = "/root/.claude/.credentials.json";
+        var credsPath = ClaudeCredentialsPath;
 
         JsonNode creds;
         if (File.Exists(credsPath))

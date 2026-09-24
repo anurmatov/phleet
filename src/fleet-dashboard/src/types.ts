@@ -172,6 +172,8 @@ export interface AgentConfig {
   provider: string
   codexSandboxMode: string | null
   outputStyle: string | null
+  /** Origin of a local Anthropic-compatible server, or null (Anthropic). Claude agents only. */
+  anthropicBaseUrl: string | null
   tools: { toolName: string; isEnabled: boolean }[]
   projects: string[]
   mcpEndpoints: McpEndpointEntry[]
@@ -222,6 +224,8 @@ export interface ConfigEdits {
   mountDockerSock: boolean
   /** Name of an output_styles row, or '' for none — the sentinel the API clears on. */
   outputStyle: string
+  /** Local Anthropic-compatible server origin, or '' for Anthropic — the sentinel the API clears on. */
+  anthropicBaseUrl: string
   instructions: { name: string; loadOrder: number }[]
 }
 

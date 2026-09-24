@@ -89,7 +89,13 @@ export default function AgentConfigModal({
                 <select
                   className="config-input"
                   value={configEdits.provider ?? configData.provider ?? 'claude'}
-                  onChange={e => onEditsChange({ provider: e.target.value, model: PROVIDER_DEFAULT_MODEL[e.target.value] ?? '' })}
+                  // Leaving claude clears the local-server origin too: the field is hidden for other
+                  // providers, and the server rejects it on anything but claude.
+                  onChange={e => onEditsChange({
+                    provider: e.target.value,
+                    model: PROVIDER_DEFAULT_MODEL[e.target.value] ?? '',
+                    ...(e.target.value !== 'claude' ? { anthropicBaseUrl: '' } : {}),
+                  })}
                 >
                   <option value="claude">Claude (Anthropic)</option>
                   <option value="codex">Codex (OpenAI)</option>
@@ -105,6 +111,13 @@ export default function AgentConfigModal({
                   onChange={model => onEditsChange({ model })}
                 />
               </div>
+              {isClaude && (
+              <div className="config-field">
+                <label className="config-label">Anthropic-compatible base URL <span className="config-provider-badge">Claude only</span></label>
+                <FieldHint>Empty = Anthropic with your Claude subscription. Set = this agent runs on a local Anthropic-compatible server (e.g. Ollama). Origin only, e.g. <code>http://&lt;server-lan-address&gt;:11434</code>, never <code>…/v1</code>; <code>localhost</code> is the container itself. Enter the server's model tag as a custom Model, leave Effort empty; Claude credentials are not mounted. <strong>Takes effect on reprovision.</strong></FieldHint>
+                <input className="config-input" value={configEdits.anthropicBaseUrl} onChange={e => onEditsChange({ anthropicBaseUrl: e.target.value })} placeholder="http://<server-lan-address>:11434" />
+              </div>
+              )}
               <div className="config-field">
                 <label className="config-label">Memory (MB)</label>
                 <input className="config-input config-input-short" type="number" min={128} value={configEdits.memoryLimitMb} onChange={e => onEditsChange({ memoryLimitMb: e.target.value })} />

@@ -47,6 +47,16 @@ public sealed class GeminiExecutor : IAgentExecutor
     public DateTimeOffset LastActivity => _lastActivity;
     public bool IsProcessWarm => false;
 
+    /// <summary>
+    /// Always zero (#347). A fresh <c>@google/gemini-cli@0.40.1</c> process per task with no session
+    /// resumption means there is no live conversation to compact; because
+    /// <see cref="IsProcessWarm"/> is always false the project-context ledger clears before every
+    /// render, so every routed delivery attaches.
+    /// </summary>
+    public int CompactionEpoch => 0;
+
+    private readonly Func<ProcessStartInfo, Process?> _processStarter;
+
     // GeminiExecutor has no background subagent task tracking (no persistent process).
     public IReadOnlyCollection<BackgroundTaskInfo> GetActiveBackgroundTasks() =>
         Array.Empty<BackgroundTaskInfo>();
@@ -55,10 +65,18 @@ public sealed class GeminiExecutor : IAgentExecutor
         Task.FromResult(false);
 
     public GeminiExecutor(IOptions<AgentOptions> config, PromptBuilder promptBuilder, ILogger<GeminiExecutor> logger)
+        : this(config, promptBuilder, logger, Process.Start)
+    {
+    }
+
+    /// <summary>Test seam: the process starter, so a test can stand in for the gemini CLI.</summary>
+    internal GeminiExecutor(IOptions<AgentOptions> config, PromptBuilder promptBuilder, ILogger<GeminiExecutor> logger,
+        Func<ProcessStartInfo, Process?> processStarter)
     {
         _config = config.Value;
         _promptBuilder = promptBuilder;
         _logger = logger;
+        _processStarter = processStarter;
 
         _logger.LogInformation(
             "GeminiExecutor: CLI-per-task mode. " +
@@ -75,7 +93,7 @@ public sealed class GeminiExecutor : IAgentExecutor
         _lastActivity = DateTimeOffset.UtcNow;
         _lastSessionId = null; // no session resumption for CLI-per-task
 
-        await foreach (var progress in RunCliAsync(task, images, documents, ct))
+        await foreach (var progress in RunCliAsync(task, images, documents, ct, emitPromptAccepted: true))
         {
             _lastActivity = DateTimeOffset.UtcNow;
             yield return progress;
@@ -112,7 +130,8 @@ public sealed class GeminiExecutor : IAgentExecutor
         string input,
         IReadOnlyList<MessageImage>? images,
         IReadOnlyList<MessageDocument>? documents,
-        [EnumeratorCancellation] CancellationToken ct)
+        [EnumeratorCancellation] CancellationToken ct,
+        bool emitPromptAccepted = false)
     {
         // Write system prompt to a temp file. GEMINI_SYSTEM_MD env var points the CLI at it.
         // The file is deleted in the finally block regardless of outcome.
@@ -212,7 +231,7 @@ public sealed class GeminiExecutor : IAgentExecutor
                 ? "--dns-result-order=ipv4first"
                 : existingNodeOpts + " --dns-result-order=ipv4first";
 
-            process = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start gemini CLI process");
+            process = _processStarter(psi) ?? throw new InvalidOperationException("Failed to start gemini CLI process");
 
             // Read stderr in background — non-fatal; logged at Warning level.
             // Collected for the turn.failed error message on non-zero exit.
@@ -237,6 +256,11 @@ public sealed class GeminiExecutor : IAgentExecutor
             // Task text is NOT passed as a -p argument to avoid ARG_MAX / E2BIG failure on long inputs.
             await process.StandardInput.WriteAsync(input.AsMemory(), ct);
             process.StandardInput.Close();
+
+            // The CLI process is running with the whole prompt on its stdin (#347 D5). A start or
+            // write failure throws before this line, so it is never emitted for an undelivered task.
+            if (emitPromptAccepted)
+                yield return AgentProgress.PromptAccepted();
 
             // Read stdout line by line and parse stream-json events.
             string? line;

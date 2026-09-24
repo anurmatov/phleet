@@ -78,6 +78,12 @@ public static class AgentHostRegistration
             };
         });
 
+        // Project context cards (#347). Always registered: with no Agent:ProjectContextRouting block
+        // the router is disabled, every message carries an empty request list, and the attacher
+        // never touches the executor input. One attacher instance owns the one ledger.
+        services.AddSingleton<ProjectContextRouter>();
+        services.AddSingleton<ProjectContextAttacher>();
+
         services.AddSingleton<IFleetConnectionState, FleetConnectionState>();
         services.AddSingleton<SessionManager>();
         services.AddSingleton<GroupRelayService>();

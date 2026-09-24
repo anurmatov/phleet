@@ -59,12 +59,10 @@ public sealed class ProjectContextAccess(
         // Defense in depth behind ContextMcpSessionGuard: a request naming a session must name one
         // bound to this same agent. Without a session id this is the SDK's implicit session, which
         // the guard binds as the response starts.
-        var sessionIds = ContextMcpRoute.ReadSessionIds(http.Request);
-        if (sessionIds.Count > 0 && !(sessionIds.Count == 1 && string.IsNullOrEmpty(sessionIds[0])))
+        if (ContextMcpRoute.ReadSessionId(http.Request) is { } sessionId &&
+            (!sessions.TryGetAgent(sessionId, out var bound) || !string.Equals(bound, agent, StringComparison.Ordinal)))
         {
-            var sessionId = sessionIds.Count == 1 ? sessionIds[0]! : sessionIds.ToString();
-            if (!sessions.TryGetAgent(sessionId, out var bound) || !string.Equals(bound, agent, StringComparison.Ordinal))
-                return Deny(agent, project, "binding_mismatch");
+            return Deny(agent, project, "binding_mismatch");
         }
 
         try

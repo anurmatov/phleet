@@ -2,7 +2,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.DependencyInjection.Extensions;
-using Microsoft.Extensions.Primitives;
 using ModelContextProtocol.Server;
 
 namespace Fleet.Orchestrator.Services;
@@ -32,9 +31,6 @@ public static class ContextMcpRoute
     /// <summary>Exactly <c>/mcp/context</c> or <c>/mcp/context/…</c>.</summary>
     public static bool IsContextPath(PathString path) => path.StartsWithSegments(ContextPath);
 
-    /// <summary><c>/mcp</c> or <c>/mcp/…</c> that is not the context route.</summary>
-    public static bool IsAdminPath(PathString path) => path.StartsWithSegments(AdminPath) && !IsContextPath(path);
-
     /// <summary>The single <c>?agent=</c> value when it is well formed; otherwise <c>null</c>.</summary>
     public static string? ReadAgent(HttpRequest request)
     {
@@ -44,8 +40,21 @@ public static class ContextMcpRoute
         return agent is not null && AgentPattern.IsMatch(agent) ? agent : null;
     }
 
-    /// <summary>The single <c>Mcp-Session-Id</c> request header, or <c>null</c> when absent.</summary>
-    public static StringValues ReadSessionIds(HttpRequest request) => request.Headers[SessionIdHeader];
+    /// <summary>
+    /// The request's <c>Mcp-Session-Id</c>, or <c>null</c> when absent or empty (a request the SDK
+    /// serves on a new session). Several header values are joined, so they can never match a
+    /// single registered id.
+    /// </summary>
+    public static string? ReadSessionId(HttpRequest request)
+    {
+        var values = request.Headers[SessionIdHeader];
+        return values.Count switch
+        {
+            0 => null,
+            1 => string.IsNullOrEmpty(values[0]) ? null : values[0],
+            _ => values.ToString(),
+        };
+    }
 
     /// <summary>
     /// <see cref="ModelContextProtocol.AspNetCore.HttpServerTransportOptions.ConfigureSessionOptions"/>:
@@ -117,13 +126,13 @@ public sealed class ContextMcpSessionGuard(
             return;
         }
 
-        var sessionIds = ContextMcpRoute.ReadSessionIds(request);
+        var sessionId = ContextMcpRoute.ReadSessionId(request);
 
         if (!ContextMcpRoute.IsContextPath(request.Path))
         {
             // Admin route: unchanged, except that a context session can never be replayed here —
-            // by header, or by the legacy transport's ?sessionId= for good measure.
-            foreach (var id in sessionIds.Concat(request.Query["sessionId"]))
+            // by any header value, or by the legacy transport's ?sessionId= for good measure.
+            foreach (var id in request.Headers[ContextMcpRoute.SessionIdHeader].Concat(request.Query["sessionId"]))
             {
                 if (id is not null && registry.Contains(id))
                 {
@@ -139,18 +148,18 @@ public sealed class ContextMcpSessionGuard(
         if (!request.Path.Equals(ContextMcpRoute.ContextPath, StringComparison.OrdinalIgnoreCase) &&
             !request.Path.Equals(ContextMcpRoute.ContextPath + "/", StringComparison.OrdinalIgnoreCase))
         {
-            await RejectAsync(context, StatusCodes.Status404NotFound, "unsupported_transport", sessionIds.ToString());
+            await RejectAsync(context, StatusCodes.Status404NotFound, "unsupported_transport", sessionId);
             return;
         }
 
         var agent = ContextMcpRoute.ReadAgent(request);
         if (agent is null)
         {
-            await RejectAsync(context, StatusCodes.Status403Forbidden, "no_agent", sessionIds.ToString());
+            await RejectAsync(context, StatusCodes.Status403Forbidden, "no_agent", sessionId);
             return;
         }
 
-        if (sessionIds.Count == 0 || (sessionIds.Count == 1 && string.IsNullOrEmpty(sessionIds[0])))
+        if (sessionId is null)
         {
             // No session yet: an initialize, or a request the SDK will serve on an implicit session.
             // Either way the response carries the new id, and it is bound to this agent before a
@@ -173,7 +182,6 @@ public sealed class ContextMcpSessionGuard(
             return;
         }
 
-        var sessionId = sessionIds.Count == 1 ? sessionIds[0]! : sessionIds.ToString();
         if (!registry.TryGetAgent(sessionId, out var boundAgent))
         {
             await RejectAsync(context, StatusCodes.Status404NotFound, "unbound_session", sessionId);

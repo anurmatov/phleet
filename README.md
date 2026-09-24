@@ -268,6 +268,19 @@ Each agent entry in `seed.json` (or created via the co-CTO's `create_agent` flow
 - `telegramSendOnly` — **must be `true`** on every non-CTO agent that shares a Telegram bot token with others (otherwise Telegram returns 409 Conflict — only one long-poller per token)
 - `prefixMessages` — when multiple agents share a bot token, set `true` so outgoing group messages are prefixed with the agent's `shortName` (e.g. `[Developer] ...`)
 
+### Project context cards
+
+Each agent–project assignment is `full` (the project's full context is resident in the system
+prompt — the default) or `card` (a compact, versioned card is resident and the full context is
+attached to turns routed to the project by repo, workflow or chat). Set it per assignment in the
+dashboard or with `update_agent_config project_modes="project-a=card"`; it takes effect on
+reprovision. Agents with a card assignment also get one read-only fallback tool,
+`get_project_context`, on the orchestrator's `/mcp/context` endpoint —
+`Provisioning:ContextMcpUrl` (env `Provisioning__ContextMcpUrl`), default
+`http://fleet-orchestrator:3600/mcp/context`. See
+**[docs/project-context-cards.md](docs/project-context-cards.md)** for authoring, keep markers,
+routes, rollout and rollback.
+
 ## Troubleshooting
 
 ### Agents start returning "unauthorized" from Claude / Codex

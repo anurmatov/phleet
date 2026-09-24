@@ -17,7 +17,9 @@ before.
 
 Set the mode per assignment:
 
-- dashboard: agent **Config** → Projects → *Project context mode*
+- dashboard: agent **Config** → Projects uses one table of every project. Check **Assigned** to add
+  the project, then choose `full` or `card` in **Context**; unchecking removes both the assignment
+  and its saved mode. `card` stays unavailable until the project has a card.
 - MCP (admin `/mcp`): `update_agent_config(agent_name=agent-a, project_modes="project-a=card,project-b=full")`
 - REST: `PUT /api/agents/agent-a/config` with `"projectModes": { "project-a": "card" }`
 

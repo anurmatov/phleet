@@ -45,12 +45,12 @@ jobs:
         run: |
           bash tests/dashboard-proxy/run.sh
 
-          # Negative control (issue AC3): main's startup-resolved conf must fail
-          # at P2 (the recreate), proving the harness still reproduces the bug.
-          git fetch origin main --depth=1
-          git show origin/main:src/fleet-dashboard/nginx.conf > /tmp/main-nginx.conf
+          # Negative control (issue AC3): the frozen pre-#341 conf (committed
+          # fixture, NOT origin/main — that holds the fixed conf after merge)
+          # must fail at P2 (the recreate), proving the harness still
+          # reproduces the bug. CI on main stays green.
           set +e
-          NGINX_CONF=/tmp/main-nginx.conf bash tests/dashboard-proxy/run.sh
+          NGINX_CONF=tests/dashboard-proxy/nginx.legacy.conf bash tests/dashboard-proxy/run.sh
           NEGATIVE_RC=$?
           set -e
           echo "negative control exit=$NEGATIVE_RC (expected 1, failing at P2)"

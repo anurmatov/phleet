@@ -57,7 +57,7 @@ public class StartupConfigurationGateTests
     {
         var path = TempKeyPath();
         File.WriteAllText(path, "gate-test-key");
-        using var services = BuildServices("codex", "deepseek/deepseek-v4-pro", true, "DEEPSEEK_API_KEY", path);
+        using var services = BuildServices("codex", "zai/glm-5.3", true, "ZAI_CODING_PLAN_API_KEY", path);
 
         AgentHostRegistration.ValidateStartupConfiguration(services, _ => null);
 
@@ -75,24 +75,26 @@ public class StartupConfigurationGateTests
         var path = TempKeyPath();
         if (content is not null)
             File.WriteAllText(path, content);
-        using var services = BuildServices("codex", "openrouter/z-ai/glm-5.3", true, "OPENROUTER_API_KEY", path);
+        using var services = BuildServices("codex", "zai/glm-5.3", true, "ZAI_CODING_PLAN_API_KEY", path);
 
         var ex = Assert.Throws<InvalidOperationException>(
             () => AgentHostRegistration.ValidateStartupConfiguration(services, _ => null));
 
-        Assert.Contains("OPENROUTER_API_KEY", ex.Message);
+        Assert.Contains("ZAI_CODING_PLAN_API_KEY", ex.Message);
         Assert.False(File.Exists(path));
     }
 
     [Theory]
     // Orchestrator predates #335 (no flags) but the model is hosted.
-    [InlineData("codex", "deepseek/deepseek-v4-pro", null, null)]
+    [InlineData("codex", "zai/glm-5.3", null, null)]
     // Orchestrator says hosted, this image does not.
-    [InlineData("codex", "gpt-5", true, "DEEPSEEK_API_KEY")]
+    [InlineData("codex", "gpt-5", true, "ZAI_CODING_PLAN_API_KEY")]
+    // An unknown prefix is not hosted, whatever the orchestrator says.
+    [InlineData("codex", "acme/x", true, "ZAI_CODING_PLAN_API_KEY")]
     // Right flag, wrong key variable.
-    [InlineData("codex", "deepseek/deepseek-v4-pro", true, "OPENROUTER_API_KEY")]
+    [InlineData("codex", "zai/glm-5.3", true, "ACME_API_KEY")]
     // Hosted routing is codex-only, so a claude agent must not be flagged.
-    [InlineData("claude", "deepseek/deepseek-v4-pro", true, "DEEPSEEK_API_KEY")]
+    [InlineData("claude", "zai/glm-5.3", true, "ZAI_CODING_PLAN_API_KEY")]
     public void HostedProvider_ParityMismatch_Throws(string provider, string model, bool? hosted, string? keyEnv)
     {
         using var services = BuildServices(provider, model, hosted, keyEnv, TempKeyPath());
@@ -104,9 +106,10 @@ public class StartupConfigurationGateTests
     }
 
     [Theory]
-    [InlineData("claude", "deepseek/deepseek-v4-pro")]
-    [InlineData("gemini", "openrouter/z-ai/glm-5.3")]
+    [InlineData("claude", "zai/glm-5.3")]
+    [InlineData("gemini", "zai/glm-5.3")]
     [InlineData("codex", "gpt-5")]
+    [InlineData("codex", "acme/x")]
     public void NonHostedAgent_WithNoFlags_PassesParity(string provider, string model)
     {
         using var services = BuildServices(provider, model, hostedProvider: false);

@@ -1,0 +1,5 @@
+event: response.failed
+data: {"response":{"created_at":0,"error":{"code":"insufficient_quota","message":"Insufficient balance or no resource package. Please recharge.[2026092414070800000000000000000000]"},"id":"resp_2026092400000000000000000000","incomplete_details":null,"metadata":{},"model":"glm-5.3","object":"response","output":[],"previous_response_id":null,"status":"failed","usage":null},"sequence_number":0,"type":"response.failed"}
+
+data: [DONE]
+

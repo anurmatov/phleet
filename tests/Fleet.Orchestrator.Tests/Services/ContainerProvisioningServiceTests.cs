@@ -233,12 +233,12 @@ public class ContainerProvisioningServiceTests
     }
 
     [Theory]
-    [InlineData("codex", "deepseek/deepseek-v4-pro", true, "DEEPSEEK_API_KEY")]
-    [InlineData("codex", "openrouter/z-ai/glm-5.3", true, "OPENROUTER_API_KEY")]
+    [InlineData("codex", "zai/glm-5.3", true, "ZAI_CODING_PLAN_API_KEY")]
+    [InlineData("codex", "acme/x", false, null)]
     [InlineData("codex", "gpt-5.4", false, null)]
     [InlineData("codex", "ollama/gpt-oss:20b", false, null)]
-    [InlineData("claude", "deepseek/deepseek-v4-pro", false, null)]
-    [InlineData("gemini", "openrouter/z-ai/glm-5.3", false, null)]
+    [InlineData("claude", "zai/glm-5.3", false, null)]
+    [InlineData("gemini", "zai/glm-5.3", false, null)]
     public void GenerateAppsettingsJson_EmitsHostedProviderFlags(
         string provider, string model, bool expectedHosted, string? expectedKeyEnv)
     {
@@ -255,8 +255,8 @@ public class ContainerProvisioningServiceTests
     }
 
     [Theory]
-    [InlineData("deepseek/deepseek-v4-pro", false)]
-    [InlineData("openrouter/z-ai/glm-5.3", false)]
+    [InlineData("zai/glm-5.3", false)]
+    [InlineData("acme/x", true)]
     [InlineData("gpt-5.4", true)]
     public void BuildBinds_HostedCodexAgent_GetsNoCodexCredentialBind(string model, bool expectBind)
     {

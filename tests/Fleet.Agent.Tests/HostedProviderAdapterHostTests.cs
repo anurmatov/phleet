@@ -13,12 +13,12 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
-using static Fleet.Agent.Tests.ResponsesNamespaceAdapterTests;
+using static Fleet.Agent.Tests.HostedProviderForwarderTests;
 
 namespace Fleet.Agent.Tests;
 
 /// <summary>
-/// #335 D4 / AC8: the adapter lives on its own loopback-only app, and only there.
+/// #335 D4 / AC7: the forwarder lives on its own loopback-only app, and only there.
 /// </summary>
 public sealed class HostedProviderAdapterHostTests : IDisposable
 {
@@ -36,44 +36,35 @@ public sealed class HostedProviderAdapterHostTests : IDisposable
         var path = Path.Combine(_dir, "key");
         File.WriteAllText(path, "adapter-host-test-key");
         var store = new HostedProviderKeyStore(path);
-        store.Load("DEEPSEEK_API_KEY");
+        store.Load("ZAI_CODING_PLAN_API_KEY");
         return store;
     }
 
-    private static IOptions<AgentOptions> Agent(string model = "deepseek/deepseek-v4-pro") => Options.Create(new AgentOptions
-    {
-        Name = "fleet-agent1",
-        Role = "generic-role",
-        WorkDir = "/workspace",
-        Provider = "codex",
-        Model = model,
-        HostedProvider = true,
-        HostedProviderKeyEnv = "DEEPSEEK_API_KEY",
-    });
-
     [Fact]
-    public async Task BindsExactlyOneLoopbackAddress_AndServesOnlyTheAdapterRoute()
+    public async Task BindsExactlyOneLoopbackAddress_AndServesOnlyTheForwarderRoute()
     {
         var upstream = new RecordingHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StringContent("{\"output\":[]}", Encoding.UTF8, "application/json"),
         }));
-        await using var host = new HostedProviderAdapterHost(Agent(), LoadedKeyStore(), NullLoggerFactory.Instance, upstream);
+        await using var host = new HostedProviderAdapterHost(ZaiAgent(), LoadedKeyStore(), NullLoggerFactory.Instance, upstream);
 
         await host.StartAsync(CancellationToken.None);
-        var baseAddress = await host.BaseAddress.WaitAsync(TimeSpan.FromSeconds(5));
+        var endpoint = await host.Endpoint.WaitAsync(TimeSpan.FromSeconds(5));
+        var baseAddress = endpoint.BaseAddress;
 
         Assert.Equal("127.0.0.1", baseAddress.Host);
         Assert.True(baseAddress.Port > 0);
 
         using var client = new HttpClient { BaseAddress = baseAddress };
+        client.DefaultRequestHeaders.TryAddWithoutValidation(HostedProviderForwarder.TokenHeader, endpoint.Token);
 
-        var models = await client.GetAsync("/deepseek/models");
+        var models = await client.GetAsync("/zai/models");
         Assert.Equal(HttpStatusCode.NotFound, models.StatusCode);
         Assert.Equal(0, upstream.Calls);
 
-        var responses = await client.PostAsync("/deepseek/responses",
-            new StringContent("{\"model\":\"deepseek-v4-pro\",\"input\":[]}", Encoding.UTF8, "application/json"));
+        var responses = await client.PostAsync("/zai/responses",
+            new StringContent("{\"model\":\"glm-5.3\",\"input\":[]}", Encoding.UTF8, "application/json"));
         Assert.Equal(HttpStatusCode.OK, responses.StatusCode);
         Assert.Equal(1, upstream.Calls);
 
@@ -84,9 +75,9 @@ public sealed class HostedProviderAdapterHostTests : IDisposable
     public async Task NonLoopbackAddressOnTheAdapterPort_IsRefused()
     {
         var upstream = new RecordingHandler((_, _) => throw new InvalidOperationException("must not be called"));
-        await using var host = new HostedProviderAdapterHost(Agent(), LoadedKeyStore(), NullLoggerFactory.Instance, upstream);
+        await using var host = new HostedProviderAdapterHost(ZaiAgent(), LoadedKeyStore(), NullLoggerFactory.Instance, upstream);
         await host.StartAsync(CancellationToken.None);
-        var port = (await host.BaseAddress.WaitAsync(TimeSpan.FromSeconds(5))).Port;
+        var port = (await host.Endpoint.WaitAsync(TimeSpan.FromSeconds(5))).BaseAddress.Port;
 
         var external = FirstNonLoopbackIPv4();
         Assert.True(external is not null, "No non-loopback IPv4 address on this machine: the refusal check cannot run.");
@@ -103,12 +94,12 @@ public sealed class HostedProviderAdapterHostTests : IDisposable
     public void ModelThatResolvesToNoHostedProvider_RefusesToConstruct()
     {
         Assert.Throws<InvalidOperationException>(() =>
-            new HostedProviderAdapterHost(Agent("gpt-5"), LoadedKeyStore(), NullLoggerFactory.Instance));
+            new HostedProviderAdapterHost(ZaiAgent("gpt-5"), LoadedKeyStore(), NullLoggerFactory.Instance));
     }
 
     /// <summary>
     /// The main agent app, built from the shipped registration graph with the hosted provider on,
-    /// has no adapter route: the adapter is reachable only on its own loopback port.
+    /// has no forwarder route: the forwarder is reachable only on its own loopback port.
     /// </summary>
     [Fact]
     public async Task MainAgentApp_Returns404ForTheAdapterRoute()
@@ -120,9 +111,9 @@ public sealed class HostedProviderAdapterHostTests : IDisposable
             ["Agent:Role"] = "generic-role",
             ["Agent:WorkDir"] = _dir,
             ["Agent:Provider"] = "codex",
-            ["Agent:Model"] = "deepseek/deepseek-v4-pro",
+            ["Agent:Model"] = "zai/glm-5.3",
             ["Agent:HostedProvider"] = "true",
-            ["Agent:HostedProviderKeyEnv"] = "DEEPSEEK_API_KEY",
+            ["Agent:HostedProviderKeyEnv"] = "ZAI_CODING_PLAN_API_KEY",
         });
         builder.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Loopback, 0));
         builder.Services.AddAgentCoreServices(builder.Configuration);
@@ -134,15 +125,16 @@ public sealed class HostedProviderAdapterHostTests : IDisposable
 
         var mainAddress = new Uri(app.Services.GetRequiredService<IServer>().Features
             .Get<IServerAddressesFeature>()!.Addresses.Single());
-        var adapterAddress = await app.Services.GetRequiredService<HostedProviderAdapterHost>()
-            .BaseAddress.WaitAsync(TimeSpan.FromSeconds(5));
+        var adapterEndpoint = await app.Services.GetRequiredService<HostedProviderAdapterHost>()
+            .Endpoint.WaitAsync(TimeSpan.FromSeconds(5));
 
-        Assert.NotEqual(mainAddress.Port, adapterAddress.Port);
+        Assert.NotEqual(mainAddress.Port, adapterEndpoint.BaseAddress.Port);
 
         using var client = new HttpClient { BaseAddress = mainAddress };
+        client.DefaultRequestHeaders.TryAddWithoutValidation(HostedProviderForwarder.TokenHeader, adapterEndpoint.Token);
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/health")).StatusCode);
-        var post = await client.PostAsync("/deepseek/responses",
-            new StringContent("{\"model\":\"deepseek-v4-pro\",\"input\":[]}", Encoding.UTF8, "application/json"));
+        var post = await client.PostAsync("/zai/responses",
+            new StringContent("{\"model\":\"glm-5.3\",\"input\":[]}", Encoding.UTF8, "application/json"));
         Assert.Equal(HttpStatusCode.NotFound, post.StatusCode);
 
         await app.StopAsync();

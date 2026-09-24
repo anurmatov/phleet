@@ -35,7 +35,7 @@ public sealed class GroupBehaviorCodexTokenUpdateTests : IAsyncDisposable
             Provider = "codex",
             Model = model,
             HostedProvider = hosted,
-            HostedProviderKeyEnv = hosted ? "DEEPSEEK_API_KEY" : null,
+            HostedProviderKeyEnv = hosted ? "ZAI_CODING_PLAN_API_KEY" : null,
         });
         var telegramOptions = Options.Create(new TelegramOptions());
         var rabbitOptions = Options.Create(new RabbitMqOptions { Exchange = "fleet.tasks" });
@@ -60,7 +60,7 @@ public sealed class GroupBehaviorCodexTokenUpdateTests : IAsyncDisposable
     [Fact]
     public async Task HostedAgent_IgnoresCodexTokenUpdate_AndCreatesNoAuthJson()
     {
-        var (behavior, executor) = Build("deepseek/deepseek-v4-pro", hosted: true);
+        var (behavior, executor) = Build("zai/glm-5.3", hosted: true);
 
         await behavior.ApplyTokenUpdateForTestsAsync(CodexTokenBroadcast);
 

@@ -5,7 +5,7 @@ namespace Fleet.Agent.Tests;
 /// <summary>#335 D5.4 / AC4: the key is read once, the file is deleted, the value is held in memory.</summary>
 public sealed class HostedProviderKeyStoreTests : IDisposable
 {
-    private const string KeyEnv = "DEEPSEEK_API_KEY";
+    private const string KeyEnv = "ZAI_CODING_PLAN_API_KEY";
     private readonly string _dir = Path.Combine(Path.GetTempPath(), $"hosted-key-{Guid.NewGuid():N}");
     private string KeyPath => Path.Combine(_dir, "key");
 

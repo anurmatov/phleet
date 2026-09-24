@@ -4674,6 +4674,57 @@ body {
   margin-top: 4px;
 }
 
+/* ── Project assignment table (agent config) ─────────────────────────────────── */
+
+/* Fixed layout: the three control columns keep their width and the project name takes the rest,
+   wrapping rather than pushing the table wider than a narrow modal. */
+.project-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.project-table-col-assigned { width: 26px; }
+.project-table-col-context { width: 72px; }
+.project-table-col-card { width: 30%; }
+
+.project-table th {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--muted);
+  text-align: left;
+  padding: 2px 4px 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.project-table td {
+  padding: 3px 4px;
+  vertical-align: middle;
+  overflow-wrap: anywhere;
+}
+
+.project-table-name label {
+  cursor: pointer;
+}
+
+.project-table-unassigned .project-table-name {
+  color: var(--muted);
+}
+
+.project-table-select {
+  width: 100%;
+  padding: 2px 4px;
+}
+
+.project-table-select:disabled {
+  opacity: 0.4;
+}
+
+.project-table-muted {
+  color: var(--muted);
+}
+
 /* ── Setup modal intro / footer ─────────────────────────────────────────────── */
 
 .setup-modal-intro {

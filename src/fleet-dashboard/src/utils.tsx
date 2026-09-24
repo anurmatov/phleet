@@ -1,4 +1,4 @@
-import type { ProjectContextMode, WorkflowSummary } from './types'
+import type { WorkflowSummary } from './types'
 
 export const TEMPORAL_UI  = import.meta.env.VITE_TEMPORAL_UI_URL ?? ''
 export const AUTH_TOKEN   = import.meta.env.VITE_AUTH_TOKEN ?? ''
@@ -12,19 +12,6 @@ export function apiFetch(url: string, init?: RequestInit): Promise<Response> {
     ? { ...init?.headers, Authorization: `Bearer ${token}` }
     : { ...init?.headers }
   return fetch(url, { ...init, headers })
-}
-
-/**
- * A project's context mode from a name-keyed map. Matched case-insensitively, the way the
- * orchestrator compares project names; a project that is not in the map is `full`.
- */
-export function projectModeFor(
-  modes: Record<string, ProjectContextMode> | undefined,
-  project: string,
-): ProjectContextMode {
-  if (!modes) return 'full'
-  const key = Object.keys(modes).find(k => k.toLowerCase() === project.toLowerCase())
-  return key !== undefined && modes[key] === 'card' ? 'card' : 'full'
 }
 
 export function statusDot(effective: string) {

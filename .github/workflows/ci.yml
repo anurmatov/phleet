@@ -60,6 +60,33 @@ jobs:
           docker build -f src/fleet-dashboard/Dockerfile -t dashproxy-test:pr .
           DASHBOARD_IMAGE=dashproxy-test:pr bash tests/dashboard-proxy/run.sh
 
+  # `npm test` is `node --test` over TypeScript sources, which needs Node >= 22.18 (type stripping
+  # on by default) — the image build uses node:20 and only type-checks the tests.
+  dashboard-tests:
+    name: Dashboard build and tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/fleet-dashboard
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
   conversations-tests:
     name: Conversations store (MySQL)
     runs-on: ubuntu-latest

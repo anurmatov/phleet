@@ -4,6 +4,7 @@ using Fleet.Orchestrator.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace Fleet.Orchestrator.Migrations
 {
     [DbContext(typeof(OrchestratorDbContext))]
-    partial class OrchestratorDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260924105327_AddAgentAnthropicBaseUrl")]
+    partial class AddAgentAnthropicBaseUrl
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -65,6 +68,9 @@ namespace Fleet.Orchestrator.Migrations
                         .HasMaxLength(20)
                         .HasColumnType("varchar(20)");
 
+                    b.Property<byte>("FormattingMode")
+                        .HasColumnType("tinyint unsigned");
+
                     b.Property<int>("GroupDebounceSeconds")
                         .HasColumnType("int");
 
@@ -96,15 +102,13 @@ namespace Fleet.Orchestrator.Migrations
                     b.Property<int>("MemoryLimitMb")
                         .HasColumnType("int");
 
-                    b.Property<bool>("MountDockerSock")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("tinyint(1)")
-                        .HasDefaultValue(false);
-
                     b.Property<string>("Model")
                         .IsRequired()
                         .HasMaxLength(100)
                         .HasColumnType("varchar(100)");
+
+                    b.Property<bool>("MountDockerSock")
+                        .HasColumnType("tinyint(1)");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -124,9 +128,6 @@ namespace Fleet.Orchestrator.Migrations
 
                     b.Property<bool>("PrefixMessages")
                         .HasColumnType("tinyint(1)");
-
-                    b.Property<byte>("FormattingMode")
-                        .HasColumnType("tinyint unsigned");
 
                     b.Property<int>("ProactiveIntervalMinutes")
                         .HasColumnType("int");

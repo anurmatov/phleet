@@ -332,6 +332,7 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         agent.Provider,
         agent.CodexSandboxMode,
         agent.OutputStyle,
+        agent.AnthropicBaseUrl,
         agent.CanReceiveChatRequests,
         agent.RequestReceivedMessage,
         agent.MountDockerSock,
@@ -429,6 +430,7 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
             return Results.BadRequest(new { error = $"Output style '{styleName}' does not exist." });
         agent.OutputStyle = styleName.Length == 0 ? null : styleName;
     }
+    if (body.AnthropicBaseUrl is not null) agent.AnthropicBaseUrl = body.AnthropicBaseUrl == "" ? null : body.AnthropicBaseUrl;
 
     // Replace-all for related tables (omit field = keep current)
     if (body.Tools is not null)
@@ -536,6 +538,11 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
             })
             .ToList();
     }
+
+    // #340: the agent's resulting state, after every field in the request is applied. A 400 here
+    // returns before SaveChanges, so nothing from this request is persisted.
+    if (AgentPatchHelpers.FinalizeClaudeLocalModel(agent) is { } localModelFault)
+        return Results.BadRequest(new { error = localModelFault });
 
     await db.SaveChangesAsync();
 
@@ -2772,7 +2779,8 @@ record AgentConfigUpdateRequest(
     bool? CanReceiveChatRequests,
     string? RequestReceivedMessage,
     bool? MountDockerSock,
-    string? OutputStyle);
+    string? OutputStyle,
+    string? AnthropicBaseUrl);
 
 record McpEndpointEntry(string McpName, string Url, string TransportType);
 record InstructionAssignmentEntry(string InstructionName, int LoadOrder);

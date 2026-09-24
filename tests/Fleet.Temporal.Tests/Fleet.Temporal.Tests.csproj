@@ -23,4 +23,9 @@
     <ProjectReference Include="..\..\src\Fleet.Temporal\Fleet.Temporal.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Recorded workflow histories replayed by the engine tests (e.g. DelegateRepoTests). -->
+    <None Update="Fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

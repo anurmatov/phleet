@@ -357,11 +357,20 @@ public class UniversalWorkflow
         var instruction = await ResolveInstructionAsync(step);
         var taskId = $"{Workflow.Info.WorkflowId}/{step.Name ?? "delegate"}";
         var timeout = TimeSpan.FromMinutes(step.TimeoutMinutes);
+        var repo = step.Repo is null ? null : _template.ResolveString(step.Repo);
 
-        // DelegateToAgentActivity.[Activity] — default name strips "Async" suffix → "DelegateToAgent"
+        // The repo is appended ONLY when it resolved to something (#347 D9). A step without it —
+        // every definition written before the field existed, and the escalation notification
+        // below — schedules exactly the five arguments it always did, so recorded histories
+        // replay and the activity input stays byte-identical. The parameters are positional, so
+        // agentBudgetSeconds goes in as its default (0) to reach the repo slot.
+        var args = string.IsNullOrWhiteSpace(repo)
+            ? new object?[] { target, instruction, taskId, step.RetryOnIncomplete, step.MaxIncompleteRetries }
+            : new object?[] { target, instruction, taskId, step.RetryOnIncomplete, step.MaxIncompleteRetries, 0, repo };
+
         var result = await Workflow.ExecuteActivityAsync<AgentTaskResult>(
-            "DelegateToAgent",
-            new object?[] { target, instruction, taskId, step.RetryOnIncomplete, step.MaxIncompleteRetries },
+            DelegateToAgentActivity.ActivityName,
+            args,
             new ActivityOptions
             {
                 StartToCloseTimeout = timeout + TimeSpan.FromMinutes(2),
@@ -440,7 +449,9 @@ public class UniversalWorkflow
                     var tcs = new TaskCompletionSource<JsonElement>();
                     _signalWaiters["escalation-decision"] = tcs;
 
-                    // 4. Best-effort notification to escalation target
+                    // 4. Best-effort notification to escalation target. It carries no Repo: it
+                    //    is about the workflow, not the repository, and stays a five-argument
+                    //    delegation. The retried attempt keeps the step's own Repo (`with` copies it).
                     var notifyStep = new DelegateStep
                     {
                         Name = $"{stepLabel}_escalation_notify",

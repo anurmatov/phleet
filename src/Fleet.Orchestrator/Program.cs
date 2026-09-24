@@ -81,11 +81,11 @@ builder.Services.AddSingleton<WorkflowStore>();
 builder.Services.AddSingleton<TemporalClientRegistry>();
 builder.Services.AddHostedService<TemporalPollerService>();
 
-// MCP server (HTTP transport — same port as REST, path /mcp)
-builder.Services
-    .AddMcpServer()
-    .WithHttpTransport()
-    .WithToolsFromAssembly();
+// MCP server (HTTP transport — same port as REST): admin /mcp, plus /mcp/context whose sessions hold
+// only get_project_context and are bound to one agent (#347 D6). The transport options, the
+// session-options filter and the guard's registry live in FleetMcpRegistration so the route tests
+// run this exact wiring.
+builder.Services.AddFleetMcpServer();
 
 var app = builder.Build();
 
@@ -185,8 +185,9 @@ app.Use(async (context, next) =>
     await next(context);
 });
 
-// MCP endpoint — explicitly mapped to /mcp so the auth middleware exemption matches
-app.MapMcp("/mcp");
+// MCP endpoints — the session guard, then /mcp/context and /mcp. Both sit under the bearer
+// middleware's /mcp prefix exemption (OrchestratorAuth); the guard is what separates them.
+app.MapFleetMcp();
 
 // Health check
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "fleet-orchestrator" }));

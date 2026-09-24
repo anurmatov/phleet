@@ -142,23 +142,28 @@ instance a production workload depends on.
 | RabbitMQ | unbind fails | warning; startup continues |
 | warmup | 60 s warmup is shorter than a cold local prefill | existing warning; the first real turn cold-starts |
 
+Claude Code prints `[claude-code:unrecognized_model]` on stderr for a local model tag.
+`ClaudeExecutor` surfaces it at `Warning`; it is expected and did not prevent successful turns
+in exact-head acceptance.
+
 There is **no startup reachability probe** on purpose: an inference-host reboot must not
 restart-loop every local agent.
 
 ## 7. Measured latency
 
-Claude Code through Ollama's Anthropic endpoint, Qwen 27B, Apple Silicon, before
-implementation:
+Exact-head acceptance on PR #343 used Claude Code through Ollama's Anthropic endpoint,
+Qwen 27B and Apple Silicon:
 
 | case | time |
 |---|---|
-| minimal prompt | 19 s |
-| full harness, cold (~21K input tokens) | 194 s |
-| identical turn, cached | 33 s |
-| Bash round trip | 70 s |
-| full Bash + MCP task | 109 s, correct ground truth |
+| full harness, cold | 161.9 s |
+| identical cached turn | 27.5 s |
+| Bash + MCP | 19.1 s |
+| full Bash + MCP task | 42.2 s |
 
-The route is viable; cold latency and instruction compliance are what acceptance measures.
+The same run passed 5/5 normal-Claude baseline, 5/5 local ground truth and 5/5 plain chat,
+plus steering, cancellation, failure paths, credential isolation and rollback. The route is
+viable; cold latency remains the main operating cost.
 
 ## 8. Verifying it
 

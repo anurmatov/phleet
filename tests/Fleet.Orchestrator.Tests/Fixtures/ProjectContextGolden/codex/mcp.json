@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "example-tools": {
+      "type": "sse",
+      "url": "http://example-tools:9000/sse"
+    },
+    "fleet-telegram": {
+      "type": "http",
+      "url": "http://fleet-telegram:3800/mcp?agent=agent-a\u0026formatting_mode=0"
+    },
+    "fleet-temporal": {
+      "type": "http",
+      "url": "http://fleet-temporal-bridge:3001/mcp?agent=agent-a"
+    },
+    "fleet-memory": {
+      "type": "http",
+      "url": "http://fleet-memory:3100?agent=agent-a"
+    }
+  }
+}

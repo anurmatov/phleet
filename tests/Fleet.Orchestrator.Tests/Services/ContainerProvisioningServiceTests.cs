@@ -485,7 +485,7 @@ public class ContainerProvisioningServiceTests
         agent.Effort = "off";
 
         var ex = Assert.Throws<InvalidOperationException>(
-            () => ContainerProvisioningService.GenerateAppsettingsJson(agent, "acto"));
+            () => ContainerProvisioningService.GenerateAppsettingsJson(agent, "cto-agent"));
 
         Assert.Contains("applies only to local Claude models", ex.Message);
     }
@@ -504,7 +504,7 @@ public class ContainerProvisioningServiceTests
 
         // Effort is already emitted by the generator; presence is the assert (byte-identity for
         // null is covered by the #340 fixtures).
-        var json = ContainerProvisioningService.GenerateAppsettingsJson(agent, "acto");
+        var json = ContainerProvisioningService.GenerateAppsettingsJson(agent, "cto-agent");
         Assert.Contains("\"Effort\"", json);
     }
 

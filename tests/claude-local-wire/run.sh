@@ -1,21 +1,32 @@
 #!/usr/bin/env bash
-# Wire-capture harness for #349: run the pinned claude CLI (from the built agent image)
-# against a Node stub and assert the thinking/output_config fields for every effort row.
+# Wire-capture harness for #349: run the pinned Claude Code CLI against a stub Anthropic endpoint
+# and assert what it sends in `thinking` and `output_config.effort` for every local-mode effort row.
 #
-# Isolation: one $RUN-prefixed network, a throwaway container for the CLI, no published
-# ports, cleanup removes only what this run created.
+# Two ways to supply the CLI, both checked against the Dockerfile pin before any row runs:
+#   docker (default)  AGENT_IMAGE=fleet:agent — the CLI inside the built agent image. One
+#                     $RUN-prefixed network, throwaway containers, no published ports; cleanup
+#                     removes only what this run created.
+#   host              CLAUDE_BIN=/path/to/claude — a host binary of the pinned version, run with an
+#                     empty environment (`env -i`) and a throwaway HOME, so no host credential,
+#                     config or inherited thinking variable can reach it. Needs node for the stub.
+#
+# The ROWS table is the contract: `ClaudeLocalModelWireHarnessTests` checks that its flag and
+# extra-body columns are exactly what ClaudeLocalModel produces for each Effort value.
 #
 # Exit codes: 0 all rows pass, 1 an assertion failed, 2 infrastructure.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STUB="$REPO_ROOT/tests/claude-local-wire/stub.mjs"
+PIN="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' "$REPO_ROOT/Dockerfile" | head -1)"
 RUN="clwire-$(date +%s)-$$"
-NET="$RUN-net"
-STUB_HOST="$RUN-stub"
-CAPTURE="/tmp/$RUN-capture.jsonl"
+WORK="$(mktemp -d "/tmp/$RUN.XXXX")"
+CAPTURE="$WORK/capture.txt"
 PHASE="init"
+MODE="docker"
+[ -n "${CLAUDE_BIN:-}" ] && MODE="host"
 AGENT_IMAGE="${AGENT_IMAGE:-fleet:agent}"
+STUB_PID=""
 
 fail_assert() { echo "FAIL [$PHASE] $*" >&2; exit 1; }
 fail_infra() { echo "INFRA [$PHASE] $*" >&2; exit 2; }
@@ -23,80 +34,130 @@ pass() { echo "PASS [$PHASE] $*"; }
 
 cleanup() {
   local rc=$?
-  docker rm -f "$RUN-cli" >/dev/null 2>&1 || true
-  docker rm -f "$STUB_HOST" >/dev/null 2>&1 || true
-  docker network rm "$NET" >/dev/null 2>&1 || true
-  rm -f "$CAPTURE"
+  if [ "$MODE" = "docker" ]; then
+    docker rm -f "$RUN-cli" "$RUN-stub" >/dev/null 2>&1 || true
+    docker network rm "$RUN-net" >/dev/null 2>&1 || true
+  elif [ -n "$STUB_PID" ]; then
+    kill "$STUB_PID" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$WORK"
   exit "$rc"
 }
 trap cleanup EXIT
 
-[ -x "$(command -v docker)" ] || fail_infra "docker is required"
-docker image inspect "$AGENT_IMAGE" >/dev/null 2>&1 || fail_infra "agent image $AGENT_IMAGE not built"
+# The claude child's local-mode environment (ClaudeLocalModel.BuildEnvironment), with the model
+# tag and base URL of the stub. The effort-specific variables are added per row below.
+LOCAL_ENV=(
+  ANTHROPIC_API_KEY=
+  ANTHROPIC_AUTH_TOKEN=phleet-local-no-auth
+  CLAUDE_CODE_ATTRIBUTION_HEADER=0
+  CLAUDE_CODE_TOTAL_TOKENS_REMINDER=off
+  DISABLE_ERROR_REPORTING=1
+  DISABLE_FEEDBACK_COMMAND=1
+  CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
+  CLAUDE_CODE_AUTO_MODE_SERVER=0
+  ANTHROPIC_DEFAULT_OPUS_MODEL=stub
+  ANTHROPIC_DEFAULT_SONNET_MODEL=stub
+  ANTHROPIC_DEFAULT_HAIKU_MODEL=stub
+  CLAUDE_CODE_SUBAGENT_MODEL=stub
+)
 
-PHASE="network"
-docker network create "$NET" >/dev/null || fail_infra "network create"
+# rows:begin
+# label|Effort|--effort value|CLAUDE_CODE_EXTRA_BODY|want thinking.type|want output_config.effort
+# `today-null` is the pre-#349 local agent (no flag): the regression the null row replaces.
+ROWS=(
+  'today-null|-|none|none|adaptive|high'
+  'null|null|xhigh|none|adaptive|xhigh'
+  'off|off|none|{"thinking":{"type":"disabled"}}|disabled|high'
+  'low|low|low|none|adaptive|low'
+  'medium|medium|medium|none|adaptive|medium'
+  'xhigh|xhigh|xhigh|none|adaptive|xhigh'
+)
+# rows:end
+
+# ── infrastructure ─────────────────────────────────────────────────────────────
+[ -n "$PIN" ] || fail_infra "could not read ARG CLAUDE_CODE_VERSION from the Dockerfile"
+
+if [ "$MODE" = "docker" ]; then
+  PHASE="docker"
+  command -v docker >/dev/null || fail_infra "docker is required (or set CLAUDE_BIN for host mode)"
+  docker image inspect "$AGENT_IMAGE" >/dev/null 2>&1 || fail_infra "agent image $AGENT_IMAGE not built"
+  VERSION="$(docker run --rm --entrypoint claude "$AGENT_IMAGE" --version 2>/dev/null || true)"
+  docker network create "$RUN-net" >/dev/null || fail_infra "network create"
+  docker run -d --name "$RUN-stub" --network "$RUN-net" \
+    -v "$STUB:/stub.mjs:ro" -v "$WORK:/record" \
+    node:22-slim node /stub.mjs /record/capture.txt 11434 >/dev/null || fail_infra "stub container"
+  BASE_URL="http://$RUN-stub:11434"
+else
+  PHASE="host"
+  command -v node >/dev/null || fail_infra "node is required for the stub in host mode"
+  VERSION="$("$CLAUDE_BIN" --version 2>/dev/null || true)"
+  PORT=$((20000 + RANDOM % 20000))
+  node "$STUB" "$CAPTURE" "$PORT" 127.0.0.1 >"$WORK/stub.log" 2>&1 &
+  STUB_PID=$!
+  BASE_URL="http://127.0.0.1:$PORT"
+fi
+
+PHASE="pin"
+case "$VERSION" in
+  "$PIN "*) pass "claude $VERSION ($MODE mode) matches the Dockerfile pin $PIN" ;;
+  *) fail_infra "claude reports '$VERSION'; the Dockerfile pins $PIN — the wire shapes are version-specific" ;;
+esac
 
 PHASE="stub"
-docker run -d --rm --name "$STUB_HOST" --network "$NET" \
-  -v "$STUB:/stub.mjs:ro" -v "$(dirname "$CAPTURE"):/record" \
-  node:22-slim node /stub.mjs "/record/$(basename "$CAPTURE")" 11434 >/dev/null \
-  || fail_infra "stub container"
+for _ in $(seq 1 50); do
+  if [ "$MODE" = "host" ]; then grep -q listening "$WORK/stub.log" 2>/dev/null && break
+  else docker logs "$RUN-stub" 2>&1 | grep -q listening && break; fi
+  sleep 0.2
+done
+touch "$CAPTURE"
 
-# One CLI turn against the stub for a given effort env/flag combination.
+# One CLI turn against the stub. $1 flag value or "none"; remaining args are extra VAR=value pairs.
 run_cli() {
-  local label="$1" extra_env="$2" flags="$3"
-  PHASE="cli:$label"
-  docker run --rm --name "$RUN-cli" --network "$NET" \
-    -e ANTHROPIC_BASE_URL="http://$STUB_HOST:11434" \
-    -e ANTHROPIC_API_KEY= \
-    -e ANTHROPIC_AUTH_TOKEN=phleet-local-no-auth \
-    -e ANTHROPIC_DEFAULT_OPUS_MODEL=stub -e ANTHROPIC_DEFAULT_SONNET_MODEL=stub \
-    -e ANTHROPIC_DEFAULT_HAIKU_MODEL=stub -e CLAUDE_CODE_SUBAGENT_MODEL=stub \
-    $extra_env \
-    "$AGENT_IMAGE" claude -p --model stub --output-format stream-json --verbose $flags \
-    'say ok' >/dev/null 2>&1 || true
-  docker rm -f "$RUN-cli" >/dev/null 2>&1 || true
-}
-
-assert_last_row() {
-  local label="$1" want_thinking="$2" want_effort="$3"
-  PHASE="assert:$label"
-  local row
-  row="$(tail -n 1 "$CAPTURE" 2>/dev/null || true)"
-  [ -n "$row" ] || fail_assert "$label: no captured request"
-  printf '%s' "$row" | grep -q "\"type\":\"$want_thinking\"" \
-    || fail_assert "$label: thinking.type expected $want_thinking, got $row"
-  if [ "$want_effort" = "none" ]; then
-    printf '%s' "$row" | grep -q '"output_config"' \
-      && fail_assert "$label: expected no output_config.effort, got $row" || true
+  local flag="$1"; shift
+  local effort_args=()
+  [ "$flag" != "none" ] && effort_args=(--effort "$flag")
+  if [ "$MODE" = "host" ]; then
+    local home="$WORK/home-$RANDOM"; mkdir -p "$home"
+    env -i PATH="$PATH" HOME="$home" ANTHROPIC_BASE_URL="$BASE_URL" "${LOCAL_ENV[@]}" "$@" \
+      timeout 120 "$CLAUDE_BIN" -p --model stub --output-format stream-json --verbose \
+      "${effort_args[@]}" 'say ok' </dev/null >/dev/null 2>&1 || true
   else
-    printf '%s' "$row" | grep -q "\"effort\":\"$want_effort\"" \
-      || fail_assert "$label: output_config.effort expected $want_effort, got $row"
+    local envs=() pair
+    for pair in "ANTHROPIC_BASE_URL=$BASE_URL" "${LOCAL_ENV[@]}" "$@"; do envs+=(-e "$pair"); done
+    docker run --rm --name "$RUN-cli" --network "$RUN-net" "${envs[@]}" --entrypoint claude "$AGENT_IMAGE" \
+      -p --model stub --output-format stream-json --verbose "${effort_args[@]}" 'say ok' \
+      </dev/null >/dev/null 2>&1 || true
   fi
-  pass "$label"
 }
 
-# Six rows of the #349 mapping table (null / off / low / medium / xhigh + the CLI default).
-run_cli default '' ''
-assert_last_row default-no-flag adaptive high
+# Runs one row and asserts the turn's messages request. $1 label, $2 flag, $3 want thinking,
+# $4 want effort, remaining args extra VAR=value pairs.
+check_row() {
+  local label="$1" flag="$2" want_thinking="$3" want_effort="$4"; shift 4
+  PHASE="row:$label"
+  local before after row
+  before="$(wc -l <"$CAPTURE")"
+  run_cli "$flag" "$@"
+  after="$(wc -l <"$CAPTURE")"
+  [ "$after" -gt "$before" ] || fail_assert "no /v1/messages request captured"
+  row="$(tail -n 1 "$CAPTURE")"
+  [ "$row" = "thinking=$want_thinking effort=$want_effort" ] \
+    || fail_assert "want 'thinking=$want_thinking effort=$want_effort', got '$row'"
+  pass "$row"
+}
 
-run_cli xhigh '' '--effort xhigh'
-assert_last_row xhigh adaptive xhigh
+for spec in "${ROWS[@]}"; do
+  IFS='|' read -r label _effort flag extra want_thinking want_effort <<<"$spec"
+  if [ "$extra" = "none" ]; then
+    check_row "$label" "$flag" "$want_thinking" "$want_effort"
+  else
+    check_row "$label" "$flag" "$want_thinking" "$want_effort" "CLAUDE_CODE_EXTRA_BODY=$extra"
+  fi
+done
 
-run_cli low '' '--effort low'
-assert_last_row low adaptive low
-
-run_cli medium '' '--effort medium'
-assert_last_row medium adaptive medium
-
-run_cli off '-e CLAUDE_CODE_EXTRA_BODY={"thinking":{"type":"disabled"}}' ''
-assert_last_row off disabled none
-
-# The env override case: CLAUDE_CODE_EFFORT_LEVEL must win over --effort when inherited —
-# this is why local mode strips it (#349 MUST NOT 4).
-run_cli env-override '-e CLAUDE_CODE_EFFORT_LEVEL=low' '--effort xhigh'
-assert_last_row env-override adaptive low
+# An inherited CLAUDE_CODE_EFFORT_LEVEL beats --effort, which is why local mode strips it.
+check_row env-override xhigh adaptive low CLAUDE_CODE_EFFORT_LEVEL=low
 
 PHASE="done"
-pass "all wire rows"
+pass "all $(( ${#ROWS[@]} + 1 )) wire rows"

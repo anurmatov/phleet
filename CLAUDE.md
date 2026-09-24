@@ -159,6 +159,26 @@ make GLM agents subscriber-only: never give a `zai/` model to an agent that answ
 
 See `docs/providers/codex-hosted-models.md`.
 
+### Claude local models
+
+A claude agent may run Claude Code against a local Anthropic-compatible server (e.g. Ollama) by
+setting the per-agent DB field `AnthropicBaseUrl` (`update_agent_config anthropic_base_url=…`, the
+dashboard's Claude-only field, or `PUT /api/agents/{name}/config`). **Local mode ⇔ provider
+`claude` and a non-empty `AnthropicBaseUrl`**; `ClaudeLocalModel.IsEnabled` in `Fleet.Shared` is the
+one predicate the orchestrator and agent both use. `Model` is the server's bare tag, `Effort` must be
+empty, and the URL is an origin only (`http://<server-address>:11434`, never `…/v1` — Claude Code
+appends `/v1/messages` itself). `ClaudeLocalModel.DescribeConfigFault` (V1–V7) is enforced at write
+time (tool error / HTTP 400, nothing saved; valid values stored canonical), at provision time
+(`GenerateAppsettingsJson` throws) and at agent startup (`ValidateStartupConfiguration`, exit 1).
+
+`ANTHROPIC_*` exists only on the claude child's `ProcessStartInfo` (`ClaudeExecutor.ApplyLocalModelEnvironment`,
+mirroring `ollama launch claude`), never in `.env`, container env or `settings.json`. With the field
+off, `psi.Environment` is never touched. A local agent gets no `.claude-credentials.json` bind,
+`entrypoint.sh` removes `/root/.claude/.credentials.json` (exit 1 if it cannot), claude token
+broadcasts are ignored, and its queue is not bound to `fleet.relay` (a stale binding is removed on a
+separate channel). No startup reachability probe: an inference-host reboot must not restart-loop
+agents. Enable and rollback both take effect on reprovision. See `docs/providers/claude-local-models.md`.
+
 ## Provider CLI Pins
 
 The agent image pins every provider CLI explicitly in `Dockerfile`:

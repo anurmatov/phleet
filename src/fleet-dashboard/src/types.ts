@@ -222,7 +222,8 @@ export interface ConfigEdits {
   provider?: string
   codexSandboxMode: string
   tools: string
-  projects: string
+  /** Assigned project names in stored order, edited only through the project table. */
+  projects: string[]
   /** Mode per project name as edited; a project missing here is `full`. Looked up case-insensitively. */
   projectModes: Record<string, ProjectContextMode>
   networks: string

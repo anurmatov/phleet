@@ -31,7 +31,8 @@ import type {
   ScheduleSummary,
   OutputStyleSummary,
 } from './types'
-import { apiFetch, heartbeatAge, projectModeFor } from './utils'
+import { apiFetch, heartbeatAge } from './utils'
+import { projectModeFor, projectPayload } from './projectAssignments'
 import { PROVIDER_DEFAULT_MODEL } from './constants'
 import AppHeader from './components/AppHeader'
 import AppFooter from './components/AppFooter'
@@ -807,7 +808,7 @@ export default function App() {
           autoMemoryEnabled: cfg.autoMemoryEnabled,
           hostPort: cfg.hostPort != null ? String(cfg.hostPort) : '',
           tools: cfg.tools.map(t => t.toolName).join(', '),
-          projects: cfg.projects.join(', '),
+          projects: cfg.projects,
           projectModes: cfg.projectModes ?? {},
           mcpEndpoints: cfg.mcpEndpoints,
           networks: cfg.networks.join(', '),
@@ -871,13 +872,12 @@ export default function App() {
     if (isNaN(memoryLimitMb) || memoryLimitMb < 128) { setConfigSaveMsg('Memory must be ≥ 128 MB'); setConfigSaveState('error'); return }
     const maxTurns = parseInt(configEdits.maxTurns, 10)
     const tools = configEdits.tools.split(',').map(t => t.trim()).filter(Boolean)
-    const projects = configEdits.projects.split(',').map(p => p.trim()).filter(Boolean)
-    // One entry per resulting assignment, keyed exactly as it is sent in `projects` — the server
+    // One mode per resulting assignment, keyed exactly as it is sent in `projects` — the server
     // rejects a key that is not an assignment, so a mode left behind by a removed project must
     // not travel.
-    const projectModes = Object.fromEntries(projects.map(p => [p, projectModeFor(configEdits.projectModes, p)]))
+    const { projects, projectModes } = projectPayload(configEdits)
     const modesChanged = projects.some(p =>
-      projectModeFor(configEdits.projectModes, p) !== projectModeFor(configData?.projectModes, p))
+      projectModes[p] !== projectModeFor(configData?.projectModes, p))
     const networks = configEdits.networks.split(',').map(n => n.trim()).filter(Boolean)
     const envRefs = configEdits.envRefs.split(',').map(r => r.trim()).filter(Boolean)
     const newTelegramUsers = configEdits.telegramUsers.split(',').map(s => s.trim()).filter(Boolean).map(Number).filter(n => !isNaN(n))

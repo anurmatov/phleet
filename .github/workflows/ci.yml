@@ -39,6 +39,27 @@ jobs:
           --filter "FullyQualifiedName!~Fleet.Conversations.Tests"
           --logger "console;verbosity=normal"
 
+      # #341: proves the dashboard nginx re-resolves fleet-orchestrator per request
+      # (Docker DNS) instead of caching one container address at config load.
+      - name: Dashboard proxy re-resolves the orchestrator
+        run: |
+          bash tests/dashboard-proxy/run.sh
+
+          # Negative control (issue AC3): the frozen pre-#341 conf (committed
+          # fixture, NOT origin/main — that holds the fixed conf after merge)
+          # must fail at P2 (the recreate), proving the harness still
+          # reproduces the bug. CI on main stays green.
+          set +e
+          NGINX_CONF=tests/dashboard-proxy/nginx.legacy.conf bash tests/dashboard-proxy/run.sh
+          NEGATIVE_RC=$?
+          set -e
+          echo "negative control exit=$NEGATIVE_RC (expected 1, failing at P2)"
+          [ "$NEGATIVE_RC" -eq 1 ]
+
+          # Built-image run (issue AC4): the dashboard image itself, no mounts.
+          docker build -f src/fleet-dashboard/Dockerfile -t dashproxy-test:pr .
+          DASHBOARD_IMAGE=dashproxy-test:pr bash tests/dashboard-proxy/run.sh
+
   conversations-tests:
     name: Conversations store (MySQL)
     runs-on: ubuntu-latest

@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"s_1"}
+{"type":"system","subtype":"compact_boundary","session_id":"s_1","uuid":"u_1","compact_metadata":{"trigger":"auto","pre_tokens":150000,"post_tokens":12000}}
+{"type":"system","subtype":"microcompact_boundary","session_id":"s_1","uuid":"u_2"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Synthetic answer after compaction."}]},"parent_tool_use_id":null}
+{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"s_1","result":"Synthetic answer after compaction."}

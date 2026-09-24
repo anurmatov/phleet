@@ -55,6 +55,14 @@ public sealed class ClaudeExecutor : IAgentExecutor
     public string? LastSessionId => _lastSessionId;
     public DateTimeOffset LastActivity => _lastActivity;
 
+    // #347: bumped on every stream-json compact_boundary. _lastCompactionEvent dedupes the two
+    // ParseProgress calls one system frame gets (background reader + turn read loop).
+    private int _compactionEpoch;
+    private ClaudeStreamEvent? _lastCompactionEvent;
+
+    /// <inheritdoc />
+    public int CompactionEpoch => Volatile.Read(ref _compactionEpoch);
+
     /// <summary>
     /// Returns a snapshot of currently active background (subagent) tasks.
     /// Entries are added on task_started and removed on task_notification (completed/failed/stopped).
@@ -143,6 +151,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
             var message = await BuildUserMessageJsonAsync(task, images, documents, ct);
 
             var attempt = 0;
+            // prompt_accepted is emitted once per call even when a mid-response death makes the
+            // retry below write the same frame a second time (#347 D5).
+            var promptAccepted = false;
 
             while (attempt < 2)
             {
@@ -189,6 +200,14 @@ public sealed class ClaudeExecutor : IAgentExecutor
                     _logger.LogWarning("Write to stdin failed (attempt {Attempt}), restarting process", attempt);
                     await KillProcessAsync();
                     continue;
+                }
+
+                // The NDJSON frame is written and flushed to the live stdin: the prompt is in
+                // Claude's hands. A write that threw never reaches this line.
+                if (!promptAccepted)
+                {
+                    promptAccepted = true;
+                    yield return AgentProgress.PromptAccepted();
                 }
 
                 // Read response events until "result" — events come from the background
@@ -1009,6 +1028,37 @@ public sealed class ClaudeExecutor : IAgentExecutor
                         SessionId     = evt.SessionId,
                     };
 
+                case "compact_boundary":
+                    // #347 compaction source for the project-context ledger. Pinned CLI
+                    // @anthropic-ai/claude-code@2.1.280 (Dockerfile): its SDK stream-json writer
+                    // emits {type:"system",subtype:"compact_boundary",session_id,uuid,
+                    // compact_metadata:{trigger:"manual"|"auto",pre_tokens,...}} after both
+                    // /compact and auto-compaction (both `compact_boundary` and `compact_metadata`
+                    // are literals in the pinned bundle, bin/claude.exe). Everything before the
+                    // boundary — attached project contexts included — is now a summary.
+                    ObserveCompaction(evt);
+                    return new AgentProgress
+                    {
+                        IsSignificant = false,
+                        Summary       = "Conversation compacted",
+                        EventType     = evt.Type,
+                        SessionId     = evt.SessionId,
+                    };
+
+                case "microcompact_boundary":
+                    // Deliberately NOT a compaction for the ledger: microcompaction trims old tool
+                    // results, never user turns, so an attached project context survives it. On the
+                    // pinned 2.1.280 bundle this subtype is transcript-internal — the SDK writer's
+                    // system-subtype allowlist yields compact_boundary and drops it — so this case
+                    // is defensive: a later pin that forwards it must still not reset the ledger.
+                    return new AgentProgress
+                    {
+                        IsSignificant = false,
+                        Summary       = "Tool results microcompacted",
+                        EventType     = evt.Type,
+                        SessionId     = evt.SessionId,
+                    };
+
                 default:
                     if (evt.Subtype is not null)
                         _logger.LogDebug("Unhandled system event subtype: {Subtype} (TaskId={TaskId})", evt.Subtype, evt.TaskId);
@@ -1035,6 +1085,27 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 EventType = evt.Type,
             },
         };
+    }
+
+    /// <summary>
+    /// Counts one compaction per frame. A system frame reaches <see cref="ParseProgress"/> twice —
+    /// from the background reader and again from the turn read loop — and must count once.
+    /// </summary>
+    private void ObserveCompaction(ClaudeStreamEvent evt)
+    {
+        if (ReferenceEquals(Interlocked.Exchange(ref _lastCompactionEvent, evt), evt))
+            return;
+
+        var epoch = Interlocked.Increment(ref _compactionEpoch);
+        string? trigger = null;
+        if (evt.ExtensionData?.TryGetValue("compact_metadata", out var metadata) == true
+            && metadata is JsonElement { ValueKind: JsonValueKind.Object } meta
+            && meta.TryGetProperty("trigger", out var t) && t.ValueKind == JsonValueKind.String)
+        {
+            trigger = t.GetString();
+        }
+        _logger.LogInformation("compaction_epoch provider=claude epoch={Epoch} source=compact_boundary trigger={Trigger}",
+            epoch, trigger ?? "unknown");
     }
 
     private static AgentProgress ParseAssistantEvent(ClaudeExecutor self, ClaudeStreamEvent evt)

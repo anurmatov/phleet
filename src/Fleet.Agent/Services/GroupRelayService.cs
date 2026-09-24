@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
 using Fleet.Shared;
@@ -37,9 +38,11 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
 
     /// <summary>
     /// Fired when a message from another agent is received via the relay.
-    /// Parameters: chatId, sender, text, type, correlationId, taskId, workflowId, signalName.
+    /// Parameters: chatId, sender, text, type, correlationId, taskId, workflowId, signalName, repo.
+    /// <c>repo</c> is the structured <c>RelayMessage.Repo</c> (#347 D9), passed through unvalidated —
+    /// the project-context router validates it at intake.
     /// </summary>
-    public event Action<long, string, string, string, string?, string?, string?, string?>? MessageReceived;
+    public event Action<long, string, string, string, string?, string?, string?, string?, string?>? MessageReceived;
 
     public GroupRelayService(
         IOptions<AgentOptions> agentConfig,
@@ -213,6 +216,9 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
         }
     }
 
+    /// <summary>Test seam: one broker delivery through the real deserialize-and-dispatch path.</summary>
+    internal Task HandleDeliveryForTestsAsync(BasicDeliverEventArgs ea) => OnRelayMessageReceived(this, ea);
+
     private Task OnRelayMessageReceived(object sender, BasicDeliverEventArgs ea)
     {
         try
@@ -230,7 +236,7 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             _logger.LogInformation("Relay received from {Sender} (type={Type}, chat={ChatId}): {Text}",
                 message.Sender, message.Type, message.ChatId, TruncateForLog(message.Text));
 
-            MessageReceived?.Invoke(message.ChatId, message.Sender, message.Text, message.Type, message.CorrelationId, message.TaskId, message.WorkflowId, message.SignalName);
+            MessageReceived?.Invoke(message.ChatId, message.Sender, message.Text, message.Type, message.CorrelationId, message.TaskId, message.WorkflowId, message.SignalName, message.Repo);
         }
         catch (Exception ex)
         {
@@ -297,7 +303,14 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             await _connection.CloseAsync();
     }
 
+    /// <remarks>
+    /// <c>Repo</c> (#347 D9) mirrors <c>Fleet.Temporal.Models.RelayMessage.Repo</c>: set from the
+    /// workflow delegation, trailing and optional so older payloads deserialize with null. It is
+    /// never parsed out of <c>Text</c>. The agent never sets it on what it publishes, and a null is
+    /// not written, so outbound relay payloads are byte-identical to before.
+    /// </remarks>
     private sealed record RelayMessage(long ChatId, string Sender, string Text, DateTimeOffset Timestamp,
         string Type = RelayMessageType.Directive, string? CorrelationId = null, string? TaskId = null,
-        string? WorkflowId = null, string? SignalName = null);
+        string? WorkflowId = null, string? SignalName = null,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Repo = null);
 }

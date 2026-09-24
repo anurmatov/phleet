@@ -24,7 +24,11 @@ public sealed record MidTurnInjectionResult(MidTurnInjectionStatus Status, strin
 
 public interface IAgentExecutor : IAsyncDisposable
 {
-    /// <summary>Send a task to the LLM process, streaming progress events.</summary>
+    /// <summary>
+    /// Send a task to the LLM process, streaming progress events. Emits exactly one
+    /// <see cref="AgentProgress.PromptAcceptedEventType"/> event per call, once the provider has the
+    /// prompt, and none when the call fails before that point.
+    /// </summary>
     IAsyncEnumerable<AgentProgress> ExecuteAsync(
         string task,
         IReadOnlyList<MessageImage>? images = null,
@@ -66,6 +70,17 @@ public interface IAgentExecutor : IAsyncDisposable
 
     /// <summary>Session/resume token from the last execution.</summary>
     string? LastSessionId { get; }
+
+    /// <summary>
+    /// Incremented every time the provider compacts the live conversation (#347). The project
+    /// context ledger resets when this moves, because an attachment that was summarised away is
+    /// no longer in the model's context. Providers without compaction keep it at zero.
+    /// </summary>
+    /// <remarks>
+    /// Default-implemented so executors that predate the ledger (test doubles included) compile
+    /// unchanged and report "never compacted".
+    /// </remarks>
+    int CompactionEpoch => 0;
 
     /// <summary>When the last task was sent or received.</summary>
     DateTimeOffset LastActivity { get; }

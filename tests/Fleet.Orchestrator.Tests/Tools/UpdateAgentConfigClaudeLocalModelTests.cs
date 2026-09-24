@@ -132,30 +132,87 @@ public class UpdateAgentConfigClaudeLocalModelTests
     }
 
     [Fact]
-    public async Task V7_EffortOnALocalAgent_RejectedRowUnchanged()
+    public async Task V7_EffortOutsideTheLocalVocabulary_RejectedRowUnchanged()
     {
         Seed(model: LocalTag, baseUrl: "http://host.docker.internal:11434");
 
         var result = await Tool().UpdateAgentConfigAsync("agent1", effort: "high");
 
-        Assert.Contains("Effort is not supported", result);
+        Assert.Contains("must be empty (model default, sent as xhigh), off, low, medium or xhigh", result);
         Assert.Null(Stored().Effort);
     }
 
     [Fact]
-    public async Task Enable_WithAnExistingEffort_RejectedUntilEffortIsCleared()
+    public async Task V7_MaxIsAlsoRejected_OnALocalAgent()
+    {
+        Seed(model: LocalTag, baseUrl: "http://host.docker.internal:11434");
+
+        var result = await Tool().UpdateAgentConfigAsync("agent1", effort: "max");
+
+        Assert.Contains("must be empty (model default, sent as xhigh), off, low, medium or xhigh", result);
+        Assert.Null(Stored().Effort);
+    }
+
+    [Theory]
+    [InlineData("off")]
+    [InlineData("low")]
+    [InlineData("medium")]
+    [InlineData("xhigh")]
+    [InlineData("")]
+    public async Task V7_TheLocalVocabulary_Saves(string effort)
+    {
+        Seed(model: LocalTag, baseUrl: "http://host.docker.internal:11434");
+
+        var result = await Tool().UpdateAgentConfigAsync("agent1", effort: effort);
+
+        // "" is a no-change when the stored value is already null.
+        if (effort == "")
+            Assert.StartsWith("No changes", result);
+        else
+            Assert.DoesNotContain("Invalid", result);
+        Assert.Equal(effort == "" ? null : effort, Stored().Effort);
+    }
+
+    [Fact]
+    public async Task Off_SkipsTheCloudVocabulary_Check()
+    {
+        // The resulting agent is local (base URL set in the same request), so the cloud list must
+        // not reject off before the shared V7 rule runs.
+        Seed();
+
+        var result = await Tool().UpdateAgentConfigAsync("agent1",
+            anthropic_base_url: "http://host.docker.internal:11434", model: LocalTag, effort: "off");
+
+        Assert.DoesNotContain("Invalid", result);
+        Assert.Equal("off", Stored().Effort);
+        Assert.Equal("http://host.docker.internal:11434", Stored().AnthropicBaseUrl);
+    }
+
+    [Fact]
+    public async Task V8_CloudClaudeOff_RejectedRowUnchanged()
+    {
+        Seed();
+
+        var result = await Tool().UpdateAgentConfigAsync("agent1", effort: "off");
+
+        Assert.Contains("applies only to local Claude models", result);
+        Assert.Null(Stored().Effort);
+    }
+
+    [Fact]
+    public async Task Enable_WithAnExistingCloudEffort_RejectedUntilItIsValidLocal()
     {
         Seed(effort: "high");
 
         var rejected = await Tool().UpdateAgentConfigAsync("agent1",
             anthropic_base_url: "http://host.docker.internal:11434", model: LocalTag);
         var accepted = await Tool().UpdateAgentConfigAsync("agent1",
-            anthropic_base_url: "http://host.docker.internal:11434", model: LocalTag, effort: "");
+            anthropic_base_url: "http://host.docker.internal:11434", model: LocalTag, effort: "medium");
 
-        Assert.Contains("Effort is not supported", rejected);
+        Assert.Contains("must be empty (model default, sent as xhigh), off, low, medium or xhigh", rejected);
         Assert.DoesNotContain("Invalid", accepted);
         Assert.Equal("http://host.docker.internal:11434", Stored().AnthropicBaseUrl);
-        Assert.Null(Stored().Effort);
+        Assert.Equal("medium", Stored().Effort);
     }
 
     [Fact]

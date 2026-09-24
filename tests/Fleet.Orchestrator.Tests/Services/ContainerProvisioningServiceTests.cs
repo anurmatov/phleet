@@ -460,7 +460,8 @@ public class ContainerProvisioningServiceTests
     [InlineData("claude", "qwen 27b", LocalUrl, null, "not allowed in a CLI argument")]
     [InlineData("claude", "sonnet", LocalUrl, null, "is a Claude model id")]
     [InlineData("claude", "lmstudio/qwen3", LocalUrl, null, "selects the codex path")]
-    [InlineData("claude", "qwen3.8:27b-agent", LocalUrl, "high", "Effort is not supported")]
+    [InlineData("claude", "qwen3.8:27b-agent", LocalUrl, "high", "must be empty (model default, sent as xhigh), off, low, medium or xhigh")]
+    [InlineData("claude", "qwen3.8:27b-agent", LocalUrl, "max", "must be empty (model default, sent as xhigh), off, low, medium or xhigh")]
     public void GenerateAppsettingsJson_RefusesAnInvalidLocalConfig(
         string provider, string model, string baseUrl, string? effort, string expected)
     {
@@ -474,6 +475,37 @@ public class ContainerProvisioningServiceTests
 
         Assert.Contains("alocal", ex.Message);
         Assert.Contains(expected, ex.Message);
+    }
+
+    [Fact]
+    public void GenerateAppsettingsJson_V8_CloudClaudeOff_Refuses()
+    {
+        var agent = MinimalAgent("acloud", "claude");
+        agent.Model = "claude-sonnet-5";
+        agent.Effort = "off";
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => ContainerProvisioningService.GenerateAppsettingsJson(agent, "cto-agent"));
+
+        Assert.Contains("applies only to local Claude models", ex.Message);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("off")]
+    [InlineData("low")]
+    [InlineData("medium")]
+    [InlineData("xhigh")]
+    public void GenerateAppsettingsJson_LocalThinkingVocabulary_Generates(string? effort)
+    {
+        var agent = LocalAgent();
+        agent.Effort = effort;
+
+        // Effort is already emitted by the generator; presence is the assert (byte-identity for
+        // null is covered by the #340 fixtures).
+        var json = ContainerProvisioningService.GenerateAppsettingsJson(agent, "cto-agent");
+        Assert.Contains("\"Effort\"", json);
     }
 
     [Theory]

@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text;
 using Fleet.Orchestrator.Data;
+using Fleet.Shared;
 using Fleet.Orchestrator.Helpers;
 using Fleet.Orchestrator.Services;
 using Microsoft.EntityFrameworkCore;
@@ -33,7 +34,7 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         [Description("Outbound Telegram formatting mode: 0=PlainText (legacy dumb-split, no parse_mode), 1=LegacyHtml (Markdown→HTML via TelegramFormatter, ParseMode.Html), 2=Rich (same syntax emitted as sendRichMessage blocks, fallback LegacyHtml→PlainText per message). Omit to keep current.")] byte? formatting_mode = null,
         [Description("Suppress intermediate tool-use progress messages in Telegram — only post the final response. Use for agents serving non-technical users (e.g. family assistant). Omit to keep current.")] bool? suppress_tool_messages = null,
         [Description("Telegram send-only mode: skip polling and message handling, only send messages. Use when multiple agents share a bot token. Omit to keep current.")] bool? telegram_send_only = null,
-        [Description("Effort level (low/medium/high/xhigh/max). Applied as --effort on Claude; mapped to codex ReasoningEffort on Codex (max collapses to xhigh). Pass empty string to clear. Omit to keep current.")] string? effort = null,
+        [Description("Effort level. Claude cloud: low/medium/high/xhigh/max. Claude local (anthropic_base_url set): off/low/medium/xhigh, or empty = model default sent as xhigh. Codex: none..xhigh. Pass empty string to clear. Omit to keep current.")] string? effort = null,
         [Description("JSON schema string for --json-schema flag (structured output). Pass empty string to clear. Omit to keep current.")] string? json_schema = null,
         [Description("JSON string for --agents flag (inline subagents). Pass empty string to clear. Omit to keep current.")] string? agents_json = null,
         [Description("Host port for the agent's HTTP API (used by orchestrator cancel proxy via 127.0.0.1:{host_port}). Pass 0 to clear. Omit to keep current.")] int? host_port = null,
@@ -44,7 +45,7 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         [Description("Message sent to requesting user when their access request is queued. Pass empty string to use the built-in default. Max 500 characters. Omit to keep current.")] string? request_received_message = null,
         [Description("Mount /var/run/docker.sock into the container (grants host-root; leave off unless agent manages containers). Omit to keep current.")] bool? mount_docker_sock = null,
         [Description("Name of an output_styles row this agent runs with — its chat tone and register. Pass empty string to clear (no style). Omit to keep current. Takes effect on the next reprovision.")] string? output_style = null,
-        [Description("Claude agents only: origin of a local Anthropic-compatible server (e.g. Ollama), e.g. http://<server-address>:11434 — origin only, never …/v1. Set, the agent runs Claude Code against that server with no Claude credential mounted; model must be the server's model tag and effort empty. Stored canonical. Pass empty string to clear (back to Anthropic). Omit to keep current. Takes effect on the next reprovision.")] string? anthropic_base_url = null,
+        [Description("Claude agents only: origin of a local Anthropic-compatible server (e.g. Ollama), e.g. http://<server-address>:11434 — origin only, never …/v1. Set, the agent runs Claude Code against that server with no Claude credential mounted; model must be the server's model tag and effort off/low/medium/xhigh (empty = model default, sent as xhigh). Stored canonical. Pass empty string to clear (back to Anthropic). Omit to keep current. Takes effect on the next reprovision.")] string? anthropic_base_url = null,
         [Description("Per-assignment project context mode, comma-separated name=mode pairs, e.g. 'project-a=card,project-b=full'. full = the full project context is resident (default); card = the project's compact card is resident and the full context is attached to routed turns. Names must be in the agent's projects after this call; card requires the project to have a card. Unlisted assignments keep their mode (a projects replace preserves modes; new projects start full). Omit to keep current. Takes effect on the next reprovision.")] string? project_modes = null)
     {
         using var scope = scopeFactory.CreateScope();
@@ -160,12 +161,22 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
 
         if (effort is not null && effort != (agent.Effort ?? ""))
         {
-            if (effort != "")
+            // #349: the cloud vocabulary check is skipped when the RESULTING agent is in local
+            // mode (resolved provider + resolved base URL) — the shared V7 rule at the finalize
+            // gate decides instead, so `off` is not rejected by the cloud list first.
+            var resultingProvider = provider ?? agent.Provider ?? "claude";
+            var resultingBaseUrl = anthropic_base_url is not null
+                ? (anthropic_base_url == "" ? null : anthropic_base_url)
+                : agent.AnthropicBaseUrl;
+            var resultingIsLocal = ClaudeLocalModel.IsEnabled(resultingProvider, resultingBaseUrl);
+
+            if (effort != "" && !resultingIsLocal)
             {
-                var resolvedProvider = provider ?? agent.Provider ?? "claude";
-                string? effortError = resolvedProvider switch
+                string? effortError = resultingProvider switch
                 {
-                    "claude" when !new[] { "low", "medium", "high", "xhigh", "max" }.Contains(effort)
+                    // "off" falls through to the finalize gate so the V8 fault is the one the
+                    // caller sees, not the generic cloud list text (#349).
+                    "claude" when effort != "off" && !new[] { "low", "medium", "high", "xhigh", "max" }.Contains(effort)
                         => $"Invalid effort '{effort}' for claude. Valid values: low, medium, high, xhigh, max.",
                     "codex" when !new[] { "none", "minimal", "low", "medium", "high", "xhigh" }.Contains(effort)
                         => $"Invalid effort '{effort}' for codex. Valid values: none, minimal, low, medium, high, xhigh.",

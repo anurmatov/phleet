@@ -159,7 +159,7 @@ export default function AgentConfigModal({
               {isClaude && (
               <div className="config-field">
                 <label className="config-label">Anthropic-compatible base URL <span className="config-provider-badge">Claude only</span></label>
-                <FieldHint>Empty = Anthropic with your Claude subscription. Set = this agent runs on a local Anthropic-compatible server (e.g. Ollama). Origin only, e.g. <code>http://&lt;server-lan-address&gt;:11434</code>, never <code>…/v1</code>; <code>localhost</code> is the container itself. Enter the server's model tag as a custom Model, leave Effort empty; Claude credentials are not mounted. <strong>Takes effect on reprovision.</strong></FieldHint>
+                <FieldHint>Empty = Anthropic with your Claude subscription. Set = this agent runs on a local Anthropic-compatible server (e.g. Ollama). Origin only, e.g. <code>http://&lt;server-lan-address&gt;:11434</code>, never <code>…/v1</code>; <code>localhost</code> is the container itself. Enter the server's model tag as a custom Model; Effort is off/low/medium/xhigh, or empty = model default (sent as xhigh). Claude credentials are not mounted. <strong>Takes effect on reprovision.</strong></FieldHint>
                 <input className="config-input" value={configEdits.anthropicBaseUrl} onChange={e => onEditsChange({ anthropicBaseUrl: e.target.value })} placeholder="http://<server-lan-address>:11434" />
               </div>
               )}
@@ -304,15 +304,41 @@ export default function AgentConfigModal({
               {(isClaude || isCodex) && (
               <div className="config-field">
                 <label className="config-label">Effort <span className="config-provider-badge">Claude + Codex</span></label>
-                <FieldHint>Reasoning effort level. <code>low</code> = faster/cheaper; <code>max</code> = deepest reasoning (Codex maps max → xhigh). Affects latency and cost.</FieldHint>
-                <select className="config-input" value={configEdits.effort ?? ''} onChange={e => onEditsChange({ effort: e.target.value })}>
-                  <option value="">default</option>
-                  <option value="low">low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
-                  <option value="xhigh">xhigh</option>
-                  <option value="max">max</option>
-                </select>
+                <FieldHint>Reasoning effort level. <code>low</code> = faster/cheaper; <code>max</code> = deepest reasoning (Codex maps max → xhigh). Affects latency and cost. Local Claude models use off/low/medium/xhigh.</FieldHint>
+                {(() => {
+                  // #349: local mode owns its own vocabulary. A stored value invalid for the
+                  // current mode still renders (with a marker) — nothing is auto-cleared, and
+                  // Save surfaces the server fault.
+                  const isLocalClaude = (configEdits.provider ?? configData?.provider ?? 'claude') === 'claude'
+                    && (configEdits.anthropicBaseUrl ?? configData?.anthropicBaseUrl ?? '').trim() !== ''
+                  const current = configEdits.effort ?? ''
+                  const localValues = ['', 'off', 'low', 'medium', 'xhigh']
+                  const invalid = isLocalClaude && current !== '' && !localValues.includes(current)
+                  return (
+                    <select className="config-input" value={current} onChange={e => onEditsChange({ effort: e.target.value })}>
+                      {isLocalClaude ? (
+                        <>
+                          <option value="">default (xhigh)</option>
+                          <option value="off">off</option>
+                          <option value="low">low</option>
+                          <option value="medium">medium</option>
+                          <option value="xhigh">xhigh</option>
+                          {invalid && <option value={current}>{current} (not valid in this mode)</option>}
+                        </>
+                      ) : (
+                        <>
+                          <option value="">default</option>
+                          <option value="low">low</option>
+                          <option value="medium">medium</option>
+                          <option value="high">high</option>
+                          <option value="xhigh">xhigh</option>
+                          <option value="max">max</option>
+                          {current === 'off' && <option value="off">off (not valid in this mode)</option>}
+                        </>
+                      )}
+                    </select>
+                  )
+                })()}
               </div>
               )}
               {isClaude && (

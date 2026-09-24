@@ -118,6 +118,18 @@ public sealed class ProjectContextTools(IServiceScopeFactory scopeFactory)
         [Description("Project name (e.g. 'my-project')")] string name)
     {
         using var scope = scopeFactory.CreateScope();
+
+        // #347 D7: on /mcp/context — the card agents' fallback route — the assignment ACL applies,
+        // keyed on THIS request's path and ?agent= (the SDK runs the call on the current request's
+        // HttpContext), never on where the session was created. /mcp, or no HttpContext at all, is
+        // the admin read below, unchanged.
+        var http = scope.ServiceProvider.GetService<IHttpContextAccessor>()?.HttpContext;
+        if (http is not null && Services.ContextMcpRoute.IsContextPath(http.Request.Path))
+        {
+            return await ActivatorUtilities.CreateInstance<Services.ProjectContextAccess>(scope.ServiceProvider)
+                .ReadAsync(http, name, http.RequestAborted);
+        }
+
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
 
         var ctx = await db.ProjectContexts

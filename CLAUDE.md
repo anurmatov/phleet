@@ -52,6 +52,8 @@ npm run dev    # local dev server
 npm run build  # production build
 ```
 
+The dashboard proxy resolves the orchestrator per request via Docker DNS (`resolver 127.0.0.11`) — do not reintroduce a literal `proxy_pass` host; the regression harness is `bash tests/dashboard-proxy/run.sh`.
+
 ## Quick Start
 
 1. Run the setup wizard from the repo root:

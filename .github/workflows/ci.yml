@@ -39,6 +39,11 @@ jobs:
           --filter "FullyQualifiedName!~Fleet.Conversations.Tests"
           --logger "console;verbosity=normal"
 
+      # #341: proves the dashboard nginx re-resolves fleet-orchestrator per request
+      # (Docker DNS) instead of caching one container address at config load.
+      - name: Dashboard proxy re-resolves the orchestrator
+        run: bash tests/dashboard-proxy/run.sh
+
   conversations-tests:
     name: Conversations store (MySQL)
     runs-on: ubuntu-latest

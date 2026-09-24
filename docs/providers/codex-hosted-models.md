@@ -134,10 +134,11 @@ property.
   the agent to start a fresh thread.
 - **Mid-turn steering is delivered, but whether GLM obeys is up to the model.** Codex finishes the
   current request, then sends a follow-up request carrying the correction, and the reply is the turn's
-  last message. In the #335 trials GLM followed 23 of 23 injected corrections, but an exact-head
-  canary also saw it ignore two. GLM messages carry no `phase`, so the executor's final-answer gate
-  never fires for GLM; Codex itself refuses a steer once the turn has ended, and the message is then
-  queued as the next turn. If a correction is ignored, send it again as a new message.
+  last message. In the #335 trials GLM followed 28 of 28 injected corrections in the executor
+  harness, then passed the revised exact-head container procedure 5 of 5 times. GLM messages carry
+  no `phase`, so the executor's final-answer gate never fires for GLM; Codex itself refuses a steer
+  once the turn has ended, and the message is then queued as the next turn. Delivery does not
+  guarantee model compliance. If a correction is ignored, send it again as a new message.
 - **Z.ai's own MCP servers** (vision, web search, web reader) are not wired.
 - **Concurrency** depends on the plan tier; excess requests get 429.
 

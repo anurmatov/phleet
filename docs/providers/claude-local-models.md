@@ -61,6 +61,66 @@ orchestrator adds none.
 cleartext. That is an operator decision, at the same trust level as the `image` override
 that `update_agent_config` already exposes. Point it only at a server you control.
 
+### 2.1 Thinking control
+
+In local mode `Effort` picks the thinking level (#349). The vocabulary is pinned for Qwen3.8 on
+Ollama; there is no discovery, because `/api/show` is Ollama-only and would put an
+inference-server call on the write or startup path.
+
+| `Effort` | Claude Code child | wire (CLI 2.1.280) | Ollama ≤ 0.34.2 → Qwen3.8 | Ollama ≥ 0.34.3 → Qwen3.8 |
+|---|---|---|---|---|
+| *before #349:* empty | no `--effort` | `adaptive`, `effort: high` | xhigh | **medium** |
+| empty (default) | `--effort xhigh` | `adaptive`, `effort: xhigh` | xhigh (`xhigh`→`high`→xhigh instructions) | xhigh |
+| `off` | no `--effort`; `CLAUDE_CODE_EXTRA_BODY={"thinking":{"type":"disabled"}}` | `thinking: disabled` (`effort: high`, ignored) | off | off |
+| `low` | `--effort low` | `adaptive`, `effort: low` | low | low |
+| `medium` | `--effort medium` | `adaptive`, `effort: medium` | medium | medium |
+| `xhigh` | `--effort xhigh` | `adaptive`, `effort: xhigh` | xhigh | xhigh |
+
+Every other value is rejected in local mode (V7), including `high` and `max`: on Ollama ≥ 0.34.3
+Qwen3.8 does not list them and silently resolves them to its served default, `medium`. `off`
+uses the extra body because `MAX_THINKING_TOKENS=0` and `CLAUDE_CODE_DISABLE_THINKING` only omit
+the `thinking` field, and Ollama then keeps thinking on. The extra body is a fixed constant; no
+operator input reaches it.
+
+Before setting its own values, the child environment **removes** `CLAUDE_CODE_EFFORT_LEVEL` (it
+overrides `--effort`), `CLAUDE_CODE_EXTRA_BODY`, `MAX_THINKING_TOKENS`,
+`CLAUDE_CODE_DISABLE_THINKING` and `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`. Each process start
+logs one line with no URL, content or token, for example
+`Claude local thinking: effort=default wire=thinking:adaptive effort:xhigh`.
+
+**Latency.** The empty default is sent as `xhigh` so the default does not depend on the server
+release. On Ollama ≥ 0.34.3 that changes an existing local agent from `medium` to `xhigh`, which
+is slower. If an agent should run at `medium`, set `effort=medium`; to change the default for
+everyone, change the empty row of `ClaudeLocalModel.EffortArgument`.
+
+**Other models and servers.** On Ollama, a model whose thinking descriptor lacks the requested
+name falls back to its served default, and a model without a descriptor takes the legacy path
+(`xhigh`→`high`); for both, the empty default behaves as it did before #349. Servers other than
+Ollama interpret `output_config.effort` themselves. The vocabulary is validated for Qwen3.8 only.
+
+| dependency | version | what depends on it |
+|---|---|---|
+| Claude Code | 2.1.280 (`Dockerfile` pin) | the wire column. A CLI bump must re-run `tests/claude-local-wire/run.sh` |
+| Ollama | v0.34.2, v0.34.3, v0.34.4 (source-verified) | the two server columns; v0.34.4 leaves the three code paths below unchanged |
+| Qwen3.8 | Ollama ≥ 0.32.12 (model manifest `requires`) | served descriptor `[false, low, medium, xhigh]`, default `medium` |
+
+Upstream sources:
+
+- [`anthropic/anthropic.go#L406-L429` @ v0.34.3](https://github.com/ollama/ollama/blob/6383a0fa9cbf97494b847226e189f6e36b401a08/anthropic/anthropic.go#L406-L429): named efforts pass through when the model has a thinking descriptor
+- [`anthropic/anthropic.go#L404-L424` @ v0.34.2](https://github.com/ollama/ollama/blob/dfabde4539e42ba1e1eab50a3a50b88aea7958a0/anthropic/anthropic.go#L404-L424): `xhigh` is always rewritten to `high`
+- [`server/model_thinking.go#L84-L86` @ v0.34.3](https://github.com/ollama/ollama/blob/6383a0fa9cbf97494b847226e189f6e36b401a08/server/model_thinking.go#L84-L86): the served Qwen3.8 default is overridden to `medium`
+- [`model/renderers/thinking.go#L30-L45` @ v0.34.3](https://github.com/ollama/ollama/blob/6383a0fa9cbf97494b847226e189f6e36b401a08/model/renderers/thinking.go#L30-L45): an omitted or unsupported level resolves to the default, applied in [`server/routes.go#L2647-L2667`](https://github.com/ollama/ollama/blob/6383a0fa9cbf97494b847226e189f6e36b401a08/server/routes.go#L2647-L2667)
+- [`model/renderers/qwen35.go#L114-L133` @ v0.34.3](https://github.com/ollama/ollama/blob/6383a0fa9cbf97494b847226e189f6e36b401a08/model/renderers/qwen35.go#L114-L133): the Qwen3.8 descriptor and its reasoning instructions
+- [`model/renderers/qwen35.go#L113` @ v0.34.2](https://github.com/ollama/ollama/blob/dfabde4539e42ba1e1eab50a3a50b88aea7958a0/model/renderers/qwen35.go#L113): `high`/`max` map to the xhigh instructions, and a literal `xhigh` is an error
+
+**Checking the wire.** `bash tests/claude-local-wire/run.sh` runs the CLI from the built agent
+image against a recording stub and prints one `PASS` per row of the table plus the
+`CLAUDE_CODE_EFFORT_LEVEL` override case. `CLAUDE_BIN=/path/to/claude` runs a host binary of the
+pinned version instead, with an empty environment.
+
+**Rollout order.** Deploy the agent image first, then set `off`/`low`/`medium`/`xhigh`: an older
+image fails V7 at startup (exit 1) on any non-empty local effort.
+
 ## 3. What changes in the container
 
 **The claude child's environment** — the only place `ANTHROPIC_*` exists. It mirrors
@@ -84,9 +144,9 @@ CLAUDE_CODE_SUBAGENT_MODEL=<Model>
 
 `CLAUDE_CODE_OAUTH_TOKEN` is removed. The placeholder token is a public constant, not a
 secret; local servers ignore it. None of this is set in `.env`, the container env,
-`settings.json` or the `Fleet.Agent` process, and it is never written to any file. The
-argv is unchanged: `--model <Model>` already routes the main loop. Each process start logs
-`Claude local model mode: base URL …, model …` at `Information`.
+`settings.json` or the `Fleet.Agent` process, and it is never written to any file. The only
+argv difference is `--effort` (§2.1); `--model <Model>` already routes the main loop. Each
+process start logs `Claude local model mode: base URL …, model …` at `Information`.
 
 **Credential isolation — four paths closed:**
 
@@ -197,9 +257,11 @@ update_agent_config agent_name=<agent> anthropic_base_url="" model=<claude-model
 reprovision_agent <agent>
 ```
 
-That restores the credentials bind and the `fleet.relay` binding. In code, revert the
-change; the added nullable column is ignored by older code, so the down-migration is
-optional.
+That restores the credentials bind and the `fleet.relay` binding. `off` is refused on a
+cloud agent (V8), so an agent set to `off` needs `effort=""` in the same call. In code, revert
+the change; the added nullable column is ignored by older code, so the down-migration is
+optional. Before reverting #349 in code, clear every local agent's non-empty `effort`: the
+older V7 rejects it at startup.
 
 **Version skew:** a new orchestrator with an old agent image runs a local agent with no
 local routing and no credentials, so its turns fail. Deploy the agent image together with

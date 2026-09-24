@@ -44,7 +44,8 @@ What the write accepts (V1–V7, `ClaudeLocalModel.DescribeConfigFault`):
 | V4 | model is 1–100 chars matching `^[A-Za-z0-9][A-Za-z0-9._:/-]*$` (`--model` is passed unquoted) |
 | V5 | model is not `claude-*`, `opus`, `sonnet` or `haiku` (case-insensitive) |
 | V6 | model does not start with `ollama/`, `lmstudio/` or a hosted prefix (`zai/`) — those select the codex path |
-| V7 | effort is empty |
+| V7 | effort is empty, or exactly `off`, `low`, `medium` or `xhigh` (case-sensitive) — see §2.1 |
+| V8 | `off` is rejected on a **cloud** claude agent (`ClaudeLocalModel.DescribeLocalOnlyEffortFault`): a local → cloud switch must not ship `--effort off` to Anthropic |
 
 A fault is a tool error or HTTP 400 and nothing is saved. A valid value is stored in
 canonical form (`scheme://host[:port]`, lowercased, default port and trailing `/` dropped).

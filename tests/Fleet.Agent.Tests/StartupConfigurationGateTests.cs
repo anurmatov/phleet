@@ -204,7 +204,7 @@ public class StartupConfigurationGateTests
     // V6
     [InlineData("claude", "ollama/qwen3:8b", LocalUrl, null, "selects the codex path")]
     // V7
-    [InlineData("claude", LocalTag, LocalUrl, "high", "Effort is not supported")]
+    [InlineData("claude", LocalTag, LocalUrl, "high", "must be empty (model default, sent as xhigh), off, low, medium or xhigh")]
     public void ClaudeLocalModel_EachFault_Throws(
         string provider, string model, string baseUrl, string? effort, string expected)
     {
@@ -214,6 +214,31 @@ public class StartupConfigurationGateTests
             () => AgentHostRegistration.ValidateStartupConfiguration(services, _ => null, NoFiles));
 
         Assert.Contains(expected, ex.Message);
+    }
+
+    [Theory]
+    [InlineData("off")]
+    [InlineData("low")]
+    [InlineData("medium")]
+    [InlineData("xhigh")]
+    [InlineData(null)]
+    [InlineData("")]
+    public void ClaudeLocalModel_TheThinkingVocabulary_Starts(string? effort)
+    {
+        using var services = BuildServices("claude", LocalTag, anthropicBaseUrl: LocalUrl, effort: effort);
+
+        AgentHostRegistration.ValidateStartupConfiguration(services, _ => null, NoFiles);
+    }
+
+    [Fact]
+    public void V8_CloudClaudeOff_ThrowsAtStartup()
+    {
+        using var services = BuildServices("claude", "claude-sonnet-5", effort: "off");
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => AgentHostRegistration.ValidateStartupConfiguration(services, _ => null, NoFiles));
+
+        Assert.Contains("applies only to local Claude models", ex.Message);
     }
 
     [Theory]

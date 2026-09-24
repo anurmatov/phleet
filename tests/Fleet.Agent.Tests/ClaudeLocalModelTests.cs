@@ -179,24 +179,78 @@ public class ClaudeLocalModelTests
     public void V6_CodexPathPrefix_Rejected(string model) =>
         Assert.Contains("selects the codex path", Fault(Url, model));
 
-    // ── V7 ───────────────────────────────────────────────────────────────────
+    // ── V7 (#349: local thinking vocabulary) ────────────────────────────────
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("off")]
+    [InlineData("low")]
+    [InlineData("medium")]
+    [InlineData("xhigh")]
+    public void V7_AcceptsTheLocalVocabulary(string? effort) =>
+        Assert.Null(Fault(Url, effort: effort));
+
+    [Theory]
+    [InlineData("high")]
+    [InlineData("max")]
+    [InlineData("none")]
+    [InlineData("minimal")]
+    [InlineData("XHIGH")]
+    [InlineData("off ")]
+    [InlineData(" low")]
+    [InlineData("OFF")]
+    public void V7_RejectsEverythingElse_Exactly(string effort) =>
+        Assert.Equal(
+            "Effort on a local Claude model must be empty (model default, sent as xhigh), off, low, medium or xhigh.",
+            Fault(Url, effort: effort));
+
+    // ── V8 (#349: off is local-only) ────────────────────────────────────────
+
+    [Fact]
+    public void V8_CloudClaudeOff_RejectedExactly() =>
+        Assert.Equal(
+            "Effort 'off' applies only to local Claude models; clear it or choose low, medium, high, xhigh or max.",
+            ClaudeLocalModel.DescribeLocalOnlyEffortFault("claude", null, "off"));
 
     [Theory]
     [InlineData("low")]
+    [InlineData("medium")]
+    [InlineData("high")]
+    [InlineData("xhigh")]
     [InlineData("max")]
-    [InlineData(" ")]
-    public void V7_Effort_Rejected(string effort) =>
-        Assert.Contains("Effort is not supported", Fault(Url, effort: effort));
+    [InlineData(null)]
+    [InlineData("")]
+    public void V8_CloudClaudeOtherEfforts_Accepted(string? effort) =>
+        Assert.Null(ClaudeLocalModel.DescribeLocalOnlyEffortFault("claude", null, effort));
 
     [Fact]
-    public void V7_EmptyEffort_Accepted() => Assert.Null(Fault(Url, effort: ""));
+    public void V8_LocalOff_AndNonClaudeOff_Accepted()
+    {
+        Assert.Null(ClaudeLocalModel.DescribeLocalOnlyEffortFault("claude", Url, "off"));
+        Assert.Null(ClaudeLocalModel.DescribeLocalOnlyEffortFault("codex", null, "off"));
+    }
+
+    // ── EffortArgument (#349) ────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData(null, "xhigh")]
+    [InlineData("", "xhigh")]
+    [InlineData("low", "low")]
+    [InlineData("medium", "medium")]
+    [InlineData("xhigh", "xhigh")]
+    public void EffortArgument_Table(string? effort, string? expected) =>
+        Assert.Equal(expected, ClaudeLocalModel.EffortArgument(effort));
+
+    [Fact]
+    public void EffortArgument_OffMeansNoFlag() => Assert.Null(ClaudeLocalModel.EffortArgument("off"));
 
     // ── D2: the child environment ────────────────────────────────────────────
 
     [Fact]
     public void BuildEnvironment_IsExactlyTheThirteenPairsInOrder()
     {
-        var env = ClaudeLocalModel.BuildEnvironment(Url, Tag);
+        var env = ClaudeLocalModel.BuildEnvironment(Url, Tag, "xhigh");
 
         Assert.Equal(
             new KeyValuePair<string, string>[]
@@ -219,6 +273,41 @@ public class ClaudeLocalModelTests
     }
 
     [Fact]
-    public void RemovedEnvVars_IsTheOAuthToken() =>
-        Assert.Equal(["CLAUDE_CODE_OAUTH_TOKEN"], ClaudeLocalModel.RemovedEnvVars);
+    public void BuildEnvironment_OffAppendsTheExtraBodyConstantLast()
+    {
+        var env = ClaudeLocalModel.BuildEnvironment(Url, Tag, "off");
+        Assert.Equal(14, env.Count);
+        Assert.Equal(
+            new KeyValuePair<string, string>(
+                "CLAUDE_CODE_EXTRA_BODY", """{"thinking":{"type":"disabled"}}"""),
+            env[^1]);
+        // The thirteen inherited entries keep their order and are untouched.
+        Assert.Equal("http://host.docker.internal:11434", env[0].Value);
+        Assert.Equal(Tag, env[^2].Value);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("low")]
+    [InlineData("medium")]
+    [InlineData("xhigh")]
+    public void BuildEnvironment_NonOff_IsByteIdenticalToToday(string? effort)
+    {
+        var env = ClaudeLocalModel.BuildEnvironment(Url, Tag, effort);
+        Assert.Equal(13, env.Count);
+        Assert.DoesNotContain(env, e => e.Key == "CLAUDE_CODE_EXTRA_BODY");
+    }
+
+    [Fact]
+    public void RemovedEnvVars_IsTheOAuthTokenPlusTheFiveThinkingOverrides() =>
+        Assert.Equal(
+        [
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_EFFORT_LEVEL",
+            "CLAUDE_CODE_EXTRA_BODY",
+            "MAX_THINKING_TOKENS",
+            "CLAUDE_CODE_DISABLE_THINKING",
+            "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
+        ], ClaudeLocalModel.RemovedEnvVars);
 }

@@ -76,7 +76,8 @@ public class AgentPatchHelpersClaudeLocalModelTests
     [InlineData("http://host.docker.internal:11434", "qwen;id", "", null, "not allowed in a CLI argument")]
     [InlineData("http://host.docker.internal:11434", "haiku", "", null, "is a Claude model id")]
     [InlineData("http://host.docker.internal:11434", "zai/glm-5.3", "", null, "selects the codex path")]
-    [InlineData("http://host.docker.internal:11434", LocalTag, "low", null, "Effort is not supported")]
+    [InlineData("http://host.docker.internal:11434", LocalTag, "high", null, "must be empty (model default, sent as xhigh), off, low, medium or xhigh")]
+    [InlineData("http://host.docker.internal:11434", LocalTag, "max", null, "must be empty (model default, sent as xhigh), off, low, medium or xhigh")]
     [InlineData("http://host.docker.internal:11434", LocalTag, "", "gemini", "applies only to provider claude")]
     public void Rejected_RowUnchanged(string baseUrl, string model, string effort, string? provider, string expected)
     {
@@ -91,6 +92,40 @@ public class AgentPatchHelpersClaudeLocalModelTests
         Assert.Equal("claude-sonnet-5", stored.Model);
         Assert.Equal("claude", stored.Provider);
         Assert.Null(stored.Effort);
+    }
+
+    [Fact]
+    public void V8_CloudClaudeOff_Rejected()
+    {
+        Seed();
+
+        var fault = Put(null, model: "claude-sonnet-5", effort: "off");
+
+        Assert.Equal(
+            "Effort 'off' applies only to local Claude models; clear it or choose low, medium, high, xhigh or max.",
+            fault);
+        Assert.Null(Stored().Effort);
+    }
+
+    [Fact]
+    public void V8_ClearingTheBaseUrl_WithOffStillSet_Rejected()
+    {
+        Seed("http://host.docker.internal:11434", LocalTag);
+        // the stored effort would be off; simulate the flip-to-cloud patch
+        var fault = Put("", model: "claude-sonnet-5", effort: "off");
+
+        Assert.Contains("applies only to local Claude models", fault);
+    }
+
+    [Fact]
+    public void LocalOff_IsAccepted()
+    {
+        Seed("http://host.docker.internal:11434", LocalTag);
+
+        var fault = Put("http://host.docker.internal:11434", LocalTag, "off");
+
+        Assert.Null(fault);
+        Assert.Equal("off", Stored().Effort);
     }
 
     [Fact]

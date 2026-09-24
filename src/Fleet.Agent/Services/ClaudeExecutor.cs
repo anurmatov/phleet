@@ -465,6 +465,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
         useLock ? WriteStdinLineAsync(message, ct) : WriteStdinLineUnlockedAsync(message, ct);
 
     internal AgentProgress ParseProgressForTests(ClaudeStreamEvent evt) => ParseProgress(evt);
+    internal string BuildArgsForTests(string? resumeSessionId = null) => BuildArgs(resumeSessionId);
     internal bool TurnCommittedToFinalAnswerForTests => _turnCommittedToFinalAnswer;
     internal void SetProcessForTests(Process? process) => _process = process;
     internal void SetEventChannelForTests(System.Threading.Channels.Channel<ClaudeStreamEvent> channel) => _eventChannel = channel;
@@ -626,8 +627,17 @@ public sealed class ClaudeExecutor : IAgentExecutor
         // #340 D2. Off, psi.Environment is never touched, so the child inherits exactly as before.
         if (ConfigureLocalModelEnvironment(() => psi.Environment, _config))
         {
-            _logger.LogInformation("Claude local model mode: base URL {BaseUrl}, model {Model}",
+            // #349 observability: what the child will send for thinking. No URL, model content
+            // or token — the base URL is logged by the #340 line only as configured.
+            var effortArg = ClaudeLocalModel.EffortArgument(_config.Effort);
+            _logger.LogInformation(
+                "Claude local model mode: base URL {BaseUrl}, model {Model}",
                 _config.AnthropicBaseUrl, _config.Model);
+            _logger.LogInformation(
+                "Claude local thinking: effort={Effort} wire=thinking:{Thinking} effort:{WireEffort}",
+                string.IsNullOrEmpty(_config.Effort) ? "default" : _config.Effort,
+                _config.Effort == "off" ? "disabled" : "adaptive",
+                _config.Effort == "off" ? "none" : effortArg);
         }
 
         _process = Process.Start(psi)
@@ -690,7 +700,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
         foreach (var name in ClaudeLocalModel.RemovedEnvVars)
             env.Remove(name);
 
-        foreach (var (name, value) in ClaudeLocalModel.BuildEnvironment(cfg.AnthropicBaseUrl!, cfg.Model))
+        foreach (var (name, value) in ClaudeLocalModel.BuildEnvironment(cfg.AnthropicBaseUrl!, cfg.Model, cfg.Effort))
             env[name] = value;
     }
 
@@ -760,8 +770,14 @@ public sealed class ClaudeExecutor : IAgentExecutor
         sb.Append($"--max-turns {_config.MaxTurns} ");
         sb.Append($"--permission-mode {_config.PermissionMode} ");
 
-        if (!string.IsNullOrWhiteSpace(_config.Effort))
-            sb.Append($"--effort {_config.Effort} ");
+        // #349: local mode owns its own effort vocabulary and default (null → xhigh, off → no
+        // flag). The cloud branch below stays byte-identical to today.
+        var localMode = ClaudeLocalModel.IsEnabled(_config.Provider, _config.AnthropicBaseUrl);
+        var effortArgument = localMode
+            ? ClaudeLocalModel.EffortArgument(_config.Effort)
+            : (string.IsNullOrWhiteSpace(_config.Effort) ? null : _config.Effort);
+        if (effortArgument is not null)
+            sb.Append($"--effort {effortArgument} ");
 
         if (!string.IsNullOrWhiteSpace(_config.JsonSchema))
             sb.Append($"--json-schema \"{EscapeArg(_config.JsonSchema)}\" ");

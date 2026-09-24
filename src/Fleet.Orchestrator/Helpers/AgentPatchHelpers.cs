@@ -23,6 +23,13 @@ internal static class AgentPatchHelpers
             return fault;
         }
 
+        // #349 V8: off exists only in local mode; a local → cloud switch must not ship it upstream.
+        if (ClaudeLocalModel.DescribeLocalOnlyEffortFault(agent.Provider, agent.AnthropicBaseUrl, agent.Effort)
+            is { } effortFault)
+        {
+            return effortFault;
+        }
+
         if (ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl))
             agent.AnthropicBaseUrl = ClaudeLocalModel.CanonicalizeBaseUrl(agent.AnthropicBaseUrl!);
 

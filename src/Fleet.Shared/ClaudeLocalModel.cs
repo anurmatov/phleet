@@ -28,8 +28,39 @@ public static partial class ClaudeLocalModel
     public const int MaxBaseUrlLength = 500;
     public const int MaxModelLength = 100;
 
-    /// <summary>Removed from the claude child's environment in local mode (D2).</summary>
-    public static IReadOnlyList<string> RemovedEnvVars { get; } = ["CLAUDE_CODE_OAUTH_TOKEN"];
+    /// <summary>Removed from the claude child's environment in local mode (D2, #349).</summary>
+    public static IReadOnlyList<string> RemovedEnvVars { get; } =
+    [
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        // #349: all five shape the thinking field the operator is choosing through Effort.
+        // CLAUDE_CODE_EFFORT_LEVEL overrides --effort (captured on 2.1.280); the rest change or
+        // remove the thinking field, which on Ollama leaves thinking ON rather than off.
+        "CLAUDE_CODE_EFFORT_LEVEL",
+        "CLAUDE_CODE_EXTRA_BODY",
+        "MAX_THINKING_TOKENS",
+        "CLAUDE_CODE_DISABLE_THINKING",
+        "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
+    ];
+
+    /// <summary>
+    /// The local-mode thinking vocabulary (#349): off, low, medium, xhigh. Pinned to the Qwen3.8
+    /// descriptor on Ollama (false/low/medium/xhigh) — NOT discovered from the server, so no
+    /// inference call sits on a write, provision or startup path (#340 invariant).
+    /// </summary>
+    public static IReadOnlyList<string> ThinkingLevels { get; } = ["off", "low", "medium", "xhigh"];
+
+    /// <summary>
+    /// What a null/empty Effort means in local mode (#349): send xhigh explicitly. Claude Code's
+    /// own default (`high`) is xhigh on Ollama ≤ 0.34.2 but resolves to medium on ≥ 0.34.3, so the
+    /// default must not depend on the server release.
+    /// </summary>
+    public const string DefaultThinkingLevel = "xhigh";
+
+    /// <summary>
+    /// The fixed body merged into every request when thinking is off (#349). A constant — no
+    /// operator input ever reaches CLAUDE_CODE_EXTRA_BODY, because it merges into every request.
+    /// </summary>
+    public const string DisabledThinkingExtraBody = """{"thinking":{"type":"disabled"}}""";
 
     private static readonly string[] ClaudeModelAliases = ["opus", "sonnet", "haiku"];
 
@@ -81,12 +112,38 @@ public static partial class ClaudeLocalModel
             }
         }
 
-        // V7
-        if (!string.IsNullOrEmpty(effort))
-            return "Effort is not supported on local Claude models; clear it.";
+        // V7 (#349)
+        if (!string.IsNullOrEmpty(effort) && !ThinkingLevels.Contains(effort))
+            return "Effort on a local Claude model must be empty (model default, sent as xhigh), off, low, medium or xhigh.";
 
         return null;
     }
+
+    /// <summary>
+    /// The cloud-side twin of V7 (#349 new V8): <c>off</c> exists only in local mode, and a local →
+    /// cloud switch (base URL cleared) must not ship <c>--effort off</c> to Anthropic. Null unless
+    /// the provider is claude, the agent is NOT in local mode, and the effort is exactly off.
+    /// </summary>
+    public static string? DescribeLocalOnlyEffortFault(string? provider, string? baseUrl, string? effort)
+    {
+        if (string.IsNullOrEmpty(baseUrl) &&
+            string.Equals(provider, "claude", StringComparison.Ordinal) &&
+            effort == "off")
+        {
+            return "Effort 'off' applies only to local Claude models; clear it or choose low, medium, high, xhigh or max.";
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The <c>--effort</c> value for a local-mode claude child (#349): null/empty → xhigh (the
+    /// version-independent default), <c>off</c> → no flag (thinking is disabled through
+    /// <see cref="DisabledThinkingExtraBody"/> instead), otherwise the value verbatim.
+    /// </summary>
+    public static string? EffortArgument(string? effort) =>
+        string.IsNullOrEmpty(effort) ? DefaultThinkingLevel
+        : effort == "off" ? null
+        : effort;
 
     /// <summary>
     /// <c>scheme://host[:port]</c>: scheme and host lowercased, default port dropped, trailing
@@ -100,22 +157,32 @@ public static partial class ClaudeLocalModel
     /// claude</c> (<c>cmd/launch/claude.go</c> <c>envVars</c> + <c>modelEnvVars</c>, commit
     /// <c>01c0fbfd</c>); only the auth-token value differs.
     /// </summary>
-    public static IReadOnlyList<KeyValuePair<string, string>> BuildEnvironment(string baseUrl, string model) =>
-    [
-        new("ANTHROPIC_BASE_URL", baseUrl),
-        new("ANTHROPIC_API_KEY", ""),
-        new("ANTHROPIC_AUTH_TOKEN", PlaceholderAuthToken),
-        new("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
-        new("CLAUDE_CODE_TOTAL_TOKENS_REMINDER", "off"),
-        new("DISABLE_ERROR_REPORTING", "1"),
-        new("DISABLE_FEEDBACK_COMMAND", "1"),
-        new("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", "1"),
-        new("CLAUDE_CODE_AUTO_MODE_SERVER", "0"),
-        new("ANTHROPIC_DEFAULT_OPUS_MODEL", model),
-        new("ANTHROPIC_DEFAULT_SONNET_MODEL", model),
-        new("ANTHROPIC_DEFAULT_HAIKU_MODEL", model),
-        new("CLAUDE_CODE_SUBAGENT_MODEL", model),
-    ];
+    public static IReadOnlyList<KeyValuePair<string, string>> BuildEnvironment(string baseUrl, string model, string? effort = null)
+    {
+        var entries = new List<KeyValuePair<string, string>>
+        {
+            new("ANTHROPIC_BASE_URL", baseUrl),
+            new("ANTHROPIC_API_KEY", ""),
+            new("ANTHROPIC_AUTH_TOKEN", PlaceholderAuthToken),
+            new("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
+            new("CLAUDE_CODE_TOTAL_TOKENS_REMINDER", "off"),
+            new("DISABLE_ERROR_REPORTING", "1"),
+            new("DISABLE_FEEDBACK_COMMAND", "1"),
+            new("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", "1"),
+            new("CLAUDE_CODE_AUTO_MODE_SERVER", "0"),
+            new("ANTHROPIC_DEFAULT_OPUS_MODEL", model),
+            new("ANTHROPIC_DEFAULT_SONNET_MODEL", model),
+            new("ANTHROPIC_DEFAULT_HAIKU_MODEL", model),
+            new("CLAUDE_CODE_SUBAGENT_MODEL", model),
+        };
+
+        // #349: appended only for off, after the thirteen inherited entries, whose order is
+        // untouched. Every other level keeps the byte-identical thirteen-entry environment.
+        if (effort == "off")
+            entries.Add(new("CLAUDE_CODE_EXTRA_BODY", DisabledThinkingExtraBody));
+
+        return entries;
+    }
 
     // V2 and V3. The fault text never includes the value: it may carry credentials.
     private static string? DescribeBaseUrlFault(string baseUrl)

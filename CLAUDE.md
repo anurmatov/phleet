@@ -167,9 +167,11 @@ A claude agent may run Claude Code against a local Anthropic-compatible server (
 setting the per-agent DB field `AnthropicBaseUrl` (`update_agent_config anthropic_base_url=…`, the
 dashboard's Claude-only field, or `PUT /api/agents/{name}/config`). **Local mode ⇔ provider
 `claude` and a non-empty `AnthropicBaseUrl`**; `ClaudeLocalModel.IsEnabled` in `Fleet.Shared` is the
-one predicate the orchestrator and agent both use. `Model` is the server's bare tag, `Effort` must be
-empty, and the URL is an origin only (`http://<server-address>:11434`, never `…/v1` — Claude Code
-appends `/v1/messages` itself). `ClaudeLocalModel.DescribeConfigFault` (V1–V7) is enforced at write
+one predicate the orchestrator and agent both use. `Model` is the server's bare tag, `Effort` is the
+thinking level `off`/`low`/`medium`/`xhigh` (empty = model default, sent as `xhigh`), and the URL is
+an origin only (`http://<server-address>:11434`, never `…/v1` — Claude Code appends `/v1/messages`
+itself). `ClaudeLocalModel.DescribeConfigFault` (V1–V7) and `DescribeLocalOnlyEffortFault` (V8: `off`
+is local-only) are enforced at write
 time (tool error / HTTP 400, nothing saved; valid values stored canonical), at provision time
 (`GenerateAppsettingsJson` throws) and at agent startup (`ValidateStartupConfiguration`, exit 1).
 

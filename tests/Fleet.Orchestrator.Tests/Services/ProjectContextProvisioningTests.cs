@@ -397,10 +397,10 @@ public class ProjectContextProvisioningTests
             ContainerProvisioningService.GenerateMcpJson(agent, "http://fleet-memory:3100"),
             ContainerProvisioningService.GenerateMcpJson(agent, "http://fleet-memory:3100", contextMcpUrl: null));
         Assert.Equal(
-            ContainerProvisioningService.GenerateSettingsJson(agent, "acto"),
-            ContainerProvisioningService.GenerateSettingsJson(agent, "acto", grantContextFallback: false));
+            ContainerProvisioningService.GenerateSettingsJson(agent, "cto-agent"),
+            ContainerProvisioningService.GenerateSettingsJson(agent, "cto-agent", grantContextFallback: false));
         Assert.Equal(
-            ContainerProvisioningService.GenerateAppsettingsJson(agent, "acto"),
-            ContainerProvisioningService.GenerateAppsettingsJson(agent, "acto", routing: null));
+            ContainerProvisioningService.GenerateAppsettingsJson(agent, "cto-agent"),
+            ContainerProvisioningService.GenerateAppsettingsJson(agent, "cto-agent", routing: null));
     }
 }

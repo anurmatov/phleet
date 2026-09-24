@@ -18,7 +18,7 @@ namespace Fleet.Orchestrator.Tests.Services;
 /// </summary>
 internal sealed class ProvisioningHarness : IAsyncDisposable
 {
-    public const string CtoAgent = "acto";
+    public const string CtoAgent = "cto-agent";
 
     private readonly SqliteConnection _connection;
 

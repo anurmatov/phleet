@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Fleet.Orchestrator.Data;
+using Fleet.Shared;
 using Microsoft.EntityFrameworkCore;
 
 namespace Fleet.Orchestrator.Services;
@@ -170,6 +171,12 @@ public sealed class ContainerProvisioningService(
         }
         else if (agent.Provider == "codex")
         {
+            // A hosted-provider agent must hold no OpenAI credential (#335 D6): its model is served
+            // by the vendor through the loopback adapter, and the credential would be one more
+            // secret in a container whose model runs a root shell.
+            if (IsHostedProvider(agent))
+                return AppendCredentialMounts(agent, binds);
+
             // Mount codex credentials for seeding new codex containers (entrypoint.sh reads this)
             var codexTokenStorePath = Path.Combine(baseDir, ".codex-credentials.json");
             if (File.Exists(codexTokenStorePath))
@@ -183,6 +190,11 @@ public sealed class ContainerProvisioningService(
                 binds.Add("./.claude-credentials.json:/root/.claude-host/.credentials.json:ro");
         }
 
+        return AppendCredentialMounts(agent, binds);
+    }
+
+    private static List<string> AppendCredentialMounts(Agent agent, List<string> binds)
+    {
         // Credential file mounts (from Files section in Credentials view)
         foreach (var mount in agent.CredentialMounts)
         {
@@ -192,6 +204,10 @@ public sealed class ContainerProvisioningService(
 
         return binds;
     }
+
+    /// <summary>True when this agent's model routes to a hosted provider (#335 D1).</summary>
+    internal static bool IsHostedProvider(Agent agent) =>
+        HostedModelProviders.TryResolve(agent.Provider, agent.Model, out _, out _);
 
     private static List<string> BuildNetworks(Agent agent)
     {
@@ -946,6 +962,7 @@ public sealed class ContainerProvisioningService(
         }
 
         var projects   = agent.Projects.Select(p => p.ProjectName).ToList();
+        var hosted     = HostedModelProviders.TryResolve(agent.Provider, agent.Model, out var hostedProvider, out _);
 
         var obj = new
         {
@@ -973,6 +990,11 @@ public sealed class ContainerProvisioningService(
                 agent.JsonSchema,
                 agent.AgentsJson,
                 agent.CodexSandboxMode,
+
+                // #335 D5. Computed from the shared registry so entrypoint.sh can decide the key
+                // handoff without a prefix list of its own, and the agent can check parity (D8).
+                HostedProvider       = hosted,
+                HostedProviderKeyEnv = hosted ? hostedProvider.KeyEnvVar : null,
 
                 // #309. Every assigned instruction, as roles/ directory names, in load order.
                 //

@@ -2,6 +2,46 @@
 # Read provider from generated appsettings (default: claude)
 PROVIDER=$(node -e "try{console.log(require('/app/appsettings.json').Agent.Provider)}catch{console.log('claude')}" 2>/dev/null || echo "claude")
 
+# Hosted model provider (#335 D5). The orchestrator computes both values from the shared registry;
+# this script holds no prefix list of its own. When set, the key moves from this environment into a
+# 0400 file that the agent reads once and deletes, so PID 1 never carries it.
+HOSTED_PROVIDER=$(node -e "try{console.log(require('/app/appsettings.json').Agent.HostedProvider===true?'true':'false')}catch{console.log('false')}" 2>/dev/null || echo "false")
+HOSTED_KEY_ENV=$(node -e "try{const v=require('/app/appsettings.json').Agent.HostedProviderKeyEnv;console.log(typeof v==='string'?v:'')}catch{console.log('')}" 2>/dev/null || echo "")
+HOSTED_KEY_FILE=/run/phleet-hosted-key
+
+if [ "$HOSTED_PROVIDER" = "true" ]; then
+    # Never print the value — only the variable name.
+    if ! [[ "$HOSTED_KEY_ENV" =~ ^[A-Z_][A-Z0-9_]*$ ]]; then
+        echo "ERROR: hosted provider enabled but Agent.HostedProviderKeyEnv is missing or invalid." >&2
+        exit 1
+    fi
+    _HOSTED_KEY_VALUE="${!HOSTED_KEY_ENV:-}"
+    _HOSTED_KEY_TRIMMED="$(printf '%s' "$_HOSTED_KEY_VALUE" | tr -d '[:space:]')"
+    if [ -z "$_HOSTED_KEY_TRIMMED" ] || [ "$_HOSTED_KEY_TRIMMED" = "<secret>" ]; then
+        echo "ERROR: ${HOSTED_KEY_ENV} is unset, blank or '<secret>'. Put the key in .env, attach ${HOSTED_KEY_ENV} as an Env Ref, then reprovision." >&2
+        exit 1
+    fi
+    if ! ( umask 077 && rm -f "$HOSTED_KEY_FILE" && printf '%s' "$_HOSTED_KEY_VALUE" > "$HOSTED_KEY_FILE" && chmod 0400 "$HOSTED_KEY_FILE" ); then
+        rm -f "$HOSTED_KEY_FILE" 2>/dev/null
+        echo "ERROR: could not write the ${HOSTED_KEY_ENV} key file ${HOSTED_KEY_FILE}." >&2
+        exit 1
+    fi
+    unset _HOSTED_KEY_VALUE _HOSTED_KEY_TRIMMED
+fi
+
+# Unconditionally, for every agent and provider: these names are reserved for hosted routing and
+# must not reach PID 1 or anything it starts. A non-hosted agent that carries one loses it here.
+# The list must equal HostedModelProviders.KeyEnvVars; EntrypointReservedKeysTests reads the line
+# directly below the marker, so keep it one line and in this exact form.
+# phleet:reserved-key-names
+for _HOSTED_VAR in ZAI_CODING_PLAN_API_KEY; do
+    if [ -n "${!_HOSTED_VAR:-}" ] && [ "$_HOSTED_VAR" != "$HOSTED_KEY_ENV" ]; then
+        echo "NOTE: unsetting ${_HOSTED_VAR}; it is reserved for hosted-provider routing and this agent does not use it." >&2
+    fi
+    unset "$_HOSTED_VAR"
+done
+unset _HOSTED_VAR
+
 if [ "$PROVIDER" = "gemini" ]; then
     # Gemini auth — OAuth credentials mounted writable directly as ~/.gemini/oauth_creds.json.
     # Two-level refresh: (1) the CLI's google-auth-library refreshes tokens in-place on expiry;
@@ -108,8 +148,12 @@ PYEOF
     fi
 
 elif [ "$PROVIDER" = "codex" ]; then
-    # Codex auth — always overwrite from host mount (source of truth, kept fresh by AuthTokenRefreshWorkflow)
-    if [ -f /root/.codex-host/auth.json ]; then
+    if [ "$HOSTED_PROVIDER" = "true" ]; then
+        # A hosted-provider agent holds no OpenAI credential (#335 D6). /root/.codex persists in the
+        # workspace volume, so an auth.json from an earlier model must be removed, not just skipped.
+        rm -f /root/.codex/auth.json
+    elif [ -f /root/.codex-host/auth.json ]; then
+        # Codex auth — always overwrite from host mount (source of truth, kept fresh by AuthTokenRefreshWorkflow)
         mkdir -p /root/.codex
         cp /root/.codex-host/auth.json /root/.codex/auth.json
     fi

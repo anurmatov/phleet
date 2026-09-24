@@ -1,0 +1,50 @@
+event: response.created
+data: {"response":{"created_at":1790232149,"id":"resp_2026092400000000000000000001","model":"glm-5.3","object":"response","output":[],"prompt_cache_key":"00000000-0000-0000-0000-000000000000","status":"in_progress"},"sequence_number":0,"type":"response.created"}
+
+event: response.in_progress
+data: {"response":{"created_at":1790232149,"id":"resp_2026092400000000000000000001","model":"glm-5.3","object":"response","output":[],"prompt_cache_key":"00000000-0000-0000-0000-000000000000","status":"in_progress"},"sequence_number":1,"type":"response.in_progress"}
+
+event: response.output_item.added
+data: {"item":{"content":[],"id":"msg_resp_2026092400000000000000000001_1","role":"assistant","status":"in_progress","type":"message"},"output_index":0,"sequence_number":2,"type":"response.output_item.added"}
+
+event: response.content_part.added
+data: {"content_index":0,"item_id":"msg_resp_2026092400000000000000000001_1","output_index":0,"part":{"annotations":[],"text":"","type":"output_text"},"sequence_number":3,"type":"response.content_part.added"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"PRO","item_id":"msg_resp_2026092400000000000000000001_1","logprobs":[],"output_index":0,"sequence_number":4,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"BE","item_id":"msg_resp_2026092400000000000000000001_1","logprobs":[],"output_index":0,"sequence_number":5,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"-","item_id":"msg_resp_2026092400000000000000000001_1","logprobs":[],"output_index":0,"sequence_number":6,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"VALUE","item_id":"msg_resp_2026092400000000000000000001_1","logprobs":[],"output_index":0,"sequence_number":7,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"-","item_id":"msg_resp_2026092400000000000000000001_1","logprobs":[],"output_index":0,"sequence_number":8,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"7","item_id":"msg_resp_2026092400000000000000000001_1","logprobs":[],"output_index":0,"sequence_number":9,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"F","item_id":"msg_resp_2026092400000000000000000001_1","logprobs":[],"output_index":0,"sequence_number":10,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"3A91","item_id":"msg_resp_2026092400000000000000000001_1","logprobs":[],"output_index":0,"sequence_number":11,"type":"response.output_text.delta"}
+
+event: response.output_text.done
+data: {"content_index":0,"item_id":"msg_resp_2026092400000000000000000001_1","output_index":0,"sequence_number":12,"text":"PROBE-VALUE-7F3A91","type":"response.output_text.done"}
+
+event: response.content_part.done
+data: {"content_index":0,"item_id":"msg_resp_2026092400000000000000000001_1","output_index":0,"part":{"annotations":[],"text":"PROBE-VALUE-7F3A91","type":"output_text"},"sequence_number":13,"type":"response.content_part.done"}
+
+event: response.output_item.done
+data: {"item":{"content":[{"annotations":[],"text":"PROBE-VALUE-7F3A91","type":"output_text"}],"id":"msg_resp_2026092400000000000000000001_1","role":"assistant","status":"completed","type":"message"},"output_index":0,"sequence_number":14,"type":"response.output_item.done"}
+
+event: response.completed
+data: {"response":{"conversation_id":"","created_at":1790232149,"error":null,"id":"resp_2026092400000000000000000001","incomplete_details":null,"instructions":"<scrubbed: the Codex base instructions echoed back>","metadata":null,"model":"glm-5.3","object":"response","output":[{"content":[{"annotations":[],"text":"PROBE-VALUE-7F3A91","type":"output_text"}],"id":"msg_resp_2026092400000000000000000001_1","role":"assistant","status":"completed","type":"message"}],"parallel_tool_calls":true,"previous_response_id":"","prompt_cache_key":"00000000-0000-0000-0000-000000000000","status":"completed","usage":{"input_tokens":4690,"input_tokens_details":{"cached_tokens":4608},"output_tokens":12,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":4702}},"sequence_number":15,"type":"response.completed"}
+
+data: [DONE]
+

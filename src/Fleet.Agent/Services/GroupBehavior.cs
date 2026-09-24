@@ -455,6 +455,11 @@ public sealed class GroupBehavior
         });
     }
 
+    internal Task ApplyTokenUpdateForTestsAsync(string tokenJson) => ApplyTokenUpdateAsync(tokenJson);
+
+    /// <summary>Where a codex token broadcast writes. Settable so tests do not touch the real home.</summary>
+    internal string CodexAuthPath { get; set; } = "/root/.codex/auth.json";
+
     private async Task ApplyTokenUpdateAsync(string tokenJson)
     {
         var shared = JsonNode.Parse(tokenJson);
@@ -481,6 +486,14 @@ public sealed class GroupBehavior
 
         if (provider == "codex")
         {
+            // A hosted-provider agent holds no OpenAI credential (#335 D6), and this broadcast would
+            // recreate auth.json in the persisted workspace volume. Nothing to restart either.
+            if (_agentConfig.HostedProvider)
+            {
+                _logger.LogDebug("Codex token update ignored — this agent routes to a hosted provider");
+                return;
+            }
+
             await ApplyCodexTokenUpdateAsync(shared!, newAccessToken, newRefreshToken, newExpiresAt.Value);
         }
         else if (provider == "gemini")
@@ -533,7 +546,7 @@ public sealed class GroupBehavior
 
     private async Task ApplyCodexTokenUpdateAsync(JsonNode payload, string newAccessToken, string? newRefreshToken, long newExpiresAt)
     {
-        const string authPath = "/root/.codex/auth.json";
+        var authPath = CodexAuthPath;
 
         var newIdToken = payload["idToken"]?.GetValue<string>();
         var newAccountId = payload["accountId"]?.GetValue<string>();

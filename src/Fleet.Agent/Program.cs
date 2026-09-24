@@ -131,4 +131,16 @@ if (!isCliMode)
     });
 }
 
-await app.RunAsync();
+// Same reason as the startup gate above: a hosted service that throws from StartAsync (the
+// hosted-provider loopback adapter failing to bind, #335) must end the process with a non-zero
+// status, not rely on unhandled-exception propagation. RunAsync has disposed the host by the time
+// it throws, so Exit here does not race the host's own shutdown.
+try
+{
+    await app.RunAsync();
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine($"Fleet.Agent host failed, exiting 1: {ex.Message}");
+    Environment.Exit(1);
+}

@@ -3,6 +3,8 @@ using Fleet.Agent.Configuration;
 using Fleet.Agent.Interfaces;
 using Fleet.Conversations.Contracts;
 using Fleet.Agent.Services;
+using Fleet.Agent.Services.HostedProviders;
+using Fleet.Shared;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -55,6 +57,16 @@ public static class AgentHostRegistration
         services.AddSingleton<CodexExecutor>();
         services.AddSingleton<GeminiExecutor>();
 
+        // Hosted provider (#335 D4/D5). Keyed off the orchestrator-emitted flag, the same value
+        // entrypoint.sh read to decide whether to hand a key over. Absent, nothing is constructed
+        // and CodexExecutor's optional adapter parameter resolves to null.
+        if (configuration.GetValue<bool>($"{AgentOptions.Section}:{nameof(AgentOptions.HostedProvider)}"))
+        {
+            services.AddSingleton<HostedProviderKeyStore>();
+            services.AddSingleton<HostedProviderAdapterHost>();
+            services.AddHostedService(sp => sp.GetRequiredService<HostedProviderAdapterHost>());
+        }
+
         services.AddSingleton<IAgentExecutor>(sp =>
         {
             var provider = sp.GetRequiredService<IOptions<AgentOptions>>().Value.Provider;
@@ -95,7 +107,14 @@ public static class AgentHostRegistration
     /// would end the test host.
     /// </para>
     /// <para>
-    /// The only fault it catches today is a codex agent whose model names a local provider
+    /// For every provider it first checks hosted-provider parity (#335 D8): the orchestrator's
+    /// <c>HostedProvider</c> / <c>HostedProviderKeyEnv</c> must match what this image's own registry
+    /// computes for the model. A mismatch means orchestrator and agent image disagree about where the
+    /// model routes. For a hosted agent it then loads the key file, which fails on a missing, blank
+    /// or <c>&lt;secret&gt;</c> key, or on a file that cannot be deleted.
+    /// </para>
+    /// <para>
+    /// It also catches a codex agent whose model names a local provider
     /// (<c>ollama/…</c>, <c>lmstudio/…</c>) with no <c>CODEX_OSS_BASE_URL</c> to reach it. That is
     /// misconfiguration, not degradation — there is no endpoint. It has to stop the host, because
     /// nothing downstream will: <c>/health</c> answers ok unconditionally and
@@ -108,23 +127,61 @@ public static class AgentHostRegistration
     {
         var agent = services.GetRequiredService<IOptions<AgentOptions>>().Value;
 
+        if (DescribeHostedProviderFault(services, agent) is { } hostedFault)
+            Fail(hostedFault);
+
         if (agent.Provider != "codex")
             return;
 
         var readEnv = environmentReader ?? Environment.GetEnvironmentVariable;
         if (CodexExecutor.DescribeLocalModelFault(
-                agent.Model, readEnv(CodexExecutor.OssBaseUrlEnvVar)) is not { } fault)
+                agent.Model, readEnv(CodexExecutor.OssBaseUrlEnvVar)) is { } fault)
         {
-            return;
+            Fail(fault);
         }
 
-        // Logged before the throw so the container's last line names the cause, rather than an
-        // unhandled-exception stack the operator has to read to the bottom of.
-        services.GetRequiredService<ILoggerFactory>()
-            .CreateLogger(typeof(AgentHostRegistration).FullName!)
-            .LogCritical("Agent '{Agent}' cannot start: {Fault}", agent.Name, fault);
+        void Fail(string fault)
+        {
+            // Logged before the throw so the container's last line names the cause, rather than an
+            // unhandled-exception stack the operator has to read to the bottom of.
+            services.GetRequiredService<ILoggerFactory>()
+                .CreateLogger(typeof(AgentHostRegistration).FullName!)
+                .LogCritical("Agent '{Agent}' cannot start: {Fault}", agent.Name, fault);
 
-        throw new InvalidOperationException(fault);
+            throw new InvalidOperationException(fault);
+        }
+    }
+
+    /// <summary>
+    /// D8 parity, then the key load for a hosted agent. Returns the fault text, or null.
+    /// </summary>
+    private static string? DescribeHostedProviderFault(IServiceProvider services, AgentOptions agent)
+    {
+        var resolved = HostedModelProviders.TryResolve(agent.Provider, agent.Model, out var provider, out _);
+        var expectedKeyEnv = resolved ? provider.KeyEnvVar : null;
+
+        if (resolved != agent.HostedProvider
+            || !string.Equals(expectedKeyEnv, agent.HostedProviderKeyEnv, StringComparison.Ordinal))
+        {
+            return "Hosted provider config parity failed: the orchestrator emitted "
+                 + $"HostedProvider={agent.HostedProvider}, HostedProviderKeyEnv={agent.HostedProviderKeyEnv ?? "null"}, "
+                 + $"but this agent image resolves provider '{agent.Provider}' model '{agent.Model}' to "
+                 + $"HostedProvider={resolved}, HostedProviderKeyEnv={expectedKeyEnv ?? "null"}. "
+                 + "The orchestrator and agent images disagree; redeploy both and reprovision.";
+        }
+
+        if (!resolved)
+            return null;
+
+        try
+        {
+            services.GetRequiredService<HostedProviderKeyStore>().Load(provider.KeyEnvVar);
+            return null;
+        }
+        catch (InvalidOperationException ex)
+        {
+            return ex.Message;
+        }
     }
 
     /// <summary>CLI mode: run a single task and exit.</summary>

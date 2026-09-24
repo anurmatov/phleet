@@ -40,6 +40,16 @@ public sealed class AgentOptions
     public string? CodexSandboxMode { get; set; }
 
     /// <summary>
+    /// True when the orchestrator resolved this agent's model to a hosted provider (#335 D5).
+    /// <c>entrypoint.sh</c> reads it to decide whether to hand a key over, and the agent checks it
+    /// against its own registry at startup (D8).
+    /// </summary>
+    public bool HostedProvider { get; set; }
+
+    /// <summary>The key env var the orchestrator named for the hosted provider, or null.</summary>
+    public string? HostedProviderKeyEnv { get; set; }
+
+    /// <summary>
     /// Every instruction assigned to this agent, as <c>roles/</c> directory names, already in the
     /// orchestrator's load order (#309).
     /// </summary>

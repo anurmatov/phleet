@@ -453,6 +453,15 @@ echo
 echo "  Fill in required configuration (press Enter to keep existing values):"
 echo
 
+# GLM on the Z.ai GLM Coding Plan (#335) — optional. A codex agent whose Model is prefixed zai/
+# needs this key attached as an Env Ref. Empty input skips; an existing value is kept. See
+# docs/providers/codex-hosted-models.md before enabling: prompts, tool results and MCP output go
+# to Z.ai.
+if $USE_CODEX; then
+  prompt_field "$ENV_FILE" "ZAI_CODING_PLAN_API_KEY" "Z.ai GLM Coding Plan API key" \
+    "Only for codex agents with a zai/ model. Plan terms: personal use only, never on an agent that serves other people. Press Enter to skip." n y
+fi
+
 # CTO agent name — used by docker-compose to wire FleetWorkflows__CtoAgent
 # into fleet-temporal-bridge and fleet-bridge so seed workflows can resolve
 # {{config.CtoAgent}} at runtime. Must be set BEFORE services start.

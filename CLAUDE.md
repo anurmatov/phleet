@@ -125,6 +125,40 @@ which inside a container is the container itself.
 `_turnLock` for the turn and a chat-driven turn has no deadline, so everything queues behind it.
 See `docs/providers/codex-local-models.md`.
 
+### Codex hosted models
+
+A codex agent's `Model` may carry a `zai/` prefix (`zai/glm-5.3`): GLM on the operator's **Z.ai GLM
+Coding Plan subscription**, through Z.ai's documented Codex route (the Responses endpoint
+`https://api.z.ai/api/v1`). `HostedModelProviders` (`src/Fleet.Shared/`) is the one registry the
+agent and orchestrator both read. `CodexExecutor` defines a `phleet_zai` provider per thread through
+`thread/start` `config` overrides and points it at `HostedProviderAdapterHost`, a nested
+loopback-only web app (`127.0.0.1:0`) that exists only when `Agent.HostedProvider` is true. Its one
+handler, `HostedProviderForwarder`, is a transparent forwarder: Codex's request bytes, framing and
+headers go through unchanged (`User-Agent` and `originator` included), only `Authorization` is
+replaced with the key, and the response streams back as bytes. Only `low` and `high` effort are
+forwarded; any other value is omitted with one warning.
+
+Key isolation is the load-bearing part. The orchestrator emits `Agent.HostedProvider` and
+`Agent.HostedProviderKeyEnv`. `entrypoint.sh` moves that key into `/run/phleet-hosted-key` (0400),
+then **unconditionally unsets `ZAI_CODING_PLAN_API_KEY` on every agent** before `exec dotnet`. The
+agent reads the file once and deletes it, and `CodexExecutor` strips the name from codex's
+environment. A hosted agent gets no `.codex-credentials.json` bind, has `auth.json` removed, and
+ignores codex token broadcasts. At startup the agent checks the orchestrator's flags against its own
+registry (parity) and exits 1 on a mismatch or an unusable key. The reserved list in `entrypoint.sh`
+sits on the line under `# phleet:reserved-key-names`; `EntrypointReservedKeysTests` keeps it equal to
+`HostedModelProviders.KeyEnvVars`.
+
+The forwarder relays only requests carrying a per-start token (`x-phleet-forwarder-token`), which
+Codex receives through `thread/start` `http_headers` and nothing else does. It turns away a plain
+request from the model's shell; it is **not** protection against root in the container. Plan terms
+make GLM agents subscriber-only: never give a `zai/` model to an agent that answers other people.
+
+| Env var | Where | Purpose |
+|---|---|---|
+| `ZAI_CODING_PLAN_API_KEY` | `.env` + agent Env Ref | Z.ai GLM Coding Plan key for `zai/` models. Reserved name |
+
+See `docs/providers/codex-hosted-models.md`.
+
 ## Provider CLI Pins
 
 The agent image pins every provider CLI explicitly in `Dockerfile`:

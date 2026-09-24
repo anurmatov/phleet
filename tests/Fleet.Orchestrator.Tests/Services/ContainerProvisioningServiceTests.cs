@@ -223,6 +223,63 @@ public class ContainerProvisioningServiceTests
         Assert.Single(tools, t => t == "mcp__fleet-memory__memory_get");
     }
 
+    // ── #335: hosted-provider flags and the codex credential bind ─────────────
+
+    private static (bool Hosted, JsonElement KeyEnv) GetHostedFlags(Agent agent)
+    {
+        var doc = JsonDocument.Parse(ContainerProvisioningService.GenerateAppsettingsJson(agent, "acto"));
+        var a = doc.RootElement.GetProperty("Agent");
+        return (a.GetProperty("HostedProvider").GetBoolean(), a.GetProperty("HostedProviderKeyEnv").Clone());
+    }
+
+    [Theory]
+    [InlineData("codex", "zai/glm-5.3", true, "ZAI_CODING_PLAN_API_KEY")]
+    [InlineData("codex", "acme/x", false, null)]
+    [InlineData("codex", "gpt-5.4", false, null)]
+    [InlineData("codex", "ollama/gpt-oss:20b", false, null)]
+    [InlineData("claude", "zai/glm-5.3", false, null)]
+    [InlineData("gemini", "zai/glm-5.3", false, null)]
+    public void GenerateAppsettingsJson_EmitsHostedProviderFlags(
+        string provider, string model, bool expectedHosted, string? expectedKeyEnv)
+    {
+        var agent = MinimalAgent("ahosted", provider);
+        agent.Model = model;
+
+        var (hosted, keyEnv) = GetHostedFlags(agent);
+
+        Assert.Equal(expectedHosted, hosted);
+        if (expectedKeyEnv is null)
+            Assert.Equal(JsonValueKind.Null, keyEnv.ValueKind);
+        else
+            Assert.Equal(expectedKeyEnv, keyEnv.GetString());
+    }
+
+    [Theory]
+    [InlineData("zai/glm-5.3", false)]
+    [InlineData("acme/x", true)]
+    [InlineData("gpt-5.4", true)]
+    public void BuildBinds_HostedCodexAgent_GetsNoCodexCredentialBind(string model, bool expectBind)
+    {
+        var baseDir = Path.Combine(Path.GetTempPath(), $"prov-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(baseDir);
+        try
+        {
+            File.WriteAllText(Path.Combine(baseDir, ".codex-credentials.json"), "{}");
+            var agent = MinimalAgent("ahosted", "codex");
+            agent.Model = model;
+
+            var binds = ContainerProvisioningService.BuildBinds(agent, baseDir);
+
+            Assert.Equal(expectBind, binds.Any(b => b.Contains(".codex-credentials.json", StringComparison.Ordinal)));
+            // Everything else a codex agent needs is still mounted.
+            Assert.Contains(binds, b => b.EndsWith(":/root/.codex", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(baseDir, recursive: true);
+        }
+    }
+
     // ── BuildBinds: MountDockerSock flag ─────────────────────────────────────
     // Verifies the exact security invariant introduced by #186: docker.sock is
     // mounted only when the agent's MountDockerSock flag is true.

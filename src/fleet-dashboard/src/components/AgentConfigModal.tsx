@@ -98,6 +98,7 @@ export default function AgentConfigModal({
               </div>
               <div className="config-field">
                 <label className="config-label">Model</label>
+                <FieldHint>Codex only: a <code>zai/</code> model needs <code>ZAI_CODING_PLAN_API_KEY</code> in Env Refs; subscriber-only use.</FieldHint>
                 <ModelSelector
                   provider={configEdits.provider ?? configData.provider ?? 'claude'}
                   value={configEdits.model}

@@ -561,21 +561,25 @@ public sealed class CodexExecutor : IAgentExecutor
 
     /// <summary>
     /// The <c>thread/start</c> <c>config</c> overrides that define a hosted provider for this thread
-    /// only (D3). Codex gets no <c>env_key</c>: the adapter holds the key.
+    /// only (D3). Codex gets no <c>env_key</c>: the forwarder holds the key. The per-start forwarder
+    /// token goes in <c>http_headers</c>, which Codex sends on every request to this provider (D10).
+    /// That is the token's only route out of this process: never an environment variable
+    /// (<c>env_http_headers</c>), a file or argv, which the model's shell could read.
     /// </summary>
-    internal static JsonObject BuildHostedProviderConfig(HostedModelProvider provider, Uri adapterBase)
+    internal static JsonObject BuildHostedProviderConfig(HostedModelProvider provider, HostedProviderEndpoint endpoint)
     {
         var prefix = $"model_providers.{provider.CodexProviderId}.";
         return new JsonObject
         {
             [prefix + "name"] = provider.DisplayName,
-            [prefix + "base_url"] = $"{adapterBase.GetLeftPart(UriPartial.Authority)}/{provider.Prefix}",
+            [prefix + "base_url"] = $"{endpoint.BaseAddress.GetLeftPart(UriPartial.Authority)}/{provider.Prefix}",
             [prefix + "wire_api"] = "responses",
             [prefix + "requires_openai_auth"] = false,
             [prefix + "supports_websockets"] = false,
             [prefix + "stream_idle_timeout_ms"] = 300000,
             [prefix + "request_max_retries"] = 2,
             [prefix + "stream_max_retries"] = 2,
+            [prefix + "http_headers"] = new JsonObject { [HostedProviderForwarder.TokenHeader] = endpoint.Token },
         };
     }
 
@@ -732,15 +736,15 @@ public sealed class CodexExecutor : IAgentExecutor
             startParams["modelProvider"] = _localModelProvider;
 
         // Hosted provider (#335 D3): defined per thread through config overrides, pointed at the
-        // loopback adapter. No config.toml is written.
+        // loopback forwarder. No config.toml is written.
         if (_hostedProvider is not null)
         {
-            var adapterBase = await (_adapterHost?.BaseAddress ?? throw new InvalidOperationException(
+            var endpoint = await (_adapterHost?.Endpoint ?? throw new InvalidOperationException(
                 $"CodexExecutor: model '{_config.Model}' selects hosted provider '{_hostedProvider.Prefix}', "
                 + "but no loopback adapter is registered (Agent:HostedProvider is false)."))
                 .WaitAsync(ct);
             startParams["modelProvider"] = _hostedProvider.CodexProviderId;
-            startParams["config"] = BuildHostedProviderConfig(_hostedProvider, adapterBase);
+            startParams["config"] = BuildHostedProviderConfig(_hostedProvider, endpoint);
         }
 
         startParams["cwd"] = _config.WorkDir;

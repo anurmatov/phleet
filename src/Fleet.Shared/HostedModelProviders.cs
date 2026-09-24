@@ -1,9 +1,9 @@
 namespace Fleet.Shared;
 
 /// <summary>
-/// One hosted model vendor that a codex agent can reach through the loopback adapter (#335).
+/// One hosted model vendor that a codex agent can reach through the loopback forwarder (#335).
 /// </summary>
-/// <param name="Prefix">The <c>Model</c> prefix before the first <c>/</c>, e.g. <c>deepseek</c>.</param>
+/// <param name="Prefix">The <c>Model</c> prefix before the first <c>/</c>, e.g. <c>zai</c>.</param>
 /// <param name="CodexProviderId">
 /// The codex <c>modelProvider</c> id. Always <c>phleet_</c>-prefixed: built-in ids cannot be
 /// overridden, and an unprefixed id could collide with a built-in codex adds later.
@@ -11,33 +11,28 @@ namespace Fleet.Shared;
 /// <param name="DisplayName">The codex provider <c>name</c>.</param>
 /// <param name="Upstream">
 /// The vendor base URL. Fixed and HTTPS: a configurable upstream would let a config edit send the
-/// key anywhere.
+/// key anywhere, and a wrong Z.ai endpoint bills the balance instead of the subscription.
 /// </param>
 /// <param name="KeyEnvVar">The <c>.env</c> key that holds this vendor's API key.</param>
-/// <param name="ToolNameMaxLength">The longest function-tool name the vendor accepts.</param>
-/// <param name="ForwardedEfforts">
-/// The codex reasoning efforts sent on. <c>null</c> means every codex value is forwarded.
-/// </param>
+/// <param name="ForwardedEfforts">The codex reasoning efforts sent on (D7).</param>
 public sealed record HostedModelProvider(
     string Prefix,
     string CodexProviderId,
     string DisplayName,
     Uri Upstream,
     string KeyEnvVar,
-    int ToolNameMaxLength,
-    IReadOnlySet<string>? ForwardedEfforts)
+    IReadOnlySet<string> ForwardedEfforts)
 {
     /// <summary>True when the executor may send <paramref name="effort"/> to this vendor (D7).</summary>
-    public bool ForwardsEffort(string effort) =>
-        ForwardedEfforts is null || ForwardedEfforts.Contains(effort);
+    public bool ForwardsEffort(string effort) => ForwardedEfforts.Contains(effort);
 }
 
 /// <summary>
 /// The hosted-provider registry (#335 D2). The single source for the agent and the orchestrator,
-/// so the two cannot disagree about which models route through the adapter.
+/// so the two cannot disagree about which models route through the forwarder.
 /// </summary>
 /// <remarks>
-/// Code, not DB, on purpose: every row here decides where a paid API key is sent.
+/// Code, not DB, on purpose: every row here decides where a subscription key is sent.
 /// </remarks>
 public static class HostedModelProviders
 {
@@ -49,27 +44,21 @@ public static class HostedModelProviders
     /// <summary>The literal the orchestrator injects for an env ref missing from <c>.env</c>.</summary>
     public const string MissingSecretPlaceholder = "<secret>";
 
-    public static readonly HostedModelProvider DeepSeek = new(
-        Prefix: "deepseek",
-        CodexProviderId: "phleet_deepseek",
-        DisplayName: "DeepSeek (phleet)",
-        Upstream: new Uri("https://api.deepseek.com"),
-        KeyEnvVar: "DEEPSEEK_API_KEY",
-        ToolNameMaxLength: 128,
-        // DeepSeek accepts every codex value and maps the ones it lacks itself.
-        ForwardedEfforts: null);
+    /// <summary>
+    /// GLM on the Z.ai GLM Coding Plan, through Z.ai's documented Codex route: the Responses
+    /// endpoint. The other Coding Plan endpoints are for other tools, and a wrong endpoint does not
+    /// draw on the subscription quota.
+    /// </summary>
+    public static readonly HostedModelProvider Zai = new(
+        Prefix: "zai",
+        CodexProviderId: "phleet_zai",
+        DisplayName: "Z.ai GLM Coding Plan (phleet)",
+        Upstream: new Uri("https://api.z.ai/api/v1"),
+        KeyEnvVar: "ZAI_CODING_PLAN_API_KEY",
+        // Z.ai's Codex catalog declares low, high and max; codex has no max.
+        ForwardedEfforts: new HashSet<string>(StringComparer.Ordinal) { "low", "high" });
 
-    public static readonly HostedModelProvider OpenRouter = new(
-        Prefix: "openrouter",
-        CodexProviderId: "phleet_openrouter",
-        DisplayName: "OpenRouter (phleet)",
-        Upstream: new Uri("https://openrouter.ai/api/v1"),
-        KeyEnvVar: "OPENROUTER_API_KEY",
-        // Undocumented for OpenRouter; this is the OpenAI limit.
-        ToolNameMaxLength: 64,
-        ForwardedEfforts: new HashSet<string>(StringComparer.Ordinal) { "minimal", "low", "medium", "high" });
-
-    public static IReadOnlyList<HostedModelProvider> All { get; } = [DeepSeek, OpenRouter];
+    public static IReadOnlyList<HostedModelProvider> All { get; } = [Zai];
 
     /// <summary>
     /// Every key env var in the registry. These names are reserved for hosted routing:
@@ -81,7 +70,7 @@ public static class HostedModelProviders
     /// <summary>
     /// Resolves a hosted provider for an agent, or returns false. Hosted routing applies to the
     /// codex provider only (D1). The model is split at the first <c>/</c>, so
-    /// <c>openrouter/z-ai/glm-5.3</c> yields the bare model <c>z-ai/glm-5.3</c>.
+    /// <c>zai/glm-5.3</c> yields the bare model <c>glm-5.3</c>.
     /// </summary>
     public static bool TryResolve(
         string? agentProvider, string? model, out HostedModelProvider provider, out string bareModel)

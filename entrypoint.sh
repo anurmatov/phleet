@@ -31,7 +31,10 @@ fi
 
 # Unconditionally, for every agent and provider: these names are reserved for hosted routing and
 # must not reach PID 1 or anything it starts. A non-hosted agent that carries one loses it here.
-for _HOSTED_VAR in DEEPSEEK_API_KEY OPENROUTER_API_KEY; do
+# The list must equal HostedModelProviders.KeyEnvVars; EntrypointReservedKeysTests reads the line
+# directly below the marker, so keep it one line and in this exact form.
+# phleet:reserved-key-names
+for _HOSTED_VAR in ZAI_CODING_PLAN_API_KEY; do
     if [ -n "${!_HOSTED_VAR:-}" ] && [ "$_HOSTED_VAR" != "$HOSTED_KEY_ENV" ]; then
         echo "NOTE: unsetting ${_HOSTED_VAR}; it is reserved for hosted-provider routing and this agent does not use it." >&2
     fi

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
@@ -85,15 +86,17 @@ public sealed class HostedProviderForwarder
         var ct = context.RequestAborted;
         var started = Stopwatch.StartNew();
         var status = 0;
-        long responseBytes = 0;
+        // Counted as bytes are relayed, so an aborted request still logs what reached Codex.
+        var responseBytes = new StrongBox<long>();
         try
         {
-            (status, responseBytes) = await ForwardAsync(context, ct);
+            status = await ForwardAsync(context, responseBytes, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // Codex went away (cancel, interrupt, restart). The upstream request was cancelled
-            // through the same token.
+            // Codex went away and the upstream request was cancelled through the same token. That
+            // is a /cancel, an interrupt or a restart — or, routinely, Codex closing the stream
+            // once it has read response.completed, before the upstream's trailing [DONE].
             status = 499;
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException)
@@ -112,11 +115,11 @@ public sealed class HostedProviderForwarder
                 "HostedProviderAdapter provider={Provider} status={Status} durationMs={DurationMs} "
                 + "requestBytes={RequestBytes} responseBytes={ResponseBytes}",
                 _provider.Prefix, status, started.ElapsedMilliseconds,
-                context.Request.ContentLength ?? 0, responseBytes);
+                context.Request.ContentLength ?? 0, responseBytes.Value);
         }
     }
 
-    private async Task<(int Status, long ResponseBytes)> ForwardAsync(HttpContext context, CancellationToken ct)
+    private async Task<int> ForwardAsync(HttpContext context, StrongBox<long> responseBytes, CancellationToken ct)
     {
         var inbound = context.Request;
 
@@ -126,7 +129,7 @@ public sealed class HostedProviderForwarder
             || !string.Equals(inbound.Path.Value, RoutePath, StringComparison.Ordinal))
         {
             context.Response.StatusCode = StatusCodes.Status404NotFound;
-            return (StatusCodes.Status404NotFound, 0);
+            return StatusCodes.Status404NotFound;
         }
 
         // 2. Token (D10): exactly one header, compared in constant time.
@@ -134,7 +137,7 @@ public sealed class HostedProviderForwarder
         if (presented.Count != 1
             || !CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(presented[0] ?? ""), _token))
         {
-            return await WriteErrorAsync(context, StatusCodes.Status401Unauthorized,
+            return await WriteErrorAsync(context, responseBytes, StatusCodes.Status401Unauthorized,
                 "phleet adapter: missing or invalid forwarder token", ct);
         }
 
@@ -142,7 +145,7 @@ public sealed class HostedProviderForwarder
         //    (chunked) is refused rather than re-framed (MUST NOT 5).
         if (inbound.ContentLength is not { } contentLength || inbound.Headers.ContainsKey("Transfer-Encoding"))
         {
-            return await WriteErrorAsync(context, StatusCodes.Status411LengthRequired,
+            return await WriteErrorAsync(context, responseBytes, StatusCodes.Status411LengthRequired,
                 "phleet adapter: Content-Length required", ct);
         }
 
@@ -151,7 +154,7 @@ public sealed class HostedProviderForwarder
         var maxBody = context.Features.Get<IHttpMaxRequestBodySizeFeature>()?.MaxRequestBodySize;
         if (contentLength > maxBody)
         {
-            return await WriteErrorAsync(context, StatusCodes.Status413PayloadTooLarge,
+            return await WriteErrorAsync(context, responseBytes, StatusCodes.Status413PayloadTooLarge,
                 "phleet adapter: request body too large", ct);
         }
 
@@ -167,7 +170,7 @@ public sealed class HostedProviderForwarder
         {
             // DNS, TLS, refused connection, or the handler's ConnectTimeout (which surfaces as a
             // cancellation that is not ours).
-            return await WriteErrorAsync(context, StatusCodes.Status502BadGateway,
+            return await WriteErrorAsync(context, responseBytes, StatusCodes.Status502BadGateway,
                 $"phleet adapter: upstream {_provider.Prefix} unreachable: {ex.GetBaseException().GetType().Name}", ct);
         }
 
@@ -199,15 +202,14 @@ public sealed class HostedProviderForwarder
             // take the same path, so the turn fails with the vendor's own message.
             await using var upstreamBody = await upstream.Content.ReadAsStreamAsync(ct);
             var buffer = new byte[CopyBufferSize];
-            long total = 0;
             int read;
             while ((read = await upstreamBody.ReadAsync(buffer, ct)) > 0)
             {
                 await response.Body.WriteAsync(buffer.AsMemory(0, read), ct);
                 await response.Body.FlushAsync(ct);
-                total += read;
+                responseBytes.Value += read;
             }
-            return (status, total);
+            return status;
         }
     }
 
@@ -255,14 +257,15 @@ public sealed class HostedProviderForwarder
         return names;
     }
 
-    private static async Task<(int, long)> WriteErrorAsync(
-        HttpContext context, int status, string message, CancellationToken ct)
+    private static async Task<int> WriteErrorAsync(
+        HttpContext context, StrongBox<long> responseBytes, int status, string message, CancellationToken ct)
     {
         context.Response.StatusCode = status;
         context.Response.ContentType = "application/json";
         var payload = new JsonObject { ["error"] = new JsonObject { ["message"] = message } };
         var bytes = Encoding.UTF8.GetBytes(payload.ToJsonString());
         await context.Response.Body.WriteAsync(bytes, ct);
-        return (status, bytes.Length);
+        responseBytes.Value = bytes.Length;
+        return status;
     }
 }

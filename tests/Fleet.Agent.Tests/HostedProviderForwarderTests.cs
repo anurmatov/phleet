@@ -195,6 +195,49 @@ public sealed class HostedProviderForwarderTests : IDisposable
         Assert.Equal("event: response.completed\ndata: {}\n\n", Encoding.UTF8.GetString(rest.ToArray()));
     }
 
+    /// <summary>
+    /// Codex closes the stream as soon as it has <c>response.completed</c>, often before the
+    /// upstream's trailing <c>[DONE]</c>. The log line must still show the bytes that reached it.
+    /// </summary>
+    [Fact]
+    public async Task ClientClosingMidStream_Logs499WithTheBytesAlreadyRelayed()
+    {
+        var logger = new ListLoggerProvider();
+        using var loggerFactory = LoggerFactory.Create(b => b.AddProvider(logger).SetMinimumLevel(LogLevel.Trace));
+        var pipe = new Pipe();
+        var upstream = new RecordingHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = SseContent(pipe.Reader.AsStream()),
+        }));
+        await using var host = await StartHostAsync(upstream, loggerFactory);
+
+        var completed = "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"u8.ToArray();
+        using (var client = new HttpClient())
+        {
+            using var request = CodexRequest(await host.Endpoint, CodexRequestBody());
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+            await using var stream = await response.Content.ReadAsStreamAsync();
+            await pipe.Writer.WriteAsync(completed);
+            var buffer = new byte[completed.Length];
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await stream.ReadExactlyAsync(buffer, cts.Token);
+            // Hang up without waiting for [DONE], as Codex does.
+        }
+
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        string? line = null;
+        while (line is null && DateTime.UtcNow < deadline)
+        {
+            line = logger.Lines.FirstOrDefault(l => l.StartsWith("HostedProviderAdapter provider=zai status="));
+            if (line is null) await Task.Delay(50);
+        }
+        await pipe.Writer.CompleteAsync();
+
+        Assert.NotNull(line);
+        Assert.StartsWith("HostedProviderAdapter provider=zai status=499 ", line);
+        Assert.EndsWith($" responseBytes={completed.Length}", line);
+    }
+
     // ── AC6: routing and errors ─────────────────────────────────────────────
 
     [Theory]

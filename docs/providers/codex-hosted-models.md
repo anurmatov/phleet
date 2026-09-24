@@ -149,8 +149,11 @@ One line per request:
 HostedProviderAdapter provider=zai status=200 durationMs=… requestBytes=… responseBytes=…
 ```
 
-Healthy means `status=200` lines during turns. Broken means non-200 lines, any `Critical` startup
-line, or a codex `unsupported call`. `status=401` lines while no codex turn is running mean something
+Healthy means `status=200` lines during turns. Codex closes the stream as soon as it has read
+`response.completed`, often before Z.ai's trailing `[DONE]`, so a `status=499` line with
+`responseBytes` above zero in a turn that completed is normal (4 of 50 requests in the #335
+acceptance run). A `status=499` on `/cancel` or on a turn that then fails is a real abort. Broken means other
+non-200 lines, any `Critical` startup line, or a codex `unsupported call`. `status=401` lines while no codex turn is running mean something
 other than codex tried to use the forwarder: check the agent's recent tool calls.
 
 The checks run 404, then 401, then 411, so a tokenless chunked request logs `status=401`, not 411.

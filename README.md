@@ -6,7 +6,7 @@
 
 Phleet is an open-source, self-hosted multi-agent AI platform built on .NET 10, coordinated by a central orchestrator backed by Temporal workflows.
 
-**Your credentials, your repos, your infrastructure.** Agents run as Docker containers on your host, use your Claude or Codex credentials, and hit your repos through your own GitHub App. Control plane, runtime state, workflow history, and memory stay on infrastructure you control; external traffic goes only to the providers you configure — Claude/Codex, GitHub, and Telegram, plus DeepSeek or OpenRouter if you give a codex agent a hosted model (see `docs/providers/codex-hosted-models.md`).
+**Your credentials, your repos, your infrastructure.** Agents run as Docker containers on your host, use your Claude or Codex credentials, and hit your repos through your own GitHub App. Control plane, runtime state, workflow history, and memory stay on infrastructure you control; external traffic goes only to the providers you configure — Claude/Codex, GitHub, and Telegram, plus Z.ai if you give a codex agent a `zai/` GLM model on your GLM Coding Plan (see `docs/providers/codex-hosted-models.md`).
 
 <p align="center">
   <img src=".github/assets/phleet-dashboard.jpg" alt="Phleet dashboard — agents and active workflows" width="900">
@@ -140,7 +140,7 @@ The rest of this README is the plumbing — configuration, deployment, troublesh
 | Linux | Claude / Codex | ⚠️ Expected to work (all containers are linux/amd64 or linux/arm64); untested at release |
 | Windows | Claude / Codex | ⚠️ Docker Desktop + WSL2 is the intended path. Unverified |
 | Any | Codex | ⚠️ Code paths ship in `seed.example.json`, but Claude has seen far more wall-clock time in real workflows |
-| Any | Codex + hosted DeepSeek / GLM | ⚠️ A `deepseek/` or `openrouter/` model prefix runs through a loopback adapter inside the agent. OpenRouter probed live through the adapter; the DeepSeek probe and the canary are pending. See `docs/providers/codex-hosted-models.md` |
+| Any | Codex + GLM (Z.ai GLM Coding Plan) | ⚠️ A `zai/` model prefix runs GLM on your Coding Plan subscription through a loopback forwarder inside the agent. Subscriber-only use. The exact-head canary is pending. See `docs/providers/codex-hosted-models.md` |
 | Any | Gemini | ⚠️ Supported via `gemini` CLI headless mode. Known trade-offs vs claude/codex: (1) no session persistence in headless mode — system prompt is re-sent on every task, so per-task token cost is higher; (2) PDFs are not passed as native content blocks — agent reads from disk via `@`-reference hints; (3) HTTP/SSE MCP transport only — stdio MCP servers are filtered out; (4) OAuth-only, no API key fallback — personal Google account required. See `docs/providers/gemini.md` for full details. |
 
 If you run Phleet on Windows, on a Linux host, or with Codex or Gemini as the primary provider and hit something broken — PRs and issue reports are very welcome. Small fixes and "it works on my box" confirmations are just as valuable as new features here.

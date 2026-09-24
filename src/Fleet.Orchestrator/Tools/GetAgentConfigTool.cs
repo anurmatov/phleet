@@ -43,9 +43,23 @@ public sealed class GetAgentConfigTool(IServiceScopeFactory scopeFactory)
         sb.AppendLine($"- Mount Docker socket: {agent.MountDockerSock}");
         sb.AppendLine();
 
+        // #347: full assignments print as they always have; card assignments name the card version
+        // and the full version it was written for.
+        var cards = agent.Projects.Any(p => p.ContextMode == ProjectContextMode.Card)
+            ? await LoadCurrentCardsAsync(db)
+            : [];
+
         sb.AppendLine("### Projects");
         if (agent.Projects.Count == 0) sb.AppendLine("(none)");
-        else foreach (var p in agent.Projects) sb.AppendLine($"- {p.ProjectName}");
+        else foreach (var p in agent.Projects)
+        {
+            if (p.ContextMode != ProjectContextMode.Card)
+                sb.AppendLine($"- {p.ProjectName}");
+            else if (cards.FirstOrDefault(c => c.Name.Equals(p.ProjectName, StringComparison.OrdinalIgnoreCase)) is { } card)
+                sb.AppendLine($"- {p.ProjectName} (card v{card.CardVersion}, for full v{card.BasedOnFullVersion})");
+            else
+                sb.AppendLine($"- {p.ProjectName} (card, but the project has no card — provisioning will refuse this agent)");
+        }
         sb.AppendLine();
 
         sb.AppendLine("### MCP Endpoints");
@@ -69,4 +83,17 @@ public sealed class GetAgentConfigTool(IServiceScopeFactory scopeFactory)
 
         return sb.ToString();
     }
+
+    private sealed record CurrentCard(string Name, int CardVersion, int BasedOnFullVersion);
+
+    // Every context's current card; names are matched to assignments in C# (OrdinalIgnoreCase).
+    private static async Task<List<CurrentCard>> LoadCurrentCardsAsync(OrchestratorDbContext db) =>
+        await db.ProjectContexts
+            .AsNoTracking()
+            .Where(p => p.CurrentCardVersion != null)
+            .Join(db.ProjectContextCardVersions,
+                p => new { Id = p.Id, Version = p.CurrentCardVersion!.Value },
+                v => new { Id = v.ProjectContextId, Version = v.VersionNumber },
+                (p, v) => new CurrentCard(p.Name, v.VersionNumber, v.BasedOnFullVersion))
+            .ToListAsync();
 }

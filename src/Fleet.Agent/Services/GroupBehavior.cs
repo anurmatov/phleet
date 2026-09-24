@@ -23,6 +23,13 @@ public sealed class GroupBehavior
     private readonly PromptAssembler _prompts;
     private readonly ILogger<GroupBehavior> _logger;
 
+    /// <summary>
+    /// Resolves project-context requests at intake (#347). Optional so existing construction sites
+    /// are unchanged; absent — or disabled because the agent has no routing block — every message
+    /// carries an empty request list.
+    /// </summary>
+    private readonly ProjectContextRouter? _contextRouter;
+
     private readonly ConcurrentDictionary<long, GroupChatBuffer> _groupBuffers = new();
 
     // Per-group debounce timers (fixes global-timer bug)
@@ -57,8 +64,10 @@ public sealed class GroupBehavior
         CommandDispatcher commands,
         PromptAssembler prompts,
         ILogger<GroupBehavior> logger,
-        IMessageSink? sink = null)
+        IMessageSink? sink = null,
+        ProjectContextRouter? contextRouter = null)
     {
+        _contextRouter = contextRouter;
         _agentConfig = agentConfig.Value;
         _telegramConfig = telegramConfig.Value;
         _allowlist = allowlist;
@@ -340,7 +349,11 @@ public sealed class GroupBehavior
 
     // --- Relay handling ---
 
-    public void OnRelayMessage(long chatId, string sender, string text, string type, string? correlationId = null, string? taskId = null, string? workflowId = null, string? signalName = null)
+    /// <param name="repo">
+    /// The structured <c>RelayMessage.Repo</c> (#347 D9). Validated by the router; a malformed value
+    /// is ignored with a Warning.
+    /// </param>
+    public void OnRelayMessage(long chatId, string sender, string text, string type, string? correlationId = null, string? taskId = null, string? workflowId = null, string? signalName = null, string? repo = null)
     {
         if (type == RelayMessageType.ConfigUpdate)
         {
@@ -410,8 +423,12 @@ public sealed class GroupBehavior
                 var prompt = _prompts.ForRelayDirective(buffer, sender, text);
                 buffer.MarkChecked();
                 var displayText = $"[Bridge: {sender}] {TaskManager.TruncateText(text, 500)}";
+                // Repo, then a leading workflow tag. Never chatId: for a relay it is a posting
+                // target, not a topic (#347 MUST NOT).
+                var contextRequests = _contextRouter?.ResolveRelay(repo, text);
                 _ = _taskManager.StartTask(chatId, prompt, displayText, isSessionTask: true,
-                    source: TaskSource.Bridge, relaySender: "bridge", correlationId: correlationId, taskId: taskId);
+                    source: TaskSource.Bridge, relaySender: "bridge", correlationId: correlationId, taskId: taskId,
+                    contextRequests: contextRequests);
             });
             return;
         }
@@ -451,8 +468,12 @@ public sealed class GroupBehavior
             var prompt = _prompts.ForRelayDirective(buffer, sender, text);
             buffer.MarkChecked();
             var displayText = $"[From: {sender}] {TaskManager.TruncateText(text, 500)}";
+            // Same signals as the bridge path above: repo, then the leading [fleet-wf:...] line,
+            // never the relay chat id.
+            var contextRequests = _contextRouter?.ResolveRelay(repo, text);
             _ = _taskManager.StartTask(chatId, prompt, displayText, isSessionTask: true,
-                source: TaskSource.Relay, relaySender: sender, taskId: taskId);
+                source: TaskSource.Relay, relaySender: sender, taskId: taskId,
+                contextRequests: contextRequests);
         });
     }
 
@@ -757,9 +778,11 @@ public sealed class GroupBehavior
 
         // Delegate entirely to TaskManager — it handles typing, execution,
         // session tracking, tool buffering, IDLE suppression, and completion events.
+        // A check-in over a real buffer routes on that buffer's chat (#347).
         _ = _taskManager.StartTask(chatId, prompt, $"[{label}]", isSessionTask: true,
             source: TaskSource.CheckIn,
-            images: pendingImages.Count > 0 ? pendingImages : null);
+            images: pendingImages.Count > 0 ? pendingImages : null,
+            contextRequests: _contextRouter?.ResolveChat(buffer.ChatId));
     }
 
     /// <summary>
@@ -779,7 +802,8 @@ public sealed class GroupBehavior
 
         var outcome = await _taskManager.StartTask(chatId, prompt, $"[{label}]", isSessionTask: true,
             source: TaskSource.DebouncedGroupBatch,
-            images: pendingImages.Count > 0 ? pendingImages : null);
+            images: pendingImages.Count > 0 ? pendingImages : null,
+            contextRequests: _contextRouter?.ResolveChat(buffer.ChatId));
 
         if (outcome is TaskDispatchOutcome.Ran or TaskDispatchOutcome.Injected or TaskDispatchOutcome.Queued)
         {

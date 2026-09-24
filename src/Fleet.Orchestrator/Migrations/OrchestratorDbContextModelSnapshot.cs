@@ -341,6 +341,13 @@ namespace Fleet.Orchestrator.Migrations
                     b.Property<int>("AgentId")
                         .HasColumnType("int");
 
+                    b.Property<string>("ContextMode")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(8)
+                        .HasColumnType("varchar(8)")
+                        .HasDefaultValue("full");
+
                     b.Property<string>("ProjectName")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -622,6 +629,9 @@ namespace Fleet.Orchestrator.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime(6)");
 
+                    b.Property<int?>("CurrentCardVersion")
+                        .HasColumnType("int");
+
                     b.Property<int>("CurrentVersion")
                         .HasColumnType("int");
 
@@ -642,6 +652,84 @@ namespace Fleet.Orchestrator.Migrations
                         .IsUnique();
 
                     b.ToTable("project_contexts", (string)null);
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.ProjectContextCardVersion", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("BasedOnFullVersion")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Content")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("CreatedBy")
+                        .HasMaxLength(100)
+                        .HasColumnType("varchar(100)");
+
+                    b.Property<int>("ProjectContextId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Reason")
+                        .HasMaxLength(500)
+                        .HasColumnType("varchar(500)");
+
+                    b.Property<int>("VersionNumber")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ProjectContextId", "VersionNumber")
+                        .IsUnique();
+
+                    b.ToTable("project_context_card_versions", (string)null);
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.ProjectContextRoute", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("CreatedBy")
+                        .HasMaxLength(100)
+                        .HasColumnType("varchar(100)");
+
+                    b.Property<int>("ProjectContextId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("SignalKind")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)");
+
+                    b.Property<string>("SignalValue")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("varchar(256)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ProjectContextId");
+
+                    b.HasIndex("SignalKind", "SignalValue", "ProjectContextId")
+                        .IsUnique();
+
+                    b.ToTable("project_context_routes", (string)null);
                 });
 
             modelBuilder.Entity("Fleet.Orchestrator.Data.ProjectContextVersion", b =>
@@ -945,6 +1033,28 @@ namespace Fleet.Orchestrator.Migrations
                     b.Navigation("Instruction");
                 });
 
+            modelBuilder.Entity("Fleet.Orchestrator.Data.ProjectContextCardVersion", b =>
+                {
+                    b.HasOne("Fleet.Orchestrator.Data.ProjectContext", "ProjectContext")
+                        .WithMany("CardVersions")
+                        .HasForeignKey("ProjectContextId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ProjectContext");
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.ProjectContextRoute", b =>
+                {
+                    b.HasOne("Fleet.Orchestrator.Data.ProjectContext", "ProjectContext")
+                        .WithMany("Routes")
+                        .HasForeignKey("ProjectContextId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ProjectContext");
+                });
+
             modelBuilder.Entity("Fleet.Orchestrator.Data.ProjectContextVersion", b =>
                 {
                     b.HasOne("Fleet.Orchestrator.Data.ProjectContext", "ProjectContext")
@@ -1002,6 +1112,10 @@ namespace Fleet.Orchestrator.Migrations
 
             modelBuilder.Entity("Fleet.Orchestrator.Data.ProjectContext", b =>
                 {
+                    b.Navigation("CardVersions");
+
+                    b.Navigation("Routes");
+
                     b.Navigation("Versions");
                 });
 

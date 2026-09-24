@@ -133,6 +133,15 @@ public record DelegateStep : StepDefinition
     public int TimeoutMinutes { get; init; } = 30;
     public bool RetryOnIncomplete { get; init; } = true;
     public int MaxIncompleteRetries { get; init; } = 3;
+
+    /// <summary>
+    /// Optional <c>owner/name</c> the delegation is about (supports {{template}}, e.g.
+    /// <c>"{{input.Repo}}"</c>). Sent to the agent as the relay message's structured <c>Repo</c>
+    /// field, which the agent uses to route project context (#347). Omitted or resolving to blank
+    /// → nothing is appended and the activity input is exactly what it was before this field
+    /// existed. Malformed values are dropped by the activity with a warning.
+    /// </summary>
+    public string? Repo { get; init; }
 }
 
 public sealed record DelegateWithEscalationStep : DelegateStep

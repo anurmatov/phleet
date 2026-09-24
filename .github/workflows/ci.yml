@@ -36,7 +36,7 @@ jobs:
       - name: Test
         run: >
           dotnet test --no-build --configuration Release
-          --filter "FullyQualifiedName!~Fleet.Conversations.Tests"
+          --filter "FullyQualifiedName!~Fleet.Conversations.Tests&FullyQualifiedName!~Fleet.Orchestrator.Tests.Migrations"
           --logger "console;verbosity=normal"
 
       # #341: proves the dashboard nginx re-resolves fleet-orchestrator per request
@@ -179,6 +179,60 @@ jobs:
             exit 1
           fi
 
+          echo "$passed test(s) executed against mysql:8.0, 0 skipped."
+
+  orchestrator-migrations:
+    name: Orchestrator migrations (MySQL)
+    runs-on: ubuntu-latest
+
+    # Pomelo migrations only run on MySQL, so this is the one place a migration's effect on a
+    # populated schema is proven. Like conversations-tests, the suite FAILS without a database.
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: orchestrator-ci
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -p$MYSQL_ROOT_PASSWORD"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Run the migration suite
+        env:
+          FLEET_ORCHESTRATOR_MIGRATION_CONNECTION: "Server=127.0.0.1;Port=3306;User ID=root;Password=orchestrator-ci;AllowPublicKeyRetrieval=true;"
+        run: >
+          dotnet test tests/Fleet.Orchestrator.Tests --configuration Release
+          --filter "FullyQualifiedName~Fleet.Orchestrator.Tests.Migrations"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=orchestrator-migrations.trx"
+          --results-directory ${{ github.workspace }}/testresults
+
+      - name: Refuse a run that skipped anything
+        if: always()
+        run: |
+          set -euo pipefail
+          trx="${{ github.workspace }}/testresults/orchestrator-migrations.trx"
+          [ -f "$trx" ] || { echo "ERROR: no test result file — the suite did not run."; exit 1; }
+          counters=$(grep -o '<Counters[^>]*>' "$trx" | head -1)
+          echo "$counters"
+          read_count() { echo "$counters" | grep -o "$1=\"[0-9]*\"" | grep -o '[0-9]*' || echo ""; }
+          executed=$(read_count executed); notExecuted=$(read_count notExecuted); passed=$(read_count passed)
+          if [ -z "$executed" ] || [ "$notExecuted" != "0" ] || [ "$executed" -eq 0 ] || [ "$passed" -ne "$executed" ]; then
+            echo "ERROR: executed=$executed notExecuted=$notExecuted passed=$passed — evidence only when every test ran and passed."
+            exit 1
+          fi
           echo "$passed test(s) executed against mysql:8.0, 0 skipped."
 
   whisper-tests:

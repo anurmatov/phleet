@@ -36,6 +36,7 @@ public class DelegateToAgentActivityTests
         public required TaskCompletionRegistry Registry { get; init; }
         public required List<string> PublishedInstructions { get; init; }
         public required List<string> PublishedTaskIds { get; init; }
+        public required List<string?> PublishedRepos { get; init; }
         public required List<string> OrchestratorRequests { get; init; }
     }
 
@@ -54,6 +55,7 @@ public class DelegateToAgentActivityTests
     {
         var publishedInstructions = new List<string>();
         var publishedTaskIds = new List<string>();
+        var publishedRepos = new List<string?>();
 
         // A RabbitMQ channel that records what was published instead of sending it.
         var channel = Substitute.For<IChannel>();
@@ -73,6 +75,8 @@ public class DelegateToAgentActivityTests
                     publishedInstructions.Add(text.GetString() ?? "");
                 if (root.TryGetProperty("TaskId", out var taskId))
                     publishedTaskIds.Add(taskId.GetString() ?? "");
+                // #347: the repo is a structured field, null when the delegation has none.
+                publishedRepos.Add(root.TryGetProperty("Repo", out var repo) ? repo.GetString() : null);
                 return ValueTask.CompletedTask;
             });
 
@@ -109,6 +113,7 @@ public class DelegateToAgentActivityTests
             Registry = registry,
             PublishedInstructions = publishedInstructions,
             PublishedTaskIds = publishedTaskIds,
+            PublishedRepos = publishedRepos,
             OrchestratorRequests = orchestratorRequests,
         };
     }
@@ -474,28 +479,31 @@ public class DelegateToAgentActivityTests
     // ── The activity surface existing callers bind to ─────────────────────────
 
     [Fact]
-    public void ActivitySignature_AppendsTheBudgetAsAnOptionalTrailingParameter()
+    public void ActivitySignature_AppendsTheBudgetAndRepoAsOptionalTrailingParameters()
     {
         // Workflows bind activities BY NAME, so a signature change breaks them at runtime rather
-        // than at compile time. The budget therefore goes last and optional: UWE's delegate step
-        // invokes "DelegateToAgent" with five positional payloads and must keep binding.
+        // than at compile time. The budget and the repo (#347) therefore go last and optional:
+        // UWE's delegate step invokes "DelegateToAgent" with five positional payloads and must
+        // keep binding.
         var method = typeof(DelegateToAgentActivity).GetMethod(nameof(DelegateToAgentActivity.DelegateToAgentAsync))!;
         var parameters = method.GetParameters();
 
-        Assert.Equal(6, parameters.Length);
+        Assert.Equal(7, parameters.Length);
         Assert.Equal(typeof(string), parameters[0].ParameterType);   // agentName
         Assert.Equal(typeof(string), parameters[1].ParameterType);   // instruction
         Assert.Equal(typeof(string), parameters[2].ParameterType);   // taskId
         Assert.Equal(typeof(bool),   parameters[3].ParameterType);   // retryOnIncomplete
         Assert.Equal(typeof(int),    parameters[4].ParameterType);   // maxIncompleteRetries
         Assert.Equal(typeof(int),    parameters[5].ParameterType);   // agentBudgetSeconds
+        Assert.Equal(typeof(string), parameters[6].ParameterType);   // repo
         Assert.Equal(typeof(Task<AgentTaskResult>), method.ReturnType);
 
         // The first three are mandatory and the rest carry defaults — this is what the Temporal
         // SDK turns into RequiredParameterCount, and it is why a five-payload caller still binds.
-        Assert.Equal([false, false, false, true, true, true],
+        Assert.Equal([false, false, false, true, true, true, true],
             parameters.Select(p => p.HasDefaultValue).ToArray());
         Assert.Equal(0, parameters[5].DefaultValue);   // 0 = "no explicit budget", not "no budget"
+        Assert.Null(parameters[6].DefaultValue);       // no repo signal
 
         // AgentTaskResult's shape is untouched.
         var resultProps = typeof(AgentTaskResult).GetProperties().Select(p => p.Name).ToHashSet();
@@ -513,7 +521,85 @@ public class DelegateToAgentActivityTests
         var method = typeof(DelegateToAgentActivity).GetMethod(nameof(DelegateToAgentActivity.DelegateToAgentAsync))!;
         var definition = Temporalio.Activities.ActivityDefinition.Create(method, _ => null);
 
-        Assert.Equal(6, definition.ParameterTypes.Count);
+        Assert.Equal(7, definition.ParameterTypes.Count);
         Assert.Equal(3, definition.RequiredParameterCount);
+
+        // Workflows that schedule by name use the constant; it must be the name the worker registers.
+        Assert.Equal(DelegateToAgentActivity.ActivityName, definition.Name);
+    }
+
+    // ── Repo signal (#347) ────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task ARepo_IsCarriedOnTheDirective_AndOnEveryContinuation()
+    {
+        var h = Build();
+        var env = new ActivityEnvironment();
+
+        var run = env.RunAsync(() =>
+            h.Activity.DelegateToAgentAsync(Agent, "write a long thing", "wf/task-repo", repo: "org/app"));
+
+        await CompleteWhenRegisteredAsync(h, "wf/task-repo", new AgentTaskResult("part one", "incomplete"));
+        await CompleteWhenRegisteredAsync(h, "wf/task-repo/incomplete-retry-1",
+            new AgentTaskResult("part two", "completed"));
+        await run;
+
+        // The continuation is the same delegation, so it routes the same way.
+        Assert.Equal(["org/app", "org/app"], h.PublishedRepos);
+
+        // Structured field only — the instruction text is not a carrier.
+        Assert.DoesNotContain(h.PublishedInstructions, i => i.Contains("org/app"));
+    }
+
+    [Fact]
+    public async Task NoRepo_PublishesANullRepo()
+    {
+        var h = Build();
+        var env = new ActivityEnvironment();
+
+        var run = env.RunAsync(() =>
+            h.Activity.DelegateToAgentAsync(Agent, "do the thing", "wf/task-norepo"));
+
+        await CompleteWhenRegisteredAsync(h, "wf/task-norepo", new AgentTaskResult("done", "completed"));
+        await run;
+
+        Assert.Equal([null], h.PublishedRepos);
+    }
+
+    [Theory]
+    [InlineData("not a repo")]
+    [InlineData("org/app/extra")]
+    [InlineData("org")]
+    [InlineData("/app")]
+    [InlineData("org/app?x=1")]
+    [InlineData("   ")]
+    public async Task AMalformedOrBlankRepo_IsDropped_AndTheDelegationStillGoesOut(string repo)
+    {
+        var h = Build();
+        var env = new ActivityEnvironment();
+
+        var run = env.RunAsync(() =>
+            h.Activity.DelegateToAgentAsync(Agent, "do the thing", "wf/task-badrepo", repo: repo));
+
+        await CompleteWhenRegisteredAsync(h, "wf/task-badrepo", new AgentTaskResult("done", "completed"));
+        var result = await run;
+
+        Assert.True(result.IsCompleted);
+        Assert.Equal([null], h.PublishedRepos);
+    }
+
+    [Fact]
+    public async Task ARepoWithSurroundingWhitespace_IsTrimmed()
+    {
+        var h = Build();
+        var env = new ActivityEnvironment();
+
+        var run = env.RunAsync(() =>
+            h.Activity.DelegateToAgentAsync(Agent, "do the thing", "wf/task-trim", repo: " org/app\n"));
+
+        await CompleteWhenRegisteredAsync(h, "wf/task-trim", new AgentTaskResult("done", "completed"));
+        await run;
+
+        Assert.Equal(["org/app"], h.PublishedRepos);
     }
 }

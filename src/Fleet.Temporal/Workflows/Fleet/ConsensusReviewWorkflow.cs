@@ -146,14 +146,9 @@ public class ConsensusReviewWorkflow
                     ? input.ReviewPrompt + instructionSuffix
                     : input.ReviewPrompt + "\n\n" + perspective + instructionSuffix;
 
-                return Workflow.ExecuteActivityAsync(
-                    (DelegateToAgentActivity a) => a.DelegateToAgentAsync(
-                        agent,
-                        instruction,
-                        $"{workflowId}/review-{agent}",
-                        true,
-                        3,
-                        agentBudgetSeconds),
+                return Workflow.ExecuteActivityAsync<AgentTaskResult>(
+                    DelegateToAgentActivity.ActivityName,
+                    DelegateArgs(agent, instruction, $"{workflowId}/review-{agent}", agentBudgetSeconds),
                     reviewOptions);
             })
             .ToArray();
@@ -200,14 +195,9 @@ public class ConsensusReviewWorkflow
         }
 
         // ── Synthesis: synthesizer consolidates the COMPACT reviews ──────────────
-        var synthesisResult = await Workflow.ExecuteActivityAsync(
-            (DelegateToAgentActivity a) => a.DelegateToAgentAsync(
-                synthesizer,
-                BuildSynthesisInstruction(input, agentReviews),
-                $"{workflowId}/synthesis",
-                true,
-                3,
-                agentBudgetSeconds),
+        var synthesisResult = await Workflow.ExecuteActivityAsync<AgentTaskResult>(
+            DelegateToAgentActivity.ActivityName,
+            DelegateArgs(synthesizer, BuildSynthesisInstruction(input, agentReviews), $"{workflowId}/synthesis", agentBudgetSeconds),
             synthesisOptions);
 
         return ComposeOutput(
@@ -236,6 +226,16 @@ public class ConsensusReviewWorkflow
                 RetryPolicy = new() { MaximumAttempts = 3 },
             });
     }
+
+    /// <summary>
+    /// The activity input for every delegate in this workflow, spelled out: exactly the six
+    /// arguments the former expression-tree calls scheduled. An expression-tree call has the
+    /// compiler append every optional parameter's default, so the activity's trailing
+    /// <c>repo</c> (#347) would otherwise have changed this workflow's input without it ever
+    /// asking for a repo.
+    /// </summary>
+    private static object?[] DelegateArgs(string agent, string instruction, string taskId, int agentBudgetSeconds) =>
+        [agent, instruction, taskId, true, 3, agentBudgetSeconds];
 
     /// <summary>
     /// Options for every delegate in this workflow.
@@ -326,14 +326,9 @@ public class ConsensusReviewWorkflow
             $"VERDICT: {ReviewVerdict.ChangesRequested}\n" +
             $"VERDICT: {ReviewVerdict.NeedsHumanReview}";
 
-        var synthesisResult = await Workflow.ExecuteActivityAsync(
-            (DelegateToAgentActivity a) => a.DelegateToAgentAsync(
-                synthesizer,
-                synthesisInstruction,
-                $"{workflowId}/synthesis",
-                true,
-                3,
-                agentBudgetSeconds),
+        var synthesisResult = await Workflow.ExecuteActivityAsync<AgentTaskResult>(
+            DelegateToAgentActivity.ActivityName,
+            DelegateArgs(synthesizer, synthesisInstruction, $"{workflowId}/synthesis", agentBudgetSeconds),
             synthesisOptions);
 
         return new ConsensusReviewOutput(

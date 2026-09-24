@@ -1,6 +1,10 @@
-import { useState } from 'react'
-import type { AgentConfig, ConfigEdits, ConfigSaveState, InstructionSummary, McpEndpointEntry, OutputStyleSummary } from '../types'
+import { useEffect, useState } from 'react'
+import type {
+  AgentConfig, ConfigEdits, ConfigSaveState, InstructionSummary, McpEndpointEntry, OutputStyleSummary,
+  ProjectCardState, ProjectContextDetail, ProjectContextMode, ProjectContextSummary,
+} from '../types'
 import { ADVANCED_DEFAULTS, countCustomized, PROVIDER_DEFAULT_MODEL, CLAUDE_PERMISSION_MODES, CODEX_SANDBOX_MODES } from '../constants'
+import { apiFetch, projectModeFor } from '../utils'
 import ModelSelector from './ModelSelector'
 import FieldHint from './FieldHint'
 import InstructionPicker from './InstructionPicker'
@@ -17,6 +21,8 @@ interface AgentConfigModalProps {
   configReprovisionConfirm: boolean
   allInstructions: InstructionSummary[]
   outputStyles: OutputStyleSummary[]
+  /** Which projects exist and which have a card — drives the per-assignment mode select. */
+  projectContexts: ProjectContextSummary[]
   projectAccess: string[] | null
   projectAccessLoading: boolean
   onEditsChange: (patch: Partial<ConfigEdits>) => void
@@ -38,6 +44,7 @@ export default function AgentConfigModal({
   configReprovisionConfirm,
   allInstructions,
   outputStyles,
+  projectContexts,
   projectAccess,
   projectAccessLoading,
   onEditsChange,
@@ -71,6 +78,44 @@ export default function AgentConfigModal({
   const provider = configEdits?.provider ?? configData?.provider ?? 'claude'
   const isClaude = provider === 'claude'
   const isCodex = provider === 'codex'
+
+  // ── Per-assignment context mode ──
+  // The assignments are whatever the Projects field says right now, deduplicated the way the
+  // orchestrator compares names (case-insensitively), so the selects follow the operator's typing.
+  const assignedProjects = (configEdits?.projects ?? '')
+    .split(',').map(p => p.trim()).filter(Boolean)
+    .filter((p, i, all) => all.findIndex(q => q.toLowerCase() === p.toLowerCase()) === i)
+  const summaryFor = (project: string) =>
+    projectContexts.find(c => c.name.toLowerCase() === project.toLowerCase()) ?? null
+
+  // Stale state is on the list row, but the keep markers a card is missing are only in the detail,
+  // so read the detail of each assigned project that has a card.
+  const [cardStates, setCardStates] = useState<Record<string, ProjectCardState | null>>({})
+  const cardProjectNames = assignedProjects
+    .map(p => summaryFor(p))
+    .filter((c): c is ProjectContextSummary => c !== null && c.cardVersion != null)
+    .map(c => c.name)
+  const cardProjectsKey = [...cardProjectNames].sort().join('\n')
+  useEffect(() => {
+    for (const name of cardProjectNames) {
+      apiFetch(`/api/project-contexts/${encodeURIComponent(name)}`)
+        .then(r => r.ok ? r.json() : Promise.reject(r.status))
+        .then((d: ProjectContextDetail) => setCardStates(prev => ({ ...prev, [name.toLowerCase()]: d.card ?? null })))
+        .catch(() => { /* the list row's stale flag still shows */ })
+    }
+    // Keyed on the set of names, not the array identity, so typing elsewhere does not refetch.
+  }, [cardProjectsKey])
+
+  function setProjectMode(project: string, mode: ProjectContextMode) {
+    if (!configEdits) return
+    const next = Object.fromEntries(
+      Object.entries(configEdits.projectModes).filter(([k]) => k.toLowerCase() !== project.toLowerCase()))
+    next[project] = mode
+    onEditsChange({ projectModes: next })
+  }
+
+  const modeChangePending = !!configData && assignedProjects.some(p =>
+    projectModeFor(configEdits?.projectModes, p) !== projectModeFor(configData.projectModes, p))
 
   return (
     <div className="config-modal-overlay" onClick={onClose}>
@@ -312,6 +357,56 @@ export default function AgentConfigModal({
                 <FieldHint>Comma-separated project names whose context files are loaded into the agent's system prompt (e.g. <code>fleet,backend</code>).</FieldHint>
                 <input className="config-input" value={configEdits.projects} onChange={e => onEditsChange({ projects: e.target.value })} placeholder="comma-separated project names" />
               </div>
+              {assignedProjects.length > 0 && (
+              <div className="config-field">
+                <label className="config-label">Project context mode</label>
+                <FieldHint><code>full</code> = the full project context is resident in the system prompt. <code>card</code> = the project's compact card is resident instead, and the full context is attached to turns routed to the project (write the card and its routes under Project Contexts). <strong>Takes effect on reprovision.</strong></FieldHint>
+                {assignedProjects.map(p => {
+                  const summary = summaryFor(p)
+                  const hasCard = summary?.cardVersion != null
+                  const mode = projectModeFor(configEdits.projectModes, p)
+                  const card = summary ? cardStates[summary.name.toLowerCase()] : undefined
+                  const stale = card?.stale ?? summary?.cardStale ?? false
+                  const missingKeeps = card?.missingKeeps ?? []
+                  return (
+                    <div key={p.toLowerCase()} className="config-related-row">
+                      <span className="config-project-chip">{p}</span>
+                      <select
+                        className="config-input config-input-sm"
+                        value={mode}
+                        onChange={e => setProjectMode(p, e.target.value as ProjectContextMode)}
+                      >
+                        <option value="full">full</option>
+                        {/* Kept selectable when already chosen, so a stored card assignment
+                            still shows as card while the project list catches up. */}
+                        <option value="card" disabled={!hasCard && mode !== 'card'}>
+                          {hasCard ? `card (v${summary!.cardVersion})` : 'card'}
+                        </option>
+                      </select>
+                      {!hasCard && (
+                        <span className="config-hint-text">
+                          {summary ? 'no card yet — write one under Project Contexts' : 'no project context with this name'}
+                        </span>
+                      )}
+                      {hasCard && (stale || missingKeeps.length > 0) && (
+                        <span
+                          className="ctx-warn"
+                          title={missingKeeps.length > 0
+                            ? 'Provisioning renders the full context for this project until the card carries every keep marker of the current full context.'
+                            : 'The card was written for an older full version. It is still used; update it under Project Contexts.'}
+                        >
+                          ⚠ {stale && card ? `stale (written for full v${card.basedOnFullVersion})` : stale ? 'stale' : ''}
+                          {missingKeeps.length > 0 && `${stale ? ' · ' : ''}missing keeps: ${missingKeeps.join(', ')}`}
+                        </span>
+                      )}
+                    </div>
+                  )
+                })}
+                {modeChangePending && (
+                  <div className="ctx-warn">Context mode changed — save, then reprovision this agent to apply it.</div>
+                )}
+              </div>
+              )}
               <div className="config-section-label">MCP Endpoints</div>
               <FieldHint>MCP Transport Type: <code>http</code> = streamable HTTP (preferred); <code>sse</code> = Server-Sent Events (legacy).</FieldHint>
               {configEdits.mcpEndpoints.map((ep, i) => (

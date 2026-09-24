@@ -132,6 +132,12 @@ property.
 - **Context window.** Codex does not know the `glm-5.3` slug. It falls back to a 272K window and no
   default effort. If a thread outgrows the model's real window, Z.ai's error ends the turn. Restart
   the agent to start a fresh thread.
+- **Mid-turn steering is delivered, but whether GLM obeys is up to the model.** Codex finishes the
+  current request, then sends a follow-up request carrying the correction, and the reply is the turn's
+  last message. In the #335 trials GLM followed 23 of 23 injected corrections, but an exact-head
+  canary also saw it ignore two. GLM messages carry no `phase`, so the executor's final-answer gate
+  never fires for GLM; Codex itself refuses a steer once the turn has ended, and the message is then
+  queued as the next turn. If a correction is ignored, send it again as a new message.
 - **Z.ai's own MCP servers** (vision, web search, web reader) are not wired.
 - **Concurrency** depends on the plan tier; excess requests get 429.
 

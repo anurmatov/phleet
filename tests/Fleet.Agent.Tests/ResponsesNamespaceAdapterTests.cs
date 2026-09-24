@@ -16,9 +16,11 @@ namespace Fleet.Agent.Tests;
 /// response rewrite, and request handling (AC5–AC7).
 /// </summary>
 /// <remarks>
-/// The SSE fixtures under <c>Fixtures/HostedProviders/</c> are <b>synthetic</b>, built from the
-/// vendors' documented event shapes. Phase 0's scrubbed captures replace them once the raw vendor
-/// probe has been run with real keys; the file names say <c>synthetic</c> until then.
+/// The OpenRouter SSE fixtures under <c>Fixtures/HostedProviders/</c> are scrubbed Phase 0 captures:
+/// the vendor's real answers to a real Codex 0.153.4 request sent through this adapter. Scrubbing
+/// replaced ids, the cache key, the echoed Codex instructions and the echoed tool schemas, and
+/// changed nothing else. The DeepSeek fixture is still <b>synthetic</b>, built from the documented
+/// event shapes, because its probe has not run yet; the file name says so.
 /// </remarks>
 public class ResponsesNamespaceAdapterTests
 {
@@ -222,12 +224,12 @@ public class ResponsesNamespaceAdapterTests
     }
 
     [Theory]
-    [InlineData("deepseek", "deepseek-function-call.synthetic.sse")]
-    [InlineData("openrouter", "openrouter-function-call.synthetic.sse")]
-    public async Task RoundTrip_Sse_UpstreamGetsFlatNames_CodexGetsNamespaceBack(string prefix, string fixture)
+    [InlineData("deepseek", "deepseek-function-call.synthetic.sse", "memory_get")]
+    [InlineData("openrouter", "openrouter-function-call.sse", "memory_stats")]
+    public async Task RoundTrip_Sse_UpstreamGetsFlatNames_CodexGetsNamespaceBack(string prefix, string fixture, string member)
     {
         var provider = HostedModelProviders.All.Single(p => p.Prefix == prefix);
-        var sse = await File.ReadAllTextAsync(RepoPaths.Resolve($"tests/Fleet.Agent.Tests/Fixtures/HostedProviders/{fixture}"));
+        var sse = HostedProviderFixture(fixture);
         var upstream = new RecordingHandler((_, _) => Task.FromResult(SseResponse(sse)));
         var logger = new ListLogger();
         var adapter = NewAdapter(provider, upstream, logger);
@@ -239,40 +241,111 @@ public class ResponsesNamespaceAdapterTests
 
         // Outbound: the namespace member reached the vendor as one flat function name.
         var sent = JsonNode.Parse(Assert.Single(upstream.Bodies))!.AsObject();
-        Assert.Contains(sent["tools"]!.AsArray(), t => (string?)t!["name"] == "mcp__memory__memory_get");
+        Assert.Contains(sent["tools"]!.AsArray(), t => (string?)t!["name"] == $"mcp__memory__{member}");
         Assert.DoesNotContain(sent["tools"]!.AsArray(), t => (string?)t!["type"] == "namespace");
 
-        // Inbound: every rewritten event carries namespace + member again.
+        // Inbound: every function_call carries namespace + member again — in .added, in .done and
+        // in the final response object.
         var events = ParseSse(ReadBody(context));
-        var itemEvents = events.Where(e => e.Json?["item"] is JsonObject).ToList();
-        var matched = itemEvents.Where(e => (string?)e.Json!["item"]!["call_id"] != "call_3").ToList();
-        Assert.NotEmpty(matched);
-        Assert.All(matched, e =>
+        var calls = FunctionCalls(events);
+        Assert.NotEmpty(calls);
+        Assert.Contains(events, e => (string?)e.Json?["type"] == "response.completed");
+        Assert.All(calls, call =>
         {
-            Assert.Equal("mcp__memory", (string?)e.Json!["item"]!["namespace"]);
-            Assert.Equal("memory_get", (string?)e.Json!["item"]!["name"]);
+            Assert.Equal("mcp__memory", (string?)call["namespace"]);
+            Assert.Equal(member, (string?)call["name"]);
         });
 
-        var completed = events.Single(e => (string?)e.Json?["type"] == "response.completed");
-        var finalCall = completed.Json!["response"]!["output"]![0]!;
-        Assert.Equal("mcp__memory", (string?)finalCall["namespace"]);
-        Assert.Equal("memory_get", (string?)finalCall["name"]);
-
-        // A near-miss name is never guessed into a tool: it comes back exactly as sent.
-        var nearMiss = itemEvents.Where(e => (string?)e.Json!["item"]!["call_id"] == "call_3").ToList();
-        Assert.All(nearMiss, e =>
-        {
-            Assert.Equal("mcp__memory.memory_get", (string?)e.Json!["item"]!["name"]);
-            Assert.Null(e.Json!["item"]!["namespace"]);
-        });
-
-        // Non-item events pass through untouched, including a non-JSON terminator.
-        Assert.Contains(events, e => (string?)e.Json?["type"] is "response.created");
-        if (prefix == "openrouter")
-            Assert.Contains(events, e => e.Data == "[DONE]");
+        // Everything else passes through: the same events in the same order, and every event with
+        // no function_call in it is JSON-equal to what the vendor sent — reasoning and message
+        // items included. A non-JSON terminator such as [DONE] is forwarded as is.
+        AssertForwardedUnchangedExceptCalls(ParseSse(sse), events);
 
         Assert.Contains(logger.Lines, l => l.Contains($"HostedProviderAdapter provider={prefix} status=200")
-            && l.Contains($"unmatchedCalls={(prefix == "openrouter" ? 1 : 0)}"));
+            && l.Contains("unmatchedCalls=0"));
+    }
+
+    [Fact]
+    public async Task RealCapture_FollowUpMessage_IsForwardedUnchanged()
+    {
+        // Phase 0 (c): the vendor's answer after a function_call_output. No call, nothing to restore.
+        var sse = HostedProviderFixture("openrouter-follow-up-message.sse");
+        var logger = new ListLogger();
+        var adapter = NewAdapter(HostedModelProviders.OpenRouter,
+            new RecordingHandler((_, _) => Task.FromResult(SseResponse(sse))), logger);
+
+        var context = NewContext("/openrouter/responses", CodexRequest("z-ai/glm-5.3"));
+        await adapter.HandleAsync(context);
+
+        Assert.Equal(200, context.Response.StatusCode);
+        var original = ParseSse(sse);
+        var events = ParseSse(ReadBody(context));
+        Assert.Empty(FunctionCalls(original));
+        AssertForwardedUnchangedExceptCalls(original, events);
+        Assert.Equal("[DONE]", events[^1].Data);
+
+        var deltas = string.Concat(events.Where(e => (string?)e.Json?["type"] == "response.output_text.delta")
+            .Select(e => (string?)e.Json!["delta"]));
+        var message = events.Single(e => (string?)e.Json?["type"] == "response.output_item.done").Json!["item"]!;
+        Assert.Equal("message", (string?)message["type"]);
+        Assert.Equal(deltas, (string?)message["content"]![0]!["text"]);
+        Assert.Contains(logger.Lines, l => l.Contains("status=200") && l.Contains("unmatchedCalls=0"));
+    }
+
+    [Fact]
+    public async Task Sse_NearMissName_IsForwardedExactlyAsSentAndCounted()
+    {
+        // A near-miss name is never guessed into a tool: it comes back exactly as sent, in the item
+        // events and in the final response, and is counted once.
+        const string call = "{\"type\":\"function_call\",\"id\":\"fc_3\",\"call_id\":\"call_3\",\"name\":\"mcp__memory.memory_get\",\"arguments\":\"{}\"}";
+        var sse = $"data: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{call}}}\n\n"
+                + $"data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{call}}}\n\n"
+                + $"data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"resp_3\",\"status\":\"completed\",\"output\":[{call}]}}}}\n\n"
+                + "data: [DONE]\n\n";
+        var logger = new ListLogger();
+        var adapter = NewAdapter(HostedModelProviders.OpenRouter,
+            new RecordingHandler((_, _) => Task.FromResult(SseResponse(sse))), logger);
+
+        var context = NewContext("/openrouter/responses", CodexRequest("z-ai/glm-5.3"));
+        await adapter.HandleAsync(context);
+
+        var calls = FunctionCalls(ParseSse(ReadBody(context)));
+        Assert.Equal(3, calls.Count);
+        Assert.All(calls, c =>
+        {
+            Assert.Equal("mcp__memory.memory_get", (string?)c["name"]);
+            Assert.Null(c["namespace"]);
+        });
+        Assert.Contains(logger.Lines, l => l.Contains("status=200") && l.Contains("unmatchedCalls=1"));
+    }
+
+    private static string HostedProviderFixture(string name) =>
+        File.ReadAllText(RepoPaths.Resolve($"tests/Fleet.Agent.Tests/Fixtures/HostedProviders/{name}"));
+
+    /// <summary>Every function_call item in item events and in response objects' output.</summary>
+    private static List<JsonObject> FunctionCalls(IEnumerable<SseEvent> events) =>
+        events.Select(e => e.Json?["item"]).OfType<JsonObject>()
+            .Concat(events.Select(e => e.Json?["response"]?["output"]).OfType<JsonArray>()
+                .SelectMany(output => output).OfType<JsonObject>())
+            .Where(item => (string?)item["type"] == "function_call")
+            .ToList();
+
+    private static void AssertForwardedUnchangedExceptCalls(List<SseEvent> original, List<SseEvent> forwarded)
+    {
+        Assert.Equal(
+            original.Select(e => (string?)e.Json?["type"] ?? e.Data),
+            forwarded.Select(e => (string?)e.Json?["type"] ?? e.Data));
+
+        for (var i = 0; i < original.Count; i++)
+        {
+            if (FunctionCalls([original[i]]).Count > 0)
+                continue;
+            Assert.True(
+                original[i].Json is null
+                    ? original[i].Data == forwarded[i].Data
+                    : JsonNode.DeepEquals(original[i].Json, forwarded[i].Json),
+                $"event {i} ({(string?)original[i].Json?["type"] ?? original[i].Data}) changed in transit");
+        }
     }
 
     [Fact]

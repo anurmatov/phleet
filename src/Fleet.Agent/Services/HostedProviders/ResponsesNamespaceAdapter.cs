@@ -17,8 +17,9 @@ namespace Fleet.Agent.Services.HostedProviders;
 /// <remarks>
 /// <para>
 /// Codex declares every MCP tool as a Responses <c>namespace</c> tool and routes a returned call
-/// only when it carries a matching <c>namespace</c> + <c>name</c>. Neither vendor accepts namespace
-/// tools. So the adapter flattens each namespace member into a plain <c>function</c> tool named by
+/// only when it carries a matching <c>namespace</c> + <c>name</c>. DeepSeek documents function tools
+/// only (OpenRouter documents the same, though the Phase 0 probe found it accepts namespace tools).
+/// So the adapter flattens each namespace member into a plain <c>function</c> tool named by
 /// Codex's own join rule, remembers the mapping for this request only, and restores
 /// <c>namespace</c> + <c>name</c> on a returned call whose name matches a flattened name
 /// <b>exactly</b>. It never guesses a mapping: a guessed name can dispatch a different, privileged

@@ -1,0 +1,112 @@
+data: {"type":"response.created","response":{"id":"gen_probe_1","object":"response","created_at":1790225036,"model":"z-ai/glm-5.3","status":"in_progress","completed_at":null,"output":[],"error":null,"incomplete_details":null,"tools":[{"type":"function","name":"exec_command"},{"type":"function","name":"write_stdin"},{"type":"function","name":"list_mcp_resources"},{"type":"function","name":"list_mcp_resource_templates"},{"type":"function","name":"read_mcp_resource"},{"type":"function","name":"request_user_input"},{"type":"function","name":"view_image"},{"type":"function","name":"multi_agent_v1__close_agent"},{"type":"function","name":"multi_agent_v1__resume_agent"},{"type":"function","name":"multi_agent_v1__send_input"},{"type":"function","name":"multi_agent_v1__spawn_agent"},{"type":"function","name":"multi_agent_v1__wait_agent"},{"type":"function","name":"mcp__memory__memory_stats"},{"type":"function","name":"get_goal"},{"type":"function","name":"create_goal"},{"type":"function","name":"update_goal"}],"tool_choice":"auto","parallel_tool_calls":true,"max_output_tokens":2048,"temperature":1,"top_p":1,"presence_penalty":0,"frequency_penalty":0,"top_logprobs":0,"max_tool_calls":null,"metadata":{},"background":false,"previous_response_id":null,"service_tier":"auto","truncation":"disabled","store":false,"instructions":"<scrubbed: Codex base instructions>","text":{"format":{"type":"text"}},"reasoning":{"effort":"high","summary":"auto"},"safety_identifier":null,"prompt_cache_key":"<scrubbed>","prompt_cache_options":null,"usage":null},"sequence_number":0}
+
+data: {"type":"response.in_progress","response":{"id":"gen_probe_1","object":"response","created_at":1790225036,"model":"z-ai/glm-5.3","status":"in_progress","completed_at":null,"output":[],"error":null,"incomplete_details":null,"tools":[{"type":"function","name":"exec_command"},{"type":"function","name":"write_stdin"},{"type":"function","name":"list_mcp_resources"},{"type":"function","name":"list_mcp_resource_templates"},{"type":"function","name":"read_mcp_resource"},{"type":"function","name":"request_user_input"},{"type":"function","name":"view_image"},{"type":"function","name":"multi_agent_v1__close_agent"},{"type":"function","name":"multi_agent_v1__resume_agent"},{"type":"function","name":"multi_agent_v1__send_input"},{"type":"function","name":"multi_agent_v1__spawn_agent"},{"type":"function","name":"multi_agent_v1__wait_agent"},{"type":"function","name":"mcp__memory__memory_stats"},{"type":"function","name":"get_goal"},{"type":"function","name":"create_goal"},{"type":"function","name":"update_goal"}],"tool_choice":"auto","parallel_tool_calls":true,"max_output_tokens":2048,"temperature":1,"top_p":1,"presence_penalty":0,"frequency_penalty":0,"top_logprobs":0,"max_tool_calls":null,"metadata":{},"background":false,"previous_response_id":null,"service_tier":"auto","truncation":"disabled","store":false,"instructions":"<scrubbed: Codex base instructions>","text":{"format":{"type":"text"}},"reasoning":{"effort":"high","summary":"auto"},"safety_identifier":null,"prompt_cache_key":"<scrubbed>","prompt_cache_options":null,"usage":null},"sequence_number":1}
+
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_probe_1","type":"reasoning","status":"in_progress","summary":[]},"sequence_number":2}
+
+data: {"type":"response.content_part.added","output_index":0,"item_id":"rs_probe_1","content_index":0,"part":{"type":"reasoning_text","text":""},"sequence_number":3}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":"We","sequence_number":4}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":" need answer asks","sequence_number":5}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":" decide","sequence_number":6}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":" then call memory_stats.","sequence_number":7}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":" Need inspect","sequence_number":8}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":" prim","sequence_number":9}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":"ality.","sequence_number":10}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":" 391 factors","sequence_number":11}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":"? sqrt","sequence_number":12}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":" ","sequence_number":13}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":"19.77","sequence_number":14}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":". primes","sequence_number":15}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":" 2","sequence_number":16}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":",3,5,","sequence_number":17}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":"7,11,13","sequence_number":18}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":",17,19.","sequence_number":19}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":" 391 /","sequence_number":20}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":"17","sequence_number":21}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":"=","sequence_number":22}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":"23 exactly","sequence_number":23}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":" (","sequence_number":24}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":"17*23=39","sequence_number":25}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":"1),","sequence_number":26}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":" so composite. Need call","sequence_number":27}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":" tool after decide","sequence_number":28}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":". P","sequence_number":29}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":"reamble perhaps","sequence_number":30}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":" no","sequence_number":31}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":" need?","sequence_number":32}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":" tool","sequence_number":33}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_probe_1","content_index":0,"delta":" call.","sequence_number":34}
+
+data: {"type":"response.reasoning_text.done","output_index":0,"item_id":"rs_probe_1","content_index":0,"text":"We need answer asks decide then call memory_stats. Need inspect primality. 391 factors? sqrt 19.77. primes 2,3,5,7,11,13,17,19. 391 /17=23 exactly (17*23=391), so composite. Need call tool after decide. Preamble perhaps no need? tool call.","sequence_number":35}
+
+data: {"type":"response.content_part.done","output_index":0,"item_id":"rs_probe_1","content_index":0,"part":{"type":"reasoning_text","text":"We need answer asks decide then call memory_stats. Need inspect primality. 391 factors? sqrt 19.77. primes 2,3,5,7,11,13,17,19. 391 /17=23 exactly (17*23=391), so composite. Need call tool after decide. Preamble perhaps no need? tool call."},"sequence_number":36}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_probe_1","type":"reasoning","status":"completed","content":[{"type":"reasoning_text","text":"We need answer asks decide then call memory_stats. Need inspect primality. 391 factors? sqrt 19.77. primes 2,3,5,7,11,13,17,19. 391 /17=23 exactly (17*23=391), so composite. Need call tool after decide. Preamble perhaps no need? tool call."}],"summary":[],"format":"unknown"},"sequence_number":37}
+
+data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_probe_1","type":"message","status":"in_progress","role":"assistant","content":[]},"sequence_number":38}
+
+data: {"type":"response.content_part.added","output_index":1,"item_id":"msg_probe_1","content_index":0,"part":{"type":"output_text","text":"","annotations":[],"logprobs":[]},"sequence_number":39}
+
+data: {"type":"response.output_text.delta","output_index":1,"item_id":"msg_probe_1","content_index":0,"delta":"39","logprobs":[],"sequence_number":40}
+
+data: {"type":"response.output_text.delta","output_index":1,"item_id":"msg_probe_1","content_index":0,"delta":"1 is composite","logprobs":[],"sequence_number":41}
+
+data: {"type":"response.output_text.delta","output_index":1,"item_id":"msg_probe_1","content_index":0,"delta":" because \\(","logprobs":[],"sequence_number":42}
+
+data: {"type":"response.output_text.delta","output_index":1,"item_id":"msg_probe_1","content_index":0,"delta":"391 = 17","logprobs":[],"sequence_number":43}
+
+data: {"type":"response.output_text.delta","output_index":1,"item_id":"msg_probe_1","content_index":0,"delta":" \\times 23\\","logprobs":[],"sequence_number":44}
+
+data: {"type":"response.output_text.delta","output_index":1,"item_id":"msg_probe_1","content_index":0,"delta":"), so it is not","logprobs":[],"sequence_number":45}
+
+data: {"type":"response.output_text.delta","output_index":1,"item_id":"msg_probe_1","content_index":0,"delta":" prime.","logprobs":[],"sequence_number":46}
+
+data: {"type":"response.output_text.done","output_index":1,"item_id":"msg_probe_1","content_index":0,"text":"391 is composite because \\(391 = 17 \\times 23\\), so it is not prime.","logprobs":[],"sequence_number":47}
+
+data: {"type":"response.content_part.done","output_index":1,"item_id":"msg_probe_1","content_index":0,"part":{"type":"output_text","text":"391 is composite because \\(391 = 17 \\times 23\\), so it is not prime.","annotations":[],"logprobs":[]},"sequence_number":48}
+
+data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_probe_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"391 is composite because \\(391 = 17 \\times 23\\), so it is not prime.","annotations":[],"logprobs":[]}]},"sequence_number":49}
+
+data: {"type":"response.output_item.added","output_index":2,"item":{"id":"fc_probe_1","type":"function_call","status":"in_progress","call_id":"call_probe_1","name":"mcp__memory__memory_stats","arguments":""},"sequence_number":50}
+
+data: {"type":"response.function_call_arguments.delta","output_index":2,"item_id":"fc_probe_1","delta":"{}","sequence_number":51}
+
+data: {"type":"response.function_call_arguments.done","output_index":2,"item_id":"fc_probe_1","name":"mcp__memory__memory_stats","arguments":"{}","sequence_number":52}
+
+data: {"type":"response.output_item.done","output_index":2,"item":{"id":"fc_probe_1","type":"function_call","status":"completed","call_id":"call_probe_1","name":"mcp__memory__memory_stats","arguments":"{}"},"sequence_number":53}
+
+data: {"type":"response.completed","response":{"id":"gen_probe_1","object":"response","created_at":1790225036,"model":"z-ai/glm-5.3","status":"completed","completed_at":1790225037,"output":[{"id":"rs_probe_1","type":"reasoning","status":"completed","content":[{"type":"reasoning_text","text":"We need answer asks decide then call memory_stats. Need inspect primality. 391 factors? sqrt 19.77. primes 2,3,5,7,11,13,17,19. 391 /17=23 exactly (17*23=391), so composite. Need call tool after decide. Preamble perhaps no need? tool call."}],"summary":[],"format":"unknown"},{"id":"msg_probe_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"391 is composite because \\(391 = 17 \\times 23\\), so it is not prime.","annotations":[],"logprobs":[]}]},{"id":"fc_probe_1","type":"function_call","status":"completed","call_id":"call_probe_1","name":"mcp__memory__memory_stats","arguments":"{}"}],"error":null,"incomplete_details":null,"tools":[{"type":"function","name":"exec_command"},{"type":"function","name":"write_stdin"},{"type":"function","name":"list_mcp_resources"},{"type":"function","name":"list_mcp_resource_templates"},{"type":"function","name":"read_mcp_resource"},{"type":"function","name":"request_user_input"},{"type":"function","name":"view_image"},{"type":"function","name":"multi_agent_v1__close_agent"},{"type":"function","name":"multi_agent_v1__resume_agent"},{"type":"function","name":"multi_agent_v1__send_input"},{"type":"function","name":"multi_agent_v1__spawn_agent"},{"type":"function","name":"multi_agent_v1__wait_agent"},{"type":"function","name":"mcp__memory__memory_stats"},{"type":"function","name":"get_goal"},{"type":"function","name":"create_goal"},{"type":"function","name":"update_goal"}],"tool_choice":"auto","parallel_tool_calls":true,"max_output_tokens":2048,"temperature":1,"top_p":1,"presence_penalty":0,"frequency_penalty":0,"top_logprobs":0,"max_tool_calls":null,"metadata":{},"background":false,"previous_response_id":null,"service_tier":"auto","truncation":"disabled","store":false,"instructions":"<scrubbed: Codex base instructions>","text":{"format":{"type":"text"}},"reasoning":{"effort":"high","summary":"auto"},"safety_identifier":null,"prompt_cache_key":"<scrubbed>","prompt_cache_options":null,"usage":{"input_tokens":8680,"input_tokens_details":{"cached_tokens":0},"output_tokens":112,"output_tokens_details":{"reasoning_tokens":78},"total_tokens":8792,"cost":0.0126448,"is_byok":false,"cost_details":{"upstream_inference_cost":0.0126448,"upstream_inference_input_cost":0.012152,"upstream_inference_output_cost":0.0004928}}},"sequence_number":54}
+
+data: [DONE]
+

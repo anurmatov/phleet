@@ -43,8 +43,12 @@ fails with codex's message. There is no fallback.
 
 ### The adapter
 
-Codex declares every MCP tool as a Responses `namespace` tool. Neither vendor accepts those, so a
-direct connection would give the model zero MCP tools. `HostedProviderAdapterHost` runs a **separate
+Codex declares every MCP tool as a Responses `namespace` tool. DeepSeek documents function tools
+only, so a direct connection would give the model zero MCP tools. OpenRouter documents the same,
+but the Phase 0 probe (2026-09-24) found it accepted a `namespace` tool and returned `namespace` on
+the call. The adapter flattens for both vendors anyway: flattening is verified on OpenRouter, and
+the adapter is needed regardless, because it is the only holder of the key (see Key isolation
+below). `HostedProviderAdapterHost` runs a **separate
 nested web app** bound to `127.0.0.1:0` only. It is built with no configuration sources, so no
 `Kestrel:Endpoints` or `ASPNETCORE_URLS` setting can give it a second listener. The main agent app
 has no adapter route. The adapter serves only `POST /<prefix>/responses` and returns 404 for anything
@@ -114,9 +118,14 @@ memory. After startup the key is in no environment block, no file and no child p
   OpenRouter.
 - **No hosted web search or image tools.** Those tool types are removed.
 - **GLM only through OpenRouter.** Z.ai's first-party API has no Responses endpoint.
-- **Vendor behaviour is doc-derived until the Phase 0 probe runs.** The field policy follows each
-  vendor's published documentation. The adapter test fixtures are marked `synthetic` until scrubbed
-  captures from a raw probe with real keys replace them (issue #335, Phase 0).
+- **Vendor probe status (issue #335, Phase 0).** OpenRouter was probed on 2026-09-24 with a real
+  codex 0.153.4 request sent through this adapter. The request, the follow-up after a tool result,
+  and a replayed `reasoning` item all returned 200. `store:true` is rejected by OpenRouter itself.
+  Its test fixtures are scrubbed captures. DeepSeek has not been probed yet: its field policy
+  follows the vendor's documentation, and its fixture is still marked `synthetic`.
+- **OpenRouter reserves credit for the full output budget.** Codex sends no `max_output_tokens`.
+  OpenRouter therefore checks the balance against the model's maximum completion (131,072 tokens for
+  GLM) on every request, and an account below that answers 402.
 
 ## 5. Troubleshooting
 
@@ -144,6 +153,7 @@ line, or `unmatchedCalls>0`, which means the model called a tool name that was n
 | Startup failure `thread/start did not echo modelProvider` | Codex did not accept the per-thread provider definition | Check the codex CLI pin; do not work around it |
 | Turn fails with `phleet adapter: upstream deepseek unreachable: <Type>` (502) | DNS, TLS or connect failure | Check outbound network. Codex retries twice |
 | Turn fails with the vendor's 401 / 429 / 400 message | Bad key, rate limit, or a request the vendor rejects | Fix the key, or read the vendor message |
+| Turn fails with 402: DeepSeek `Insufficient Balance`, or OpenRouter `requires more credits, or fewer max_tokens` | The vendor account is unfunded. OpenRouter checks against the model's full output budget (§4) | Add credit to the vendor account. For OpenRouter, also check the key's own credit limit |
 | Turn fails with `phleet adapter: rejected tools …` (400) | Tool name collision, an over-long name, or a namespace member that is not a function | Rename or fix the tool at its MCP server |
 | Turn hangs, then fails after about 5 minutes | Upstream stream went silent | Codex's `stream_idle_timeout_ms` (300 s) fires, then the turn fails |
 

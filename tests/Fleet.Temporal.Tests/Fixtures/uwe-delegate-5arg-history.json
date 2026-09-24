@@ -510,7 +510,7 @@
       "activityTaskFailedEventAttributes": {
         "failure": {
           "message": "step failed on purpose",
-          "stackTrace": "   at Fleet.Temporal.Tests.Engine.DelegateHistoryActivities.DelegateAsync(String target, String instruction, String taskId, Boolean retryOnIncomplete, Int32 maxIncompleteRetries, Int32 agentBudgetSeconds, String repo) in /tmp/pre347/tests/Fleet.Temporal.Tests/Engine/DelegateHistoryScenario.cs:line 166\n   at Temporalio.Activities.ActivityDefinition.InvokeAsync(Object[] parameters)\n   at Temporalio.Worker.ActivityWorker.ExecuteActivityInternalAsync(RunningActivity act, ActivityTask tsk, DataConverter dataConverter)",
+          "stackTrace": "   at Fleet.Temporal.Tests.Engine.DelegateHistoryActivities.DelegateAsync(String target, String instruction, String taskId, Boolean retryOnIncomplete, Int32 maxIncompleteRetries, Int32 agentBudgetSeconds, String repo) in tests/Fleet.Temporal.Tests/Engine/DelegateHistoryScenario.cs:line 166\n   at Temporalio.Activities.ActivityDefinition.InvokeAsync(Object[] parameters)\n   at Temporalio.Worker.ActivityWorker.ExecuteActivityInternalAsync(RunningActivity act, ActivityTask tsk, DataConverter dataConverter)",
           "applicationFailureInfo": {
             "nonRetryable": true
           }

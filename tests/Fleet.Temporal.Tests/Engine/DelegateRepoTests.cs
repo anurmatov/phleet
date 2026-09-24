@@ -26,8 +26,9 @@ namespace Fleet.Temporal.Tests.Engine;
 /// <para>
 /// The baseline is <c>Fixtures/uwe-delegate-5arg-history.json</c>: <see cref="DelegateHistoryScenario"/>
 /// run on the engine BEFORE this change (commit 67ed2b9, the scenario file copied unchanged into
-/// that tree) on a time-skipping test server, with only the worker identity replaced by a
-/// placeholder. It must never be regenerated from post-change code — it would then stop being a
+/// that tree) on a time-skipping test server. Only replay-irrelevant text was edited afterwards: the
+/// worker identity (now a placeholder host) and the recording directory in one failure stack trace.
+/// It must never be regenerated from post-change code — it would then stop being a
 /// pre-change history and every assertion here would compare the engine with itself.
 /// </para>
 /// </summary>

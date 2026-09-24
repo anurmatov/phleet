@@ -9,6 +9,11 @@ HOSTED_PROVIDER=$(node -e "try{console.log(require('/app/appsettings.json').Agen
 HOSTED_KEY_ENV=$(node -e "try{const v=require('/app/appsettings.json').Agent.HostedProviderKeyEnv;console.log(typeof v==='string'?v:'')}catch{console.log('')}" 2>/dev/null || echo "")
 HOSTED_KEY_FILE=/run/phleet-hosted-key
 
+# Claude local model mode (#340 D3). Any non-empty Agent.AnthropicBaseUrl counts, whitespace-only
+# included: that is a fault the agent's startup gate rejects, so here it fails closed (no credentials
+# copied) rather than open. Only a flag is printed, never the URL.
+CLAUDE_LOCAL_MODEL=$(node -e "try{const v=require('/app/appsettings.json').Agent.AnthropicBaseUrl;console.log(v!==undefined&&v!==null&&String(v)!==''?'true':'false')}catch{console.log('false')}" 2>/dev/null || echo "false")
+
 if [ "$HOSTED_PROVIDER" = "true" ]; then
     # Never print the value — only the variable name.
     if ! [[ "$HOSTED_KEY_ENV" =~ ^[A-Z_][A-Z0-9_]*$ ]]; then
@@ -186,6 +191,14 @@ for (const [name, s] of Object.entries(servers)) {
 }
 if (toml) fs.writeFileSync('/root/.codex/config.toml', toml);
 " 2>/dev/null || true
+    fi
+elif [ "$CLAUDE_LOCAL_MODEL" = "true" ]; then
+    # A local-model agent holds no Claude OAuth credential (#340 D3). /root/.claude persists in the
+    # workspace volume, so a credentials file from an earlier life must be removed, not just skipped.
+    rm -f /root/.claude/.credentials.json
+    if [ -e /root/.claude/.credentials.json ] || [ -L /root/.claude/.credentials.json ]; then
+        echo "ERROR: Claude local model mode, but /root/.claude/.credentials.json could not be removed (bind-mounted?). Remove the mount, then reprovision." >&2
+        exit 1
     fi
 else
     # Claude auth — always overwrite from host mount (source of truth, kept fresh by AuthTokenRefreshWorkflow)

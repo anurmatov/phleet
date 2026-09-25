@@ -21,6 +21,15 @@ public class Agent
     public int ProactiveIntervalMinutes { get; set; } = 0;
     public string GroupListenMode { get; set; } = "mention";
     public int GroupDebounceSeconds { get; set; } = 15;
+
+    /// <summary>
+    /// Seconds <c>WarmupService</c> may spend pre-spawning the executor before it cancels (#357).
+    /// Default <see cref="WarmupTimeout.DefaultSeconds"/> keeps cloud agents unchanged; local-model
+    /// agents with cold starts near three minutes opt up per agent. Provision-time configuration:
+    /// changing it requires <c>reprovision_agent</c>, not <c>restart_agent</c>. Validated on every
+    /// write path via <see cref="WarmupTimeout.DescribeFault"/>; timeout stays non-fatal.
+    /// </summary>
+    public int WarmupTimeoutSeconds { get; set; } = WarmupTimeout.DefaultSeconds;
     public string ShortName { get; set; } = "";
     public bool ShowStats { get; set; } = true;
     public bool PrefixMessages { get; set; } = false;

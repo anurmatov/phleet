@@ -201,7 +201,7 @@ instance a production workload depends on.
 | orchestrator DB | row edited directly into an invalid state | provisioning throws; the agent stays down with the named fault |
 | filesystem | stale credentials file cannot be removed | `entrypoint.sh` prints `ERROR:` and exits 1 |
 | RabbitMQ | unbind fails | warning; startup continues |
-| warmup | 60 s warmup is shorter than a cold local prefill | existing warning; the first real turn cold-starts |
+| warmup | warmup timeout shorter than a cold local prefill | warning names the configured timeout; the first real turn cold-starts. Raise `Warmup timeout` (10–600 s, default 60) per agent, then reprovision |
 
 Claude Code prints `[claude-code:unrecognized_model]` on stderr for a local model tag.
 `ClaudeExecutor` surfaces it at `Warning`; it is expected and did not prevent successful turns

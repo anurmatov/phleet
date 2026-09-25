@@ -28,6 +28,7 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         [Description("Proactive message interval in minutes (0=disabled). Omit to keep current.")] int? proactive_interval_minutes = null,
         [Description("Group listen mode (mention, all, none). Omit to keep current.")] string? group_listen_mode = null,
         [Description("Group debounce in seconds before processing group messages. Omit to keep current.")] int? group_debounce_seconds = null,
+        [Description("Warmup timeout in seconds before the startup ping gives up (10-600, default 60). Slow local-model cold starts may need 180. Omit to keep current. Takes effect on the next reprovision.")] int? warmup_timeout_seconds = null,
         [Description("Short name for the agent (used in group chat). Omit to keep current.")] string? short_name = null,
         [Description("Show stats in status messages. Omit to keep current.")] bool? show_stats = null,
         [Description("Prefix all outgoing telegram messages with bold [ShortName] header for shared-bot visibility. Omit to keep current.")] bool? prefix_messages = null,
@@ -118,6 +119,15 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         {
             changes.AppendLine($"- group_debounce_seconds: {agent.GroupDebounceSeconds} → {group_debounce_seconds}");
             agent.GroupDebounceSeconds = group_debounce_seconds.Value;
+        }
+
+        if (warmup_timeout_seconds is not null && warmup_timeout_seconds != agent.WarmupTimeoutSeconds)
+        {
+            // Rejected, never clamped (#357 MUST NOT): a hidden correction makes live configuration unauditable.
+            if (WarmupTimeout.DescribeFault(warmup_timeout_seconds.Value) is { } warmupFault)
+                return warmupFault;
+            changes.AppendLine($"- warmup_timeout_seconds: {agent.WarmupTimeoutSeconds} → {warmup_timeout_seconds}");
+            agent.WarmupTimeoutSeconds = warmup_timeout_seconds.Value;
         }
 
         if (short_name is not null && short_name != agent.ShortName)

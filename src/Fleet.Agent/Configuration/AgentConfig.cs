@@ -17,6 +17,15 @@ public sealed class AgentOptions
     public int ProactiveIntervalMinutes { get; set; } = 0;
     public string GroupListenMode { get; set; } = "mention";
     public int GroupDebounceSeconds { get; set; } = 15;
+
+    /// <summary>
+    /// Seconds <see cref="Services.WarmupService"/> may spend pre-spawning the executor before it
+    /// cancels (#357). Provision-time configuration written by the orchestrator from the persisted
+    /// <c>Agent.WarmupTimeoutSeconds</c> row — the only runtime timeout source. Defaults to
+    /// <see cref="WarmupTimeout.DefaultSeconds"/>; validated on the orchestrator write paths, not
+    /// re-clamped here.
+    /// </summary>
+    public int WarmupTimeoutSeconds { get; set; } = WarmupTimeout.DefaultSeconds;
     public string ShortName { get; set; } = "";
     public bool ShowStats { get; set; } = true;
     public bool PrefixMessages { get; set; } = false;

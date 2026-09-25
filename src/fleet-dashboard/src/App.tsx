@@ -36,6 +36,7 @@ import type {
 import { apiFetch, heartbeatAge } from './utils'
 import { projectPayload } from './projectAssignments'
 import { PROVIDER_DEFAULT_MODEL } from './constants'
+import { parseWarmupTimeoutSeconds, warmupTimeoutEditValue } from './warmupTimeout'
 import AppHeader from './components/AppHeader'
 import AppFooter from './components/AppFooter'
 import Sidenav from './components/Sidenav'
@@ -71,7 +72,7 @@ const DEFAULT_CREATE_FORM: CreateForm = {
   containerName: '', memoryLimitMb: '4096', isEnabled: true, image: '',
   permissionMode: 'acceptEdits', maxTurns: '50', workDir: '/workspace',
   proactiveIntervalMinutes: '0',
-  groupListenMode: 'mention', groupDebounceSeconds: '15', shortName: '',
+  groupListenMode: 'mention', groupDebounceSeconds: '15', warmupTimeoutSeconds: '60', shortName: '',
   effort: '', jsonSchema: '', agentsJson: '', autoMemoryEnabled: true,
   showStats: true, prefixMessages: false, formattingMode: 0, suppressToolMessages: false, telegramSendOnly: false, provider: 'claude',
   codexSandboxMode: '',
@@ -828,6 +829,7 @@ export default function App() {
           proactiveIntervalMinutes: String(cfg.proactiveIntervalMinutes),
           groupListenMode: cfg.groupListenMode,
           groupDebounceSeconds: String(cfg.groupDebounceSeconds),
+          warmupTimeoutSeconds: warmupTimeoutEditValue(cfg.warmupTimeoutSeconds),
           shortName: cfg.shortName,
           displayName: cfg.displayName,
           showStats: cfg.showStats,
@@ -905,6 +907,8 @@ export default function App() {
     const memoryLimitMb = parseInt(configEdits.memoryLimitMb, 10)
     if (isNaN(memoryLimitMb) || memoryLimitMb < 128) { setConfigSaveMsg('Memory must be ≥ 128 MB'); setConfigSaveState('error'); return }
     const maxTurns = parseInt(configEdits.maxTurns, 10)
+    const warmupTimeout = parseWarmupTimeoutSeconds(configEdits.warmupTimeoutSeconds)
+    if (!warmupTimeout.ok) { setConfigSaveMsg(warmupTimeout.error); setConfigSaveState('error'); return }
     const tools = configEdits.tools.split(',').map(t => t.trim()).filter(Boolean)
     const { projects } = projectPayload(configEdits)
     const networks = configEdits.networks.split(',').map(n => n.trim()).filter(Boolean)
@@ -931,6 +935,7 @@ export default function App() {
         proactiveIntervalMinutes: parseInt(configEdits.proactiveIntervalMinutes, 10) || 0,
         groupListenMode: configEdits.groupListenMode,
         groupDebounceSeconds: parseInt(configEdits.groupDebounceSeconds, 10) || 15,
+        warmupTimeoutSeconds: warmupTimeout.value,
         shortName: configEdits.shortName,
         displayName: configEdits.displayName,
         showStats: configEdits.showStats,
@@ -1596,6 +1601,7 @@ export default function App() {
         proactiveIntervalMinutes: String(cfg.proactiveIntervalMinutes),
         groupListenMode: cfg.groupListenMode,
         groupDebounceSeconds: String(cfg.groupDebounceSeconds),
+        warmupTimeoutSeconds: warmupTimeoutEditValue(cfg.warmupTimeoutSeconds),
         showStats: cfg.showStats,
         prefixMessages: cfg.prefixMessages,
         formattingMode: cfg.formattingMode,
@@ -1626,6 +1632,8 @@ export default function App() {
     const createModel = createForm.model.trim() || PROVIDER_DEFAULT_MODEL[createProvider] || ''
     if (!createModel) { setCreateMsg('Model is required'); return }
     if (!createForm.role.trim()) { setCreateMsg('Role is required'); return }
+    const createWarmupTimeout = parseWarmupTimeoutSeconds(createForm.warmupTimeoutSeconds)
+    if (!createWarmupTimeout.ok) { setCreateMsg(createWarmupTimeout.error); return }
     setCreateState('creating'); setCreateMsg('')
     try {
       const body = {
@@ -1643,6 +1651,7 @@ export default function App() {
         proactiveIntervalMinutes: parseInt(createForm.proactiveIntervalMinutes) || 0,
         groupListenMode: createForm.groupListenMode || 'mention',
         groupDebounceSeconds: parseInt(createForm.groupDebounceSeconds) || 15,
+        warmupTimeoutSeconds: createWarmupTimeout.value,
         shortName: createForm.shortName,
         showStats: createForm.showStats,
         prefixMessages: createForm.prefixMessages,
@@ -1708,6 +1717,7 @@ export default function App() {
         proactiveIntervalMinutes: String(t.proactiveIntervalMinutes ?? 0),
         groupListenMode: t.groupListenMode ?? 'mention',
         groupDebounceSeconds: String(t.groupDebounceSeconds ?? 15),
+        warmupTimeoutSeconds: warmupTimeoutEditValue(t.warmupTimeoutSeconds),
         showStats: t.showStats ?? false,
         prefixMessages: t.prefixMessages ?? false,
         formattingMode: t.formattingMode ?? 0,

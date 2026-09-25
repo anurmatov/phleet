@@ -31,7 +31,7 @@ public sealed class ListAgentConfigsTool(IServiceScopeFactory scopeFactory)
         foreach (var a in agents)
         {
             var status = a.IsEnabled ? "enabled" : "disabled";
-            sb.AppendLine($"- **{a.Name}** ({a.DisplayName}) — role: {a.Role}, model: {a.Model}, memory: {a.MemoryLimitMb}MB, {status}");
+            sb.AppendLine($"- **{a.Name}** ({a.DisplayName}) — role: {a.Role}, model: {a.Model}, memory: {a.MemoryLimitMb}MB, warmup: {a.WarmupTimeoutSeconds}s, {status}");
         }
 
         return sb.ToString();

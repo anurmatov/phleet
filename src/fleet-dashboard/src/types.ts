@@ -123,6 +123,7 @@ export interface CreateForm {
   proactiveIntervalMinutes: string
   groupListenMode: string
   groupDebounceSeconds: string
+  warmupTimeoutSeconds: string
   shortName: string
   effort: string
   jsonSchema: string
@@ -157,6 +158,7 @@ export interface AgentConfig {
   proactiveIntervalMinutes: number
   groupListenMode: string
   groupDebounceSeconds: number
+  warmupTimeoutSeconds: number
   shortName: string
   displayName: string
   showStats: boolean
@@ -198,6 +200,7 @@ export interface ConfigEdits {
   proactiveIntervalMinutes: string
   groupListenMode: string
   groupDebounceSeconds: string
+  warmupTimeoutSeconds: string
   shortName: string
   displayName: string
   showStats: boolean

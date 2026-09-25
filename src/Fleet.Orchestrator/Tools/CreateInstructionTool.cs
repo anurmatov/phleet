@@ -1,12 +1,13 @@
 using System.ComponentModel;
 using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Services;
 using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol.Server;
 
 namespace Fleet.Orchestrator.Tools;
 
 [McpServerToolType]
-public sealed class CreateInstructionTool(IServiceScopeFactory scopeFactory)
+public sealed class CreateInstructionTool(IServiceScopeFactory scopeFactory, PromptSizePolicy sizePolicy)
 {
     [McpServerTool(Name = "create_instruction")]
     [Description("Create a new instruction record with an initial v1 version. Fails if an instruction with that name already exists.")]
@@ -44,6 +45,8 @@ public sealed class CreateInstructionTool(IServiceScopeFactory scopeFactory)
 
         await db.SaveChangesAsync();
 
-        return $"Instruction '{instruction_name}' created at v1.";
+        var size = sizePolicy.Evaluate(PromptSizeKind.Instruction, instruction_name, previousContent: null, content);
+        sizePolicy.LogWrite(size, "mcp", instruction_name);
+        return $"Instruction '{instruction_name}' created at v1." + PromptSizePolicy.RenderMcpLines(size);
     }
 }

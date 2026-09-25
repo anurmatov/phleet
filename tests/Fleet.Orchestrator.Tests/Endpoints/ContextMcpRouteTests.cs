@@ -13,6 +13,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol.AspNetCore;
 
@@ -66,6 +67,8 @@ public class ContextMcpRouteTests : IAsyncLifetime
         builder.Logging.AddProvider(new SinkLoggerProvider(_logs));
         builder.Services.AddDbContext<OrchestratorDbContext>(o => o.UseSqlite(_connection));
         builder.Services.AddFleetMcpServer();
+        // ProjectContextTools takes the #346 size policy; Program.cs registers it outside AddFleetMcpServer.
+        builder.Services.AddSingleton(new PromptSizePolicy(10_000, 10_000, NullLogger.Instance));
 
         _app = builder.Build();
 

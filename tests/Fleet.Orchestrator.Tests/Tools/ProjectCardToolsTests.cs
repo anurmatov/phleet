@@ -1,5 +1,7 @@
 using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Services;
 using Fleet.Orchestrator.Tools;
+using Microsoft.Extensions.Logging.Abstractions;
 using static Fleet.Orchestrator.Tests.ProjectCardTestSupport;
 
 namespace Fleet.Orchestrator.Tests.Tools;
@@ -17,7 +19,7 @@ public sealed class ProjectCardToolsTests : IDisposable
     public void Dispose() => _db.Dispose();
 
     private ProjectCardTools CardTools() => new(_db.ScopeFactory, _db.Logs.CreateLogger<ProjectCardTools>());
-    private ProjectContextTools ContextTools() => new(_db.ScopeFactory);
+    private ProjectContextTools ContextTools() => new(_db.ScopeFactory, new PromptSizePolicy(10_000, 10_000, NullLogger.Instance));
     private ManageProjectRoutesTool RouteTool() => new(_db.ScopeFactory);
 
     private int Seed(string name, params string[] fullVersions)

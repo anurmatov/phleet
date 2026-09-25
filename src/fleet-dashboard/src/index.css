@@ -2463,62 +2463,6 @@ body {
   text-overflow: ellipsis;
 }
 
-/* ── Project context cards and routes (#347) ────────────────────────────── */
-
-.ctx-card-badge {
-  font-size: 11px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  padding: 1px 5px;
-  color: var(--text);
-}
-
-.ctx-stale-badge {
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 8px;
-  font-weight: 600;
-  background: rgba(251, 191, 36, 0.12);
-  color: var(--yellow);
-}
-
-.ctx-warn {
-  font-size: 11px;
-  color: var(--yellow);
-}
-
-.ctx-panel {
-  margin-top: 16px;
-}
-
-.ctx-rejection {
-  border: 1px solid var(--red);
-  border-radius: 4px;
-  padding: 6px 8px;
-  font-size: 11px;
-  color: var(--red);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.ctx-route-kind {
-  font-family: monospace;
-  font-size: 11px;
-  color: var(--accent);
-  width: 110px;
-  flex-shrink: 0;
-}
-
-.ctx-route-value {
-  font-family: monospace;
-  font-size: 12px;
-  flex: 1;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
 .instr-diff {
   border-top: 1px solid var(--border);
   padding-top: 8px;
@@ -4653,30 +4597,15 @@ body {
   gap: 6px;
 }
 
-.instruction-picker-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.instruction-picker-label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  cursor: pointer;
-  flex: 1;
-}
-
 .instruction-picker-hint {
   font-size: 11px;
   color: var(--muted);
   margin-top: 4px;
 }
 
-/* ── Project assignment table (agent config) ─────────────────────────────────── */
+/* ── Project and instruction tables (agent config) ───────────────────────────── */
 
-/* Fixed layout: the three control columns keep their width and the project name takes the rest,
+/* Fixed layout: the control and Size columns keep their width and the name takes the rest,
    wrapping rather than pushing the table wider than a narrow modal. */
 .project-table {
   width: 100%;
@@ -4686,8 +4615,8 @@ body {
 }
 
 .project-table-col-assigned { width: 26px; }
-.project-table-col-context { width: 72px; }
-.project-table-col-card { width: 30%; }
+.project-table-col-order { width: 72px; }
+.project-table-col-size { width: 96px; }
 
 .project-table th {
   font-size: 10px;
@@ -4712,17 +4641,18 @@ body {
   color: var(--muted);
 }
 
-.project-table-select {
-  width: 100%;
-  padding: 2px 4px;
-}
-
-.project-table-select:disabled {
-  opacity: 0.4;
-}
-
 .project-table-muted {
   color: var(--muted);
+}
+
+/* #346: Size cells in the agent config project and instruction tables. */
+.size-cell {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.size-cell-over {
+  color: var(--yellow);
 }
 
 /* ── Setup modal intro / footer ─────────────────────────────────────────────── */

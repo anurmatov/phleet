@@ -32,6 +32,20 @@ public sealed class ProjectContextEndpointsTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task List_reports_the_canonical_context_bytes()
+    {
+        await PostAsync("/api/project-contexts", new { name = "row-a", content = "abc" });
+        await PostAsync("/api/project-contexts/row-a/versions", new { content = "дд中" });
+        await PostAsync("/api/project-contexts/row-a/rollback/1");
+
+        var list = await Client.GetFromJsonAsync<JsonElement>("/api/project-contexts");
+
+        // #346 Size column: the row CurrentVersion points at (v3, a copy of v1).
+        Assert.Equal(3, list.EnumerateArray().Single(c => c.GetProperty("name").GetString() == "row-a")
+            .GetProperty("currentBytes").GetInt32());
+    }
+
+    [Fact]
     public async Task Cyrillic_is_measured_in_bytes()
     {
         var created = await PostAsync("/api/project-contexts", new { name = "row-a", content = "abc" });

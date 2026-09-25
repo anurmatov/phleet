@@ -42,6 +42,16 @@ public static class ProjectContextEndpoints
                 })
                 .ToListAsync();
 
+            // #346: the canonical content (the version row CurrentVersion points at), for the
+            // dashboard's Size column. Only the current rows are read, never the whole history.
+            var currentContents = await db.ProjectContexts
+                .AsNoTracking()
+                .Join(db.ProjectContextVersions,
+                    p => new { Id = p.Id, Version = p.CurrentVersion },
+                    v => new { Id = v.ProjectContextId, Version = v.VersionNumber },
+                    (p, v) => new { p.Id, v.Content })
+                .ToDictionaryAsync(x => x.Id, x => x.Content);
+
             // Agent assignments via agent_projects (name-keyed join)
             var agents = await db.Agents
                 .Include(a => a.Projects)
@@ -58,6 +68,7 @@ public static class ProjectContextEndpoints
                     .Where(a => a.Projects.Any(pr => pr.ProjectName.Equals(p.Name, StringComparison.OrdinalIgnoreCase)))
                     .Select(a => a.Name)
                     .OrderBy(n => n),
+                CurrentBytes = currentContents.TryGetValue(p.Id, out var content) ? PromptSizePolicy.Utf8Bytes(content) : (int?)null,
             }));
         });
 

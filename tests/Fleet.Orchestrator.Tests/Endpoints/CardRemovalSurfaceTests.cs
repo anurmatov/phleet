@@ -111,7 +111,7 @@ public sealed class CardRemovalSurfaceTests : IAsyncLifetime
         var list = await _client.GetFromJsonAsync<JsonElement>("/api/project-contexts");
 
         Assert.Equal(["name", "currentVersion", "versions"], detail.EnumerateObject().Select(p => p.Name).ToList());
-        Assert.Equal(["name", "currentVersion", "isActive", "totalVersions", "agents"],
+        Assert.Equal(["name", "currentVersion", "isActive", "totalVersions", "agents", "currentBytes"],
             list[0].EnumerateObject().Select(p => p.Name).ToList());
     }
 

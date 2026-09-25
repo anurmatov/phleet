@@ -44,6 +44,10 @@ public static class InstructionEndpoints
                 i.IsActive,
                 TotalVersions = i.Versions.Count,
                 Agents = i.AgentInstructions.Select(ai => ai.Agent.Name).OrderBy(n => n),
+                // #346: UTF-8 bytes of the current version, for the dashboard's Size column.
+                CurrentBytes = i.Versions.FirstOrDefault(v => v.VersionNumber == i.CurrentVersion)?.Content is { } content
+                    ? PromptSizePolicy.Utf8Bytes(content)
+                    : (int?)null,
             }));
         });
 

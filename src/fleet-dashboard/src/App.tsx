@@ -34,7 +34,7 @@ import type {
   PromptSizeReport,
 } from './types'
 import { apiFetch, heartbeatAge } from './utils'
-import { projectModeFor, projectPayload } from './projectAssignments'
+import { projectPayload } from './projectAssignments'
 import { PROVIDER_DEFAULT_MODEL } from './constants'
 import AppHeader from './components/AppHeader'
 import AppFooter from './components/AppFooter'
@@ -810,8 +810,9 @@ export default function App() {
       .finally(() => setProjectAccessLoading(false))
     // Refresh in case a style was added or removed since the page loaded.
     loadOutputStyles()
-    // Same for cards: the per-project mode select needs to know which projects have one.
+    // Same for the project and instruction tables, whose Size columns show the current bytes.
     loadProjectContexts()
+    loadInstructions()
     apiFetch(`/api/agents/${encodeURIComponent(agentName)}/config`)
       .then(r => r.ok ? r.json() : Promise.reject(r.status))
       .then((cfg: AgentConfig) => {
@@ -843,7 +844,6 @@ export default function App() {
           hostPort: cfg.hostPort != null ? String(cfg.hostPort) : '',
           tools: cfg.tools.map(t => t.toolName).join(', '),
           projects: cfg.projects,
-          projectModes: cfg.projectModes ?? {},
           mcpEndpoints: cfg.mcpEndpoints,
           networks: cfg.networks.join(', '),
           envRefs: cfg.envRefs.join(', '),
@@ -906,12 +906,7 @@ export default function App() {
     if (isNaN(memoryLimitMb) || memoryLimitMb < 128) { setConfigSaveMsg('Memory must be ≥ 128 MB'); setConfigSaveState('error'); return }
     const maxTurns = parseInt(configEdits.maxTurns, 10)
     const tools = configEdits.tools.split(',').map(t => t.trim()).filter(Boolean)
-    // One mode per resulting assignment, keyed exactly as it is sent in `projects` — the server
-    // rejects a key that is not an assignment, so a mode left behind by a removed project must
-    // not travel.
-    const { projects, projectModes } = projectPayload(configEdits)
-    const modesChanged = projects.some(p =>
-      projectModes[p] !== projectModeFor(configData?.projectModes, p))
+    const { projects } = projectPayload(configEdits)
     const networks = configEdits.networks.split(',').map(n => n.trim()).filter(Boolean)
     const envRefs = configEdits.envRefs.split(',').map(r => r.trim()).filter(Boolean)
     const newTelegramUsers = configEdits.telegramUsers.split(',').map(s => s.trim()).filter(Boolean).map(Number).filter(n => !isNaN(n))
@@ -955,7 +950,7 @@ export default function App() {
         mountDockerSock: configEdits.mountDockerSock,
         outputStyle: configEdits.outputStyle,
         anthropicBaseUrl: configEdits.anthropicBaseUrl,
-        tools, projects, projectModes, mcpEndpoints: configEdits.mcpEndpoints, networks, envRefs,
+        tools, projects, mcpEndpoints: configEdits.mcpEndpoints, networks, envRefs,
         instructions: configEdits.instructions.map(i => ({ instructionName: i.name, loadOrder: i.loadOrder })),
       }),
     })
@@ -972,13 +967,10 @@ export default function App() {
         if (andReprovision) return apiFetch(`/api/agents/${encodeURIComponent(agentName)}/reprovision`, { method: 'POST' }).then(r2 => { if (!r2.ok) throw new Error('Reprovision failed') })
       })
       .then(() => {
-        // The saved modes are now the baseline, so a second save does not repeat the notice.
-        setConfigData(prev => prev ? { ...prev, projects, projectModes } : prev)
+        setConfigData(prev => prev ? { ...prev, projects } : prev)
         setConfigSaveState('success')
-        setConfigSaveMsg(andReprovision
-          ? 'Saved & reprovisioning…'
-          : modesChanged ? 'Saved — reprovision to apply the context mode change' : 'Saved')
-        setTimeout(() => setConfigSaveState('idle'), modesChanged && !andReprovision ? 8000 : 4000)
+        setConfigSaveMsg(andReprovision ? 'Saved & reprovisioning…' : 'Saved')
+        setTimeout(() => setConfigSaveState('idle'), 4000)
       })
       .catch((err: Error) => {
         setConfigSaveState('error'); setConfigSaveMsg(err.message)
@@ -1164,18 +1156,6 @@ export default function App() {
       .finally(() => setContextDetailLoading(prev => ({ ...prev, [name]: false })))
   }
 
-  /**
-   * Re-reads a context after a card or route change. Unlike loadContextDetail it leaves the full
-   * editor alone, so an unsaved full edit survives saving a card next to it.
-   */
-  function refreshContextDetail(name: string) {
-    apiFetch(`/api/project-contexts/${encodeURIComponent(name)}`)
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
-      .then((detail: ProjectContextDetail) => setContextDetail(prev => ({ ...prev, [name]: detail })))
-      .catch(() => {})
-    apiFetch('/api/project-contexts').then(r => r.json()).then((list: ProjectContextSummary[]) => setProjectContexts(list)).catch(() => {})
-  }
-
   function toggleContext(name: string) {
     if (expandedContext === name) { setExpandedContext(null); return }
     setExpandedContext(name)
@@ -1193,21 +1173,14 @@ export default function App() {
       body: JSON.stringify({ content, reason }),
     })
       .then(async r => { if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }; return r.json() })
-      .then((res: { card?: { stale: boolean; basedOnFullVersion: number; missingKeeps: string[] }; size?: PromptSizeReport }) => {
+      .then((res: { size?: PromptSizeReport }) => {
         applySizeWarning(setCtxSizeWarnings, name, res?.size)
-        // Present only when the project has a card: a full edit can leave it stale or missing a
-        // keep marker, and the operator should hear that where they just saved.
-        const card = res?.card
-        const cardNote = !card ? ''
-          : card.missingKeeps?.length ? ` — card is missing keep markers: ${card.missingKeeps.join(', ')} (card agents fall back to full)`
-          : card.stale ? ` — card is now stale (written for full v${card.basedOnFullVersion})`
-          : ''
         setContextSaveState(prev => ({ ...prev, [name]: 'success' }))
-        setContextSaveMsg(prev => ({ ...prev, [name]: `Saved${cardNote}` }))
+        setContextSaveMsg(prev => ({ ...prev, [name]: 'Saved' }))
         setContextReason(prev => ({ ...prev, [name]: '' }))
         loadContextDetail(name)
         apiFetch('/api/project-contexts').then(r => r.json()).then((list: ProjectContextSummary[]) => setProjectContexts(list)).catch(() => {})
-        setTimeout(() => setContextSaveState(prev => ({ ...prev, [name]: 'idle' })), cardNote ? 8000 : 3000)
+        setTimeout(() => setContextSaveState(prev => ({ ...prev, [name]: 'idle' })), 3000)
       })
       .catch((err: Error) => {
         setContextSaveState(prev => ({ ...prev, [name]: 'error' })); setContextSaveMsg(prev => ({ ...prev, [name]: err.message }))
@@ -2038,7 +2011,6 @@ export default function App() {
             onNewFormChange={(field, value) => setCtxNewForm(prev => ({ ...prev, [field]: value }))}
             onNewFormSubmit={createContext}
             onRefresh={loadProjectContexts}
-            onCardOrRoutesChanged={refreshContextDetail}
             sizeLimit={promptSizeLimits ? promptSizeLimits.projectContext.limitBytes : undefined}
             sizeWarnings={ctxSizeWarnings}
           />
@@ -2219,6 +2191,7 @@ export default function App() {
           allInstructions={instructions}
           outputStyles={outputStyles}
           projectContexts={projectContexts}
+          promptSizeLimits={promptSizeLimits}
           projectAccess={projectAccess}
           projectAccessLoading={projectAccessLoading}
           onEditsChange={patch => setConfigEdits(prev => prev ? { ...prev, ...patch } : prev)}

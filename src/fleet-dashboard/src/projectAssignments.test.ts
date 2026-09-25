@@ -1,116 +1,74 @@
 // Run with `npm test` (node --test, Node ≥ 22.18 strips the types). Type-checked by `tsc -b`.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import type { ProjectCardState, ProjectContextSummary } from './types'
+import type { ProjectContextSummary } from './types'
 import {
-  assignProject, cardSelectable, projectPayload, projectRows, setProjectMode, unassignProject,
+  assignProject, projectPayload, projectRows, unassignProject,
   type ProjectAssignments,
 } from './projectAssignments.ts'
+import { sizeCell } from './sizeMeter.ts'
 
-function ctx(name: string, cardVersion: number | null = null, cardStale = false): ProjectContextSummary {
-  return { name, currentVersion: 1, isActive: true, totalVersions: 1, agents: [], cardVersion, cardStale }
+function ctx(name: string, currentBytes?: number | null): ProjectContextSummary {
+  return { name, currentVersion: 1, isActive: true, totalVersions: 1, agents: [], currentBytes }
 }
 
-// alpha has a card, beta has none, gamma has a stale one.
-const contexts = [ctx('gamma', 1, true), ctx('beta'), ctx('alpha', 2)]
+const contexts = [ctx('gamma', 12_000), ctx('beta', 400), ctx('alpha', 2_048)]
 
-const mixed: ProjectAssignments = { projects: ['gamma', 'Alpha'], projectModes: { gamma: 'card', Alpha: 'full' } }
+const assigned: ProjectAssignments = { projects: ['gamma', 'Alpha'] }
 
-test('load: a mixed assignment shows the right checkboxes and modes, sorted by name', () => {
-  const rows = projectRows(contexts, mixed)
+test('load: checkboxes, names and sizes, sorted by name', () => {
   assert.deepEqual(
-    rows.map(r => [r.name, r.assigned, r.mode, r.cardVersion]),
-    [['Alpha', true, 'full', 2], ['beta', false, 'full', null], ['gamma', true, 'card', 1]])
+    projectRows(contexts, assigned).map(r => [r.name, r.assigned, r.currentBytes]),
+    [['Alpha', true, 2_048], ['beta', false, 400], ['gamma', true, 12_000]])
 })
 
 test('load: an assignment with no project context still shows, so it can be unassigned', () => {
-  const rows = projectRows(contexts, { projects: ['delta'], projectModes: { delta: 'card' } })
+  const rows = projectRows(contexts, { projects: ['delta'] })
   const delta = rows.find(r => r.name === 'delta')!
   assert.equal(delta.assigned, true)
   assert.equal(delta.hasContext, false)
-  assert.equal(delta.mode, 'card')
+  assert.equal(delta.currentBytes, null)
   assert.equal(rows.length, 4)
 })
 
-test('load: no mode entry means full', () => {
-  const rows = projectRows(contexts, { projects: ['alpha'], projectModes: {} })
-  assert.equal(rows.find(r => r.name === 'alpha')!.mode, 'full')
+test('toggle on: assigns after the existing projects and checks the row', () => {
+  const next = assignProject(assigned, 'beta')
+  assert.deepEqual(next, { projects: ['gamma', 'Alpha', 'beta'] })
+  assert.equal(projectRows(contexts, next).find(r => r.name === 'beta')!.assigned, true)
 })
 
-test('select: a project with a card is assigned in full mode and card becomes available', () => {
-  const next = assignProject({ projects: ['gamma'], projectModes: { gamma: 'card' } }, 'alpha')
-  assert.deepEqual(next, { projects: ['gamma', 'alpha'], projectModes: { gamma: 'card', alpha: 'full' } })
-  const alpha = projectRows(contexts, next).find(r => r.name === 'alpha')!
-  assert.equal(alpha.mode, 'full')
-  assert.equal(cardSelectable(alpha), true)
+test('toggle on: an already-assigned project is left alone, whatever the casing', () => {
+  assert.equal(assignProject(assigned, 'ALPHA'), assigned)
 })
 
-test('select: a project without a card is assigned in full mode and card stays unavailable', () => {
-  const next = assignProject({ projects: [], projectModes: {} }, 'beta')
-  const beta = projectRows(contexts, next).find(r => r.name === 'beta')!
-  assert.equal(beta.assigned, true)
-  assert.equal(beta.mode, 'full')
-  assert.equal(beta.cardVersion, null)
-  assert.equal(cardSelectable(beta), false)
+test('toggle off: removes the assignment case-insensitively and unchecks the row', () => {
+  const next = unassignProject(assigned, 'GAMMA')
+  assert.deepEqual(next, { projects: ['Alpha'] })
+  assert.equal(projectRows(contexts, next).find(r => r.name === 'gamma')!.assigned, false)
 })
 
-test('select: an unassigned row never offers card', () => {
-  const alpha = projectRows(contexts, { projects: [], projectModes: {} }).find(r => r.name === 'alpha')!
-  assert.equal(cardSelectable(alpha), false)
+test('toggle off then on again restores the assignment', () => {
+  assert.deepEqual(assignProject(unassignProject(assigned, 'gamma'), 'gamma'), { projects: ['Alpha', 'gamma'] })
 })
 
-test('select: an already-assigned project is left alone, whatever the casing', () => {
-  assert.equal(assignProject(mixed, 'ALPHA'), mixed)
+test('payload: names only, trimmed and deduplicated in stored order, nothing else travels', () => {
+  const payload = projectPayload({ projects: [' gamma ', 'Alpha', 'alpha', ''] })
+  assert.deepEqual(payload, { projects: ['gamma', 'Alpha'] })
+  assert.deepEqual(Object.keys(payload), ['projects'])
 })
 
-test('deselect: removes both the assignment and its mode, case-insensitively', () => {
-  const next = unassignProject(mixed, 'GAMMA')
-  assert.deepEqual(next, { projects: ['Alpha'], projectModes: { Alpha: 'full' } })
-  assert.deepEqual(projectPayload(next), { projects: ['Alpha'], projectModes: { Alpha: 'full' } })
+test('size refresh: a refetched context list after a save changes the Size cell', () => {
+  const before = projectRows(contexts, assigned).find(r => r.name === 'gamma')!
+  assert.deepEqual(sizeCell(before.currentBytes, 10_000),
+    { text: '12,000 B', over: true, title: '12,000 / 10,000 bytes — over the soft limit, saving is still allowed' })
+
+  // The dashboard refetches /api/project-contexts after every context write; rows derive from it.
+  const after = projectRows([ctx('gamma', 3_000), ctx('beta', 400), ctx('alpha', 2_048)], assigned)
+    .find(r => r.name === 'gamma')!
+  assert.deepEqual(sizeCell(after.currentBytes, 10_000), { text: '3,000 B', over: false, title: '3,000 / 10,000 bytes' })
 })
 
-test('deselect then select again starts from full', () => {
-  const next = assignProject(unassignProject(mixed, 'gamma'), 'gamma')
-  assert.equal(projectRows(contexts, next).find(r => r.name === 'gamma')!.mode, 'full')
-})
-
-test('mode change: replaces the entry under any casing instead of adding a second key', () => {
-  const next = setProjectMode(mixed, 'alpha', 'card')
-  assert.deepEqual(next.projectModes, { gamma: 'card', alpha: 'card' })
-  assert.deepEqual(next.projects, mixed.projects)
-  assert.deepEqual(projectPayload(next).projectModes, { gamma: 'card', Alpha: 'card' })
-})
-
-test('missing card: a stored card mode stays selectable so it still shows as card', () => {
-  const gone = [ctx('alpha')]
-  const alpha = projectRows(gone, { projects: ['alpha'], projectModes: { alpha: 'card' } })[0]
-  assert.equal(alpha.cardVersion, null)
-  assert.equal(alpha.mode, 'card')
-  assert.equal(cardSelectable(alpha), true)
-})
-
-test('missing card: card detail adds missing keeps and the stale base version', () => {
-  const card: ProjectCardState = {
-    currentVersion: 1, basedOnFullVersion: 3, stale: true, missingKeeps: ['deploy'], invalidKeeps: [], versions: [],
-  }
-  const gamma = projectRows(contexts, mixed, { gamma: card }).find(r => r.name === 'gamma')!
-  assert.equal(gamma.stale, true)
-  assert.equal(gamma.staleBasedOn, 3)
-  assert.deepEqual(gamma.missingKeeps, ['deploy'])
-  // Without the detail, the list row's stale flag still shows.
-  const listOnly = projectRows(contexts, mixed).find(r => r.name === 'gamma')!
-  assert.equal(listOnly.stale, true)
-  assert.equal(listOnly.staleBasedOn, null)
-})
-
-test('payload: one mode per assignment in stored order; stray and duplicate entries do not travel', () => {
-  const payload = projectPayload({
-    projects: [' gamma ', 'Alpha', 'alpha', ''],
-    projectModes: { GAMMA: 'card', removed: 'card' },
-  })
-  assert.deepEqual(payload, { projects: ['gamma', 'Alpha'], projectModes: { gamma: 'card', Alpha: 'full' } })
-})
-
-test('payload: an unchanged load round-trips exactly', () => {
-  assert.deepEqual(projectPayload(mixed), mixed)
+test('size: limit disabled or unavailable shows bytes only, never a warning', () => {
+  assert.deepEqual(sizeCell(12_000, null), { text: '12,000 B', over: false })
+  assert.deepEqual(sizeCell(12_000, undefined), { text: '12,000 B', over: false })
 })

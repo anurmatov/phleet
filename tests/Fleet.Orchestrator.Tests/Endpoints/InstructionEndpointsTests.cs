@@ -55,6 +55,19 @@ public sealed class InstructionEndpointsTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task List_reports_the_current_version_bytes()
+    {
+        await CreateAsync("row-a", "abc");
+        await NewVersionAsync("row-a", "дд中");
+
+        var list = await Client.GetFromJsonAsync<JsonElement>("/api/instructions");
+
+        // #346 Size column: the current version (v2), measured in UTF-8 bytes — 2 + 2 + 3.
+        Assert.Equal(7, list.EnumerateArray().Single(i => i.GetProperty("name").GetString() == "row-a")
+            .GetProperty("currentBytes").GetInt32());
+    }
+
+    [Fact]
     public async Task Create_reports_size_with_no_previous_and_keeps_its_message()
     {
         var body = await CreateAsync("row-a", "abc");

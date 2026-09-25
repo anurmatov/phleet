@@ -65,6 +65,9 @@ namespace Fleet.Orchestrator.Migrations
                         .HasMaxLength(20)
                         .HasColumnType("varchar(20)");
 
+                    b.Property<byte>("FormattingMode")
+                        .HasColumnType("tinyint unsigned");
+
                     b.Property<int>("GroupDebounceSeconds")
                         .HasColumnType("int");
 
@@ -96,15 +99,15 @@ namespace Fleet.Orchestrator.Migrations
                     b.Property<int>("MemoryLimitMb")
                         .HasColumnType("int");
 
-                    b.Property<bool>("MountDockerSock")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("tinyint(1)")
-                        .HasDefaultValue(false);
-
                     b.Property<string>("Model")
                         .IsRequired()
                         .HasMaxLength(100)
                         .HasColumnType("varchar(100)");
+
+                    b.Property<bool>("MountDockerSock")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("tinyint(1)")
+                        .HasDefaultValue(false);
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -124,9 +127,6 @@ namespace Fleet.Orchestrator.Migrations
 
                     b.Property<bool>("PrefixMessages")
                         .HasColumnType("tinyint(1)");
-
-                    b.Property<byte>("FormattingMode")
-                        .HasColumnType("tinyint unsigned");
 
                     b.Property<int>("ProactiveIntervalMinutes")
                         .HasColumnType("int");
@@ -340,13 +340,6 @@ namespace Fleet.Orchestrator.Migrations
 
                     b.Property<int>("AgentId")
                         .HasColumnType("int");
-
-                    b.Property<string>("ContextMode")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(8)
-                        .HasColumnType("varchar(8)")
-                        .HasDefaultValue("full");
 
                     b.Property<string>("ProjectName")
                         .IsRequired()

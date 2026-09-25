@@ -389,6 +389,7 @@ public class ContainerProvisioningServiceTests
             "ProactiveIntervalMinutes": 0,
             "GroupListenMode": "mention",
             "GroupDebounceSeconds": 15,
+            "WarmupTimeoutSeconds": 60,
             "ShortName": "",
             "ShowStats": true,
             "PrefixMessages": false,

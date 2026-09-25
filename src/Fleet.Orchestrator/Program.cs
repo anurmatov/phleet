@@ -6,6 +6,7 @@ using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Endpoints;
 using Fleet.Orchestrator.Helpers;
 using Fleet.Orchestrator.Services;
+using Fleet.Shared;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 
@@ -340,6 +341,7 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         agent.ProactiveIntervalMinutes,
         agent.GroupListenMode,
         agent.GroupDebounceSeconds,
+        agent.WarmupTimeoutSeconds,
         agent.ShortName,
         agent.ShowStats,
         agent.PrefixMessages,
@@ -416,6 +418,13 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     if (body.ProactiveIntervalMinutes is not null) agent.ProactiveIntervalMinutes = body.ProactiveIntervalMinutes.Value;
     if (body.GroupListenMode is not null) agent.GroupListenMode = body.GroupListenMode;
     if (body.GroupDebounceSeconds is not null) agent.GroupDebounceSeconds = body.GroupDebounceSeconds.Value;
+    if (body.WarmupTimeoutSeconds is not null)
+    {
+        // Rejected, never clamped (#357 MUST NOT): a hidden correction makes live configuration unauditable.
+        if (WarmupTimeout.DescribeFault(body.WarmupTimeoutSeconds.Value) is { } warmupFault)
+            return Results.BadRequest(new { error = warmupFault });
+        agent.WarmupTimeoutSeconds = body.WarmupTimeoutSeconds.Value;
+    }
     if (body.ShortName is not null) agent.ShortName = string.IsNullOrWhiteSpace(body.ShortName) ? agent.Name : body.ShortName.Trim();
     if (body.ShowStats is not null) agent.ShowStats = body.ShowStats.Value;
     if (body.PrefixMessages is not null) agent.PrefixMessages = body.PrefixMessages.Value;
@@ -844,6 +853,9 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
     if (await db.Agents.AnyAsync(a => a.Name == name))
         return Results.Conflict(new { error = $"Agent '{name}' already exists" });
 
+    if (body.WarmupTimeoutSeconds is not null && WarmupTimeout.DescribeFault(body.WarmupTimeoutSeconds.Value) is { } warmupFault)
+        return Results.BadRequest(new { error = warmupFault });
+
     var containerName = string.IsNullOrWhiteSpace(body.ContainerName) ? $"fleet-{name}" : body.ContainerName.Trim();
     var displayName   = string.IsNullOrWhiteSpace(body.DisplayName)   ? name               : body.DisplayName.Trim();
 
@@ -863,6 +875,7 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         ProactiveIntervalMinutes  = body.ProactiveIntervalMinutes  ?? 0,
         GroupListenMode           = body.GroupListenMode           ?? "mention",
         GroupDebounceSeconds      = body.GroupDebounceSeconds      ?? 15,
+        WarmupTimeoutSeconds      = body.WarmupTimeoutSeconds      ?? WarmupTimeout.DefaultSeconds,
         ShortName                 = string.IsNullOrWhiteSpace(body.ShortName) ? name : body.ShortName.Trim(),
         ShowStats                 = body.ShowStats                 ?? true,
         PrefixMessages            = body.PrefixMessages            ?? false,
@@ -2395,6 +2408,7 @@ record AgentConfigUpdateRequest(
     int? ProactiveIntervalMinutes,
     string? GroupListenMode,
     int? GroupDebounceSeconds,
+    int? WarmupTimeoutSeconds,
     string? ShortName,
     bool? ShowStats,
     bool? PrefixMessages,
@@ -2465,6 +2479,7 @@ record CreateAgentRequest(
     int? ProactiveIntervalMinutes,
     string? GroupListenMode,
     int? GroupDebounceSeconds,
+    int? WarmupTimeoutSeconds,
     string? ShortName,
     bool? ShowStats,
     bool? PrefixMessages,

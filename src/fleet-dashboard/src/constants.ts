@@ -74,6 +74,7 @@ export const ADVANCED_DEFAULTS: Record<string, string | number | boolean | null>
   proactiveIntervalMinutes: 0,
   groupListenMode: 'mention',
   groupDebounceSeconds: 15,
+  warmupTimeoutSeconds: 60,
   shortName: '',
   showStats: true,
   prefixMessages: false,

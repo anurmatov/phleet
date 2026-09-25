@@ -190,6 +190,11 @@ export default function AgentConfigModal({
                 <input className="config-input config-input-short" type="number" min={0} value={configEdits.groupDebounceSeconds} onChange={e => onEditsChange({ groupDebounceSeconds: e.target.value })} />
               </div>
               <div className="config-field">
+                <label className="config-label">Warmup Timeout (s)</label>
+                <FieldHint>Seconds the startup warmup ping may run before giving up (10–600). Default <code>60</code>; slow local-model cold starts may need <code>180</code>. Takes effect on the next reprovision.</FieldHint>
+                <input className="config-input config-input-short" type="number" min={10} max={600} step={1} value={configEdits.warmupTimeoutSeconds} onChange={e => onEditsChange({ warmupTimeoutSeconds: e.target.value })} />
+              </div>
+              <div className="config-field">
                 <label className="config-label">Proactive Interval (min)</label>
                 <FieldHint>How often (in minutes) the agent self-initiates a check-in task. <code>0</code> = disabled.</FieldHint>
                 <input className="config-input config-input-short" type="number" min={0} value={configEdits.proactiveIntervalMinutes} onChange={e => onEditsChange({ proactiveIntervalMinutes: e.target.value })} />

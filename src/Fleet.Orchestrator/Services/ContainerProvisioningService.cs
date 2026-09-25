@@ -1078,6 +1078,7 @@ public sealed class ContainerProvisioningService(
                 agent.ProactiveIntervalMinutes,
                 agent.GroupListenMode,
                 agent.GroupDebounceSeconds,
+                agent.WarmupTimeoutSeconds,
                 agent.ShortName,
                 agent.ShowStats,
                 agent.PrefixMessages,

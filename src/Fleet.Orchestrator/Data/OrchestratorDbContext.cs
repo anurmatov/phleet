@@ -1,3 +1,4 @@
+using Fleet.Shared;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
 
@@ -55,6 +56,7 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.Property(x => x.ContainerName).HasMaxLength(200).IsRequired();
             e.Property(x => x.PermissionMode).HasMaxLength(50).HasDefaultValue("acceptEdits");
             e.Property(x => x.MaxTurns).HasDefaultValue(50);
+            e.Property(x => x.WarmupTimeoutSeconds).HasDefaultValue(WarmupTimeout.DefaultSeconds);
             e.Property(x => x.WorkDir).HasMaxLength(500).HasDefaultValue("/workspace");
             e.Property(x => x.GroupListenMode).HasMaxLength(50).HasDefaultValue("mention");
             e.Property(x => x.ShortName).HasMaxLength(100).HasDefaultValue("");

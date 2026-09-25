@@ -158,15 +158,18 @@ public sealed class RemoveProjectContextCardsMigrationTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Every_migration_applies_to_an_empty_database_with_no_preflight_lines_and_this_one_is_last()
+    public async Task Every_migration_applies_to_an_empty_database_with_no_preflight_lines()
     {
         var logs = new ProvisioningLogSink();
         await using var db = NewContext(_connectionString);
 
         await ContextRemovalPreflight.MigrateAsync(db, logs.For<RemoveProjectContextCardsMigrationTests>(), 10_000);
 
+        // Deliberately not "this one is last": later migrations (e.g. #357's
+        // AddAgentWarmupTimeoutSeconds) append after it, and each new tip owns that assertion in
+        // its own migration tests. Here only the apply-without-preflight behaviour is pinned.
         Assert.Empty(await db.Database.GetPendingMigrationsAsync());
-        Assert.Equal(Removal, (await db.Database.GetAppliedMigrationsAsync()).Last());
+        Assert.Contains(Removal, await db.Database.GetAppliedMigrationsAsync());
         Assert.DoesNotContain(logs.Entries, e => e.Message.StartsWith("Context removal", StringComparison.Ordinal));
     }
 

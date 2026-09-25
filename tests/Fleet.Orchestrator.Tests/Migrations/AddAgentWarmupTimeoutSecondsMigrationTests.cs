@@ -84,6 +84,18 @@ public sealed class AddAgentWarmupTimeoutSecondsMigrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Every_migration_applies_and_this_one_is_last()
+    {
+        // Moved from RemoveProjectContextCardsMigrationTests (#357 review): each migration tip
+        // owns the "I am last" assertion, so appending a migration never breaks its predecessor.
+        await using var db = NewContext();
+        await db.Database.MigrateAsync();
+
+        Assert.Empty(await db.Database.GetPendingMigrationsAsync());
+        Assert.Equal(Target, (await db.Database.GetAppliedMigrationsAsync()).Last());
+    }
+
+    [Fact]
     public async Task Down_drops_the_column_and_up_applies_again()
     {
         await MigrateAsync(Target);

@@ -1,12 +1,13 @@
 using System.ComponentModel;
 using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Services;
 using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol.Server;
 
 namespace Fleet.Orchestrator.Tools;
 
 [McpServerToolType]
-public sealed class RollbackInstructionTool(IServiceScopeFactory scopeFactory)
+public sealed class RollbackInstructionTool(IServiceScopeFactory scopeFactory, PromptSizePolicy sizePolicy)
 {
     private const int MaxVersions = 20;
 
@@ -29,6 +30,8 @@ public sealed class RollbackInstructionTool(IServiceScopeFactory scopeFactory)
         var target = instruction.Versions.FirstOrDefault(v => v.VersionNumber == target_version);
         if (target is null)
             return $"Version {target_version} does not exist for instruction '{instruction_name}'.";
+
+        var previousContent = instruction.Versions.FirstOrDefault(v => v.VersionNumber == instruction.CurrentVersion)?.Content;
 
         var newVersionNumber = instruction.CurrentVersion + 1;
 
@@ -57,6 +60,9 @@ public sealed class RollbackInstructionTool(IServiceScopeFactory scopeFactory)
 
         await db.SaveChangesAsync();
 
-        return $"Instruction '{instruction_name}' rolled back to v{target_version} content — saved as v{newVersionNumber}.";
+        var size = sizePolicy.Evaluate(PromptSizeKind.Instruction, instruction_name, previousContent, target.Content);
+        sizePolicy.LogWrite(size, "mcp", instruction_name);
+        return $"Instruction '{instruction_name}' rolled back to v{target_version} content — saved as v{newVersionNumber}."
+             + PromptSizePolicy.RenderMcpLines(size);
     }
 }

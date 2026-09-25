@@ -7,6 +7,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.AspNetCore;
 
 namespace Fleet.Orchestrator.Tests.Tools;
@@ -63,7 +64,7 @@ public sealed class GetProjectContextRouteTests : IAsyncLifetime
         await _connection.DisposeAsync();
     }
 
-    private ProjectContextTools Tools => new(_services.GetRequiredService<IServiceScopeFactory>());
+    private ProjectContextTools Tools => new(_services.GetRequiredService<IServiceScopeFactory>(), new PromptSizePolicy(10_000, 10_000, NullLogger.Instance));
     private ContextSessionRegistry Registry => _services.GetRequiredService<ContextSessionRegistry>();
 
     private void Request(string path, string? query = null, string? sessionId = null)

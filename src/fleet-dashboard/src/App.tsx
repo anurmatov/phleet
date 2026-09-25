@@ -30,6 +30,8 @@ import type {
   WorkflowTypeInfo,
   ScheduleSummary,
   OutputStyleSummary,
+  PromptSizeLimits,
+  PromptSizeReport,
 } from './types'
 import { apiFetch, heartbeatAge } from './utils'
 import { projectModeFor, projectPayload } from './projectAssignments'
@@ -161,6 +163,11 @@ export default function App() {
   const [instrNewForm, setInstrNewForm] = useState({ name: '', content: '', reason: '' })
   const [instrNewState, setInstrNewState] = useState<'idle' | 'saving' | 'success' | 'error'>('idle')
   const [instrNewMsg, setInstrNewMsg] = useState('')
+  // #346: the active soft limits (null until loaded, or when the policy route is unavailable) and
+  // the last write's size warning per row.
+  const [promptSizeLimits, setPromptSizeLimits] = useState<PromptSizeLimits | null>(null)
+  const [instrSizeWarnings, setInstrSizeWarnings] = useState<Record<string, string>>({})
+  const [ctxSizeWarnings, setCtxSizeWarnings] = useState<Record<string, string>>({})
 
   // Project contexts
   const [projectContexts, setProjectContexts] = useState<ProjectContextSummary[]>([])
@@ -420,6 +427,32 @@ export default function App() {
       .catch(() => setOutputStyles([]))
   }
 
+  // #346: fetched once. On failure or 404 (an older orchestrator) the meters show bytes only.
+  function loadPromptSizeLimits() {
+    apiFetch('/api/prompt-size-policy')
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then((policy: PromptSizeLimits) => setPromptSizeLimits(policy))
+      .catch(() => setPromptSizeLimits(null))
+  }
+
+  /**
+   * #346: a write's `size.warning` sets the row's ⚠ badge and notice; a write with no warning clears
+   * it. A response without `size` (an older orchestrator) changes nothing.
+   */
+  function applySizeWarning(
+    set: React.Dispatch<React.SetStateAction<Record<string, string>>>,
+    name: string,
+    size: PromptSizeReport | undefined,
+  ) {
+    if (!size) return
+    set(prev => {
+      const next = { ...prev }
+      if (size.warning) next[name] = size.warning
+      else delete next[name]
+      return next
+    })
+  }
+
   function loadProjectContexts() {
     setProjectContextsLoading(true)
     apiFetch('/api/project-contexts')
@@ -459,6 +492,7 @@ export default function App() {
 
     loadInstructions()
     loadProjectContexts()
+    loadPromptSizeLimits()
     loadOutputStyles()
     fetchCompleted()
 
@@ -982,7 +1016,8 @@ export default function App() {
       body: JSON.stringify({ content, reason }),
     })
       .then(async r => { if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }; return r.json() })
-      .then(() => {
+      .then((res: { size?: PromptSizeReport }) => {
+        applySizeWarning(setInstrSizeWarnings, name, res?.size)
         setInstructionSaveState(prev => ({ ...prev, [name]: 'success' }))
         setInstructionSaveMsg(prev => ({ ...prev, [name]: 'Saved' }))
         setInstructionReason(prev => ({ ...prev, [name]: '' }))
@@ -1000,7 +1035,8 @@ export default function App() {
     setInstructionSaveState(prev => ({ ...prev, [name]: 'saving' }))
     apiFetch(`/api/instructions/${encodeURIComponent(name)}/rollback/${targetVersion}`, { method: 'POST' })
       .then(async r => { if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }; return r.json() })
-      .then(() => {
+      .then((res: { size?: PromptSizeReport }) => {
+        applySizeWarning(setInstrSizeWarnings, name, res?.size)
         setInstructionSaveState(prev => ({ ...prev, [name]: 'success' }))
         setInstructionSaveMsg(prev => ({ ...prev, [name]: `Rolled back to v${targetVersion}` }))
         setSelectedVersion(prev => ({ ...prev, [name]: null }))
@@ -1082,6 +1118,7 @@ export default function App() {
   }
 
   function createInstruction() {
+    const name = instrNewForm.name
     setInstrNewState('saving')
     apiFetch('/api/instructions', {
       method: 'POST',
@@ -1096,7 +1133,8 @@ export default function App() {
         if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
         return r.json()
       })
-      .then(() => {
+      .then((res: { size?: PromptSizeReport }) => {
+        applySizeWarning(setInstrSizeWarnings, name, res?.size)
         setInstrNewState('success')
         setInstrNewMsg('Created')
         setInstrShowNew(false)
@@ -1155,7 +1193,8 @@ export default function App() {
       body: JSON.stringify({ content, reason }),
     })
       .then(async r => { if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }; return r.json() })
-      .then((res: { card?: { stale: boolean; basedOnFullVersion: number; missingKeeps: string[] } }) => {
+      .then((res: { card?: { stale: boolean; basedOnFullVersion: number; missingKeeps: string[] }; size?: PromptSizeReport }) => {
+        applySizeWarning(setCtxSizeWarnings, name, res?.size)
         // Present only when the project has a card: a full edit can leave it stale or missing a
         // keep marker, and the operator should hear that where they just saved.
         const card = res?.card
@@ -1180,7 +1219,8 @@ export default function App() {
     setContextSaveState(prev => ({ ...prev, [name]: 'saving' }))
     apiFetch(`/api/project-contexts/${encodeURIComponent(name)}/rollback/${targetVersion}`, { method: 'POST' })
       .then(async r => { if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }; return r.json() })
-      .then(() => {
+      .then((res: { size?: PromptSizeReport }) => {
+        applySizeWarning(setCtxSizeWarnings, name, res?.size)
         setContextSaveState(prev => ({ ...prev, [name]: 'success' }))
         setContextSaveMsg(prev => ({ ...prev, [name]: `Rolled back to v${targetVersion}` }))
         setContextSelectedVersion(prev => ({ ...prev, [name]: null }))
@@ -1238,6 +1278,7 @@ export default function App() {
   }
 
   function createContext() {
+    const name = ctxNewForm.name
     setCtxNewState('saving')
     apiFetch('/api/project-contexts', {
       method: 'POST',
@@ -1251,7 +1292,8 @@ export default function App() {
         if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
         return r.json()
       })
-      .then(() => {
+      .then((res: { size?: PromptSizeReport }) => {
+        applySizeWarning(setCtxSizeWarnings, name, res?.size)
         setCtxNewState('success')
         setCtxNewMsg('Created')
         setCtxShowNew(false)
@@ -1959,6 +2001,8 @@ export default function App() {
             onNewFormChange={(field, value) => setInstrNewForm(prev => ({ ...prev, [field]: value }))}
             onNewFormSubmit={createInstruction}
             onRefresh={loadInstructions}
+            sizeLimit={promptSizeLimits ? promptSizeLimits.instruction.limitBytes : undefined}
+            sizeWarnings={instrSizeWarnings}
           />
         )}
 
@@ -1995,6 +2039,8 @@ export default function App() {
             onNewFormSubmit={createContext}
             onRefresh={loadProjectContexts}
             onCardOrRoutesChanged={refreshContextDetail}
+            sizeLimit={promptSizeLimits ? promptSizeLimits.projectContext.limitBytes : undefined}
+            sizeWarnings={ctxSizeWarnings}
           />
         )}
 

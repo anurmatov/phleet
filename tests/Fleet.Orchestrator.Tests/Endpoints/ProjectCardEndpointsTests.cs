@@ -46,6 +46,8 @@ public class ProjectCardEndpointsTests : IAsyncLifetime
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(_logs);
         builder.Services.AddDbContext<OrchestratorDbContext>(o => o.UseSqlite(_connection));
+        // The #346 size report on the full-context writes; Program.cs registers the policy.
+        builder.Services.AddSingleton(new PromptSizePolicy(10_000, 10_000, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance));
 
         _app = builder.Build();
 

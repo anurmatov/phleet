@@ -314,6 +314,47 @@ export interface MemoryDoc {
   created_at: string
   updated_at: string
   content: string
+  /** #346 — absent on an older fleet-memory. */
+  size_guidance?: MemoryEmbeddingSize
+}
+
+/** #346 — `GET /internal/memory/{id}` size guidance; `limit_bytes` is null when the guidance is off. */
+export interface MemoryEmbeddingSize {
+  unit: 'utf8Bytes'
+  bytes: number
+  limit_bytes: number | null
+  limit_key: string
+}
+
+/** #346 — the `size` report on a memory PUT (snake_case, like the rest of the fleet-memory API). */
+export interface MemorySizeReport {
+  kind: 'memory'
+  unit: 'utf8Bytes'
+  previous_bytes: number | null
+  bytes: number
+  limit_bytes: number | null
+  limit_key: string
+  status: 'under' | 'crossed' | 'stillOver' | 'disabled'
+  warning: string | null
+}
+
+/** #346 — the `size` report on an instruction or project-context write. */
+export interface PromptSizeReport {
+  kind: 'instruction' | 'projectContext'
+  unit: 'utf8Bytes'
+  previousBytes: number | null
+  bytes: number
+  limitBytes: number | null
+  limitKey: string
+  status: 'under' | 'crossed' | 'stillOver' | 'disabled'
+  warning: string | null
+}
+
+/** #346 — `GET /api/prompt-size-policy`; `limitBytes` is null when that check is disabled. */
+export interface PromptSizeLimits {
+  unit: 'utf8Bytes'
+  instruction: { limitBytes: number | null; limitKey: string }
+  projectContext: { limitBytes: number | null; limitKey: string }
 }
 
 export interface MemorySearchResult {

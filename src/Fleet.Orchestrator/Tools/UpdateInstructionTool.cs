@@ -1,12 +1,13 @@
 using System.ComponentModel;
 using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Services;
 using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol.Server;
 
 namespace Fleet.Orchestrator.Tools;
 
 [McpServerToolType]
-public sealed class UpdateInstructionTool(IServiceScopeFactory scopeFactory)
+public sealed class UpdateInstructionTool(IServiceScopeFactory scopeFactory, PromptSizePolicy sizePolicy)
 {
     private const int MaxVersions = 20;
 
@@ -27,6 +28,9 @@ public sealed class UpdateInstructionTool(IServiceScopeFactory scopeFactory)
 
         if (instruction is null)
             return $"Instruction '{instruction_name}' not found.";
+
+        // Captured before Versions.Add so the new row is never mistaken for the previous one.
+        var previousContent = instruction.Versions.FirstOrDefault(v => v.VersionNumber == instruction.CurrentVersion)?.Content;
 
         var newVersionNumber = instruction.CurrentVersion + 1;
 
@@ -55,6 +59,8 @@ public sealed class UpdateInstructionTool(IServiceScopeFactory scopeFactory)
 
         await db.SaveChangesAsync();
 
-        return $"Instruction '{instruction_name}' updated to v{newVersionNumber}.";
+        var size = sizePolicy.Evaluate(PromptSizeKind.Instruction, instruction_name, previousContent, content);
+        sizePolicy.LogWrite(size, "mcp", instruction_name);
+        return $"Instruction '{instruction_name}' updated to v{newVersionNumber}." + PromptSizePolicy.RenderMcpLines(size);
     }
 }

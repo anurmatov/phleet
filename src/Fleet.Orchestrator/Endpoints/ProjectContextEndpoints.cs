@@ -1,5 +1,6 @@
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
 namespace Fleet.Orchestrator.Endpoints;
@@ -12,7 +13,8 @@ namespace Fleet.Orchestrator.Endpoints;
 /// Lifted out of <c>Program.cs</c> (#347) — the output-style precedent — so the endpoint tests map
 /// the SAME handlers a live orchestrator maps. The handlers are as before plus the #347 additions:
 /// the card fields on list and detail, keep-marker validation on create and new version, the
-/// <c>card</c> block on a full write when the project has a card, and the rollback warning.
+/// <c>card</c> block on a full write when the project has a card, and the rollback warning. #346
+/// adds the <c>size</c> report (<see cref="PromptSizePolicy"/>) to the three writes, after the commit.
 /// Writes are gated by the method-based bearer middleware (<see cref="OrchestratorAuth"/>).
 /// </remarks>
 public static class ProjectContextEndpoints
@@ -153,7 +155,7 @@ public static class ProjectContextEndpoints
         });
 
         // REST: create new project context with initial v1 content
-        app.MapPost("/api/project-contexts", async (HttpRequest request, IServiceScopeFactory scopeFactory) =>
+        app.MapPost("/api/project-contexts", async (HttpRequest request, IServiceScopeFactory scopeFactory, [FromServices] PromptSizePolicy sizePolicy) =>
         {
             using var scope = scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
@@ -189,11 +191,13 @@ public static class ProjectContextEndpoints
             });
             await db.SaveChangesAsync();
 
-            return Results.Ok(new { message = $"Project context '{body.Name}' created at v1" });
+            var size = sizePolicy.Evaluate(PromptSizeKind.ProjectContext, body.Name, previousContent: null, body.Content);
+            sizePolicy.LogWrite(size, "rest", body.Name);
+            return Results.Ok(new { message = $"Project context '{body.Name}' created at v1", size });
         });
 
         // REST: create new version of a project context
-        app.MapPost("/api/project-contexts/{name}/versions", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory) =>
+        app.MapPost("/api/project-contexts/{name}/versions", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, [FromServices] PromptSizePolicy sizePolicy) =>
         {
             using var scope = scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
@@ -214,6 +218,9 @@ public static class ProjectContextEndpoints
             if (InvalidKeeps(body.Content) is { } invalidResult)
                 return invalidResult;
 
+            // Captured before Versions.Add so the new row is never mistaken for the previous one.
+            var previousContent = CurrentContent(ctx);
+
             var newVersion = ctx.CurrentVersion + 1;
             ctx.Versions.Add(new ProjectContextVersion
             {
@@ -233,16 +240,19 @@ public static class ProjectContextEndpoints
 
             await db.SaveChangesAsync();
 
+            var size = sizePolicy.Evaluate(PromptSizeKind.ProjectContext, name, previousContent, body.Content);
+            sizePolicy.LogWrite(size, "rest", name);
+
             var message = $"Project context '{name}' updated to v{newVersion}";
             var card = await ProjectCardService.EvaluateCurrentAsync(db, ctx, body.Content);
             return card is null
-                ? Results.Ok(new { message, version = newVersion })
-                : Results.Ok(new { message, version = newVersion, card = CardSummary(card) });
+                ? Results.Ok(new { message, version = newVersion, size })
+                : Results.Ok(new { message, version = newVersion, card = CardSummary(card), size });
         });
 
         // REST: rollback project context to a prior version (creates new version with old content).
         // The recovery path: invalid keep markers in the restored content are allowed, with a Warning.
-        app.MapPost("/api/project-contexts/{name}/rollback/{targetVersion:int}", async (string name, int targetVersion, IServiceScopeFactory scopeFactory, ILoggerFactory loggerFactory) =>
+        app.MapPost("/api/project-contexts/{name}/rollback/{targetVersion:int}", async (string name, int targetVersion, IServiceScopeFactory scopeFactory, ILoggerFactory loggerFactory, [FromServices] PromptSizePolicy sizePolicy) =>
         {
             using var scope = scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
@@ -261,6 +271,7 @@ public static class ProjectContextEndpoints
                 return Results.NotFound(new { error = $"Version {targetVersion} not found" });
 
             var content = target.Content;
+            var previousContent = CurrentContent(ctx);
             var newVersion = ctx.CurrentVersion + 1;
             ctx.Versions.Add(new ProjectContextVersion
             {
@@ -283,11 +294,14 @@ public static class ProjectContextEndpoints
             ProjectCardService.WarnOnInvalidFullRollback(
                 loggerFactory.CreateLogger(typeof(ProjectContextEndpoints).FullName!), ctx.Name, targetVersion, content);
 
+            var size = sizePolicy.Evaluate(PromptSizeKind.ProjectContext, name, previousContent, content);
+            sizePolicy.LogWrite(size, "rest", name);
+
             var message = $"Rolled back '{name}' to v{targetVersion} content — saved as v{newVersion}";
             var card = await ProjectCardService.EvaluateCurrentAsync(db, ctx, content);
             return card is null
-                ? Results.Ok(new { message, version = newVersion })
-                : Results.Ok(new { message, version = newVersion, card = CardSummary(card) });
+                ? Results.Ok(new { message, version = newVersion, size })
+                : Results.Ok(new { message, version = newVersion, card = CardSummary(card), size });
         });
 
         // REST: toggle active/inactive on a project context
@@ -322,6 +336,13 @@ public static class ProjectContextEndpoints
                 invalidKeeps = invalid,
             });
     }
+
+    /// <summary>
+    /// Content of the version row <c>CurrentVersion</c> points at, or null when that row is missing —
+    /// the size report then has no <c>previousBytes</c>.
+    /// </summary>
+    private static string? CurrentContent(ProjectContext ctx) =>
+        ctx.Versions.FirstOrDefault(v => v.VersionNumber == ctx.CurrentVersion)?.Content;
 
     private static object CardSummary(ProjectCardState card) => new
     {

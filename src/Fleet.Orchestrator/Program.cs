@@ -39,6 +39,10 @@ builder.Services.AddSingleton<ConfigService>();
 builder.Services.AddSingleton<IConfigWriter>(sp => sp.GetRequiredService<ConfigService>());
 builder.Services.AddSingleton<IAclChangeNotifier>(sp => sp.GetRequiredService<ConfigService>());
 builder.Services.AddSingleton<MemoryProxyService>();
+// Advisory instruction / project-context size limits (#346): parsed once from the raw config
+// strings, never through the options binder, so a bad value is a Warning rather than a crash.
+builder.Services.AddSingleton(sp => PromptSizePolicy.FromConfiguration(
+    sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<ILogger<PromptSizePolicy>>()));
 builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(5));
 
 builder.Services.AddHttpContextAccessor();
@@ -88,6 +92,9 @@ builder.Services.AddHostedService<TemporalPollerService>();
 builder.Services.AddFleetMcpServer();
 
 var app = builder.Build();
+
+// Resolve the size policy now so an invalid value warns at startup, then log the active limits.
+app.Services.GetRequiredService<PromptSizePolicy>().LogStartup();
 
 // Auto-migrate and seed DB on startup
 if (!string.IsNullOrEmpty(connectionString))
@@ -579,195 +586,12 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
 // handlers a live orchestrator serves rather than a copy of them.
 app.MapOutputStyleEndpoints();
 
-// REST: list all instructions with version summary
-app.MapGet("/api/instructions", async (IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
+// REST: the /api/instructions surface — list, detail, new version, rollback, create and
+// toggle-active. Mapped from Endpoints/InstructionEndpoints.cs for the same reason (#346).
+app.MapInstructionEndpoints();
 
-    var instructions = await db.Instructions
-        .Include(i => i.Versions)
-        .Include(i => i.AgentInstructions)
-            .ThenInclude(ai => ai.Agent)
-        .AsSplitQuery()
-        .AsNoTracking()
-        .OrderBy(i => i.Name)
-        .ToListAsync();
-
-    return Results.Ok(instructions.Select(i => new
-    {
-        i.Name,
-        i.CurrentVersion,
-        i.IsActive,
-        TotalVersions = i.Versions.Count,
-        Agents = i.AgentInstructions.Select(ai => ai.Agent.Name).OrderBy(n => n),
-    }));
-});
-
-// REST: get full instruction with all versions and content
-app.MapGet("/api/instructions/{name}", async (string name, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
-
-    var instruction = await db.Instructions
-        .Include(i => i.Versions.OrderByDescending(v => v.VersionNumber))
-        .AsNoTracking()
-        .FirstOrDefaultAsync(i => i.Name == name);
-
-    if (instruction is null)
-        return Results.NotFound(new { error = $"Instruction '{name}' not found" });
-
-    return Results.Ok(new
-    {
-        instruction.Name,
-        instruction.CurrentVersion,
-        Versions = instruction.Versions.Select(v => new
-        {
-            v.VersionNumber,
-            v.Content,
-            CreatedAt = v.CreatedAt.ToString("yyyy-MM-dd HH:mm:ss"),
-            v.CreatedBy,
-            v.Reason,
-        }),
-    });
-});
-
-// REST: create new version of an instruction
-app.MapPost("/api/instructions/{name}/versions", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
-
-    var body = await request.ReadFromJsonAsync<InstructionUpdateRequest>();
-    if (body is null || string.IsNullOrWhiteSpace(body.Content))
-        return Results.BadRequest(new { error = "content is required" });
-
-    const int MaxVersions = 20;
-
-    var instruction = await db.Instructions
-        .Include(i => i.Versions.OrderBy(v => v.VersionNumber))
-        .FirstOrDefaultAsync(i => i.Name == name);
-
-    if (instruction is null)
-        return Results.NotFound(new { error = $"Instruction '{name}' not found" });
-
-    var newVersion = instruction.CurrentVersion + 1;
-    instruction.Versions.Add(new InstructionVersion
-    {
-        InstructionId = instruction.Id,
-        VersionNumber = newVersion,
-        Content       = body.Content,
-        CreatedAt     = DateTime.UtcNow,
-        CreatedBy     = body.CreatedBy ?? "dashboard",
-        Reason        = body.Reason,
-    });
-    instruction.CurrentVersion = newVersion;
-
-    var excess = instruction.Versions.Count - MaxVersions;
-    if (excess > 0)
-        db.InstructionVersions.RemoveRange(instruction.Versions.OrderBy(v => v.VersionNumber).Take(excess));
-
-    await db.SaveChangesAsync();
-    return Results.Ok(new { message = $"Instruction '{name}' updated to v{newVersion}", version = newVersion });
-});
-
-// REST: rollback instruction to a prior version (creates new version with old content)
-app.MapPost("/api/instructions/{name}/rollback/{targetVersion:int}", async (string name, int targetVersion, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
-
-    const int MaxVersions = 20;
-
-    var instruction = await db.Instructions
-        .Include(i => i.Versions.OrderBy(v => v.VersionNumber))
-        .FirstOrDefaultAsync(i => i.Name == name);
-
-    if (instruction is null)
-        return Results.NotFound(new { error = $"Instruction '{name}' not found" });
-
-    var target = instruction.Versions.FirstOrDefault(v => v.VersionNumber == targetVersion);
-    if (target is null)
-        return Results.NotFound(new { error = $"Version {targetVersion} not found" });
-
-    var newVersion = instruction.CurrentVersion + 1;
-    instruction.Versions.Add(new InstructionVersion
-    {
-        InstructionId = instruction.Id,
-        VersionNumber = newVersion,
-        Content       = target.Content,
-        CreatedAt     = DateTime.UtcNow,
-        CreatedBy     = "rollback",
-        Reason        = $"rollback to v{targetVersion}",
-    });
-    instruction.CurrentVersion = newVersion;
-
-    var excess = instruction.Versions.Count - MaxVersions;
-    if (excess > 0)
-        db.InstructionVersions.RemoveRange(instruction.Versions.OrderBy(v => v.VersionNumber).Take(excess));
-
-    await db.SaveChangesAsync();
-    return Results.Ok(new { message = $"Rolled back '{name}' to v{targetVersion} content — saved as v{newVersion}", version = newVersion });
-});
-
-// REST: create a new instruction with initial v1 content
-app.MapPost("/api/instructions", async (HttpRequest request, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
-
-    var body = await request.ReadFromJsonAsync<InstructionCreateRequest>();
-    if (body is null || string.IsNullOrWhiteSpace(body.Name) || string.IsNullOrWhiteSpace(body.Content))
-        return Results.BadRequest(new { error = "name and content are required" });
-
-    if (!System.Text.RegularExpressions.Regex.IsMatch(body.Name, @"^[a-zA-Z0-9_-]+$"))
-        return Results.BadRequest(new { error = "name must contain only letters, digits, hyphens, or underscores" });
-
-    var exists = await db.Instructions.AnyAsync(i => i.Name == body.Name);
-    if (exists)
-        return Results.Conflict(new { error = $"Instruction '{body.Name}' already exists" });
-
-    var instr = new Instruction { Name = body.Name, CurrentVersion = 1 };
-    db.Instructions.Add(instr);
-    await db.SaveChangesAsync();
-
-    db.InstructionVersions.Add(new InstructionVersion
-    {
-        InstructionId = instr.Id,
-        VersionNumber = 1,
-        Content       = body.Content,
-        CreatedAt     = DateTime.UtcNow,
-        CreatedBy     = body.CreatedBy ?? "dashboard",
-        Reason        = body.Reason ?? "Initial creation",
-    });
-    await db.SaveChangesAsync();
-
-    return Results.Ok(new { message = $"Instruction '{body.Name}' created at v1" });
-});
-
-// REST: toggle active/inactive on an instruction
-app.MapPost("/api/instructions/{name}/toggle-active", async (string name, ToggleActiveRequest req, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null) return Results.Problem("Database is not configured");
-    var instr = await db.Instructions.FirstOrDefaultAsync(i => i.Name == name);
-    if (instr is null) return Results.NotFound(new { error = $"Instruction '{name}' not found" });
-    instr.IsActive = req.IsActive;
-    await db.SaveChangesAsync();
-    return Results.Ok(new { instr.Name, instr.IsActive });
-});
+// REST: GET /api/prompt-size-policy — the active instruction and project-context soft limits (#346).
+app.MapPromptSizePolicyEndpoints();
 
 // REST: the /api/project-contexts surface — full contexts (list, detail, create, new version,
 // rollback, toggle-active), then the #347 card and route writes. Mapped from Endpoints/ so the

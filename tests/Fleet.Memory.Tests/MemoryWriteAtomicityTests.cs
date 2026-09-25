@@ -317,6 +317,7 @@ public class MemoryWriteAtomicityTests : IDisposable
             vectorStore,
             embeddingService,
             qdrantOptions,
+            new MemorySizeGuidance(0, NullLogger.Instance),
             NullLogger<MemoryService>.Instance);
 
         var doc = new MemoryDocument
@@ -328,12 +329,76 @@ public class MemoryWriteAtomicityTests : IDisposable
         };
 
         // Act
-        var (stored, _, indexingWarning) = await service.StoreAsync(doc);
+        var (stored, _, indexingWarning, _) = await service.StoreAsync(doc);
 
         // Assert: warning returned to caller
         Assert.NotNull(indexingWarning);
         Assert.StartsWith("warning_indexing_deferred:", indexingWarning);
         // File must be committed to disk despite indexing failure
         Assert.True(File.Exists(stored.FilePath), "Memory file must be on disk even when indexing fails");
+    }
+
+    // ── Pre-save similarity probe is best-effort (#346) ─────────────────────────
+
+    private MemoryService ServiceWithProbe(IEmbeddingService embeddingService)
+    {
+        var qdrantOptions = Options.Create(new QdrantOptions
+        {
+            Url = "http://localhost:1",   // fake — never reached; EmbedAsync throws first
+            SimilarityThreshold = 0.85f   // the probe runs before the save
+        });
+        var vectorStore = new VectorStore(qdrantOptions, Options.Create(new EmbeddingOptions()), NullLogger<VectorStore>.Instance);
+        return new MemoryService(_store, vectorStore, embeddingService, qdrantOptions,
+            new MemorySizeGuidance(0, NullLogger.Instance), NullLogger<MemoryService>.Instance);
+    }
+
+    private int LearningFileCount() => Directory.EnumerateFiles(Path.Combine(_tempDir, "learning"), "*.md").Count();
+
+    [Fact]
+    public async Task StoreAsync_SavesAnyway_WhenTheSimilarityProbeFails()
+    {
+        var embeddingService = Substitute.For<IEmbeddingService>();
+        embeddingService
+            .EmbedAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromException<float[]>(new HttpRequestException("simulated embedder rejection")));
+
+        var (stored, similar, indexingWarning, _) = await ServiceWithProbe(embeddingService).StoreAsync(new MemoryDocument
+        {
+            Id = Guid.NewGuid().ToString(),
+            Type = "learning",
+            Title = "Probe failure test",
+            Content = "Saved even though the pre-save probe could not embed"
+        });
+
+        Assert.True(File.Exists(stored.FilePath), "The memory must be saved when the probe fails");
+        Assert.Empty(similar);
+        Assert.NotNull(indexingWarning);
+        Assert.StartsWith("warning_indexing_deferred:", indexingWarning);
+    }
+
+    [Fact]
+    public async Task StoreAsync_CallerCancellation_StillPropagates_AndWritesNothing()
+    {
+        var embeddingService = Substitute.For<IEmbeddingService>();
+        embeddingService
+            .EmbedAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(ci =>
+            {
+                ci.Arg<CancellationToken>().ThrowIfCancellationRequested();
+                return Task.FromException<float[]>(new HttpRequestException("never reached"));
+            });
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ServiceWithProbe(embeddingService).StoreAsync(new MemoryDocument
+        {
+            Id = Guid.NewGuid().ToString(),
+            Type = "learning",
+            Title = "Cancelled probe",
+            Content = "Must not be written"
+        }, cts.Token));
+
+        Assert.Equal(0, LearningFileCount());
     }
 }

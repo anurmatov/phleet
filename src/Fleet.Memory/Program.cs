@@ -33,6 +33,11 @@ else
     builder.Services.AddSingleton<IEmbeddingService, OnnxEmbeddingService>();
 }
 
+// Embedding-input size guidance (#346), off by default. Parsed from the raw config string, never
+// bound into EmbeddingOptions above: a typo there would be a crash loop, here it is one Warning.
+builder.Services.AddSingleton(sp => MemorySizeGuidance.FromConfiguration(
+    builder.Configuration, sp.GetRequiredService<ILogger<MemorySizeGuidance>>()));
+
 // Services
 builder.Services.AddSingleton<MemoryService>();
 builder.Services.AddSingleton<ReadCounterService>();
@@ -54,6 +59,13 @@ builder.Services
     .WithToolsFromAssembly();
 
 var app = builder.Build();
+
+// Resolve the guidance now so an invalid value warns at startup, then log the active value.
+app.Services.GetRequiredService<MemorySizeGuidance>().LogStartup(
+    embeddingConfig.Provider,
+    embeddingConfig.Provider.Equals("ollama", StringComparison.OrdinalIgnoreCase)
+        ? embeddingConfig.Ollama.Model
+        : Path.GetFileNameWithoutExtension(embeddingConfig.Onnx.ModelPath));
 
 app.MapMcp();
 
@@ -120,7 +132,7 @@ app.MapGet("/internal/memory/search", async (string? q, MemoryService memoryServ
 });
 
 // GET /internal/memory/{id} — full content + metadata
-app.MapGet("/internal/memory/{id}", async (string id, MemoryService memoryService) =>
+app.MapGet("/internal/memory/{id}", async (string id, MemoryService memoryService, MemorySizeGuidance sizeGuidance) =>
 {
     var doc = await memoryService.GetAsync(id);
     if (doc is null)
@@ -138,6 +150,14 @@ app.MapGet("/internal/memory/{id}", async (string id, MemoryService memoryServic
         created_at = doc.Created,
         updated_at = doc.Updated,
         content    = doc.Content,
+        // #346: what the dashboard meter measures against — the exact embedding input's size.
+        size_guidance = new
+        {
+            unit        = MemorySizeGuidance.Unit,
+            bytes       = MemorySizeGuidance.Utf8Bytes(MemoryService.EmbeddingText(doc)),
+            limit_bytes = sizeGuidance.Enabled ? sizeGuidance.LimitBytes : (int?)null,
+            limit_key   = MemorySizeGuidance.Key,
+        },
     });
 });
 
@@ -167,15 +187,17 @@ app.MapPut("/internal/memory/{id}", async (string id, HttpRequest request, Memor
 
     try
     {
-        var (updated, indexingWarning) = await memoryService.UpdateAsync(id,
+        var (updated, indexingWarning, size) = await memoryService.UpdateAsync(id,
             content: body.Content,
             tags: body.Tags,
-            project: body.Project);
+            project: body.Project,
+            surface: "rest");
         return Results.Ok(new
         {
             id = updated.Id,
             updated_at = updated.Updated,
-            indexing_warning = indexingWarning
+            indexing_warning = indexingWarning,
+            size,
         });
     }
     catch (InvalidDataException ex)

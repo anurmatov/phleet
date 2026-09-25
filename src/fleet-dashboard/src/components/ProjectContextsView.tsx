@@ -8,6 +8,8 @@ import type {
 } from '../types'
 import { apiFetch, computeDiff } from '../utils'
 import FieldHint from './FieldHint'
+import SizeMeter from './SizeMeter'
+import type { MeterLimit } from '../sizeMeter'
 import MemoryText from './MemoryText'
 
 const ROUTE_KINDS: RouteSignalKind[] = ['repo', 'workflow', 'chat']
@@ -317,6 +319,10 @@ interface ProjectContextsViewProps {
   onRefresh: () => void
   /** Re-reads one context (and the list) after a card or route write, leaving the full editor alone. */
   onCardOrRoutesChanged: (name: string) => void
+  /** #346 — the project-context soft limit from GET /api/prompt-size-policy; undefined when unavailable. */
+  sizeLimit: MeterLimit
+  /** #346 — the last write's size warning per row; cleared by a later write with none. */
+  sizeWarnings: Record<string, string>
 }
 
 export default function ProjectContextsView({
@@ -351,6 +357,8 @@ export default function ProjectContextsView({
   onNewFormSubmit,
   onRefresh,
   onCardOrRoutesChanged,
+  sizeLimit,
+  sizeWarnings,
 }: ProjectContextsViewProps) {
   const [showArchived, setShowArchived] = useState(false)
   // Unsaved card text per context. Held here rather than in the panel so collapsing a row does not
@@ -424,6 +432,7 @@ export default function ProjectContextsView({
                 value={newForm.content}
                 onChange={e => onNewFormChange('content', e.target.value)}
               />
+              <SizeMeter text={newForm.content} limit={sizeLimit} kind="prompt" />
             </div>
           </div>
           <div className="wfd-new-form-actions">
@@ -471,6 +480,7 @@ export default function ProjectContextsView({
           const toggleConfirming = ctxToggleConfirm[ctx.name] ?? false
           const toggleState = ctxToggleState[ctx.name] ?? 'idle'
           const toggleMsg = ctxToggleMsg[ctx.name] ?? ''
+          const sizeWarning = sizeWarnings[ctx.name]
 
           return (
             <div key={ctx.name} className={`instr-row${!ctx.isActive ? ' wfd-row-inactive' : ''}`}>
@@ -495,6 +505,7 @@ export default function ProjectContextsView({
                   <span className={`wfd-active-badge${ctx.isActive ? ' active' : ' inactive'}`}>
                     {ctx.isActive ? 'active' : 'inactive'}
                   </span>
+                  {sizeWarning && <span className="size-warning-badge" title={sizeWarning}>⚠</span>}
                   {ctx.agents.length > 0 && (
                     <span className="instr-agents" title={ctx.agents.join(', ')}>
                       {ctx.agents.length} agent{ctx.agents.length !== 1 ? 's' : ''}
@@ -543,6 +554,7 @@ export default function ProjectContextsView({
                           rows={20}
                           spellCheck={false}
                         />
+                        <SizeMeter text={editContent} limit={sizeLimit} kind="prompt" />
                         <div className="instr-save-row">
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <FieldHint>Short note explaining this version. Shown in version history.</FieldHint>
@@ -565,6 +577,7 @@ export default function ProjectContextsView({
                             <span className={`config-feedback config-feedback-${saveState}`}>{saveMsg}</span>
                           )}
                         </div>
+                        {sizeWarning && <div className="size-warning-notice">⚠ {sizeWarning}</div>}
                       </div>
 
                       <div className="instr-history-col">

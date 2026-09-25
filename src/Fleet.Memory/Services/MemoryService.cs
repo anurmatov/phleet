@@ -10,17 +10,28 @@ public sealed class MemoryService(
     VectorStore vectorStore,
     IEmbeddingService embeddingService,
     IOptions<QdrantOptions> qdrantOptions,
+    MemorySizeGuidance sizeGuidance,
     ILogger<MemoryService> logger)
 {
     private readonly float _similarityThreshold = qdrantOptions.Value.SimilarityThreshold;
+
+    /// <summary>
+    /// The exact string a memory is embedded as — one input, no chunking. The #346 size report and
+    /// guidance measure this string, so it is the one definition both the probe and the index use.
+    /// </summary>
+    public static string EmbeddingText(MemoryDocument doc) => $"{doc.Title}\n\n{doc.Content}";
 
     /// <summary>
     /// Stores a new memory. Throws <see cref="InvalidDataException"/> if serialization produces
     /// unparseable YAML (error_serialization_validation). Throws <see cref="IOException"/> if the
     /// atomic rename fails (error_write_failed). On indexing infrastructure failures the file is
     /// committed to disk and IndexingWarning is set (warning_indexing_deferred).
+    /// The pre-save similarity probe is best-effort: any failure except the caller's own cancellation
+    /// skips the duplicate hint and the memory is saved anyway. The size report is produced after the
+    /// file is committed, even when indexing then fails.
     /// </summary>
-    public async Task<(MemoryDocument Stored, List<(string Id, string Title, float Score)> SimilarMemories, string? IndexingWarning)> StoreAsync(MemoryDocument doc, CancellationToken ct = default)
+    public async Task<(MemoryDocument Stored, List<(string Id, string Title, float Score)> SimilarMemories, string? IndexingWarning, MemorySizeReport Size)> StoreAsync(
+        MemoryDocument doc, CancellationToken ct = default, string surface = "mcp")
     {
         if (string.IsNullOrEmpty(doc.Id))
             doc.Id = Guid.NewGuid().ToString();
@@ -31,25 +42,34 @@ public sealed class MemoryService(
         var similarMemories = new List<(string Id, string Title, float Score)>();
         if (_similarityThreshold > 0)
         {
-            var textToEmbed = $"{doc.Title}\n\n{doc.Content}";
-            var embedding = await embeddingService.EmbedAsync(textToEmbed, ct);
-            var candidates = await vectorStore.SearchDenseOnlyAsync(embedding, limit: 3, ct);
-
-            foreach (var (filePath, score) in candidates)
+            try
             {
-                if (score >= _similarityThreshold)
+                var embedding = await embeddingService.EmbedAsync(EmbeddingText(doc), ct);
+                var candidates = await vectorStore.SearchDenseOnlyAsync(embedding, limit: 3, ct);
+
+                foreach (var (filePath, score) in candidates)
                 {
-                    try
+                    if (score >= _similarityThreshold)
                     {
-                        var existing = await fileStore.ParseFileAsync(filePath);
-                        if (existing is not null)
-                            similarMemories.Add((existing.Id, existing.Title, score));
-                    }
-                    catch (InvalidDataException)
-                    {
-                        // Corrupt candidate file — skip it
+                        try
+                        {
+                            var existing = await fileStore.ParseFileAsync(filePath);
+                            if (existing is not null)
+                                similarMemories.Add((existing.Id, existing.Title, score));
+                        }
+                        catch (InvalidDataException)
+                        {
+                            // Corrupt candidate file — skip it
+                        }
                     }
                 }
+            }
+            catch (Exception ex) when (!(ex is OperationCanceledException && ct.IsCancellationRequested))
+            {
+                // Best-effort: a failing or rejecting embedder (or Qdrant) must not stop the save.
+                // The caller's own cancellation still propagates, and nothing is written.
+                logger.LogWarning("Similarity check skipped for new memory {Id}: {ExceptionType}", doc.Id, ex.GetType().Name);
+                similarMemories.Clear();
             }
         }
 
@@ -60,9 +80,11 @@ public sealed class MemoryService(
         // Index immediately at the final path (rename-then-index ordering ensures Qdrant
         // always receives the correct file path, never a temp path).
         string? indexingWarning = null;
+        MemoryDocument? onDisk = null;
         try
         {
-            await IndexFileAsync(doc.FilePath, ct);
+            onDisk = await ParseForIndexAsync(doc.FilePath);
+            await IndexDocumentAsync(onDisk, doc.FilePath, ct);
         }
         catch (InvalidDataException ex)
         {
@@ -81,7 +103,13 @@ public sealed class MemoryService(
             indexingWarning = $"warning_indexing_deferred: memory written but not yet searchable — {ex.GetType().Name}: {ex.Message}";
         }
 
-        return (doc, similarMemories, indexingWarning);
+        // Measured on the text IndexFileAsync embeds — the document as parsed back from disk. Only if
+        // the read-back itself failed (an I/O fault, already reported as deferred) is the in-memory copy
+        // used, which the pre-write round-trip validation makes identical.
+        var size = sizeGuidance.Evaluate(doc.Id, previousText: null, EmbeddingText(onDisk ?? doc));
+        sizeGuidance.LogWrite(size, surface, "store", doc.Id);
+
+        return (doc, similarMemories, indexingWarning, size);
     }
 
     public async Task<List<MemoryDocument>> SearchAsync(string query, int limit = 10, string? type = null, string? project = null, string? agent = null, CancellationToken ct = default)
@@ -165,15 +193,22 @@ public sealed class MemoryService(
     /// <see cref="InvalidDataException"/> if the mutation produces unparseable YAML,
     /// or <see cref="IOException"/> if the atomic rename fails.
     /// On indexing infrastructure failures the file is committed and IndexingWarning is set.
+    /// The size report compares the embedding text before and after the update; a tags-only or
+    /// project-only update still reports it, because reindexing embeds the whole memory.
     /// </summary>
-    public async Task<(MemoryDocument Doc, string? IndexingWarning)> UpdateAsync(string id, string? title = null, string? content = null, List<string>? tags = null, string? project = null, CancellationToken ct = default)
+    public async Task<(MemoryDocument Doc, string? IndexingWarning, MemorySizeReport Size)> UpdateAsync(
+        string id, string? title = null, string? content = null, List<string>? tags = null, string? project = null,
+        CancellationToken ct = default, string surface = "mcp")
     {
         var filePath = fileStore.FindFileById(id)
             ?? throw new FileNotFoundException($"Memory not found: {id}");
 
         // fileStore.UpdateAsync throws InvalidDataException (pre-write validation) or IOException (rename).
+        string? previousText = null;
         var doc = await fileStore.UpdateAsync(filePath, d =>
         {
+            // Captured before any change is applied: d is the document as it is on disk.
+            previousText = EmbeddingText(d);
             if (title is not null) d.Title = title;
             if (content is not null) d.Content = content;
             if (tags is not null) d.Tags = tags;
@@ -182,9 +217,11 @@ public sealed class MemoryService(
 
         // Index immediately after the rename completes (file is at final path).
         string? indexingWarning = null;
+        MemoryDocument? onDisk = null;
         try
         {
-            await IndexFileAsync(filePath, ct);
+            onDisk = await ParseForIndexAsync(filePath);
+            await IndexDocumentAsync(onDisk, filePath, ct);
         }
         catch (InvalidDataException ex)
         {
@@ -199,7 +236,10 @@ public sealed class MemoryService(
             indexingWarning = $"warning_indexing_deferred: memory updated but not yet searchable — {ex.GetType().Name}: {ex.Message}";
         }
 
-        return (doc, indexingWarning);
+        var size = sizeGuidance.Evaluate(doc.Id, previousText, EmbeddingText(onDisk ?? doc));
+        sizeGuidance.LogWrite(size, surface, "update", doc.Id);
+
+        return (doc, indexingWarning, size);
     }
 
     public async Task DeleteAsync(string id, bool permanent = false, CancellationToken ct = default)
@@ -220,15 +260,22 @@ public sealed class MemoryService(
     /// Throws <see cref="InvalidDataException"/> if the file cannot be parsed (bad YAML or not a memory file).
     /// Other exceptions indicate infrastructure failures (Qdrant, embedding) and propagate as-is.
     /// </summary>
-    public async Task IndexFileAsync(string filePath, CancellationToken ct = default)
+    public async Task IndexFileAsync(string filePath, CancellationToken ct = default) =>
+        await IndexDocumentAsync(await ParseForIndexAsync(filePath), filePath, ct);
+
+    private async Task<MemoryDocument> ParseForIndexAsync(string filePath)
     {
         // ParseFileAsync throws InvalidDataException for bad YAML (corrupt file).
         // Returns null only for files without a frontmatter header (not a memory file).
         var doc = await fileStore.ParseFileAsync(filePath);
         if (doc is null)
             throw new InvalidDataException($"File is not a parseable memory file: {filePath}");
+        return doc;
+    }
 
-        var textToEmbed = $"{doc.Title}\n\n{doc.Content}";
+    private async Task IndexDocumentAsync(MemoryDocument doc, string filePath, CancellationToken ct)
+    {
+        var textToEmbed = EmbeddingText(doc);
         var embedding = await embeddingService.EmbedAsync(textToEmbed, ct);
 
         var payload = new Dictionary<string, object>

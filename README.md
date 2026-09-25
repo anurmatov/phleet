@@ -234,6 +234,28 @@ Agent config is database-driven (MySQL via EF Core). On first run, the orchestra
 
 The tracked repo root stays clean — only source, `.env.example`, `seed.example.json`, and `docker-compose.example.yml` live there. All runtime state is under `./fleet/`.
 
+### Size warnings
+
+Advisory size feedback, measured in UTF-8 bytes (not tokens). A write over a limit is always saved; the response carries a `size` report and the dashboard shows a meter.
+
+| Key (env form) | Service | Default | Measures |
+|---|---|---|---|
+| `PromptSizeWarnings__InstructionBytes` | orchestrator | 10000 | one role instruction |
+| `PromptSizeWarnings__ProjectContextBytes` | orchestrator | 10000 | one project context |
+| `Embedding__InputGuidanceBytes` (`FLEET_MEMORY_EMBEDDING_INPUT_GUIDANCE_BYTES`) | fleet-memory | 0 (off) | one memory's embedding input, `{title}\n\n{content}` |
+
+`0` turns a check off. An empty value counts as unset; an invalid value falls back to the default with one startup warning. Values are read once at startup, so recreate the service after a change (`docker compose restart` re-reads nothing). A hand-managed compose file must add the fleet-memory `environment:` line itself.
+
+fleet-memory embeds each memory as one input and re-embeds every file on restart, so text past the model's input window may be cut off or rejected. Rough starting points, not token maths:
+
+| Embedding setup | Input window | Suggested starting value |
+|---|---|---|
+| `onnx` / all-MiniLM-L6-v2 (default) | 512 tokens, hard-cut | about 2,000 for English prose; less for non-Latin text |
+| `ollama` / `bge-m3` | 8,192 tokens | 25,000 (observed on a mixed English/Cyrillic corpus) |
+| anything else | model card | measure on your own corpus |
+
+After every fleet-memory start, a `Full index size check:` line reports `scanned`, `indexed`, `indexFailures`, `corrupt` and `overGuidance`; it is a Warning when any of the last three is non-zero.
+
 See `.env.example` for all required variables with descriptions.
 
 ### Speech-to-text hotwords

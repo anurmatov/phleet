@@ -1,13 +1,14 @@
 using System.ComponentModel;
 using System.Text;
 using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Services;
 using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol.Server;
 
 namespace Fleet.Orchestrator.Tools;
 
 [McpServerToolType]
-public sealed class ProjectContextTools(IServiceScopeFactory scopeFactory)
+public sealed class ProjectContextTools(IServiceScopeFactory scopeFactory, PromptSizePolicy sizePolicy)
 {
     private const int MaxVersions = 20;
 
@@ -47,7 +48,9 @@ public sealed class ProjectContextTools(IServiceScopeFactory scopeFactory)
 
         await db.SaveChangesAsync();
 
-        return $"Project context '{name}' created at v1.";
+        var size = sizePolicy.Evaluate(PromptSizeKind.ProjectContext, name, previousContent: null, content);
+        sizePolicy.LogWrite(size, "mcp", name);
+        return $"Project context '{name}' created at v1." + PromptSizePolicy.RenderMcpLines(size);
     }
 
     [McpServerTool(Name = "list_project_contexts")]
@@ -189,6 +192,9 @@ public sealed class ProjectContextTools(IServiceScopeFactory scopeFactory)
         if (InvalidKeepsError(content) is { } invalidError)
             return invalidError;
 
+        // Captured before Versions.Add so the new row is never mistaken for the previous one.
+        var previousContent = ctx.Versions.FirstOrDefault(v => v.VersionNumber == ctx.CurrentVersion)?.Content;
+
         var newVersionNumber = ctx.CurrentVersion + 1;
 
         ctx.Versions.Add(new ProjectContextVersion
@@ -216,7 +222,12 @@ public sealed class ProjectContextTools(IServiceScopeFactory scopeFactory)
 
         await db.SaveChangesAsync();
 
-        return $"Project context '{name}' updated to v{newVersionNumber}." + await CardLineAsync(db, ctx, content);
+        var size = sizePolicy.Evaluate(PromptSizeKind.ProjectContext, name, previousContent, content);
+        sizePolicy.LogWrite(size, "mcp", name);
+
+        // Today's output, Card: line included, stays an exact prefix; the Size: lines follow it.
+        return $"Project context '{name}' updated to v{newVersionNumber}." + await CardLineAsync(db, ctx, content)
+             + PromptSizePolicy.RenderMcpLines(size);
     }
 
     [McpServerTool(Name = "rollback_project_context")]
@@ -238,6 +249,8 @@ public sealed class ProjectContextTools(IServiceScopeFactory scopeFactory)
         var target = ctx.Versions.FirstOrDefault(v => v.VersionNumber == target_version);
         if (target is null)
             return $"Version {target_version} does not exist for project context '{name}'.";
+
+        var previousContent = ctx.Versions.FirstOrDefault(v => v.VersionNumber == ctx.CurrentVersion)?.Content;
 
         var newVersionNumber = ctx.CurrentVersion + 1;
 
@@ -270,8 +283,12 @@ public sealed class ProjectContextTools(IServiceScopeFactory scopeFactory)
         var logger = scope.ServiceProvider.GetService<ILogger<ProjectContextTools>>() ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<ProjectContextTools>.Instance;
         Services.ProjectCardService.WarnOnInvalidFullRollback(logger, ctx.Name, target_version, target.Content);
 
+        var size = sizePolicy.Evaluate(PromptSizeKind.ProjectContext, name, previousContent, target.Content);
+        sizePolicy.LogWrite(size, "mcp", name);
+
         return $"Project context '{name}' rolled back to v{target_version} content — saved as v{newVersionNumber}."
-             + await CardLineAsync(db, ctx, target.Content);
+             + await CardLineAsync(db, ctx, target.Content)
+             + PromptSizePolicy.RenderMcpLines(size);
     }
 
     /// <summary>

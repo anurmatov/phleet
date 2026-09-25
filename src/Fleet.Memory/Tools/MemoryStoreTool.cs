@@ -65,7 +65,7 @@ public sealed class MemoryStoreTool(
 
         try
         {
-            var (stored, similarMemories, indexingWarning) = await memoryService.StoreAsync(doc);
+            var (stored, similarMemories, indexingWarning, size) = await memoryService.StoreAsync(doc);
 
             var result = indexingWarning is not null
                 ? $"Stored memory '{stored.Title}' (id: {stored.Id}, path: {stored.FilePath})\n{indexingWarning}"
@@ -78,7 +78,8 @@ public sealed class MemoryStoreTool(
                     result += $"\n- {existingId[..8]} — {existingTitle} (similarity: {score:F2})";
             }
 
-            return result;
+            // #346: nothing when the guidance is off, so the output stays byte-identical.
+            return result + MemorySizeGuidance.RenderMcpLines(size);
         }
         catch (InvalidDataException ex)
         {

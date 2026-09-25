@@ -1,6 +1,0 @@
-{"method":"turn/started","params":{"turn":{"id":"t_1"}}}
-{"method":"item/started","params":{"threadId":"t_thread_1","turnId":"t_1","item":{"type":"contextCompaction","id":"i_1"}}}
-{"method":"item/completed","params":{"threadId":"t_thread_1","turnId":"t_1","completedAtMs":1767225600000,"item":{"type":"contextCompaction","id":"i_1"}}}
-{"method":"thread/compacted","params":{"threadId":"t_thread_1","turnId":"t_1"}}
-{"method":"item/completed","params":{"threadId":"t_thread_1","turnId":"t_1","item":{"type":"agentMessage","phase":"final_answer","text":"Synthetic answer after compaction."}}}
-{"method":"turn/completed","params":{"turnId":"t_1","turn":{"id":"t_1","status":"completed","durationMs":12}}}

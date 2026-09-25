@@ -6,23 +6,6 @@ namespace Fleet.Agent.Models;
 /// </summary>
 public sealed class AgentProgress
 {
-    /// <summary>
-    /// Emitted exactly once per <c>ExecuteAsync</c>, when the executor has handed the prompt to the
-    /// provider (#347 D5): claude after the stdin frame write + flush, codex after <c>turn/start</c>
-    /// returned a turn id, gemini after the process was started with the prompt.
-    /// <c>TaskManager</c> consumes it to mark the project-context ledger and never forwards it to a
-    /// sink, Telegram or the conversation event projection.
-    /// </summary>
-    public const string PromptAcceptedEventType = "prompt_accepted";
-
-    /// <summary>A fresh <see cref="PromptAcceptedEventType"/> event. Never significant.</summary>
-    public static AgentProgress PromptAccepted() => new()
-    {
-        IsSignificant = false,
-        Summary = "Prompt accepted",
-        EventType = PromptAcceptedEventType,
-    };
-
     /// <summary>Whether this update is worth sending to the user (filters noise).</summary>
     public bool IsSignificant { get; init; }
 

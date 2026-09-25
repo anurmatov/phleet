@@ -23,12 +23,6 @@ public sealed class MessageRouter
     /// </summary>
     private readonly IMessageSink _sink;
 
-    /// <summary>
-    /// Resolves project-context requests at intake (#347). Optional so existing construction sites
-    /// are unchanged; absent or disabled, every message carries an empty request list.
-    /// </summary>
-    private readonly ProjectContextRouter? _contextRouter;
-
     public MessageRouter(
         IOptions<AgentOptions> agentConfig,
         IOptions<TelegramOptions> telegramConfig,
@@ -38,10 +32,8 @@ public sealed class MessageRouter
         GroupRelayService relay,
         CommandDispatcher commands,
         ILogger<MessageRouter> logger,
-        IMessageSink? sink = null,
-        ProjectContextRouter? contextRouter = null)
+        IMessageSink? sink = null)
     {
-        _contextRouter = contextRouter;
         _agentConfig = agentConfig.Value;
         _telegramConfig = telegramConfig.Value;
         _allowlist = allowlist;
@@ -154,8 +146,7 @@ public sealed class MessageRouter
                     task = _groupBehavior.BuildDmTask(msg.ChatId, task, msg.ReplyToText, msg.TelegramMessageId, msg.ChatUsername, msg.ChatFirstName, msg.IsVoiceTranscription);
                 _ = _taskManager.StartTask(msg.ChatId, task, displayText, isSessionTask: false,
                     source: TaskSource.NewCommand, images: msg.Images.Count > 0 ? msg.Images : null,
-                    documents: msg.Documents.Count > 0 ? msg.Documents : null,
-                    contextRequests: _contextRouter?.ResolveChat(msg.ChatId));
+                    documents: msg.Documents.Count > 0 ? msg.Documents : null);
                 return;
             }
 
@@ -203,11 +194,9 @@ public sealed class MessageRouter
 
         // When busy, StartTask enqueues the message and notifies the user automatically.
         // Use /new <task> for parallel tasks, or /cancel to stop the current one.
-        // The chat is the only project-context signal a Telegram message offers (#347).
         _ = _taskManager.StartTask(msg.ChatId, trimmed, messageDisplayText, isSessionTask: true,
             images: msg.Images.Count > 0 ? msg.Images : null,
-            documents: msg.Documents.Count > 0 ? msg.Documents : null,
-            contextRequests: _contextRouter?.ResolveChat(msg.ChatId));
+            documents: msg.Documents.Count > 0 ? msg.Documents : null);
     }
 
     private CancellationToken _shutdownToken = CancellationToken.None;

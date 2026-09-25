@@ -236,6 +236,8 @@ services:
       - Embedding__Dimensions=${FLEET_MEMORY_EMBEDDING_DIMENSIONS:-384}
       - Embedding__Ollama__Url=${FLEET_MEMORY_OLLAMA_URL:-http://host.docker.internal:11434}
       - Embedding__Ollama__Model=${FLEET_MEMORY_OLLAMA_MODEL:-nomic-embed-text}
+      # Embedding-input size guidance in UTF-8 bytes; empty or 0 = off (#346). Advisory only.
+      - Embedding__InputGuidanceBytes=${FLEET_MEMORY_EMBEDDING_INPUT_GUIDANCE_BYTES:-}
     mem_limit: 512m
     restart: unless-stopped
     depends_on:

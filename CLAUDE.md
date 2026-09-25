@@ -274,6 +274,13 @@ Key config files:
 - `./fleet/seed.json` — initial agent definitions for DB bootstrap (never commit production configs)
 - `./fleet/docker-compose.yml` — generated from `docker-compose.example.yml` with fleet-dir-relative build contexts
 
+Size warnings (#346) are advisory and measured in UTF-8 bytes, never tokens: `PromptSizeWarnings__InstructionBytes` and
+`PromptSizeWarnings__ProjectContextBytes` (orchestrator, default 10000 each) and `Embedding__InputGuidanceBytes` (fleet-memory,
+compose var `FLEET_MEMORY_EMBEDDING_INPUT_GUIDANCE_BYTES`, default 0 = off). `0` disables a check; invalid values fall back to the
+default with one Warning. They are parsed from the raw config string — never add them to an options class — and read once at
+startup, so a change needs a recreate. Writes always succeed; REST adds `size`, MCP appends `Size:` lines. Suggested memory
+values are in the README.
+
 The tracked repo root stays clean: only source, `.env.example`, `seed.example.json`, and `docker-compose.example.yml`. All runtime state lives under `./fleet/`.
 
 Configuration priority (highest to lowest):

@@ -278,8 +278,8 @@ public partial class FixtureHygieneTests
     /// empty corpus. Asserted against the TEST OUTPUT tree, which is where that failure shows up.
     /// </summary>
     [Theory]
-    [InlineData(ProviderFrameReplay.ClaudeDirectory, 6)]  // + compact-boundary (#347)
-    [InlineData(ProviderFrameReplay.CodexDirectory, 6)]   // + context-compaction (#347)
+    [InlineData(ProviderFrameReplay.ClaudeDirectory, 5)]
+    [InlineData(ProviderFrameReplay.CodexDirectory, 5)]
     [InlineData(ProviderFrameReplay.GeminiDirectory, 4)]
     public void EveryProviderCorpusIsCopiedToTheTestOutput(string provider, int expectedFiles)
     {

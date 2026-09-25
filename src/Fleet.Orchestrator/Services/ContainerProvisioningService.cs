@@ -309,12 +309,9 @@ public sealed class ContainerProvisioningService(
         var envValues = LoadEnvFile(envFile);
         envValues.TryGetValue("FLEET_CTO_AGENT", out var ctoAgentName);
 
-        // #347: every assignment's EFFECTIVE mode is decided once, here, and everything below keys
-        // on it. A card assignment whose context or card row is missing throws before any file is
-        // written, so the agent is not started on a silent fallback.
         var projectContexts = await ResolveProjectContextsAsync(agent);
 
-        await GenerateConfigFilesAsync(agent, baseDir, ctoAgentName ?? "", projectContexts);
+        await GenerateConfigFilesAsync(agent, baseDir, ctoAgentName ?? "");
         await GenerateInstructionFilesAsync(agent, baseDir, instructionVersionOverrides);
         await GenerateProjectContextFilesAsync(agent, baseDir, projectContexts);
 
@@ -372,9 +369,8 @@ public sealed class ContainerProvisioningService(
                 $"container created (id={containerId[..12]}) but failed to start — check Docker logs");
 
         var networksMsg = string.Join(", ", spec.Networks);
-        var notes = projectContexts.Notes.Count > 0 ? " — " + string.Join("; ", projectContexts.Notes) : "";
         return ProvisionResult.Ok(agentName,
-            $"container '{agent.ContainerName}' created and started (id={containerId[..12]}, networks=[{networksMsg}]){notes}");
+            $"container '{agent.ContainerName}' created and started (id={containerId[..12]}, networks=[{networksMsg}])");
     }
 
     /// <summary>
@@ -733,8 +729,7 @@ public sealed class ContainerProvisioningService(
     /// Generates appsettings.json, .mcp.json, and settings.json into the agent's
     /// .generated/ workspace directory before the container is started.
     /// </summary>
-    private async Task GenerateConfigFilesAsync(
-        Agent agent, string baseDir, string ctoAgentName, ProjectContextPlan projectContexts)
+    private async Task GenerateConfigFilesAsync(Agent agent, string baseDir, string ctoAgentName)
     {
         var generatedDir = Path.Combine(baseDir, "workspaces", agent.ContainerName, ".generated");
         Directory.CreateDirectory(generatedDir);
@@ -757,18 +752,9 @@ public sealed class ContainerProvisioningService(
         var style = await ResolveOutputStyleAsync(agent);
         await WriteOutputStyleFileAsync(agent, generatedDir, style);
 
-        // #347 D6: the fallback endpoint and its one grant exist only for an agent with at least one
-        // EFFECTIVE card assignment. Everyone else gets exactly the bytes they got before cards.
-        var contextMcpUrl = projectContexts.HasEffectiveCard
-            ? ResolveContextMcpUrl(config["Provisioning:ContextMcpUrl"])
-            : null;
-
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"),
-            GenerateAppsettingsJson(agent, ctoAgentName, style, projectContexts.Routing));
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),
-            GenerateMcpJson(agent, fleetMemoryMcpUrl, contextMcpUrl));
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),
-            GenerateSettingsJson(agent, ctoAgentName, style, grantContextFallback: projectContexts.HasEffectiveCard));
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName, style));
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl));
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent, ctoAgentName, style));
 
         logger.LogInformation(
             "Generated config files for '{Agent}' in {Dir}",
@@ -921,27 +907,11 @@ public sealed class ContainerProvisioningService(
             agent.Name, rolesDir, instructions.Count);
     }
 
-    // ── project contexts (#347: per-assignment full/card) ──────────────────────
-
-    /// <summary>The fallback MCP route's default URL, matching the example compose service name.</summary>
-    internal const string DefaultContextMcpUrl = "http://fleet-orchestrator:3600/mcp/context";
-
-    /// <summary>The MCP server name card agents reach the fallback route under.</summary>
-    internal const string ContextMcpServerName = "fleet-context";
-
-    /// <summary>The one tool grant the fallback route carries.</summary>
-    internal const string ContextFallbackGrant = "mcp__fleet-context__get_project_context";
-
-    /// <summary><c>Provisioning:ContextMcpUrl</c>, or the default when unset or not an absolute URL.</summary>
-    internal static string ResolveContextMcpUrl(string? raw) =>
-        !string.IsNullOrWhiteSpace(raw) && Uri.TryCreate(raw.Trim(), UriKind.Absolute, out _)
-            ? raw.Trim()
-            : DefaultContextMcpUrl;
+    // ── project contexts ───────────────────────────────────────────────────────
 
     /// <summary>
-    /// Loads the agent's assigned project contexts and decides each assignment's effective mode.
-    /// Names are matched in C# (<see cref="StringComparer.OrdinalIgnoreCase"/>) on loaded rows, never
-    /// by database collation.
+    /// Loads the agent's assigned project contexts. Names are matched in C#
+    /// (<see cref="StringComparer.OrdinalIgnoreCase"/>) on loaded rows, never by database collation.
     /// </summary>
     private async Task<ProjectContextPlan> ResolveProjectContextsAsync(Agent agent)
     {
@@ -953,7 +923,7 @@ public sealed class ContainerProvisioningService(
 
         var headers = await db.ProjectContexts.AsNoTracking().Select(p => new { p.Id, p.Name }).ToListAsync();
         var ids = agent.Projects
-            .Select(ap => ProjectContextAccess.MatchByName(headers, ap.ProjectName, h => h.Name)?.Id)
+            .Select(ap => ProjectNameMatch.MatchByName(headers, ap.ProjectName, h => h.Name)?.Id)
             .OfType<int>()
             .Distinct()
             .ToList();
@@ -962,10 +932,7 @@ public sealed class ContainerProvisioningService(
             ? []
             : await db.ProjectContexts
                 .Include(p => p.Versions)
-                .Include(p => p.CardVersions)
-                .Include(p => p.Routes)
                 .Where(p => ids.Contains(p.Id))
-                .AsSplitQuery()
                 .AsNoTracking()
                 .ToListAsync();
 
@@ -973,124 +940,38 @@ public sealed class ContainerProvisioningService(
     }
 
     /// <summary>
-    /// Decides every assignment's EFFECTIVE mode from loaded rows, once per provision.
+    /// Every assignment renders the project's canonical context — the version row
+    /// <c>CurrentVersion</c> points at, else the latest — or a stub when the context or its versions
+    /// are missing.
     /// </summary>
-    /// <remarks>
-    /// <list type="table">
-    /// <listheader><term>DB mode / card state</term><description>effective · <c>context.md</c> · <c>full.md</c></description></listheader>
-    /// <item><term><c>full</c>, any</term><description>full · full content, or today's stub · none</description></item>
-    /// <item><term><c>card</c>, no missing keeps</term><description>card · card + footer · full content (<c>Warning card_stale</c> when stale)</description></item>
-    /// <item><term><c>card</c>, missing keeps</term><description>full · full content · none (<c>Warning card_fallback_full</c> + a result note)</description></item>
-    /// <item><term><c>card</c>, no context row / no card</term><description>throws — the agent is not started</description></item>
-    /// </list>
-    /// A card that lacks a keep marker of the current full context is never rendered: it would drop
-    /// a marked rule from the agent's prompt. Falling back to full keeps the rule resident, and says so.
-    /// </remarks>
     internal static ProjectContextPlan BuildProjectContextPlan(
         Agent agent, IReadOnlyCollection<ProjectContext> contexts, ILogger logger)
     {
         var assignments = new List<ProjectContextAssignment>();
-        var notes = new List<string>();
-        var matched = new List<(string ProjectName, ProjectContext Context)>();
 
         foreach (var agentProject in agent.Projects)
         {
             var projectName = agentProject.ProjectName;
-            var ctx = ProjectContextAccess.MatchByName(contexts, projectName, c => c.Name);
-            if (ctx is not null)
-                matched.Add((projectName, ctx));
-
+            var ctx = ProjectNameMatch.MatchByName(contexts, projectName, c => c.Name);
             var version = ctx?.Versions.FirstOrDefault(v => v.VersionNumber == ctx.CurrentVersion)
                        ?? ctx?.Versions.OrderByDescending(v => v.VersionNumber).FirstOrDefault();
 
-            if (!string.Equals(agentProject.ContextMode, ProjectContextMode.Card, StringComparison.Ordinal))
-            {
-                assignments.Add(FullAssignment(agent, projectName, agentProject.ContextMode, ctx, version, logger));
-                continue;
-            }
-
-            // Card mode. Every inconsistency below is only reachable by hand-editing the DB (the
-            // write paths refuse card mode without a card), and falling back silently would hide it.
-            if (ctx is null)
-                throw CardProvisionFault(agent, projectName, "no project context with that name exists");
-            if (ctx.CurrentCardVersion is not { } cardVersion)
-                throw CardProvisionFault(agent, projectName, "the project has no card (CurrentCardVersion is NULL)");
-            var card = ctx.CardVersions.FirstOrDefault(c => c.VersionNumber == cardVersion)
-                ?? throw CardProvisionFault(agent, projectName, $"card version {cardVersion} has no row");
-            if (version is null)
-                throw CardProvisionFault(agent, projectName, "the project context has no full versions");
-
-            var state = ProjectCardService.Evaluate(
-                card.VersionNumber, card.BasedOnFullVersion, card.Content, version.VersionNumber, version.Content);
-            var effectiveCard = state.MissingKeeps.Count == 0;
-
-            logger.LogInformation(
-                "ProjectContext assignment agent={Agent} project={Project} mode={Mode} effective={Effective} " +
-                "card={Card} basedOn={BasedOn} full={Full} stale={Stale} missingKeeps={MissingKeeps} invalidKeeps={InvalidKeeps}",
-                agent.Name, projectName, ProjectContextMode.Card,
-                effectiveCard ? ProjectContextMode.Card : ProjectContextMode.Full,
-                state.CurrentVersion, state.BasedOnFullVersion, version.VersionNumber,
-                state.Stale ? "true" : "false",
-                state.MissingKeeps.Count == 0 ? "-" : string.Join(",", state.MissingKeeps),
-                state.InvalidKeeps.Count);
-
-            if (!effectiveCard)
-            {
-                var slugs = string.Join(", ", state.MissingKeeps);
-                logger.LogWarning(
-                    "ProjectContext card_fallback_full agent={Agent} project={Project} card={Card} missingKeeps={MissingKeeps} " +
-                    "— the card lacks keep marker(s) of full v{Full}; rendering the full context",
-                    agent.Name, projectName, state.CurrentVersion, string.Join(",", state.MissingKeeps), version.VersionNumber);
-                notes.Add(
-                    $"project '{projectName}' rendered in full: its card v{state.CurrentVersion} is missing keep marker(s) {slugs}");
-                assignments.Add(new ProjectContextAssignment(
-                    projectName, ProjectContextMode.Card, EffectiveCard: false, version.Content, FullMd: null, version.VersionNumber));
-                continue;
-            }
-
-            if (state.Stale)
-            {
-                logger.LogWarning(
-                    "ProjectContext card_stale agent={Agent} project={Project} card={Card} basedOn={BasedOn} full={Full}",
-                    agent.Name, projectName, state.CurrentVersion, state.BasedOnFullVersion, version.VersionNumber);
-            }
-
-            assignments.Add(new ProjectContextAssignment(
-                projectName,
-                ProjectContextMode.Card,
-                EffectiveCard: true,
-                ProjectCardService.RenderResidentCard(
-                    projectName, card.Content, card.VersionNumber, card.BasedOnFullVersion, version.VersionNumber),
-                FullMd: version.Content,
-                version.VersionNumber));
+            assignments.Add(Assignment(agent, projectName, ctx, version, logger));
         }
 
-        // Routes cover EVERY assigned project, in any effective mode: precedence is evaluated over
-        // all of them, and a level whose matches are all full must still win (and attach nothing).
-        var routes = assignments.Any(a => a.EffectiveCard)
-            ? matched
-                .SelectMany(m => m.Context.Routes.Select(r => new ProjectContextRouteEntry(r.SignalKind, r.SignalValue, m.ProjectName)))
-                .Distinct()
-                .OrderBy(r => r.Kind, StringComparer.Ordinal)
-                .ThenBy(r => r.Value, StringComparer.Ordinal)
-                .ThenBy(r => r.Project, StringComparer.Ordinal)
-                .ToList()
-            : [];
-
-        return new ProjectContextPlan(assignments, routes, notes);
+        return new ProjectContextPlan(assignments);
     }
 
-    /// <summary>A full-mode assignment: exactly what provisioning wrote before cards existed.</summary>
-    private static ProjectContextAssignment FullAssignment(
-        Agent agent, string projectName, string mode, ProjectContext? ctx, ProjectContextVersion? version, ILogger logger)
+    private static ProjectContextAssignment Assignment(
+        Agent agent, string projectName, ProjectContext? ctx, ProjectContextVersion? version, ILogger logger)
     {
         if (ctx is null)
         {
             logger.LogWarning(
                 "Project context '{Project}' not found in DB for agent '{Agent}' — generating empty stub",
                 projectName, agent.Name);
-            return new ProjectContextAssignment(projectName, mode, EffectiveCard: false,
-                $"# {projectName}\n\n(No content — project context not yet seeded in DB)\n", FullMd: null, FullVersion: null);
+            return new ProjectContextAssignment(projectName,
+                $"# {projectName}\n\n(No content — project context not yet seeded in DB)\n");
         }
 
         if (version is null)
@@ -1098,35 +979,28 @@ public sealed class ContainerProvisioningService(
             logger.LogWarning(
                 "Project context '{Project}' has no versions for agent '{Agent}' — generating empty stub",
                 projectName, agent.Name);
-            return new ProjectContextAssignment(projectName, mode, EffectiveCard: false,
-                $"# {projectName}\n\n(No content — no versions found)\n", FullMd: null, FullVersion: null);
+            return new ProjectContextAssignment(projectName,
+                $"# {projectName}\n\n(No content — no versions found)\n");
         }
 
-        return new ProjectContextAssignment(projectName, mode, EffectiveCard: false, version.Content, FullMd: null, version.VersionNumber);
+        return new ProjectContextAssignment(projectName, version.Content);
     }
 
-    private static InvalidOperationException CardProvisionFault(Agent agent, string projectName, string reason) =>
-        new($"Agent '{agent.Name}' cannot be provisioned: project '{projectName}' is assigned in card mode, but " +
-            $"{reason}. Flip the assignment to full or repair the project context, then reprovision.");
-
     /// <summary>
-    /// Writes <c>projects/{name}/context.md</c> for every assignment and <c>projects/{name}/full.md</c>
-    /// for effective card assignments into the agent's <c>.generated/projects/</c> directory before the
-    /// container is started.
+    /// Writes <c>projects/{name}/context.md</c> for every assignment into the agent's
+    /// <c>.generated/projects/</c> directory before the container is started.
     /// </summary>
     private async Task GenerateProjectContextFilesAsync(Agent agent, string baseDir, ProjectContextPlan plan)
     {
         var projectsDir = Path.Combine(baseDir, "workspaces", agent.ContainerName, ".generated", "projects");
         Directory.CreateDirectory(projectsDir);
 
-        // A full.md left by an earlier card provision would still be mounted, and the agent attaches
-        // it for any project in cardProjects — so every full.md that is not an effective card
-        // assignment's is removed, not merely left unwritten.
-        var cardNames = plan.Assignments.Where(a => a.EffectiveCard).Select(a => a.ProjectName).ToHashSet(StringComparer.Ordinal);
+        // A full.md is left over from a card-mode provision before cards were removed (#346). Nothing
+        // reads it any more; delete every one so a formerly-card agent ends up identical to any other.
         foreach (var dir in Directory.EnumerateDirectories(projectsDir))
         {
             var fullMd = Path.Combine(dir, "full.md");
-            if (!cardNames.Contains(Path.GetFileName(dir)) && File.Exists(fullMd))
+            if (File.Exists(fullMd))
             {
                 File.Delete(fullMd);
                 logger.LogInformation(
@@ -1145,8 +1019,6 @@ public sealed class ContainerProvisioningService(
             var dir = Path.Combine(projectsDir, assignment.ProjectName);
             Directory.CreateDirectory(dir);
             await File.WriteAllTextAsync(Path.Combine(dir, "context.md"), assignment.ContextMd);
-            if (assignment.FullMd is not null)
-                await File.WriteAllTextAsync(Path.Combine(dir, "full.md"), assignment.FullMd);
         }
 
         logger.LogInformation(
@@ -1154,12 +1026,7 @@ public sealed class ContainerProvisioningService(
             agent.Name, projectsDir, agent.Projects.Count);
     }
 
-    /// <param name="routing">
-    /// #347: the <c>Agent.ProjectContextRouting</c> block, non-null only for an agent with at least
-    /// one effective card assignment — see <see cref="ProjectContextPlan.Routing"/>.
-    /// </param>
-    internal static string GenerateAppsettingsJson(
-        Agent agent, string ctoAgentName, OutputStyle? style = null, ProjectContextRouting? routing = null)
+    internal static string GenerateAppsettingsJson(Agent agent, string ctoAgentName, OutputStyle? style = null)
     {
         if (!string.IsNullOrWhiteSpace(agent.OutputStyle) && style is null)
             throw new InvalidOperationException(
@@ -1187,10 +1054,6 @@ public sealed class ContainerProvisioningService(
             {
                 tools.Add("mcp__fleet-temporal__notify_cto");
             }
-
-            // #347: the fallback tool, for an agent with an effective card assignment only.
-            if (routing is not null && !tools.Contains(ContextFallbackGrant, StringComparer.OrdinalIgnoreCase))
-                tools.Add(ContextFallbackGrant);
 
             tools.Sort(StringComparer.OrdinalIgnoreCase);
         }
@@ -1265,18 +1128,10 @@ public sealed class ContainerProvisioningService(
         // Added by editing the serialized document rather than by a nullable property on the
         // anonymous type above, because a null property still SERIALIZES — and an agent with no
         // style must produce the same bytes it produced before this existed.
-        //
-        // #347's ProjectContextRouting block follows the same rule, for the same reason: an agent
-        // with no effective card assignment is byte-identical to before cards existed.
-        var inlineStyle = style is not null && !HasStyleFile(agent);
-        if (!inlineStyle && routing is null) return json;
+        if (style is null || HasStyleFile(agent)) return json;
 
         var node = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
-        var agentNode = node["Agent"]!.AsObject();
-        if (inlineStyle)
-            agentNode["OutputStyleBody"] = OutputStyleRenderer.ForPrompt(style!);
-        if (routing is not null)
-            agentNode["ProjectContextRouting"] = routing.ToJsonNode();
+        node["Agent"]!.AsObject()["OutputStyleBody"] = OutputStyleRenderer.ForPrompt(style);
         return node.ToJsonString(IndentedJson);
     }
 
@@ -1326,12 +1181,7 @@ public sealed class ContainerProvisioningService(
         return withoutQuery.TrimEnd('/');
     }
 
-    /// <param name="contextMcpUrl">
-    /// #347: the fallback route's base URL, non-null only for an agent with at least one effective
-    /// card assignment. It adds <c>fleet-context</c> (an explicit DB row of that name wins, but still
-    /// gets <c>?agent=</c>). The admin <c>/mcp</c> is never injected here.
-    /// </param>
-    internal static string GenerateMcpJson(Agent agent, string fleetMemoryMcpUrl, string? contextMcpUrl = null)
+    internal static string GenerateMcpJson(Agent agent, string fleetMemoryMcpUrl)
     {
         var mcpServers = agent.McpEndpoints
             .OrderBy(e => e.McpName)
@@ -1345,12 +1195,9 @@ public sealed class ContainerProvisioningService(
                     // double-appending when the URL was stored in the DB with ?agent= already.
                     // fleet-telegram also gets ?formatting_mode={n} so send tools can honour the agent's
                     // FormattingMode without an extra orchestrator round-trip on every send.
-                    // fleet-context too, but only when the fallback is due: the route 403s any
-                    // session without an agent, and a zero-card agent's row is left byte-identical.
                     var url = e.McpName == "fleet-telegram"
                         ? WithAgentTelegramParams(e.Url, agent.Name, (byte)agent.FormattingMode)
-                        : (e.McpName == "fleet-memory" || e.McpName == "fleet-temporal" ||
-                           (contextMcpUrl is not null && e.McpName == ContextMcpServerName))
+                        : (e.McpName == "fleet-memory" || e.McpName == "fleet-temporal")
                             ? WithAgentParam(e.Url, agent.Name)
                             : e.Url;
                     return (object)new { type = e.TransportType, url };
@@ -1362,13 +1209,6 @@ public sealed class ContainerProvisioningService(
         {
             var url = WithAgentParam(fleetMemoryMcpUrl, agent.Name);
             mcpServers["fleet-memory"] = new { type = "http", url };
-        }
-
-        // #347 D6: the card agents' fallback — one read-only tool on sessions bound to this agent.
-        if (contextMcpUrl is not null && !mcpServers.ContainsKey(ContextMcpServerName))
-        {
-            var url = WithAgentParam(contextMcpUrl, agent.Name);
-            mcpServers[ContextMcpServerName] = new { type = "http", url };
         }
 
         return JsonSerializer.Serialize(new { mcpServers }, IndentedJson);
@@ -1384,12 +1224,7 @@ public sealed class ContainerProvisioningService(
     /// point: naming an unresolvable style would leave the agent silently on <c>default</c> with
     /// nothing to show for it, which is indistinguishable from the style not working.
     /// </exception>
-    /// <param name="grantContextFallback">
-    /// #347: true only for an agent with at least one effective card assignment, which gets
-    /// <c>mcp__fleet-context__get_project_context</c>.
-    /// </param>
-    internal static string GenerateSettingsJson(
-        Agent agent, string ctoAgentName, OutputStyle? style = null, bool grantContextFallback = false)
+    internal static string GenerateSettingsJson(Agent agent, string ctoAgentName, OutputStyle? style = null)
     {
         if (!string.IsNullOrWhiteSpace(agent.OutputStyle) && style is null)
             throw new InvalidOperationException(
@@ -1417,9 +1252,6 @@ public sealed class ContainerProvisioningService(
         {
             allow.Add("mcp__fleet-temporal__notify_cto");
         }
-
-        if (grantContextFallback && !allow.Contains(ContextFallbackGrant, StringComparer.OrdinalIgnoreCase))
-            allow.Add(ContextFallbackGrant);
 
         allow.Sort(StringComparer.OrdinalIgnoreCase);
 
@@ -1502,87 +1334,13 @@ public record ProvisionResult(string AgentName, bool Success, string Message)
     public static ProvisionResult Fail(string agentName, string message) => new(agentName, false, message);
 }
 
-/// <summary>One assignment's project context, resolved once per provision (#347).</summary>
+/// <summary>One assignment's project context, resolved once per provision.</summary>
 /// <param name="ProjectName">The assignment's name — the <c>projects/</c> directory the agent reads.</param>
-/// <param name="Mode">The DB mode, <see cref="ProjectContextMode"/>.</param>
-/// <param name="EffectiveCard">The card is resident. False for DB <c>full</c> and for a card that fell back.</param>
 /// <param name="ContextMd">The <c>context.md</c> body.</param>
-/// <param name="FullMd">The <c>full.md</c> body — the current full content — for effective card only.</param>
-/// <param name="FullVersion">The full version rendered, or null for a stub.</param>
-internal sealed record ProjectContextAssignment(
-    string ProjectName, string Mode, bool EffectiveCard, string ContextMd, string? FullMd, int? FullVersion);
+internal sealed record ProjectContextAssignment(string ProjectName, string ContextMd);
 
-/// <summary>One route in <c>Agent.ProjectContextRouting.routes</c>.</summary>
-internal sealed record ProjectContextRouteEntry(string Kind, string Value, string Project);
-
-/// <summary>Every assignment's effective mode, plus the routes and the notes for the provision result.</summary>
-internal sealed record ProjectContextPlan(
-    IReadOnlyList<ProjectContextAssignment> Assignments,
-    IReadOnlyList<ProjectContextRouteEntry> Routes,
-    IReadOnlyList<string> Notes)
+/// <summary>Every assignment's project context.</summary>
+internal sealed record ProjectContextPlan(IReadOnlyList<ProjectContextAssignment> Assignments)
 {
-    public static readonly ProjectContextPlan Empty = new([], [], []);
-
-    public bool HasEffectiveCard => Assignments.Any(a => a.EffectiveCard);
-
-    /// <summary>The <c>Agent.ProjectContextRouting</c> block, or null with no effective card assignment.</summary>
-    public ProjectContextRouting? Routing
-    {
-        get
-        {
-            var cards = Assignments.Where(a => a.EffectiveCard).ToList();
-            if (cards.Count == 0) return null;
-
-            var cardProjects = cards.Select(a => a.ProjectName)
-                .Distinct(StringComparer.Ordinal)
-                .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(p => p, StringComparer.Ordinal)
-                .ToList();
-            var fullVersions = new Dictionary<string, int>(StringComparer.Ordinal);
-            foreach (var a in cards)
-                fullVersions[a.ProjectName] = a.FullVersion!.Value;
-
-            return new ProjectContextRouting(cardProjects, fullVersions, Routes);
-        }
-    }
-}
-
-/// <summary>
-/// <c>Agent.ProjectContextRouting</c> in the generated <c>appsettings.json</c> (#347), bound by the
-/// agent's <c>AgentOptions.ProjectContextRouting</c>. Property names are camelCase, as pinned.
-/// </summary>
-/// <param name="CardProjects">Effective card assignment names, ordinal-ignore-case sorted.</param>
-/// <param name="FullVersions">The current full version of each card project.</param>
-/// <param name="Routes">Routes of every assigned project, any effective mode; sorted kind, value, project.</param>
-internal sealed record ProjectContextRouting(
-    IReadOnlyList<string> CardProjects,
-    IReadOnlyDictionary<string, int> FullVersions,
-    IReadOnlyList<ProjectContextRouteEntry> Routes)
-{
-    public System.Text.Json.Nodes.JsonObject ToJsonNode()
-    {
-        var fullVersions = new System.Text.Json.Nodes.JsonObject();
-        foreach (var p in CardProjects)
-            fullVersions[p] = FullVersions[p];
-
-        var routes = new System.Text.Json.Nodes.JsonArray();
-        foreach (var r in Routes)
-            routes.Add(new System.Text.Json.Nodes.JsonObject
-            {
-                ["kind"] = r.Kind,
-                ["value"] = r.Value,
-                ["project"] = r.Project,
-            });
-
-        var cardProjects = new System.Text.Json.Nodes.JsonArray();
-        foreach (var p in CardProjects)
-            cardProjects.Add(p);
-
-        return new System.Text.Json.Nodes.JsonObject
-        {
-            ["cardProjects"] = cardProjects,
-            ["fullVersions"] = fullVersions,
-            ["routes"] = routes,
-        };
-    }
+    public static readonly ProjectContextPlan Empty = new([]);
 }

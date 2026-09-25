@@ -93,54 +93,6 @@ public sealed class AgentOptions
     /// </para>
     /// </remarks>
     public string OutputStyleBody { get; set; } = "";
-
-    /// <summary>
-    /// Per-assignment project context routing (#347), written by the orchestrator only for an agent
-    /// with at least one effective <c>card</c> assignment.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>Null is the normal case</b> and means "every assignment is full": the router is disabled
-    /// silently, every message carries an empty request list, and delivery is exactly what it was
-    /// before cards existed.
-    /// </para>
-    /// <para>
-    /// A malformed block does not stop the agent. <see cref="Services.ProjectContextRouter"/>
-    /// validates it once, logs one Warning naming the fault and disables itself, so the agent runs
-    /// card-only (the resident card plus the <c>get_project_context</c> fallback).
-    /// </para>
-    /// </remarks>
-    public ProjectContextRoutingOptions? ProjectContextRouting { get; set; }
-}
-
-/// <summary>
-/// The <c>Agent:ProjectContextRouting</c> block (#347). Key names are pinned by the orchestrator:
-/// <c>cardProjects</c>, <c>fullVersions</c>, <c>routes[{kind,value,project}]</c>.
-/// </summary>
-/// <remarks>
-/// Everything is bound as strings on purpose. A value the binder cannot convert (a version that is
-/// not a number) would otherwise throw while <see cref="AgentOptions"/> is materialised and take the
-/// whole agent down, where the contract for a malformed block is "router disabled, one Warning".
-/// <see cref="Services.ProjectContextRoutingTable.TryCreate"/> does the parsing.
-/// </remarks>
-public sealed class ProjectContextRoutingOptions
-{
-    /// <summary>Effective card assignment names. Only these are ever attached.</summary>
-    public List<string> CardProjects { get; set; } = [];
-
-    /// <summary>Current full-context version for each card project (positive integer).</summary>
-    public Dictionary<string, string> FullVersions { get; set; } = [];
-
-    /// <summary>Every route whose context matches ANY assigned project, in any effective mode.</summary>
-    public List<ProjectContextRouteOptions> Routes { get; set; } = [];
-}
-
-/// <summary>One route row: <c>kind</c> is <c>repo</c>, <c>workflow</c> or <c>chat</c>.</summary>
-public sealed class ProjectContextRouteOptions
-{
-    public string Kind { get; set; } = "";
-    public string Value { get; set; } = "";
-    public string Project { get; set; } = "";
 }
 
 public sealed class TelegramOptions

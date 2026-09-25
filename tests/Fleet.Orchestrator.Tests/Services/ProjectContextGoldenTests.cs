@@ -3,8 +3,8 @@ using Fleet.Orchestrator.Data;
 namespace Fleet.Orchestrator.Tests.Services;
 
 /// <summary>
-/// #347 AC 2: an agent with zero effective card assignments is provisioned byte for byte as before
-/// cards existed.
+/// Every assignment is provisioned byte for byte as a <c>full</c> assignment was before cards existed
+/// (#347 AC 2, kept through the #346 card removal).
 /// </summary>
 /// <remarks>
 /// <para>
@@ -16,9 +16,7 @@ namespace Fleet.Orchestrator.Tests.Services;
 /// change with itself.
 /// </para>
 /// <para>
-/// The scenario is deliberately hostile to a leak: <c>project-a</c> HAS a card and routes, but the
-/// assignment is <c>full</c>. Nothing of the card, the routes, <c>fleet-context</c> or the fallback
-/// grant may appear, and no <c>full.md</c> may be written.
+/// No <c>full.md</c> may be written, and nothing of the removed fallback wiring may appear.
 /// </para>
 /// </remarks>
 public class ProjectContextGoldenTests
@@ -28,24 +26,16 @@ public class ProjectContextGoldenTests
 
     internal const string FullV1 = "# project-a\n\nFirst version.\n";
     internal const string FullV2 = "# project-a\n\nBuild with care.\n\n<!-- keep:rule-one -->\nNever skip review.\n";
-    internal const string CardV1 = "project-a in brief.\n\n<!-- keep:rule-one -->\nNever skip review.\n";
 
     internal static string FixtureDir(string provider) =>
         Path.Combine(AppContext.BaseDirectory, "Fixtures", "ProjectContextGolden", provider);
 
-    /// <summary>The golden scenario. <paramref name="projectAMode"/> is <c>full</c> for the golden run.</summary>
-    internal static void SeedScenario(OrchestratorDbContext db, string provider, string projectAMode = ProjectContextMode.Full)
+    /// <summary>The golden scenario.</summary>
+    internal static void SeedScenario(OrchestratorDbContext db, string provider)
     {
-        var ctx = new ProjectContext { Name = "project-a", CurrentVersion = 2, CurrentCardVersion = 1 };
+        var ctx = new ProjectContext { Name = "project-a", CurrentVersion = 2 };
         ctx.Versions.Add(new ProjectContextVersion { VersionNumber = 1, Content = FullV1, CreatedBy = "seed" });
         ctx.Versions.Add(new ProjectContextVersion { VersionNumber = 2, Content = FullV2, CreatedBy = "seed" });
-        ctx.CardVersions.Add(new ProjectContextCardVersion
-        {
-            VersionNumber = 1, Content = CardV1, BasedOnFullVersion = 2, CreatedBy = "seed",
-        });
-        ctx.Routes.Add(new ProjectContextRoute { SignalKind = RouteSignalKind.Repo, SignalValue = "org/app" });
-        ctx.Routes.Add(new ProjectContextRoute { SignalKind = RouteSignalKind.Workflow, SignalValue = "ExampleWorkflow" });
-        ctx.Routes.Add(new ProjectContextRoute { SignalKind = RouteSignalKind.Chat, SignalValue = "-100000000001" });
         db.ProjectContexts.Add(ctx);
 
         var instruction = new Instruction { Name = "base", CurrentVersion = 1 };
@@ -66,7 +56,7 @@ public class ProjectContextGoldenTests
         agent.Tools.Add(new AgentTool { ToolName = "Bash", IsEnabled = true });
         agent.Tools.Add(new AgentTool { ToolName = "mcp__fleet-memory__memory_search", IsEnabled = true });
         agent.Tools.Add(new AgentTool { ToolName = "Write", IsEnabled = false });
-        agent.Projects.Add(new AgentProject { ProjectName = "project-a", ContextMode = projectAMode });
+        agent.Projects.Add(new AgentProject { ProjectName = "project-a" });
         agent.Projects.Add(new AgentProject { ProjectName = "project-b" });
         agent.McpEndpoints.Add(new AgentMcpEndpoint
         {
@@ -90,7 +80,7 @@ public class ProjectContextGoldenTests
     [InlineData("claude")]
     [InlineData("codex")]
     [InlineData("gemini")]
-    public async Task ZeroCardAgent_GeneratesByteIdenticalFiles(string provider)
+    public async Task Assignments_GenerateByteIdenticalFiles(string provider)
     {
         await using var harness = ProvisioningHarness.Create();
         await harness.SeedAsync(db => SeedScenario(db, provider));

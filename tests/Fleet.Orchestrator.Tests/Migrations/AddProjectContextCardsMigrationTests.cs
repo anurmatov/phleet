@@ -89,21 +89,15 @@ public sealed class AddProjectContextCardsMigrationTests : IAsyncLifetime
             "INSERT INTO agent_projects (AgentId, ProjectName) SELECT Id, 'project-c' FROM agents WHERE Name = 'agent-b'");
         Assert.Equal("full", await ScalarAsync<string>("SELECT ContextMode FROM agent_projects WHERE ProjectName = 'project-c'"));
 
-        // D10: card versions and routes are keyed on the context's Id and die with it.
-        await using (var db = NewContext())
-        {
-            var ctx = await db.ProjectContexts.SingleAsync(p => p.Name == "project-a");
-            db.ProjectContextCardVersions.Add(new ProjectContextCardVersion
-            {
-                ProjectContextId = ctx.Id, VersionNumber = 1, Content = "Card.", BasedOnFullVersion = 1,
-            });
-            db.ProjectContextRoutes.Add(new ProjectContextRoute
-            {
-                ProjectContextId = ctx.Id, SignalKind = RouteSignalKind.Repo, SignalValue = "org/app",
-            });
-            ctx.CurrentCardVersion = 1;
-            await db.SaveChangesAsync();
-        }
+        // D10: card versions and routes are keyed on the context's Id and die with it. Raw SQL: the
+        // card entities left the EF model with RemoveProjectContextCards (#346).
+        await ExecAsync(_connectionString, """
+            INSERT INTO project_context_card_versions (ProjectContextId, VersionNumber, Content, BasedOnFullVersion, CreatedAt)
+            SELECT Id, 1, 'Card.', 1, UTC_TIMESTAMP() FROM project_contexts WHERE Name = 'project-a';
+            INSERT INTO project_context_routes (ProjectContextId, SignalKind, SignalValue, CreatedAt)
+            SELECT Id, 'repo', 'org/app', UTC_TIMESTAMP() FROM project_contexts WHERE Name = 'project-a';
+            UPDATE project_contexts SET CurrentCardVersion = 1 WHERE Name = 'project-a';
+            """);
 
         // The route uniqueness is enforced by the database, not only by the API.
         await Assert.ThrowsAsync<MySqlException>(() => ExecAsync(_connectionString, """
@@ -139,15 +133,6 @@ public sealed class AddProjectContextCardsMigrationTests : IAsyncLifetime
             SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()
             AND TABLE_NAME IN ('project_context_card_versions', 'project_context_routes')
             """));
-    }
-
-    [Fact]
-    public async Task Every_migration_applies_to_an_empty_database_and_this_one_is_last()
-    {
-        await using var db = NewContext();
-        await db.Database.MigrateAsync();
-        Assert.Empty(await db.Database.GetPendingMigrationsAsync());
-        Assert.Equal(Target, (await db.Database.GetAppliedMigrationsAsync()).Last());
     }
 
     private OrchestratorDbContext NewContext() =>

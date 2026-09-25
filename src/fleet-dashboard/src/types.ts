@@ -176,8 +176,6 @@ export interface AgentConfig {
   anthropicBaseUrl: string | null
   tools: { toolName: string; isEnabled: boolean }[]
   projects: string[]
-  /** Per-assignment context mode, keyed by the assignment's project name. Absent on an older orchestrator. */
-  projectModes?: Record<string, ProjectContextMode>
   mcpEndpoints: McpEndpointEntry[]
   networks: string[]
   envRefs: string[]
@@ -188,13 +186,6 @@ export interface AgentConfig {
   mountDockerSock: boolean
   instructions: { name: string; loadOrder: number }[]
 }
-
-/**
- * How an assigned project's context reaches the agent. `full` = the full context is resident in
- * the system prompt (the default). `card` = a compact card is resident and the full context is
- * attached to turns routed to the project. Takes effect on reprovision.
- */
-export type ProjectContextMode = 'full' | 'card'
 
 export interface ConfigEdits {
   model: string
@@ -224,8 +215,6 @@ export interface ConfigEdits {
   tools: string
   /** Assigned project names in stored order, edited only through the project table. */
   projects: string[]
-  /** Mode per project name as edited; a project missing here is `full`. Looked up case-insensitively. */
-  projectModes: Record<string, ProjectContextMode>
   networks: string
   envRefs: string
   mcpEndpoints: McpEndpointEntry[]
@@ -267,6 +256,8 @@ export interface InstructionSummary {
   isActive: boolean
   totalVersions: number
   agents: string[]
+  /** UTF-8 bytes of the current version. Absent on an older orchestrator. */
+  currentBytes?: number | null
 }
 
 export interface InstructionVersion {
@@ -431,12 +422,8 @@ export interface ProjectContextSummary {
   isActive: boolean
   totalVersions: number
   agents: string[]
-  /** Current card version, or null when the project has no card. */
-  cardVersion?: number | null
-  /** The card was written for an older full version. */
-  cardStale?: boolean
-  /** Agents holding this project in `card` mode. */
-  cardAssignments?: string[]
+  /** UTF-8 bytes of the canonical context (the current version). Absent on an older orchestrator. */
+  currentBytes?: number | null
 }
 
 export interface ProjectContextVersion {
@@ -447,50 +434,10 @@ export interface ProjectContextVersion {
   reason: string
 }
 
-export interface ProjectCardVersion {
-  versionNumber: number
-  /** The full-context version this card version was written for. */
-  basedOnFullVersion: number
-  content: string
-  createdAt: string
-  createdBy: string | null
-  reason: string | null
-}
-
-export interface ProjectCardState {
-  currentVersion: number
-  basedOnFullVersion: number
-  stale: boolean
-  /** Keep-marker slugs of the current full context the current card lacks (provisioning renders full). */
-  missingKeeps: string[]
-  /** Malformed keep-marker candidates found in the current card. */
-  invalidKeeps: string[]
-  /** Newest first. */
-  versions: ProjectCardVersion[]
-}
-
-export type RouteSignalKind = 'repo' | 'workflow' | 'chat'
-
-export interface ProjectContextRoute {
-  id: number
-  kind: RouteSignalKind
-  value: string
-}
-
 export interface ProjectContextDetail {
   name: string
   currentVersion: number
   versions: ProjectContextVersion[]
-  /** null when the project has no card; absent on an older orchestrator. */
-  card?: ProjectCardState | null
-  routes?: ProjectContextRoute[]
-}
-
-/** Body of a rejected card write (HTTP 400). */
-export interface ProjectCardRejection {
-  error: string
-  missingKeeps?: string[]
-  invalidKeeps?: string[]
 }
 
 export interface WorkflowTypeInfo {

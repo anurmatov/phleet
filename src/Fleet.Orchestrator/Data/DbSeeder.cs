@@ -20,10 +20,13 @@ public static class DbSeeder
         ILogger? logger = null,
         TemporalClientRegistry? temporal = null,
         string? projectsDir = null,
-        string? outputStylesDir = null)
+        string? outputStylesDir = null,
+        int projectContextLimitBytes = PromptSizePolicy.DefaultLimitBytes)
     {
+        // The #346 preflight runs first when RemoveProjectContextCards is pending; it throws
+        // ContextRemovalBlockedException, having migrated nothing, when a project would lose its only text.
         logger?.LogInformation("Running database migrations...");
-        await db.Database.MigrateAsync();
+        await ContextRemovalPreflight.MigrateAsync(db, logger, projectContextLimitBytes);
 
         logger?.LogInformation("Seeding instructions from {RolesDir}...", rolesDir);
         await SeedInstructionsAsync(db, rolesDir, logger);

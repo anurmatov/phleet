@@ -9,10 +9,6 @@ namespace Fleet.Agent.Models;
 /// <see cref="Identity"/> is optional and trailing so existing construction sites are unchanged.
 /// Each part keeps its OWN identity — a coalesced entry is one turn but several submissions, and
 /// each part needs its own submission id so the client can correlate its acceptance event.
-///
-/// <see cref="ContextRequests"/> (#347) are the part's own project-context requests. They are
-/// unioned in <see cref="QueuedMessage.BuildPayload"/> and rendered once for the merged turn —
-/// never per part, which would repeat the same block inside one turn.
 /// </summary>
 public sealed record QueuedMessagePart(
     string Task,
@@ -27,8 +23,7 @@ public sealed record QueuedMessagePart(
     long UserId,
     DateTimeOffset ArrivedAt,
     string SenderDisplay,
-    ConversationIdentity? Identity = null,
-    IReadOnlyList<ContextAttachmentRequest>? ContextRequests = null);
+    ConversationIdentity? Identity = null);
 
 /// <summary>
 /// A pending FIFO queue entry. User-message entries may accumulate several
@@ -125,8 +120,7 @@ public sealed class QueuedMessage
             Documents: _parts.SelectMany(part => part.Documents ?? []).ToList(),
             UserId: UserId,
             Identity: Identity,
-            MergedSubmissionIds: MergedSubmissionIds,
-            ContextRequests: ContextAttachmentRequest.Union(_parts.Select(part => part.ContextRequests)));
+            MergedSubmissionIds: MergedSubmissionIds);
 
     private string BuildCombinedTask(DateTimeOffset startedAt)
     {
@@ -176,5 +170,4 @@ public sealed record QueuedMessagePayload(
     IReadOnlyList<MessageDocument>? Documents,
     long UserId,
     ConversationIdentity? Identity = null,
-    IReadOnlyList<string>? MergedSubmissionIds = null,
-    IReadOnlyList<ContextAttachmentRequest>? ContextRequests = null);
+    IReadOnlyList<string>? MergedSubmissionIds = null);

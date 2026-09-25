@@ -139,28 +139,7 @@ public class AgentProject
     public int AgentId { get; set; }
     public required string ProjectName { get; set; }
 
-    /// <summary>
-    /// How this project's context reaches the agent — <see cref="ProjectContextMode.Full"/> (the
-    /// full context resident in the system prompt, as before cards existed) or
-    /// <see cref="ProjectContextMode.Card"/> (a compact card resident, the full context attached to
-    /// routed turns). The assignment, not the project, carries the mode.
-    /// </summary>
-    public string ContextMode { get; set; } = ProjectContextMode.Full;
-
     public Agent Agent { get; set; } = null!;
-}
-
-/// <summary>Valid values for <see cref="AgentProject.ContextMode"/>.</summary>
-public static class ProjectContextMode
-{
-    /// <summary>The canonical full context is resident in the system prompt.</summary>
-    public const string Full = "full";
-
-    /// <summary>The project card is resident; the full context is attached to routed turns.</summary>
-    public const string Card = "card";
-
-    /// <summary>True for exactly <c>full</c> or <c>card</c> (ordinal, lower-case as stored).</summary>
-    public static bool IsValid(string? value) => value is Full or Card;
 }
 
 public class AgentMcpEndpoint
@@ -229,112 +208,7 @@ public class ProjectContext
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 
-    /// <summary>Current <see cref="ProjectContextCardVersion"/> number, or <c>null</c> when the project has no card.</summary>
-    public int? CurrentCardVersion { get; set; }
-
     public List<ProjectContextVersion> Versions { get; set; } = [];
-    public List<ProjectContextCardVersion> CardVersions { get; set; } = [];
-    public List<ProjectContextRoute> Routes { get; set; } = [];
-}
-
-/// <summary>
-/// One version of a project's card — the compact text resident for card-mode assignments.
-/// <see cref="BasedOnFullVersion"/> records which full context version the author wrote it for.
-/// </summary>
-public class ProjectContextCardVersion
-{
-    public int Id { get; set; }
-    public int ProjectContextId { get; set; }
-    public int VersionNumber { get; set; }
-    public required string Content { get; set; }
-    public int BasedOnFullVersion { get; set; }
-    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
-    public string? CreatedBy { get; set; }
-    public string? Reason { get; set; }
-
-    public ProjectContext ProjectContext { get; set; } = null!;
-}
-
-/// <summary>
-/// A deterministic routing signal that attaches a project's full context to a turn. Keyed on the
-/// context's <c>Id</c>, never its name, so a route cannot outlive or detach from its context.
-/// </summary>
-public class ProjectContextRoute
-{
-    public int Id { get; set; }
-    public int ProjectContextId { get; set; }
-
-    /// <summary>One of <see cref="RouteSignalKind"/>.</summary>
-    public required string SignalKind { get; set; }
-
-    /// <summary>Normalised signal value — see <see cref="RouteSignalKind.Normalize"/>.</summary>
-    public required string SignalValue { get; set; }
-
-    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
-    public string? CreatedBy { get; set; }
-
-    public ProjectContext ProjectContext { get; set; } = null!;
-}
-
-/// <summary>Valid values for <see cref="ProjectContextRoute.SignalKind"/>, and their write-time rules.</summary>
-public static class RouteSignalKind
-{
-    public const string Repo = "repo";
-    public const string Workflow = "workflow";
-    public const string Chat = "chat";
-
-    public const int MaxValueLength = 256;
-
-    private static readonly System.Text.RegularExpressions.Regex RepoPattern =
-        new(@"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
-
-    public static bool IsValidKind(string? kind) => kind is Repo or Workflow or Chat;
-
-    /// <summary>
-    /// Validates <paramref name="value"/> for <paramref name="kind"/> and returns the stored form:
-    /// <c>repo</c> lower-case <c>owner/name</c>; <c>workflow</c> exact; <c>chat</c> the decimal
-    /// string of a signed 64-bit integer. Returns <c>null</c> and an error message when invalid.
-    /// </summary>
-    public static string? Normalize(string? kind, string? value, out string? error)
-    {
-        error = null;
-        if (!IsValidKind(kind))
-        {
-            error = $"kind must be one of: {Repo}, {Workflow}, {Chat}";
-            return null;
-        }
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            error = "value must be non-blank";
-            return null;
-        }
-        if (value.Length > MaxValueLength)
-        {
-            error = $"value must be at most {MaxValueLength} characters";
-            return null;
-        }
-
-        switch (kind)
-        {
-            case Repo:
-                if (!RepoPattern.IsMatch(value))
-                {
-                    error = "repo value must be owner/name ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)";
-                    return null;
-                }
-                return value.ToLowerInvariant();
-            case Chat:
-                if (!long.TryParse(value.Trim(), System.Globalization.NumberStyles.AllowLeadingSign,
-                        System.Globalization.CultureInfo.InvariantCulture, out var chatId))
-                {
-                    error = "chat value must be a signed 64-bit integer";
-                    return null;
-                }
-                return chatId.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            default:
-                return value;
-        }
-    }
 }
 
 public class ProjectContextVersion

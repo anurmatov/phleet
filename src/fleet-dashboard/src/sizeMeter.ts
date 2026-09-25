@@ -44,3 +44,24 @@ export function meterState(text: string, limit: MeterLimit, offLabel: string): M
     label: `${formatBytes(bytes)} / ${formatBytes(limit)} bytes`,
   }
 }
+
+export interface SizeCell {
+  /** `12,345 B`, or `—` when the size is unknown (no current version, or an older orchestrator). */
+  text: string
+  over: boolean
+  /** Tooltip naming the soft limit, when one is active. */
+  title?: string
+}
+
+/**
+ * One Size cell of the agent config tables: a row's server-measured UTF-8 bytes against the soft
+ * limit the server reports for that kind — the same formatting and over-limit rule as the meter.
+ */
+export function sizeCell(bytes: number | null | undefined, limit: MeterLimit): SizeCell {
+  if (bytes == null) return { text: '—', over: false }
+  const text = `${formatBytes(bytes)} B`
+  if (limit == null) return { text, over: false }
+  return bytes > limit
+    ? { text, over: true, title: `${formatBytes(bytes)} / ${formatBytes(limit)} bytes — over the soft limit, saving is still allowed` }
+    : { text, over: false, title: `${formatBytes(bytes)} / ${formatBytes(limit)} bytes` }
+}

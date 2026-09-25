@@ -1,11 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import type {
   AgentConfig, ConfigEdits, ConfigSaveState, InstructionSummary, McpEndpointEntry, OutputStyleSummary,
-  ProjectCardState, ProjectContextDetail, ProjectContextSummary,
+  ProjectContextSummary, PromptSizeLimits,
 } from '../types'
 import { ADVANCED_DEFAULTS, countCustomized, PROVIDER_DEFAULT_MODEL, CLAUDE_PERMISSION_MODES, CODEX_SANDBOX_MODES } from '../constants'
 import { apiFetch } from '../utils'
-import { projectModeFor, projectPayload } from '../projectAssignments'
 import ModelSelector from './ModelSelector'
 import FieldHint from './FieldHint'
 import InstructionPicker from './InstructionPicker'
@@ -23,8 +22,10 @@ interface AgentConfigModalProps {
   configReprovisionConfirm: boolean
   allInstructions: InstructionSummary[]
   outputStyles: OutputStyleSummary[]
-  /** Which projects exist and which have a card — the rows of the project assignment table. */
+  /** Which projects exist, with their canonical-context size — the rows of the project assignment table. */
   projectContexts: ProjectContextSummary[]
+  /** The soft limits for the Size columns; null when they could not be read. */
+  promptSizeLimits: PromptSizeLimits | null
   projectAccess: string[] | null
   projectAccessLoading: boolean
   onEditsChange: (patch: Partial<ConfigEdits>) => void
@@ -47,6 +48,7 @@ export default function AgentConfigModal({
   allInstructions,
   outputStyles,
   projectContexts,
+  promptSizeLimits,
   projectAccess,
   projectAccessLoading,
   onEditsChange,
@@ -80,32 +82,6 @@ export default function AgentConfigModal({
   const provider = configEdits?.provider ?? configData?.provider ?? 'claude'
   const isClaude = provider === 'claude'
   const isCodex = provider === 'codex'
-
-  // ── Project assignments ──
-  const assignedProjects = configEdits ? projectPayload(configEdits).projects : []
-  const summaryFor = (project: string) =>
-    projectContexts.find(c => c.name.toLowerCase() === project.toLowerCase()) ?? null
-
-  // Stale state is on the list row, but the keep markers a card is missing are only in the detail,
-  // so read the detail of each assigned project that has a card.
-  const [cardStates, setCardStates] = useState<Record<string, ProjectCardState | null>>({})
-  const cardProjectNames = assignedProjects
-    .map(p => summaryFor(p))
-    .filter((c): c is ProjectContextSummary => c !== null && c.cardVersion != null)
-    .map(c => c.name)
-  const cardProjectsKey = [...cardProjectNames].sort().join('\n')
-  useEffect(() => {
-    for (const name of cardProjectNames) {
-      apiFetch(`/api/project-contexts/${encodeURIComponent(name)}`)
-        .then(r => r.ok ? r.json() : Promise.reject(r.status))
-        .then((d: ProjectContextDetail) => setCardStates(prev => ({ ...prev, [name.toLowerCase()]: d.card ?? null })))
-        .catch(() => { /* the list row's stale flag still shows */ })
-    }
-    // Keyed on the set of names, not the array identity, so typing elsewhere does not refetch.
-  }, [cardProjectsKey])
-
-  const modeChangePending = !!configData && assignedProjects.some(p =>
-    projectModeFor(configEdits?.projectModes, p) !== projectModeFor(configData.projectModes, p))
 
   return (
     <div className="config-modal-overlay" onClick={onClose}>
@@ -370,16 +346,13 @@ export default function AgentConfigModal({
               </div>
               <div className="config-field">
                 <label className="config-label">Projects</label>
-                <FieldHint>Checked projects have their context loaded into the agent. Context: <code>full</code> = the full project context is resident in the system prompt; <code>card</code> = the project's compact card is resident instead, and the full context is attached to turns routed to the project. <strong>Takes effect on reprovision.</strong></FieldHint>
+                <FieldHint>Checked projects have their full context loaded into the agent's system prompt. Size is the current context in UTF-8 bytes. <strong>Takes effect on reprovision.</strong></FieldHint>
                 <ProjectAssignmentTable
                   contexts={projectContexts}
                   value={configEdits}
-                  cardStates={cardStates}
-                  onChange={({ projects, projectModes }) => onEditsChange({ projects, projectModes })}
+                  sizeLimit={promptSizeLimits ? promptSizeLimits.projectContext.limitBytes : undefined}
+                  onChange={({ projects }) => onEditsChange({ projects })}
                 />
-                {modeChangePending && (
-                  <div className="ctx-warn">Context mode changed — save, then reprovision this agent to apply it.</div>
-                )}
               </div>
               <div className="config-section-label">MCP Endpoints</div>
               <FieldHint>MCP Transport Type: <code>http</code> = streamable HTTP (preferred); <code>sse</code> = Server-Sent Events (legacy).</FieldHint>
@@ -478,10 +451,11 @@ export default function AgentConfigModal({
               </div>
               <div className="config-section-label">Instructions</div>
               <div className="config-field">
-                <FieldHint>Role instructions composed into this agent's system prompt. Checked items are included; load order controls concatenation sequence. <code>base</code> is auto-attached and excluded here.</FieldHint>
+                <FieldHint>Role instructions composed into this agent's system prompt. Checked items are included; load order controls concatenation sequence. Size is the current version in UTF-8 bytes. <code>base</code> is auto-attached and excluded here.</FieldHint>
                 <InstructionPicker
                   allInstructions={allInstructions}
                   selected={configEdits.instructions}
+                  sizeLimit={promptSizeLimits ? promptSizeLimits.instruction.limitBytes : undefined}
                   onChange={instructions => onEditsChange({ instructions })}
                 />
               </div>

@@ -85,16 +85,17 @@ builder.Services.AddSingleton<WorkflowStore>();
 builder.Services.AddSingleton<TemporalClientRegistry>();
 builder.Services.AddHostedService<TemporalPollerService>();
 
-// MCP server (HTTP transport — same port as REST): admin /mcp, plus /mcp/context whose sessions hold
-// only get_project_context and are bound to one agent (#347 D6). The transport options, the
-// session-options filter and the guard's registry live in FleetMcpRegistration so the route tests
-// run this exact wiring.
-builder.Services.AddFleetMcpServer();
+// MCP server (HTTP transport — same port as REST, path /mcp)
+builder.Services
+    .AddMcpServer()
+    .WithHttpTransport()
+    .WithToolsFromAssembly();
 
 var app = builder.Build();
 
 // Resolve the size policy now so an invalid value warns at startup, then log the active limits.
-app.Services.GetRequiredService<PromptSizePolicy>().LogStartup();
+var promptSizePolicy = app.Services.GetRequiredService<PromptSizePolicy>();
+promptSizePolicy.LogStartup();
 
 // Auto-migrate and seed DB on startup
 if (!string.IsNullOrEmpty(connectionString))
@@ -109,7 +110,21 @@ if (!string.IsNullOrEmpty(connectionString))
     var temporalReg   = string.IsNullOrWhiteSpace(temporalAddr)
         ? null
         : app.Services.GetRequiredService<TemporalClientRegistry>();
-    await DbSeeder.SeedAsync(db, rolesDir, seedFilePath, startupLogger, temporalReg, projectsDir);
+    // Every SeedAsync failure — a blocked #346 context-removal preflight, a migration or a seeding
+    // error — ends the process with exit code 1 before app.Run(), so no listener, hosted service or
+    // reprovisioning ever exists. An unhandled exception after Build() does not exit reliably (it has
+    // wedged on arm64 and dumped core on x86), hence the explicit exit, as in Fleet.Agent/Program.cs.
+    // Console.Error, not the logger: this path must not resolve anything from DI.
+    try
+    {
+        await DbSeeder.SeedAsync(db, rolesDir, seedFilePath, startupLogger, temporalReg, projectsDir,
+            projectContextLimitBytes: promptSizePolicy.ProjectContextLimitBytes);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"Fleet.Orchestrator startup aborted, exiting 1: {ex.Message}");
+        Environment.Exit(1);
+    }
 }
 
 // WebSocket support
@@ -192,9 +207,8 @@ app.Use(async (context, next) =>
     await next(context);
 });
 
-// MCP endpoints — the session guard, then /mcp/context and /mcp. Both sit under the bearer
-// middleware's /mcp prefix exemption (OrchestratorAuth); the guard is what separates them.
-app.MapFleetMcp();
+// MCP endpoint — explicitly mapped to /mcp so the auth middleware exemption matches
+app.MapMcp("/mcp");
 
 // Health check
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "fleet-orchestrator" }));
@@ -346,8 +360,6 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         agent.MountDockerSock,
         Tools = agent.Tools.Select(t => new { t.ToolName, t.IsEnabled }),
         Projects = agent.Projects.Select(p => p.ProjectName),
-        // #347: per-assignment context mode, keyed by the assignment name exactly as stored.
-        ProjectModes = agent.Projects.ToDictionary(p => p.ProjectName, p => p.ContextMode),
         McpEndpoints = agent.McpEndpoints.Select(e => new { e.McpName, e.Url, e.TransportType }),
         Networks = agent.Networks.Select(n => n.NetworkName),
         EnvRefs = agent.EnvRefs.Select(r => r.EnvKeyName),
@@ -459,12 +471,14 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
             .ToList();
     }
 
-    // #347: the projects replace-all PRESERVES ContextMode for every name that remains
-    // (case-insensitive); new names start full. projectModes then applies to the RESULTING
-    // assignments; a key outside them, a bad value, or card on a project without a card is a 400
-    // returned before SaveChanges, so nothing from this request is saved.
-    if (await AgentProjectModes.UpdateAssignmentsAsync(db, agent, body.Projects, body.ProjectModes) is { } projectsError)
-        return Results.BadRequest(new { error = projectsError });
+    if (body.Projects is not null)
+    {
+        db.AgentProjects.RemoveRange(agent.Projects);
+        agent.Projects = body.Projects
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(p => new AgentProject { AgentId = agent.Id, ProjectName = p })
+            .ToList();
+    }
 
     if (body.McpEndpoints is not null)
     {
@@ -555,9 +569,7 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     await db.SaveChangesAsync();
 
     // Project assignment IS the memory-ACL grant. Sync after the save so the hook sees the
-    // committed assignment list, and only when the caller actually touched projects. A mode change
-    // is not an ACL change: projectModes alone never reaches the hook, and a mode change sent with
-    // the same projects list passes the same name set, which stages nothing and publishes nothing.
+    // committed assignment list, and only when the caller actually touched projects.
     if (body.Projects is not null)
     {
         await AgentProjectAccessSync.SyncAndBroadcastAsync(
@@ -593,11 +605,10 @@ app.MapInstructionEndpoints();
 // REST: GET /api/prompt-size-policy — the active instruction and project-context soft limits (#346).
 app.MapPromptSizePolicyEndpoints();
 
-// REST: the /api/project-contexts surface — full contexts (list, detail, create, new version,
-// rollback, toggle-active), then the #347 card and route writes. Mapped from Endpoints/ so the
-// endpoint tests exercise the same handlers a live orchestrator serves rather than a copy of them.
+// REST: the /api/project-contexts surface — list, detail, create, new version, rollback and
+// toggle-active. Mapped from Endpoints/ so the endpoint tests exercise the same handlers a live
+// orchestrator serves rather than a copy of them.
 app.MapProjectContextEndpoints();
-app.MapProjectCardEndpoints();
 
 // REST: active workflows across all Temporal namespaces
 app.MapGet("/api/workflows", (WorkflowStore workflows) =>
@@ -874,10 +885,9 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         foreach (var t in body.Tools.Distinct(StringComparer.OrdinalIgnoreCase))
             db.AgentTools.Add(new AgentTool { AgentId = agent.Id, ToolName = t, IsEnabled = true });
 
-    // New assignments are always full (#347); a card mode is set afterwards, per assignment.
     if (body.Projects is not null)
         foreach (var p in body.Projects.Distinct(StringComparer.OrdinalIgnoreCase))
-            db.AgentProjects.Add(new AgentProject { AgentId = agent.Id, ProjectName = p, ContextMode = ProjectContextMode.Full });
+            db.AgentProjects.Add(new AgentProject { AgentId = agent.Id, ProjectName = p });
 
     if (body.McpEndpoints is not null)
         foreach (var e in body.McpEndpoints.DistinctBy(x => x.McpName, StringComparer.OrdinalIgnoreCase))
@@ -2409,8 +2419,7 @@ record AgentConfigUpdateRequest(
     string? RequestReceivedMessage,
     bool? MountDockerSock,
     string? OutputStyle,
-    string? AnthropicBaseUrl,
-    Dictionary<string, string>? ProjectModes = null);
+    string? AnthropicBaseUrl);
 
 record McpEndpointEntry(string McpName, string Url, string TransportType);
 record InstructionAssignmentEntry(string InstructionName, int LoadOrder);

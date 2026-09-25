@@ -114,13 +114,9 @@ public sealed class GetUweReferenceTool
         - `timeoutMinutes`: default 30
         - `retryOnIncomplete`: auto-retry if agent returns isIncomplete=true (default true)
         - `maxIncompleteRetries`: max continuation retries (default 3)
-        - `repo` (optional): `owner/name` this delegation is about — supports `{{template}}`, e.g.
-          `"repo": "{{input.Repo}}"`. Sent to the agent as the relay message's structured `Repo`
-          field (never parsed from the instruction), where it selects project context by `repo`
-          route. Omitted or resolving to empty → nothing is sent and the step behaves exactly as
-          before; a value that is not `owner/name` is dropped with a warning and the delegation
-          still runs. Also valid on `delegate_with_escalation` (the escalation notification never
-          carries it).
+        - `repo` (optional): `owner/name` this delegation is about — supports `{{template}}`. Carried to
+          the agent as the relay message's `Repo` field, as metadata only: the agent ignores it. Kept so
+          existing definitions and recorded workflows stay valid.
 
         ### 9. delegate_with_escalation
         Same as `delegate` but wraps execution with an escalation pattern.

@@ -25,9 +25,6 @@ public sealed class ProjectContextTools(IServiceScopeFactory scopeFactory, Promp
         if (!System.Text.RegularExpressions.Regex.IsMatch(name, @"^[a-zA-Z0-9_-]+$"))
             return "name must contain only letters, digits, hyphens, or underscores.";
 
-        if (InvalidKeepsError(content) is { } invalidError)
-            return invalidError;
-
         var exists = await db.ProjectContexts.AnyAsync(p => p.Name == name);
         if (exists)
             return $"Project context '{name}' already exists. Use update_project_context to add a new version.";
@@ -54,7 +51,7 @@ public sealed class ProjectContextTools(IServiceScopeFactory scopeFactory, Promp
     }
 
     [McpServerTool(Name = "list_project_contexts")]
-    [Description("List all project contexts with current version number, card version and staleness, and agent assignments (card-mode holders marked).")]
+    [Description("List all project contexts with current version number and agent assignments.")]
     public async Task<string> ListProjectContextsAsync()
     {
         using var scope = scopeFactory.CreateScope();
@@ -68,18 +65,12 @@ public sealed class ProjectContextTools(IServiceScopeFactory scopeFactory, Promp
                 p.Id,
                 p.Name,
                 p.CurrentVersion,
-                p.CurrentCardVersion,
                 TotalVersions = db.ProjectContextVersions.Count(v => v.ProjectContextId == p.Id),
             })
             .ToListAsync();
 
         if (contexts.Count == 0)
             return "No project contexts found.";
-
-        var cardBases = await db.ProjectContextCardVersions
-            .AsNoTracking()
-            .Select(v => new { v.ProjectContextId, v.VersionNumber, v.BasedOnFullVersion })
-            .ToListAsync();
 
         var agents = await db.Agents
             .Include(a => a.Projects)
@@ -92,24 +83,14 @@ public sealed class ProjectContextTools(IServiceScopeFactory scopeFactory, Promp
 
         foreach (var ctx in contexts)
         {
-            // Card-mode holders are marked: they are the agents to reprovision after a card change.
             var assignedAgents = agents
-                .Select(a => (a.Name, Assignment: a.Projects.FirstOrDefault(p => p.ProjectName.Equals(ctx.Name, StringComparison.OrdinalIgnoreCase))))
-                .Where(x => x.Assignment is not null)
-                .OrderBy(x => x.Name)
-                .Select(x => x.Assignment!.ContextMode == ProjectContextMode.Card ? $"{x.Name} (card)" : x.Name)
+                .Where(a => a.Projects.Any(p => p.ProjectName.Equals(ctx.Name, StringComparison.OrdinalIgnoreCase)))
+                .Select(a => a.Name)
+                .OrderBy(n => n)
                 .ToList();
 
-            var card = ctx.CurrentCardVersion is { } cv
-                ? cardBases.FirstOrDefault(v => v.ProjectContextId == ctx.Id && v.VersionNumber == cv)
-                : null;
-            var cardStr = card is null
-                ? ""
-                : $" — card v{card.VersionNumber} for full v{card.BasedOnFullVersion}" +
-                  (Services.ProjectCardService.IsStale(card.BasedOnFullVersion, ctx.CurrentVersion) ? " (stale)" : "");
-
             var agentsStr = assignedAgents.Count > 0 ? string.Join(", ", assignedAgents) : "(none)";
-            sb.AppendLine($"- **{ctx.Name}** — v{ctx.CurrentVersion} ({ctx.TotalVersions} versions){cardStr} — agents: {agentsStr}");
+            sb.AppendLine($"- **{ctx.Name}** — v{ctx.CurrentVersion} ({ctx.TotalVersions} versions) — agents: {agentsStr}");
         }
 
         return sb.ToString();
@@ -121,18 +102,6 @@ public sealed class ProjectContextTools(IServiceScopeFactory scopeFactory, Promp
         [Description("Project name (e.g. 'my-project')")] string name)
     {
         using var scope = scopeFactory.CreateScope();
-
-        // #347 D7: on /mcp/context — the card agents' fallback route — the assignment ACL applies,
-        // keyed on THIS request's path and ?agent= (the SDK runs the call on the current request's
-        // HttpContext), never on where the session was created. /mcp, or no HttpContext at all, is
-        // the admin read below, unchanged.
-        var http = scope.ServiceProvider.GetService<IHttpContextAccessor>()?.HttpContext;
-        if (http is not null && Services.ContextMcpRoute.IsContextPath(http.Request.Path))
-        {
-            return await ActivatorUtilities.CreateInstance<Services.ProjectContextAccess>(scope.ServiceProvider)
-                .ReadAsync(http, name, http.RequestAborted);
-        }
-
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
 
         var ctx = await db.ProjectContexts
@@ -189,9 +158,6 @@ public sealed class ProjectContextTools(IServiceScopeFactory scopeFactory, Promp
         if (ctx is null)
             return $"Project context '{name}' not found.";
 
-        if (InvalidKeepsError(content) is { } invalidError)
-            return invalidError;
-
         // Captured before Versions.Add so the new row is never mistaken for the previous one.
         var previousContent = ctx.Versions.FirstOrDefault(v => v.VersionNumber == ctx.CurrentVersion)?.Content;
 
@@ -225,9 +191,8 @@ public sealed class ProjectContextTools(IServiceScopeFactory scopeFactory, Promp
         var size = sizePolicy.Evaluate(PromptSizeKind.ProjectContext, name, previousContent, content);
         sizePolicy.LogWrite(size, "mcp", name);
 
-        // Today's output, Card: line included, stays an exact prefix; the Size: lines follow it.
-        return $"Project context '{name}' updated to v{newVersionNumber}." + await CardLineAsync(db, ctx, content)
-             + PromptSizePolicy.RenderMcpLines(size);
+        // Today's output stays an exact prefix; the Size: lines follow it.
+        return $"Project context '{name}' updated to v{newVersionNumber}." + PromptSizePolicy.RenderMcpLines(size);
     }
 
     [McpServerTool(Name = "rollback_project_context")]
@@ -279,34 +244,10 @@ public sealed class ProjectContextTools(IServiceScopeFactory scopeFactory, Promp
 
         await db.SaveChangesAsync();
 
-        // The recovery path: invalid keep markers in the restored content are allowed, with a Warning.
-        var logger = scope.ServiceProvider.GetService<ILogger<ProjectContextTools>>() ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<ProjectContextTools>.Instance;
-        Services.ProjectCardService.WarnOnInvalidFullRollback(logger, ctx.Name, target_version, target.Content);
-
         var size = sizePolicy.Evaluate(PromptSizeKind.ProjectContext, name, previousContent, target.Content);
         sizePolicy.LogWrite(size, "mcp", name);
 
         return $"Project context '{name}' rolled back to v{target_version} content — saved as v{newVersionNumber}."
-             + await CardLineAsync(db, ctx, target.Content)
              + PromptSizePolicy.RenderMcpLines(size);
-    }
-
-    /// <summary>
-    /// Tool error naming each invalid keep candidate and the valid grammar, or null when there is
-    /// none. The only new rule on full writes, and it only triggers on text with a keep candidate.
-    /// </summary>
-    private static string? InvalidKeepsError(string content)
-    {
-        var invalid = Services.KeepMarkerParser.Parse(content).Invalid;
-        return invalid.Count == 0
-            ? null
-            : $"Project context rejected, {Services.KeepMarkerParser.DescribeInvalid(invalid)} Nothing was saved.";
-    }
-
-    /// <summary>One <c>Card: …</c> line after a full write when the project has a card, else empty.</summary>
-    private static async Task<string> CardLineAsync(OrchestratorDbContext db, ProjectContext ctx, string fullContent)
-    {
-        var card = await Services.ProjectCardService.EvaluateCurrentAsync(db, ctx, fullContent);
-        return card is null ? "" : "\n" + Services.ProjectCardService.DescribeCardLine(card, ctx.CurrentVersion);
     }
 }

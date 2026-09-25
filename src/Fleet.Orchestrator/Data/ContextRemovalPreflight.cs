@@ -140,6 +140,7 @@ public static class ContextRemovalPreflight
                 LEFT JOIN project_context_card_versions cur
                   ON cur.ProjectContextId = pc.Id AND cur.VersionNumber = pc.CurrentCardVersion
                 WHERE EXISTS (SELECT 1 FROM project_context_card_versions cv WHERE cv.ProjectContextId = pc.Id)
+                ORDER BY pc.Name
                 """, ct))
             .Select(r => (Project: (string)r[0]!, Bytes: r[1] is null ? (int?)null : Convert.ToInt32(r[1], CultureInfo.InvariantCulture)))
             .ToList();

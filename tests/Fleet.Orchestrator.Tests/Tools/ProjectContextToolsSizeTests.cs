@@ -7,8 +7,8 @@ namespace Fleet.Orchestrator.Tests.Tools;
 
 /// <summary>
 /// The #346 <c>Size:</c> lines on <c>create_project_context</c>, <c>update_project_context</c> and
-/// <c>rollback_project_context</c>. Today's full success output — the optional <c>Card:</c> line
-/// included — is an exact prefix; errors get no <c>Size:</c> line.
+/// <c>rollback_project_context</c>. Today's full success output is an exact prefix; errors get no
+/// <c>Size:</c> line.
 /// </summary>
 public sealed class ProjectContextToolsSizeTests : IDisposable
 {
@@ -46,28 +46,17 @@ public sealed class ProjectContextToolsSizeTests : IDisposable
     }
 
     [Fact]
-    public async Task Card_line_stays_before_the_size_lines()
+    public async Task Keep_marker_comments_are_inert_text()
     {
-        await Tools().CreateProjectContextAsync("row-a", "Full v1", "agent-a");
-        using (var db = _db.NewDb())
-        {
-            var ctx = db.ProjectContexts.Single(p => p.Name == "row-a");
-            db.ProjectContextCardVersions.Add(new ProjectContextCardVersion
-            {
-                ProjectContextId = ctx.Id, VersionNumber = 1, Content = "Card v1", BasedOnFullVersion = 1, CreatedBy = "test",
-            });
-            ctx.CurrentCardVersion = 1;
-            db.SaveChanges();
-        }
+        // #346: keep markers are no longer parsed, so a formerly-invalid one is saved like any text.
+        await Tools().CreateProjectContextAsync("row-a", "abc", "agent-a");
 
-        var result = await Tools().UpdateProjectContextAsync("row-a", new string('a', 10_001), "edit", "agent-a");
+        var result = await Tools().UpdateProjectContextAsync("row-a", "Full <!-- keep:Bad -->", "edit", "agent-a");
 
-        var lines = result.Split('\n');
-        Assert.Equal("Project context 'row-a' updated to v2.", lines[0]);
-        Assert.StartsWith("Card: v1 for full v1 — stale (full is v2)", lines[1]);
-        Assert.StartsWith("Size: 7 → 10,001 UTF-8 bytes;", lines[2]);
-        Assert.StartsWith("Size warning: ", lines[3]);
-        Assert.Equal(4, lines.Length);
+        Assert.Equal(
+            "Project context 'row-a' updated to v2." +
+            "\nSize: 3 → 22 UTF-8 bytes; project-context soft limit 10,000 (PromptSizeWarnings:ProjectContextBytes).",
+            result);
     }
 
     [Fact]
@@ -80,9 +69,5 @@ public sealed class ProjectContextToolsSizeTests : IDisposable
         Assert.Equal("Project context 'row-a' already exists. Use update_project_context to add a new version.",
             await Tools().CreateProjectContextAsync("row-a", "abc", "agent-a"));
         Assert.Equal("Version 5 does not exist for project context 'row-a'.", await Tools().RollbackProjectContextAsync("row-a", 5));
-
-        var invalidKeep = await Tools().UpdateProjectContextAsync("row-a", "Full <!-- keep:Bad -->", "edit", "agent-a");
-        Assert.StartsWith("Project context rejected,", invalidKeep);
-        Assert.DoesNotContain("Size:", invalidKeep);
     }
 }

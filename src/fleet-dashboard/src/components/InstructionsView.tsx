@@ -6,6 +6,8 @@ import type {
 } from '../types'
 import { computeDiff } from '../utils'
 import FieldHint from './FieldHint'
+import SizeMeter from './SizeMeter'
+import type { MeterLimit } from '../sizeMeter'
 import MemoryText from './MemoryText'
 
 interface InstructionsViewProps {
@@ -43,6 +45,10 @@ interface InstructionsViewProps {
   onNewFormChange: (field: string, value: string) => void
   onNewFormSubmit: () => void
   onRefresh: () => void
+  /** #346 — the instruction soft limit from GET /api/prompt-size-policy; undefined when unavailable. */
+  sizeLimit: MeterLimit
+  /** #346 — the last write's size warning per row; cleared by a later write with none. */
+  sizeWarnings: Record<string, string>
 }
 
 export default function InstructionsView({
@@ -80,6 +86,8 @@ export default function InstructionsView({
   onNewFormChange,
   onNewFormSubmit,
   onRefresh,
+  sizeLimit,
+  sizeWarnings,
 }: InstructionsViewProps) {
   const [showArchived, setShowArchived] = useState(false)
 
@@ -141,6 +149,7 @@ export default function InstructionsView({
                 value={newForm.content}
                 onChange={e => onNewFormChange('content', e.target.value)}
               />
+              <SizeMeter text={newForm.content} limit={sizeLimit} kind="prompt" />
             </div>
             <div className="wfd-form-row">
               <label className="config-label">Reason</label>
@@ -198,6 +207,7 @@ export default function InstructionsView({
           const toggleConfirming = instrToggleConfirm[instr.name] ?? false
           const toggleState = instrToggleState[instr.name] ?? 'idle'
           const toggleMsg = instrToggleMsg[instr.name] ?? ''
+          const sizeWarning = sizeWarnings[instr.name]
 
           return (
             <div key={instr.name} className={`instr-row${!instr.isActive ? ' wfd-row-inactive' : ''}`}>
@@ -209,6 +219,7 @@ export default function InstructionsView({
                   <span className={`wfd-active-badge${instr.isActive ? ' active' : ' inactive'}`}>
                     {instr.isActive ? 'active' : 'inactive'}
                   </span>
+                  {sizeWarning && <span className="size-warning-badge" title={sizeWarning}>⚠</span>}
                   {instr.agents.length > 0 && (
                     <span className="instr-agents" title={instr.agents.join(', ')}>
                       {instr.agents.length} agent{instr.agents.length !== 1 ? 's' : ''}
@@ -257,6 +268,7 @@ export default function InstructionsView({
                           rows={20}
                           spellCheck={false}
                         />
+                        <SizeMeter text={editContent} limit={sizeLimit} kind="prompt" />
                         <div className="instr-save-row">
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <FieldHint>Short note explaining this version. Shown in version history for audit trail.</FieldHint>
@@ -279,6 +291,7 @@ export default function InstructionsView({
                             <span className={`config-feedback config-feedback-${saveState}`}>{saveMsg}</span>
                           )}
                         </div>
+                        {sizeWarning && <div className="size-warning-notice">⚠ {sizeWarning}</div>}
                       </div>
 
                       <div className="instr-history-col">

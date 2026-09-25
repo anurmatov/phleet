@@ -5574,3 +5574,34 @@ body {
   text-decoration: underline dotted;
 }
 .memory-ref-link:hover { color: var(--text); }
+
+/* ── Size meter and warnings (#346) — advisory only, never blocks a save ──── */
+
+.size-meter {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 4px 0 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.size-meter-count { font-variant-numeric: tabular-nums; }
+.size-meter-over,
+.size-meter-over .size-meter-count { color: var(--amber); }
+.size-warning-badge {
+  color: var(--amber);
+  font-size: 12px;
+  cursor: help;
+}
+.size-warning-notice {
+  margin-top: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--amber);
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 4px;
+}
+.memory-cv-chip-size { background: rgba(245, 158, 11, 0.12); color: var(--amber); }

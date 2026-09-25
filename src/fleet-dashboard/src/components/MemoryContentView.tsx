@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
-import type { MemoryDoc } from '../types'
+import type { MemoryDoc, MemorySizeReport } from '../types'
 import { apiFetch } from '../utils'
+import { formatBytes } from '../sizeMeter'
+import SizeMeter from './SizeMeter'
 import { useMemoryIdCache } from '../context/MemoryIdCacheContext'
 
 interface MemoryContentViewProps {
@@ -54,6 +56,9 @@ export default function MemoryContentView({ id, onDeleted, onSaved }: MemoryCont
   const [saveError, setSaveError] = useState('')
   const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [deleteError, setDeleteError] = useState('')
+  // #346: the last save's size warning and indexing warning. Survives the reload after the save;
+  // cleared by the next save or when a different memory is shown.
+  const [saveNotices, setSaveNotices] = useState<string[]>([])
   const { refresh: refreshIdCache } = useMemoryIdCache()
 
   const load = useCallback(async () => {
@@ -76,6 +81,7 @@ export default function MemoryContentView({ id, onDeleted, onSaved }: MemoryCont
   }, [id])
 
   useEffect(() => { load() }, [load])
+  useEffect(() => { setSaveNotices([]) }, [id])
 
   function startEdit() {
     if (!doc) return
@@ -89,6 +95,7 @@ export default function MemoryContentView({ id, onDeleted, onSaved }: MemoryCont
     if (!doc) return
     setState('saving')
     setSaveError('')
+    setSaveNotices([])
     try {
       const resp = await apiFetch(`/api/memory/${encodeURIComponent(doc.id)}`, {
         method: 'PUT',
@@ -106,6 +113,9 @@ export default function MemoryContentView({ id, onDeleted, onSaved }: MemoryCont
         return
       }
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      // An older fleet-memory sends no `size`; indexing_warning was discarded before #346.
+      const body: { indexing_warning?: string | null; size?: MemorySizeReport } = await resp.json().catch(() => ({}))
+      setSaveNotices([body.size?.warning, body.indexing_warning].filter((n): n is string => !!n))
       await load()
       onSaved?.(doc.id)
     } catch (e) {
@@ -146,6 +156,9 @@ export default function MemoryContentView({ id, onDeleted, onSaved }: MemoryCont
 
   if (!doc) return null
 
+  const guidance = doc.size_guidance
+  const overGuidance = guidance != null && guidance.limit_bytes != null && guidance.bytes > guidance.limit_bytes
+
   return (
     <div className="memory-cv">
       {/* S6: Delete confirmation modal rendered via portal */}
@@ -182,7 +195,14 @@ export default function MemoryContentView({ id, onDeleted, onSaved }: MemoryCont
         <span className="memory-cv-meta-id" title={doc.id}>{doc.id.substring(0, 8)}</span>
         {doc.agent && <span className="memory-cv-meta-text">by {doc.agent}</span>}
         <span className="memory-cv-meta-text">updated {new Date(doc.updated_at).toLocaleDateString()}</span>
+        {state === 'loaded' && overGuidance && (
+          <span className="memory-cv-chip memory-cv-chip-size" title={`Embedding input over the ${guidance.limit_key} guidance`}>
+            ⚠ {formatBytes(guidance.bytes)} B &gt; guidance
+          </span>
+        )}
       </div>
+
+      {saveNotices.map(n => <div key={n} className="size-warning-notice">⚠ {n}</div>)}
 
       {deleteError && <div className="memory-cv-error-inline">Delete failed: {deleteError}</div>}
       {saveError && <div className="memory-cv-error-inline">{saveError}</div>}
@@ -203,6 +223,11 @@ export default function MemoryContentView({ id, onDeleted, onSaved }: MemoryCont
             value={editContent}
             onChange={e => setEditContent(e.target.value)}
             disabled={state === 'saving'}
+          />
+          <SizeMeter
+            text={doc.title + '\n\n' + editContent}
+            limit={guidance ? guidance.limit_bytes : undefined}
+            kind="memory"
           />
         </div>
       ) : (

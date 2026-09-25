@@ -7,7 +7,8 @@ import type {
 import { computeDiff } from '../utils'
 import FieldHint from './FieldHint'
 import SizeMeter from './SizeMeter'
-import type { MeterLimit } from '../sizeMeter'
+import SizeCellView from './SizeCellView'
+import { sizeCell, type MeterLimit } from '../sizeMeter'
 import MemoryText from './MemoryText'
 
 interface InstructionsViewProps {
@@ -225,6 +226,7 @@ export default function InstructionsView({
                       {instr.agents.length} agent{instr.agents.length !== 1 ? 's' : ''}
                     </span>
                   )}
+                  <SizeCellView cell={sizeCell(instr.currentBytes, sizeLimit)} />
                 </span>
                 <div className="wfd-row-actions" onClick={e => e.stopPropagation()}>
                   {toggleState === 'idle' || toggleState === 'pending' ? (

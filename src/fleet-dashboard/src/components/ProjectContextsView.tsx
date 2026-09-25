@@ -7,7 +7,8 @@ import type {
 import { computeDiff } from '../utils'
 import FieldHint from './FieldHint'
 import SizeMeter from './SizeMeter'
-import type { MeterLimit } from '../sizeMeter'
+import SizeCellView from './SizeCellView'
+import { sizeCell, type MeterLimit } from '../sizeMeter'
 import MemoryText from './MemoryText'
 
 interface ProjectContextsViewProps {
@@ -207,6 +208,7 @@ export default function ProjectContextsView({
                       {ctx.agents.length} agent{ctx.agents.length !== 1 ? 's' : ''}
                     </span>
                   )}
+                  <SizeCellView cell={sizeCell(ctx.currentBytes, sizeLimit)} />
                 </span>
                 <div className="wfd-row-actions" onClick={e => e.stopPropagation()}>
                   {toggleState === 'idle' || toggleState === 'pending' ? (

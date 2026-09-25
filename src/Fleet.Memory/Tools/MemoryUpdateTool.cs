@@ -63,12 +63,14 @@ public sealed class MemoryUpdateTool(
             var actualContent = string.IsNullOrEmpty(content) ? null : content;
             var actualProject = string.IsNullOrEmpty(project) ? null : project;
 
-            var (doc, indexingWarning) = await memoryService.UpdateAsync(id, actualTitle, actualContent, tagList, actualProject);
+            var (doc, indexingWarning, size) = await memoryService.UpdateAsync(id, actualTitle, actualContent, tagList, actualProject);
 
             var result = $"Updated memory '{doc.Title}' (id: {doc.Id})";
             if (indexingWarning is not null)
                 result += $"\n{indexingWarning}";
-            return result;
+
+            // #346: nothing when the guidance is off, so the output stays byte-identical.
+            return result + MemorySizeGuidance.RenderMcpLines(size);
         }
         catch (FileNotFoundException)
         {

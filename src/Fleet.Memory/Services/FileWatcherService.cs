@@ -10,6 +10,7 @@ public sealed class FileWatcherService(
     MemoryService memoryService,
     MemoryFileStore fileStore,
     VectorStore vectorStore,
+    MemorySizeGuidance sizeGuidance,
     IOptions<StorageOptions> storageOptions,
     ILogger<FileWatcherService> logger) : BackgroundService
 {
@@ -73,12 +74,13 @@ public sealed class FileWatcherService(
     {
         logger.LogInformation("Starting full index of {Path}", _basePath);
 
-        var allDocs = await fileStore.ListAllAsync();
+        var (allDocs, corrupt) = await fileStore.ListAllAsync();
         var existingKeys = await vectorStore.GetAllFilePathKeysAsync(ct);
 
         var filePathsOnDisk = new HashSet<string>();
 
         var indexed = 0;
+        var indexFailures = 0;
         foreach (var doc in allDocs)
         {
             filePathsOnDisk.Add(doc.FilePath);
@@ -94,10 +96,12 @@ public sealed class FileWatcherService(
             }
             catch (InvalidDataException ex)
             {
+                corrupt++;
                 logger.LogError(ex, "Corrupt memory file skipped during full scan: {Path}", doc.FilePath);
             }
             catch (Exception ex)
             {
+                indexFailures++;
                 logger.LogWarning(ex, "Failed to index {Path} during full scan", doc.FilePath);
             }
         }
@@ -117,6 +121,11 @@ public sealed class FileWatcherService(
         }
 
         logger.LogInformation("Full index complete: {Indexed} indexed, {Orphans} orphans removed", indexed, orphans.Count);
+
+        // #346: the size check reuses the documents parsed above — no extra I/O, no embedding calls.
+        // Over-guidance memories were indexed like any other; this only reports them.
+        foreach (var (level, message) in sizeGuidance.SummarizeFullScan(indexed, indexFailures, corrupt, allDocs).Lines)
+            logger.Log(level, "{SizeCheck}", message);
     }
 
     private async Task PollForChangesAsync(CancellationToken ct)

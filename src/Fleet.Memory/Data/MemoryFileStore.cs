@@ -157,9 +157,15 @@ public sealed partial class MemoryFileStore(IOptions<StorageOptions> storageOpti
         return ParseMarkdown(text, filePath);
     }
 
-    public async Task<List<MemoryDocument>> ListAllAsync()
+    /// <summary>
+    /// Every parsed memory under the type directories, plus how many enumerated <c>.md</c> files were
+    /// skipped as corrupt — unparseable YAML, or no frontmatter at all (not a memory file). So the
+    /// files enumerated are exactly <c>Documents.Count + Corrupt</c>.
+    /// </summary>
+    public async Task<(List<MemoryDocument> Documents, int Corrupt)> ListAllAsync()
     {
         var results = new List<MemoryDocument>();
+        var corrupt = 0;
 
         foreach (var type in MemoryDocument.ValidTypes)
         {
@@ -174,15 +180,18 @@ public sealed partial class MemoryFileStore(IOptions<StorageOptions> storageOpti
                     var doc = await ParseFileAsync(file);
                     if (doc is not null)
                         results.Add(doc);
+                    else
+                        corrupt++;
                 }
                 catch (InvalidDataException ex)
                 {
+                    corrupt++;
                     logger.LogError(ex, "Skipping corrupt memory file during scan: {Path}", file);
                 }
             }
         }
 
-        return results;
+        return (results, corrupt);
     }
 
     public async Task<List<MemoryDocument>> ListFilteredAsync(string? type = null, string? project = null, string? agent = null, string? tag = null)

@@ -137,8 +137,9 @@ public sealed class PromptBuilder(IOptions<AgentOptions> config, ILogger<PromptB
             sb.AppendLine("that search alone might miss.");
         }
 
-        // The output style, for providers that have no output-style mechanism (#314). Claude reads
-        // the identical text as a style file, so the orchestrator leaves this empty for it.
+        // The output style, for providers that have no output-style mechanism (#314) and for
+        // local-model claude (#365). Cloud claude reads the identical text as a style file, so the
+        // orchestrator leaves this empty for it.
         //
         // Placed BEFORE the formatting block on purpose: the style carries register and length, and
         // the per-agent formatting mode still decides structure. Whatever the block below says about

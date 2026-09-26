@@ -16,8 +16,9 @@ namespace Fleet.Orchestrator.Tests.Services;
 /// <c>OutputStyleBody</c>, would each be a silent change to every agent in the fleet.
 /// </para>
 /// <para>
-/// The other half is provider parity. Claude resolves the style as a file; codex and gemini get the
-/// identical text inlined. A style that reached one provider and vanished for the others is the
+/// The other half is provider parity. Cloud claude resolves the style as a file; codex, gemini and
+/// local-model claude (#365) get the identical text inlined. A style that reached one provider and
+/// vanished for the others is the
 /// failure this must not introduce, so both directions are pinned.
 /// </para>
 /// </remarks>
@@ -172,6 +173,95 @@ public class OutputStyleGenerationTests
 
         Assert.Equal(codex, gemini);
     }
+
+    // ── claude in local-model mode: inlined, no file (#365) ──────────────────
+
+    private const string LocalUrl = "http://inference-host:11434";
+
+    private static Agent LocalClaudeAgentWith(string? outputStyle)
+    {
+        var agent = AgentWith("claude", outputStyle);
+        agent.Model = "qwen3.8:27b-agent";
+        agent.AnthropicBaseUrl = LocalUrl;
+        return agent;
+    }
+
+    /// <summary>
+    /// AC1. Claude Code re-asserts an active style with a new system-role message every turn. A
+    /// local server that folds every system message into the top block then changes the prompt
+    /// prefix on every turn and never reuses its KV cache, so local mode takes the codex/gemini path.
+    /// </summary>
+    [Fact]
+    public void LocalClaudeAgentWithStyle_GetsNoSettingsKeyFileOrMount()
+    {
+        var agent = LocalClaudeAgentWith("fleet-messaging");
+
+        var settings = ContainerProvisioningService.GenerateSettingsJson(agent, "acto", Style());
+        var binds = ContainerProvisioningService.BuildBinds(agent, "/fleet");
+
+        Assert.DoesNotContain("outputStyle", settings, StringComparison.Ordinal);
+        Assert.DoesNotContain(binds, b => b.Contains("output-styles", StringComparison.Ordinal));
+        Assert.False(ContainerProvisioningService.HasStyleFile(agent));
+    }
+
+    /// <summary>AC1. The text is not dropped: it is the same text codex and gemini receive.</summary>
+    [Fact]
+    public void LocalClaudeAgentWithStyle_GetsTheBodyInlined()
+    {
+        var style = Style();
+
+        var appsettings = ContainerProvisioningService.GenerateAppsettingsJson(
+            LocalClaudeAgentWith(style.Name), "acto", style);
+        var codex = ContainerProvisioningService.GenerateAppsettingsJson(AgentWith("codex", style.Name), "acto", style);
+
+        static string BodyOf(string json) =>
+            JsonDocument.Parse(json).RootElement.GetProperty("Agent").GetProperty("OutputStyleBody").GetString()!;
+
+        Assert.Equal(OutputStyleRenderer.ForPrompt(style), BodyOf(appsettings));
+        Assert.Equal(BodyOf(codex), BodyOf(appsettings));
+    }
+
+    [Fact]
+    public void LocalClaudeAgentWithoutStyle_GetsNoStyleAnywhere()
+    {
+        var agent = LocalClaudeAgentWith(outputStyle: null);
+
+        Assert.DoesNotContain("outputStyle",
+            ContainerProvisioningService.GenerateSettingsJson(agent, "acto"), StringComparison.Ordinal);
+        Assert.DoesNotContain("OutputStyleBody",
+            ContainerProvisioningService.GenerateAppsettingsJson(agent, "acto"), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// AC2. A cloud claude agent is untouched: settings.json bytes captured from main at 479fb58,
+    /// and an appsettings.json equal to the styleless one, so the prompt the agent assembles from it
+    /// is byte-identical to the one it assembles today.
+    /// </summary>
+    [Fact]
+    public void CloudClaudeAgentWithStyle_ConfigIsUnchanged()
+    {
+        var agent = AgentWith("claude", "fleet-messaging");
+
+        var settings = ContainerProvisioningService.GenerateSettingsJson(agent, "acto", Style());
+        var appsettings = ContainerProvisioningService.GenerateAppsettingsJson(agent, "acto", Style());
+
+        Assert.Equal(CloudClaudeSettingsOnMain, settings);
+        Assert.Equal(
+            ContainerProvisioningService.GenerateAppsettingsJson(AgentWith("claude", null), "acto"),
+            appsettings);
+    }
+
+    private const string CloudClaudeSettingsOnMain =
+        "{\n"
+        + "  \"permissions\": {\n"
+        + "    \"allow\": [\n"
+        + "      \"mcp__fleet-memory__memory_get\",\n"
+        + "      \"mcp__fleet-temporal__notify_cto\",\n"
+        + "      \"Read\"\n"
+        + "    ]\n"
+        + "  },\n"
+        + "  \"outputStyle\": \"fleet-messaging\"\n"
+        + "}";
 
     // ── the dangling reference ───────────────────────────────────────────────
 

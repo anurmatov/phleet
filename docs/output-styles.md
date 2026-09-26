@@ -15,6 +15,10 @@ provider:
 | `outputStyle` in `~/.claude/settings.json` | set | not set |
 | text inlined into the system prompt | no | yes, frontmatter stripped |
 
+A claude agent in local-model mode (non-empty `AnthropicBaseUrl`) takes the codex / gemini column
+(#365). Claude Code re-asserts an active style with a new system-role message every turn. A local
+server that folds system messages into the top of the prompt then misses its KV cache on every turn.
+
 `NULL` means no style, and an agent with no style is provisioned byte for byte as it was before
 styles existed. That is the rollout switch and the rollback.
 

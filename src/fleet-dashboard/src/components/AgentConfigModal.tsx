@@ -129,6 +129,13 @@ export default function AgentConfigModal({
                 <input className="config-input" value={configEdits.anthropicBaseUrl} onChange={e => onEditsChange({ anthropicBaseUrl: e.target.value })} placeholder="http://<server-lan-address>:11434" />
               </div>
               )}
+              {isClaude && configEdits.anthropicBaseUrl.trim() !== '' && (
+              <div className="config-field">
+                <label className="config-label">Context window (tokens) <span className="config-provider-badge">Local only</span></label>
+                <FieldHint>Set to the server's context size (for example its <code>--ctx</code>). Claude CLI then compacts before the server rejects a turn. Empty = not set. 4096–1048576. <strong>Takes effect on reprovision.</strong></FieldHint>
+                <input className="config-input config-input-short" type="number" min={4096} max={1048576} step={1} value={configEdits.contextWindow} onChange={e => onEditsChange({ contextWindow: e.target.value })} placeholder="e.g. 65536" />
+              </div>
+              )}
               <div className="config-field">
                 <label className="config-label">Memory (MB)</label>
                 <input className="config-input config-input-short" type="number" min={128} value={configEdits.memoryLimitMb} onChange={e => onEditsChange({ memoryLimitMb: e.target.value })} />

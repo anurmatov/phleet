@@ -7,19 +7,19 @@ using MySqlConnector;
 namespace Fleet.Orchestrator.Tests.Migrations;
 
 /// <summary>
-/// <c>AddAgentWarmupTimeoutSeconds</c> (#357) against a real MySQL 8.0: existing agent rows resolve
-/// to 60 with no backfill, the column is non-null with default 60, and the migration round-trips.
+/// <c>AddAgentContextWindow</c> (#367) against a real MySQL 8.0: the column is a nullable int with
+/// no default, existing agent rows stay null (today's behaviour), and the migration round-trips.
 /// </summary>
 /// <remarks>
 /// ⚠️ <b>These tests FAIL when the database is absent. They never skip.</b> The main CI job excludes
 /// this namespace; the <c>orchestrator-migrations</c> job runs it beside a <c>mysql:8.0</c> service.
 /// </remarks>
-public sealed class AddAgentWarmupTimeoutSecondsMigrationTests : IAsyncLifetime
+public sealed class AddAgentContextWindowMigrationTests : IAsyncLifetime
 {
     public const string ConnectionVariable = "FLEET_ORCHESTRATOR_MIGRATION_CONNECTION";
 
-    private const string Before = "20260925105427_RemoveProjectContextCards";
-    private const string Target = "20260925150402_AddAgentWarmupTimeoutSeconds";
+    private const string Before = "20260925150402_AddAgentWarmupTimeoutSeconds";
+    private const string Target = "20260926173913_AddAgentContextWindow";
 
     private string _admin = "";
     private string _database = "";
@@ -48,11 +48,11 @@ public sealed class AddAgentWarmupTimeoutSecondsMigrationTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Existing_rows_resolve_to_sixty_without_backfill()
+    public async Task Existing_rows_stay_null()
     {
         await MigrateAsync(Before);
 
-        // A row written by the pre-#357 schema: no WarmupTimeoutSeconds anywhere in the INSERT.
+        // A row written by the pre-#367 schema: no ContextWindow anywhere in the INSERT.
         await ExecAsync(_connectionString, """
             INSERT INTO agents (Name, DisplayName, Role, Model, ContainerName, MemoryLimitMb, IsEnabled,
                                 GroupDebounceSeconds, PrefixMessages, ProactiveIntervalMinutes, ShowStats, TelegramSendOnly)
@@ -61,56 +61,60 @@ public sealed class AddAgentWarmupTimeoutSecondsMigrationTests : IAsyncLifetime
 
         await MigrateAsync(Target);
 
-        Assert.Equal(60L, await ScalarAsync<long>("SELECT WarmupTimeoutSeconds FROM agents WHERE Name = 'agent-a'"));
+        Assert.Equal(1L, await ScalarAsync<long>("SELECT COUNT(*) FROM agents WHERE Name = 'agent-a' AND ContextWindow IS NULL"));
     }
 
     [Fact]
-    public async Task Column_is_non_null_with_default_sixty()
+    public async Task Column_is_a_nullable_int_with_no_default()
     {
         await MigrateAsync(Target);
 
-        Assert.Equal("int|NO|60", await ScalarAsync<string>("""
-            SELECT CONCAT(COLUMN_TYPE, '|', IS_NULLABLE, '|', COLUMN_DEFAULT) FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'agents' AND COLUMN_NAME = 'WarmupTimeoutSeconds'
+        Assert.Equal("int|YES|none", await ScalarAsync<string>("""
+            SELECT CONCAT(COLUMN_TYPE, '|', IS_NULLABLE, '|', IFNULL(COLUMN_DEFAULT, 'none')) FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'agents' AND COLUMN_NAME = 'ContextWindow'
             """));
 
-        // An old image inserting without the column still gets 60 (rollback path).
+        // An old image inserting without the column leaves it null (rollback path).
         await ExecAsync(_connectionString, """
             INSERT INTO agents (Name, DisplayName, Role, Model, ContainerName, MemoryLimitMb, IsEnabled,
                                 GroupDebounceSeconds, PrefixMessages, ProactiveIntervalMinutes, ShowStats, TelegramSendOnly)
             VALUES ('agent-b', 'Agent B', 'dev', 'model-x', 'fleet-agent-b', 1024, 1, 15, 0, 0, 1, 0);
             """);
-        Assert.Equal(60L, await ScalarAsync<long>("SELECT WarmupTimeoutSeconds FROM agents WHERE Name = 'agent-b'"));
+        Assert.Equal(1L, await ScalarAsync<long>("SELECT COUNT(*) FROM agents WHERE Name = 'agent-b' AND ContextWindow IS NULL"));
     }
 
     [Fact]
-    public async Task Every_migration_applies()
+    public async Task Every_migration_applies_and_this_one_is_last()
     {
-        // Not "this one is last": #367's AddAgentContextWindow appends after it, and each new tip
-        // owns that assertion in its own migration tests.
+        // Each migration tip owns the "I am last" assertion, so appending a migration never breaks
+        // its predecessor (moved here from AddAgentWarmupTimeoutSecondsMigrationTests).
         await using var db = NewContext();
         await db.Database.MigrateAsync();
 
         Assert.Empty(await db.Database.GetPendingMigrationsAsync());
-        Assert.Contains(Target, await db.Database.GetAppliedMigrationsAsync());
+        Assert.Equal(Target, (await db.Database.GetAppliedMigrationsAsync()).Last());
     }
 
     [Fact]
     public async Task Down_drops_the_column_and_up_applies_again()
     {
         await MigrateAsync(Target);
+        await ExecAsync(_connectionString, """
+            INSERT INTO agents (Name, DisplayName, Role, Model, ContainerName, MemoryLimitMb, IsEnabled,
+                                GroupDebounceSeconds, PrefixMessages, ProactiveIntervalMinutes, ShowStats, TelegramSendOnly,
+                                ContextWindow)
+            VALUES ('agent-c', 'Agent C', 'dev', 'model-x', 'fleet-agent-c', 1024, 1, 15, 0, 0, 1, 0, 131072);
+            """);
         await MigrateAsync(Before);
 
         Assert.Equal(0L, await ScalarAsync<long>("""
             SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()
-            AND TABLE_NAME = 'agents' AND COLUMN_NAME = 'WarmupTimeoutSeconds'
+            AND TABLE_NAME = 'agents' AND COLUMN_NAME = 'ContextWindow'
             """));
+        Assert.Equal(1L, await ScalarAsync<long>("SELECT COUNT(*) FROM agents WHERE Name = 'agent-c'"));
 
         await MigrateAsync(Target);
-        Assert.Equal(1L, await ScalarAsync<long>("""
-            SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()
-            AND TABLE_NAME = 'agents' AND COLUMN_NAME = 'WarmupTimeoutSeconds'
-            """));
+        Assert.Equal(1L, await ScalarAsync<long>("SELECT COUNT(*) FROM agents WHERE Name = 'agent-c' AND ContextWindow IS NULL"));
     }
 
     private OrchestratorDbContext NewContext() =>

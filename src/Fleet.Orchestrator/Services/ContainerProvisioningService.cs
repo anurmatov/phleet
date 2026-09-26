@@ -122,6 +122,12 @@ public sealed class ContainerProvisioningService(
         if (!string.IsNullOrWhiteSpace(kokoroServiceUrl))
             env.Add($"Tts__ServiceUrl={kokoroServiceUrl}");
 
+        // #367: a local server's context size, so Claude CLI compacts before the server rejects the
+        // turn. Local-mode claude agents only: Anthropic models have known windows an override
+        // could shrink. The claude child inherits it; ClaudeExecutor strips only its own list.
+        if (agent.ContextWindow is int window && ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl))
+            env.Add($"{ContextWindow.EnvVar}={window}");
+
         return env;
     }
 
@@ -314,6 +320,11 @@ public sealed class ContainerProvisioningService(
         await GenerateConfigFilesAsync(agent, baseDir, ctoAgentName ?? "");
         await GenerateInstructionFilesAsync(agent, baseDir, instructionVersionOverrides);
         await GenerateProjectContextFilesAsync(agent, baseDir, projectContexts);
+
+        if (agent.ContextWindow is not null && !ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl))
+            logger.LogInformation(
+                "ContextWindow {ContextWindow} ignored for '{Agent}': it applies only to a claude agent with AnthropicBaseUrl set",
+                agent.ContextWindow, agentName);
 
         var spec      = BuildDesiredSpec(agent, envValues);
 

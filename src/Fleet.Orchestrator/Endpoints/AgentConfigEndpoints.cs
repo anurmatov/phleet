@@ -75,6 +75,7 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         agent.CodexSandboxMode,
         agent.OutputStyle,
         agent.AnthropicBaseUrl,
+        agent.ContextWindow,
         agent.CanReceiveChatRequests,
         agent.RequestReceivedMessage,
         agent.MountDockerSock,
@@ -180,6 +181,13 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
         agent.OutputStyle = styleName.Length == 0 ? null : styleName;
     }
     if (body.AnthropicBaseUrl is not null) agent.AnthropicBaseUrl = body.AnthropicBaseUrl == "" ? null : body.AnthropicBaseUrl;
+    if (body.ContextWindow is not null)
+    {
+        // #367: 0 clears; anything else must be in range — rejected, never clamped.
+        if (body.ContextWindow != 0 && ContextWindow.DescribeFault(body.ContextWindow.Value) is { } windowFault)
+            return Results.BadRequest(new { error = windowFault });
+        agent.ContextWindow = body.ContextWindow == 0 ? null : body.ContextWindow;
+    }
 
     // Replace-all for related tables (omit field = keep current)
     if (body.Tools is not null)
@@ -364,4 +372,5 @@ internal sealed record AgentConfigUpdateRequest(
     string? RequestReceivedMessage,
     bool? MountDockerSock,
     string? OutputStyle,
-    string? AnthropicBaseUrl);
+    string? AnthropicBaseUrl,
+    int? ContextWindow);

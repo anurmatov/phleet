@@ -13,7 +13,13 @@ ARG CODEX_CLI_VERSION=0.153.4
 ARG GEMINI_CLI_VERSION=0.40.1
 ARG MC_VERSION=RELEASE.2025-08-13T08-35-41Z
 
-RUN apt-get update && apt-get install -y curl git jq rsync cron openssh-client && rm -rf /var/lib/apt/lists/*
+# ffmpeg/ffprobe let agents look inside video attachments (#361). --no-install-recommends is
+# scoped to ffmpeg alone so its X11/GUI recommends stay out without changing what the other
+# packages already pull in.
+RUN apt-get update && apt-get install -y curl git jq rsync cron openssh-client && \
+    apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN ffmpeg -version >/dev/null && ffprobe -version >/dev/null || \
+    (echo "ERROR: ffmpeg/ffprobe not runnable in the agent image" && exit 1)
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y nodejs && \
     npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} @openai/codex@${CODEX_CLI_VERSION}

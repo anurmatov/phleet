@@ -138,7 +138,9 @@ That is the complete Phase-0 client command set. There is **no** client equivale
 `/reset`, `/stop`, `/run`, `/status`, `/tts` or `/cancel_bg` — see *Constraints* below.
 
 `submission.steer` is not a separate code path: inject-vs-queue is decided by the runtime's
-ordinary dispatch, exactly as it is for the existing chat channel.
+ordinary dispatch, exactly as it is for the existing chat channel. When Claude runs an injected
+message as a turn of its own (it arrived as the model was finishing its answer), that answer is
+emitted as `turn.recovered_answer` in the host turn, before the host turn's `turn.final` (#369).
 
 ---
 

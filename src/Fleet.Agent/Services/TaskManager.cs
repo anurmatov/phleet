@@ -733,6 +733,39 @@ public sealed class TaskManager
             }
         }
 
+        // #369: an injected message that reached Claude after it had begun its final answer runs
+        // as its own turn with its own result, after the executor already returned on the first.
+        // Deliver that answer here, right after the turn's own answer and before its terminal
+        // event, instead of leaving it to surface out-of-band on the user's next message. Only
+        // after an injection — a turn without one never waits.
+        async Task DeliverInjectedTurnAnswersAsync(int injectedCount)
+        {
+            if (injectedCount <= 0) return;
+            await foreach (var extra in _executor.ReadInjectedTurnAnswersAsync(injectedCount, ct))
+            {
+                if (extra.FinalResult is not { Length: > 0 } text || ProtocolSanitizer.IsIdleMarker(text))
+                    continue;
+
+                allAssistantTexts.Add(text);
+                _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.AnsweredAsSeparateTurn);
+                _logger.LogInformation(
+                    "Task #{TaskId}: delivering the answer to an injected message that ran as its own turn", taskId);
+
+                // The extra turn's own stats, and none of the first turn's tool calls.
+                var (turnStats, turnToolCalls) = (stats, toolCalls.ToList());
+                stats = extra.Stats;
+                toolCalls.Clear();
+                var marker = extra.IsErrorResult ? " [incomplete — executor reported an error]" : "";
+                await SendWithStatsAsync($"{Prefix()}{text}{marker}");
+                (stats, toolCalls) = (turnStats, turnToolCalls);
+
+                var (extraText, extraTruncated) = ProtocolSanitizer.SanitizeAndBound(
+                    text, ProtocolLimits.MaxNoticeTextChars, attachmentDir);
+                PublishEvent(chatId, ConversationEventKind.TurnRecoveredAnswer, identity,
+                    new TurnRecoveredAnswerPayload { Text = extraText, Truncated = extraTruncated ? true : null });
+            }
+        }
+
         // Grab the inbox for this task to receive mid-execution messages
         var inboxReader = state.Get(taskId)?.Inbox.Reader;
 
@@ -741,6 +774,7 @@ public sealed class TaskManager
             var currentTask = task;
             IReadOnlyList<MessageImage>? currentImages = images;
             IReadOnlyList<MessageDocument>? currentDocuments = documents;
+            var injectedIntoLastTurn = 0;
 
             while (true)
             {
@@ -928,6 +962,9 @@ public sealed class TaskManager
                         {
                             await SendWithStatsAsync($"{Prefix()}{lastResult}");
                         }
+                        // ...then any injected message Claude answered in a turn of its own, so the
+                        // merged continuation below does not start while that turn is still running.
+                        await DeliverInjectedTurnAnswersAsync(completingTask?.InjectionCount ?? 0);
 
                         // ...and terminate it on the event path too, under the OUTGOING identity,
                         // before the new turn is minted below. This turn really did finish and
@@ -988,6 +1025,7 @@ public sealed class TaskManager
 
                     if (completingTask is not null)
                     {
+                        injectedIntoLastTurn = completingTask.InjectionCount;
                         completingTask.InjectedMessagesForResume.Clear();
                         completingTask.Closed = true;
                     }
@@ -1058,6 +1096,7 @@ public sealed class TaskManager
                 // Send the final text to Telegram, but relay ALL assistant texts
                 // so that agent addresses from intermediate turns aren't lost
                 await SendWithStatsAsync($"{Prefix()}{lastResult}{marker}");
+                await DeliverInjectedTurnAnswersAsync(injectedIntoLastTurn);
                 var fullText = string.Join("\n", allAssistantTexts);
                 // errorResult covers max-turns exhaustion (IsErrorResult from executor) — use
                 // Incomplete so the workflow continuation loop can retry, not Failed which abandons.

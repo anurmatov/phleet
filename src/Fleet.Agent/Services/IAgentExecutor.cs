@@ -43,6 +43,22 @@ public interface IAgentExecutor : IAsyncDisposable
         CancellationToken ct = default) =>
         Task.FromResult(MidTurnInjectionResult.Unsupported);
 
+    /// <summary>
+    /// After a turn that had messages injected into it, reads the answers of any further turns
+    /// the provider started on its own for those messages (#369), one result per such turn.
+    /// Called only when an injection happened; the wait for a turn to start is bounded, so an
+    /// absorbed injection costs a short pause and nothing else. Providers that always fold an
+    /// injection into the running turn, or cannot inject, yield nothing.
+    /// </summary>
+    IAsyncEnumerable<AgentProgress> ReadInjectedTurnAnswersAsync(int injectedMessages, CancellationToken ct = default) =>
+        NoInjectedTurnAnswersAsync();
+
+    private static async IAsyncEnumerable<AgentProgress> NoInjectedTurnAnswersAsync()
+    {
+        await Task.CompletedTask;
+        yield break;
+    }
+
     /// <summary>Stop the running process gracefully.</summary>
     Task StopProcessAsync();
 

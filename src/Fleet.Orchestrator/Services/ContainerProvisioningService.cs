@@ -154,9 +154,9 @@ public sealed class ContainerProvisioningService(
 
         // Output styles resolve as a PROJECT-level directory beside the user-level settings.json
         // above — that is the combination provisioning produces and the one that was verified on
-        // the pinned CLI. Claude only: the other providers get the same text in their prompt and
-        // have nothing that would read this. Absent for a styleless agent, so its container config
-        // is unchanged.
+        // the pinned CLI. Cloud claude only: the other providers and local-model claude get the
+        // same text in their prompt (see HasStyleFile). Absent for a styleless agent, so its
+        // container config is unchanged.
         if (HasStyleFile(agent))
             binds.Add($"./workspaces/{containerName}/.generated/output-styles:/workspace/.claude/output-styles:ro");
 
@@ -768,14 +768,23 @@ public sealed class ContainerProvisioningService(
     /// same text inlined into its prompt.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Output styles are a Claude Code feature: only a claude agent has anything that reads the
     /// file or the <c>settings.json</c> key. Codex and gemini carry the identical text in
     /// <c>Agent.OutputStyleBody</c> instead — see <see cref="GenerateAppsettingsJson"/>. The split
     /// is here, in one predicate, so no path can give a provider the file and forget the prompt.
+    /// </para>
+    /// <para>
+    /// A claude agent in local-model mode takes the inlined path too (#365). Claude Code
+    /// re-asserts an active style by appending a system-role message every turn, and a local
+    /// server that folds every system message into the top block then changes the prompt prefix
+    /// on every turn, so its KV cache never matches and each message re-prefills the whole prompt.
+    /// </para>
     /// </remarks>
     internal static bool HasStyleFile(Agent agent) =>
         !string.IsNullOrWhiteSpace(agent.OutputStyle) &&
-        string.Equals(agent.Provider, "claude", StringComparison.OrdinalIgnoreCase);
+        string.Equals(agent.Provider, "claude", StringComparison.OrdinalIgnoreCase) &&
+        !ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl);
 
     private async Task<OutputStyle?> ResolveOutputStyleAsync(Agent agent)
     {
@@ -1123,8 +1132,8 @@ public sealed class ContainerProvisioningService(
 
         var json = JsonSerializer.Serialize(obj, IndentedJson);
 
-        // Inlined for codex and gemini only. Claude reads the style file instead, and putting the
-        // text in both places would assert the same rules twice with nothing to gain.
+        // Inlined for codex, gemini and local-model claude (#365). Cloud claude reads the style file
+        // instead, and putting the text in both places would assert the same rules twice.
         //
         // Added by editing the serialized document rather than by a nullable property on the
         // anonymous type above, because a null property still SERIALIZES — and an agent with no

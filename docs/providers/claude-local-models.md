@@ -13,7 +13,7 @@ new executor, listener or host port, and no Claude credential anywhere in the co
 | provider | `claude` | `codex` |
 | server API | Anthropic Messages (`/v1/messages`) | OpenAI-compatible (`/v1`) |
 | config | per-agent DB field `AnthropicBaseUrl` + bare `Model` tag | `ollama/…` model prefix + `CODEX_OSS_BASE_URL` env ref |
-| harness | Claude Code: its tools, prompt, subagents, output styles | codex app-server |
+| harness | Claude Code: its tools, prompt, subagents; an output style is inlined into the prompt (`output-styles.md`) | codex app-server |
 
 Pick this path when the agent's instructions, tools and workflows are written for Claude
 Code and you want to keep them while the model runs locally. Different agents may point at

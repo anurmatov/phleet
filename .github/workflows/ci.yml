@@ -437,3 +437,23 @@ jobs:
       - name: Clean up
         if: always()
         run: docker image rm -f fleet:comms-ci || true
+
+  agent-image:
+    name: Agent image build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Nothing else in CI builds the agent image. Its sources are pinned third-party downloads
+      # that a vendor can withdraw (#330, #363); a clean runner is where that shows first.
+      - name: Build the image
+        run: docker build -t fleet:agent-ci .
+
+      - name: mc runs and reports the pinned release
+        run: docker run --rm --entrypoint mc fleet:agent-ci --version
+
+      - name: Clean up
+        if: always()
+        run: docker image rm -f fleet:agent-ci || true

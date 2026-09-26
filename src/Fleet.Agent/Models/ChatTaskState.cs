@@ -11,7 +11,8 @@ public sealed class ChatTaskState
 
     public int Count { get { lock (_lock) return _tasks.Count; } }
 
-    public RunningTask Add(string description, CancellationTokenSource cts, bool isSessionTask, long userId = 0, string? bridgeTaskId = null)
+    public RunningTask Add(string description, CancellationTokenSource cts, bool isSessionTask, long userId = 0, string? bridgeTaskId = null,
+        TaskSource source = TaskSource.UserMessage)
     {
         lock (_lock)
         {
@@ -25,6 +26,7 @@ public sealed class ChatTaskState
                 IsSessionTask = isSessionTask,
                 UserId = userId,
                 BridgeTaskId = bridgeTaskId,
+                Source = source,
             };
             _tasks[id] = task;
             return task;

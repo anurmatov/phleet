@@ -14,6 +14,8 @@ public sealed class InjectionOutcomeCounter
     public const string DroppedAtQueueCap = "dropped_at_queue_cap";
     public const string PossibleDuplicateAfterResume = "possible_duplicate_after_resume";
     public const string MergedIntoQueue = "merged_into_queue";
+    /// <summary>An injected message ran as its own provider turn and its answer was delivered at once (#369).</summary>
+    public const string AnsweredAsSeparateTurn = "answered_as_separate_turn";
 
     private readonly ConcurrentDictionary<(string provider, string outcome), long> _counts = new();
 

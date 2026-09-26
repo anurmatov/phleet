@@ -307,6 +307,126 @@ public sealed class ClaudeExecutor : IAgentExecutor
         }
     }
 
+    /// <summary>
+    /// How long, after a turn with an injection, to wait for Claude CLI to start another turn
+    /// before concluding the injection was absorbed (#369). The next turn's <c>system/init</c>
+    /// follows the previous <c>result</c> almost at once, so a short bound is enough; a later
+    /// start is still recovered by <see cref="DrainStaleTurnEvents"/> on the next send.
+    /// </summary>
+    internal TimeSpan InjectedTurnStartWait { get; set; } = TimeSpan.FromSeconds(3);
+
+    /// <summary>
+    /// Claude CLI folds a stdin message into the running turn only at its next step. A message
+    /// that arrives while the model is already producing its final answer has no next step, so
+    /// the CLI runs it as a new turn — <c>system/init</c>, then its own <c>result</c> — after
+    /// <see cref="ExecuteAsync"/> has already returned on the first <c>result</c> (#369).
+    /// This reads up to <paramref name="injectedMessages"/> such turns and yields each one's
+    /// answer as soon as its <c>result</c> arrives.
+    /// </summary>
+    /// <remarks>
+    /// Only a <c>system/init</c> starts a turn here: any other non-system event is left in the
+    /// channel for <see cref="DrainStaleTurnEvents"/>, and the wait for an init is bounded by
+    /// <see cref="InjectedTurnStartWait"/>. A started turn is read until its result or until the
+    /// process exits (the channel completes), like a normal turn. Cancellation kills the process,
+    /// as in <see cref="ExecuteAsync"/>, so a half-read turn cannot answer the next message.
+    /// </remarks>
+    public async IAsyncEnumerable<AgentProgress> ReadInjectedTurnAnswersAsync(
+        int injectedMessages,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        if (injectedMessages <= 0 || _eventChannel is null)
+            yield break;
+
+        await _sendLock.WaitAsync(ct);
+        try
+        {
+            var reader = _eventChannel.Reader;
+            var remaining = injectedMessages;
+            while (remaining > 0)
+            {
+                if (!await WaitForTurnStartAsync(reader, ct))
+                    yield break;
+
+                _logger.LogInformation("Injected message started its own Claude turn; reading its answer");
+                _currentTurnAssistantText = null;
+
+                while (true)
+                {
+                    ClaudeStreamEvent evt;
+                    try
+                    {
+                        evt = await reader.ReadAsync(ct);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        await KillProcessAsync();
+                        throw;
+                    }
+                    catch (ChannelClosedException)
+                    {
+                        yield break;
+                    }
+
+                    var isCurrentTurnResult = IsCurrentTurnResult(evt);
+                    var progress = ParseProgress(evt);
+                    if (evt.Type != "result")
+                        continue;
+                    if (!isCurrentTurnResult)
+                        break; // e.g. a background task-notification turn: not an answer; wait for the next start
+
+                    remaining--;
+                    yield return new AgentProgress
+                    {
+                        IsSignificant = true,
+                        Summary = progress.Summary,
+                        EventType = "result",
+                        FinalResult = progress.FinalResult,
+                        SessionId = progress.SessionId,
+                        IsErrorResult = progress.IsErrorResult,
+                        Stats = ParseStats(evt),
+                    };
+                    break;
+                }
+            }
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Waits, bounded by <see cref="InjectedTurnStartWait"/>, for the next turn's
+    /// <c>system/init</c> and consumes it. Other system events are consumed (the background
+    /// reader already processed them). Returns false on timeout, on a closed channel, or when
+    /// the next event is anything else, which stays in the channel for the stale drain.
+    /// </summary>
+    private async Task<bool> WaitForTurnStartAsync(ChannelReader<ClaudeStreamEvent> reader, CancellationToken ct)
+    {
+        using var wait = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        wait.CancelAfter(InjectedTurnStartWait);
+        while (true)
+        {
+            try
+            {
+                if (!await reader.WaitToReadAsync(wait.Token))
+                    return false;
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                return false;
+            }
+
+            if (!reader.TryPeek(out var next))
+                continue;
+            if (next.Type != "system")
+                return false;
+            reader.TryRead(out _);
+            if (next.Subtype == "init")
+                return true;
+        }
+    }
+
     public async Task<MidTurnInjectionResult> TryInjectMessageAsync(
         string task,
         IReadOnlyList<MessageImage>? images = null,

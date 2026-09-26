@@ -241,6 +241,9 @@ events — locations, contacts, polls, venue shares — are not attachments.
   marker. If transcription is disabled or fails, the message is still delivered with the
   persisted file and its `(voice message)` / `(video note)` placeholder — and is **not**
   marked. `Video` and `Audio` are deliberately not transcribed.
+- **Seeing a video**: the agent image ships `ffmpeg` and `ffprobe`, so an agent can sample frames
+  from a persisted video and read them as images:
+  `ffmpeg -i in.mp4 -vf fps=1/2 -frames:v 6 /tmp/f_%02d.jpg`. Nothing extracts frames automatically.
 - **Failures are non-fatal**: persistence disabled, oversize, or a download error drops the
   attachment only — the caption or placeholder still reaches the agent, and
   `HasMediaAttachment` stays set so group media is not lost behind the mention gate.

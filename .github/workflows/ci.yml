@@ -437,3 +437,59 @@ jobs:
       - name: Clean up
         if: always()
         run: docker image rm -f fleet:comms-ci || true
+
+  agent-image:
+    name: Agent image build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Nothing else in CI builds the agent image, so its build-time guards (provider CLI pins,
+      # ffmpeg/ffprobe) would otherwise first run on a deploy.
+      - name: Build the image
+        run: docker build -t fleet:agent-ci .
+
+      - name: ffmpeg and ffprobe run in the image
+        run: |
+          docker run --rm --entrypoint ffmpeg fleet:agent-ci -version
+          docker run --rm --entrypoint ffprobe fleet:agent-ci -version
+
+      # The exact command CLAUDE.md gives agents, on an H.264 .mp4 like the ones Telegram sends.
+      - name: Frame extraction from an .mp4 produces JPEGs
+        run: |
+          docker run --rm -i --entrypoint sh fleet:agent-ci -s <<'EOF'
+          set -eu
+          cd /tmp
+          ffmpeg -loglevel error -f lavfi -i testsrc=duration=12:size=320x240:rate=25 \
+            -c:v libx264 -pix_fmt yuv420p in.mp4
+          ffmpeg -i in.mp4 -vf fps=1/2 -frames:v 6 /tmp/f_%02d.jpg
+          n=0
+          for f in /tmp/f_*.jpg; do
+            [ "$(od -An -tx1 -N3 "$f" | tr -d ' ')" = "ffd8ff" ] || { echo "ERROR: $f is not a JPEG"; exit 1; }
+            n=$((n + 1))
+          done
+          [ "$n" -eq 6 ] || { echo "ERROR: expected 6 frames, got $n"; exit 1; }
+          echo "extracted $n JPEG frames"
+          EOF
+
+      # Informational: the image size, and how much of it the ffmpeg install added, read from the
+      # image's own apt history.
+      - name: Image size
+        run: |
+          docker image ls fleet:agent-ci --format '{{.Repository}}:{{.Tag}} {{.Size}}'
+          docker run --rm -i --entrypoint sh fleet:agent-ci -s <<'EOF'
+          set -eu
+          pkgs=$(awk '/^Commandline: .*--no-install-recommends ffmpeg/ {f=1; next}
+                      f && /^End-Date/ {exit}
+                      f && /^Install: / {sub(/^Install: /, ""); print; exit}' /var/log/apt/history.log \
+                 | sed 's/([^)]*)//g; s/,/ /g')
+          [ -n "$pkgs" ] || { echo "ERROR: no ffmpeg install entry in apt history"; exit 1; }
+          kib=$(dpkg-query -W -f='${Installed-Size}\n' $pkgs | awk '{s += $1} END {print s}')
+          echo "ffmpeg install: $(echo $pkgs | wc -w) packages, $((kib / 1024)) MiB installed"
+          EOF
+
+      - name: Clean up
+        if: always()
+        run: docker image rm -f fleet:agent-ci || true

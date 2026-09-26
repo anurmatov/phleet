@@ -217,7 +217,8 @@ public sealed class TaskManager
                     return ReportDisposition(chatId, identity, TaskDispatchOutcome.Dropped);
                 }
                 var enqueued = EnqueueFreshMessage(chatId, queuedPart,
-                    notifyUser: source is not (TaskSource.CheckIn or TaskSource.DebouncedGroupBatch),
+                    notifyUser: source is not (TaskSource.CheckIn or TaskSource.DebouncedGroupBatch)
+                        && BusyNoticeApplies(chatId, source),
                     completeBridgeOnDrop: true);
                 // Release the reservation only when enqueue failed — a queued task keeps it.
                 if (!enqueued && taskId is not null)
@@ -245,8 +246,9 @@ public sealed class TaskManager
             // DebouncedGroupBatch must NOT use DeferUntilTurnEndAsync — that is reserved for
             // CheckIn. The FIFO preserves ordering with other queued work.
             // DebouncedGroupBatch is silent: sending "I'm busy" for automated group checks is noise.
+            // So is a chat message queued behind that chat's own turn (#369).
             var enqueued = EnqueueFreshMessage(chatId, queuedPart,
-                notifyUser: source != TaskSource.DebouncedGroupBatch,
+                notifyUser: source != TaskSource.DebouncedGroupBatch && BusyNoticeApplies(chatId, source),
                 completeBridgeOnDrop: true);
             // Release the reservation only when enqueue failed — a queued task keeps it.
             if (!enqueued && taskId is not null)
@@ -260,7 +262,7 @@ public sealed class TaskManager
         try
         {
         var cts = new CancellationTokenSource();
-        var running = state.Add(displayText, cts, isSessionTask, userId, bridgeTaskId: taskId);
+        var running = state.Add(displayText, cts, isSessionTask, userId, bridgeTaskId: taskId, source: source);
 
         // TurnId is minted ONCE, here at registration, and lives on the RunningTask. Every event
         // this turn emits derives from this identity via `with` rather than rebuilding it.
@@ -733,6 +735,39 @@ public sealed class TaskManager
             }
         }
 
+        // #369: an injected message that reached Claude after it had begun its final answer runs
+        // as its own turn with its own result, after the executor already returned on the first.
+        // Deliver that answer here, right after the turn's own answer and before its terminal
+        // event, instead of leaving it to surface out-of-band on the user's next message. Only
+        // after an injection — a turn without one never waits.
+        async Task DeliverInjectedTurnAnswersAsync(int injectedCount)
+        {
+            if (injectedCount <= 0) return;
+            await foreach (var extra in _executor.ReadInjectedTurnAnswersAsync(injectedCount, ct))
+            {
+                if (extra.FinalResult is not { Length: > 0 } text || ProtocolSanitizer.IsIdleMarker(text))
+                    continue;
+
+                allAssistantTexts.Add(text);
+                _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.AnsweredAsSeparateTurn);
+                _logger.LogInformation(
+                    "Task #{TaskId}: delivering the answer to an injected message that ran as its own turn", taskId);
+
+                // The extra turn's own stats, and none of the first turn's tool calls.
+                var (turnStats, turnToolCalls) = (stats, toolCalls.ToList());
+                stats = extra.Stats;
+                toolCalls.Clear();
+                var marker = extra.IsErrorResult ? " [incomplete — executor reported an error]" : "";
+                await SendWithStatsAsync($"{Prefix()}{text}{marker}");
+                (stats, toolCalls) = (turnStats, turnToolCalls);
+
+                var (extraText, extraTruncated) = ProtocolSanitizer.SanitizeAndBound(
+                    text, ProtocolLimits.MaxNoticeTextChars, attachmentDir);
+                PublishEvent(chatId, ConversationEventKind.TurnRecoveredAnswer, identity,
+                    new TurnRecoveredAnswerPayload { Text = extraText, Truncated = extraTruncated ? true : null });
+            }
+        }
+
         // Grab the inbox for this task to receive mid-execution messages
         var inboxReader = state.Get(taskId)?.Inbox.Reader;
 
@@ -741,6 +776,7 @@ public sealed class TaskManager
             var currentTask = task;
             IReadOnlyList<MessageImage>? currentImages = images;
             IReadOnlyList<MessageDocument>? currentDocuments = documents;
+            var injectedIntoLastTurn = 0;
 
             while (true)
             {
@@ -928,6 +964,9 @@ public sealed class TaskManager
                         {
                             await SendWithStatsAsync($"{Prefix()}{lastResult}");
                         }
+                        // ...then any injected message Claude answered in a turn of its own, so the
+                        // merged continuation below does not start while that turn is still running.
+                        await DeliverInjectedTurnAnswersAsync(completingTask?.InjectionCount ?? 0);
 
                         // ...and terminate it on the event path too, under the OUTGOING identity,
                         // before the new turn is minted below. This turn really did finish and
@@ -988,6 +1027,7 @@ public sealed class TaskManager
 
                     if (completingTask is not null)
                     {
+                        injectedIntoLastTurn = completingTask.InjectionCount;
                         completingTask.InjectedMessagesForResume.Clear();
                         completingTask.Closed = true;
                     }
@@ -1058,6 +1098,7 @@ public sealed class TaskManager
                 // Send the final text to Telegram, but relay ALL assistant texts
                 // so that agent addresses from intermediate turns aren't lost
                 await SendWithStatsAsync($"{Prefix()}{lastResult}{marker}");
+                await DeliverInjectedTurnAnswersAsync(injectedIntoLastTurn);
                 var fullText = string.Join("\n", allAssistantTexts);
                 // errorResult covers max-turns exhaustion (IsErrorResult from executor) — use
                 // Incomplete so the workflow continuation loop can retry, not Failed which abandons.
@@ -1164,7 +1205,8 @@ public sealed class TaskManager
         {
             if (running.Closed)
             {
-                var enqueued = EnqueueMessage(chatId, message, notifyUser: true);
+                // Includes the injected-answer read window: the turn is closed but still this chat's.
+                var enqueued = EnqueueMessage(chatId, message, notifyUser: BusyNoticeApplies(chatId, message.Source));
                 if (enqueued) _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DegradedToQueue);
                 return enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull;
             }
@@ -1201,13 +1243,14 @@ public sealed class TaskManager
             _injectionCounter.Increment(_agentConfig.Provider, counterOutcome);
             _logger.LogInformation("Mid-turn injection unavailable for chat {ChatId} (status={Status}, error={Error}); queued for turn-end delivery",
                 chatId, result.Status, result.Error);
-            return await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: result.Status == MidTurnInjectionStatus.Failed);
+            return await EnqueueForTurnEndAsync(chatId, running, message,
+                notifyUser: result.Status == MidTurnInjectionStatus.Failed && BusyNoticeApplies(chatId, message.Source));
         }
         catch (Exception ex)
         {
             _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.FailedThenQueued);
             _logger.LogWarning(ex, "Mid-turn injection failed for chat {ChatId}; queued for turn-end delivery", chatId);
-            return await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: true);
+            return await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: BusyNoticeApplies(chatId, message.Source));
         }
         finally
         {
@@ -1367,10 +1410,36 @@ public sealed class TaskManager
         _logger.LogInformation("Message queued (position {Pos}) for chat {ChatId}; queue entries={EntryCount}, max parts per entry={MaxParts}",
             queuePos, chatId, _messageQueue.Count, MaxQueuedPartsPerEntry);
         if (notifyUser && !(_agentConfig.SuppressToolMessages && chatId < 0))
+        {
+            queued.BusyNoticeSent = true;
             _ = _sink.SendTextAsync(chatId, $"I'm busy right now — your message is queued (position {queuePos}). I'll get to it once my current task finishes.");
+        }
         OnStatusChanged?.Invoke();
         return true;
     }
+
+    /// <summary>
+    /// Whether a message from <paramref name="chatId"/> that has to wait gets the busy notice (#369).
+    /// It does only when the agent is busy on work that did not come from this chat: a turn or queued
+    /// entry for another chat, or a Relay/Bridge directive. Waiting behind the chat's own turn,
+    /// including its injected-answer read window, is silent. Relay/Bridge arrivals keep the notice.
+    /// </summary>
+    private bool BusyNoticeApplies(long chatId, TaskSource source)
+    {
+        if (source is TaskSource.Relay or TaskSource.Bridge)
+            return true;
+
+        foreach (var (taskChatId, state) in _chatTasks)
+        {
+            if (state.Snapshot().Any(t => !IsChatsOwnWork(chatId, taskChatId, t.Source)))
+                return true;
+        }
+
+        return _messageQueue.Any(q => !IsChatsOwnWork(chatId, q.ChatId, q.Source));
+    }
+
+    private static bool IsChatsOwnWork(long chatId, long workChatId, TaskSource workSource) =>
+        workChatId == chatId && workSource is not (TaskSource.Relay or TaskSource.Bridge);
 
     private void RemovePendingIndexIfCurrent(QueuedMessage queued)
     {
@@ -1581,7 +1650,7 @@ public sealed class TaskManager
 
         _logger.LogInformation("Draining queued message for chat {ChatId} (source={Source}, parts={Parts})",
             queued.ChatId, queued.Source, queued.PartCount);
-        if (!(_agentConfig.SuppressToolMessages && queued.ChatId < 0))
+        if (queued.BusyNoticeSent)
             _ = _sink.SendTextAsync(queued.ChatId, "Now processing your queued message...");
         OnStatusChanged?.Invoke();
 

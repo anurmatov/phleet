@@ -49,6 +49,12 @@ public sealed class QueuedMessage
     /// <summary>Set while holding QueueDispatchLock once DrainQueue has claimed this entry.</summary>
     public bool Claimed { get; set; }
 
+    /// <summary>
+    /// True when the busy notice was sent for this entry at enqueue time. DrainQueue sends
+    /// "Now processing" only then, so a silently queued message stays silent (#369).
+    /// </summary>
+    public bool BusyNoticeSent { get; set; }
+
     public QueuedMessagePart FirstPart => _parts[0];
     public IReadOnlyList<QueuedMessagePart> Parts => [.. _parts];
     public int PartCount => _parts.Count;

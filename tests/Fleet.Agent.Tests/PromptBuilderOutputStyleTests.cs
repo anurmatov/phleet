@@ -11,9 +11,9 @@ namespace Fleet.Agent.Tests;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Claude resolves the style as a file, so the orchestrator leaves <c>OutputStyleBody</c> empty for
-/// it and there is nothing to assert here for that provider. Codex and gemini get the identical
-/// text inlined, and what matters is where in the prompt it lands: the style carries register and
+/// Cloud claude resolves the style as a file, so the orchestrator leaves <c>OutputStyleBody</c> empty
+/// for it. Codex, gemini and local-model claude (#365) get the identical text inlined, and what
+/// matters is where in the prompt it lands: the style carries register and
 /// length, while the per-agent formatting mode still decides structure.
 /// </para>
 /// <para>
@@ -51,6 +51,30 @@ public class PromptBuilderOutputStyleTests
         var prompt = Builder(StyleBody).BuildSystemPrompt();
 
         Assert.Contains("Lowercase and conversational.", prompt, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #365. A claude agent in local-model mode receives the style inlined, the codex/gemini way,
+    /// and the appended prompt must carry it — the provider is claude, but nothing may skip it.
+    /// </summary>
+    [Fact]
+    public void LocalModelClaudeAgent_StyleBodyIsInlinedIntoThePrompt()
+    {
+        var prompt = new PromptBuilder(
+            Options.Create(new AgentOptions
+            {
+                Name             = "test-agent",
+                Role             = "test",
+                WorkDir          = Path.GetTempPath(),
+                Provider         = "claude",
+                Model            = "qwen3.8:27b-agent",
+                AnthropicBaseUrl = "http://inference-host:11434",
+                FormattingMode   = FormattingMode.LegacyHtml,
+                OutputStyleBody  = StyleBody,
+            }),
+            NullLogger<PromptBuilder>.Instance).BuildSystemPrompt();
+
+        Assert.Contains(StyleBody.TrimEnd('\n'), prompt, StringComparison.Ordinal);
     }
 
     /// <summary>

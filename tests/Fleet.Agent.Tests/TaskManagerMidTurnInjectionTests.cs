@@ -547,10 +547,11 @@ public class TaskManagerMidTurnInjectionTests
     }
 
     [Fact]
-    public async Task DeliverMidTurnMessage_FailedInjection_SendsBusyNotice()
+    public async Task DeliverMidTurnMessage_FailedInjection_IntoTheChatsOwnTurn_IsQueuedSilently()
     {
-        // A Failed injection means the write to the process stdin broke. The user sent
-        // a message they expect a reply to, so they must be told the agent is busy.
+        // A Failed injection means the write to the process stdin broke. The message waits for
+        // the chat's own turn and is answered after it, so no busy notice is sent (#369). A
+        // workflow directive or another chat's turn still gets it (TaskManagerQueueNoticeTests).
         var executor = new ControllableExecutor { InjectionResult = MidTurnInjectionResult.Failed("write error") };
         var counter = new InjectionOutcomeCounter();
         var sink = Substitute.For<IMessageSink>();
@@ -566,7 +567,7 @@ public class TaskManagerMidTurnInjectionTests
         executor.ReleaseAllTurns();
         await idle;
 
-        await sink.Received(1).SendTextAsync(123, Arg.Is<string>(s => s.Contains("busy")));
+        await sink.DidNotReceive().SendTextAsync(123, Arg.Is<string>(s => s.Contains("busy")));
     }
 
     [Fact]

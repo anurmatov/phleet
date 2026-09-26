@@ -11,6 +11,7 @@ WORKDIR /app
 ARG CLAUDE_CODE_VERSION=2.1.280
 ARG CODEX_CLI_VERSION=0.153.4
 ARG GEMINI_CLI_VERSION=0.40.1
+ARG MC_VERSION=RELEASE.2025-08-13T08-35-41Z
 
 RUN apt-get update && apt-get install -y curl git jq rsync cron openssh-client && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
@@ -42,11 +43,21 @@ RUN curl -fsSL https://download.docker.com/linux/static/stable/$(uname -m)/docke
     | tar xz --strip-components=1 -C /usr/local/bin docker/docker
 
 # MinIO client for file sharing via fleet-minio
-# dl.min.io returns 410 Gone since 2026-09 (#330); the client is taken from the
-# official quay.io image instead. COPY --from resolves per build platform, so no
-# hand-rolled arch mapping. Pin the dated tag, never :latest.
-COPY --from=quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z /usr/bin/mc /usr/local/bin/mc
-RUN chmod +x /usr/local/bin/mc
+# dl.min.io returns 410 (#330) and quay.io/minio refuses anonymous pulls (401, #363), so the
+# binary comes from the pinned GitHub release. The sha256 values live here, never fetched from
+# the same release at build time; a new MC_VERSION needs both values replaced with it.
+RUN ARCH="$(dpkg --print-architecture)" && \
+    case "$ARCH" in \
+      amd64) MC_SHA256=01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891 ;; \
+      arm64) MC_SHA256=14c8c9616cfce4636add161304353244e8de383b2e2752c0e9dad01d4c27c12c ;; \
+      *) echo "ERROR: no pinned mc sha256 for architecture ${ARCH}" && exit 1 ;; \
+    esac && \
+    curl -fsSL "https://github.com/minio/mc/releases/download/${MC_VERSION}/mc.linux-${ARCH}.${MC_VERSION}" \
+      -o /usr/local/bin/mc && \
+    echo "${MC_SHA256}  /usr/local/bin/mc" | sha256sum -c - && \
+    chmod +x /usr/local/bin/mc
+RUN mc --version | grep -q "version ${MC_VERSION} " || \
+    (echo "ERROR: expected mc ${MC_VERSION}" && mc --version && exit 1)
 
 ARG GIT_COMMIT=unknown
 ENV FLEET_BUILD_COMMIT=$GIT_COMMIT

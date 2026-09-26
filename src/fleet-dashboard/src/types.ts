@@ -176,6 +176,8 @@ export interface AgentConfig {
   outputStyle: string | null
   /** Origin of a local Anthropic-compatible server, or null (Anthropic). Claude agents only. */
   anthropicBaseUrl: string | null
+  /** The local server's context size in tokens, or null. Used only in local mode (#367). */
+  contextWindow?: number | null
   tools: { toolName: string; isEnabled: boolean }[]
   projects: string[]
   mcpEndpoints: McpEndpointEntry[]
@@ -230,6 +232,8 @@ export interface ConfigEdits {
   outputStyle: string
   /** Local Anthropic-compatible server origin, or '' for Anthropic — the sentinel the API clears on. */
   anthropicBaseUrl: string
+  /** Context window in tokens, or '' for not set (sent as 0, which the API clears on). */
+  contextWindow: string
   instructions: { name: string; loadOrder: number }[]
 }
 

@@ -46,7 +46,8 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         [Description("Message sent to requesting user when their access request is queued. Pass empty string to use the built-in default. Max 500 characters. Omit to keep current.")] string? request_received_message = null,
         [Description("Mount /var/run/docker.sock into the container (grants host-root; leave off unless agent manages containers). Omit to keep current.")] bool? mount_docker_sock = null,
         [Description("Name of an output_styles row this agent runs with — its chat tone and register. Pass empty string to clear (no style). Omit to keep current. Takes effect on the next reprovision.")] string? output_style = null,
-        [Description("Claude agents only: origin of a local Anthropic-compatible server (e.g. Ollama), e.g. http://<server-address>:11434 — origin only, never …/v1. Set, the agent runs Claude Code against that server with no Claude credential mounted; model must be the server's model tag and effort off/low/medium/xhigh (empty = model default, sent as xhigh). Stored canonical. Pass empty string to clear (back to Anthropic). Omit to keep current. Takes effect on the next reprovision.")] string? anthropic_base_url = null)
+        [Description("Claude agents only: origin of a local Anthropic-compatible server (e.g. Ollama), e.g. http://<server-address>:11434 — origin only, never …/v1. Set, the agent runs Claude Code against that server with no Claude credential mounted; model must be the server's model tag and effort off/low/medium/xhigh (empty = model default, sent as xhigh). Stored canonical. Pass empty string to clear (back to Anthropic). Omit to keep current. Takes effect on the next reprovision.")] string? anthropic_base_url = null,
+        [Description("Claude local-model agents only (anthropic_base_url set): the server's context size in tokens (4096-1048576), e.g. its --ctx. Passed to Claude CLI as CLAUDE_CODE_MAX_CONTEXT_TOKENS so it compacts before the server rejects the turn; ignored for cloud agents. Pass 0 to clear. Omit to keep current. Takes effect on the next reprovision.")] int? context_window = null)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
@@ -297,6 +298,15 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
             }
             changes.AppendLine($"- output_style: {agent.OutputStyle ?? "(none)"} → {(styleName.Length == 0 ? "(none)" : styleName)}");
             agent.OutputStyle = styleName.Length == 0 ? null : styleName;
+        }
+
+        if (context_window is not null && context_window != (agent.ContextWindow ?? 0))
+        {
+            // #367: 0 clears; anything else must be in range — rejected, never clamped.
+            if (context_window != 0 && ContextWindow.DescribeFault(context_window.Value) is { } windowFault)
+                return windowFault;
+            changes.AppendLine($"- context_window: {agent.ContextWindow?.ToString() ?? "(none)"} → {(context_window == 0 ? "(none)" : context_window.ToString())}");
+            agent.ContextWindow = context_window == 0 ? null : context_window;
         }
 
         var previousBaseUrl = agent.AnthropicBaseUrl;

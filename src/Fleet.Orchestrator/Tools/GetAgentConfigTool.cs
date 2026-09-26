@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text;
 using Fleet.Orchestrator.Data;
+using Fleet.Shared;
 using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol.Server;
 
@@ -40,6 +41,9 @@ public sealed class GetAgentConfigTool(IServiceScopeFactory scopeFactory)
         sb.AppendLine($"- Enabled: {agent.IsEnabled}");
         sb.AppendLine($"- Telegram send-only: {agent.TelegramSendOnly}");
         sb.AppendLine($"- Warmup timeout: {agent.WarmupTimeoutSeconds}s");
+        sb.AppendLine($"- Context window: {(agent.ContextWindow is int window ? $"{window} tokens" : "(none)")}"
+            + (agent.ContextWindow is not null && !ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl)
+                ? " (ignored: not a local-model claude agent)" : ""));
         sb.AppendLine($"- Auto memory: {agent.AutoMemoryEnabled}");
         sb.AppendLine($"- Mount Docker socket: {agent.MountDockerSock}");
         sb.AppendLine();

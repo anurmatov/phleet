@@ -121,6 +121,19 @@ pinned version instead, with an empty environment.
 **Rollout order.** Deploy the agent image first, then set `off`/`low`/`medium`/`xhigh`: an older
 image fails V7 at startup (exit 1) on any non-empty local effort.
 
+### 2.2 Context window
+
+Claude Code does not know the window of a model name it does not recognise, so it can compact
+later than the server's fixed context, and the server then rejects the turn (one tested server
+returns `400 context_length_exceeded` and truncates nothing). Set the per-agent `ContextWindow`
+to the server's context size, for example its `--ctx`:
+`update_agent_config agent_name=<agent> context_window=65536`, or **Context window (tokens)** in
+the dashboard (shown only when the base URL is set). Provisioning puts
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS=<value>` in the container env, which the claude child inherits,
+and **it takes effect only on `reprovision_agent`**. The range is 4096–1048576 (a 400 otherwise);
+`0` clears it. There is no default: a wrong guess fails silently. A cloud agent never gets the
+variable, even with a stored value, and provisioning logs that it was ignored.
+
 ## 3. What changes in the container
 
 **The claude child's environment** — the only place `ANTHROPIC_*` exists. It mirrors

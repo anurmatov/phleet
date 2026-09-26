@@ -66,6 +66,15 @@ public class Agent
     [MaxLength(500)]
     public string? AnthropicBaseUrl { get; set; }
 
+    /// <summary>
+    /// The local server's context size in tokens, or <c>null</c> (#367). Provisioning passes it to
+    /// Claude CLI as <see cref="Fleet.Shared.ContextWindow.EnvVar"/> only when the agent is in local
+    /// mode; a cloud agent ignores it. <c>null</c> keeps Claude CLI's own behaviour. Validated on
+    /// every write path via <see cref="Fleet.Shared.ContextWindow.DescribeFault"/>; changing it
+    /// requires <c>reprovision_agent</c>.
+    /// </summary>
+    public int? ContextWindow { get; set; }
+
     public List<AgentTool> Tools { get; set; } = [];
     public List<AgentProject> Projects { get; set; } = [];
     public List<AgentMcpEndpoint> McpEndpoints { get; set; } = [];

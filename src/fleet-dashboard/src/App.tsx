@@ -37,6 +37,7 @@ import { apiFetch, heartbeatAge } from './utils'
 import { projectPayload } from './projectAssignments'
 import { PROVIDER_DEFAULT_MODEL } from './constants'
 import { parseWarmupTimeoutSeconds, warmupTimeoutEditValue } from './warmupTimeout'
+import { contextWindowEditValue, parseContextWindow } from './contextWindow'
 import AppHeader from './components/AppHeader'
 import AppFooter from './components/AppFooter'
 import Sidenav from './components/Sidenav'
@@ -856,6 +857,7 @@ export default function App() {
           mountDockerSock: cfg.mountDockerSock ?? false,
           outputStyle: cfg.outputStyle ?? '',
           anthropicBaseUrl: cfg.anthropicBaseUrl ?? '',
+          contextWindow: contextWindowEditValue(cfg.contextWindow),
           instructions: cfg.instructions ?? [],
         })
       })
@@ -909,6 +911,8 @@ export default function App() {
     const maxTurns = parseInt(configEdits.maxTurns, 10)
     const warmupTimeout = parseWarmupTimeoutSeconds(configEdits.warmupTimeoutSeconds)
     if (!warmupTimeout.ok) { setConfigSaveMsg(warmupTimeout.error); setConfigSaveState('error'); return }
+    const contextWindow = parseContextWindow(configEdits.contextWindow)
+    if (!contextWindow.ok) { setConfigSaveMsg(contextWindow.error); setConfigSaveState('error'); return }
     const tools = configEdits.tools.split(',').map(t => t.trim()).filter(Boolean)
     const { projects } = projectPayload(configEdits)
     const networks = configEdits.networks.split(',').map(n => n.trim()).filter(Boolean)
@@ -955,6 +959,7 @@ export default function App() {
         mountDockerSock: configEdits.mountDockerSock,
         outputStyle: configEdits.outputStyle,
         anthropicBaseUrl: configEdits.anthropicBaseUrl,
+        contextWindow: contextWindow.value,
         tools, projects, mcpEndpoints: configEdits.mcpEndpoints, networks, envRefs,
         instructions: configEdits.instructions.map(i => ({ instructionName: i.name, loadOrder: i.loadOrder })),
       }),

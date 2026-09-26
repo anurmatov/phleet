@@ -181,7 +181,10 @@ off, `psi.Environment` is never touched. A local agent gets no `.claude-credenti
 `entrypoint.sh` removes `/root/.claude/.credentials.json` (exit 1 if it cannot), claude token
 broadcasts are ignored, and its queue is not bound to `fleet.relay` (a stale binding is removed on a
 separate channel). No startup reachability probe: an inference-host reboot must not restart-loop
-agents. Enable and rollback both take effect on reprovision. See `docs/providers/claude-local-models.md`.
+agents. Enable and rollback both take effect on reprovision. The nullable per-agent `ContextWindow`
+(#367, 4096–1048576, `0` clears) puts `CLAUDE_CODE_MAX_CONTEXT_TOKENS` in a local agent's container env
+on reprovision so Claude CLI compacts before the server's limit; cloud agents never get it. See
+`docs/providers/claude-local-models.md`.
 
 ## Project contexts
 

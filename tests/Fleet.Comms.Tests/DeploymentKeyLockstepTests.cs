@@ -105,6 +105,110 @@ public class DeploymentKeyLockstepTests
         Assert.DoesNotContain("8082", published);
     }
 
+    /// <summary>The journal's operator keys (#375). Same two rules as the conversation keys.</summary>
+    public static TheoryData<string> JournalKeys() =>
+    [
+        "FLEET_COMMS_JOURNAL_ENABLED",
+        "FLEET_COMMS_JOURNAL_BIND",
+        "FLEET_COMMS_JOURNAL_KEY",
+        "FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS",
+        "FLEET_COMMS_JOURNAL_RETENTION",
+    ];
+
+    [Theory]
+    [MemberData(nameof(JournalKeys))]
+    public void Every_journal_key_is_documented_in_the_env_example(string key)
+    {
+        Assert.Contains(key, Read(".env.example"), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [MemberData(nameof(JournalKeys))]
+    public void Every_journal_key_is_wired_in_the_example_compose(string key)
+    {
+        Assert.Contains($"${{{key}", Read("docker-compose.example.yml"), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The signing key reaches the service and the operator one-shot, and no other service.
+    /// </summary>
+    [Fact]
+    public void The_journal_key_is_given_only_to_fleet_comms_and_fleet_comms_ops()
+    {
+        var compose = Read("docker-compose.example.yml");
+
+        var holders = Regex.Matches(compose, @"^  ([a-z0-9-]+):\s*$", RegexOptions.Multiline)
+            .Select(m => (Name: m.Groups[1].Value, Start: m.Index))
+            .ToList();
+
+        var withKey = holders
+            .Select((service, i) => (service.Name, Body: compose[service.Start..(i + 1 < holders.Count ? holders[i + 1].Start : compose.Length)]))
+            .Where(service => service.Body.Contains("${FLEET_COMMS_JOURNAL_KEY", StringComparison.Ordinal))
+            .Select(service => service.Name)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(["fleet-comms", "fleet-comms-ops"], withKey);
+    }
+
+    /// <summary>
+    /// The journal listener is never published as a host port (MUST NOT 8).
+    /// </summary>
+    [Fact]
+    public void The_journal_listener_is_not_published_as_a_host_port()
+    {
+        Assert.DoesNotContain("8083", PublishedContainerPorts(Read("docker-compose.example.yml")));
+    }
+
+    /// <summary>The check above can fail: a compose file that publishes 8083, in any spelling, is caught.</summary>
+    [Theory]
+    [InlineData("    ports:\n      - \"127.0.0.1:3500:8080\"\n      - \"8083:8083\"\n")]
+    [InlineData("    ports:\n      - 8083:8083\n")]
+    [InlineData("    ports:\n      - \"0.0.0.0:18083:8083\"\n")]
+    [InlineData("    ports: [\"8083:8083\"]\n")]
+    [InlineData("    ports:\n      - target: 8083\n        published: 18083\n")]
+    public void A_compose_file_publishing_8083_is_detected(string portsBlock)
+    {
+        var compose = "services:\n  fleet-comms:\n    image: fleet:comms\n" + portsBlock;
+
+        Assert.Contains("8083", PublishedContainerPorts(compose));
+    }
+
+    /// <summary>
+    /// Every port number that appears in any <c>ports:</c> entry, host or container side: short
+    /// syntax quoted or not (including <c>${VAR:-default}</c> substitutions), flow lists, and the long
+    /// syntax. Deliberately over-inclusive — a false alarm costs a look, a miss publishes a listener.
+    /// </summary>
+    private static IReadOnlyList<string> PublishedContainerPorts(string compose)
+    {
+        var ports = new List<string>();
+        var lines = compose.Split('\n');
+
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            var trimmed = line.Trim();
+            if (!trimmed.StartsWith("ports:", StringComparison.Ordinal)) continue;
+
+            ports.AddRange(Numbers(trimmed["ports:".Length..]));
+
+            var indent = line.Length - line.TrimStart().Length;
+            for (var j = i + 1; j < lines.Length; j++)
+            {
+                var entry = lines[j];
+                if (entry.Trim().Length == 0 || entry.TrimStart().StartsWith('#')) continue;
+                if (entry.Length - entry.TrimStart().Length <= indent) break;
+
+                ports.AddRange(Numbers(entry));
+            }
+        }
+
+        return ports;
+
+        static IEnumerable<string> Numbers(string text) =>
+            Regex.Matches(text, "(?<![0-9])[0-9]{1,5}(?![0-9])").Select(m => m.Value);
+    }
+
     /// <summary>
     /// The conversation database publishes no host port either.
     /// </summary>

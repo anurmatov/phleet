@@ -205,6 +205,157 @@ public sealed class CommsOptions
 
     private static readonly System.Text.RegularExpressions.Regex AgentNamePattern =
         new("^[A-Za-z0-9_-]{1,128}$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    // ── Conversation journal (opt-in, #375) ──────────────────────────────────────────
+
+    /// <summary>The journal listener and store. Off by default; see docs/comms-journal.md.</summary>
+    public JournalOptions Journal { get; set; } = new();
+
+    /// <summary>
+    /// Fails fast on a journal configuration that cannot work. A no-op while the journal is off.
+    /// </summary>
+    public void ValidateJournal() => Journal.Validate(ConversationsEnabled);
+}
+
+/// <summary>
+/// The conversation journal: <c>Comms__Journal__*</c>.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Off by default, and off means absent.</b> With <see cref="Enabled"/> false no journal listener
+/// is built, bound or started, no journal route exists anywhere, and the retention sweep never
+/// touches a journal table.
+/// </para>
+/// <para>
+/// Every validation failure is an <see cref="InvalidOperationException"/> whose message starts with
+/// a fixed code (<c>journal_…</c>) and never contains key material.
+/// </para>
+/// </remarks>
+public sealed class JournalOptions
+{
+    /// <summary>Most distinct ids <see cref="ExcludedChatIds"/> may hold.</summary>
+    public const int MaxExcludedChatIds = 256;
+
+    public static readonly TimeSpan MinimumMessageRetention = TimeSpan.FromDays(1);
+
+    public bool Enabled { get; set; }
+
+    /// <summary>
+    /// The internal journal listener. Container-network only: never published as a host port and
+    /// never proxied. A separate application from north, south and ops.
+    /// </summary>
+    public string Url { get; set; } = "http://0.0.0.0:8083";
+
+    /// <summary>
+    /// Comma-separated base64url HMAC keys, each at least 32 bytes after decoding. Every key
+    /// verifies; the first one mints. <b>A secret</b>: never logged and never echoed.
+    /// </summary>
+    public string TokenKeys { get; set; } = "";
+
+    /// <summary>
+    /// Chat ids that are never journaled, comma-separated. Blank elements and <c>0</c> are ignored,
+    /// so the compose default <c>${FLEET_GROUP_CHAT_ID},</c> is valid with an empty tail and with the
+    /// installer's "no group" value <c>0</c>.
+    /// </summary>
+    public string ExcludedChatIds { get; set; } = "";
+
+    public TimeSpan MessageRetention { get; set; } = TimeSpan.FromDays(365);
+
+    /// <summary>The parsed keys. Call after <see cref="Validate"/>.</summary>
+    public IReadOnlyList<byte[]> Keys() => Fleet.Conversations.Journal.JournalTokens.ParseKeys(TokenKeys);
+
+    /// <summary>The parsed exclusion list. Call after <see cref="Validate"/>.</summary>
+    public IReadOnlySet<long> ExcludedChats() => ParseExcludedChatIds(ExcludedChatIds);
+
+    public void Validate(bool conversationsEnabled)
+    {
+        if (!Enabled) return;
+
+        if (!conversationsEnabled)
+            throw new InvalidOperationException(
+                "journal_requires_conversations: Comms__Journal__Enabled is true, but the conversation "
+                + "feature is not configured (Comms__ConversationConnectionString). The journal lives "
+                + "in the conversation database.");
+
+        try
+        {
+            Keys();
+        }
+        catch (FormatException e)
+        {
+            // e.Message names the entry's position, never its value.
+            throw new InvalidOperationException(
+                $"journal_key_invalid: Comms__Journal__TokenKeys: {e.Message}. Each key is base64url "
+                + "and decodes to at least 32 bytes.");
+        }
+
+        try
+        {
+            ParseExcludedChatIds(ExcludedChatIds);
+        }
+        catch (FormatException e)
+        {
+            throw new InvalidOperationException(
+                $"journal_excluded_ids_invalid: Comms__Journal__ExcludedChatIds: {e.Message}.");
+        }
+
+        if (!IsHttpUrl(Url))
+            throw new InvalidOperationException(
+                "journal_url_invalid: Comms__Journal__Url is not an absolute http:// or https:// URL.");
+
+        if (MessageRetention < MinimumMessageRetention)
+            throw new InvalidOperationException(
+                "journal_retention_invalid: Comms__Journal__MessageRetention must be at least 1.00:00:00.");
+    }
+
+    /// <summary>
+    /// Splits on <c>,</c> and trims each element. Empty elements and <c>0</c> are ignored, and
+    /// duplicates collapse. A non-empty element that is not an invariant-culture
+    /// <see cref="long"/> (leading sign allowed) is invalid, as is a list of more than
+    /// <see cref="MaxExcludedChatIds"/> distinct ids.
+    /// </summary>
+    /// <remarks>
+    /// <c>0</c> names no chat — the classifier refuses chat id 0 on its own (rule 1) — and it is what
+    /// <c>setup.sh</c> writes for <c>FLEET_GROUP_CHAT_ID</c> when no group is configured. Refusing it
+    /// would stop every Comms listener on a default install that turned the journal on.
+    /// </remarks>
+    /// <exception cref="FormatException">The message names the element's position.</exception>
+    public static IReadOnlySet<long> ParseExcludedChatIds(string? value)
+    {
+        var ids = new HashSet<long>();
+        var elements = (value ?? string.Empty).Split(',');
+
+        for (var i = 0; i < elements.Length; i++)
+        {
+            var element = elements[i].Trim();
+            if (element.Length == 0) continue;
+
+            if (!long.TryParse(element, System.Globalization.NumberStyles.AllowLeadingSign,
+                    System.Globalization.CultureInfo.InvariantCulture, out var id))
+                throw new FormatException($"element {i + 1} is not an integer chat id");
+
+            if (id == 0) continue;
+
+            ids.Add(id);
+        }
+
+        if (ids.Count > MaxExcludedChatIds)
+            throw new FormatException($"more than {MaxExcludedChatIds} distinct chat ids");
+
+        return ids;
+    }
+
+    private static bool IsHttpUrl(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+
+        // Kestrel's wildcard hosts are not URI hosts; validate the rest of the address.
+        var candidate = value.Replace("://*:", "://0.0.0.0:", StringComparison.Ordinal)
+            .Replace("://+:", "://0.0.0.0:", StringComparison.Ordinal);
+
+        return Uri.TryCreate(candidate, UriKind.Absolute, out var uri)
+            && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
+    }
 }
 
 /// <summary>

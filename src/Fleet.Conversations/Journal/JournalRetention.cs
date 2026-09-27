@@ -1,0 +1,218 @@
+using System.Globalization;
+using Microsoft.Extensions.Logging;
+using MySqlConnector;
+
+namespace Fleet.Conversations.Journal;
+
+/// <summary>What an operator purge selects. Exactly one of the three scopes is set.</summary>
+public sealed record JournalPurgeSelector
+{
+    public string? MessageId { get; init; }
+    public string? ConversationId { get; init; }
+    public long? TelegramChatId { get; init; }
+
+    /// <summary>Only messages sent before this instant, when set.</summary>
+    public DateTimeOffset? Before { get; init; }
+}
+
+/// <summary>Rows a purge deleted, or would delete.</summary>
+public sealed record JournalPurgeCounts(long Messages, long Observers, long Attachments, long Conversations);
+
+/// <summary>
+/// The journal's retention sweep and the operator purge.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A platform delete or edit never reaches a bot, so the journal keeps the original until the
+/// retention horizon or an operator purge. Backups keep purged rows until the backup rotation.
+/// </para>
+/// <para>
+/// Observers and attachments go with their message through <c>ON DELETE CASCADE</c>. A conversation
+/// is deleted only once it holds no message; the foreign key from <c>journal_messages</c> has no
+/// cascade, so a conversation that gained a message in between refuses the delete rather than
+/// orphaning it.
+/// </para>
+/// </remarks>
+public sealed class JournalRetention(
+    string connectionString,
+    TimeSpan retention,
+    int batchSize,
+    ILogger logger,
+    JournalRuntimeStats? stats = null,
+    TimeProvider? time = null)
+{
+    /// <summary>Upper bound on batches per sweep, so one tick cannot run unbounded.</summary>
+    private const int MaxBatchesPerSweep = 1000;
+
+    private readonly TimeProvider _time = time ?? TimeProvider.System;
+
+    public sealed record SweepResult(int Messages, int Conversations);
+
+    /// <summary>
+    /// Deletes messages sent before <c>now − retention</c>, in batches, then conversations left with
+    /// no message.
+    /// </summary>
+    public async Task<SweepResult> SweepOnceAsync(CancellationToken ct = default)
+    {
+        var cutoff = (_time.GetUtcNow() - retention).UtcDateTime;
+        var messages = 0;
+        var conversations = 0;
+
+        await using var connection = new MySqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+
+        for (var i = 0; i < MaxBatchesPerSweep; i++)
+        {
+            await using var command = new MySqlCommand(
+                "DELETE FROM journal_messages WHERE sent_at < @cutoff ORDER BY sent_at, id LIMIT @batch",
+                connection);
+            command.Parameters.AddWithValue("@cutoff", cutoff);
+            command.Parameters.AddWithValue("@batch", batchSize);
+
+            var removed = await command.ExecuteNonQueryAsync(ct);
+            messages += removed;
+            if (removed < batchSize) break;
+        }
+
+        for (var i = 0; i < MaxBatchesPerSweep; i++)
+        {
+            await using var command = new MySqlCommand(
+                """
+                DELETE FROM journal_conversations
+                 WHERE NOT EXISTS (SELECT 1 FROM journal_messages m
+                                    WHERE m.conversation_id = journal_conversations.id)
+                 LIMIT @batch
+                """, connection);
+            command.Parameters.AddWithValue("@batch", batchSize);
+
+            var removed = await command.ExecuteNonQueryAsync(ct);
+            conversations += removed;
+            if (removed < batchSize) break;
+        }
+
+        if (messages + conversations > 0)
+        {
+            logger.LogInformation(
+                "journal retention removed {Messages} message(s) and {Conversations} empty conversation(s)",
+                messages, conversations);
+        }
+
+        stats?.RecordSweep(messages, conversations);
+        return new SweepResult(messages, conversations);
+    }
+
+    /// <summary>Counts a sweep that failed. The next tick retries it.</summary>
+    public void RecordFailure() => stats?.RecordSweepFailure();
+
+    /// <summary>
+    /// Deletes what <paramref name="selector"/> names, in ONE transaction, and returns the counts.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Without <paramref name="confirm"/> the same statements run and the transaction is rolled back,
+    /// so the counts a dry run prints are exactly what a confirmed run deletes, from the same code
+    /// path, and no row changes.
+    /// </para>
+    /// <para>
+    /// Conversations in the selector's scope that are left with no message are deleted too. On any
+    /// database error the transaction rolls back and nothing is deleted.
+    /// </para>
+    /// </remarks>
+    public static async Task<JournalPurgeCounts> PurgeAsync(
+        string connectionString, JournalPurgeSelector selector, bool confirm, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(selector);
+
+        var scopes = (selector.MessageId is null ? 0 : 1)
+            + (selector.ConversationId is null ? 0 : 1)
+            + (selector.TelegramChatId is null ? 0 : 1);
+
+        if (scopes != 1)
+            throw new ArgumentException("exactly one of message, conversation or telegram chat is required", nameof(selector));
+
+        // The conversations in scope, and the messages within them that match.
+        var scope = selector switch
+        {
+            { MessageId: not null } =>
+                "c.id IN (SELECT conversation_id FROM journal_messages WHERE id = @message)",
+            { ConversationId: not null } => "c.id = @conversation",
+            _ => "c.telegram_chat_id = @chat",
+        };
+
+        var match = selector switch
+        {
+            { MessageId: not null } => "m.id = @message",
+            { ConversationId: not null } => "m.conversation_id = @conversation",
+            _ => "m.conversation_id IN (SELECT id FROM journal_conversations WHERE telegram_chat_id = @chat)",
+        };
+
+        if (selector.Before is not null) match += " AND m.sent_at < @before";
+
+        await using var connection = new MySqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        try
+        {
+            // The scoped conversations first, locked, so an ingest cannot add to one mid-purge.
+            var conversationIds = new List<string>();
+            await using (var lockScope = Bind(new MySqlCommand(
+                $"SELECT c.id FROM journal_conversations c WHERE {scope} FOR UPDATE", connection, transaction)))
+            {
+                await using var reader = await lockScope.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct)) conversationIds.Add(reader.GetString(0));
+            }
+
+            var observers = await CountAsync(
+                $"SELECT COUNT(*) FROM journal_message_observers o JOIN journal_messages m ON m.id = o.message_id WHERE {match}");
+            var attachments = await CountAsync(
+                $"SELECT COUNT(*) FROM journal_attachments a JOIN journal_messages m ON m.id = a.message_id WHERE {match}");
+
+            long messages;
+            await using (var deleteMessages = Bind(new MySqlCommand(
+                $"DELETE m FROM journal_messages m WHERE {match}", connection, transaction)))
+            {
+                messages = await deleteMessages.ExecuteNonQueryAsync(ct);
+            }
+
+            long conversations = 0;
+            foreach (var id in conversationIds)
+            {
+                await using var deleteConversation = new MySqlCommand(
+                    """
+                    DELETE FROM journal_conversations
+                     WHERE id = @id
+                       AND NOT EXISTS (SELECT 1 FROM journal_messages m
+                                        WHERE m.conversation_id = journal_conversations.id)
+                    """, connection, transaction);
+                deleteConversation.Parameters.AddWithValue("@id", id);
+                conversations += await deleteConversation.ExecuteNonQueryAsync(ct);
+            }
+
+            if (confirm) await transaction.CommitAsync(ct);
+            else await transaction.RollbackAsync(ct);
+
+            return new JournalPurgeCounts(messages, observers, attachments, conversations);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            throw;
+        }
+
+        async Task<long> CountAsync(string sql)
+        {
+            await using var command = Bind(new MySqlCommand(sql, connection, transaction));
+            return Convert.ToInt64(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+        }
+
+        MySqlCommand Bind(MySqlCommand command)
+        {
+            if (selector.MessageId is not null) command.Parameters.AddWithValue("@message", selector.MessageId);
+            if (selector.ConversationId is not null) command.Parameters.AddWithValue("@conversation", selector.ConversationId);
+            if (selector.TelegramChatId is not null) command.Parameters.AddWithValue("@chat", selector.TelegramChatId);
+            if (selector.Before is not null) command.Parameters.AddWithValue("@before", selector.Before.Value.UtcDateTime);
+            return command;
+        }
+    }
+}

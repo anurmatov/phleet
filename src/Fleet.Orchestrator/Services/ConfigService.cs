@@ -24,9 +24,14 @@ public sealed class ConfigService : IConfigWriter, IAclChangeNotifier
     /// These are database credentials or the general orchestrator auth token (mounted into
     /// every agent container — exposing it via the config API would let any agent read all
     /// peer bot tokens).
+    ///
+    /// <c>FLEET_COMMS_JOURNAL_</c> holds the conversation journal's token-signing key, and the
+    /// whole prefix is denied: the non-secret journal keys are operator-edited in <c>.env</c>,
+    /// never through this API.
     /// </summary>
     private static readonly string[] DenylistPrefixes =
-        ["MYSQL_", "DB_", "FLEET_MYSQL_", "MINIO_", "CLAUDE_CREDENTIALS_", "CODEX_CREDENTIALS_"];
+        ["MYSQL_", "DB_", "FLEET_MYSQL_", "MINIO_", "CLAUDE_CREDENTIALS_", "CODEX_CREDENTIALS_",
+         "FLEET_COMMS_JOURNAL_"];
 
     private static readonly HashSet<string> DenylistExact =
         new([

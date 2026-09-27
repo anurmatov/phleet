@@ -25,11 +25,16 @@ namespace Fleet.Conversations;
 /// The byte store, when attachments are configured. Null leaves every attachment path inert, which
 /// is what an install without an attachment root gets.
 /// </param>
+/// <param name="journal">
+/// The journal's retention sweep, when the journal is enabled (#375). Null leaves the journal
+/// tables untouched, which is what an install with the journal off gets.
+/// </param>
 public sealed class GarbageCollector(
     string connectionString,
     ConversationStoreOptions options,
     ILogger logger,
-    AttachmentStore? attachments = null)
+    AttachmentStore? attachments = null,
+    Journal.JournalRetention? journal = null)
 {
     /// <summary>What one pass removed.</summary>
     public sealed record SweepResult
@@ -51,6 +56,11 @@ public sealed class GarbageCollector(
 
         /// <summary>Files on the volume with no row at all.</summary>
         public int OrphanFiles { get; init; }
+
+        /// <summary>Journal messages past their retention, and conversations left empty.</summary>
+        public int JournalMessages { get; init; }
+
+        public int JournalConversations { get; init; }
     }
 
     public async Task<SweepResult> SweepOnceAsync(CancellationToken ct = default)
@@ -63,6 +73,7 @@ public sealed class GarbageCollector(
         var claims = await PruneClaimsAsync(connection, ct);
         var strandedAttachments = await SweepStrandedAttachmentsAsync(connection, ct);
         var orphans = await SweepOrphanFilesAsync(connection, ct);
+        var journalSweep = await SweepJournalAsync(ct);
 
         if (ephemeral + durable + outbox + claims > 0)
         {
@@ -90,7 +101,35 @@ public sealed class GarbageCollector(
             PrunedAttachments = prunedAttachments,
             StrandedAttachments = strandedAttachments,
             OrphanFiles = orphans,
+            JournalMessages = journalSweep?.Messages ?? 0,
+            JournalConversations = journalSweep?.Conversations ?? 0,
         };
+    }
+
+    /// <summary>
+    /// The journal sweep, LAST and isolated: an error is logged, counted and retried next tick, and
+    /// never stands between the conversation steps above and their next run.
+    /// </summary>
+    private async Task<Journal.JournalRetention.SweepResult?> SweepJournalAsync(CancellationToken ct)
+    {
+        if (journal is null) return null;
+
+        try
+        {
+            return await journal.SweepOnceAsync(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception e)
+        {
+            // Type only. A driver's message can carry the connection string.
+            journal.RecordFailure();
+            logger.LogWarning("journal retention sweep failed and will retry next tick: {Error}",
+                e.GetType().Name);
+            return null;
+        }
     }
 
     /// <summary>

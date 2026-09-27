@@ -507,6 +507,15 @@ services:
       - Comms__Conversations__EphemeralEventRetention=${FLEET_COMMS_EPHEMERAL_RETENTION:-1.00:00:00}
       - Comms__Conversations__DurableEventRetention=${FLEET_COMMS_DURABLE_RETENTION:-30.00:00:00}
       - Comms__Conversations__OutboxRetention=${FLEET_COMMS_OUTBOX_RETENTION:-1.00:00:00}
+      # ── Conversation journal (opt-in, needs the conversation feature) ────────
+      # Off unless FLEET_COMMS_JOURNAL_ENABLED=true. Its listener is on the Docker network only and
+      # is NEVER in the `ports:` block above: publishers are containers on fleet-net. The workflow
+      # activity group is always excluded; the extra list is appended to it.
+      - Comms__Journal__Enabled=${FLEET_COMMS_JOURNAL_ENABLED:-false}
+      - Comms__Journal__Url=${FLEET_COMMS_JOURNAL_BIND:-http://0.0.0.0:8083}
+      - Comms__Journal__TokenKeys=${FLEET_COMMS_JOURNAL_KEY:-}
+      - Comms__Journal__ExcludedChatIds=${FLEET_GROUP_CHAT_ID:-},${FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS:-}
+      - Comms__Journal__MessageRetention=${FLEET_COMMS_JOURNAL_RETENTION:-365.00:00:00}
     volumes:
       - fleet_comms_auth:/var/lib/fleet-comms
     mem_limit: 512m
@@ -604,6 +613,9 @@ services:
       # the applied version is a SELECT the runtime account can do — so both are here and the
       # command picks the right one.
       - Comms__ConversationConnectionString=${FLEET_COMMS_CONVERSATION_DB:-}
+      # `journal token` mints with the first key and prints to stdout — which is why it runs here,
+      # with logging disabled, and never on fleet-comms.
+      - Comms__Journal__TokenKeys=${FLEET_COMMS_JOURNAL_KEY:-}
     volumes:
       - fleet_comms_auth:/var/lib/fleet-comms
     networks:

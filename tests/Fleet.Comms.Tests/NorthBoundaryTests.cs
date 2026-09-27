@@ -53,6 +53,19 @@ public class NorthBoundaryTests
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
+    /// <summary>The journal routes (#375) are never mapped on the north listener.</summary>
+    [Theory]
+    [InlineData("POST", "/journal/v1/messages")]
+    [InlineData("GET", "/journal/v1/status")]
+    public async Task NoJournalRouteIsReachableOnTheNorthListener(string method, string path)
+    {
+        await using var host = await NorthTestHost.StartAsync();
+
+        var response = await host.Client.SendAsync(new HttpRequestMessage(new HttpMethod(method), path));
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
     /// <summary>
     /// The structural half, and the one that actually holds the line. Probing for 404s proves those
     /// nine paths are absent today; this proves the north app's route table is EXACTLY the four

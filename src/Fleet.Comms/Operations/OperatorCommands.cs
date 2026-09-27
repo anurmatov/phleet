@@ -1,4 +1,5 @@
 using Fleet.Conversations;
+using Fleet.Conversations.Journal;
 using Fleet.Comms.Auth;
 using Fleet.Comms.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -31,6 +32,17 @@ public static class OperatorCommands
           store verify --in <path>               check a backup before trusting it
           store backup --out <path>              consistent copy of the auth store
 
+          conversations migrate                  apply the conversation schema (DDL account)
+          conversations status                   applied schema version against this binary's
+
+          journal token --purpose <ingest|status> --subject <s>
+                                                 print a journal token minted with the first key
+          journal status                         per-observer message counts and last ingest
+          journal purge --message <id> | --conversation <id> | --telegram-chat <chatId>
+                        [--before <ISO-8601>] [--confirm]
+                                                 delete journal rows; without --confirm, print
+                                                 the counts it would delete and change nothing
+
         Run with no arguments to start the service.
         """;
 
@@ -54,6 +66,9 @@ public static class OperatorCommands
                 ("store", "backup") => await BackupAsync(args, output, ct),
                 ("conversations", "migrate") => await ConversationsMigrateAsync(output, error, ct),
                 ("conversations", "status") => await ConversationsStatusAsync(output, ct),
+                ("journal", "token") => JournalToken(args, output),
+                ("journal", "status") => await JournalStatusAsync(output, error, ct),
+                ("journal", "purge") => await JournalPurgeAsync(args, output, error, ct),
                 ("--help", _) or ("-h", _) or ("help", _) => Write(output, Usage, 0),
                 _ => Write(error, $"Unknown command: {string.Join(' ', args)}\n\n{Usage}", 2),
             };
@@ -348,12 +363,21 @@ public static class OperatorCommands
     private static string Required(string[] args, string name) =>
         Optional(args, name) ?? throw new OperatorCommandException($"{name} is required.\n\n{Usage}");
 
-    private static string? Optional(string[] args, string name)
+    /// <param name="allowNegativeNumber">
+    /// Only <c>--telegram-chat</c> takes one: basic-group and supergroup chat ids are negative.
+    /// Every other option keeps refusing a value that starts with <c>-</c>, which is how a
+    /// forgotten value followed by the next flag is caught.
+    /// </param>
+    private static string? Optional(string[] args, string name, bool allowNegativeNumber = false)
     {
         var index = Array.IndexOf(args, name);
         if (index < 0)
             return null;
-        if (index + 1 >= args.Length || args[index + 1].StartsWith('-'))
+        if (index + 1 >= args.Length
+            || (args[index + 1].StartsWith('-')
+                && !(allowNegativeNumber && long.TryParse(args[index + 1],
+                    System.Globalization.NumberStyles.AllowLeadingSign,
+                    System.Globalization.CultureInfo.InvariantCulture, out _))))
             throw new OperatorCommandException($"{name} needs a value.");
         return args[index + 1];
     }
@@ -433,6 +457,166 @@ public static class OperatorCommands
         output.WriteLine(status.Describe());
 
         return status.Matches ? 0 : 1;
+    }
+
+    // ── journal (#375) ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Mints a journal token with the FIRST configured key and prints it to stdout — the operator's
+    /// terminal, run through the <c>logging: none</c> one-shot, and nowhere else.
+    /// </summary>
+    private static int JournalToken(string[] args, TextWriter output)
+    {
+        var purpose = Required(args, "--purpose");
+        var subject = Required(args, "--subject");
+
+        if (purpose is not (JournalTokens.PurposeIngest or JournalTokens.PurposeStatus))
+            throw new OperatorCommandException(
+                $"--purpose must be {JournalTokens.PurposeIngest} or {JournalTokens.PurposeStatus}. "
+                + "Other purposes are reserved for later slices and no route accepts them.");
+
+        if (!JournalTokens.IsValidSubject(subject))
+            throw new OperatorCommandException(
+                "--subject is 1-128 characters of [A-Za-z0-9_-]. It names the publishing runtime.");
+
+        IReadOnlyList<byte[]> keys;
+        try
+        {
+            keys = CommsConfiguration.Resolve().Journal.Keys();
+        }
+        catch (FormatException e)
+        {
+            // Position only, never the value.
+            throw new OperatorCommandException(
+                $"journal_key_invalid: Comms__Journal__TokenKeys: {e.Message}.");
+        }
+
+        output.WriteLine(JournalTokens.Mint(keys[0], purpose, subject));
+        return 0;
+    }
+
+    private static async Task<int> JournalStatusAsync(TextWriter output, TextWriter error, CancellationToken ct)
+    {
+        var store = new MySqlJournalStore(JournalConnectionString(), NullLogger.Instance);
+
+        Fleet.Conversations.Contracts.JournalStoreStatus status;
+        try
+        {
+            status = await store.GetStatusAsync(ct);
+        }
+        catch (Fleet.Conversations.Contracts.JournalStoreUnavailableException)
+        {
+            return Write(error, "journal status: the conversation database is not answering.", 1);
+        }
+
+        output.WriteLine($"schema version: {status.SchemaVersion?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "none"}");
+
+        if (status.SchemaVersion is null or < MySqlJournalStore.RequiredSchemaVersion)
+        {
+            output.WriteLine($"the journal tables arrive with version {MySqlJournalStore.RequiredSchemaVersion}; run conversations migrate");
+            return 1;
+        }
+
+        if (status.Observers.Count == 0)
+        {
+            output.WriteLine("No observers.");
+            return 0;
+        }
+
+        output.WriteLine($"{"OBSERVER",-32} {"MESSAGES",10} LAST_INGEST_AT");
+        foreach (var observer in status.Observers)
+        {
+            output.WriteLine(
+                $"{observer.Observer,-32} {observer.Messages,10} "
+                + (observer.LastIngestAt is { } at ? at.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture) : "-"));
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// Deletes journal rows in ONE transaction and prints the counts. Without <c>--confirm</c> the
+    /// same transaction runs and is rolled back, so the printed counts are exactly what a confirmed
+    /// run would delete and nothing changes.
+    /// </summary>
+    private static async Task<int> JournalPurgeAsync(
+        string[] args, TextWriter output, TextWriter error, CancellationToken ct)
+    {
+        var message = Optional(args, "--message");
+        var conversation = Optional(args, "--conversation");
+        var chat = Optional(args, "--telegram-chat", allowNegativeNumber: true);
+        var before = Optional(args, "--before");
+
+        if ((message is null ? 0 : 1) + (conversation is null ? 0 : 1) + (chat is null ? 0 : 1) != 1)
+            throw new OperatorCommandException(
+                $"journal purge needs exactly one of --message, --conversation or --telegram-chat.\n\n{Usage}");
+
+        long? chatId = null;
+        if (chat is not null)
+        {
+            if (!long.TryParse(chat, System.Globalization.NumberStyles.AllowLeadingSign,
+                    System.Globalization.CultureInfo.InvariantCulture, out var parsed) || parsed == 0)
+                throw new OperatorCommandException("--telegram-chat is a non-zero integer chat id.");
+            chatId = parsed;
+        }
+
+        DateTimeOffset? cutoff = null;
+        if (before is not null)
+        {
+            if (!System.Text.RegularExpressions.Regex.IsMatch(before, "(Z|[+-][0-9]{2}:[0-9]{2})$")
+                || !DateTimeOffset.TryParse(before, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out var parsed))
+                throw new OperatorCommandException("--before is an ISO-8601 time with an offset, e.g. 2026-01-01T00:00:00Z.");
+            cutoff = parsed;
+        }
+
+        var confirm = HasFlag(args, "--confirm");
+        var selector = new JournalPurgeSelector
+        {
+            MessageId = message,
+            ConversationId = conversation,
+            TelegramChatId = chatId,
+            Before = cutoff,
+        };
+
+        var connection = JournalConnectionString();
+
+        JournalPurgeCounts counts;
+        try
+        {
+            counts = await JournalRetention.PurgeAsync(connection, selector, confirm, ct);
+        }
+        catch (Exception e) when (e is not OperationCanceledException)
+        {
+            // The class only: a driver message can carry the connection string. The transaction
+            // rolled back, so nothing was deleted.
+            return Write(error, $"journal purge failed ({e.GetType().Name}); nothing was deleted.", 1);
+        }
+
+        var summary = $"{counts.Messages} message(s), {counts.Observers} observer row(s), "
+            + $"{counts.Attachments} attachment row(s), {counts.Conversations} conversation(s)";
+
+        output.WriteLine(confirm
+            ? $"deleted: {summary}"
+            : $"would delete: {summary}\n(dry run; nothing changed. Pass --confirm to delete.)");
+
+        return 0;
+    }
+
+    /// <summary>The runtime account when configured (it holds DELETE), else the DDL one.</summary>
+    private static string JournalConnectionString()
+    {
+        var options = CommsConfiguration.Resolve();
+
+        var connection = !string.IsNullOrWhiteSpace(options.ConversationConnectionString)
+            ? options.ConversationConnectionString
+            : options.ConversationMigrationConnectionString;
+
+        if (string.IsNullOrWhiteSpace(connection))
+            throw new OperatorCommandException(
+                "No conversation connection string is configured, so there is no journal to reach.");
+
+        return connection;
     }
 
     private static int Write(TextWriter writer, string message, int exitCode)

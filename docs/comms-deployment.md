@@ -184,6 +184,26 @@ completes it as `dropped`, and acknowledges. It does **not** stop a running turn
 receives no `control.ack`. Nothing here is broken; cancel execution is a later slice. Do not enable a
 cancel affordance in a client against this build.
 
+### The conversation journal (opt-in)
+
+A durable, text-only record of Telegram messages, written by your own agent runtimes to an internal
+listener. It needs durable conversations and lives in the same database. Full contract:
+[comms-journal.md](comms-journal.md).
+
+1. In `.env`: `FLEET_COMMS_JOURNAL_ENABLED=true` and a `FLEET_COMMS_JOURNAL_KEY`
+   (`openssl rand 48 | base64 | tr '+/' '-_' | tr -d '='`). `setup.sh` asks once and generates the
+   key; `upgrade.sh` never changes the decision.
+2. `docker compose run --rm fleet-comms-ops conversations migrate` applies 0004. It is additive and
+   runs whether or not the journal is on.
+3. Recreate `fleet-comms`. The listener binds `http://0.0.0.0:8083` on the Docker network. ⚠️ It is
+   **never** published and never proxied; publishers are containers on the same network.
+4. Mint one token per publishing runtime:
+   `docker compose run --rm fleet-comms-ops journal token --purpose ingest --subject <runtime-name>`.
+
+The workflow-activity group (`FLEET_GROUP_CHAT_ID`) is always excluded; setup's "no group" value
+`0` is ignored. To turn the journal off, set the flag to `false` and recreate: the tables and rows
+stay.
+
 ### Retention is a garbage-collection horizon, not deletion
 
 Nothing here serves a request to erase anything. Rows age out; ephemeral events are pruned without

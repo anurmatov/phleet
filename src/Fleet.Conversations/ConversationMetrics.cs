@@ -140,4 +140,27 @@ public static class ConversationMetrics
     /// </summary>
     public static void ObserveAttachmentBytes(Func<IEnumerable<Measurement<long>>> liveBytes) =>
         Meter.CreateObservableGauge("fleet.conversations.attachment.live_bytes", liveBytes, "By");
+
+    // ── conversation journal (#375) ──────────────────────────────────────────
+    //
+    // Same rule as everything above: fixed codes only. Never a subject, a chat id, a token or text.
+
+    /// <summary>
+    /// Ingest outcomes, tagged <c>result</c>: <c>created</c>, <c>duplicate</c>,
+    /// <c>observer_added</c>, <c>conflict</c>, <c>invalid</c>, <c>excluded</c>, <c>unavailable</c>.
+    /// </summary>
+    public static readonly Counter<long> JournalIngest =
+        Meter.CreateCounter<long>("fleet.journal.ingest", "records");
+
+    /// <summary>Requests the journal listener refused, tagged <c>reason</c> with the error code.</summary>
+    public static readonly Counter<long> JournalRejected =
+        Meter.CreateCounter<long>("fleet.journal.rejected", "requests");
+
+    /// <summary>Rows the retention sweep removed, tagged <c>kind</c>: <c>message</c>, <c>conversation</c>.</summary>
+    public static readonly Counter<long> JournalGcDeleted =
+        Meter.CreateCounter<long>("fleet.journal.gc.deleted", "rows");
+
+    /// <summary>Time from an authenticated ingest request to its answer.</summary>
+    public static readonly Histogram<double> JournalIngestDuration =
+        Meter.CreateHistogram<double>("fleet.journal.ingest.duration", "ms");
 }

@@ -77,6 +77,8 @@ unset FLEET_COMMS_CONVERSATIONS_ENABLED FLEET_COMMS_CONVERSATION_DB \
       FLEET_COMMS_MYSQL_DDL_PASSWORD FLEET_COMMS_MYSQL_RUNTIME_PASSWORD
 unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY \
       FLEET_COMMS_AGENT_LABEL FLEET_COMMS_STORE_PROVISIONED
+unset FLEET_COMMS_JOURNAL_ENABLED FLEET_COMMS_JOURNAL_BIND FLEET_COMMS_JOURNAL_KEY \
+      FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS FLEET_COMMS_JOURNAL_RETENTION
 
 ENV_EXAMPLE="$SCRIPT_DIR/.env.example"
 COMPOSE_EXAMPLE="$SCRIPT_DIR/docker-compose.example.yml"
@@ -563,6 +565,30 @@ if [[ "$_comms_enabled" == "true" ]]; then
 
     prompt_field "$ENV_FILE" "FLEET_COMMS_BROKER" "Broker connection for the outboxes" \
       "AMQP URI. Without it the outboxes still accumulate correctly and nothing is lost, but nothing is dispatched." n n "amqp://guest:guest@rabbitmq:5672/"
+
+    # The conversation journal, asked ONCE and only with conversations on. Declining
+    # writes false and no key: nothing listens on the journal port.
+    _journal_enabled=$(read_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_ENABLED")
+    if [[ -z "$_journal_enabled" ]]; then
+      echo
+      echo -e "  ${BOLD}Fleet.Comms — conversation journal${NC}"
+      echo "  A durable, text-only record of Telegram messages, written by your own"
+      echo "  agent runtimes to an internal listener that is never published."
+      echo "  See docs/comms-journal.md."
+      read -r -p "  Enable the conversation journal? [y/N] " _journal_answer
+      case "$_journal_answer" in
+        [yY]*) _journal_enabled=true ;;
+        *)     _journal_enabled=false ;;
+      esac
+      $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_ENABLED" "$_journal_enabled"
+    fi
+
+    # The signing key is generated only for a host that opted in, and never replaced: every token
+    # minted with it would stop verifying.
+    if [[ "$_journal_enabled" == "true" && -z "$(read_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_KEY")" ]]; then
+      $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_KEY" \
+        "$(openssl rand 48 | base64 | tr '+/' '-_' | tr -d '=')"
+    fi
   fi
 fi
 

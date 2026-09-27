@@ -1,0 +1,243 @@
+namespace Fleet.Conversations.Contracts;
+
+// The conversation journal's record contract (docs/comms-journal.md). One record is one Telegram
+// message as one runtime observed it. BCL-only, like the rest of this project.
+
+public enum JournalSenderKind { Human, Agent }
+
+public enum JournalTextFormat { Plain, Html, Rich }
+
+/// <summary>
+/// The wire record's <c>origin</c>: which runtime observed the message. Not the task origin the
+/// classifier takes (<see cref="JournalTaskOrigin"/>).
+/// </summary>
+/// <remarks>
+/// Only these two are accepted in this slice. The schema already carries the values later slices
+/// write (<c>agent_tool</c>, <c>agent_copy</c>, <c>client_submission</c>, <c>client_turn</c>), so those
+/// slices stay additive, but nothing here can produce them.
+/// </remarks>
+public enum JournalRecordOrigin { TelegramUpdate, AgentRuntime }
+
+public enum JournalAttachmentKind { Photo, Document, Voice, Video, VideoNote, Audio, Animation, Sticker, Other }
+
+/// <summary>Why an attachment's bytes are not in the journal. Required on every attachment in this slice.</summary>
+public enum JournalNotArchivedReason
+{
+    MediaDisabled, OverBotApiLimit, OverSizeCap, UnsupportedKind, DownloadFailed, SourceExpired,
+}
+
+public sealed record JournalSender
+{
+    public required JournalSenderKind Kind { get; init; }
+    public required string Id { get; init; }
+    public string? Display { get; init; }
+}
+
+/// <summary>Links the chunks of one long outbound reply. <c>1 ≤ Part ≤ Parts ≤ 64</c>.</summary>
+public sealed record JournalSendGroup
+{
+    public required string Id { get; init; }
+    public required int Part { get; init; }
+    public required int Parts { get; init; }
+}
+
+/// <summary>Attachment METADATA. This slice stores no bytes and no reference to any.</summary>
+public sealed record JournalAttachment
+{
+    public required int Ordinal { get; init; }
+    public required JournalAttachmentKind Kind { get; init; }
+    public required string MimeType { get; init; }
+    public long? ByteSize { get; init; }
+    public string? FileName { get; init; }
+    public string? FileUniqueId { get; init; }
+    public required JournalNotArchivedReason NotArchivedReason { get; init; }
+}
+
+public sealed record JournalTelegramRef
+{
+    public required long BotId { get; init; }
+    public required long ChatId { get; init; }
+    public required JournalChatKind ChatKind { get; init; }
+    public string? ChatTitle { get; init; }
+    public required long MessageId { get; init; }
+    public long? ReplyToMessageId { get; init; }
+
+    /// <summary>An album is N records sharing this id, one per platform message id.</summary>
+    public string? MediaGroupId { get; init; }
+}
+
+/// <summary>A validated journal record. The observer is never part of it: it is the token subject.</summary>
+public sealed record JournalRecord
+{
+    /// <summary>The publisher's idempotency key (a ULID).</summary>
+    public required string EventId { get; init; }
+
+    public required JournalTelegramRef Telegram { get; init; }
+    public required JournalDirection Direction { get; init; }
+    public required JournalSender Sender { get; init; }
+
+    /// <summary>The platform's message date, never the time it was received.</summary>
+    public required DateTimeOffset SentAt { get; init; }
+
+    /// <summary>Raw platform text or caption only. Never a path, hint, prompt or transcript.</summary>
+    public string? Text { get; init; }
+
+    public JournalTextFormat? TextFormat { get; init; }
+
+    /// <summary>A speech-to-text result. Never merged into <see cref="Text"/>.</summary>
+    public string? Transcript { get; init; }
+
+    public bool TranscriptTruncated { get; init; }
+    public required JournalRecordOrigin Origin { get; init; }
+    public JournalSendGroup? SendGroup { get; init; }
+    public IReadOnlyList<JournalAttachment> Attachments { get; init; } = [];
+}
+
+public enum JournalIngestOutcome
+{
+    /// <summary>A new natural key: conversation (upsert), message, observer and attachments written.</summary>
+    Created,
+
+    /// <summary>Already recorded for this observer, or this event id was already recorded. Nothing written.</summary>
+    Duplicate,
+
+    /// <summary>A known message seen by a new observer: one observer row written.</summary>
+    ObserverAdded,
+
+    /// <summary>Same natural key, different fingerprint. Nothing written.</summary>
+    Conflict,
+
+    /// <summary>The event id was already recorded with a different fingerprint. Nothing written.</summary>
+    EventIdReused,
+}
+
+public sealed record JournalIngestResult
+{
+    public required JournalIngestOutcome Outcome { get; init; }
+
+    /// <summary>The journal message id; null for a conflict.</summary>
+    public string? MessageId { get; init; }
+}
+
+/// <summary>
+/// The store cannot answer: the database is unreachable, or its schema is behind this binary.
+/// </summary>
+/// <remarks>The message carries no connection detail; <see cref="Reason"/> is a fixed code or null.</remarks>
+public sealed class JournalStoreUnavailableException(string? reason, Exception? inner = null)
+    : Exception(reason is null ? "journal store unavailable" : $"journal store unavailable: {reason}", inner)
+{
+    /// <summary>The schema-behind code, <c>schema_behind</c>, or null for a connection failure.</summary>
+    public string? Reason { get; } = reason;
+
+    public const string SchemaBehind = "schema_behind";
+}
+
+public sealed record JournalObserverStatus
+{
+    public required string Observer { get; init; }
+    public required long Messages { get; init; }
+    public DateTimeOffset? LastIngestAt { get; init; }
+}
+
+public sealed record JournalStoreStatus
+{
+    public int? SchemaVersion { get; init; }
+    public required IReadOnlyList<JournalObserverStatus> Observers { get; init; }
+}
+
+/// <summary>
+/// The wire and column spelling of every journal enum, in one table, so the parser and the store
+/// cannot drift apart.
+/// </summary>
+public static class JournalWire
+{
+    public static string Of(JournalDirection value) => value switch
+    {
+        JournalDirection.Inbound => "inbound",
+        JournalDirection.Outbound => "outbound",
+        _ => throw new ArgumentOutOfRangeException(nameof(value)),
+    };
+
+    public static string Of(JournalChatKind value) => value switch
+    {
+        JournalChatKind.Private => "private",
+        JournalChatKind.Group => "group",
+        JournalChatKind.Supergroup => "supergroup",
+        _ => throw new ArgumentOutOfRangeException(nameof(value)),
+    };
+
+    public static string Of(JournalSenderKind value) => value switch
+    {
+        JournalSenderKind.Human => "human",
+        JournalSenderKind.Agent => "agent",
+        _ => throw new ArgumentOutOfRangeException(nameof(value)),
+    };
+
+    public static string Of(JournalTextFormat value) => value switch
+    {
+        JournalTextFormat.Plain => "plain",
+        JournalTextFormat.Html => "html",
+        JournalTextFormat.Rich => "rich",
+        _ => throw new ArgumentOutOfRangeException(nameof(value)),
+    };
+
+    public static string Of(JournalRecordOrigin value) => value switch
+    {
+        JournalRecordOrigin.TelegramUpdate => "telegram_update",
+        JournalRecordOrigin.AgentRuntime => "agent_runtime",
+        _ => throw new ArgumentOutOfRangeException(nameof(value)),
+    };
+
+    public static string Of(JournalAttachmentKind value) => value switch
+    {
+        JournalAttachmentKind.Photo => "photo",
+        JournalAttachmentKind.Document => "document",
+        JournalAttachmentKind.Voice => "voice",
+        JournalAttachmentKind.Video => "video",
+        JournalAttachmentKind.VideoNote => "video_note",
+        JournalAttachmentKind.Audio => "audio",
+        JournalAttachmentKind.Animation => "animation",
+        JournalAttachmentKind.Sticker => "sticker",
+        JournalAttachmentKind.Other => "other",
+        _ => throw new ArgumentOutOfRangeException(nameof(value)),
+    };
+
+    public static string Of(JournalNotArchivedReason value) => value switch
+    {
+        JournalNotArchivedReason.MediaDisabled => "media_disabled",
+        JournalNotArchivedReason.OverBotApiLimit => "over_bot_api_limit",
+        JournalNotArchivedReason.OverSizeCap => "over_size_cap",
+        JournalNotArchivedReason.UnsupportedKind => "unsupported_kind",
+        JournalNotArchivedReason.DownloadFailed => "download_failed",
+        JournalNotArchivedReason.SourceExpired => "source_expired",
+        _ => throw new ArgumentOutOfRangeException(nameof(value)),
+    };
+
+    /// <summary>Parses an exact, case-sensitive wire value. Anything else is not a value.</summary>
+    public static bool TryParse<T>(string? wire, out T value) where T : struct, Enum
+    {
+        foreach (var candidate in Enum.GetValues<T>())
+        {
+            if (string.Equals(OfAny(candidate), wire, StringComparison.Ordinal))
+            {
+                value = candidate;
+                return true;
+            }
+        }
+
+        value = default;
+        return false;
+    }
+
+    private static string OfAny<T>(T value) where T : struct, Enum => value switch
+    {
+        JournalDirection v => Of(v),
+        JournalChatKind v => Of(v),
+        JournalSenderKind v => Of(v),
+        JournalTextFormat v => Of(v),
+        JournalRecordOrigin v => Of(v),
+        JournalAttachmentKind v => Of(v),
+        JournalNotArchivedReason v => Of(v),
+        _ => throw new NotSupportedException(typeof(T).Name),
+    };
+}

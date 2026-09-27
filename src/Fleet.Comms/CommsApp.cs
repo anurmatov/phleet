@@ -7,6 +7,7 @@ using Fleet.Comms.Routes;
 using Fleet.Comms.Contracts;
 using Fleet.Conversations;
 using Fleet.Conversations.Contracts;
+using Fleet.Conversations.Journal;
 using Microsoft.Extensions.Logging;
 using Fleet.Protocol;
 using Microsoft.AspNetCore.Builder;
@@ -149,6 +150,15 @@ public static class CommsApp
         var agentName = conversationSection[nameof(CommsOptions.AgentName)];
         var attachmentRoot = conversationSection[nameof(CommsOptions.AttachmentRootPath)];
 
+        // The journal's in-process status, shared by the retention sweep below and the journal
+        // listener Program builds. Registered only when the journal is on, like everything else of it.
+        var journalEnabled = bool.TryParse(
+            conversationSection[$"{nameof(CommsOptions.Journal)}:{nameof(JournalOptions.Enabled)}"],
+            out var journalFlag) && journalFlag;
+
+        if (journalEnabled)
+            builder.Services.TryAddSingleton(provider => new JournalRuntimeStats(provider.GetService<TimeProvider>()));
+
         if (!string.IsNullOrWhiteSpace(conversationConnection))
         {
             builder.Services.AddHostedService(provider => new ConversationMaintenanceService(
@@ -168,7 +178,18 @@ public static class CommsApp
                         ? null
                         : new AttachmentStore(
                             attachmentRoot,
-                            provider.GetRequiredService<ILogger<AttachmentStore>>())),
+                            provider.GetRequiredService<ILogger<AttachmentStore>>()),
+
+                    // The journal sweep rides the same tick (#375). Null with the journal off, so
+                    // the collector never touches a journal table on an install that did not opt in.
+                    journalEnabled
+                        ? new JournalRetention(
+                            conversationConnection,
+                            provider.GetRequiredService<IOptions<CommsOptions>>().Value.Journal.MessageRetention,
+                            provider.GetRequiredService<IOptions<ConversationStoreOptions>>().Value.OutboxBatchSize,
+                            provider.GetRequiredService<ILogger<JournalRetention>>(),
+                            provider.GetRequiredService<JournalRuntimeStats>())
+                        : null),
                 provider.GetRequiredService<IOptions<ConversationStoreOptions>>().Value,
                 provider.GetRequiredService<ILogger<ConversationMaintenanceService>>()));
 
@@ -461,6 +482,56 @@ public static class CommsApp
 
         var app = builder.Build();
         SouthEndpoints.Map(app, store, options, attachments);
+        return app;
+    }
+
+    /// <summary>
+    /// Build the journal application: the internal ingest and status surface, on its own listener
+    /// (#375).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A FOURTH application, separate from north, south and ops for the reason each of those is
+    /// separate: a routing mistake must not be able to put a journal route on a surface with a
+    /// different caller, or put another surface's credential in front of this one. Journal
+    /// publishers hold a journal token and never the south bearer.
+    /// </para>
+    /// <para>
+    /// Container-network only. The compose example publishes no host port for it.
+    /// </para>
+    /// <para>
+    /// ⚠️ It never migrates. The store reports a schema below 0004 as unavailable instead.
+    /// </para>
+    /// </remarks>
+    public static WebApplication BuildJournalApp(
+        WebApplicationBuilder builder, IJournalStore store, CommsOptions options,
+        JournalRuntimeStats stats, TimeProvider? time = null)
+    {
+        var keys = options.Journal.Keys();
+        var excluded = options.Journal.ExcludedChats();
+
+        var app = builder.Build();
+
+        // Outermost: nothing unhandled reaches a caller as a stack trace or a driver message.
+        app.Use(async (context, next) =>
+        {
+            try
+            {
+                await next(context);
+            }
+            catch (Exception) when (!context.Response.HasStarted)
+            {
+                context.Response.Clear();
+                context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                context.Response.ContentType = "application/json";
+                await context.Response.WriteAsync("{\"error\":\"internal\"}");
+            }
+        });
+
+        JournalAuth.Use(app, keys, stats);
+        JournalEndpoints.Map(app, store, stats, excluded, time ?? TimeProvider.System,
+            app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal"));
+
         return app;
     }
 

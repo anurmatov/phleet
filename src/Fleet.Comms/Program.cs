@@ -109,6 +109,10 @@ static async Task<int> RunServiceAsync(string[] args)
 
     options.ValidateConversations();
 
+    // The journal is validated here too, before any host starts: every failure is a process that
+    // exits 1 with a fixed `journal_…` code and never the key.
+    options.ValidateJournal();
+
     WebApplication? southApp = null;
 
     if (options.ConversationsEnabled)
@@ -134,6 +138,28 @@ static async Task<int> RunServiceAsync(string[] args)
         southApp = CommsApp.BuildSouthApp(southBuilder, store, options, attachments);
     }
 
+    // ── The journal listener, only when the journal is enabled (#375) ─────────────────
+    //
+    // Off means nothing is bound, registered or started. On, it is a fourth application on its own
+    // container-network address — never published, never proxied — and it never accepts the south
+    // bearer. It never migrates: a schema below 0004 is answered as unavailable.
+    WebApplication? journalApp = null;
+
+    if (options.Journal.Enabled)
+    {
+        var journalBuilder = WebApplication.CreateBuilder();
+        journalBuilder.WebHost.UseSetting(WebHostDefaults.ServerUrlsKey, string.Empty);
+        journalBuilder.WebHost.UseUrls(options.Journal.Url);
+
+        var journalStore = new Fleet.Conversations.Journal.MySqlJournalStore(
+            options.ConversationConnectionString,
+            northApp.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal.Store"));
+
+        journalApp = CommsApp.BuildJournalApp(
+            journalBuilder, journalStore, options,
+            northApp.Services.GetRequiredService<Fleet.Conversations.Journal.JournalRuntimeStats>());
+    }
+
     // Both or neither. If either listener cannot bind — port already in use, address unavailable — the
     // process fails rather than coming up half-configured: a north listener with no readiness path is
     // the state an operator cannot diagnose, and a readiness path with no north listener is a service
@@ -155,7 +181,27 @@ static async Task<int> RunServiceAsync(string[] args)
         ? new[] { northApp, opsApp }
         : [northApp, opsApp, southApp];
 
-    await Task.WhenAll(hosts.Select(h => h.StartAsync()));
+    // The journal first, and alone: a port already in use is reported as its own code before any
+    // other listener has served a request.
+    if (journalApp is not null)
+    {
+        try
+        {
+            await journalApp.StartAsync();
+        }
+        catch (Exception e)
+        {
+            throw new InvalidOperationException(
+                $"journal_bind_failed: could not bind Comms__Journal__Url ({e.GetType().Name}).");
+        }
+
+        hosts = [journalApp, .. hosts];
+        await Task.WhenAll(hosts.Skip(1).Select(h => h.StartAsync()));
+    }
+    else
+    {
+        await Task.WhenAll(hosts.Select(h => h.StartAsync()));
+    }
 
     await Task.WhenAny(hosts.Select(h => h.WaitForShutdownAsync()));
     await Task.WhenAll(hosts.Select(h => h.StopAsync()));

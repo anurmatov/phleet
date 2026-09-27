@@ -2,6 +2,9 @@ using System.Net;
 using Fleet.Comms.Routes;
 using Fleet.Conversations.Contracts;
 using Fleet.Conversations.Journal;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
 
 namespace Fleet.Comms.Tests;
 
@@ -93,6 +96,34 @@ public sealed class JournalEndpointTests
         await using var rotated = await JournalTestHost.StartAsync(JournalTestHost.KeyB);
         Assert.Equal(HttpStatusCode.Unauthorized, (await rotated.PostAsync(JournalRecords.Valid(), oldToken)).StatusCode);
         Assert.Equal(HttpStatusCode.Created, (await rotated.PostAsync(JournalRecords.Valid(), newToken)).StatusCode);
+    }
+
+    /// <summary>
+    /// The journal routes are not on the south listener: with the SOUTH bearer, which gets a caller
+    /// past south's pre-routing check, both paths are router 404s (AC10).
+    /// </summary>
+    [Fact]
+    public async Task The_journal_routes_are_404_on_the_south_listener()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseSetting(WebHostDefaults.ServerUrlsKey, string.Empty);
+        builder.WebHost.UseTestServer();
+
+        await using var south = CommsApp.BuildSouthApp(builder, new FakeConversationStore(), new Configuration.CommsOptions
+        {
+            SouthBearerToken = "south-token",
+            AgentName = "example-agent",
+            ConversationConnectionString = "configured",
+        });
+        await south.StartAsync();
+        var client = south.GetTestClient();
+
+        foreach (var (method, path) in new[] { (HttpMethod.Get, JournalEndpoints.StatusPath), (HttpMethod.Post, JournalEndpoints.MessagesPath) })
+        {
+            var request = new HttpRequestMessage(method, path);
+            request.Headers.TryAddWithoutValidation("Authorization", "Bearer south-token");
+            Assert.Equal(HttpStatusCode.NotFound, (await client.SendAsync(request)).StatusCode);
+        }
     }
 
     // ── the record (AC13, AC16d) ─────────────────────────────────────────────

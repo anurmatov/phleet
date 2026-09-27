@@ -155,6 +155,18 @@ public class OpsListenerTests
         }
     }
 
+    /// <summary>The journal routes (#375) are not on the ops listener either.</summary>
+    [Fact]
+    public async Task NoJournalRouteIsReachableOnTheOpsListener()
+    {
+        await using var ops = BuildOps(new InMemoryAuthStore());
+        var client = ops.GetTestClient();
+
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await client.PostAsync("/journal/v1/messages", new StringContent("{}"))).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/journal/v1/status")).StatusCode);
+    }
+
     private static WebApplication BuildOps(IAuthStore store)
     {
         var builder = WebApplication.CreateBuilder();

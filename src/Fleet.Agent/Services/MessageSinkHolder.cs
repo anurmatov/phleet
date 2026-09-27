@@ -50,6 +50,15 @@ public sealed class MessageSinkHolder : IMessageSink
     public Task SendHtmlTextAsync(long chatId, string htmlText, CancellationToken ct = default)
         => _inner.SendHtmlTextAsync(chatId, htmlText, ct);
 
+    public Task SendTextAsync(long chatId, string text, OutboundOrigin origin, CancellationToken ct = default)
+        => _inner.SendTextAsync(chatId, text, origin, ct);
+
+    public Task SendHtmlTextAsync(long chatId, string htmlText, OutboundOrigin origin, CancellationToken ct = default)
+        => _inner.SendHtmlTextAsync(chatId, htmlText, origin, ct);
+
+    public Task SendPhotoAsync(long chatId, string filePath, string? caption, OutboundOrigin origin, CancellationToken ct = default)
+        => _inner.SendPhotoAsync(chatId, filePath, caption, origin, ct);
+
     /// <summary>
     /// Forwards to the attached sink, yielding <c>0</c> when none is attached — the same value a
     /// Telegram chat that has not been sent to yet already produces (#277 D-2a). This is the ONLY

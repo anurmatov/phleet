@@ -4,6 +4,7 @@ using Fleet.Agent.Interfaces;
 using Fleet.Conversations.Contracts;
 using Fleet.Agent.Services;
 using Fleet.Agent.Services.HostedProviders;
+using Fleet.Journal.Client;
 using Fleet.Shared;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -138,6 +139,11 @@ public static class AgentHostRegistration
 
         if (DescribeClaudeLocalModelFault(agent, fileExists ?? File.Exists) is { } localFault)
             Fail(localFault);
+
+        // Registered only with a token, so this runs only when one is set. The fault names the key,
+        // never the value.
+        if (services.GetService<IOptions<JournalOptions>>()?.Value.DescribeFault() is { } journalFault)
+            Fail(journalFault);
 
         if (agent.Provider != "codex")
             return;
@@ -332,9 +338,51 @@ public static class AgentHostRegistration
         services.AddHostedService<OrchestratorHeartbeatService>();
 
         AddConversationSouthSeam(services, configuration);
+        AddJournal(services, configuration);
 
         return services;
     }
+
+    /// <summary>
+    /// The conversation journal publisher (#377), registered only when <c>Journal:IngestToken</c>
+    /// is set.
+    /// </summary>
+    /// <remarks>
+    /// Absent, <b>nothing</b> is registered — no options, no spool, no capture, no HTTP client, no
+    /// hosted service — so the transport and heartbeat receive null and behave byte-identically
+    /// (<c>JournalRegistrationTests</c>). Present but malformed fails startup through
+    /// <see cref="ValidateStartupConfiguration"/>, which is where the process reliably exits 1.
+    /// </remarks>
+    internal static void AddJournal(IServiceCollection services, IConfiguration configuration)
+    {
+        var section = configuration.GetSection(JournalOptions.Section);
+        if (string.IsNullOrWhiteSpace(section[nameof(JournalOptions.IngestToken)]))
+            return;
+
+        services.Configure<JournalOptions>(section);
+        services.AddSingleton<JournalCounters>();
+        services.AddSingleton(sp => new JournalSpool(Path.Combine(
+            sp.GetRequiredService<IOptions<AgentOptions>>().Value.WorkDir, ".fleet", "journal-spool")));
+        services.AddSingleton<JournalCapture>();
+
+        services.AddHttpClient(JournalHttpClientName)
+            // A recreated Comms container comes back on a new address; recycle pooled connections so
+            // the drainer resolves the name again instead of holding a dead one.
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(2) });
+        services.AddSingleton(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<JournalOptions>>().Value;
+            var http = sp.GetRequiredService<IHttpClientFactory>().CreateClient(JournalHttpClientName);
+            http.BaseAddress = new Uri(options.BaseUrl);
+            return new JournalHttpClient(http, options.IngestToken!);
+        });
+
+        // AddSingleton + factory-AddHostedService: the heartbeat injects the concrete drainer.
+        services.AddSingleton<JournalDrainer>();
+        services.AddHostedService(sp => sp.GetRequiredService<JournalDrainer>());
+    }
+
+    internal const string JournalHttpClientName = "journal";
 
     /// <summary>
     /// The agent half of the durable conversation seam (#303), registered only when it is

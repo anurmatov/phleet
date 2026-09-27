@@ -125,6 +125,27 @@ public sealed class ContractsDependencyTests
         }
     }
 
+    /// <summary>
+    /// The journal publisher the agent now references (#377) must not become the back door: it
+    /// references the contracts only and carries no driver, ORM or store package.
+    /// </summary>
+    [Fact]
+    public void The_journal_client_references_only_the_contracts()
+    {
+        var project = LoadProject(Path.Combine("src", "Fleet.Journal.Client", "Fleet.Journal.Client.csproj"));
+
+        Assert.Equal(["Fleet.Conversations.Contracts"], ProjectReferences(project).ToArray());
+
+        foreach (var package in PackageReferences(project))
+        {
+            foreach (var forbidden in DatabaseAssemblies.Concat(OrmAssemblies))
+                Assert.False(
+                    package.StartsWith(forbidden, StringComparison.OrdinalIgnoreCase),
+                    $"Fleet.Journal.Client references '{package}'. The agent reaches the journal only "
+                    + "through the ingest listener.");
+        }
+    }
+
     private static readonly string[] DatabaseAssemblies =
         ["MySqlConnector", "MySql.Data", "Npgsql", "Microsoft.Data.Sqlite", "System.Data.SqlClient"];
 

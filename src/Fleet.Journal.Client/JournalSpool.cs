@@ -88,6 +88,17 @@ public sealed class JournalSpool
 
     /// <summary>The byte limit (records plus media).</summary>
     internal long MaxBytes { get; init; } = JournalOptions.MaxSpoolBytes;
+
+    /// <summary>
+    /// Lets a test fail every write to one record's pending file, as a full or broken disk would.
+    /// Returns the exception to throw, or null to write normally.
+    /// </summary>
+    internal Func<string, Exception?>? WriteFaultForTesting { get; set; }
+
+    private void ThrowIfFaulted(string id)
+    {
+        if (WriteFaultForTesting?.Invoke(id) is { } fault) throw fault;
+    }
     public string PendingDir => Path.Combine(Root, "pending");
     public string MediaDir => Path.Combine(Root, "media");
     public string DeadDir => Path.Combine(Root, "dead");
@@ -203,9 +214,10 @@ public sealed class JournalSpool
         return entries;
     }
 
-    /// <summary>Rewrites a pending record's bookkeeping or record, atomically.</summary>
+    /// <summary>Rewrites a pending record's bookkeeping or record, atomically. Throws when it cannot.</summary>
     public void Save(SpoolEntry entry)
     {
+        ThrowIfFaulted(entry.Id);
         var path = PendingPath(entry.Id);
         var before = SafeLength(path);
         var bytes = Serialize(entry);
@@ -213,12 +225,20 @@ public sealed class JournalSpool
         lock (_gate) _bytes += bytes.Length - before;
     }
 
-    /// <summary>Delivered or dropped: the record and its media go.</summary>
+    /// <summary>
+    /// Delivered or dropped: the record and its media go. Throws when the pending file is still
+    /// there afterwards, so the caller does not treat an undeleted record as gone.
+    /// </summary>
     public void Delete(SpoolEntry entry)
     {
+        ThrowIfFaulted(entry.Id);
         var path = PendingPath(entry.Id);
         var freed = SafeLength(path);
-        if (!TryDelete(path)) return;
+        if (!TryDelete(path))
+        {
+            if (File.Exists(path)) throw new IOException("journal spool: a pending record could not be deleted");
+            return;
+        }
 
         foreach (var ordinal in entry.MediaOrdinals)
         {
@@ -240,11 +260,16 @@ public sealed class JournalSpool
     /// </summary>
     public void MoveToDead(SpoolEntry entry, string reason)
     {
+        ThrowIfFaulted(entry.Id);
         entry.LastError = reason;
         var from = PendingPath(entry.Id);
         var freed = SafeLength(from);
         WriteAtomically(Path.Combine(DeadDir, entry.Id + ".json"), Serialize(entry));
-        if (!TryDelete(from)) return;
+        if (!TryDelete(from))
+        {
+            if (File.Exists(from)) throw new IOException("journal spool: a pending record could not be moved to dead/");
+            return;
+        }
 
         lock (_gate)
         {

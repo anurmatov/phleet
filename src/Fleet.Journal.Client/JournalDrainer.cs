@@ -23,6 +23,11 @@ public sealed record JournalHeartbeatSnapshot(
 /// or 5xx failures pause the drainer 30 s, so an outage is not hammered.
 /// </para>
 /// <para>
+/// A pass that fails for one record — the spool cannot record its outcome, or anything else
+/// throws — delays only that record: its attempt and backoff are kept in memory, and the next pass
+/// moves on to the next due record.
+/// </para>
+/// <para>
 /// ⚠️ Logs carry record ids, statuses and reason codes only — never text, never the token.
 /// </para>
 /// </remarks>
@@ -48,6 +53,10 @@ public sealed class JournalDrainer : BackgroundService
 
     private readonly Dictionary<string, DateTimeOffset> _schedule = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTimeOffset> _policyWarnedAt = new(StringComparer.Ordinal);
+
+    // Attempts the spool could not record. Applied over what is on disk, so a record whose file
+    // cannot be written still backs off instead of looking new on every pass.
+    private readonly Dictionary<string, (int Attempts, DateTimeOffset? FirstAttemptAt)> _unsaved = new(StringComparer.Ordinal);
     private DateTimeOffset _pausedUntil = DateTimeOffset.MinValue;
     private DateTimeOffset _nextDeadSweep = DateTimeOffset.MinValue;
     private int _consecutiveFailures;
@@ -148,17 +157,54 @@ public sealed class JournalDrainer : BackgroundService
         if (entry is null)
         {
             _schedule.Remove(due);
+            _unsaved.Remove(due);
             return TimeSpan.Zero;
+        }
+
+        if (_unsaved.TryGetValue(entry.Id, out var kept) && kept.Attempts > entry.Attempts)
+        {
+            entry.Attempts = kept.Attempts;
+            entry.FirstAttemptAt ??= kept.FirstAttemptAt;
         }
 
         entry.FirstAttemptAt ??= now;
         entry.Attempts++;
 
-        var body = JsonSerializer.SerializeToUtf8Bytes(entry.Record, JournalRecordJson.StoredOptions);
-        var result = await _client.PostAsync(body, ct);
-        Handle(entry, result, _time.GetUtcNow());
+        try
+        {
+            var body = JsonSerializer.SerializeToUtf8Bytes(entry.Record, JournalRecordJson.StoredOptions);
+            var result = await _client.PostAsync(body, ct);
+            Handle(entry, result, _time.GetUtcNow());
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception e)
+        {
+            Defer(entry, e);
+        }
+
         return TimeSpan.Zero;
     }
+
+    /// <summary>
+    /// This record's pass failed. Keep its attempt and backoff in memory so it waits its turn, and
+    /// let the next pass try the next due record.
+    /// </summary>
+    private void Defer(SpoolEntry entry, Exception e)
+    {
+        var next = _time.GetUtcNow() + Backoff(entry.Attempts);
+        _unsaved[entry.Id] = (entry.Attempts, entry.FirstAttemptAt);
+        _schedule[entry.Id] = next;
+
+        // The type only: an exception message could carry a path.
+        _logger.LogWarning("journal record {Id} could not be processed ({Error}); retrying it after backoff, other records continue",
+            entry.Id, e.GetType().Name);
+    }
+
+    /// <summary>When the drainer will next try <paramref name="id"/>, as it currently believes. For tests.</summary>
+    internal DateTimeOffset? ScheduledFor(string id) => _schedule.TryGetValue(id, out var at) ? at : null;
 
     private void RefreshSchedule()
     {
@@ -167,6 +213,8 @@ public sealed class JournalDrainer : BackgroundService
 
         foreach (var gone in _schedule.Keys.Where(id => !present.Contains(id)).ToList())
             _schedule.Remove(gone);
+        foreach (var gone in _unsaved.Keys.Where(id => !present.Contains(id)).ToList())
+            _unsaved.Remove(gone);
 
         foreach (var id in ids)
         {
@@ -258,6 +306,15 @@ public sealed class JournalDrainer : BackgroundService
             case 0 or >= 500:
                 entry.LastError = status == 0 ? result.Error ?? "transport" : $"http_{status}";
 
+                // Counted before the spool write, so a record whose file cannot be written still
+                // counts toward the outage pause.
+                if (++_consecutiveFailures >= OutageThreshold)
+                {
+                    _consecutiveFailures = 0;
+                    _pausedUntil = now + OutagePause;
+                    _logger.LogWarning("journal listener failing ({Error}); drainer paused 30 s", entry.LastError);
+                }
+
                 if (entry.Attempts >= PersistentAttempts && now - entry.FirstAttemptAt >= PersistentAge)
                 {
                     Dead(entry, "persistent_5xx");
@@ -266,13 +323,6 @@ public sealed class JournalDrainer : BackgroundService
                 {
                     entry.NextAttemptAt = now + Backoff(entry.Attempts);
                     Save(entry);
-                }
-
-                if (++_consecutiveFailures >= OutageThreshold)
-                {
-                    _consecutiveFailures = 0;
-                    _pausedUntil = now + OutagePause;
-                    _logger.LogWarning("journal listener failing ({Error}); drainer paused 30 s", entry.LastError);
                 }
                 return;
 
@@ -330,7 +380,12 @@ public sealed class JournalDrainer : BackgroundService
     {
         _spool.Save(entry);
         _schedule[entry.Id] = entry.NextAttemptAt;
+        _unsaved.Remove(entry.Id);
     }
 
-    private void Remove(SpoolEntry entry) => _schedule.Remove(entry.Id);
+    private void Remove(SpoolEntry entry)
+    {
+        _schedule.Remove(entry.Id);
+        _unsaved.Remove(entry.Id);
+    }
 }

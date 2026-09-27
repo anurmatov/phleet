@@ -411,6 +411,75 @@ public sealed class JournalDrainerTests
         }
     }
 
+    /// <summary>
+    /// A record whose outcome the spool cannot write only delays itself: its attempt and backoff
+    /// are kept in memory, the pass does not throw, and the next record is delivered.
+    /// </summary>
+    [Fact]
+    public async Task A_record_the_spool_cannot_update_delays_only_itself()
+    {
+        using var rig = new DrainerRig();
+        var a = rig.Write(Records.Record(1));
+        rig.Time.Advance(TimeSpan.FromMilliseconds(5));
+        var b = rig.Write(Records.Record(2));
+        Assert.True(string.CompareOrdinal(a, b) < 0, "A must be the older record");
+
+        rig.Spool.WriteFaultForTesting = id => id == a ? new IOException("disk full") : null;
+        rig.Listener.Respond = body => Records.MessageId(body) == 1 ? FakeListener.Status(503) : FakeListener.Status(201, "{\"result\":\"created\"}");
+
+        // Pass 1: A fails and its backoff cannot be saved. The pass must not throw.
+        await rig.Drainer.RunOnceAsync(default);
+        Assert.Equal(rig.Time.GetUtcNow() + TimeSpan.FromSeconds(1), rig.Drainer.ScheduledFor(a));
+        Assert.Equal(0, rig.Spool.Load(a)!.Attempts); // nothing reached the disk
+
+        // Pass 2: A is not due, so B goes out.
+        await rig.Drainer.RunOnceAsync(default);
+        Assert.Equal([a], rig.Spool.PendingIds());
+        Assert.Equal(1, rig.Counters.Get("journal_delivered"));
+        Assert.Equal([1L, 2L], rig.Listener.Posted.Select(Records.MessageId));
+
+        // The in-memory attempt count still drives the backoff: the second failure waits 2 s.
+        rig.Time.Advance(TimeSpan.FromSeconds(1));
+        await rig.Drainer.RunOnceAsync(default);
+        Assert.Equal(3, rig.Listener.Posted.Count);
+        Assert.Equal(rig.Time.GetUtcNow() + TimeSpan.FromSeconds(2), rig.Drainer.ScheduledFor(a));
+
+        // Once the disk recovers, A's real attempt count is written.
+        rig.Spool.WriteFaultForTesting = null;
+        rig.Time.Advance(TimeSpan.FromSeconds(2));
+        await rig.Drainer.RunOnceAsync(default);
+        Assert.Equal(3, rig.Spool.Load(a)!.Attempts);
+        Assert.Contains(rig.Log.Lines, l => l.Message.Contains("could not be processed (IOException)", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A delivered record that cannot be deleted is retried later (the listener answers duplicate)
+    /// rather than resent in a tight loop ahead of everything else.
+    /// </summary>
+    [Fact]
+    public async Task A_delivered_record_that_cannot_be_deleted_does_not_block_the_next()
+    {
+        using var rig = new DrainerRig();
+        var a = rig.Write(Records.Record(1));
+        rig.Time.Advance(TimeSpan.FromMilliseconds(5));
+        rig.Write(Records.Record(2));
+        rig.Spool.WriteFaultForTesting = id => id == a ? new IOException("read-only") : null;
+
+        await rig.Drainer.RunOnceAsync(default);
+        await rig.Drainer.RunOnceAsync(default);
+
+        Assert.Equal([a], rig.Spool.PendingIds());
+        Assert.Equal(1, rig.Counters.Get("journal_delivered")); // B only: A is not counted until it is gone
+        Assert.Equal([1L, 2L], rig.Listener.Posted.Select(Records.MessageId));
+
+        rig.Spool.WriteFaultForTesting = null;
+        rig.Time.Advance(TimeSpan.FromSeconds(1));
+        await rig.Drainer.RunOnceAsync(default);
+
+        Assert.Empty(rig.Spool.PendingIds());
+        Assert.Equal(2, rig.Counters.Get("journal_delivered"));
+    }
+
     [Fact]
     public async Task A_restart_resumes_pending_and_delivers_once()
     {

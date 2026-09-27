@@ -372,7 +372,8 @@ Unload the local model on the server with `keep_alive: 0` if nothing else uses i
    Make sure `.env` has a value for `CODEX_OSS_BASE_URL`, then reprovision.
 4. If you skip step 3, those agents fail provisioning with the old fault "AnthropicBaseUrl
    applies only to provider claude; clear it before changing provider." The failure is loud,
-   not silent.
+   not silent. The old orchestrator removes the running container before it hits that fault,
+   so a reprovision leaves the agent down until you do step 3 and reprovision again.
 
 Claude local agents are unaffected. After the revert, Codex agents stored with effort `none` or
 `minimal` again send no effort.

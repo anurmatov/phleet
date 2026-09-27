@@ -334,7 +334,7 @@ public class ContainerProvisioningServiceTests
     {
         var agent = MinimalAgent("alocal", "claude");
         agent.Model = "qwen3.8:27b-agent";
-        agent.AnthropicBaseUrl = baseUrl;
+        agent.LocalBaseUrl = baseUrl;
         return agent;
     }
 
@@ -472,7 +472,8 @@ public class ContainerProvisioningServiceTests
 
     [Theory]
     // V1 — a hand-edited row: the field left behind on a provider change.
-    [InlineData("codex", "qwen3.8:27b-agent", LocalUrl, null, "applies only to provider claude")]
+    [InlineData("codex", "qwen3.8:27b-agent", LocalUrl, null, "must be ollama/<tag> or lmstudio/<tag>")]
+    [InlineData("gemini", "qwen3.8:27b-agent", LocalUrl, null, "Local model runs on claude or codex")]
     // V2, V3
     [InlineData("claude", "qwen3.8:27b-agent", "http://inference-host:11434/v1", null, "has a path")]
     [InlineData("claude", "qwen3.8:27b-agent", "  ", null, "has surrounding whitespace")]
@@ -488,7 +489,7 @@ public class ContainerProvisioningServiceTests
     {
         var agent = MinimalAgent("alocal", provider);
         agent.Model = model;
-        agent.AnthropicBaseUrl = baseUrl;
+        agent.LocalBaseUrl = baseUrl;
         agent.Effort = effort;
 
         var ex = Assert.Throws<InvalidOperationException>(

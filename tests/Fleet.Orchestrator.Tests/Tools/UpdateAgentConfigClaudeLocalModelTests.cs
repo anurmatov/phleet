@@ -43,7 +43,7 @@ public class UpdateAgentConfigClaudeLocalModelTests
         db.Agents.Add(new Agent
         {
             Name = "agent1", DisplayName = "agent1", Role = "test", Model = model, Provider = provider,
-            MemoryLimitMb = 1024, ContainerName = "agent1", AnthropicBaseUrl = baseUrl, Effort = effort,
+            MemoryLimitMb = 1024, ContainerName = "agent1", LocalBaseUrl = baseUrl, Effort = effort,
         });
         db.SaveChanges();
     }
@@ -63,9 +63,9 @@ public class UpdateAgentConfigClaudeLocalModelTests
             anthropic_base_url: "http://host.docker.internal:11434/", model: LocalTag, effort: "");
 
         Assert.DoesNotContain("Invalid", result);
-        Assert.Contains("anthropic_base_url: (none) → http://host.docker.internal:11434", result);
+        Assert.Contains("local_base_url: (none) → http://host.docker.internal:11434", result);
         var stored = Stored();
-        Assert.Equal("http://host.docker.internal:11434", stored.AnthropicBaseUrl);
+        Assert.Equal("http://host.docker.internal:11434", stored.LocalBaseUrl);
         Assert.Equal(LocalTag, stored.Model);
     }
 
@@ -77,7 +77,7 @@ public class UpdateAgentConfigClaudeLocalModelTests
         await Tool().UpdateAgentConfigAsync("agent1",
             anthropic_base_url: "HTTP://Host.Docker.Internal:11434", model: LocalTag);
 
-        Assert.Equal("http://host.docker.internal:11434", Stored().AnthropicBaseUrl);
+        Assert.Equal("http://host.docker.internal:11434", Stored().LocalBaseUrl);
     }
 
     [Theory]
@@ -97,28 +97,28 @@ public class UpdateAgentConfigClaudeLocalModelTests
 
         var result = await Tool().UpdateAgentConfigAsync("agent1", anthropic_base_url: baseUrl, model: model);
 
-        Assert.StartsWith("Invalid Claude local model configuration", result);
+        Assert.StartsWith("Invalid local model configuration", result);
         Assert.Contains(expected, result);
         var stored = Stored();
-        Assert.Null(stored.AnthropicBaseUrl);
+        Assert.Null(stored.LocalBaseUrl);
         Assert.Equal("claude-sonnet-5", stored.Model);
     }
 
     [Fact]
-    public async Task V1_ProviderChangedWithoutClearing_RejectedRowUnchanged()
+    public async Task C1_SwitchedToCodexWithACloudModelWhileLocal_RejectedRowUnchanged()
     {
         Seed(model: LocalTag, baseUrl: "http://host.docker.internal:11434");
 
         var result = await Tool().UpdateAgentConfigAsync("agent1", provider: "codex", model: "gpt-5");
 
-        Assert.Contains("applies only to provider claude", result);
+        Assert.Contains("must be ollama/<tag> or lmstudio/<tag>", result);
         var stored = Stored();
         Assert.Equal("claude", stored.Provider);
-        Assert.Equal("http://host.docker.internal:11434", stored.AnthropicBaseUrl);
+        Assert.Equal("http://host.docker.internal:11434", stored.LocalBaseUrl);
     }
 
     [Fact]
-    public async Task V1_ProviderChangedAndClearedInOneRequest_Accepted()
+    public async Task ProviderChangedAndClearedInOneRequest_Accepted()
     {
         Seed(model: LocalTag, baseUrl: "http://host.docker.internal:11434");
 
@@ -128,7 +128,7 @@ public class UpdateAgentConfigClaudeLocalModelTests
         Assert.DoesNotContain("Invalid", result);
         var stored = Stored();
         Assert.Equal("codex", stored.Provider);
-        Assert.Null(stored.AnthropicBaseUrl);
+        Assert.Null(stored.LocalBaseUrl);
     }
 
     [Fact]
@@ -185,7 +185,7 @@ public class UpdateAgentConfigClaudeLocalModelTests
 
         Assert.DoesNotContain("Invalid", result);
         Assert.Equal("off", Stored().Effort);
-        Assert.Equal("http://host.docker.internal:11434", Stored().AnthropicBaseUrl);
+        Assert.Equal("http://host.docker.internal:11434", Stored().LocalBaseUrl);
     }
 
     [Fact]
@@ -211,7 +211,7 @@ public class UpdateAgentConfigClaudeLocalModelTests
 
         Assert.Contains("must be empty (model default, sent as xhigh), off, low, medium or xhigh", rejected);
         Assert.DoesNotContain("Invalid", accepted);
-        Assert.Equal("http://host.docker.internal:11434", Stored().AnthropicBaseUrl);
+        Assert.Equal("http://host.docker.internal:11434", Stored().LocalBaseUrl);
         Assert.Equal("medium", Stored().Effort);
     }
 
@@ -222,8 +222,8 @@ public class UpdateAgentConfigClaudeLocalModelTests
 
         var result = await Tool().UpdateAgentConfigAsync("agent1", anthropic_base_url: "", model: "claude-sonnet-5");
 
-        Assert.Contains("anthropic_base_url: http://host.docker.internal:11434 → (none)", result);
-        Assert.Null(Stored().AnthropicBaseUrl);
+        Assert.Contains("local_base_url: http://host.docker.internal:11434 → (none)", result);
+        Assert.Null(Stored().LocalBaseUrl);
     }
 
     [Fact]
@@ -244,7 +244,7 @@ public class UpdateAgentConfigClaudeLocalModelTests
         var result = await Tool().UpdateAgentConfigAsync("agent1", effort: "max", model: "opus");
 
         Assert.DoesNotContain("Invalid", result);
-        Assert.DoesNotContain("anthropic_base_url", result);
+        Assert.DoesNotContain("local_base_url", result);
         Assert.Equal("max", Stored().Effort);
     }
 }

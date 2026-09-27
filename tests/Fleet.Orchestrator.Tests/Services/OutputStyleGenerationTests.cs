@@ -182,7 +182,7 @@ public class OutputStyleGenerationTests
     {
         var agent = AgentWith("claude", outputStyle);
         agent.Model = "qwen3.8:27b-agent";
-        agent.AnthropicBaseUrl = LocalUrl;
+        agent.LocalBaseUrl = LocalUrl;
         return agent;
     }
 

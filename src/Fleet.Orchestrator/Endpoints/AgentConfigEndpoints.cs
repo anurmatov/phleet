@@ -75,7 +75,9 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         agent.Provider,
         agent.CodexSandboxMode,
         agent.OutputStyle,
-        agent.AnthropicBaseUrl,
+        // #382: one stored value under both names; anthropicBaseUrl is the pre-#382 alias.
+        agent.LocalBaseUrl,
+        AnthropicBaseUrl = agent.LocalBaseUrl,
         agent.ContextWindow,
         agent.CanReceiveChatRequests,
         agent.RequestReceivedMessage,
@@ -182,7 +184,12 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
             return Results.BadRequest(new { error = $"Output style '{styleName}' does not exist." });
         agent.OutputStyle = styleName.Length == 0 ? null : styleName;
     }
-    if (body.AnthropicBaseUrl is not null) agent.AnthropicBaseUrl = body.AnthropicBaseUrl == "" ? null : body.AnthropicBaseUrl;
+    // #382 A1: localBaseUrl and its alias anthropicBaseUrl resolve to one value, or a 400 naming both.
+    var (baseUrlSent, baseUrl, baseUrlError) = AgentPatchHelpers.ResolveLocalBaseUrl(
+        body.LocalBaseUrl, body.AnthropicBaseUrl, "localBaseUrl", "anthropicBaseUrl");
+    if (baseUrlError is not null)
+        return Results.BadRequest(new { error = baseUrlError });
+    if (baseUrlSent) agent.LocalBaseUrl = baseUrl;
     if (body.ContextWindow is not null)
     {
         // #367: 0 clears; anything else must be in range — rejected, never clamped.
@@ -298,9 +305,9 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
             .ToList();
     }
 
-    // #340: the agent's resulting state, after every field in the request is applied. A 400 here
-    // returns before SaveChanges, so nothing from this request is persisted.
-    if (AgentPatchHelpers.FinalizeClaudeLocalModel(agent) is { } localModelFault)
+    // #340, #382: the agent's resulting state, after every field in the request is applied. A 400
+    // here returns before SaveChanges, so nothing from this request is persisted.
+    if (AgentPatchHelpers.FinalizeLocalModel(agent) is { } localModelFault)
         return Results.BadRequest(new { error = localModelFault });
 
     await db.SaveChangesAsync();
@@ -376,4 +383,5 @@ internal sealed record AgentConfigUpdateRequest(
     bool? MountDockerSock,
     string? OutputStyle,
     string? AnthropicBaseUrl,
-    int? ContextWindow);
+    int? ContextWindow,
+    string? LocalBaseUrl = null);

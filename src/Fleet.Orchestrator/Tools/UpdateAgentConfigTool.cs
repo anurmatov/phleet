@@ -35,20 +35,21 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         [Description("Outbound Telegram formatting mode: 0=PlainText (legacy dumb-split, no parse_mode), 1=LegacyHtml (Markdown→HTML via TelegramFormatter, ParseMode.Html), 2=Rich (same syntax emitted as sendRichMessage blocks, fallback LegacyHtml→PlainText per message). Omit to keep current.")] byte? formatting_mode = null,
         [Description("Suppress intermediate tool-use progress messages in Telegram — only post the final response. Use for agents serving non-technical users (e.g. family assistant). Omit to keep current.")] bool? suppress_tool_messages = null,
         [Description("Telegram send-only mode: skip polling and message handling, only send messages. Use when multiple agents share a bot token. Omit to keep current.")] bool? telegram_send_only = null,
-        [Description("Effort level. Claude cloud: low/medium/high/xhigh/max. Claude local (anthropic_base_url set): off/low/medium/xhigh, or empty = model default sent as xhigh. Codex: none..xhigh. Pass empty string to clear. Omit to keep current.")] string? effort = null,
+        [Description("Effort level. Claude cloud: low/medium/high/xhigh/max. Claude local (local_base_url set): off/low/medium/xhigh, or empty = model default sent as xhigh. Codex (cloud or local): none..xhigh. Pass empty string to clear. Omit to keep current.")] string? effort = null,
         [Description("JSON schema string for --json-schema flag (structured output). Pass empty string to clear. Omit to keep current.")] string? json_schema = null,
         [Description("JSON string for --agents flag (inline subagents). Pass empty string to clear. Omit to keep current.")] string? agents_json = null,
         [Description("Host port for the agent's HTTP API (used by orchestrator cancel proxy via 127.0.0.1:{host_port}). Pass 0 to clear. Omit to keep current.")] int? host_port = null,
         [Description("Enable Claude's built-in auto-memory. Set to false for agents using fleet-memory (disables CLAUDE_CODE_DISABLE_AUTO_MEMORY). Omit to keep current.")] bool? auto_memory_enabled = null,
         [Description("Journal this agent's human Telegram DMs and allowed groups in Comms. Requires FLEET_COMMS_JOURNAL_KEY and takes effect on reprovision. Omit to keep current.")] bool? journal_enabled = null,
-        [Description("LLM provider: claude or codex. Omit to keep current. A claude agent with anthropic_base_url set must have it cleared before changing provider.")] string? provider = null,
+        [Description("LLM provider: claude or codex. Omit to keep current. A local-model agent (local_base_url set) keeps its URL across claude <-> codex; send the matching model too (bare tag for claude, ollama/<tag> or lmstudio/<tag> for codex). Clear local_base_url before switching to gemini.")] string? provider = null,
         [Description("Codex sandbox mode (danger-full-access, workspace-write, read-only). Pass empty string to clear. Omit to keep current. Only applies to codex agents.")] string? codex_sandbox_mode = null,
         [Description("Enable access-request flow for unknown DMs (CanReceiveChatRequests). When true, unknown DMs are forwarded to the CTO agent (FLEET_CTO_AGENT) instead of being silently dropped. Omit to keep current.")] bool? can_receive_chat_requests = null,
         [Description("Message sent to requesting user when their access request is queued. Pass empty string to use the built-in default. Max 500 characters. Omit to keep current.")] string? request_received_message = null,
         [Description("Mount /var/run/docker.sock into the container (grants host-root; leave off unless agent manages containers). Omit to keep current.")] bool? mount_docker_sock = null,
         [Description("Name of an output_styles row this agent runs with — its chat tone and register. Pass empty string to clear (no style). Omit to keep current. Takes effect on the next reprovision.")] string? output_style = null,
-        [Description("Claude agents only: origin of a local Anthropic-compatible server (e.g. Ollama), e.g. http://<server-address>:11434 — origin only, never …/v1. Set, the agent runs Claude Code against that server with no Claude credential mounted; model must be the server's model tag and effort off/low/medium/xhigh (empty = model default, sent as xhigh). Stored canonical. Pass empty string to clear (back to Anthropic). Omit to keep current. Takes effect on the next reprovision.")] string? anthropic_base_url = null,
-        [Description("Claude local-model agents only (anthropic_base_url set): the server's context size in tokens (4096-1048576), e.g. its --ctx. Passed to Claude CLI as CLAUDE_CODE_MAX_CONTEXT_TOKENS so it compacts before the server rejects the turn; ignored for cloud agents. Pass 0 to clear. Omit to keep current. Takes effect on the next reprovision.")] int? context_window = null)
+        [Description("Local model (#382), claude or codex agents: origin of the local inference server (e.g. Ollama), e.g. http://<server-address>:11434 — origin only, never …/v1; Fleet adds /v1/messages for claude and /v1 for codex. Set, the agent runs against that server; claude needs the server's bare model tag and effort off/low/medium/xhigh (empty = model default, sent as xhigh), codex needs model ollama/<tag> or lmstudio/<tag>. Stored canonical. Pass empty string to clear (back to the cloud). Omit to keep current. Takes effect on the next reprovision.")] string? local_base_url = null,
+        [Description("Deprecated alias of local_base_url. If both are sent they must agree.")] string? anthropic_base_url = null,
+        [Description("Local-model agents only (local_base_url set, claude or codex): the server's context size in tokens (4096-1048576), e.g. its num_ctx or --ctx. Claude gets it as CLAUDE_CODE_MAX_CONTEXT_TOKENS and codex as model_context_window, so each compacts before the server rejects the turn; ignored for cloud agents. Pass 0 to clear. Omit to keep current. Takes effect on the next reprovision.")] int? context_window = null)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
@@ -60,6 +61,12 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
 
         if (agent is null)
             return $"Agent '{agent_name}' not found in DB.";
+
+        // #382 A1: resolved first, so the effort check below sees the resulting local mode.
+        var (baseUrlSent, baseUrl, baseUrlError) = AgentPatchHelpers.ResolveLocalBaseUrl(
+            local_base_url, anthropic_base_url, "local_base_url", "anthropic_base_url");
+        if (baseUrlError is not null)
+            return baseUrlError;
 
         var changes = new StringBuilder();
 
@@ -176,9 +183,7 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
             // mode (resolved provider + resolved base URL) — the shared V7 rule at the finalize
             // gate decides instead, so `off` is not rejected by the cloud list first.
             var resultingProvider = provider ?? agent.Provider ?? "claude";
-            var resultingBaseUrl = anthropic_base_url is not null
-                ? (anthropic_base_url == "" ? null : anthropic_base_url)
-                : agent.AnthropicBaseUrl;
+            var resultingBaseUrl = baseUrlSent ? baseUrl : agent.LocalBaseUrl;
             var resultingIsLocal = ClaudeLocalModel.IsEnabled(resultingProvider, resultingBaseUrl);
 
             if (effort != "" && !resultingIsLocal)
@@ -316,17 +321,17 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
             agent.ContextWindow = context_window == 0 ? null : context_window;
         }
 
-        var previousBaseUrl = agent.AnthropicBaseUrl;
-        if (anthropic_base_url is not null)
-            agent.AnthropicBaseUrl = anthropic_base_url == "" ? null : anthropic_base_url;
+        var previousBaseUrl = agent.LocalBaseUrl;
+        if (baseUrlSent)
+            agent.LocalBaseUrl = baseUrl;
 
-        // #340: the agent's resulting state, after every field above is applied. Returning here
-        // skips SaveChanges, so nothing from this request is persisted.
-        if (AgentPatchHelpers.FinalizeClaudeLocalModel(agent) is { } localFault)
-            return $"Invalid Claude local model configuration: {localFault}";
+        // #340, #382: the agent's resulting state, after every field above is applied. Returning
+        // here skips SaveChanges, so nothing from this request is persisted.
+        if (AgentPatchHelpers.FinalizeLocalModel(agent) is { } localFault)
+            return $"Invalid local model configuration: {localFault}";
 
-        if (agent.AnthropicBaseUrl != previousBaseUrl)
-            changes.AppendLine($"- anthropic_base_url: {previousBaseUrl ?? "(none)"} → {agent.AnthropicBaseUrl ?? "(none)"}");
+        if (agent.LocalBaseUrl != previousBaseUrl)
+            changes.AppendLine($"- local_base_url: {previousBaseUrl ?? "(none)"} → {agent.LocalBaseUrl ?? "(none)"}");
 
         if (changes.Length == 0)
             return $"No changes specified for agent '{agent_name}'.";

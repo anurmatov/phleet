@@ -41,9 +41,19 @@ public sealed class GetAgentConfigTool(IServiceScopeFactory scopeFactory)
         sb.AppendLine($"- Enabled: {agent.IsEnabled}");
         sb.AppendLine($"- Telegram send-only: {agent.TelegramSendOnly}");
         sb.AppendLine($"- Warmup timeout: {agent.WarmupTimeoutSeconds}s");
+        // #382: a legacy codex local agent reaches its server through the Env Ref, not the URL.
+        var localOn = LocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl);
+        var legacyCodexLocal = !localOn
+            && string.Equals(agent.Provider, "codex", StringComparison.Ordinal)
+            && CodexLocalModelProviders.Split(agent.Model).Provider is not null
+            && agent.EnvRefs.Any(e => e.EnvKeyName == "CODEX_OSS_BASE_URL");
+        sb.AppendLine("- Local model: " + (localOn ? $"on — server {agent.LocalBaseUrl}"
+            : legacyCodexLocal ? "on — server from CODEX_OSS_BASE_URL Env Ref (legacy)"
+            : "off"));
         sb.AppendLine($"- Context window: {(agent.ContextWindow is int window ? $"{window} tokens" : "(none)")}"
-            + (agent.ContextWindow is not null && !ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl)
-                ? " (ignored: not a local-model claude agent)" : ""));
+            + (agent.ContextWindow is null || localOn ? ""
+                : legacyCodexLocal ? " (ignored: legacy Env Ref; set the local server URL)"
+                : " (ignored: local model off)"));
         sb.AppendLine($"- Auto memory: {agent.AutoMemoryEnabled}");
         sb.AppendLine($"- Journal enabled: {agent.JournalEnabled}");
         sb.AppendLine($"- Mount Docker socket: {agent.MountDockerSock}");

@@ -6,8 +6,8 @@ namespace Fleet.Orchestrator.Tests.Helpers;
 
 /// <summary>
 /// #340 D1 point 1 on the <c>PUT /api/agents/{name}/config</c> path. The handler maps
-/// <c>AnthropicBaseUrl</c> (<c>""</c> clears), applies the rest of the request, then calls
-/// <see cref="AgentPatchHelpers.FinalizeClaudeLocalModel"/> and returns 400 without saving on a
+/// <c>LocalBaseUrl</c> (<c>""</c> clears), applies the rest of the request, then calls
+/// <see cref="AgentPatchHelpers.FinalizeLocalModel"/> and returns 400 without saving on a
 /// fault. These tests run that sequence against a store and read back through a fresh context.
 /// </summary>
 /// <remarks>
@@ -29,7 +29,7 @@ public class AgentPatchHelpersClaudeLocalModelTests
         db.Agents.Add(new Agent
         {
             Name = "agent1", DisplayName = "agent1", Role = "test", Model = model, Provider = "claude",
-            MemoryLimitMb = 1024, ContainerName = "agent1", AnthropicBaseUrl = baseUrl,
+            MemoryLimitMb = 1024, ContainerName = "agent1", LocalBaseUrl = baseUrl,
         });
         db.SaveChanges();
     }
@@ -43,9 +43,9 @@ public class AgentPatchHelpersClaudeLocalModelTests
         if (model is not null) agent.Model = model;
         if (effort is not null) agent.Effort = effort == "" ? null : effort;
         if (provider is not null) agent.Provider = provider;
-        if (anthropicBaseUrl is not null) agent.AnthropicBaseUrl = anthropicBaseUrl == "" ? null : anthropicBaseUrl;
+        if (anthropicBaseUrl is not null) agent.LocalBaseUrl = anthropicBaseUrl == "" ? null : anthropicBaseUrl;
 
-        if (AgentPatchHelpers.FinalizeClaudeLocalModel(agent) is { } fault)
+        if (AgentPatchHelpers.FinalizeLocalModel(agent) is { } fault)
             return fault;
 
         db.SaveChanges();
@@ -65,7 +65,7 @@ public class AgentPatchHelpersClaudeLocalModelTests
 
         Assert.Null(Put("http://host.docker.internal:11434/", model: LocalTag));
 
-        Assert.Equal("http://host.docker.internal:11434", Stored().AnthropicBaseUrl);
+        Assert.Equal("http://host.docker.internal:11434", Stored().LocalBaseUrl);
     }
 
     [Theory]
@@ -78,7 +78,7 @@ public class AgentPatchHelpersClaudeLocalModelTests
     [InlineData("http://host.docker.internal:11434", "zai/glm-5.3", "", null, "selects the codex path")]
     [InlineData("http://host.docker.internal:11434", LocalTag, "high", null, "must be empty (model default, sent as xhigh), off, low, medium or xhigh")]
     [InlineData("http://host.docker.internal:11434", LocalTag, "max", null, "must be empty (model default, sent as xhigh), off, low, medium or xhigh")]
-    [InlineData("http://host.docker.internal:11434", LocalTag, "", "gemini", "applies only to provider claude")]
+    [InlineData("http://host.docker.internal:11434", LocalTag, "", "gemini", "Local model runs on claude or codex")]
     public void Rejected_RowUnchanged(string baseUrl, string model, string effort, string? provider, string expected)
     {
         Seed();
@@ -88,7 +88,7 @@ public class AgentPatchHelpersClaudeLocalModelTests
         Assert.NotNull(fault);
         Assert.Contains(expected, fault);
         var stored = Stored();
-        Assert.Null(stored.AnthropicBaseUrl);
+        Assert.Null(stored.LocalBaseUrl);
         Assert.Equal("claude-sonnet-5", stored.Model);
         Assert.Equal("claude", stored.Provider);
         Assert.Null(stored.Effort);
@@ -135,7 +135,7 @@ public class AgentPatchHelpersClaudeLocalModelTests
 
         Assert.Null(Put("", model: "claude-sonnet-5"));
 
-        Assert.Null(Stored().AnthropicBaseUrl);
+        Assert.Null(Stored().LocalBaseUrl);
     }
 
     [Fact]
@@ -145,6 +145,6 @@ public class AgentPatchHelpersClaudeLocalModelTests
 
         Assert.Null(Put(anthropicBaseUrl: null));
 
-        Assert.Equal("http://host.docker.internal:11434", Stored().AnthropicBaseUrl);
+        Assert.Equal("http://host.docker.internal:11434", Stored().LocalBaseUrl);
     }
 }

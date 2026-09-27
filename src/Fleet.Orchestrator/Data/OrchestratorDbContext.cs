@@ -65,7 +65,8 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.Property(x => x.CodexSandboxMode).HasMaxLength(30);
             // Not a relationship on purpose — see Agent.OutputStyle.
             e.Property(x => x.OutputStyle).HasMaxLength(100);
-            e.Property(x => x.AnthropicBaseUrl).HasMaxLength(500);
+            // #382: property renamed, column kept, so there is no migration and rollback reads it.
+            e.Property(x => x.LocalBaseUrl).HasColumnName("AnthropicBaseUrl").HasMaxLength(500);
             e.Property(x => x.AutoMemoryEnabled).HasDefaultValue(true);
             e.Property(x => x.JournalEnabled).HasColumnName("journal_enabled").HasDefaultValue(false);
             e.Property(x => x.CanReceiveChatRequests).HasDefaultValue(false);

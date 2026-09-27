@@ -64,12 +64,16 @@ public class Agent
     public string? OutputStyle { get; set; }
 
     /// <summary>
-    /// Origin of a local Anthropic-compatible server, stored canonical, or <c>null</c> (#340). Set on
-    /// a claude agent, it runs Claude Code against that server with no Claude credential mounted —
-    /// see <see cref="ClaudeLocalModel"/>. <c>null</c> is the rollout switch and the rollback.
+    /// Origin of a local inference server, stored canonical, or <c>null</c> (#340, #382). Set on a
+    /// claude or codex agent, it runs that harness against the server — see <see cref="LocalModel"/>.
+    /// <c>null</c> is the rollout switch and the rollback.
     /// </summary>
+    /// <remarks>
+    /// Stored in the <c>AnthropicBaseUrl</c> column (#382 renamed only this property): the rollback
+    /// image reads the same column, and the agent-side key and API aliases keep the old name.
+    /// </remarks>
     [MaxLength(500)]
-    public string? AnthropicBaseUrl { get; set; }
+    public string? LocalBaseUrl { get; set; }
 
     /// <summary>
     /// The local server's context size in tokens, or <c>null</c> (#367). Provisioning passes it to

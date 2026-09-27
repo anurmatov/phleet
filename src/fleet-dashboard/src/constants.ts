@@ -1,3 +1,5 @@
+import type { LocalModelSuggestion } from './types'
+
 // ── Provider model lists ──────────────────────────────────────────────────────
 
 export const PROVIDER_MODELS: Record<string, string[]> = {
@@ -15,9 +17,7 @@ export const PROVIDER_MODELS: Record<string, string[]> = {
     'gpt-5.4-mini',
     'gpt-5.3-codex',
     'codex-mini-latest',
-    // An `ollama/` or `lmstudio/` prefix routes the thread to a local inference server.
-    // Requires CODEX_OSS_BASE_URL on the agent — see docs/providers/codex-local-models.md.
-    'ollama/gpt-oss:20b',
+    // Local models are not listed here: "Runs on: Local server" edits them (LOCAL_MODEL_SUGGESTIONS).
     // A `zai/` prefix runs GLM on the Z.ai GLM Coding Plan through the agent's loopback
     // forwarder. Needs ZAI_CODING_PLAN_API_KEY as an Env Ref; subscriber-only use —
     // see docs/providers/codex-hosted-models.md.
@@ -38,6 +38,17 @@ export const PROVIDER_DEFAULT_MODEL: Record<string, string> = {
   codex: 'gpt-5',
   gemini: 'gemini-2.5-flash',
 }
+
+// Local-mode suggestion chips (#382). Public registry tags only: a chip never fills the server
+// URL or the context window, which are deployment-specific operator input.
+const QWEN_CODEX_EFFORT = { value: 'none', note: 'Effort set to none — recommended for Qwen3.8 on Codex' }
+const QWEN_CONTEXT_HINT = 'Qwen3.8 supports up to 262144; enter the context your server is configured with.'
+
+export const LOCAL_MODEL_SUGGESTIONS: LocalModelSuggestion[] = [
+  { label: 'Qwen3.8 27B', tag: 'qwen3.8:27b', harnesses: ['claude', 'codex'], codexEffort: QWEN_CODEX_EFFORT, contextHint: QWEN_CONTEXT_HINT },
+  { label: 'Qwen3.8 Flash Next', tag: 'qwen3.8-flash-next:125b-a6b-q4_K_M', harnesses: ['claude', 'codex'], codexEffort: QWEN_CODEX_EFFORT, contextHint: QWEN_CONTEXT_HINT },
+  { label: 'gpt-oss 20B', tag: 'gpt-oss:20b', harnesses: ['codex'] },
+]
 
 export const CLAUDE_PERMISSION_MODES: string[] = [
   'default',

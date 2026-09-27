@@ -140,6 +140,37 @@ allowlist skips rule 4.
 request. The server repeats the check with `Human` and no allowlist, so only rules 1 and 3 apply
 there, and it runs before any write.
 
+## The agent publisher (slice 2)
+
+`Fleet.Journal.Client` (Contracts only) holds the classifier wrapper, spool, wire serializer and
+drainer; `Fleet.Agent` captures in the Telegram transport.
+
+| agent setting | purpose | default |
+|---|---|---|
+| `Journal__IngestToken` | enabling key; an `ingest` token for this agent's subject | empty = off |
+| `Journal__BaseUrl` | the listener | `http://fleet-comms:8083` |
+| `Journal__ExcludedChatIds` | same parsing as the listener's list | empty |
+
+Blank token: nothing is registered and the agent is byte-identical. A token not shaped
+`cj1.ingest.*`, a non-http(s) URL or a bad exclusion list stops startup (exit 1, key named, value
+never printed).
+
+- **Inbound**: one record per raw Telegram message, from the raw text or caption, Telegram's date,
+  media group id, file unique ids and sizes, and the transcript. Never the placeholder, the image
+  prompt or attachment hints. Commands (`/new …`, `/tts`) are journaled like any message.
+- **Outbound**: one record per Bot API message Telegram accepted, with its format (`plain`, `html`,
+  or `rich` carrying the Markdown source). A reply split into several messages shares one
+  `sendGroup`. Relay and bridge output (`OutboundOrigin`) is excluded, including its images.
+- **Spool**: `{WorkDir}/.fleet/journal-spool/{pending,media,dead}`; inbound media hardlinked from
+  the attachment directory, outbound media copied. Limits: 10,000 records or 1 GiB; at the limit
+  the new record is dropped. S2 sends every attachment as `not_archived(media_disabled)`.
+- **Drainer**: one request at a time, oldest due record first, never FIFO-blocked; backoff 1 s
+  doubling to 5 min; 15 s timeout; 30 s pause after 5 straight transport/5xx failures. `401` stalls
+  everything, `404` pauses 5 min, `422 excluded_chat|unknown_conversation` drops, a refused record
+  goes to `dead/` (kept 30 days). Redrive: move a file from `dead/` back to `pending/`.
+- **Heartbeat**: `Journal{enabled,spoolDepth,oldestAgeSeconds,dropped,dead,authFailed}`, absent
+  when the journal is off. Logs carry reason codes and record ids only — never text or the token.
+
 ## Tokens and rotation
 
 `cj1.<purpose>.<subject>.<mac>`, with `mac = base64url(HMAC-SHA256(key, "cj1|" + purpose + "|" + subject))`

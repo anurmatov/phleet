@@ -33,6 +33,16 @@ public static class JournalRecordJson
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
 
+    /// <summary>
+    /// For re-serializing a stored record (spool file, request body): the same relaxed escaping,
+    /// or Cyrillic would grow sixfold as <c>\uXXXX</c> and a body that fitted would not.
+    /// </summary>
+    public static readonly JsonSerializerOptions StoredOptions = new()
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        WriteIndented = false,
+    };
+
     private static readonly Regex MimePattern = new(
         "^[A-Za-z0-9!#$&^_.+-]{1,63}/[A-Za-z0-9!#$&^_.+-]{1,63}$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 

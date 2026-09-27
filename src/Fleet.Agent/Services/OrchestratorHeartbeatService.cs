@@ -1,6 +1,8 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Fleet.Agent.Configuration;
+using Fleet.Journal.Client;
 using Fleet.Shared;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -29,6 +31,7 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
     private readonly TaskManager _taskManager;
     private readonly IFleetConnectionState _connectionState;
     private readonly ILogger<OrchestratorHeartbeatService> _logger;
+    private readonly JournalDrainer? _journal;
 
     private IConnection? _connection;
     private IChannel? _channel;
@@ -40,8 +43,10 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
         IOptions<RabbitMqOptions> rabbitConfig,
         TaskManager taskManager,
         IFleetConnectionState connectionState,
-        ILogger<OrchestratorHeartbeatService> logger)
+        ILogger<OrchestratorHeartbeatService> logger,
+        JournalDrainer? journal = null)
     {
+        _journal = journal;
         _agentConfig = agentConfig.Value;
         _rabbitConfig = rabbitConfig.Value;
         _taskManager = taskManager;
@@ -171,7 +176,8 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
             QueuedCount: queueSnapshot.Count,
             QueuedMessages: queuedMessages,
             BackgroundTasks: backgroundTasks.Length > 0 ? backgroundTasks : null,
-            TelegramConnected: _connectionState.TelegramConnected);
+            TelegramConnected: _connectionState.TelegramConnected,
+            Journal: JournalHeartbeat.From(_journal?.Snapshot()));
 
         var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
         var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent, Expiration = "60000" };
@@ -220,8 +226,27 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
         int QueuedCount = 0,
         QueuedMessageInfo[]? QueuedMessages = null,
         BackgroundTaskSummary[]? BackgroundTasks = null,
-        bool? TelegramConnected = null  // null = legacy agent; false = headless; true = connected
+        bool? TelegramConnected = null,  // null = legacy agent; false = headless; true = connected
+        // Absent, not null, when the journal is off: an agent without an ingest token publishes
+        // exactly the heartbeat it published before #377.
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        JournalHeartbeat? Journal = null
     );
+
+    /// <summary>The conversation journal on this agent (#377). Counts and ages only.</summary>
+    private sealed record JournalHeartbeat(
+        [property: JsonPropertyName("enabled")] bool Enabled,
+        [property: JsonPropertyName("spoolDepth")] int SpoolDepth,
+        [property: JsonPropertyName("oldestAgeSeconds")] long OldestAgeSeconds,
+        [property: JsonPropertyName("dropped")] long Dropped,
+        [property: JsonPropertyName("dead")] int Dead,
+        // 1 while the listener refuses the token, 0 otherwise.
+        [property: JsonPropertyName("authFailed")] int AuthFailed)
+    {
+        public static JournalHeartbeat? From(JournalHeartbeatSnapshot? s) => s is null
+            ? null
+            : new(s.Enabled, s.SpoolDepth, s.OldestAgeSeconds, s.Dropped, s.Dead, s.AuthFailed ? 1 : 0);
+    }
 
     private sealed record QueuedMessageInfo(string Preview, string Source, DateTimeOffset QueuedAt);
 

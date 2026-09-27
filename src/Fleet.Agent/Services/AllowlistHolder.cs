@@ -1,5 +1,6 @@
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
+using Fleet.Conversations.Contracts;
 using Microsoft.Extensions.Options;
 
 namespace Fleet.Agent.Services;
@@ -26,6 +27,12 @@ public sealed class AllowlistHolder
 
     /// <summary>Returns a snapshot of the current allowed group IDs (for the proactive loop).</summary>
     public IReadOnlyList<long> GetAllowedGroupIds() { lock (_lock) return [.._allowedGroupIds]; }
+
+    /// <summary>A copy of both lists for the journal classifier's rule 4, taken under the lock.</summary>
+    public JournalAllowlist JournalSnapshot()
+    {
+        lock (_lock) return new JournalAllowlist(new HashSet<long>(_allowedUserIds), new HashSet<long>(_allowedGroupIds));
+    }
 
     /// <summary>
     /// Applies a diff and returns the users that were genuinely new (not previously allowed),

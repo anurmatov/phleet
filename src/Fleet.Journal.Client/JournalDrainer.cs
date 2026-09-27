@@ -154,7 +154,7 @@ public sealed class JournalDrainer : BackgroundService
         entry.FirstAttemptAt ??= now;
         entry.Attempts++;
 
-        var body = JsonSerializer.SerializeToUtf8Bytes(entry.Record);
+        var body = JsonSerializer.SerializeToUtf8Bytes(entry.Record, JournalRecordJson.StoredOptions);
         var result = await _client.PostAsync(body, ct);
         Handle(entry, result, _time.GetUtcNow());
         return TimeSpan.Zero;

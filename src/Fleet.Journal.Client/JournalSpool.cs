@@ -54,7 +54,7 @@ public sealed class SpoolEntry
 /// </remarks>
 public sealed class JournalSpool
 {
-    private static readonly JsonSerializerOptions Json = new() { WriteIndented = false };
+    private static JsonSerializerOptions Json => JournalRecordJson.StoredOptions;
 
     private readonly TimeProvider _time;
     private readonly Lock _gate = new();
@@ -82,6 +82,12 @@ public sealed class JournalSpool
     }
 
     public string Root { get; }
+
+    /// <summary>The record limit; a test lowers it rather than writing ten thousand files.</summary>
+    internal int MaxRecords { get; init; } = JournalOptions.MaxSpoolRecords;
+
+    /// <summary>The byte limit (records plus media).</summary>
+    internal long MaxBytes { get; init; } = JournalOptions.MaxSpoolBytes;
     public string PendingDir => Path.Combine(Root, "pending");
     public string MediaDir => Path.Combine(Root, "media");
     public string DeadDir => Path.Combine(Root, "dead");
@@ -104,7 +110,7 @@ public sealed class JournalSpool
 
         lock (_gate)
         {
-            if (_pendingCount >= JournalOptions.MaxSpoolRecords || _bytes >= JournalOptions.MaxSpoolBytes)
+            if (_pendingCount >= MaxRecords || _bytes >= MaxBytes)
                 return SpoolWriteOutcome.Full;
         }
 

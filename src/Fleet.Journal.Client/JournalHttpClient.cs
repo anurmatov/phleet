@@ -28,12 +28,16 @@ public sealed class JournalHttpClient
 
     private readonly HttpClient _http;
     private readonly string _token;
+    private readonly TimeSpan _timeout;
 
     /// <param name="http">A client whose <see cref="HttpClient.BaseAddress"/> is the journal listener.</param>
-    public JournalHttpClient(HttpClient http, string token)
+    /// <param name="token">The ingest token.</param>
+    /// <param name="timeout">The per-request budget; <see cref="RequestTimeout"/> unless a test shortens it.</param>
+    public JournalHttpClient(HttpClient http, string token, TimeSpan? timeout = null)
     {
         _http = http;
         _token = token.Trim();
+        _timeout = timeout ?? RequestTimeout;
     }
 
     public async Task<JournalSendResult> PostAsync(ReadOnlyMemory<byte> body, CancellationToken ct)
@@ -46,7 +50,7 @@ public sealed class JournalHttpClient
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(RequestTimeout);
+        timeout.CancelAfter(_timeout);
 
         HttpResponseMessage response;
         try

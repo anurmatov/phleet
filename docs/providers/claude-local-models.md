@@ -6,41 +6,49 @@ is reused unchanged: same persistent `claude -p` process, same stream-json proto
 flat `mcp__server__tool` names, streaming, mid-turn steering and cancellation. There is no
 new executor, listener or host port, and no Claude credential anywhere in the container.
 
+**To set it up, use `local-models.md`.** It covers the dashboard flow shared with Codex, the API
+fields, validation, rollout, rollback and troubleshooting. This page explains how the Claude
+path works underneath.
+
 ## 1. What it is, and when to use it
 
 | | Claude local (this page) | Codex local (`codex-local-models.md`) |
 |---|---|---|
 | provider | `claude` | `codex` |
 | server API | Anthropic Messages (`/v1/messages`) | OpenAI-compatible (`/v1`) |
-| config | per-agent DB field `AnthropicBaseUrl` + bare `Model` tag | `ollama/…` model prefix + `CODEX_OSS_BASE_URL` env ref |
+| config | **Runs on → Local server**: per-agent Server URL + bare `Model` tag | **Runs on → Local server**: per-agent Server URL + `ollama/…` or `lmstudio/…` model |
 | harness | Claude Code: its tools, prompt, subagents; an output style is inlined into the prompt (`output-styles.md`) | codex app-server |
 
 Pick this path when the agent's instructions, tools and workflows are written for Claude
 Code and you want to keep them while the model runs locally. Different agents may point at
 different servers; changing one agent's endpoint needs no orchestrator restart.
 
-**Local mode ⇔ provider `claude` and a non-empty `AnthropicBaseUrl`.** `null` or `""` is
-off. A whitespace-only value is a fault, never off. `ClaudeLocalModel.IsEnabled`
-(`src/Fleet.Shared/`) is the one predicate the orchestrator and agent both use.
+**Local mode ⇔ provider `claude` and a non-empty Server URL.** `null` or `""` is off. A
+whitespace-only value is a fault, never off. `ClaudeLocalModel.IsEnabled` (`src/Fleet.Shared/`)
+is the one predicate the orchestrator and agent both use for Claude. The URL is stored in the
+existing `AnthropicBaseUrl` DB column and reaches the agent as `Agent.AnthropicBaseUrl`.
 
 ## 2. Enabling one agent
 
+Follow `local-models.md` §2: provider **Claude**, **Runs on → Local server**, the Server URL,
+the model tag and the context window, then **Save & Reprovision**. With MCP:
+
 ```
-update_agent_config agent_name=<agent> anthropic_base_url=http://<server-address>:11434 model=<tag> effort=""
+update_agent_config agent_name=<agent> local_base_url=http://<server-address>:11434 model=<tag> context_window=131072 effort=""
 reprovision_agent <agent>
 ```
 
-Or the dashboard: agent config → **Anthropic-compatible base URL** (Claude only), a custom
-**Model**, **Effort** = default, then *Save & reprovision*. A plain restart is not enough:
-the value reaches the container through the generated `appsettings.json` and the binds.
+A plain restart is not enough: the value reaches the container through the generated
+`appsettings.json` and the binds.
 
-What the write accepts (V1–V7, `ClaudeLocalModel.DescribeConfigFault`):
+What the write accepts (`LocalModel.DescribeConfigFault` runs L1 and L2, then the Claude rules
+in `ClaudeLocalModel.DescribeConfigFault`):
 
 | rule | requirement |
 |---|---|
-| V1 | provider is `claude` — clear the field before changing provider |
-| V2 | **origin only**: `http`/`https`, a host, no credentials, query or fragment, path empty or `/`, ≤ 500 chars, no surrounding whitespace. `…/v1` is rejected: Claude Code appends `/v1/messages` itself |
-| V3 | host is not `localhost`, `127.0.0.0/8`, `::1`, `0.0.0.0`/`::` (or their mapped forms) — inside the container that is the container itself |
+| L1 | provider is `claude` or `codex` (replaces V1). Switching to `codex` keeps the URL; send an `ollama/<tag>` model in the same call (C1 in `local-models.md` §5) |
+| L2 | **origin only** (formerly V2): `http`/`https`, a host, no credentials, query or fragment, path empty or `/`, ≤ 500 chars, no surrounding whitespace. `…/v1` is rejected: Claude Code appends `/v1/messages` itself |
+| L2 | host is not `localhost`, `127.0.0.0/8`, `::1`, `0.0.0.0`/`::` (or their mapped forms) — inside the container that is the container itself (formerly V3) |
 | V4 | model is 1–100 chars matching `^[A-Za-z0-9][A-Za-z0-9._:/-]*$` (`--model` is passed unquoted) |
 | V5 | model is not `claude-*`, `opus`, `sonnet` or `haiku` (case-insensitive) |
 | V6 | model does not start with `ollama/`, `lmstudio/` or a hosted prefix (`zai/`) — those select the codex path |
@@ -127,12 +135,16 @@ Claude Code does not know the window of a model name it does not recognise, so i
 later than the server's fixed context, and the server then rejects the turn (one tested server
 returns `400 context_length_exceeded` and truncates nothing). Set the per-agent `ContextWindow`
 to the server's context size, for example its `--ctx`:
-`update_agent_config agent_name=<agent> context_window=65536`, or **Context window (tokens)** in
-the dashboard (shown only when the base URL is set). Provisioning puts
+`update_agent_config agent_name=<agent> context_window=131072`, or **Context window** in
+the dashboard (shown only when **Runs on** is Local server). Provisioning puts
 `CLAUDE_CODE_MAX_CONTEXT_TOKENS=<value>` in the container env, which the claude child inherits,
 and **it takes effect only on `reprovision_agent`**. The range is 4096–1048576 (a 400 otherwise);
 `0` clears it. There is no default: a wrong guess fails silently. A cloud agent never gets the
 variable, even with a stored value, and provisioning logs that it was ignored.
+
+Claude Code keeps a fixed compaction buffer of about 33k tokens, whatever the window. A Fleet
+Claude agent's base prompt is about 30k tokens, so at 65536 only about 2k tokens are free before
+compaction starts. Use at least 131072 for real work, on the server and on the agent.
 
 ## 3. What changes in the container
 
@@ -140,7 +152,7 @@ variable, even with a stored value, and provisioning logs that it was ignored.
 `ollama launch claude` (`cmd/launch/claude.go`, commit `01c0fbfd`); only the token differs:
 
 ```
-ANTHROPIC_BASE_URL=<AnthropicBaseUrl>
+ANTHROPIC_BASE_URL=<Server URL>
 ANTHROPIC_API_KEY=
 ANTHROPIC_AUTH_TOKEN=phleet-local-no-auth
 CLAUDE_CODE_ATTRIBUTION_HEADER=0
@@ -263,10 +275,11 @@ agent's routing key only.
 
 ## 9. Rollback
 
-Per agent:
+Per agent: set **Runs on → Cloud**, pick a Claude model, and click **Save & Reprovision**.
+With MCP:
 
 ```
-update_agent_config agent_name=<agent> anthropic_base_url="" model=<claude-model>
+update_agent_config agent_name=<agent> local_base_url="" model=<claude-model>
 reprovision_agent <agent>
 ```
 
@@ -274,8 +287,24 @@ That restores the credentials bind and the `fleet.relay` binding. `off` is refus
 cloud agent (V8), so an agent set to `off` needs `effort=""` in the same call. In code, revert
 the change; the added nullable column is ignored by older code, so the down-migration is
 optional. Before reverting #349 in code, clear every local agent's non-empty `effort`: the
-older V7 rejects it at startup.
+older V7 rejects it at startup. Reverting #382 needs no step for Claude local agents
+(`local-models.md` §11).
 
 **Version skew:** a new orchestrator with an old agent image runs a local agent with no
 local routing and no credentials, so its turns fail. Deploy the agent image together with
 the orchestrator.
+
+## 10. Legacy field names and Env Refs
+
+Claude local never used an Env Ref. The URL has always been a per-agent field. What changed in
+#382 is the name:
+
+| where | current name | legacy alias (still accepted) |
+|---|---|---|
+| dashboard | **Runs on → Local server**, **Server URL** | the Claude-only "Anthropic-compatible base URL" field |
+| REST | `localBaseUrl` | `anthropicBaseUrl` |
+| MCP `update_agent_config` | `local_base_url` | `anthropic_base_url` |
+
+`GET` returns both REST keys with the same value. If you send both names in one call, rule A1
+applies (`local-models.md` §4). The DB column and the generated `Agent.AnthropicBaseUrl` key keep
+their old names: `entrypoint.sh` reads that key to choose its local branch.

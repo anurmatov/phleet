@@ -111,8 +111,19 @@ routing the thread to a local OpenAI-compatible inference server. Only those two
 recognised — codex reserves them, and any other prefix (`owl/t-lite`) passes through untouched, so
 an unprefixed model produces exactly the payload it always did.
 
-A prefixed model requires `CODEX_OSS_BASE_URL` (e.g. `http://host.docker.internal:11434/v1`) as a
-provision-time env var on the agent. If it is unset or blank, **the host refuses to start** —
+A prefixed model needs a server URL. The operator sets it like Claude local (**Runs on → Local
+server**, the shared per-agent URL field; see "Claude local models"). When Codex local mode is on,
+provisioning adds `Agent.CodexOssBaseUrl = <origin>/v1` and `Agent.ContextWindow` to the generated
+appsettings by JSON-node edit, and every other agent's bytes stay unchanged. `CodexExecutor` sets
+`CODEX_OSS_BASE_URL` on the app-server child's `ProcessStartInfo`, overriding any inherited value,
+and merges `model_context_window` into the `thread/start` `config`. A legacy agent with no URL still
+works through a `CODEX_OSS_BASE_URL` Env Ref (e.g. `http://<server-address>:11434/v1`); with neither,
+provisioning fails with a named fault (P1). Until #383 lands, a Codex local agent still holds the
+OpenAI credential, applies token broadcasts and is bound to `fleet.relay`, unlike a Claude local agent.
+
+The agent-side gate reads `Agent.CodexOssBaseUrl` first, then the environment. A present config
+value must be exactly the canonical origin plus `/v1` with a prefixed model (S1). With no URL from
+either source, **the host refuses to start** —
 `AgentHostRegistration.ValidateStartupConfiguration` throws before `app.Run()` and `Program.cs`
 logs at `Critical` and calls `Environment.Exit(1)`, so the container exits non-zero rather than
 coming up with `/health` answering ok. The explicit exit is not optional: **a throw alone did not
@@ -125,7 +136,8 @@ which inside a container is the container itself.
 
 ⚠️ A wedged local inference server takes the whole agent down, not one turn: `CodexExecutor` holds
 `_turnLock` for the turn and a chat-driven turn has no deadline, so everything queues behind it.
-See `docs/providers/codex-local-models.md`.
+See `docs/providers/local-models.md` (setup, validation, rollout, rollback, troubleshooting) and
+`docs/providers/codex-local-models.md`.
 
 ### Codex hosted models
 
@@ -164,14 +176,18 @@ See `docs/providers/codex-hosted-models.md`.
 ### Claude local models
 
 A claude agent may run Claude Code against a local Anthropic-compatible server (e.g. Ollama) by
-setting the per-agent DB field `AnthropicBaseUrl` (`update_agent_config anthropic_base_url=…`, the
-dashboard's Claude-only field, or `PUT /api/agents/{name}/config`). **Local mode ⇔ provider
-`claude` and a non-empty `AnthropicBaseUrl`**; `ClaudeLocalModel.IsEnabled` in `Fleet.Shared` is the
-one predicate the orchestrator and agent both use. `Model` is the server's bare tag, `Effort` is the
+setting the per-agent server URL (dashboard **Runs on → Local server**, `update_agent_config
+local_base_url=…`, or `localBaseUrl` on `PUT /api/agents/{name}/config`; `anthropic_base_url` /
+`anthropicBaseUrl` stay as pure aliases, resolved by rule A1). The orchestrator entity property is
+`Agent.LocalBaseUrl`, mapped to the unchanged `AnthropicBaseUrl` column; `Fleet.Agent`'s
+`AgentOptions.AnthropicBaseUrl` and the generated `Agent.AnthropicBaseUrl` key keep the old name,
+because `entrypoint.sh` reads that key. **Local mode ⇔ provider `claude` and a non-empty URL**;
+`ClaudeLocalModel.IsEnabled` in `Fleet.Shared` is the one predicate the orchestrator and agent both
+use. `Model` is the server's bare tag, `Effort` is the
 thinking level `off`/`low`/`medium`/`xhigh` (empty = model default, sent as `xhigh`), and the URL is
 an origin only (`http://<server-address>:11434`, never `…/v1` — Claude Code appends `/v1/messages`
-itself). `ClaudeLocalModel.DescribeConfigFault` (V1–V7) and `DescribeLocalOnlyEffortFault` (V8: `off`
-is local-only) are enforced at write
+itself). `LocalModel` (L1/L2, shared with Codex local), `ClaudeLocalModel.DescribeConfigFault`
+(V4–V7) and `DescribeLocalOnlyEffortFault` (V8: `off` is local-only) are enforced at write
 time (tool error / HTTP 400, nothing saved; valid values stored canonical), at provision time
 (`GenerateAppsettingsJson` throws) and at agent startup (`ValidateStartupConfiguration`, exit 1).
 
@@ -184,7 +200,7 @@ separate channel). No startup reachability probe: an inference-host reboot must 
 agents. Enable and rollback both take effect on reprovision. The nullable per-agent `ContextWindow`
 (#367, 4096–1048576, `0` clears) puts `CLAUDE_CODE_MAX_CONTEXT_TOKENS` in a local agent's container env
 on reprovision so Claude CLI compacts before the server's limit; cloud agents never get it. See
-`docs/providers/claude-local-models.md`.
+`docs/providers/local-models.md` and `docs/providers/claude-local-models.md`.
 
 ## Project contexts
 

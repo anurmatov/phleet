@@ -110,6 +110,9 @@ internal sealed class FakeJournalStore : IJournalStore
     public string? UnavailableReason { get; set; }
     public bool Unavailable { get; set; }
 
+    /// <summary>When set, IngestAsync throws it: an unexpected fault, not an unavailable store.</summary>
+    public Exception? Fault { get; set; }
+
     public int Calls => Volatile.Read(ref _calls);
 
     public async Task<JournalIngestResult> IngestAsync(JournalRecord record, string observer, CancellationToken ct = default)
@@ -120,6 +123,7 @@ internal sealed class FakeJournalStore : IJournalStore
         if (Gate is not null) await Gate.WaitAsync(ct);
 
         if (Unavailable) throw new JournalStoreUnavailableException(UnavailableReason);
+        if (Fault is not null) throw Fault;
 
         lock (Ingested) Ingested.Add((record, observer));
         return new JournalIngestResult

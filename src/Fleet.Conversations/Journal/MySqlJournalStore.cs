@@ -17,6 +17,17 @@ namespace Fleet.Conversations.Journal;
 /// <c>503 store_unavailable</c>.
 /// </para>
 /// <para>
+/// ⚠️ <b>READ COMMITTED, on purpose.</b> An ingest's first reads look up keys that usually do not
+/// exist yet: its event id and, for a first message, its conversation key. Under REPEATABLE READ a
+/// locking read of a missing key takes a gap lock, and two parallel first messages holding gap
+/// locks on the same range then deadlock on their inserts — measured at 24 to 47 of 48 parallel
+/// distinct records answering 503 after the single retry. Under READ COMMITTED no gap lock is
+/// taken; the unique keys arbitrate instead. Two first messages for one new conversation both
+/// insert it, the loser waits on the winner's row and gets a duplicate key, and its one retry finds
+/// the committed row and serializes behind its lock. InnoDB then needs row-based binary logging,
+/// the MySQL 8.0 default.
+/// </para>
+/// <para>
 /// ⚠️ It never migrates. It reads <c>MAX(version)</c> from <c>schema_migrations</c> and, below 4,
 /// refuses without touching a journal table. Only a CURRENT answer is cached (30 s): a behind answer
 /// is re-read on the next request, so the first post after <c>conversations migrate</c> succeeds.
@@ -152,10 +163,12 @@ public sealed class MySqlJournalStore : IJournalStore
         var sentAt = record.SentAt.UtcDateTime;
         var sourceKey = JournalKeys.SourceKey(record.Telegram.MessageId);
 
-        await using var transaction = await connection.BeginTransactionAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(
+            System.Data.IsolationLevel.ReadCommitted, ct);
 
-        // 1. The conversation row, locked. Absent is fine: the key's gap is locked instead, so a
-        //    concurrent first message for the same chat waits here or deadlocks and is retried.
+        // 1. The conversation row, locked when it exists. When it does not, READ COMMITTED takes no
+        //    gap lock: a concurrent first message for the same chat meets this one at the unique
+        //    conversation key on insert, and the loser retries.
         string? conversationId;
         await using (var select = Command(connection, transaction,
             "SELECT id FROM journal_conversations WHERE conversation_key = @key FOR UPDATE"))
@@ -165,9 +178,10 @@ public sealed class MySqlJournalStore : IJournalStore
         }
 
         // 2. The event id, before anything is written: a reused id is a duplicate only when this
-        //    observer's earlier submission had the same fingerprint.
+        //    observer's earlier submission had the same fingerprint. A plain read of the latest
+        //    committed row; the unique event key catches a concurrent first use at insert.
         await using (var byEvent = Command(connection, transaction,
-            "SELECT message_id, fingerprint FROM journal_message_observers WHERE event_id = @event FOR UPDATE"))
+            "SELECT message_id, fingerprint FROM journal_message_observers WHERE event_id = @event"))
         {
             byEvent.Parameters.AddWithValue("@event", record.EventId);
             await using var reader = await byEvent.ExecuteReaderAsync(ct);

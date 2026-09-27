@@ -255,6 +255,23 @@ public sealed class JournalEndpointTests
         Assert.Equal(expected, await response.Content.ReadAsStringAsync());
     }
 
+    /// <summary>
+    /// An unexpected fault is a fixed 500 with no message, and it is counted, so it shows in the
+    /// status route rather than vanishing.
+    /// </summary>
+    [Fact]
+    public async Task An_unexpected_fault_is_a_fixed_500_and_is_counted()
+    {
+        await using var host = await JournalTestHost.StartAsync(
+            store: new FakeJournalStore { Fault = new InvalidOperationException("driver detail Password=secret") });
+
+        var response = await host.PostAsync(JournalRecords.Valid(), Ingest());
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.Equal("{\"error\":\"internal\"}", await response.Content.ReadAsStringAsync());
+        Assert.Equal(1, host.Stats.Read().RejectedSinceStart["internal"]);
+    }
+
     // ── the per-subject cap (AC16d) ──────────────────────────────────────────
 
     /// <summary>

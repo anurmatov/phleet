@@ -363,15 +363,21 @@ public static class OperatorCommands
     private static string Required(string[] args, string name) =>
         Optional(args, name) ?? throw new OperatorCommandException($"{name} is required.\n\n{Usage}");
 
-    private static string? Optional(string[] args, string name)
+    /// <param name="allowNegativeNumber">
+    /// Only <c>--telegram-chat</c> takes one: basic-group and supergroup chat ids are negative.
+    /// Every other option keeps refusing a value that starts with <c>-</c>, which is how a
+    /// forgotten value followed by the next flag is caught.
+    /// </param>
+    private static string? Optional(string[] args, string name, bool allowNegativeNumber = false)
     {
         var index = Array.IndexOf(args, name);
         if (index < 0)
             return null;
-        // A negative number is a value, not a flag: basic-group and supergroup chat ids are negative.
         if (index + 1 >= args.Length
-            || (args[index + 1].StartsWith('-') && !long.TryParse(args[index + 1],
-                System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out _)))
+            || (args[index + 1].StartsWith('-')
+                && !(allowNegativeNumber && long.TryParse(args[index + 1],
+                    System.Globalization.NumberStyles.AllowLeadingSign,
+                    System.Globalization.CultureInfo.InvariantCulture, out _))))
             throw new OperatorCommandException($"{name} needs a value.");
         return args[index + 1];
     }
@@ -538,7 +544,7 @@ public static class OperatorCommands
     {
         var message = Optional(args, "--message");
         var conversation = Optional(args, "--conversation");
-        var chat = Optional(args, "--telegram-chat");
+        var chat = Optional(args, "--telegram-chat", allowNegativeNumber: true);
         var before = Optional(args, "--before");
 
         if ((message is null ? 0 : 1) + (conversation is null ? 0 : 1) + (chat is null ? 0 : 1) != 1)

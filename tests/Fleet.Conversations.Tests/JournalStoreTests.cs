@@ -191,6 +191,44 @@ public sealed class JournalStoreTests(MySqlFixture fixture)
         Assert.True(started.Elapsed < TimeSpan.FromSeconds(15), $"took {started.Elapsed}");
     }
 
+    // ── concurrency: distinct records in parallel never 503 ──────────────────
+
+    /// <summary>
+    /// Distinct records posted at once, across many new conversations and into ONE new
+    /// conversation, all succeed. Every ingest's first reads look up keys that do not exist yet
+    /// (the event id, the conversation key); if those lookups took gap locks, parallel first
+    /// messages would deadlock, exhaust the single retry and answer 503.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task Parallel_distinct_records_never_answer_503(int round)
+    {
+        await using var host = await JournalHttpHost.StartAsync(Db);
+        const int perKind = 24;
+        var baseChat = -1000000200000L - round * 1000;
+
+        var bodies = new List<(string Json, string Subject)>();
+        for (var i = 0; i < perKind; i++)
+        {
+            // One new conversation each...
+            bodies.Add((new JournalJson { ChatId = baseChat - 1 - i, MessageId = 1 }.ToString(), $"p{i}"));
+
+            // ...and many messages into one conversation that does not exist yet.
+            bodies.Add((new JournalJson { ChatId = baseChat, MessageId = 100 + i }.ToString(), $"q{i}"));
+        }
+
+        var before = await JournalDb.CountAsync(Db);
+        var responses = await Task.WhenAll(bodies.Select(b => host.PostAsync(b.Json, b.Subject)));
+        var statuses = responses.Select(r => (int)r.StatusCode).ToArray();
+
+        Assert.True(statuses.All(status => status == 201),
+            "statuses: " + string.Join(",", statuses.GroupBy(x => x).Select(g => $"{g.Key}x{g.Count()}")));
+        Assert.Equal(new JournalDb.Counts(perKind + 1, 2 * perKind, 2 * perKind, 0),
+            await JournalDb.CountAsync(Db) - before);
+    }
+
     // ── AC3: conversation keys follow the chat KIND ──────────────────────────
 
     [Theory]

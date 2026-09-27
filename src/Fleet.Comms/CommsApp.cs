@@ -511,16 +511,23 @@ public static class CommsApp
         var excluded = options.Journal.ExcludedChats();
 
         var app = builder.Build();
+        var journalLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal");
 
-        // Outermost: nothing unhandled reaches a caller as a stack trace or a driver message.
+        // Outermost: nothing unhandled reaches a caller as a stack trace or a driver message. It is
+        // still logged — type and subject only, since a driver message can carry a connection
+        // string — and counted, so a fault is visible in /journal/v1/status and on the meter.
         app.Use(async (context, next) =>
         {
             try
             {
                 await next(context);
             }
-            catch (Exception) when (!context.Response.HasStarted)
+            catch (Exception e) when (!context.Response.HasStarted)
             {
+                journalLogger.LogError("journal request from {Subject} failed: {Error}",
+                    context.Items[JournalAuth.SubjectItem] as string ?? "(unauthenticated)", e.GetType().Name);
+                stats.Rejected("internal");
+
                 context.Response.Clear();
                 context.Response.StatusCode = StatusCodes.Status500InternalServerError;
                 context.Response.ContentType = "application/json";
@@ -529,8 +536,7 @@ public static class CommsApp
         });
 
         JournalAuth.Use(app, keys, stats);
-        JournalEndpoints.Map(app, store, stats, excluded, time ?? TimeProvider.System,
-            app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal"));
+        JournalEndpoints.Map(app, store, stats, excluded, time ?? TimeProvider.System, journalLogger);
 
         return app;
     }

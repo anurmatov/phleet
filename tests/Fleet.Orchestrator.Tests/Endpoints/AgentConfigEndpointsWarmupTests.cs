@@ -139,6 +139,17 @@ public sealed class AgentConfigEndpointsWarmupTests : IAsyncLifetime
         Assert.Equal(180, config.GetProperty("warmupTimeoutSeconds").GetInt32());
     }
 
+    [Fact]
+    public async Task Journal_enabled_round_trips()
+    {
+        var response = await _client.PutAsJsonAsync("/api/agents/agent1/config",
+            new { journalEnabled = true });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var config = await _client.GetFromJsonAsync<JsonElement>("/api/agents/agent1/config");
+        Assert.True(config.GetProperty("journalEnabled").GetBoolean());
+    }
+
     private async Task<int> StoredSecondsAsync()
     {
         await using var scope = _app.Services.CreateAsyncScope();

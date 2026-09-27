@@ -42,6 +42,11 @@ public class Agent
     public string? AgentsJson { get; set; }
     public int? HostPort { get; set; }
     public bool AutoMemoryEnabled { get; set; } = true;
+    /// <summary>
+    /// Opts this agent into journaling its human Telegram conversations. Provisioning remains
+    /// byte-identical while false; enabling it requires the journal signing key.
+    /// </summary>
+    public bool JournalEnabled { get; set; } = false;
     [MaxLength(30)]
     public string? CodexSandboxMode { get; set; }
 

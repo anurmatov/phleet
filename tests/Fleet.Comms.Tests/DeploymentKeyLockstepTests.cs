@@ -130,10 +130,10 @@ public class DeploymentKeyLockstepTests
     }
 
     /// <summary>
-    /// The signing key reaches the service and the operator one-shot, and no other service.
+    /// The signing key reaches Comms, its operator one-shot, and the orchestrator token minter.
     /// </summary>
     [Fact]
-    public void The_journal_key_is_given_only_to_fleet_comms_and_fleet_comms_ops()
+    public void The_journal_key_is_given_only_to_its_three_consumers()
     {
         var compose = Read("docker-compose.example.yml");
 
@@ -148,7 +148,7 @@ public class DeploymentKeyLockstepTests
             .Order(StringComparer.Ordinal)
             .ToArray();
 
-        Assert.Equal(["fleet-comms", "fleet-comms-ops"], withKey);
+        Assert.Equal(["fleet-comms", "fleet-comms-ops", "fleet-orchestrator"], withKey);
     }
 
     /// <summary>

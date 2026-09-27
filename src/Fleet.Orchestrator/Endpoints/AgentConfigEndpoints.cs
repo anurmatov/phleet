@@ -71,6 +71,7 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         agent.AgentsJson,
         agent.HostPort,
         agent.AutoMemoryEnabled,
+        agent.JournalEnabled,
         agent.Provider,
         agent.CodexSandboxMode,
         agent.OutputStyle,
@@ -154,6 +155,7 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     if (body.JsonSchema is not null) agent.JsonSchema = body.JsonSchema == "" ? null : body.JsonSchema;
     if (body.AgentsJson is not null) agent.AgentsJson = body.AgentsJson == "" ? null : body.AgentsJson;
     if (body.AutoMemoryEnabled is not null) agent.AutoMemoryEnabled = body.AutoMemoryEnabled.Value;
+    if (body.JournalEnabled is not null) agent.JournalEnabled = body.JournalEnabled.Value;
     if (body.Provider is not null) agent.Provider = body.Provider;
     if (body.CodexSandboxMode is not null)
     {
@@ -358,6 +360,7 @@ internal sealed record AgentConfigUpdateRequest(
     string? JsonSchema,
     string? AgentsJson,
     bool? AutoMemoryEnabled,
+    bool? JournalEnabled,
     string? Provider,
     string? CodexSandboxMode,
     string[]? Tools,

@@ -78,6 +78,7 @@ export default function StepConfigPanel({ root, selectedPath, onChange, workflow
     queuedCount: 0,
     queuedMessages: null,
     backgroundTasks: null,
+    journal: null,
     containerName: null,
     containerStartedAt: null,
     hostPort: null,

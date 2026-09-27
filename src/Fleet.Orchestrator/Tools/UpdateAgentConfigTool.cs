@@ -40,6 +40,7 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         [Description("JSON string for --agents flag (inline subagents). Pass empty string to clear. Omit to keep current.")] string? agents_json = null,
         [Description("Host port for the agent's HTTP API (used by orchestrator cancel proxy via 127.0.0.1:{host_port}). Pass 0 to clear. Omit to keep current.")] int? host_port = null,
         [Description("Enable Claude's built-in auto-memory. Set to false for agents using fleet-memory (disables CLAUDE_CODE_DISABLE_AUTO_MEMORY). Omit to keep current.")] bool? auto_memory_enabled = null,
+        [Description("Journal this agent's human Telegram DMs and allowed groups in Comms. Requires FLEET_COMMS_JOURNAL_KEY and takes effect on reprovision. Omit to keep current.")] bool? journal_enabled = null,
         [Description("LLM provider: claude or codex. Omit to keep current. A claude agent with anthropic_base_url set must have it cleared before changing provider.")] string? provider = null,
         [Description("Codex sandbox mode (danger-full-access, workspace-write, read-only). Pass empty string to clear. Omit to keep current. Only applies to codex agents.")] string? codex_sandbox_mode = null,
         [Description("Enable access-request flow for unknown DMs (CanReceiveChatRequests). When true, unknown DMs are forwarded to the CTO agent (FLEET_CTO_AGENT) instead of being silently dropped. Omit to keep current.")] bool? can_receive_chat_requests = null,
@@ -223,6 +224,12 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         {
             changes.AppendLine($"- auto_memory_enabled: {agent.AutoMemoryEnabled} → {auto_memory_enabled}");
             agent.AutoMemoryEnabled = auto_memory_enabled.Value;
+        }
+
+        if (journal_enabled is not null && journal_enabled != agent.JournalEnabled)
+        {
+            changes.AppendLine($"- journal_enabled: {agent.JournalEnabled} → {journal_enabled}");
+            agent.JournalEnabled = journal_enabled.Value;
         }
 
         if (provider is not null && provider != agent.Provider)

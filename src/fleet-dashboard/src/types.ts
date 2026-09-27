@@ -14,6 +14,15 @@ export interface BackgroundTaskSummary {
   summary: string | null
 }
 
+export interface JournalHeartbeat {
+  enabled: boolean
+  spoolDepth: number
+  oldestAgeSeconds: number | null
+  dropped: number
+  dead: number
+  authFailed: boolean
+}
+
 export interface AgentState {
   agentName: string
   displayName: string | null
@@ -32,6 +41,7 @@ export interface AgentState {
   containerName: string | null
   containerStartedAt: string | null
   hostPort: number | null
+  journal: JournalHeartbeat | null
 }
 
 export interface TaskRecord {
@@ -169,6 +179,7 @@ export interface AgentConfig {
   jsonSchema: string
   agentsJson: string
   autoMemoryEnabled: boolean
+  journalEnabled: boolean
   hostPort: number | null
   telegramSendOnly: boolean
   provider: string
@@ -213,6 +224,7 @@ export interface ConfigEdits {
   jsonSchema: string
   agentsJson: string
   autoMemoryEnabled: boolean
+  journalEnabled: boolean
   hostPort: string
   telegramSendOnly: boolean
   provider?: string

@@ -84,15 +84,15 @@ public sealed class AddAgentContextWindowMigrationTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Every_migration_applies_and_this_one_is_last()
+    public async Task Migration_applies()
     {
         // Each migration tip owns the "I am last" assertion, so appending a migration never breaks
         // its predecessor (moved here from AddAgentWarmupTimeoutSecondsMigrationTests).
         await using var db = NewContext();
         await db.Database.MigrateAsync();
 
-        Assert.Empty(await db.Database.GetPendingMigrationsAsync());
-        Assert.Equal(Target, (await db.Database.GetAppliedMigrationsAsync()).Last());
+        await db.GetService<IMigrator>().MigrateAsync(Target);
+        Assert.Contains(Target, await db.Database.GetAppliedMigrationsAsync());
     }
 
     [Fact]

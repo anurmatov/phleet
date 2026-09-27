@@ -424,6 +424,8 @@ services:
       - Provisioning__KokoroServiceUrl=http://fleet-kokoro-tts:8880
       - Orchestrator__AuthToken=${ORCHESTRATOR_AUTH_TOKEN}
       - Orchestrator__ConfigToken=${ORCHESTRATOR_CONFIG_TOKEN}
+      - Journal__TokenKey=${FLEET_COMMS_JOURNAL_KEY:-}
+      - Journal__ExcludedChatIds=${FLEET_GROUP_CHAT_ID:-},${FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS:-}
     mem_limit: 512m
     restart: unless-stopped
     depends_on:

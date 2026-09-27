@@ -16,7 +16,7 @@ public sealed class AgentRegistry
 {
     private readonly ConcurrentDictionary<string, AgentState> _agents = new(StringComparer.OrdinalIgnoreCase);
     // Track last-broadcast effective status + task + queue count + bg task count per agent to avoid duplicate pushes
-    private readonly ConcurrentDictionary<string, (string Status, string? Task, int QueuedCount, int BgTaskCount)> _lastBroadcast = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, BroadcastKey> _lastBroadcast = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentBag<WebSocket> _sockets = [];
     private readonly TaskHistoryStore _taskHistory;
     private readonly ILogger<AgentRegistry> _logger;
@@ -76,6 +76,7 @@ public sealed class AgentRegistry
                     QueuedCount      = heartbeat.QueuedCount,
                     QueuedMessages   = heartbeat.QueuedMessages,
                     BackgroundTasks  = heartbeat.BackgroundTasks,
+                    Journal          = heartbeat.Journal,
                 };
                 // New agent already doing a task — record start time
                 if (heartbeat.CurrentTask is not null)
@@ -116,6 +117,7 @@ public sealed class AgentRegistry
                 existing.QueuedCount    = heartbeat.QueuedCount;
                 existing.QueuedMessages = heartbeat.QueuedMessages;
                 existing.BackgroundTasks = heartbeat.BackgroundTasks;
+                existing.Journal         = heartbeat.Journal;
                 // Update registration fields only when provided (registration messages)
                 if (heartbeat.Endpoint      is not null) existing.Endpoint      = heartbeat.Endpoint;
                 if (heartbeat.Role          is not null) existing.Role          = heartbeat.Role;
@@ -196,15 +198,23 @@ public sealed class AgentRegistry
         var task = state.CurrentTask;
         var queued = state.QueuedCount;
         var bgCount = state.BackgroundTasks?.Length ?? 0;
-        var prev = _lastBroadcast.GetOrAdd(state.AgentName, _ => ("", null, 0, 0));
+        var current = new BroadcastKey(
+            effective, task, queued, bgCount,
+            state.Journal?.Enabled,
+            state.Journal?.SpoolDepth,
+            state.Journal?.OldestAgeSeconds,
+            state.Journal?.Dropped,
+            state.Journal?.Dead,
+            state.Journal?.AuthFailed);
+        var prev = _lastBroadcast.GetOrAdd(state.AgentName, _ => default);
 
         // Dedup is by count only, not content — summary/elapsed changes within a stable-count
         // window will not trigger a push and will instead wait for the next heartbeat that
         // changes the count (or status/task).
-        if (!force && prev.Status == effective && prev.Task == task && prev.QueuedCount == queued && prev.BgTaskCount == bgCount)
+        if (!force && prev == current)
             return;
 
-        _lastBroadcast[state.AgentName] = (effective, task, queued, bgCount);
+        _lastBroadcast[state.AgentName] = current;
         _ = BroadcastAsync(state);
     }
 
@@ -242,4 +252,16 @@ public sealed class AgentRegistry
         if (dead.Count > 0)
             _logger.LogDebug("Skipped {Count} closed WebSocket connection(s)", dead.Count);
     }
+
+    private readonly record struct BroadcastKey(
+        string? Status,
+        string? Task,
+        int QueuedCount,
+        int BgTaskCount,
+        bool? JournalEnabled,
+        long? JournalSpoolDepth,
+        long? JournalOldestAgeSeconds,
+        long? JournalDropped,
+        long? JournalDead,
+        bool? JournalAuthFailed);
 }

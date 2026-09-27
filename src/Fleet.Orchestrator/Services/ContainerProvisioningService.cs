@@ -14,9 +14,23 @@ public sealed class ContainerProvisioningService(
     IServiceScopeFactory scopeFactory,
     DockerService docker,
     IConfiguration config,
+    JournalTokenService journalTokens,
     ILogger<ContainerProvisioningService> logger)
 {
     private const string DefaultAgentImage = "fleet:agent";
+    internal const string JournalMcpServerName = "fleet-comms-journal";
+
+    /// <summary>
+    /// Header support is a property of the pinned provider CLI, not something provisioning probes
+    /// at runtime. Flip a false value only with a pinned-CLI tools/list transcript in the PR.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, bool> McpHeaderSupport =
+        new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["claude"] = true,
+            ["codex"] = false,
+            ["gemini"] = false,
+        };
 
     private static readonly JsonSerializerOptions IndentedJson = new() { WriteIndented = true };
 
@@ -295,6 +309,9 @@ public sealed class ContainerProvisioningService(
         if (agent is null)
             return ProvisionResult.Fail(agentName, "agent not found in DB");
 
+        if (DescribeJournalProvisioningFault(agent) is { } journalFault)
+            return ProvisionResult.Fail(agentName, journalFault);
+
         // Guard: bypassPermissions is rejected — fleet containers run as root and Claude CLI
         // refuses --dangerously-skip-permissions for root processes, which crashes the agent immediately.
         // Use acceptEdits + an explicit AllowedTools list instead.
@@ -430,6 +447,11 @@ public sealed class ContainerProvisioningService(
         IReadOnlyDictionary<string, int>? instructionVersionOverrides = null,
         CancellationToken ct = default)
     {
+        // Journal faults must be found before DeprovisionAsync. A missing signing key or an
+        // unsupported provider therefore leaves the old, working container untouched.
+        if (await DescribeJournalProvisioningFaultAsync(agentName, ct) is { } journalFault)
+            return ProvisionResult.Fail(agentName, journalFault);
+
         var deprovision = await DeprovisionAsync(agentName, ct);
         if (!deprovision.Success)
         {
@@ -756,6 +778,11 @@ public sealed class ContainerProvisioningService(
             agent.PermissionMode);
 
         var fleetMemoryMcpUrl = NormalizeFleetMemoryMcpUrl(config["FleetMemory:McpUrl"]);
+        var journal = BuildJournalProvisioning(agent);
+        if (agent.JournalEnabled && journal.IngestToken is null)
+            logger.LogInformation(
+                "Journal enabled for '{Agent}', but it has no Telegram bot token ref; omitting Journal config",
+                agent.Name);
 
         // The style file is written BEFORE settings.json, so "settings.json names a style that
         // exists on disk" is a fact about the order rather than a hope. GenerateSettingsJson
@@ -763,8 +790,8 @@ public sealed class ContainerProvisioningService(
         var style = await ResolveOutputStyleAsync(agent);
         await WriteOutputStyleFileAsync(agent, generatedDir, style);
 
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName, style));
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl));
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName, style, journal));
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl, journal.ReadToken));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent, ctoAgentName, style));
 
         logger.LogInformation(
@@ -1046,7 +1073,11 @@ public sealed class ContainerProvisioningService(
             agent.Name, projectsDir, agent.Projects.Count);
     }
 
-    internal static string GenerateAppsettingsJson(Agent agent, string ctoAgentName, OutputStyle? style = null)
+    internal static string GenerateAppsettingsJson(
+        Agent agent,
+        string ctoAgentName,
+        OutputStyle? style = null,
+        JournalProvisioning? journal = null)
     {
         if (!string.IsNullOrWhiteSpace(agent.OutputStyle) && style is null)
             throw new InvalidOperationException(
@@ -1149,10 +1180,25 @@ public sealed class ContainerProvisioningService(
         // Added by editing the serialized document rather than by a nullable property on the
         // anonymous type above, because a null property still SERIALIZES — and an agent with no
         // style must produce the same bytes it produced before this existed.
-        if (style is null || HasStyleFile(agent)) return json;
+        if ((style is null || HasStyleFile(agent))
+            && journal?.IngestToken is null
+            && journal?.ReadToken is null)
+            return json;
 
         var node = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
-        node["Agent"]!.AsObject()["OutputStyleBody"] = OutputStyleRenderer.ForPrompt(style);
+        if (style is not null && !HasStyleFile(agent))
+            node["Agent"]!.AsObject()["OutputStyleBody"] = OutputStyleRenderer.ForPrompt(style);
+        if (journal?.ReadToken is not null)
+            node["Agent"]!.AsObject()["McpHeaderSupport"] = true;
+        if (journal?.IngestToken is not null)
+        {
+            node["Journal"] = new System.Text.Json.Nodes.JsonObject
+            {
+                ["IngestToken"] = journal.IngestToken,
+                ["ExcludedChatIds"] = new System.Text.Json.Nodes.JsonArray(
+                    journal.ExcludedChatIds.Select(id => System.Text.Json.Nodes.JsonValue.Create(id)).ToArray()),
+            };
+        }
         return node.ToJsonString(IndentedJson);
     }
 
@@ -1202,7 +1248,10 @@ public sealed class ContainerProvisioningService(
         return withoutQuery.TrimEnd('/');
     }
 
-    internal static string GenerateMcpJson(Agent agent, string fleetMemoryMcpUrl)
+    internal static string GenerateMcpJson(
+        Agent agent,
+        string fleetMemoryMcpUrl,
+        string? journalReadToken = null)
     {
         var mcpServers = agent.McpEndpoints
             .OrderBy(e => e.McpName)
@@ -1210,6 +1259,24 @@ public sealed class ContainerProvisioningService(
                 e => e.McpName,
                 e =>
                 {
+                    if (string.Equals(e.McpName, JournalMcpServerName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!SupportsMcpHeaders(agent.Provider))
+                            throw new InvalidOperationException("journal_headers_unsupported");
+                        if (string.IsNullOrWhiteSpace(journalReadToken))
+                            throw new InvalidOperationException("journal_key_missing");
+
+                        return (object)new
+                        {
+                            type = e.TransportType,
+                            url = WithoutQuery(e.Url),
+                            headers = new Dictionary<string, string>
+                            {
+                                ["Authorization"] = $"Bearer {journalReadToken}",
+                            },
+                        };
+                    }
+
                     // Append ?agent={name} to fleet-telegram, fleet-memory, and fleet-temporal URLs
                     // so each server can identify the calling agent without relying on the LLM to pass it.
                     // WithAgentParam strips any existing query string before appending to prevent
@@ -1233,6 +1300,63 @@ public sealed class ContainerProvisioningService(
         }
 
         return JsonSerializer.Serialize(new { mcpServers }, IndentedJson);
+    }
+
+    internal static bool SupportsMcpHeaders(string? provider) =>
+        provider is not null && McpHeaderSupport.TryGetValue(provider, out var supported) && supported;
+
+    internal static string WithoutQuery(string url)
+    {
+        var trimmed = url.TrimEnd('/');
+        var question = trimmed.IndexOf('?');
+        return (question >= 0 ? trimmed[..question] : trimmed).TrimEnd('/');
+    }
+
+    private async Task<string?> DescribeJournalProvisioningFaultAsync(
+        string agentName, CancellationToken ct)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        var agent = await db.Agents
+            .Include(a => a.McpEndpoints)
+            .Include(a => a.EnvRefs)
+            .AsNoTracking()
+            .FirstOrDefaultAsync(a => a.Name == agentName, ct);
+        return agent is null ? null : DescribeJournalProvisioningFault(agent);
+    }
+
+    private string? DescribeJournalProvisioningFault(Agent agent)
+    {
+        var hasJournalEndpoint = agent.McpEndpoints.Any(e =>
+            string.Equals(e.McpName, JournalMcpServerName, StringComparison.OrdinalIgnoreCase));
+        if (!agent.JournalEnabled && !hasJournalEndpoint) return null;
+
+        var keyFault = journalTokens.DescribeKeyFault();
+        if (keyFault is not null) return keyFault;
+        if (hasJournalEndpoint && !SupportsMcpHeaders(agent.Provider))
+            return "journal_headers_unsupported";
+        return null;
+    }
+
+    private JournalProvisioning BuildJournalProvisioning(Agent agent)
+    {
+        if (DescribeJournalProvisioningFault(agent) is { } fault)
+            throw new InvalidOperationException(fault);
+
+        var hasBotToken = agent.EnvRefs.Any(e =>
+            e.EnvKeyName.StartsWith("TELEGRAM_", StringComparison.OrdinalIgnoreCase)
+            && e.EnvKeyName.EndsWith("_BOT_TOKEN", StringComparison.OrdinalIgnoreCase));
+        var hasJournalEndpoint = agent.McpEndpoints.Any(e =>
+            string.Equals(e.McpName, JournalMcpServerName, StringComparison.OrdinalIgnoreCase));
+
+        return new JournalProvisioning(
+            agent.JournalEnabled && hasBotToken
+                ? journalTokens.Mint(JournalTokenService.PurposeIngest, agent.Name)
+                : null,
+            agent.JournalEnabled ? journalTokens.ExcludedChatIds() : [],
+            hasJournalEndpoint
+                ? journalTokens.Mint(JournalTokenService.PurposeRead, agent.Name)
+                : null);
     }
 
     /// <summary>
@@ -1354,6 +1478,11 @@ public record ProvisionResult(string AgentName, bool Success, string Message)
     public static ProvisionResult Ok(string agentName, string message)   => new(agentName, true,  message);
     public static ProvisionResult Fail(string agentName, string message) => new(agentName, false, message);
 }
+
+internal sealed record JournalProvisioning(
+    string? IngestToken,
+    IReadOnlyList<long> ExcludedChatIds,
+    string? ReadToken);
 
 /// <summary>One assignment's project context, resolved once per provision.</summary>
 /// <param name="ProjectName">The assignment's name — the <c>projects/</c> directory the agent reads.</param>

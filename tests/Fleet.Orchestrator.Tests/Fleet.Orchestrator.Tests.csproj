@@ -31,6 +31,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\Fleet.Conversations\Fleet.Conversations.csproj" />
     <ProjectReference Include="..\..\src\Fleet.Orchestrator\Fleet.Orchestrator.csproj" />
   </ItemGroup>
 

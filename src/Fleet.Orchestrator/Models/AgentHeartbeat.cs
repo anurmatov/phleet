@@ -18,7 +18,19 @@ public sealed record AgentHeartbeat(
     string[]? Capabilities = null,
     int QueuedCount = 0,
     QueuedMessageInfo[]? QueuedMessages = null,
-    BackgroundTaskSummary[]? BackgroundTasks = null);
+    BackgroundTaskSummary[]? BackgroundTasks = null,
+    JournalHeartbeat? Journal = null);
+
+/// <summary>
+/// Optional journal health emitted by S2 agents. Null means an older agent and is displayed as n/a.
+/// </summary>
+public sealed record JournalHeartbeat(
+    bool Enabled,
+    long SpoolDepth,
+    long? OldestAgeSeconds,
+    long Dropped,
+    long Dead,
+    bool AuthFailed);
 
 /// <summary>Snapshot of a queued message waiting to be processed by an agent.</summary>
 public sealed record QueuedMessageInfo(string Preview, string Source, DateTimeOffset QueuedAt);
@@ -62,6 +74,8 @@ public sealed class AgentState
     public QueuedMessageInfo[]? QueuedMessages { get; set; }
     /// <summary>Active background subagent tasks spawned via the Agent tool with run_in_background=true.</summary>
     public BackgroundTaskSummary[]? BackgroundTasks { get; set; }
+    /// <summary>Latest durable-spool health, or null for an old agent heartbeat.</summary>
+    public JournalHeartbeat? Journal { get; set; }
 
     /// <summary>True when this entry was synthesized from DB config and has never sent a heartbeat.</summary>
     public bool IsDbOnly { get; set; }

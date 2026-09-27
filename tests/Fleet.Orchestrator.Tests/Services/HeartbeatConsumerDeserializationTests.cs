@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Fleet.Orchestrator.Models;
 
 namespace Fleet.Orchestrator.Tests.Services;
 
@@ -94,5 +95,35 @@ public class HeartbeatConsumerDeserializationTests
         Assert.Equal("", payload.RequestId);
         Assert.Equal("", payload.TargetAgent);
         Assert.Equal(0L, payload.UserId);
+    }
+
+    [Fact]
+    public void Deserialize_HeartbeatJournal_BindsEveryField()
+    {
+        const string json = """
+            {
+              "agent_name":"agent-1",
+              "status":"idle",
+              "timestamp":"2026-09-27T12:00:00Z",
+              "journal":{
+                "enabled":true,
+                "spool_depth":7,
+                "oldest_age_seconds":42,
+                "dropped":2,
+                "dead":1,
+                "auth_failed":true
+              }
+            }
+            """;
+
+        var heartbeat = JsonSerializer.Deserialize<AgentHeartbeat>(json, SnakeCaseOpts);
+
+        Assert.NotNull(heartbeat?.Journal);
+        Assert.True(heartbeat.Journal.Enabled);
+        Assert.Equal(7, heartbeat.Journal.SpoolDepth);
+        Assert.Equal(42, heartbeat.Journal.OldestAgeSeconds);
+        Assert.Equal(2, heartbeat.Journal.Dropped);
+        Assert.Equal(1, heartbeat.Journal.Dead);
+        Assert.True(heartbeat.Journal.AuthFailed);
     }
 }

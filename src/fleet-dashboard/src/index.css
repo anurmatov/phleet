@@ -5535,3 +5535,15 @@ body {
   border-radius: 4px;
 }
 .memory-cv-chip-size { background: rgba(245, 158, 11, 0.12); color: var(--amber); }
+/* ── Comms journal status ───────────────────────────────────────────────── */
+.journal-panel {
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.journal-panel-header { display: flex; align-items: center; justify-content: space-between; }
+.journal-panel-stats { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 10px; color: var(--muted); font-size: 13px; }
+.journal-panel-unavailable { margin-top: 10px; color: var(--red); }
+.journal-panel-muted { margin-top: 10px; color: var(--muted); }

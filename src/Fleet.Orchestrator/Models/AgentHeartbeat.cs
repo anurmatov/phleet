@@ -26,11 +26,11 @@ public sealed record AgentHeartbeat(
 /// </summary>
 public sealed record JournalHeartbeat(
     bool Enabled,
-    long SpoolDepth,
+    int SpoolDepth,
     long? OldestAgeSeconds,
     long Dropped,
-    long Dead,
-    bool AuthFailed);
+    int Dead,
+    int AuthFailed);
 
 /// <summary>Snapshot of a queued message waiting to be processed by an agent.</summary>
 public sealed record QueuedMessageInfo(string Preview, string Source, DateTimeOffset QueuedAt);

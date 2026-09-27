@@ -263,5 +263,5 @@ public sealed class AgentRegistry
         long? JournalOldestAgeSeconds,
         long? JournalDropped,
         long? JournalDead,
-        bool? JournalAuthFailed);
+        int? JournalAuthFailed);
 }

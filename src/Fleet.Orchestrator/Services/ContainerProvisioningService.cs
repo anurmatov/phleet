@@ -1195,8 +1195,7 @@ public sealed class ContainerProvisioningService(
             node["Journal"] = new System.Text.Json.Nodes.JsonObject
             {
                 ["IngestToken"] = journal.IngestToken,
-                ["ExcludedChatIds"] = new System.Text.Json.Nodes.JsonArray(
-                    journal.ExcludedChatIds.Select(id => System.Text.Json.Nodes.JsonValue.Create(id)).ToArray()),
+                ["ExcludedChatIds"] = string.Join(',', journal.ExcludedChatIds),
             };
         }
         return node.ToJsonString(IndentedJson);

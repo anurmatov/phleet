@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Fleet.Conversations.Journal;
+using Fleet.Comms.Configuration;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Microsoft.Extensions.Configuration;
@@ -88,7 +89,16 @@ public sealed class JournalProvisioningTests
             Path.Combine(harness.GeneratedDir("fleet-agent-1"), "appsettings.json")));
         var journal = doc.RootElement.GetProperty("Journal");
         Assert.StartsWith("cj1.ingest.agent-1.", journal.GetProperty("IngestToken").GetString());
-        Assert.Equal([-100L, 200L], journal.GetProperty("ExcludedChatIds").EnumerateArray().Select(x => x.GetInt64()));
+        Assert.Equal(JsonValueKind.String, journal.GetProperty("ExcludedChatIds").ValueKind);
+        Assert.Equal("-100,200", journal.GetProperty("ExcludedChatIds").GetString());
+
+        var options = new ConfigurationBuilder()
+            .AddJsonStream(new MemoryStream(Encoding.UTF8.GetBytes(doc.RootElement.GetRawText())))
+            .Build()
+            .GetSection("Journal")
+            .Get<JournalOptions>();
+        Assert.NotNull(options);
+        Assert.Equal([-100L, 200L], options.ExcludedChats().Order());
     }
 
     [Fact]

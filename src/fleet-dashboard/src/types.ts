@@ -20,7 +20,7 @@ export interface JournalHeartbeat {
   oldestAgeSeconds: number | null
   dropped: number
   dead: number
-  authFailed: boolean
+  authFailed: number
 }
 
 export interface AgentState {

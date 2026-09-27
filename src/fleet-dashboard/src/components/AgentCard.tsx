@@ -326,7 +326,7 @@ export default function AgentCard({
             <span className="row-detail-label">journal</span>
             <span className="row-detail-value">
               {agent.journal
-                ? `spool ${agent.journal.spoolDepth} · oldest ${agent.journal.oldestAgeSeconds == null ? 'n/a' : `${agent.journal.oldestAgeSeconds}s`} · auth ${agent.journal.authFailed ? 'failed' : 'ok'} · dropped ${agent.journal.dropped} · dead ${agent.journal.dead}`
+                ? `spool ${agent.journal.spoolDepth} · oldest ${agent.journal.oldestAgeSeconds == null ? 'n/a' : `${agent.journal.oldestAgeSeconds}s`} · auth ${agent.journal.authFailed !== 0 ? 'failed' : 'ok'} · dropped ${agent.journal.dropped} · dead ${agent.journal.dead}`
                 : 'n/a'}
             </span>
           </div>

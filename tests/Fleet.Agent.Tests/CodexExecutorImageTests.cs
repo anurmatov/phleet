@@ -265,6 +265,8 @@ public class CodexExecutorImageTests
     [Theory]
     [InlineData(null, null)]
     [InlineData("", null)]
+    [InlineData("none", "none")]         // #382: forwarded verbatim
+    [InlineData("minimal", "minimal")]
     [InlineData("low", "low")]
     [InlineData("medium", "medium")]
     [InlineData("high", "high")]

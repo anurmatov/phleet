@@ -41,6 +41,17 @@ public sealed class CodexExecutor : IAgentExecutor
     private readonly string? _localModelProvider;
     private readonly string _threadModel;
     private readonly string? _ossBaseUrl;
+    // True when _ossBaseUrl is Agent:CodexOssBaseUrl (#382), which StartProcessAsync sets on the
+    // codex child; false when it is the CODEX_OSS_BASE_URL the child inherits (legacy Env Ref).
+    private readonly bool _ossBaseUrlFromConfig;
+    private readonly string? _inheritedOssBaseUrl;
+    private bool _ossOverrideWarningLogged;
+
+    // #382 observability, local provider only: one window report per thread, one line per compaction.
+    private bool _contextWindowReported;
+    private string? _compactionTurnId;
+    private int _compactedNotices;
+    private int _compactionItems;
 
     // Hosted provider (#335), resolved once from AgentOptions.Model. Null for every agent that
     // does not name a hosted prefix, and then nothing below differs from before.
@@ -71,13 +82,6 @@ public sealed class CodexExecutor : IAgentExecutor
     private const int StartupRetryBudget = 3;
     private static readonly TimeSpan InterruptDrainTimeout = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan TurnSteerTimeout = TimeSpan.FromSeconds(2);
-
-    /// <summary>
-    /// The codex built-in <c>modelProvider</c> ids that point at a local OpenAI-compatible
-    /// inference server. Lives in <see cref="CodexLocalModelProviders"/> so the claude local-model
-    /// validation reads the same list (#340 V6).
-    /// </summary>
-    private static IReadOnlyList<string> LocalModelProviders => CodexLocalModelProviders.Ids;
 
     public string? LastSessionId => _threadId;
     public DateTimeOffset LastActivity => _lastActivity;
@@ -124,7 +128,9 @@ public sealed class CodexExecutor : IAgentExecutor
         // constructor, so a misconfigured model surfaces as a named startup failure instead of a
         // DI resolution error with no agent name in it.
         (_localModelProvider, _threadModel) = SplitLocalModel(_config.Model);
-        _ossBaseUrl = (environmentReader ?? Environment.GetEnvironmentVariable)(OssBaseUrlEnvVar);
+        _inheritedOssBaseUrl = (environmentReader ?? Environment.GetEnvironmentVariable)(OssBaseUrlEnvVar);
+        _ossBaseUrlFromConfig = !string.IsNullOrEmpty(_config.CodexOssBaseUrl);
+        _ossBaseUrl = _ossBaseUrlFromConfig ? _config.CodexOssBaseUrl : _inheritedOssBaseUrl;
 
         // The hosted prefixes never overlap the local ones, so at most one of the two is set.
         if (HostedModelProviders.TryResolve("codex", _config.Model, out var hosted, out var bareModel))
@@ -143,19 +149,13 @@ public sealed class CodexExecutor : IAgentExecutor
     /// Any other string — including one that merely contains a slash, such as <c>owl/t-lite</c> —
     /// comes back unchanged with a null provider. That is deliberate: an unprefixed model must
     /// produce exactly the <c>thread/start</c> payload it produced before this existed.
+    /// <para>
+    /// The algorithm lives in <see cref="CodexLocalModelProviders.Split"/>, so the orchestrator's
+    /// codex local-model check (#382 C1) and the startup gate split a model exactly as this does.
+    /// </para>
     /// </remarks>
-    internal static (string? Provider, string Model) SplitLocalModel(string model)
-    {
-        var slash = model.IndexOf('/');
-        if (slash <= 0 || slash == model.Length - 1)
-            return (null, model);
-
-        var prefix = model[..slash];
-        var provider = LocalModelProviders.FirstOrDefault(
-            p => string.Equals(p, prefix, StringComparison.OrdinalIgnoreCase));
-
-        return provider is null ? (null, model) : (provider, model[(slash + 1)..]);
-    }
+    internal static (string? Provider, string Model) SplitLocalModel(string model) =>
+        CodexLocalModelProviders.Split(model);
 
     /// <summary>
     /// Describes the configuration fault in a codex agent whose model names a local provider but
@@ -526,18 +526,33 @@ public sealed class CodexExecutor : IAgentExecutor
         };
 
     // Maps fleet effort tiers to the codex ReasoningEffort enum (none/minimal/low/medium/high/xhigh).
-    // Codex has no "max" level — fleet's "max" collapses to "xhigh" (codex's ceiling).
+    // Codex has no "max" level — fleet's "max" collapses to "xhigh" (codex's ceiling). none and
+    // minimal go through verbatim (#382): Qwen3.8 on codex needs none to reliably emit a final message.
     internal static string? MapEffortToCodex(string? effort) =>
         effort switch
         {
             null or "" => null,
-            "low"    => "low",
-            "medium" => "medium",
-            "high"   => "high",
-            "xhigh"  => "xhigh",
-            "max"    => "xhigh", // codex ceiling; fleet "max" == codex "xhigh"
-            _        => null,
+            "none"    => "none",
+            "minimal" => "minimal",
+            "low"     => "low",
+            "medium"  => "medium",
+            "high"    => "high",
+            "xhigh"   => "xhigh",
+            "max"     => "xhigh", // codex ceiling; fleet "max" == codex "xhigh"
+            _         => null,
         };
+
+    /// <summary>
+    /// Merges <c>model_context_window</c> into the <c>thread/start</c> <c>config</c> overrides,
+    /// creating the object when absent and keeping every key already in it.
+    /// </summary>
+    internal static void MergeModelContextWindow(JsonObject startParams, int contextWindow)
+    {
+        if (startParams["config"] is not JsonObject config)
+            startParams["config"] = config = new JsonObject();
+
+        config["model_context_window"] = contextWindow;
+    }
 
     /// <summary>
     /// D7: a hosted provider receives <c>effort</c> only when the value is in its forwarded set.
@@ -670,6 +685,25 @@ public sealed class CodexExecutor : IAgentExecutor
         foreach (var keyEnvVar in HostedModelProviders.KeyEnvVars)
             psi.Environment.Remove(keyEnvVar);
 
+        // #382: the orchestrator's URL replaces whatever the container inherited, so a stale Env Ref
+        // cannot point the agent at another server. The legacy route leaves the environment as is.
+        if (_localModelProvider is not null && _ossBaseUrlFromConfig)
+        {
+            psi.Environment[OssBaseUrlEnvVar] = _ossBaseUrl;
+
+            // Names the variable only; the inherited value is not logged.
+            if (!_ossOverrideWarningLogged
+                && !string.IsNullOrWhiteSpace(_inheritedOssBaseUrl)
+                && !string.Equals(_inheritedOssBaseUrl, _ossBaseUrl, StringComparison.Ordinal))
+            {
+                _ossOverrideWarningLogged = true;
+                _logger.LogWarning(
+                    "CodexExecutor: the inherited {EnvVar} is superseded by Agent:CodexOssBaseUrl; "
+                    + "the Env Ref can be removed from this agent",
+                    OssBaseUrlEnvVar);
+            }
+        }
+
         _process = _processStarter(psi) ?? throw new InvalidOperationException("Failed to start codex app-server");
         _stdin = new StreamWriter(_process.StandardInput.BaseStream, new UTF8Encoding(false)) { AutoFlush = true };
         _notificationChannel = Channel.CreateUnbounded<JsonObject>(new UnboundedChannelOptions
@@ -690,8 +724,11 @@ public sealed class CodexExecutor : IAgentExecutor
         if (_localModelProvider is not null)
         {
             _logger.LogInformation(
-                "CodexExecutor: local inference — provider {Provider}, model {Model}, {EnvVar}={BaseUrl}",
-                _localModelProvider, _threadModel, OssBaseUrlEnvVar, _ossBaseUrl);
+                "CodexExecutor: local inference — provider {Provider}, model {Model}, {EnvVar}={BaseUrl}, "
+                + "source={Source}, contextWindow={ContextWindow}",
+                _localModelProvider, _threadModel, OssBaseUrlEnvVar, _ossBaseUrl,
+                _ossBaseUrlFromConfig ? "agent config" : "legacy env",
+                (object?)_config.ContextWindow ?? "unset");
         }
 
         return Task.CompletedTask;
@@ -730,8 +767,8 @@ public sealed class CodexExecutor : IAgentExecutor
             ["model"] = _threadModel,
         };
 
-        // The only difference from the frontier payload. codex resolves the provider's base URL
-        // from CODEX_OSS_BASE_URL in this process's environment, which the app-server inherits.
+        // codex resolves the local provider's base URL from CODEX_OSS_BASE_URL in the app-server's
+        // environment: set by StartProcessAsync from Agent:CodexOssBaseUrl, else inherited (legacy).
         if (_localModelProvider is not null)
             startParams["modelProvider"] = _localModelProvider;
 
@@ -746,6 +783,11 @@ public sealed class CodexExecutor : IAgentExecutor
             startParams["modelProvider"] = _hostedProvider.CodexProviderId;
             startParams["config"] = BuildHostedProviderConfig(_hostedProvider, endpoint);
         }
+
+        // #382, local provider only. codex derives its auto-compaction threshold from this window,
+        // so Fleet sets no second one; cloud and hosted models keep their model-owned limits.
+        if (_localModelProvider is not null && _config.ContextWindow is int contextWindow)
+            MergeModelContextWindow(startParams, contextWindow);
 
         startParams["cwd"] = _config.WorkDir;
         startParams["approvalPolicy"] = "never";
@@ -769,6 +811,7 @@ public sealed class CodexExecutor : IAgentExecutor
 
         var thread = threadResponse.RequireObject("thread");
         _threadId = thread.RequireString("id");
+        _contextWindowReported = false;
         var ephemeral = thread["ephemeral"]?.GetValue<bool>() ?? false;
         var path = thread["path"];
         if (!ephemeral || path is not null && path.GetValueKindSafe() != JsonValueKind.Null)
@@ -954,6 +997,8 @@ public sealed class CodexExecutor : IAgentExecutor
             if (method is null || @params is null)
                 continue;
 
+            ObserveLocalContext(method, @params);
+
             if (method == "thread/tokenUsage/updated")
             {
                 var turnId = @params["turnId"]?.GetValue<string>();
@@ -1007,6 +1052,59 @@ public sealed class CodexExecutor : IAgentExecutor
                     yield break;
             }
         }
+    }
+
+    /// <summary>
+    /// #382, local provider only: logs the context window codex actually applied, once per thread,
+    /// and each context compaction. Both channel readers call it before any turn filter, so no
+    /// notification is missed. Counts only — never prompt text or the token-usage payload.
+    /// </summary>
+    private void ObserveLocalContext(string method, JsonObject @params)
+    {
+        if (_localModelProvider is null)
+            return;
+
+        if (method == "thread/tokenUsage/updated")
+        {
+            if (_contextWindowReported
+                || (@params["tokenUsage"] as JsonObject)?["modelContextWindow"] is not JsonValue window
+                || !window.TryGetValue<long>(out var reported))
+            {
+                return;
+            }
+
+            _contextWindowReported = true;
+            _logger.LogInformation(
+                "CodexExecutor: codex reports modelContextWindow {Reported} (configured {Configured})",
+                reported, (object?)_config.ContextWindow ?? "unset");
+            if (_config.ContextWindow is int configured && reported > configured)
+            {
+                _logger.LogWarning(
+                    "CodexExecutor: codex did not apply model_context_window (reported {Reported}, configured {Configured})",
+                    reported, configured);
+            }
+            return;
+        }
+
+        var isItem = method == "item/completed"
+            && (@params["item"] as JsonObject)?["type"]?.GetValue<string>() == "contextCompaction";
+        if (!isItem && method != "thread/compacted")
+            return;
+
+        // codex can announce one compaction twice: the deprecated thread/compacted notification and
+        // a contextCompaction item. Per turn, only a rise in the higher of the two counts is new.
+        var turnId = @params["turnId"]?.GetValue<string>();
+        if (!string.Equals(turnId, _compactionTurnId, StringComparison.Ordinal))
+            (_compactionTurnId, _compactedNotices, _compactionItems) = (turnId, 0, 0);
+
+        var seen = Math.Max(_compactedNotices, _compactionItems);
+        if (isItem)
+            _compactionItems++;
+        else
+            _compactedNotices++;
+
+        if (Math.Max(_compactedNotices, _compactionItems) > seen)
+            _logger.LogInformation("CodexExecutor: codex compacted the thread context");
     }
 
     private AgentProgress? MapNotification(string method, JsonObject @params, string turnId)
@@ -1222,6 +1320,8 @@ public sealed class CodexExecutor : IAgentExecutor
                 var @params = notification["params"] as JsonObject;
                 if (method is null || @params is null)
                     continue;
+
+                ObserveLocalContext(method, @params);
 
                 if (method == "thread/tokenUsage/updated")
                 {

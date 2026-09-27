@@ -21,11 +21,13 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
     public const string CtoAgent = "cto-agent";
 
     private readonly SqliteConnection _connection;
+    private readonly FakeDockerApi _dockerApi = new();
 
     public string BaseDir { get; }
     public ServiceProvider Services { get; }
     public ContainerProvisioningService Service { get; }
     public ProvisioningLogSink Logs { get; } = new();
+    public int DockerRequestCount => _dockerApi.RequestCount;
 
     private ProvisioningHarness(IReadOnlyDictionary<string, string?>? extraConfig)
     {
@@ -56,10 +58,11 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
         var config = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
         var docker = new DockerService(
             NullLogger<DockerService>.Instance,
-            new HttpClient(new FakeDockerApi()) { BaseAddress = new Uri("http://localhost") });
+            new HttpClient(_dockerApi) { BaseAddress = new Uri("http://localhost") });
 
         Service = new ContainerProvisioningService(
-            Services.GetRequiredService<IServiceScopeFactory>(), docker, config, Logs.For<ContainerProvisioningService>());
+            Services.GetRequiredService<IServiceScopeFactory>(), docker, config,
+            new JournalTokenService(config), Logs.For<ContainerProvisioningService>());
     }
 
     public static ProvisioningHarness Create(IReadOnlyDictionary<string, string?>? extraConfig = null) => new(extraConfig);
@@ -93,8 +96,11 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
     /// <summary>No container exists; create and start succeed.</summary>
     private sealed class FakeDockerApi : HttpMessageHandler
     {
+        public int RequestCount { get; private set; }
+
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
+            RequestCount++;
             var path = request.RequestUri!.AbsolutePath;
             if (request.Method == HttpMethod.Post && path.EndsWith("/containers/create", StringComparison.Ordinal))
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Created)

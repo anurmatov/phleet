@@ -13,6 +13,7 @@ import type {
 } from '../types'
 import { temporalUiUrl, heartbeatAge, decodeUnicode } from '../utils'
 import AgentCard from './AgentCard'
+import CommsJournalPanel from './CommsJournalPanel'
 
 interface AgentsViewProps {
   sorted: AgentState[]
@@ -176,6 +177,7 @@ export default function AgentsView({
 
   return (
     <div className="view-page">
+      <CommsJournalPanel />
       {/* ── Agent list ── */}
       <div className="agent-list">
         {sorted.map(agent => (

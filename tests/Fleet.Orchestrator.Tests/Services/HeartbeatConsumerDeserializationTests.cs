@@ -1,4 +1,6 @@
 using System.Text.Json;
+using Fleet.Orchestrator.Models;
+using Fleet.Orchestrator.Services;
 
 namespace Fleet.Orchestrator.Tests.Services;
 
@@ -94,5 +96,36 @@ public class HeartbeatConsumerDeserializationTests
         Assert.Equal("", payload.RequestId);
         Assert.Equal("", payload.TargetAgent);
         Assert.Equal(0L, payload.UserId);
+    }
+
+    [Fact]
+    public void Deserialize_HeartbeatJournal_BindsRealAgentPayload()
+    {
+        // Serialized by Fleet.Agent's heartbeat record: PascalCase envelope and camelCase journal.
+        const string json = """
+            {
+              "AgentName":"agent-1",
+              "Status":"idle",
+              "Timestamp":"2026-09-27T12:00:00Z",
+              "Journal":{
+                "enabled":true,
+                "spoolDepth":7,
+                "oldestAgeSeconds":42,
+                "dropped":2,
+                "dead":1,
+                "authFailed":1
+              }
+            }
+            """;
+
+        var heartbeat = HeartbeatConsumerService.DeserializeHeartbeat(json);
+
+        Assert.NotNull(heartbeat?.Journal);
+        Assert.True(heartbeat.Journal.Enabled);
+        Assert.Equal(7, heartbeat.Journal.SpoolDepth);
+        Assert.Equal(42, heartbeat.Journal.OldestAgeSeconds);
+        Assert.Equal(2, heartbeat.Journal.Dropped);
+        Assert.Equal(1, heartbeat.Journal.Dead);
+        Assert.Equal(1, heartbeat.Journal.AuthFailed);
     }
 }

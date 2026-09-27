@@ -34,6 +34,8 @@ builder.Services.AddSingleton<TaskHistoryStore>();
 builder.Services.AddSingleton<AgentRegistry>();
 builder.Services.AddSingleton<DockerService>();
 builder.Services.AddSingleton<ContainerProvisioningService>();
+builder.Services.AddSingleton<JournalTokenService>();
+builder.Services.AddSingleton<CommsJournalStatusProxy>();
 builder.Services.AddSingleton<SetupService>();
 builder.Services.AddSingleton<ICredentialsReader, EnvFileCredentialsReader>();
 builder.Services.AddSingleton<ConfigService>();
@@ -306,6 +308,7 @@ app.MapGet("/api/agents/{name}/history", (string name, TaskHistoryStore taskHist
 // REST: agent config read/write lives in Endpoints/AgentConfigEndpoints.cs so the
 // production handlers can be exercised over real HTTP by the endpoint tests (#357).
 app.MapAgentConfigEndpoints();
+app.MapCommsJournalEndpoints();
 
 // REST: the /api/output-styles surface (#317) — list, read, create, update and delete.
 // Mapped from Endpoints/OutputStyleEndpoints.cs so the endpoint tests exercise the same

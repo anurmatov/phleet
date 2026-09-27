@@ -16,6 +16,9 @@ namespace Fleet.Orchestrator.Services;
 /// </summary>
 public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable, IRabbitMqStatus
 {
+    internal static readonly JsonSerializerOptions HeartbeatJsonOptions =
+        new() { PropertyNameCaseInsensitive = true };
+
     private readonly RabbitMqOptions _rabbitConfig;
     private readonly AgentRegistry _registry;
     private readonly AgentConfigPublisherService _publisher;
@@ -117,8 +120,7 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
         try
         {
             var json = Encoding.UTF8.GetString(ea.Body.Span);
-            var heartbeat = JsonSerializer.Deserialize<AgentHeartbeat>(json,
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            var heartbeat = DeserializeHeartbeat(json);
 
             if (heartbeat is null)
             {
@@ -136,6 +138,9 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
 
         return Task.CompletedTask;
     }
+
+    internal static AgentHeartbeat? DeserializeHeartbeat(string json) =>
+        JsonSerializer.Deserialize<AgentHeartbeat>(json, HeartbeatJsonOptions);
 
     private async Task HandleAccessRequestAsync(BasicDeliverEventArgs ea)
     {

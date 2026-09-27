@@ -92,17 +92,28 @@ import json, sys, os
 mcp_path, settings_path = sys.argv[1], sys.argv[2]
 with open(mcp_path) as f:
     mcp = json.load(f)
+with open('/app/appsettings.json') as f:
+    appsettings = json.load(f)
+mcp_header_support = appsettings.get("Agent", {}).get("McpHeaderSupport") is True
 
 servers = mcp.get("mcpServers", {})
 gemini_servers = {}
 
 for name, cfg in servers.items():
     url = cfg.get("url", "")
-    # Gemini CLI mcpServers schema accepts only "url" — the transport is inferred
-    # from the URL scheme. Do NOT include "transport" or "type" keys; the CLI
+    headers = cfg.get("headers")
+    # False until a pinned-CLI tools/list proof flips ContainerProvisioningService.McpHeaderSupport.
+    # Fail closed: do not turn an authenticated server into a header-less one.
+    if headers and not mcp_header_support:
+        print(f"WARN: skipping MCP server '{name}' (headers unsupported by pinned gemini CLI)", file=sys.stderr)
+        continue
+    # Gemini CLI mcpServers schema infers transport from the URL. Do NOT include
+    # "transport" or "type" keys; the CLI
     # rejects unknown fields with "Unrecognized key(s) in object" and drops the server.
     if url:
         gemini_servers[name] = {"url": url}
+        if headers:
+            gemini_servers[name]["headers"] = headers
     else:
         print(f"WARN: skipping MCP server '{name}' (no URL — stdio transport not supported by gemini CLI)", file=sys.stderr)
 
@@ -173,24 +184,36 @@ elif [ "$PROVIDER" = "codex" ]; then
 const fs = require('fs');
 const appsettings = JSON.parse(fs.readFileSync('/app/appsettings.json', 'utf8'));
 const allowedTools = (appsettings.Agent && appsettings.Agent.AllowedTools) || [];
+const mcpHeaderSupport = appsettings.Agent && appsettings.Agent.McpHeaderSupport === true;
 const mcpCfg = JSON.parse(fs.readFileSync('$MCP_JSON', 'utf8'));
 const servers = mcpCfg.mcpServers || {};
 let toml = '';
 for (const [name, s] of Object.entries(servers)) {
     if (!s.url) continue;
+    // False until a pinned-CLI tools/list proof flips ContainerProvisioningService.McpHeaderSupport.
+    // Fail closed: do not turn an authenticated server into a header-less one.
+    if (s.headers && Object.keys(s.headers).length > 0 && !mcpHeaderSupport) {
+        console.error('WARN: skipping MCP server \'' + name + '\' (headers unsupported by pinned codex CLI)');
+        continue;
+    }
     const prefix = 'mcp__' + name + '__';
     const enabled = allowedTools
         .filter(t => t.startsWith(prefix))
         .map(t => t.slice(prefix.length));
     toml += '[mcp_servers.' + name + ']\n';
     toml += 'url = \"' + s.url + '\"\n';
+    if (s.headers && Object.keys(s.headers).length > 0) {
+        const pairs = Object.entries(s.headers)
+            .map(([k, v]) => JSON.stringify(k) + ' = ' + JSON.stringify(String(v)));
+        toml += 'http_headers = { ' + pairs.join(', ') + ' }\n';
+    }
     if (enabled.length > 0) {
         toml += 'enabled_tools = [' + enabled.map(t => '\"' + t + '\"').join(', ') + ']\n';
     }
     toml += '\n';
 }
 if (toml) fs.writeFileSync('/root/.codex/config.toml', toml);
-" 2>/dev/null || true
+" || true
     fi
 elif [ "$CLAUDE_LOCAL_MODEL" = "true" ]; then
     # A local-model agent holds no Claude OAuth credential (#340 D3). /root/.claude persists in the

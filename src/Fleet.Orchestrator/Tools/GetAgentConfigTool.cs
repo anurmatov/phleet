@@ -45,6 +45,7 @@ public sealed class GetAgentConfigTool(IServiceScopeFactory scopeFactory)
             + (agent.ContextWindow is not null && !ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl)
                 ? " (ignored: not a local-model claude agent)" : ""));
         sb.AppendLine($"- Auto memory: {agent.AutoMemoryEnabled}");
+        sb.AppendLine($"- Journal enabled: {agent.JournalEnabled}");
         sb.AppendLine($"- Mount Docker socket: {agent.MountDockerSock}");
         sb.AppendLine();
 

@@ -148,6 +148,26 @@ public class ContainerProvisioningServiceTests
         Assert.DoesNotContain("/mcp", url);
     }
 
+    [Fact]
+    public void GenerateMcpJson_AgentWithoutJournalEndpoint_IsByteIdenticalToMain()
+    {
+        const string expected = """
+            {
+              "mcpServers": {
+                "fleet-memory": {
+                  "type": "http",
+                  "url": "http://fleet-memory:3100?agent=agolden"
+                }
+              }
+            }
+            """;
+
+        var actual = ContainerProvisioningService.GenerateMcpJson(
+            MinimalAgent("agolden", "claude"), "http://fleet-memory:3100");
+
+        Assert.Equal(expected.ReplaceLineEndings("\n"), actual.ReplaceLineEndings("\n"));
+    }
+
     // ── GenerateAppsettingsJson: codex auto-grants ────────────────────────────
     // entrypoint.sh reads AllowedTools from appsettings.json to generate config.toml
     // enabled_tools for each MCP server. So the baseline grants (memory_get, notify_cto)

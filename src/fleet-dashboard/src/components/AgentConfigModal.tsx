@@ -419,6 +419,13 @@ export default function AgentConfigModal({
               </div>
               <div className="config-field">
                 <label className="config-field config-field-checkbox">
+                  <input type="checkbox" checked={configEdits.journalEnabled} onChange={e => onEditsChange({ journalEnabled: e.target.checked })} />
+                  <span className="config-label">Journal human Telegram messages</span>
+                </label>
+                <FieldHint>Records this agent&apos;s DMs and allowed groups in Comms. Needs <code>FLEET_COMMS_JOURNAL_KEY</code>.</FieldHint>
+              </div>
+              <div className="config-field">
+                <label className="config-field config-field-checkbox">
                   <input type="checkbox" checked={configEdits.telegramSendOnly} onChange={e => onEditsChange({ telegramSendOnly: e.target.checked })} />
                   <span className="config-label">Telegram Send-Only (no polling)</span>
                 </label>

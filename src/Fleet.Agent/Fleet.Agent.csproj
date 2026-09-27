@@ -21,6 +21,8 @@
       ContractsDependencyTests keeps it that way.
     -->
     <ProjectReference Include="..\Fleet.Conversations.Contracts\Fleet.Conversations.Contracts.csproj" />
+    <!-- The journal publisher (#377): Contracts only, the same rule as above. -->
+    <ProjectReference Include="..\Fleet.Journal.Client\Fleet.Journal.Client.csproj" />
   </ItemGroup>
 
   <ItemGroup>

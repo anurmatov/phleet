@@ -655,6 +655,17 @@ public sealed class TaskManager
 
     // --- Private ---
 
+    /// <summary>
+    /// A reply to another agent's directive or to a workflow is operational traffic: the journal
+    /// never records it, even in a chat a human can see.
+    /// </summary>
+    internal static OutboundOrigin OriginOf(TaskSource source) => source switch
+    {
+        TaskSource.Relay => OutboundOrigin.Relay,
+        TaskSource.Bridge => OutboundOrigin.Bridge,
+        _ => OutboundOrigin.Human,
+    };
+
     private async Task ProcessTask(long chatId, int taskId, string task, string displayText,
         bool isSessionTask, TaskSource source, string? relaySender, string? correlationId, string? relayTaskId,
         IReadOnlyList<MessageImage>? images, IReadOnlyList<MessageDocument>? documents,
@@ -682,6 +693,7 @@ public sealed class TaskManager
 
         var attachmentDir = _telegramAttachmentDir;
         string Prefix() => state.Count > 1 ? $"[#{taskId}] " : "";
+        var origin = OriginOf(source);
 
         string? lastResult = null;
         string? lastError = null;
@@ -722,11 +734,11 @@ public sealed class TaskManager
                         var displayName = $"{char.ToUpperInvariant(_agentConfig.ShortName[0])}{_agentConfig.ShortName[1..]}";
                         htmlPrefix = $"<b>{displayName}:</b>\n";
                     }
-                    await _sink.SendHtmlTextAsync(chatId, $"{htmlPrefix}{encoded}{statsText}{toolBlock}");
+                    await _sink.SendHtmlTextByOriginAsync(chatId, $"{htmlPrefix}{encoded}{statsText}{toolBlock}", origin);
                 }
                 else
                 {
-                    await _sink.SendTextAsync(chatId, $"{content}{statsText}");
+                    await _sink.SendTextByOriginAsync(chatId, $"{content}{statsText}", origin);
                 }
             }
             catch (Exception ex)
@@ -806,7 +818,7 @@ public sealed class TaskManager
                     if (progress.EventType == "warning" && progress.IsSignificant)
                     {
                         // User-facing warning (e.g. provider capability notice) — deliver immediately
-                        await _sink.SendTextAsync(chatId, progress.Summary);
+                        await _sink.SendTextByOriginAsync(chatId, progress.Summary, origin);
                         var (noticeText, noticeTruncated) = ProtocolSanitizer.SanitizeAndBound(
                             progress.Summary, ProtocolLimits.MaxNoticeTextChars, attachmentDir);
                         PublishEvent(chatId, ConversationEventKind.TurnNotice, identity,
@@ -816,7 +828,7 @@ public sealed class TaskManager
                     {
                         // Stale answer from the prior turn preserved during drain — deliver
                         // immediately so it reaches the user before the new turn's response.
-                        await _sink.SendTextAsync(chatId, progress.Summary);
+                        await _sink.SendTextByOriginAsync(chatId, progress.Summary, origin);
                         var (recoveredText, recoveredTruncated) = ProtocolSanitizer.SanitizeAndBound(
                             progress.Summary, ProtocolLimits.MaxNoticeTextChars, attachmentDir);
                         PublishEvent(chatId, ConversationEventKind.TurnRecoveredAnswer, identity,
@@ -843,7 +855,7 @@ public sealed class TaskManager
                                 htmlPrefix = $"<b>{displayName}:</b>\n";
                             }
                             var encoded = System.Net.WebUtility.HtmlEncode($"{Prefix()}... {summaryText}");
-                            await _sink.SendHtmlTextAsync(chatId, $"{htmlPrefix}<blockquote expandable>{encoded}</blockquote>");
+                            await _sink.SendHtmlTextByOriginAsync(chatId, $"{htmlPrefix}<blockquote expandable>{encoded}</blockquote>", origin);
                         }
                         OnToolUse?.Invoke(chatId, progress.ToolName, progress.Summary);
 
@@ -1303,7 +1315,7 @@ public sealed class TaskManager
         {
             try
             {
-                await _sink.SendTextAsync(chatId, "I'm busy right now — your message is queued. I'll get to it once my current turn finishes.");
+                await _sink.SendTextByOriginAsync(chatId, "I'm busy right now — your message is queued. I'll get to it once my current turn finishes.", OriginOf(message.Source));
             }
             catch (Exception ex)
             {
@@ -1387,7 +1399,7 @@ public sealed class TaskManager
             _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DroppedAtQueueCap);
             // DebouncedGroupBatch drops silently — the notice is noise for automated checks.
             if (part.Source != TaskSource.DebouncedGroupBatch)
-                _ = _sink.SendTextAsync(chatId, $"Queue is full ({MaxQueueDepth} messages waiting). Please wait for tasks to complete.");
+                _ = _sink.SendTextByOriginAsync(chatId, $"Queue is full ({MaxQueueDepth} messages waiting). Please wait for tasks to complete.", OriginOf(part.Source));
             // Production relay passes taskId but no correlationId — gate on either so relay
             // completions are not dead code when the source has only a taskId.
             if (completeBridgeOnDrop && part.Source is TaskSource.Bridge or TaskSource.Relay
@@ -1412,7 +1424,7 @@ public sealed class TaskManager
         if (notifyUser && !(_agentConfig.SuppressToolMessages && chatId < 0))
         {
             queued.BusyNoticeSent = true;
-            _ = _sink.SendTextAsync(chatId, $"I'm busy right now — your message is queued (position {queuePos}). I'll get to it once my current task finishes.");
+            _ = _sink.SendTextByOriginAsync(chatId, $"I'm busy right now — your message is queued (position {queuePos}). I'll get to it once my current task finishes.", OriginOf(part.Source));
         }
         OnStatusChanged?.Invoke();
         return true;
@@ -1651,7 +1663,7 @@ public sealed class TaskManager
         _logger.LogInformation("Draining queued message for chat {ChatId} (source={Source}, parts={Parts})",
             queued.ChatId, queued.Source, queued.PartCount);
         if (queued.BusyNoticeSent)
-            _ = _sink.SendTextAsync(queued.ChatId, "Now processing your queued message...");
+            _ = _sink.SendTextByOriginAsync(queued.ChatId, "Now processing your queued message...", OriginOf(queued.Source));
         OnStatusChanged?.Invoke();
 
         // Identity and the merged-submission list must survive the queue. Without them the turn

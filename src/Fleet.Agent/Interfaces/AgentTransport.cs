@@ -4,6 +4,7 @@ using Fleet.Agent.Configuration;
 using Fleet.Shared;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services;
+using Fleet.Conversations.Contracts;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -40,6 +41,13 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     private readonly IFleetConnectionState _connectionState;
     private readonly ILogger<AgentTransport> _logger;
     private readonly RichFallbackCounter _richFallbackCounter;
+
+    // The conversation journal (#377). Null unless Journal__IngestToken is set, and every capture
+    // site is a no-op when it is null — an agent without a token sends exactly what it sent before.
+    private readonly JournalCapture? _journal;
+
+    /// <summary>True when the journal was injected (a token is set). For the registration tests.</summary>
+    internal bool JournalEnabled => _journal is not null;
 
     // DocumentDownloadHelper wraps IDocumentDownloader so the download+persist path
     // can be unit-tested by injecting a fake downloader. Exposed as internal so tests
@@ -81,8 +89,10 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         ILogger<AgentTransport> logger,
         MessageSinkHolder sinkHolder,
         RichFallbackCounter? richFallbackCounter = null,
-        SinkSuppressionCounter? sinkCounter = null)
+        SinkSuppressionCounter? sinkCounter = null,
+        JournalCapture? journal = null)
     {
+        _journal = journal;
         _agentConfig = agentConfig.Value;
         _telegramConfig = telegramConfig.Value;
         _allowlist = allowlist;
@@ -237,7 +247,26 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
 
     // --- IMessageSink ---
 
-    public async Task SendTextAsync(long chatId, string text, CancellationToken ct = default)
+    public Task SendTextAsync(long chatId, string text, CancellationToken ct = default)
+        => SendTextAsync(chatId, text, OutboundOrigin.Human, ct);
+
+    public async Task SendTextAsync(long chatId, string text, OutboundOrigin origin, CancellationToken ct = default)
+    {
+        // Everything one call puts on Telegram is journaled together, so a reply split into several
+        // messages shares one sendGroup. Flushed in finally: a send that fails half-way still
+        // journals the parts Telegram accepted.
+        var journal = _journal?.Outbound(origin);
+        try
+        {
+            await SendTextCoreAsync(chatId, text, journal, ct);
+        }
+        finally
+        {
+            journal?.Flush();
+        }
+    }
+
+    private async Task SendTextCoreAsync(long chatId, string text, JournalCapture.OutboundBatch? journal, CancellationToken ct)
     {
         // chatId==0 means "headless workflow delegation" — no Telegram destination.
         // The result still flows back to the caller via the relay (see OnTaskCompleted).
@@ -264,7 +293,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 if (caption is null && i + 1 < parts.Length && parts[i + 1].Trim() is { Length: > 0 } after)
                     caption = after;
 
-                await SendPhotoAsync(chatId, filePath, caption, ct);
+                await SendPhotoCoreAsync(chatId, filePath, caption, journal, ct);
                 // Photos consume the reply slot even though SendPhotoAsync doesn't pass replyParams.
                 // Edge case: [reply_to: N][IMAGE:...] will silently drop the reply thread on the photo.
                 // Acceptable for now — photo+reply threading is a rare combination.
@@ -291,7 +320,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                         ? $"{char.ToUpperInvariant(_agentConfig.ShortName[0])}{_agentConfig.ShortName[1..]}: "
                         : null;
                     var fullText = prefix is not null ? prefix + segment : segment;
-                    replyUsed = await SendRichWithFallbackAsync(chatId, fullText, replyToMessageId, replyUsed, ct);
+                    replyUsed = await SendRichWithFallbackAsync(chatId, fullText, replyToMessageId, replyUsed, ct, journal);
                 }
                 else if (_agentConfig.FormattingMode == FormattingMode.LegacyHtml)
                 {
@@ -309,7 +338,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                                 ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
                                 : null;
                             var sentId = await SendMessageWithReplyFallbackAsync(chatId, prefix + chunk,
-                                ParseMode.Html, replyParams, ct);
+                                ParseMode.Html, replyParams, ct, journal);
                             _lastSentMessageIds[chatId] = sentId;
                             replyUsed = true;
                         }
@@ -323,7 +352,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                                 ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
                                 : null;
                             var sentId = await SendMessageWithReplyFallbackAsync(chatId, chunk,
-                                ParseMode.Html, replyParams, ct);
+                                ParseMode.Html, replyParams, ct, journal);
                             _lastSentMessageIds[chatId] = sentId;
                             replyUsed = true;
                         }
@@ -340,7 +369,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                             ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
                             : null;
                         var sentId = await SendMessageWithReplyFallbackAsync(chatId, $"<b>{displayName}:</b>\n{escaped}",
-                            ParseMode.Html, replyParams, ct);
+                            ParseMode.Html, replyParams, ct, journal);
                         _lastSentMessageIds[chatId] = sentId;
                         replyUsed = true;
                     }
@@ -353,7 +382,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                         var replyParams = !replyUsed && replyToMessageId.HasValue
                             ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
                             : null;
-                        var sentId = await SendMessageWithReplyFallbackAsync(chatId, chunk, null, replyParams, ct);
+                        var sentId = await SendMessageWithReplyFallbackAsync(chatId, chunk, null, replyParams, ct, journal);
                         _lastSentMessageIds[chatId] = sentId;
                         replyUsed = true;
                     }
@@ -371,8 +400,10 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     private async Task<long> SendMessageWithReplyFallbackAsync(
         long chatId, string text, ParseMode? parseMode,
         Telegram.Bot.Types.ReplyParameters? replyParams,
-        CancellationToken ct)
+        CancellationToken ct,
+        JournalCapture.OutboundBatch? journal = null)
     {
+        var format = parseMode == ParseMode.Html ? JournalTextFormat.Html : JournalTextFormat.Plain;
         try
         {
             var m = replyParams is not null
@@ -383,6 +414,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 : (parseMode.HasValue
                     ? await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
                     : await _bot!.SendMessage(chatId, text, cancellationToken: ct));
+            JournalSent(journal, chatId, m, text, format);
             return m.Id;
         }
         catch (Exception ex) when (ex.Message.Contains("message to be replied not found")
@@ -392,6 +424,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             var m = parseMode.HasValue
                 ? await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
                 : await _bot!.SendMessage(chatId, text, cancellationToken: ct);
+            JournalSent(journal, chatId, m, text, format);
             return m.Id;
         }
         catch (Exception ex) when (IsParseEntitiesError(ex) && parseMode == ParseMode.Html)
@@ -402,6 +435,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             var m = replyParams is not null
                 ? await _bot!.SendMessage(chatId, plain, replyParameters: replyParams, cancellationToken: ct)
                 : await _bot!.SendMessage(chatId, plain, cancellationToken: ct);
+            JournalSent(journal, chatId, m, plain, JournalTextFormat.Plain);
             return m.Id;
         }
     }
@@ -420,7 +454,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     private async Task<bool> SendRichWithFallbackAsync(
         long chatId, string text,
         int? replyToMessageId, bool replyAlreadyUsed,
-        CancellationToken ct)
+        CancellationToken ct,
+        JournalCapture.OutboundBatch? journal = null)
     {
         var agentName = _agentConfig.Name;
         bool replyUsed = replyAlreadyUsed;
@@ -436,6 +471,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             var m = replyParams is not null
                 ? await _bot!.SendRichMessage(chatId, richMsg, replyParameters: replyParams, cancellationToken: ct)
                 : await _bot!.SendRichMessage(chatId, richMsg, cancellationToken: ct);
+            // The journal keeps the Markdown the blocks were rendered from, marked rich.
+            JournalSent(journal, chatId, m, text, JournalTextFormat.Rich);
             _lastSentMessageIds[chatId] = m.Id;
             replyUsed = true;
             return replyUsed;
@@ -458,7 +495,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                     ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
                     : null;
                 var sentId = await SendMessageWithReplyFallbackAsync(chatId, chunk,
-                    ParseMode.Html, replyParams, ct);
+                    ParseMode.Html, replyParams, ct, journal);
                 _lastSentMessageIds[chatId] = sentId;
                 replyUsed = true;
             }
@@ -478,7 +515,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             var replyParams = !replyUsed && replyToMessageId.HasValue
                 ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
                 : null;
-            var sentId = await SendMessageWithReplyFallbackAsync(chatId, slice, null, replyParams, ct);
+            var sentId = await SendMessageWithReplyFallbackAsync(chatId, slice, null, replyParams, ct, journal);
             _lastSentMessageIds[chatId] = sentId;
             replyUsed = true;
         }
@@ -516,7 +553,23 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         return (text, replyToMessageId);
     }
 
-    public async Task SendHtmlTextAsync(long chatId, string htmlText, CancellationToken ct = default)
+    public Task SendHtmlTextAsync(long chatId, string htmlText, CancellationToken ct = default)
+        => SendHtmlTextAsync(chatId, htmlText, OutboundOrigin.Human, ct);
+
+    public async Task SendHtmlTextAsync(long chatId, string htmlText, OutboundOrigin origin, CancellationToken ct = default)
+    {
+        var journal = _journal?.Outbound(origin);
+        try
+        {
+            await SendHtmlTextCoreAsync(chatId, htmlText, journal, ct);
+        }
+        finally
+        {
+            journal?.Flush();
+        }
+    }
+
+    private async Task SendHtmlTextCoreAsync(long chatId, string htmlText, JournalCapture.OutboundBatch? journal, CancellationToken ct)
     {
         if (chatId == 0) return;
         // Reserved-band keys belong to a non-Telegram conversation and have no Telegram
@@ -530,11 +583,28 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         foreach (var chunk in SplitMessage(htmlText, 4000))
         {
             var balanced = BalanceBlockquotesInChunk(chunk);
-            await _bot.SendMessage(chatId, balanced, parseMode: ParseMode.Html, cancellationToken: ct);
+            var m = await _bot.SendMessage(chatId, balanced, parseMode: ParseMode.Html, cancellationToken: ct);
+            JournalSent(journal, chatId, m, balanced, JournalTextFormat.Html);
         }
     }
 
-    public async Task SendPhotoAsync(long chatId, string filePath, string? caption, CancellationToken ct = default)
+    public Task SendPhotoAsync(long chatId, string filePath, string? caption, CancellationToken ct = default)
+        => SendPhotoAsync(chatId, filePath, caption, OutboundOrigin.Human, ct);
+
+    public async Task SendPhotoAsync(long chatId, string filePath, string? caption, OutboundOrigin origin, CancellationToken ct = default)
+    {
+        var journal = _journal?.Outbound(origin);
+        try
+        {
+            await SendPhotoCoreAsync(chatId, filePath, caption, journal, ct);
+        }
+        finally
+        {
+            journal?.Flush();
+        }
+    }
+
+    private async Task SendPhotoCoreAsync(long chatId, string filePath, string? caption, JournalCapture.OutboundBatch? journal, CancellationToken ct)
     {
         if (chatId == 0) return;
         // Reserved-band keys belong to a non-Telegram conversation and have no Telegram
@@ -548,7 +618,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             _logger.LogWarning("Photo file not found (likely from remote agent): {FilePath}", filePath);
             var agentHint = "[image from agent — view in their direct chat]";
             var message = caption is { Length: > 0 } ? $"{caption}\n{agentHint}" : agentHint;
-            await _bot.SendMessage(chatId, message, cancellationToken: ct);
+            var hint = await _bot.SendMessage(chatId, message, cancellationToken: ct);
+            JournalSent(journal, chatId, hint, message, JournalTextFormat.Plain);
             return;
         }
 
@@ -557,12 +628,18 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             var bytes = await File.ReadAllBytesAsync(filePath, ct);
             using var stream = new MemoryStream(bytes);
             var inputFile = InputFile.FromStream(stream, Path.GetFileName(filePath));
-            await _bot.SendPhoto(chatId, inputFile, caption: caption, cancellationToken: ct);
+            var sent = await _bot.SendPhoto(chatId, inputFile, caption: caption, cancellationToken: ct);
+            // The bytes Telegram received, copied now: a workspace file can be overwritten later.
+            JournalSent(journal, chatId, sent, caption, JournalTextFormat.Plain, new JournalMediaItem(
+                JournalAttachmentKind.Photo, InferMimeType(ExtractSafeExtension(filePath, ".jpg")), bytes.LongLength,
+                Path.GetFileName(filePath), sent.Photo?.LastOrDefault()?.FileUniqueId, Bytes: bytes));
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to send photo {FilePath}", filePath);
-            await _bot.SendMessage(chatId, $"[photo: {filePath} — send failed]", cancellationToken: ct);
+            var failed = $"[photo: {filePath} — send failed]";
+            var notice = await _bot.SendMessage(chatId, failed, cancellationToken: ct);
+            JournalSent(journal, chatId, notice, failed, JournalTextFormat.Plain);
         }
     }
 
@@ -730,10 +807,13 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                         if (audioBytes is { Length: > 0 })
                         {
                             using var ms = new System.IO.MemoryStream(audioBytes);
-                            await _bot!.SendVoice(
+                            var voice = await _bot!.SendVoice(
                                 message.Chat.Id,
                                 new Telegram.Bot.Types.InputFileStream(ms, "response.ogg"),
                                 replyParameters: new Telegram.Bot.Types.ReplyParameters { MessageId = replied.MessageId });
+                            JournalSentAlone(message.Chat.Id, voice, null, JournalTextFormat.Plain, new JournalMediaItem(
+                                JournalAttachmentKind.Voice, "audio/ogg", audioBytes.LongLength, "response.ogg",
+                                voice.Voice?.FileUniqueId, Bytes: audioBytes));
                             _logger.LogInformation("TTS voice sent for message {MsgId} ({Chars} chars)", replied.MessageId, sourceText.Length);
                         }
                     }
@@ -743,6 +823,9 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                     }
                 });
             }
+
+            // The command itself is a message a human sent: journaled like any other (#377).
+            JournalReceived(message, transcript: null, photoPath: null, mediaPath: null);
             return;
         }
 
@@ -770,6 +853,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         // failed to transcribe, or arrived while the service is disabled, must NOT be marked
         // — a false marker would tell the agent to distrust text the user actually typed.
         var inputSource = MessageInputSource.Typed;
+        string? transcript = null;
 
         // Transcribe voice messages and video notes if the whisper service is configured
         if (isSpokenMessage && _voiceTranscription.IsEnabled)
@@ -803,6 +887,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 if (transcribed is not null)
                 {
                     text = transcribed;
+                    transcript = transcribed;
                     // A video-note transcript carries the same speech-to-text risk as a voice
                     // one, so it carries the same marker.
                     inputSource = MessageInputSource.VoiceTranscription;
@@ -810,10 +895,11 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                         media.Kind, text.Length, message.From?.Username ?? "unknown");
 
                     // Echo transcription back so user can verify whisper got it right
-                    await _bot!.SendMessage(
+                    var echo = await _bot!.SendMessage(
                         chatId,
                         $"🎤 {transcribed}",
                         replyParameters: new Telegram.Bot.Types.ReplyParameters { MessageId = message.MessageId });
+                    JournalSentAlone(chatId, echo, $"🎤 {transcribed}", JournalTextFormat.Plain);
                 }
                 else
                 {
@@ -874,6 +960,11 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             ChatFirstName = message.Chat.FirstName,
         };
 
+        // One journal record per raw Telegram message, from the message itself: the raw text or
+        // caption and the downloaded files, never the placeholder, the image prompt or the hints
+        // added below. An album is one record per photo, tied by its media group id (#377).
+        JournalReceived(message, transcript, downloadedImage?.FilePath, downloadedDocument?.FilePath);
+
         // Media group: buffer all photos and flush as one IncomingMessage after debounce
         if (message.MediaGroupId is { } mediaGroupId && isPhoto)
         {
@@ -926,6 +1017,138 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             : baseMsg with { Images = images, Documents = documents };
         await RouteAsync(msg);
     }
+
+    // ── conversation journal (#377) ──────────────────────────────────────────
+
+    /// <summary>
+    /// Adds a message Telegram accepted to <paramref name="journal"/>. Never throws: a journal
+    /// problem must not turn a delivered message into a failed send.
+    /// </summary>
+    private void JournalSent(
+        JournalCapture.OutboundBatch? journal, long chatId, Message? sent, string? text,
+        JournalTextFormat format, JournalMediaItem? media = null)
+    {
+        if (journal is null || sent is null) return;
+        try
+        {
+            journal.Add(new JournalMessage
+            {
+                BotId = _bot!.BotId,
+                ChatId = sent.Chat?.Id is { } id && id != 0 ? id : chatId,
+                ChatType = ChatTypeName(sent.Chat?.Type),
+                ChatTitle = sent.Chat?.Title,
+                MessageId = sent.Id,
+                ReplyToMessageId = sent.ReplyToMessage?.Id,
+                Date = sent.Date,
+                SenderKind = JournalSenderKind.Agent,
+                SenderId = (sent.From?.Id ?? _bot.BotId).ToString(System.Globalization.CultureInfo.InvariantCulture),
+                SenderDisplay = sent.From?.Username ?? sent.From?.FirstName,
+                Text = text,
+                TextFormat = format,
+                Media = media is null ? [] : [media],
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("journal: outbound capture skipped ({Error})", ex.GetType().Name);
+        }
+    }
+
+    /// <summary>A human-facing message sent outside any IMessageSink call (TTS voice, transcript echo).</summary>
+    private void JournalSentAlone(long chatId, Message? sent, string? text, JournalTextFormat format, JournalMediaItem? media = null)
+    {
+        var journal = _journal?.Outbound(OutboundOrigin.Human);
+        if (journal is null) return;
+        JournalSent(journal, chatId, sent, text, format, media);
+        journal.Flush();
+    }
+
+    /// <summary>
+    /// Journals one raw inbound message. Classification (rule 4 reads the live allowlist) happens
+    /// inside the capture before anything is written, so an unauthorized chat writes nothing.
+    /// </summary>
+    private void JournalReceived(Message message, string? transcript, string? photoPath, string? mediaPath)
+    {
+        if (_journal is null) return;
+        try
+        {
+            var items = new List<JournalMediaItem>();
+            if (message.Photo is { Length: > 0 } photos)
+            {
+                var largest = photos.OrderByDescending(p => p.FileSize ?? 0).First();
+                items.Add(new JournalMediaItem(JournalAttachmentKind.Photo, "image/jpeg", largest.FileSize,
+                    FileName: null, largest.FileUniqueId, LocalPath: photoPath));
+            }
+
+            if (TelegramMediaMapper.TryMap(message) is { } file)
+            {
+                items.Add(new JournalMediaItem(
+                    JournalKind(file.Kind),
+                    file.MimeType ?? InferMimeType(ExtractSafeExtension(file.FileName, file.DefaultExtension)),
+                    file.FileSize > 0 ? file.FileSize : null,
+                    file.FileName,
+                    FileUniqueIdOf(message, file.Kind),
+                    LocalPath: mediaPath));
+            }
+
+            var from = message.From;
+            _journal.Inbound(new JournalMessage
+            {
+                BotId = _bot?.BotId ?? 0,
+                ChatId = message.Chat.Id,
+                ChatType = ChatTypeName(message.Chat.Type),
+                ChatTitle = message.Chat.Title,
+                MessageId = message.MessageId,
+                ReplyToMessageId = message.ReplyToMessage?.MessageId,
+                MediaGroupId = message.MediaGroupId,
+                Date = message.Date,
+                SenderKind = from?.IsBot == true ? JournalSenderKind.Agent : JournalSenderKind.Human,
+                SenderId = (from?.Id ?? message.SenderChat?.Id ?? message.Chat.Id).ToString(System.Globalization.CultureInfo.InvariantCulture),
+                SenderDisplay = from?.Username ?? from?.FirstName ?? message.SenderChat?.Title,
+                Text = message.Text ?? message.Caption,
+                Transcript = transcript,
+                Media = items,
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("journal: inbound capture skipped ({Error})", ex.GetType().Name);
+        }
+    }
+
+    private static string? ChatTypeName(ChatType? type) => type switch
+    {
+        ChatType.Private => "private",
+        ChatType.Group => "group",
+        ChatType.Supergroup => "supergroup",
+        ChatType.Channel => "channel",
+        _ => null,
+    };
+
+    private static JournalAttachmentKind JournalKind(TelegramMediaKind kind) => kind switch
+    {
+        TelegramMediaKind.Document => JournalAttachmentKind.Document,
+        TelegramMediaKind.Video => JournalAttachmentKind.Video,
+        TelegramMediaKind.VideoNote => JournalAttachmentKind.VideoNote,
+        TelegramMediaKind.Audio => JournalAttachmentKind.Audio,
+        TelegramMediaKind.Voice => JournalAttachmentKind.Voice,
+        TelegramMediaKind.Animation => JournalAttachmentKind.Animation,
+        TelegramMediaKind.Sticker => JournalAttachmentKind.Sticker,
+        _ => JournalAttachmentKind.Other,
+    };
+
+    /// <summary>The file_unique_id the descriptor does not carry, read from the raw message.</summary>
+    private static string? FileUniqueIdOf(Message message, TelegramMediaKind kind) => kind switch
+    {
+        TelegramMediaKind.Animation => message.Animation?.FileUniqueId,
+        TelegramMediaKind.Document => message.Document?.FileUniqueId,
+        TelegramMediaKind.Video => message.Video?.FileUniqueId,
+        TelegramMediaKind.VideoNote => message.VideoNote?.FileUniqueId,
+        TelegramMediaKind.Audio => message.Audio?.FileUniqueId,
+        TelegramMediaKind.Voice => message.Voice?.FileUniqueId,
+        TelegramMediaKind.Sticker => message.Sticker?.FileUniqueId,
+        _ => null,
+    };
 
     /// <summary>
     /// Download a Telegram photo to memory (and optionally persist to disk).

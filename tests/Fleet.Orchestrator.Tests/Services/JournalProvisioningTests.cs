@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Fleet.Conversations.Journal;
-using Fleet.Comms.Configuration;
+using Fleet.Journal.Client;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Microsoft.Extensions.Configuration;
@@ -98,7 +98,7 @@ public sealed class JournalProvisioningTests
             .GetSection("Journal")
             .Get<JournalOptions>();
         Assert.NotNull(options);
-        Assert.Equal([-100L, 200L], options.ExcludedChats().Order());
+        Assert.Equal([-100L, 200L], JournalOptions.ParseExcludedChatIds(options.ExcludedChatIds).Order());
     }
 
     [Fact]

@@ -17,6 +17,11 @@ ENV_FILE="$FLEET_BASE_DIR/.env"
 # Unset them here: .env is the record of the decision.
 unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY \
       FLEET_COMMS_AGENT_LABEL FLEET_COMMS_STORE_PROVISIONED
+# The journal decision in .env is preserved as it is: upgrade never asks, never flips it, and never
+# generates a key for a host that did not opt in. `conversations migrate` below applies 0004 either
+# way; it is additive.
+unset FLEET_COMMS_JOURNAL_ENABLED FLEET_COMMS_JOURNAL_BIND FLEET_COMMS_JOURNAL_KEY \
+      FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS FLEET_COMMS_JOURNAL_RETENTION
 
 COMPOSE_EXAMPLE="$SCRIPT_DIR/docker-compose.example.yml"
 COMPOSE_FILE="$FLEET_BASE_DIR/docker-compose.yml"

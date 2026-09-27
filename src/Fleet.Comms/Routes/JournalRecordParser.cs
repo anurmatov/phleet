@@ -94,6 +94,13 @@ internal static class JournalRecordParser
                 failure = e.Failure;
                 return null;
             }
+            catch (InvalidOperationException)
+            {
+                // A property NAME that is not a valid string (an escaped lone surrogate) is the one
+                // read not routed through the typed accessors. Still the record's fault: 422.
+                failure = Invalid("body");
+                return null;
+            }
         }
     }
 
@@ -121,8 +128,7 @@ internal static class JournalRecordParser
         JournalTextFormat? textFormat = null;
         if (fields.TryGetValue("textFormat", out var format) && format.ValueKind != JsonValueKind.Null)
         {
-            if (format.ValueKind != JsonValueKind.String
-                || !JournalWire.TryParse<JournalTextFormat>(format.GetString(), out var parsed))
+            if (!JournalWire.TryParse<JournalTextFormat>(StringAt(format, "textFormat"), out var parsed))
                 throw Refuse("textFormat");
             textFormat = parsed;
         }
@@ -194,16 +200,14 @@ internal static class JournalRecordParser
         string? mediaGroupId = null;
         if (fields.TryGetValue("mediaGroupId", out var group) && group.ValueKind != JsonValueKind.Null)
         {
-            if (group.ValueKind != JsonValueKind.String || !AsciiIdPattern.IsMatch(group.GetString()!))
-                throw Refuse("telegram.mediaGroupId");
-            mediaGroupId = group.GetString();
+            mediaGroupId = StringAt(group, "telegram.mediaGroupId");
+            if (!AsciiIdPattern.IsMatch(mediaGroupId)) throw Refuse("telegram.mediaGroupId");
         }
 
         long? replyTo = null;
         if (fields.TryGetValue("replyToMessageId", out var reply) && reply.ValueKind != JsonValueKind.Null)
         {
-            if (!reply.TryGetInt64(out var value)) throw Refuse("telegram.replyToMessageId");
-            replyTo = value;
+            replyTo = Int64At(reply, "telegram.replyToMessageId");
         }
 
         return new JournalTelegramRef
@@ -249,14 +253,16 @@ internal static class JournalRecordParser
             throw Refuse("sendGroup");
         }
 
-        if (!fields.TryGetValue("id", out var id) || id.ValueKind != JsonValueKind.String
-            || !Ulid.IsValid(id.GetString()!.ToUpperInvariant())
-            || !fields.TryGetValue("part", out var part) || !part.TryGetInt32(out var p)
-            || !fields.TryGetValue("parts", out var parts) || !parts.TryGetInt32(out var n)
-            || p < 1 || p > n || n > MaxSendParts)
+        if (!fields.TryGetValue("id", out var id) || !fields.TryGetValue("part", out var part)
+            || !fields.TryGetValue("parts", out var parts))
             throw Refuse("sendGroup");
 
-        return new JournalSendGroup { Id = id.GetString()!.ToUpperInvariant(), Part = p, Parts = n };
+        var groupId = StringAt(id, "sendGroup").ToUpperInvariant();
+        var p = Int32At(part, "sendGroup");
+        var n = Int32At(parts, "sendGroup");
+        if (!Ulid.IsValid(groupId) || p < 1 || p > n || n > MaxSendParts) throw Refuse("sendGroup");
+
+        return new JournalSendGroup { Id = groupId, Part = p, Parts = n };
     }
 
     private static JournalAttachment ReadAttachment(JsonElement element, string path)
@@ -272,8 +278,9 @@ internal static class JournalRecordParser
 
         var fields = Fields(element, AttachmentFields, prefix: path + ".");
 
-        if (!fields.TryGetValue("ordinal", out var ordinal) || !ordinal.TryGetInt32(out var o) || o is < 0 or > 15)
-            throw Refuse(path + ".ordinal");
+        if (!fields.TryGetValue("ordinal", out var ordinal)) throw Refuse(path + ".ordinal");
+        var o = Int32At(ordinal, path + ".ordinal");
+        if (o is < 0 or > 15) throw Refuse(path + ".ordinal");
 
         var mime = OptionalString(fields, "mimeType", path + ".mimeType", maxCodePoints: 127);
         if (mime is null || !MimePattern.IsMatch(mime)) throw Refuse(path + ".mimeType");
@@ -281,16 +288,15 @@ internal static class JournalRecordParser
         long? byteSize = null;
         if (fields.TryGetValue("byteSize", out var size) && size.ValueKind != JsonValueKind.Null)
         {
-            if (!size.TryGetInt64(out var value) || value < 0) throw Refuse(path + ".byteSize");
-            byteSize = value;
+            byteSize = Int64At(size, path + ".byteSize");
+            if (byteSize < 0) throw Refuse(path + ".byteSize");
         }
 
         string? fileUniqueId = null;
         if (fields.TryGetValue("fileUniqueId", out var unique) && unique.ValueKind != JsonValueKind.Null)
         {
-            if (unique.ValueKind != JsonValueKind.String || !AsciiIdPattern.IsMatch(unique.GetString()!))
-                throw Refuse(path + ".fileUniqueId");
-            fileUniqueId = unique.GetString();
+            fileUniqueId = StringAt(unique, path + ".fileUniqueId");
+            if (!AsciiIdPattern.IsMatch(fileUniqueId)) throw Refuse(path + ".fileUniqueId");
         }
 
         return new JournalAttachment
@@ -346,19 +352,19 @@ internal static class JournalRecordParser
     }
 
     private static string RequiredString(Dictionary<string, JsonElement> fields, string name) =>
-        Required(fields, name, JsonValueKind.String).GetString()!;
+        StringAt(Required(fields, name, JsonValueKind.String), name);
 
     private static long RequiredInt64(Dictionary<string, JsonElement> fields, string name, string path)
     {
-        if (!fields.TryGetValue(name, out var value) || !value.TryGetInt64(out var number)) throw Refuse(path);
-        return number;
+        if (!fields.TryGetValue(name, out var value)) throw Refuse(path);
+        return Int64At(value, path);
     }
 
     private static T RequiredEnum<T>(Dictionary<string, JsonElement> fields, string name, string? path = null)
         where T : struct, Enum
     {
-        if (!fields.TryGetValue(name, out var value) || value.ValueKind != JsonValueKind.String
-            || !JournalWire.TryParse<T>(value.GetString(), out var parsed))
+        if (!fields.TryGetValue(name, out var value)
+            || !JournalWire.TryParse<T>(StringAt(value, path ?? name), out var parsed))
             throw Refuse(path ?? name);
         return parsed;
     }
@@ -368,9 +374,7 @@ internal static class JournalRecordParser
         Dictionary<string, JsonElement> fields, string name, string path, int maxCodePoints)
     {
         if (!fields.TryGetValue(name, out var value) || value.ValueKind == JsonValueKind.Null) return null;
-        if (value.ValueKind != JsonValueKind.String) throw Refuse(path);
-
-        var text = value.GetString()!;
+        var text = StringAt(value, path);
         if (!IsWellFormed(text, out _) || CodePoints(text) > maxCodePoints) throw Refuse(path);
         return text;
     }
@@ -379,11 +383,44 @@ internal static class JournalRecordParser
     private static string? OptionalText(Dictionary<string, JsonElement> fields, string name)
     {
         if (!fields.TryGetValue(name, out var value) || value.ValueKind == JsonValueKind.Null) return null;
-        if (value.ValueKind != JsonValueKind.String) throw Refuse(name);
-
-        var text = value.GetString()!;
+        var text = StringAt(value, name);
         if (!IsWellFormed(text, out var bytes) || bytes > MaxTextBytes) throw Refuse(name);
         return text;
+    }
+
+    // ⚠️ The typed accessors below are the ONLY way a value is read. JsonElement's own getters
+    // throw InvalidOperationException on a wrong kind (TryGetInt64 on a string) or on an escaped
+    // lone surrogate (GetString), and an exception there used to escape as a 500 that a publisher
+    // would retry. Every such case is a field violation: 422 naming the field.
+
+    /// <summary>A JSON string, or a refusal naming <paramref name="path"/>.</summary>
+    private static string StringAt(JsonElement value, string path)
+    {
+        if (value.ValueKind != JsonValueKind.String) throw Refuse(path);
+
+        try
+        {
+            return value.GetString()!;
+        }
+        catch (InvalidOperationException)
+        {
+            // An escaped lone surrogate (e.g. "\ud800") has no UTF-16 string.
+            throw Refuse(path);
+        }
+    }
+
+    /// <summary>A JSON integer that fits a <see cref="long"/>, or a refusal.</summary>
+    private static long Int64At(JsonElement value, string path)
+    {
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out var number)) throw Refuse(path);
+        return number;
+    }
+
+    /// <summary>A JSON integer that fits an <see cref="int"/>, or a refusal.</summary>
+    private static int Int32At(JsonElement value, string path)
+    {
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out var number)) throw Refuse(path);
+        return number;
     }
 
     /// <summary>True when the string has no lone surrogate; <paramref name="utf8Bytes"/> is its UTF-8 length.</summary>

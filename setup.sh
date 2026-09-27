@@ -605,12 +605,6 @@ if $PROMPT_TELEGRAM; then
     "Optional. Create a Telegram group, add both bots as members, then forward any message from the group to https://t.me/userinfobot — it replies with the negative integer group ID. Agents use this group for status updates and cross-agent coordination. Leave 0 to skip groups." \
     "n" "n" "0"
 
-  # The journal's exclusion list always starts with this id, and 0 names no chat.
-  if [[ "$(read_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_ENABLED")" == "true" \
-        && "$(read_env_var "$ENV_FILE" "FLEET_GROUP_CHAT_ID")" == "0" ]]; then
-    warn "FLEET_GROUP_CHAT_ID=0 with the journal on: fleet-comms refuses to start (journal_excluded_ids_invalid). Set the group id, or leave FLEET_GROUP_CHAT_ID blank."
-  fi
-
   prompt_field "$ENV_FILE" "TELEGRAM_NOTIFIER_BOT_TOKEN" "Telegram notifier bot token" \
     "Create a bot at https://t.me/BotFather (send /newbot). This bot sends messages from every non-CTO agent and the fleet bridge." "y" "y"
 

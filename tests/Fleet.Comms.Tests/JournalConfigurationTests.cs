@@ -42,6 +42,9 @@ public sealed class JournalConfigurationTests : IDisposable
     [InlineData("-1001, ", 1)]
     [InlineData(" -5 ,-5", 1)]
     [InlineData("+7,-7", 2)]
+    [InlineData("0", 0)]
+    [InlineData("0,", 0)]
+    [InlineData(" 0 ,-100111", 1)]
     public void A_valid_list_parses_ignoring_blank_elements_and_collapsing_duplicates(string value, int count)
     {
         Assert.Equal(count, JournalOptions.ParseExcludedChatIds(value).Count);
@@ -55,7 +58,6 @@ public sealed class JournalConfigurationTests : IDisposable
 
     [Theory]
     [InlineData("abc")]
-    [InlineData("0")]
     [InlineData("1.5")]
     [InlineData("-1001,abc")]
     [InlineData("1 2")]
@@ -77,9 +79,12 @@ public sealed class JournalConfigurationTests : IDisposable
     /// <summary>
     /// The compose default is <c>${FLEET_GROUP_CHAT_ID:-},${FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS:-}</c>,
     /// so with neither set it is a lone comma, and with only the group set it has an empty tail.
+    /// <c>0</c> is what <c>setup.sh</c> writes when no group is configured.
     /// </summary>
     [Theory]
     [InlineData("", "")]
+    [InlineData("0", "")]
+    [InlineData("0", "-100111")]
     [InlineData("-1009876543210", "")]
     [InlineData("-1009876543210", "-100111,-100222")]
     [InlineData("", "-100111")]
@@ -138,7 +143,6 @@ public sealed class JournalConfigurationTests : IDisposable
         { "journal_key_invalid", ShortSecret, null, null, "on" },
         { "journal_key_invalid", $"{Key},{ShortSecret}", null, null, "on" },
         { "journal_excluded_ids_invalid", Key, "abc", null, "on" },
-        { "journal_excluded_ids_invalid", Key, "0", null, "on" },
         { "journal_url_invalid", Key, null, "not a url", "on" },
     };
 

@@ -200,9 +200,9 @@ listener. It needs durable conversations and lives in the same database. Full co
 4. Mint one token per publishing runtime:
    `docker compose run --rm fleet-comms-ops journal token --purpose ingest --subject <runtime-name>`.
 
-The workflow-activity group (`FLEET_GROUP_CHAT_ID`) is always excluded. ⚠️ With it set to `0`, the
-service refuses to start (`journal_excluded_ids_invalid`); set the real id or leave it blank. To turn
-the journal off, set the flag to `false` and recreate: the tables and rows stay.
+The workflow-activity group (`FLEET_GROUP_CHAT_ID`) is always excluded; setup's "no group" value
+`0` is ignored. To turn the journal off, set the flag to `false` and recreate: the tables and rows
+stay.
 
 ### Retention is a garbage-collection horizon, not deletion
 

@@ -253,8 +253,9 @@ public sealed class JournalOptions
     public string TokenKeys { get; set; } = "";
 
     /// <summary>
-    /// Chat ids that are never journaled, comma-separated. Blank elements are ignored, so the
-    /// compose default <c>${FLEET_GROUP_CHAT_ID},</c> with an empty tail is valid.
+    /// Chat ids that are never journaled, comma-separated. Blank elements and <c>0</c> are ignored,
+    /// so the compose default <c>${FLEET_GROUP_CHAT_ID},</c> is valid with an empty tail and with the
+    /// installer's "no group" value <c>0</c>.
     /// </summary>
     public string ExcludedChatIds { get; set; } = "";
 
@@ -308,11 +309,16 @@ public sealed class JournalOptions
     }
 
     /// <summary>
-    /// Splits on <c>,</c> and trims each element. Empty elements are ignored and duplicates
-    /// collapse. A non-empty element that is not an invariant-culture <see cref="long"/> (leading
-    /// sign allowed), or is <c>0</c>, is invalid, as is a list of more than
+    /// Splits on <c>,</c> and trims each element. Empty elements and <c>0</c> are ignored, and
+    /// duplicates collapse. A non-empty element that is not an invariant-culture
+    /// <see cref="long"/> (leading sign allowed) is invalid, as is a list of more than
     /// <see cref="MaxExcludedChatIds"/> distinct ids.
     /// </summary>
+    /// <remarks>
+    /// <c>0</c> names no chat — the classifier refuses chat id 0 on its own (rule 1) — and it is what
+    /// <c>setup.sh</c> writes for <c>FLEET_GROUP_CHAT_ID</c> when no group is configured. Refusing it
+    /// would stop every Comms listener on a default install that turned the journal on.
+    /// </remarks>
     /// <exception cref="FormatException">The message names the element's position.</exception>
     public static IReadOnlySet<long> ParseExcludedChatIds(string? value)
     {
@@ -328,8 +334,7 @@ public sealed class JournalOptions
                     System.Globalization.CultureInfo.InvariantCulture, out var id))
                 throw new FormatException($"element {i + 1} is not an integer chat id");
 
-            if (id == 0)
-                throw new FormatException($"element {i + 1} is 0, which names no chat");
+            if (id == 0) continue;
 
             ids.Add(id);
         }

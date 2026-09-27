@@ -45,7 +45,7 @@ One record is one Telegram message as one runtime observed it. UTF-8 JSON, at mo
 | `telegram.replyToMessageId` | optional int64 |
 | `telegram.mediaGroupId` | optional, printable ASCII ≤ 64. An album is N records sharing it |
 | `direction` | `inbound` \| `outbound` |
-| `sender` | `{kind: human\|agent, id (≤ 128), display? (≤ 128)}` |
+| `sender` | `{kind: human\|agent, id, display?}`: `id` a JSON **string** of ≤ 128 characters (a numeric id is refused), `display` ≤ 128 |
 | `sentAt` | ISO-8601 **with an offset**: the platform's message date, never receive time. `2013-01-01T00:00:00Z` ≤ sentAt ≤ server now + 10 min |
 | `text` | raw platform text or caption, ≤ 65,536 UTF-8 bytes, or null |
 | `textFormat` | `plain` \| `html` \| `rich`; required when `text` is set |
@@ -55,7 +55,7 @@ One record is one Telegram message as one runtime observed it. UTF-8 JSON, at mo
 | `sendGroup` | optional `{id: ULID, part, parts}` linking the chunks of one long outbound reply; outbound only, `1 ≤ part ≤ parts ≤ 64` |
 | `attachments[]` | at most 16; see below |
 
-Unknown or duplicated fields are refused. `observer` is not a field: **the observer is always the
+Unknown or duplicated fields, and a value of the wrong JSON type (a string where an integer belongs, an escaped lone surrogate), are `422 invalid_record{field}`. `observer` is not a field: **the observer is always the
 token subject**, and a body `observer` is `422 invalid_record{observer}`.
 
 **Attachments are metadata only**: `ordinal` (0–15, unique), `kind`
@@ -168,12 +168,10 @@ the old key and recreate again. Its tokens then answer `401`.
 Every `FLEET_COMMS_JOURNAL_` key is denied by the orchestrator config API: it is never returned by
 `/api/config/all` or `/api/config/values` and cannot be written by `set_config_values`. Edit `.env`.
 
-The exclusion list is split on `,` and trimmed; empty elements are ignored and duplicates collapse.
-An element that is not an integer, or is `0`, or more than 256 distinct ids, is invalid. The compose
-file always prepends `FLEET_GROUP_CHAT_ID`, the workflow-activity group.
-
-⚠️ `FLEET_GROUP_CHAT_ID=0` (setup's "no group" answer) makes the list contain `0`, and the service
-refuses to start. Set the real group id, or leave it blank.
+The exclusion list is split on `,` and trimmed. Empty elements and `0` are ignored — `0` names no
+chat, and it is what `setup.sh` writes for `FLEET_GROUP_CHAT_ID` when no group is configured — and
+duplicates collapse. An element that is not an integer, or more than 256 distinct ids, is invalid.
+The compose file always prepends `FLEET_GROUP_CHAT_ID`, the workflow-activity group.
 
 Startup refuses, exiting 1 with a message that never contains a key: `journal_requires_conversations`,
 `journal_key_invalid`, `journal_excluded_ids_invalid`, `journal_url_invalid`,

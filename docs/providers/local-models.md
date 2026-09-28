@@ -132,7 +132,7 @@ trailing `/` dropped. The DB column is still `AnthropicBaseUrl`. There is no mig
 - The container env of a Codex local agent has neither `CODEX_OSS_BASE_URL` nor
   `CLAUDE_CODE_MAX_CONTEXT_TOKENS`. It needs no Env Ref.
 - Codex derives its own compaction threshold from `model_context_window`. Fleet sets no second
-  threshold.
+  threshold. Codex compaction is best-effort (§6).
 - Every change takes effect on reprovision, not on save.
 
 ## 4. API
@@ -241,9 +241,21 @@ Codex there is one exception: the agent's Env Refs contain exactly `CODEX_OSS_BA
   no final message, so the agent sends nothing back.
 - **`none` and `minimal` are now sent.** Before this change, Fleet dropped them and sent no
   effort at all. This applies to cloud Codex agents stored with those values too.
-- **Context window.** The value reaches codex as `model_context_window`. Codex compacts from
-  it. Without it, codex uses its own fallback window and does not compact before the server
-  rejects the prompt.
+- **Context window.** The value reaches codex as `model_context_window`. Codex compacts when a
+  thread reaches 90% of it: 117,964 tokens at 131,072. Without it, codex uses its own fallback
+  window and does not compact before the server rejects the prompt.
+- **Compaction is best-effort.** Codex 0.153.4 has two limits:
+  - **One large step is not checked.** Codex checks the limit only before it adds a new message
+    and after each model reply. A single message or tool output bigger than the space left
+    under the server's limit reaches the server unchecked. That space is at most about 13k tokens
+    at 131,072.
+  - **An overflow sticks the thread.** The server rejects the oversized prompt with HTTP 400.
+    Codex does not treat that 400 as a context overflow, so it never trims the history to
+    compact. Every later turn fails with `Failed to run pre-sampling compact` or
+    `context_length_exceeded`.
+  - **Recovery: reset the thread.** Send `/cancel all`, then `/reset`, or restart the agent.
+    The agent then starts a new codex thread without the old conversation. The upstream report
+    is openai/codex#48870; automatic recovery is #385.
 - **No wedge guard.** A server that accepts a request and never answers blocks the whole agent,
   not one turn. Recover with `/cancel`. Details: `codex-local-models.md`, "Operational cautions".
 - **LM Studio.** Pick **Server → LM Studio** and enter its origin, for example
@@ -412,7 +424,9 @@ The `CodexExecutor: local inference — provider …, model …` line now ends w
 | `Information` "codex reports modelContextWindow N (configured W)" | once per thread. N is the window codex works with. It is at or a little below W | if it says `configured unset`, set the context window |
 | `Warning` "codex did not apply model_context_window" | N is higher than W. Codex ignored the setting and will not compact in time | check that the agent image is current and report it. Expect `context_length_exceeded` on long threads until it is fixed |
 | `Information` "codex compacted the thread context" | codex shrank the thread before the limit | nothing. This is the intended behaviour |
-| turn error `context_length_exceeded`, or HTTP 400 from the server | the prompt is larger than the server's context | make the agent's context window equal to the server's, never higher. Reprovision |
+| turn error `context_length_exceeded`, or HTTP 400 from the server, and the context window is unset or higher than the server's | codex compacts too late or not at all | make the agent's context window equal to the server's, never higher. Reprovision; that also resets the thread |
+| the same error on a Codex local agent whose context window equals the server's | one step was larger than the space left under the limit, and the thread is now over it (§6). It stays stuck | reset the thread: `/cancel all`, then `/reset`, or restart the agent. Keep single messages and tool outputs well under 13k tokens |
+| `Failed to run pre-sampling compact` from codex | codex tried to compact, but the compaction request itself was over the server's limit | reset the thread, as above |
 
 ### Agent startup exits
 

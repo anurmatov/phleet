@@ -135,6 +135,7 @@ cache grab or silent truncation, neither chosen deliberately.
 Then set the agent's **Context window** to the same value, never higher. Fleet passes it to
 codex as `thread/start` `config.model_context_window`, and codex compacts from it. Without it,
 codex uses its own fallback window and does not compact before the server rejects the prompt.
+Compaction is best-effort; see the caution below.
 
 For Qwen3.8, use the full tags `qwen3.8:27b` or `qwen3.8-flash-next:125b-a6b-q4_K_M`, and set
 effort `none`. See `local-models.md` §8.
@@ -150,6 +151,19 @@ exceeds the context window is out of reach regardless of tool-call quality.
   does none of these. The local model has shell access in a container that holds a working
   OpenAI credential. If the model must not reach a cloud credential, use Claude local. See
   `local-models.md` §7.
+- ⚠️ **Compaction is best-effort, and an overflow sticks the thread.** Codex 0.153.4
+  compacts at 90% of the context window: 117,964 tokens at 131,072. It checks only before it
+  adds a new message and after each model reply.
+  - A single message or tool output bigger than the space left under the server's limit
+    reaches the server unchecked. That space is at most about 13k tokens at 131,072.
+  - The server rejects the oversized prompt with HTTP 400. Codex does not treat that 400 as a
+    context overflow, so it never trims the history to compact. Every later turn fails with
+    `Failed to run pre-sampling compact` or `context_length_exceeded`.
+  - Recovery is to reset the thread: `/cancel all`, then `/reset`, or restart the agent. The
+    agent then starts a new codex thread without the old conversation.
+
+  The upstream report is openai/codex#48870; automatic recovery is #385. See `local-models.md`
+  §6.
 - **Use Ollama 0.34 or later.** Codex sends MCP tools as namespaced tools. Older Ollama
   releases return the call without its namespace, and Codex rejects it as an unsupported
   call.

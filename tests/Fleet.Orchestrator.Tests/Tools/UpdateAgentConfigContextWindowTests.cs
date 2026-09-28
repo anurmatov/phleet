@@ -109,7 +109,7 @@ public class UpdateAgentConfigContextWindowTests
             Role = "test",
             Model = "qwen3.8:27b-agent",
             Provider = "claude",
-            AnthropicBaseUrl = "http://inference-host:11434",
+            LocalBaseUrl = "http://inference-host:11434",
             MemoryLimitMb = 1024,
             ContainerName = "agent1",
         });

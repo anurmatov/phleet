@@ -139,7 +139,7 @@ public sealed class ContainerProvisioningService(
         // #367: a local server's context size, so Claude CLI compacts before the server rejects the
         // turn. Local-mode claude agents only: Anthropic models have known windows an override
         // could shrink. The claude child inherits it; ClaudeExecutor strips only its own list.
-        if (agent.ContextWindow is int window && ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl))
+        if (agent.ContextWindow is int window && ClaudeLocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl))
             env.Add($"{ContextWindow.EnvVar}={window}");
 
         return env;
@@ -206,7 +206,7 @@ public sealed class ContainerProvisioningService(
         {
             // A local-model agent must hold no Claude credential (#340 D3): its model is served by a
             // local Anthropic-compatible server, which must never receive a real OAuth token.
-            if (ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl))
+            if (ClaudeLocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl))
                 return AppendCredentialMounts(agent, binds);
 
             // Mount orchestrator-stored Claude credentials for seeding new containers (entrypoint.sh reads this)
@@ -231,26 +231,26 @@ public sealed class ContainerProvisioningService(
     }
 
     /// <summary>
-    /// The Claude local-model fault that must stop provisioning (#340 D1 point 2), or null: V1–V7,
-    /// or a local agent carrying a credential mount into <c>/root/.claude*</c>, which would hand
-    /// it the Claude credential the bind skip above withholds.
+    /// The local-model fault that must stop provisioning (#340 D1 point 2, #382), or null: L1, L2,
+    /// V4–V8, C1, C2, or a claude local agent carrying a credential mount into
+    /// <c>/root/.claude*</c>, which would hand it the Claude credential the bind skip above withholds.
     /// </summary>
-    internal static string? DescribeClaudeLocalModelFault(Agent agent)
+    internal static string? DescribeLocalModelFault(Agent agent)
     {
-        if (ClaudeLocalModel.DescribeConfigFault(agent.Provider, agent.AnthropicBaseUrl, agent.Model, agent.Effort)
+        if (LocalModel.DescribeConfigFault(agent.Provider, agent.LocalBaseUrl, agent.Model, agent.Effort)
             is { } fault)
         {
             return fault;
         }
 
         // #349 V8: off exists only in local mode; a local → cloud switch must not ship it upstream.
-        if (ClaudeLocalModel.DescribeLocalOnlyEffortFault(agent.Provider, agent.AnthropicBaseUrl, agent.Effort)
+        if (ClaudeLocalModel.DescribeLocalOnlyEffortFault(agent.Provider, agent.LocalBaseUrl, agent.Effort)
             is { } effortFault)
         {
             return effortFault;
         }
 
-        if (!ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl))
+        if (!ClaudeLocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl))
             return null;
 
         // "/root/.claude" also covers /root/.claude-host and /root/.claude.json.
@@ -261,6 +261,36 @@ public sealed class ContainerProvisioningService(
             : $"Claude local model mode forbids a credential mount into /root/.claude*, but one targets "
             + $"{claudeMount.MountPath}. Remove it, then reprovision.";
     }
+
+    /// <summary>
+    /// P1 (#382): a codex agent whose model is <c>ollama/…</c> or <c>lmstudio/…</c> and has no local
+    /// server URL must reach its server through the legacy <c>CODEX_OSS_BASE_URL</c> Env Ref, with a
+    /// non-blank value in <c>.env</c>. Returns the fault, or null.
+    /// </summary>
+    /// <remarks>
+    /// Without this the Env Ref loop injects the literal <c>&lt;secret&gt;</c> for a missing key, and a
+    /// missing or unreadable <c>.env</c> reads as empty, so the agent would only fail at startup.
+    /// </remarks>
+    internal static string? DescribeCodexServerUrlFault(Agent agent, IReadOnlyDictionary<string, string> envValues)
+    {
+        if (!string.Equals(agent.Provider, "codex", StringComparison.Ordinal)
+            || !string.IsNullOrEmpty(agent.LocalBaseUrl)
+            || CodexLocalModelProviders.Split(agent.Model).Provider is null)
+        {
+            return null;
+        }
+
+        if (!agent.EnvRefs.Any(e => e.EnvKeyName == CodexOssBaseUrlEnvRef))
+            return $"Codex local model '{agent.Model}' has no server URL: set the local server URL, "
+                 + $"or the legacy {CodexOssBaseUrlEnvRef} Env Ref.";
+
+        return envValues.TryGetValue(CodexOssBaseUrlEnvRef, out var value) && !string.IsNullOrWhiteSpace(value)
+            ? null
+            : $"Codex local model '{agent.Model}' has no server URL: its {CodexOssBaseUrlEnvRef} Env Ref has "
+            + "no non-blank value in the orchestrator's .env. Set the local server URL instead, or fix .env.";
+    }
+
+    private const string CodexOssBaseUrlEnvRef = "CODEX_OSS_BASE_URL";
 
     /// <summary>True when this agent's model routes to a hosted provider (#335 D1).</summary>
     internal static bool IsHostedProvider(Agent agent) =>
@@ -332,16 +362,34 @@ public sealed class ContainerProvisioningService(
         var envValues = LoadEnvFile(envFile);
         envValues.TryGetValue("FLEET_CTO_AGENT", out var ctoAgentName);
 
+        if (DescribeCodexServerUrlFault(agent, envValues) is { } serverUrlFault)
+            return ProvisionResult.Fail(agentName, serverUrlFault);
+
         var projectContexts = await ResolveProjectContextsAsync(agent);
 
         await GenerateConfigFilesAsync(agent, baseDir, ctoAgentName ?? "");
         await GenerateInstructionFilesAsync(agent, baseDir, instructionVersionOverrides);
         await GenerateProjectContextFilesAsync(agent, baseDir, projectContexts);
 
-        if (agent.ContextWindow is not null && !ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl))
+        if (LocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl))
+        {
             logger.LogInformation(
-                "ContextWindow {ContextWindow} ignored for '{Agent}': it applies only to a claude agent with AnthropicBaseUrl set",
+                "Local model for '{Agent}': harness {Provider}, server {Origin}, context window {ContextWindow}",
+                agentName, agent.Provider, agent.LocalBaseUrl, (object?)agent.ContextWindow ?? "unset");
+            if (LocalModel.IsCodexEnabled(agent.Provider, agent.LocalBaseUrl)
+                && agent.EnvRefs.Any(e => e.EnvKeyName == CodexOssBaseUrlEnvRef))
+            {
+                logger.LogWarning(
+                    "Local model for '{Agent}': {EnvRef} Env Ref superseded by the local server URL; remove the Env Ref",
+                    agentName, CodexOssBaseUrlEnvRef);
+            }
+        }
+        else if (agent.ContextWindow is not null)
+        {
+            logger.LogInformation(
+                "ContextWindow {ContextWindow} ignored for '{Agent}': it applies only to a claude or codex agent with a local server URL",
                 agent.ContextWindow, agentName);
+        }
 
         var spec      = BuildDesiredSpec(agent, envValues);
 
@@ -451,6 +499,10 @@ public sealed class ContainerProvisioningService(
         // unsupported provider therefore leaves the old, working container untouched.
         if (await DescribeJournalProvisioningFaultAsync(agentName, ct) is { } journalFault)
             return ProvisionResult.Fail(agentName, journalFault);
+
+        // P1 (#382) likewise: a codex local agent with no reachable server keeps its old container.
+        if (await DescribeCodexServerUrlFaultAsync(agentName, ct) is { } serverUrlFault)
+            return ProvisionResult.Fail(agentName, serverUrlFault);
 
         var deprovision = await DeprovisionAsync(agentName, ct);
         if (!deprovision.Success)
@@ -822,7 +874,7 @@ public sealed class ContainerProvisioningService(
     internal static bool HasStyleFile(Agent agent) =>
         !string.IsNullOrWhiteSpace(agent.OutputStyle) &&
         string.Equals(agent.Provider, "claude", StringComparison.OrdinalIgnoreCase) &&
-        !ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl);
+        !ClaudeLocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl);
 
     private async Task<OutputStyle?> ResolveOutputStyleAsync(Agent agent)
     {
@@ -1086,7 +1138,7 @@ public sealed class ContainerProvisioningService(
 
         // #340 D1 point 2: a row edited by hand into an invalid state stops here, and reprovision
         // leaves the agent down with the named fault instead of starting it misconfigured.
-        if (DescribeClaudeLocalModelFault(agent) is { } localFault)
+        if (DescribeLocalModelFault(agent) is { } localFault)
             throw new InvalidOperationException($"Agent '{agent.Name}' cannot be provisioned: {localFault}");
 
         var tools = agent.Tools.Where(t => t.IsEnabled).OrderBy(t => t.ToolName).Select(t => t.ToolName).ToList();
@@ -1147,8 +1199,8 @@ public sealed class ContainerProvisioningService(
 
                 // #340. Always canonical, so the agent's startup gate can treat any other form as
                 // version skew or a hand edit. null for every agent not in local mode.
-                AnthropicBaseUrl = ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl)
-                    ? ClaudeLocalModel.CanonicalizeBaseUrl(agent.AnthropicBaseUrl!)
+                AnthropicBaseUrl = ClaudeLocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl)
+                    ? ClaudeLocalModel.CanonicalizeBaseUrl(agent.LocalBaseUrl!)
                     : null,
 
                 // #309. Every assigned instruction, as roles/ directory names, in load order.
@@ -1180,9 +1232,11 @@ public sealed class ContainerProvisioningService(
         // Added by editing the serialized document rather than by a nullable property on the
         // anonymous type above, because a null property still SERIALIZES — and an agent with no
         // style must produce the same bytes it produced before this existed.
+        var codexLocal = LocalModel.IsCodexEnabled(agent.Provider, agent.LocalBaseUrl);
         if ((style is null || HasStyleFile(agent))
             && journal?.IngestToken is null
-            && journal?.ReadToken is null)
+            && journal?.ReadToken is null
+            && !codexLocal)
             return json;
 
         var node = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
@@ -1190,6 +1244,16 @@ public sealed class ContainerProvisioningService(
             node["Agent"]!.AsObject()["OutputStyleBody"] = OutputStyleRenderer.ForPrompt(style);
         if (journal?.ReadToken is not null)
             node["Agent"]!.AsObject()["McpHeaderSupport"] = true;
+
+        // #382: codex local mode only, so every other agent keeps its bytes. The agent sets the URL
+        // as CODEX_OSS_BASE_URL on the codex child and sends the window as model_context_window.
+        if (codexLocal)
+        {
+            var agentNode = node["Agent"]!.AsObject();
+            agentNode["CodexOssBaseUrl"] = LocalModel.CodexOssBaseUrl(LocalModel.CanonicalizeBaseUrl(agent.LocalBaseUrl!));
+            if (agent.ContextWindow is int window)
+                agentNode["ContextWindow"] = window;
+        }
         if (journal?.IngestToken is not null)
         {
             node["Journal"] = new System.Text.Json.Nodes.JsonObject
@@ -1322,6 +1386,19 @@ public sealed class ContainerProvisioningService(
             .AsNoTracking()
             .FirstOrDefaultAsync(a => a.Name == agentName, ct);
         return agent is null ? null : DescribeJournalProvisioningFault(agent);
+    }
+
+    private async Task<string?> DescribeCodexServerUrlFaultAsync(string agentName, CancellationToken ct)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        var agent = await db.Agents
+            .Include(a => a.EnvRefs)
+            .AsNoTracking()
+            .FirstOrDefaultAsync(a => a.Name == agentName, ct);
+        return agent is null
+            ? null
+            : DescribeCodexServerUrlFault(agent, LoadEnvFile(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env"));
     }
 
     private string? DescribeJournalProvisioningFault(Agent agent)

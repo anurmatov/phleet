@@ -185,9 +185,11 @@ export interface AgentConfig {
   provider: string
   codexSandboxMode: string | null
   outputStyle: string | null
-  /** Origin of a local Anthropic-compatible server, or null (Anthropic). Claude agents only. */
-  anthropicBaseUrl: string | null
-  /** The local server's context size in tokens, or null. Used only in local mode (#367). */
+  /** Origin of the local inference server, or null (cloud). Claude and Codex agents (#382). */
+  localBaseUrl?: string | null
+  /** Older name of `localBaseUrl`; an older orchestrator returns only this. Read, never sent. */
+  anthropicBaseUrl?: string | null
+  /** The local server's context size in tokens, or null. Used only in local mode (#367, #382). */
   contextWindow?: number | null
   tools: { toolName: string; isEnabled: boolean }[]
   projects: string[]
@@ -242,11 +244,28 @@ export interface ConfigEdits {
   mountDockerSock: boolean
   /** Name of an output_styles row, or '' for none — the sentinel the API clears on. */
   outputStyle: string
-  /** Local Anthropic-compatible server origin, or '' for Anthropic — the sentinel the API clears on. */
-  anthropicBaseUrl: string
+  /** "Runs on": true = Local server. Kept in the edit state because a fresh Local has no URL or tag yet. */
+  localMode: boolean
+  /** Local server origin, or '' — the sentinel the API clears on. */
+  localBaseUrl: string
+  /** Codex local server software; the `<server>/` prefix of a Codex local model. */
+  localServer: CodexLocalServer
   /** Context window in tokens, or '' for not set (sent as 0, which the API clears on). */
   contextWindow: string
   instructions: { name: string; loadOrder: number }[]
+}
+
+/** The two local servers codex routes on (`ollama/<tag>`, `lmstudio/<tag>`). */
+export type CodexLocalServer = 'ollama' | 'lmstudio'
+
+/** A suggestion chip in local mode: a public registry tag, never a URL or context size. */
+export interface LocalModelSuggestion {
+  label: string
+  tag: string
+  harnesses: ('claude' | 'codex')[]
+  /** Effort the chip also sets on Codex, with the note shown while it is in effect. */
+  codexEffort?: { value: string; note: string }
+  contextHint?: string
 }
 
 export interface AgentTemplateSummary {

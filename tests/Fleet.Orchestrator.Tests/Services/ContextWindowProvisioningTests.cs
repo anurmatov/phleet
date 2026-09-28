@@ -20,7 +20,7 @@ public class ContextWindowProvisioningTests
         Role = "developer",
         Model = baseUrl is null ? "claude-sonnet-4-6" : "qwen3.8:27b-agent",
         Provider = provider,
-        AnthropicBaseUrl = baseUrl,
+        LocalBaseUrl = baseUrl,
         ContextWindow = window,
         ContainerName = "fleet-agent-ctx",
         MemoryLimitMb = 512,

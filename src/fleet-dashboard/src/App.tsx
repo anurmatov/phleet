@@ -37,7 +37,8 @@ import { apiFetch, heartbeatAge } from './utils'
 import { projectPayload } from './projectAssignments'
 import { PROVIDER_DEFAULT_MODEL } from './constants'
 import { parseWarmupTimeoutSeconds, warmupTimeoutEditValue } from './warmupTimeout'
-import { contextWindowEditValue, parseContextWindow } from './contextWindow'
+import { contextWindowEditValue } from './contextWindow'
+import { localModelEditValues, localModelSaveBody, parseEnvRefs } from './localModel'
 import AppHeader from './components/AppHeader'
 import AppFooter from './components/AppFooter'
 import Sidenav from './components/Sidenav'
@@ -857,7 +858,7 @@ export default function App() {
           requestReceivedMessage: cfg.requestReceivedMessage ?? '',
           mountDockerSock: cfg.mountDockerSock ?? false,
           outputStyle: cfg.outputStyle ?? '',
-          anthropicBaseUrl: cfg.anthropicBaseUrl ?? '',
+          ...localModelEditValues(cfg),
           contextWindow: contextWindowEditValue(cfg.contextWindow),
           instructions: cfg.instructions ?? [],
         })
@@ -905,19 +906,18 @@ export default function App() {
   function saveConfig(agentName: string, andReprovision: boolean) {
     if (!configEdits) return
     const provider = (configEdits.provider ?? 'claude').trim()
-    const model = configEdits.model.trim() || PROVIDER_DEFAULT_MODEL[provider] || ''
-    if (!model) { setConfigSaveMsg('Model is required'); setConfigSaveState('error'); return }
+    // Model, local server URL (sent as `localBaseUrl` only) and context window, with the empty-URL rule.
+    const localModel = localModelSaveBody({ ...configEdits, provider })
+    if (!localModel.ok) { setConfigSaveMsg(localModel.error); setConfigSaveState('error'); return }
     const memoryLimitMb = parseInt(configEdits.memoryLimitMb, 10)
     if (isNaN(memoryLimitMb) || memoryLimitMb < 128) { setConfigSaveMsg('Memory must be ≥ 128 MB'); setConfigSaveState('error'); return }
     const maxTurns = parseInt(configEdits.maxTurns, 10)
     const warmupTimeout = parseWarmupTimeoutSeconds(configEdits.warmupTimeoutSeconds)
     if (!warmupTimeout.ok) { setConfigSaveMsg(warmupTimeout.error); setConfigSaveState('error'); return }
-    const contextWindow = parseContextWindow(configEdits.contextWindow)
-    if (!contextWindow.ok) { setConfigSaveMsg(contextWindow.error); setConfigSaveState('error'); return }
     const tools = configEdits.tools.split(',').map(t => t.trim()).filter(Boolean)
     const { projects } = projectPayload(configEdits)
     const networks = configEdits.networks.split(',').map(n => n.trim()).filter(Boolean)
-    const envRefs = configEdits.envRefs.split(',').map(r => r.trim()).filter(Boolean)
+    const envRefs = parseEnvRefs(configEdits.envRefs)
     const newTelegramUsers = configEdits.telegramUsers.split(',').map(s => s.trim()).filter(Boolean).map(Number).filter(n => !isNaN(n))
     const newTelegramGroups = configEdits.telegramGroups.split(',').map(s => s.trim()).filter(Boolean).map(Number).filter(n => !isNaN(n))
     const prevUsers = configData?.telegramUsers ?? []
@@ -931,7 +931,8 @@ export default function App() {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model, memoryLimitMb,
+        ...localModel.body,
+        memoryLimitMb,
         isEnabled: configEdits.isEnabled,
         image: configEdits.image,
         permissionMode: configEdits.permissionMode,
@@ -960,8 +961,6 @@ export default function App() {
         requestReceivedMessage: configEdits.requestReceivedMessage || undefined,
         mountDockerSock: configEdits.mountDockerSock,
         outputStyle: configEdits.outputStyle,
-        anthropicBaseUrl: configEdits.anthropicBaseUrl,
-        contextWindow: contextWindow.value,
         tools, projects, mcpEndpoints: configEdits.mcpEndpoints, networks, envRefs,
         instructions: configEdits.instructions.map(i => ({ instructionName: i.name, loadOrder: i.loadOrder })),
       }),

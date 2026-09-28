@@ -65,6 +65,21 @@ public sealed class AgentOptions
     public string? AnthropicBaseUrl { get; set; }
 
     /// <summary>
+    /// The codex local server's OpenAI-compatible base URL, <c>&lt;canonical origin&gt;/v1</c> (#382),
+    /// or null. Written by the orchestrator only for a codex agent in local model mode;
+    /// <see cref="Services.CodexExecutor"/> sets it as <c>CODEX_OSS_BASE_URL</c> on the codex child,
+    /// overriding any inherited value. Null leaves the legacy <c>CODEX_OSS_BASE_URL</c> Env Ref route.
+    /// </summary>
+    public string? CodexOssBaseUrl { get; set; }
+
+    /// <summary>
+    /// Codex local model mode only (#382): the server's context size in tokens, sent as
+    /// <c>thread/start</c> <c>config.model_context_window</c> so codex compacts before the server
+    /// rejects the prompt. Null leaves codex's own default. Never applied to cloud or hosted models.
+    /// </summary>
+    public int? ContextWindow { get; set; }
+
+    /// <summary>
     /// Every instruction assigned to this agent, as <c>roles/</c> directory names, already in the
     /// orchestrator's load order (#309).
     /// </summary>

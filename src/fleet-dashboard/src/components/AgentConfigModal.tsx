@@ -3,10 +3,12 @@ import type {
   AgentConfig, ConfigEdits, ConfigSaveState, InstructionSummary, McpEndpointEntry, OutputStyleSummary,
   ProjectContextSummary, PromptSizeLimits,
 } from '../types'
-import { ADVANCED_DEFAULTS, countCustomized, PROVIDER_DEFAULT_MODEL, CLAUDE_PERMISSION_MODES, CODEX_SANDBOX_MODES } from '../constants'
+import { ADVANCED_DEFAULTS, countCustomized, CLAUDE_PERMISSION_MODES, CODEX_SANDBOX_MODES } from '../constants'
+import { effortChoices, switchProvider } from '../localModel'
 import { apiFetch } from '../utils'
 import ModelSelector from './ModelSelector'
 import FieldHint from './FieldHint'
+import LocalModelFields from './LocalModelFields'
 import InstructionPicker from './InstructionPicker'
 import ProjectAssignmentTable from './ProjectAssignmentTable'
 
@@ -82,6 +84,7 @@ export default function AgentConfigModal({
   const provider = configEdits?.provider ?? configData?.provider ?? 'claude'
   const isClaude = provider === 'claude'
   const isCodex = provider === 'codex'
+  const isLocal = (isClaude || isCodex) && (configEdits?.localMode ?? false)
 
   return (
     <div className="config-modal-overlay" onClick={onClose}>
@@ -99,41 +102,28 @@ export default function AgentConfigModal({
                 <label className="config-label">Provider</label>
                 <select
                   className="config-input"
-                  value={configEdits.provider ?? configData.provider ?? 'claude'}
-                  // Leaving claude clears the local-server origin too: the field is hidden for other
-                  // providers, and the server rejects it on anything but claude.
-                  onChange={e => onEditsChange({
-                    provider: e.target.value,
-                    model: PROVIDER_DEFAULT_MODEL[e.target.value] ?? '',
-                    ...(e.target.value !== 'claude' ? { anthropicBaseUrl: '' } : {}),
-                  })}
+                  value={provider}
+                  // Switching keeps local mode between Claude and Codex (the model follows the
+                  // harness's form) and clears it for Gemini — see switchProvider.
+                  onChange={e => onEditsChange(switchProvider({ ...configEdits, provider }, e.target.value))}
                 >
                   <option value="claude">Claude (Anthropic)</option>
                   <option value="codex">Codex (OpenAI)</option>
                   <option value="gemini">Gemini (Google)</option>
                 </select>
               </div>
+              {(isClaude || isCodex) && (
+                <LocalModelFields edits={{ ...configEdits, provider }} onEditsChange={onEditsChange} />
+              )}
+              {!isLocal && (
               <div className="config-field">
                 <label className="config-label">Model</label>
                 <FieldHint>Codex only: a <code>zai/</code> model needs <code>ZAI_CODING_PLAN_API_KEY</code> in Env Refs; subscriber-only use.</FieldHint>
                 <ModelSelector
-                  provider={configEdits.provider ?? configData.provider ?? 'claude'}
+                  provider={provider}
                   value={configEdits.model}
                   onChange={model => onEditsChange({ model })}
                 />
-              </div>
-              {isClaude && (
-              <div className="config-field">
-                <label className="config-label">Anthropic-compatible base URL <span className="config-provider-badge">Claude only</span></label>
-                <FieldHint>Empty = Anthropic with your Claude subscription. Set = this agent runs on a local Anthropic-compatible server (e.g. Ollama). Origin only, e.g. <code>http://&lt;server-lan-address&gt;:11434</code>, never <code>…/v1</code>; <code>localhost</code> is the container itself. Enter the server's model tag as a custom Model; Effort is off/low/medium/xhigh, or empty = model default (sent as xhigh). Claude credentials are not mounted. <strong>Takes effect on reprovision.</strong></FieldHint>
-                <input className="config-input" value={configEdits.anthropicBaseUrl} onChange={e => onEditsChange({ anthropicBaseUrl: e.target.value })} placeholder="http://<server-lan-address>:11434" />
-              </div>
-              )}
-              {isClaude && configEdits.anthropicBaseUrl.trim() !== '' && (
-              <div className="config-field">
-                <label className="config-label">Context window (tokens) <span className="config-provider-badge">Local only</span></label>
-                <FieldHint>Set to the server's context size (for example its <code>--ctx</code>). Claude CLI then compacts before the server rejects a turn. Empty = not set. 4096–1048576. <strong>Takes effect on reprovision.</strong></FieldHint>
-                <input className="config-input config-input-short" type="number" min={4096} max={1048576} step={1} value={configEdits.contextWindow} onChange={e => onEditsChange({ contextWindow: e.target.value })} placeholder="e.g. 65536" />
               </div>
               )}
               <div className="config-field">
@@ -282,38 +272,18 @@ export default function AgentConfigModal({
               {(isClaude || isCodex) && (
               <div className="config-field">
                 <label className="config-label">Effort <span className="config-provider-badge">Claude + Codex</span></label>
-                <FieldHint>Reasoning effort level. <code>low</code> = faster/cheaper; <code>max</code> = deepest reasoning (Codex maps max → xhigh). Affects latency and cost. Local Claude models use off/low/medium/xhigh.</FieldHint>
+                <FieldHint>Reasoning effort level. <code>low</code> = faster/cheaper; <code>max</code> = deepest reasoning (Codex maps max → xhigh). Affects latency and cost. Codex also takes none/minimal; local Claude models use off/low/medium/xhigh.</FieldHint>
                 {(() => {
-                  // #349: local mode owns its own vocabulary. A stored value invalid for the
+                  // #349: each harness and mode owns its vocabulary. A stored value invalid for the
                   // current mode still renders (with a marker) — nothing is auto-cleared, and
                   // Save surfaces the server fault.
-                  const isLocalClaude = (configEdits.provider ?? configData?.provider ?? 'claude') === 'claude'
-                    && (configEdits.anthropicBaseUrl ?? configData?.anthropicBaseUrl ?? '').trim() !== ''
+                  const choices = effortChoices(provider, isLocal)
                   const current = configEdits.effort ?? ''
-                  const localValues = ['', 'off', 'low', 'medium', 'xhigh']
-                  const invalid = isLocalClaude && current !== '' && !localValues.includes(current)
+                  const defaultLabel = isClaude && isLocal ? 'default (xhigh)' : 'default'
                   return (
                     <select className="config-input" value={current} onChange={e => onEditsChange({ effort: e.target.value })}>
-                      {isLocalClaude ? (
-                        <>
-                          <option value="">default (xhigh)</option>
-                          <option value="off">off</option>
-                          <option value="low">low</option>
-                          <option value="medium">medium</option>
-                          <option value="xhigh">xhigh</option>
-                          {invalid && <option value={current}>{current} (not valid in this mode)</option>}
-                        </>
-                      ) : (
-                        <>
-                          <option value="">default</option>
-                          <option value="low">low</option>
-                          <option value="medium">medium</option>
-                          <option value="high">high</option>
-                          <option value="xhigh">xhigh</option>
-                          <option value="max">max</option>
-                          {current === 'off' && <option value="off">off (not valid in this mode)</option>}
-                        </>
-                      )}
+                      {choices.map(v => <option key={v} value={v}>{v === '' ? defaultLabel : v}</option>)}
+                      {!choices.includes(current) && <option value={current}>{current} (not valid in this mode)</option>}
                     </select>
                   )
                 })()}

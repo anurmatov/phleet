@@ -22,7 +22,9 @@ public class CodexExecutorTests
         string workDir = "/workspace",
         Func<string, string?>? environmentReader = null,
         HostedProviderAdapterHost? adapterHost = null,
-        string? effort = null)
+        string? effort = null,
+        string? codexOssBaseUrl = null,
+        int? contextWindow = null)
     {
         var agentOptions = Options.Create(new AgentOptions
         {
@@ -33,6 +35,8 @@ public class CodexExecutorTests
         if (model is not null)
             agentOptions.Value.Model = model;
         agentOptions.Value.Effort = effort;
+        agentOptions.Value.CodexOssBaseUrl = codexOssBaseUrl;
+        agentOptions.Value.ContextWindow = contextWindow;
         var telegramOptions = Options.Create(new TelegramOptions
         {
             AttachmentDir = attachmentDir,
@@ -50,10 +54,16 @@ public class CodexExecutorTests
     private sealed class CapturingLogger<T> : ILogger<T>
     {
         public List<string> Messages { get; } = [];
+        public List<(LogLevel Level, string Message)> Entries { get; } = [];
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
         public bool IsEnabled(LogLevel logLevel) => true;
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
-            Func<TState, Exception?, string> formatter) => Messages.Add(formatter(state, exception));
+            Func<TState, Exception?, string> formatter)
+        {
+            var message = formatter(state, exception);
+            Messages.Add(message);
+            Entries.Add((logLevel, message));
+        }
     }
 
     [Fact]
@@ -796,6 +806,399 @@ public class CodexExecutorTests
         }
     }
 
+    // ── #382: codex local model mode ─────────────────────────────────────────
+
+    private const string ConfigOssBaseUrl = "http://inference-host:11434/v1";
+    private const string InheritedOssBaseUrl = "http://other-host:11434/v1";
+
+    private static readonly string[] BaselineThreadStartKeys =
+        ["model", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"];
+
+    /// <summary>
+    /// AC6: the provisioned agent's <c>thread/start</c> carries the provider, the bare tag and the
+    /// window, and the codex child gets the config URL even though the container inherited another.
+    /// </summary>
+    [Fact]
+    public async Task ThreadStart_LocalModelFromAgentConfig_SendsContextWindowAndOverridesTheInheritedUrl()
+    {
+        using var capture = new ThreadStartCapture();
+        using var workspace = new TempWorkspace();
+        var logger = new CapturingLogger<CodexExecutor>();
+        var previous = Environment.GetEnvironmentVariable("CODEX_OSS_BASE_URL");
+        try
+        {
+            // The real process environment, which ProcessStartInfo copies, and the executor's view of it.
+            Environment.SetEnvironmentVariable("CODEX_OSS_BASE_URL", InheritedOssBaseUrl);
+            var executor = CreateExecutor(
+                model: "ollama/qwen3.8:27b",
+                workDir: workspace.Path,
+                environmentReader: key => key == "CODEX_OSS_BASE_URL" ? InheritedOssBaseUrl : null,
+                processStarter: capture.Start,
+                logger: logger,
+                codexOssBaseUrl: ConfigOssBaseUrl,
+                contextWindow: 131072);
+
+            var startParams = await DriveThreadStartAsync(executor, capture);
+
+            Assert.Equal(
+                ["model", "modelProvider", "config", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"],
+                startParams.Select(kv => kv.Key));
+            Assert.Equal("qwen3.8:27b", (string?)startParams["model"]);
+            Assert.Equal("ollama", (string?)startParams["modelProvider"]);
+            Assert.Equal("""{"model_context_window":131072}""", startParams["config"]!.ToJsonString());
+            Assert.DoesNotContain("model_auto_compact_token_limit", startParams.ToJsonString());
+
+            Assert.Equal(ConfigOssBaseUrl, capture.LastStartInfo!.Environment["CODEX_OSS_BASE_URL"]);
+
+            Assert.Single(logger.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains(
+                "inherited CODEX_OSS_BASE_URL is superseded by Agent:CodexOssBaseUrl"));
+            Assert.DoesNotContain(logger.Messages, m => m.Contains("other-host"));
+            Assert.Contains(logger.Messages, m => m.Contains("local inference")
+                && m.Contains($"CODEX_OSS_BASE_URL={ConfigOssBaseUrl}")
+                && m.Contains("source=agent config")
+                && m.Contains("contextWindow=131072"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("CODEX_OSS_BASE_URL", previous);
+        }
+    }
+
+    /// <summary>
+    /// The override is applied on every start, but a restart loop names the superseded Env Ref once.
+    /// </summary>
+    [Fact]
+    public async Task StartProcess_ConfigUrlOverride_WarnsOncePerExecutor()
+    {
+        var starts = new List<System.Diagnostics.ProcessStartInfo>();
+        var logger = new CapturingLogger<CodexExecutor>();
+        var executor = CreateExecutor(
+            model: "ollama/qwen3.8:27b",
+            environmentReader: key => key == "CODEX_OSS_BASE_URL" ? InheritedOssBaseUrl : null,
+            processStarter: psi => { starts.Add(psi); return null; },
+            logger: logger,
+            codexOssBaseUrl: ConfigOssBaseUrl);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => executor.EnsureProcessReadyForTestsAsync());
+
+        Assert.Equal(3, starts.Count);
+        Assert.All(starts, psi => Assert.Equal(ConfigOssBaseUrl, psi.Environment["CODEX_OSS_BASE_URL"]));
+        Assert.Single(logger.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("superseded"));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("  ")]
+    [InlineData(ConfigOssBaseUrl)]
+    public async Task StartProcess_ConfigUrl_NoWarningWhenNothingDifferentIsInherited(string? inherited)
+    {
+        var starts = new List<System.Diagnostics.ProcessStartInfo>();
+        var logger = new CapturingLogger<CodexExecutor>();
+        var executor = CreateExecutor(
+            model: "ollama/qwen3.8:27b",
+            environmentReader: key => key == "CODEX_OSS_BASE_URL" ? inherited : null,
+            processStarter: psi => { starts.Add(psi); return null; },
+            logger: logger,
+            codexOssBaseUrl: ConfigOssBaseUrl);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => executor.EnsureProcessReadyForTestsAsync());
+
+        Assert.All(starts, psi => Assert.Equal(ConfigOssBaseUrl, psi.Environment["CODEX_OSS_BASE_URL"]));
+        Assert.DoesNotContain(logger.Messages, m => m.Contains("superseded"));
+    }
+
+    [Fact]
+    public async Task ThreadStart_LocalModelWithoutContextWindow_SendsNoConfig()
+    {
+        using var capture = new ThreadStartCapture();
+        using var workspace = new TempWorkspace();
+        var executor = CreateExecutor(
+            model: "ollama/qwen3.8:27b",
+            workDir: workspace.Path,
+            environmentReader: _ => null,
+            processStarter: capture.Start,
+            codexOssBaseUrl: ConfigOssBaseUrl);
+
+        var startParams = await DriveThreadStartAsync(executor, capture);
+
+        Assert.Equal(
+            ["model", "modelProvider", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"],
+            startParams.Select(kv => kv.Key));
+    }
+
+    /// <summary>
+    /// AC7, legacy: an Env Ref-only agent sends today's payload and its child inherits the
+    /// environment untouched; the source is named in the log.
+    /// </summary>
+    [Fact]
+    public async Task ThreadStart_LegacyEnvOnly_PayloadAndChildEnvironmentUnchanged()
+    {
+        using var capture = new ThreadStartCapture();
+        using var workspace = new TempWorkspace();
+        var logger = new CapturingLogger<CodexExecutor>();
+        var executor = CreateExecutor(
+            model: "ollama/qwen3.8:27b",
+            workDir: workspace.Path,
+            environmentReader: key => key == "CODEX_OSS_BASE_URL" ? InheritedOssBaseUrl : null,
+            processStarter: capture.Start,
+            logger: logger);
+
+        var startParams = await DriveThreadStartAsync(executor, capture);
+
+        Assert.Equal(
+            ["model", "modelProvider", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"],
+            startParams.Select(kv => kv.Key));
+        var psi = capture.LastStartInfo!;
+        Assert.Equal(
+            Environment.GetEnvironmentVariable("CODEX_OSS_BASE_URL"),
+            psi.Environment.TryGetValue("CODEX_OSS_BASE_URL", out var value) ? value : null);
+        Assert.DoesNotContain(logger.Messages, m => m.Contains("superseded"));
+        Assert.Contains(logger.Messages, m => m.Contains("source=legacy env") && m.Contains("contextWindow=unset"));
+    }
+
+    /// <summary>
+    /// AC7 and MUST NOT: a window configured on a cloud or unknown-prefix model changes nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("gpt-5")]
+    [InlineData("acme/x")]
+    public async Task ThreadStart_CloudModel_IgnoresContextWindow(string model)
+    {
+        using var capture = new ThreadStartCapture();
+        using var workspace = new TempWorkspace();
+        var executor = CreateExecutor(
+            model: model,
+            workDir: workspace.Path,
+            environmentReader: _ => null,
+            processStarter: capture.Start,
+            contextWindow: 131072);
+
+        var startParams = await DriveThreadStartAsync(executor, capture);
+
+        Assert.Equal(BaselineThreadStartKeys, startParams.Select(kv => kv.Key));
+        Assert.Equal(model, (string?)startParams["model"]);
+        Assert.DoesNotContain("model_context_window", startParams.ToJsonString());
+    }
+
+    /// <summary>AC7: the hosted config keys are exactly the D3 set, with no window merged in.</summary>
+    [Fact]
+    public async Task ThreadStart_HostedModel_IgnoresContextWindow()
+    {
+        using var capture = new ThreadStartCapture();
+        using var workspace = new TempWorkspace();
+        await using var adapter = await StartAdapterHostAsync();
+        var executor = CreateExecutor(
+            model: "zai/glm-5.3",
+            workDir: workspace.Path,
+            environmentReader: _ => null,
+            processStarter: capture.Start,
+            adapterHost: adapter,
+            contextWindow: 131072);
+
+        var startParams = await DriveThreadStartAsync(executor, capture, echoedProvider: "phleet_zai");
+
+        Assert.Equal(
+            ["model", "modelProvider", "config", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"],
+            startParams.Select(kv => kv.Key));
+        Assert.Equal(
+            ["name", "base_url", "wire_api", "requires_openai_auth", "supports_websockets",
+             "stream_idle_timeout_ms", "request_max_retries", "stream_max_retries", "http_headers"],
+            startParams["config"]!.AsObject().Select(kv => kv.Key["model_providers.phleet_zai.".Length..]));
+        Assert.DoesNotContain("model_context_window", startParams.ToJsonString());
+    }
+
+    [Fact]
+    public void MergeModelContextWindow_KeepsEveryExistingConfigKey()
+    {
+        var startParams = new JsonObject
+        {
+            ["model"] = "m",
+            ["config"] = new JsonObject { ["model_providers.p.name"] = "P", ["n"] = 2 },
+        };
+
+        CodexExecutor.MergeModelContextWindow(startParams, 131072);
+
+        Assert.Equal(
+            """{"model":"m","config":{"model_providers.p.name":"P","n":2,"model_context_window":131072}}""",
+            startParams.ToJsonString());
+    }
+
+    [Fact]
+    public void MergeModelContextWindow_CreatesConfigWhenAbsent()
+    {
+        var startParams = new JsonObject { ["model"] = "m" };
+
+        CodexExecutor.MergeModelContextWindow(startParams, 131072);
+
+        Assert.Equal("""{"model":"m","config":{"model_context_window":131072}}""", startParams.ToJsonString());
+    }
+
+    /// <summary>AC15: none and minimal reach turn/start verbatim, for cloud and local alike.</summary>
+    [Theory]
+    [InlineData("gpt-5", "none")]
+    [InlineData("gpt-5", "minimal")]
+    [InlineData("ollama/qwen3.8:27b", "none")]
+    [InlineData("ollama/qwen3.8:27b", "minimal")]
+    public async Task TurnStart_NoneAndMinimal_AreForwardedVerbatim(string model, string effort)
+    {
+        using var capture = new ThreadStartCapture();
+        using var workspace = new TempWorkspace();
+        var executor = CreateExecutor(
+            model: model,
+            workDir: workspace.Path,
+            environmentReader: _ => null,
+            processStarter: capture.Start,
+            effort: effort,
+            codexOssBaseUrl: model.StartsWith("ollama/", StringComparison.Ordinal) ? ConfigOssBaseUrl : null);
+
+        var turnStart = await DriveTurnStartAsync(executor, capture);
+
+        Assert.Equal(effort, (string?)turnStart["effort"]);
+    }
+
+    // Round-tripped through the parser, as the stdout reader delivers every frame.
+    private static JsonObject TokenUsageWithWindow(string turnId, long modelContextWindow) =>
+        JsonNode.Parse(new JsonObject
+        {
+            ["method"] = "thread/tokenUsage/updated",
+            ["params"] = new JsonObject
+            {
+                ["threadId"] = "thread-1",
+                ["turnId"] = turnId,
+                ["tokenUsage"] = new JsonObject
+                {
+                    ["last"] = new JsonObject { ["inputTokens"] = 12, ["outputTokens"] = 7 },
+                    ["total"] = new JsonObject { ["inputTokens"] = 12, ["outputTokens"] = 7 },
+                    ["modelContextWindow"] = modelContextWindow,
+                },
+            },
+        }.ToJsonString())!.AsObject();
+
+    private static JsonObject ThreadCompacted(string turnId) =>
+        new()
+        {
+            ["method"] = "thread/compacted",
+            ["params"] = new JsonObject { ["threadId"] = "thread-1", ["turnId"] = turnId },
+        };
+
+    private static JsonObject CompactionItemCompleted(string turnId) =>
+        new()
+        {
+            ["method"] = "item/completed",
+            ["params"] = new JsonObject
+            {
+                ["threadId"] = "thread-1",
+                ["turnId"] = turnId,
+                ["item"] = new JsonObject { ["type"] = "contextCompaction", ["id"] = "item-1" },
+            },
+        };
+
+    private static async Task<CapturingLogger<CodexExecutor>> StreamLocalTurnAsync(
+        string model, int? contextWindow, params JsonObject[] notifications)
+    {
+        var logger = new CapturingLogger<CodexExecutor>();
+        var executor = CreateExecutor(model: model, logger: logger, contextWindow: contextWindow);
+        var channel = Channel.CreateUnbounded<JsonObject>();
+        executor.SetNotificationChannelForTests(channel);
+        executor.SetThreadStateForTests("thread-1", "turn-1");
+
+        foreach (var notification in notifications)
+            await channel.Writer.WriteAsync(notification);
+        await channel.Writer.WriteAsync(TurnCompleted("turn-1", "done"));
+
+        await CollectAsync(executor.StreamTurnForTests("turn-1"));
+        return logger;
+    }
+
+    [Fact]
+    public async Task LocalModel_ReportsTheAppliedWindowOncePerThread()
+    {
+        // The first update belongs to a stale turn: it is observed before the turn filter.
+        var logger = await StreamLocalTurnAsync(
+            "ollama/qwen3.8:27b", 131072,
+            TokenUsageWithWindow("turn-old", 124518), TokenUsageWithWindow("turn-1", 124518));
+
+        var report = Assert.Single(logger.Entries, e => e.Message.Contains("modelContextWindow"));
+        Assert.Equal(LogLevel.Information, report.Level);
+        Assert.Equal("CodexExecutor: codex reports modelContextWindow 124518 (configured 131072)", report.Message);
+        Assert.DoesNotContain(logger.Messages, m => m.Contains("did not apply"));
+    }
+
+    [Fact]
+    public async Task LocalModel_ReportedWindowAboveConfigured_Warns()
+    {
+        var logger = await StreamLocalTurnAsync(
+            "ollama/qwen3.8:27b", 131072, TokenUsageWithWindow("turn-1", 258400));
+
+        Assert.Contains("CodexExecutor: codex reports modelContextWindow 258400 (configured 131072)", logger.Messages);
+        var warning = Assert.Single(logger.Entries, e => e.Level == LogLevel.Warning);
+        Assert.Equal(
+            "CodexExecutor: codex did not apply model_context_window (reported 258400, configured 131072)",
+            warning.Message);
+    }
+
+    [Fact]
+    public async Task LocalModel_NoConfiguredWindow_ReportsUnsetAndNeverWarns()
+    {
+        var logger = await StreamLocalTurnAsync(
+            "ollama/qwen3.8:27b", null, TokenUsageWithWindow("turn-1", 258400));
+
+        Assert.Contains("CodexExecutor: codex reports modelContextWindow 258400 (configured unset)", logger.Messages);
+        Assert.DoesNotContain(logger.Entries, e => e.Level == LogLevel.Warning);
+    }
+
+    [Fact]
+    public async Task LocalModel_OneCompactionAnnouncedTwice_LogsOnce_AndASecondOneLogsAgain()
+    {
+        var logger = await StreamLocalTurnAsync(
+            "ollama/qwen3.8:27b", 131072,
+            CompactionItemCompleted("turn-1"), ThreadCompacted("turn-1"),
+            ThreadCompacted("turn-1"), CompactionItemCompleted("turn-1"),
+            ThreadCompacted("turn-other"));
+
+        Assert.Equal(3, logger.Messages.Count(m => m == "CodexExecutor: codex compacted the thread context"));
+    }
+
+    [Theory]
+    [InlineData("gpt-5")]
+    [InlineData("zai/glm-5.3")]
+    public async Task NonLocalModel_LogsNeitherWindowNorCompaction(string model)
+    {
+        var logger = await StreamLocalTurnAsync(
+            model, 131072,
+            TokenUsageWithWindow("turn-1", 258400), ThreadCompacted("turn-1"), CompactionItemCompleted("turn-1"));
+
+        Assert.DoesNotContain(logger.Messages, m => m.Contains("modelContextWindow") || m.Contains("compacted"));
+    }
+
+    /// <summary>The interrupted-turn drain reads usage updates too, so it observes them as well.</summary>
+    [Fact]
+    public async Task LocalModel_InterruptedTurnDrain_ObservesTheWindowAndCompaction()
+    {
+        var logger = new CapturingLogger<CodexExecutor>();
+        var executor = CreateExecutor(model: "ollama/qwen3.8:27b", logger: logger, contextWindow: 131072);
+        var channel = Channel.CreateUnbounded<JsonObject>();
+        executor.SetNotificationChannelForTests(channel);
+        executor.SetThreadStateForTests("thread-1", "turn-1");
+
+        await channel.Writer.WriteAsync(TokenUsageWithWindow("turn-1", 124518));
+        await channel.Writer.WriteAsync(ThreadCompacted("turn-1"));
+        await channel.Writer.WriteAsync(TurnCompleted("turn-1", "", "interrupted"));
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            await foreach (var _ in executor.StreamTurnForTests("turn-1", cts.Token))
+            {
+            }
+        });
+
+        Assert.Contains("CodexExecutor: codex reports modelContextWindow 124518 (configured 131072)", logger.Messages);
+        Assert.Contains("CodexExecutor: codex compacted the thread context", logger.Messages);
+    }
+
     /// <summary>
     /// Runs the real startup handshake against the stand-in app-server and returns the
     /// <c>thread/start</c> params exactly as they went over the wire.
@@ -823,6 +1226,43 @@ public class CodexExecutorTests
         await responder;
 
         return capture.ReadThreadStartParams();
+    }
+
+    /// <summary>
+    /// Runs one real turn against the stand-in app-server and returns the <c>turn/start</c> params
+    /// exactly as they went over the wire. Closing the capture ends the stand-in, which the executor
+    /// reports as an app-server exit, so the turn finishes without a scripted notification.
+    /// </summary>
+    private static async Task<JsonObject> DriveTurnStartAsync(CodexExecutor executor, ThreadStartCapture capture)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        var responder = Task.Run(async () =>
+        {
+            await executor.WaitAndCompleteNextPendingRequestForTests(new JsonObject(), cts.Token);
+            await executor.WaitAndCompleteNextPendingRequestForTests(new JsonObject
+            {
+                ["thread"] = new JsonObject { ["id"] = "thread-1", ["ephemeral"] = true },
+            }, cts.Token);
+            await executor.WaitAndCompleteNextPendingRequestForTests(new JsonObject
+            {
+                ["turn"] = new JsonObject { ["id"] = "turn-1" },
+            }, cts.Token);
+        }, cts.Token);
+
+        var turn = Task.Run(async () =>
+        {
+            await foreach (var _ in executor.ExecuteAsync("hello", ct: cts.Token)) { }
+        }, cts.Token);
+
+        await responder;
+        // Set only once turn/start has been written and answered.
+        while (executor.ActiveTurnIdForTests is null)
+            await Task.Delay(1, cts.Token);
+
+        var turnStart = capture.ReadParams("turn/start");
+        await turn;
+        return turnStart;
     }
 
     /// <summary>A throwaway <c>WorkDir</c>, because startup writes <c>system-prompt.md</c> into it.</summary>
@@ -880,7 +1320,9 @@ public class CodexExecutorTests
             return _process;
         }
 
-        public JsonObject ReadThreadStartParams()
+        public JsonObject ReadThreadStartParams() => ReadParams("thread/start");
+
+        public JsonObject ReadParams(string method)
         {
             // Closing the executor's stdin lets cat drain and exit, so the capture file is complete.
             _process!.StandardInput.BaseStream.Close();
@@ -889,14 +1331,14 @@ public class CodexExecutorTests
             foreach (var line in File.ReadAllLines(_capturePath))
             {
                 if (JsonNode.Parse(line) is JsonObject frame &&
-                    (string?)frame["method"] == "thread/start" &&
+                    (string?)frame["method"] == method &&
                     frame["params"] is JsonObject startParams)
                 {
                     return startParams;
                 }
             }
 
-            throw new InvalidOperationException($"No thread/start frame was captured in {_capturePath}.");
+            throw new InvalidOperationException($"No {method} frame was captured in {_capturePath}.");
         }
 
         public void Dispose()

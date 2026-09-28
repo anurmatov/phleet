@@ -1,6 +1,3 @@
-using System.Net;
-using System.Text.RegularExpressions;
-
 namespace Fleet.Shared;
 
 /// <summary>
@@ -17,7 +14,7 @@ namespace Fleet.Shared;
 /// already choose the agent's image, so this adds no reach; the value is an operator decision.
 /// </para>
 /// </remarks>
-public static partial class ClaudeLocalModel
+public static class ClaudeLocalModel
 {
     /// <summary>
     /// The <c>ANTHROPIC_AUTH_TOKEN</c> the claude child sends. Local servers ignore it; it exists so
@@ -25,8 +22,8 @@ public static partial class ClaudeLocalModel
     /// </summary>
     public const string PlaceholderAuthToken = "phleet-local-no-auth";
 
-    public const int MaxBaseUrlLength = 500;
-    public const int MaxModelLength = 100;
+    public const int MaxBaseUrlLength = LocalModel.MaxBaseUrlLength;
+    public const int MaxModelLength = LocalModel.MaxModelTagLength;
 
     /// <summary>Removed from the claude child's environment in local mode (D2, #349).</summary>
     public static IReadOnlyList<string> RemovedEnvVars { get; } =
@@ -64,10 +61,6 @@ public static partial class ClaudeLocalModel
 
     private static readonly string[] ClaudeModelAliases = ["opus", "sonnet", "haiku"];
 
-    // --model is appended unquoted by ClaudeExecutor.BuildArgs, so the tag must be a single safe token.
-    [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9._:/-]*$")]
-    private static partial Regex ModelTagPattern();
-
     public static bool IsEnabled(string? provider, string? baseUrl) =>
         string.Equals(provider, "claude", StringComparison.Ordinal) && !string.IsNullOrEmpty(baseUrl);
 
@@ -84,14 +77,14 @@ public static partial class ClaudeLocalModel
         if (!string.Equals(provider, "claude", StringComparison.Ordinal))
             return "AnthropicBaseUrl applies only to provider claude; clear it before changing provider.";
 
-        // V2, V3
-        if (DescribeBaseUrlFault(baseUrl) is { } urlFault)
+        // V2, V3 (#382 L2): shared with codex local mode.
+        if (LocalModel.DescribeBaseUrlFault(baseUrl) is { } urlFault)
             return urlFault;
 
-        // V4
-        if (string.IsNullOrEmpty(model) || model.Length > MaxModelLength || !ModelTagPattern().IsMatch(model))
-            return $"The local model tag must be 1–{MaxModelLength} characters matching "
-                 + "^[A-Za-z0-9][A-Za-z0-9._:/-]*$; it contains characters not allowed in a CLI argument.";
+        // V4. --model is appended unquoted by ClaudeExecutor.BuildArgs, so the tag must be a single
+        // safe token.
+        if (string.IsNullOrEmpty(model) || LocalModel.DescribeModelTagFault(model) is not null)
+            return LocalModel.DescribeModelTagFault(model);
 
         // V5
         if (model.StartsWith("claude-", StringComparison.OrdinalIgnoreCase)
@@ -149,8 +142,7 @@ public static partial class ClaudeLocalModel
     /// <c>scheme://host[:port]</c>: scheme and host lowercased, default port dropped, trailing
     /// <c>/</c> removed. Only meaningful for a value that passed <see cref="DescribeConfigFault"/>.
     /// </summary>
-    public static string CanonicalizeBaseUrl(string baseUrl) =>
-        new Uri(baseUrl, UriKind.Absolute).GetLeftPart(UriPartial.Authority);
+    public static string CanonicalizeBaseUrl(string baseUrl) => LocalModel.CanonicalizeBaseUrl(baseUrl);
 
     /// <summary>
     /// The claude child's environment in local mode, in order (D2). Mirrors <c>ollama launch
@@ -182,71 +174,5 @@ public static partial class ClaudeLocalModel
             entries.Add(new("CLAUDE_CODE_EXTRA_BODY", DisabledThinkingExtraBody));
 
         return entries;
-    }
-
-    // V2 and V3. The fault text never includes the value: it may carry credentials.
-    private static string? DescribeBaseUrlFault(string baseUrl)
-    {
-        if (baseUrl.Length > MaxBaseUrlLength)
-            return BaseUrlFault($"is longer than {MaxBaseUrlLength} characters");
-
-        // Checked on the raw string: Uri parsing would trim it and hide the difference.
-        if (baseUrl.Trim().Length != baseUrl.Length)
-            return BaseUrlFault("has surrounding whitespace");
-
-        // '@' only ever delimits userinfo in an origin. Checked raw because "http://@host" parses
-        // with an empty UserInfo, and GetLeftPart would then keep the '@' in the canonical form.
-        if (baseUrl.Contains('@'))
-            return BaseUrlFault("has credentials");
-
-        if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
-            return BaseUrlFault("is not an absolute URI");
-
-        if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
-            return BaseUrlFault("must use http or https");
-
-        if (string.IsNullOrEmpty(uri.Host))
-            return BaseUrlFault("has no host");
-
-        if (uri.UserInfo.Length > 0)
-            return BaseUrlFault("has credentials");
-
-        if (uri.Query.Length > 0)
-            return BaseUrlFault("has a query");
-
-        if (uri.Fragment.Length > 0)
-            return BaseUrlFault("has a fragment");
-
-        if (uri.AbsolutePath != "/")
-            return BaseUrlFault("has a path");
-
-        if (IsContainerLocal(uri))
-            return "AnthropicBaseUrl points at localhost, which inside an agent container is the container "
-                 + "itself; use the inference server's LAN address or host name.";
-
-        return null;
-    }
-
-    private static string BaseUrlFault(string reason) =>
-        $"AnthropicBaseUrl {reason}. It must be an http(s) origin such as http://<server-address>:11434 — "
-      + "no path (Claude Code appends /v1/messages), credentials, query or fragment.";
-
-    // V3: localhost (any case, trailing dot), 127.0.0.0/8, ::1, the unspecified addresses, and their
-    // IPv4-mapped IPv6 forms. Uri has already folded 127.1 and 2130706433 into 127.0.0.1.
-    private static bool IsContainerLocal(Uri uri)
-    {
-        var host = uri.IdnHost.TrimEnd('.');
-        if (string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase))
-            return true;
-
-        if (!IPAddress.TryParse(host, out var address))
-            return false;
-
-        if (address.IsIPv4MappedToIPv6)
-            address = address.MapToIPv4();
-
-        return IPAddress.IsLoopback(address)
-            || address.Equals(IPAddress.Any)
-            || address.Equals(IPAddress.IPv6Any);
     }
 }

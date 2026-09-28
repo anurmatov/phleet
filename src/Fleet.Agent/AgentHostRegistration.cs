@@ -120,10 +120,10 @@ public static class AgentHostRegistration
     /// mode. <paramref name="fileExists"/> is the file probe, injectable for tests.
     /// </para>
     /// <para>
-    /// It also catches a codex agent whose model names a local provider
-    /// (<c>ollama/…</c>, <c>lmstudio/…</c>) with no <c>CODEX_OSS_BASE_URL</c> to reach it. That is
-    /// misconfiguration, not degradation — there is no endpoint. It has to stop the host, because
-    /// nothing downstream will: <c>/health</c> answers ok unconditionally and
+    /// It also catches a codex local model with no usable server URL: <c>Agent:CodexOssBaseUrl</c>
+    /// failing #382 S1, or, when that key is absent, an <c>ollama/…</c> or <c>lmstudio/…</c> model
+    /// with no <c>CODEX_OSS_BASE_URL</c>. That is misconfiguration, not degradation. It has to stop
+    /// the host, because nothing downstream will: <c>/health</c> answers ok unconditionally and
     /// <see cref="Services.WarmupService"/> swallows executor startup failures as a warning, so a
     /// lazy check leaves the container up, reported healthy, and unable to answer a single turn.
     /// </para>
@@ -148,9 +148,9 @@ public static class AgentHostRegistration
         if (agent.Provider != "codex")
             return;
 
-        var readEnv = environmentReader ?? Environment.GetEnvironmentVariable;
-        if (CodexExecutor.DescribeLocalModelFault(
-                agent.Model, readEnv(CodexExecutor.OssBaseUrlEnvVar)) is { } fault)
+        // #382 S1 when the orchestrator wrote Agent:CodexOssBaseUrl; otherwise the legacy env check.
+        if (DescribeCodexLocalModelFault(agent, environmentReader ?? Environment.GetEnvironmentVariable)
+            is { } fault)
         {
             Fail(fault);
         }
@@ -213,6 +213,37 @@ public static class AgentHostRegistration
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Codex local model mode: #382 S1 when <c>Agent:CodexOssBaseUrl</c> is present, otherwise the
+    /// legacy <c>CODEX_OSS_BASE_URL</c> check. Returns the fault text, or null.
+    /// </summary>
+    /// <remarks>
+    /// The orchestrator writes the key only in codex local mode, always as
+    /// <see cref="LocalModel.CodexOssBaseUrl"/> of a canonical origin, so any other value, or a model
+    /// that does not split as local, means version skew or a hand-edited <c>appsettings.json</c>. A
+    /// sound key needs no env var: <see cref="CodexExecutor"/> sets it on the codex child. The fault
+    /// text never includes the value.
+    /// </remarks>
+    private static string? DescribeCodexLocalModelFault(AgentOptions agent, Func<string, string?> readEnv)
+    {
+        var url = agent.CodexOssBaseUrl;
+        if (string.IsNullOrEmpty(url))
+            return CodexExecutor.DescribeLocalModelFault(agent.Model, readEnv(CodexExecutor.OssBaseUrlEnvVar));
+
+        const string path = "/v1";
+        var origin = url.EndsWith(path, StringComparison.Ordinal) ? url[..^path.Length] : "";
+        if (LocalModel.DescribeBaseUrlFault(origin) is not null
+            || LocalModel.CodexOssBaseUrl(LocalModel.CanonicalizeBaseUrl(origin)) != url)
+        {
+            return "Agent:CodexOssBaseUrl is not <canonical origin>/v1; redeploy both images and reprovision";
+        }
+
+        return CodexLocalModelProviders.Split(agent.Model).Provider is null
+            ? $"Agent:CodexOssBaseUrl is set, but model '{agent.Model}' is not ollama/<tag> or "
+              + "lmstudio/<tag>; redeploy both images and reprovision"
+            : null;
     }
 
     /// <summary>

@@ -21,7 +21,8 @@ public class StartupConfigurationGateTests
 {
     private static ServiceProvider BuildServices(
         string provider, string model, bool? hostedProvider = null, string? hostedKeyEnv = null,
-        string? keyFilePath = null, string? anthropicBaseUrl = null, string? effort = null)
+        string? keyFilePath = null, string? anthropicBaseUrl = null, string? effort = null,
+        string? codexOssBaseUrl = null)
     {
         // DisableDefaults-equivalent: nothing ambient, only the values the gate reads.
         var values = new Dictionary<string, string?>
@@ -40,6 +41,8 @@ public class StartupConfigurationGateTests
             values["Agent:AnthropicBaseUrl"] = anthropicBaseUrl;
         if (effort is not null)
             values["Agent:Effort"] = effort;
+        if (codexOssBaseUrl is not null)
+            values["Agent:CodexOssBaseUrl"] = codexOssBaseUrl;
 
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(values).Build();
 
@@ -168,6 +171,67 @@ public class StartupConfigurationGateTests
         using var services = BuildServices(provider, model);
 
         AgentHostRegistration.ValidateStartupConfiguration(services, _ => null);
+    }
+
+    // ── #382 S1: codex local model mode from Agent:CodexOssBaseUrl ──────────
+
+    private const string CodexOssBaseUrl = "http://inference-host:11434/v1";
+
+    [Theory]
+    [InlineData("ollama/qwen3.8:27b")]
+    [InlineData("lmstudio/qwen3.8:27b")]
+    public void CodexConfigBaseUrl_WithoutTheEnvVar_Passes(string model)
+    {
+        using var services = BuildServices("codex", model, codexOssBaseUrl: CodexOssBaseUrl);
+
+        AgentHostRegistration.ValidateStartupConfiguration(
+            services, _ => throw new InvalidOperationException("the env var must not be read"));
+    }
+
+    [Theory]
+    [InlineData("http://inference-host:11434")]       // the origin alone
+    [InlineData("http://Inference-Host:11434/v1")]    // not canonical
+    [InlineData("http://inference-host:11434/v1/")]   // not exactly /v1
+    [InlineData("http://inference-host:80/v1")]       // default port kept
+    [InlineData("http://inference-host:11434/v1/v1")]
+    [InlineData("http://localhost:11434/v1")]         // L2 on the origin
+    [InlineData("/v1")]
+    [InlineData("   ")]
+    public void CodexConfigBaseUrl_NotCanonicalOriginPlusV1_Throws(string codexOssBaseUrl)
+    {
+        using var services = BuildServices("codex", "ollama/qwen3.8:27b", codexOssBaseUrl: codexOssBaseUrl);
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => AgentHostRegistration.ValidateStartupConfiguration(services, _ => CodexOssBaseUrl));
+
+        Assert.Contains("CodexOssBaseUrl is not <canonical origin>/v1; redeploy both images and reprovision", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("gpt-5")]
+    [InlineData("qwen3.8:27b")]
+    [InlineData("owl/t-lite")]
+    public void CodexConfigBaseUrl_ModelNotLocal_Throws(string model)
+    {
+        using var services = BuildServices("codex", model, codexOssBaseUrl: CodexOssBaseUrl);
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => AgentHostRegistration.ValidateStartupConfiguration(services, _ => null));
+
+        Assert.Contains($"'{model}'", ex.Message);
+        Assert.EndsWith("redeploy both images and reprovision", ex.Message);
+    }
+
+    [Fact]
+    public void CodexLocalPrefix_WithNeitherConfigUrlNorEnvVar_StillThrows()
+    {
+        using var services = BuildServices("codex", "ollama/qwen3.8:27b");
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => AgentHostRegistration.ValidateStartupConfiguration(services, _ => null));
+
+        Assert.Contains("CODEX_OSS_BASE_URL", ex.Message);
+        Assert.Contains("ollama/qwen3.8:27b", ex.Message);
     }
 
     // ── #340: Claude local model mode ────────────────────────────────────────

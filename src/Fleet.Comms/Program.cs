@@ -113,6 +113,89 @@ static async Task<int> RunServiceAsync(string[] args)
     // exits 1 with a fixed `journal_…` code and never the key.
     options.ValidateJournal();
 
+    // Media is validated the same way, and the bucket is PROBED before any host serves a request.
+    //
+    // Two different outcomes, and the split is the design:
+    //   • a configuration that cannot work (missing field, unknown bucket, rejected credentials)
+    //     exits 1 with a fixed `media_…` / `credentials_rejected` code and never the value;
+    //   • a bucket that is merely not answering starts DEGRADED — uploads answer 503, the text
+    //     journal works, the container stays healthy, and the probe loop recovers on its own.
+    // A wrong credential is not the second case: it will not repair itself, and a Comms that came
+    // up permanently degraded is how a broken deployment hides from its own healthcheck.
+    options.ValidateMedia();
+
+    Fleet.Comms.CommsApp.JournalMedia? media = null;
+
+    if (options.Media.Enabled)
+    {
+        var mediaLogger = northApp.Services
+            .GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal.Media");
+        var objectLogger = northApp.Services
+            .GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Conversations.Journal.S3ObjectStore");
+
+        var bucket = new Fleet.Conversations.Journal.S3ObjectStore(
+            new Fleet.Conversations.Journal.JournalMediaOptions
+            {
+                Endpoint = options.Media.Endpoint,
+                Bucket = options.Media.Bucket,
+                AccessKey = options.Media.AccessKey,
+                SecretKey = options.Media.SecretKey,
+                Region = options.Media.Region,
+                RequestTimeout = options.Media.RequestTimeout,
+            },
+            objectLogger);
+
+        var gate = new Fleet.Conversations.Journal.JournalMediaHealth(bucket, mediaLogger);
+
+        // One probe, with a hard budget. `StartupProbeBudget` is why this is bounded rather than
+        // relying on the SDK's own timeout: an operator with a typo'd endpoint should see an exit
+        // code, not a container that hangs in "starting" until the orchestrator kills it.
+        var objects = new Fleet.Conversations.Journal.MySqlJournalObjectStore(
+            options.ConversationConnectionString, mediaLogger);
+
+        // One probe, bounded. `false` is a bucket that is not answering; `JournalProbeFailureException`
+        // is a bucket that answered and refused. Only the first is degraded.
+        bool reachable;
+        try
+        {
+            reachable = await ProbeWithinBudgetAsync(bucket);
+        }
+        catch (Fleet.Conversations.Journal.JournalProbeFailureException)
+        {
+            // The message is the fixed code; the SDK's own text is deliberately not repeated, and
+            // neither carries the secret.
+            await Console.Error.WriteLineAsync(
+                "credentials_rejected: Comms__Media__Endpoint is set but the bucket refused this "
+                + "account, or the bucket does not exist. Fix the credentials or the bucket name — "
+                + "media_state=degraded does not cover a configuration that cannot work.");
+            return 1;
+        }
+
+        media = new Fleet.Comms.CommsApp.JournalMedia(gate, bucket, objects);
+
+        if (reachable)
+        {
+            gate.MarkStartupState(true);
+        }
+        else
+        {
+            await Console.Error.WriteLineAsync(
+                "media_state=degraded: the journal object store is not reachable; uploads answer "
+                + "503 media_unavailable until it is. The journal itself is unaffected.");
+        }
+
+        // ⚠️ The last guard before a listener accepts an upload: the bucket must not be world
+        //    readable. A public bucket would make every archived attachment readable by anyone who
+        //    can guess a key, and the credentials are not what protects the bytes there.
+        if (await BucketIsPublicAsync(options.Media))
+        {
+            await Console.Error.WriteLineAsync(
+                "bucket_public: an unsigned read of the journal bucket succeeded. The bucket must "
+                + "deny anonymous listing; refusing to start with a public object store.");
+            return 1;
+        }
+    }
+
     WebApplication? southApp = null;
 
     if (options.ConversationsEnabled)
@@ -153,11 +236,29 @@ static async Task<int> RunServiceAsync(string[] args)
 
         var journalStore = new Fleet.Conversations.Journal.MySqlJournalStore(
             options.ConversationConnectionString,
-            northApp.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal.Store"));
+            northApp.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal.Store"))
+        {
+            Objects = media?.Objects,
+        };
 
         journalApp = CommsApp.BuildJournalApp(
             journalBuilder, journalStore, options,
-            northApp.Services.GetRequiredService<Fleet.Conversations.Journal.JournalRuntimeStats>());
+            northApp.Services.GetRequiredService<Fleet.Conversations.Journal.JournalRuntimeStats>(),
+            media: media);
+
+        if (media is not null)
+        {
+            // The probe loop runs on the JOURNAL host, not the north one: the bucket is the
+            // journal's dependency, and a deployment with the journal off must not probe a bucket
+            // it never enabled.
+            //
+            // `media.Gate` is the interface, so the concrete prober is hosted through it. The cast
+            // is the same one CommsApp's media registration uses: the value the routes gate on and
+            // the loop that refreshes it are one object, and a second instance would probe a bucket
+            // the routes never ask about.
+            journalBuilder.Services.AddHostedService(_ =>
+                (Fleet.Conversations.Journal.JournalMediaHealth)media.Gate);
+        }
     }
 
     // Both or neither. If either listener cannot bind — port already in use, address unavailable — the
@@ -206,6 +307,49 @@ static async Task<int> RunServiceAsync(string[] args)
     await Task.WhenAny(hosts.Select(h => h.WaitForShutdownAsync()));
     await Task.WhenAll(hosts.Select(h => h.StopAsync()));
     return shutdownRequested ? 0 : 1;
+}
+
+/// <summary>
+/// The startup probe, with a budget shorter than the SDK's own timeout.
+/// </summary>
+/// <remarks>
+/// AC5's "under 10 s" is a property of THIS call, not of the SDK: with a typo'd endpoint the SDK
+/// would retry for its full configured timeout, and a container that spends 30 s in "starting"
+/// before exiting 1 looks like a slow start rather than a refusal.
+/// </remarks>
+static async Task<bool> ProbeWithinBudgetAsync(Fleet.Conversations.Journal.S3ObjectStore bucket)
+{
+    // Shorter than the SDK's own 30 s request timeout on purpose.
+    using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+    return await bucket.ProbeAsync(budget.Token);
+}
+
+/// <summary>
+/// The anonymous probe: an unsigned bucket listing must be refused.
+/// </summary>
+/// <remarks>
+/// <b>Not a credentials test.</b> This account's credentials were just accepted one call earlier;
+/// what is being asked here is whether someone who has none can read the bucket. Only 2xx counts
+/// as public — a 403, a 400, or a transport error all mean "anonymous cannot read this", and
+/// treating an error as public would refuse to start on a bucket that is correctly locked down.
+/// </remarks>
+static async Task<bool> BucketIsPublicAsync(Fleet.Comms.Configuration.MediaOptions media)
+{
+    using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+
+    try
+    {
+        var endpoint = media.Endpoint.TrimEnd('/');
+        var response = await http.GetAsync(
+            $"{endpoint}/{media.Bucket}?list-type=2", HttpCompletionOption.ResponseHeadersRead);
+
+        return response.IsSuccessStatusCode;
+    }
+    catch (Exception)
+    {
+        // Unreachable, refused, or not HTTP. None of those is "the whole world can read it".
+        return false;
+    }
 }
 
 /// <summary>Named so the test host can reference the entry-point assembly.</summary>

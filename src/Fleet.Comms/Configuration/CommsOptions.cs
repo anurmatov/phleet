@@ -215,6 +215,118 @@ public sealed class CommsOptions
     /// Fails fast on a journal configuration that cannot work. A no-op while the journal is off.
     /// </summary>
     public void ValidateJournal() => Journal.Validate(ConversationsEnabled);
+
+    // ── Journal media (opt-in, #388) ───────────────────────────────────────────────
+
+    /// <summary>
+    /// Journal media: <c>Comms__Media__*</c>. Off unless <c>Endpoint</c> is set, and requires the
+    /// journal — there is nothing to attach an object to without a journal message.
+    /// </summary>
+    public MediaOptions Media { get; set; } = new();
+
+    /// <summary>
+    /// Fails fast on a media configuration that cannot work. A no-op while media is off.
+    /// </summary>
+    public void ValidateMedia()
+    {
+        Media.Validate(requireFields: true);
+
+        if (Media.Enabled && !Journal.Enabled)
+            throw new InvalidOperationException(
+                "media_requires_journal: Comms__Media__Endpoint is set but the journal is off. "
+                + "Objects are attached to journal messages; enable the journal first.");
+    }
+}
+
+/// <summary>
+/// The journal's object store: <c>Comms__Media__*</c> (#388).
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b><see cref="Endpoint"/> is the enabling key.</b> Blank means media does not exist: no upload
+/// route is mapped, the sweeper never lists the bucket, and every attachment an agent offers is
+/// refused <c>409 media_disabled</c> — which is exactly the answer the S2 drainer already knows how
+/// to handle.
+/// </para>
+/// <para>
+/// When it IS set, the four fields below are required rather than defaulted. A bucket name, an
+/// access key and a secret have no sane default, and a shipped one is a credential every
+/// deployment that did not notice it has.
+/// </para>
+/// <para>
+/// ⚠️ The secret is a credential: never logged, never echoed, never a metric label. Every failure
+/// this class reports names a field, never a value.
+/// </para>
+/// </remarks>
+public sealed class MediaOptions
+{
+    /// <summary>Largest object the store accepts, in bytes. Equal to the Telegram Bot API's file cap.</summary>
+    public const long MaxObjectBytes = 20_971_520;
+
+    /// <summary>An object no upload has completed or committed is deleted after this long.</summary>
+    public static readonly TimeSpan AbandonAfter = TimeSpan.FromHours(24);
+
+    /// <summary>How long a <c>deleting</c> row's bytes are kept, so a restore can still catch them.</summary>
+    public static readonly TimeSpan DeleteGrace = TimeSpan.FromHours(72);
+
+    /// <summary>How often a degraded store re-probes.</summary>
+    public static readonly TimeSpan ProbeRetry = TimeSpan.FromSeconds(30);
+
+    /// <summary>Per-request S3 budget. A hung bucket must not hold an upload slot open.</summary>
+    public static readonly TimeSpan RequestTimeoutValue = TimeSpan.FromSeconds(30);
+
+    /// <summary>The object-store endpoint (e.g. <c>http://comms-minio:9000</c>). The enabling key.</summary>
+    public string Endpoint { get; set; } = "";
+
+    public string Bucket { get; set; } = "comms-journal";
+
+    public string AccessKey { get; set; } = "";
+
+    public string SecretKey { get; set; } = "";
+
+    public string Region { get; set; } = "us-east-1";
+
+    /// <summary>True when media is configured at all.</summary>
+    public bool Enabled => !string.IsNullOrWhiteSpace(Endpoint);
+
+    /// <summary>The per-request budget, as a value the store can hand to the SDK.</summary>
+    public TimeSpan RequestTimeout => RequestTimeoutValue;
+
+    /// <summary>
+    /// Names every field that is missing or unusable. Never contains a value of any field.
+    /// </summary>
+    /// <param name="requireFields">
+    /// True from startup and from the object store's own constructor, which is the same guard seen
+    /// from the other side. False from a code path that only reads the constants.
+    /// </param>
+    /// <exception cref="InvalidOperationException">A fixed <c>media_…</c> code and the field name.</exception>
+    public void Validate(bool requireFields = true)
+    {
+        if (!Enabled) return;
+
+        if (!CommsUrl.IsHttp(Endpoint))
+            throw new InvalidOperationException(
+                "media_endpoint_invalid: Comms__Media__Endpoint must be an absolute http:// or "
+                + "https:// URL.");
+
+        if (!requireFields) return;
+
+        if (string.IsNullOrWhiteSpace(Bucket))
+            throw new InvalidOperationException(
+                "media_bucket_invalid: Comms__Media__Bucket is required when media is enabled.");
+
+        if (string.IsNullOrWhiteSpace(AccessKey))
+            throw new InvalidOperationException(
+                "media_access_key_invalid: Comms__Media__AccessKey is required when media is enabled.");
+
+        if (string.IsNullOrWhiteSpace(SecretKey))
+            throw new InvalidOperationException(
+                "media_secret_key_invalid: Comms__Media__SecretKey is required when media is enabled.");
+
+        if (string.IsNullOrWhiteSpace(Region))
+            throw new InvalidOperationException(
+                "media_region_invalid: Comms__Media__Region is required when media is enabled.");
+    }
 }
 
 /// <summary>
@@ -345,11 +457,23 @@ public sealed class JournalOptions
         return ids;
     }
 
-    private static bool IsHttpUrl(string? value)
+    private static bool IsHttpUrl(string? value) => CommsUrl.IsHttp(value);
+}
+
+/// <summary>
+/// The URL shape two option classes need to accept, in one definition.
+/// </summary>
+/// <remarks>
+/// Kestrel's wildcard hosts are not URI hosts, so <c>http://*:8083</c> and <c>http://+:8083</c> are
+/// rewritten to <c>0.0.0.0</c> before the check. Two copies of that rewrite is how one of them
+/// drifts and a bind address starts being refused.
+/// </remarks>
+internal static class CommsUrl
+{
+    public static bool IsHttp(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return false;
 
-        // Kestrel's wildcard hosts are not URI hosts; validate the rest of the address.
         var candidate = value.Replace("://*:", "://0.0.0.0:", StringComparison.Ordinal)
             .Replace("://+:", "://0.0.0.0:", StringComparison.Ordinal);
 

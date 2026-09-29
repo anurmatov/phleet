@@ -42,6 +42,14 @@ public static class OperatorCommands
                         [--before <ISO-8601>] [--confirm]
                                                  delete journal rows; without --confirm, print
                                                  the counts it would delete and change nothing
+          journal verify-media [--sample N]      re-read and re-hash every committed attachment's
+                                                 object; exits 1 on any mismatch or missing object
+
+          media backup --out <dir>               copy every committed object this directory is
+                                                 missing, re-hash each, write a manifest atomically
+          media verify --in <dir>                check a backup directory against its manifest
+          media restore --in <dir>               PutObject every object the bucket is missing,
+                                                 then verify the bucket
 
         Run with no arguments to start the service.
         """;
@@ -69,6 +77,10 @@ public static class OperatorCommands
                 ("journal", "token") => JournalToken(args, output),
                 ("journal", "status") => await JournalStatusAsync(output, error, ct),
                 ("journal", "purge") => await JournalPurgeAsync(args, output, error, ct),
+                ("journal", "verify-media") => await JournalMediaCommands.VerifyMediaAsync(args, output, error, ct),
+                ("media", "backup") => await JournalMediaCommands.BackupAsync(args, output, error, ct),
+                ("media", "verify") => await JournalMediaCommands.VerifyAsync(args, output, error, ct),
+                ("media", "restore") => await JournalMediaCommands.RestoreAsync(args, output, error, ct),
                 ("--help", _) or ("-h", _) or ("help", _) => Write(output, Usage, 0),
                 _ => Write(error, $"Unknown command: {string.Join(' ', args)}\n\n{Usage}", 2),
             };
@@ -604,20 +616,7 @@ public static class OperatorCommands
     }
 
     /// <summary>The runtime account when configured (it holds DELETE), else the DDL one.</summary>
-    private static string JournalConnectionString()
-    {
-        var options = CommsConfiguration.Resolve();
-
-        var connection = !string.IsNullOrWhiteSpace(options.ConversationConnectionString)
-            ? options.ConversationConnectionString
-            : options.ConversationMigrationConnectionString;
-
-        if (string.IsNullOrWhiteSpace(connection))
-            throw new OperatorCommandException(
-                "No conversation connection string is configured, so there is no journal to reach.");
-
-        return connection;
-    }
+    private static string JournalConnectionString() => JournalMediaCommandsSupport.ConnectionString();
 
     private static int Write(TextWriter writer, string message, int exitCode)
     {

@@ -27,15 +27,30 @@ public static class JournalEndpoints
     public const string MessagesPath = "/journal/v1/messages";
     public const string StatusPath = "/journal/v1/status";
 
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
+    /// <summary>Shared with the upload routes, so one JSON shape answers the whole listener.</summary>
+    internal static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
+    private static JsonSerializerOptions Json => JsonOptions;
+
+    /// <param name="media">
+    /// The media gate, when the deployment configured a bucket. Null leaves the two upload routes
+    /// unmapped and every byte reference in a record answered <c>409 media_disabled</c> — the
+    /// pre-slice-4 behaviour, and what the S2 drainer already handles.
+    /// </param>
+    /// <param name="mediaStats">
+    /// Object and byte counts for the status route. Null with media off, so the status body gains
+    /// no <c>media</c> key at all rather than one full of nulls.
+    /// </param>
     public static void Map(
         WebApplication app, IJournalStore store, JournalRuntimeStats stats,
-        IReadOnlySet<long> excludedChatIds, TimeProvider time, ILogger logger)
+        IReadOnlySet<long> excludedChatIds, TimeProvider time, ILogger logger,
+        JournalMediaGate? media = null, IJournalObjectStore? bytes = null,
+        MySqlJournalObjectStore? objects = null)
     {
+
         app.MapPost(MessagesPath, async Task<IResult> (HttpContext context, CancellationToken ct) =>
         {
             var subject = (string)context.Items[JournalAuth.SubjectItem]!;
@@ -43,7 +58,9 @@ public static class JournalEndpoints
 
             try
             {
-                return await IngestAsync(context, subject, store, stats, excludedChatIds, time, logger, ct);
+                return await IngestAsync(
+                    context, subject, store, stats, excludedChatIds, time, logger,
+                    media is not null, ct);
             }
             finally
             {
@@ -53,6 +70,22 @@ public static class JournalEndpoints
 
         app.MapGet(StatusPath, async Task<IResult> (CancellationToken ct) =>
         {
+            // Read once per status request, never per field: two counts from two queries would let
+            // `objects` and `bytes_stored` describe different moments.
+            JournalMediaStats? mediaStats = null;
+
+            if (objects is not null)
+            {
+                try
+                {
+                    mediaStats = await objects.ReadStatsAsync(ct);
+                }
+                catch (Exception e) when (e is MySqlConnector.MySqlException or InvalidOperationException)
+                {
+                    logger.LogWarning("journal media stats unavailable: {Error}", e.GetType().Name);
+                }
+            }
+
             JournalStoreStatus status;
             try
             {
@@ -95,13 +128,39 @@ public static class JournalEndpoints
                     p50Ms = runtime.IngestP50Milliseconds,
                     p95Ms = runtime.IngestP95Milliseconds,
                 },
+
+                // Absent, not null, when the deployment has no bucket — the same rule as the
+                // heartbeat's journal block: an install that did not opt in reports exactly what it
+                // reported before this slice.
+                media = media is null ? null : new
+                {
+                    state = media.MediaState,
+                    objects = mediaStats?.Objects ?? 0,
+                    bytesStored = mediaStats?.BytesStored ?? 0,
+                    lastSweepAt = runtime.ObjectsLastSweepAt,
+                    deletedSinceStart = new
+                    {
+                        abandoned = runtime.ObjectsAbandonedDeleted,
+                        retired = runtime.ObjectsRetiredDeleted,
+                        orphans = runtime.ObjectsOrphansDeleted,
+                    },
+                    sweepFailures = runtime.ObjectSweepFailures,
+                    upload = new
+                    {
+                        windowSeconds = 3600,
+                        samples = runtime.UploadSamples,
+                        p50Ms = runtime.UploadP50Milliseconds,
+                        p95Ms = runtime.UploadP95Milliseconds,
+                    },
+                },
             }, Json);
         });
     }
 
     private static async Task<IResult> IngestAsync(
         HttpContext context, string subject, IJournalStore store, JournalRuntimeStats stats,
-        IReadOnlySet<long> excludedChatIds, TimeProvider time, ILogger logger, CancellationToken ct)
+        IReadOnlySet<long> excludedChatIds, TimeProvider time, ILogger logger,
+        bool mediaEnabled, CancellationToken ct)
     {
         // 1. Size, before parsing: the declared length first, then the bytes actually sent.
         if (context.Request.ContentLength > JournalRecordParser.MaxBodyBytes)
@@ -111,7 +170,18 @@ public static class JournalEndpoints
         if (body is null)
             return Refused(stats, "too_large", StatusCodes.Status413PayloadTooLarge, new { error = "too_large" });
 
-        // 2. The record, field by field.
+        // 2. A byte reference on a deployment without media is refused BEFORE the record is parsed,
+        //    and with the same answer the parser gives: `409 media_disabled`. Ordered ahead of
+        //    validation so a caller that sent a byte reference to a media-less Comms learns the
+        //    feature is off rather than that its record also had a bad field.
+        if (!mediaEnabled && JournalRecordParser.ReferencesBytes(body.Value))
+        {
+            JournalRuntimeStats.Ingest("media_disabled");
+            stats.Rejected("media_disabled");
+            return Error(StatusCodes.Status409Conflict, new { error = "media_disabled" });
+        }
+
+        // 3. The record, field by field.
         var record = JournalRecordParser.Parse(body.Value, time.GetUtcNow(), out var failure);
         if (record is null)
         {
@@ -123,7 +193,7 @@ public static class JournalEndpoints
                     : (object)new { error = failure.Error, field = failure.Field });
         }
 
-        // 3. Classification BEFORE any write. Human and a null allowlist: only "no chat" and
+        // 4. Classification BEFORE any write. Human and a null allowlist: only "no chat" and
         //    "operational chat" can apply on the server, and chat id 0 was already refused above.
         var decision = JournalClassifier.Classify(
             record.Direction, record.Telegram.ChatId, record.Telegram.ChatKind,
@@ -136,7 +206,7 @@ public static class JournalEndpoints
             return Error(StatusCodes.Status422UnprocessableEntity, new { error = "excluded_chat" });
         }
 
-        // 4. The store: one transaction.
+        // 5. The store: one transaction.
         JournalIngestResult result;
         try
         {
@@ -163,6 +233,15 @@ public static class JournalEndpoints
             case JournalIngestOutcome.ObserverAdded:
                 JournalRuntimeStats.Ingest("observer_added");
                 return Results.Json(new { messageId = result.MessageId, result = "observer_added" }, Json);
+
+            case JournalIngestOutcome.UploadIncomplete:
+                // Not a conflict and not a permanent failure: the object is gone, was never
+                // uploaded, or belongs to someone else. The agent re-uploads from its spool and
+                // resends, so the ordinals are what it needs to know which attachment to redo.
+                JournalRuntimeStats.Ingest("upload_incomplete");
+                stats.Rejected("upload_incomplete");
+                return Error(StatusCodes.Status409Conflict,
+                    new { error = "upload_incomplete", attachments = result.UploadOrdinals });
 
             case JournalIngestOutcome.EventIdReused:
                 logger.LogInformation("journal event id reused by {Subject} with a different record", subject);

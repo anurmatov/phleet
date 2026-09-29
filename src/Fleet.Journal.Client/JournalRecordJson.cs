@@ -133,7 +133,20 @@ public static class JournalRecordJson
                 if (a.ByteSize is >= 0) w.WriteNumber("byteSize", a.ByteSize.Value);
                 if (Clamp(a.FileName, 255) is { Length: > 0 } name) w.WriteString("fileName", name);
                 if (a.FileUniqueId is { } unique && AsciiId.IsMatch(unique)) w.WriteString("fileUniqueId", unique);
-                w.WriteString("notArchivedReason", JournalWire.Of(a.NotArchivedReason));
+
+                // Exactly one of the two, mirroring the contract: a declined attachment names its
+                // reason, an archived one names its upload and the digest the server must match.
+                // Writing both would be a record the listener refuses.
+                if (a.UploadId is { } uploadId)
+                {
+                    w.WriteString("uploadId", uploadId);
+                    if (a.UploadSha256 is { } digest) w.WriteString("uploadSha256", digest);
+                }
+                else if (a.NotArchivedReason is { } reason)
+                {
+                    w.WriteString("notArchivedReason", JournalWire.Of(reason));
+                }
+
                 w.WriteEndObject();
             }
             w.WriteEndArray();

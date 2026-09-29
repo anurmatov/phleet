@@ -34,6 +34,21 @@ public sealed class JournalOptions
     /// </summary>
     public string ExcludedChatIds { get; set; } = "";
 
+    /// <summary>
+    /// Opt-in for archived media. <c>false</c> — the default — registers no uploader, so the agent
+    /// journals attachments exactly as it did before media existed.
+    /// </summary>
+    /// <remarks>
+    /// <b>Not derived from the ingest token.</b> The listener answers <c>409 media_disabled</c> and
+    /// the drainer rewrites the attachment, which works; but a deployment that has not provisioned
+    /// the bucket would then make every agent hash and upload every attachment before learning that.
+    /// One flag, set when the bucket exists, is the honest gate.
+    /// </remarks>
+    public bool MediaEnabled { get; set; }
+
+    /// <summary>Where uploads go. Defaults to the journal's own base URL — the same listener.</summary>
+    public string MediaBaseUrl { get; set; } = "";
+
     public bool Enabled => !string.IsNullOrWhiteSpace(IngestToken);
 
     private static readonly Regex TokenShape = new(
@@ -54,6 +69,14 @@ public sealed class JournalOptions
         if (!Uri.TryCreate(BaseUrl, UriKind.Absolute, out var uri)
             || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
             return $"{Section}:{nameof(BaseUrl)} is not an absolute http:// or https:// URL.";
+
+        if (MediaEnabled)
+        {
+            var mediaBase = string.IsNullOrWhiteSpace(MediaBaseUrl) ? BaseUrl : MediaBaseUrl;
+            if (!Uri.TryCreate(mediaBase, UriKind.Absolute, out var media)
+                || (media.Scheme != Uri.UriSchemeHttp && media.Scheme != Uri.UriSchemeHttps))
+                return $"{Section}:{nameof(MediaBaseUrl)} is set to enable media but is not an absolute http:// or https:// URL.";
+        }
 
         try
         {

@@ -51,7 +51,14 @@ public sealed record JournalMediaItem(
     string? FileName,
     string? FileUniqueId,
     string? LocalPath = null,
-    byte[]? Bytes = null);
+    byte[]? Bytes = null,
+    /// <summary>
+    /// Set when the caller already knows there are no bytes to spool — a photo the agent skipped on
+    /// its own size limit, a file the Bot API will not hand over, a kind the mapper declines. The
+    /// attachment journals that reason instead of waiting for the drain to discover the file is
+    /// missing.
+    /// </summary>
+    JournalMediaReason? Declined = null);
 
 /// <summary>
 /// Turns what the Telegram transport sent and received into journal records in the spool
@@ -206,12 +213,19 @@ public sealed class JournalCapture
                 ByteSize = item.ByteSize ?? item.Bytes?.LongLength,
                 FileName = item.FileName,
                 FileUniqueId = item.FileUniqueId,
-                // S2 archives no bytes: the metadata is journaled and the attachment says why its
-                // bytes are not there, so a message is never shown with a silently missing file.
-                NotArchivedReason = JournalNotArchivedReason.MediaDisabled,
+                // The wire contract requires exactly one of `notArchivedReason` or `uploadId` on
+                // every attachment, so capture states which one it is leaving to the drainer:
+                // `media_disabled` is the placeholder for "this has no upload yet and no known
+                // refusal", and the drainer replaces it with an `uploadId` the moment it has proven
+                // bytes. A record that reaches the listener with the placeholder still on it is
+                // stored as not-archived, which is the honest answer for a deployment with no
+                // bucket — and it is why a pre-drain record is postable at all.
+                NotArchivedReason = item.Declined is { } declined && declined != JournalMediaReason.Uploaded
+                    ? WireReason(declined)
+                    : JournalNotArchivedReason.MediaDisabled,
             });
 
-            if (item.Bytes is not null || item.LocalPath is not null)
+            if (item.Declined is null && (item.Bytes is not null || item.LocalPath is not null))
                 media.Add(new SpoolMedia(ordinal, item.LocalPath, item.Bytes, mode));
         }
 
@@ -264,6 +278,17 @@ public sealed class JournalCapture
                 break;
         }
     }
+
+    /// <summary>The wire code for a decline. The six codes only; never a made-up value.</summary>
+    private static JournalNotArchivedReason WireReason(JournalMediaReason reason) => reason switch
+    {
+        JournalMediaReason.MediaDisabled => JournalNotArchivedReason.MediaDisabled,
+        JournalMediaReason.OverBotApiLimit => JournalNotArchivedReason.OverBotApiLimit,
+        JournalMediaReason.OverSizeCap => JournalNotArchivedReason.OverSizeCap,
+        JournalMediaReason.UnsupportedKind => JournalNotArchivedReason.UnsupportedKind,
+        JournalMediaReason.DownloadFailed => JournalNotArchivedReason.DownloadFailed,
+        _ => JournalNotArchivedReason.SourceExpired,
+    };
 
     /// <summary>
     /// Telegram's own date when there is one. The contract refuses anything before 2013, which is

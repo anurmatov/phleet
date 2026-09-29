@@ -408,12 +408,47 @@ public static class AgentHostRegistration
             return new JournalHttpClient(http, options.IngestToken!);
         });
 
+        // The media uploader is registered on the SAME token and the SAME base URL as the message
+        // post, and only when the deployment says media exists. Absent, the drainer holds a null
+        // uploader and every attachment journals the reason it always journaled — a host that has
+        // not enabled media is byte-identical to one built before slice 4.
+        //
+        // It is deliberately NOT a second credential. An upload is proof of bytes from the subject
+        // that declared them, so a separate media token would be a second subject on the same
+        // journal, and the owner binding that makes uploads safe would stop meaning anything.
+        var options = section.Get<JournalOptions>() ?? new JournalOptions();
+
+        if (options.MediaEnabled)
+        {
+            services.AddHttpClient(JournalMediaHttpClientName)
+                .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(2) });
+
+            services.AddSingleton(sp =>
+            {
+                var journal = sp.GetRequiredService<IOptions<JournalOptions>>().Value;
+                var http = sp.GetRequiredService<IHttpClientFactory>().CreateClient(JournalMediaHttpClientName);
+                http.BaseAddress = new Uri(
+                    string.IsNullOrWhiteSpace(journal.MediaBaseUrl) ? journal.BaseUrl : journal.MediaBaseUrl);
+                return new JournalMediaHttpClient(http, journal.IngestToken!);
+            });
+
+            services.AddSingleton<JournalMediaUploader>();
+        }
+
         // AddSingleton + factory-AddHostedService: the heartbeat injects the concrete drainer.
-        services.AddSingleton<JournalDrainer>();
+        services.AddSingleton<JournalDrainer>(sp => new JournalDrainer(
+            sp.GetRequiredService<JournalSpool>(),
+            sp.GetRequiredService<JournalHttpClient>(),
+            sp.GetRequiredService<JournalCounters>(),
+            sp.GetRequiredService<ILogger<JournalDrainer>>(),
+            time: null,
+            media: sp.GetService<JournalMediaUploader>()));
         services.AddHostedService(sp => sp.GetRequiredService<JournalDrainer>());
     }
 
     internal const string JournalHttpClientName = "journal";
+
+    internal const string JournalMediaHttpClientName = "journal-media";
 
     /// <summary>
     /// The agent half of the durable conversation seam (#303), registered only when it is

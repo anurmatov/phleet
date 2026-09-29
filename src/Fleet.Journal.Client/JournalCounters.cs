@@ -18,6 +18,15 @@ public sealed class JournalCounters
     public void SpoolFull() => Add("journal_spool_dropped{reason=full}");
     public void CaptureFailed() => Add("journal_capture_failed");
     public void MediaDisabled() => Add("journal_media_disabled");
+
+    /// <summary>
+    /// An attachment whose bytes did not reach the store, counted by the reason the record carries.
+    /// <paramref name="reason"/> is one of the six fixed wire codes, never a caller-built string.
+    /// </summary>
+    public void MediaReason(string reason) => Add($"journal_media_reason{{reason={reason}}}");
+
+    /// <summary>One upload attempt and how it ended. <paramref name="result"/> is a fixed code.</summary>
+    public void Upload(string result) => Add($"journal_upload{{result={result}}}");
     public void EndpointMissing() => Add("journal_endpoint_missing");
 
     /// <summary>Records lost on the agent before they reached the spool: spool full or a write error.</summary>

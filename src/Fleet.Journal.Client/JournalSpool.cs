@@ -32,6 +32,19 @@ public sealed class SpoolEntry
     public string? LastError { get; set; }
     public IReadOnlyList<int> MediaOrdinals { get; init; } = [];
 
+    /// <summary>
+    /// Where each media ordinal's bytes came from, by ordinal. Present so the drainer can still
+    /// stage a file the capture could not link — a photo the agent skipped on its own size limit,
+    /// or a hardlink whose source the attachment sweeper already pruned.
+    /// </summary>
+    /// <remarks>
+    /// Not written to the record file: it is a path on the agent's disk, and a record moved to
+    /// <c>dead/</c> and redriven days later would carry a path that means nothing. A redrive
+    /// therefore declines with <c>source_expired</c>, which is the honest answer.
+    /// </remarks>
+    internal IReadOnlyDictionary<int, string> MediaSources { get; init; } =
+        new Dictionary<int, string>();
+
     /// <summary>The wire record, as JSON, exactly what is posted.</summary>
     public required JsonObject Record { get; set; }
 }
@@ -130,6 +143,7 @@ public sealed class JournalSpool
         {
             long mediaBytes = 0;
             var ordinals = new List<int>();
+            var sources = new Dictionary<int, string>();
 
             // Media first: a record never points at a file that is not there yet.
             foreach (var item in media)
@@ -157,6 +171,7 @@ public sealed class JournalSpool
 
                 written.Add(target);
                 ordinals.Add(item.Ordinal);
+                if (item.SourcePath is { Length: > 0 } source) sources[item.Ordinal] = source;
                 mediaBytes += SafeLength(target);
             }
 
@@ -167,6 +182,7 @@ public sealed class JournalSpool
                 CreatedAt = now,
                 NextAttemptAt = now,
                 MediaOrdinals = ordinals,
+                MediaSources = sources,
                 Record = record,
             };
 
@@ -310,6 +326,46 @@ public sealed class JournalSpool
 
         var entry = TryRead(oldest);
         return entry is null ? null : _time.GetUtcNow() - entry.CreatedAt;
+    }
+
+    /// <summary>
+    /// Materialises a media file the record references but the spool does not hold.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The capture path spools what it has. When it does not — an inbound photo the agent skipped
+    /// because of its own size limit, a file whose hardlink source was already pruned — the record
+    /// still journals its metadata and the bytes are named by nothing. This is the one place that
+    /// can still put them there, because it is the last point before the message goes out where
+    /// "hash the file, then the message" is still true.
+    /// </para>
+    /// <para>
+    /// <b>The same atomic write as any other spool file</b>, so a crash during a copy leaves a temp
+    /// name and not half a JPEG that the uploader would happily hash and ship.
+    /// </para>
+    /// <para>
+    /// Returns false when the source is missing or unreadable. That is not an error: the attachment
+    /// declines its bytes with a reason, which is the outcome the contract has always had.
+    /// </para>
+    /// </remarks>
+    public bool TryStageMedia(string id, int ordinal, string? sourcePath)
+    {
+        if (ordinal < 0 || string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+            return false;
+
+        var target = MediaPath(id, ordinal);
+        if (File.Exists(target)) return true;
+
+        try
+        {
+            Directory.CreateDirectory(MediaDir);
+            CopyAtomically(sourcePath, target);
+            return true;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     public string MediaPath(string id, int ordinal) => Path.Combine(MediaDir, $"{id}.{ordinal}");

@@ -20,7 +20,7 @@ description: Code review checklist and PR review workflow for Fleet QA agents
 - [ ] Authentication/authorization checks in place
 
 ### Quality
-- [ ] Code follows project conventions (CLAUDE.md)
+- [ ] Code follows project conventions (AGENTS.md)
 - [ ] No unnecessary complexity
 - [ ] Tests cover the changes
 - [ ] All tests pass

@@ -1,5 +1,8 @@
 # Fleet — Autonomous AI Agent System
 
+Canonical instructions for AI coding agents (Codex, Claude Code, Cursor). Claude Code reads this
+file when `CLAUDE.md` is absent — do not recreate `CLAUDE.md`.
+
 ## Repository Structure
 
 ```

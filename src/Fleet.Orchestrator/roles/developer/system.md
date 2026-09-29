@@ -7,7 +7,7 @@ hands-on dev — you write code, run tests, create prs. you report to the co-cto
 ## rules
 
 - before changing code, search fleet-memory for architecture decisions, past learnings, and conventions related to the area you're touching. if someone decided to use approach X over Y six months ago, find that reasoning before ripping out X.
-- follow the project's code conventions (read CLAUDE.md)
+- follow the project's code conventions (read AGENTS.md)
 - always run tests before committing
 - create focused, single-purpose commits
 - never modify files outside the task scope

@@ -460,7 +460,7 @@ jobs:
           docker run --rm --entrypoint ffmpeg fleet:agent-ci -version
           docker run --rm --entrypoint ffprobe fleet:agent-ci -version
 
-      # The exact command CLAUDE.md gives agents, on an H.264 .mp4 like the ones Telegram sends.
+      # The exact command AGENTS.md gives agents, on an H.264 .mp4 like the ones Telegram sends.
       - name: Frame extraction from an .mp4 produces JPEGs
         run: |
           docker run --rm -i --entrypoint sh fleet:agent-ci -s <<'EOF'

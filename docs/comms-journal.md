@@ -58,12 +58,17 @@ One record is one Telegram message as one runtime observed it. UTF-8 JSON, at mo
 Unknown or duplicated fields, and a value of the wrong JSON type (a string where an integer belongs, an escaped lone surrogate), are `422 invalid_record{field}`. `observer` is not a field: **the observer is always the
 token subject**, and a body `observer` is `422 invalid_record{observer}`.
 
-**Attachments are metadata only**: `ordinal` (0–15, unique), `kind`
+**Attachments are metadata only** on a deployment with no object store, which is the default:
+`ordinal` (0–15, unique), `kind`
 (`photo|document|voice|video|video_note|audio|animation|sticker|other`), `mimeType`, `byteSize?`,
 `fileName?`, `fileUniqueId?`, and a required `notArchivedReason`
 (`media_disabled|over_bot_api_limit|over_size_cap|unsupported_kind|download_failed|source_expired`).
 Rows are stored `not_archived`, so a message is never visible with a dangling attachment. An
 `uploadId`, `objectId` or `bytes` field is `409 media_disabled`.
+
+**With `Comms__Media__Endpoint` set, the same field carries bytes.** See [Media](#media-slice-4)
+below: an attachment names an `uploadId` whose bytes the sending subject physically uploaded, and
+`notArchivedReason` is then absent rather than nullable.
 
 `delivery_state` is derived: inbound → `received`, outbound → `sent`.
 
@@ -163,7 +168,9 @@ never printed).
   `sendGroup`. Relay and bridge output (`OutboundOrigin`) is excluded, including its images.
 - **Spool**: `{WorkDir}/.fleet/journal-spool/{pending,media,dead}`; inbound media hardlinked from
   the attachment directory, outbound media copied. Limits: 10,000 records or 1 GiB; at the limit
-  the new record is dropped. S2 sends every attachment as `not_archived(media_disabled)`.
+  the new record is dropped. With media off every attachment goes as `not_archived(media_disabled)`;
+  with media on the drainer uploads the spooled file first and then names it (see
+  [Media](#media-slice-4)).
 - **Drainer**: one request at a time, oldest due record first, never FIFO-blocked; backoff 1 s
   doubling to 5 min; 15 s timeout; 30 s pause after 5 straight transport/5xx failures. `401` stalls
   everything, `404` pauses 5 min, `422 excluded_chat|unknown_conversation` drops, a refused record
@@ -207,6 +214,99 @@ The compose file always prepends `FLEET_GROUP_CHAT_ID`, the workflow-activity gr
 Startup refuses, exiting 1 with a message that never contains a key: `journal_requires_conversations`,
 `journal_key_invalid`, `journal_excluded_ids_invalid`, `journal_url_invalid`,
 `journal_retention_invalid`, and `journal_bind_failed` for a port in use.
+
+## Media (slice 4)
+
+`Comms__Media__Endpoint` is the enabling key. Blank means media does not exist: no upload route, no
+object store, no credentials held, and every attachment is `not_archived` exactly as in slice 1.
+
+### Bytes are always proven
+
+**There is no hash-only shortcut anywhere in the upload path.** An attachment can only name an
+object whose bytes the attaching subject itself sent. That is the whole security property: without
+it, a subject could name a digest it read somewhere and then `fetch_attachment` content it never
+held. Dedup happens *after* proof and only ever moves an attachment onto an object the caller
+already proved.
+
+`journal_objects.owner` is the token subject that opened the row. It binds who may complete and
+commit an upload and nothing else — **read access never depends on it.** `fetch_attachment` is
+authorised by message observership (D4).
+
+### Lifecycle
+
+| Step | Answer |
+|---|---|
+| `POST /journal/v1/uploads {sha256, byteSize, mimeType}` | `201 {uploadId}`, row `uploading`, `owner = subject`. No dedup here. |
+| `PUT /journal/v1/uploads/{id}` | same subject only; `404` (identical to unknown id) otherwise. Bytes stream through SHA-256 into the bucket. |
+| mismatch, declared vs actual | object deleted, row `aborted`, `422 sha256_mismatch` |
+| store error | `503`, row left `uploading` so the subject can retry |
+| commit naming the `uploadId` | row `committed`, or deduped onto an existing committed object |
+
+A foreign `uploadId` answers `404`, never `403`: a 403 would confirm the id exists and turn the
+upload surface into an oracle for enumerating other runtimes' uploads.
+
+### Sweeper
+
+Runs on the existing GC tick, after retention.
+
+| Class | Rule |
+|---|---|
+| abandoned | `uploading/uploaded/aborted` past `created_at + 24 h` |
+| retired | `deleting` past `delete_after` (72 h grace) |
+| orphan | weekly `ListObjectsV2 j1/`, keys older than 24 h with no row |
+
+Bytes are deleted before the row, so a failure between the two leaves a row pointing at nothing —
+which the next tick resolves, because a missing object is not an error. **A live attachment stops
+every class absolutely**: a dedup loser is exactly the row whose bytes an attachment can still be
+read through, and an age-based sweep must not delete them.
+
+### Startup and degraded mode
+
+A missing field exits 1. `HeadBucket` then classifies the answer:
+
+- 403 / `InvalidAccessKeyId` / `SignatureDoesNotMatch` / `NoSuchBucket` → exit 1 naming only the
+  failure class. These need an operator, not a retry.
+- network error or timeout → start **degraded**, re-probe every 30 s, uploads answer
+  `503 media_unavailable`.
+- An unsigned `GET {endpoint}/{bucket}?list-type=2` must answer 403. Anything else exits 1 with
+  `bucket_public` — a world-readable bucket is not a degraded one.
+
+### ⚠️ Three S3 facts that cost a full debug cycle
+
+These are in `S3ObjectStore` with comments; they are here because every one of them passed a
+fake-bucket test and failed against a real server.
+
+1. **A `PutObject` length must be stated on the request.** The SDK reads `Headers.ContentLength`
+   and, when it is absent and the stream is not seekable, fails client-side with "Could not
+   determine content length" before sending anything. An HTTP request body is never seekable, so an
+   upload cannot work without it. Setting it also makes the SDK *stop consulting* `Stream.Length` —
+   so a stream reporting one length while the request states another uploads the request's number
+   and reports success.
+2. **The SDK takes the synchronous read path** when a content length is known. An ASP.NET Core
+   request body throws on a sync read ("Synchronous operations are disallowed"), so a wrapping
+   stream must delegate `Read` to `ReadAsync`.
+3. **An empty listing has no `Contents` element**, which the SDK surfaces as a null collection, not
+   an empty one. That is the first orphan sweep of every fresh deployment.
+
+### Backup CLI
+
+| Command | Does |
+|---|---|
+| `media backup --out DIR` | copies `committed`/`deleting` objects the bucket is missing, re-hashing each; writes `manifest-<UTC>.jsonl` atomically; non-zero on any failure |
+| `media restore --in DIR` | `PutObject` for each missing object, then verifies |
+| `journal verify-media [--sample N]` | `GetObject` + full re-hash of committed attachments; prints `rows= objects= bytes= mismatches= missing=`; exits 1 on any mismatch |
+
+A dump that has never been restored is not a backup: `backup → wipe → restore → verify-media` is the
+acceptance, and it is what proves the manifest rather than the manifest's own self-report.
+
+### What the CI fixture does not prove
+
+`tests/Fleet.Conversations.Tests/S3Fixture.cs` runs SeaweedFS (MinIO publishes no public image
+source) and its requests are **unsigned by construction** — SeaweedFS without a signing key answers
+a signed request with `400 InvalidRequest` instead of the real `403`, so a signed fixture would
+report a **false green** on `credentials_rejected`. The fixture therefore proves the data plane:
+bytes in, identical bytes out, correct digest, correct key. It does not prove the credential
+classes, and no assertion in that file should be quoted as if it did.
 
 ## Retention, purge and deletion semantics
 

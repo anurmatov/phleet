@@ -211,6 +211,59 @@ announcing a gap, because their absence is not a loss, and durable events are pr
 retained floor advanced in the same transaction so a reader is told exactly what it can no longer
 have.
 
+## Journal media (slice 4)
+
+The journal's object store, for installs that archive attachment bytes. Off unless
+`FLEET_COMMS_MEDIA_ENABLED=true`, and off means the bucket is not deployed, no credentials exist,
+and no service holds any.
+
+### What it adds
+
+`comms-minio` and `comms-minio-init` under the **`comms-media`** profile, on a `comms-media`
+network declared **`internal: true`** with **no published ports**. `fleet-comms` and
+`fleet-comms-ops` join that network; nothing else does.
+
+The internal network is not belt-and-braces. It is what makes "the bucket is not reachable from
+outside the compose project" a property of the network rather than of nobody having remembered a
+`ports:` line — and `DeploymentKeyLockstepTests` fails the build if a host port ever appears on the
+media service or a service without credentials is given them.
+
+`comms-minio-init` creates the bucket and a **scoped runtime policy**
+(`s3:GetObject,PutObject,DeleteObject,ListBucket,AbortMultipartUpload` on that one bucket) and
+writes the two keys `fleet-comms` reads. It reads its own credentials from the environment; the
+policy document keeps the bucket name as a placeholder that `init.sh` substitutes, so the file in
+the repo contains no deployment-specific value.
+
+### Keys
+
+| Key | What it is |
+|---|---|
+| `FLEET_COMMS_MEDIA_ENABLED` | profile switch; also sets `Comms__Media__Endpoint` |
+| `FLEET_COMMS_MEDIA_ENDPOINT` | the bucket URL on the internal network |
+| `FLEET_COMMS_MEDIA_BUCKET` | default `comms-journal` |
+| `FLEET_COMMS_MEDIA_ACCESS_KEY` / `_SECRET_KEY` | the **scoped** runtime credentials, not the root ones |
+| `FLEET_COMMS_MINIO_ROOT_USER` / `_PASSWORD` | root credentials, used only by the init container and the sidecar |
+| `FLEET_COMMS_MEDIA_BACKUP_DIR` | host directory the ops container writes `media backup` output to |
+
+Only `fleet-comms` and `fleet-comms-ops` receive the media credentials. The config API cannot read
+or write `FLEET_COMMS_MEDIA_*` or `FLEET_COMMS_MINIO_*` — they are on the orchestrator's denylist,
+because a settings endpoint that can rewrite a bucket credential is a way to move the journal's
+archive without ever touching a shell.
+
+### Enabling and upgrading
+
+`setup.sh` prompts for the media block only when the journal is on, and adds `--profile
+comms-media`. `upgrade.sh` resolves the same profile before `down`, so an install that turns media
+off does not leave the bucket running. Both scripts unset the media keys when the feature is off
+rather than leaving stale values in the generated file.
+
+### Backing it up
+
+`media backup --out DIR` from the ops container, into the bind-mounted `FLEET_COMMS_MEDIA_BACKUP_DIR`.
+It writes a manifest and re-hashes every object it copies. The acceptance is the round trip, not the
+manifest: **`backup`, wipe, `restore`, `journal verify-media` exits 0** — see
+`docs/comms-journal.md`.
+
 ## TLS and the reverse proxy
 
 **This service never terminates TLS.** Without it, enrollment codes, device secrets and access

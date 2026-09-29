@@ -79,6 +79,11 @@ unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY \
       FLEET_COMMS_AGENT_LABEL FLEET_COMMS_STORE_PROVISIONED
 unset FLEET_COMMS_JOURNAL_ENABLED FLEET_COMMS_JOURNAL_BIND FLEET_COMMS_JOURNAL_KEY \
       FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS FLEET_COMMS_JOURNAL_RETENTION
+# Media is a decision on top of the journal's decision. Same rule: the exported shell must not
+# override what .env records, and a stale export would start an upload route nobody configured.
+unset FLEET_COMMS_MEDIA_ENDPOINT FLEET_COMMS_MEDIA_BUCKET FLEET_COMMS_MEDIA_BACKUP_DIR \
+      FLEET_COMMS_MEDIA_ACCESS_KEY FLEET_COMMS_MEDIA_SECRET_KEY \
+      FLEET_COMMS_MINIO_ROOT_USER FLEET_COMMS_MINIO_ROOT_PASSWORD
 
 ENV_EXAMPLE="$SCRIPT_DIR/.env.example"
 COMPOSE_EXAMPLE="$SCRIPT_DIR/docker-compose.example.yml"
@@ -588,6 +593,48 @@ if [[ "$_comms_enabled" == "true" ]]; then
     if [[ "$_journal_enabled" == "true" && -z "$(read_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_KEY")" ]]; then
       $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_KEY" \
         "$(openssl rand 48 | base64 | tr '+/' '-_' | tr -d '=')"
+    fi
+
+    # Journal media, asked ONCE and only with the journal on. There is nothing to attach an
+    # object to without a journal message, so this question does not exist for a host that
+    # declined the one above.
+    #
+    # Declining writes a BLANK endpoint rather than a `false`: the endpoint is the enabling key,
+    # and a blank value is the same state as never having been asked.
+    if [[ "$_journal_enabled" == "true" ]]; then
+      _media_endpoint=$(read_env_var "$ENV_FILE" "FLEET_COMMS_MEDIA_ENDPOINT")
+      if [[ -z "$_media_endpoint" ]]; then
+        echo
+        echo -e "  ${BOLD}Fleet.Comms — journal media${NC}"
+        echo "  Photos and documents attached to journaled messages, stored in a"
+        echo "  MinIO bucket on an internal Docker network with no published port."
+        echo "  Needs the comms-media profile: docker compose --profile comms"
+        echo "  --profile comms-media up -d. See docs/comms-journal.md."
+        read -r -p "  Store journaled media objects? [y/N] " _media_answer
+        case "$_media_answer" in
+          [yY]*)
+            $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_MEDIA_ENDPOINT" "http://comms-minio:9000"
+            ;;
+          *)
+            $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_MEDIA_ENDPOINT" ""
+            ;;
+        esac
+      fi
+
+      # Credentials are generated only for a host that opted in, and never replaced: a bucket
+      # already holding objects keeps them only while the runtime key still resolves.
+      if [[ -n "$(read_env_var "$ENV_FILE" "FLEET_COMMS_MEDIA_ENDPOINT")" ]]; then
+        # The profile flag is added HERE rather than through COMPOSE_PROFILES in .env, for the
+        # same reason the comms profile is: whether compose honours COMPOSE_PROFILES from
+        # --env-file was never verified, and a variable that silently does nothing is worse
+        # than a flag that obviously works.
+        COMMS_PROFILE_ARGS+=(--profile comms-media)
+
+        _autogen_local_cred "$ENV_FILE" "FLEET_COMMS_MINIO_ROOT_USER"      "openssl rand -hex 12"
+        _autogen_local_cred "$ENV_FILE" "FLEET_COMMS_MINIO_ROOT_PASSWORD"  "openssl rand -base64 24"
+        _autogen_local_cred "$ENV_FILE" "FLEET_COMMS_MEDIA_ACCESS_KEY"     "openssl rand -hex 16"
+        _autogen_local_cred "$ENV_FILE" "FLEET_COMMS_MEDIA_SECRET_KEY"     "openssl rand -base64 24"
+      fi
     fi
   fi
 fi

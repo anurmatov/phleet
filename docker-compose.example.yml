@@ -518,6 +518,17 @@ services:
       - Comms__Journal__TokenKeys=${FLEET_COMMS_JOURNAL_KEY:-}
       - Comms__Journal__ExcludedChatIds=${FLEET_GROUP_CHAT_ID:-},${FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS:-}
       - Comms__Journal__MessageRetention=${FLEET_COMMS_JOURNAL_RETENTION:-365.00:00:00}
+      # ── Journal media (opt-in, needs the journal AND the comms-media profile) ───
+      # The endpoint is the enabling key: blank means no bucket, no upload route, and every
+      # attachment an agent offers is refused 409 media_disabled.
+      #
+      # The credential pair here is the SCOPED runtime one, not the root pair. Root exists so the
+      # init container can create the bucket once; a long-running service holding it could change
+      # the bucket's anonymous policy, which is the exposure the startup probe checks for.
+      - Comms__Media__Endpoint=${FLEET_COMMS_MEDIA_ENDPOINT:-}
+      - Comms__Media__Bucket=${FLEET_COMMS_MEDIA_BUCKET:-comms-journal}
+      - Comms__Media__AccessKey=${FLEET_COMMS_MEDIA_ACCESS_KEY:-}
+      - Comms__Media__SecretKey=${FLEET_COMMS_MEDIA_SECRET_KEY:-}
     volumes:
       - fleet_comms_auth:/var/lib/fleet-comms
     mem_limit: 512m
@@ -531,6 +542,9 @@ services:
       retries: 5
     networks:
       - fleet-net
+      # Only reachable when the comms-media profile is on; compose ignores a network a running
+      # service does not use, so this is inert on a deployment that never opted in.
+      - comms-media
     logging:
       driver: json-file
       options:
@@ -618,10 +632,89 @@ services:
       # `journal token` mints with the first key and prints to stdout — which is why it runs here,
       # with logging disabled, and never on fleet-comms.
       - Comms__Journal__TokenKeys=${FLEET_COMMS_JOURNAL_KEY:-}
+      # `media backup`, `media verify`, `media restore` and `journal verify-media` all read the
+      # bucket. They are the ONLY operator path that holds these credentials; the root pair stays
+      # with the init container and never reaches a command anyone can run twice.
+      - Comms__Media__Endpoint=${FLEET_COMMS_MEDIA_ENDPOINT:-}
+      - Comms__Media__Bucket=${FLEET_COMMS_MEDIA_BUCKET:-comms-journal}
+      - Comms__Media__AccessKey=${FLEET_COMMS_MEDIA_ACCESS_KEY:-}
+      - Comms__Media__SecretKey=${FLEET_COMMS_MEDIA_SECRET_KEY:-}
     volumes:
       - fleet_comms_auth:/var/lib/fleet-comms
+      # `media backup --out` writes here. A bind mount rather than a volume on purpose: the whole
+      # point is a file the operator can carry off this host, and a named volume is not portable
+      # without a second copy step.
+      - ${FLEET_COMMS_MEDIA_BACKUP_DIR:-./fleet/media-backup}:/var/backups/fleet-media
     networks:
       - fleet-net
+      - comms-media
+    logging:
+      driver: "none"
+
+  # ── Journal media (opt-in, profile `comms-media`) ───────────────────────────
+  #
+  # The journal's object store. Its OWN MinIO, not a bucket on fleet-minio.
+  #
+  # fleet-minio is an anonymous-READ share bucket that agents write into and that a host port
+  # publishes on purpose. Journal objects are archived human conversation content. Sharing one
+  # server between the two means one mistaken `mc anonymous set` on the share bucket exposes the
+  # archive too, and one restore of the share bucket destroys the archive with it. The same
+  # argument made comms-mysql its own database.
+  #
+  # ⚠️ NO `ports:` BLOCK, unlike fleet-minio. Nothing outside this network ever reads the bucket:
+  # the only readers are fleet-comms (uploads) and fleet-comms-ops (backup, verify, restore). A
+  # published port would put the archive on a host interface, which is the exposure the operator
+  # agreed to for a share bucket and did NOT agree to for this one.
+  comms-minio:
+    profiles: ["comms-media"]
+    image: minio/minio
+    container_name: comms-minio
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: ${FLEET_COMMS_MINIO_ROOT_USER:-}
+      MINIO_ROOT_PASSWORD: ${FLEET_COMMS_MINIO_ROOT_PASSWORD:-}
+    volumes:
+      - comms_minio_data:/data
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - comms-media
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # One-shot: create the bucket once, create the scoped runtime user once, attach the least
+  # privilege policy that still lets a PUT of a known length work.
+  #
+  # Root is used HERE and nowhere else. The long-running services get the scoped user, so neither
+  # can put the bucket into public-read — the configuration the Comms start-up probe refuses to
+  # boot under.
+  comms-minio-init:
+    profiles: ["comms-media"]
+    image: minio/mc
+    container_name: comms-minio-init
+    depends_on:
+      comms-minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${FLEET_COMMS_MINIO_ROOT_USER:-}
+      MINIO_ROOT_PASSWORD: ${FLEET_COMMS_MINIO_ROOT_PASSWORD:-}
+      FLEET_COMMS_MEDIA_BUCKET: ${FLEET_COMMS_MEDIA_BUCKET:-comms-journal}
+      FLEET_COMMS_MEDIA_ACCESS_KEY: ${FLEET_COMMS_MEDIA_ACCESS_KEY:-}
+      FLEET_COMMS_MEDIA_SECRET_KEY: ${FLEET_COMMS_MEDIA_SECRET_KEY:-}
+    entrypoint: ["/bin/sh", "/init/init.sh"]
+    volumes:
+      - ./deploy/comms-minio-init:/init:ro
+    restart: on-failure
+    networks:
+      - comms-media
     logging:
       driver: "none"
 
@@ -650,6 +743,10 @@ volumes:
   # their own client with no self-service recovery — restore from a `store backup` file.
   comms_mysql_data:
   fleet_comms_auth:
+  # Journal objects. Losing this volume is losing archived media: the journal MESSAGE survives (it
+  # is in comms-mysql) but every attachment's bytes are gone and no restore can recreate them.
+  # `media backup` exists so this is recoverable — run it before any operation that can drop it.
+  comms_minio_data:
   temporal_pg_data:
   fleet_mysql_data:
   minio_data:
@@ -658,3 +755,12 @@ networks:
   fleet-net:
     name: fleet-net
     driver: bridge
+  # `internal: true` is the load-bearing line. Docker creates no gateway, publishes no port and
+  # installs no masquerade rule for an internal network, so nothing in it can reach the internet
+  # and nothing on the internet can reach it. That is what makes "no ports: block" a property of
+  # the network rather than of this file being careful: a later edit that adds a port to a
+  # comms-minio service still cannot expose it.
+  comms-media:
+    name: comms-media
+    driver: bridge
+    internal: true

@@ -81,7 +81,23 @@ public static class JournalFingerprint
             if (!first) b.Append(',');
             first = false;
 
-            // Attachment keys, in ordinal order: byteSize, fileUniqueId, kind, mimeType, ordinal.
+            // Attachment keys, in ordinal order: byteSize, fileUniqueId, kind, mimeType, objectId,
+            // ordinal.
+            //
+            // ⚠️ `objectId` was added by slice 4 (#388) and is the ONLY change to this encoding
+            //    since 0004. It is included because an archived attachment and a declined one are
+            //    different messages: two runtimes that disagreed about whether to archive the same
+            //    photo must not answer "duplicate" to each other.
+            //
+            //    It is the SERVER-resolved object id — the committed winner's id, for a dedup loser
+            //    as much as for a winner — never the upload id the caller sent. MySqlJournalStore
+            //    builds the record it fingerprints from the media plan, so both halves of the
+            //    ingest agree on it and a retry of a committed submission replays as `duplicate`
+            //    instead of `conflict`.
+            //
+            //    Every record with no attachment names an object, which is every record any
+            //    deployment could hold before this slice, so `,\"objectId\":null` is what existing
+            //    golden vectors still encode and they are unchanged.
             b.Append("{\"byteSize\":");
             Integer(b, a.ByteSize);
             b.Append(",\"fileUniqueId\":");
@@ -90,6 +106,8 @@ public static class JournalFingerprint
             String(b, JournalWire.Of(a.Kind));
             b.Append(",\"mimeType\":");
             String(b, a.MimeType);
+            b.Append(",\"objectId\":");
+            String(b, a.ObjectId);
             b.Append(",\"ordinal\":");
             Integer(b, a.Ordinal);
             b.Append('}');

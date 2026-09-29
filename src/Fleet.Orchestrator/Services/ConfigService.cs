@@ -28,10 +28,18 @@ public sealed class ConfigService : IConfigWriter, IAclChangeNotifier
     /// <c>FLEET_COMMS_JOURNAL_</c> holds the conversation journal's token-signing key, and the
     /// whole prefix is denied: the non-secret journal keys are operator-edited in <c>.env</c>,
     /// never through this API.
+    ///
+    /// <c>FLEET_COMMS_MEDIA_</c> and <c>FLEET_COMMS_MINIO_</c> are the journal object store's
+    /// bucket credentials and root password (#388), and they need their OWN prefixes. The matcher
+    /// below is <see cref="string.StartsWith"/> on the whole key, so the existing <c>MINIO_</c>
+    /// entry — which catches <c>MINIO_ACCESS_KEY</c> — does NOT cover
+    /// <c>FLEET_COMMS_MINIO_ROOT_PASSWORD</c>: the prefix is not a substring of it. A deployment
+    /// that turned on journal media and could read its own bucket secret back out of
+    /// <c>/api/config/all</c> is the failure this line exists to prevent.
     /// </summary>
     private static readonly string[] DenylistPrefixes =
         ["MYSQL_", "DB_", "FLEET_MYSQL_", "MINIO_", "CLAUDE_CREDENTIALS_", "CODEX_CREDENTIALS_",
-         "FLEET_COMMS_JOURNAL_"];
+         "FLEET_COMMS_JOURNAL_", "FLEET_COMMS_MEDIA_", "FLEET_COMMS_MINIO_"];
 
     private static readonly HashSet<string> DenylistExact =
         new([

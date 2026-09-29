@@ -21,6 +21,7 @@ public sealed class JournalRuntimeStats(TimeProvider? time = null)
     private readonly TimeProvider _time = time ?? TimeProvider.System;
     private readonly ConcurrentDictionary<string, long> _rejected = new(StringComparer.Ordinal);
     private readonly Queue<(DateTimeOffset At, double Milliseconds)> _latency = new();
+    private readonly Queue<(DateTimeOffset At, double Milliseconds)> _uploadLatency = new();
     private readonly Lock _gate = new();
 
     private DateTimeOffset? _gcLastRunAt;
@@ -51,6 +52,23 @@ public sealed class JournalRuntimeStats(TimeProvider? time = null)
         }
     }
 
+    /// <summary>
+    /// Records one upload's duration in its OWN window. An upload holds megabytes and a bucket
+    /// round trip; folding it into the ingest window would make ingest p95 mean "whichever of the
+    /// two was slower", which is not a number anyone can act on.
+    /// </summary>
+    public void RecordUploadDurationSample(double milliseconds)
+    {
+        ConversationMetrics.JournalUploadDuration.Record(milliseconds);
+
+        var now = _time.GetUtcNow();
+        lock (_gate)
+        {
+            _uploadLatency.Enqueue((now, milliseconds));
+            Prune(_uploadLatency, now);
+        }
+    }
+
     public void RecordSweep(int messages, int conversations)
     {
         lock (_gate)
@@ -72,6 +90,32 @@ public sealed class JournalRuntimeStats(TimeProvider? time = null)
         lock (_gate) _gcFailures++;
     }
 
+    // ── media (#388) ──────────────────────────────────────────────────────────
+
+    private DateTimeOffset? _objectsLastSweepAt;
+    private long _objectsAbandoned;
+    private long _objectsRetired;
+    private long _objectsOrphans;
+    private long _objectSweepFailures;
+
+    /// <summary>Counts one upload attempt by its fixed outcome code, on the status route and the meter.</summary>
+    public void Upload(string result)
+    {
+        ConversationMetrics.JournalUpload.Add(1, new KeyValuePair<string, object?>("result", result));
+    }
+
+    public void RecordObjectSweep(int abandoned, int retired, int orphans, int failures)
+    {
+        lock (_gate)
+        {
+            _objectsLastSweepAt = _time.GetUtcNow();
+            _objectsAbandoned += abandoned;
+            _objectsRetired += retired;
+            _objectsOrphans += orphans;
+            _objectSweepFailures += failures;
+        }
+    }
+
     public sealed record Snapshot
     {
         public required IReadOnlyDictionary<string, long> RejectedSinceStart { get; init; }
@@ -82,17 +126,30 @@ public sealed class JournalRuntimeStats(TimeProvider? time = null)
         public required int LatencySamples { get; init; }
         public double? IngestP50Milliseconds { get; init; }
         public double? IngestP95Milliseconds { get; init; }
+
+        /// <summary>The media sweep, and the upload latency window. Null sweep time means it has not run.</summary>
+        public DateTimeOffset? ObjectsLastSweepAt { get; init; }
+        public long ObjectsAbandonedDeleted { get; init; }
+        public long ObjectsRetiredDeleted { get; init; }
+        public long ObjectsOrphansDeleted { get; init; }
+        public long ObjectSweepFailures { get; init; }
+        public int UploadSamples { get; init; }
+        /// <summary>Upload latency percentiles over the rolling hour. Null when no upload has been sampled.</summary>
+        public double? UploadP50Milliseconds { get; init; }
+        public double? UploadP95Milliseconds { get; init; }
     }
 
     public Snapshot Read()
     {
         double[] samples;
+        double[] uploadSamples;
         Snapshot partial;
 
         lock (_gate)
         {
             Prune(_time.GetUtcNow());
             samples = _latency.Select(s => s.Milliseconds).ToArray();
+            uploadSamples = _uploadLatency.Select(s => s.Milliseconds).ToArray();
             partial = new Snapshot
             {
                 RejectedSinceStart = new SortedDictionary<string, long>(
@@ -102,23 +159,35 @@ public sealed class JournalRuntimeStats(TimeProvider? time = null)
                 GcDeletedConversations = _gcConversations,
                 GcFailures = _gcFailures,
                 LatencySamples = samples.Length,
+                ObjectsLastSweepAt = _objectsLastSweepAt,
+                ObjectsAbandonedDeleted = _objectsAbandoned,
+                ObjectsRetiredDeleted = _objectsRetired,
+                ObjectsOrphansDeleted = _objectsOrphans,
+                ObjectSweepFailures = _objectSweepFailures,
+                UploadSamples = uploadSamples.Length,
             };
         }
 
         Array.Sort(samples);
+        Array.Sort(uploadSamples);
         return partial with
         {
             IngestP50Milliseconds = Percentile(samples, 0.50),
             IngestP95Milliseconds = Percentile(samples, 0.95),
+            UploadP50Milliseconds = Percentile(uploadSamples, 0.50),
+            UploadP95Milliseconds = Percentile(uploadSamples, 0.95),
         };
     }
 
-    private void Prune(DateTimeOffset now)
+    private void Prune(DateTimeOffset now) => Prune(_latency, now);
+
+    private static void Prune(
+        Queue<(DateTimeOffset At, double Milliseconds)> queue, DateTimeOffset now)
     {
-        while (_latency.Count > 0
-               && (_latency.Count > MaxLatencySamples || now - _latency.Peek().At > LatencyWindow))
+        while (queue.Count > 0
+               && (queue.Count > MaxLatencySamples || now - queue.Peek().At > LatencyWindow))
         {
-            _latency.Dequeue();
+            queue.Dequeue();
         }
     }
 

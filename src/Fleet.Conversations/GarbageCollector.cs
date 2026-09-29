@@ -34,7 +34,8 @@ public sealed class GarbageCollector(
     ConversationStoreOptions options,
     ILogger logger,
     AttachmentStore? attachments = null,
-    Journal.JournalRetention? journal = null)
+    Journal.JournalRetention? journal = null,
+    Journal.JournalObjectSweeper? media = null)
 {
     /// <summary>What one pass removed.</summary>
     public sealed record SweepResult
@@ -61,6 +62,13 @@ public sealed class GarbageCollector(
         public int JournalMessages { get; init; }
 
         public int JournalConversations { get; init; }
+
+        /// <summary>Objects retired with their messages, abandoned, and keys with no row at all (#388).</summary>
+        public int MediaRetired { get; init; }
+
+        public int MediaAbandoned { get; init; }
+
+        public int MediaOrphans { get; init; }
     }
 
     public async Task<SweepResult> SweepOnceAsync(CancellationToken ct = default)
@@ -74,6 +82,7 @@ public sealed class GarbageCollector(
         var strandedAttachments = await SweepStrandedAttachmentsAsync(connection, ct);
         var orphans = await SweepOrphanFilesAsync(connection, ct);
         var journalSweep = await SweepJournalAsync(ct);
+        var mediaSweep = await SweepMediaAsync(ct);
 
         if (ephemeral + durable + outbox + claims > 0)
         {
@@ -103,7 +112,41 @@ public sealed class GarbageCollector(
             OrphanFiles = orphans,
             JournalMessages = journalSweep?.Messages ?? 0,
             JournalConversations = journalSweep?.Conversations ?? 0,
+            MediaRetired = mediaSweep?.Retired ?? 0,
+            MediaAbandoned = mediaSweep?.Abandoned ?? 0,
+            MediaOrphans = mediaSweep?.Orphans ?? 0,
         };
+    }
+
+    /// <summary>
+    /// The media object sweep, AFTER the journal sweep and also isolated (#388).
+    /// </summary>
+    /// <remarks>
+    /// The order matters: retention marks objects <c>deleting</c> and the sweeper is what removes
+    /// them, so a tick that ran them the other way round would leave a retired object for another
+    /// hour. Null with media off, which leaves <c>journal_objects</c> and the bucket untouched — the
+    /// same rule the journal sweep follows.
+    /// </remarks>
+    private async Task<Journal.JournalObjectSweeper.SweepResult?> SweepMediaAsync(CancellationToken ct)
+    {
+        if (media is null) return null;
+
+        try
+        {
+            return await media.SweepOnceAsync(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception e)
+        {
+            // Type only. A driver's message can carry the connection string, and an S3 message can
+            // carry the endpoint.
+            logger.LogWarning("journal media sweep failed and will retry next tick: {Error}",
+                e.GetType().Name);
+            return null;
+        }
     }
 
     /// <summary>

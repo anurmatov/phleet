@@ -1,4 +1,5 @@
 using System.Globalization;
+using Fleet.Conversations.Contracts;
 using Microsoft.Extensions.Logging;
 using MySqlConnector;
 
@@ -39,14 +40,26 @@ public sealed class JournalRetention(
     int batchSize,
     ILogger logger,
     JournalRuntimeStats? stats = null,
-    TimeProvider? time = null)
+    TimeProvider? time = null,
+    IJournalObjectStore? objects = null)
 {
     /// <summary>Upper bound on batches per sweep, so one tick cannot run unbounded.</summary>
     private const int MaxBatchesPerSweep = 1000;
 
+    /// <summary>
+    /// How long a retired object's bytes are kept after its message is gone. A backup taken before
+    /// the mark must still restore to a whole set, and a restore that re-creates a message whose
+    /// object was already deleted is a hole nothing can repair afterwards.
+    /// </summary>
+    public static readonly TimeSpan DeleteGrace = TimeSpan.FromHours(72);
+
     private readonly TimeProvider _time = time ?? TimeProvider.System;
 
-    public sealed record SweepResult(int Messages, int Conversations);
+    /// <summary>
+    /// Objects this sweep retired: their messages are gone, so their bytes go after the delete
+    /// grace. Zero on a deployment without media.
+    /// </summary>
+    public sealed record SweepResult(int Messages, int Conversations, int Objects = 0);
 
     /// <summary>
     /// Deletes messages sent before <c>now − retention</c>, in batches, then conversations left with
@@ -58,11 +71,57 @@ public sealed class JournalRetention(
         var messages = 0;
         var conversations = 0;
 
+        // Keys retired by THIS sweep. Nothing here deletes them — the grace window is the point —
+        // and the object sweeper is what eventually removes the bytes.
+        var retiredKeys = new List<string>();
+
         await using var connection = new MySqlConnection(connectionString);
         await connection.OpenAsync(ct);
 
         for (var i = 0; i < MaxBatchesPerSweep; i++)
         {
+            // ⚠️ Mark the objects BEFORE deleting the messages, and collect their keys here rather
+            //    than looking them up afterwards: once the attachment rows cascade away, nothing
+            //    connects the object to anything and the bucket would keep the bytes forever.
+            //    `deleting` + `delete_after` is the state the object sweeper acts on.
+            if (objects is not null)
+            {
+                await using var mark = new MySqlCommand(
+                    """
+                    SELECT a.object_id, o.object_key
+                      FROM journal_attachments a
+                      JOIN journal_messages m ON m.id = a.message_id
+                      JOIN journal_objects o ON o.id = a.object_id
+                     WHERE m.sent_at < @cutoff AND a.object_id IS NOT NULL
+                     LIMIT @batch
+                    """, connection);
+                mark.Parameters.AddWithValue("@cutoff", cutoff);
+                mark.Parameters.AddWithValue("@batch", batchSize);
+
+                var doomed = new List<(string Id, string Key)>();
+                await using (var reader = await mark.ExecuteReaderAsync(ct))
+                {
+                    while (await reader.ReadAsync(ct))
+                        doomed.Add((reader.GetString(0), reader.GetString(1)));
+                }
+
+                foreach (var (id, key) in doomed)
+                {
+                    await using var retire = new MySqlCommand(
+                        """
+                        UPDATE journal_objects
+                           SET state = 'deleting', delete_after = DATE_ADD(UTC_TIMESTAMP(6), INTERVAL @grace SECOND),
+                               updated_at = UTC_TIMESTAMP(6)
+                         WHERE id = @id AND state = 'committed'
+                        """, connection);
+                    retire.Parameters.AddWithValue("@id", id);
+                    retire.Parameters.AddWithValue("@grace", (int)DeleteGrace.TotalSeconds);
+                    await retire.ExecuteNonQueryAsync(ct);
+
+                    retiredKeys.Add(key);
+                }
+            }
+
             await using var command = new MySqlCommand(
                 "DELETE FROM journal_messages WHERE sent_at < @cutoff ORDER BY sent_at, id LIMIT @batch",
                 connection);
@@ -98,7 +157,7 @@ public sealed class JournalRetention(
         }
 
         stats?.RecordSweep(messages, conversations);
-        return new SweepResult(messages, conversations);
+        return new SweepResult(messages, conversations, retiredKeys.Count);
     }
 
     /// <summary>Counts a sweep that failed. The next tick retries it.</summary>

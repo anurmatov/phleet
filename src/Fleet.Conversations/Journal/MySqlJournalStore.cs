@@ -33,10 +33,23 @@ namespace Fleet.Conversations.Journal;
 /// is re-read on the next request, so the first post after <c>conversations migrate</c> succeeds.
 /// </para>
 /// </remarks>
-public sealed class MySqlJournalStore : IJournalStore
+public sealed partial class MySqlJournalStore : IJournalStore
 {
-    /// <summary>The schema version that created the journal tables.</summary>
-    public const int RequiredSchemaVersion = 4;
+    /// <summary>
+    /// The object store, when media is configured (#388). Null on a deployment without media, which
+    /// is the state every install was in before this slice: an <c>uploadId</c> is then refused by
+    /// the route with <c>409 media_disabled</c> and this store never sees one.
+    /// </summary>
+    public MySqlJournalObjectStore? Objects { get; init; }
+
+    /// <summary>
+    /// The schema version this binary needs. <b>5, not 4:</b> slice 4 (#388) adds
+    /// <c>journal_objects</c> and the attachment→object key, and a record with an
+    /// <c>uploadId</c> cannot be written against 0004. Refusing a schema behind this binary is the
+    /// existing rule; raising the number is what makes an unmigrated database answer
+    /// <c>503 schema_behind</c> rather than failing mid-transaction.
+    /// </summary>
+    public const int RequiredSchemaVersion = 5;
 
     private static readonly TimeSpan SchemaCacheDuration = TimeSpan.FromSeconds(30);
 
@@ -63,14 +76,43 @@ public sealed class MySqlJournalStore : IJournalStore
     }
 
     public async Task<JournalIngestResult> IngestAsync(
-        JournalRecord record, string observer, CancellationToken ct = default)
+        JournalRecord recordInput, string observer, CancellationToken ct = default)
     {
-        ArgumentNullException.ThrowIfNull(record);
+        ArgumentNullException.ThrowIfNull(recordInput);
 
         if (!JournalTokens.IsValidSubject(observer))
             throw new ArgumentException("an observer is 1-128 characters of [A-Za-z0-9_-]", nameof(observer));
 
+        // Reassigned once, after the media plan resolves each upload to the object it points at.
+        // Everything downstream — fingerprint, attachment rows — reads the resolved record.
+        var record = recordInput;
         var conversationKey = JournalKeys.ConversationKey(record.Telegram);
+
+        // ── media proof, BEFORE the conversation lock ────────────────────────────
+        //
+        // Resolved outside the transaction, and the lock is never held across an S3 round trip.
+        // Every ingest takes this conversation's row lock, so a stalled bucket under a held lock
+        // would stall every publisher in the chat. The state is re-checked inside the transaction
+        // below, which is where the write is made atomic; these rows are only ever advanced
+        // forward by their owner or backward by the sweeper, and the in-transaction guard is the
+        // one the write depends on.
+        var media = ResolveUploads(record, observer);
+        if (media.Refusal is not null)
+        {
+            JournalRuntimeStats.Ingest("upload_incomplete");
+            return media.Refusal;
+        }
+
+        // ⚠️ The fingerprint is computed over the record with the SERVER-resolved object ids, not
+        //    with the caller's upload ids. `objectId` is part of the attachment fingerprint (see
+        //    JournalFingerprint.Canonical), so encoding the resolved id — the dedup winner's id for
+        //    a loser as much as for a winner — is what makes two subjects that archived the same
+        //    photo agree on the fingerprint of one message, and what makes a retry of a committed
+        //    submission replay as `duplicate` rather than `conflict`.
+        //
+        //    A record with no uploadId has no object ids and fingerprints exactly as it did before
+        //    slice 4: text-only ingest is byte-for-byte unchanged.
+        record = WithObjectIds(record, media.Resolved);
         var fingerprint = JournalFingerprint.Compute(conversationKey, record);
 
         try
@@ -82,7 +124,8 @@ public sealed class MySqlJournalStore : IJournalStore
             {
                 try
                 {
-                    return await IngestOnceAsync(connection, record, observer, conversationKey, fingerprint, ct);
+                    return await IngestOnceAsync(
+                        connection, record, observer, conversationKey, fingerprint, media, ct);
                 }
                 catch (MySqlException e) when (attempt == 0 && IsRetryable(e))
                 {
@@ -157,7 +200,7 @@ public sealed class MySqlJournalStore : IJournalStore
 
     private async Task<JournalIngestResult> IngestOnceAsync(
         MySqlConnection connection, JournalRecord record, string observer,
-        string conversationKey, string fingerprint, CancellationToken ct)
+        string conversationKey, string fingerprint, MediaPlan media, CancellationToken ct)
     {
         var now = _time.GetUtcNow().UtcDateTime;
         var sentAt = record.SentAt.UtcDateTime;
@@ -267,6 +310,23 @@ public sealed class MySqlJournalStore : IJournalStore
                     await fill.ExecuteNonQueryAsync(ct);
                 }
 
+                // A loser this subject proved is parked, not deleted: this path writes no
+                // attachment row, so the row is the only thing that keeps the sweeper able to see
+                // the bytes. See the loser block in the insert path for the full rule.
+                foreach (var loser in media.Losers)
+                {
+                    await using var park = Command(connection, transaction,
+                        """
+                        UPDATE journal_objects
+                           SET state = 'aborted', updated_at = @now
+                         WHERE id = @id AND owner = @owner AND state = 'uploaded'
+                        """);
+                    park.Parameters.AddWithValue("@id", loser);
+                    park.Parameters.AddWithValue("@owner", observer);
+                    park.Parameters.AddWithValue("@now", now);
+                    await park.ExecuteNonQueryAsync(ct);
+                }
+
                 await transaction.CommitAsync(ct);
                 return new JournalIngestResult { Outcome = JournalIngestOutcome.ObserverAdded, MessageId = messageId };
             }
@@ -308,7 +368,9 @@ public sealed class MySqlJournalStore : IJournalStore
             await create.ExecuteNonQueryAsync(ct);
         }
 
-        // 4. A new message: the row, this observer, and attachment metadata.
+        // 4. A new message: the row, this observer, and attachment metadata. Reaching step 4 means
+        //    this submission INSERTS the message — the observer-added case returned from step 3.
+        const bool insertedMessage = true;
         var newMessageId = Ulid.NewUlid(_time.GetUtcNow());
 
         await using (var insert = Command(connection, transaction,
@@ -357,18 +419,30 @@ public sealed class MySqlJournalStore : IJournalStore
 
         await InsertObserverAsync(connection, transaction, newMessageId, observer, record.EventId, fingerprint, now, ct);
 
-        // Metadata only, and never visible with a dangling reference: every row is not_archived
-        // and names why.
+        // One row per attachment, and exactly two shapes.
+        //
+        // An attachment that names an upload becomes `committed` and points at an object; anything
+        // else is `not_archived` naming its reason. Never both, never neither — which is why the
+        // object id is bound only on the committed branch and the reason only on the other.
+        //
+        // ⚠️ A message is never visible with a dangling reference: the state transition and the
+        // attachment inserts are in THIS transaction, and every refusal above happens before
+        // anything is written.
         foreach (var attachment in record.Attachments)
         {
+            // `objectId` is non-null exactly when the attachment is committed, which the compiler
+            // cannot see through TryGetValue's bool return.
+            media.Resolved.TryGetValue(attachment.Ordinal, out var attachmentObject);
+            var committed = !string.IsNullOrEmpty(attachmentObject);
+
             await using var attach = Command(connection, transaction,
                 """
                 INSERT INTO journal_attachments
-                    (id, message_id, ordinal, kind, mime_type, byte_size, original_file_name,
-                     telegram_file_unique_id, state, not_archived_reason, created_at)
+                    (id, message_id, ordinal, kind, mime_type, byte_size, sha256, original_file_name,
+                     telegram_file_unique_id, object_id, state, not_archived_reason, created_at, committed_at)
                 VALUES
-                    (@id, @message, @ordinal, @kind, @mime, @size, @fileName,
-                     @fileUniqueId, 'not_archived', @reason, @now)
+                    (@id, @message, @ordinal, @kind, @mime, @size, @sha, @fileName,
+                     @fileUniqueId, @object, @state, @reason, @now, @committedAt)
                 """);
             attach.Parameters.AddWithValue("@id", Ulid.NewUlid(_time.GetUtcNow()));
             attach.Parameters.AddWithValue("@message", newMessageId);
@@ -376,14 +450,141 @@ public sealed class MySqlJournalStore : IJournalStore
             attach.Parameters.AddWithValue("@kind", JournalWire.Of(attachment.Kind));
             attach.Parameters.AddWithValue("@mime", attachment.MimeType);
             attach.Parameters.AddWithValue("@size", attachment.ByteSize);
+            attach.Parameters.AddWithValue("@sha",
+                committed && media.Digests.TryGetValue(attachmentObject!, out var digest) ? digest : null);
             attach.Parameters.AddWithValue("@fileName", attachment.FileName);
             attach.Parameters.AddWithValue("@fileUniqueId", attachment.FileUniqueId);
-            attach.Parameters.AddWithValue("@reason", JournalWire.Of(attachment.NotArchivedReason));
+            attach.Parameters.AddWithValue("@object", committed ? (object?)attachmentObject : null);
+            attach.Parameters.AddWithValue("@state", committed ? "committed" : "not_archived");
+            attach.Parameters.AddWithValue("@reason", committed ? null
+                : attachment.NotArchivedReason is { } reasonValue ? JournalWire.Of(reasonValue) : null);
             attach.Parameters.AddWithValue("@now", now);
+            attach.Parameters.AddWithValue("@committedAt", committed ? (object?)now : null);
             await attach.ExecuteNonQueryAsync(ct);
         }
 
+        // ── the media state transitions, in THIS transaction ───────────────────
+        //
+        // Two objects per attachment id are possible here and they are opposite jobs:
+        //
+        //  * the object THIS subject proved (`media.Proved`) must become `committed`, and only this
+        //    subject's own row may be written — `owner = @owner` is what keeps a commit from
+        //    advancing someone else's row;
+        //  * the object the attachment POINTS at (`media.Resolved`) may already be committed and
+        //    owned by someone else. That is the dedup winner. Nothing is written to it; it only has
+        //    to still be committed, which the lock below and the re-read prove.
+        //
+        // Locking first is what makes "the winner is still committed" true at the moment the
+        // attachment is written, rather than true when the plan read it.
+        foreach (var target in media.Resolved.Values.Distinct(StringComparer.Ordinal))
+        {
+            await using (var relock = Command(connection, transaction,
+                "SELECT state FROM journal_objects WHERE id = @id FOR UPDATE"))
+            {
+                relock.Parameters.AddWithValue("@id", target);
+                var state = await relock.ExecuteScalarAsync(ct) as string;
+
+                if (state != "committed" && state != "uploaded" && state != "uploading")
+                {
+                    // Swept, aborted, or scheduled for deletion between the plan and here. The same
+                    // answer the pre-flight gives, and nothing above this survives it.
+                    await transaction.RollbackAsync(ct);
+                    JournalRuntimeStats.Ingest("upload_incomplete");
+                    return new JournalIngestResult
+                    {
+                        Outcome = JournalIngestOutcome.UploadIncomplete,
+                        UploadOrdinals = record.Attachments
+                            .Where(a => a.UploadId is not null)
+                            .Select(a => a.Ordinal)
+                            .Distinct().Order().ToArray(),
+                    };
+                }
+            }
+
+            // Only a row this subject owns is written. The dedup winner is typically someone
+            // else's committed object: it is re-locked above and left exactly as it was.
+            if (!media.Proved.Contains(target)) continue;
+
+            await using var commit = Command(connection, transaction,
+                """
+                UPDATE journal_objects
+                   SET state = 'committed', committed_sha256 = @sha, updated_at = @now
+                 WHERE id = @id AND owner = @owner
+                   AND state IN ('uploading', 'uploaded', 'committed')
+                """);
+            commit.Parameters.AddWithValue("@id", target);
+            commit.Parameters.AddWithValue("@owner", observer);
+            commit.Parameters.AddWithValue("@sha", media.Digests[target]);
+            commit.Parameters.AddWithValue("@now", now);
+
+            if (await commit.ExecuteNonQueryAsync(ct) != 1)
+            {
+                // The row stopped being this subject's live upload between the plan and here.
+                await transaction.RollbackAsync(ct);
+                JournalRuntimeStats.Ingest("upload_incomplete");
+                return new JournalIngestResult
+                {
+                    Outcome = JournalIngestOutcome.UploadIncomplete,
+                    UploadOrdinals = record.Attachments
+                        .Where(a => a.UploadId is not null)
+                        .Select(a => a.Ordinal)
+                        .Distinct().Order().ToArray(),
+                };
+            }
+        }
+
+        // ── dedup losers, INSIDE this transaction ──────────────────────────────
+        //
+        // A loser is this subject's own object that lost the race for the digest. It is retired
+        // here, on every path that resolves a loser, and the two paths differ only in what happens
+        // to the bytes:
+        //
+        //  * the submission that INSERTS the message writes its attachment straight at the winner,
+        //    so the loser is referenced by nothing. Its row goes and its bytes follow after the
+        //    commit — an `aborted` row here would be an object no retention pass can ever reach,
+        //    because the attachment that would have carried it to `deleting` points elsewhere;
+        //  * the submission that only ADDS an observer never wrote an attachment row at all — the
+        //    message's attachments are the ones the first subject committed. Its loser is therefore
+        //    parked in `aborted` and left to the sweeper, which is the class that exists for
+        //    "row exists, nothing references it".
+        //
+        // Owner-bound either way: a loser is always the submitting subject's own row, and a write
+        // that could name someone else's object would be a different bug.
+        foreach (var loser in media.Losers)
+        {
+            var drop = Command(connection, transaction,
+                insertedMessage
+                    ? "DELETE FROM journal_objects WHERE id = @id AND owner = @owner AND state = 'uploaded'"
+                    : "UPDATE journal_objects SET state = 'aborted', updated_at = @now "
+                      + "WHERE id = @id AND owner = @owner AND state = 'uploaded'");
+            await using (drop.ConfigureAwait(false))
+            {
+                drop.Parameters.AddWithValue("@id", loser);
+                drop.Parameters.AddWithValue("@owner", observer);
+                if (!insertedMessage) drop.Parameters.AddWithValue("@now", now);
+                await drop.ExecuteNonQueryAsync(ct);
+            }
+        }
+
         await transaction.CommitAsync(ct);
+
+        // The loser's bytes, AFTER the commit. A bucket delete must never hold the transaction open
+        // or fail it, so the DELETE above runs first and the object goes here. If this fails the
+        // sweeper's orphan pass finds the key — the row that would have named it no longer exists,
+        // which is the trade for not leaving an unreachable row behind.
+        foreach (var (loser, loserKey) in insertedMessage ? media.LoserKeys : [])
+        {
+            try
+            {
+                await Objects!.DeleteBytesAsync(loserKey, ct);
+            }
+            catch (Exception e)
+            {
+                _logger.LogWarning("journal dedup loser bytes could not be deleted and will be swept: {Error}",
+                    e.GetType().Name);
+            }
+        }
+
         return new JournalIngestResult { Outcome = JournalIngestOutcome.Created, MessageId = newMessageId };
     }
 

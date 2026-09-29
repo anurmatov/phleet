@@ -208,6 +208,105 @@ jobs:
 
           echo "$passed test(s) executed against mysql:8.0, 0 skipped."
 
+  # The journal's media plane (#388). These are the only tests in the repo that put bytes through
+  # the real AWS SDK into a real bucket, and they are the reason that plane exists: five defects in
+  # S3ObjectStore passed every fake-bucket assertion in the suite and were only visible against a
+  # server that answers. See tests/Fleet.Conversations.Tests/S3Fixture.cs for what the fixture
+  # proves and — read that part — what it cannot.
+  #
+  # SeaweedFS rather than MinIO because MinIO publishes no public source for its images. Pinned by
+  # digest, so "the fixture image changed underneath us" is a commit, not an outage.
+  media-s3-tests:
+    name: Journal media object store (S3)
+    runs-on: ubuntu-latest
+
+    services:
+      seaweedfs:
+        image: chrislusf/seaweedfs@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+        ports:
+          - 8333:8333
+          - 8888:8888
+        args: >-
+          server -s3 -dir=/data -ip=0.0.0.0
+          -s3.port=8333 -master.port=9333 -master.port.grpc=19333
+          -volume.port=8444 -filer.port=8888 -filer.port.grpc=48888
+          -s3.port.iceberg=0 -s3.port.lance=0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build Fleet.Conversations (Release)
+        run: dotnet build src/Fleet.Conversations/Fleet.Conversations.csproj --no-restore --configuration Release
+
+      - name: Run the S3 media suite
+        env:
+          # Placeholder credentials on purpose. SeaweedFS without a signing key cannot authenticate
+          # a signed request, and the fixture builds its client with AnonymousAWSCredentials — see
+          # S3Fixture for why a signed fixture would produce a FALSE GREEN on the credential classes.
+          FLEET_COMMS_S3_ENDPOINT: "http://127.0.0.1:8333"
+          FLEET_COMMS_S3_FILER: "http://127.0.0.1:8888"
+          FLEET_COMMS_S3_BUCKET: "journal-ci"
+          FLEET_COMMS_S3_ACCESS_KEY: "placeholder"
+          FLEET_COMMS_S3_SECRET_KEY: "placeholder"
+          # The S3 upload tests ride the same scratch database as the rest of the suite.
+          FLEET_CONVERSATIONS_MIGRATION_CONNECTION: "Server=127.0.0.1;Port=3306;User ID=root;Password=media-ci;AllowPublicKeyRetrieval=true;"
+        run: >
+          dotnet test tests/Fleet.Conversations.Tests --configuration Release
+          --filter "FullyQualifiedName~JournalS3"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=media-s3.trx"
+          --results-directory ${{ github.workspace }}/testresults
+
+      # Same rule as the MySQL job: a filter that matched nothing would report success with zero
+      # tests executed, which is the exact shape of a gate that quietly stopped gating.
+      - name: Refuse a run that skipped or found nothing
+        if: always()
+        run: |
+          set -euo pipefail
+          trx="${{ github.workspace }}/testresults/media-s3.trx"
+
+          if [ ! -f "$trx" ]; then
+            echo "ERROR: no test result file at $trx — the S3 suite did not run."
+            exit 1
+          fi
+
+          counters=$(grep -o '<Counters[^>]*>' "$trx" | head -1)
+          echo "$counters"
+
+          read_count() { echo "$counters" | grep -o "$1=\"[0-9]*\"" | grep -o '[0-9]*' || echo ""; }
+
+          executed=$(read_count executed)
+          notExecuted=$(read_count notExecuted)
+          passed=$(read_count passed)
+
+          if [ -z "$executed" ] || [ -z "$notExecuted" ] || [ -z "$passed" ]; then
+            echo "ERROR: could not read the counters out of $trx."
+            exit 1
+          fi
+
+          if [ "$notExecuted" -ne 0 ]; then
+            echo "ERROR: $notExecuted test(s) did not execute."
+            exit 1
+          fi
+
+          # The filter is the only way this job could run nothing; a zero count means the tests it
+          # is named for are gone, which is a failure and not a pass.
+          if [ "${executed:-0}" -lt 10 ] || [ "$passed" -ne "$executed" ]; then
+            echo "ERROR: executed=$executed passed=$passed — expected at least 10 S3 tests, all passing."
+            exit 1
+          fi
+
+          echo "$passed S3 media test(s) executed against SeaweedFS, 0 skipped."
+
   orchestrator-migrations:
     name: Orchestrator migrations (MySQL)
     runs-on: ubuntu-latest

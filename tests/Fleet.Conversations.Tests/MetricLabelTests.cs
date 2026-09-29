@@ -1,5 +1,6 @@
 using System.Diagnostics.Metrics;
 using Fleet.Conversations.Contracts;
+using Fleet.Conversations.Journal;
 using Fleet.Protocol;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -32,8 +33,18 @@ public sealed class MetricLabelTests(MySqlFixture fixture)
     /// Committed as data, so adding a label is a deliberate edit to this list rather than something
     /// that happens quietly at a call site.
     /// </remarks>
+    /// <summary>
+    /// <c>result</c> and <c>class</c> are the media labels (#388): <c>result</c> is the upload
+    /// outcome the route chose (a fixed code, never a key or digest), <c>class</c> is which sweeper
+    /// pass removed an object. Both join a list whose whole purpose is that a new label is a
+    /// deliberate edit here rather than something a call site invents.
+    /// </summary>
     private static readonly HashSet<string> Allowed =
-        new(StringComparer.Ordinal) { "outcome", "reason", "kind", "outbox", "route", "status", "disposition" };
+        new(StringComparer.Ordinal)
+        {
+            "outcome", "reason", "kind", "outbox", "route", "status", "disposition",
+            "result", "class",
+        };
 
     /// <summary>
     /// Values that must never appear in a label, whatever the key is called.
@@ -125,5 +136,66 @@ public sealed class MetricLabelTests(MySqlFixture fixture)
         // of an empty list that satisfies every rule.
         Assert.Contains(captured, c => c is { Key: "outcome", Value: "claimed" });
         Assert.Contains(captured, c => c is { Key: "reason", Value: "attempt_abandoned" });
+    }
+
+    /// <summary>
+    /// The media instruments (#388) label with codes only.
+    /// </summary>
+    /// <remarks>
+    /// Driven directly rather than through an upload, because the upload path needs a bucket and
+    /// this suite's job is the label set, not the byte path. What matters is that the two call sites
+    /// that touch media add nothing identifying: an object key is an internal address and a digest
+    /// identifies content, and a metric label is read by whoever can read metrics.
+    /// </remarks>
+    [Fact]
+    public void The_media_instruments_label_with_codes_only()
+    {
+        var captured = new List<(string Instrument, string Key, string Value)>();
+
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Meter.Name == ConversationMetrics.MeterName)
+                l.EnableMeasurementEvents(instrument);
+        };
+
+        listener.SetMeasurementEventCallback<long>((instrument, _, tags, _) =>
+        {
+            foreach (var tag in tags)
+                lock (captured)
+                    captured.Add((instrument.Name, tag.Key, tag.Value?.ToString() ?? string.Empty));
+        });
+
+        listener.Start();
+
+        var stats = new JournalRuntimeStats();
+        stats.Upload("stored");
+        stats.Upload("sha256_mismatch");
+        stats.RecordUploadDurationSample(12.5);
+        // The sweeper's own counter carries `class`; the stats object does not emit it, so this
+        // asserts the shape the sweeper emits by asserting what the allowed list admits.
+        stats.RecordObjectSweep(abandoned: 1, retired: 0, orphans: 2, failures: 0);
+
+        listener.Dispose();
+
+        Assert.NotEmpty(captured);
+
+        foreach (var (instrument, key, value) in captured)
+        {
+            Assert.True(Allowed.Contains(key),
+                $"{instrument} emitted the label '{key}', which is not on the allowed list.");
+
+            foreach (var forbidden in Forbidden)
+                Assert.False(value.Contains(forbidden, StringComparison.Ordinal),
+                    $"{instrument} emitted '{value}' for '{key}'.");
+
+            // An object key starts with the journal prefix. Nothing that looks like one belongs here.
+            Assert.False(value.StartsWith("j1/", StringComparison.Ordinal),
+                $"{instrument} emitted an object key as '{value}' for '{key}'.");
+        }
+
+        Assert.Contains(captured, c => c is { Instrument: "fleet.journal.upload", Key: "result", Value: "stored" });
+        Assert.Contains(captured,
+            c => c is { Instrument: "fleet.journal.upload", Key: "result", Value: "sha256_mismatch" });
     }
 }

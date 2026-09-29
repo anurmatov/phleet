@@ -128,6 +128,114 @@ public sealed class JournalConfigurationTests : IDisposable
             Assert.Throws<InvalidOperationException>(options.ValidateJournal).Message);
     }
 
+    // ── media validation (#388) ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Blank endpoint means media does not exist, and everything else is then irrelevant. The
+    /// default state of every deployment, so it is the case that must never demand credentials.
+    /// </summary>
+    [Fact]
+    public void Media_off_needs_nothing_and_validates_clean()
+    {
+        var options = EnabledOptions(Key);
+
+        Assert.False(options.Media.Enabled);
+        options.ValidateMedia();
+    }
+
+    /// <summary>
+    /// Setting the endpoint turns the feature on, and every other field becomes required. A media
+    /// configuration that half-exists is worse than none: uploads would open rows against a bucket
+    /// nobody can address.
+    /// </summary>
+    [Theory]
+    [InlineData("", "bucket", "media_bucket_invalid")]
+    [InlineData("", "access", "media_access_key_invalid")]
+    [InlineData("", "secret", "media_secret_key_invalid")]
+    [InlineData("", "region", "media_region_invalid")]
+    public void An_enabled_media_section_requires_every_field(string url, string missing, string code)
+    {
+        var options = EnabledOptions(Key);
+        options.Media.Endpoint = "http://comms-minio:9000";
+        options.Media.AccessKey = "runtime";
+        options.Media.SecretKey = "runtime-secret";
+        Assert.True(options.Media.Enabled, "the endpoint is the enabling key");
+
+        switch (missing)
+        {
+            case "bucket": options.Media.Bucket = ""; break;
+            case "access": options.Media.AccessKey = ""; break;
+            case "secret": options.Media.SecretKey = ""; break;
+            case "region": options.Media.Region = ""; break;
+        }
+
+        Assert.StartsWith(code,
+            Assert.Throws<InvalidOperationException>(options.ValidateMedia).Message);
+    }
+
+    [Theory]
+    [InlineData("http://comms-minio:9000")]
+    [InlineData("https://media.internal:9000")]
+    public void A_complete_media_configuration_validates(string url)
+    {
+        var options = EnabledOptions(Key);
+        options.Media.Endpoint = url;
+        options.Media.AccessKey = "runtime";
+        options.Media.SecretKey = "runtime-secret";
+
+        options.ValidateMedia();
+    }
+
+    [Theory]
+    [InlineData("comms-minio:9000")]
+    [InlineData("ftp://comms-minio:9000")]
+    [InlineData("not a url")]
+    public void The_media_endpoint_must_be_an_absolute_http_url(string url)
+    {
+        var options = EnabledOptions(Key);
+        options.Media.Endpoint = url;
+
+        Assert.StartsWith("media_endpoint_invalid",
+            Assert.Throws<InvalidOperationException>(options.ValidateMedia).Message);
+    }
+
+    /// <summary>
+    /// Media without a journal is a configuration mistake, not a mode. There is no table to put an
+    /// object row in, so uploads would write bytes no row can find, name or ever retire.
+    /// </summary>
+    [Fact]
+    public void Media_requires_the_journal()
+    {
+        var options = new CommsOptions { ConversationConnectionString = "Server=x;Port=1;User ID=u;Password=p;Database=d;" };
+        options.Media.Endpoint = "http://comms-minio:9000";
+        // Fully populated apart from the journal: `ValidateMedia` checks the bucket's own fields
+        // FIRST, so a test that left them blank would assert the wrong code and pass for the wrong
+        // reason.
+        options.Media.AccessKey = "runtime";
+        options.Media.SecretKey = "runtime-secret";
+
+        Assert.StartsWith("media_requires_journal",
+            Assert.Throws<InvalidOperationException>(options.ValidateMedia).Message);
+    }
+
+    /// <summary>
+    /// ⚠️ A validation failure must never quote the credential it is complaining about. The codes
+    /// above name fields; this is the assertion that keeps the message safe to log.
+    /// </summary>
+    [Fact]
+    public void A_media_failure_names_the_field_and_never_the_secret()
+    {
+        const string secret = "sQu3rrel-THis-Must-Not-Leak-9";
+        var options = EnabledOptions(Key);
+        options.Media.Endpoint = "http://comms-minio:9000";
+        options.Media.AccessKey = "runtime";
+        options.Media.SecretKey = secret;
+        options.Media.Region = "";
+
+        var message = Assert.Throws<InvalidOperationException>(options.ValidateMedia).Message;
+        Assert.DoesNotContain(secret, message, StringComparison.Ordinal);
+    }
+
     // ── the real entry point (AC14) ──────────────────────────────────────────
 
     private static readonly string Key = JournalTestHost.KeyA;

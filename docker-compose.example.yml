@@ -698,13 +698,18 @@ services:
   # boot under.
   comms-minio-init:
     profiles: ["comms-media"]
-    # NOT `minio/mc`. That image is built `FROM scratch` — the `mc` binary and the CA bundle and
-    # nothing else — so it has no `/bin/sh`, no `sed`, no `awk`, and this script could not be
-    # invoked in it at all. Use an image carrying the MinIO client AND a shell, pinned to the same
-    # `mc` release the alias-stdin behaviour documented in init.sh was verified against
-    # (RELEASE.2025-08-13T08-35-41Z). init.sh checks for `mc` on PATH and exits 127 with a clear
-    # message if the pin regresses to a shell-less image.
-    image: minio/mc
+    # `minio/mc`, pinned. The published release image is built from upstream `Dockerfile.release`
+    # on `ubi9/ubi-micro`: it DOES carry a shell (`/bin/sh`, `/bin/bash`) and coreutils, so this
+    # script can run in it — what it does NOT carry is `sed`, `awk`, `grep` or `envsubst`. That is
+    # the real constraint, and it is why init.sh does its substitution with bash builtins.
+    #
+    # The untagged image was the bug this pin fixes: an operator pulling `minio/mc:latest` gets
+    # whatever `mc` the base image ships, and the alias-stdin behaviour init.sh depends on is
+    # release-specific. Pin to the release that behaviour was measured against.
+    #
+    # init.sh checks for `mc` on PATH and exits 127 with a message if the pin ever regresses to an
+    # image without the client.
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
     container_name: comms-minio-init
     depends_on:
       comms-minio:
@@ -716,12 +721,23 @@ services:
       FLEET_COMMS_MEDIA_ACCESS_KEY: ${FLEET_COMMS_MEDIA_ACCESS_KEY:-}
       FLEET_COMMS_MEDIA_SECRET_KEY: ${FLEET_COMMS_MEDIA_SECRET_KEY:-}
     # ⚠️ `/bin/bash`, not `/bin/sh`. The bucket-name substitution in init.sh uses
-    # `${var//pattern/replacement}`, which dash rejects with "Bad substitution"; and the image has
-    # to carry a shell at all, which `minio/mc` (built `FROM scratch`) does not. See the header of
-    # deploy/comms-minio-init/init.sh.
+    # `${var//pattern/replacement}`, which a POSIX `sh` rejects with "Bad substitution" (measured on
+    # dash 0.5.12). `minio/mc`'s `/bin/sh` is bash, so this happens to work unforced — say it in the
+    # entrypoint anyway, so the interpreter is a stated choice and not an accident of the base image.
+    # See the header of deploy/comms-minio-init/init.sh.
     entrypoint: ["/bin/bash", "/init/init.sh"]
     volumes:
       - ./deploy/comms-minio-init:/init:ro
+    # `restart: on-failure` is a RETRY, not a repair loop: the script is idempotent (bucket
+    # --ignore-existing, user add updates in place, policy create overwrites), so a transient
+    # failure — MinIO still settling, a network blip — converges on the next attempt.
+    #
+    # The one failure it cannot fix is a bad pin: if `mc` is ever missing from this image, init.sh
+    # exits 127 and restarts forever. That is deliberate. This service is a one-shot, so it is the
+    # ONLY place the root credential is used after the server starts; `restart: "no"` would let it
+    # stay dead and silently leave the scoped runtime user with no policy — the exact Access Denied
+    # failure this whole job exists to prevent. `logging: driver: none` below is what stops the
+    # loop from filling the disk, and the symptom is loud: `docker ps` shows the restart count.
     restart: on-failure
     networks:
       - comms-media

@@ -799,16 +799,20 @@ jobs:
         if: always()
         run: docker image rm -f fleet:agent-ci || true
 
-  # The journal object-store provisioner runs inside the MinIO client image, and that image carries
-  # nothing but the `mc` binary. This job is what stops init.sh from ever again reaching a
-  # production host and dying three lines into itself.
+  # The journal object-store provisioner runs inside the pinned MinIO client image, and that image
+  # has no `sed`, `awk`, `grep` or `envsubst`. This job is what stops init.sh from ever again
+  # reaching a production host and dying three lines into itself.
   #
-  # Why a guard and not a real run: MinIO withdrew every anonymous pull channel this repo has
-  # (dl.min.io returns 410, Docker Hub `minio/minio` and `quay.io/minio/*` return 401 — measured
-  # 2026-09-30), so there is no image to start here. Stated plainly so nobody reads green checks as
-  # more than they are: CI proves this script's EXTERNAL DEPENDENCIES and its substitution logic.
-  # The first run against a real MinIO on the deploy host remains the proof of the
-  # `mc admin policy` verbs — the same gap docs/comms-journal.md records for the startup probe.
+  # Why a guard and not a real run: the image cannot be pulled here. MinIO withdrew every anonymous
+  # channel this repo has — `dl.min.io` 410, Docker Hub and quay.io 401, `mirror.gcr.io` and
+  # `public.ecr.aws` do not mirror the repository at all (all measured 2026-09-30). What IS still
+  # downloadable is the `mc` release binary and its sha256sum, from the pinned tag on the GitHub
+  # release, and the next step pins it in CI exactly that way.
+  #
+  # Stated plainly so nobody reads green checks as more than they are: CI pins and hashes the
+  # client, proves the script's EXTERNAL DEPENDENCIES, and runs the substitution logic. It does not
+  # run `init.sh` inside the image, and it does not prove the `mc admin policy` verbs — the deploy
+  # host remains the only place that can, and the same gap is recorded in docs/comms-journal.md.
   minio-init-dependencies:
     name: MinIO init script dependencies
     runs-on: ubuntu-latest
@@ -817,9 +821,42 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: The mc the image ships is the mc CI reasons about
+        # The compose file pins `minio/mc:RELEASE.2025-08-13T08-35-41Z` because the alias-stdin
+        # behaviour and the `mc admin policy` verbs in init.sh were measured against that release.
+        # The image cannot be pulled (see the job header), but the release binary and its sha256sum
+        # can, so CI downloads them, checks the hash, and runs the `mc` VERSION that the pin names.
+        # If the compose pin and this release ever disagree, this step fails.
+        run: |
+          set -euo pipefail
+          RELEASE=RELEASE.2025-08-13T08-35-41Z
+
+          if ! grep -q "image: minio/mc:${RELEASE}" docker-compose.example.yml; then
+            echo "::error::docker-compose.example.yml no longer pins minio/mc:${RELEASE}."
+            echo "The behaviours init.sh depends on are release-specific — update this step's RELEASE"
+            echo "in the same change, or the pin stops being the thing CI verified."
+            exit 1
+          fi
+
+          mkdir -p /tmp/mcpin
+          curl -sSfL -o /tmp/mcpin/mc \
+            "https://github.com/minio/mc/releases/download/${RELEASE}/mc.linux-amd64.${RELEASE}"
+          curl -sSfL -o /tmp/mcpin/mc.sha256sum \
+            "https://github.com/minio/mc/releases/download/${RELEASE}/mc.linux-amd64.${RELEASE}.sha256sum"
+
+          # The shipped checksum names the file `mc.RELEASE…`, not `mc`; rename before verifying so
+          # the check is the upstream one rather than a hand-copied hash.
+          mv /tmp/mcpin/mc "/tmp/mcpin/mc.${RELEASE}"
+          (cd /tmp/mcpin && sha256sum -c mc.sha256sum)
+          mv "/tmp/mcpin/mc.${RELEASE}" /tmp/mcpin/mc
+          chmod +x /tmp/mcpin/mc
+          /tmp/mcpin/mc --version | grep -q "${RELEASE}"
+
+          echo "mc ${RELEASE} verified against its published sha256sum."
+
       - name: init.sh must call nothing but mc and shell builtins
-        # The failure this exists for: `sed` on line 76 of the old script. `minio/mc` is built
-        # `FROM scratch`, so the call exited 127 AFTER the bucket and the runtime user existed.
+        # The failure this exists for: `sed` on line 76 of the old script. The pinned release image
+        # has no `sed`, so the call exited 127 AFTER the bucket and the runtime user existed.
         run: ./scripts/check-minio-init-deps.sh
 
       - name: The bash-only substitution has a bash to run in

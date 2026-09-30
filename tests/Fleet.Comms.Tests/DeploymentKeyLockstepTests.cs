@@ -253,21 +253,25 @@ public class DeploymentKeyLockstepTests
     }
 
     /// <summary>
-    /// The init script runs inside the MinIO client image, which ships nothing but <c>mc</c> — so
-    /// it may not call another binary, and its bash-only substitution needs bash to run in.
+    /// The init script runs inside the pinned MinIO client image, so it may not call another
+    /// binary, and its bash-only substitution needs bash to run in.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// MUST NOT: reintroduce <c>sed</c>, <c>cat</c>, <c>awk</c> or <c>envsubst</c> here, or switch
+    /// MUST NOT: reintroduce <c>sed</c>, <c>awk</c>, <c>grep</c> or <c>envsubst</c> here, or switch
     /// the shebang or the compose entrypoint back to <c>sh</c>.
     /// </para>
     /// <para>
-    /// <c>minio/mc</c> is built <c>FROM scratch</c>: the last stage of the upstream Dockerfile
-    /// copies the <c>mc</c> binary and the CA bundle and nothing else. The old script substituted
-    /// the bucket name with <c>sed</c>, which exited 127 three steps AFTER the bucket was created
-    /// and the runtime user added — so the deployment came up with a scoped user holding no policy
-    /// and every upload, list and download answering <c>Access Denied</c>, while the bucket and the
-    /// user both looked correctly created. Nothing outside a real host could see it.
+    /// The pinned <c>minio/mc</c> release image is built from upstream <c>Dockerfile.release</c> on
+    /// <c>ubi9/ubi-micro</c>: it has a shell and coreutils (<c>cat</c> included), but not <c>sed</c>,
+    /// <c>awk</c>, <c>grep</c> or <c>envsubst</c>. The <c>FROM scratch</c> / "no shell at all" claim
+    /// that used to be written here came from reading the dev <c>Dockerfile</c> instead. The old
+    /// script substituted the bucket name with <c>sed</c>, which exited 127 three steps AFTER the
+    /// bucket was created and the runtime user added — so the deployment came up with a scoped user
+    /// holding no policy and every upload, list and download answering <c>Access Denied</c>, while
+    /// the bucket and the user both looked correctly created. Nothing outside a real host could see
+    /// it. The allowlist below stays stricter than the image requires so the script never depends on
+    /// which coreutils a given base image happens to ship.
     /// </para>
     /// <para>
     /// This is the cheap half of the guard; <c>scripts/check-minio-init-deps.sh</c> is the
@@ -302,17 +306,28 @@ public class DeploymentKeyLockstepTests
                     executable,
                     @"(^|[;&|(`]|$\()[ \t]*" + Regex.Escape(binary) + @"[ \t<]",
                     RegexOptions.Multiline),
-                $"init.sh calls `{binary}`, which the scratch-built minio/mc image does not ship. "
+                $"init.sh calls `{binary}`, which the pinned minio/mc release image does not ship "
+                + "(ubi9/ubi-micro: shell and coreutils, no sed/awk/grep/envsubst). "
                 + "Read a file with $(<file), substitute with ${var//pattern/replacement}, and "
                 + "build text with the printf builtin.");
         }
 
         // The substitution is a bashism, so BOTH places that choose the interpreter have to say
-        // bash. dash answers `${var//pattern/replacement}` with "Bad substitution", which is how a
-        // cosmetic revert to `sh` would reintroduce the same broken policy.
+        // bash. A POSIX `sh` answers `${var//pattern/replacement}` with "Bad substitution" (measured
+        // on dash 0.5.12), which is how a cosmetic revert to `sh` would reintroduce the same broken
+        // policy — minio/mc's own /bin/sh is bash, so this is stated rather than assumed.
         Assert.StartsWith("#!/bin/bash", script);
         Assert.Contains(
             "entrypoint: [\"/bin/bash\", \"/init/init.sh\"]",
+            Read("docker-compose.example.yml"),
+            StringComparison.Ordinal);
+
+        // The `mc` behaviour this script depends on (credentials on stdin, the `mc admin policy`
+        // verbs) is release-specific, so the image is pinned and the pin is checked here: an
+        // untagged `minio/mc` is a different client on every pull, and nothing else in the repo or
+        // in CI would notice the change.
+        Assert.Contains(
+            "image: minio/mc:RELEASE.2025-08-13T08-35-41Z",
             Read("docker-compose.example.yml"),
             StringComparison.Ordinal);
 

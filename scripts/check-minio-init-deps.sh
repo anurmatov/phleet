@@ -1,11 +1,11 @@
 #!/bin/bash
 # Fail when the journal object-store provisioner asks its image for a binary that image lacks.
 #
-# WHY THIS EXISTS. `minio/mc` is built `FROM scratch`: the last stage of the upstream Dockerfile
-# copies the `mc` binary and the CA bundle out of a Go build stage and nothing else. There is no
-# `/bin/sh`, no `sed`, no `awk`, no `cat`, no `envsubst`. Line 76 of the old init.sh called `sed`,
-# which exited 127 — three steps AFTER the bucket was created and the runtime user was added. The
-# container died, `restart: on-failure` could not repair it, and the deployment was left with a
+# WHY THIS EXISTS. The pinned `minio/mc` release image (upstream `Dockerfile.release`, on
+# `ubi9/ubi-micro`) is NOT `FROM scratch` — that is the dev Dockerfile. It ships a shell and
+# coreutils-single, so `cat` works there. What it does not ship is `sed`, `awk`, `grep` or
+# `envsubst`, and line 76 of the old init.sh called `sed`: it exited 127 — three steps AFTER the
+# bucket was created and the runtime user was added. The container died, `restart: on-failure` could not repair it, and the deployment was left with a
 # scoped user holding NO policy: every upload, list and download answered `Access Denied`, while
 # the bucket and the user both looked correctly created. No CI job could see any of it.
 #

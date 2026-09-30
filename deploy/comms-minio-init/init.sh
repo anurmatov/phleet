@@ -24,15 +24,24 @@ set -eu
 : "${FLEET_COMMS_MEDIA_ACCESS_KEY:?set FLEET_COMMS_MEDIA_ACCESS_KEY}"
 : "${FLEET_COMMS_MEDIA_SECRET_KEY:?set FLEET_COMMS_MEDIA_SECRET_KEY}"
 
-# ⚠️ `minio/mc` is built `FROM scratch` (upstream Dockerfile: the last stage copies the `mc`
-# binary and the CA bundle out of a Go build stage and nothing else). There is no `/bin/sh`, no
-# `/bin/bash`, no `sed`, `awk`, `grep`, `cp` or `envsubst` in that image. So nothing here may call
-# a binary other than `mc`. The check below is what turns that from a comment into a failure at the
-# top of the log rather than exit 127 three lines later.
+# ⚠️ THE IMAGE IS `minio/mc`, PINNED (see docker-compose.example.yml). The published release image
+# is built from upstream `Dockerfile.release` on `ubi9/ubi-micro`, NOT `FROM scratch` — that is the
+# dev `Dockerfile`, and reading it instead of the release one is what produced the wrong "no shell
+# at all" story this file used to carry. What the release image actually gives you:
+#
+#   present:  /bin/sh and /bin/bash (ubi-micro's /bin/sh is bash), coreutils-single (`cat` included)
+#   absent:   `sed`, `awk`, `grep`, `envsubst`
+#
+# So the script CAN run here — and the old `sed` call really did exit 127 three steps into it, which
+# is the incident this header describes. What it cannot do is depend on the text tools that are not
+# in the image. The rule below is therefore stronger than "no sed": nothing here calls any binary
+# other than `mc`, so the script does not care which coreutils a given base image happens to ship.
+# The check is what turns that from a comment into a failure at the top of the log rather than exit
+# 127 three lines later.
 if ! command -v mc >/dev/null 2>&1; then
-  echo "comms-minio-init: no \`mc\` on PATH — this image cannot run this script. It needs an image" >&2
-  echo "  carrying the MinIO client AND a shell, and it must be the \`mc\` from the SAME release the" >&2
-  echo "  alias behaviour documented below was verified against." >&2
+  echo "comms-minio-init: no \`mc\` on PATH — this image cannot run this script. It needs the" >&2
+  echo "  pinned MinIO client image (minio/mc:RELEASE.2025-08-13T08-35-41Z), whose \`mc\` release" >&2
+  echo "  the alias-stdin and \`mc admin policy\` behaviour documented below were verified against." >&2
   exit 127
 fi
 
@@ -99,8 +108,10 @@ mc admin user add comms "$FLEET_COMMS_MEDIA_ACCESS_KEY" "$FLEET_COMMS_MEDIA_SECR
 #
 # The pattern escapes `$` and braces so it matches the literal placeholder text rather than
 # expanding it; the `|`-delimited `sed` form it replaces was doing the same thing.
-# Read with bash's own `< file` rather than `$(cat file)`: `cat` is another binary the client image
-# does not have, and after the guard above the only external command this script may need is `mc`.
+# Read with bash's own `< file` rather than `$(cat file)`. `cat` IS in this image (coreutils-single
+# on ubi-micro) — the point is not that it is missing, it is that a base-image swap or a slimmer
+# variant is free to drop it, and the guard treats any non-`mc` binary as a defect. After the guard
+# above, `mc` is the only external command this script may need.
 policy_json="$(</init/comms-runtime-policy.json)"
 policy_json="${policy_json//\$\{comms-journal\}/${FLEET_COMMS_MEDIA_BUCKET}}"
 printf '%s\n' "$policy_json" > /tmp/comms-runtime-policy.json
@@ -120,8 +131,19 @@ case "$policy_json" in
     ;;
 esac
 
-mc admin policy create comms comms-journal-runtime /tmp/comms-runtime-policy.json \
-  || mc admin policy update comms comms-journal-runtime /tmp/comms-runtime-policy.json
+# `create` overwrites an existing policy of the same name, so this is already idempotent and a
+# re-run is safe.
+#
+# ⚠️ There is deliberately NO `|| mc admin policy update` fallback here. In the pinned release
+# `update` is not a policy verb at all — `mc admin policy` offers create/remove/list/info/attach/
+# detach/entities — and the binary answers it with "Deprecated command. Please use 'mc admin policy
+# attach' instead." A fallback that cannot succeed is worse than none: it hides the reason `create`
+# failed behind an unrelated deprecation message, which is exactly the kind of half-configured
+# provisioner this script exists to avoid.
+#
+# Measured on the pinned client against a real MinIO (2026-09-30): `create` on an already-existing
+# policy succeeds and re-applies the document, so repeated runs converge rather than drift.
+mc admin policy create comms comms-journal-runtime /tmp/comms-runtime-policy.json
 
 mc admin policy attach comms comms-journal-runtime --user "$FLEET_COMMS_MEDIA_ACCESS_KEY"
 

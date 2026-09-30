@@ -239,16 +239,25 @@ writes the two keys `fleet-comms` reads. It reads its own credentials from the e
 policy document keeps the bucket name as a placeholder that `init.sh` substitutes, so the file in
 the repo contains no deployment-specific value.
 
-⚠️ **`comms-minio-init` cannot run on `minio/mc`.** That image is built `FROM scratch` — the `mc`
-binary and the CA bundle, nothing else — so it has no `/bin/sh`, no `sed`, no `cat`, no `envsubst`.
-The substitution is done by bash (`${var//pattern/replacement}`), the script's shebang is
-`#!/bin/bash`, and the compose entrypoint invokes `/bin/bash` — dash rejects that substitution with
-"Bad substitution", so both have to say bash. Use an image carrying the MinIO client **and** a
-shell, pinned to the `mc` release the alias-stdin behaviour in `init.sh` was verified against.
+⚠️ **`comms-minio-init` runs on `minio/mc`, pinned to
+`minio/mc:RELEASE.2025-08-13T08-35-41Z`.** The published release image is built from upstream
+`Dockerfile.release` on `ubi9/ubi-micro`. It **does** carry a shell (`/bin/sh`, `/bin/bash`) and
+coreutils-single — the "no shell at all" story that used to be written here came from reading the
+dev `Dockerfile` (`FROM scratch`), not the release one. What it does **not** carry is `sed`, `awk`,
+`grep` or `envsubst`.
+
+That is the constraint the script is written against: the substitution is done by bash
+(`${var//pattern/replacement}`), the shebang is `#!/bin/bash`, and the compose entrypoint invokes
+`/bin/bash` — a POSIX `sh` rejects that substitution with "Bad substitution" (measured on dash
+0.5.12), so both places say bash rather than relying on the base image's `/bin/sh` happening to be
+bash. The pin matters because the `mc` behaviour `init.sh` depends on (alias credentials on stdin,
+the `mc admin policy` verbs) is release-specific; an untagged `minio/mc` is a different client on
+every pull.
+
 `scripts/check-minio-init-deps.sh` (CI job "MinIO init script dependencies") fails the build if the
-script ever calls a binary that image will not have; the old `sed` call exited 127 *after* the
-bucket and the runtime user existed, leaving a scoped user with no policy and every call answered
-`Access Denied`.
+script ever calls a binary other than `mc`. That is stricter than the image requires, on purpose:
+the old `sed` call exited 127 *after* the bucket and the runtime user existed, leaving a scoped user
+with no policy and every call answered `Access Denied`, and no check we had could see it.
 
 ### Keys
 

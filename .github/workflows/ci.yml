@@ -798,3 +798,106 @@ jobs:
       - name: Clean up
         if: always()
         run: docker image rm -f fleet:agent-ci || true
+
+  # The journal object-store provisioner runs inside the MinIO client image, and that image carries
+  # nothing but the `mc` binary. This job is what stops init.sh from ever again reaching a
+  # production host and dying three lines into itself.
+  #
+  # Why a guard and not a real run: MinIO withdrew every anonymous pull channel this repo has
+  # (dl.min.io returns 410, Docker Hub `minio/minio` and `quay.io/minio/*` return 401 — measured
+  # 2026-09-30), so there is no image to start here. Stated plainly so nobody reads green checks as
+  # more than they are: CI proves this script's EXTERNAL DEPENDENCIES and its substitution logic.
+  # The first run against a real MinIO on the deploy host remains the proof of the
+  # `mc admin policy` verbs — the same gap docs/comms-journal.md records for the startup probe.
+  minio-init-dependencies:
+    name: MinIO init script dependencies
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: init.sh must call nothing but mc and shell builtins
+        # The failure this exists for: `sed` on line 76 of the old script. `minio/mc` is built
+        # `FROM scratch`, so the call exited 127 AFTER the bucket and the runtime user existed.
+        run: ./scripts/check-minio-init-deps.sh
+
+      - name: The bash-only substitution has a bash to run in
+        # `${var//pattern/replacement}` is a bashism; dash answers "Bad substitution" (measured on
+        # dash 0.5.12). The shebang and the compose entrypoint must agree on bash, so the pair is
+        # checked rather than either half — a "tidy" reformat of either one reintroduces the bug.
+        run: |
+          set -euo pipefail
+          SCRIPT=deploy/comms-minio-init/init.sh
+
+          if grep -qE '\$\{[A-Za-z_][A-Za-z0-9_]*//' "$SCRIPT" \
+             && [ "$(head -n1 "$SCRIPT")" != '#!/bin/bash' ]; then
+            echo "::error::$SCRIPT uses bash pattern substitution but does not declare #!/bin/bash."
+            echo "dash rejects \${var//pattern/replacement} with 'Bad substitution'."
+            exit 1
+          fi
+
+          if ! grep -q 'entrypoint: \["/bin/bash", "/init/init.sh"\]' docker-compose.example.yml; then
+            echo "::error::docker-compose.example.yml must invoke init.sh with /bin/bash, not /bin/sh."
+            echo "The substitution in init.sh is a bashism; /bin/sh (dash) fails with 'Bad substitution'."
+            exit 1
+          fi
+          echo "bash is declared in both the shebang and the compose entrypoint."
+
+      - name: The bucket substitution produces the policy that mc is handed
+        # The defect, replayed without a MinIO server: run the substitution block taken from the
+        # SHIPPED script against the SHIPPED policy file, and assert the result is valid JSON naming
+        # the configured bucket with no placeholder left. This is what would have failed red on the
+        # `sed` version, because the file it was meant to write was never written at all.
+        run: |
+          set -euo pipefail
+
+          # Extract the block rather than duplicating it, so this cannot drift from production.
+          {
+            echo 'set -eu'
+            echo 'FLEET_COMMS_MEDIA_BUCKET="journal-prod-2026"'
+            sed -n '/^# Read with bash/,/^esac$/p' deploy/comms-minio-init/init.sh
+          } > /tmp/subst.sh
+          sed -i 's|/init/comms-runtime-policy.json|deploy/comms-minio-init/comms-runtime-policy.json|; s|/tmp/comms-runtime-policy.json|/tmp/policy-out.json|' /tmp/subst.sh
+
+          bash /tmp/subst.sh
+
+          test -s /tmp/policy-out.json || { echo "::error::no policy file was produced"; exit 1; }
+          grep -q 'arn:aws:s3:::journal-prod-2026"' /tmp/policy-out.json \
+            || { echo "::error::the bucket name was not substituted"; exit 1; }
+          grep -q 'arn:aws:s3:::journal-prod-2026/\*"' /tmp/policy-out.json \
+            || { echo "::error::the object wildcard resource was not substituted"; exit 1; }
+          if grep -q 'comms-journal}' /tmp/policy-out.json; then
+            echo "::error::the placeholder survived the substitution"
+            exit 1
+          fi
+
+          python3 -c 'import json; d=json.load(open("/tmp/policy-out.json")); assert d["Version"]=="2012-10-17"; a=set(d["Statement"][0]["Action"]); assert a=={"s3:GetObject","s3:PutObject","s3:DeleteObject","s3:ListBucket","s3:AbortMultipartUpload"}, a; r=set(d["Statement"][0]["Resource"]); assert r=={"arn:aws:s3:::journal-prod-2026","arn:aws:s3:::journal-prod-2026/*"}, r; print("policy JSON valid, actions and resources scoped to the configured bucket")'
+
+      - name: An unsubstituted placeholder fails closed
+        # The substitution's other failure mode: if the placeholder and the pattern ever stop
+        # matching each other, the result is a policy that names a bucket called `${comms-journal}`
+        # — a policy granting nothing, which is the original Access Denied wearing a different hat.
+        # `mc admin policy create` would accept that happily, so the script has to refuse it.
+        #
+        # Simulated by rewriting the PLACEHOLDER in a copy of the real policy file, so the shipped
+        # block runs against input whose placeholder it cannot match.
+        run: |
+          set -euo pipefail
+          WORK=$(mktemp -d)
+          sed 's/\${comms-journal}/\${some-other-placeholder}/' \
+            deploy/comms-minio-init/comms-runtime-policy.json > "$WORK/policy.json"
+
+          {
+            echo 'set -eu'
+            echo 'FLEET_COMMS_MEDIA_BUCKET=journal-prod-2026'
+            sed -n '/^# Read with bash/,/^esac$/p' deploy/comms-minio-init/init.sh
+          } > "$WORK/guard.sh"
+          sed -i "s|/init/comms-runtime-policy.json|$WORK/policy.json|; s|/tmp/comms-runtime-policy.json|$WORK/out.json|" "$WORK/guard.sh"
+
+          if bash "$WORK/guard.sh"; then
+            echo "::error::the script accepted a policy whose placeholder was never substituted"
+            cat "$WORK/out.json" || true
+            exit 1
+          fi
+          echo "an unsubstituted policy fails closed."

@@ -253,6 +253,75 @@ public class DeploymentKeyLockstepTests
     }
 
     /// <summary>
+    /// The init script runs inside the MinIO client image, which ships nothing but <c>mc</c> — so
+    /// it may not call another binary, and its bash-only substitution needs bash to run in.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// MUST NOT: reintroduce <c>sed</c>, <c>cat</c>, <c>awk</c> or <c>envsubst</c> here, or switch
+    /// the shebang or the compose entrypoint back to <c>sh</c>.
+    /// </para>
+    /// <para>
+    /// <c>minio/mc</c> is built <c>FROM scratch</c>: the last stage of the upstream Dockerfile
+    /// copies the <c>mc</c> binary and the CA bundle and nothing else. The old script substituted
+    /// the bucket name with <c>sed</c>, which exited 127 three steps AFTER the bucket was created
+    /// and the runtime user added — so the deployment came up with a scoped user holding no policy
+    /// and every upload, list and download answering <c>Access Denied</c>, while the bucket and the
+    /// user both looked correctly created. Nothing outside a real host could see it.
+    /// </para>
+    /// <para>
+    /// This is the cheap half of the guard; <c>scripts/check-minio-init-deps.sh</c> is the
+    /// exhaustive half and runs in CI. This one exists so the rule fails in the same place the
+    /// script is edited, and so <c>dotnet test</c> alone is enough to catch it.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void The_media_init_script_needs_nothing_the_minio_client_image_lacks()
+    {
+        var script = Read(Path.Combine("deploy", "comms-minio-init", "init.sh"));
+
+        // Strip comments and the shebang: the rule is about what the shell executes, not what the
+        // file explains.
+        var executable = string.Join(
+            '\n',
+            script.Split('\n')
+                .Select((line, i) => (line, i))
+                .Where(x => x.i > 0 && !x.line.TrimStart().StartsWith("#", StringComparison.Ordinal))
+                .Select(x => x.line));
+
+        // Anchored to a command position rather than searched as a substring: `mc admin policy
+        // update` contains "date", and a test that fires on that is a test people delete.
+        foreach (var binary in new[]
+                 {
+                     "sed", "awk", "envsubst", "cat", "grep", "tr", "cut", "head", "tail", "jq",
+                     "curl", "wget", "date", "mktemp", "dirname", "basename", "python", "openssl",
+                 })
+        {
+            Assert.False(
+                Regex.IsMatch(
+                    executable,
+                    @"(^|[;&|(`]|$\()[ \t]*" + Regex.Escape(binary) + @"[ \t<]",
+                    RegexOptions.Multiline),
+                $"init.sh calls `{binary}`, which the scratch-built minio/mc image does not ship. "
+                + "Read a file with $(<file), substitute with ${var//pattern/replacement}, and "
+                + "build text with the printf builtin.");
+        }
+
+        // The substitution is a bashism, so BOTH places that choose the interpreter have to say
+        // bash. dash answers `${var//pattern/replacement}` with "Bad substitution", which is how a
+        // cosmetic revert to `sh` would reintroduce the same broken policy.
+        Assert.StartsWith("#!/bin/bash", script);
+        Assert.Contains(
+            "entrypoint: [\"/bin/bash\", \"/init/init.sh\"]",
+            Read("docker-compose.example.yml"),
+            StringComparison.Ordinal);
+
+        // And the script must refuse a policy whose placeholder survived, rather than hand `mc` a
+        // document that grants nothing.
+        Assert.Contains("case \"$policy_json\" in", script, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The signing key reaches Comms, its operator one-shot, and the orchestrator token minter.
     /// </summary>
     [Fact]

@@ -698,6 +698,12 @@ services:
   # boot under.
   comms-minio-init:
     profiles: ["comms-media"]
+    # NOT `minio/mc`. That image is built `FROM scratch` — the `mc` binary and the CA bundle and
+    # nothing else — so it has no `/bin/sh`, no `sed`, no `awk`, and this script could not be
+    # invoked in it at all. Use an image carrying the MinIO client AND a shell, pinned to the same
+    # `mc` release the alias-stdin behaviour documented in init.sh was verified against
+    # (RELEASE.2025-08-13T08-35-41Z). init.sh checks for `mc` on PATH and exits 127 with a clear
+    # message if the pin regresses to a shell-less image.
     image: minio/mc
     container_name: comms-minio-init
     depends_on:
@@ -709,7 +715,11 @@ services:
       FLEET_COMMS_MEDIA_BUCKET: ${FLEET_COMMS_MEDIA_BUCKET:-comms-journal}
       FLEET_COMMS_MEDIA_ACCESS_KEY: ${FLEET_COMMS_MEDIA_ACCESS_KEY:-}
       FLEET_COMMS_MEDIA_SECRET_KEY: ${FLEET_COMMS_MEDIA_SECRET_KEY:-}
-    entrypoint: ["/bin/sh", "/init/init.sh"]
+    # ⚠️ `/bin/bash`, not `/bin/sh`. The bucket-name substitution in init.sh uses
+    # `${var//pattern/replacement}`, which dash rejects with "Bad substitution"; and the image has
+    # to carry a shell at all, which `minio/mc` (built `FROM scratch`) does not. See the header of
+    # deploy/comms-minio-init/init.sh.
+    entrypoint: ["/bin/bash", "/init/init.sh"]
     volumes:
       - ./deploy/comms-minio-init:/init:ro
     restart: on-failure

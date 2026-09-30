@@ -239,6 +239,17 @@ writes the two keys `fleet-comms` reads. It reads its own credentials from the e
 policy document keeps the bucket name as a placeholder that `init.sh` substitutes, so the file in
 the repo contains no deployment-specific value.
 
+⚠️ **`comms-minio-init` cannot run on `minio/mc`.** That image is built `FROM scratch` — the `mc`
+binary and the CA bundle, nothing else — so it has no `/bin/sh`, no `sed`, no `cat`, no `envsubst`.
+The substitution is done by bash (`${var//pattern/replacement}`), the script's shebang is
+`#!/bin/bash`, and the compose entrypoint invokes `/bin/bash` — dash rejects that substitution with
+"Bad substitution", so both have to say bash. Use an image carrying the MinIO client **and** a
+shell, pinned to the `mc` release the alias-stdin behaviour in `init.sh` was verified against.
+`scripts/check-minio-init-deps.sh` (CI job "MinIO init script dependencies") fails the build if the
+script ever calls a binary that image will not have; the old `sed` call exited 127 *after* the
+bucket and the runtime user existed, leaving a scoped user with no policy and every call answered
+`Access Denied`.
+
 ### Keys
 
 | Key | What it is |

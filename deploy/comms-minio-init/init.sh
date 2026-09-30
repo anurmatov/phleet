@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Provision the journal object store, on first start only.
 #
 # ONE SHOT, run by the comms-minio-init container. It is the ONLY place the root credential is
@@ -23,6 +23,18 @@ set -eu
 : "${FLEET_COMMS_MEDIA_BUCKET:?set FLEET_COMMS_MEDIA_BUCKET}"
 : "${FLEET_COMMS_MEDIA_ACCESS_KEY:?set FLEET_COMMS_MEDIA_ACCESS_KEY}"
 : "${FLEET_COMMS_MEDIA_SECRET_KEY:?set FLEET_COMMS_MEDIA_SECRET_KEY}"
+
+# ⚠️ `minio/mc` is built `FROM scratch` (upstream Dockerfile: the last stage copies the `mc`
+# binary and the CA bundle out of a Go build stage and nothing else). There is no `/bin/sh`, no
+# `/bin/bash`, no `sed`, `awk`, `grep`, `cp` or `envsubst` in that image. So nothing here may call
+# a binary other than `mc`. The check below is what turns that from a comment into a failure at the
+# top of the log rather than exit 127 three lines later.
+if ! command -v mc >/dev/null 2>&1; then
+  echo "comms-minio-init: no \`mc\` on PATH — this image cannot run this script. It needs an image" >&2
+  echo "  carrying the MinIO client AND a shell, and it must be the \`mc\` from the SAME release the" >&2
+  echo "  alias behaviour documented below was verified against." >&2
+  exit 127
+fi
 
 # The root credential goes to `mc alias set` on STDIN, never as an argument: an argument is visible
 # in `ps` to anything else in the container for as long as it runs.
@@ -69,12 +81,44 @@ mc mb --ignore-existing "comms/${FLEET_COMMS_MEDIA_BUCKET}"
 mc admin user add comms "$FLEET_COMMS_MEDIA_ACCESS_KEY" "$FLEET_COMMS_MEDIA_SECRET_KEY"
 
 # The policy is generated, not copied. MinIO interpolates `${aws:username}` inside a policy
-# document; the bucket name here is a plain variable this script substitutes with sed. A literal
+# document; the bucket name here is a plain variable this script substitutes. A literal
 # bucket name in the tracked JSON would be a policy every deployment that copied this file and
 # renamed its bucket silently grants over NOTHING — the scoped user would hold access to a bucket
 # that does not exist, and to no bucket that does.
-sed "s|\${comms-journal}|${FLEET_COMMS_MEDIA_BUCKET}|g" \
-  /init/comms-runtime-policy.json > /tmp/comms-runtime-policy.json
+#
+# ⚠️ The substitution is done by the SHELL, not by `sed`. `sed` is not in the image this runs in —
+# the old `sed "s|…|…|g"` exited 127 *after* the bucket and the runtime user had been created, so
+# the container exited, `restart: on-failure` never recovered it, and the runtime user was left with
+# no policy attached: every scoped call answered `Access Denied`, with the bucket and the user both
+# looking correctly created.
+#
+# `${var//pattern/replacement}` is a **bash** feature — `sh` (dash) rejects it with "Bad
+# substitution", measured on dash 0.5.12. That is why this file's shebang is `#!/bin/bash` and why
+# the compose entrypoint invokes it as `/bin/bash` rather than `/bin/sh`. Anyone tempted to
+# "tidy" either of those back to `sh` breaks this line first.
+#
+# The pattern escapes `$` and braces so it matches the literal placeholder text rather than
+# expanding it; the `|`-delimited `sed` form it replaces was doing the same thing.
+# Read with bash's own `< file` rather than `$(cat file)`: `cat` is another binary the client image
+# does not have, and after the guard above the only external command this script may need is `mc`.
+policy_json="$(</init/comms-runtime-policy.json)"
+policy_json="${policy_json//\$\{comms-journal\}/${FLEET_COMMS_MEDIA_BUCKET}}"
+printf '%s\n' "$policy_json" > /tmp/comms-runtime-policy.json
+
+# A substitution that silently matched nothing would produce a policy that names a bucket called
+# `${comms-journal}` — a policy granting nothing, which is exactly the failure above wearing a
+# different hat. Fail here instead of letting `mc admin policy create` accept it.
+#
+# The check is for ANY `${...}`, not for this file's placeholder specifically. A policy document is
+# also where MinIO's own `${aws:username}` interpolation lives, so a placeholder that survives is
+# never a thing the server can act on: it either names a bucket that does not exist or grants
+# nothing. Both are the Access Denied above arriving by a different route.
+case "$policy_json" in
+  *'${'*)
+    echo "comms-minio-init: the policy still contains an unsubstituted \${...} placeholder" >&2
+    exit 1
+    ;;
+esac
 
 mc admin policy create comms comms-journal-runtime /tmp/comms-runtime-policy.json \
   || mc admin policy update comms comms-journal-runtime /tmp/comms-runtime-policy.json

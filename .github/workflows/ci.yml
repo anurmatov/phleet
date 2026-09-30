@@ -323,28 +323,45 @@ jobs:
             -s3.iam.config=/fixtures/seaweedfs-signed-identity.json \
             -s3.port.iceberg=0 -s3.port.lance=0
 
-          # Wait for the S3 port of each, and for the filer gRPC port that sits behind it.
+          # Wait until each container's S3 endpoint ANSWERS OVER HTTP, not merely until the port
+          # accepts a connection.
           #
-          # `weed server` starts master, then volume, then filer, then S3. The S3 gateway is the
-          # last to listen and it does not listen until it has read the filer's configuration over
-          # gRPC — `startS3Server` retries `GetFilerConfiguration` forever before it builds its
-          # router — so an S3 port that answers already implies a reachable filer. The gRPC ports
-          # are probed anyway because they are the ports bucket creation actually uses, and a
-          # container that came up half-configured is worth naming here rather than meeting as a
-          # mysterious 404 in the fixture.
+          # ⚠️ An earlier shape of this loop also TCP-probed the filer gRPC ports 48888/48889, and
+          # that alone failed the job: those ports are never published to the runner, so the host
+          # probe can never succeed no matter how healthy the container is. It timed out at
+          # "seaweedfs on :48888 never listened" on run 36656155673, before a single test ran.
           #
-          # A TCP probe rather than an HTTP one: both containers now name an identity config, so an
-          # unauthenticated request is refused with 403, which is a WORKING server. Treating 403 as
-          # not-ready would hang the job on a fixture that is fine.
-          for c in 8333 48888 8334 48889; do
+          # Publishing them would be the wrong fix — the tests never touch those ports. What the
+          # suite actually uses is the published S3 endpoint, so that is what gets polled, and the
+          # probe is HTTP rather than TCP: `weed server` starts master, then volume, then filer,
+          # then S3, and `startS3Server` reads the filer's configuration over gRPC BEFORE it builds
+          # its router. An S3 endpoint that answers over HTTP therefore already proves the filer is
+          # reachable, which is exactly the dependency worth waiting for.
+          #
+          # The accepted set is {200, 403, 404}, measured against the pinned image with both
+          # containers' identity configs in place:
+          #   200  unauthenticated ListAllMyBuckets on the primary container, which names an
+          #        `anonymous` identity — empty <Buckets/> on a fresh server, so it proves nothing
+          #        about buckets and everything about readiness
+          #   403  the signed container, which names only a keyed identity: AccessDenied is a
+          #        WORKING server refusing an anonymous caller, and treating it as not-ready would
+          #        hang the job on a fixture that is fine
+          #   404  a bucket-level path that this gateway does not route
+          # Anything else — a refused connection, a 5xx, a hang — is not ready yet.
+          wait_for_s3() {
+            local name=$1 url=$2 body i
             for i in $(seq 1 60); do
-              if (exec 3<>"/dev/tcp/127.0.0.1/$c") 2>/dev/null; then
-                exec 3>&- 3<&-
-                echo "seaweedfs:$c is listening"
-                break
-              fi
+              # `|| true`: while the port is not listening yet curl exits non-zero, which under
+              # `set -e` would end the job instead of falling through to the next attempt.
+              body=$(curl -sS -m 5 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || true)
+              case "$body" in
+                200|403|404)
+                  echo "seaweedfs $name answered $body over HTTP"
+                  return 0
+                  ;;
+              esac
               if [ "$i" -eq 60 ]; then
-                echo "ERROR: seaweedfs on :$c never listened. Logs:"
+                echo "ERROR: seaweedfs $name never answered over HTTP at $url (last: $body). Logs:"
                 docker ps -a
                 docker logs weed-anon || true
                 docker logs weed-signed || true
@@ -352,7 +369,9 @@ jobs:
               fi
               sleep 2
             done
-          done
+          }
+          wait_for_s3 weed-anon "http://127.0.0.1:8333/"
+          wait_for_s3 weed-signed "http://127.0.0.1:8334/"
 
           # Prove both mounts actually landed, so a wrong path is THIS step's failure and not a
           # confusing "the store refused an authenticated PUT" from the fixture.

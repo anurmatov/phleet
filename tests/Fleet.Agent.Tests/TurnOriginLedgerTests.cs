@@ -769,6 +769,57 @@ public sealed class TurnOriginLedgerTests : IDisposable
             AssertGone(pid);
         }
 
+        [Fact]
+        public async Task Claude_cancelled_run_keeps_unknown_until_the_process_exit_is_confirmed()
+        {
+            using var standIn = new StandInProcess();
+            var claude = Claude();
+            claude.SetProcessForTests(standIn.Process);
+            var stdin = new SignalingTextWriter();
+            claude.SetStdinForTests(stdin);
+            var events = Channel.CreateUnbounded<ClaudeStreamEvent>();
+            claude.SetEventChannelForTests(events);
+            var feed = new LineFeed();
+            var reader = claude.RunStdoutReaderForTests(new StreamReader(feed));
+            using var cancelRun = new CancellationTokenSource();
+
+            _rig.At(100);
+            var run = EnumerateUntilCancelled(OutboundOrigin.Human, ct => claude.SendCommandAsync("/compact", ct), cancelRun.Token);
+            await stdin.WaitForWriteAsync();
+
+            // Cancelling releases the lock; claude may still be running the command.
+            _rig.At(102);
+            await cancelRun.CancelAsync();
+            await run.WaitAsync(Timeout);
+            Assert.Contains(Intervals, i => i is { Origin: TurnOrigin.Unknown, LockHeld: true } && i.End == ReceiptRig.T(102));
+            Assert.Contains(Intervals, i => i is { Origin: TurnOrigin.Unknown, LockHeld: false, End: null });
+
+            _rig.At(105);
+            using (_rig.OpenTurn(OutboundOrigin.Human))
+            {
+                _rig.At(110.1);
+                await _rig.DeliverAsync(ReceiptRig.Receipt(110, messageId: 1));
+                _rig.At(112.25);
+                await _rig.DecideAsync();
+                Assert.Equal(0, _rig.Rows);
+
+                var pid = standIn.Process.Id;
+                _rig.At(120);
+                await claude.StopProcessAsync();
+                AssertGone(pid);
+                Assert.DoesNotContain(Intervals, i => i is { Origin: TurnOrigin.Unknown, End: null });
+
+                _rig.At(125.1);
+                await _rig.DeliverAsync(ReceiptRig.Receipt(125, messageId: 2));
+                _rig.At(127.25);
+                await _rig.DecideAsync();
+            }
+
+            Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
+            Assert.Equal(1, _rig.Rows);
+            await reader.WaitAsync(Timeout);
+        }
+
         // ── Codex ──
 
         [Fact]
@@ -796,7 +847,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
         }
 
         [Fact]
-        public async Task Codex_run_is_unknown_and_closes_with_the_send_lock()
+        public async Task Codex_run_keeps_unknown_after_the_send_lock_until_its_own_turn_completes()
         {
             using var standIn = new StandInProcess();
             var codex = Codex();
@@ -809,21 +860,184 @@ public sealed class TurnOriginLedgerTests : IDisposable
 
             _rig.At(100);
             var run = Enumerate(OutboundOrigin.Human, () => codex.SendCommandAsync("ls"));
-            await Eventually(() => Intervals.Count == 1);
-            Assert.Equal((TurnOrigin.Unknown, true), (Intervals[0].Origin, Intervals[0].LockHeld));
+            await Eventually(() => Intervals.Count == 2);
+            Assert.All(Intervals, i => Assert.Equal(TurnOrigin.Unknown, i.Origin));
 
+            // The request is accepted and the lock released; the command has not run yet.
             _rig.At(101);
             await codex.WaitAndCompleteNextPendingRequestForTests(new JsonObject(), cts.Token);
-            await Eventually(() => Intervals[0].End is not null);
-            Assert.Equal(ReceiptRig.T(101), Intervals[0].End);
+            await Eventually(() => Intervals.Any(i => i is { LockHeld: true, End: not null }));
+            Assert.Equal(ReceiptRig.T(101), Intervals.Single(i => i.LockHeld).End);
+            Assert.Null(Intervals.Single(i => !i.LockHeld).End);
 
-            await notes.Writer.WriteAsync(new JsonObject
-            {
-                ["method"] = "turn/started",
-                ["params"] = new JsonObject { ["turn"] = new JsonObject { ["id"] = "cmd-1" } },
-            });
+            _rig.At(105);
+            await notes.Writer.WriteAsync(TurnStarted("cmd-1"));
+            _rig.At(110);
             await notes.Writer.WriteAsync(TurnCompleted("cmd-1"));
             await run.WaitAsync(Timeout);
+            Assert.Equal(ReceiptRig.T(110), Intervals.Single(i => !i.LockHeld).End);
+        }
+
+        [Fact]
+        public async Task Codex_run_accepted_then_a_human_lock_before_its_notifications_journals_none_of_its_sends()
+        {
+            using var standIn = new StandInProcess();
+            var codex = Codex();
+            codex.SetProcessForTests(standIn.Process);
+            codex.SetStdinForTests(standIn.StandardInput);
+            codex.SetThreadStateForTests("thread-1", null);
+            var notes = Channel.CreateUnbounded<JsonObject>();
+            codex.SetNotificationChannelForTests(notes);
+            using var cts = new CancellationTokenSource(Timeout);
+
+            _rig.At(100);
+            var run = Enumerate(OutboundOrigin.Human, () => codex.SendCommandAsync("./notify.sh"));
+            await Eventually(() => Intervals.Count == 2);
+            _rig.At(101);
+            await codex.WaitAndCompleteNextPendingRequestForTests(new JsonObject(), cts.Token);
+            await Eventually(() => Intervals.Any(i => i is { LockHeld: true, End: not null }));
+
+            // A human turn takes the turn lock before the shell command's first notification.
+            _rig.At(102);
+            var human = Enumerate(OutboundOrigin.Human, () => codex.ExecuteAsync("hello"));
+            await Eventually(() => Intervals.Any(i => i is { Origin: TurnOrigin.Human, LockHeld: true, End: null }));
+
+            _rig.At(103);
+            await notes.Writer.WriteAsync(TurnStarted("cmd-1"));
+            await notes.Writer.WriteAsync(Note("item/started", "cmd-1"));
+
+            // The shell command's own send, stamped inside the human turn: excluded.
+            _rig.At(105.1);
+            await _rig.DeliverAsync(ReceiptRig.Receipt(105, messageId: 1));
+            _rig.At(107.25);
+            await _rig.DecideAsync();
+            Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
+            Assert.Equal(0, _rig.Rows);
+
+            // Only the command's own turn/completed ends the exclusion.
+            _rig.At(110);
+            await notes.Writer.WriteAsync(TurnCompleted("cmd-1"));
+            await run.WaitAsync(Timeout);
+
+            _rig.At(115.1);
+            await _rig.DeliverAsync(ReceiptRig.Receipt(115, messageId: 2));
+            _rig.At(117.25);
+            await _rig.DecideAsync();
+            Assert.Equal(1, _rig.Rows);
+
+            await codex.WaitAndCompleteNextPendingRequestForTests(
+                new JsonObject { ["turn"] = new JsonObject { ["id"] = "turn-1" } }, cts.Token);
+            _rig.At(120);
+            await notes.Writer.WriteAsync(TurnCompleted("turn-1"));
+            await human.WaitAsync(Timeout);
+        }
+
+        [Fact]
+        public async Task Codex_cancelled_run_keeps_unknown_until_the_process_exit_is_confirmed()
+        {
+            using var standIn = new StandInProcess();
+            var codex = Codex();
+            codex.SetProcessForTests(standIn.Process);
+            codex.SetStdinForTests(standIn.StandardInput);
+            codex.SetThreadStateForTests("thread-1", null);
+            var notes = Channel.CreateUnbounded<JsonObject>();
+            codex.SetNotificationChannelForTests(notes);
+            var feed = new LineFeed();
+            var reader = codex.RunStdoutReaderForTests(new StreamReader(feed));
+            using var cancelRun = new CancellationTokenSource();
+            using var cts = new CancellationTokenSource(Timeout);
+
+            _rig.At(100);
+            var run = EnumerateUntilCancelled(OutboundOrigin.Human, ct => codex.SendCommandAsync("./notify.sh", ct), cancelRun.Token);
+            await Eventually(() => Intervals.Count == 2);
+            _rig.At(101);
+            await codex.WaitAndCompleteNextPendingRequestForTests(new JsonObject(), cts.Token);
+            feed.WriteLine(TurnStarted("cmd-1").ToJsonString());
+
+            // Cancelling the command proves nothing about the shell it started.
+            _rig.At(102);
+            await cancelRun.CancelAsync();
+            await run.WaitAsync(Timeout);
+            Assert.Contains(Intervals, i => i is { Origin: TurnOrigin.Unknown, LockHeld: false, End: null });
+
+            _rig.At(105);
+            using (_rig.OpenTurn(OutboundOrigin.Human))
+            {
+                _rig.At(110.1);
+                await _rig.DeliverAsync(ReceiptRig.Receipt(110, messageId: 1));
+                _rig.At(112.25);
+                await _rig.DecideAsync();
+                Assert.Equal(0, _rig.Rows);
+
+                var pid = standIn.Process.Id;
+                _rig.At(120);
+                await codex.StopProcessAsync();
+                AssertGone(pid);
+                Assert.DoesNotContain(Intervals, i => i is { Origin: TurnOrigin.Unknown, End: null });
+
+                _rig.At(125.1);
+                await _rig.DeliverAsync(ReceiptRig.Receipt(125, messageId: 2));
+                _rig.At(127.25);
+                await _rig.DecideAsync();
+            }
+
+            Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
+            Assert.Equal(1, _rig.Rows);
+            feed.End();
+            await reader.WaitAsync(Timeout);
+        }
+
+        [Fact]
+        public async Task Codex_interrupted_turn_whose_drain_times_out_stays_unknown_until_the_process_exit_is_confirmed()
+        {
+            using var standIn = new StandInProcess();
+            var codex = Codex();
+            codex.SetProcessForTests(standIn.Process);
+            codex.SetStdinForTests(standIn.StandardInput);
+            codex.SetThreadStateForTests("thread-1", null);
+            var notes = Channel.CreateUnbounded<JsonObject>();
+            codex.SetNotificationChannelForTests(notes);
+            var feed = new LineFeed();
+            var reader = codex.RunStdoutReaderForTests(new StreamReader(feed));
+            using var cancelTurn = new CancellationTokenSource();
+            using var cts = new CancellationTokenSource(Timeout);
+
+            _rig.At(100);
+            var relay = EnumerateUntilCancelled(OutboundOrigin.Relay, ct => codex.ExecuteAsync("directive", ct: ct), cancelTurn.Token);
+            await codex.WaitAndCompleteNextPendingRequestForTests(
+                new JsonObject { ["turn"] = new JsonObject { ["id"] = "turn-r" } }, cts.Token);
+            feed.WriteLine(TurnStarted("turn-r").ToJsonString());
+            await Eventually(() => codex.ActiveTurnIdForTests == "turn-r");
+
+            // Cancelled, and the interrupted turn never reports its end within the drain.
+            _rig.At(102);
+            await cancelTurn.CancelAsync();
+            await relay.WaitAsync(Timeout);
+            Assert.Contains(Intervals, i => i is { Origin: TurnOrigin.Relay, End: not null });
+            Assert.Contains(Intervals, i => i is { Origin: TurnOrigin.Unknown, End: null });
+
+            _rig.At(105);
+            using (_rig.OpenTurn(OutboundOrigin.Human))
+            {
+                _rig.At(110.1);
+                await _rig.DeliverAsync(ReceiptRig.Receipt(110, messageId: 1));
+                _rig.At(112.25);
+                await _rig.DecideAsync();
+                Assert.Equal(0, _rig.Rows);
+
+                _rig.At(120);
+                await codex.StopProcessAsync();
+
+                _rig.At(125.1);
+                await _rig.DeliverAsync(ReceiptRig.Receipt(125, messageId: 2));
+                _rig.At(127.25);
+                await _rig.DecideAsync();
+            }
+
+            Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
+            Assert.Equal(1, _rig.Rows);
+            feed.End();
+            await reader.WaitAsync(Timeout);
         }
 
         [Fact]
@@ -942,6 +1156,86 @@ public sealed class TurnOriginLedgerTests : IDisposable
             Assert.Equal(0, _rig.Rows);
         }
 
+        [Fact]
+        public async Task Gemini_cancel_with_a_confirmed_kill_closes_the_interval_at_the_exit()
+        {
+            using var standIn = new GeminiStandIn();
+            var gemini = Gemini(standIn);
+            using var cancel = new CancellationTokenSource();
+
+            _rig.At(100);
+            var relay = EnumerateUntilCancelled(OutboundOrigin.Relay, ct => gemini.ExecuteAsync("directive", ct: ct), cancel.Token);
+            await Eventually(() => Intervals.Count == 1);
+
+            _rig.At(102);
+            await cancel.CancelAsync();
+            await relay.WaitAsync(Timeout);
+            Assert.Equal((TurnOrigin.Relay, (DateTimeOffset?)ReceiptRig.T(102)), (Intervals.Single().Origin, Intervals.Single().End));
+        }
+
+        [Fact]
+        public async Task Gemini_failed_kill_keeps_the_relay_interval_until_the_process_really_exits()
+        {
+            using var standIn = new GeminiStandIn();
+            var gemini = Gemini(standIn, terminate: _ => Task.FromResult(false));
+            await AssertExclusionHeldUntilExitAsync(gemini, exit: () => standIn.Release());
+        }
+
+        [Fact]
+        public async Task Gemini_delayed_kill_keeps_the_relay_interval_until_the_kill_takes_effect()
+        {
+            using var standIn = new GeminiStandIn();
+            var killNow = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var gemini = Gemini(standIn, terminate: process =>
+            {
+                // The kill lands only when the test says so; the bounded wait gives up first.
+                _ = killNow.Task.ContinueWith(_ => process.Kill(entireProcessTree: true), TaskScheduler.Default);
+                return Task.FromResult(false);
+            });
+            await AssertExclusionHeldUntilExitAsync(gemini, exit: () => killNow.SetResult());
+        }
+
+        /// <summary>
+        /// A relay CLI is cancelled and its kill does not confirm an exit. Until <paramref name="exit"/>
+        /// makes it exit, a human send is excluded; afterwards one is captured.
+        /// </summary>
+        private async Task AssertExclusionHeldUntilExitAsync(GeminiExecutor gemini, Action exit)
+        {
+            using var cancel = new CancellationTokenSource();
+
+            _rig.At(100);
+            var relay = EnumerateUntilCancelled(OutboundOrigin.Relay, ct => gemini.ExecuteAsync("directive", ct: ct), cancel.Token);
+            await Eventually(() => Intervals.Count == 1);
+
+            _rig.At(102);
+            await cancel.CancelAsync();
+            await relay.WaitAsync(Timeout);
+            Assert.Equal((TurnOrigin.Relay, (DateTimeOffset?)null), (Intervals.Single().Origin, Intervals.Single().End));
+
+            _rig.At(105);
+            using (_rig.OpenTurn(OutboundOrigin.Human))
+            {
+                _rig.At(110.1);
+                await _rig.DeliverAsync(ReceiptRig.Receipt(110, messageId: 1));
+                _rig.At(112.25);
+                await _rig.DecideAsync();
+                Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
+                Assert.Equal(0, _rig.Rows);
+
+                _rig.At(120);
+                exit();
+                await Eventually(() => Intervals.Single(i => i.Origin == TurnOrigin.Relay).End is not null);
+                Assert.Equal(ReceiptRig.T(120), Intervals.Single(i => i.Origin == TurnOrigin.Relay).End);
+
+                _rig.At(125.1);
+                await _rig.DeliverAsync(ReceiptRig.Receipt(125, messageId: 2));
+                _rig.At(127.25);
+                await _rig.DecideAsync();
+            }
+
+            Assert.Equal(1, _rig.Rows);
+        }
+
         // ── harness ──
 
         private const string Assistant = """{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}""";
@@ -965,20 +1259,32 @@ public sealed class TurnOriginLedgerTests : IDisposable
                 _ => null, ledger: _rig.Ledger);
         }
 
-        private GeminiExecutor Gemini(GeminiStandIn standIn)
+        private GeminiExecutor Gemini(GeminiStandIn standIn, Func<Process, Task<bool>>? terminate = null)
         {
             var options = Options.Create(new AgentOptions
             {
                 Name = "test", Role = "test", WorkDir = _rig.Root, Provider = "gemini", Model = "gemini-2.5-flash",
             });
             return new GeminiExecutor(options, new PromptBuilder(options, NullLogger<PromptBuilder>.Instance),
-                NullLogger<GeminiExecutor>.Instance, standIn.Start, _rig.Ledger);
+                NullLogger<GeminiExecutor>.Instance, standIn.Start, _rig.Ledger, terminate);
         }
 
         private Task Enumerate(OutboundOrigin origin, Func<IAsyncEnumerable<AgentProgress>> call) => Task.Run(async () =>
         {
             using var _ = _rig.Ledger.Pending(origin);
             await foreach (var __ in call()) { }
+        });
+
+        /// <summary>Like <see cref="Enumerate"/>, for a call the test cancels: the cancellation is the expected end.</summary>
+        private Task EnumerateUntilCancelled(
+            OutboundOrigin origin, Func<CancellationToken, IAsyncEnumerable<AgentProgress>> call, CancellationToken ct) => Task.Run(async () =>
+        {
+            using var _ = _rig.Ledger.Pending(origin);
+            try
+            {
+                await foreach (var __ in call(ct)) { }
+            }
+            catch (OperationCanceledException) { }
         });
 
         private static ClaudeStreamEvent Result() => new() { Type = "result", Subtype = "success", Result = "ok" };
@@ -997,10 +1303,16 @@ public sealed class TurnOriginLedgerTests : IDisposable
             }
         }
 
-        private static JsonObject Note(string method) => new()
+        private static JsonObject Note(string method, string turnId = "turn-x") => new()
         {
             ["method"] = method,
-            ["params"] = new JsonObject { ["turnId"] = "turn-x" },
+            ["params"] = new JsonObject { ["turnId"] = turnId },
+        };
+
+        private static JsonObject TurnStarted(string turnId) => new()
+        {
+            ["method"] = "turn/started",
+            ["params"] = new JsonObject { ["turn"] = new JsonObject { ["id"] = turnId } },
         };
 
         private static JsonObject TurnCompleted(string turnId) => new()

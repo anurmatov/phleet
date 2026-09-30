@@ -993,8 +993,11 @@ public sealed class ClaudeExecutor : IAgentExecutor
     {
         _lastActivity = DateTimeOffset.UtcNow;
         await _sendLock.WaitAsync(ct);
-        // #394: a raw command is never attributed to anyone.
+        // #394: a raw command is never attributed to anyone. A cancelled command releases the lock
+        // while claude may still be running it, so commandInterval stays until its own result is
+        // read below or the process's end is confirmed.
         var turnInterval = _ledger?.OpenTurn(command: true);
+        TurnOriginLedger.LedgerInterval? commandInterval = null;
 
         try
         {
@@ -1025,6 +1028,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 type = "user",
                 message = new { role = "user", content = command }
             });
+            commandInterval = _ledger?.OpenUntilEnded(_activity);
             await WriteStdinLineAsync(message, ct);
 
             // Read response events until "result" — via the channel, not _stdout directly.
@@ -1040,6 +1044,11 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
                 var isCurrentTurnResult = IsCurrentTurnResult(evt);
                 var progress = ParseProgress(evt);
+
+                // The command's own result: closed before the yield, which a caller may never resume.
+                if (isCurrentTurnResult)
+                    commandInterval?.Close();
+
                 yield return progress;
 
                 if (isCurrentTurnResult)

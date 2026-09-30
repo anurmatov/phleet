@@ -58,6 +58,12 @@ public sealed class GeminiExecutor : IAgentExecutor
     private readonly TurnOriginLedger? _ledger;
     private readonly Func<ProcessStartInfo, Process?> _processStarter;
 
+    // Kills a CLI that is still running and reports whether its exit is confirmed (#394).
+    private readonly Func<Process, Task<bool>> _terminate;
+
+    /// <summary>How long a kill waits for the exit before the process is handed to a watcher.</summary>
+    internal static readonly TimeSpan KillExitWait = TimeSpan.FromSeconds(10);
+
     public GeminiExecutor(
         IOptions<AgentOptions> config, PromptBuilder promptBuilder, ILogger<GeminiExecutor> logger,
         TurnOriginLedger? ledger = null)
@@ -67,13 +73,15 @@ public sealed class GeminiExecutor : IAgentExecutor
 
     internal GeminiExecutor(
         IOptions<AgentOptions> config, PromptBuilder promptBuilder, ILogger<GeminiExecutor> logger,
-        Func<ProcessStartInfo, Process?> processStarter, TurnOriginLedger? ledger = null)
+        Func<ProcessStartInfo, Process?> processStarter, TurnOriginLedger? ledger = null,
+        Func<Process, Task<bool>>? terminate = null)
     {
         _config = config.Value;
         _promptBuilder = promptBuilder;
         _logger = logger;
         _processStarter = processStarter;
         _ledger = ledger;
+        _terminate = terminate ?? KillAndConfirmExitAsync;
 
         _logger.LogInformation(
             "GeminiExecutor: CLI-per-task mode. " +
@@ -332,16 +340,27 @@ public sealed class GeminiExecutor : IAgentExecutor
         finally
         {
             // Kill any still-running process and delete the temp system-prompt file + attachment dir.
-            try
+            // #394: the ledger interval closes only on a confirmed exit. A kill that failed or has
+            // not taken effect yet leaves the CLI able to send, so a watcher keeps the interval
+            // open until the process really exits.
+            var exited = true;
+            if (process is not null)
             {
-                if (process is not null && !process.HasExited)
-                    process.Kill(entireProcessTree: true);
+                try { exited = process.HasExited || await _terminate(process); }
+                catch { exited = false; }
             }
-            catch { /* non-fatal */ }
 
-            // Already closed at exit on the normal path; here after a cancellation or a failure.
-            processInterval?.Close();
-            process?.Dispose();
+            if (exited)
+            {
+                // Already closed at exit on the normal path; here after a cancellation or a failure.
+                processInterval?.Close();
+                process?.Dispose();
+            }
+            else
+            {
+                _logger.LogWarning("GeminiExecutor: the gemini CLI did not confirm its exit after a kill; waiting for it in the background");
+                _ = CloseOnExitAsync(process!, processInterval);
+            }
 
             try { File.Delete(systemPromptPath); }
             catch { /* non-fatal */ }
@@ -352,6 +371,41 @@ public sealed class GeminiExecutor : IAgentExecutor
                     Directory.Delete(attachmentDir, recursive: true);
             }
             catch { /* non-fatal */ }
+        }
+    }
+
+    /// <summary>Kills the CLI and waits a bounded time for the exit. True only when the exit is confirmed.</summary>
+    private static async Task<bool> KillAndConfirmExitAsync(Process process)
+    {
+        try { process.Kill(entireProcessTree: true); }
+        catch { /* the exit check below decides */ }
+
+        try
+        {
+            using var wait = new CancellationTokenSource(KillExitWait);
+            await process.WaitForExitAsync(wait.Token);
+        }
+        catch { /* not confirmed within the bound */ }
+
+        try { return process.HasExited; }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Closes <paramref name="interval"/> once <paramref name="process"/> has really exited (#394).
+    /// A wait that fails leaves the interval open: the exclusion is kept, never guessed away.
+    /// </summary>
+    private static async Task CloseOnExitAsync(Process process, TurnOriginLedger.LedgerInterval? interval)
+    {
+        try
+        {
+            await process.WaitForExitAsync();
+            interval?.Close();
+        }
+        catch { /* exit not confirmed: the interval stays open */ }
+        finally
+        {
+            process.Dispose();
         }
     }
 

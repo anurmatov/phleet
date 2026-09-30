@@ -341,9 +341,12 @@ public sealed class CodexExecutor : IAgentExecutor
     {
         _lastActivity = DateTimeOffset.UtcNow;
         await _sendLock.WaitAsync(ct);
-        // #394: a raw command is never attributed to anyone. The shell command streams after the
-        // release below; its item/* notifications open an untracked unknown interval then.
+        // #394: a raw command is never attributed to anyone. The lock-held interval covers the
+        // request; the shell command itself runs after the request was accepted and the lock
+        // released, so commandInterval covers it until its own turn/completed is read below or the
+        // app-server's exit is confirmed — whoever takes a lock meanwhile.
         var turnInterval = _ledger?.OpenTurn(command: true);
+        TurnOriginLedger.LedgerInterval? commandInterval = null;
 
         Exception? commandError = null;
 
@@ -361,6 +364,11 @@ public sealed class CodexExecutor : IAgentExecutor
                 ["command"] = command,
             };
 
+            // Opened before the request, so no notification of the command can precede it. A
+            // request that fails any other way than an RPC refusal may still have been accepted:
+            // the interval then stays open until the process ends.
+            commandInterval = _ledger?.OpenUntilEnded(_activity);
+
             // Intentional: `thread/shellCommand` is the v2 thread-scoped shell entrypoint.
             // It preserves shell syntax (pipes, redirects, quoting) unlike `command/exec`.
             await SendRequestAsync(ThreadShellCommandMethod, shellParams, ct);
@@ -372,6 +380,8 @@ public sealed class CodexExecutor : IAgentExecutor
             LogRpcError(ex);
             if (ex.IsSessionError) RequestRestart();
             commandError = ex;
+            // Refused, so nothing runs.
+            commandInterval?.Close();
         }
         finally
         {
@@ -388,6 +398,13 @@ public sealed class CodexExecutor : IAgentExecutor
         await foreach (var progress in StreamTurnAsync(expectedTurnId: null, ct))
         {
             _lastActivity = DateTimeOffset.UtcNow;
+
+            // The command's own turn/completed: closed before the yield, which a caller may never
+            // resume. Not on a channel-closed result — a cancelled reader is not a confirmed exit,
+            // and a real one closes the interval itself. A cancelled enumeration closes nothing.
+            if (progress.FinalResult is not null && !progress.IsProcessExit)
+                commandInterval?.Close();
+
             yield return progress;
             if (progress.FinalResult is not null) yield break;
         }
@@ -1403,6 +1420,10 @@ public sealed class CodexExecutor : IAgentExecutor
         catch (OperationCanceledException)
         {
             _logger.LogWarning("CodexExecutor timed out draining interrupted turn {TurnId}", turnId);
+
+            // #394: the turn was not seen to end, so it may still run after the lock is released.
+            // Opened while the caller's lock-held interval is still open, so coverage is seamless.
+            _ledger?.OpenUntilEnded(_activity);
         }
         catch (ChannelClosedException)
         {

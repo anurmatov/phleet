@@ -44,6 +44,10 @@ public enum ToolSendAttribution
 /// <see cref="TurnOrigin.Unknown"/> interval; only the first terminal event after it, stdout EOF or
 /// a completed kill closes it. Silence, a timeout, another lock acquisition, a restart request or a
 /// cancelled reader never do.</item>
+/// <item><see cref="OpenUntilEnded"/>, for work that can outlive the turn lock (a shell command
+/// accepted before it runs, a cancelled command, an interrupted turn whose drain timed out, a
+/// Gemini CLI whose kill is unconfirmed). <see cref="TurnOrigin.Unknown"/>; it ends only on that
+/// work's own terminal event or a confirmed process exit, whoever holds the lock meanwhile.</item>
 /// </list>
 /// <para>
 /// The rule (<see cref="Attribute"/>) is fail closed: <b>every</b> instant of
@@ -129,6 +133,33 @@ public sealed class TurnOriginLedger
     public ProviderActivity TrackProvider() => new(this);
 
     /// <summary>
+    /// Opens an <see cref="TurnOrigin.Unknown"/> interval for provider work that can outlive the
+    /// turn lock: a shell command that streams after its request was accepted, a turn that was
+    /// cancelled without a confirmed end. No lock, silence, timeout or other turn's terminal event
+    /// closes it — only <see cref="LedgerInterval.Close"/>, called by the executor once it has seen
+    /// this work's own terminal event, or <paramref name="owner"/>'s confirmed process end.
+    /// </summary>
+    /// <param name="owner">The provider process the work runs in. Null: only an explicit close ends it.</param>
+    public LedgerInterval OpenUntilEnded(ProviderActivity? owner)
+    {
+        lock (_gate)
+        {
+            var now = _time.GetUtcNow();
+            var interval = new LedgerInterval(this, TurnOrigin.Unknown, now, lockHeld: false, owner);
+
+            // A process confirmed dead runs nothing.
+            if (owner is { Ended: true })
+                interval.End = now;
+            else
+                owner?.Held.Add(interval);
+
+            _intervals.Add(interval);
+            SweepLocked(now);
+            return interval;
+        }
+    }
+
+    /// <summary>
     /// Decides a tool send stamped <paramref name="requestedAt"/> by the publisher's clock, as of now.
     /// An interval still open counts as covering up to now. The caller waits until the agent clock
     /// has passed the end of the window; asked earlier, the answer is <see cref="ToolSendAttribution.Unattributed"/>.
@@ -204,7 +235,11 @@ public sealed class TurnOriginLedger
 
         interval.End = now;
         if (interval.LockHeld) _openLockHeld--;
-        if (interval.Owner is { } owner && ReferenceEquals(owner.Open, interval)) owner.Open = null;
+        if (interval.Owner is { } owner)
+        {
+            if (ReferenceEquals(owner.Open, interval)) owner.Open = null;
+            owner.Held.Remove(interval);
+        }
         SweepLocked(now);
     }
 
@@ -238,7 +273,9 @@ public sealed class TurnOriginLedger
         lock (_gate)
         {
             activity.Ended = true;
-            if (activity.Open is { } open) CloseLocked(open, _time.GetUtcNow());
+            var now = _time.GetUtcNow();
+            if (activity.Open is { } open) CloseLocked(open, now);
+            foreach (var held in activity.Held.ToArray()) CloseLocked(held, now);
         }
     }
 
@@ -312,13 +349,19 @@ public sealed class TurnOriginLedger
         internal LedgerInterval? Open { get; set; }
         internal bool Ended { get; set; }
 
+        /// <summary>Intervals from <see cref="OpenUntilEnded"/>: a terminal event does not close them.</summary>
+        internal List<LedgerInterval> Held { get; } = [];
+
         /// <summary>
         /// A turn-content event was read. Opens an unknown interval when no lock-held and no
         /// untracked interval is open.
         /// </summary>
         public void TurnContent() => _ledger.OnTurnContent(this);
 
-        /// <summary>A terminal event was read: closes the interval this process opened, if any.</summary>
+        /// <summary>
+    /// A terminal event was read: closes the untracked interval the reader opened, if any — never
+    /// one from <see cref="OpenUntilEnded"/>.
+    /// </summary>
         public void TurnEnded() => _ledger.OnTurnEnded(this);
 
         /// <summary>

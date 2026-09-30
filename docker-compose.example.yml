@@ -653,18 +653,9 @@ services:
 
   # ── Journal media (opt-in, profile `comms-media`) ───────────────────────────
   #
-  # The journal's object store. Its OWN MinIO, not a bucket on fleet-minio.
-  #
-  # fleet-minio is an anonymous-READ share bucket that agents write into and that a host port
-  # publishes on purpose. Journal objects are archived human conversation content. Sharing one
-  # server between the two means one mistaken `mc anonymous set` on the share bucket exposes the
-  # archive too, and one restore of the share bucket destroys the archive with it. The same
-  # argument made comms-mysql its own database.
-  #
-  # ⚠️ NO `ports:` BLOCK, unlike fleet-minio. Nothing outside this network ever reads the bucket:
-  # the only readers are fleet-comms (uploads) and fleet-comms-ops (backup, verify, restore). A
-  # published port would put the archive on a host interface, which is the exposure the operator
-  # agreed to for a share bucket and did NOT agree to for this one.
+  # Keep archived conversation media on a dedicated object store, separate from public storage.
+  # Only fleet-comms and fleet-comms-ops access this private bucket through the internal network.
+  # No host ports: uploads and backup/verify/restore commands use authenticated internal access.
   comms-minio:
     profiles: ["comms-media"]
     image: minio/minio

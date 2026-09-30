@@ -420,6 +420,75 @@ public sealed class JournalConfigurationTests : IDisposable
         await stdout;
     }
 
+    [Fact]
+    public async Task Shared_probe_budget_expiry_after_signed_head_starts_degraded()
+    {
+        var endpoint = FreePort();
+        var journal = FreePort();
+        using var listener = new TcpListener(IPAddress.Loopback, endpoint);
+        listener.Start();
+        using var stop = new CancellationTokenSource();
+        var anonymousRequested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var serving = Task.Run(async () =>
+        {
+            try
+            {
+                // HEAD uses over half the shared eight-second budget. GET must outlive the
+                // remainder but not its own five-second timeout, so caller cancellation wins.
+                using var head = await listener.AcceptTcpClientAsync(stop.Token);
+                using var headReader = new StreamReader(head.GetStream());
+                Assert.StartsWith("HEAD ", await headReader.ReadLineAsync(stop.Token));
+                while (await headReader.ReadLineAsync(stop.Token) is { Length: > 0 }) { }
+                await Task.Delay(TimeSpan.FromSeconds(4.5), stop.Token);
+                await head.GetStream().WriteAsync(System.Text.Encoding.ASCII.GetBytes(
+                    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"), stop.Token);
+                head.Close();
+
+                using var get = await listener.AcceptTcpClientAsync(stop.Token);
+                using var getReader = new StreamReader(get.GetStream());
+                Assert.StartsWith("GET ", await getReader.ReadLineAsync(stop.Token));
+                while (await getReader.ReadLineAsync(stop.Token) is { Length: > 0 }) { }
+                anonymousRequested.SetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, stop.Token);
+            }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+        });
+        var env = MediaEnvironment($"http://127.0.0.1:{endpoint}");
+        env["Comms__Journal__Url"] = $"http://127.0.0.1:{journal}";
+        using var process = Start(env);
+        var stderr = process.StandardError.ReadToEndAsync();
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        try
+        {
+            await anonymousRequested.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            var deadline = Stopwatch.StartNew();
+            while (!CanConnect(journal))
+            {
+                if (process.HasExited) Assert.Fail(await stderr);
+                Assert.True(deadline.Elapsed < TimeSpan.FromSeconds(10), "journal never started degraded");
+                await Task.Delay(50);
+            }
+            using var http = new HttpClient();
+            http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Bearer", JournalTestHost.Token("ingest"));
+            using var response = await http.PostAsync(
+                $"http://127.0.0.1:{journal}/journal/v1/uploads",
+                new StringContent(System.Text.Json.JsonSerializer.Serialize(new
+                { sha256 = new string('a', 64), byteSize = 1, mimeType = "image/jpeg" })));
+            // A valid, authenticated upload declaration must still find the media gate closed.
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        }
+        finally
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            stop.Cancel();
+            await serving;
+        }
+        Assert.Contains("media_state=degraded", await stderr);
+        await stdout;
+    }
+
     [Theory]
     [InlineData(200)]
     [InlineData(404)]

@@ -310,7 +310,16 @@ static async Task<bool> ProbeWithinBudgetAsync(Fleet.Conversations.Journal.S3Obj
 {
     // Shorter than the SDK's own 30 s request timeout on purpose.
     using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(8));
-    return await bucket.ProbeAsync(budget.Token) && await bucket.ProbeAnonymousAsync(budget.Token);
+    try
+    {
+        return await bucket.ProbeAsync(budget.Token) && await bucket.ProbeAnonymousAsync(budget.Token);
+    }
+    catch (OperationCanceledException) when (budget.IsCancellationRequested)
+    {
+        // Neither successful HEAD nor partial anonymous probing proves both checks passed.
+        // Expiring this shared startup budget is an unavailable dependency, not a bad config.
+        return false;
+    }
 }
 
 /// <summary>Named so the test host can reference the entry-point assembly.</summary>

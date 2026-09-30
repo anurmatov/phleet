@@ -264,6 +264,36 @@ public sealed class JournalDrainer : BackgroundService
                 }
                 return;
 
+            case 409 when result.Error == "upload_incomplete" && ClearUploadReferences(entry):
+                // ⚠️ The server refused the upload references this record carries. It says so
+                //    without distinguishing why, and every reason it could mean — the object was
+                //    swept or aborted between the PUT and the commit, the spool file was restored
+                //    from a backup whose bucket no longer has it, the row stopped being ours — is
+                //    answered the same way and is RECOVERABLE from the local spool: the bytes are
+                //    still on disk, so this record can simply upload them again.
+                //
+                //    Dead-lettering here throws away a message the agent is owed, permanently, over
+                //    a bucket hiccup. Clearing the references puts the record back into exactly the
+                //    shape the capture wrote — no uploadId, no uploadSha256, the placeholder
+                //    `media_disabled` the upload pass reads as "not proven yet" — and the next pass
+                //    re-uploads through UploadMediaAsync. That pass is idempotent by the record's
+                //    own content, which is what makes this loop safe rather than a duplicate-PUT
+                //    generator.
+                //
+                //    The retry is bounded, but not by the 5xx rule: 409 does not increment the
+                //    consecutive-failure counter, so a record whose bytes the bucket will never
+                //    accept re-puts them on every pass until the media route's own cap or an operator
+                //    stops it. That is the deliberate trade — a spurious refusal must not cost a
+                //    delivered message — and `journal_media_reason{reason=upload_incomplete}` is the
+                //    signal that says a record has been spinning here rather than a count to alert on.
+                _counters.MediaReason("upload_incomplete");
+                entry.NextAttemptAt = now;
+                Save(entry);
+                _logger.LogWarning(
+                    "journal record {Id} had unresolvable upload references; clearing them and "
+                    + "re-uploading from the spool", entry.Id);
+                return;
+
             case 409:
                 Dead(entry, result.Error ?? "conflict");
                 return;
@@ -415,6 +445,16 @@ public sealed class JournalDrainer : BackgroundService
             {
                 attachment["uploadId"] = upload.UploadId;
                 attachment["uploadSha256"] = upload.Sha256;
+
+                // ⚠️ The capture writes `notArchivedReason: "media_disabled"` as a placeholder for
+                //    "I had no bucket to put this in". Now that the drain HAS proven the bytes, that
+                //    placeholder is a lie — and worse than a lie: the parser treats
+                //    `notArchivedReason` and `uploadId` as mutually exclusive and refuses the
+                //    attachment when both are present, so leaving it here turns every drained record
+                //    with media into a 422 for the whole submission. The reason is removed as the
+                //    upload id is set, in the same mutation, and the record that goes to the wire is
+                //    the record the parser accepts.
+                attachment.Remove("notArchivedReason");
             }
             else
             {
@@ -496,6 +536,41 @@ public sealed class JournalDrainer : BackgroundService
             }
 
             if (!referenced) continue;
+            attachment["notArchivedReason"] = "media_disabled";
+            changed = true;
+        }
+
+        return changed;
+    }
+
+    /// <summary>
+    /// Puts every attachment that references stored bytes back into the "not proven yet" shape:
+    /// <c>uploadId</c> and <c>uploadSha256</c> gone, placeholder <c>media_disabled</c> in their
+    /// place. Returns false when there was nothing to clear.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately the mirror image of <see cref="RewriteUploadsAsMediaDisabled"/> and not a reuse
+    /// of it: that one is the terminal answer for a deployment with no bucket, so it drops
+    /// <c>sha256</c> and leaves the record settled. This one must KEEP the attachment's declared
+    /// <c>sha256</c> — the capture's honest reading of the spool file — because the re-upload
+    /// compares the bytes it hashes against it. A record with nothing left to re-prove returns
+    /// false, which is what stops the 409 handler from looping.
+    /// </remarks>
+    private static bool ClearUploadReferences(SpoolEntry entry)
+    {
+        if (entry.Record["attachments"] is not System.Text.Json.Nodes.JsonArray attachments) return false;
+
+        var changed = false;
+        foreach (var node in attachments)
+        {
+            if (node is not System.Text.Json.Nodes.JsonObject attachment) continue;
+
+            // Only an attachment that actually carries an upload reference can be re-uploaded. A
+            // reason-only attachment is already settled and must not be touched.
+            if (!HasText(attachment, "uploadId")) continue;
+
+            attachment.Remove("uploadId");
+            attachment.Remove("uploadSha256");
             attachment["notArchivedReason"] = "media_disabled";
             changed = true;
         }

@@ -250,15 +250,28 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     public Task SendTextAsync(long chatId, string text, CancellationToken ct = default)
         => SendTextAsync(chatId, text, OutboundOrigin.Human, ct);
 
-    public async Task SendTextAsync(long chatId, string text, OutboundOrigin origin, CancellationToken ct = default)
+    // Not journaled (#394). Notices, progress posts and command output come this way; a turn's
+    // answer comes through SendReplyAsync, the only outbound send the journal records.
+    public Task SendTextAsync(long chatId, string text, OutboundOrigin origin, CancellationToken ct = default)
+        => SendTextCoreAsync(chatId, text, journalText: "", journal: null, ct);
+
+    /// <summary>
+    /// Sends a turn's answer: the one outbound send that is journaled (#394). Telegram gets exactly
+    /// what the composed reply always produced. The journal gets the body alone, rendered through
+    /// the same stage that sent each message, and never the stats line or the tool block.
+    /// </summary>
+    public async Task SendReplyAsync(long chatId, AgentReply reply, OutboundOrigin origin, CancellationToken ct = default)
     {
-        // Everything one call puts on Telegram is journaled together, so a reply split into several
-        // messages shares one sendGroup. Flushed in finally: a send that fails half-way still
-        // journals the parts Telegram accepted.
+        // Everything one reply puts on Telegram is journaled together, so a reply split into
+        // several messages shares one sendGroup. Flushed in finally: a send that fails half-way
+        // still journals the parts Telegram accepted.
         var journal = _journal?.Outbound(origin);
         try
         {
-            await SendTextCoreAsync(chatId, text, journal, ct);
+            if (reply.HasToolBlock)
+                await SendHtmlTextCoreAsync(chatId, reply.ComposeHtml(), reply.HtmlBody(), journal, ct);
+            else
+                await SendTextCoreAsync(chatId, reply.ComposeText(), reply.Content, journal, ct);
         }
         finally
         {
@@ -266,7 +279,16 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         }
     }
 
-    private async Task SendTextCoreAsync(long chatId, string text, JournalCapture.OutboundBatch? journal, CancellationToken ct)
+    /// <summary>The transport renders a reply itself, so it can journal the body apart from the footer.</summary>
+    public bool RendersReplies => true;
+
+    /// <param name="text">What Telegram gets, exactly as before #394.</param>
+    /// <param name="journalText">
+    /// The reply body without the footer (Path S), put through the same token strip, <c>[IMAGE:]</c>
+    /// split and per-mode render as <paramref name="text"/>. Only its last part can differ, since
+    /// the footer is appended at the very end. Unused without a journal.
+    /// </param>
+    private async Task SendTextCoreAsync(long chatId, string text, string journalText, JournalCapture.OutboundBatch? journal, CancellationToken ct)
     {
         // chatId==0 means "headless workflow delegation" — no Telegram destination.
         // The result still flows back to the caller via the relay (see OnTaskCompleted).
@@ -282,6 +304,12 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
 
         // Split on [IMAGE:...] markers; odd-indexed segments are file paths
         var parts = ImageMarkerRegex.Split(text);
+
+        // The journal's view of each part (#394): the same part of the body alone. A part the body
+        // does not reach holds only footer, and nothing of it is journaled.
+        string[] journalParts = journal is null ? [] : ImageMarkerRegex.Split(ExtractReplyToToken(journalText).text);
+        string JournalPart(int index) => index < journalParts.Length ? journalParts[index] : "";
+
         bool replyUsed = false;
         for (var i = 0; i < parts.Length; i++)
         {
@@ -293,7 +321,12 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 if (caption is null && i + 1 < parts.Length && parts[i + 1].Trim() is { Length: > 0 } after)
                     caption = after;
 
-                await SendPhotoCoreAsync(chatId, filePath, caption, journal, ct);
+                // The journal captions the photo from the same part of the body: a caption that was
+                // only the stats line journals as none.
+                var captionPart = caption is null ? -1 : i - 1 >= 0 && parts[i - 1].Trim() == caption ? i - 1 : i + 1;
+                var journalCaption = captionPart >= 0 && JournalPart(captionPart).Trim() is { Length: > 0 } body ? body : null;
+
+                await SendPhotoCoreAsync(chatId, filePath, caption, journalCaption, journal, ct);
                 // Photos consume the reply slot even though SendPhotoAsync doesn't pass replyParams.
                 // Edge case: [reply_to: N][IMAGE:...] will silently drop the reply thread on the photo.
                 // Acceptable for now — photo+reply threading is a rare combination.
@@ -311,6 +344,10 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 var segment = parts[i].Trim();
                 if (segment.Length == 0) continue;
 
+                // The same segment of the body alone. Every stage below renders it exactly as it
+                // renders the segment, and zips the two by index (JournalPiece).
+                var journalSegment = JournalPart(i).Trim();
+
                 // Prepend bold [ShortName] header when PrefixMessages is enabled
                 if (_agentConfig.FormattingMode == FormattingMode.Rich)
                 {
@@ -320,7 +357,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                         ? $"{char.ToUpperInvariant(_agentConfig.ShortName[0])}{_agentConfig.ShortName[1..]}: "
                         : null;
                     var fullText = prefix is not null ? prefix + segment : segment;
-                    replyUsed = await SendRichWithFallbackAsync(chatId, fullText, replyToMessageId, replyUsed, ct, journal);
+                    var journalFullText = journalSegment.Length == 0 ? "" : prefix is not null ? prefix + journalSegment : journalSegment;
+                    replyUsed = await SendRichWithFallbackAsync(chatId, fullText, journalFullText, replyToMessageId, replyUsed, ct, journal);
                 }
                 else if (_agentConfig.FormattingMode == FormattingMode.LegacyHtml)
                 {
@@ -331,13 +369,15 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                     {
                         var displayName = $"{char.ToUpperInvariant(_agentConfig.ShortName[0])}{_agentConfig.ShortName[1..]}";
                         var prefix = $"<b>{displayName}:</b>\n";
-                        foreach (var chunk in TelegramFormatter.FormatAndSplit(segment, prefix.Length))
+                        var chunks = NonEmpty(TelegramFormatter.FormatAndSplit(segment, prefix.Length));
+                        var bodyChunks = BodyPieces(journalSegment, s => TelegramFormatter.FormatAndSplit(s, prefix.Length));
+                        for (var k = 0; k < chunks.Count; k++)
                         {
-                            if (chunk.Length == 0) continue;
                             var replyParams = !replyUsed && replyToMessageId.HasValue
                                 ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
                                 : null;
-                            var sentId = await SendMessageWithReplyFallbackAsync(chatId, prefix + chunk,
+                            var sentId = await SendMessageWithReplyFallbackAsync(chatId, prefix + chunks[k],
+                                JournalPiece(bodyChunks, k, chunks.Count) is { } body ? prefix + body : null,
                                 ParseMode.Html, replyParams, ct, journal);
                             _lastSentMessageIds[chatId] = sentId;
                             replyUsed = true;
@@ -345,14 +385,15 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                     }
                     else
                     {
-                        foreach (var chunk in TelegramFormatter.FormatAndSplit(segment))
+                        var chunks = NonEmpty(TelegramFormatter.FormatAndSplit(segment));
+                        var bodyChunks = BodyPieces(journalSegment, s => TelegramFormatter.FormatAndSplit(s));
+                        for (var k = 0; k < chunks.Count; k++)
                         {
-                            if (chunk.Length == 0) continue;
                             var replyParams = !replyUsed && replyToMessageId.HasValue
                                 ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
                                 : null;
-                            var sentId = await SendMessageWithReplyFallbackAsync(chatId, chunk,
-                                ParseMode.Html, replyParams, ct, journal);
+                            var sentId = await SendMessageWithReplyFallbackAsync(chatId, chunks[k],
+                                JournalPiece(bodyChunks, k, chunks.Count), ParseMode.Html, replyParams, ct, journal);
                             _lastSentMessageIds[chatId] = sentId;
                             replyUsed = true;
                         }
@@ -362,13 +403,18 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 {
                     // Legacy prefix path — byte-identical to pre-formatter behavior.
                     var displayName = $"{char.ToUpperInvariant(_agentConfig.ShortName[0])}{_agentConfig.ShortName[1..]}";
-                    foreach (var chunk in SplitMessage(segment, 3990))
+                    var chunks = SplitMessage(segment, 3990).ToList();
+                    var bodyChunks = BodyPieces(journalSegment, s => SplitMessage(s, 3990));
+                    for (var k = 0; k < chunks.Count; k++)
                     {
-                        var escaped = System.Net.WebUtility.HtmlEncode(chunk);
+                        var escaped = System.Net.WebUtility.HtmlEncode(chunks[k]);
                         var replyParams = !replyUsed && replyToMessageId.HasValue
                             ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
                             : null;
                         var sentId = await SendMessageWithReplyFallbackAsync(chatId, $"<b>{displayName}:</b>\n{escaped}",
+                            JournalPiece(bodyChunks, k, chunks.Count) is { } body
+                                ? $"<b>{displayName}:</b>\n{System.Net.WebUtility.HtmlEncode(body)}"
+                                : null,
                             ParseMode.Html, replyParams, ct, journal);
                         _lastSentMessageIds[chatId] = sentId;
                         replyUsed = true;
@@ -377,12 +423,15 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 else
                 {
                     // Legacy plain path — byte-identical to pre-formatter behavior.
-                    foreach (var chunk in SplitMessage(segment, 4000))
+                    var chunks = SplitMessage(segment, 4000).ToList();
+                    var bodyChunks = BodyPieces(journalSegment, s => SplitMessage(s, 4000));
+                    for (var k = 0; k < chunks.Count; k++)
                     {
                         var replyParams = !replyUsed && replyToMessageId.HasValue
                             ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
                             : null;
-                        var sentId = await SendMessageWithReplyFallbackAsync(chatId, chunk, null, replyParams, ct, journal);
+                        var sentId = await SendMessageWithReplyFallbackAsync(chatId, chunks[k],
+                            JournalPiece(bodyChunks, k, chunks.Count), null, replyParams, ct, journal);
                         _lastSentMessageIds[chatId] = sentId;
                         replyUsed = true;
                     }
@@ -391,18 +440,58 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         }
     }
 
+    private static List<string> NonEmpty(IEnumerable<string> chunks) => chunks.Where(c => c.Length > 0).ToList();
+
+    /// <summary>
+    /// What one render stage makes of the reply body (#394): its own non-empty pieces, or none when
+    /// the body is empty — a part that held only the footer. Never throws: the body is rendered
+    /// next to the send, and a journal problem must cost the record, never change the send.
+    /// </summary>
+    private List<string> BodyPieces(string body, Func<string, IEnumerable<string>> render)
+    {
+        if (body.Length == 0) return [];
+        try
+        {
+            return NonEmpty(render(body));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("journal: reply body render skipped ({Error})", ex.GetType().Name);
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// The journal text of sent message <paramref name="index"/> out of the <paramref name="sentCount"/>
+    /// one render stage sends, zipped by index with that stage's <paramref name="bodyPieces"/> (#394).
+    /// A sent message past the last body piece is footer only: null, not journaled. Body pieces
+    /// beyond the sent count are appended to the last sent message.
+    /// </summary>
+    internal static string? JournalPiece(List<string> bodyPieces, int index, int sentCount)
+    {
+        if (index >= bodyPieces.Count) return null;
+        return index == sentCount - 1 && bodyPieces.Count > sentCount
+            ? string.Concat(bodyPieces.Skip(index))
+            : bodyPieces[index];
+    }
+
     /// <summary>
     /// Sends a text message and returns the Telegram <c>message_id</c> of the sent message.
     /// Falls back to standalone (without reply threading) when the reply target is not found.
     /// Falls back to plain text (strips HTML tags) when the API rejects parse-entities so the
     /// message is always delivered — never silently dropped on a formatting failure.
     /// </summary>
+    /// <param name="journalText">
+    /// What the journal keeps of this message, put through the same fallback as <paramref name="text"/>;
+    /// null when the message is not journaled (a footer-only message, or not a reply at all).
+    /// </param>
     private async Task<long> SendMessageWithReplyFallbackAsync(
-        long chatId, string text, ParseMode? parseMode,
+        long chatId, string text, string? journalText, ParseMode? parseMode,
         Telegram.Bot.Types.ReplyParameters? replyParams,
         CancellationToken ct,
         JournalCapture.OutboundBatch? journal = null)
     {
+        if (journalText is null) journal = null;
         var format = parseMode == ParseMode.Html ? JournalTextFormat.Html : JournalTextFormat.Plain;
         try
         {
@@ -414,7 +503,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 : (parseMode.HasValue
                     ? await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
                     : await _bot!.SendMessage(chatId, text, cancellationToken: ct));
-            JournalSent(journal, chatId, m, text, format);
+            JournalSent(journal, chatId, m, journalText, format);
             return m.Id;
         }
         catch (Exception ex) when (ex.Message.Contains("message to be replied not found")
@@ -424,7 +513,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             var m = parseMode.HasValue
                 ? await _bot!.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
                 : await _bot!.SendMessage(chatId, text, cancellationToken: ct);
-            JournalSent(journal, chatId, m, text, format);
+            JournalSent(journal, chatId, m, journalText, format);
             return m.Id;
         }
         catch (Exception ex) when (IsParseEntitiesError(ex) && parseMode == ParseMode.Html)
@@ -435,7 +524,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             var m = replyParams is not null
                 ? await _bot!.SendMessage(chatId, plain, replyParameters: replyParams, cancellationToken: ct)
                 : await _bot!.SendMessage(chatId, plain, cancellationToken: ct);
-            JournalSent(journal, chatId, m, plain, JournalTextFormat.Plain);
+            JournalSent(journal, chatId, m, journalText is null ? null : TelegramFormatter.StripHtmlTagsToPlain(journalText),
+                JournalTextFormat.Plain);
             return m.Id;
         }
     }
@@ -451,8 +541,10 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     /// Never drops a message.
     /// </summary>
     // Returns true if the reply token was consumed (so the caller can set replyUsed).
+    // journalText is the same text without the footer, empty when there is no body: each stage
+    // renders it as it renders text, and the journal keeps what the stage that sent made of it.
     private async Task<bool> SendRichWithFallbackAsync(
-        long chatId, string text,
+        long chatId, string text, string journalText,
         int? replyToMessageId, bool replyAlreadyUsed,
         CancellationToken ct,
         JournalCapture.OutboundBatch? journal = null)
@@ -471,8 +563,9 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             var m = replyParams is not null
                 ? await _bot!.SendRichMessage(chatId, richMsg, replyParameters: replyParams, cancellationToken: ct)
                 : await _bot!.SendRichMessage(chatId, richMsg, cancellationToken: ct);
-            // The journal keeps the Markdown the blocks were rendered from, marked rich.
-            JournalSent(journal, chatId, m, text, JournalTextFormat.Rich);
+            // The journal keeps the Markdown the blocks were rendered from, marked rich. One
+            // message, so a body-less one (only the footer) is not journaled at all.
+            JournalSent(journalText.Length == 0 ? null : journal, chatId, m, journalText, JournalTextFormat.Rich);
             _lastSentMessageIds[chatId] = m.Id;
             replyUsed = true;
             return replyUsed;
@@ -488,14 +581,15 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         // ── LegacyHtml fallback ───────────────────────────────────────────────
         try
         {
-            foreach (var chunk in TelegramFormatter.FormatAndSplit(text))
+            var chunks = NonEmpty(TelegramFormatter.FormatAndSplit(text));
+            var bodyChunks = BodyPieces(journalText, s => TelegramFormatter.FormatAndSplit(s));
+            for (var k = 0; k < chunks.Count; k++)
             {
-                if (chunk.Length == 0) continue;
                 var replyParams = !replyUsed && replyToMessageId.HasValue
                     ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
                     : null;
-                var sentId = await SendMessageWithReplyFallbackAsync(chatId, chunk,
-                    ParseMode.Html, replyParams, ct, journal);
+                var sentId = await SendMessageWithReplyFallbackAsync(chatId, chunks[k],
+                    JournalPiece(bodyChunks, k, chunks.Count), ParseMode.Html, replyParams, ct, journal);
                 _lastSentMessageIds[chatId] = sentId;
                 replyUsed = true;
             }
@@ -510,12 +604,15 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         }
 
         // ── PlainText last resort ─────────────────────────────────────────────
-        foreach (var slice in TelegramFormatter.SplitPlain(text))
+        var slices = TelegramFormatter.SplitPlain(text);
+        var bodySlices = BodyPieces(journalText, TelegramFormatter.SplitPlain);
+        for (var k = 0; k < slices.Count; k++)
         {
             var replyParams = !replyUsed && replyToMessageId.HasValue
                 ? new Telegram.Bot.Types.ReplyParameters { MessageId = replyToMessageId.Value }
                 : null;
-            var sentId = await SendMessageWithReplyFallbackAsync(chatId, slice, null, replyParams, ct, journal);
+            var sentId = await SendMessageWithReplyFallbackAsync(chatId, slices[k],
+                JournalPiece(bodySlices, k, slices.Count), null, replyParams, ct, journal);
             _lastSentMessageIds[chatId] = sentId;
             replyUsed = true;
         }
@@ -556,20 +653,16 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     public Task SendHtmlTextAsync(long chatId, string htmlText, CancellationToken ct = default)
         => SendHtmlTextAsync(chatId, htmlText, OutboundOrigin.Human, ct);
 
-    public async Task SendHtmlTextAsync(long chatId, string htmlText, OutboundOrigin origin, CancellationToken ct = default)
-    {
-        var journal = _journal?.Outbound(origin);
-        try
-        {
-            await SendHtmlTextCoreAsync(chatId, htmlText, journal, ct);
-        }
-        finally
-        {
-            journal?.Flush();
-        }
-    }
+    // Not journaled (#394): the tool-progress blockquote comes this way. A reply with a tool block
+    // reaches SendHtmlTextCoreAsync through SendReplyAsync instead.
+    public Task SendHtmlTextAsync(long chatId, string htmlText, OutboundOrigin origin, CancellationToken ct = default)
+        => SendHtmlTextCoreAsync(chatId, htmlText, journalHtml: null, journal: null, ct);
 
-    private async Task SendHtmlTextCoreAsync(long chatId, string htmlText, JournalCapture.OutboundBatch? journal, CancellationToken ct)
+    /// <param name="journalHtml">
+    /// Path T's body without the footer (<see cref="AgentReply.HtmlBody"/>), or null when nothing is
+    /// journaled. See <see cref="ToolBlockJournalPieces"/>.
+    /// </param>
+    private async Task SendHtmlTextCoreAsync(long chatId, string htmlText, string? journalHtml, JournalCapture.OutboundBatch? journal, CancellationToken ct)
     {
         if (chatId == 0) return;
         // Reserved-band keys belong to a non-Telegram conversation and have no Telegram
@@ -578,33 +671,73 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         if (Services.ConversationRegistry.IsReservedKey(chatId)) return;
         if (_bot is null) return;
 
+        List<string> bodyChunks = journal is null || journalHtml is null ? [] : ToolBlockJournalPieces(journalHtml);
+
         // Telegram doesn't support <br>, <br/>, or <br /> — replace all variants with newline.
-        htmlText = Regex.Replace(htmlText, @"<br\s*/?>", "\n", RegexOptions.IgnoreCase);
+        htmlText = ReplaceBreaks(htmlText);
+        var k = 0;
         foreach (var chunk in SplitMessage(htmlText, 4000))
         {
             var balanced = BalanceBlockquotesInChunk(chunk);
             var m = await _bot.SendMessage(chatId, balanced, parseMode: ParseMode.Html, cancellationToken: ct);
-            JournalSent(journal, chatId, m, balanced, JournalTextFormat.Html);
+            // Sent chunk k carries body chunk k and then footer; a chunk past the body, or one
+            // whose body was only markers, is not journaled.
+            if (k < bodyChunks.Count && !string.IsNullOrWhiteSpace(bodyChunks[k]))
+                JournalSent(journal, chatId, m, BalanceBlockquotesInChunk(bodyChunks[k]), JournalTextFormat.Html);
+            k++;
+        }
+    }
+
+    private static string ReplaceBreaks(string html) => Regex.Replace(html, @"<br\s*/?>", "\n", RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// Path T's journal pieces before balancing (#394). <paramref name="bodyHtml"/> gets the same
+    /// &lt;br&gt; normalisation and the same hard 4,000-character cuts as the full text Telegram
+    /// got. Hard cuts are prefix-stable and the footer comes last, so piece k is exactly the body
+    /// part of sent chunk k. Every character inside an <c>[IMAGE:…]</c> or <c>[reply_to: N]</c>
+    /// match on the whole body is removed: Path T sends both as literal text, and an image marker
+    /// holds a local path. Never throws; a failure leaves the reply unjournaled.
+    /// </summary>
+    internal List<string> ToolBlockJournalPieces(string bodyHtml)
+    {
+        try
+        {
+            var body = ReplaceBreaks(bodyHtml);
+            var masked = new bool[body.Length];
+            foreach (Match marker in ImageMarkerRegex.Matches(body).Concat(ReplyToTokenRegex.Matches(body)))
+                Array.Fill(masked, true, marker.Index, marker.Length);
+
+            var pieces = new List<string>();
+            var start = 0;
+            foreach (var chunk in SplitMessage(body, 4000))
+            {
+                var piece = new System.Text.StringBuilder(chunk.Length);
+                for (var c = 0; c < chunk.Length; c++)
+                {
+                    if (!masked[start + c]) piece.Append(chunk[c]);
+                }
+                pieces.Add(piece.ToString());
+                start += chunk.Length;
+            }
+            return pieces;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("journal: reply body render skipped ({Error})", ex.GetType().Name);
+            return [];
         }
     }
 
     public Task SendPhotoAsync(long chatId, string filePath, string? caption, CancellationToken ct = default)
         => SendPhotoAsync(chatId, filePath, caption, OutboundOrigin.Human, ct);
 
-    public async Task SendPhotoAsync(long chatId, string filePath, string? caption, OutboundOrigin origin, CancellationToken ct = default)
-    {
-        var journal = _journal?.Outbound(origin);
-        try
-        {
-            await SendPhotoCoreAsync(chatId, filePath, caption, journal, ct);
-        }
-        finally
-        {
-            journal?.Flush();
-        }
-    }
+    // Not journaled (#394). A photo is journaled only as part of a reply, from its [IMAGE:] marker.
+    public Task SendPhotoAsync(long chatId, string filePath, string? caption, OutboundOrigin origin, CancellationToken ct = default)
+        => SendPhotoCoreAsync(chatId, filePath, caption, journalCaption: null, journal: null, ct);
 
-    private async Task SendPhotoCoreAsync(long chatId, string filePath, string? caption, JournalCapture.OutboundBatch? journal, CancellationToken ct)
+    /// <param name="journalCaption">The caption as the reply body has it, without the footer (#394).</param>
+    private async Task SendPhotoCoreAsync(long chatId, string filePath, string? caption, string? journalCaption,
+        JournalCapture.OutboundBatch? journal, CancellationToken ct)
     {
         if (chatId == 0) return;
         // Reserved-band keys belong to a non-Telegram conversation and have no Telegram
@@ -615,11 +748,11 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
 
         if (!File.Exists(filePath))
         {
+            // Not journaled (#394): the hint stands in for a photo this agent could not send.
             _logger.LogWarning("Photo file not found (likely from remote agent): {FilePath}", filePath);
             var agentHint = "[image from agent — view in their direct chat]";
             var message = caption is { Length: > 0 } ? $"{caption}\n{agentHint}" : agentHint;
-            var hint = await _bot.SendMessage(chatId, message, cancellationToken: ct);
-            JournalSent(journal, chatId, hint, message, JournalTextFormat.Plain);
+            await _bot.SendMessage(chatId, message, cancellationToken: ct);
             return;
         }
 
@@ -630,16 +763,15 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             var inputFile = InputFile.FromStream(stream, Path.GetFileName(filePath));
             var sent = await _bot.SendPhoto(chatId, inputFile, caption: caption, cancellationToken: ct);
             // The bytes Telegram received, copied now: a workspace file can be overwritten later.
-            JournalSent(journal, chatId, sent, caption, JournalTextFormat.Plain, new JournalMediaItem(
+            JournalSent(journal, chatId, sent, journalCaption, JournalTextFormat.Plain, new JournalMediaItem(
                 JournalAttachmentKind.Photo, InferMimeType(ExtractSafeExtension(filePath, ".jpg")), bytes.LongLength,
                 Path.GetFileName(filePath), sent.Photo?.LastOrDefault()?.FileUniqueId, Bytes: bytes));
         }
         catch (Exception ex)
         {
+            // Not journaled (#394): the notice names a local path.
             _logger.LogWarning(ex, "Failed to send photo {FilePath}", filePath);
-            var failed = $"[photo: {filePath} — send failed]";
-            var notice = await _bot.SendMessage(chatId, failed, cancellationToken: ct);
-            JournalSent(journal, chatId, notice, failed, JournalTextFormat.Plain);
+            await _bot.SendMessage(chatId, $"[photo: {filePath} — send failed]", cancellationToken: ct);
         }
     }
 
@@ -894,12 +1026,12 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                     _logger.LogInformation("{Kind} transcribed ({Chars} chars) from {Sender}",
                         media.Kind, text.Length, message.From?.Username ?? "unknown");
 
-                    // Echo transcription back so user can verify whisper got it right
-                    var echo = await _bot!.SendMessage(
+                    // Echo transcription back so user can verify whisper got it right. Not journaled
+                    // (#394): the inbound record already holds the transcript.
+                    await _bot!.SendMessage(
                         chatId,
                         $"🎤 {transcribed}",
                         replyParameters: new Telegram.Bot.Types.ReplyParameters { MessageId = message.MessageId });
-                    JournalSentAlone(chatId, echo, $"🎤 {transcribed}", JournalTextFormat.Plain);
                 }
                 else
                 {
@@ -1061,7 +1193,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         }
     }
 
-    /// <summary>A human-facing message sent outside any IMessageSink call (TTS voice, transcript echo).</summary>
+    /// <summary>A human-facing message sent outside any IMessageSink call: the TTS voice reply.</summary>
     private void JournalSentAlone(long chatId, Message? sent, string? text, JournalTextFormat format, JournalMediaItem? media = null)
     {
         var journal = _journal?.Outbound(OutboundOrigin.Human);

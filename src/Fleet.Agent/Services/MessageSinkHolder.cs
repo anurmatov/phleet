@@ -60,6 +60,15 @@ public sealed class MessageSinkHolder : IMessageSink
         => _inner.SendPhotoAsync(chatId, filePath, caption, origin, ct);
 
     /// <summary>
+    /// Forwarded, not inherited: the interface default would compose the reply here and hand the
+    /// transport a plain send, which never journals (#394).
+    /// </summary>
+    public Task SendReplyAsync(long chatId, AgentReply reply, OutboundOrigin origin, CancellationToken ct = default)
+        => _inner.SendReplyAsync(chatId, reply, origin, ct);
+
+    public bool RendersReplies => _inner.RendersReplies;
+
+    /// <summary>
     /// Forwards to the attached sink, yielding <c>0</c> when none is attached — the same value a
     /// Telegram chat that has not been sent to yet already produces (#277 D-2a). This is the ONLY
     /// path by which <c>telegramMessageId</c> reaches <see cref="CompletionContextBuffer"/>; the

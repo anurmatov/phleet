@@ -151,7 +151,7 @@ public sealed class JournalCaptureTests : IDisposable
     {
         var rig = Rig.Build(_root);
 
-        await rig.Transport.SendTextAsync(User, new string('a', 3990) + "\n" + new string('b', 3990) + "\n" + new string('c', 100));
+        await rig.Transport.SendReplyAsync(User, new AgentReply(new string('a', 3990) + "\n" + new string('b', 3990) + "\n" + new string('c', 100)), OutboundOrigin.Human);
 
         Assert.Equal(3, rig.Bot.Texts.Count);
         var records = rig.Spool.Pending().Select(e => e.Record).ToList();
@@ -172,7 +172,7 @@ public sealed class JournalCaptureTests : IDisposable
     {
         var rig = Rig.Build(_root);
 
-        await rig.Transport.SendTextAsync(User, "short");
+        await rig.Transport.SendReplyAsync(User, new AgentReply("short"), OutboundOrigin.Human);
 
         Assert.Null(Assert.Single(rig.Spool.Pending()).Record["sendGroup"]);
     }
@@ -250,10 +250,10 @@ public sealed class JournalCaptureTests : IDisposable
         // Everything the fingerprint reads is equal; only the per-observer fields differ.
         Assert.Equal(WithoutObserverFields(a), WithoutObserverFields(b));
 
-        // The echo each agent sent is its own outbound record.
-        var echo = first.Spool.Pending().Select(e => e.Record).Single(r => r["direction"]!.GetValue<string>() == "outbound");
-        Assert.Equal("🎤 hello there", echo["text"]!.GetValue<string>());
-        Assert.Equal(30, echo["telegram"]!["replyToMessageId"]!.GetValue<long>());
+        // Each agent echoed its transcript, and the echo is not a record (#394): the inbound
+        // record already holds the transcript.
+        Assert.Contains("🎤 hello there", first.Bot.Texts);
+        Assert.DoesNotContain(first.Spool.Pending(), e => e.Record["direction"]!.GetValue<string>() == "outbound");
     }
 
     internal static string WithoutObserverFields(JsonObject record)
@@ -294,8 +294,8 @@ public sealed class JournalCaptureTests : IDisposable
         var image = Path.Combine(_root, "x.png");
         await File.WriteAllBytesAsync(image, [1, 2, 3]);
 
-        await rig.Holder.SendTextAsync(User, $"see [IMAGE:{image}]", OutboundOrigin.Relay);
-        await rig.Holder.SendTextAsync(User, "and [IMAGE:/workspace/x.png]", OutboundOrigin.Relay);
+        await rig.Holder.SendReplyAsync(User, new AgentReply($"see [IMAGE:{image}]"), OutboundOrigin.Relay);
+        await rig.Holder.SendReplyAsync(User, new AgentReply("and [IMAGE:/workspace/x.png]"), OutboundOrigin.Relay);
 
         Assert.NotEmpty(rig.Bot.Requests);
         Assert.Empty(Directory.GetFiles(rig.Spool.PendingDir));
@@ -309,7 +309,7 @@ public sealed class JournalCaptureTests : IDisposable
         var image = Path.Combine(_root, "chart.png");
         await File.WriteAllBytesAsync(image, [1, 2, 3]);
 
-        await rig.Transport.SendTextAsync(User, $"the chart [IMAGE:{image}]");
+        await rig.Transport.SendReplyAsync(User, new AgentReply($"the chart [IMAGE:{image}]"), OutboundOrigin.Human);
         await File.WriteAllBytesAsync(image, [9, 9, 9]); // overwritten later: the spool keeps what was sent
 
         // The transport sends the leading text and then the photo captioned with it: two
@@ -327,14 +327,21 @@ public sealed class JournalCaptureTests : IDisposable
     }
 
     [Fact]
-    public async Task Html_output_is_journaled_as_html()
+    public async Task A_reply_sent_as_html_is_journaled_as_html()
     {
         var rig = Rig.Build(_root);
 
+        // A pre-formatted HTML notice is not a reply, so it is not journaled (#394)...
         await rig.Holder.SendHtmlTextAsync(Group, "<b>done</b>");
+        Assert.Empty(rig.Spool.Pending());
+
+        // ...while a reply with a tool block goes out as HTML and is journaled as HTML, body only.
+        await rig.Holder.SendReplyAsync(Group,
+            new AgentReply("done & dusted", "\n(1 in / 2 out)", "\n<blockquote expandable>Read(x)</blockquote>"),
+            OutboundOrigin.Human);
 
         var record = Assert.Single(rig.Spool.Pending()).Record;
-        Assert.Equal("<b>done</b>", record["text"]!.GetValue<string>());
+        Assert.Equal("done &amp; dusted", record["text"]!.GetValue<string>());
         Assert.Equal("html", record["textFormat"]!.GetValue<string>());
         Assert.Equal("supergroup", record["telegram"]!["chatKind"]!.GetValue<string>());
     }
@@ -356,7 +363,7 @@ public sealed class JournalCaptureTests : IDisposable
             Id = 51, Chat = new Chat { Id = Operational, Type = ChatType.Supergroup },
             From = new User { Id = User, FirstName = "Ann" }, Date = Rig.Now, Text = "ops chatter",
         }, UpdateType.Message);
-        await rig.Transport.SendTextAsync(Operational, "ops reply");
+        await rig.Transport.SendReplyAsync(Operational, new AgentReply("ops reply"), OutboundOrigin.Human);
 
         Assert.Empty(Directory.GetFiles(rig.Spool.PendingDir));
         Assert.Equal(1, rig.Counters.Get("journal_excluded{reason=unauthorized_chat}"));
@@ -370,7 +377,7 @@ public sealed class JournalCaptureTests : IDisposable
         Directory.Delete(rig.Spool.PendingDir, recursive: true);
         await File.WriteAllTextAsync(rig.Spool.PendingDir, "not a directory");
 
-        await rig.Transport.SendTextAsync(User, "still delivered");
+        await rig.Transport.SendReplyAsync(User, new AgentReply("still delivered"), OutboundOrigin.Human);
 
         Assert.Equal(["still delivered"], rig.Bot.Texts);
         Assert.Equal(1, rig.Counters.Get("journal_capture_failed"));

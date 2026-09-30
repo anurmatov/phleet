@@ -73,6 +73,11 @@ public sealed class CodexExecutor : IAgentExecutor
     private volatile bool _turnHasFinalAnswerPhase;
     private readonly Func<ProcessStartInfo, Process?> _processStarter;
 
+    // The tool-send turn ledger (#394). Null without the journal, and then nothing below records.
+    // _activity belongs to the current app-server process and its stdout reader.
+    private readonly TurnOriginLedger? _ledger;
+    private TurnOriginLedger.ProviderActivity? _activity;
+
     private const string CodexBin = "codex";
     internal const string OssBaseUrlEnvVar = "CODEX_OSS_BASE_URL";
     private const string InitializedMethod = "initialized";
@@ -104,8 +109,9 @@ public sealed class CodexExecutor : IAgentExecutor
         IOptions<TelegramOptions> telegramConfig,
         PromptBuilder promptBuilder,
         ILogger<CodexExecutor> logger,
-        HostedProviderAdapterHost? adapterHost = null)
-        : this(config, telegramConfig, promptBuilder, logger, Process.Start, adapterHost: adapterHost)
+        HostedProviderAdapterHost? adapterHost = null,
+        TurnOriginLedger? ledger = null)
+        : this(config, telegramConfig, promptBuilder, logger, Process.Start, adapterHost: adapterHost, ledger: ledger)
     {
     }
 
@@ -116,13 +122,15 @@ public sealed class CodexExecutor : IAgentExecutor
         ILogger<CodexExecutor> logger,
         Func<ProcessStartInfo, Process?> processStarter,
         Func<string, string?>? environmentReader = null,
-        HostedProviderAdapterHost? adapterHost = null)
+        HostedProviderAdapterHost? adapterHost = null,
+        TurnOriginLedger? ledger = null)
     {
         _config = config.Value;
         _promptBuilder = promptBuilder;
         _logger = logger;
         _normalizedAttachmentDir = Path.GetFullPath(telegramConfig.Value.AttachmentDir);
         _processStarter = processStarter;
+        _ledger = ledger;
 
         // Resolved here and validated in EnsureProcessReadyAsync rather than thrown from the
         // constructor, so a misconfigured model surfaces as a named startup failure instead of a
@@ -191,6 +199,9 @@ public sealed class CodexExecutor : IAgentExecutor
         // the first turn completes, mirroring ClaudeExecutor's _sendLock.WaitAsync pattern.
         // This replaces the previous single-flight throw (G2 deviation) with graceful queuing.
         await _turnLock.WaitAsync(ct);
+        // #394: held from here to the release below, never while waiting. The pending origin, or
+        // unknown (warmup, the CLI).
+        var turnInterval = _ledger?.OpenTurn();
 
         string? turnId = null;
         var (forwardedPaths, skippedCount) = CollectImagePaths(images);
@@ -266,6 +277,7 @@ public sealed class CodexExecutor : IAgentExecutor
         }
         finally
         {
+            turnInterval?.Close();
             _turnLock.Release();
         }
     }
@@ -329,6 +341,9 @@ public sealed class CodexExecutor : IAgentExecutor
     {
         _lastActivity = DateTimeOffset.UtcNow;
         await _sendLock.WaitAsync(ct);
+        // #394: a raw command is never attributed to anyone. The shell command streams after the
+        // release below; its item/* notifications open an untracked unknown interval then.
+        var turnInterval = _ledger?.OpenTurn(command: true);
 
         Exception? commandError = null;
 
@@ -360,6 +375,7 @@ public sealed class CodexExecutor : IAgentExecutor
         }
         finally
         {
+            turnInterval?.Close();
             _sendLock.Release();
         }
 
@@ -377,6 +393,8 @@ public sealed class CodexExecutor : IAgentExecutor
         }
     }
 
+    // Only a flag, applied at the next turn start: the app-server keeps running and can still send,
+    // so an untracked turn's ledger interval stays open until then (#394).
     public void RequestRestart() => _restartRequested = true;
 
     public async Task StopProcessAsync()
@@ -448,6 +466,21 @@ public sealed class CodexExecutor : IAgentExecutor
     internal void SetProcessForTests(System.Diagnostics.Process? process) => _process = process;
 
     internal void SetStdinForTests(StreamWriter writer) => _stdin = writer;
+
+    /// <summary>
+    /// Starts the stdout reader over <paramref name="stdout"/>, as StartProcessAsync does for a real
+    /// app-server, feeding the channel set by <see cref="SetNotificationChannelForTests"/> (or a
+    /// fresh one). Cancel <paramref name="ct"/> to cancel it.
+    /// </summary>
+    internal Task RunStdoutReaderForTests(StreamReader stdout, CancellationToken ct = default)
+    {
+        var channel = _notificationChannel ??= Channel.CreateUnbounded<JsonObject>(
+            new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
+        _readerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var activity = _activity = _ledger?.TrackProvider();
+        var token = _readerCts.Token;
+        return Task.Run(() => ReadStdoutAsync(stdout, channel.Writer, activity, token), CancellationToken.None);
+    }
 
     // Polls _pendingRequests until a TCS appears, resolves it with the given result, and returns.
     // Use in tests to stand in for a codex app-server answering one JSON-RPC request — turn/steer
@@ -712,7 +745,8 @@ public sealed class CodexExecutor : IAgentExecutor
             SingleWriter = true,
         });
         _readerCts = new CancellationTokenSource();
-        _ = Task.Run(() => ReadStdoutAsync(_process.StandardOutput, _notificationChannel.Writer, _readerCts.Token));
+        var activity = _activity = _ledger?.TrackProvider();
+        _ = Task.Run(() => ReadStdoutAsync(_process.StandardOutput, _notificationChannel.Writer, activity, _readerCts.Token));
         _ = Task.Run(() => ReadStderrAsync(_process.StandardError, _readerCts.Token));
 
         _threadId = null;
@@ -822,11 +856,12 @@ public sealed class CodexExecutor : IAgentExecutor
         }
     }
 
-    private async Task ReadStdoutAsync(StreamReader reader, ChannelWriter<JsonObject> writer, CancellationToken ct)
+    private async Task ReadStdoutAsync(
+        StreamReader reader, ChannelWriter<JsonObject> writer, TurnOriginLedger.ProviderActivity? activity, CancellationToken ct)
     {
         try
         {
-            string? line;
+            string? line = "";
             while (!ct.IsCancellationRequested && (line = await reader.ReadLineAsync(ct)) is not null)
             {
                 if (string.IsNullOrWhiteSpace(line))
@@ -858,8 +893,16 @@ public sealed class CodexExecutor : IAgentExecutor
                 }
 
                 if (obj["method"] is JsonValue)
+                {
+                    ObserveTurnActivity(activity, obj);
                     await writer.WriteAsync(obj, ct);
+                }
             }
+
+            // The loop also ends on cancellation, which StopInternalAsync reports itself once its
+            // kill has completed. Only stdout EOF is a process end here (#394).
+            if (line is null)
+                activity?.ProcessEnded();
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -871,6 +914,22 @@ public sealed class CodexExecutor : IAgentExecutor
             FailPendingRequests(new InvalidOperationException("Codex app-server stdout reader stopped before the request completed."));
             writer.TryComplete();
         }
+    }
+
+    /// <summary>
+    /// #394: the reader sees every notification as it is read, whoever later consumes it, so a turn
+    /// the app-server runs outside a lock-held interval — a shell command streaming after its
+    /// request returned, an interrupted turn that outlived its drain — becomes visible here.
+    /// </summary>
+    private static void ObserveTurnActivity(TurnOriginLedger.ProviderActivity? activity, JsonObject notification)
+    {
+        if (activity is null || notification["method"] is not JsonValue value || !value.TryGetValue<string>(out var method))
+            return;
+
+        if (method == "turn/completed")
+            activity.TurnEnded();
+        else if (method == "turn/started" || method.StartsWith("item/", StringComparison.Ordinal))
+            activity.TurnContent();
     }
 
     private async Task ReadStderrAsync(StreamReader reader, CancellationToken ct)
@@ -1364,6 +1423,11 @@ public sealed class CodexExecutor : IAgentExecutor
                 if (!_process.HasExited)
                     _process.Kill(entireProcessTree: true);
                 await _process.WaitForExitAsync();
+
+                // #394: the kill has completed (or the process had already exited) — a confirmed
+                // end. Cancelling the reader above is not one, and a kill that threw proves nothing.
+                _activity?.ProcessEnded();
+                _activity = null;
             }
             catch { }
 

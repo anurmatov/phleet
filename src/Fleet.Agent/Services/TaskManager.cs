@@ -79,6 +79,12 @@ public sealed class TaskManager
     /// </summary>
     private readonly string? _telegramAttachmentDir;
 
+    /// <summary>
+    /// The tool-send turn ledger (#394): the origin each executor enumeration runs under. Optional,
+    /// and null without the journal.
+    /// </summary>
+    private readonly TurnOriginLedger? _ledger;
+
     public TaskManager(
         IOptions<AgentOptions> agentConfig,
         IAgentExecutor executor,
@@ -88,8 +94,10 @@ public sealed class TaskManager
         IConversationEventPublisher? events = null,
         IOptions<TelegramOptions>? telegramConfig = null,
         ConversationEventCounters? counters = null,
-        IMessageSink? sink = null)
+        IMessageSink? sink = null,
+        TurnOriginLedger? ledger = null)
     {
+        _ledger = ledger;
         _agentConfig = agentConfig.Value;
         _executor = executor;
         _sessions = sessions;
@@ -755,6 +763,7 @@ public sealed class TaskManager
         async Task DeliverInjectedTurnAnswersAsync(int injectedCount)
         {
             if (injectedCount <= 0) return;
+            using var pendingOrigin = _ledger?.Pending(origin);
             await foreach (var extra in _executor.ReadInjectedTurnAnswersAsync(injectedCount, ct))
             {
                 if (extra.FinalResult is not { Length: > 0 } text || ProtocolSanitizer.IsIdleMarker(text))
@@ -792,6 +801,8 @@ public sealed class TaskManager
 
             while (true)
             {
+                // #394: the executor tags its lock-held interval with this, once it holds the lock.
+                using var pendingOrigin = _ledger?.Pending(origin);
                 await foreach (var progress in _executor.ExecuteAsync(currentTask, currentImages, currentDocuments, ct))
                 {
                     if (isSessionTask && progress.SessionId is not null)

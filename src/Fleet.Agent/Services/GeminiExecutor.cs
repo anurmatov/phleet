@@ -54,11 +54,26 @@ public sealed class GeminiExecutor : IAgentExecutor
     public Task<bool> CancelBackgroundTaskAsync(string taskId, CancellationToken ct = default) =>
         Task.FromResult(false);
 
-    public GeminiExecutor(IOptions<AgentOptions> config, PromptBuilder promptBuilder, ILogger<GeminiExecutor> logger)
+    // The tool-send turn ledger (#394). Null without the journal, and then nothing below records.
+    private readonly TurnOriginLedger? _ledger;
+    private readonly Func<ProcessStartInfo, Process?> _processStarter;
+
+    public GeminiExecutor(
+        IOptions<AgentOptions> config, PromptBuilder promptBuilder, ILogger<GeminiExecutor> logger,
+        TurnOriginLedger? ledger = null)
+        : this(config, promptBuilder, logger, Process.Start, ledger)
+    {
+    }
+
+    internal GeminiExecutor(
+        IOptions<AgentOptions> config, PromptBuilder promptBuilder, ILogger<GeminiExecutor> logger,
+        Func<ProcessStartInfo, Process?> processStarter, TurnOriginLedger? ledger = null)
     {
         _config = config.Value;
         _promptBuilder = promptBuilder;
         _logger = logger;
+        _processStarter = processStarter;
+        _ledger = ledger;
 
         _logger.LogInformation(
             "GeminiExecutor: CLI-per-task mode. " +
@@ -75,7 +90,7 @@ public sealed class GeminiExecutor : IAgentExecutor
         _lastActivity = DateTimeOffset.UtcNow;
         _lastSessionId = null; // no session resumption for CLI-per-task
 
-        await foreach (var progress in RunCliAsync(task, images, documents, ct))
+        await foreach (var progress in RunCliAsync(task, images, documents, command: false, ct))
         {
             _lastActivity = DateTimeOffset.UtcNow;
             yield return progress;
@@ -91,7 +106,7 @@ public sealed class GeminiExecutor : IAgentExecutor
         // Run the command as a regular task so the agent at least sees the input and can respond.
         _lastActivity = DateTimeOffset.UtcNow;
 
-        await foreach (var progress in RunCliAsync(command, images: null, documents: null, ct: ct))
+        await foreach (var progress in RunCliAsync(command, images: null, documents: null, command: true, ct: ct))
         {
             _lastActivity = DateTimeOffset.UtcNow;
             yield return progress;
@@ -108,10 +123,14 @@ public sealed class GeminiExecutor : IAgentExecutor
 
     // ── Core per-task runner ──────────────────────────────────────────────────
 
+    /// <param name="command">
+    /// A raw command (<c>SendCommandAsync</c>): its ledger interval is always unknown (#394).
+    /// </param>
     private async IAsyncEnumerable<AgentProgress> RunCliAsync(
         string input,
         IReadOnlyList<MessageImage>? images,
         IReadOnlyList<MessageDocument>? documents,
+        bool command,
         [EnumeratorCancellation] CancellationToken ct)
     {
         // Write system prompt to a temp file. GEMINI_SYSTEM_MD env var points the CLI at it.
@@ -124,6 +143,10 @@ public sealed class GeminiExecutor : IAgentExecutor
         var attachmentDir = Path.Combine(Path.GetTempPath(), $"gemini-attach-{Guid.NewGuid():N}");
 
         Process? process = null;
+
+        // #394: Gemini has no turn lock — one CLI per call, and calls may overlap — so the ledger
+        // interval spans this process from start to exit. The pending origin, or unknown.
+        TurnOriginLedger.LedgerInterval? processInterval = null;
 
         // Capture wall-clock start time before the process starts so DurationMs measures
         // the full task duration. (_lastActivity is updated on every yielded event, so
@@ -212,7 +235,8 @@ public sealed class GeminiExecutor : IAgentExecutor
                 ? "--dns-result-order=ipv4first"
                 : existingNodeOpts + " --dns-result-order=ipv4first";
 
-            process = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start gemini CLI process");
+            process = _processStarter(psi) ?? throw new InvalidOperationException("Failed to start gemini CLI process");
+            processInterval = _ledger?.OpenTurn(command);
 
             // Read stderr in background — non-fatal; logged at Warning level.
             // Collected for the turn.failed error message on non-zero exit.
@@ -276,6 +300,7 @@ public sealed class GeminiExecutor : IAgentExecutor
 
             await stderrTask;
             await process.WaitForExitAsync(ct);
+            processInterval?.Close();
 
             if (process.ExitCode == 0)
             {
@@ -314,6 +339,8 @@ public sealed class GeminiExecutor : IAgentExecutor
             }
             catch { /* non-fatal */ }
 
+            // Already closed at exit on the normal path; here after a cancellation or a failure.
+            processInterval?.Close();
             process?.Dispose();
 
             try { File.Delete(systemPromptPath); }

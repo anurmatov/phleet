@@ -521,6 +521,9 @@ services:
       - Comms__Journal__TokenKeys=${FLEET_COMMS_JOURNAL_KEY:-}
       - Comms__Journal__ExcludedChatIds=${FLEET_GROUP_CHAT_ID:-},${FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS:-}
       - Comms__Journal__MessageRetention=${FLEET_COMMS_JOURNAL_RETENTION:-365.00:00:00}
+      # Read-token subjects that may read EVERY journaled message through the read tools; everyone
+      # else reads only what its own runtime observed. Blank by default.
+      - Comms__Journal__ReadAllSubjects=${FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS:-}
       # ── Journal media (opt-in, needs the journal AND the comms-media profile) ───
       # The endpoint is the enabling key: blank means no bucket, no upload route, and every
       # attachment an agent offers is refused 409 media_disabled.

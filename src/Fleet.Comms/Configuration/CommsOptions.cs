@@ -373,11 +373,28 @@ public sealed class JournalOptions
 
     public TimeSpan MessageRetention { get; set; } = TimeSpan.FromDays(365);
 
+    /// <summary>
+    /// Read-token subjects granted scope <c>all</c> by the read tools (#394), comma-separated.
+    /// Blank by default: every reader then sees only the messages its own runtime observed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A deployment setting and nothing else. Its <c>.env</c> key sits under the
+    /// <c>FLEET_COMMS_JOURNAL_</c> prefix the orchestrator's config API refuses, so no agent can
+    /// widen its own scope, and scope is never encoded in a token: removing a subject here and
+    /// recreating Comms revokes the grant without rotating a key.
+    /// </para>
+    /// </remarks>
+    public string ReadAllSubjects { get; set; } = "";
+
     /// <summary>The parsed keys. Call after <see cref="Validate"/>.</summary>
     public IReadOnlyList<byte[]> Keys() => Fleet.Conversations.Journal.JournalTokens.ParseKeys(TokenKeys);
 
     /// <summary>The parsed exclusion list. Call after <see cref="Validate"/>.</summary>
     public IReadOnlySet<long> ExcludedChats() => ParseExcludedChatIds(ExcludedChatIds);
+
+    /// <summary>The parsed <c>all</c>-scope grants. Call after <see cref="Validate"/>.</summary>
+    public IReadOnlySet<string> AllScopeSubjects() => ParseReadAllSubjects(ReadAllSubjects);
 
     public void Validate(bool conversationsEnabled)
     {
@@ -409,6 +426,17 @@ public sealed class JournalOptions
         {
             throw new InvalidOperationException(
                 $"journal_excluded_ids_invalid: Comms__Journal__ExcludedChatIds: {e.Message}.");
+        }
+
+        try
+        {
+            ParseReadAllSubjects(ReadAllSubjects);
+        }
+        catch (FormatException e)
+        {
+            throw new InvalidOperationException(
+                $"journal_read_grants_invalid: Comms__Journal__ReadAllSubjects: {e.Message}. Each "
+                + "entry is a read-token subject: 1-128 characters of [A-Za-z0-9_-].");
         }
 
         if (!IsHttpUrl(Url))
@@ -455,6 +483,31 @@ public sealed class JournalOptions
             throw new FormatException($"more than {MaxExcludedChatIds} distinct chat ids");
 
         return ids;
+    }
+
+    /// <summary>
+    /// Splits on <c>,</c> and trims each element. Empty elements are ignored and duplicates
+    /// collapse; any other element must be a valid token subject, compared exactly as the token
+    /// verifier yields it (ordinal, case-sensitive).
+    /// </summary>
+    /// <exception cref="FormatException">The message names the element's position, never its value.</exception>
+    public static IReadOnlySet<string> ParseReadAllSubjects(string? value)
+    {
+        var subjects = new HashSet<string>(StringComparer.Ordinal);
+        var elements = (value ?? string.Empty).Split(',');
+
+        for (var i = 0; i < elements.Length; i++)
+        {
+            var element = elements[i].Trim();
+            if (element.Length == 0) continue;
+
+            if (!Fleet.Conversations.Journal.JournalTokens.IsValidSubject(element))
+                throw new FormatException($"element {i + 1} is not a token subject");
+
+            subjects.Add(element);
+        }
+
+        return subjects;
     }
 
     private static bool IsHttpUrl(string? value) => CommsUrl.IsHttp(value);

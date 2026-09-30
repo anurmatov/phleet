@@ -113,6 +113,7 @@ public class DeploymentKeyLockstepTests
         "FLEET_COMMS_JOURNAL_KEY",
         "FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS",
         "FLEET_COMMS_JOURNAL_RETENTION",
+        "FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS",
     ];
 
     [Theory]
@@ -127,6 +128,67 @@ public class DeploymentKeyLockstepTests
     public void Every_journal_key_is_wired_in_the_example_compose(string key)
     {
         Assert.Contains($"${{{key}", Read("docker-compose.example.yml"), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Both scripts unset every journal key before they read <c>.env</c>, so a stale export in the
+    /// operator's shell cannot override the recorded decision — for the read-all grant (#394), a
+    /// forgotten export would silently widen a reader's scope on the next recreate.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(JournalKeys))]
+    public void Every_journal_key_is_unset_by_setup_and_upgrade(string key)
+    {
+        Assert.Contains(key, UnsetNames(Read("setup.sh")));
+        Assert.Contains(key, UnsetNames(Read("upgrade.sh")));
+    }
+
+    /// <summary>
+    /// The read-all grant reaches the one service that serves the read tools. The operator one-shot
+    /// never serves a read, and a copy of the list anywhere else is a second place it can drift.
+    /// </summary>
+    [Fact]
+    public void The_read_all_grant_is_given_only_to_fleet_comms()
+    {
+        var compose = Read("docker-compose.example.yml");
+
+        var holders = Regex.Matches(compose, @"^  ([a-z0-9-]+):\s*$", RegexOptions.Multiline)
+            .Select(m => (Name: m.Groups[1].Value, Start: m.Index))
+            .ToList();
+
+        var withGrant = holders
+            .Select((service, i) => (service.Name, Body: compose[service.Start..(i + 1 < holders.Count ? holders[i + 1].Start : compose.Length)]))
+            .Where(service => service.Body.Contains("${FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS", StringComparison.Ordinal))
+            .Select(service => service.Name)
+            .ToArray();
+
+        Assert.Equal(["fleet-comms"], withGrant);
+        Assert.Contains(
+            "Comms__Journal__ReadAllSubjects=${FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS:-}", compose, StringComparison.Ordinal);
+    }
+
+    /// <summary>Every name an <c>unset</c> statement (with its <c>\</c> continuations) names.</summary>
+    private static IReadOnlySet<string> UnsetNames(string script)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        var lines = script.Split('\n');
+
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (!lines[i].StartsWith("unset ", StringComparison.Ordinal)) continue;
+
+            for (var j = i; j < lines.Length; j++)
+            {
+                var line = lines[j].TrimEnd();
+                foreach (var word in line.TrimEnd('\\').Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                    names.Add(word);
+
+                if (!line.EndsWith('\\')) break;
+            }
+        }
+
+        names.Remove("unset");
+        return names;
     }
 
     /// <summary>The journal media keys (#388). Same two rules as the journal keys.</summary>

@@ -1,0 +1,14 @@
+{
+  "row": "plain-noprefix-none-reply-to",
+  "callCount": 1,
+  "calls": [
+    {
+      "method": "sendMessage",
+      "chatId": 111,
+      "text": "Replying to your question: yes, **it works**.",
+      "parseMode": null,
+      "replyTo": 4242,
+      "outcome": "ok"
+    }
+  ]
+}

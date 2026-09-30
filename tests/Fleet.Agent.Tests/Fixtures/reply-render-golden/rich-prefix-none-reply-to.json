@@ -1,0 +1,27 @@
+{
+  "row": "rich-prefix-none-reply-to",
+  "callCount": 1,
+  "calls": [
+    {
+      "method": "sendRichMessage",
+      "chatId": 111,
+      "rich": {
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": [
+              "Agent1: Replying to your question: yes, ",
+              {
+                "type": "bold",
+                "text": "it works"
+              },
+              "."
+            ]
+          }
+        ]
+      },
+      "replyTo": 4242,
+      "outcome": "ok"
+    }
+  ]
+}

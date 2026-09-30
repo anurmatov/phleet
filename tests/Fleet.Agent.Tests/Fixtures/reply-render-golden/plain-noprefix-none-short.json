@@ -1,0 +1,14 @@
+{
+  "row": "plain-noprefix-none-short",
+  "callCount": 1,
+  "calls": [
+    {
+      "method": "sendMessage",
+      "chatId": 111,
+      "text": "Here is the **answer**: use `x < y` & keep <b>tags</b> literal.",
+      "parseMode": null,
+      "replyTo": null,
+      "outcome": "ok"
+    }
+  ]
+}

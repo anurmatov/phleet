@@ -1,0 +1,22 @@
+{
+  "row": "rich-noprefix-tools-trailing-image",
+  "callCount": 2,
+  "calls": [
+    {
+      "method": "sendMessage",
+      "chatId": 111,
+      "text": "<blockquote expandable>... Using Read({&quot;file_path&quot;:&quot;/workspace/example/notes.md&quot;})</blockquote>",
+      "parseMode": "Html",
+      "replyTo": null,
+      "outcome": "ok"
+    },
+    {
+      "method": "sendMessage",
+      "chatId": 111,
+      "text": "Here is the chart:\n[IMAGE:/workspace/example/chart.png]\n(12k in / 340 out | cache: 5k | $2 | ctx: 17%)\n<blockquote expandable>Read({&quot;file_path&quot;:&quot;/workspace/example/notes.md&quot;})</blockquote>",
+      "parseMode": "Html",
+      "replyTo": null,
+      "outcome": "ok"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "row": "plain-prefix-tools-reply-to",
+  "callCount": 2,
+  "calls": [
+    {
+      "method": "sendMessage",
+      "chatId": 111,
+      "text": "<b>Agent1:</b>\n<blockquote expandable>... Using Read({&quot;file_path&quot;:&quot;/workspace/example/notes.md&quot;})</blockquote>",
+      "parseMode": "Html",
+      "replyTo": null,
+      "outcome": "ok"
+    },
+    {
+      "method": "sendMessage",
+      "chatId": 111,
+      "text": "<b>Agent1:</b>\n[reply_to: 4242] Replying to your question: yes, **it works**.\n(12k in / 340 out | cache: 5k | $2 | ctx: 17%)\n<blockquote expandable>Read({&quot;file_path&quot;:&quot;/workspace/example/notes.md&quot;})</blockquote>",
+      "parseMode": "Html",
+      "replyTo": null,
+      "outcome": "ok"
+    }
+  ]
+}

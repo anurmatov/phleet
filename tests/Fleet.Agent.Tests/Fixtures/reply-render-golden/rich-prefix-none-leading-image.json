@@ -1,0 +1,15 @@
+{
+  "row": "rich-prefix-none-leading-image",
+  "callCount": 1,
+  "calls": [
+    {
+      "method": "sendPhoto",
+      "chatId": 111,
+      "caption": "The chart shows **steady** growth.",
+      "parseMode": null,
+      "file": "chart.png",
+      "replyTo": null,
+      "outcome": "ok"
+    }
+  ]
+}

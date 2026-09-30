@@ -1,0 +1,14 @@
+{
+  "row": "legacyhtml-noprefix-none-short",
+  "callCount": 1,
+  "calls": [
+    {
+      "method": "sendMessage",
+      "chatId": 111,
+      "text": "Here is the <b>answer</b>: use <code>x &lt; y</code> &amp; keep &lt;b&gt;tags&lt;/b&gt; literal.",
+      "parseMode": "Html",
+      "replyTo": null,
+      "outcome": "ok"
+    }
+  ]
+}

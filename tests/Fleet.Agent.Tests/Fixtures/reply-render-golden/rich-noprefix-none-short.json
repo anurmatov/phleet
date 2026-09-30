@@ -1,0 +1,32 @@
+{
+  "row": "rich-noprefix-none-short",
+  "callCount": 1,
+  "calls": [
+    {
+      "method": "sendRichMessage",
+      "chatId": 111,
+      "rich": {
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": [
+              "Here is the ",
+              {
+                "type": "bold",
+                "text": "answer"
+              },
+              ": use ",
+              {
+                "type": "code",
+                "text": "x < y"
+              },
+              " & keep <b>tags</b> literal."
+            ]
+          }
+        ]
+      },
+      "replyTo": null,
+      "outcome": "ok"
+    }
+  ]
+}

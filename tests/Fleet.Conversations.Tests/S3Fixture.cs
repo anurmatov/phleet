@@ -63,7 +63,6 @@ public sealed class S3Fixture : IAsyncLifetime
     /// </para>
     /// </remarks>
     public const string SignedEndpointVariable = "FLEET_COMMS_S3_SIGNED_ENDPOINT";
-    public const string SignedFilerVariable = "FLEET_COMMS_S3_SIGNED_FILER";
     public const string SignedBucketVariable = "FLEET_COMMS_S3_SIGNED_BUCKET";
 
     /// <summary>
@@ -108,14 +107,9 @@ public sealed class S3Fixture : IAsyncLifetime
     public void ReadSignedEnvironment()
     {
         SignedEndpoint = Environment.GetEnvironmentVariable(SignedEndpointVariable);
-        var filer = Environment.GetEnvironmentVariable(SignedFilerVariable);
-        if (!string.IsNullOrWhiteSpace(filer)) SignedFiler = filer;
         var bucket = Environment.GetEnvironmentVariable(SignedBucketVariable);
         if (!string.IsNullOrWhiteSpace(bucket)) SignedBucket = bucket;
     }
-
-    /// <summary>Filer of the signed bucket, used only to pre-create it.</summary>
-    public string SignedFiler { get; private set; } = "http://127.0.0.1:8888";
 
     /// <summary>
     /// A store over the SIGNED bucket — real credentials through the store's own constructor, so
@@ -140,31 +134,26 @@ public sealed class S3Fixture : IAsyncLifetime
     }
 
     /// <summary>
-    /// The SeaweedFS filer, used ONLY to create the bucket. Configurable so a deployment that puts
-    /// the two behind different addresses can still run this suite.
-    /// </summary>
-    public string FilerEndpoint { get; private set; } = "http://127.0.0.1:8888";
-
-    /// <summary>
-    /// ⚠️ <b>Unsigned requests, by construction.</b> The credentials come from the environment but
-    /// are never used: the client is built with no credentials, which is how the AWS SDK sends an
-    /// anonymous request.
+    /// ⚠️ <b>Both fixture containers name an identity config, and this suite signs.</b> There is no
+    /// anonymous container any more, because an anonymous client cannot create the bucket it wants:
+    /// on SeaweedFS the only call that creates a bucket is an authenticated PUT for an <c>Admin</c>
+    /// identity (<c>autoCreateBucket</c> → <c>isUserAdmin</c>).
     /// </summary>
     /// <remarks>
     /// <para>
-    /// A <c>signingKey</c> in the fixture's IAM config turns a wrong secret into HTTP <c>400
-    /// InvalidRequest</c> ("Signed request requires setting up SeaweedFS S3 authentication") rather
-    /// than the <c>403 InvalidAccessKeyId</c> the real deployment gets. A suite run against that
-    /// fixture would therefore prove the store classifies a rejected credential as
-    /// <c>credentials_rejected</c> when it does not — the exact false green this file exists to
-    /// avoid.
+    /// The filer's HTTP API is NOT a way to create a bucket, which is what an earlier version of
+    /// this file assumed. <c>weed s3</c> takes its bucket root from the filer's
+    /// <c>GetFilerConfiguration().DirBuckets</c> (<c>/buckets</c> unless
+    /// <c>filer.options.buckets_folder</c> says otherwise), and <c>Filer.IsBucket</c> is true only
+    /// for a directory whose parent is exactly that path. A multipart POST to the filer root makes a
+    /// top-level directory, so it answers 201 and the S3 <c>HeadBucket</c> for the same name stays
+    /// 404 forever. Run 36652704531 measured exactly that, 15 times.
     /// </para>
     /// <para>
-    /// So the bucket is created over the filer (multipart POST, which no S3 signature is involved
-    /// in) and the fixture never signs. What that buys: the bucket's anonymous LIST answers 200,
-    /// which is the state Comms' own start-up probe refuses to boot under. That is why the probe
-    /// assertions below expect success against a PUBLIC bucket — and why this fixture proves the
-    /// data plane, never the credential classes. See the class remarks.
+    /// The primary container names an <c>anonymous</c> identity carrying <c>Admin</c> as well as the
+    /// keyed one, so a request this suite sends unsigned still resolves — SeaweedFS only resolves
+    /// anonymous requests against an identity the config actually NAMES, which is why simply naming
+    /// a key is not enough to keep the old behaviour available.
     /// </para>
     /// </remarks>
     public async Task InitializeAsync()
@@ -182,17 +171,17 @@ public sealed class S3Fixture : IAsyncLifetime
                 + "  This FAILS rather than skipping on purpose: these tests prove a byte written "
                 + "through the real SDK is readable back with the digest the store computed, and a "
                 + "skipped run claims that happened when it did not.\n\n"
-                + "  CI supplies a SeaweedFS service container. Locally:\n"
-                + "    weed server -s3 -dir=/tmp/sw\n"
+                + "  CI starts two SeaweedFS containers. Locally:\n"
+                + "    weed server -s3 -dir=/tmp/sw \\\n"
+                + "      -s3.iam.config=tests/fixtures/seaweedfs-primary-identity.json\n"
                 + $"    export {EndpointVariable}='http://127.0.0.1:8333'\n"
-                + "    # the fixture creates the bucket itself, over the filer\n"
+                + "    # the fixture creates the bucket itself, with an admin PUT\n"
                 + $"    export {AccessVariable}='placeholder' {SecretVariable}='placeholder'");
 
         Endpoint = endpoint;
         AccessKey = access;
         SecretKey = secret;
         Bucket = Environment.GetEnvironmentVariable("FLEET_COMMS_S3_BUCKET") ?? "journal-ci";
-        FilerEndpoint = Environment.GetEnvironmentVariable("FLEET_COMMS_S3_FILER") ?? FilerEndpoint;
 
         // Fail at fixture time, not inside the first assertion: an unreachable bucket is a missing
         // prerequisite, not a failing test.
@@ -204,13 +193,31 @@ public sealed class S3Fixture : IAsyncLifetime
 
         if (reachable == 404)
         {
-            // SeaweedFS creates a bucket when a file is written under it, over the FILER rather
-            // than the S3 API — a signed CreateBucket would need a working signature, which this
-            // fixture deliberately does not have.
-            await EnsureBucketOverFilerAsync();
+            // ⚠️ The filer trick this used to rely on NEVER created a bucket. Measured against the
+            // pinned image on CI run 36652704531: `POST /<bucket>/` answered 201 and the S3
+            // `HeadBucket` for the same name stayed 404, on both containers, on a clean server.
+            //
+            // The reason is in the SeaweedFS source, and it is structural rather than a timing
+            // problem that a longer wait could fix:
+            //
+            //   - `weed s3` takes its bucket root from the filer: `GetFilerConfiguration()` returns
+            //     `DirBuckets`, and `startS3Server` stores it as `S3ApiServerOption.BucketsPath`
+            //     (`/buckets` unless `filer.options.buckets_folder` says otherwise).
+            //   - `Filer.IsBucket` is true only for a directory whose PARENT is exactly that path.
+            //   - A multipart POST to the filer root creates a top-level directory, so its parent
+            //     is `/` — not a bucket, invisible to the S3 layer, forever.
+            //
+            // So the primary bucket is created the way the signed one always was: an authenticated
+            // PUT, which auto-creates for an `Admin` identity (`autoCreateBucket` → `isUserAdmin`).
+            // That needs an identity on the primary container too, and an `anonymous` identity with
+            // `Admin` keeps the unauthenticated data-plane calls working — `LookupAnonymous` only
+            // resolves an identity the config NAMES.
+            await EnsureBucketAsync(Store(), Bucket, "primary");
             if (await HeadAsync(ProbeUrl) is not (200 or 403))
                 throw new InvalidOperationException(
-                    $"could not create bucket {Bucket} over the filer at {FilerEndpoint}.");
+                    $"could not create bucket {Bucket}. An admin PUT was accepted and the bucket "
+                    + "still does not answer HeadBucket — see EnsureBucketAsync for how a bucket is "
+                    + "actually created on this server.");
         }
 
         using var store = Store();
@@ -229,29 +236,39 @@ public sealed class S3Fixture : IAsyncLifetime
         if (SignedEndpoint is not null) await EnsureSignedBucketAsync();
     }
 
+    /// <summary>Creates the signed bucket, or fails the run explaining why it could not.</summary>
+    private Task EnsureSignedBucketAsync() => EnsureBucketAsync(SignedStore(), SignedBucket, "signed");
+
     /// <summary>
-    /// Creates the signed bucket, or fails the run explaining why it could not.
+    /// Creates <paramref name="bucket"/> by an authenticated PUT, then proves it answers
+    /// <c>HeadBucket</c>.
     /// </summary>
     /// <remarks>
-    /// ⚠️ Not over the filer. The anonymous fixture creates its bucket that way because a signed
-    /// CreateBucket needs a working signature; on the SIGNED fixture the signature works, and the
-    /// bucket must be created by an authenticated S3 write — SeaweedFS auto-creates on upload for an
-    /// <c>Admin</c> identity. A top-level filer directory is NOT visible to the S3 layer here:
-    /// measured against the pinned image, <c>POST /&lt;bucket&gt;/</c> returned 201 while the S3
-    /// <c>HeadBucket</c> for the same name still answered 404.
+    /// <para>
+    /// ⚠️ <b>An authenticated PUT is the only way this server creates a bucket, for the anonymous
+    /// fixture as much as for the signed one.</b> The filer route is not a shortcut: S3 buckets are
+    /// the directories immediately under the filer's <c>DirBuckets</c> directory, and a POST to the
+    /// filer root creates a directory somewhere the S3 layer never looks. Measured against the
+    /// pinned image, <c>POST /&lt;bucket&gt;/</c> returned 201 while the S3 <c>HeadBucket</c> for the
+    /// same name still answered 404.
+    /// </para>
+    /// <para>
+    /// ⚠️ The PUT must come FIRST, and that is not incidental: the bucket does not exist until
+    /// something creates it, and <c>HeadBucket</c> on a missing bucket answers 404 — which the store
+    /// classifies as a startup failure. Probing before creating inverts the dependency and fails the
+    /// fixture for a reason that has nothing to do with the code.
+    /// </para>
+    /// <para>
+    /// The key is a real ULID under the journal prefix because SeaweedFS's auto-create only fires
+    /// for an <c>Admin</c> identity on an ordinary PUT (<c>autoCreateBucket</c> →
+    /// <c>isUserAdmin</c>); it is deleted immediately, so the orphan sweep never sees a byte the
+    /// suite did not intend to leave.
+    /// </para>
     /// </remarks>
-    private async Task EnsureSignedBucketAsync()
+    private static async Task EnsureBucketAsync(S3ObjectStore store, string bucket, string label)
     {
-        using var store = SignedStore();
+        using var _ = store;
 
-        // ⚠️ The PUT must come FIRST, and that is not incidental: the bucket does not exist until
-        //    something creates it, and `HeadBucket` on a missing bucket answers 404 — which the
-        //    store classifies as a startup failure. Probing before creating inverts the dependency
-        //    and fails the fixture for a reason that has nothing to do with the code.
-        //
-        // The key is a real ULID under the journal prefix because SeaweedFS's auto-create only
-        // fires for an Admin identity on an ordinary PUT; it is deleted immediately, so the orphan
-        // sweep never sees a byte the suite did not intend to leave.
         var keep = JournalObjectKeys.For(Fleet.Protocol.Ulid.NewUlid());
         var marker = new byte[16];
         Random.Shared.NextBytes(marker);
@@ -261,9 +278,8 @@ public sealed class S3Fixture : IAsyncLifetime
             var written = await store.PutAsync(keep, body, marker.LongLength, "application/octet-stream");
             if (!written.Succeeded)
                 throw new InvalidOperationException(
-                    $"could not create bucket {SignedBucket} on the signed fixture at "
-                    + $"{SignedEndpoint}: the store refused an authenticated PUT. Check that "
-                    + "-s3.iam.config names an identity with Admin, and that its access key is at "
+                    $"could not create bucket {bucket} on the {label} fixture: the store refused an "
+                    + "authenticated PUT. Check that -s3.iam.config names an identity with Admin "
                     + "and that its access key matches the identity named in -s3.iam.config "
                     + "exactly. See SignedAccessKey.");
         }
@@ -272,7 +288,7 @@ public sealed class S3Fixture : IAsyncLifetime
 
         if (!await store.ProbeAsync())
             throw new InvalidOperationException(
-                $"bucket {SignedBucket} exists on the signed fixture but HeadBucket refused it. The "
+                $"bucket {bucket} exists on the {label} fixture but HeadBucket refused it. The "
                 + "identity's policy does not grant s3:ListBucket on the bucket — which is exactly "
                 + "the failure the shipped scoped policy must not have, so this is worth reading "
                 + "as a real finding.");
@@ -318,40 +334,17 @@ public sealed class S3Fixture : IAsyncLifetime
         }
     }
 
-    private async Task EnsureBucketOverFilerAsync()
-    {
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
-
-        // A multipart POST to /<bucket>/ is how the filer creates a directory, and SeaweedFS
-        // treats a top-level directory as a bucket. The file is a keep-marker; the fixture deletes
-        // it so the orphan sweep sees nothing it did not put there.
-        using var form = new MultipartFormDataContent();
-        var keep = new ByteArrayContent([]);
-        keep.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
-        form.Add(keep, "file", ".fixture-keep");
-
-        var created = await http.PostAsync($"{FilerEndpoint.TrimEnd('/')}/{Bucket}/", form);
-        if (!created.IsSuccessStatusCode)
-            throw new InvalidOperationException(
-                $"the filer refused to create {Bucket}: HTTP {(int)created.StatusCode}.");
-
-        var deleted = await http.DeleteAsync($"{FilerEndpoint.TrimEnd('/')}/{Bucket}/.fixture-keep");
-        if (!deleted.IsSuccessStatusCode && deleted.StatusCode != System.Net.HttpStatusCode.NotFound)
-            throw new InvalidOperationException(
-                $"the filer refused to remove the keep marker: HTTP {(int)deleted.StatusCode}.");
-    }
-
     public Task DisposeAsync() => Task.CompletedTask;
 
     /// <summary>
     /// A store over the fixture's bucket, built through the same constructor Comms uses.
     /// </summary>
     /// <remarks>
-    /// The access/secret pair here is a PLACEHOLDER, not a working credential: SeaweedFS without a
-    /// signing key authenticates nobody, and the store's own client is built from
-    /// <see cref="Client"/> so nothing it sends is signed. The fields are filled because
-    /// <see cref="JournalMediaOptions.Validate"/> requires them — the same guard that protects the
-    /// real deployment, which is also under test here.
+    /// The pair comes from the environment because a real deployment can point the fixture at a
+    /// bucket it manages, and it is what the client signs with. On CI it is the fixture identity
+    /// named in <c>tests/fixtures/seaweedfs-primary-identity.json</c>; the fields are required by
+    /// <see cref="JournalMediaOptions.Validate"/> — the same guard that protects the real
+    /// deployment, which is also under test here.
     /// </remarks>
     public S3ObjectStore Store(string? bucket = null) => new(
         new JournalMediaOptions
@@ -367,15 +360,17 @@ public sealed class S3Fixture : IAsyncLifetime
 
     /// <summary>
     /// Raw client, for the assertions that must not go through the store's own abstraction.
-    /// ⚠️ <b>Anonymous.</b> The credentials above are read so a real deployment can point the
-    /// fixture at a bucket it manages, but the SDK is given none — passing them would make a
-    /// signed request, which SeaweedFS answers 400 rather than 403 without a signing key.
+    /// ⚠️ <b>Signed with the fixture identity.</b> This used to send anonymous requests, which
+    /// worked only against a server with no identity configured — and such a server cannot create a
+    /// bucket at all, because SeaweedFS auto-creates one only for an <c>Admin</c> identity. The
+    /// primary container therefore names an identity too, and this client signs with it.
     /// </summary>
+    /// <remarks>
+    /// A deployment that wants the old behaviour can point <c>FLEET_COMMS_S3_ACCESS_KEY</c> at an
+    /// identity the server names; the fixture never invents credentials of its own.
+    /// </remarks>
     public AmazonS3Client Client() => new(
-        // `AnonymousAWSCredentials` is the SDK's declared "send this unsigned". Handing it nothing
-        // is different: the default chain then searches the environment and FAILS the call when it
-        // finds nothing, which is not the same as not needing credentials.
-        new Amazon.Runtime.AnonymousAWSCredentials(),
+        new Amazon.Runtime.BasicAWSCredentials(AccessKey, SecretKey),
         new AmazonS3Config
         {
             ServiceURL = Endpoint,

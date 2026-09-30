@@ -153,8 +153,14 @@ jobs:
           FLEET_CONVERSATIONS_MIGRATION_CONNECTION: "Server=127.0.0.1;Port=3306;User ID=comms_ddl;Password=ci-ddl;AllowPublicKeyRetrieval=true;"
           FLEET_CONVERSATIONS_CONNECTION: "Server=127.0.0.1;Port=3306;User ID=comms_runtime;Password=ci-runtime;AllowPublicKeyRetrieval=true;"
           FLEET_CONVERSATIONS_BROKER: "amqp://guest:guest@127.0.0.1:5672/"
+        # ⚠️ `JournalS3*` is excluded here and runs in `media-s3-tests` below, which is the job that
+        # has a SeaweedFS beside it. Same reason this job excludes nothing else: that suite FAILS
+        # (never skips) without a bucket, and a job that ran it would fail for want of a fixture it
+        # was never given — the exact shape that tempts someone to make the fixture skip, which is
+        # how the media acceptance criteria would stop being evidence while the summary stayed green.
         run: >
           dotnet test tests/Fleet.Conversations.Tests --configuration Release
+          --filter "FullyQualifiedName!~JournalS3"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=conversations.trx"
           --results-directory ${{ github.workspace }}/testresults
@@ -278,11 +284,33 @@ jobs:
 
           # 127.0.0.1, not the container's own address: the suite connects to the published port on
           # the runner, exactly as it did with services.
+          #
+          # ⚠️ BOTH containers name an identity config, including the primary one. An earlier shape
+          # ran the primary container with no identity and had the fixture create its bucket over
+          # the filer's HTTP API. That could never have worked, for two reasons, both structural:
+          #
+          #   1. A bucket is the directory immediately under the filer's `DirBuckets` directory
+          #      (`/buckets`), which is where `weed s3` puts it. A multipart POST to the filer ROOT
+          #      creates a top-level directory whose parent is `/`, so `Filer.IsBucket` is false and
+          #      the S3 layer never sees it: 201 from the filer, permanent 404 from `HeadBucket`.
+          #      That is exactly what run 36652704531 measured.
+          #   2. The one call that DOES create a bucket — an authenticated PUT for an `Admin`
+          #      identity — requires a server that has an identity. A server with no identity
+          #      cannot create a bucket by any route available to this suite.
+          #
+          # ⚠️ Also note the filer's HTTP port has never been on the path for bucket creation:
+          # `weed s3` dials the filer over gRPC (`filer.port.grpc`), so no amount of waiting on
+          # :8888 could have changed this result.
+          #
+          # The primary config names `anonymous` with `Admin` so unsigned requests still work if a
+          # future fixture wants them, and `fleet-ci` for the PUT that creates the bucket.
           docker run -d --name weed-anon -p 127.0.0.1:8333:8333 -p 127.0.0.1:8888:8888 \
+            -v "$PWD/tests/fixtures:/fixtures:ro" \
             --entrypoint weed "$IMAGE" \
             server -s3 -dir=/data -ip=0.0.0.0 \
             -s3.port=8333 -master.port=9333 -master.port.grpc=19333 \
             -volume.port=8444 -filer.port=8888 -filer.port.grpc=48888 \
+            -s3.iam.config=/fixtures/seaweedfs-primary-identity.json \
             -s3.port.iceberg=0 -s3.port.lance=0
 
           # The identity file is in the checkout, so it is mounted now that checkout has run.
@@ -295,12 +323,20 @@ jobs:
             -s3.iam.config=/fixtures/seaweedfs-signed-identity.json \
             -s3.port.iceberg=0 -s3.port.lance=0
 
-          # Wait for the S3 port of each. `weed server` masters, then volumes, then the filer, then
-          # S3, so the S3 port answering is the last thing to come up and the only one worth waiting
-          # on. A TCP probe rather than an HTTP one: on the signed container an unauthenticated
-          # request is refused with 403, which is a WORKING server, and treating 403 as not-ready
-          # would hang the job on a fixture that is fine.
-          for c in 8333 8334; do
+          # Wait for the S3 port of each, and for the filer gRPC port that sits behind it.
+          #
+          # `weed server` starts master, then volume, then filer, then S3. The S3 gateway is the
+          # last to listen and it does not listen until it has read the filer's configuration over
+          # gRPC — `startS3Server` retries `GetFilerConfiguration` forever before it builds its
+          # router — so an S3 port that answers already implies a reachable filer. The gRPC ports
+          # are probed anyway because they are the ports bucket creation actually uses, and a
+          # container that came up half-configured is worth naming here rather than meeting as a
+          # mysterious 404 in the fixture.
+          #
+          # A TCP probe rather than an HTTP one: both containers now name an identity config, so an
+          # unauthenticated request is refused with 403, which is a WORKING server. Treating 403 as
+          # not-ready would hang the job on a fixture that is fine.
+          for c in 8333 48888 8334 48889; do
             for i in $(seq 1 60); do
               if (exec 3<>"/dev/tcp/127.0.0.1/$c") 2>/dev/null; then
                 exec 3>&- 3<&-
@@ -318,8 +354,10 @@ jobs:
             done
           done
 
-          # Prove the mount actually landed, so a wrong path is THIS step's failure and not a
+          # Prove both mounts actually landed, so a wrong path is THIS step's failure and not a
           # confusing "the store refused an authenticated PUT" from the fixture.
+          docker exec weed-anon test -r /fixtures/seaweedfs-primary-identity.json
+          echo "primary identity is mounted in weed-anon"
           docker exec weed-signed test -r /fixtures/seaweedfs-signed-identity.json
           echo "signed identity is mounted in weed-signed"
 
@@ -336,16 +374,15 @@ jobs:
 
       - name: Run the S3 media suite
         env:
-          # The PRIMARY bucket takes no signature: the fixture builds its client with
-          # AnonymousAWSCredentials so the data-plane tests assert on bytes rather than on
-          # authentication. The values below are fixture constants for throwaway containers on an
-          # ephemeral runner; no deployment uses them.
+          # The primary bucket is created by, and written through, a SIGNED request: the only call
+          # that creates a bucket on SeaweedFS is an authenticated PUT for an `Admin` identity, so
+          # the fixture's client signs with the pair below. The values are fixture constants for
+          # throwaway containers on an ephemeral runner; no deployment uses them.
           #
-          # `FLEET_COMMS_S3_ACCESS_KEY`/`_SECRET_KEY` are still supplied because the store's own
-          # option validation wants a pair, and the SIGNED bucket uses the same two values — see
-          # S3Fixture.SignedAccessKey and the `weed-signed` container started above.
+          # They must be byte-identical to the credentials named in
+          # tests/fixtures/seaweedfs-primary-identity.json — SeaweedFS looks an access key up
+          # exactly, and a key the file does not name is answered 403 InvalidAccessKeyId.
           FLEET_COMMS_S3_ENDPOINT: "http://127.0.0.1:8333"
-          FLEET_COMMS_S3_FILER: "http://127.0.0.1:8888"
           FLEET_COMMS_S3_BUCKET: "journal-ci"
           FLEET_COMMS_S3_ACCESS_KEY: "placeholder"
           FLEET_COMMS_S3_SECRET_KEY: "placeholder"
@@ -354,7 +391,6 @@ jobs:
           # The SECOND SeaweedFS (`weed-signed`), with an identity configured, is what makes the
           # credential classes and the operator commands testable at all. Read by S3Fixture.
           FLEET_COMMS_S3_SIGNED_ENDPOINT: "http://127.0.0.1:8334"
-          FLEET_COMMS_S3_SIGNED_FILER: "http://127.0.0.1:8889"
           # The signed identity is a fixture constant (S3Fixture.SignedAccessKey), not an env var:
           # it is a throwaway container on an ephemeral runner and there is no secret to hide.
         run: >

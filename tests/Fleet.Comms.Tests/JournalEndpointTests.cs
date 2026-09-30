@@ -131,7 +131,11 @@ public sealed class JournalEndpointTests
     public static TheoryData<string, int, string> Refusals() => new()
     {
         { JournalRecords.Valid(extra: ",\"observer\":\"agent2\""), 422, "{\"error\":\"invalid_record\",\"field\":\"observer\"}" },
+        // agent_tool (#394, AC11) is only an agent's own outbound message.
         { JournalRecords.Valid(origin: "agent_tool"), 422, "{\"error\":\"invalid_record\",\"field\":\"origin\"}" },
+        { AgentSender(JournalRecords.Valid(origin: "agent_tool")), 422, "{\"error\":\"invalid_record\",\"field\":\"origin\"}" },
+        { JournalRecords.Valid(origin: "agent_tool", direction: "outbound"), 422, "{\"error\":\"invalid_record\",\"field\":\"origin\"}" },
+        { JournalRecords.Valid(origin: "agent_copy"), 422, "{\"error\":\"invalid_record\",\"field\":\"origin\"}" },
         { JournalRecords.Valid(attachments: "[{\"ordinal\":0,\"kind\":\"photo\",\"mimeType\":\"image/jpeg\",\"notArchivedReason\":\"media_disabled\",\"uploadId\":\"u1\"}]"), 409, "{\"error\":\"media_disabled\"}" },
         { JournalRecords.Valid(sentAt: "2012-12-31T23:59:59Z"), 422, "{\"error\":\"invalid_record\",\"field\":\"sentAt\"}" },
         { JournalRecords.Valid(sentAt: DateTimeOffset.UtcNow.AddHours(1).ToString("O")), 422, "{\"error\":\"invalid_record\",\"field\":\"sentAt\"}" },
@@ -180,6 +184,54 @@ public sealed class JournalEndpointTests
         Assert.Equal(expected, await response.Content.ReadAsStringAsync());
         Assert.Equal(0, host.Store.Calls);
     }
+
+    /// <summary>An agent's outbound tool send is stored under <c>agent_tool</c> (#394, AC11).</summary>
+    [Fact]
+    public async Task An_outbound_agent_tool_record_from_an_agent_is_created()
+    {
+        await using var host = await JournalTestHost.StartAsync();
+
+        var response = await host.PostAsync(
+            AgentSender(JournalRecords.Valid(origin: "agent_tool", direction: "outbound")), Ingest());
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var (record, _) = Assert.Single(host.Store.Ingested);
+        Assert.Equal(JournalRecordOrigin.AgentTool, record.Origin);
+        Assert.Equal(JournalDirection.Outbound, record.Direction);
+        Assert.Equal(JournalSenderKind.Agent, record.Sender.Kind);
+    }
+
+    /// <summary>What the agent's journal client writes for a tool send is what this listener accepts.</summary>
+    [Fact]
+    public async Task The_journal_client_wire_form_of_an_agent_tool_record_is_accepted()
+    {
+        await using var host = await JournalTestHost.StartAsync();
+        var record = new JournalRecord
+        {
+            EventId = Fleet.Protocol.Ulid.NewUlid(),
+            Telegram = new JournalTelegramRef
+            {
+                BotId = 7001, ChatId = -1001234567890, ChatKind = JournalChatKind.Supergroup, MessageId = 43,
+            },
+            Direction = JournalDirection.Outbound,
+            Sender = new JournalSender { Kind = JournalSenderKind.Agent, Id = "7001" },
+            SentAt = DateTimeOffset.UtcNow.AddMinutes(-1),
+            Text = "<b>done</b>",
+            TextFormat = JournalTextFormat.Html,
+            Origin = JournalRecordOrigin.AgentTool,
+            Attachments = [],
+        };
+
+        var body = System.Text.Encoding.UTF8.GetString(Fleet.Journal.Client.JournalRecordJson.Serialize(record));
+        var response = await host.PostAsync(body, Ingest());
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        Assert.Contains("\"origin\":\"agent_tool\"", body, StringComparison.Ordinal);
+        Assert.Equal(JournalRecordOrigin.AgentTool, Assert.Single(host.Store.Ingested).Record.Origin);
+    }
+
+    private static string AgentSender(string body) =>
+        body.Replace("\"kind\":\"human\"", "\"kind\":\"agent\"", StringComparison.Ordinal);
 
     /// <summary>65,536 UTF-8 bytes is the limit, counted in bytes, not characters.</summary>
     [Fact]

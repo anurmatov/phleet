@@ -209,6 +209,12 @@ internal static class JournalRecordParser
 
         var origin = RequiredEnum<JournalRecordOrigin>(fields, "origin");
 
+        // A tool send (#394) is only ever an agent's own outbound message. Any other record claiming
+        // that origin is refused rather than stored under it. Origin is not in the fingerprint.
+        if (origin == JournalRecordOrigin.AgentTool
+            && (direction != JournalDirection.Outbound || sender.Kind != JournalSenderKind.Agent))
+            throw Refuse("origin");
+
         JournalSendGroup? sendGroup = null;
         if (fields.TryGetValue("sendGroup", out var group) && group.ValueKind != JsonValueKind.Null)
             sendGroup = ReadSendGroup(group, direction);

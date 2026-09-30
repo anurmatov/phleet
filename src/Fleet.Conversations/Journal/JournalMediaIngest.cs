@@ -85,6 +85,14 @@ public partial class MySqlJournalStore
 
         // One connection for the whole read: N attachments must not be N pools' worth of
         // connections, and one snapshot is the answer the whole record is judged against.
+        //
+        // ⚠️ Opened here and disposed here — never cached on the instance. MySqlJournalStore is a
+        //    singleton and ingest is concurrent, so a field holding "the" read connection would
+        //    hand one open MySqlConnection to two requests at once. Two commands on one connection
+        //    interleave their result streams: the second ExecuteReader throws, or worse, a reader
+        //    reads the other command's rows. `using` was already forcing per-call disposal on
+        //    every path, so the cache bought nothing but the race. MySqlConnector pools the
+        //    physical socket underneath, so opening per call is not per-call TCP.
         using var connection = OpenSync();
         foreach (var attachment in named)
         {
@@ -207,17 +215,13 @@ public partial class MySqlJournalStore
         UploadOrdinals = ordinals.Distinct().Order().ToArray(),
     };
 
-    private System.Data.IDbConnection? _pooledReadConnection;
-
+    /// <summary>
+    /// A fresh, open connection for one synchronous read burst. The caller disposes it.
+    /// </summary>
     private MySqlConnector.MySqlConnection OpenSync()
     {
-        if (_pooledReadConnection is MySqlConnector.MySqlConnection existing
-            && existing.State == System.Data.ConnectionState.Open)
-            return existing;
-
         var connection = new MySqlConnector.MySqlConnection(ReadConnectionString());
         connection.Open();
-        _pooledReadConnection = connection;
         return connection;
     }
 

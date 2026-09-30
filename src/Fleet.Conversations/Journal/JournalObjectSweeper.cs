@@ -107,13 +107,20 @@ public sealed class JournalObjectSweeper(
     }
 
     /// <summary>
-    /// One row-driven class: bytes first, then the row.
+    /// One row-driven class: is it still referenced, then bytes, then the row.
     /// </summary>
     /// <remarks>
-    /// The order is the invariant. Bytes then row means a failure between the two leaves a row with
-    /// no object — which the next tick deletes, because <see cref="IJournalObjectStore.DeleteAsync"/>
-    /// treats a missing object as success. Row then bytes would leave an object with no row, and
-    /// only the weekly orphan sweep could find it.
+    /// <para>
+    /// The reference guard comes first precisely because a referenced object is not doomed. Bytes
+    /// before the row is still the order for the two steps that ARE a deletion: a failure between
+    /// them leaves a row with no object, which the next tick deletes, because
+    /// <see cref="IJournalObjectStore.DeleteAsync"/> treats a missing object as success. Row before
+    /// bytes would leave an object with no row, findable only by the weekly orphan sweep.
+    /// </para>
+    /// <para>
+    /// Neither order protects an object that an attachment still points at, so that question is
+    /// answered before any of it. See the guard in the loop.
+    /// </para>
     /// </remarks>
     private async Task<(int Removed, int Failures)> SweepClassAsync(
         string sql, DateTime cutoff, string metricClass, CancellationToken ct)
@@ -138,6 +145,33 @@ public sealed class JournalObjectSweeper(
 
         foreach (var (id, key) in doomed)
         {
+            await using var connection = await OpenAsync(ct);
+
+            // ⚠️ A live attachment is an absolute stop, for every class, and it is checked BEFORE
+            //    the bucket delete. A dedup loser is exactly the case that makes this load-bearing:
+            //    its own subject committed against it, lost dedup, and its attachment row now points
+            //    at the WINNER while the loser's row goes stale.
+            //
+            //    The previous order was bytes-first, and it was wrong: once DeleteAsync succeeds
+            //    there is nothing left to skip. The row survives (the FK refuses it), the guard logs
+            //    "leaving it for retention", and the next tick repeats the delete on an object that
+            //    is already gone — permanently un-downloadable media behind a row that reads healthy.
+            //    That is the one failure this sweep must never produce, and the "row then bytes"
+            //    trade-off below does not apply here: a referenced object is not doomed at all, so
+            //    there is no orphan to create by refusing early.
+            await using (var referenced = new MySqlCommand(
+                "SELECT 1 FROM journal_attachments WHERE object_id = @id LIMIT 1", connection))
+            {
+                referenced.Parameters.AddWithValue("@id", id);
+                if (await referenced.ExecuteScalarAsync(ct) is not null)
+                {
+                    logger.LogWarning(
+                        "journal object {Id} passed its {Class} deadline but is still referenced "
+                        + "by an attachment; leaving it and its bytes for retention", id, metricClass);
+                    continue;
+                }
+            }
+
             try
             {
                 await objects.DeleteAsync(key, ct);
@@ -147,27 +181,6 @@ public sealed class JournalObjectSweeper(
                 // Row untouched. Counted, retried next tick.
                 failures++;
                 continue;
-            }
-
-            await using var connection = await OpenAsync(ct);
-
-            // ⚠️ A live attachment is an absolute stop, for every class. A dedup loser is exactly
-            //    the case that makes this load-bearing: its own subject committed against it, lost
-            //    dedup, and its attachment row now points at the WINNER while the loser's row goes
-            //    stale. Nothing but this guard stops an age-based sweep from deleting bytes that an
-            //    attachment can still be read through. The FK would refuse the DELETE anyway; the
-            //    point is to skip the bucket delete the FK cannot take back.
-            await using (var referenced = new MySqlCommand(
-                "SELECT 1 FROM journal_attachments WHERE object_id = @id LIMIT 1", connection))
-            {
-                referenced.Parameters.AddWithValue("@id", id);
-                if (await referenced.ExecuteScalarAsync(ct) is not null)
-                {
-                    logger.LogWarning(
-                        "journal object {Id} passed its {Class} deadline but is still referenced "
-                        + "by an attachment; leaving it for retention", id, metricClass);
-                    continue;
-                }
             }
 
             await using var delete = new MySqlCommand(

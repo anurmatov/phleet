@@ -84,6 +84,15 @@ public sealed class JournalRetention(
             //    than looking them up afterwards: once the attachment rows cascade away, nothing
             //    connects the object to anything and the bucket would keep the bytes forever.
             //    `deleting` + `delete_after` is the state the object sweeper acts on.
+            //
+            // ⚠️⚠️ AND: only objects no SURVIVING message references. One object can be attached to
+            //    several messages — dedup points every attachment with the same digest at the one
+            //    committed object, and a forward can copy an attachment row onto another message.
+            //    Marking on "this expiring message points at it" retires bytes that a live message
+            //    is still serving: the sweeper's own reference guard then refuses the row delete
+            //    forever, and the operator is left with a `deleting` row whose bytes come back on
+            //    every restore. The NOT EXISTS is the whole difference between retiring an object
+            //    and prematurely deleting one.
             if (objects is not null)
             {
                 await using var mark = new MySqlCommand(
@@ -93,6 +102,13 @@ public sealed class JournalRetention(
                       JOIN journal_messages m ON m.id = a.message_id
                       JOIN journal_objects o ON o.id = a.object_id
                      WHERE m.sent_at < @cutoff AND a.object_id IS NOT NULL
+                       AND NOT EXISTS (
+                             SELECT 1
+                               FROM journal_attachments a2
+                               JOIN journal_messages m2 ON m2.id = a2.message_id
+                              WHERE a2.object_id = a.object_id
+                                AND m2.sent_at >= @cutoff)
+                     ORDER BY a.object_id
                      LIMIT @batch
                     """, connection);
                 mark.Parameters.AddWithValue("@cutoff", cutoff);

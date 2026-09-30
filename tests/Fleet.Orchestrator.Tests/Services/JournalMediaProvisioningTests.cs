@@ -42,7 +42,7 @@ public sealed class JournalMediaProvisioningTests : IDisposable
     public void An_agent_with_media_on_gets_Journal_MediaEnabled_true()
     {
         var json = ContainerProvisioningService.GenerateAppsettingsJson(
-            AgentWithJournal(), "acto",
+            AgentWithJournal(), "coordinator",
             journal: new JournalProvisioning("ingest-token", [], null, MediaEnabled: true));
 
         Assert.True(HasMediaKey(json));
@@ -56,7 +56,7 @@ public sealed class JournalMediaProvisioningTests : IDisposable
     public void An_agent_with_media_off_gets_no_media_key_at_all()
     {
         var json = ContainerProvisioningService.GenerateAppsettingsJson(
-            AgentWithJournal(), "acto",
+            AgentWithJournal(), "coordinator",
             journal: new JournalProvisioning("ingest-token", [], null, MediaEnabled: false));
 
         Assert.False(
@@ -137,7 +137,7 @@ public sealed class JournalMediaProvisioningTests : IDisposable
         Assert.Equal(expected, service.MediaEndpointIsConfigured());
 
         var json = ContainerProvisioningService.GenerateAppsettingsJson(
-            AgentWithJournal(), "acto",
+            AgentWithJournal(), "coordinator",
             journal: new JournalProvisioning("ingest-token", [], null, service.MediaEndpointIsConfigured()));
 
         // `true` is written; `false` is ABSENT (the one-write rollback), so the assertion is on

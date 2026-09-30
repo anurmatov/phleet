@@ -316,7 +316,24 @@ public sealed class S3ObjectStore : IJournalObjectStore, IDisposable
     {
         try
         {
-            await _s3.GetBucketLocationAsync(new GetBucketLocationRequest { BucketName = _bucket }, ct);
+            // ⚠️ `HeadBucket`, as specified — NOT `GetBucketLocation`. Two reasons, and the second
+            //    is the one that would have bitten in production:
+            //
+            //    1. `GetBucketLocation` is a DIFFERENT permission (`s3:GetBucketLocation`) than the
+            //       one the shipped runtime policy grants. A probe that asks for a permission the
+            //       deployment deliberately did not grant fails on a perfectly healthy bucket.
+            //       `HeadBucket` is `s3:ListBucket`, which the policy DOES grant on the bucket ARN.
+            //    2. `GetBucketLocation` is a bucket-subresource GET. MinIO answers a subresource
+            //       request against a bucket the credentials cannot see with `403 AccessDenied`,
+            //       while `HeadBucket` answers the same situation with `404 NotFound` — so the
+            //       classification below is written against what THIS call actually returns.
+            //
+            // Measured against the CI fixture (SeaweedFS, anonymous): an existing bucket answers
+            // 200, a missing one answers `404 NotFound` with ErrorCode `NotFound` — NOT
+            // `NoSuchBucket`. That is why the status code leads and the error-code list is a
+            // secondary match: a real S3 says `NoSuchBucket`, MinIO says `AccessDenied`, SeaweedFS
+            // says `NotFound`, and all three mean "the operator has to fix this".
+            await _s3.HeadBucketAsync(new HeadBucketRequest { BucketName = _bucket }, ct);
             return true;
         }
         catch (JournalProbeFailureException)
@@ -326,11 +343,16 @@ public sealed class S3ObjectStore : IJournalObjectStore, IDisposable
         catch (AmazonS3Exception e)
         {
             // The failure classes the operator must fix, named here so the caller's message never
-            // has to quote the SDK. A 403 on an unauthenticated bucket read is the same class as a
-            // rejected signature: this account cannot use the bucket it was given.
-            if (e.StatusCode is System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.Unauthorized
+            // has to quote the SDK. A 403 on a bucket the credentials cannot see is the same class
+            // as a rejected signature: this account cannot use the bucket it was given.
+            //
+            // 404 is in that list because for HEAD-on-a-bucket it is not a transient answer — it is
+            // "no such bucket", or MinIO's refusal to say whether there is one.
+            if (e.StatusCode is System.Net.HttpStatusCode.Forbidden
+                    or System.Net.HttpStatusCode.Unauthorized
+                    or System.Net.HttpStatusCode.NotFound
                 || e.ErrorCode is "NoSuchBucket" or "InvalidAccessKeyId" or "SignatureDoesNotMatch"
-                    or "AccessDenied")
+                    or "AccessDenied" or "NotFound")
             {
                 throw new JournalProbeFailureException(e);
             }

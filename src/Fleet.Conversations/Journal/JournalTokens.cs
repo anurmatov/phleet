@@ -29,7 +29,10 @@ public static class JournalTokens
     public const string PurposeIngest = "ingest";
     public const string PurposeStatus = "status";
 
-    /// <summary>Reserved for the read-tools slice. Refused by every route in this slice.</summary>
+    /// <summary>
+    /// The read tools (#394): <c>POST /journal/v1/mcp</c> and nothing else. It carries no scope —
+    /// what a subject may read is the deployment's decision, made on the server.
+    /// </summary>
     public const string PurposeRead = "read";
 
     /// <summary>Reserved for the service-publisher slice. Refused by every route in this slice.</summary>

@@ -220,66 +220,22 @@ jobs:
     name: Journal media object store (S3)
     runs-on: ubuntu-latest
 
+    # Only MySQL is declared as a service. The two SeaweedFS containers are started by a step
+    # AFTER checkout (below), because a service container cannot be made to work here:
+    #
+    #   - `args` is not a valid key under `services.<id>`, and GitHub rejects the whole workflow
+    #     file before any job runs when it appears.
+    #   - `options` IS valid, but a free-form command in it fails container init: the runner
+    #     prepends its own `docker create` arguments, so the `--entrypoint weed` and the `weed
+    #     server …` words land where Docker expects flags. Measured on run 36651444927, where
+    #     `Initialize containers` failed and every step after it was skipped.
+    #   - `volumes:` on a service mounts the workspace BEFORE `actions/checkout` runs, and the
+    #     workspace is empty at container init. The signed identity file was therefore missing at
+    #     start — a container that cannot read its own `-s3.iam.config` is not a signed bucket.
+    #
+    # A step has none of these problems: it runs after checkout, it is a real `docker run` with
+    # the flags in the right places, and it can wait for readiness explicitly.
     services:
-      seaweedfs:
-        image: chrislusf/seaweedfs@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
-        ports:
-          - 8333:8333
-          - 8888:8888
-        # `args` is not a valid key under `services.<id>` — GitHub rejects the whole workflow file
-        # with "services.seaweedfs contains unexpected property: args", and it does so before any
-        # job runs: the run reports "a workflow file issue" and no check is ever reported on the
-        # PR. The command has to go in `options`, which is the one key that reaches `docker run`.
-        # The explicit ports are belt-and-braces: the image's default ports are already 8333/8888,
-        # but the port mapping is what makes them reachable on 127.0.0.1 from the runner.
-        options: >-
-          --entrypoint weed
-          server -s3 -dir=/data -ip=0.0.0.0
-          -s3.port=8333 -master.port=9333 -master.port.grpc=19333
-          -volume.port=8444 -filer.port=8888 -filer.port.grpc=48888
-          -s3.port.iceberg=0 -s3.port.lance=0
-          --health-cmd="wget -q -O- http://127.0.0.1:8888/ || exit 1"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=20
-
-      # A SECOND SeaweedFS with an identity configured, for the credential classes: a wrong secret
-      # must be classified `credentials_rejected` (403) and not retried, and `HeadBucket` must
-      # succeed with the shipped scoped policy. The primary container above has no identity, so it
-      # cannot answer either question.
-      #
-      # Same pinned image. These are fixture values for a throwaway container on an ephemeral
-      # runner; nothing in this repo or any deployment uses them.
-      seaweedfs-signed:
-        image: chrislusf/seaweedfs@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
-        ports:
-          - 8334:8333
-          - 8889:8888
-        volumes:
-          - ${{ github.workspace }}/tests/fixtures:/fixtures:ro
-        options: >-
-          --entrypoint weed
-          server -s3 -dir=/data -ip=0.0.0.0
-          -s3.port=8333 -master.port=9334 -master.port.grpc=19334
-          -volume.port=8445 -filer.port=8888 -filer.port.grpc=48889
-          -s3.iam.config=/fixtures/seaweedfs-signed-identity.json
-          -s3.port.iceberg=0 -s3.port.lance=0
-          --health-cmd="wget -q -O- http://127.0.0.1:8888/ || exit 1"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=20
-
-      # ⚠️ ONE identity-configured container, not two. The operator commands (`media backup`,
-      # `media restore`, `journal verify-media`) build their store through
-      # `JournalMediaCommands.OpenStore()`, which uses the store's real constructor and therefore
-      # ALWAYS SIGNS — so they need this bucket, not the identity-less primary one. The same bucket
-      # serves the credential-class tests because the identity here is the pair the suite already
-      # passes to the store; a second signed container would only double the containers for one
-      # assertion set.
-      # The S3 upload tests are not pure object-plane tests: they prove that an upload becomes a
-      # committed journal_object and survives a restart, which is a database claim. Without this
-      # service MySqlFixture FAILS rather than skips — which is correct, but means the job has to
-      # actually provide one. Same shape as conversations-tests and orchestrator-migrations.
       mysql:
         image: mysql:8.0
         env:
@@ -292,9 +248,80 @@ jobs:
           --health-timeout=5s
           --health-retries=20
 
+      # The S3 upload tests are not pure object-plane tests: they prove an upload becomes a
+      # committed journal_object and survives a restart, which is a database claim. MySqlFixture
+      # FAILS rather than skips without one, so the job has to provide it. Same shape as
+      # conversations-tests and orchestrator-migrations.
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # Two SeaweedFS containers, started HERE rather than as services — see the note above the
+      # `services:` block for why a service container cannot carry them.
+      #
+      #   8333 anonymous  — the data plane. No identity, so the suite's anonymous client works and
+      #                     the assertions are about bytes rather than about authentication.
+      #   8334 signed     — `-s3.iam.config` naming the identity in tests/fixtures. This is what
+      #                     makes the credential classes and the operator CLI testable at all: the
+      #                     operator verbs build their store through the real constructor and
+      #                     therefore ALWAYS sign, and against the anonymous bucket every one of
+      #                     those calls is answered 400.
+      #
+      # Both are pinned by digest, same image as before. Readiness is waited for explicitly because
+      # there is no service health-check to wait on: a bucket that is not listening yet is a
+      # mysterious 400 or a refused connection in the middle of the suite otherwise.
+      - name: Start the SeaweedFS fixtures
+        run: |
+          set -euo pipefail
+          IMAGE=chrislusf/seaweedfs@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+
+          # 127.0.0.1, not the container's own address: the suite connects to the published port on
+          # the runner, exactly as it did with services.
+          docker run -d --name weed-anon -p 127.0.0.1:8333:8333 -p 127.0.0.1:8888:8888 \
+            --entrypoint weed "$IMAGE" \
+            server -s3 -dir=/data -ip=0.0.0.0 \
+            -s3.port=8333 -master.port=9333 -master.port.grpc=19333 \
+            -volume.port=8444 -filer.port=8888 -filer.port.grpc=48888 \
+            -s3.port.iceberg=0 -s3.port.lance=0
+
+          # The identity file is in the checkout, so it is mounted now that checkout has run.
+          docker run -d --name weed-signed -p 127.0.0.1:8334:8333 -p 127.0.0.1:8889:8888 \
+            -v "$PWD/tests/fixtures:/fixtures:ro" \
+            --entrypoint weed "$IMAGE" \
+            server -s3 -dir=/data -ip=0.0.0.0 \
+            -s3.port=8333 -master.port=9334 -master.port.grpc=19334 \
+            -volume.port=8445 -filer.port=8888 -filer.port.grpc=48889 \
+            -s3.iam.config=/fixtures/seaweedfs-signed-identity.json \
+            -s3.port.iceberg=0 -s3.port.lance=0
+
+          # Wait for the S3 port of each. `weed server` masters, then volumes, then the filer, then
+          # S3, so the S3 port answering is the last thing to come up and the only one worth waiting
+          # on. A TCP probe rather than an HTTP one: on the signed container an unauthenticated
+          # request is refused with 403, which is a WORKING server, and treating 403 as not-ready
+          # would hang the job on a fixture that is fine.
+          for c in 8333 8334; do
+            for i in $(seq 1 60); do
+              if (exec 3<>"/dev/tcp/127.0.0.1/$c") 2>/dev/null; then
+                exec 3>&- 3<&-
+                echo "seaweedfs:$c is listening"
+                break
+              fi
+              if [ "$i" -eq 60 ]; then
+                echo "ERROR: seaweedfs on :$c never listened. Logs:"
+                docker ps -a
+                docker logs weed-anon || true
+                docker logs weed-signed || true
+                exit 1
+              fi
+              sleep 2
+            done
+          done
+
+          # Prove the mount actually landed, so a wrong path is THIS step's failure and not a
+          # confusing "the store refused an authenticated PUT" from the fixture.
+          docker exec weed-signed test -r /fixtures/seaweedfs-signed-identity.json
+          echo "signed identity is mounted in weed-signed"
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -316,7 +343,7 @@ jobs:
           #
           # `FLEET_COMMS_S3_ACCESS_KEY`/`_SECRET_KEY` are still supplied because the store's own
           # option validation wants a pair, and the SIGNED bucket uses the same two values — see
-          # S3Fixture.SignedAccessKey and the `seaweedfs-signed` service above.
+          # S3Fixture.SignedAccessKey and the `weed-signed` container started above.
           FLEET_COMMS_S3_ENDPOINT: "http://127.0.0.1:8333"
           FLEET_COMMS_S3_FILER: "http://127.0.0.1:8888"
           FLEET_COMMS_S3_BUCKET: "journal-ci"
@@ -324,8 +351,8 @@ jobs:
           FLEET_COMMS_S3_SECRET_KEY: "placeholder"
           # The S3 upload tests ride the same scratch database as the rest of the suite.
           FLEET_CONVERSATIONS_MIGRATION_CONNECTION: "Server=127.0.0.1;Port=3306;User ID=root;Password=media-ci;AllowPublicKeyRetrieval=true;"
-          # The SECOND SeaweedFS, with an identity configured, is what makes the credential classes
-          # and the operator commands testable at all. Read by S3Fixture.
+          # The SECOND SeaweedFS (`weed-signed`), with an identity configured, is what makes the
+          # credential classes and the operator commands testable at all. Read by S3Fixture.
           FLEET_COMMS_S3_SIGNED_ENDPOINT: "http://127.0.0.1:8334"
           FLEET_COMMS_S3_SIGNED_FILER: "http://127.0.0.1:8889"
           # The signed identity is a fixture constant (S3Fixture.SignedAccessKey), not an env var:
@@ -336,6 +363,13 @@ jobs:
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=media-s3.trx"
           --results-directory ${{ github.workspace }}/testresults
+
+      # The containers this step started are not service containers, so the runner does not stop
+      # them. Left running they hold 8333/8334 against the next job on this runner, and a leaked
+      # container is far harder to notice than a step that failed.
+      - name: Stop the SeaweedFS fixtures
+        if: always()
+        run: docker rm -f weed-anon weed-signed || true
 
       # Same rule as the MySQL job: a filter that matched nothing would report success with zero
       # tests executed, which is the exact shape of a gate that quietly stopped gating.

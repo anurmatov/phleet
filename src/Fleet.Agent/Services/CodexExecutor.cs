@@ -367,7 +367,7 @@ public sealed class CodexExecutor : IAgentExecutor
             // Opened before the request, so no notification of the command can precede it. A
             // request that fails any other way than an RPC refusal may still have been accepted:
             // the interval then stays open until the process ends.
-            commandInterval = _ledger?.OpenUntilEnded(_activity);
+            commandInterval = _ledger?.OpenCommand(_activity);
 
             // Intentional: `thread/shellCommand` is the v2 thread-scoped shell entrypoint.
             // It preserves shell syntax (pipes, redirects, quoting) unlike `command/exec`.
@@ -943,11 +943,31 @@ public sealed class CodexExecutor : IAgentExecutor
         if (activity is null || notification["method"] is not JsonValue value || !value.TryGetValue<string>(out var method))
             return;
 
+        var @params = notification["params"] as JsonObject;
+
         if (method == "turn/completed")
-            activity.TurnEnded();
-        else if (method == "turn/started" || method.StartsWith("item/", StringComparison.Ordinal))
+        {
+            activity.TurnEnded(TryString((@params?["turn"] as JsonObject)?["id"]));
+            return;
+        }
+
+        if (method == "turn/started" || method.StartsWith("item/", StringComparison.Ordinal))
             activity.TurnContent();
+
+        // Only /run starts a user shell command, so its turn is the command's: the command's
+        // interval retires with that turn's completion even if nobody reads the stream any more.
+        if (method == "item/started"
+            && @params?["item"] is JsonObject item
+            && TryString(item["type"]) == "commandExecution"
+            && TryString(item["source"]) == "userShell"
+            && TryString(@params["turnId"]) is { Length: > 0 } shellTurnId)
+        {
+            activity.ShellCommandTurn(shellTurnId);
+        }
     }
+
+    private static string? TryString(JsonNode? node) =>
+        node is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
 
     private async Task ReadStderrAsync(StreamReader reader, CancellationToken ct)
     {
@@ -1422,8 +1442,9 @@ public sealed class CodexExecutor : IAgentExecutor
             _logger.LogWarning("CodexExecutor timed out draining interrupted turn {TurnId}", turnId);
 
             // #394: the turn was not seen to end, so it may still run after the lock is released.
-            // Opened while the caller's lock-held interval is still open, so coverage is seamless.
-            _ledger?.OpenUntilEnded(_activity);
+            // Opened while the caller's lock-held interval is still open, so coverage is seamless;
+            // the reader retires it on this turn's own turn/completed, or the exit does.
+            _ledger?.OpenUntilTurnEnds(_activity, turnId);
         }
         catch (ChannelClosedException)
         {

@@ -770,7 +770,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
         }
 
         [Fact]
-        public async Task Claude_cancelled_run_keeps_unknown_until_the_process_exit_is_confirmed()
+        public async Task Claude_cancelled_run_retires_on_its_own_late_result_not_another_turns_and_capture_resumes_without_restart()
         {
             using var standIn = new StandInProcess();
             var claude = Claude();
@@ -783,40 +783,51 @@ public sealed class TurnOriginLedgerTests : IDisposable
             var reader = claude.RunStdoutReaderForTests(new StreamReader(feed));
             using var cancelRun = new CancellationTokenSource();
 
+            async Task Read(double at, string line)
+            {
+                _rig.At(at);
+                feed.WriteLine(line);
+                await events.Reader.ReadAsync().AsTask().WaitAsync(Timeout);
+            }
+
             _rig.At(100);
             var run = EnumerateUntilCancelled(OutboundOrigin.Human, ct => claude.SendCommandAsync("/compact", ct), cancelRun.Token);
             await stdin.WaitForWriteAsync();
 
-            // Cancelling releases the lock; claude may still be running the command.
+            // Cancelling releases the lock; claude is still running the command, and nobody reads.
             _rig.At(102);
             await cancelRun.CancelAsync();
             await run.WaitAsync(Timeout);
             Assert.Contains(Intervals, i => i is { Origin: TurnOrigin.Unknown, LockHeld: true } && i.End == ReceiptRig.T(102));
-            Assert.Contains(Intervals, i => i is { Origin: TurnOrigin.Unknown, LockHeld: false, End: null });
 
             _rig.At(105);
             using (_rig.OpenTurn(OutboundOrigin.Human))
             {
+                // Another turn's result — a background task's — is not the command's.
+                await Read(108, """{"type":"result","subtype":"success","result":"bg","origin":{"kind":"task-notification"}}""");
+                Assert.Contains(Intervals, i => i is { Origin: TurnOrigin.Unknown, LockHeld: false, End: null });
+
                 _rig.At(110.1);
                 await _rig.DeliverAsync(ReceiptRig.Receipt(110, messageId: 1));
+
+                // The command's own result, read after its caller stopped reading.
+                await Read(112, """{"type":"result","subtype":"success","result":"compacted"}""");
+                Assert.DoesNotContain(Intervals, i => i is { Origin: TurnOrigin.Unknown, End: null });
+
                 _rig.At(112.25);
                 await _rig.DecideAsync();
                 Assert.Equal(0, _rig.Rows);
 
-                var pid = standIn.Process.Id;
-                _rig.At(120);
-                await claude.StopProcessAsync();
-                AssertGone(pid);
-                Assert.DoesNotContain(Intervals, i => i is { Origin: TurnOrigin.Unknown, End: null });
-
-                _rig.At(125.1);
-                await _rig.DeliverAsync(ReceiptRig.Receipt(125, messageId: 2));
-                _rig.At(127.25);
+                _rig.At(120.1);
+                await _rig.DeliverAsync(ReceiptRig.Receipt(120, messageId: 2));
+                _rig.At(122.25);
                 await _rig.DecideAsync();
             }
 
             Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
             Assert.Equal(1, _rig.Rows);
+            Assert.False(standIn.Process.HasExited, "capture resumed without a restart");
+            feed.End();
             await reader.WaitAsync(Timeout);
         }
 
@@ -933,7 +944,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
         }
 
         [Fact]
-        public async Task Codex_cancelled_run_keeps_unknown_until_the_process_exit_is_confirmed()
+        public async Task Codex_cancelled_run_retires_on_its_shell_turns_late_completion_not_another_turns_and_capture_resumes_without_restart()
         {
             using var standIn = new StandInProcess();
             var codex = Codex();
@@ -947,48 +958,59 @@ public sealed class TurnOriginLedgerTests : IDisposable
             using var cancelRun = new CancellationTokenSource();
             using var cts = new CancellationTokenSource(Timeout);
 
+            async Task Read(double at, JsonObject note)
+            {
+                _rig.At(at);
+                feed.WriteLine(note.ToJsonString());
+                await notes.Reader.ReadAsync().AsTask().WaitAsync(Timeout);
+            }
+
             _rig.At(100);
             var run = EnumerateUntilCancelled(OutboundOrigin.Human, ct => codex.SendCommandAsync("./notify.sh", ct), cancelRun.Token);
             await Eventually(() => Intervals.Count == 2);
             _rig.At(101);
             await codex.WaitAndCompleteNextPendingRequestForTests(new JsonObject(), cts.Token);
-            feed.WriteLine(TurnStarted("cmd-1").ToJsonString());
 
-            // Cancelling the command proves nothing about the shell it started.
+            // The caller gives up before the shell command has said anything.
             _rig.At(102);
             await cancelRun.CancelAsync();
             await run.WaitAsync(Timeout);
-            Assert.Contains(Intervals, i => i is { Origin: TurnOrigin.Unknown, LockHeld: false, End: null });
 
             _rig.At(105);
             using (_rig.OpenTurn(OutboundOrigin.Human))
             {
+                await Read(106, TurnStarted("cmd-1"));
+                await Read(106.5, ShellItem("cmd-1"));
+
+                // Another turn's completion is not the shell command's.
+                await Read(108, TurnCompleted("other-9"));
+                Assert.Contains(Intervals, i => i is { Origin: TurnOrigin.Unknown, LockHeld: false, End: null });
+
                 _rig.At(110.1);
                 await _rig.DeliverAsync(ReceiptRig.Receipt(110, messageId: 1));
+
+                await Read(112, TurnCompleted("cmd-1"));
+                Assert.DoesNotContain(Intervals, i => i is { Origin: TurnOrigin.Unknown, End: null });
+
                 _rig.At(112.25);
                 await _rig.DecideAsync();
                 Assert.Equal(0, _rig.Rows);
 
-                var pid = standIn.Process.Id;
-                _rig.At(120);
-                await codex.StopProcessAsync();
-                AssertGone(pid);
-                Assert.DoesNotContain(Intervals, i => i is { Origin: TurnOrigin.Unknown, End: null });
-
-                _rig.At(125.1);
-                await _rig.DeliverAsync(ReceiptRig.Receipt(125, messageId: 2));
-                _rig.At(127.25);
+                _rig.At(120.1);
+                await _rig.DeliverAsync(ReceiptRig.Receipt(120, messageId: 2));
+                _rig.At(122.25);
                 await _rig.DecideAsync();
             }
 
             Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
             Assert.Equal(1, _rig.Rows);
+            Assert.False(standIn.Process.HasExited, "capture resumed without a restart");
             feed.End();
             await reader.WaitAsync(Timeout);
         }
 
         [Fact]
-        public async Task Codex_interrupted_turn_whose_drain_times_out_stays_unknown_until_the_process_exit_is_confirmed()
+        public async Task Codex_interrupted_turn_whose_drain_times_out_retires_on_its_own_late_completion()
         {
             using var standIn = new StandInProcess();
             var codex = Codex();
@@ -1002,6 +1024,13 @@ public sealed class TurnOriginLedgerTests : IDisposable
             using var cancelTurn = new CancellationTokenSource();
             using var cts = new CancellationTokenSource(Timeout);
 
+            async Task Read(double at, JsonObject note)
+            {
+                _rig.At(at);
+                feed.WriteLine(note.ToJsonString());
+                await notes.Reader.ReadAsync().AsTask().WaitAsync(Timeout);
+            }
+
             _rig.At(100);
             var relay = EnumerateUntilCancelled(OutboundOrigin.Relay, ct => codex.ExecuteAsync("directive", ct: ct), cancelTurn.Token);
             await codex.WaitAndCompleteNextPendingRequestForTests(
@@ -1009,7 +1038,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
             feed.WriteLine(TurnStarted("turn-r").ToJsonString());
             await Eventually(() => codex.ActiveTurnIdForTests == "turn-r");
 
-            // Cancelled, and the interrupted turn never reports its end within the drain.
+            // Cancelled, and the interrupted turn does not report its end within the drain.
             _rig.At(102);
             await cancelTurn.CancelAsync();
             await relay.WaitAsync(Timeout);
@@ -1019,25 +1048,71 @@ public sealed class TurnOriginLedgerTests : IDisposable
             _rig.At(105);
             using (_rig.OpenTurn(OutboundOrigin.Human))
             {
+                await Read(108, TurnCompleted("other-9"));
+                Assert.Contains(Intervals, i => i is { Origin: TurnOrigin.Unknown, End: null });
+
                 _rig.At(110.1);
                 await _rig.DeliverAsync(ReceiptRig.Receipt(110, messageId: 1));
+
+                await Read(112, TurnCompleted("turn-r"));
+                Assert.DoesNotContain(Intervals, i => i is { Origin: TurnOrigin.Unknown, End: null });
+
                 _rig.At(112.25);
                 await _rig.DecideAsync();
                 Assert.Equal(0, _rig.Rows);
 
-                _rig.At(120);
-                await codex.StopProcessAsync();
-
-                _rig.At(125.1);
-                await _rig.DeliverAsync(ReceiptRig.Receipt(125, messageId: 2));
-                _rig.At(127.25);
+                _rig.At(120.1);
+                await _rig.DeliverAsync(ReceiptRig.Receipt(120, messageId: 2));
+                _rig.At(122.25);
                 await _rig.DecideAsync();
             }
 
             Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
             Assert.Equal(1, _rig.Rows);
+            Assert.False(standIn.Process.HasExited, "capture resumed without a restart");
             feed.End();
             await reader.WaitAsync(Timeout);
+        }
+
+        [Fact]
+        public void Held_intervals_retire_only_on_their_own_terminal_or_a_confirmed_exit()
+        {
+            var ledger = _rig.Ledger;
+
+            // A command bound to a shell turn: another turn's completion leaves it open.
+            var codex = ledger.TrackProvider();
+            _rig.At(100);
+            var shell = ledger.OpenCommand(codex);
+            codex.ShellCommandTurn("cmd-1");
+            codex.TurnEnded("other-9");
+            Assert.Null(Intervals.Single().End);
+            _rig.At(101);
+            codex.TurnEnded("cmd-1");
+            Assert.Equal(ReceiptRig.T(101), Intervals.Single().End);
+            shell.Close();
+
+            // A turn bound after its completion was already read retires at once.
+            _rig.At(102);
+            ledger.OpenUntilTurnEnds(codex, "cmd-1");
+            Assert.All(Intervals, i => Assert.NotNull(i.End));
+
+            // Claude: only a result for a stdin message retires the oldest waiting command.
+            var claude = ledger.TrackProvider();
+            _rig.At(103);
+            ledger.OpenCommand(claude);
+            claude.TurnEnded();
+            Assert.Contains(Intervals, i => i.End is null);
+            claude.CommandResult();
+            Assert.All(Intervals, i => Assert.NotNull(i.End));
+
+            // A command whose terminal never comes ends with a confirmed exit, and not before.
+            _rig.At(104);
+            ledger.OpenCommand(claude);
+            claude.TurnEnded();
+            Assert.Contains(Intervals, i => i.End is null);
+            _rig.At(105);
+            claude.ProcessEnded();
+            Assert.All(Intervals, i => Assert.NotNull(i.End));
         }
 
         [Fact]
@@ -1307,6 +1382,20 @@ public sealed class TurnOriginLedgerTests : IDisposable
         {
             ["method"] = method,
             ["params"] = new JsonObject { ["turnId"] = turnId },
+        };
+
+        private static JsonObject ShellItem(string turnId) => new()
+        {
+            ["method"] = "item/started",
+            ["params"] = new JsonObject
+            {
+                ["turnId"] = turnId,
+                ["item"] = new JsonObject
+                {
+                    ["type"] = "commandExecution", ["id"] = "item-1", ["command"] = "./notify.sh",
+                    ["source"] = "userShell", ["status"] = "inProgress",
+                },
+            },
         };
 
         private static JsonObject TurnStarted(string turnId) => new()

@@ -44,10 +44,10 @@ public enum ToolSendAttribution
 /// <see cref="TurnOrigin.Unknown"/> interval; only the first terminal event after it, stdout EOF or
 /// a completed kill closes it. Silence, a timeout, another lock acquisition, a restart request or a
 /// cancelled reader never do.</item>
-/// <item><see cref="OpenUntilEnded"/>, for work that can outlive the turn lock (a shell command
-/// accepted before it runs, a cancelled command, an interrupted turn whose drain timed out, a
-/// Gemini CLI whose kill is unconfirmed). <see cref="TurnOrigin.Unknown"/>; it ends only on that
-/// work's own terminal event or a confirmed process exit, whoever holds the lock meanwhile.</item>
+/// <item><see cref="OpenCommand"/> and <see cref="OpenUntilTurnEnds"/>, for work that can outlive
+/// the turn lock (a raw command, cancelled or not; an interrupted turn whose drain timed out).
+/// <see cref="TurnOrigin.Unknown"/>; it ends only on that work's own terminal event or a confirmed
+/// process exit, whoever holds the lock meanwhile.</item>
 /// </list>
 /// <para>
 /// The rule (<see cref="Attribute"/>) is fail closed: <b>every</b> instant of
@@ -133,27 +133,63 @@ public sealed class TurnOriginLedger
     public ProviderActivity TrackProvider() => new(this);
 
     /// <summary>
+    /// Opens a held interval (<see cref="OpenHeld"/>) for a raw command written to the provider
+    /// (<c>/run</c>). The executor closes it when it reads the command's result; the stdout reader
+    /// also retires it on the command's own terminal event, so a command whose caller
+    /// stopped reading does not hold the exclusion until the process exits: Codex through
+    /// <see cref="ProviderActivity.ShellCommandTurn"/>, Claude through
+    /// <see cref="ProviderActivity.CommandResult"/>. Another turn's terminal event never does.
+    /// </summary>
+    public LedgerInterval OpenCommand(ProviderActivity? owner) =>
+        OpenHeld(owner, bind: activity => activity.Commands.Add);
+
+    /// <summary>
+    /// Opens a held interval (<see cref="OpenHeld"/>) for a Codex turn whose id is known — an
+    /// interrupted turn whose drain timed out. The reader retires it on that turn's
+    /// <c>turn/completed</c>, or at once if it already read one.
+    /// </summary>
+    public LedgerInterval OpenUntilTurnEnds(ProviderActivity? owner, string turnId) =>
+        OpenHeld(owner, bind: activity => interval =>
+        {
+            if (activity.CompletedTurns.Contains(turnId))
+            {
+                CloseLocked(interval, _time.GetUtcNow());
+                return;
+            }
+
+            activity.ByTurn.TryAdd(turnId, []);
+            activity.ByTurn[turnId].Add(interval);
+        });
+
+    /// <summary>
     /// Opens an <see cref="TurnOrigin.Unknown"/> interval for provider work that can outlive the
     /// turn lock: a shell command that streams after its request was accepted, a turn that was
     /// cancelled without a confirmed end. No lock, silence, timeout or other turn's terminal event
-    /// closes it — only <see cref="LedgerInterval.Close"/>, called by the executor once it has seen
-    /// this work's own terminal event, or <paramref name="owner"/>'s confirmed process end.
+    /// closes it — only <see cref="LedgerInterval.Close"/> by the executor, the reader's
+    /// correlation of this work's own terminal event (<paramref name="bind"/>), or
+    /// <paramref name="owner"/>'s confirmed process end.
     /// </summary>
     /// <param name="owner">The provider process the work runs in. Null: only an explicit close ends it.</param>
-    public LedgerInterval OpenUntilEnded(ProviderActivity? owner)
+    /// <param name="bind">How the reader correlates the interval with the work's own terminal event.</param>
+    private LedgerInterval OpenHeld(ProviderActivity? owner, Func<ProviderActivity, Action<LedgerInterval>> bind)
     {
         lock (_gate)
         {
             var now = _time.GetUtcNow();
             var interval = new LedgerInterval(this, TurnOrigin.Unknown, now, lockHeld: false, owner);
+            _intervals.Add(interval);
 
             // A process confirmed dead runs nothing.
             if (owner is { Ended: true })
+            {
                 interval.End = now;
-            else
-                owner?.Held.Add(interval);
+            }
+            else if (owner is not null)
+            {
+                owner.Held.Add(interval);
+                bind(owner)(interval);
+            }
 
-            _intervals.Add(interval);
             SweepLocked(now);
             return interval;
         }
@@ -239,6 +275,8 @@ public sealed class TurnOriginLedger
         {
             if (ReferenceEquals(owner.Open, interval)) owner.Open = null;
             owner.Held.Remove(interval);
+            owner.Commands.Remove(interval);
+            foreach (var bound in owner.ByTurn.Values) bound.Remove(interval);
         }
         SweepLocked(now);
     }
@@ -249,8 +287,9 @@ public sealed class TurnOriginLedger
         {
             // A process confirmed dead cannot start anything; a reader still draining its pipe must
             // not open an interval nothing would ever close.
-            if (activity.Ended || _openLockHeld > 0) return;
-            if (_intervals.Any(i => !i.LockHeld && i.End is null)) return;
+            // Only the reader's own untracked interval suppresses a new one. A command's interval
+            // may end on the command's terminal while this other turn is still running.
+            if (activity.Ended || _openLockHeld > 0 || activity.Open is not null) return;
 
             var now = _time.GetUtcNow();
             var interval = new LedgerInterval(this, TurnOrigin.Unknown, now, lockHeld: false, owner: activity);
@@ -260,11 +299,38 @@ public sealed class TurnOriginLedger
         }
     }
 
-    private void OnTurnEnded(ProviderActivity activity)
+    private void OnTurnEnded(ProviderActivity activity, string? turnId)
     {
         lock (_gate)
         {
-            if (activity.Open is { } open) CloseLocked(open, _time.GetUtcNow());
+            var now = _time.GetUtcNow();
+            if (activity.Open is { } open) CloseLocked(open, now);
+            if (turnId is null) return;
+
+            activity.RememberCompleted(turnId);
+            if (activity.ByTurn.Remove(turnId, out var bound))
+                foreach (var interval in bound.ToArray()) CloseLocked(interval, now);
+        }
+    }
+
+    private void OnShellCommandTurn(ProviderActivity activity, string turnId)
+    {
+        lock (_gate)
+        {
+            // Several shell items in one turn bind once; the oldest waiting command takes the turn.
+            if (activity.Ended || activity.ByTurn.ContainsKey(turnId) || activity.Commands.Count == 0) return;
+
+            var command = activity.Commands[0];
+            activity.Commands.RemoveAt(0);
+            activity.ByTurn[turnId] = [command];
+        }
+    }
+
+    private void OnCommandResult(ProviderActivity activity)
+    {
+        lock (_gate)
+        {
+            if (activity.Commands.Count > 0) CloseLocked(activity.Commands[0], _time.GetUtcNow());
         }
     }
 
@@ -349,8 +415,27 @@ public sealed class TurnOriginLedger
         internal LedgerInterval? Open { get; set; }
         internal bool Ended { get; set; }
 
-        /// <summary>Intervals from <see cref="OpenUntilEnded"/>: a terminal event does not close them.</summary>
+        /// <summary>Intervals from <see cref="OpenHeld"/> and its variants: open until retired or the process ends.</summary>
         internal List<LedgerInterval> Held { get; } = [];
+
+        /// <summary>Command intervals waiting for their own terminal event, oldest first.</summary>
+        internal List<LedgerInterval> Commands { get; } = [];
+
+        /// <summary>Held intervals bound to a Codex turn id, retired by that turn's completion.</summary>
+        internal Dictionary<string, List<LedgerInterval>> ByTurn { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>Recently completed turn ids, so a turn bound after its completion was read retires at once.</summary>
+        internal HashSet<string> CompletedTurns { get; } = new(StringComparer.Ordinal);
+
+        private readonly Queue<string> _completedOrder = new();
+        private const int CompletedTurnMemory = 256;
+
+        internal void RememberCompleted(string turnId)
+        {
+            if (!CompletedTurns.Add(turnId)) return;
+            _completedOrder.Enqueue(turnId);
+            if (_completedOrder.Count > CompletedTurnMemory) CompletedTurns.Remove(_completedOrder.Dequeue());
+        }
 
         /// <summary>
         /// A turn-content event was read. Opens an unknown interval when no lock-held and no
@@ -360,9 +445,24 @@ public sealed class TurnOriginLedger
 
         /// <summary>
     /// A terminal event was read: closes the untracked interval the reader opened, if any — never
-    /// one from <see cref="OpenUntilEnded"/>.
+    /// one from <see cref="OpenHeld"/>.
     /// </summary>
-        public void TurnEnded() => _ledger.OnTurnEnded(this);
+        /// <param name="turnId">The turn that ended, when the provider names it (Codex).</param>
+        public void TurnEnded(string? turnId = null) => _ledger.OnTurnEnded(this, turnId);
+
+        /// <summary>
+        /// Codex: an item of turn <paramref name="turnId"/> is a user shell command
+        /// (<c>commandExecution</c> with <c>source: userShell</c>), which only <c>/run</c> starts.
+        /// The oldest waiting command interval is bound to that turn and retires with it.
+        /// </summary>
+        public void ShellCommandTurn(string turnId) => _ledger.OnShellCommandTurn(this, turnId);
+
+        /// <summary>
+        /// Claude: a result for a message written on stdin (human or unstamped origin). Claude
+        /// answers stdin messages one at a time and in order, so it belongs to the oldest waiting
+        /// command — the one written before any later message.
+        /// </summary>
+        public void CommandResult() => _ledger.OnCommandResult(this);
 
         /// <summary>
         /// Confirmed termination only — stdout EOF, or a kill after <c>WaitForExitAsync</c>

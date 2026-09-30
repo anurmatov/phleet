@@ -766,7 +766,11 @@ public sealed class ClaudeExecutor : IAgentExecutor
         if (activity is null) return;
 
         if (evt.Type == "result")
+        {
             activity.TurnEnded();
+            // A result for a stdin message retires the oldest waiting /run, whoever still reads.
+            if (IsCurrentTurnResult(evt)) activity.CommandResult();
+        }
         else if (evt.Type is "assistant" or "user" or "stream_event" || evt is { Type: "system", Subtype: "init" })
             activity.TurnContent();
     }
@@ -1028,7 +1032,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 type = "user",
                 message = new { role = "user", content = command }
             });
-            commandInterval = _ledger?.OpenUntilEnded(_activity);
+            commandInterval = _ledger?.OpenCommand(_activity);
             await WriteStdinLineAsync(message, ct);
 
             // Read response events until "result" — via the channel, not _stdout directly.

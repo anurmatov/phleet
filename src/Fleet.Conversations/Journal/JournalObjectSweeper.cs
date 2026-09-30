@@ -146,6 +146,18 @@ public sealed class JournalObjectSweeper(
         foreach (var (id, key) in doomed)
         {
             await using var connection = await OpenAsync(ct);
+            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, ct);
+            // Share commit/PUT row locks and recheck the candidate after acquiring the lock.
+            var eligible = metricClass == "abandoned"
+                ? "state IN ('uploading','uploaded','aborted') AND created_at < @cutoff"
+                : "state = 'deleting' AND delete_after IS NOT NULL AND delete_after < @cutoff";
+            await using (var lockRow = new MySqlCommand(
+                $"SELECT object_key FROM journal_objects WHERE id = @id AND {eligible} FOR UPDATE", connection, transaction))
+            {
+                lockRow.Parameters.AddWithValue("@id", id);
+                lockRow.Parameters.AddWithValue("@cutoff", cutoff);
+                if (await lockRow.ExecuteScalarAsync(ct) is null) continue;
+            }
 
             // ⚠️ A live attachment is an absolute stop, for every class, and it is checked BEFORE
             //    the bucket delete. A dedup loser is exactly the case that makes this load-bearing:
@@ -160,7 +172,7 @@ public sealed class JournalObjectSweeper(
             //    trade-off below does not apply here: a referenced object is not doomed at all, so
             //    there is no orphan to create by refusing early.
             await using (var referenced = new MySqlCommand(
-                "SELECT 1 FROM journal_attachments WHERE object_id = @id LIMIT 1", connection))
+                "SELECT 1 FROM journal_attachments WHERE object_id = @id LIMIT 1", connection, transaction))
             {
                 referenced.Parameters.AddWithValue("@id", id);
                 if (await referenced.ExecuteScalarAsync(ct) is not null)
@@ -184,9 +196,10 @@ public sealed class JournalObjectSweeper(
             }
 
             await using var delete = new MySqlCommand(
-                "DELETE FROM journal_objects WHERE id = @id", connection);
+                "DELETE FROM journal_objects WHERE id = @id", connection, transaction);
             delete.Parameters.AddWithValue("@id", id);
             removed += await delete.ExecuteNonQueryAsync(ct);
+            await transaction.CommitAsync(ct);
         }
 
         if (failures > 0)

@@ -303,6 +303,11 @@ public sealed partial class MySqlJournalStore : IJournalStore
                     return new JournalIngestResult { Outcome = JournalIngestOutcome.Duplicate, MessageId = messageId };
                 }
 
+                if (!await LockProofRowsAsync(connection, transaction, media, observer, ct))
+                {
+                    await transaction.RollbackAsync(ct);
+                    return RefuseUploads(media.Resolved.Keys);
+                }
                 await InsertObserverAsync(connection, transaction, messageId, observer, record.EventId, fingerprint, now, ct);
 
                 // First non-null transcript wins and is never overwritten.
@@ -368,7 +373,7 @@ public sealed partial class MySqlJournalStore : IJournalStore
                             UPDATE journal_objects
                                SET state = 'committed', committed_sha256 = @sha, updated_at = @now
                              WHERE id = @id AND owner = @owner
-                               AND state IN ('uploading', 'uploaded', 'committed')
+                               AND state IN ('uploaded', 'committed')
                             """))
                         {
                             commit.Parameters.AddWithValue("@id", resolvedId);
@@ -514,6 +519,76 @@ public sealed partial class MySqlJournalStore : IJournalStore
 
         await InsertObserverAsync(connection, transaction, newMessageId, observer, record.EventId, fingerprint, now, ct);
 
+        if (!await LockProofRowsAsync(connection, transaction, media, observer, ct))
+        {
+            await transaction.RollbackAsync(ct);
+            return RefuseUploads(media.Resolved.Keys);
+        }
+
+        // ── the media state transitions, in THIS transaction ───────────────────
+        //
+        // Two objects per attachment id are possible here and they are opposite jobs:
+        //
+        //  * the object THIS subject proved (`media.Proved`) must become `committed`, and only this
+        //    subject's own row may be written — `owner = @owner` is what keeps a commit from
+        //    advancing someone else's row;
+        //  * the object the attachment POINTS at (`media.Resolved`) may already be committed and
+        //    owned by someone else. That is the dedup winner. Nothing is written to it; it only has
+        //    to still be committed, which the lock below and the re-read prove.
+        //
+        // Locking first is what makes "the winner is still committed" true at the moment the
+        // attachment is written, rather than true when the plan read it.
+        foreach (var target in media.Resolved.Values.Distinct(StringComparer.Ordinal))
+        {
+            await using (var relock = Command(connection, transaction,
+                "SELECT state FROM journal_objects WHERE id = @id FOR UPDATE"))
+            {
+                relock.Parameters.AddWithValue("@id", target);
+                var state = await relock.ExecuteScalarAsync(ct) as string;
+
+                if (state != "committed" && state != "uploaded")
+                {
+                    // Swept, aborted, or scheduled for deletion between the plan and here. The same
+                    // answer the pre-flight gives, and nothing above this survives it.
+                    await transaction.RollbackAsync(ct);
+                    JournalRuntimeStats.Ingest("upload_incomplete");
+                    return new JournalIngestResult
+                    {
+                        Outcome = JournalIngestOutcome.UploadIncomplete,
+                        UploadOrdinals = media.Resolved.Keys.Order().ToArray(),
+                    };
+                }
+            }
+
+            // Only a row this subject owns is written. The dedup winner is typically someone
+            // else's committed object: it is re-locked above and left exactly as it was.
+            if (!media.Proved.Contains(target)) continue;
+
+            await using var commit = Command(connection, transaction,
+                """
+                UPDATE journal_objects
+                   SET state = 'committed', committed_sha256 = @sha, updated_at = @now
+                 WHERE id = @id AND owner = @owner
+                   AND state IN ('uploaded', 'committed')
+                """);
+            commit.Parameters.AddWithValue("@id", target);
+            commit.Parameters.AddWithValue("@owner", observer);
+            commit.Parameters.AddWithValue("@sha", media.Digests[target]);
+            commit.Parameters.AddWithValue("@now", now);
+
+            if (await commit.ExecuteNonQueryAsync(ct) != 1)
+            {
+                // The row stopped being this subject's live upload between the plan and here.
+                await transaction.RollbackAsync(ct);
+                JournalRuntimeStats.Ingest("upload_incomplete");
+                return new JournalIngestResult
+                {
+                    Outcome = JournalIngestOutcome.UploadIncomplete,
+                    UploadOrdinals = media.Resolved.Keys.Order().ToArray(),
+                };
+            }
+        }
+
         // One row per attachment, and exactly two shapes.
         //
         // An attachment that names an upload becomes `committed` and points at an object; anything
@@ -558,70 +633,6 @@ public sealed partial class MySqlJournalStore : IJournalStore
             await attach.ExecuteNonQueryAsync(ct);
         }
 
-        // ── the media state transitions, in THIS transaction ───────────────────
-        //
-        // Two objects per attachment id are possible here and they are opposite jobs:
-        //
-        //  * the object THIS subject proved (`media.Proved`) must become `committed`, and only this
-        //    subject's own row may be written — `owner = @owner` is what keeps a commit from
-        //    advancing someone else's row;
-        //  * the object the attachment POINTS at (`media.Resolved`) may already be committed and
-        //    owned by someone else. That is the dedup winner. Nothing is written to it; it only has
-        //    to still be committed, which the lock below and the re-read prove.
-        //
-        // Locking first is what makes "the winner is still committed" true at the moment the
-        // attachment is written, rather than true when the plan read it.
-        foreach (var target in media.Resolved.Values.Distinct(StringComparer.Ordinal))
-        {
-            await using (var relock = Command(connection, transaction,
-                "SELECT state FROM journal_objects WHERE id = @id FOR UPDATE"))
-            {
-                relock.Parameters.AddWithValue("@id", target);
-                var state = await relock.ExecuteScalarAsync(ct) as string;
-
-                if (state != "committed" && state != "uploaded" && state != "uploading")
-                {
-                    // Swept, aborted, or scheduled for deletion between the plan and here. The same
-                    // answer the pre-flight gives, and nothing above this survives it.
-                    await transaction.RollbackAsync(ct);
-                    JournalRuntimeStats.Ingest("upload_incomplete");
-                    return new JournalIngestResult
-                    {
-                        Outcome = JournalIngestOutcome.UploadIncomplete,
-                        UploadOrdinals = media.Resolved.Keys.Order().ToArray(),
-                    };
-                }
-            }
-
-            // Only a row this subject owns is written. The dedup winner is typically someone
-            // else's committed object: it is re-locked above and left exactly as it was.
-            if (!media.Proved.Contains(target)) continue;
-
-            await using var commit = Command(connection, transaction,
-                """
-                UPDATE journal_objects
-                   SET state = 'committed', committed_sha256 = @sha, updated_at = @now
-                 WHERE id = @id AND owner = @owner
-                   AND state IN ('uploading', 'uploaded', 'committed')
-                """);
-            commit.Parameters.AddWithValue("@id", target);
-            commit.Parameters.AddWithValue("@owner", observer);
-            commit.Parameters.AddWithValue("@sha", media.Digests[target]);
-            commit.Parameters.AddWithValue("@now", now);
-
-            if (await commit.ExecuteNonQueryAsync(ct) != 1)
-            {
-                // The row stopped being this subject's live upload between the plan and here.
-                await transaction.RollbackAsync(ct);
-                JournalRuntimeStats.Ingest("upload_incomplete");
-                return new JournalIngestResult
-                {
-                    Outcome = JournalIngestOutcome.UploadIncomplete,
-                    UploadOrdinals = media.Resolved.Keys.Order().ToArray(),
-                };
-            }
-        }
-
         // Park unreferenced dedup losers for the 24-hour sweeper on every ingest path.
         foreach (var loser in media.Losers)
         {
@@ -637,6 +648,21 @@ public sealed partial class MySqlJournalStore : IJournalStore
         await transaction.CommitAsync(ct);
 
         return new JournalIngestResult { Outcome = JournalIngestOutcome.Created, MessageId = newMessageId };
+    }
+
+    private static async Task<bool> LockProofRowsAsync(
+        MySqlConnection connection, MySqlTransaction transaction, MediaPlan media, string owner, CancellationToken ct)
+    {
+        foreach (var id in media.Proved.Order(StringComparer.Ordinal))
+        {
+            await using var command = Command(connection, transaction,
+                "SELECT owner, state FROM journal_objects WHERE id = @id FOR UPDATE");
+            command.Parameters.AddWithValue("@id", id);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct) || reader.GetString(0) != owner
+                || reader.GetString(1) is not ("uploaded" or "committed")) return false;
+        }
+        return true;
     }
 
     private static async Task InsertObserverAsync(

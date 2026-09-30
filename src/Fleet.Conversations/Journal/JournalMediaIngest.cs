@@ -137,11 +137,16 @@ public partial class MySqlJournalStore
         // "at most one" a property of the schema, and the UPDATE in IngestOnceAsync does not write
         // committed_sha256 over an existing value, so a race between two first-commits is decided
         // by the unique key and the loser retries.
+        var submissionWinners = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (ordinal, digest) in digests.ToArray())
         {
             var winner = CommittedObjectWithDigest(connection, digest);
-
-            if (winner is null || string.Equals(winner, ordinal, StringComparison.Ordinal)) continue;
+            if (winner is null && !submissionWinners.TryGetValue(digest, out winner))
+            {
+                submissionWinners[digest] = ordinal;
+                continue;
+            }
+            if (string.Equals(winner, ordinal, StringComparison.Ordinal)) continue;
 
             foreach (var key in resolved.Keys
                      .Where(k => string.Equals(resolved[k], ordinal, StringComparison.Ordinal))

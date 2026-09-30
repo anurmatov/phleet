@@ -84,89 +84,61 @@ public sealed class JournalRetention(
 
         for (var i = 0; i < MaxBatchesPerSweep; i++)
         {
-            // ⚠️ Mark the objects BEFORE deleting the messages, and collect their keys here rather
-            //    than looking them up afterwards: once the attachment rows cascade away, nothing
-            //    connects the object to anything and the bucket would keep the bytes forever.
-            //    `deleting` + `delete_after` is the state the object sweeper acts on.
-            //
-            // ⚠️⚠️ AND: only objects no SURVIVING message references. One object can be attached to
-            //    several messages — dedup points every attachment with the same digest at the one
-            //    committed object, and a forward can copy an attachment row onto another message.
-            //    Marking on "this expiring message points at it" retires bytes that a live message
-            //    is still serving: the sweeper's own reference guard then refuses the row delete
-            //    forever, and the operator is left with a `deleting` row whose bytes come back on
-            //    every restore. The NOT EXISTS is the whole difference between retiring an object
-            //    and prematurely deleting one.
+            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, ct);
+            var batch = new List<string>();
+            await using (var select = new MySqlCommand(
+                "SELECT id FROM journal_messages WHERE sent_at < @cutoff ORDER BY sent_at, id LIMIT @batch FOR UPDATE",
+                connection, transaction))
+            {
+                select.Parameters.AddWithValue("@cutoff", cutoff);
+                select.Parameters.AddWithValue("@batch", batchSize);
+                await using var reader = await select.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct)) batch.Add(reader.GetString(0));
+            }
+            if (batch.Count == 0) break;
+            var names = batch.Select((_, index) => $"@m{index}").ToArray();
+            var selection = string.Join(",", names);
+
             if (objects is not null)
             {
-                await using var mark = new MySqlCommand(
-                    """
-                    SELECT a.object_id, o.object_key
-                      FROM journal_attachments a
-                      JOIN journal_messages m ON m.id = a.message_id
-                      JOIN journal_objects o ON o.id = a.object_id
-                     WHERE m.sent_at < @cutoff AND a.object_id IS NOT NULL
-                       AND NOT EXISTS (
-                             SELECT 1
-                               FROM journal_attachments a2
-                               JOIN journal_messages m2 ON m2.id = a2.message_id
-                              WHERE a2.object_id = a.object_id
-                                AND m2.sent_at >= @cutoff)
-                     ORDER BY a.object_id
-                     LIMIT @batch
-                    """, connection);
-                mark.Parameters.AddWithValue("@cutoff", cutoff);
-                mark.Parameters.AddWithValue("@batch", batchSize);
-
                 var doomed = new List<(string Id, string Key)>();
-                await using (var reader = await mark.ExecuteReaderAsync(ct))
+                await using (var select = BatchCommand(
+                    $"SELECT DISTINCT o.id, o.object_key FROM journal_objects o "
+                    + $"JOIN journal_attachments a ON a.object_id = o.id WHERE a.message_id IN ({selection}) ORDER BY o.id"))
                 {
-                    while (await reader.ReadAsync(ct))
-                        doomed.Add((reader.GetString(0), reader.GetString(1)));
+                    await using var reader = await select.ExecuteReaderAsync(ct);
+                    while (await reader.ReadAsync(ct)) doomed.Add((reader.GetString(0), reader.GetString(1)));
                 }
-
                 foreach (var (id, key) in doomed)
                 {
-                    // ⚠️ `committed_sha256` goes NULL with the state change. The unique key on that
-                    //    column is what makes "one committed object per digest" a property of the
-                    //    schema, and ingest leans on it: dedup finds the existing object BY DIGEST,
-                    //    and the commit never writes a digest over one it did not set.
-                    //
-                    //    A `deleting` row is on its way to the bin — the sweeper takes the bytes at
-                    //    `delete_after` and the row with them — but a retained digest stays visible
-                    //    to that lookup for the whole 72 h grace, and the row it names is the doomed
-                    //    one. Re-sending the same bytes inside the window would point a live
-                    //    attachment at an object scheduled for deletion, and the reference guard
-                    //    cannot help: it asks about a SURVIVING message, and a re-send inside the
-                    //    grace is exactly the case where the old message is already swept.
-                    //
-                    //    NULL is what the schema's own comment calls the uncommitted state, and
-                    //    MySQL admits any number of rows to it, so the key keeps its guarantee for
-                    //    live objects and stops blocking the dead one.
-                    await using var retire = new MySqlCommand(
-                        """
-                        UPDATE journal_objects
-                           SET state = 'deleting', delete_after = DATE_ADD(UTC_TIMESTAMP(6), INTERVAL @grace SECOND),
-                               committed_sha256 = NULL, updated_at = UTC_TIMESTAMP(6)
-                         WHERE id = @id AND state = 'committed'
-                        """, connection);
+                    // Lock before checking references, as on the commit and object-sweep paths.
+                    await using (var held = new MySqlCommand(
+                        "SELECT id FROM journal_objects WHERE id = @id FOR UPDATE", connection, transaction))
+                    {
+                        held.Parameters.AddWithValue("@id", id);
+                        await held.ExecuteScalarAsync(ct);
+                    }
+                    await using var retire = BatchCommand(
+                        "UPDATE journal_objects SET state = 'deleting', committed_sha256 = NULL, "
+                        + "delete_after = DATE_ADD(UTC_TIMESTAMP(6), INTERVAL @grace SECOND), updated_at = UTC_TIMESTAMP(6) "
+                        + "WHERE id = @id AND state = 'committed' AND NOT EXISTS "
+                        + $"(SELECT 1 FROM journal_attachments WHERE object_id = @id AND message_id NOT IN ({selection}))");
                     retire.Parameters.AddWithValue("@id", id);
                     retire.Parameters.AddWithValue("@grace", (int)DeleteGrace.TotalSeconds);
-                    await retire.ExecuteNonQueryAsync(ct);
-
-                    retiredKeys.Add(key);
+                    if (await retire.ExecuteNonQueryAsync(ct) == 1) retiredKeys.Add(key);
                 }
             }
+            await using var command = BatchCommand($"DELETE FROM journal_messages WHERE id IN ({selection})");
+            messages += await command.ExecuteNonQueryAsync(ct);
+            await transaction.CommitAsync(ct);
+            if (batch.Count < batchSize) break;
 
-            await using var command = new MySqlCommand(
-                "DELETE FROM journal_messages WHERE sent_at < @cutoff ORDER BY sent_at, id LIMIT @batch",
-                connection);
-            command.Parameters.AddWithValue("@cutoff", cutoff);
-            command.Parameters.AddWithValue("@batch", batchSize);
-
-            var removed = await command.ExecuteNonQueryAsync(ct);
-            messages += removed;
-            if (removed < batchSize) break;
+            MySqlCommand BatchCommand(string sql)
+            {
+                var command = new MySqlCommand(sql, connection, transaction);
+                for (var index = 0; index < batch.Count; index++) command.Parameters.AddWithValue(names[index], batch[index]);
+                return command;
+            }
         }
 
         for (var i = 0; i < MaxBatchesPerSweep; i++)

@@ -135,10 +135,10 @@ public static class JournalUploadEndpoints
         // 1. One answer for "no such upload" and "not yours".
         if (!Ulid.IsValid(uploadId)) return NotFoundJson(stats);
 
-        JournalObjectRow? row;
+        LockedJournalObject locked;
         try
         {
-            row = await objects.FindByIdAsync(uploadId, ct);
+            locked = await objects.LockByIdAsync(uploadId, ct);
         }
         catch (Exception e) when (e is MySqlConnector.MySqlException or InvalidOperationException)
         {
@@ -146,6 +146,8 @@ public static class JournalUploadEndpoints
             return Error(StatusCodes.Status503ServiceUnavailable, new { error = "store_unavailable" });
         }
 
+        await using var held = locked;
+        var row = held.Row;
         if (row is null || !string.Equals(row.Owner, subject, StringComparison.Ordinal))
             return NotFoundJson(stats);
 
@@ -202,17 +204,16 @@ public static class JournalUploadEndpoints
                 Convert.FromHexString(write.Sha256), Convert.FromHexString(row.Sha256)))
         {
             await DiscardAsync(bytes, row.ObjectKey, logger, ct);
-            await objects.MarkAbortedAsync(uploadId, subject, ct);
+            await held.CompleteAsync(subject, aborted: true, ct);
 
             stats.Upload("sha256_mismatch");
             return Error(StatusCodes.Status422UnprocessableEntity, new { error = "sha256_mismatch" });
         }
 
         // 6. `uploaded`, guarded on owner and state. Zero rows means this upload stopped being live
-        //    mid-PUT — swept, or committed by a retry — and the object is discarded.
-        if (!await objects.MarkUploadedAsync(uploadId, subject, ct))
+        //    mid-PUT. Never discard bytes on a stale completion.
+        if (!await held.CompleteAsync(subject, aborted: false, ct))
         {
-            await DiscardAsync(bytes, row.ObjectKey, logger, ct);
             stats.Upload("upload_incomplete");
             return Error(StatusCodes.Status409Conflict, new { error = "upload_incomplete" });
         }

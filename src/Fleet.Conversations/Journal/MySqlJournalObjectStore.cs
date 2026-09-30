@@ -122,6 +122,28 @@ public sealed class MySqlJournalObjectStore(string connectionString, ILogger log
         return Read(reader);
     }
 
+    /// <summary>Holds the object row lock across a PUT, also excluding commit and sweep deletion.</summary>
+    public async Task<LockedJournalObject> LockByIdAsync(string id, CancellationToken ct = default)
+    {
+        var connection = await OpenAsync(ct);
+        try
+        {
+            var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, ct);
+            try
+            {
+                await using var command = new MySqlCommand(
+                    "SELECT id, object_key, owner, sha256, byte_size, mime_type, state "
+                    + "FROM journal_objects WHERE id = @id FOR UPDATE", connection, transaction);
+                command.Parameters.AddWithValue("@id", id);
+                await using var reader = await command.ExecuteReaderAsync(ct);
+                var row = await reader.ReadAsync(ct) ? Read(reader) : null;
+                return new LockedJournalObject(connection, transaction, row, _time);
+            }
+            catch { await transaction.DisposeAsync(); throw; }
+        }
+        catch { await connection.DisposeAsync(); throw; }
+    }
+
     /// <summary>
     /// Bytes arrived and matched: <c>uploading</c> → <c>uploaded</c>.
     /// </summary>

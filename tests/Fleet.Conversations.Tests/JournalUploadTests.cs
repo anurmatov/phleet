@@ -39,7 +39,7 @@ public sealed class JournalUploadTests : IAsyncLifetime
     /// A schema of this class's own. The shared <c>mysql</c> one is written by every other store
     /// suite, and "1 committed object" is a claim about the whole table.
     /// </summary>
-    private static readonly MySqlFixture Shared = new();
+    private readonly MySqlFixture Shared = new();
 
     private ScratchDatabase _scratch = null!;
     private FakeBucket _bucket = null!;
@@ -63,13 +63,10 @@ public sealed class JournalUploadTests : IAsyncLifetime
         await _bucket.DisposeAsync();
         await _scratch.DisposeAsync();
 
-        // See the note in `JournalS3UploadTests`: a static fixture is never disposed by xUnit, and
-        // the pool it holds counts against the server's `max_connections`.
-        if (Interlocked.Exchange(ref _sharedDisposed, 1) == 0)
-            await Shared.DisposeAsync();
+        // Each test owns and releases its fixture schema and pools.
+        await Shared.DisposeAsync();
     }
 
-    private static int _sharedDisposed;
 
     // ── AC1: two observers, one photo, one object ───────────────────────────
 
@@ -216,8 +213,8 @@ public sealed class JournalUploadTests : IAsyncLifetime
 
     /// <summary>
     /// Subject B commits a message naming the digest of A's committed object without uploading
-    /// anything: <c>409 upload_incomplete</c>, 0 attachment rows, and B cannot read A's attachment
-    /// by id.
+    /// anything: <c>409 upload_incomplete</c>, no additional attachments or observership.
+    /// Read-surface authorization acceptance belongs to the separate read API.
     /// </summary>
     [Fact]
     public async Task Borrowing_another_subjects_committed_object_is_refused()
@@ -226,21 +223,15 @@ public sealed class JournalUploadTests : IAsyncLifetime
         var upload = await UploadAsync(_host.A, bytes, "image/jpeg");
         Assert.Equal(HttpStatusCode.Created, (await _host.PostRecordAsync(upload, -1000000000004, "agent1")).StatusCode);
 
-        // The wire contract lets an attachment point at bytes in exactly one way: an `uploadId`
-        // this subject proved. B's attempt is to name A's committed object directly, and a caller
-        // never gets to choose an object id — the server resolves it from the upload.
-        var objectId = await ScalarAsync(
-            "SELECT object_id FROM journal_attachments WHERE state = 'committed' LIMIT 1");
-
+        // B knows the digest and declares it, but never sends any bytes.
+        var declaration = await _host.DeclareAsync("agent2", upload.Sha256, bytes.LongLength, "image/jpeg");
         var borrowed = await _host.PostRawAsync(
-            UploadRecords.WithAttachment(-1000000000004,
-                "{\"ordinal\":0,\"kind\":\"photo\",\"mimeType\":\"image/jpeg\",\"byteSize\":21,\"objectId\":\""
-                + objectId + "\"}"),
-            "agent2");
-
+            UploadRecords.UploadAttachment(-1000000000004, declaration, upload.Sha256, bytes.LongLength), "agent2");
         Assert.Equal(HttpStatusCode.Conflict, borrowed.StatusCode);
-        Assert.Equal("media_disabled", ErrorCode(borrowed));
+        Assert.Equal("upload_incomplete", ErrorCode(borrowed));
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM journal_attachments"));
+        Assert.Equal("uploading", await StateAsync(declaration));
+        Assert.Equal(0, await CountAsync("SELECT COUNT(*) FROM journal_message_observers WHERE observer = 'agent2'"));
 
     }
 
@@ -416,7 +407,6 @@ public sealed class JournalUploadTests : IAsyncLifetime
         var attachment = declined["attachments"]![0]!.AsObject();
         attachment.Remove("uploadId");
         attachment.Remove("uploadSha256");
-        attachment["state"] = "not_archived";
         attachment["notArchivedReason"] = "download_failed";
         Assert.Equal(HttpStatusCode.Created,
             (await _host.PostRawAsync(declined, "agent1")).StatusCode);
@@ -435,12 +425,186 @@ public sealed class JournalUploadTests : IAsyncLifetime
         var uploads = new List<Uploaded>();
         for (var i = 0; i < 8; i++)
             uploads.Add(await UploadAsync(i % 2 == 0 ? _host.A : _host.B, bytes, "image/jpeg"));
+        const long chat = -1000000000500;
+        var baseline = UploadRecords.UploadAttachment(chat, uploads[0].UploadId, uploads[0].Sha256, uploads[0].ByteSize);
+        baseline["attachments"] = new JsonArray();
+        Assert.Equal(HttpStatusCode.Created, (await _host.PostRawAsync(baseline, "agent1")).StatusCode);
+        await using var connection = new MySqlConnection(Db);
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using (var held = new MySqlCommand(
+            "SELECT id FROM journal_conversations WHERE telegram_chat_id = @chat FOR UPDATE", connection, transaction))
+        {
+            held.Parameters.AddWithValue("@chat", chat);
+            await held.ExecuteScalarAsync();
+        }
+        var unavailable = 0;
+        var records = uploads.Select(upload => UploadRecords.UploadAttachment(
+            chat, upload.UploadId, upload.Sha256, upload.ByteSize)).ToArray();
         var replies = await Task.WhenAll(uploads.Select((upload, i) =>
-            _host.PostRecordAsync(upload, -1000000000500 - i, upload.Subject)));
-        Assert.All(replies, reply => Assert.Equal(HttpStatusCode.Created, reply.StatusCode));
+            CommitWithRetryAsync(records[i], upload.Subject, async () =>
+            {
+                // Every first request really times out on the held SQL row lock.
+                if (Interlocked.Increment(ref unavailable) == uploads.Count) await transaction.CommitAsync();
+            })));
+        Assert.True(unavailable >= uploads.Count, "no actual transient failures were retried");
+        Assert.All(replies, reply => Assert.True(reply.StatusCode is HttpStatusCode.Created or HttpStatusCode.OK));
+        Assert.Equal(9, await CountAsync("SELECT COUNT(*) FROM journal_messages"));
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM journal_objects WHERE state = 'committed'"));
         Assert.Equal(7, await CountAsync("SELECT COUNT(*) FROM journal_objects WHERE state = 'aborted'"));
         Assert.Equal(1, await CountAsync("SELECT COUNT(DISTINCT object_id) FROM journal_attachments"));
+    }
+
+    private async Task<HttpResponseMessage> CommitWithRetryAsync(JsonObject record, string subject, Func<Task>? onUnavailable = null)
+    {
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            var reply = await _host.PostRawAsync(record, subject);
+            if (reply.StatusCode != HttpStatusCode.ServiceUnavailable) return reply;
+            reply.Dispose();
+            if (onUnavailable is not null) await onUnavailable();
+            await Task.Delay(TimeSpan.FromMilliseconds(20 * (attempt + 1)));
+        }
+        throw new InvalidOperationException("commit did not converge after eight attempts");
+    }
+
+    [Fact]
+    public async Task Two_fresh_equal_digest_uploads_in_one_record_have_one_winner()
+    {
+        var bytes = new byte[] { 1, 2, 3 };
+        var first = await UploadAsync(_host.A, bytes, "image/jpeg");
+        var second = await UploadAsync(_host.A, bytes, "image/jpeg");
+        var record = UploadRecords.UploadAttachment(-1000000000600, first.UploadId, first.Sha256, first.ByteSize);
+        var attachment = record["attachments"]![0]!.DeepClone();
+        attachment["ordinal"] = 1;
+        attachment["uploadId"] = second.UploadId;
+        record["attachments"]!.AsArray().Add(attachment);
+        Assert.Equal(HttpStatusCode.Created, (await _host.PostRawAsync(record, "agent1")).StatusCode);
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM journal_objects WHERE state = 'committed'"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM journal_objects WHERE state = 'aborted'"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(DISTINCT object_id) FROM journal_attachments"));
+    }
+
+    [Fact]
+    public async Task Retention_retires_every_attachment_in_the_exact_reversed_order_batch()
+    {
+        var uploads = new List<Uploaded>();
+        for (byte i = 1; i <= 3; i++) uploads.Add(await UploadAsync(_host.A, [i], "image/jpeg"));
+        uploads.Sort((a, b) => string.CompareOrdinal(a.UploadId, b.UploadId));
+        var later = UploadRecords.UploadAttachment(-1000000000700,
+            uploads[0].UploadId, uploads[0].Sha256, 1);
+        later["sentAt"] = "2026-09-28T10:00:00+00:00";
+        var earlier = UploadRecords.UploadAttachment(-1000000000701,
+            uploads[1].UploadId, uploads[1].Sha256, 1);
+        earlier["sentAt"] = "2026-09-27T10:00:00+00:00";
+        var extra = earlier["attachments"]![0]!.DeepClone();
+        extra["ordinal"] = 1;
+        extra["uploadId"] = uploads[2].UploadId;
+        extra["uploadSha256"] = uploads[2].Sha256;
+        earlier["attachments"]!.AsArray().Add(extra);
+        Assert.Equal(HttpStatusCode.Created, (await _host.PostRawAsync(later, "agent1")).StatusCode);
+        Assert.Equal(HttpStatusCode.Created, (await _host.PostRawAsync(earlier, "agent1")).StatusCode);
+        var clock = new ManualTime(new DateTimeOffset(2026, 10, 30, 0, 0, 0, TimeSpan.Zero));
+        var retention = new JournalRetention(Db, TimeSpan.FromDays(30), 1, NullLogger.Instance,
+            time: clock, objects: _bucket);
+        var result = await retention.SweepOnceAsync();
+        Assert.Equal(2, result.Messages);
+        Assert.Equal(3, result.Objects);
+        Assert.Equal(0, await CountAsync("SELECT COUNT(*) FROM journal_objects WHERE state = 'committed'"));
+        Assert.Equal(3, await CountAsync("SELECT COUNT(*) FROM journal_objects WHERE state = 'deleting'"));
+    }
+
+    [Fact]
+    public async Task Overlapping_puts_cannot_replace_or_delete_successful_bytes()
+    {
+        var bytes = new byte[] { 1, 2, 3 };
+        var id = await _host.DeclareAsync("agent1", Sha256(bytes), bytes.Length, "image/jpeg");
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        _bucket.BeforePutAsync = async () =>
+        {
+            if (Interlocked.Increment(ref calls) == 1)
+            {
+                entered.SetResult();
+                await release.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+        };
+        var first = _host.PutRawAsync("agent1", id, bytes);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var second = _host.PutRawAsync("agent1", id, [4, 5, 6]);
+        try
+        {
+            await WaitForObjectLockWaitAsync();
+            Assert.Equal(1, Volatile.Read(ref calls));
+        }
+        finally { release.TrySetResult(); }
+        Assert.Equal(HttpStatusCode.OK, (await first).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await second).StatusCode);
+        Assert.Equal("uploaded", await StateAsync(id));
+        Assert.Equal(bytes, Assert.Single(_bucket.Objects).Value);
+    }
+
+    [Fact]
+    public async Task Sweep_waits_for_the_commit_lock_and_rechecks_eligibility()
+    {
+        var upload = await UploadAsync(_host.A, [1, 2, 3], "image/jpeg");
+        await using var connection = new MySqlConnection(Db);
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using (var held = new MySqlCommand("SELECT id FROM journal_objects WHERE id = @id FOR UPDATE", connection, transaction))
+        {
+            held.Parameters.AddWithValue("@id", upload.UploadId);
+            await held.ExecuteScalarAsync();
+        }
+        var sweep = _host.SweepAsync(25);
+        await WaitForObjectLockWaitAsync();
+        await using (var commit = new MySqlCommand(
+            "UPDATE journal_objects SET state = 'committed', committed_sha256 = sha256 WHERE id = @id", connection, transaction))
+        {
+            commit.Parameters.AddWithValue("@id", upload.UploadId);
+            await commit.ExecuteNonQueryAsync();
+        }
+        await transaction.CommitAsync();
+        Assert.Equal(0, (await sweep).Abandoned);
+        Assert.Single(_bucket.Keys);
+        Assert.Equal(HttpStatusCode.Created,
+            (await _host.PostRecordAsync(upload, -1000000000800, "agent1")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Commit_waits_for_sweep_deletion_and_never_attaches_missing_bytes()
+    {
+        var upload = await UploadAsync(_host.A, [1, 2, 3], "image/jpeg");
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _bucket.BeforeDeleteAsync = async () =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        };
+        var sweep = _host.SweepAsync(25);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var commit = _host.PostRecordAsync(upload, -1000000000801, "agent1");
+        try { await WaitForObjectLockWaitAsync(); }
+        finally { release.TrySetResult(); }
+        Assert.Equal(1, (await sweep).Abandoned);
+        Assert.Equal(HttpStatusCode.Conflict, (await commit).StatusCode);
+        Assert.Empty(_bucket.Keys);
+        Assert.Equal(0, await CountAsync("SELECT COUNT(*) FROM journal_attachments"));
+    }
+
+    private async Task WaitForObjectLockWaitAsync()
+    {
+        var until = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < until)
+        {
+            if (await CountAsync("SELECT COUNT(*) FROM performance_schema.data_lock_waits w "
+                + "JOIN performance_schema.data_locks l ON l.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID "
+                + "WHERE l.OBJECT_SCHEMA = DATABASE() AND l.OBJECT_NAME = 'journal_objects'") > 0) return;
+            await Task.Delay(20);
+        }
+        Assert.Fail("no conflicting object-row lock was observed");
     }
 
     private static string Sha256(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
@@ -555,6 +719,8 @@ internal sealed class FakeBucket : IJournalObjectStore
 
     public Dictionary<string, byte[]> Objects { get; } = [];
     public bool FailNextPut { get; set; }
+    public Func<Task>? BeforePutAsync { get; set; }
+    public Func<Task>? BeforeDeleteAsync { get; set; }
     public bool Reachable { get; set; } = true;
 
     public IReadOnlyCollection<string> Keys => Objects.Keys;
@@ -563,6 +729,7 @@ internal sealed class FakeBucket : IJournalObjectStore
         string objectKey, Stream body, long byteSize, string contentType,
         CancellationToken ct = default, long? contentLength = null)
     {
+        if (BeforePutAsync is not null) await BeforePutAsync();
         if (FailNextPut || !Reachable)
         {
             FailNextPut = false;
@@ -603,15 +770,15 @@ internal sealed class FakeBucket : IJournalObjectStore
     public Task<bool> ExistsAsync(string objectKey, CancellationToken ct = default) =>
         Task.FromResult(Objects.ContainsKey(objectKey));
 
-    public Task DeleteAsync(string objectKey, CancellationToken ct = default)
+    public async Task DeleteAsync(string objectKey, CancellationToken ct = default)
     {
+        if (BeforeDeleteAsync is not null) await BeforeDeleteAsync();
         // A bucket that is down fails reads AND deletes. A fake that answered deletes from an
         // in-memory map while unreachable would let a sweep appear to succeed while the real
         // bucket kept every byte.
-        if (!Reachable) return Task.FromException(new JournalObjectStoreUnavailableException());
+        if (!Reachable) throw new JournalObjectStoreUnavailableException();
 
         Objects.Remove(objectKey);
-        return Task.CompletedTask;
     }
 
     /// <summary>

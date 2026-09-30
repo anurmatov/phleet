@@ -451,6 +451,13 @@ internal sealed class ManualTime(DateTimeOffset start) : TimeProvider
     public override DateTimeOffset GetUtcNow() => _now;
 
     public void Advance(TimeSpan by) => _now += by;
+
+    /// <summary>
+    /// Place the clock at an instant chosen outside this provider — a deadline the DATABASE stamped
+    /// (<c>delete_after</c> is <c>UTC_TIMESTAMP(6)</c> plus the grace), which no <see cref="Advance"/>
+    /// measured from the fixture's fixed start can reach.
+    /// </summary>
+    public void SetTo(DateTimeOffset when) => _now = when;
 }
 
 /// <summary>

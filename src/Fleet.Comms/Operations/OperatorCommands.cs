@@ -605,8 +605,12 @@ public static class OperatorCommands
             return Write(error, $"journal purge failed ({e.GetType().Name}); nothing was deleted.", 1);
         }
 
+        // The object count is printed because it is the only number here that is NOT a deletion:
+        // the bytes are still in the bucket and leave after the delete grace. An operator reading
+        // "purged" as "gone" would be wrong about the storage and right about the database.
         var summary = $"{counts.Messages} message(s), {counts.Observers} observer row(s), "
-            + $"{counts.Attachments} attachment row(s), {counts.Conversations} conversation(s)";
+            + $"{counts.Attachments} attachment row(s), {counts.Conversations} conversation(s), "
+            + $"{counts.Objects} object(s) scheduled for deletion";
 
         output.WriteLine(confirm
             ? $"deleted: {summary}"

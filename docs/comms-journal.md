@@ -408,6 +408,23 @@ changes nothing. A database error rolls back and exits 1.
 A platform delete or edit does not reach bots, so the journal keeps the original until retention or
 purge. Backups keep purged rows until your backup rotation removes them.
 
+Both paths retire the archived objects their messages held, in the same transaction as the delete and
+before it. The order is not stylistic: the attachment rows go by cascade, and after that nothing
+connects an object to any message — the sweeper never sees it and the bucket keeps those bytes for the
+life of the archive.
+
+Retirement is guarded. One object can be referenced by several messages, because dedup points every
+attachment with the same digest at the one committed object, so a delete that names one message must
+not retire bytes another message is still serving. Only objects no surviving message references are
+retired, and `journal_objects.committed_sha256` is released at the same moment: the unique key on that
+column is what makes "one committed object per digest" a property of the schema, and a row already
+scheduled for deletion must not keep claiming it while a re-send of the same bytes is still possible.
+
+Retirement is a mark, not a delete. `state = 'deleting'` and `delete_after` are 72 hours out, and the
+object sweeper takes the bytes after that — never before, and never while an attachment still points
+at the object. `journal purge` counts those objects in the line it prints, because they are the only
+number in it that is not yet gone.
+
 ## Status and metrics
 
 `GET /journal/v1/status` (a `status` token) and `journal status` report the schema version and, per

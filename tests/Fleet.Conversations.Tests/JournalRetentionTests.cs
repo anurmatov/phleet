@@ -132,13 +132,13 @@ public sealed class JournalRetentionTests(MySqlFixture fixture) : IDisposable
         var dry = await RunAsync("journal", "purge", "--telegram-chat", "-100801");
 
         Assert.Equal(0, dry.Exit);
-        Assert.Contains("would delete: 2 message(s), 3 observer row(s), 2 attachment row(s), 1 conversation(s)", dry.Stdout, StringComparison.Ordinal);
+        Assert.Contains("would delete: 2 message(s), 3 observer row(s), 2 attachment row(s), 1 conversation(s), 0 object(s)", dry.Stdout, StringComparison.Ordinal);
         Assert.Equal(before, await JournalDb.CountAsync(scratch.ConnectionString));
 
         var confirmed = await RunAsync("journal", "purge", "--telegram-chat", "-100801", "--confirm");
 
         Assert.Equal(0, confirmed.Exit);
-        Assert.Contains("deleted: 2 message(s), 3 observer row(s), 2 attachment row(s), 1 conversation(s)", confirmed.Stdout, StringComparison.Ordinal);
+        Assert.Contains("deleted: 2 message(s), 3 observer row(s), 2 attachment row(s), 1 conversation(s), 0 object(s)", confirmed.Stdout, StringComparison.Ordinal);
         Assert.Equal(new JournalDb.Counts(1, 1, 1, 1, 0), await JournalDb.CountAsync(scratch.ConnectionString));
         Assert.Equal("-100802", await MySqlFixture.ScalarRowOnAsync(
             scratch.ConnectionString, "SELECT telegram_chat_id FROM journal_conversations"));
@@ -158,13 +158,13 @@ public sealed class JournalRetentionTests(MySqlFixture fixture) : IDisposable
         var conversation = await MySqlFixture.ScalarRowOnAsync(scratch.ConnectionString, "SELECT id FROM journal_conversations");
         var before = await RunAsync("journal", "purge", "--conversation", conversation,
             "--before", now.AddDays(-5).ToString("O"), "--confirm");
-        Assert.Contains("deleted: 1 message(s), 1 observer row(s), 0 attachment row(s), 0 conversation(s)", before.Stdout, StringComparison.Ordinal);
+        Assert.Contains("deleted: 1 message(s), 1 observer row(s), 0 attachment row(s), 0 conversation(s), 0 object(s)", before.Stdout, StringComparison.Ordinal);
         Assert.Equal("NULL", await MySqlFixture.ScalarRowOnAsync(scratch.ConnectionString,
             $"SELECT MAX(id) FROM journal_messages WHERE id = '{first.MessageId}'"));
 
         var remaining = await MySqlFixture.ScalarRowOnAsync(scratch.ConnectionString, "SELECT id FROM journal_messages");
         var last = await RunAsync("journal", "purge", "--message", remaining, "--confirm");
-        Assert.Contains("deleted: 1 message(s), 1 observer row(s), 0 attachment row(s), 1 conversation(s)", last.Stdout, StringComparison.Ordinal);
+        Assert.Contains("deleted: 1 message(s), 1 observer row(s), 0 attachment row(s), 1 conversation(s), 0 object(s)", last.Stdout, StringComparison.Ordinal);
         Assert.Equal(new JournalDb.Counts(0, 0, 0, 0, 0), await JournalDb.CountAsync(scratch.ConnectionString));
     }
 

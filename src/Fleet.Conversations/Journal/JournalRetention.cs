@@ -16,8 +16,12 @@ public sealed record JournalPurgeSelector
     public DateTimeOffset? Before { get; init; }
 }
 
-/// <summary>Rows a purge deleted, or would delete.</summary>
-public sealed record JournalPurgeCounts(long Messages, long Observers, long Attachments, long Conversations);
+/// <summary>
+/// Rows a purge deleted, or would delete. <see cref="Objects"/> counts the archived media objects it
+/// retired; their bytes stay in the bucket until the delete grace passes.
+/// </summary>
+public sealed record JournalPurgeCounts(
+    long Messages, long Observers, long Attachments, long Conversations, long Objects = 0);
 
 /// <summary>
 /// The journal's retention sweep and the operator purge.
@@ -123,11 +127,27 @@ public sealed class JournalRetention(
 
                 foreach (var (id, key) in doomed)
                 {
+                    // ⚠️ `committed_sha256` goes NULL with the state change. The unique key on that
+                    //    column is what makes "one committed object per digest" a property of the
+                    //    schema, and ingest leans on it: dedup finds the existing object BY DIGEST,
+                    //    and the commit never writes a digest over one it did not set.
+                    //
+                    //    A `deleting` row is on its way to the bin — the sweeper takes the bytes at
+                    //    `delete_after` and the row with them — but a retained digest stays visible
+                    //    to that lookup for the whole 72 h grace, and the row it names is the doomed
+                    //    one. Re-sending the same bytes inside the window would point a live
+                    //    attachment at an object scheduled for deletion, and the reference guard
+                    //    cannot help: it asks about a SURVIVING message, and a re-send inside the
+                    //    grace is exactly the case where the old message is already swept.
+                    //
+                    //    NULL is what the schema's own comment calls the uncommitted state, and
+                    //    MySQL admits any number of rows to it, so the key keeps its guarantee for
+                    //    live objects and stops blocking the dead one.
                     await using var retire = new MySqlCommand(
                         """
                         UPDATE journal_objects
                            SET state = 'deleting', delete_after = DATE_ADD(UTC_TIMESTAMP(6), INTERVAL @grace SECOND),
-                               updated_at = UTC_TIMESTAMP(6)
+                               committed_sha256 = NULL, updated_at = UTC_TIMESTAMP(6)
                          WHERE id = @id AND state = 'committed'
                         """, connection);
                     retire.Parameters.AddWithValue("@id", id);
@@ -192,6 +212,12 @@ public sealed class JournalRetention(
     /// Conversations in the selector's scope that are left with no message are deleted too. On any
     /// database error the transaction rolls back and nothing is deleted.
     /// </para>
+    /// <para>
+    /// The archived objects the purged messages held are retired in the SAME transaction, before the
+    /// messages go, under the same surviving-reference guard the retention sweep uses. Without that
+    /// the delete cascades the attachment rows away, nothing connects an object to anything again,
+    /// and its bytes sit in the bucket for the life of the archive with no row to schedule them.
+    /// </para>
     /// </remarks>
     public static async Task<JournalPurgeCounts> PurgeAsync(
         string connectionString, JournalPurgeSelector selector, bool confirm, CancellationToken ct = default)
@@ -223,6 +249,11 @@ public sealed class JournalRetention(
 
         if (selector.Before is not null) match += " AND m.sent_at < @before";
 
+        // The same predicate against a message aliased `m2`. The surviving-reference guard below
+        // needs it: a subquery only sees the aliases in its OWN FROM, so reusing `{match}` there
+        // would reference an `m` that subquery never introduced.
+        var matchOn = match.Replace("m.", "m2.", StringComparison.Ordinal);
+
         await using var connection = new MySqlConnection(connectionString);
         await connection.OpenAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
@@ -242,6 +273,57 @@ public sealed class JournalRetention(
                 $"SELECT COUNT(*) FROM journal_message_observers o JOIN journal_messages m ON m.id = o.message_id WHERE {match}");
             var attachments = await CountAsync(
                 $"SELECT COUNT(*) FROM journal_attachments a JOIN journal_messages m ON m.id = a.message_id WHERE {match}");
+
+            // ⚠️ BEFORE the delete, and inside the transaction. The attachment rows go by cascade a
+            //    few lines below, and after that nothing connects an object to any message — the
+            //    sweeper never sees it and the bucket keeps the bytes for the life of the archive.
+            //
+            //    The same guard retention uses: retire only what no message OUTSIDE the purge
+            //    references. Dedup points every attachment carrying one digest at a single committed
+            //    object, so purging one message must not retire bytes another message still serves.
+            //    The DELETE that follows takes row locks on exactly the rows these subqueries read,
+            //    so "still referenced" is decided against the state the delete will produce.
+            //
+            //    Unlike a re-send, a purge cannot fail on a row already in `deleting`: the object is
+            //    scheduled either way. What must not happen is a purge restarting a delete the
+            //    retention sweep already put in motion — hence `state = 'committed'` and no re-stamp.
+            //
+            //    ⚠️ The two subqueries alias their message tables `m` and `m2` on purpose, and the
+            //    second predicate is `matchOn`, not `match`. A subquery sees the outer statement's
+            //    tables too, so reusing `match` inside `NOT EXISTS` referenced an `m` that subquery
+            //    never joined — and instead of a wrong answer, MySQL and MariaDB both resolved it
+            //    against the UPDATE target and failed the purge outright with `Unknown column
+            //    'm.conversation_id'`. Loud is the good outcome here: silently binding the guard to
+            //    the object's own row is what would have made it always true.
+            long objects = 0;
+            await using (var retire = new MySqlCommand(
+                $"""
+                UPDATE journal_objects
+                   SET state = 'deleting',
+                       delete_after = DATE_ADD(UTC_TIMESTAMP(6), INTERVAL @grace SECOND),
+                       committed_sha256 = NULL,
+                       updated_at = UTC_TIMESTAMP(6)
+                 WHERE state = 'committed'
+                   AND EXISTS (SELECT 1 FROM journal_attachments a
+                                JOIN journal_messages m ON m.id = a.message_id
+                               WHERE a.object_id = journal_objects.id AND {match})
+                   AND NOT EXISTS (SELECT 1 FROM journal_attachments a2
+                                    JOIN journal_messages m2 ON m2.id = a2.message_id
+                                   WHERE a2.object_id = journal_objects.id
+                                     AND NOT ({matchOn}))
+                """, connection, transaction))
+            {
+                retire.Parameters.AddWithValue("@grace", (int)DeleteGrace.TotalSeconds);
+                if (selector.MessageId is not null)
+                    retire.Parameters.AddWithValue("@message", selector.MessageId);
+                if (selector.ConversationId is not null)
+                    retire.Parameters.AddWithValue("@conversation", selector.ConversationId);
+                if (selector.TelegramChatId is not null)
+                    retire.Parameters.AddWithValue("@chat", selector.TelegramChatId);
+                if (selector.Before is not null)
+                    retire.Parameters.AddWithValue("@before", selector.Before.Value.UtcDateTime);
+                objects = await retire.ExecuteNonQueryAsync(ct);
+            }
 
             long messages;
             await using (var deleteMessages = Bind(new MySqlCommand(
@@ -267,7 +349,7 @@ public sealed class JournalRetention(
             if (confirm) await transaction.CommitAsync(ct);
             else await transaction.RollbackAsync(ct);
 
-            return new JournalPurgeCounts(messages, observers, attachments, conversations);
+            return new JournalPurgeCounts(messages, observers, attachments, conversations, objects);
         }
         catch
         {

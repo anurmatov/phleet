@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
@@ -538,6 +539,246 @@ public sealed class JournalS3UploadTests(S3Fixture fixture) : IAsyncLifetime
     }
 
     /// <summary>
+    /// Bytes retired by retention can be re-sent inside the 72 h delete grace.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>uq_committed_sha</c> is what makes "at most one committed object per digest" a property of
+    /// the schema rather than a read-then-write race, and ingest relies on it: the dedup loop finds
+    /// the existing object <b>by digest</b> (<see cref="JournalMediaIngest"/>) and the commit never
+    /// writes <c>committed_sha256</c> over a value it did not set.
+    /// </para>
+    /// <para>
+    /// ⚠️ Retiring an object therefore cannot leave its digest in the unique column. A row in
+    /// <c>deleting</c> is as good as gone — the sweeper takes the bytes at <c>delete_after</c> and
+    /// the row with them — but a retained digest is still visible to the dedup lookup for the whole
+    /// grace window, and the row it names is precisely the one that is on its way to the bin. Pointing
+    /// a live attachment at a doomed object is the failure this test exists for.
+    /// </para>
+    /// <para>
+    /// The reference guard from <see cref="An_object_shared_by_two_messages_survives_retention_of_the_older_one"/>
+    /// cannot rescue it either. It asks whether a SURVIVING message references the object, and a
+    /// re-send inside the grace window is exactly the case where the answer is no: the old message
+    /// has already been swept, and the new one arrives after.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task Retired_bytes_can_be_re_sent_inside_the_delete_grace()
+    {
+        var photo = new byte[4096];
+        Random.Shared.NextBytes(photo);
+
+        var first = await _host.UploadAsync(_host.CredentialA.Subject, photo);
+        var now = _host.Time.GetUtcNow();
+        Assert.Equal(JournalIngestOutcome.Created,
+            (await _host.Store.IngestAsync(
+                UploadRecordWithUpload(9_100_030, first, photo.LongLength, now.AddDays(-3)),
+                _host.CredentialA.Subject)).Outcome);
+
+        // Expire it, and sweep with the object store attached so retirement actually happens.
+        _host.Time.Advance(TimeSpan.FromDays(2));
+        var retention = new JournalRetention(
+            _host.ConnectionString, TimeSpan.FromDays(1), batchSize: 100,
+            NullLogger.Instance, null, _host.Time, _bucket);
+        Assert.Equal(1, (await retention.SweepOnceAsync()).Objects);
+
+        var objectId = (await _host.QueryAsync(
+            $"SELECT id FROM journal_objects WHERE sha256 = '{first.Sha256}'")).Single();
+        Assert.Equal("deleting", await _host.ScalarAsync(
+            $"SELECT state FROM journal_objects WHERE id = '{objectId}'"));
+
+        // ⚠️ THE FIX, in one column. A `deleting` row must stop occupying the unique digest key while
+        //    its bytes wait out the grace. NULL is what the schema's own comment describes as the
+        //    uncommitted state, and MySQL lets any number of rows hold it — so the key keeps doing
+        //    its job for live objects and stops blocking the dead one.
+        Assert.True(string.IsNullOrEmpty(await _host.ScalarAsync(
+                $"SELECT committed_sha256 FROM journal_objects WHERE id = '{objectId}'")),
+            "a retired object must release uq_committed_sha or a re-send inside the grace collides");
+
+        // The re-send. Same bytes, a fresh upload, inside the 72 h window and before the sweeper has
+        // run — the state an operator sees when someone posts the same photo again the next day.
+        var second = await _host.UploadAsync(_host.CredentialA.Subject, photo);
+        Assert.Equal(JournalIngestOutcome.Created,
+            (await _host.Store.IngestAsync(
+                UploadRecordWithUpload(9_100_031, second, photo.LongLength, _host.Time.GetUtcNow()),
+                _host.CredentialA.Subject)).Outcome);
+
+        // Every attachment holds the digest it proved, so a pointer at the doomed row would surface
+        // here as a NULL digest before it ever surfaced as a restore hole.
+        Assert.Equal("1", await _host.ScalarAsync(
+            "SELECT COUNT(*) FROM journal_attachments WHERE object_id IS NOT NULL AND sha256 IS NOT NULL"));
+
+        // The attachment points at a live object, and the bytes are readable through it.
+        var liveId = await _host.ScalarAsync(
+            "SELECT object_id FROM journal_attachments ORDER BY created_at DESC");
+        Assert.Equal("committed", await _host.ScalarAsync(
+            $"SELECT state FROM journal_objects WHERE id = '{liveId}'"));
+
+        var liveKey = await _host.ScalarAsync(
+            $"SELECT object_key FROM journal_objects WHERE id = '{liveId}'");
+        var read = await _bucket.GetAsync(liveKey);
+        Assert.NotNull(read);
+        using var ms = new MemoryStream();
+        using (read!.Content) await read.Content.CopyToAsync(ms);
+        Assert.Equal(photo, ms.ToArray());
+    }
+
+    /// <summary>
+    /// A purge retires the objects its messages held, in its own transaction, and leaves the ones a
+    /// surviving message still uses.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>journal purge</c> deletes the messages and the attachment rows go with them by
+    /// <c>ON DELETE CASCADE</c>. Until this ran, that was the last thing the object table knew: the
+    /// row stayed <c>committed</c> forever, nothing ever scheduled its bytes, and the bucket kept
+    /// archived conversation content the operator had just purged. The weekly orphan sweep is not a
+    /// substitute — it is a backstop for objects that never got a row, and it is the last line the
+    /// operator should be relying on for a delete they issued deliberately.
+    /// </para>
+    /// <para>
+    /// The dry run is part of the claim. <see cref="JournalRetention.PurgeAsync"/> promises the counts
+    /// it prints are what a confirmed run deletes, from the same code path; an object count that lied
+    /// in the dry run would be the one number in that line an operator acts on.
+    /// </para>
+    /// <para>
+    /// ⚠️ The second chat holds the same bytes in a SEPARATE conversation, which is what dedup makes
+    ///     possible and what the guard exists for. Purging one chat must not retire the object the
+    ///     other is still serving — and unlike retention, a purge has no cutoff to distinguish them,
+    ///     so the guard here is "referenced by a message the purge does not name".
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task A_purge_retires_its_own_objects_and_spares_a_surviving_reference()
+    {
+        // ⚠️ Random on purpose, and load-bearing rather than tidiness: the bucket is shared by the
+        //    whole "s3" collection while every test gets its OWN database. Fixed bytes would dedup
+        //    against an object an earlier test committed, and this test's scratch database would
+        //    then hold no row for the digest its own attachments carry.
+        var shared = new byte[6000];
+        Random.Shared.NextBytes(shared);
+        var unshared = new byte[2000];
+        Random.Shared.NextBytes(unshared);
+
+        var sharedUpload = await _host.UploadAsync(_host.CredentialA.Subject, shared);
+        var unsharedUpload = await _host.UploadAsync(_host.CredentialA.Subject, unshared);
+
+        // Chat 9_100_040 is the purge target: one message holding the shared object, one holding its
+        // own. Chat 9_100_041 survives and shares the first object.
+        foreach (var (chat, upload, size) in new (long, Uploaded, long)[]
+                 {
+                     (9_100_040, sharedUpload, shared.LongLength),
+                     (9_100_040, unsharedUpload, unshared.LongLength),
+                     (9_100_041, sharedUpload, shared.LongLength),
+                 })
+        {
+            Assert.Equal(JournalIngestOutcome.Created,
+                (await _host.Store.IngestAsync(
+                    UploadRecordWithUpload(chat, upload, size, _host.Time.GetUtcNow()),
+                    _host.CredentialA.Subject)).Outcome);
+        }
+
+        // ⚠️ Derived from THIS test's own attachment rows, and DISTINCT.
+        //
+        //    Dedup is the scenario, not an obstacle to it: the two messages that carry the same
+        //    bytes share ONE committed object, so the lookup returns that object twice and
+        //    `.Single()` would fail on the very case under test. `Distinct()` is the assertion —
+        //    two attachment rows, one object — and the chat filter keeps the query inside this
+        //    test's own rows, because `journal_objects` is keyed by digest and the bucket is shared
+        //    by the whole collection while every test gets its own scratch database.
+        string ObjectOfThisTest(string digest) =>
+            "SELECT DISTINCT object_id FROM journal_attachments"
+            + " WHERE sha256 = '" + digest + "'"
+            + " AND message_id IN (SELECT id FROM journal_messages WHERE conversation_id IN"
+            + " (SELECT id FROM journal_conversations WHERE telegram_chat_id IN (9100040, 9100041)))";
+
+        var sharedId = (await _host.QueryAsync(ObjectOfThisTest(sharedUpload.Sha256))).Single();
+        var unsharedId = (await _host.QueryAsync(ObjectOfThisTest(unsharedUpload.Sha256))).Single();
+
+        // The premise, stated where it can fail: the shared object spans TWO conversations, one of
+        // them the chat the purge does NOT name. That is the guard case exactly — and it is why the
+        // object is reached through two conversations rather than two messages in one: a purge that
+        // names a conversation takes every message in it, so a same-conversation pair would leave
+        // the guard nothing to spare.
+        Assert.Equal("2", await _host.ScalarAsync(
+            "SELECT COUNT(DISTINCT m.conversation_id) FROM journal_attachments a "
+            + "JOIN journal_messages m ON m.id = a.message_id "
+            + $"WHERE a.object_id = '{sharedId}'"));
+
+        // The scenario the guard is tested against: ONE object row, TWO messages, across two chats.
+        // If this ever reads 2 the purge below is not the shared case and proves nothing.
+        Assert.Equal("2", await _host.ScalarAsync(
+            $"SELECT COUNT(*) FROM journal_attachments WHERE object_id = '{sharedId}'"));
+
+        // And the two objects are genuinely distinct, each named only by attachments carrying its
+        // own digest. Without this, a lookup that quietly returned the SAME row for both digests
+        // would make the "spared vs retired" pair below meaningless.
+        Assert.NotEqual(sharedId, unsharedId);
+        Assert.Equal("0", await _host.ScalarAsync(
+            $"SELECT COUNT(*) FROM journal_attachments WHERE object_id = '{unsharedId}' "
+            + $"AND sha256 <> '{unsharedUpload.Sha256}'"));
+
+        // Positive, because that is what the record carries: `UploadRecordWithUpload` writes
+        // `ChatId` verbatim and `JournalKeys` keys a DM without changing its sign.
+        var selector = new JournalPurgeSelector { TelegramChatId = 9_100_040 };
+
+        // The dry run must report the retirement it is about to make, and make none of it.
+        var dry = await JournalRetention.PurgeAsync(_host.ConnectionString, selector, confirm: false);
+        Assert.Equal((2L, 2L, 2L, 1L, 1L),
+            (dry.Messages, dry.Observers, dry.Attachments, dry.Conversations, dry.Objects));
+        Assert.Equal("committed", await _host.ScalarAsync(
+            $"SELECT state FROM journal_objects WHERE id = '{unsharedId}'"));
+
+        var purged = await JournalRetention.PurgeAsync(_host.ConnectionString, selector, confirm: true);
+        Assert.Equal((2L, 2L, 2L, 1L, 1L),
+            (purged.Messages, purged.Observers, purged.Attachments, purged.Conversations, purged.Objects));
+
+        // THE FIX: the object nothing but the purged messages referenced is scheduled for deletion,
+        // and it released the unique digest key as retention's sweep does.
+        Assert.Equal("deleting", await _host.ScalarAsync(
+            $"SELECT state FROM journal_objects WHERE id = '{unsharedId}'"));
+        Assert.True(string.IsNullOrEmpty(await _host.ScalarAsync(
+                $"SELECT committed_sha256 FROM journal_objects WHERE id = '{unsharedId}'")),
+            "a purged object must release uq_committed_sha or re-sending its bytes collides");
+
+        // ⚠️ THE GUARD: the surviving chat still has the shared object, live and readable.
+        Assert.Equal("committed", await _host.ScalarAsync(
+            $"SELECT state FROM journal_objects WHERE id = '{sharedId}'"));
+
+        // Nothing is deleted yet — the grace window is the point, and the surviving bytes have to
+        // still be there when the sweeper runs past the deadline of the object that IS doomed.
+        Assert.NotNull(await _bucket.GetAsync(await _host.ScalarAsync(
+            $"SELECT object_key FROM journal_objects WHERE id = '{sharedId}'")));
+
+        // ⚠️ The deadline is stamped by the DATABASE (`UTC_TIMESTAMP(6)`), not by the host's fixed
+        //    fixture clock, so the advance has to be measured from wall-clock now and not from
+        //    `_host.Time`. Advancing the grace alone from a clock already three days ahead lands
+        //    BEFORE the deadline and the object stands — a false negative that reads as "the purge
+        //    never scheduled it". The minute is because the comparison is strict.
+        var deadline = DateTime.Parse(
+            (await _host.QueryAsync($"SELECT delete_after FROM journal_objects WHERE id = '{unsharedId}'")).Single(),
+            CultureInfo.InvariantCulture);
+        _host.Time.SetTo(new DateTimeOffset(deadline.AddMinutes(1), TimeSpan.Zero));
+        var swept = await _host.SweepNowAsync();
+        Assert.Equal(0, swept.Failures);
+        Assert.Equal(1, swept.Retired);
+
+        Assert.Equal("committed", await _host.ScalarAsync(
+            $"SELECT state FROM journal_objects WHERE id = '{sharedId}'"));
+        Assert.Equal("0", await _host.ScalarAsync(
+            $"SELECT COUNT(*) FROM journal_objects WHERE id = '{unsharedId}'"));
+
+        // The bytes the surviving message serves are intact after the sweep took the other object.
+        var sharedKey = await _host.ScalarAsync(
+            $"SELECT object_key FROM journal_objects WHERE id = '{sharedId}'");
+        var read = await _bucket.GetAsync(sharedKey);
+        Assert.NotNull(read);
+        using var ms = new MemoryStream();
+        using (read!.Content) await read.Content.CopyToAsync(ms);
+        Assert.Equal(shared, ms.ToArray());
+    }
+
+    /// <summary>
     /// An object whose deadline passed while an attachment still points at it keeps its BYTES, not
     /// merely its row.
     /// </summary>
@@ -833,6 +1074,16 @@ internal sealed class S3UploadHost : IAsyncDisposable
         _time.Advance(TimeSpan.FromHours(hours) + TimeSpan.FromMinutes(1));
         return _sweeper.SweepOnceAsync();
     }
+
+    /// <summary>
+    /// Sweep at wherever the clock currently stands, without advancing it.
+    /// </summary>
+    /// <remarks>
+    /// For deadlines the DATABASE stamped — <c>delete_after</c> is <c>UTC_TIMESTAMP(6)</c> plus the
+    /// grace, so <see cref="SweepAsync"/> which measures from the fixture's fixed start instant
+    /// cannot reach them. The caller positions <see cref="Time"/> against the row and calls this.
+    /// </remarks>
+    public Task<JournalObjectSweeper.SweepResult> SweepNowAsync() => _sweeper.SweepOnceAsync();
 
     public async Task<string> DeclareAsync(string subject, string sha, long size, string mime)
     {

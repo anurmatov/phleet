@@ -190,7 +190,7 @@ static async Task<int> RunServiceAsync(string[] args)
         if (await BucketIsPublicAsync(options.Media))
         {
             await Console.Error.WriteLineAsync(
-                "bucket_public: an unsigned read of the journal bucket succeeded. The bucket must "
+                "bucket_public: an unsigned read of the journal bucket did not return 403. The bucket must "
                 + "deny anonymous listing; refusing to start with a public object store.");
             return 1;
         }
@@ -241,11 +241,6 @@ static async Task<int> RunServiceAsync(string[] args)
             Objects = media?.Objects,
         };
 
-        journalApp = CommsApp.BuildJournalApp(
-            journalBuilder, journalStore, options,
-            northApp.Services.GetRequiredService<Fleet.Conversations.Journal.JournalRuntimeStats>(),
-            media: media);
-
         if (media is not null)
         {
             // The probe loop runs on the JOURNAL host, not the north one: the bucket is the
@@ -259,6 +254,11 @@ static async Task<int> RunServiceAsync(string[] args)
             journalBuilder.Services.AddHostedService(_ =>
                 (Fleet.Conversations.Journal.JournalMediaHealth)media.Gate);
         }
+
+        journalApp = CommsApp.BuildJournalApp(
+            journalBuilder, journalStore, options,
+            northApp.Services.GetRequiredService<Fleet.Conversations.Journal.JournalRuntimeStats>(),
+            media: media);
     }
 
     // Both or neither. If either listener cannot bind — port already in use, address unavailable — the
@@ -329,9 +329,8 @@ static async Task<bool> ProbeWithinBudgetAsync(Fleet.Conversations.Journal.S3Obj
 /// </summary>
 /// <remarks>
 /// <b>Not a credentials test.</b> This account's credentials were just accepted one call earlier;
-/// what is being asked here is whether someone who has none can read the bucket. Only 2xx counts
-/// as public — a 403, a 400, or a transport error all mean "anonymous cannot read this", and
-/// treating an error as public would refuse to start on a bucket that is correctly locked down.
+/// what is being asked here is whether anonymous listing is explicitly denied. Only 403 proves
+/// that. Other HTTP answers fail closed; transport failures leave startup degraded.
 /// </remarks>
 static async Task<bool> BucketIsPublicAsync(Fleet.Comms.Configuration.MediaOptions media)
 {
@@ -340,14 +339,14 @@ static async Task<bool> BucketIsPublicAsync(Fleet.Comms.Configuration.MediaOptio
     try
     {
         var endpoint = media.Endpoint.TrimEnd('/');
-        var response = await http.GetAsync(
+        using var response = await http.GetAsync(
             $"{endpoint}/{media.Bucket}?list-type=2", HttpCompletionOption.ResponseHeadersRead);
 
-        return response.IsSuccessStatusCode;
+        return response.StatusCode != System.Net.HttpStatusCode.Forbidden;
     }
-    catch (Exception)
+    catch (Exception e) when (e is HttpRequestException or TaskCanceledException)
     {
-        // Unreachable, refused, or not HTTP. None of those is "the whole world can read it".
+        // A network outage must not stop the text journal from starting degraded.
         return false;
     }
 }

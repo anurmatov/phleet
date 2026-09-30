@@ -340,6 +340,74 @@ public sealed class JournalConfigurationTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Unreachable_media_starts_the_real_journal_listener_degraded()
+    {
+        var journal = FreePort();
+        var env = MediaEnvironment($"http://127.0.0.1:{FreePort()}");
+        env["Comms__Journal__Url"] = $"http://127.0.0.1:{journal}";
+        using var process = Start(env);
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        var stderr = process.StandardError.ReadToEndAsync();
+        try
+        {
+            var deadline = Stopwatch.StartNew();
+            while (!CanConnect(journal))
+            {
+                if (process.HasExited) Assert.Fail(await stderr);
+                Assert.True(deadline.Elapsed < TimeSpan.FromSeconds(25), "journal listener never started");
+                await Task.Delay(100);
+            }
+        }
+        finally
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+        }
+        Assert.Contains("media_state=degraded", await stderr, StringComparison.Ordinal);
+        await stdout;
+    }
+
+    [Theory]
+    [InlineData(200)]
+    [InlineData(404)]
+    [InlineData(500)]
+    public async Task Anonymous_probe_requires_exactly_403(int status)
+    {
+        var port = FreePort();
+        using var listener = new HttpListener();
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        listener.Start();
+        var serving = Task.Run(async () =>
+        {
+            // One signed HEAD, then one unsigned GET.
+            for (var i = 0; i < 2; i++)
+            {
+                var context = await listener.GetContextAsync();
+                context.Response.StatusCode = context.Request.HttpMethod == "HEAD" ? 200 : status;
+                context.Response.Close();
+            }
+        });
+        var (exit, _, stderr, _) = await RunAsync(
+            MediaEnvironment($"http://127.0.0.1:{port}"), TimeSpan.FromSeconds(15));
+        await serving.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, exit);
+        Assert.Contains("bucket_public", stderr, StringComparison.Ordinal);
+    }
+
+    private Dictionary<string, string> MediaEnvironment(string endpoint)
+    {
+        var env = BaseEnvironment();
+        AddConversations(env);
+        env["Comms__Journal__Enabled"] = "true";
+        env["Comms__Journal__TokenKeys"] = Key;
+        env["Comms__Journal__Url"] = $"http://127.0.0.1:{FreePort()}";
+        env["Comms__Media__Endpoint"] = endpoint;
+        env["Comms__Media__AccessKey"] = "synthetic-runtime";
+        env["Comms__Media__SecretKey"] = "synthetic-secret";
+        return env;
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private static CommsOptions EnabledOptions(string keys, string excluded = "") => new()

@@ -44,7 +44,10 @@ public class SendToCeoToolTests
         if (ceoChatId != 0)
             ceoConfig.Apply(ceoChatId.ToString());
 
-        return new SendToCeoTool(factory, accessor, ceoConfig, NullLogger<SendToCeoTool>.Instance);
+        // Receipts off: these tests cover the Bot API calls, ToolSendReceiptTests the receipts.
+        var sender = new TelegramSender(new ToolSendReceiptPublisher(null, NullLogger<ToolSendReceiptPublisher>.Instance));
+
+        return new SendToCeoTool(factory, accessor, ceoConfig, sender, NullLogger<SendToCeoTool>.Instance);
     }
 
     // ── CEO chat ID not configured ─────────────────────────────────────────────

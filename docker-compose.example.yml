@@ -266,6 +266,9 @@ services:
       # Template keys: {SHORTNAME} is expanded per-agent to pull per-agent bot tokens
       # (for non-CTO agents that need their own dedicated bot).
       - PEER_AGENT_DERIVED_KEYS=TELEGRAM_{SHORTNAME}_BOT_TOKEN
+      # Conversation journal: report send_message / send_to_ceo sends back to the calling agent
+      # (exchange fleet.journal.tool-sends). Off unless FLEET_COMMS_JOURNAL_ENABLED=true.
+      - Journal__ToolSendReceipts=${FLEET_COMMS_JOURNAL_ENABLED:-false}
     mem_limit: 128m
     restart: unless-stopped
     depends_on:

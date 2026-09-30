@@ -70,7 +70,18 @@ public sealed class JournalS3UploadTests(S3Fixture fixture) : IAsyncLifetime
         await _host.DisposeAsync();
         _bucket.Dispose();
         await _scratch.DisposeAsync();
+
+        // ⚠️ `Shared` is a STATIC field, so xUnit never disposes it — and every MySqlFixture holds
+        //    pooled connections to the one MySQL 8.0 service container. Left alone, this class and
+        //    the two other classes that do the same (`JournalUploadTests`,
+        //    `JournalObjectSweeperTests`) each keep a pool open for the whole run, which is how the
+        //    MySQL job reached `Too many connections` once the media suite added its own classes.
+        //    Interlocked guards it because the collection runs serialised but a static outlives it.
+        if (Interlocked.Exchange(ref _sharedDisposed, 1) == 0)
+            await Shared.DisposeAsync();
     }
+
+    private static int _sharedDisposed;
 
     /// <summary>
     /// AC1's shape, with the bucket being the real thing: two subjects each prove their own bytes,

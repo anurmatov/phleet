@@ -71,7 +71,14 @@ public sealed class JournalObjectSweeperTests : IAsyncLifetime
     {
         await _bucket.DisposeAsync();
         await _scratch.DisposeAsync();
+
+        // See the note in `JournalS3UploadTests`: a static fixture is never disposed by xUnit, and
+        // the pool it holds counts against the server's `max_connections`.
+        if (Interlocked.Exchange(ref _sharedDisposed, 1) == 0)
+            await Shared.DisposeAsync();
     }
+
+    private static int _sharedDisposed;
 
     private JournalObjectSweeper Sweeper() =>
         new(Db, _bucket, NullLogger.Instance, _stats, _time);

@@ -64,6 +64,8 @@ public sealed class MySqlFixture : IAsyncLifetime
 
         var builder = new MySqlConnectionStringBuilder(_adminConnectionString) { Database = string.Empty };
 
+        builder = Pooled(builder);
+
         await using (var connection = new MySqlConnection(builder.ConnectionString))
         {
             await connection.OpenAsync();
@@ -72,16 +74,16 @@ public sealed class MySqlFixture : IAsyncLifetime
             await create.ExecuteNonQueryAsync();
         }
 
-        MigrationConnectionString = new MySqlConnectionStringBuilder(_adminConnectionString)
+        MigrationConnectionString = Pooled(new MySqlConnectionStringBuilder(_adminConnectionString)
         {
             Database = _database,
-        }.ConnectionString;
+        }).ConnectionString;
 
         var runtime = Environment.GetEnvironmentVariable(RuntimeVariable);
 
         ConnectionString = string.IsNullOrWhiteSpace(runtime)
             ? MigrationConnectionString
-            : new MySqlConnectionStringBuilder(runtime) { Database = _database }.ConnectionString;
+            : Pooled(new MySqlConnectionStringBuilder(runtime) { Database = _database }).ConnectionString;
 
         await new MigrationRunner(MigrationConnectionString).MigrateAsync();
     }
@@ -257,11 +259,36 @@ public sealed class MySqlFixture : IAsyncLifetime
     }
 
     private string ServerConnectionString() =>
-        new MySqlConnectionStringBuilder(_adminConnectionString) { Database = string.Empty }
+        Pooled(new MySqlConnectionStringBuilder(_adminConnectionString) { Database = string.Empty })
             .ConnectionString;
 
     private static string WithDatabase(string connectionString, string database) =>
-        new MySqlConnectionStringBuilder(connectionString) { Database = database }.ConnectionString;
+        Pooled(new MySqlConnectionStringBuilder(connectionString) { Database = database })
+            .ConnectionString;
+
+    /// <summary>
+    /// Caps the connection pool on every connection string this fixture hands out.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠️ Every fixture in this assembly points at ONE MySQL server, and xUnit runs classes from
+    /// different collections in parallel. MySqlConnector's default pool is 100 connections PER
+    /// CONNECTION STRING while the server's default <c>max_connections</c> is 151, so a handful of
+    /// concurrently-initialising classes is enough to exhaust it. The failure then lands as
+    /// <c>Too many connections</c> on whichever class loses the race, which reads like a bug in
+    /// whatever that test happened to be — the worst possible shape of flake, because it moves.
+    /// </para>
+    /// <para>
+    /// Applied in ONE place rather than at each call site on purpose: a cap that only some of the
+    /// builders remember is not a cap, and the scratch databases and the DDL-less account are
+    /// exactly the paths a call-site fix would miss.
+    /// </para>
+    /// </remarks>
+    private static MySqlConnectionStringBuilder Pooled(MySqlConnectionStringBuilder builder)
+    {
+        builder.MaximumPoolSize = 10;
+        return builder;
+    }
 }
 
 /// <summary>An empty database that drops itself.</summary>

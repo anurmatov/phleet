@@ -62,7 +62,14 @@ public sealed class JournalUploadTests : IAsyncLifetime
         await _host.DisposeAsync();
         await _bucket.DisposeAsync();
         await _scratch.DisposeAsync();
+
+        // See the note in `JournalS3UploadTests`: a static fixture is never disposed by xUnit, and
+        // the pool it holds counts against the server's `max_connections`.
+        if (Interlocked.Exchange(ref _sharedDisposed, 1) == 0)
+            await Shared.DisposeAsync();
     }
+
+    private static int _sharedDisposed;
 
     // ── AC1: two observers, one photo, one object ───────────────────────────
 

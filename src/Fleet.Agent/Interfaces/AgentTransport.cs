@@ -49,6 +49,9 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     /// <summary>True when the journal was injected (a token is set). For the registration tests.</summary>
     internal bool JournalEnabled => _journal is not null;
 
+    /// <summary>This agent's own bot id, or null without a bot. The tool-send receipt check (#394).</summary>
+    internal long? BotId => _bot?.BotId;
+
     // DocumentDownloadHelper wraps IDocumentDownloader so the download+persist path
     // can be unit-tested by injecting a fake downloader. Exposed as internal so tests
     // that directly construct AgentTransport can substitute the helper.

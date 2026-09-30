@@ -8,6 +8,7 @@ using Fleet.Journal.Client;
 using Fleet.Shared;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -371,8 +372,16 @@ public static class AgentHostRegistration
         AddConversationSouthSeam(services, configuration);
         AddJournal(services, configuration);
 
+        // #394. With the journal off an agent declares nothing on the broker; it only removes a
+        // receipt queue an earlier journal-on life left behind.
+        if (!JournalConfigured(configuration))
+            services.AddHostedService<ToolSendReceiptQueueCleanup>();
+
         return services;
     }
+
+    private static bool JournalConfigured(IConfiguration configuration) =>
+        !string.IsNullOrWhiteSpace(configuration.GetSection(JournalOptions.Section)[nameof(JournalOptions.IngestToken)]);
 
     /// <summary>
     /// The conversation journal publisher (#377), registered only when <c>Journal:IngestToken</c>
@@ -387,7 +396,7 @@ public static class AgentHostRegistration
     internal static void AddJournal(IServiceCollection services, IConfiguration configuration)
     {
         var section = configuration.GetSection(JournalOptions.Section);
-        if (string.IsNullOrWhiteSpace(section[nameof(JournalOptions.IngestToken)]))
+        if (!JournalConfigured(configuration))
             return;
 
         services.Configure<JournalOptions>(section);
@@ -395,6 +404,24 @@ public static class AgentHostRegistration
         services.AddSingleton(sp => new JournalSpool(Path.Combine(
             sp.GetRequiredService<IOptions<AgentOptions>>().Value.WorkDir, ".fleet", "journal-spool")));
         services.AddSingleton<JournalCapture>();
+
+        // Tool-send receipts (#394). The ledger exists only here, so without the journal every
+        // executor and TaskManager hold null and record nothing. AddSingleton + factory-AddHostedService,
+        // the same pair as the drainer; the bot id is read from the transport lazily, once it exists.
+        services.AddSingleton<TurnOriginLedger>();
+        services.AddSingleton(sp =>
+        {
+            long? botId = null;
+            return new ToolSendReceiptConsumer(
+                sp.GetRequiredService<IOptions<AgentOptions>>(),
+                sp.GetRequiredService<GroupRelayService>(),
+                sp.GetRequiredService<TurnOriginLedger>(),
+                sp.GetRequiredService<JournalCapture>(),
+                sp.GetRequiredService<JournalCounters>(),
+                () => botId ??= sp.GetServices<IHostedService>().OfType<AgentTransport>().FirstOrDefault()?.BotId,
+                sp.GetRequiredService<ILogger<ToolSendReceiptConsumer>>());
+        });
+        services.AddHostedService(sp => sp.GetRequiredService<ToolSendReceiptConsumer>());
 
         services.AddHttpClient(JournalHttpClientName)
             // A recreated Comms container comes back on a new address; recycle pooled connections so

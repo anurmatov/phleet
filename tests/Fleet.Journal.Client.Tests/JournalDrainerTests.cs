@@ -1,6 +1,9 @@
 using System.Diagnostics;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Nodes;
+using Fleet.Comms;
 using Fleet.Conversations.Contracts;
 using Microsoft.Extensions.Logging;
 
@@ -524,6 +527,152 @@ public sealed class JournalDrainerTests
         Assert.NotEmpty(rig.Log.Lines);
         Assert.DoesNotContain(rig.Log.Lines, l => l.Message.Contains("secret-looking", StringComparison.Ordinal));
         Assert.DoesNotContain(rig.Log.Lines, l => l.Message.Contains("cj1.", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The record a drained media attachment produces is accepted by the REAL ingest parser.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The capture writes <c>notArchivedReason: "media_disabled"</c> as a placeholder meaning "I had
+    /// no bucket to put this in". The parser treats <c>notArchivedReason</c> and <c>uploadId</c> as
+    /// mutually exclusive and refuses an attachment carrying both — so if the upload pass set the id
+    /// and left the placeholder, every drained record with media would come back <c>422</c> for the
+    /// whole submission, and the agent would dead-letter a message Telegram actually delivered.
+    /// </para>
+    /// <para>
+    /// ⚠️ Asserting that the spool JSON has no <c>notArchivedReason</c> key would prove the drainer
+    /// agrees with itself. This hands the posted bytes to
+    /// <see cref="CommsApp.ValidateIngestRecord"/>, which is the parser the ingest route calls, so
+    /// what is asserted is the contract between two processes rather than a field name.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task A_drained_media_record_is_accepted_by_the_real_ingest_parser()
+    {
+        using var rig = new DrainerRig();
+        var bytes = "the bytes the journal must keep"u8.ToArray();
+        var media = Path.Combine(rig.Root, "source.jpg");
+        await File.WriteAllBytesAsync(media, bytes);
+
+        // An S4-shaped capture: the attachment declares its bytes and says they were not archived.
+        var id = rig.Write(
+            Records.Record(1, attachments: [Photo(0)]),
+            [new SpoolMedia(0, media, null, SpoolMediaMode.Copy)]);
+        Assert.Equal("media_disabled",
+            rig.Spool.Load(id)!.Record["attachments"]![0]!["notArchivedReason"]!.GetValue<string>());
+
+        await rig.NewDrainer(rig.Spool, rig.Listener, rig.NewUploader()).RunOnceAsync(default);
+
+        var posted = Assert.Single(rig.Listener.Posted).ToJsonString();
+        var attachment = JsonNode.Parse(posted)!["attachments"]![0]!.AsObject();
+
+        // The placeholder is gone and the upload reference took its place — in the same mutation.
+        Assert.Null(attachment["notArchivedReason"]);
+        Assert.NotNull(attachment["uploadId"]);
+        Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(bytes)),
+            attachment["uploadSha256"]!.GetValue<string>());
+
+        // And the parser that answers real ingests accepts it. `now` is the drainer's clock, so the
+        // record's `sentAt` sits inside the parser's future-skew window exactly as it does in
+        // production — a record the parser rejects for its date would be a fixture bug, not a finding.
+        var (status, error, field) = CommsApp.ValidateIngestRecord(
+            Encoding.UTF8.GetBytes(posted), rig.Time.GetUtcNow());
+        Assert.True(status == 0,
+            $"the ingest parser refused the drained record: {status} {error} {field}");
+
+        Assert.Equal(1, rig.Counters.Get("journal_delivered"));
+    }
+
+    /// <summary>
+    /// <c>409 upload_incomplete</c> clears the upload references and re-uploads from the spool
+    /// instead of dead-lettering a message the agent is owed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The server refuses upload references without saying which of its reasons applies — swept or
+    /// aborted object, a spool restored from a backup whose bucket no longer holds the object, a row
+    /// that stopped being ours. Every one of them is recoverable locally: the bytes are still in the
+    /// spool. Dead-lettering here throws away a delivered message over a bucket hiccup, so the
+    /// record goes back into the shape the capture wrote and the next pass uploads again.
+    /// </para>
+    /// <para>
+    /// The PUT count is the assertion that matters. "The fields were cleared" alone is also true of
+    /// a record that settled as <c>not_archived</c> and lost its bytes forever; two PUTs of the same
+    /// bytes is what proves the re-upload actually happened.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task Upload_incomplete_clears_the_references_and_uploads_again_rather_than_dying()
+    {
+        using var rig = new DrainerRig();
+        var bytes = "the bytes the journal must keep"u8.ToArray();
+        var media = Path.Combine(rig.Root, "source.jpg");
+        await File.WriteAllBytesAsync(media, bytes);
+        var digest = Convert.ToHexStringLower(SHA256.HashData(bytes));
+
+        var id = rig.Write(
+            Records.Record(1, attachments: [Photo(0)]),
+            [new SpoolMedia(0, media, null, SpoolMediaMode.Copy)]);
+
+        // First post carries upload references and is refused; the second, cleared, is accepted.
+        var answers = new Queue<HttpResponseMessage>([
+            FakeListener.Status(409, "{\"error\":\"upload_incomplete\"}"),
+            FakeListener.Status(201, "{\"result\":\"created\"}"),
+        ]);
+
+        var mediaFake = new MediaFake();
+        var listener = new FakeListener
+        {
+            // The server accepts the record only once it no longer claims stored bytes.
+            Respond = _ => answers.Dequeue(),
+        };
+        var drainer = rig.NewDrainer(rig.Spool, listener, rig.NewUploader(mediaFake));
+
+        // Pass 1: uploaded, posted, refused. The references are cleared; the record stays pending.
+        await drainer.RunOnceAsync(default);
+
+        Assert.Equal([id], rig.Spool.PendingIds());
+        Assert.Equal(0, rig.Spool.DeadCount);
+        var cleared = rig.Spool.Load(id)!.Record["attachments"]![0]!.AsObject();
+        Assert.Null(cleared["uploadId"]);
+        Assert.Null(cleared["uploadSha256"]);
+        Assert.Equal("media_disabled", cleared["notArchivedReason"]!.GetValue<string>());
+        Assert.Equal(1, rig.Counters.Get("journal_media_reason{reason=upload_incomplete}"));
+        Assert.True(rig.Log.Count(LogLevel.Warning) >= 1);
+
+        // Pass 2: the bytes go up AGAIN — that is what "recoverable from the spool" means. The
+        // clock moves because a pass takes at most one request and the record's backoff is real.
+        rig.Time.Advance(TimeSpan.FromSeconds(1));
+        await drainer.RunOnceAsync(default);
+
+        Assert.Empty(rig.Spool.PendingIds());
+        Assert.Equal(0, rig.Spool.DeadCount);
+        Assert.Equal(1, rig.Counters.Get("journal_delivered"));
+        Assert.Equal(2, mediaFake.Requests.Count(r => r.Method == "PUT"));
+
+        // One message, posted twice. The record that went the SECOND time still carries upload
+        // references — and it must: the cleared record is re-uploaded from the spool before it is
+        // posted, so it arrives with a FRESH id and the same digest. An attachment that arrived
+        // with the placeholder instead would journal the message with its bytes silently missing,
+        // which is the failure this whole branch exists to avoid.
+        Assert.Equal([1L, 1L], listener.Posted.Select(Records.MessageId));
+        var resent = listener.Posted[1]["attachments"]![0]!.AsObject();
+        Assert.NotNull(resent["uploadId"]);
+        Assert.Null(resent["notArchivedReason"]);
+        Assert.Equal(digest, resent["uploadSha256"]!.GetValue<string>());
+        Assert.Equal(3, resent["byteSize"]!.GetValue<long>());
+
+        // The cleared state is what the SPOOL holds between the two passes — that is the durable
+        // half of the fix, and the half that survives a crash between the refuse and the re-upload.
+        Assert.Equal("media_disabled", cleared["notArchivedReason"]!.GetValue<string>());
+
+        // The bytes that went up the second time are the bytes the capture spooled — the digest is
+        // what the server compares against the object it hashes, so a re-upload of anything else
+        // would be a silent corruption that no later stage could detect.
+        var puts = mediaFake.Requests.Where(r => r.Method == "PUT").ToList();
+        Assert.All(puts, p => Assert.Equal(bytes, p.Bytes));
+        Assert.Equal(digest, Convert.ToHexStringLower(SHA256.HashData(puts[1].Bytes!)));
     }
 
     [Fact]

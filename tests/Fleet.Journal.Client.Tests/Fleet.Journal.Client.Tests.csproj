@@ -21,6 +21,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Fleet.Journal.Client\Fleet.Journal.Client.csproj" />
+    <!--
+      Referenced so a test can hand the record the drainer put on the wire to the REAL journal
+      parser. `JournalRecordParser` is internal to Fleet.Comms and its `InternalsVisibleTo` names
+      Fleet.Comms.Tests, so the seam is a public host method rather than a second test that
+      re-implements the parser's rules and agrees with them by construction.
+    -->
+    <ProjectReference Include="..\..\src\Fleet.Comms\Fleet.Comms.csproj" />
   </ItemGroup>
 
 </Project>

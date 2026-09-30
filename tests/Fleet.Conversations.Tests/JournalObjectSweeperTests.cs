@@ -10,10 +10,22 @@ namespace Fleet.Conversations.Tests;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The order each class works in is the invariant under test: <b>bytes first, then the row</b>. A
-/// failure between the two leaves a row whose object is gone, which the next tick deletes because
-/// deleting a missing object is success. The reverse order leaves an object with no row, and only
-/// the weekly listing can find it — which is how a bucket grows forever.
+/// The order each class works in is the invariant under test: <b>is it still referenced, then bytes,
+/// then the row</b>.
+///
+/// <para>
+/// The reference guard runs before anything is deleted, because a referenced object is not doomed
+/// and there is no orphan to create by refusing it early. Bytes before the row is still the order
+/// for the two steps that ARE a deletion: a failure between them leaves a row whose object is gone,
+/// which the next tick deletes because deleting a missing object is success. The reverse order
+/// leaves an object with no row, and only the weekly listing can find it — which is how a bucket
+/// grows forever.
+/// </para>
+/// <para>
+/// ⚠️ The guard's position is not a detail. With bytes first, the bucket delete succeeded and the
+/// guard then refused the row — so a referenced object lost its bytes while its row stayed healthy
+/// and every assertion about the ROW passed. The case that catches it asks the bucket, and it lives
+/// in <c>JournalS3UploadTests</c> where a real bucket can be consulted.
 /// </para>
 /// <para>
 /// ⚠️ These assert the <c>Failures</c> counter and that the row survived, not merely that nothing

@@ -38,11 +38,106 @@ public sealed class S3Fixture : IAsyncLifetime
     public const string AccessVariable = "FLEET_COMMS_S3_ACCESS_KEY";
     public const string SecretVariable = "FLEET_COMMS_S3_SECRET_KEY";
 
+    /// <summary>
+    /// ⚠️ <b>Set this to run the suite against a bucket that actually authenticates.</b>
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The default fixture sends anonymous requests, which is enough to prove the data plane and
+    /// nothing else. A second bucket configured with a real identity — SeaweedFS
+    /// <c>-s3.iam.config=&lt;file&gt;</c> with an <c>Admin</c> identity — lets the suite prove the
+    /// things the anonymous fixture structurally cannot: that <c>HeadBucket</c> succeeds with the
+    /// shipped runtime policy, that a WRONG secret is classified <c>credentials_rejected</c> rather
+    /// than retried, and the operator commands (<c>media backup</c> / <c>media restore</c> /
+    /// <c>journal verify-media</c>), which build their own <see cref="S3ObjectStore"/> from the
+    /// environment and therefore always sign.
+    /// </para>
+    /// <para>
+    /// ⚠️ <b>My earlier comment on this file claimed SeaweedFS answers a signed request with 400
+    /// rather than 403, and that a signed fixture was therefore a false green.</b> That is true only
+    /// of a server with NO identity configured. Measured 2026-09-29 against the pinned image with
+    /// <c>-s3.iam.config</c> holding an Admin identity: a signed PUT succeeds, a wrong secret is
+    /// answered <c>403 AccessDenied</c>, and an unauthenticated request is refused. The credential
+    /// classes are provable on this fixture, so this variable exists and the claim is retired here
+    /// rather than left as folk law.
+    /// </para>
+    /// </remarks>
+    public const string SignedEndpointVariable = "FLEET_COMMS_S3_SIGNED_ENDPOINT";
+    public const string SignedFilerVariable = "FLEET_COMMS_S3_SIGNED_FILER";
+    public const string SignedBucketVariable = "FLEET_COMMS_S3_SIGNED_BUCKET";
+
+    /// <summary>
+    /// The identity the signed fixture authenticates.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠️ SeaweedFS looks an access key up <i>exactly</i> (its own <c>accessKeyIdent</c> map), so the
+    /// value here must be byte-identical to the one in the identity file. Measured 2026-09-29
+    /// against the pinned image: a key the file does not name is answered
+    /// <c>403 InvalidAccessKeyId</c>, which is the correct behaviour and not a bug to work around.
+    /// </para>
+    /// <para>
+    /// The pair is <c>placeholder</c>/<c>placeholder</c> — the same values the anonymous fixture
+    /// already passes to <see cref="JournalMediaOptions"/> — so one identity serves both the
+    /// credential-class bucket and the bucket the operator commands run against. They are fixture
+    /// values for throwaway containers on ephemeral runners; nothing in this repo or any deployment
+    /// uses them, and <see cref="JournalMediaOptions.Validate"/> still requires them to be present.
+    /// </para>
+    /// </remarks>
+    public const string SignedAccessKey = "placeholder";
+    public const string SignedSecretKey = "placeholder";
 
     public string Endpoint { get; private set; } = string.Empty;
     public string AccessKey { get; private set; } = string.Empty;
     public string SecretKey { get; private set; } = string.Empty;
     public string Bucket { get; private set; } = string.Empty;
+
+    /// <summary>Endpoint of the identity-configured bucket, or null when none was supplied.</summary>
+    public string? SignedEndpoint { get; private set; }
+
+    /// <summary>The bucket behind <see cref="SignedEndpoint"/>; auto-created by an admin PUT.</summary>
+    public string SignedBucket { get; private set; } = "journal-ci-signed";
+
+    /// <summary>
+    /// True when a bucket that authenticates is available. Tests that need real credentials
+    /// <b>fail</b> when this is false — they never skip silently.
+    /// </summary>
+    public bool HasSignedBucket => SignedEndpoint is not null;
+
+    /// <summary>Reads the signed fixture's environment. Empty when the endpoint is not set.</summary>
+    public void ReadSignedEnvironment()
+    {
+        SignedEndpoint = Environment.GetEnvironmentVariable(SignedEndpointVariable);
+        var filer = Environment.GetEnvironmentVariable(SignedFilerVariable);
+        if (!string.IsNullOrWhiteSpace(filer)) SignedFiler = filer;
+        var bucket = Environment.GetEnvironmentVariable(SignedBucketVariable);
+        if (!string.IsNullOrWhiteSpace(bucket)) SignedBucket = bucket;
+    }
+
+    /// <summary>Filer of the signed bucket, used only to pre-create it.</summary>
+    public string SignedFiler { get; private set; } = "http://127.0.0.1:8888";
+
+    /// <summary>
+    /// A store over the SIGNED bucket — real credentials through the store's own constructor, so
+    /// the client is the same one Comms builds. Unlike <see cref="Store"/>, this signs.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">No signed bucket was supplied to the run.</exception>
+    public S3ObjectStore SignedStore()
+    {
+        if (SignedEndpoint is null)
+            throw new InvalidOperationException(
+                $"{SignedEndpointVariable} is not set, so this run has no bucket that authenticates. "
+                + "The assertions that need one FAIL rather than skip — see the class remarks.");
+
+        return new S3ObjectStore(new JournalMediaOptions
+        {
+            Endpoint = SignedEndpoint,
+            Bucket = SignedBucket,
+            AccessKey = SignedAccessKey,
+            SecretKey = SignedSecretKey,
+            Region = "us-east-1",
+        }, NullLogger.Instance);
+    }
 
     /// <summary>
     /// The SeaweedFS filer, used ONLY to create the bucket. Configurable so a deployment that puts
@@ -125,6 +220,62 @@ public sealed class S3Fixture : IAsyncLifetime
                 + "fixture checked — so this is a store or addressing failure.");
 
         await EmptyJournalPrefixAsync(store);
+
+        // The signed bucket is optional at FIXTURE level and mandatory at TEST level: reading it
+        // here must not fail a run that only wants the data plane, but SignedStore() throws when a
+        // test asks for it and the run did not supply one. A silently-skipped credential test is
+        // the exact failure shape this file exists to prevent.
+        ReadSignedEnvironment();
+        if (SignedEndpoint is not null) await EnsureSignedBucketAsync();
+    }
+
+    /// <summary>
+    /// Creates the signed bucket, or fails the run explaining why it could not.
+    /// </summary>
+    /// <remarks>
+    /// ⚠️ Not over the filer. The anonymous fixture creates its bucket that way because a signed
+    /// CreateBucket needs a working signature; on the SIGNED fixture the signature works, and the
+    /// bucket must be created by an authenticated S3 write — SeaweedFS auto-creates on upload for an
+    /// <c>Admin</c> identity. A top-level filer directory is NOT visible to the S3 layer here:
+    /// measured against the pinned image, <c>POST /&lt;bucket&gt;/</c> returned 201 while the S3
+    /// <c>HeadBucket</c> for the same name still answered 404.
+    /// </remarks>
+    private async Task EnsureSignedBucketAsync()
+    {
+        using var store = SignedStore();
+
+        // ⚠️ The PUT must come FIRST, and that is not incidental: the bucket does not exist until
+        //    something creates it, and `HeadBucket` on a missing bucket answers 404 — which the
+        //    store classifies as a startup failure. Probing before creating inverts the dependency
+        //    and fails the fixture for a reason that has nothing to do with the code.
+        //
+        // The key is a real ULID under the journal prefix because SeaweedFS's auto-create only
+        // fires for an Admin identity on an ordinary PUT; it is deleted immediately, so the orphan
+        // sweep never sees a byte the suite did not intend to leave.
+        var keep = JournalObjectKeys.For(Fleet.Protocol.Ulid.NewUlid());
+        var marker = new byte[16];
+        Random.Shared.NextBytes(marker);
+
+        await using (var body = new MemoryStream(marker))
+        {
+            var written = await store.PutAsync(keep, body, marker.LongLength, "application/octet-stream");
+            if (!written.Succeeded)
+                throw new InvalidOperationException(
+                    $"could not create bucket {SignedBucket} on the signed fixture at "
+                    + $"{SignedEndpoint}: the store refused an authenticated PUT. Check that "
+                    + "-s3.iam.config names an identity with Admin, and that its access key is at "
+                    + "and that its access key matches the identity named in -s3.iam.config "
+                    + "exactly. See SignedAccessKey.");
+        }
+
+        await store.DeleteAsync(keep);
+
+        if (!await store.ProbeAsync())
+            throw new InvalidOperationException(
+                $"bucket {SignedBucket} exists on the signed fixture but HeadBucket refused it. The "
+                + "identity's policy does not grant s3:ListBucket on the bucket — which is exactly "
+                + "the failure the shipped scoped policy must not have, so this is worth reading "
+                + "as a real finding.");
     }
 
     /// <summary>
@@ -235,5 +386,19 @@ public sealed class S3Fixture : IAsyncLifetime
         });
 }
 
-[CollectionDefinition("s3")]
+/// <summary>
+/// The two classes that put bytes through the real bucket, serialised.
+/// </summary>
+/// <remarks>
+/// ⚠️ <c>DisableParallelization</c> is not a performance concession; without it the suite cannot
+/// make exact count assertions. Both classes write into the SAME named bucket, and several assert
+/// "exactly one object under <c>j1/</c>" or "one committed row". xUnit runs different classes in a
+/// collection concurrently unless this is set, so each class' bucket would contain the other's
+/// objects and the counts would be wrong for reasons that have nothing to do with the code.
+///
+/// The fixture empties the journal prefix at start-up, which handles a dirty runner. It cannot
+/// handle a CONCURRENT neighbour, and it must not try to: deleting another class' live objects
+/// mid-assertion is worse than the failure it would fix.
+/// </remarks>
+[CollectionDefinition("s3", DisableParallelization = true)]
 public sealed class S3Collection : ICollectionFixture<S3Fixture>;

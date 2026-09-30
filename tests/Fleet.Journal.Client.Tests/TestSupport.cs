@@ -118,6 +118,25 @@ internal sealed class DrainerRig : IDisposable
         return new JournalDrainer(spool, new JournalHttpClient(http, Records.Token, timeout), Counters, Log, Time);
     }
 
+    /// <summary>
+    /// A drainer that also uploads media, which is the shape the agent runs. <paramref name="media"/>
+    /// serves the media endpoint — pass a <see cref="MediaFake"/> you kept a reference to when the
+    /// test needs to count PUTs, otherwise a fresh one is used.
+    /// </summary>
+    public JournalDrainer NewDrainer(JournalSpool spool, HttpMessageHandler listener, JournalMediaUploader media)
+    {
+        var http = new HttpClient(listener) { BaseAddress = new Uri("http://journal.test") };
+        return new JournalDrainer(
+            spool, new JournalHttpClient(http, Records.Token), Counters, Log, Time, media);
+    }
+
+    /// <summary>A media uploader pointed at <paramref name="media"/> (a fresh fake unless given).</summary>
+    public JournalMediaUploader NewUploader(HttpMessageHandler? media = null)
+    {
+        var http = new HttpClient(media ?? new MediaFake()) { BaseAddress = new Uri("http://journal.test") };
+        return new JournalMediaUploader(new JournalMediaHttpClient(http, Records.Token), Time);
+    }
+
     /// <summary>Spools <paramref name="record"/> and returns its spool id.</summary>
     public string Write(JournalRecord record, IReadOnlyList<SpoolMedia>? media = null)
     {
@@ -144,4 +163,50 @@ internal sealed class CapturingLogger<T> : ILogger<T>
     }
 
     public int Count(LogLevel level) { lock (Lines) return Lines.Count(l => l.Level == level); }
+}
+
+/// <summary>
+/// The media endpoint as the uploader sees it: declare hands out an upload id, PUT accepts the
+/// bytes, and every request is recorded so a test can count them.
+/// </summary>
+/// <remarks>
+/// Deliberately a second fake rather than a shared fixture: the only thing two media tests agree
+/// about is the URL, and a fixture that owns the upload id would make "the same object was put
+/// twice" and "a different object was put twice" the same assertion.
+/// </remarks>
+internal sealed class MediaFake : HttpMessageHandler
+{
+    public string UploadId { get; } = Fleet.Protocol.Ulid.NewUlid().ToString();
+
+    public Func<HttpRequestMessage, HttpResponseMessage> Declare { get; set; }
+
+    public Func<HttpRequestMessage, HttpResponseMessage> Put { get; set; }
+
+    public List<Recorded> Requests { get; } = [];
+
+    public MediaFake()
+    {
+        Declare = _ => Reply(HttpStatusCode.Created, $"{{\"uploadId\":\"{UploadId}\"}}");
+        Put = _ => Reply(HttpStatusCode.OK, "{\"result\":\"uploaded\"}");
+    }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        var body = request.Content is null ? null : await request.Content.ReadAsStringAsync(ct);
+        var bytes = request.Content is null ? null : await request.Content.ReadAsByteArrayAsync(ct);
+
+        lock (Requests)
+        {
+            Requests.Add(new Recorded(
+                request.Method.Method, request.RequestUri!.AbsolutePath, body, bytes,
+                request.Headers.Authorization?.ToString()));
+        }
+
+        return request.Method == HttpMethod.Post ? Declare(request) : Put(request);
+    }
+
+    public static HttpResponseMessage Reply(HttpStatusCode status, string json) =>
+        new(status) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+
+    public sealed record Recorded(string Method, string Path, string? Body, byte[]? Bytes, string? Authorization);
 }

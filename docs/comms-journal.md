@@ -277,6 +277,20 @@ already proved.
 commit an upload and nothing else — **read access never depends on it.** `fetch_attachment` is
 authorised by message observership (D4).
 
+### Scoped acceptance amendment (#388, 2026-09-30)
+
+Human-approved scope: AC1b's observer-authorized `fetch_attachment` read-denial check is not
+required for this upload-only slice. An authenticated private deployment may authorize agents
+without per-message observership; this is not a change to the broader public D4 read policy,
+and this slice introduces no journal read API.
+
+AC1b's digest-only commit refusal remains required. Private storage, agent authentication,
+owner-bound uploads and byte proof are unchanged; UUID secrecy never substitutes for
+authentication. Exact pushed-head isolated runtime acceptance remains required before merge,
+including pinned-image identity, unmodified init/verifier execution, scoped `mc ls`,
+media-enabled startup/S3 acceptance and verified teardown with final exit 0. No runtime waiver
+or merge approval is granted by this amendment.
+
 ### Lifecycle
 
 | Step | Answer |

@@ -204,6 +204,25 @@ The workflow-activity group (`FLEET_GROUP_CHAT_ID`) is always excluded; setup's 
 `0` is ignored. To turn the journal off, set the flag to `false` and recreate: the tables and rows
 stay.
 
+**Tool sends and read tools (slice 5).** No migration.
+
+- **Rollout order:** Comms first (so `agent_tool` records are accepted), then `fleet-telegram`
+  (recreated with `Journal__ToolSendReceipts`, which compose sets from `FLEET_COMMS_JOURNAL_ENABLED`),
+  then agents. Any other order is harmless: receipts wait in the agent's queue or are unroutable,
+  and `agent_tool` records an older Comms refuses go to the agent's `dead/`; move them back to
+  `pending/` after the upgrade.
+- **Read tools, per agent:** set the agent's `fleet-comms-journal` endpoint URL to
+  `http://fleet-comms:8083/journal/v1/mcp` and grant it the tools
+  `mcp__fleet-comms-journal__search_messages`, `mcp__fleet-comms-journal__get_message` and
+  `mcp__fleet-comms-journal__get_conversation`, then reprovision. Provisioning already mints the
+  `read` bearer for any agent with that endpoint; providers without header support fail closed. Never add
+  these to a template. To revoke, remove the endpoint and tools and reprovision.
+- **Scope `all`:** list the subject in `FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS` in `.env` and recreate
+  `fleet-comms`. The config API and the dashboard deny this key on purpose. Everyone else reads only
+  messages their own bot observed.
+- **Rollback:** revert and redeploy; rows already written stay valid. Delete leftover
+  `fleet.journal.tool-sends.*` queues (journal-off agents delete their own at startup).
+
 ### Retention is a garbage-collection horizon, not deletion
 
 Nothing here serves a request to erase anything. Rows age out; ephemeral events are pruned without

@@ -10,9 +10,10 @@ and status surfaces around them. It is **off by default**; with it off a deploym
 Telegram history today lives only in Telegram and in bounded in-memory buffers, and nothing is
 replayable after a restart. The journal is the durable, queryable record.
 
-Not in this slice, and not accepted by it: capture inside the agent runtime, media bytes or object
-storage, read tools, capture of tool-initiated sends and copies, projection of first-party client
-conversations, edits and deletions, cross-observer reads, backfill, and a metrics exporter.
+Later slices added capture inside the agent runtime (slice 2), media bytes (slice 4), and
+tool-initiated sends and the read tools (slice 5, below). Still not in the journal: copies,
+projection of first-party client conversations, edits and deletions, backfill, and a metrics
+exporter.
 
 ## The listener
 
@@ -21,12 +22,12 @@ conversations, edits and deletions, cross-observer reads, backfill, and a metric
 | Address | `Comms__Journal__Url`, default `http://0.0.0.0:8083` |
 | Built | only when `Comms__Journal__Enabled=true`; otherwise nothing is bound, registered or started |
 | Reachable | the container network only. It is **never** published as a host port and never proxied |
-| Routes | `POST /journal/v1/messages` (token purpose `ingest`), `GET /journal/v1/status` (`status`) |
+| Routes | `POST /journal/v1/messages` (token purpose `ingest`), `GET /journal/v1/status` (`status`), `POST /journal/v1/mcp` (`read`, see [Read tools](#read-tools-slice-5)) |
 
 It is a separate application from north, south and ops. The journal routes are not mapped on any
 of those, and the south bearer is not a journal credential. Authentication runs before routing and
 before any body byte is read, on every path: an absent, malformed, bad-MAC or wrong-purpose token,
-and any path that is not one of the two routes, all get the same `401 {"error":"unauthorized"}`.
+and any path that is not one of the routes, all get the same `401 {"error":"unauthorized"}`.
 
 After authentication each subject may hold **8** requests in flight. The ninth gets
 `429 {"error":"too_many_requests"}` with `Retry-After: 1`, before its body is read.
@@ -51,7 +52,7 @@ One record is one Telegram message as one runtime observed it. UTF-8 JSON, at mo
 | `textFormat` | `plain` \| `html` \| `rich`; required when `text` is set |
 | `transcript` | speech-to-text result, ≤ 65,536 UTF-8 bytes, or null. Never merged into `text` |
 | `transcriptTruncated` | optional bool |
-| `origin` | `telegram_update` \| `agent_runtime` |
+| `origin` | `telegram_update` \| `agent_runtime` \| `agent_tool`. `agent_tool` (slice 5) only with `direction: outbound` and `sender.kind: agent`; anything else is `422 invalid_record{origin}`. Not in the fingerprint |
 | `sendGroup` | optional `{id: ULID, part, parts}` linking the chunks of one long outbound reply; outbound only, `1 ≤ part ≤ parts ≤ 64` |
 | `attachments[]` | at most 16; see below |
 
@@ -171,9 +172,10 @@ never printed).
 - **Inbound**: one record per raw Telegram message, from the raw text or caption, Telegram's date,
   media group id, file unique ids and sizes, and the transcript. Never the placeholder, the image
   prompt or attachment hints. Commands (`/new …`, `/tts`) are journaled like any message.
-- **Outbound**: one record per Bot API message Telegram accepted, with its format (`plain`, `html`,
-  or `rich` carrying the Markdown source). A reply split into several messages shares one
-  `sendGroup`. Relay and bridge output (`OutboundOrigin`) is excluded, including its images.
+- **Outbound**: replies only, one record per Bot API message Telegram accepted, with its format
+  (`plain`, `html`, or `rich` carrying the Markdown source). A reply split into several messages
+  shares one `sendGroup`. Relay and bridge output (`OutboundOrigin`) is excluded, including its
+  images. See [Capture policy](#capture-policy-slice-5) for what counts as a reply.
 - **Spool**: `{WorkDir}/.fleet/journal-spool/{pending,media,dead}`; inbound media hardlinked from
   the attachment directory, outbound media copied. Limits: 10,000 records or 1 GiB; at the limit
   the new record is dropped. With media off every attachment goes as `not_archived(media_disabled)`;
@@ -186,11 +188,119 @@ never printed).
 - **Heartbeat**: `Journal{enabled,spoolDepth,oldestAgeSeconds,dropped,dead,authFailed}`, absent
   when the journal is off. Logs carry reason codes and record ids only — never text or the token.
 
+## Capture policy (slice 5)
+
+Outbound capture is **opt-in per send**. `IMessageSink.SendReplyAsync(chatId, AgentReply, origin)`
+is the only outbound path that journals; `AgentReply` carries the body, the stats line and the
+tool-call block separately. `SendTextAsync`, `SendHtmlTextAsync` and `SendPhotoAsync` never open a
+journal batch, whatever their origin. Nothing is decided by matching text, so a new notice is
+excluded without anyone having to list it.
+
+| Send | Journaled |
+|---|---|
+| The final reply, the merged-turn reply, an injected turn's answer, a recovered answer | yes, body only |
+| Photos from `[IMAGE:]` markers inside a reply | yes, with media |
+| The TTS voice reply | yes |
+| Tool-progress blockquotes, the provider warning, "Task failed", "Error:", "Task cancelled.", "Done! (no text output)" | no |
+| Queue, busy, cancel and command notices; image-skip notices | no |
+| The photo-missing hint and the photo-failed notice inside a reply (they carry a local path) | no |
+| The transcript echo `🎤 …` (the inbound row already holds the transcript) | no |
+
+**Telegram output does not change.** Journaling only observes: every Bot API call a reply makes —
+method, text or caption, parse mode, reply target, message count — is what it was before slice 5.
+`ReplyRenderGoldenTests` compares them with fixtures recorded from the code before the change. The
+journal never holds the footer (the stats line or the tool-call block), tool arguments, runtime
+error text or a local path.
+
+Which footer a reply has picks its render path:
+
+| Path | When | Telegram | Journal text |
+|---|---|---|---|
+| **T** | a tool block is present, any `FormattingMode` | `prefix + HtmlEncode(body) + stats + toolBlock` in hard 4,000-character HTML chunks. `[IMAGE:]` and `[reply_to:]` are sent as literal text and no photo goes out (existing behaviour) | chunk *k* of `prefix + HtmlEncode(body)`, cut the same way, with every `[IMAGE:…]` and `[reply_to: N]` removed, then blockquote-balanced. A chunk that is only footer, or empty after removing markers, is not journaled |
+| **S** | no tool block (a stats line or nothing) | the normal path: `[reply_to:]`, `[IMAGE:]` split, per-mode rendering and the rich → HTML → plain fallbacks | each part as sent, except the last `[IMAGE:]` part, which alone carries the stats line: it is rendered again without it through the stage that actually sent it and zipped by index. Surplus body pieces go on the last zipped message. A photo whose caption held the stats line is journaled with the body-only caption (null when empty) |
+
+A split reply is one `sendGroup`, and `parts` counts journaled messages only.
+
+## Tool sends (slice 5)
+
+Messages an agent sends through the Telegram MCP tools (`send_message`, `send_to_ceo`) are sent by
+`fleet-telegram`, not by the agent. Only the agent knows the turn's origin, its allowlist and its
+exclusion list, so `fleet-telegram` reports what it sent and the agent classifies and spools it with
+its own ingest token. The records carry `origin: agent_tool`; the observer is the agent.
+
+**Receipts.** Every Bot API send in `Fleet.Telegram` goes through `TelegramSender`, and a source-scan
+test fails if anything else calls a send method on a bot client. When a tool call ends with at least
+one message accepted, `fleet-telegram` publishes one receipt:
+
+- to the direct exchange `fleet.journal.tool-sends`, routing key the lower-cased `?agent=` name,
+  persistent, JSON `v: 1`: `agent`, `tool`, `requestedAt` (UTC, before the first Bot API call),
+  `botId`, `chat{id,type,title}` and `messages[{messageId, date, replyToMessageId?, text,
+  textFormat}]` in send order;
+- only when `Journal__ToolSendReceipts=true` (compose sets it from `FLEET_COMMS_JOURNAL_ENABLED`).
+  Off, `fleet-telegram` opens no broker connection and declares nothing;
+- fire-and-forget through a 1,000-entry queue. A full queue, a broker error, a 10 s publish timeout
+  or shutdown drops the receipt and counts it. **The tool result never waits on the broker.**
+
+Sends through the notifier fallback bot are never recorded: that bot is not in the agent's
+conversation.
+
+**The agent's queue.** An agent with the journal on declares the durable queue
+`fleet.journal.tool-sends.<name>` (24 h TTL, 10,000 messages, `drop-head`), bound with its
+lower-cased name, and consumes it on its broker connection with manual ack. An agent with the
+journal off declares nothing and deletes that queue at startup if it exists. A receipt that fails
+to parse, has the wrong version or is over 1 MiB is `receipt_invalid`; one whose `botId` is not the
+agent's own bot is `tool_send_foreign_bot`. Both are acked and dropped.
+
+### Origin attribution (fail closed)
+
+`TurnOriginLedger` records every period in which the provider may be acting, tagged `human`,
+`relay`, `bridge` or `unknown`. With `W = [requestedAt − 2 s, requestedAt + 2 s]`:
+
+- a tool send is journaled **only if** the union of `human` intervals covers every instant of `W`
+  **and** no `relay`, `bridge` or `unknown` interval touches `W`. There is no precedence between
+  intervals;
+- an uncovered part of `W` (before a turn, after it, between two turns) → `tool_send_unattributed`;
+  any non-human overlap → `tool_send_non_human`;
+- the decision waits until the agent clock passes `requestedAt + 2.25 s`. The receipt waits unacked
+  in a list of at most 1,000 (overflow → `receipt_deferred_overflow`, acked, excluded) and is acked
+  after the decision. An interval still open counts as covering up to decision time;
+- `requestedAt` later than the receipt's arrival → `receipt_clock_skew`. The guarantee holds while
+  the `fleet-telegram` and agent clocks differ by at most 2 s: trivially on one host, with NTP on
+  several;
+- closed intervals are kept 10 minutes, open ones forever. A window that starts before that horizon
+  or before the agent started — including a receipt redelivered after an agent restart — is excluded.
+
+Where intervals come from:
+
+| Source | Interval |
+|---|---|
+| An executor turn (`ExecuteAsync`, Claude `ReadInjectedTurnAnswersAsync`) | opens right **after** the executor takes its turn lock and closes before it releases it. Its origin is the one `TaskManager` set with `Pending(origin)` before enumerating, else `unknown` (warmup). A task waiting for the lock has none |
+| `/run` (`SendCommandAsync`) | lock-held, always `unknown` |
+| Gemini | one CLI process per call, from start to exit |
+| A turn the provider starts by itself (an injected message before the lock is taken, a background-task notification) | `unknown`, opened by the stdout reader on a turn-content event (Claude `assistant`, `user`, `stream_event`, `system/init`; Codex `turn/started`, `item/*`) while no other interval is open |
+
+An `unknown` interval from the stdout reader closes **only** on the first terminal event after it
+opened (Claude `result`, Codex `turn/completed`) or on confirmed process end (stdout EOF, or a kill
+after `WaitForExitAsync` returned). `RequestRestart()`, reader cancellation, a `TryStopProcessAsync`
+that returned `false`, silence and another lock acquisition do not close it. After 10 minutes open it
+logs `journal_ledger_unknown_stuck` once and stays open.
+
+The trade-off is chosen: a genuine human tool send is not journaled when it falls within 2 s of the
+start or end of its own turn, within 2 s of any relay, bridge, `/run` or warmup activity, or while an
+untracked provider turn is still unterminated. Relay and bridge sends are never journaled.
+
+**Idempotency.** A duplicate receipt or a redelivery resolves on the natural key
+`(conversation, tg:<messageId>)`: same observer and fingerprint answer `200 duplicate`.
+
+**Known limit.** Any broker client can publish to an agent's receipt queue, as it can already publish
+relay directives. The `botId` check blocks cross-bot rows; broker authentication is out of scope.
+
 ## Tokens and rotation
 
 `cj1.<purpose>.<subject>.<mac>`, with `mac = base64url(HMAC-SHA256(key, "cj1|" + purpose + "|" + subject))`
 unpadded. The subject is `^[A-Za-z0-9_-]{1,128}$` and names the publishing runtime; it becomes the
-observer. Purposes accepted: `ingest`, `status`. `read` and `ingest-service` are reserved and refused.
+observer. Purposes accepted: `ingest`, `status`, `read` (slice 5). `ingest-service` is reserved and
+refused. A `read` token carries no scope: what its subject may read is decided on the server.
 There is no token table: identity is derived. Tokens are never logged or used as metric labels.
 
 ```bash
@@ -211,6 +321,8 @@ the old key and recreate again. Its tokens then answer `401`.
 | `FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS` | `Comms__Journal__ExcludedChatIds=${FLEET_GROUP_CHAT_ID},${…}` | empty |
 | `FLEET_COMMS_JOURNAL_RETENTION` | `Comms__Journal__MessageRetention` | `365.00:00:00`, minimum `1.00:00:00` |
 | `FLEET_COMMS_MEDIA_ENDPOINT` | `Journal:MediaEnabled` **on each agent** (see below) | `false` |
+| `FLEET_COMMS_JOURNAL_ENABLED` | `Journal__ToolSendReceipts` on `fleet-telegram` (see [Tool sends](#tool-sends-slice-5)) | `false` |
+| `FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS` | `Comms__Journal__ReadAllSubjects` (`fleet-comms`). Comma-separated read subjects with scope `all` | empty |
 
 ### `Journal:MediaEnabled` — the agent's half of the media switch
 
@@ -411,6 +523,68 @@ on a bucket that does not exist answers `404`, and auto-creation happens on the 
 A filer `POST /<bucket>/` creates a *filer* directory that S3 does not see, so it is not a way to
 make a bucket.
 
+## Read tools (slice 5)
+
+A read-only MCP server over the journal: streamable HTTP, **stateless**, at `POST /journal/v1/mcp`
+on the journal listener only (it exists only with the journal on; never north, south or ops, never a
+host port). The endpoint URL agents use is `http://fleet-comms:8083/journal/v1/mcp`.
+
+- **Auth** runs first, as on every journal route. The token is `cj1.read.<subject>`; no token, an
+  `ingest` token or any other token gets the identical `401`. An authenticated `GET` or `DELETE`
+  answers `405` with `Allow: POST` — a `401` there would push MCP clients into an OAuth flow. The
+  8-in-flight cap per subject applies.
+- **Grant, per agent only**: the `fleet-comms-journal` endpoint (S3 already provisions its bearer
+  header) plus the tools `mcp__fleet-comms-journal__{search_messages,get_message,get_conversation}`.
+  Never in a template, never auto-granted.
+
+**Scope.**
+
+| scope | rule | granted by |
+|---|---|---|
+| `observed` (default) | message M is readable iff a `journal_message_observers` row `(M, subject)` exists | any valid `read` token |
+| `all` | every message | the subject is listed in `Comms__Journal__ReadAllSubjects` (`FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS`, comma-separated, exact match) |
+
+Message-level observership is "the conversations the agent's own bot is in", exactly: a DM is all
+observed by that agent, and in a group an agent never reads what its bot was not delivered. An agent
+with read access but the journal off has observed nothing. The `all` key sits under the
+`FLEET_COMMS_JOURNAL_` prefix the orchestrator config API denies, so no agent can widen its own
+scope; an invalid subject in it exits 1 with `journal_read_grants_invalid` (position named, value
+never printed). Scope is never encoded in the token.
+
+**Tools** (all `readOnlyHint: true`, JSON output, ids are `journal_messages.id` /
+`journal_conversations.id` ULIDs):
+
+| tool | input | output |
+|---|---|---|
+| `search_messages` | `query?` (≤ 256 chars over `text` + `transcript`; operators `+-<>()~*"@` stripped, every term required, short terms and stopwords dropped, nothing left → `invalid_query`), `conversation_id?`, `sender_kind?`, `sender_id?`, `direction?`, `since?` / `until?` (ISO-8601 with offset on `sent_at`, half-open), `limit` 1–100 (20), `cursor?` | `items[]` with `text_preview` (≤ 500 chars), `text_truncated`, `has_transcript`, `attachment_count`; `next_cursor`. Newest first |
+| `get_message` | `message_id`, or `telegram_chat_id` + `telegram_message_id` | the full record. The Telegram form with several in-scope matches → `ambiguous` with up to 10 candidate ids |
+| `get_conversation` | `conversation_id`, `from_message_id?` (exclusive), `direction` `forward` (default) or `backward`, `limit` 1–200 (50), `cursor?` | `conversation{…}`, full records, `next_cursor`. A page also ends at 262,144 bytes of text + transcript, with at least one record |
+
+Attachments are metadata only (`ordinal, kind, mime_type, byte_size, file_name, state,
+not_archived_reason`) — never an object id, key, bucket, `sha256`, file unique id or URL.
+
+**No oracle.** An out-of-scope id and a missing one answer the same bytes, `{"error":"not_found"}`
+with `isError`. Search returns no totals. A conversation with no in-scope message is `not_found`, and
+`search_messages` with a hidden or missing `conversation_id` returns empty `items` and a null cursor.
+`reply_to.message_id` is `null` whether the target is missing or hidden. A replay anchor must be in
+scope and in the given conversation; anything else answers exactly like a missing conversation.
+Other errors: `invalid_cursor`, `invalid_query`, `invalid_argument{field}` and
+`store_unavailable` (retryable, never a partial page).
+
+**Pagination (no cross-page snapshot).** Keyset only on immutable keys — search on `(sent_at, id)`
+descending (`ix_sent`), replay on `(order_key, id)` (`ix_order`), never `OFFSET`. Each page is one
+READ COMMITTED query. The cursor is opaque base64url JSON `{v, tool, filterHash, conversationId?,
+direction?, last:{key, id}}`, holds no server state and so survives a restart; reused with other
+filters, another tool, conversation or direction it is `invalid_cursor`, decided from the cursor and
+arguments alone. Scope is re-applied on every page. One traversal guarantees:
+
+| # | Guarantee |
+|---|---|
+| G1 | No message appears twice |
+| G2 | A message committed, in scope and matching both at traversal start and when the page covering its key is read is returned exactly once |
+| G3 | A message that becomes visible mid-traversal (a delayed commit, a late spool drain with an old `sent_at`, a new observer row, a transcript that now matches `query`) is returned at most once, and only if its key is still ahead of the cursor |
+| G4 | A record is shown as it stood when its page was read, and is never re-sent after a later update |
+
 ## Retention, purge and deletion semantics
 
 The existing hourly garbage-collection tick deletes messages with `sent_at < now − retention` in
@@ -453,9 +627,23 @@ number in it that is not yet gone.
 observer, its message count and last ingest time. The route adds refusals since start by reason,
 the last sweep and what it deleted, and ingest p50/p95 over the last hour. Never message text.
 
+The route also reports `read.allScopeSubjects` (sorted) and `read.requestsSinceStart` (tool → result
+→ count). The `journal status` CLI is a one-shot process and has no in-process counts.
+
 Under the `Fleet.Conversations` meter: `fleet.journal.ingest{result}` (`created`, `duplicate`,
 `observer_added`, `conflict`, `invalid`, `excluded`, `unavailable`), `fleet.journal.rejected{reason}`,
-`fleet.journal.gc.deleted{kind}` and the histogram `fleet.journal.ingest.duration` (ms).
+`fleet.journal.gc.deleted{kind}`, `fleet.journal.read{tool,result}` and the histograms
+`fleet.journal.ingest.duration` and `fleet.journal.read.duration{tool}` (ms).
+
+Agent counters (in-process `JournalCounters`, like the capture counters): `journal_excluded{reason}`,
+`tool_send_captured`, `tool_send_unattributed`, `tool_send_non_human`, `tool_send_foreign_bot`,
+`receipt_clock_skew`, `receipt_deferred_overflow`, `receipt_invalid`, and the one-off
+`journal_ledger_unknown_stuck` warning. `fleet-telegram` counts `journal_receipts_published` and
+`journal_receipts_dropped` and logs both in its drop warning, at most once a minute.
+
+Working: `agent_tool` rows appear, and new outbound rows hold no `<blockquote expandable>`. Broken:
+the unattributed or drop counters climb, or `dead/` grows with `invalid_record{origin}` (Comms older
+than the agents).
 
 `/ready` gets no new reason: its existing schema check reports `503 {status:"unhealthy", schema:…}`
 until `conversations migrate` has applied 0004. Ingest reads the schema version itself and caches

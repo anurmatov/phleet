@@ -445,6 +445,7 @@ public sealed class JournalDrainer : BackgroundService
             {
                 attachment["uploadId"] = upload.UploadId;
                 attachment["uploadSha256"] = upload.Sha256;
+                attachment["byteSize"] = upload.ByteSize;
 
                 // ⚠️ The capture writes `notArchivedReason: "media_disabled"` as a placeholder for
                 //    "I had no bucket to put this in". Now that the drain HAS proven the bytes, that

@@ -18,13 +18,11 @@ namespace Fleet.Conversations.Journal;
 /// bytes the attachment actually resolves to.
 /// </param>
 /// <param name="Losers">
-/// Objects this submission proved that lost dedup. Their rows are deleted inside the same
-/// transaction as the message — nothing references them once the attachment points at the winner —
-/// and their bytes go after the commit.
+/// Objects this submission proved that lost dedup. Their rows become aborted inside the same
+/// transaction as the message; the 24-hour sweeper removes their unreferenced bytes.
 /// </param>
 /// <param name="LoserKeys">
-/// The same objects with the bucket keys that hold their bytes, because the row is gone by the time
-/// the bytes are worth deleting.
+/// The same objects with the bucket keys that hold their bytes.
 /// </param>
 /// <param name="Proved">
 /// The object ids belonging to THIS subject — every upload id in the record, winner or loser. These
@@ -115,7 +113,8 @@ public partial class MySqlJournalStore
             //    This is the whole "bytes are always proven" rule seen from the commit side: the
             //    only way to attach an object is to have uploaded bytes that hashed to it, so
             //    naming a digest can never reach an object someone else uploaded.
-            if (!string.Equals(row.Sha256, attachment.UploadSha256, StringComparison.OrdinalIgnoreCase))
+            if (row.ByteSize != attachment.ByteSize
+                || !string.Equals(row.Sha256, attachment.UploadSha256, StringComparison.OrdinalIgnoreCase))
                 return new MediaPlan(RefuseUploads(named.Select(a => a.Ordinal)), resolved, digests, losers, [], EmptyIds);
 
             resolved[attachment.Ordinal] = row.Id;

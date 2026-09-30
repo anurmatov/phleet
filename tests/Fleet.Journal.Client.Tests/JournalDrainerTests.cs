@@ -661,7 +661,7 @@ public sealed class JournalDrainerTests
         Assert.NotNull(resent["uploadId"]);
         Assert.Null(resent["notArchivedReason"]);
         Assert.Equal(digest, resent["uploadSha256"]!.GetValue<string>());
-        Assert.Equal(3, resent["byteSize"]!.GetValue<long>());
+        Assert.Equal(bytes.LongLength, resent["byteSize"]!.GetValue<long>());
 
         // The cleared state is what the SPOOL holds between the two passes — that is the durable
         // half of the fix, and the half that survives a crash between the refuse and the re-upload.

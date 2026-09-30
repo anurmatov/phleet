@@ -346,7 +346,7 @@ public sealed class JournalUploadTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.OK, (await _host.PutRawAsync("agent1", upload, bytes)).StatusCode);
         Assert.Equal("uploaded", await StateAsync(upload));
         Assert.Equal(HttpStatusCode.Created,
-            (await _host.PostRecordAsync(new Uploaded(upload, Sha256(bytes), "agent1"), -1000000000006, "agent1")).StatusCode);
+            (await _host.PostRecordAsync(new Uploaded(upload, Sha256(bytes), "agent1", bytes.LongLength), -1000000000006, "agent1")).StatusCode);
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM journal_objects"));
         Assert.Equal(1, _bucket.Keys.Count);
     }
@@ -367,13 +367,89 @@ public sealed class JournalUploadTests : IAsyncLifetime
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
+    [Theory]
+    [InlineData(2L)]
+    [InlineData(null)]
+    public async Task Commit_requires_the_size_that_the_subject_uploaded(long? size)
+    {
+        var bytes = new byte[] { 1, 2, 3 };
+        var upload = await UploadAsync(_host.A, bytes, "image/jpeg");
+        var record = UploadRecords.UploadAttachment(-1000000000400, upload.UploadId, upload.Sha256, bytes.Length);
+        record["attachments"]![0]!["byteSize"] = size;
+        var response = await _host.PostRawAsync(record, "agent1");
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("upload_incomplete", ErrorCode(response));
+        Assert.Equal("uploaded", await StateAsync(upload.UploadId));
+        Assert.Equal(0, await CountAsync("SELECT COUNT(*) FROM journal_attachments"));
+    }
+
+    [Fact]
+    public async Task Different_messages_park_the_dedup_loser_until_the_sweep()
+    {
+        var bytes = new byte[] { 1, 2, 3 };
+        var first = await UploadAsync(_host.A, bytes, "image/jpeg");
+        var second = await UploadAsync(_host.B, bytes, "image/jpeg");
+        Assert.Equal(HttpStatusCode.Created,
+            (await _host.PostRecordAsync(first, -1000000000401, "agent1")).StatusCode);
+        Assert.Equal(HttpStatusCode.Created,
+            (await _host.PostRecordAsync(second, -1000000000402, "agent2")).StatusCode);
+        Assert.Equal("aborted", await StateAsync(second.UploadId));
+        Assert.Equal(2, _bucket.Keys.Count);
+        Assert.Equal(1, await CountAsync("SELECT COUNT(DISTINCT object_id) FROM journal_attachments"));
+        Assert.Equal(1, (await _host.SweepAsync(hours: 25)).Abandoned);
+        Assert.Single(_bucket.Keys);
+        Assert.Equal(2, await CountAsync("SELECT COUNT(*) FROM journal_attachments"));
+    }
+
+    [Fact]
+    public async Task A_later_observer_can_upgrade_using_another_messages_dedup_winner()
+    {
+        var bytes = new byte[] { 1, 2, 3 };
+        var first = await UploadAsync(_host.A, bytes, "image/jpeg");
+        Assert.Equal(HttpStatusCode.Created,
+            (await _host.PostRecordAsync(first, -1000000000403, "agent1")).StatusCode);
+        var second = await UploadAsync(_host.B, bytes, "image/jpeg");
+        var archived = UploadRecords.UploadAttachment(-1000000000404,
+            second.UploadId, second.Sha256, bytes.Length);
+        var declined = archived.DeepClone().AsObject();
+        declined["eventId"] = Fleet.Protocol.Ulid.NewUlid();
+        var attachment = declined["attachments"]![0]!.AsObject();
+        attachment.Remove("uploadId");
+        attachment.Remove("uploadSha256");
+        attachment["state"] = "not_archived";
+        attachment["notArchivedReason"] = "download_failed";
+        Assert.Equal(HttpStatusCode.Created,
+            (await _host.PostRawAsync(declined, "agent1")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK,
+            (await _host.PostRawAsync(archived, "agent2")).StatusCode);
+        Assert.Equal(2, await CountAsync("SELECT COUNT(*) FROM journal_attachments WHERE state = 'committed'"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(DISTINCT object_id) FROM journal_attachments"));
+        Assert.Equal("committed", await StateAsync(first.UploadId));
+        Assert.Equal("aborted", await StateAsync(second.UploadId));
+    }
+
+    [Fact]
+    public async Task Concurrent_messages_with_the_same_bytes_converge_on_one_winner()
+    {
+        var bytes = new byte[] { 1, 2, 3 };
+        var uploads = new List<Uploaded>();
+        for (var i = 0; i < 8; i++)
+            uploads.Add(await UploadAsync(i % 2 == 0 ? _host.A : _host.B, bytes, "image/jpeg"));
+        var replies = await Task.WhenAll(uploads.Select((upload, i) =>
+            _host.PostRecordAsync(upload, -1000000000500 - i, upload.Subject)));
+        Assert.All(replies, reply => Assert.Equal(HttpStatusCode.Created, reply.StatusCode));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM journal_objects WHERE state = 'committed'"));
+        Assert.Equal(7, await CountAsync("SELECT COUNT(*) FROM journal_objects WHERE state = 'aborted'"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(DISTINCT object_id) FROM journal_attachments"));
+    }
+
     private static string Sha256(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
 
     private async Task<Uploaded> UploadAsync(JournalCredential credential, byte[] bytes, string mime)
     {
         var id = await _host.DeclareAsync(credential.Subject, Sha256(bytes), bytes.LongLength, mime);
         Assert.Equal(HttpStatusCode.OK, (await _host.PutRawAsync(credential.Subject, id, bytes)).StatusCode);
-        return new Uploaded(id, Sha256(bytes), credential.Subject);
+        return new Uploaded(id, Sha256(bytes), credential.Subject, bytes.LongLength);
     }
 
     private async Task<string> StateAsync(string uploadId) => await ScalarAsync(
@@ -438,7 +514,7 @@ internal static class UploadRecords
 }
 
 /// <summary>One upload this test proved: the id, the digest, and the subject that owns it.</summary>
-internal sealed record Uploaded(string UploadId, string Sha256, string Subject);
+internal sealed record Uploaded(string UploadId, string Sha256, string Subject, long ByteSize = 21);
 
 /// <summary>A subject and its minted token — the two observers in AC1.</summary>
 internal sealed record JournalCredential(string Subject);
@@ -692,7 +768,7 @@ internal sealed class JournalMediaHost : IAsyncDisposable
     {
         var json = UploadRecords.WithAttachment(chatId,
             $"{{\"ordinal\":0,\"kind\":\"photo\",\"mimeType\":\"image/jpeg\","
-            + $"\"byteSize\":21,\"uploadId\":\"{upload.UploadId}\",\"uploadSha256\":\"{upload.Sha256}\"}}");
+            + $"\"byteSize\":{upload.ByteSize},\"uploadId\":\"{upload.UploadId}\",\"uploadSha256\":\"{upload.Sha256}\"}}");
 
         return await PostRawAsync(json, subject);
     }

@@ -30,12 +30,12 @@ public enum JournalMediaReason
 
 /// <summary>One attachment's answer: an upload reference, or a reason there is none.</summary>
 public readonly record struct JournalMediaUpload(
-    JournalMediaReason Reason, string? UploadId, string? Sha256)
+    JournalMediaReason Reason, string? UploadId, string? Sha256, long ByteSize = 0)
 {
     public bool IsUploaded => Reason == JournalMediaReason.Uploaded && UploadId is not null;
 
-    public static JournalMediaUpload Uploaded(string uploadId, string sha256) =>
-        new(JournalMediaReason.Uploaded, uploadId, sha256);
+    public static JournalMediaUpload Uploaded(string uploadId, string sha256, long byteSize) =>
+        new(JournalMediaReason.Uploaded, uploadId, sha256, byteSize);
 
     public static JournalMediaUpload Declined(JournalMediaReason reason) => new(reason, null, null);
 
@@ -206,7 +206,7 @@ public sealed class JournalMediaUploader(
         if (stored.Status is not (200 or 201))
             throw new JournalMediaRetryableException(stored.Status, stored.Error);
 
-        return JournalMediaUpload.Uploaded(declared.UploadId, digest);
+        return JournalMediaUpload.Uploaded(declared.UploadId, digest, payload.LongLength);
     }
 }
 

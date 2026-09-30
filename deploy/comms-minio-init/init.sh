@@ -1,0 +1,160 @@
+#!/bin/bash
+# Provision the journal object store, on first start only.
+#
+# ONE SHOT, run by the comms-minio-init container. It is the ONLY place the root credential is
+# used after the server starts, and the only place the bucket's anonymous policy is ever written.
+#
+# ⚠️ THE SCOPED USER IS THE POINT. fleet-comms and fleet-comms-ops run as
+# `comms_media_runtime`, which holds GetObject, PutObject, DeleteObject, ListBucket and
+# AbortMultipartUpload on this one bucket. Root additionally holds the admin actions that change
+# the bucket's OWN policy — including `mc anonymous set public`.
+#
+# Comms refuses to boot when an unsigned ListObjectsV2 on this bucket answers anything other than
+# 403 (see docs/comms-journal.md). That check is only a guard if nothing in the running fleet can
+# produce the configuration it checks for. Give a long-running service the root key and the guard
+# becomes a restart away from being switched off by the very process it protects; give it the
+# scoped key and the state the guard detects is one the deployment cannot reach by accident.
+#
+# The same argument, one service over, is why comms-mysql hands its runtime account no DDL grant.
+set -eu
+
+: "${MINIO_ROOT_USER:?set FLEET_COMMS_MINIO_ROOT_USER on the comms-minio-init service}"
+: "${MINIO_ROOT_PASSWORD:?set FLEET_COMMS_MINIO_ROOT_PASSWORD on the comms-minio-init service}"
+: "${FLEET_COMMS_MEDIA_BUCKET:?set FLEET_COMMS_MEDIA_BUCKET}"
+: "${FLEET_COMMS_MEDIA_ACCESS_KEY:?set FLEET_COMMS_MEDIA_ACCESS_KEY}"
+: "${FLEET_COMMS_MEDIA_SECRET_KEY:?set FLEET_COMMS_MEDIA_SECRET_KEY}"
+
+# ⚠️ THE IMAGE IS `minio/mc`, PINNED (see docker-compose.example.yml). The published release image
+# is built from upstream `Dockerfile.release` on `ubi9/ubi-micro`, NOT `FROM scratch` — that is the
+# dev `Dockerfile`, and reading it instead of the release one is what produced the wrong "no shell
+# at all" story this file used to carry. What the release image actually gives you:
+#
+#   present:  /bin/sh and /bin/bash (ubi-micro's /bin/sh is bash), coreutils-single (`cat` included)
+#   absent:   `sed`, `awk`, `grep`, `envsubst`
+#
+# So the script CAN run here — and the old `sed` call really did exit 127 three steps into it, which
+# is the incident this header describes. What it cannot do is depend on the text tools that are not
+# in the image. The rule below is therefore stronger than "no sed": nothing here calls any binary
+# other than `mc`, so the script does not care which coreutils a given base image happens to ship.
+# The check is what turns that from a comment into a failure at the top of the log rather than exit
+# 127 three lines later.
+if ! command -v mc >/dev/null 2>&1; then
+  echo "comms-minio-init: no \`mc\` on PATH — this image cannot run this script. It needs the" >&2
+  echo "  pinned MinIO client image (minio/mc:RELEASE.2025-08-13T08-35-41Z), whose \`mc\` release" >&2
+  echo "  the alias-stdin and \`mc admin policy\` behaviour documented below were verified against." >&2
+  exit 127
+fi
+
+# The root credential goes to `mc alias set` on STDIN, never as an argument: an argument is visible
+# in `ps` to anything else in the container for as long as it runs.
+#
+# ⚠️ It is NOT passed through the environment either. `mc` reads the access key and secret key from
+# stdin when they are not arguments, and it does NOT read `MC_ACCESS_KEY` / `MC_SECRET_KEY` at all.
+# Exporting them and running a bare `mc alias set` printed "Added successfully" and stored an alias
+# with an EMPTY access key and an EMPTY secret key — a silent failure, because the alias is then
+# unusable for every later command and the first real failure is a confusing `mc mb` 403 much further
+# down this script.
+#
+# Verified against `mc` RELEASE.2025-08-13T08-35-41Z:
+#   MC_ACCESS_KEY=x MC_SECRET_KEY=y mc alias set a URL  -> accessKey='' secretKey=''
+#   printf 'x\ny\n' | mc alias set a URL               -> accessKey='x' secretKey='y'
+#   MC_HOST_a='http://x:y@URL' mc alias set a URL       -> accessKey='' secretKey=''
+# so stdin is the only route that both works and keeps the keys out of `ps`.
+#
+# `set -e` still holds: `mc` is the last element of the pipeline, so its exit status is the
+# pipeline's, and a refused alias set aborts here rather than at the first `mc mb`.
+#
+# Run against an S3 endpoint on 2026-09-30 with `mc` RELEASE.2025-08-13T08-35-41Z, both scripts
+# against the SAME server, and the stored alias read back out of `~/.mc/config.json`:
+#
+#   before (exported MC_ACCESS_KEY/MC_SECRET_KEY, bare `mc alias set`)
+#     alias comms accessKey='' secretKey=''   -> "Added successfully"
+#     then: `mc mb` -> "Unable to make bucket ... Access Denied."
+#   after (piped on stdin)
+#     alias comms accessKey='<root>' secretKey='<root>'
+#     then: bucket created, runtime user added, policy created, `mc ls` on the bucket succeeds.
+#
+# That server answers the S3 data plane but not MinIO's IAM admin API, so the two
+# `mc admin policy` lines and the scoped-key `mc alias set` that follows them are NOT proven here.
+# They are the part only MinIO can prove, and MinIO's download channels are withdrawn (dl.min.io
+# returns 410). Run the profile once on a real host before trusting them.
+printf '%s\n%s\n' "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" |
+  mc alias set comms http://comms-minio:9000
+
+# The bucket. Private by default, and this script never touches its policy again — there is no
+# `mc anonymous` line here to delete later, which is the difference between a guard and a habit.
+mc mb --ignore-existing "comms/${FLEET_COMMS_MEDIA_BUCKET}"
+
+# The scoped runtime user. Idempotent: `mc admin user add` on an existing access key updates it, so
+# rotating FLEET_COMMS_MEDIA_SECRET_KEY and recreating this container is the rotation path.
+mc admin user add comms "$FLEET_COMMS_MEDIA_ACCESS_KEY" "$FLEET_COMMS_MEDIA_SECRET_KEY"
+
+# The policy is generated, not copied. MinIO interpolates `${aws:username}` inside a policy
+# document; the bucket name here is a plain variable this script substitutes. A literal
+# bucket name in the tracked JSON would be a policy every deployment that copied this file and
+# renamed its bucket silently grants over NOTHING — the scoped user would hold access to a bucket
+# that does not exist, and to no bucket that does.
+#
+# ⚠️ The substitution is done by the SHELL, not by `sed`. `sed` is not in the image this runs in —
+# the old `sed "s|…|…|g"` exited 127 *after* the bucket and the runtime user had been created, so
+# the container exited, `restart: on-failure` never recovered it, and the runtime user was left with
+# no policy attached: every scoped call answered `Access Denied`, with the bucket and the user both
+# looking correctly created.
+#
+# `${var//pattern/replacement}` is a **bash** feature — `sh` (dash) rejects it with "Bad
+# substitution", measured on dash 0.5.12. That is why this file's shebang is `#!/bin/bash` and why
+# the compose entrypoint invokes it as `/bin/bash` rather than `/bin/sh`. Anyone tempted to
+# "tidy" either of those back to `sh` breaks this line first.
+#
+# The pattern escapes `$` and braces so it matches the literal placeholder text rather than
+# expanding it; the `|`-delimited `sed` form it replaces was doing the same thing.
+# Read with bash's own `< file` rather than `$(cat file)`. `cat` IS in this image (coreutils-single
+# on ubi-micro) — the point is not that it is missing, it is that a base-image swap or a slimmer
+# variant is free to drop it, and the guard treats any non-`mc` binary as a defect. After the guard
+# above, `mc` is the only external command this script may need.
+policy_json="$(</init/comms-runtime-policy.json)"
+policy_json="${policy_json//\$\{comms-journal\}/${FLEET_COMMS_MEDIA_BUCKET}}"
+printf '%s\n' "$policy_json" > /tmp/comms-runtime-policy.json
+
+# A substitution that silently matched nothing would produce a policy that names a bucket called
+# `${comms-journal}` — a policy granting nothing, which is exactly the failure above wearing a
+# different hat. Fail here instead of letting `mc admin policy create` accept it.
+#
+# The check is for ANY `${...}`, not for this file's placeholder specifically. A policy document is
+# also where MinIO's own `${aws:username}` interpolation lives, so a placeholder that survives is
+# never a thing the server can act on: it either names a bucket that does not exist or grants
+# nothing. Both are the Access Denied above arriving by a different route.
+case "$policy_json" in
+  *'${'*)
+    echo "comms-minio-init: the policy still contains an unsubstituted \${...} placeholder" >&2
+    exit 1
+    ;;
+esac
+
+# `create` overwrites an existing policy of the same name, so this is already idempotent and a
+# re-run is safe.
+#
+# ⚠️ There is deliberately NO `|| mc admin policy update` fallback here. In the pinned release
+# `update` is not a policy verb at all — `mc admin policy` offers create/remove/list/info/attach/
+# detach/entities — and the binary answers it with "Deprecated command. Please use 'mc admin policy
+# attach' instead." A fallback that cannot succeed is worse than none: it hides the reason `create`
+# failed behind an unrelated deprecation message, which is exactly the kind of half-configured
+# provisioner this script exists to avoid.
+#
+# Measured on the pinned client against a real MinIO (2026-09-30): `create` on an already-existing
+# policy succeeds and re-applies the document, so repeated runs converge rather than drift.
+mc admin policy create comms comms-journal-runtime /tmp/comms-runtime-policy.json
+
+mc admin policy attach comms comms-journal-runtime --user "$FLEET_COMMS_MEDIA_ACCESS_KEY"
+
+# The check that would have caught a wrong policy at deploy rather than at the first upload: the
+# scoped key can list, and the scoped key CANNOT read the bucket's anonymous policy.
+#
+# Arguments here, deliberately, where the root alias above uses stdin. This is the one place the
+# script needs the alias to be provably usable, and the values are the runtime pair the container
+# already carries in its own environment for the lifetime of the deployment — not the root pair.
+# The failure mode is also the one worth having: a wrong policy fails the `mc ls` below it.
+mc alias set runtime http://comms-minio:9000 "$FLEET_COMMS_MEDIA_ACCESS_KEY" "$FLEET_COMMS_MEDIA_SECRET_KEY"
+mc ls "runtime/${FLEET_COMMS_MEDIA_BUCKET}" >/dev/null
+
+echo "comms-minio-init: bucket ${FLEET_COMMS_MEDIA_BUCKET} ready, runtime policy attached"

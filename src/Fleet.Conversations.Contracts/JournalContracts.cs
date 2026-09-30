@@ -41,7 +41,10 @@ public sealed record JournalSendGroup
     public required int Parts { get; init; }
 }
 
-/// <summary>Attachment METADATA. This slice stores no bytes and no reference to any.</summary>
+/// <summary>
+/// One attachment in a record: its metadata, and either a reason its bytes are not archived or the
+/// id of an upload the caller already proved bytes for.
+/// </summary>
 public sealed record JournalAttachment
 {
     public required int Ordinal { get; init; }
@@ -50,7 +53,30 @@ public sealed record JournalAttachment
     public long? ByteSize { get; init; }
     public string? FileName { get; init; }
     public string? FileUniqueId { get; init; }
-    public required JournalNotArchivedReason NotArchivedReason { get; init; }
+
+    /// <summary>
+    /// The upload whose bytes this attachment names, when the caller proved them. Null exactly when
+    /// <see cref="NotArchivedReason"/> is set: one of the two is always present, never both.
+    /// </summary>
+    public string? UploadId { get; init; }
+
+    /// <summary>
+    /// The lowercase hex SHA-256 of the bytes the caller uploaded for <see cref="UploadId"/>.
+    /// Required with it, and checked against what the server hashed at PUT time — naming an id is
+    /// not proof of holding its bytes.
+    /// </summary>
+    public string? UploadSha256 { get; init; }
+
+    /// <summary>Set when the bytes are not archived. Null when <see cref="UploadId"/> names an upload.</summary>
+    public JournalNotArchivedReason? NotArchivedReason { get; init; }
+
+    /// <summary>
+    /// The object this attachment resolved to, filled in by the SERVER from the validated
+    /// <see cref="UploadId"/> (dedup winner included). A caller that sends it is refused — it is
+    /// part of the record's fingerprint, so letting a client choose it would let one client forge
+    /// another's duplicate as a conflict.
+    /// </summary>
+    public string? ObjectId { get; init; }
 }
 
 public sealed record JournalTelegramRef
@@ -109,6 +135,13 @@ public enum JournalIngestOutcome
 
     /// <summary>The event id was already recorded with a different fingerprint. Nothing written.</summary>
     EventIdReused,
+
+    /// <summary>
+    /// An <c>uploadId</c> named an object that is unknown, foreign-owned, not yet uploaded, aborted,
+    /// swept, or already committed as someone else's loser. Nothing written; the client re-uploads
+    /// from its spool. Carries the offending attachment ordinals.
+    /// </summary>
+    UploadIncomplete,
 }
 
 public sealed record JournalIngestResult
@@ -117,6 +150,12 @@ public sealed record JournalIngestResult
 
     /// <summary>The journal message id; null for a conflict.</summary>
     public string? MessageId { get; init; }
+
+    /// <summary>
+    /// Attachment ordinals that could not be attached, for <see cref="JournalIngestOutcome.UploadIncomplete"/>.
+    /// Sorted, distinct, and never empty when the outcome is that one.
+    /// </summary>
+    public IReadOnlyList<int> UploadOrdinals { get; init; } = [];
 }
 
 /// <summary>

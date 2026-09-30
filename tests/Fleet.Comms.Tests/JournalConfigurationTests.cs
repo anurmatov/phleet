@@ -128,6 +128,114 @@ public sealed class JournalConfigurationTests : IDisposable
             Assert.Throws<InvalidOperationException>(options.ValidateJournal).Message);
     }
 
+    // ── media validation (#388) ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Blank endpoint means media does not exist, and everything else is then irrelevant. The
+    /// default state of every deployment, so it is the case that must never demand credentials.
+    /// </summary>
+    [Fact]
+    public void Media_off_needs_nothing_and_validates_clean()
+    {
+        var options = EnabledOptions(Key);
+
+        Assert.False(options.Media.Enabled);
+        options.ValidateMedia();
+    }
+
+    /// <summary>
+    /// Setting the endpoint turns the feature on, and every other field becomes required. A media
+    /// configuration that half-exists is worse than none: uploads would open rows against a bucket
+    /// nobody can address.
+    /// </summary>
+    [Theory]
+    [InlineData("", "bucket", "media_bucket_invalid")]
+    [InlineData("", "access", "media_access_key_invalid")]
+    [InlineData("", "secret", "media_secret_key_invalid")]
+    [InlineData("", "region", "media_region_invalid")]
+    public void An_enabled_media_section_requires_every_field(string url, string missing, string code)
+    {
+        var options = EnabledOptions(Key);
+        options.Media.Endpoint = "http://comms-minio:9000";
+        options.Media.AccessKey = "runtime";
+        options.Media.SecretKey = "runtime-secret";
+        Assert.True(options.Media.Enabled, "the endpoint is the enabling key");
+
+        switch (missing)
+        {
+            case "bucket": options.Media.Bucket = ""; break;
+            case "access": options.Media.AccessKey = ""; break;
+            case "secret": options.Media.SecretKey = ""; break;
+            case "region": options.Media.Region = ""; break;
+        }
+
+        Assert.StartsWith(code,
+            Assert.Throws<InvalidOperationException>(options.ValidateMedia).Message);
+    }
+
+    [Theory]
+    [InlineData("http://comms-minio:9000")]
+    [InlineData("https://media.internal:9000")]
+    public void A_complete_media_configuration_validates(string url)
+    {
+        var options = EnabledOptions(Key);
+        options.Media.Endpoint = url;
+        options.Media.AccessKey = "runtime";
+        options.Media.SecretKey = "runtime-secret";
+
+        options.ValidateMedia();
+    }
+
+    [Theory]
+    [InlineData("comms-minio:9000")]
+    [InlineData("ftp://comms-minio:9000")]
+    [InlineData("not a url")]
+    public void The_media_endpoint_must_be_an_absolute_http_url(string url)
+    {
+        var options = EnabledOptions(Key);
+        options.Media.Endpoint = url;
+
+        Assert.StartsWith("media_endpoint_invalid",
+            Assert.Throws<InvalidOperationException>(options.ValidateMedia).Message);
+    }
+
+    /// <summary>
+    /// Media without a journal is a configuration mistake, not a mode. There is no table to put an
+    /// object row in, so uploads would write bytes no row can find, name or ever retire.
+    /// </summary>
+    [Fact]
+    public void Media_requires_the_journal()
+    {
+        var options = new CommsOptions { ConversationConnectionString = "Server=x;Port=1;User ID=u;Password=p;Database=d;" };
+        options.Media.Endpoint = "http://comms-minio:9000";
+        // Fully populated apart from the journal: `ValidateMedia` checks the bucket's own fields
+        // FIRST, so a test that left them blank would assert the wrong code and pass for the wrong
+        // reason.
+        options.Media.AccessKey = "runtime";
+        options.Media.SecretKey = "runtime-secret";
+
+        Assert.StartsWith("media_requires_journal",
+            Assert.Throws<InvalidOperationException>(options.ValidateMedia).Message);
+    }
+
+    /// <summary>
+    /// ⚠️ A validation failure must never quote the credential it is complaining about. The codes
+    /// above name fields; this is the assertion that keeps the message safe to log.
+    /// </summary>
+    [Fact]
+    public void A_media_failure_names_the_field_and_never_the_secret()
+    {
+        const string secret = "sQu3rrel-THis-Must-Not-Leak-9";
+        var options = EnabledOptions(Key);
+        options.Media.Endpoint = "http://comms-minio:9000";
+        options.Media.AccessKey = "runtime";
+        options.Media.SecretKey = secret;
+        options.Media.Region = "";
+
+        var message = Assert.Throws<InvalidOperationException>(options.ValidateMedia).Message;
+        Assert.DoesNotContain(secret, message, StringComparison.Ordinal);
+    }
+
     // ── the real entry point (AC14) ──────────────────────────────────────────
 
     private static readonly string Key = JournalTestHost.KeyA;
@@ -230,6 +338,195 @@ public sealed class JournalConfigurationTests : IDisposable
             process.Kill(entireProcessTree: true);
             await process.WaitForExitAsync();
         }
+    }
+
+    [Fact]
+    public async Task Unreachable_media_starts_the_real_journal_listener_degraded()
+    {
+        var journal = FreePort();
+        var env = MediaEnvironment($"http://127.0.0.1:{FreePort()}");
+        env["Comms__Journal__Url"] = $"http://127.0.0.1:{journal}";
+        using var process = Start(env);
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        var stderr = process.StandardError.ReadToEndAsync();
+        try
+        {
+            var deadline = Stopwatch.StartNew();
+            while (!CanConnect(journal))
+            {
+                if (process.HasExited) Assert.Fail(await stderr);
+                Assert.True(deadline.Elapsed < TimeSpan.FromSeconds(25), "journal listener never started");
+                await Task.Delay(100);
+            }
+        }
+        finally
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+        }
+        Assert.Contains("media_state=degraded", await stderr, StringComparison.Ordinal);
+        await stdout;
+    }
+
+    [Fact]
+    public async Task Signed_head_success_with_anonymous_transport_failure_starts_degraded()
+    {
+        var endpoint = FreePort();
+        var journal = FreePort();
+        using var listener = new TcpListener(IPAddress.Loopback, endpoint);
+        listener.Start();
+        using var stop = new CancellationTokenSource();
+        var serving = Task.Run(async () =>
+        {
+            try
+            {
+                while (!stop.IsCancellationRequested)
+                {
+                    using var client = await listener.AcceptTcpClientAsync(stop.Token);
+                    using var reader = new StreamReader(client.GetStream());
+                    var firstLine = await reader.ReadLineAsync(stop.Token);
+                    while (await reader.ReadLineAsync(stop.Token) is { Length: > 0 }) { }
+                    if (firstLine?.StartsWith("HEAD ", StringComparison.Ordinal) == true)
+                        await client.GetStream().WriteAsync(System.Text.Encoding.ASCII.GetBytes(
+                            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"), stop.Token);
+                    // GET closes without any HTTP answer: this is a transport failure, not 200/500.
+                }
+            }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+        });
+        var env = MediaEnvironment($"http://127.0.0.1:{endpoint}");
+        env["Comms__Journal__Url"] = $"http://127.0.0.1:{journal}";
+        using var process = Start(env);
+        var stderr = process.StandardError.ReadToEndAsync();
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        try
+        {
+            var deadline = Stopwatch.StartNew();
+            while (!CanConnect(journal))
+            {
+                if (process.HasExited) Assert.Fail(await stderr);
+                Assert.True(deadline.Elapsed < TimeSpan.FromSeconds(15), "journal never started degraded");
+                await Task.Delay(50);
+            }
+        }
+        finally
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            stop.Cancel();
+            await serving;
+        }
+        Assert.Contains("media_state=degraded", await stderr);
+        await stdout;
+    }
+
+    [Fact]
+    public async Task Shared_probe_budget_expiry_after_signed_head_starts_degraded()
+    {
+        var endpoint = FreePort();
+        var journal = FreePort();
+        using var listener = new TcpListener(IPAddress.Loopback, endpoint);
+        listener.Start();
+        using var stop = new CancellationTokenSource();
+        var anonymousRequested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var serving = Task.Run(async () =>
+        {
+            try
+            {
+                // HEAD uses over half the shared eight-second budget. GET must outlive the
+                // remainder but not its own five-second timeout, so caller cancellation wins.
+                using var head = await listener.AcceptTcpClientAsync(stop.Token);
+                using var headReader = new StreamReader(head.GetStream());
+                Assert.StartsWith("HEAD ", await headReader.ReadLineAsync(stop.Token));
+                while (await headReader.ReadLineAsync(stop.Token) is { Length: > 0 }) { }
+                await Task.Delay(TimeSpan.FromSeconds(4.5), stop.Token);
+                await head.GetStream().WriteAsync(System.Text.Encoding.ASCII.GetBytes(
+                    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"), stop.Token);
+                head.Close();
+
+                using var get = await listener.AcceptTcpClientAsync(stop.Token);
+                using var getReader = new StreamReader(get.GetStream());
+                Assert.StartsWith("GET ", await getReader.ReadLineAsync(stop.Token));
+                while (await getReader.ReadLineAsync(stop.Token) is { Length: > 0 }) { }
+                anonymousRequested.SetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, stop.Token);
+            }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+        });
+        var env = MediaEnvironment($"http://127.0.0.1:{endpoint}");
+        env["Comms__Journal__Url"] = $"http://127.0.0.1:{journal}";
+        using var process = Start(env);
+        var stderr = process.StandardError.ReadToEndAsync();
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        try
+        {
+            await anonymousRequested.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            var deadline = Stopwatch.StartNew();
+            while (!CanConnect(journal))
+            {
+                if (process.HasExited) Assert.Fail(await stderr);
+                Assert.True(deadline.Elapsed < TimeSpan.FromSeconds(10), "journal never started degraded");
+                await Task.Delay(50);
+            }
+            using var http = new HttpClient();
+            http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Bearer", JournalTestHost.Token("ingest"));
+            using var response = await http.PostAsync(
+                $"http://127.0.0.1:{journal}/journal/v1/uploads",
+                new StringContent(System.Text.Json.JsonSerializer.Serialize(new
+                { sha256 = new string('a', 64), byteSize = 1, mimeType = "image/jpeg" })));
+            // A valid, authenticated upload declaration must still find the media gate closed.
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        }
+        finally
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            stop.Cancel();
+            await serving;
+        }
+        Assert.Contains("media_state=degraded", await stderr);
+        await stdout;
+    }
+
+    [Theory]
+    [InlineData(200)]
+    [InlineData(404)]
+    [InlineData(500)]
+    public async Task Anonymous_probe_requires_exactly_403(int status)
+    {
+        var port = FreePort();
+        using var listener = new HttpListener();
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        listener.Start();
+        var serving = Task.Run(async () =>
+        {
+            // One signed HEAD, then one unsigned GET.
+            for (var i = 0; i < 2; i++)
+            {
+                var context = await listener.GetContextAsync();
+                context.Response.StatusCode = context.Request.HttpMethod == "HEAD" ? 200 : status;
+                context.Response.Close();
+            }
+        });
+        var (exit, _, stderr, _) = await RunAsync(
+            MediaEnvironment($"http://127.0.0.1:{port}"), TimeSpan.FromSeconds(15));
+        await serving.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, exit);
+        Assert.Contains("bucket_public", stderr, StringComparison.Ordinal);
+    }
+
+    private Dictionary<string, string> MediaEnvironment(string endpoint)
+    {
+        var env = BaseEnvironment();
+        AddConversations(env);
+        env["Comms__Journal__Enabled"] = "true";
+        env["Comms__Journal__TokenKeys"] = Key;
+        env["Comms__Journal__Url"] = $"http://127.0.0.1:{FreePort()}";
+        env["Comms__Media__Endpoint"] = endpoint;
+        env["Comms__Media__AccessKey"] = "synthetic-runtime";
+        env["Comms__Media__SecretKey"] = "synthetic-secret";
+        return env;
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

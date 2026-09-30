@@ -113,6 +113,78 @@ static async Task<int> RunServiceAsync(string[] args)
     // exits 1 with a fixed `journal_…` code and never the key.
     options.ValidateJournal();
 
+    // Media is validated the same way, and the bucket is PROBED before any host serves a request.
+    //
+    // Two different outcomes, and the split is the design:
+    //   • a configuration that cannot work (missing field, unknown bucket, rejected credentials)
+    //     exits 1 with a fixed `media_…` / `credentials_rejected` code and never the value;
+    //   • a bucket that is merely not answering starts DEGRADED — uploads answer 503, the text
+    //     journal works, the container stays healthy, and the probe loop recovers on its own.
+    // A wrong credential is not the second case: it will not repair itself, and a Comms that came
+    // up permanently degraded is how a broken deployment hides from its own healthcheck.
+    options.ValidateMedia();
+
+    Fleet.Comms.CommsApp.JournalMedia? media = null;
+
+    if (options.Media.Enabled)
+    {
+        var mediaLogger = northApp.Services
+            .GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal.Media");
+        var objectLogger = northApp.Services
+            .GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Conversations.Journal.S3ObjectStore");
+
+        var bucket = new Fleet.Conversations.Journal.S3ObjectStore(
+            new Fleet.Conversations.Journal.JournalMediaOptions
+            {
+                Endpoint = options.Media.Endpoint,
+                Bucket = options.Media.Bucket,
+                AccessKey = options.Media.AccessKey,
+                SecretKey = options.Media.SecretKey,
+                Region = options.Media.Region,
+                RequestTimeout = options.Media.RequestTimeout,
+            },
+            objectLogger);
+
+        var gate = new Fleet.Conversations.Journal.JournalMediaHealth(bucket, mediaLogger);
+
+        // One probe, with a hard budget. `StartupProbeBudget` is why this is bounded rather than
+        // relying on the SDK's own timeout: an operator with a typo'd endpoint should see an exit
+        // code, not a container that hangs in "starting" until the orchestrator kills it.
+        var objects = new Fleet.Conversations.Journal.MySqlJournalObjectStore(
+            options.ConversationConnectionString, mediaLogger);
+
+        // One probe, bounded. `false` is a bucket that is not answering; `JournalProbeFailureException`
+        // is a bucket that answered and refused. Only the first is degraded.
+        bool reachable;
+        try
+        {
+            reachable = await ProbeWithinBudgetAsync(bucket);
+        }
+        catch (Fleet.Conversations.Journal.JournalAnonymousAccessException)
+        {
+            await Console.Error.WriteLineAsync("bucket_public: anonymous listing did not return 403.");
+            return 1;
+        }
+        catch (Fleet.Conversations.Journal.JournalProbeFailureException)
+        {
+            // The message is the fixed code; the SDK's own text is deliberately not repeated, and
+            // neither carries the secret.
+            await Console.Error.WriteLineAsync(
+                "credentials_rejected: Comms__Media__Endpoint is set but the bucket refused this "
+                + "account, or the bucket does not exist. Fix the credentials or the bucket name — "
+                + "media_state=degraded does not cover a configuration that cannot work.");
+            return 1;
+        }
+
+        media = new Fleet.Comms.CommsApp.JournalMedia(gate, bucket, objects);
+
+        gate.MarkStartupState(reachable);
+        if (!reachable)
+            await Console.Error.WriteLineAsync(
+                "media_state=degraded: signed reachability and anonymous denial are not both confirmed; uploads answer 503.");
+
+    }
+
     WebApplication? southApp = null;
 
     if (options.ConversationsEnabled)
@@ -153,11 +225,29 @@ static async Task<int> RunServiceAsync(string[] args)
 
         var journalStore = new Fleet.Conversations.Journal.MySqlJournalStore(
             options.ConversationConnectionString,
-            northApp.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal.Store"));
+            northApp.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal.Store"))
+        {
+            Objects = media?.Objects,
+        };
+
+        if (media is not null)
+        {
+            // The probe loop runs on the JOURNAL host, not the north one: the bucket is the
+            // journal's dependency, and a deployment with the journal off must not probe a bucket
+            // it never enabled.
+            //
+            // `media.Gate` is the interface, so the concrete prober is hosted through it. The cast
+            // is the same one CommsApp's media registration uses: the value the routes gate on and
+            // the loop that refreshes it are one object, and a second instance would probe a bucket
+            // the routes never ask about.
+            journalBuilder.Services.AddHostedService(_ =>
+                (Fleet.Conversations.Journal.JournalMediaHealth)media.Gate);
+        }
 
         journalApp = CommsApp.BuildJournalApp(
             journalBuilder, journalStore, options,
-            northApp.Services.GetRequiredService<Fleet.Conversations.Journal.JournalRuntimeStats>());
+            northApp.Services.GetRequiredService<Fleet.Conversations.Journal.JournalRuntimeStats>(),
+            media: media);
     }
 
     // Both or neither. If either listener cannot bind — port already in use, address unavailable — the
@@ -206,6 +296,30 @@ static async Task<int> RunServiceAsync(string[] args)
     await Task.WhenAny(hosts.Select(h => h.WaitForShutdownAsync()));
     await Task.WhenAll(hosts.Select(h => h.StopAsync()));
     return shutdownRequested ? 0 : 1;
+}
+
+/// <summary>
+/// The startup probe, with a budget shorter than the SDK's own timeout.
+/// </summary>
+/// <remarks>
+/// AC5's "under 10 s" is a property of THIS call, not of the SDK: with a typo'd endpoint the SDK
+/// would retry for its full configured timeout, and a container that spends 30 s in "starting"
+/// before exiting 1 looks like a slow start rather than a refusal.
+/// </remarks>
+static async Task<bool> ProbeWithinBudgetAsync(Fleet.Conversations.Journal.S3ObjectStore bucket)
+{
+    // Shorter than the SDK's own 30 s request timeout on purpose.
+    using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+    try
+    {
+        return await bucket.ProbeAsync(budget.Token) && await bucket.ProbeAnonymousAsync(budget.Token);
+    }
+    catch (OperationCanceledException) when (budget.IsCancellationRequested)
+    {
+        // Neither successful HEAD nor partial anonymous probing proves both checks passed.
+        // Expiring this shared startup budget is an unavailable dependency, not a bad config.
+        return false;
+    }
 }
 
 /// <summary>Named so the test host can reference the entry-point assembly.</summary>

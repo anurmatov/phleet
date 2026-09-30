@@ -58,12 +58,17 @@ One record is one Telegram message as one runtime observed it. UTF-8 JSON, at mo
 Unknown or duplicated fields, and a value of the wrong JSON type (a string where an integer belongs, an escaped lone surrogate), are `422 invalid_record{field}`. `observer` is not a field: **the observer is always the
 token subject**, and a body `observer` is `422 invalid_record{observer}`.
 
-**Attachments are metadata only**: `ordinal` (0–15, unique), `kind`
+**Attachments are metadata only** on a deployment with no object store, which is the default:
+`ordinal` (0–15, unique), `kind`
 (`photo|document|voice|video|video_note|audio|animation|sticker|other`), `mimeType`, `byteSize?`,
 `fileName?`, `fileUniqueId?`, and a required `notArchivedReason`
 (`media_disabled|over_bot_api_limit|over_size_cap|unsupported_kind|download_failed|source_expired`).
 Rows are stored `not_archived`, so a message is never visible with a dangling attachment. An
 `uploadId`, `objectId` or `bytes` field is `409 media_disabled`.
+
+**With `Comms__Media__Endpoint` set, the same field carries bytes.** See [Media](#media-slice-4)
+below: an attachment names an `uploadId` whose bytes the sending subject physically uploaded, and
+`notArchivedReason` is then absent rather than nullable.
 
 `delivery_state` is derived: inbound → `received`, outbound → `sent`.
 
@@ -101,6 +106,14 @@ Encoded: the conversation key, `messageId`, `direction`, `sender.kind`, `sender.
 `transcript`, `textFormat`, `chatTitle`, `sender.display`, `notArchivedReason` and `eventId` — so two
 bots that saw one supergroup message agree.
 
+**The rule the exclusion list encodes: no field the observers cannot agree on may enter the
+fingerprint.** Whether any one agent archived an attachment is exactly such a field — it differs for
+ordinary reasons (`upgrade.sh` reprovisions agents one at a time, so two of them run different media
+policies for a while; one download failed; one size cap is lower). Slice 4 briefly encoded the
+server-resolved object id and turned that disagreement into `409 idempotency_conflict`, which the
+drainer dead-letters. An archived and a declined attachment are different rows, and that is what the
+attachment table is for; they are not different messages.
+
 One transaction per record, with the conversation row locked `FOR UPDATE`:
 
 | case | response | writes |
@@ -109,7 +122,7 @@ One transaction per record, with the conversation row locked `FOR UPDATE`:
 | `eventId` already recorded with the same fingerprint | `200 duplicate` | none |
 | `eventId` already recorded with a different fingerprint | `409 idempotency_conflict{event_id_reused}` | none |
 | same natural key and fingerprint, same observer | `200 duplicate` | none — not even a transcript this observer did not send first time |
-| same natural key and fingerprint, new observer | `200 observer_added` | observer row; `transcript` filled only if still null |
+| same natural key and fingerprint, new observer | `200 observer_added` | observer row; `transcript` filled only if still null; an attachment this observer proved and the stored row left `not_archived` is committed and pointed at that object |
 | same natural key, different fingerprint | `409 idempotency_conflict` | none |
 | chat in the exclusion list | `422 excluded_chat` | none |
 | a field violation | `422 invalid_record{field}` | none |
@@ -163,7 +176,9 @@ never printed).
   `sendGroup`. Relay and bridge output (`OutboundOrigin`) is excluded, including its images.
 - **Spool**: `{WorkDir}/.fleet/journal-spool/{pending,media,dead}`; inbound media hardlinked from
   the attachment directory, outbound media copied. Limits: 10,000 records or 1 GiB; at the limit
-  the new record is dropped. S2 sends every attachment as `not_archived(media_disabled)`.
+  the new record is dropped. With media off every attachment goes as `not_archived(media_disabled)`;
+  with media on the drainer uploads the spooled file first and then names it (see
+  [Media](#media-slice-4)).
 - **Drainer**: one request at a time, oldest due record first, never FIFO-blocked; backoff 1 s
   doubling to 5 min; 15 s timeout; 30 s pause after 5 straight transport/5xx failures. `401` stalls
   everything, `404` pauses 5 min, `422 excluded_chat|unknown_conversation` drops, a refused record
@@ -195,6 +210,43 @@ the old key and recreate again. Its tokens then answer `401`.
 | `FLEET_COMMS_JOURNAL_KEY` | `Comms__Journal__TokenKeys` (`fleet-comms` and `fleet-comms-ops` only) | empty |
 | `FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS` | `Comms__Journal__ExcludedChatIds=${FLEET_GROUP_CHAT_ID},${…}` | empty |
 | `FLEET_COMMS_JOURNAL_RETENTION` | `Comms__Journal__MessageRetention` | `365.00:00:00`, minimum `1.00:00:00` |
+| `FLEET_COMMS_MEDIA_ENDPOINT` | `Journal:MediaEnabled` **on each agent** (see below) | `false` |
+
+### `Journal:MediaEnabled` — the agent's half of the media switch
+
+Two settings enable media, on two different containers, and only one of them is settable per agent:
+
+| setting | container | what it does |
+|---|---|---|
+| `Comms__Media__Endpoint` | Comms | makes the upload route and the object store exist |
+| `Journal:MediaEnabled` | each agent | makes the agent's drainer upload the bytes it captures |
+
+**`Journal:MediaEnabled` is derived at provisioning, never configured per agent.** The orchestrator
+writes it into the agent's `appsettings.json` when — and only when — this deployment's provisioning
+env file sets `FLEET_COMMS_MEDIA_ENDPOINT` to a non-blank value
+(`ContainerProvisioningService.MediaEndpointIsConfigured`).
+
+The ENDPOINT ALONE is the gate, because that is the key compose treats as the media switch
+(`Comms__Media__Endpoint=${FLEET_COMMS_MEDIA_ENDPOINT:-}`) and the key `upgrade.sh` uses to decide
+whether to start the `comms-media` profile. One switch, three readers, no way to disagree.
+
+⚠️ It deliberately does **not** also require `FLEET_COMMS_MEDIA_BUCKET`. That key is defaulted by
+compose and was not written by `setup.sh`, so requiring it meant a fresh install that accepted media
+provisioned every agent with the flag **off** — media silently off on a deployment with a working
+bucket. `setup.sh` now records the bucket name too, so `grep FLEET_COMMS_MEDIA .env` shows the whole
+decision, but the gate does not depend on that.
+
+That derivation is the design, not a convenience. Nothing on the agent side can know whether a
+bucket exists, and a flag nobody can set is a flag that is never on: without it the agent journals
+every attachment as `not_archived(media_disabled)` forever while Comms happily accepts uploads, and
+the media plane silently never runs. The agent's own env is denylisted for media credentials, so it
+cannot be the source either — an agent must not read a secret to decide a boolean.
+
+Because it is derived, **changing it means reprovisioning the agent**, not restarting it, and turning
+media off for one agent is not possible without turning it off for the deployment. `upgrade.sh` prints
+that reminder when media is on. The bucket name and the scoped credential pair are outside the gate
+on purpose: an agent must not read a secret to decide a boolean, and a half-provisioned bucket is
+Comms' startup failure to raise, not the agent's to guess at.
 
 Every `FLEET_COMMS_JOURNAL_` key is denied by the orchestrator config API: it is never returned by
 `/api/config/all` or `/api/config/values` and cannot be written by `set_config_values`. Edit `.env`.
@@ -207,6 +259,157 @@ The compose file always prepends `FLEET_GROUP_CHAT_ID`, the workflow-activity gr
 Startup refuses, exiting 1 with a message that never contains a key: `journal_requires_conversations`,
 `journal_key_invalid`, `journal_excluded_ids_invalid`, `journal_url_invalid`,
 `journal_retention_invalid`, and `journal_bind_failed` for a port in use.
+
+## Media (slice 4)
+
+`Comms__Media__Endpoint` is the enabling key. Blank means media does not exist: no upload route, no
+object store, no credentials held, and every attachment is `not_archived` exactly as in slice 1.
+
+### Bytes are always proven
+
+**There is no hash-only shortcut anywhere in the upload path.** An attachment can only name an
+object whose bytes the attaching subject itself sent. That is the whole security property: without
+it, a subject could name a digest it read somewhere and then `fetch_attachment` content it never
+held. Dedup happens *after* proof and only ever moves an attachment onto an object the caller
+already proved.
+
+`journal_objects.owner` is the token subject that opened the row. It binds who may complete and
+commit an upload and nothing else — **read access never depends on it.** `fetch_attachment` is
+authorised by message observership (D4).
+
+### Scoped acceptance amendment (#388, 2026-09-30)
+
+Human-approved scope: AC1b's observer-authorized `fetch_attachment` read-denial check is not
+required for this upload-only slice. An authenticated private deployment may authorize agents
+without per-message observership; this is not a change to the broader public D4 read policy,
+and this slice introduces no journal read API.
+
+AC1b's digest-only commit refusal remains required. Private storage, agent authentication,
+owner-bound uploads and byte proof are unchanged; UUID secrecy never substitutes for
+authentication. Exact pushed-head isolated runtime acceptance remains required before merge,
+including pinned-image identity, unmodified init/verifier execution, scoped `mc ls`,
+media-enabled startup/S3 acceptance and verified teardown with final exit 0. No runtime waiver
+or merge approval is granted by this amendment.
+
+### Lifecycle
+
+| Step | Answer |
+|---|---|
+| `POST /journal/v1/uploads {sha256, byteSize, mimeType}` | `201 {uploadId}`, row `uploading`, `owner = subject`. No dedup here. |
+| `PUT /journal/v1/uploads/{id}` | same subject only; `404` (identical to unknown id) otherwise. Bytes stream through SHA-256 into the bucket. |
+| mismatch, declared vs actual | object deleted, row `aborted`, `422 sha256_mismatch` |
+| store error | `503`, row left `uploading` so the subject can retry |
+| commit naming the `uploadId` | row `committed`, or deduped onto an existing committed object |
+
+A foreign `uploadId` answers `404`, never `403`: a 403 would confirm the id exists and turn the
+upload surface into an oracle for enumerating other runtimes' uploads.
+
+### Sweeper
+
+Runs on the existing GC tick, after retention.
+
+| Class | Rule |
+|---|---|
+| abandoned | `uploading/uploaded/aborted` past `created_at + 24 h` |
+| retired | `deleting` past `delete_after` (72 h grace) |
+| orphan | weekly `ListObjectsV2 j1/`, keys older than 24 h with no row |
+
+Bytes are deleted before the row, so a failure between the two leaves a row pointing at nothing —
+which the next tick resolves, because a missing object is not an error. **A live attachment stops
+every class absolutely**: a dedup loser is exactly the row whose bytes an attachment can still be
+read through, and an age-based sweep must not delete them.
+
+### Startup and degraded mode
+
+A missing field exits 1. `HeadBucket` then classifies the answer:
+
+- 403 / `InvalidAccessKeyId` / `SignatureDoesNotMatch` / `NoSuchBucket` / `NotFound` /
+  `AccessDenied`, or HTTP 404 → exit 1 naming only the failure class. These need an operator, not a
+  retry.
+- network error or timeout → start **degraded**, re-probe every 30 s, uploads answer
+  `503 media_unavailable`.
+- An unsigned `GET {endpoint}/{bucket}?list-type=2` must answer 403. Anything else exits 1 with
+  `bucket_public` — a world-readable bucket is not a degraded one.
+
+⚠️ **`HeadBucket`, not `GetBucketLocation`, and the answer is not the error code you expect.**
+`GetBucketLocation` needs `s3:GetBucketLocation`, which the shipped policy does NOT grant — and
+MinIO answers a missing action with `403 AccessDenied`, so a probe using it reports a correctly
+configured deployment as a rejected credential. `HeadBucket` is `s3:ListBucket`, which the policy
+does grant on the bucket ARN.
+
+Then the servers disagree about what a missing bucket means, and the classifier has to know all
+three answers: a missing bucket answers `404 NotFound` with `ErrorCode` **`NotFound`** on SeaweedFS,
+`NoSuchBucket` on real S3, and `AccessDenied` on MinIO. That is why the HTTP status leads and the
+error-code list is a secondary match — matching `NoSuchBucket` alone is a startup that hangs
+"degraded" on the servers that are telling you the bucket is gone.
+
+### ⚠️ Three S3 facts that cost a full debug cycle
+
+These are in `S3ObjectStore` with comments; they are here because every one of them passed a
+fake-bucket test and failed against a real server.
+
+1. **A `PutObject` length must be stated on the request.** The SDK reads `Headers.ContentLength`
+   and, when it is absent and the stream is not seekable, fails client-side with "Could not
+   determine content length" before sending anything. An HTTP request body is never seekable, so an
+   upload cannot work without it. Setting it also makes the SDK *stop consulting* `Stream.Length` —
+   so a stream reporting one length while the request states another uploads the request's number
+   and reports success.
+2. **The SDK takes the synchronous read path** when a content length is known. An ASP.NET Core
+   request body throws on a sync read ("Synchronous operations are disallowed"), so a wrapping
+   stream must delegate `Read` to `ReadAsync`.
+3. **An empty listing has no `Contents` element**, which the SDK surfaces as a null collection, not
+   an empty one. That is the first orphan sweep of every fresh deployment.
+
+### Backup CLI
+
+| Command | Does |
+|---|---|
+| `media backup --out DIR` | copies `committed`/`deleting` objects the bucket is missing, re-hashing each; writes `manifest-<UTC>.jsonl` atomically; non-zero on any failure |
+| `media restore --in DIR` | `PutObject` for each missing object, then verifies |
+| `journal verify-media [--sample N]` | `GetObject` + full re-hash of committed attachments; prints `rows= objects= bytes= mismatches= missing=`; exits 1 on any mismatch |
+
+A dump that has never been restored is not a backup: `backup → wipe → restore → verify-media` is the
+acceptance, and it is what proves the manifest rather than the manifest's own self-report.
+
+### What the CI fixture proves, and what it still does not
+
+`tests/Fleet.Conversations.Tests/S3Fixture.cs` runs SeaweedFS, because MinIO publishes no public
+image source. CI runs **two** of them:
+
+| fixture | env var | signs? | proves |
+|---|---|---|---|
+| anonymous | `FLEET_COMMS_S3_ENDPOINT` | no | the data plane: bytes in, identical bytes out, correct digest, correct key |
+| signed | `FLEET_COMMS_S3_SIGNED_ENDPOINT` | yes | the credential classes, and the operator CLI |
+
+An earlier version of this section claimed a signed fixture was impossible — that SeaweedFS without
+a signing key answers a signed request with `400 InvalidRequest`, so testing credential rejection
+against it would be a false green. **That claim was wrong and it cost coverage.** SeaweedFS
+authenticates when started with `-s3.iam.config=<file>` naming an identity whose key lookup is
+**exact**, and with it in place a signed PUT succeeds, a wrong secret answers a real
+`403 AccessDenied`, and an unknown key is refused. The suite therefore does prove the classes the
+startup probe classifies, against a server that actually checks the signature.
+
+Three things the signed fixture still does not prove, so do not quote it as if it did:
+
+- **It is SeaweedFS, not MinIO or real S3.** The error-code disagreements above are exactly why the
+  classifier matches several answers; this fixture pins one of them.
+- **The identity is an `Admin` identity**, because SeaweedFS has no IAM policy engine to express the
+  shipped policy's narrower grants. A test that passes here proves the credential is *accepted and
+  checked*, and that `HeadBucket` is an action the deployment's credential can perform — it does
+  NOT prove `deploy/comms-minio-init/comms-runtime-policy.json` is scoped correctly.
+- **MinIO itself has never been the subject of a startup test.** MinIO publishes no pullable image
+  (Docker Hub and quay.io both refuse anonymous pulls, `dl.min.io` returns 410), so no CI job and no
+  local run has ever started the shipped policy against the server it is written for. The
+  `GetBucketLocation`/`HeadBucket` reasoning above is reasoned from the policy document and MinIO's
+  documented behaviour, not measured. **The first deploy to a real MinIO is the proof of that
+  reasoning**, and the thing to watch is `credentials_rejected` at startup on a bucket that exists.
+
+The operator CLI (`media backup`, `media restore`, `journal verify-media`) builds its store through
+the real constructor, which always signs — so those tests run against the **signed** bucket and
+cannot run against the anonymous one. `EnsureSignedBucketAsync` PUTs before it probes: `HeadBucket`
+on a bucket that does not exist answers `404`, and auto-creation happens on the first admin `PUT`.
+A filer `POST /<bucket>/` creates a *filer* directory that S3 does not see, so it is not a way to
+make a bucket.
 
 ## Retention, purge and deletion semantics
 
@@ -226,6 +429,23 @@ changes nothing. A database error rolls back and exits 1.
 
 A platform delete or edit does not reach bots, so the journal keeps the original until retention or
 purge. Backups keep purged rows until your backup rotation removes them.
+
+Both paths retire the archived objects their messages held, in the same transaction as the delete and
+before it. The order is not stylistic: the attachment rows go by cascade, and after that nothing
+connects an object to any message — the sweeper never sees it and the bucket keeps those bytes for the
+life of the archive.
+
+Retirement is guarded. One object can be referenced by several messages, because dedup points every
+attachment with the same digest at the one committed object, so a delete that names one message must
+not retire bytes another message is still serving. Only objects no surviving message references are
+retired, and `journal_objects.committed_sha256` is released at the same moment: the unique key on that
+column is what makes "one committed object per digest" a property of the schema, and a row already
+scheduled for deletion must not keep claiming it while a re-send of the same bytes is still possible.
+
+Retirement is a mark, not a delete. `state = 'deleting'` and `delete_after` are 72 hours out, and the
+object sweeper takes the bytes after that — never before, and never while an attachment still points
+at the object. `journal purge` counts those objects in the line it prints, because they are the only
+number in it that is not yet gone.
 
 ## Status and metrics
 

@@ -64,6 +64,8 @@ public sealed class MySqlFixture : IAsyncLifetime
 
         var builder = new MySqlConnectionStringBuilder(_adminConnectionString) { Database = string.Empty };
 
+        builder = Pooled(builder);
+
         await using (var connection = new MySqlConnection(builder.ConnectionString))
         {
             await connection.OpenAsync();
@@ -72,16 +74,16 @@ public sealed class MySqlFixture : IAsyncLifetime
             await create.ExecuteNonQueryAsync();
         }
 
-        MigrationConnectionString = new MySqlConnectionStringBuilder(_adminConnectionString)
+        MigrationConnectionString = Pooled(new MySqlConnectionStringBuilder(_adminConnectionString)
         {
             Database = _database,
-        }.ConnectionString;
+        }).ConnectionString;
 
         var runtime = Environment.GetEnvironmentVariable(RuntimeVariable);
 
         ConnectionString = string.IsNullOrWhiteSpace(runtime)
             ? MigrationConnectionString
-            : new MySqlConnectionStringBuilder(runtime) { Database = _database }.ConnectionString;
+            : Pooled(new MySqlConnectionStringBuilder(runtime) { Database = _database }).ConnectionString;
 
         await new MigrationRunner(MigrationConnectionString).MigrateAsync();
     }
@@ -90,7 +92,8 @@ public sealed class MySqlFixture : IAsyncLifetime
     {
         if (_database.Length == 0) return;
 
-        var builder = new MySqlConnectionStringBuilder(_adminConnectionString) { Database = string.Empty };
+        await ClearSchemaPoolsAsync(_database);
+        var builder = Pooled(new MySqlConnectionStringBuilder(_adminConnectionString) { Database = string.Empty });
 
         await using var connection = new MySqlConnection(builder.ConnectionString);
         await connection.OpenAsync();
@@ -184,11 +187,22 @@ public sealed class MySqlFixture : IAsyncLifetime
             Password = password,
         };
 
-        return new RestrictedAccount(user, builder.ConnectionString, this);
+        return new RestrictedAccount(user, Pooled(builder).ConnectionString, this);
+    }
+
+    private async Task ClearSchemaPoolsAsync(string name)
+    {
+        foreach (var configured in new[] { _adminConnectionString, Environment.GetEnvironmentVariable(RuntimeVariable) })
+        {
+            if (string.IsNullOrWhiteSpace(configured)) continue;
+            await using var pool = new MySqlConnection(WithDatabase(configured, name));
+            await MySqlConnection.ClearPoolAsync(pool);
+        }
     }
 
     internal async Task DropDatabaseAsync(string name)
     {
+        await ClearSchemaPoolsAsync(name);
         await using var connection = new MySqlConnection(ServerConnectionString());
         await connection.OpenAsync();
         await using var drop = new MySqlCommand($"DROP DATABASE IF EXISTS `{name}`", connection);
@@ -257,11 +271,38 @@ public sealed class MySqlFixture : IAsyncLifetime
     }
 
     private string ServerConnectionString() =>
-        new MySqlConnectionStringBuilder(_adminConnectionString) { Database = string.Empty }
+        Pooled(new MySqlConnectionStringBuilder(_adminConnectionString) { Database = string.Empty })
             .ConnectionString;
 
     private static string WithDatabase(string connectionString, string database) =>
-        new MySqlConnectionStringBuilder(connectionString) { Database = database }.ConnectionString;
+        Pooled(new MySqlConnectionStringBuilder(connectionString) { Database = database })
+            .ConnectionString;
+
+    /// <summary>
+    /// Caps the connection pool on every connection string this fixture hands out.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠️ Every fixture in this assembly points at ONE MySQL server, and xUnit runs classes from
+    /// different collections in parallel. MySqlConnector's default pool is 100 connections PER
+    /// CONNECTION STRING while the server's default <c>max_connections</c> is 151, so a handful of
+    /// concurrently-initialising classes is enough to exhaust it. The failure then lands as
+    /// <c>Too many connections</c> on whichever class loses the race, which reads like a bug in
+    /// whatever that test happened to be — the worst possible shape of flake, because it moves.
+    /// </para>
+    /// <para>
+    /// Applied in ONE place rather than at each call site on purpose: a cap that only some of the
+    /// builders remember is not a cap, and the scratch databases and the DDL-less account are
+    /// exactly the paths a call-site fix would miss.
+    /// </para>
+    /// </remarks>
+    private static MySqlConnectionStringBuilder Pooled(MySqlConnectionStringBuilder builder)
+    {
+        builder.MaximumPoolSize = 10;
+        builder.ConnectionTimeout = 5;
+        builder.DefaultCommandTimeout = 10;
+        return builder;
+    }
 }
 
 /// <summary>An empty database that drops itself.</summary>
@@ -284,7 +325,12 @@ public sealed class RestrictedAccount(string user, string connectionString, MySq
 
     public string ConnectionString { get; } = connectionString;
 
-    public ValueTask DisposeAsync() => new(fixture.DropAccountAsync(User));
+    public async ValueTask DisposeAsync()
+    {
+        await using var pool = new MySqlConnection(ConnectionString);
+        await MySqlConnection.ClearPoolAsync(pool);
+        await fixture.DropAccountAsync(User);
+    }
 }
 
 /// <summary>A conversation row lock held by a second connection, released on disposal.</summary>

@@ -51,11 +51,70 @@ internal static class JournalRecordParser
 
     private static readonly string[] SendGroupFields = ["id", "part", "parts"];
 
+    /// <remarks>
+    /// <c>uploadId</c> and <c>uploadSha256</c> arrive with media (slice 4). They are in this list
+    /// because <see cref="Fields"/> refuses an unknown field by name, and an attachment field that
+    /// the contract accepts but this list forgot is a record refused as malformed — a caller that
+    /// did everything right told it had done something wrong.
+    /// </remarks>
     private static readonly string[] AttachmentFields =
-        ["ordinal", "kind", "mimeType", "byteSize", "fileName", "fileUniqueId", "notArchivedReason"];
+        ["ordinal", "kind", "mimeType", "byteSize", "fileName", "fileUniqueId", "notArchivedReason",
+         "uploadId", "uploadSha256"];
 
-    /// <summary>Fields that would reference stored bytes. None exists in this slice.</summary>
-    private static readonly string[] ByteReferenceFields = ["uploadId", "objectId", "bytes"];
+    /// <summary>
+    /// Fields that would reference stored bytes. <c>uploadId</c> is the one media slice 4 accepts;
+    /// <c>objectId</c> and <c>bytes</c> are never accepted from a caller — the first is what the
+    /// server resolves a validated upload into, the second does not exist.
+    /// </summary>
+    private static readonly string[] ByteReferenceFields = ["objectId", "bytes"];
+
+    /// <summary>The fields that mean "this record names bytes I already uploaded".</summary>
+    private static readonly string[] UploadReferenceFields = ["uploadId", "uploadSha256"];
+
+    /// <summary>
+    /// Cheap structural check for the routes: does this body reference stored bytes at all?
+    /// </summary>
+    /// <remarks>
+    /// Answers for the whole body so a deployment without media can refuse it before parsing, and
+    /// so the byte-reference fields can be refused by name inside a record that does use uploads.
+    /// A parse failure here is false — the parser reports the malformed body, which is the more
+    /// useful answer.
+    /// </remarks>
+    public static bool ReferencesBytes(ReadOnlyMemory<byte> body)
+    {
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(body);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+
+        using (document)
+        {
+            if (document.RootElement.ValueKind != JsonValueKind.Object) return false;
+            if (!document.RootElement.TryGetProperty("attachments", out var attachments)
+                || attachments.ValueKind != JsonValueKind.Array)
+                return false;
+
+            foreach (var attachment in attachments.EnumerateArray())
+            {
+                if (attachment.ValueKind != JsonValueKind.Object) continue;
+
+                foreach (var name in ByteReferenceFields.Concat(UploadReferenceFields))
+                {
+                    if (attachment.TryGetProperty(name, out _)) return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>The one MIME grammar this listener accepts. Shared with the upload declaration.</summary>
+    internal static bool IsMimeType(string value) => MimePattern.IsMatch(value);
 
     private static readonly Regex MimePattern = new(
         "^[A-Za-z0-9!#$&^_.+-]{1,63}/[A-Za-z0-9!#$&^_.+-]{1,63}$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -269,7 +328,10 @@ internal static class JournalRecordParser
     {
         if (element.ValueKind != JsonValueKind.Object) throw Refuse(path);
 
-        // A byte reference is not a malformed record; it is a feature this slice does not have.
+        // `objectId` and `bytes` are refused on EVERY deployment, media enabled or not. A caller
+        // naming the object it wants is naming one it may not own: the server resolves an uploadId
+        // into an object id, and the digest the fingerprint encodes is the resolved one. `bytes` is
+        // not a field — bytes go to the upload route and nowhere else.
         foreach (var name in ByteReferenceFields)
         {
             if (element.TryGetProperty(name, out _))
@@ -299,6 +361,46 @@ internal static class JournalRecordParser
             if (!AsciiIdPattern.IsMatch(fileUniqueId)) throw Refuse(path + ".fileUniqueId");
         }
 
+        // ── exactly one of: a reason, or an upload ──────────────────────────────
+        //
+        // `notArchivedReason` and `uploadId` are mutually exclusive and one is required. A record
+        // that gave neither would be an attachment whose bytes are archived without an object and
+        // declined without a reason — the two states this row exists to distinguish.
+        var hasUpload = fields.TryGetValue("uploadId", out var uploadNode)
+            && uploadNode.ValueKind != JsonValueKind.Null;
+        var hasReason = fields.TryGetValue("notArchivedReason", out var reasonNode)
+            && reasonNode.ValueKind != JsonValueKind.Null;
+
+        if (hasUpload == hasReason) throw Refuse(path + ".uploadId");
+
+        if (!hasUpload)
+        {
+            return new JournalAttachment
+            {
+                Ordinal = o,
+                Kind = RequiredEnum<JournalAttachmentKind>(fields, "kind", path + ".kind"),
+                MimeType = mime,
+                ByteSize = byteSize,
+                FileName = OptionalString(fields, "fileName", path + ".fileName", maxCodePoints: 255),
+                FileUniqueId = fileUniqueId,
+                NotArchivedReason = RequiredEnum<JournalNotArchivedReason>(
+                    fields, "notArchivedReason", path + ".notArchivedReason"),
+            };
+        }
+
+        // An upload reference is a ULID and a lowercase-hex digest, or nothing. The digest is
+        // REQUIRED with the id: it is the claim the commit compares against the bytes the server
+        // hashed at PUT time, and without it the commit would be trusting a name alone.
+        var uploadId = StringAt(uploadNode, path + ".uploadId").ToUpperInvariant();
+        if (!Ulid.IsValid(uploadId)) throw Refuse(path + ".uploadId");
+
+        if (!fields.TryGetValue("uploadSha256", out var shaNode)
+            || shaNode.ValueKind != JsonValueKind.String
+            || !IsLowerHexSha256(shaNode.GetString()!))
+        {
+            throw Refuse(path + ".uploadSha256");
+        }
+
         return new JournalAttachment
         {
             Ordinal = o,
@@ -307,9 +409,22 @@ internal static class JournalRecordParser
             ByteSize = byteSize,
             FileName = OptionalString(fields, "fileName", path + ".fileName", maxCodePoints: 255),
             FileUniqueId = fileUniqueId,
-            NotArchivedReason = RequiredEnum<JournalNotArchivedReason>(
-                fields, "notArchivedReason", path + ".notArchivedReason"),
+            UploadId = uploadId,
+            UploadSha256 = shaNode.GetString(),
         };
+    }
+
+    /// <summary>64 lowercase hex characters. Uppercase is refused: digests are stored lowercase.</summary>
+    private static bool IsLowerHexSha256(string value)
+    {
+        if (value.Length != 64) return false;
+
+        foreach (var c in value)
+        {
+            if (c is not (>= '0' and <= '9') && c is not (>= 'a' and <= 'f')) return false;
+        }
+
+        return true;
     }
 
     private static DateTimeOffset ReadSentAt(string value, DateTimeOffset now)

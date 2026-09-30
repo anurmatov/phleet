@@ -20,7 +20,7 @@ public sealed class JournalStoreTests(MySqlFixture fixture)
 {
     private string Db => fixture.ConnectionString;
 
-    private static JournalDb.Counts None => new(0, 0, 0, 0);
+    private static JournalDb.Counts None => new(0, 0, 0, 0, 0);
 
     /// <summary>Posts and returns the status, the body and the row delta in the four tables.</summary>
     private async Task<(HttpStatusCode Status, string Body, JournalDb.Counts Delta)> PostAsync(
@@ -48,7 +48,7 @@ public sealed class JournalStoreTests(MySqlFixture fixture)
 
         Assert.Equal(HttpStatusCode.Created, status);
         Assert.Contains("\"result\":\"created\"", body, StringComparison.Ordinal);
-        Assert.Equal(new JournalDb.Counts(1, 1, 1, 2), delta);
+        Assert.Equal(new JournalDb.Counts(1, 1, 1, 2, 0), delta);
 
         // Derived, not requested.
         Assert.Equal("received|telegram_update|tg:42|42",
@@ -119,10 +119,10 @@ public sealed class JournalStoreTests(MySqlFixture fixture)
         var second = await PostAsync(host,
             (record with { EventId = Fleet.Protocol.Ulid.NewUlid(), BotId = 7002 }).ToString(), "agent2");
 
-        Assert.Equal(new JournalDb.Counts(1, 1, 1, 0), first.Delta);
+        Assert.Equal(new JournalDb.Counts(1, 1, 1, 0, 0), first.Delta);
         Assert.Equal(HttpStatusCode.OK, second.Status);
         Assert.Contains("\"result\":\"observer_added\"", second.Body, StringComparison.Ordinal);
-        Assert.Equal(new JournalDb.Counts(0, 0, 1, 0), second.Delta);
+        Assert.Equal(new JournalDb.Counts(0, 0, 1, 0, 0), second.Delta);
     }
 
     [Fact]
@@ -225,7 +225,7 @@ public sealed class JournalStoreTests(MySqlFixture fixture)
 
         Assert.True(statuses.All(status => status == 201),
             "statuses: " + string.Join(",", statuses.GroupBy(x => x).Select(g => $"{g.Key}x{g.Count()}")));
-        Assert.Equal(new JournalDb.Counts(perKind + 1, 2 * perKind, 2 * perKind, 0),
+        Assert.Equal(new JournalDb.Counts(perKind + 1, 2 * perKind, 2 * perKind, 0, 0),
             await JournalDb.CountAsync(Db) - before);
     }
 
@@ -322,15 +322,16 @@ public sealed class JournalStoreTests(MySqlFixture fixture)
             + "VALUES ('01J0000000000000000000000A', 'c_1', 'p_1', 'ref-1'), ('01J0000000000000000000000B', 'c_1', 'p_1', 'ref-2')");
 
         // Every table 0001-0003 created. schema_migrations is the runner's bookkeeping and gains
-        // exactly the one row for 0004.
+        // exactly the rows for 0004 and 0005.
         var tables = (await TablesAsync(scratch.ConnectionString)).Where(t => t != "schema_migrations").ToList();
         Assert.DoesNotContain("journal_messages", tables);
+        Assert.DoesNotContain("journal_objects", tables);
         Assert.Contains("conversations", tables);
         var before = await RowCountsAsync(scratch.ConnectionString, tables);
 
         var applied = await new MigrationRunner(scratch.ConnectionString).MigrateAsync();
 
-        Assert.Equal([4], applied);
+        Assert.Equal([4, 5], applied);
         Assert.Equal(before, await RowCountsAsync(scratch.ConnectionString, tables));
         Assert.True((await new MigrationRunner(scratch.ConnectionString).GetStatusAsync()).Matches);
 
@@ -353,7 +354,8 @@ public sealed class JournalStoreTests(MySqlFixture fixture)
              WHERE table_schema = DATABASE() AND table_name LIKE 'journal\_%'
                AND (column_name IN ('id','conversation_key','conversation_id','source_key','fingerprint',
                                     'reply_to_source_key','media_group_id','send_group_id','message_id',
-                                    'observer','event_id','mime_type','sha256','telegram_file_unique_id','object_id')
+                                    'observer','event_id','mime_type','sha256','telegram_file_unique_id','object_id',
+                                    'object_key','owner','committed_sha256')
                     AND collation_name <> 'ascii_bin')
             """);
         Assert.Equal("0", wrong);

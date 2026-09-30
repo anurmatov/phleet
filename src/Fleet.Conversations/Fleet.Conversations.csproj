@@ -17,6 +17,19 @@
     this repository pins is an EF Core 9 release with no EF Core 10 counterpart.
   -->
   <ItemGroup>
+    <!--
+      The journal's object store (#388). MinIO is the deployment's bucket, and this is the only
+      S3-compatible client in the repository.
+
+      4.0.103.4, and two of its defaults are overridden rather than inherited, in
+      `S3ObjectStore`: `ForcePathStyle` (MinIO addresses the bucket in the path, so virtual-host
+      style would request a hostname that does not resolve) and both checksum properties (the SDK's
+      default appends a CRC-32 trailer that MinIO 2024+ rejects on PutObject). The journal's
+      integrity check is the SHA-256 the server computes over the bytes it received, so dropping
+      the SDK's trailer costs nothing.
+    -->
+    <PackageReference Include="AWSSDK.S3" Version="4.0.103.4" />
+
     <PackageReference Include="MySqlConnector" Version="2.4.0" />
     <PackageReference Include="RabbitMQ.Client" Version="7.1.2" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.5" />

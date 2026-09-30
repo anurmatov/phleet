@@ -43,6 +43,8 @@ public sealed class JournalPublisherInteropTests(MySqlFixture fixture) : IDispos
 
         var created = await host.PostAsync(first, "agent1");
         var observed = await host.PostAsync(second, "agent2");
+        if (created.StatusCode != HttpStatusCode.Created)
+            throw new InvalidOperationException($"created -> {(int)created.StatusCode} {await created.Content.ReadAsStringAsync()}");
 
         Assert.Equal(HttpStatusCode.Created, created.StatusCode);
         Assert.Equal(HttpStatusCode.OK, observed.StatusCode);

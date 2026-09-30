@@ -1,0 +1,11 @@
+{
+  "identities": [
+    {
+      "name": "fleet-ci",
+      "credentials": [
+        { "accessKey": "placeholder", "secretKey": "placeholder" }
+      ],
+      "actions": ["Admin"]
+    }
+  ]
+}

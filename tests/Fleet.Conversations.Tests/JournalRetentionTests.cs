@@ -46,7 +46,7 @@ public sealed class JournalRetentionTests(MySqlFixture fixture) : IDisposable
 
         await store.IngestAsync(JournalDb.Record(-100701, 1, real.AddHours(-1), attachments: 1), "agent1");
         await store.IngestAsync(JournalDb.Record(-100702, 1, real.AddDays(2).AddHours(-1), attachments: 1), "agent1");
-        Assert.Equal(new JournalDb.Counts(2, 2, 2, 2), await JournalDb.CountAsync(scratch.ConnectionString));
+        Assert.Equal(new JournalDb.Counts(2, 2, 2, 2, 0), await JournalDb.CountAsync(scratch.ConnectionString));
 
         clock.Now = real.AddDays(2);
         var stats = new JournalRuntimeStats(clock);
@@ -56,7 +56,7 @@ public sealed class JournalRetentionTests(MySqlFixture fixture) : IDisposable
         var result = await retention.SweepOnceAsync();
 
         Assert.Equal(new JournalRetention.SweepResult(1, 1), result);
-        Assert.Equal(new JournalDb.Counts(1, 1, 1, 1), await JournalDb.CountAsync(scratch.ConnectionString));
+        Assert.Equal(new JournalDb.Counts(1, 1, 1, 1, 0), await JournalDb.CountAsync(scratch.ConnectionString));
         Assert.Equal("-100702", await MySqlFixture.ScalarRowOnAsync(
             scratch.ConnectionString, "SELECT telegram_chat_id FROM journal_conversations"));
 
@@ -81,7 +81,7 @@ public sealed class JournalRetentionTests(MySqlFixture fixture) : IDisposable
             scratch.ConnectionString, TimeSpan.FromDays(1), batchSize: 2, NullLogger.Instance).SweepOnceAsync();
 
         Assert.Equal(new JournalRetention.SweepResult(5, 1), result);
-        Assert.Equal(new JournalDb.Counts(0, 0, 0, 0), await JournalDb.CountAsync(scratch.ConnectionString));
+        Assert.Equal(new JournalDb.Counts(0, 0, 0, 0, 0), await JournalDb.CountAsync(scratch.ConnectionString));
     }
 
     /// <summary>
@@ -132,14 +132,14 @@ public sealed class JournalRetentionTests(MySqlFixture fixture) : IDisposable
         var dry = await RunAsync("journal", "purge", "--telegram-chat", "-100801");
 
         Assert.Equal(0, dry.Exit);
-        Assert.Contains("would delete: 2 message(s), 3 observer row(s), 2 attachment row(s), 1 conversation(s)", dry.Stdout, StringComparison.Ordinal);
+        Assert.Contains("would delete: 2 message(s), 3 observer row(s), 2 attachment row(s), 1 conversation(s), 0 object(s)", dry.Stdout, StringComparison.Ordinal);
         Assert.Equal(before, await JournalDb.CountAsync(scratch.ConnectionString));
 
         var confirmed = await RunAsync("journal", "purge", "--telegram-chat", "-100801", "--confirm");
 
         Assert.Equal(0, confirmed.Exit);
-        Assert.Contains("deleted: 2 message(s), 3 observer row(s), 2 attachment row(s), 1 conversation(s)", confirmed.Stdout, StringComparison.Ordinal);
-        Assert.Equal(new JournalDb.Counts(1, 1, 1, 1), await JournalDb.CountAsync(scratch.ConnectionString));
+        Assert.Contains("deleted: 2 message(s), 3 observer row(s), 2 attachment row(s), 1 conversation(s), 0 object(s)", confirmed.Stdout, StringComparison.Ordinal);
+        Assert.Equal(new JournalDb.Counts(1, 1, 1, 1, 0), await JournalDb.CountAsync(scratch.ConnectionString));
         Assert.Equal("-100802", await MySqlFixture.ScalarRowOnAsync(
             scratch.ConnectionString, "SELECT telegram_chat_id FROM journal_conversations"));
     }
@@ -158,14 +158,14 @@ public sealed class JournalRetentionTests(MySqlFixture fixture) : IDisposable
         var conversation = await MySqlFixture.ScalarRowOnAsync(scratch.ConnectionString, "SELECT id FROM journal_conversations");
         var before = await RunAsync("journal", "purge", "--conversation", conversation,
             "--before", now.AddDays(-5).ToString("O"), "--confirm");
-        Assert.Contains("deleted: 1 message(s), 1 observer row(s), 0 attachment row(s), 0 conversation(s)", before.Stdout, StringComparison.Ordinal);
+        Assert.Contains("deleted: 1 message(s), 1 observer row(s), 0 attachment row(s), 0 conversation(s), 0 object(s)", before.Stdout, StringComparison.Ordinal);
         Assert.Equal("NULL", await MySqlFixture.ScalarRowOnAsync(scratch.ConnectionString,
             $"SELECT MAX(id) FROM journal_messages WHERE id = '{first.MessageId}'"));
 
         var remaining = await MySqlFixture.ScalarRowOnAsync(scratch.ConnectionString, "SELECT id FROM journal_messages");
         var last = await RunAsync("journal", "purge", "--message", remaining, "--confirm");
-        Assert.Contains("deleted: 1 message(s), 1 observer row(s), 0 attachment row(s), 1 conversation(s)", last.Stdout, StringComparison.Ordinal);
-        Assert.Equal(new JournalDb.Counts(0, 0, 0, 0), await JournalDb.CountAsync(scratch.ConnectionString));
+        Assert.Contains("deleted: 1 message(s), 1 observer row(s), 0 attachment row(s), 1 conversation(s), 0 object(s)", last.Stdout, StringComparison.Ordinal);
+        Assert.Equal(new JournalDb.Counts(0, 0, 0, 0, 0), await JournalDb.CountAsync(scratch.ConnectionString));
     }
 
     [Theory]
@@ -236,7 +236,7 @@ public sealed class JournalRetentionTests(MySqlFixture fixture) : IDisposable
         var run = await RunAsync("journal", "status");
 
         Assert.Equal(0, run.Exit);
-        Assert.Contains("schema version: 4", run.Stdout, StringComparison.Ordinal);
+        Assert.Contains("schema version: 5", run.Stdout, StringComparison.Ordinal);
         Assert.Matches(@"agent1\s+2 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}Z", run.Stdout);
         Assert.Matches(@"agent2\s+1 ", run.Stdout);
     }

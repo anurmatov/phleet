@@ -518,6 +518,17 @@ services:
       - Comms__Journal__TokenKeys=${FLEET_COMMS_JOURNAL_KEY:-}
       - Comms__Journal__ExcludedChatIds=${FLEET_GROUP_CHAT_ID:-},${FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS:-}
       - Comms__Journal__MessageRetention=${FLEET_COMMS_JOURNAL_RETENTION:-365.00:00:00}
+      # ── Journal media (opt-in, needs the journal AND the comms-media profile) ───
+      # The endpoint is the enabling key: blank means no bucket, no upload route, and every
+      # attachment an agent offers is refused 409 media_disabled.
+      #
+      # The credential pair here is the SCOPED runtime one, not the root pair. Root exists so the
+      # init container can create the bucket once; a long-running service holding it could change
+      # the bucket's anonymous policy, which is the exposure the startup probe checks for.
+      - Comms__Media__Endpoint=${FLEET_COMMS_MEDIA_ENDPOINT:-}
+      - Comms__Media__Bucket=${FLEET_COMMS_MEDIA_BUCKET:-comms-journal}
+      - Comms__Media__AccessKey=${FLEET_COMMS_MEDIA_ACCESS_KEY:-}
+      - Comms__Media__SecretKey=${FLEET_COMMS_MEDIA_SECRET_KEY:-}
     volumes:
       - fleet_comms_auth:/var/lib/fleet-comms
     mem_limit: 512m
@@ -531,6 +542,9 @@ services:
       retries: 5
     networks:
       - fleet-net
+      # Only reachable when the comms-media profile is on; compose ignores a network a running
+      # service does not use, so this is inert on a deployment that never opted in.
+      - comms-media
     logging:
       driver: json-file
       options:
@@ -618,10 +632,106 @@ services:
       # `journal token` mints with the first key and prints to stdout — which is why it runs here,
       # with logging disabled, and never on fleet-comms.
       - Comms__Journal__TokenKeys=${FLEET_COMMS_JOURNAL_KEY:-}
+      # `media backup`, `media verify`, `media restore` and `journal verify-media` all read the
+      # bucket. They are the ONLY operator path that holds these credentials; the root pair stays
+      # with the init container and never reaches a command anyone can run twice.
+      - Comms__Media__Endpoint=${FLEET_COMMS_MEDIA_ENDPOINT:-}
+      - Comms__Media__Bucket=${FLEET_COMMS_MEDIA_BUCKET:-comms-journal}
+      - Comms__Media__AccessKey=${FLEET_COMMS_MEDIA_ACCESS_KEY:-}
+      - Comms__Media__SecretKey=${FLEET_COMMS_MEDIA_SECRET_KEY:-}
     volumes:
       - fleet_comms_auth:/var/lib/fleet-comms
+      # `media backup --out` writes here. A bind mount rather than a volume on purpose: the whole
+      # point is a file the operator can carry off this host, and a named volume is not portable
+      # without a second copy step.
+      - ${FLEET_COMMS_MEDIA_BACKUP_DIR:-./fleet/media-backup}:/var/backups/fleet-media
     networks:
       - fleet-net
+      - comms-media
+    logging:
+      driver: "none"
+
+  # ── Journal media (opt-in, profile `comms-media`) ───────────────────────────
+  #
+  # Keep archived conversation media on a dedicated object store, separate from public storage.
+  # Only fleet-comms and fleet-comms-ops access this private bucket through the internal network.
+  # No host ports: uploads and backup/verify/restore commands use authenticated internal access.
+  comms-minio:
+    profiles: ["comms-media"]
+    image: minio/minio
+    container_name: comms-minio
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: ${FLEET_COMMS_MINIO_ROOT_USER:-}
+      MINIO_ROOT_PASSWORD: ${FLEET_COMMS_MINIO_ROOT_PASSWORD:-}
+    volumes:
+      - comms_minio_data:/data
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - comms-media
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # One-shot: create the bucket once, create the scoped runtime user once, attach the least
+  # privilege policy that still lets a PUT of a known length work.
+  #
+  # Root is used HERE and nowhere else. The long-running services get the scoped user, so neither
+  # can put the bucket into public-read — the configuration the Comms start-up probe refuses to
+  # boot under.
+  comms-minio-init:
+    profiles: ["comms-media"]
+    # `minio/mc`, pinned. The published release image is built from upstream `Dockerfile.release`
+    # on `ubi9/ubi-micro`: it DOES carry a shell (`/bin/sh`, `/bin/bash`) and coreutils, so this
+    # script can run in it — what it does NOT carry is `sed`, `awk`, `grep` or `envsubst`. That is
+    # the real constraint, and it is why init.sh does its substitution with bash builtins.
+    #
+    # The untagged image was the bug this pin fixes: an operator pulling `minio/mc:latest` gets
+    # whatever `mc` the base image ships, and the alias-stdin behaviour init.sh depends on is
+    # release-specific. Pin to the release that behaviour was measured against.
+    #
+    # init.sh checks for `mc` on PATH and exits 127 with a message if the pin ever regresses to an
+    # image without the client.
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    container_name: comms-minio-init
+    depends_on:
+      comms-minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${FLEET_COMMS_MINIO_ROOT_USER:-}
+      MINIO_ROOT_PASSWORD: ${FLEET_COMMS_MINIO_ROOT_PASSWORD:-}
+      FLEET_COMMS_MEDIA_BUCKET: ${FLEET_COMMS_MEDIA_BUCKET:-comms-journal}
+      FLEET_COMMS_MEDIA_ACCESS_KEY: ${FLEET_COMMS_MEDIA_ACCESS_KEY:-}
+      FLEET_COMMS_MEDIA_SECRET_KEY: ${FLEET_COMMS_MEDIA_SECRET_KEY:-}
+    # ⚠️ `/bin/bash`, not `/bin/sh`. The bucket-name substitution in init.sh uses
+    # `${var//pattern/replacement}`, which a POSIX `sh` rejects with "Bad substitution" (measured on
+    # dash 0.5.12). `minio/mc`'s `/bin/sh` is bash, so this happens to work unforced — say it in the
+    # entrypoint anyway, so the interpreter is a stated choice and not an accident of the base image.
+    # See the header of deploy/comms-minio-init/init.sh.
+    entrypoint: ["/bin/bash", "/init/init.sh"]
+    volumes:
+      - ./deploy/comms-minio-init:/init:ro
+    # `restart: on-failure` is a RETRY, not a repair loop: the script is idempotent (bucket
+    # --ignore-existing, user add updates in place, policy create overwrites), so a transient
+    # failure — MinIO still settling, a network blip — converges on the next attempt.
+    #
+    # The one failure it cannot fix is a bad pin: if `mc` is ever missing from this image, init.sh
+    # exits 127 and restarts forever. That is deliberate. This service is a one-shot, so it is the
+    # ONLY place the root credential is used after the server starts; `restart: "no"` would let it
+    # stay dead and silently leave the scoped runtime user with no policy — the exact Access Denied
+    # failure this whole job exists to prevent. `logging: driver: none` below is what stops the
+    # loop from filling the disk, and the symptom is loud: `docker ps` shows the restart count.
+    restart: on-failure
+    networks:
+      - comms-media
     logging:
       driver: "none"
 
@@ -650,6 +760,10 @@ volumes:
   # their own client with no self-service recovery — restore from a `store backup` file.
   comms_mysql_data:
   fleet_comms_auth:
+  # Journal objects. Losing this volume is losing archived media: the journal MESSAGE survives (it
+  # is in comms-mysql) but every attachment's bytes are gone and no restore can recreate them.
+  # `media backup` exists so this is recoverable — run it before any operation that can drop it.
+  comms_minio_data:
   temporal_pg_data:
   fleet_mysql_data:
   minio_data:
@@ -658,3 +772,12 @@ networks:
   fleet-net:
     name: fleet-net
     driver: bridge
+  # `internal: true` is the load-bearing line. Docker creates no gateway, publishes no port and
+  # installs no masquerade rule for an internal network, so nothing in it can reach the internet
+  # and nothing on the internet can reach it. That is what makes "no ports: block" a property of
+  # the network rather than of this file being careful: a later edit that adds a port to a
+  # comms-minio service still cannot expose it.
+  comms-media:
+    name: comms-media
+    driver: bridge
+    internal: true

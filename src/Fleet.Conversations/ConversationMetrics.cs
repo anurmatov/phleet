@@ -163,4 +163,25 @@ public static class ConversationMetrics
     /// <summary>Time from an authenticated ingest request to its answer.</summary>
     public static readonly Histogram<double> JournalIngestDuration =
         Meter.CreateHistogram<double>("fleet.journal.ingest.duration", "ms");
+
+    // ── media (#388) ──────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Upload outcomes, tagged <c>result</c>: <c>declared</c>, <c>stored</c>, <c>sha256_mismatch</c>,
+    /// <c>too_large</c>, <c>unauthorized</c>, <c>unavailable</c>. Fixed codes — never a subject, a
+    /// key, a digest or a content type.
+    /// </summary>
+    public static readonly Counter<long> JournalUpload =
+        Meter.CreateCounter<long>("fleet.journal.upload", "uploads");
+
+    /// <summary>Time from an authenticated upload PUT to its answer, including the bucket write.</summary>
+    public static readonly Histogram<double> JournalUploadDuration =
+        Meter.CreateHistogram<double>("fleet.journal.upload.duration", "ms");
+
+    /// <summary>
+    /// Objects the sweeper deleted, tagged <c>class</c>: <c>abandoned</c>, <c>retired</c>,
+    /// <c>orphan</c>.
+    /// </summary>
+    public static readonly Counter<long> JournalOrphansDeleted =
+        Meter.CreateCounter<long>("fleet.journal.orphans_deleted", "objects");
 }

@@ -1,0 +1,15 @@
+{
+  "identities": [
+    {
+      "name": "anonymous",
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    },
+    {
+      "name": "fleet-ci",
+      "credentials": [
+        { "accessKey": "placeholder", "secretKey": "placeholder" }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

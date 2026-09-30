@@ -153,8 +153,14 @@ jobs:
           FLEET_CONVERSATIONS_MIGRATION_CONNECTION: "Server=127.0.0.1;Port=3306;User ID=comms_ddl;Password=ci-ddl;AllowPublicKeyRetrieval=true;"
           FLEET_CONVERSATIONS_CONNECTION: "Server=127.0.0.1;Port=3306;User ID=comms_runtime;Password=ci-runtime;AllowPublicKeyRetrieval=true;"
           FLEET_CONVERSATIONS_BROKER: "amqp://guest:guest@127.0.0.1:5672/"
+        # ⚠️ `JournalS3*` is excluded here and runs in `media-s3-tests` below, which is the job that
+        # has a SeaweedFS beside it. Same reason this job excludes nothing else: that suite FAILS
+        # (never skips) without a bucket, and a job that ran it would fail for want of a fixture it
+        # was never given — the exact shape that tempts someone to make the fixture skip, which is
+        # how the media acceptance criteria would stop being evidence while the summary stayed green.
         run: >
           dotnet test tests/Fleet.Conversations.Tests --configuration Release
+          --filter "FullyQualifiedName!~JournalS3"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=conversations.trx"
           --results-directory ${{ github.workspace }}/testresults
@@ -207,6 +213,259 @@ jobs:
           fi
 
           echo "$passed test(s) executed against mysql:8.0, 0 skipped."
+
+  # The journal's media plane (#388). These are the only tests in the repo that put bytes through
+  # the real AWS SDK into a real bucket, and they are the reason that plane exists: five defects in
+  # S3ObjectStore passed every fake-bucket assertion in the suite and were only visible against a
+  # server that answers. See tests/Fleet.Conversations.Tests/S3Fixture.cs for what the fixture
+  # proves and — read that part — what it cannot.
+  #
+  # SeaweedFS rather than MinIO because MinIO publishes no public source for its images. Pinned by
+  # digest, so "the fixture image changed underneath us" is a commit, not an outage.
+  media-s3-tests:
+    name: Journal media object store (S3)
+    runs-on: ubuntu-latest
+
+    # Only MySQL is declared as a service. The two SeaweedFS containers are started by a step
+    # AFTER checkout (below), because a service container cannot be made to work here:
+    #
+    #   - `args` is not a valid key under `services.<id>`, and GitHub rejects the whole workflow
+    #     file before any job runs when it appears.
+    #   - `options` IS valid, but a free-form command in it fails container init: the runner
+    #     prepends its own `docker create` arguments, so the `--entrypoint weed` and the `weed
+    #     server …` words land where Docker expects flags. Measured on run 36651444927, where
+    #     `Initialize containers` failed and every step after it was skipped.
+    #   - `volumes:` on a service mounts the workspace BEFORE `actions/checkout` runs, and the
+    #     workspace is empty at container init. The signed identity file was therefore missing at
+    #     start — a container that cannot read its own `-s3.iam.config` is not a signed bucket.
+    #
+    # A step has none of these problems: it runs after checkout, it is a real `docker run` with
+    # the flags in the right places, and it can wait for readiness explicitly.
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: media-ci
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -p$MYSQL_ROOT_PASSWORD"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+      # The S3 upload tests are not pure object-plane tests: they prove an upload becomes a
+      # committed journal_object and survives a restart, which is a database claim. MySqlFixture
+      # FAILS rather than skips without one, so the job has to provide it. Same shape as
+      # conversations-tests and orchestrator-migrations.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Two SeaweedFS containers, started HERE rather than as services — see the note above the
+      # `services:` block for why a service container cannot carry them.
+      #
+      #   8333 anonymous  — the data plane. No identity, so the suite's anonymous client works and
+      #                     the assertions are about bytes rather than about authentication.
+      #   8334 signed     — `-s3.iam.config` naming the identity in tests/fixtures. This is what
+      #                     makes the credential classes and the operator CLI testable at all: the
+      #                     operator verbs build their store through the real constructor and
+      #                     therefore ALWAYS sign, and against the anonymous bucket every one of
+      #                     those calls is answered 400.
+      #
+      # Both are pinned by digest, same image as before. Readiness is waited for explicitly because
+      # there is no service health-check to wait on: a bucket that is not listening yet is a
+      # mysterious 400 or a refused connection in the middle of the suite otherwise.
+      - name: Start the SeaweedFS fixtures
+        run: |
+          set -euo pipefail
+          IMAGE=chrislusf/seaweedfs@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+
+          # 127.0.0.1, not the container's own address: the suite connects to the published port on
+          # the runner, exactly as it did with services.
+          #
+          # ⚠️ BOTH containers name an identity config, including the primary one. An earlier shape
+          # ran the primary container with no identity and had the fixture create its bucket over
+          # the filer's HTTP API. That could never have worked, for two reasons, both structural:
+          #
+          #   1. A bucket is the directory immediately under the filer's `DirBuckets` directory
+          #      (`/buckets`), which is where `weed s3` puts it. A multipart POST to the filer ROOT
+          #      creates a top-level directory whose parent is `/`, so `Filer.IsBucket` is false and
+          #      the S3 layer never sees it: 201 from the filer, permanent 404 from `HeadBucket`.
+          #      That is exactly what run 36652704531 measured.
+          #   2. The one call that DOES create a bucket — an authenticated PUT for an `Admin`
+          #      identity — requires a server that has an identity. A server with no identity
+          #      cannot create a bucket by any route available to this suite.
+          #
+          # ⚠️ Also note the filer's HTTP port has never been on the path for bucket creation:
+          # `weed s3` dials the filer over gRPC (`filer.port.grpc`), so no amount of waiting on
+          # :8888 could have changed this result.
+          #
+          # The primary config names `anonymous` with `Admin` so unsigned requests still work if a
+          # future fixture wants them, and `fleet-ci` for the PUT that creates the bucket.
+          docker run -d --name weed-anon -p 127.0.0.1:8333:8333 -p 127.0.0.1:8888:8888 \
+            -v "$PWD/tests/fixtures:/fixtures:ro" \
+            --entrypoint weed "$IMAGE" \
+            server -s3 -dir=/data -ip=0.0.0.0 \
+            -s3.port=8333 -master.port=9333 -master.port.grpc=19333 \
+            -volume.port=8444 -filer.port=8888 -filer.port.grpc=48888 \
+            -s3.iam.config=/fixtures/seaweedfs-primary-identity.json \
+            -s3.port.iceberg=0 -s3.port.lance=0
+
+          # The identity file is in the checkout, so it is mounted now that checkout has run.
+          docker run -d --name weed-signed -p 127.0.0.1:8334:8333 -p 127.0.0.1:8889:8888 \
+            -v "$PWD/tests/fixtures:/fixtures:ro" \
+            --entrypoint weed "$IMAGE" \
+            server -s3 -dir=/data -ip=0.0.0.0 \
+            -s3.port=8333 -master.port=9334 -master.port.grpc=19334 \
+            -volume.port=8445 -filer.port=8888 -filer.port.grpc=48889 \
+            -s3.iam.config=/fixtures/seaweedfs-signed-identity.json \
+            -s3.port.iceberg=0 -s3.port.lance=0
+
+          # Wait until each container's S3 endpoint ANSWERS OVER HTTP, not merely until the port
+          # accepts a connection.
+          #
+          # ⚠️ An earlier shape of this loop also TCP-probed the filer gRPC ports 48888/48889, and
+          # that alone failed the job: those ports are never published to the runner, so the host
+          # probe can never succeed no matter how healthy the container is. It timed out at
+          # "seaweedfs on :48888 never listened" on run 36656155673, before a single test ran.
+          #
+          # Publishing them would be the wrong fix — the tests never touch those ports. What the
+          # suite actually uses is the published S3 endpoint, so that is what gets polled, and the
+          # probe is HTTP rather than TCP: `weed server` starts master, then volume, then filer,
+          # then S3, and `startS3Server` reads the filer's configuration over gRPC BEFORE it builds
+          # its router. An S3 endpoint that answers over HTTP therefore already proves the filer is
+          # reachable, which is exactly the dependency worth waiting for.
+          #
+          # The accepted set is {200, 403, 404}, measured against the pinned image with both
+          # containers' identity configs in place:
+          #   200  unauthenticated ListAllMyBuckets on the primary container, which names an
+          #        `anonymous` identity — empty <Buckets/> on a fresh server, so it proves nothing
+          #        about buckets and everything about readiness
+          #   403  the signed container, which names only a keyed identity: AccessDenied is a
+          #        WORKING server refusing an anonymous caller, and treating it as not-ready would
+          #        hang the job on a fixture that is fine
+          #   404  a bucket-level path that this gateway does not route
+          # Anything else — a refused connection, a 5xx, a hang — is not ready yet.
+          wait_for_s3() {
+            local name=$1 url=$2 body i
+            for i in $(seq 1 60); do
+              # `|| true`: while the port is not listening yet curl exits non-zero, which under
+              # `set -e` would end the job instead of falling through to the next attempt.
+              body=$(curl -sS -m 5 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || true)
+              case "$body" in
+                200|403|404)
+                  echo "seaweedfs $name answered $body over HTTP"
+                  return 0
+                  ;;
+              esac
+              if [ "$i" -eq 60 ]; then
+                echo "ERROR: seaweedfs $name never answered over HTTP at $url (last: $body). Logs:"
+                docker ps -a
+                docker logs weed-anon || true
+                docker logs weed-signed || true
+                exit 1
+              fi
+              sleep 2
+            done
+          }
+          wait_for_s3 weed-anon "http://127.0.0.1:8333/"
+          wait_for_s3 weed-signed "http://127.0.0.1:8334/"
+
+          # Prove both mounts actually landed, so a wrong path is THIS step's failure and not a
+          # confusing "the store refused an authenticated PUT" from the fixture.
+          docker exec weed-anon test -r /fixtures/seaweedfs-primary-identity.json
+          echo "primary identity is mounted in weed-anon"
+          docker exec weed-signed test -r /fixtures/seaweedfs-signed-identity.json
+          echo "signed identity is mounted in weed-signed"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build Fleet.Conversations (Release)
+        run: dotnet build src/Fleet.Conversations/Fleet.Conversations.csproj --no-restore --configuration Release
+
+      - name: Run the S3 media suite
+        env:
+          # The primary bucket is created by, and written through, a SIGNED request: the only call
+          # that creates a bucket on SeaweedFS is an authenticated PUT for an `Admin` identity, so
+          # the fixture's client signs with the pair below. The values are fixture constants for
+          # throwaway containers on an ephemeral runner; no deployment uses them.
+          #
+          # They must be byte-identical to the credentials named in
+          # tests/fixtures/seaweedfs-primary-identity.json — SeaweedFS looks an access key up
+          # exactly, and a key the file does not name is answered 403 InvalidAccessKeyId.
+          FLEET_COMMS_S3_ENDPOINT: "http://127.0.0.1:8333"
+          FLEET_COMMS_S3_BUCKET: "journal-ci"
+          FLEET_COMMS_S3_ACCESS_KEY: "placeholder"
+          FLEET_COMMS_S3_SECRET_KEY: "placeholder"
+          # The S3 upload tests ride the same scratch database as the rest of the suite.
+          FLEET_CONVERSATIONS_MIGRATION_CONNECTION: "Server=127.0.0.1;Port=3306;User ID=root;Password=media-ci;AllowPublicKeyRetrieval=true;"
+          # The SECOND SeaweedFS (`weed-signed`), with an identity configured, is what makes the
+          # credential classes and the operator commands testable at all. Read by S3Fixture.
+          FLEET_COMMS_S3_SIGNED_ENDPOINT: "http://127.0.0.1:8334"
+          # The signed identity is a fixture constant (S3Fixture.SignedAccessKey), not an env var:
+          # it is a throwaway container on an ephemeral runner and there is no secret to hide.
+        run: >
+          dotnet test tests/Fleet.Conversations.Tests --configuration Release
+          --filter "FullyQualifiedName~JournalS3"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=media-s3.trx"
+          --results-directory ${{ github.workspace }}/testresults
+
+      # The containers this step started are not service containers, so the runner does not stop
+      # them. Left running they hold 8333/8334 against the next job on this runner, and a leaked
+      # container is far harder to notice than a step that failed.
+      - name: Stop the SeaweedFS fixtures
+        if: always()
+        run: docker rm -f weed-anon weed-signed || true
+
+      # Same rule as the MySQL job: a filter that matched nothing would report success with zero
+      # tests executed, which is the exact shape of a gate that quietly stopped gating.
+      - name: Refuse a run that skipped or found nothing
+        if: always()
+        run: |
+          set -euo pipefail
+          trx="${{ github.workspace }}/testresults/media-s3.trx"
+
+          if [ ! -f "$trx" ]; then
+            echo "ERROR: no test result file at $trx — the S3 suite did not run."
+            exit 1
+          fi
+
+          counters=$(grep -o '<Counters[^>]*>' "$trx" | head -1)
+          echo "$counters"
+
+          read_count() { echo "$counters" | grep -o "$1=\"[0-9]*\"" | grep -o '[0-9]*' || echo ""; }
+
+          executed=$(read_count executed)
+          notExecuted=$(read_count notExecuted)
+          passed=$(read_count passed)
+
+          if [ -z "$executed" ] || [ -z "$notExecuted" ] || [ -z "$passed" ]; then
+            echo "ERROR: could not read the counters out of $trx."
+            exit 1
+          fi
+
+          if [ "$notExecuted" -ne 0 ]; then
+            echo "ERROR: $notExecuted test(s) did not execute."
+            exit 1
+          fi
+
+          # The filter is the only way this job could run nothing; a zero count means the tests it
+          # is named for are gone, which is a failure and not a pass.
+          if [ "${executed:-0}" -lt 10 ] || [ "$passed" -ne "$executed" ]; then
+            echo "ERROR: executed=$executed passed=$passed — expected at least 10 S3 tests, all passing."
+            exit 1
+          fi
+
+          echo "$passed S3 media test(s) executed against SeaweedFS, 0 skipped."
 
   orchestrator-migrations:
     name: Orchestrator migrations (MySQL)
@@ -539,3 +798,146 @@ jobs:
       - name: Clean up
         if: always()
         run: docker image rm -f fleet:agent-ci || true
+
+  # The journal object-store provisioner runs inside the pinned MinIO client image, and that image
+  # has no `sed`, `awk`, `grep` or `envsubst`. This job is what stops init.sh from ever again
+  # reaching a production host and dying three lines into itself.
+  #
+  # Why a guard and not a real run: the image cannot be pulled here. MinIO withdrew every anonymous
+  # channel this repo has — `dl.min.io` 410, Docker Hub and quay.io 401, `mirror.gcr.io` and
+  # `public.ecr.aws` do not mirror the repository at all (all measured 2026-09-30). What IS still
+  # downloadable is the `mc` release binary and its sha256sum, from the pinned tag on the GitHub
+  # release, and the next step pins it in CI exactly that way.
+  #
+  # Stated plainly so nobody reads green checks as more than they are: CI pins and hashes the
+  # client, proves the script's EXTERNAL DEPENDENCIES, and runs the substitution logic. It does not
+  # run `init.sh` inside the image, and it does not prove the `mc admin policy` verbs — the deploy
+  # host remains the only place that can, and the same gap is recorded in docs/comms-journal.md.
+  minio-init-dependencies:
+    name: MinIO init script dependencies
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: The mc the image ships is the mc CI reasons about
+        # The compose file pins `minio/mc:RELEASE.2025-08-13T08-35-41Z` because the alias-stdin
+        # behaviour and the `mc admin policy` verbs in init.sh were measured against that release.
+        # The image cannot be pulled (see the job header), but the release binary and its sha256sum
+        # can, so CI downloads them, checks the hash, and runs the `mc` VERSION that the pin names.
+        # If the compose pin and this release ever disagree, this step fails.
+        run: |
+          set -euo pipefail
+          RELEASE=RELEASE.2025-08-13T08-35-41Z
+
+          if ! grep -q "image: minio/mc:${RELEASE}" docker-compose.example.yml; then
+            echo "::error::docker-compose.example.yml no longer pins minio/mc:${RELEASE}."
+            echo "The behaviours init.sh depends on are release-specific — update this step's RELEASE"
+            echo "in the same change, or the pin stops being the thing CI verified."
+            exit 1
+          fi
+
+          mkdir -p /tmp/mcpin
+          curl -sSfL -o /tmp/mcpin/mc \
+            "https://github.com/minio/mc/releases/download/${RELEASE}/mc.linux-amd64.${RELEASE}"
+          curl -sSfL -o /tmp/mcpin/mc.sha256sum \
+            "https://github.com/minio/mc/releases/download/${RELEASE}/mc.linux-amd64.${RELEASE}.sha256sum"
+
+          # The shipped checksum names the file `mc.RELEASE…`, not `mc`; rename before verifying so
+          # the check is the upstream one rather than a hand-copied hash.
+          mv /tmp/mcpin/mc "/tmp/mcpin/mc.${RELEASE}"
+          (cd /tmp/mcpin && sha256sum -c mc.sha256sum)
+          mv "/tmp/mcpin/mc.${RELEASE}" /tmp/mcpin/mc
+          chmod +x /tmp/mcpin/mc
+          /tmp/mcpin/mc --version | grep -q "${RELEASE}"
+
+          echo "mc ${RELEASE} verified against its published sha256sum."
+
+      - name: init.sh must call nothing but mc and shell builtins
+        # The failure this exists for: `sed` on line 76 of the old script. The pinned release image
+        # has no `sed`, so the call exited 127 AFTER the bucket and the runtime user existed.
+        #
+        # Scope is deliberately just the provisioner. `scripts/verify-minio-init-in-image.sh` is a
+        # HOST-side helper that drives `docker run` and is not in scope for what the image ships.
+        run: ./scripts/check-minio-init-deps.sh deploy/comms-minio-init/init.sh
+
+      - name: The bash-only substitution has a bash to run in
+        # `${var//pattern/replacement}` is a bashism; dash answers "Bad substitution" (measured on
+        # dash 0.5.12). The shebang and the compose entrypoint must agree on bash, so the pair is
+        # checked rather than either half — a "tidy" reformat of either one reintroduces the bug.
+        run: |
+          set -euo pipefail
+          SCRIPT=deploy/comms-minio-init/init.sh
+
+          if grep -qE '\$\{[A-Za-z_][A-Za-z0-9_]*//' "$SCRIPT" \
+             && [ "$(head -n1 "$SCRIPT")" != '#!/bin/bash' ]; then
+            echo "::error::$SCRIPT uses bash pattern substitution but does not declare #!/bin/bash."
+            echo "dash rejects \${var//pattern/replacement} with 'Bad substitution'."
+            exit 1
+          fi
+
+          if ! grep -q 'entrypoint: \["/bin/bash", "/init/init.sh"\]' docker-compose.example.yml; then
+            echo "::error::docker-compose.example.yml must invoke init.sh with /bin/bash, not /bin/sh."
+            echo "The substitution in init.sh is a bashism; /bin/sh (dash) fails with 'Bad substitution'."
+            exit 1
+          fi
+          echo "bash is declared in both the shebang and the compose entrypoint."
+
+      - name: The bucket substitution produces the policy that mc is handed
+        # The defect, replayed without a MinIO server: run the substitution block taken from the
+        # SHIPPED script against the SHIPPED policy file, and assert the result is valid JSON naming
+        # the configured bucket with no placeholder left. This is what would have failed red on the
+        # `sed` version, because the file it was meant to write was never written at all.
+        run: |
+          set -euo pipefail
+
+          # Extract the block rather than duplicating it, so this cannot drift from production.
+          {
+            echo 'set -eu'
+            echo 'FLEET_COMMS_MEDIA_BUCKET="journal-prod-2026"'
+            sed -n '/^# Read with bash/,/^esac$/p' deploy/comms-minio-init/init.sh
+          } > /tmp/subst.sh
+          sed -i 's|/init/comms-runtime-policy.json|deploy/comms-minio-init/comms-runtime-policy.json|; s|/tmp/comms-runtime-policy.json|/tmp/policy-out.json|' /tmp/subst.sh
+
+          bash /tmp/subst.sh
+
+          test -s /tmp/policy-out.json || { echo "::error::no policy file was produced"; exit 1; }
+          grep -q 'arn:aws:s3:::journal-prod-2026"' /tmp/policy-out.json \
+            || { echo "::error::the bucket name was not substituted"; exit 1; }
+          grep -q 'arn:aws:s3:::journal-prod-2026/\*"' /tmp/policy-out.json \
+            || { echo "::error::the object wildcard resource was not substituted"; exit 1; }
+          if grep -q 'comms-journal}' /tmp/policy-out.json; then
+            echo "::error::the placeholder survived the substitution"
+            exit 1
+          fi
+
+          python3 -c 'import json; d=json.load(open("/tmp/policy-out.json")); assert d["Version"]=="2012-10-17"; a=set(d["Statement"][0]["Action"]); assert a=={"s3:GetObject","s3:PutObject","s3:DeleteObject","s3:ListBucket","s3:AbortMultipartUpload"}, a; r=set(d["Statement"][0]["Resource"]); assert r=={"arn:aws:s3:::journal-prod-2026","arn:aws:s3:::journal-prod-2026/*"}, r; print("policy JSON valid, actions and resources scoped to the configured bucket")'
+
+      - name: An unsubstituted placeholder fails closed
+        # The substitution's other failure mode: if the placeholder and the pattern ever stop
+        # matching each other, the result is a policy that names a bucket called `${comms-journal}`
+        # — a policy granting nothing, which is the original Access Denied wearing a different hat.
+        # `mc admin policy create` would accept that happily, so the script has to refuse it.
+        #
+        # Simulated by rewriting the PLACEHOLDER in a copy of the real policy file, so the shipped
+        # block runs against input whose placeholder it cannot match.
+        run: |
+          set -euo pipefail
+          WORK=$(mktemp -d)
+          sed 's/\${comms-journal}/\${some-other-placeholder}/' \
+            deploy/comms-minio-init/comms-runtime-policy.json > "$WORK/policy.json"
+
+          {
+            echo 'set -eu'
+            echo 'FLEET_COMMS_MEDIA_BUCKET=journal-prod-2026'
+            sed -n '/^# Read with bash/,/^esac$/p' deploy/comms-minio-init/init.sh
+          } > "$WORK/guard.sh"
+          sed -i "s|/init/comms-runtime-policy.json|$WORK/policy.json|; s|/tmp/comms-runtime-policy.json|$WORK/out.json|" "$WORK/guard.sh"
+
+          if bash "$WORK/guard.sh"; then
+            echo "::error::the script accepted a policy whose placeholder was never substituted"
+            cat "$WORK/out.json" || true
+            exit 1
+          fi
+          echo "an unsubstituted policy fails closed."

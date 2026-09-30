@@ -25,6 +25,21 @@ public sealed class ConfigServiceDenylistTests : IDisposable
         "FLEET_COMMS_JOURNAL_RETENTION",
     ];
 
+    /// <summary>
+    /// The journal object store's keys (#388). <c>FLEET_COMMS_MINIO_</c> is the one that proves the
+    /// matcher's shape: the pre-existing <c>MINIO_</c> prefix is not a prefix of it, so without its
+    /// own entry the root password would be served by <c>/api/config/all</c>.
+    /// </summary>
+    private static readonly string[] MediaKeys =
+    [
+        "FLEET_COMMS_MEDIA_ENABLED",
+        "FLEET_COMMS_MEDIA_ACCESS_KEY",
+        "FLEET_COMMS_MEDIA_SECRET_KEY",
+        "FLEET_COMMS_MEDIA_BUCKET",
+        "FLEET_COMMS_MINIO_ROOT_USER",
+        "FLEET_COMMS_MINIO_ROOT_PASSWORD",
+    ];
+
     private readonly string _envFile = Path.GetTempFileName();
 
     public void Dispose()
@@ -49,6 +64,39 @@ public sealed class ConfigServiceDenylistTests : IDisposable
     [InlineData("FLEET_COMMS_JOURNALS")]
     public void Neighbouring_keys_are_not_denylisted(string key)
     {
+        Assert.False(ConfigService.IsDenylisted(key));
+    }
+
+    /// <summary>
+    /// AC1c: every media and media-MinIO key is denied, including the two that look like they would
+    /// already be covered by <c>MINIO_</c>.
+    /// </summary>
+    [Theory]
+    [InlineData("FLEET_COMMS_MEDIA_SECRET_KEY")]
+    [InlineData("FLEET_COMMS_MEDIA_ACCESS_KEY")]
+    [InlineData("FLEET_COMMS_MINIO_ROOT_USER")]
+    [InlineData("FLEET_COMMS_MINIO_ROOT_PASSWORD")]
+    [InlineData("fleet_comms_media_secret_key")]
+    [InlineData("FLEET_COMMS_MEDIA_BUCKET")]
+    public void Every_media_key_is_denylisted(string key)
+    {
+        Assert.True(ConfigService.IsDenylisted(key));
+    }
+
+    /// <summary>
+    /// The two new prefixes are exact, and the pre-existing <c>MINIO_</c> entry is untouched: an
+    /// unrelated key that merely CONTAINS one of the new prefixes is still not denied.
+    /// </summary>
+    [Theory]
+    [InlineData("FLEET_COMMS_MEDIAL")]
+    [InlineData("FLEET_COMMS_MINIOS")]
+    [InlineData("COMMS_MEDIA_KEY")]
+    [InlineData("MINIO_ACCESS_KEY")]
+    public void A_media_prefix_that_is_not_a_prefix_does_not_denylist(string key)
+    {
+        // MINIO_ACCESS_KEY is denied by the pre-existing MINIO_ entry, not by the new ones; the
+        // assertion below is the negative half.
+        if (key == "MINIO_ACCESS_KEY") { Assert.True(ConfigService.IsDenylisted(key)); return; }
         Assert.False(ConfigService.IsDenylisted(key));
     }
 
@@ -90,6 +138,46 @@ public sealed class ConfigServiceDenylistTests : IDisposable
         Assert.Equal(before, await File.ReadAllTextAsync(_envFile));
     }
 
+    /// <summary>
+    /// The media keys are refused on the way in as well, by both paths: <c>PUT /api/config/values</c>
+    /// and the <c>set_config_values</c> tool. A read-side denylist that a write could bypass would
+    /// let an agent install its own bucket credential and then read it back.
+    /// </summary>
+    [Theory]
+    [InlineData("FLEET_COMMS_MEDIA_SECRET_KEY")]
+    [InlineData("FLEET_COMMS_MINIO_ROOT_PASSWORD")]
+    public async Task A_direct_write_of_a_media_key_is_refused_and_the_file_is_unchanged(string key)
+    {
+        var service = await ServiceWithJournalKeysAsync();
+        var before = await File.ReadAllTextAsync(_envFile);
+
+        await Assert.ThrowsAsync<DenylistedException>(() => service.PutValuesAsync(
+            new Dictionary<string, string> { [key] = "replaced" }));
+
+        Assert.Equal(before, await File.ReadAllTextAsync(_envFile));
+    }
+
+    /// <summary>
+    /// AC1c end to end: <c>GET /api/config</c> does not return them — the same surface the journal
+    /// keys are checked on, with the media values present in the file.
+    /// </summary>
+    [Fact]
+    public async Task Neither_config_surface_returns_a_media_key()
+    {
+        var service = await ServiceWithJournalKeysAsync();
+
+        var all = service.GetAll();
+        var values = await service.GetValuesAsync([.. MediaKeys, "FLEET_COMMS_ENABLED"]);
+
+        foreach (var key in MediaKeys)
+        {
+            Assert.False(all.ContainsKey(key), $"{key} was returned by /api/config/all");
+            Assert.False(values.Literals.ContainsKey(key), $"{key} was returned by /api/config/values");
+        }
+
+        Assert.Equal("true", values.Literals["FLEET_COMMS_ENABLED"]);
+    }
+
     /// <summary><c>set_config_values</c> refuses the key before anything is written.</summary>
     [Fact]
     public async Task Set_config_values_refuses_the_signing_key()
@@ -124,6 +212,12 @@ public sealed class ConfigServiceDenylistTests : IDisposable
             + "FLEET_COMMS_JOURNAL_BIND=http://0.0.0.0:8083\n"
             + "FLEET_COMMS_JOURNAL_KEY=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v\n"
             + "FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS=-100111\n"
+            + "FLEET_COMMS_MEDIA_ENABLED=true\n"
+            + "FLEET_COMMS_MEDIA_BUCKET=comms-journal\n"
+            + "FLEET_COMMS_MEDIA_ACCESS_KEY=fleet-comms\n"
+            + "FLEET_COMMS_MEDIA_SECRET_KEY=a-bucket-secret\n"
+            + "FLEET_COMMS_MINIO_ROOT_USER=root\n"
+            + "FLEET_COMMS_MINIO_ROOT_PASSWORD=a-root-password\n"
             + "FLEET_COMMS_JOURNAL_RETENTION=365.00:00:00\n");
 
         var db = new OrchestratorDbContext(new DbContextOptionsBuilder<OrchestratorDbContext>()

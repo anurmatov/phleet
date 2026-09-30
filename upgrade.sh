@@ -22,6 +22,14 @@ unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY \
 # way; it is additive.
 unset FLEET_COMMS_JOURNAL_ENABLED FLEET_COMMS_JOURNAL_BIND FLEET_COMMS_JOURNAL_KEY \
       FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS FLEET_COMMS_JOURNAL_RETENTION
+# Media likewise: the endpoint in .env is the recorded decision, and an upgrade never turns a
+# bucket on for a host that declined one. Flipping it on would start a second MinIO holding
+# archived conversation media that nobody chose to keep, and flipping it off would leave the
+# bucket running with no service able to reach it. `conversations migrate` applies 0005 either
+# way; it is additive.
+unset FLEET_COMMS_MEDIA_ENDPOINT FLEET_COMMS_MEDIA_BUCKET FLEET_COMMS_MEDIA_BACKUP_DIR \
+      FLEET_COMMS_MEDIA_ACCESS_KEY FLEET_COMMS_MEDIA_SECRET_KEY \
+      FLEET_COMMS_MINIO_ROOT_USER FLEET_COMMS_MINIO_ROOT_PASSWORD
 
 COMPOSE_EXAMPLE="$SCRIPT_DIR/docker-compose.example.yml"
 COMPOSE_FILE="$FLEET_BASE_DIR/docker-compose.yml"
@@ -76,6 +84,12 @@ section "[1/4] Stopping services..."
 COMMS_ENABLED=$(read_env_var "$ENV_FILE" "FLEET_COMMS_ENABLED")
 COMMS_PROFILE_ARGS=()
 [[ "$COMMS_ENABLED" == "true" ]] && COMMS_PROFILE_ARGS=(--profile comms)
+# Media's profile follows the ENDPOINT, not a separate boolean — there is no second switch to
+# disagree with the first. A host with an endpoint but no profile flag would come back from an
+# upgrade with its services unable to reach a bucket they are configured to use, so this is
+# resolved here, before `down`, for the same reason COMMS_ENABLED is.
+MEDIA_ENDPOINT=$(read_env_var "$ENV_FILE" "FLEET_COMMS_MEDIA_ENDPOINT")
+[[ -n "$MEDIA_ENDPOINT" ]] && COMMS_PROFILE_ARGS+=(--profile comms-media)
 
 if docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" ps --quiet 2>/dev/null | head -1 | grep -q .; then
   # `--profile comms` on down too, so an enabled service is actually stopped. When disabling, the
@@ -190,6 +204,29 @@ else
         run --rm fleet-comms-ops conversations migrate) \
         || { fail "Could not apply the conversation migrations — see docs/comms-deployment.md"; exit 1; }
     fi
+  fi
+
+  # A host that opted into media before this key was recorded has an endpoint and no bucket name.
+  # Compose defaults the name, so its own services were always fine — but the ORCHESTRATOR derives
+  # the AGENT-side media flag (`Journal:MediaEnabled`) from this file, and an absent key there meant
+  # every agent journalled attachments as `not_archived(media_disabled)` on a deployment that had a
+  # working bucket. Silent, and it only clears on reprovision.
+  #
+  # Backfilled only when an endpoint is present, and never over a name the operator chose: the
+  # runtime policy is scoped to one exact bucket, so guessing here would grant access to a bucket
+  # that does not exist. Idempotent — after the first upgrade this changes nothing.
+  if [[ -n "$MEDIA_ENDPOINT" ]] && ! grep -qE "^FLEET_COMMS_MEDIA_BUCKET=" "$ENV_FILE"; then
+    [[ -s "$ENV_FILE" && -n "$(tail -c 1 "$ENV_FILE")" ]] && printf '\n' >> "$ENV_FILE"
+    printf 'FLEET_COMMS_MEDIA_BUCKET=comms-journal\n' >> "$ENV_FILE"
+    ok "Recorded FLEET_COMMS_MEDIA_BUCKET=comms-journal for the existing media endpoint"
+  fi
+
+  # The agent-side flag is DERIVED at provisioning time, so a reprovision is what turns an agent's
+  # uploader on — restarting the container does not. Say so rather than let an operator conclude the
+  # upgrade enabled it.
+  if [[ -n "$MEDIA_ENDPOINT" ]]; then
+    warn "Media is enabled: reprovision the agents that journal media to pick up Journal:MediaEnabled."
+    warn "  POST /api/agents/<name>/reprovision, or the dashboard's Reprovision action."
   fi
 
   (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env "${COMMS_PROFILE_ARGS[@]}" up -d)

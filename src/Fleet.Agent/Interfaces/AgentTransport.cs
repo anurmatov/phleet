@@ -963,7 +963,14 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         // One journal record per raw Telegram message, from the message itself: the raw text or
         // caption and the downloaded files, never the placeholder, the image prompt or the hints
         // added below. An album is one record per photo, tied by its media group id (#377).
-        JournalReceived(message, transcript, downloadedImage?.FilePath, downloadedDocument?.FilePath);
+        JournalReceived(
+            message, transcript, downloadedImage?.FilePath, downloadedDocument?.FilePath,
+            photoDecline: isPhoto && downloadedImage is null
+                ? MediaAbsence(photoSizeOf(message), _telegramConfig.MaxImageBytes)
+                : null,
+            mediaDecline: media is not null && downloadedMedia is null
+                ? MediaAbsence(media.FileSize > 0 ? media.FileSize : null, _telegramConfig.MaxDocumentBytes)
+                : null);
 
         // Media group: buffer all photos and flush as one IncomingMessage after debounce
         if (message.MediaGroupId is { } mediaGroupId && isPhoto)
@@ -1067,7 +1074,15 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     /// Journals one raw inbound message. Classification (rule 4 reads the live allowlist) happens
     /// inside the capture before anything is written, so an unauthorized chat writes nothing.
     /// </summary>
-    private void JournalReceived(Message message, string? transcript, string? photoPath, string? mediaPath)
+    /// <param name="photoDecline">
+    /// Why the photo has no bytes on disk, when there are none. The download path already decided
+    /// this — the agent's own size cap refused it, or the fetch failed — and passing the answer
+    /// through is what lets the journal say <c>over_size_cap</c> rather than guessing at drain time
+    /// that a file is simply not there.
+    /// </param>
+    private void JournalReceived(
+        Message message, string? transcript, string? photoPath, string? mediaPath,
+        Fleet.Journal.Client.JournalMediaReason? photoDecline = null, Fleet.Journal.Client.JournalMediaReason? mediaDecline = null)
     {
         if (_journal is null) return;
         try
@@ -1077,7 +1092,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             {
                 var largest = photos.OrderByDescending(p => p.FileSize ?? 0).First();
                 items.Add(new JournalMediaItem(JournalAttachmentKind.Photo, "image/jpeg", largest.FileSize,
-                    FileName: null, largest.FileUniqueId, LocalPath: photoPath));
+                    FileName: null, largest.FileUniqueId, LocalPath: photoPath,
+                    Declined: photoPath is null ? photoDecline : null));
             }
 
             if (TelegramMediaMapper.TryMap(message) is { } file)
@@ -1088,7 +1104,16 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                     file.FileSize > 0 ? file.FileSize : null,
                     file.FileName,
                     FileUniqueIdOf(message, file.Kind),
-                    LocalPath: mediaPath));
+                    LocalPath: mediaPath,
+                    Declined: mediaPath is null ? mediaDecline : null));
+            }
+
+            // A media type the mapper declines has no download path at all, so there is nothing to
+            // have failed: the kind itself is the reason its bytes are absent.
+            if (items.Count == 0 && HasJournalMediaMetadata(message))
+            {
+                items.Add(new JournalMediaItem(JournalAttachmentKind.Other, "application/octet-stream",
+                    null, null, null, Declined: Fleet.Journal.Client.JournalMediaReason.UnsupportedKind));
             }
 
             var from = message.From;
@@ -1136,6 +1161,27 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         TelegramMediaKind.Sticker => JournalAttachmentKind.Sticker,
         _ => JournalAttachmentKind.Other,
     };
+
+    /// <summary>The largest photo size the update declared, or null when it declared none.</summary>
+    private static long? photoSizeOf(Message message) =>
+        message.Photo is { Length: > 0 } photos
+            ? photos.OrderByDescending(p => p.FileSize ?? 0).First().FileSize
+            : null;
+
+    /// <summary>
+    /// Why the bytes are not on disk, from the platform's declared size and the agent's own cap.
+    /// </summary>
+    private static Fleet.Journal.Client.JournalMediaReason MediaAbsence(long? platformFileSize, long maxLocalBytes) =>
+        Fleet.Journal.Client.JournalMediaAbsent.Reason(platformFileSize, maxLocalBytes);
+
+    /// <summary>
+    /// True when the update carries media the agent has no descriptor for. A mapper decline is a
+    /// decision, not an oversight, and the journal should say so rather than drop the attachment.
+    /// </summary>
+    private static bool HasJournalMediaMetadata(Message message) =>
+        message.Contact is not null || message.Location is not null || message.Poll is not null
+        || message.Venue is not null || message.Game is not null || message.ProximityAlertTriggered is not null
+        || message.Invoice is not null || message.SuccessfulPayment is not null;
 
     /// <summary>The file_unique_id the descriptor does not carry, read from the raw message.</summary>
     private static string? FileUniqueIdOf(Message message, TelegramMediaKind kind) => kind switch

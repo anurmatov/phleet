@@ -135,6 +135,17 @@ public static class CommsApp
 
         builder.Services.AddNorthBoundary();
 
+        // Media, registered only when a bucket is configured. Like the sweeps below, this is read
+        // straight from configuration: options are not resolvable until after Build().
+        if (!string.IsNullOrWhiteSpace(
+                builder.Configuration.GetSection(CommsOptions.SectionName)
+                    [$"{nameof(CommsOptions.Media)}:{nameof(Fleet.Comms.Configuration.MediaOptions.Endpoint)}"]))
+        {
+            builder.Services.AddJournalMedia();
+            builder.Services.AddHostedService(provider => (JournalMediaHealth)provider
+                .GetRequiredService<JournalMediaGate>());
+        }
+
         // The background sweeps and the outbox drain, registered only when the feature is
         // configured. Read straight from configuration because options are not resolvable until
         // after Build(), and a hosted service has to be registered before it.
@@ -149,6 +160,13 @@ public static class CommsApp
         var brokerConnection = conversationSection[nameof(CommsOptions.BrokerConnectionString)];
         var agentName = conversationSection[nameof(CommsOptions.AgentName)];
         var attachmentRoot = conversationSection[nameof(CommsOptions.AttachmentRootPath)];
+
+        // Media, read straight from configuration like the four above (options are not resolvable
+        // until after Build()), and registered only when a bucket is configured.
+        var mediaEndpoint = conversationSection[
+            $"{nameof(CommsOptions.Media)}:{nameof(Fleet.Comms.Configuration.MediaOptions.Endpoint)}"];
+
+        if (!string.IsNullOrWhiteSpace(mediaEndpoint)) builder.Services.AddJournalMedia();
 
         // The journal's in-process status, shared by the retention sweep below and the journal
         // listener Program builds. Registered only when the journal is on, like everything else of it.
@@ -182,14 +200,43 @@ public static class CommsApp
 
                     // The journal sweep rides the same tick (#375). Null with the journal off, so
                     // the collector never touches a journal table on an install that did not opt in.
+                    //
+                    // The object store is threaded through so retention can mark an object
+                    // `deleting` in the same batch that removes its message — after the cascade
+                    // nothing connects the object to anything, and the bucket keeps the bytes
+                    // forever with no row left to find them by.
                     journalEnabled
                         ? new JournalRetention(
                             conversationConnection,
                             provider.GetRequiredService<IOptions<CommsOptions>>().Value.Journal.MessageRetention,
                             provider.GetRequiredService<IOptions<ConversationStoreOptions>>().Value.OutboxBatchSize,
                             provider.GetRequiredService<ILogger<JournalRetention>>(),
-                            provider.GetRequiredService<JournalRuntimeStats>())
-                        : null),
+                            provider.GetRequiredService<JournalRuntimeStats>(),
+                            time: null,
+                            objects: string.IsNullOrWhiteSpace(mediaEndpoint)
+                                ? null
+                                : provider.GetRequiredService<IJournalObjectStore>())
+                        : null,
+
+                    // The object sweep, on the same tick and AFTER retention (#388): retention
+                    // marks, the sweeper removes, and the other order would leave a retired object
+                    // sitting for another hour. Null without media, which leaves journal_objects
+                    // and the bucket untouched.
+                    string.IsNullOrWhiteSpace(mediaEndpoint)
+                        ? null
+                        : new JournalObjectSweeper(
+                            conversationConnection,
+                            provider.GetRequiredService<IJournalObjectStore>(),
+                            provider.GetRequiredService<ILogger<JournalObjectSweeper>>(),
+                            provider.GetRequiredService<JournalRuntimeStats>(),
+                            // The same clock everything else in the journal uses. The sweeper's whole
+                            // job is comparing rows against `created_at`, and `created_at` is written
+                            // by a store that takes a TimeProvider — a sweep on a different clock
+                            // from the one that stamped the row is an age comparison between two
+                            // clocks, which is wrong in both directions: too eager if the sweeper's
+                            // clock runs ahead, and silently never if it runs behind.
+                            provider.GetService<TimeProvider>())
+                        ),
                 provider.GetRequiredService<IOptions<ConversationStoreOptions>>().Value,
                 provider.GetRequiredService<ILogger<ConversationMaintenanceService>>()));
 
@@ -505,7 +552,7 @@ public static class CommsApp
     /// </remarks>
     public static WebApplication BuildJournalApp(
         WebApplicationBuilder builder, IJournalStore store, CommsOptions options,
-        JournalRuntimeStats stats, TimeProvider? time = null)
+        JournalRuntimeStats stats, TimeProvider? time = null, JournalMedia? media = null)
     {
         var keys = options.Journal.Keys();
         var excluded = options.Journal.ExcludedChats();
@@ -536,9 +583,136 @@ public static class CommsApp
         });
 
         JournalAuth.Use(app, keys, stats);
-        JournalEndpoints.Map(app, store, stats, excluded, time ?? TimeProvider.System, journalLogger);
+
+        // Media, when the deployment configured a bucket. The two upload routes are mapped HERE
+        // and nowhere else — the same rule that keeps a journal route off north, south and ops: a
+        // route that accepts megabytes must not be reachable from a listener with a different
+        // credential in front of it.
+        if (media is not null)
+        {
+            // ⚠️ The object table and the message table are written by ONE store instance, so media
+            //    requires the real store rather than a substitute. A host that wired a fake
+            //    IJournalStore and turned media on would otherwise accept uploads into a bucket
+            //    nothing could ever attach them to.
+            if (store is not MySqlJournalStore journalStore)
+                throw new InvalidOperationException(
+                    "media_requires_journal_store: the journal listener was built with a store that "
+                    + "is not the MySQL store, so there is no journal_objects table to write.");
+
+            if (!ReferenceEquals(journalStore.Objects, media.Objects))
+                throw new InvalidOperationException(
+                    "media_requires_journal_store: the MySQL store and the media gate were built "
+                    + "with different object stores. Uploads and commits must go through one.");
+
+            JournalUploadEndpoints.Map(
+                app, media.Objects, media.Bytes, stats, time ?? TimeProvider.System, journalLogger,
+                media.Gate);
+        }
+
+        JournalEndpoints.Map(
+            app, store, stats, excluded, time ?? TimeProvider.System, journalLogger,
+            media?.Gate, media?.Bytes, media?.Objects);
 
         return app;
+    }
+
+    /// <summary>
+    /// The media half of the journal listener, as one value. Null everywhere it is absent means
+    /// "no bucket configured", which is the state every deployment was in before #388.
+    /// </summary>
+    /// <param name="Gate">
+    /// The interface, not the concrete health service: the routes ask it a question, and a
+    /// composition that could only be built with the real prober could not be exercised without a
+    /// bucket. <c>Program</c> passes the hosted <see cref="JournalMediaHealth"/>, which is the only
+    /// implementation a deployment ever has.
+    /// </param>
+    /// <summary>
+    /// Parse one ingest body with the REAL ingest parser and report the outcome.
+    /// </summary>
+    /// <returns>
+    /// <c>(0, null)</c> when the record is accepted; otherwise the status the ingest route would
+    /// answer and the error it would name.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// ⚠️ This exists for ONE reason: <see cref="Routes.JournalRecordParser"/> is internal and
+    /// <c>InternalsVisibleTo</c> names only Fleet.Comms.Tests. The drainer's contract is not "my
+    /// JSON has the field I expect" — it is "the parser that answers real ingests accepts what I
+    /// put on the wire." A test in Fleet.Journal.Client.Tests that re-implemented these rules would
+    /// agree with the drainer by construction and catch nothing; the only honest seam is the same
+    /// code the route calls. Nothing but that test calls this.
+    /// </para>
+    /// <para>
+    /// No media gate is consulted, so this is the parser alone: what a record with upload references
+    /// looks like to the parser on a deployment that HAS a bucket.
+    /// </para>
+    /// </remarks>
+    public static (int Status, string? Error, string? Field) ValidateIngestRecord(
+        ReadOnlyMemory<byte> body, DateTimeOffset now)
+    {
+        var record = Routes.JournalRecordParser.Parse(body, now, out var failure);
+        if (record is not null) return (0, null, null);
+
+        ArgumentNullException.ThrowIfNull(failure);
+        return (failure.Status, failure.Error, failure.Field);
+    }
+
+    public sealed record JournalMedia(
+        JournalMediaGate Gate, IJournalObjectStore Bytes, MySqlJournalObjectStore Objects);
+
+    /// <summary>
+    /// The media services, registered only when a bucket is configured.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Factories, not instances: <see cref="S3ObjectStore"/> builds an SDK client, and a client
+    /// constructed on an install with no bucket is a credential holder that exists for no reason.
+    /// </para>
+    /// <para>
+    /// These are on the NORTH container's provider, which is where the maintenance loop lives. The
+    /// journal listener gets its own instance from <c>Program</c> — the two share the bucket and
+    /// the credentials, and neither shares a mutable state that matters.
+    /// </para>
+    /// </remarks>
+    public static IServiceCollection AddJournalMedia(this IServiceCollection services)
+    {
+        services.TryAddSingleton<IJournalObjectStore>(provider =>
+        {
+            var media = provider.GetRequiredService<IOptions<CommsOptions>>().Value.Media;
+
+            if (!media.Enabled)
+                throw new InvalidOperationException(
+                    "Comms__Media__Endpoint is not configured, so there is no object store to "
+                    + "resolve. Reaching this means an upload route or a sweep was registered on an "
+                    + "install that did not enable media.");
+
+            return new S3ObjectStore(
+                new JournalMediaOptions
+                {
+                    Endpoint = media.Endpoint,
+                    Bucket = media.Bucket,
+                    AccessKey = media.AccessKey,
+                    SecretKey = media.SecretKey,
+                    Region = media.Region,
+                    RequestTimeout = media.RequestTimeout,
+                },
+                provider.GetRequiredService<ILogger<S3ObjectStore>>());
+        });
+
+        // The bucket is wired into the row store so a dedup loser's bytes can be deleted once the
+        // transaction that removed its row has committed. Two halves of one object, one owner.
+        services.TryAddSingleton(provider => new MySqlJournalObjectStore(
+            provider.GetRequiredService<IOptions<CommsOptions>>().Value.ConversationConnectionString,
+            provider.GetRequiredService<ILogger<MySqlJournalObjectStore>>())
+        {
+            Bytes = provider.GetRequiredService<IJournalObjectStore>(),
+        });
+
+        services.TryAddSingleton<JournalMediaGate>(provider => new JournalMediaHealth(
+            provider.GetRequiredService<IJournalObjectStore>(),
+            provider.GetRequiredService<ILogger<JournalMediaHealth>>()));
+
+        return services;
     }
 
     private static void ConfigureAuthRateLimiter(RateLimiterOptions options)

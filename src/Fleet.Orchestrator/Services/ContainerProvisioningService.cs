@@ -1261,6 +1261,12 @@ public sealed class ContainerProvisioningService(
                 ["IngestToken"] = journal.IngestToken,
                 ["ExcludedChatIds"] = string.Join(',', journal.ExcludedChatIds),
             };
+
+            // Written only when true, so an agent in a deployment with no bucket produces the exact
+            // bytes it produced before media existed. Absent means false on the agent side, which is
+            // the safe default and keeps this a one-write rollback.
+            if (journal.MediaEnabled)
+                node["Journal"]!.AsObject()["MediaEnabled"] = true;
         }
         return node.ToJsonString(IndentedJson);
     }
@@ -1432,8 +1438,55 @@ public sealed class ContainerProvisioningService(
             agent.JournalEnabled ? journalTokens.ExcludedChatIds() : [],
             hasJournalEndpoint
                 ? journalTokens.Mint(JournalTokenService.PurposeRead, agent.Name)
-                : null);
+                : null,
+            // ⚠️ Derived, never configured per agent. `Journal:MediaEnabled` is the agent's opt-in
+            //    for archived media, and nothing else on the agent side can know whether a bucket
+            //    exists. Without this key the flag is unreachable from a provisioned deployment:
+            //    the agent journals every attachment as `not_archived(media_disabled)` forever and
+            //    the media plane never runs, while Comms happily accepts uploads.
+            //
+            //    The gate is the ENDPOINT ALONE, which is the same key the compose file uses to
+            //    enable media (`Comms__Media__Endpoint=${FLEET_COMMS_MEDIA_ENDPOINT:-}`) and the
+            //    same key `upgrade.sh` uses to decide whether to start the `comms-media` profile.
+            //    There is therefore exactly one switch, and no second condition that can be unset
+            //    while the bucket is running. An earlier version of this also required
+            //    `FLEET_COMMS_MEDIA_BUCKET`, which `setup.sh` never writes — compose defaults it to
+            //    `comms-journal` — so a fresh install that said yes to media provisioned every
+            //    agent with the flag OFF. That is the bug this line exists to avoid, not a
+            //    theoretical one.
+            //
+            //    The bucket name and the scoped credential pair are deliberately NOT part of the
+            //    gate: an agent must not read a secret to decide a boolean, and a half-provisioned
+            //    bucket is Comms' startup failure to raise, not the agent's to guess at.
+            MediaEnabled: MediaEndpointIsConfigured());
     }
+
+    /// <summary>
+    /// Whether the deployment's media switch is on, read from the same <c>.env</c> the orchestrator
+    /// reads the Codex server URL from.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Read from the provisioning env file the same way <c>DescribeCodexServerUrlFault</c> reads the
+    /// Codex URL — these values are deployment-scoped, and the orchestrator's own process environment
+    /// is not where the Comms media settings live. <c>LoadEnvFile</c> keeps <c>KEY=</c> as an empty
+    /// value and skips a commented <c>#KEY=…</c>, so both "declined media" (<c>setup.sh</c> writes a
+    /// blank endpoint) and "never asked" (the line is commented out in <c>.env.example</c>) read as
+    /// off.
+    /// </para>
+    /// <para>
+    /// The endpoint alone, with no <c>FLEET_COMMS_MEDIA_BUCKET</c> condition: see the caller for why
+    /// that second condition was the bug.
+    /// </para>
+    /// </remarks>
+    internal bool MediaEndpointIsConfigured()
+    {
+        var env = LoadEnvFile(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env");
+        return HasMeaningfulValue(env, "FLEET_COMMS_MEDIA_ENDPOINT");
+    }
+
+    private static bool HasMeaningfulValue(IReadOnlyDictionary<string, string> env, string key) =>
+        env.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value);
 
     /// <summary>
     /// The user-level <c>~/.claude/settings.json</c>. Carries <c>outputStyle</c> only for an agent
@@ -1558,7 +1611,8 @@ public record ProvisionResult(string AgentName, bool Success, string Message)
 internal sealed record JournalProvisioning(
     string? IngestToken,
     IReadOnlyList<long> ExcludedChatIds,
-    string? ReadToken);
+    string? ReadToken,
+    bool MediaEnabled = false);
 
 /// <summary>One assignment's project context, resolved once per provision.</summary>
 /// <param name="ProjectName">The assignment's name — the <c>projects/</c> directory the agent reads.</param>

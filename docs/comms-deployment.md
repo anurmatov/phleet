@@ -211,6 +211,107 @@ announcing a gap, because their absence is not a loss, and durable events are pr
 retained floor advanced in the same transaction so a reader is told exactly what it can no longer
 have.
 
+## Journal media (slice 4)
+
+The journal's object store, for installs that archive attachment bytes. Off unless
+`FLEET_COMMS_MEDIA_ENDPOINT` is set to a non-blank value, and off means the bucket is not deployed,
+no credentials exist, and no service holds any.
+
+⚠️ **There is no `FLEET_COMMS_MEDIA_ENABLED`.** An earlier version of this page named a boolean
+that no script, compose file or setting ever implemented, and an operator who set it would have
+gotten nothing. `FLEET_COMMS_MEDIA_ENDPOINT` is the switch: a blank or absent value is off, exactly
+as it is for Comms and for `upgrade.sh`'s profile decision.
+
+### What it adds
+
+`comms-minio` and `comms-minio-init` under the **`comms-media`** profile, on a `comms-media`
+network declared **`internal: true`** with **no published ports**. `fleet-comms` and
+`fleet-comms-ops` join that network; nothing else does.
+
+The internal network is not belt-and-braces. It is what makes "the bucket is not reachable from
+outside the compose project" a property of the network rather than of nobody having remembered a
+`ports:` line — and `DeploymentKeyLockstepTests` fails the build if a host port ever appears on the
+media service or a service without credentials is given them.
+
+`comms-minio-init` creates the bucket and a **scoped runtime policy**
+(`s3:GetObject,PutObject,DeleteObject,ListBucket,AbortMultipartUpload` on that one bucket) and
+writes the two keys `fleet-comms` reads. It reads its own credentials from the environment; the
+policy document keeps the bucket name as a placeholder that `init.sh` substitutes, so the file in
+the repo contains no deployment-specific value.
+
+⚠️ **`comms-minio-init` runs on `minio/mc`, pinned to
+`minio/mc:RELEASE.2025-08-13T08-35-41Z`.** The published release image is built from upstream
+`Dockerfile.release` on `ubi9/ubi-micro`. It **does** carry a shell (`/bin/sh`, `/bin/bash`) and
+coreutils-single — the "no shell at all" story that used to be written here came from reading the
+dev `Dockerfile` (`FROM scratch`), not the release one. What it does **not** carry is `sed`, `awk`,
+`grep` or `envsubst`.
+
+That is the constraint the script is written against: the substitution is done by bash
+(`${var//pattern/replacement}`), the shebang is `#!/bin/bash`, and the compose entrypoint invokes
+`/bin/bash` — a POSIX `sh` rejects that substitution with "Bad substitution" (measured on dash
+0.5.12), so both places say bash rather than relying on the base image's `/bin/sh` happening to be
+bash. The pin matters because the `mc` behaviour `init.sh` depends on (alias credentials on stdin,
+the `mc admin policy` verbs) is release-specific; an untagged `minio/mc` is a different client on
+every pull.
+
+`scripts/check-minio-init-deps.sh` (CI job "MinIO init script dependencies") fails the build if the
+script ever calls a binary other than `mc`. That is stricter than the image requires, on purpose:
+the old `sed` call exited 127 *after* the bucket and the runtime user existed, leaving a scoped user
+with no policy and every call answered `Access Denied`, and no check we had could see it.
+
+`scripts/verify-minio-init-in-image.sh` is the **host-side** proof, and it can only run on the deploy
+host: it prints the pinned image's identity (image id, `mc` version, and which of `sed`/`awk`/`grep`/
+`envsubst` are actually present), runs the repo's `init.sh` inside the pinned image using the same
+`:/init:ro` mount and `/bin/bash` entrypoint as compose, then lists the bucket with **only** the
+scoped runtime credentials — which is what proves the policy is *attached*, not merely created. Run it
+before enabling media on a new host; CI cannot, because MinIO publishes no pullable image.
+
+It creates **its own network and its own MinIO server** and never names the live bucket. That is
+load-bearing: `init.sh` hardcodes the policy name `comms-journal-runtime`, so a verifier pointed at
+the live server would create that policy over the live one and then remove it during cleanup — the
+exact `Access Denied` failure the provisioner exists to prevent. The compose service name is aliased
+inside the container to the disposable server, which is what lets `init.sh` run byte-for-byte
+unmodified. It needs `FLEET_COMMS_VERIFY_SERVER_IMAGE` because `minio/mc` ships the client only.
+
+⚠️ Every docker flag goes **before** the image name. `docker run … "$IMAGE" --entrypoint /bin/bash -c …`
+reads correctly and does nothing of the kind: everything after the image is argv for the container's
+`ENTRYPOINT`, and this image's is `["mc"]`, so the flags are handed to `mc`.
+`MinioVerifyHelperInvocationTests` fails the build on that, on a live network or bucket name, on a
+missing `--entrypoint`, and on a swallowed cleanup error — the four defects the first version had.
+
+### Keys
+
+| Key | What it is |
+|---|---|
+| `FLEET_COMMS_MEDIA_ENDPOINT` | **the switch.** the bucket URL on the internal network; also derives each agent's `Journal:MediaEnabled` |
+| `FLEET_COMMS_MEDIA_BUCKET` | default `comms-journal`; `setup.sh` records it, compose defaults it |
+| `FLEET_COMMS_MEDIA_ACCESS_KEY` / `_SECRET_KEY` | the **scoped** runtime credentials, not the root ones |
+| `FLEET_COMMS_MINIO_ROOT_USER` / `_PASSWORD` | root credentials, used only by the init container and the sidecar |
+| `FLEET_COMMS_MEDIA_BACKUP_DIR` | host directory the ops container writes `media backup` output to |
+
+Because the agent-side flag is **derived at provisioning**, changing `FLEET_COMMS_MEDIA_ENDPOINT`
+means **reprovisioning** the agents that journal media — restarting a container does not pick it up.
+`upgrade.sh` prints that reminder when media is on.
+
+Only `fleet-comms` and `fleet-comms-ops` receive the media credentials. The config API cannot read
+or write `FLEET_COMMS_MEDIA_*` or `FLEET_COMMS_MINIO_*` — they are on the orchestrator's denylist,
+because a settings endpoint that can rewrite a bucket credential is a way to move the journal's
+archive without ever touching a shell.
+
+### Enabling and upgrading
+
+`setup.sh` prompts for the media block only when the journal is on, and adds `--profile
+comms-media`. `upgrade.sh` resolves the same profile before `down`, so an install that turns media
+off does not leave the bucket running. Both scripts unset the media keys when the feature is off
+rather than leaving stale values in the generated file.
+
+### Backing it up
+
+`media backup --out DIR` from the ops container, into the bind-mounted `FLEET_COMMS_MEDIA_BACKUP_DIR`.
+It writes a manifest and re-hashes every object it copies. The acceptance is the round trip, not the
+manifest: **`backup`, wipe, `restore`, `journal verify-media` exits 0** — see
+`docs/comms-journal.md`.
+
 ## TLS and the reverse proxy
 
 **This service never terminates TLS.** Without it, enrollment codes, device secrets and access

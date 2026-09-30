@@ -110,14 +110,20 @@ internal sealed record JournalJson
 /// <summary>Row counts and schema helpers for the journal suites.</summary>
 internal static class JournalDb
 {
+    /// <summary>
+    /// <c>journal_objects</c> is in the list from slice 4: a test that counts rows without it would
+    /// not notice an object row it failed to write, and the object table is exactly where slice 4's
+    /// failures show up.
+    /// </summary>
     public static readonly string[] Tables =
-        ["journal_conversations", "journal_messages", "journal_message_observers", "journal_attachments"];
+        ["journal_conversations", "journal_messages", "journal_message_observers", "journal_attachments",
+         "journal_objects"];
 
-    public sealed record Counts(long Conversations, long Messages, long Observers, long Attachments)
+    public sealed record Counts(long Conversations, long Messages, long Observers, long Attachments, long Objects)
     {
         public static Counts operator -(Counts a, Counts b) =>
             new(a.Conversations - b.Conversations, a.Messages - b.Messages,
-                a.Observers - b.Observers, a.Attachments - b.Attachments);
+                a.Observers - b.Observers, a.Attachments - b.Attachments, a.Objects - b.Objects);
     }
 
     public static async Task<Counts> CountAsync(string connectionString)
@@ -129,7 +135,7 @@ internal static class JournalDb
                 connectionString, $"SELECT COUNT(*) FROM {Tables[i]}"), System.Globalization.CultureInfo.InvariantCulture);
         }
 
-        return new Counts(values[0], values[1], values[2], values[3]);
+        return new Counts(values[0], values[1], values[2], values[3], values[4]);
     }
 
     /// <summary>

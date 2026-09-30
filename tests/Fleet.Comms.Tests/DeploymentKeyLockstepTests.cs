@@ -129,6 +129,213 @@ public class DeploymentKeyLockstepTests
         Assert.Contains($"${{{key}", Read("docker-compose.example.yml"), StringComparison.Ordinal);
     }
 
+    /// <summary>The journal media keys (#388). Same two rules as the journal keys.</summary>
+    public static TheoryData<string> MediaKeys() =>
+    [
+        "FLEET_COMMS_MEDIA_ENDPOINT",
+        "FLEET_COMMS_MEDIA_BUCKET",
+        "FLEET_COMMS_MEDIA_BACKUP_DIR",
+        "FLEET_COMMS_MEDIA_ACCESS_KEY",
+        "FLEET_COMMS_MEDIA_SECRET_KEY",
+        "FLEET_COMMS_MINIO_ROOT_USER",
+        "FLEET_COMMS_MINIO_ROOT_PASSWORD",
+    ];
+
+    [Theory]
+    [MemberData(nameof(MediaKeys))]
+    public void Every_media_key_is_documented_in_the_env_example(string key)
+    {
+        Assert.Contains(key, Read(".env.example"), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [MemberData(nameof(MediaKeys))]
+    public void Every_media_key_is_wired_in_the_example_compose(string key)
+    {
+        Assert.Contains($"${{{key}", Read("docker-compose.example.yml"), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The bucket publishes no host port, and its network is internal.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Two independent guards, because they fail differently. A <c>ports:</c> entry on
+    /// <c>comms-minio</c> puts archived conversation media on a host interface. Dropping
+    /// <c>internal: true</c> from <c>comms-media</c> does not publish anything on its own, but it
+    /// removes the property that makes the absence of <c>ports:</c> structural: on a non-internal
+    /// network, a later service added to it can reach the outside and be reached.
+    /// </para>
+    /// <para>
+    /// This is the same rule the journal listener and the conversation database are held to. The
+    /// bucket is the third member of that family, and the only one whose contents cannot be
+    /// regenerated: a lost journal MESSAGE is a row, a lost object is the photo.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void The_media_bucket_publishes_no_host_port_and_sits_on_an_internal_network()
+    {
+        var compose = Read("docker-compose.example.yml");
+
+        var service = CommsServiceBlock(compose, "comms-minio", "comms-minio-init");
+        Assert.DoesNotContain("ports:", service, StringComparison.Ordinal);
+
+        var network = TopLevelBlock(compose, "comms-media");
+        Assert.Contains("internal: true", network, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The media credentials reach only the two services that need them.
+    /// </summary>
+    /// <remarks>
+    /// MUST NOT: "Only fleet-comms and fleet-comms-ops hold media credentials." The scoped pair is
+    /// the least-privilege half of that rule; the root pair is the more dangerous one and reaches
+    /// the server and its one-shot init container and nothing else.
+    /// </remarks>
+    [Fact]
+    public void The_media_credentials_are_given_only_to_their_consumers()
+    {
+        var compose = Read("docker-compose.example.yml");
+
+        var holders = Regex.Matches(compose, @"^  ([a-z0-9-]+):\s*$", RegexOptions.Multiline)
+            .Select(m => (Name: m.Groups[1].Value, Start: m.Index))
+            .ToList();
+
+        var bodies = holders
+            .Select((service, i) => (service.Name, Body: compose[service.Start..(i + 1 < holders.Count ? holders[i + 1].Start : compose.Length)]))
+            .ToArray();
+
+        // The credential COMMS reads, not the name the init container is handed. Its own
+        // environment entry has to pass the substitution through to reach `mc`, which is why
+        // matching on the environment VARIABLE name alone would list a provisioner as a holder.
+        var scoped = bodies
+            .Where(b => b.Body.Contains("Comms__Media__AccessKey=${FLEET_COMMS_MEDIA_ACCESS_KEY", StringComparison.Ordinal))
+            .Select(b => b.Name).Order(StringComparer.Ordinal).ToArray();
+        Assert.Equal(["fleet-comms", "fleet-comms-ops"], scoped);
+
+        var secret = bodies
+            .Where(b => b.Body.Contains("Comms__Media__SecretKey=${FLEET_COMMS_MEDIA_SECRET_KEY", StringComparison.Ordinal))
+            .Select(b => b.Name).Order(StringComparer.Ordinal).ToArray();
+        Assert.Equal(["fleet-comms", "fleet-comms-ops"], secret);
+
+        // Root reaches the server and the one-shot that provisions it. Nothing long-running that
+        // serves a request, and nothing that reads the bucket.
+        var root = bodies
+            .Where(b => b.Body.Contains("MINIO_ROOT_USER: ${FLEET_COMMS_MINIO_ROOT_USER", StringComparison.Ordinal))
+            .Select(b => b.Name).Order(StringComparer.Ordinal).ToArray();
+        Assert.Equal(["comms-minio", "comms-minio-init"], root);
+    }
+
+    /// <summary>The init script carries no literal credential.</summary>
+    /// <remarks>
+    /// Same rule as the MySQL account script, and for the same reason: a value in a tracked file is
+    /// a value every checkout — and every deployment that copied it without noticing — holds.
+    /// </remarks>
+    [Fact]
+    public void The_media_init_script_reads_its_credentials_from_the_environment()
+    {
+        var script = Read(Path.Combine("deploy", "comms-minio-init", "init.sh"));
+
+        foreach (var key in new[]
+                 {
+                     "MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD",
+                     "FLEET_COMMS_MEDIA_ACCESS_KEY", "FLEET_COMMS_MEDIA_SECRET_KEY",
+                 })
+        {
+            Assert.Contains("${" + key + ":?", script, StringComparison.Ordinal);
+        }
+
+        // And the policy is generated rather than literal: a bucket name baked into the tracked
+        // JSON is a policy scoped to a bucket that does not exist.
+        var policy = Read(Path.Combine("deploy", "comms-minio-init", "comms-runtime-policy.json"));
+        Assert.Contains("${comms-journal}", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"comms-journal\"", policy, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The init script runs inside the pinned MinIO client image, so it may not call another
+    /// binary, and its bash-only substitution needs bash to run in.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// MUST NOT: reintroduce <c>sed</c>, <c>awk</c>, <c>grep</c> or <c>envsubst</c> here, or switch
+    /// the shebang or the compose entrypoint back to <c>sh</c>.
+    /// </para>
+    /// <para>
+    /// The pinned <c>minio/mc</c> release image is built from upstream <c>Dockerfile.release</c> on
+    /// <c>ubi9/ubi-micro</c>: it has a shell and coreutils (<c>cat</c> included), but not <c>sed</c>,
+    /// <c>awk</c>, <c>grep</c> or <c>envsubst</c>. The <c>FROM scratch</c> / "no shell at all" claim
+    /// that used to be written here came from reading the dev <c>Dockerfile</c> instead. The old
+    /// script substituted the bucket name with <c>sed</c>, which exited 127 three steps AFTER the
+    /// bucket was created and the runtime user added — so the deployment came up with a scoped user
+    /// holding no policy and every upload, list and download answering <c>Access Denied</c>, while
+    /// the bucket and the user both looked correctly created. Nothing outside a real host could see
+    /// it. The allowlist below stays stricter than the image requires so the script never depends on
+    /// which coreutils a given base image happens to ship.
+    /// </para>
+    /// <para>
+    /// This is the cheap half of the guard; <c>scripts/check-minio-init-deps.sh</c> is the
+    /// exhaustive half and runs in CI. This one exists so the rule fails in the same place the
+    /// script is edited, and so <c>dotnet test</c> alone is enough to catch it.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void The_media_init_script_needs_nothing_the_minio_client_image_lacks()
+    {
+        var script = Read(Path.Combine("deploy", "comms-minio-init", "init.sh"));
+
+        // Strip comments and the shebang: the rule is about what the shell executes, not what the
+        // file explains.
+        var executable = string.Join(
+            '\n',
+            script.Split('\n')
+                .Select((line, i) => (line, i))
+                .Where(x => x.i > 0 && !x.line.TrimStart().StartsWith("#", StringComparison.Ordinal))
+                .Select(x => x.line));
+
+        // Anchored to a command position rather than searched as a substring: `mc admin policy
+        // update` contains "date", and a test that fires on that is a test people delete.
+        foreach (var binary in new[]
+                 {
+                     "sed", "awk", "envsubst", "cat", "grep", "tr", "cut", "head", "tail", "jq",
+                     "curl", "wget", "date", "mktemp", "dirname", "basename", "python", "openssl",
+                 })
+        {
+            Assert.False(
+                Regex.IsMatch(
+                    executable,
+                    @"(^|[;&|(`]|$\()[ \t]*" + Regex.Escape(binary) + @"[ \t<]",
+                    RegexOptions.Multiline),
+                $"init.sh calls `{binary}`, which the pinned minio/mc release image does not ship "
+                + "(ubi9/ubi-micro: shell and coreutils, no sed/awk/grep/envsubst). "
+                + "Read a file with $(<file), substitute with ${var//pattern/replacement}, and "
+                + "build text with the printf builtin.");
+        }
+
+        // The substitution is a bashism, so BOTH places that choose the interpreter have to say
+        // bash. A POSIX `sh` answers `${var//pattern/replacement}` with "Bad substitution" (measured
+        // on dash 0.5.12), which is how a cosmetic revert to `sh` would reintroduce the same broken
+        // policy — minio/mc's own /bin/sh is bash, so this is stated rather than assumed.
+        Assert.StartsWith("#!/bin/bash", script);
+        Assert.Contains(
+            "entrypoint: [\"/bin/bash\", \"/init/init.sh\"]",
+            Read("docker-compose.example.yml"),
+            StringComparison.Ordinal);
+
+        // The `mc` behaviour this script depends on (credentials on stdin, the `mc admin policy`
+        // verbs) is release-specific, so the image is pinned and the pin is checked here: an
+        // untagged `minio/mc` is a different client on every pull, and nothing else in the repo or
+        // in CI would notice the change.
+        Assert.Contains(
+            "image: minio/mc:RELEASE.2025-08-13T08-35-41Z",
+            Read("docker-compose.example.yml"),
+            StringComparison.Ordinal);
+
+        // And the script must refuse a policy whose placeholder survived, rather than hand `mc` a
+        // document that grants nothing.
+        Assert.Contains("case \"$policy_json\" in", script, StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// The signing key reaches Comms, its operator one-shot, and the orchestrator token minter.
     /// </summary>
@@ -292,6 +499,35 @@ public class DeploymentKeyLockstepTests
         foreach (var ddl in new[] { "ALL PRIVILEGES", "CREATE", "ALTER", "DROP", "INDEX", "REFERENCES" })
             Assert.DoesNotContain(ddl, runtimeGrant, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// One service's <c>services:</c> block, from its header up to the next service header.
+    /// </summary>
+    private static string CommsServiceBlock(string compose, string service, string nextService)
+    {
+        var start = compose.IndexOf($"  {service}:", StringComparison.Ordinal);
+        Assert.True(start >= 0, $"service {service} is not declared");
+
+        var after = compose[(start + 1)..];
+        var end = after.IndexOf($"\n  {nextService}:", StringComparison.Ordinal);
+        return end < 0 ? compose[start..] : compose[start..(start + 1 + end)];
+    }
+
+    /// <summary>
+    /// One top-level block (<c>services:</c>, <c>networks:</c>, <c>volumes:</c>) or one entry inside
+    /// one, sliced by indentation rather than by a named neighbour — the next entry is exactly the
+    /// thing an edit adds or removes.
+    /// </summary>
+    private static string TopLevelBlock(string compose, string key)
+    {
+        var lines = compose.Split('\n');
+        var start = Array.FindIndex(lines, l => l == $"  {key}:");
+        Assert.True(start >= 0, $"{key} is not declared");
+
+        var end = Array.FindIndex(lines, start + 1, l => l.Length > 0 && l[0] != ' ' && l[0] != '#');
+        return string.Join("\n", lines[start..(end < 0 ? lines.Length : end)]);
+    }
+
 
     private static string Read(string relativePath) =>
         File.ReadAllText(Path.Combine(RepositoryRoot().FullName, relativePath));

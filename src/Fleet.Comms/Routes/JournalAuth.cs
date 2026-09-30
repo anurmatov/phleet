@@ -30,6 +30,19 @@ public static class JournalAuth
     /// <summary>The one 401 body. Byte-identical for every refusal.</summary>
     internal static readonly byte[] UnauthorizedBody = Encoding.UTF8.GetBytes("{\"error\":\"unauthorized\"}");
 
+    /// <summary>
+    /// The 404 an upload route answers for "no such upload" and "not yours".
+    /// </summary>
+    /// <remarks>
+    /// ⚠️ <b>Byte-identical to the 401.</b> The status says "not found" and the body says nothing
+    /// more: a foreign-owned upload id and a fabricated one produce the same bytes, so the route is
+    /// not an oracle for whether someone else has opened an upload. The status differs from the
+    /// middleware's 401 only because a PUT to a path that resolves needs a 404, not a 401.
+    /// </remarks>
+    public static IResult Unauthorized() => Results.Content(
+        Encoding.UTF8.GetString(UnauthorizedBody), "application/json",
+        statusCode: StatusCodes.Status404NotFound);
+
     internal static readonly byte[] TooManyRequestsBody = Encoding.UTF8.GetBytes("{\"error\":\"too_many_requests\"}");
 
     public static void Use(WebApplication app, IReadOnlyList<byte[]> keys, JournalRuntimeStats stats)
@@ -79,11 +92,25 @@ public static class JournalAuth
     }
 
     /// <summary>The token purpose a request needs, by exact method and path; null for anything else.</summary>
+    /// <remarks>
+    /// The two upload routes need <c>ingest</c> too (#388), and the PUT is matched by prefix rather
+    /// than by an exact path because the id is in it. <b>Prefix matching is safe here and nowhere
+    /// else</b>: the check is the whole route table, so a path that starts like an upload route but
+    /// is not one still resolves to <c>ingest</c> and then 404s from the router — after being
+    /// authenticated, which is the order that must not change.
+    /// </remarks>
     private static string? RequiredPurpose(HttpRequest request)
     {
         var path = request.Path.Value;
 
         if (HttpMethods.IsPost(request.Method) && string.Equals(path, JournalEndpoints.MessagesPath, StringComparison.Ordinal))
+            return JournalTokens.PurposeIngest;
+
+        if (HttpMethods.IsPost(request.Method) && path == JournalUploadEndpoints.UploadsPath)
+            return JournalTokens.PurposeIngest;
+
+        if (HttpMethods.IsPut(request.Method)
+            && path?.StartsWith(JournalUploadEndpoints.UploadsPath + "/", StringComparison.Ordinal) == true)
             return JournalTokens.PurposeIngest;
 
         if (HttpMethods.IsGet(request.Method) && string.Equals(path, JournalEndpoints.StatusPath, StringComparison.Ordinal))

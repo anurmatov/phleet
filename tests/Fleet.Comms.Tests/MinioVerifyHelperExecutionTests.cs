@@ -61,6 +61,15 @@ public sealed class MinioVerifyHelperExecutionTests : IDisposable
         fi
 
         case "$1" in
+          ps)
+            if [ "${MOCK_BEHAVIOR:-}" = "server-inspection-error" ]; then
+              echo "daemon unavailable" >&2; exit 2
+            fi
+            if [ "${MOCK_BEHAVIOR:-}" = "server-survives" ]; then
+              for a in "$@"; do case "$a" in name=*) echo "${a#name=}" ;; esac; done
+            fi
+            exit 0 ;;
+
           image)   echo "image=sha256:mockclient"; echo "created=2026-01-01T00:00:00Z"; exit 0 ;;
           pull)    exit 0 ;;
           rm)      exit 0 ;;
@@ -80,14 +89,24 @@ public sealed class MinioVerifyHelperExecutionTests : IDisposable
             # `-f …` is the readiness probe asking for the server IP; a bare inspect is the removal
             # verification. They must answer differently or the script never gets past readiness.
             if [ "$2" = "-f" ]; then echo "172.99.0.5"; exit 0; fi
+            if [ "${MOCK_BEHAVIOR:-}" = "server-inspection-error" ]; then echo "daemon unavailable" >&2; exit 2; fi
             if [ "${MOCK_BEHAVIOR:-}" = "server-survives" ]; then echo "[{}]"; exit 0; fi
             echo "Error: No such object" >&2; exit 1
             ;;
           network)
             case "$2" in
               create)  echo "mocknetworkid"; exit 0 ;;
+              ls)
+                if [ "${MOCK_BEHAVIOR:-}" = "network-inspection-error" ]; then
+                  echo "daemon unavailable" >&2; exit 2
+                fi
+                if [ "${MOCK_BEHAVIOR:-}" = "network-survives" ]; then
+                  for a in "$@"; do case "$a" in name=*) echo "${a#name=}" ;; esac; done
+                fi
+                exit 0 ;;
               rm)      exit 0 ;;
               inspect)
+                if [ "${MOCK_BEHAVIOR:-}" = "network-inspection-error" ]; then echo "daemon unavailable" >&2; exit 2; fi
                 if [ "${MOCK_BEHAVIOR:-}" = "network-survives" ]; then echo "[{}]"; exit 0; fi
                 echo "Error: No such network" >&2; exit 1
                 ;;
@@ -99,6 +118,16 @@ public sealed class MinioVerifyHelperExecutionTests : IDisposable
         case "$*" in
           *"/init/init.sh"*)
             if [ "${MOCK_BEHAVIOR:-}" = "init-fails" ]; then echo "simulated init.sh failure" >&2; exit 7; fi
+            # Model protected host files, not the contents of a separate named volume.
+            for a in "$@"; do
+              case "$a" in *":/mc")
+                case "${MOCK_BEHAVIOR:-}" in
+                  *inspection-error) ;; # Isolate the inspection failure from mount failures.
+                  *) touch "${a%%:/mc}/protected" ;;
+                esac
+                ;;
+              esac
+            done
             echo "Added 'comms' successfully."
             exit 0
             ;;
@@ -118,7 +147,19 @@ public sealed class MinioVerifyHelperExecutionTests : IDisposable
         # does what it is told, so the normal path proves the removal command is well-formed and the
         # script still reaches a verified PASS.
         case "$*" in
-          *"rm -rf -- "*) exit 0 ;;
+          *"rm -rf -- "*)
+            if [ "${MOCK_BEHAVIOR:-}" = "bind-survives" ]; then exit 1; fi
+            # Only an absolute bind source reaches the host's protected files.
+            # A named volume mounted at the same destination is separate storage.
+            for a in "$@"; do
+              case "$a" in /*:/work)
+                host=${a%:/work}
+                log "CLEANUP_BIND: $host"
+                /bin/rm -rf -- "$host/mc-config" "$host/runtime-config" "$host/init"
+                ;;
+              esac
+            done
+            exit 0 ;;
         esac
 
         exit 0
@@ -136,6 +177,18 @@ public sealed class MinioVerifyHelperExecutionTests : IDisposable
 
         var docker = Path.Combine(_root, "bin", "docker");
         File.WriteAllText(docker, DockerStandIn);
+        var rm = Path.Combine(_root, "bin", "rm");
+        File.WriteAllText(rm, """
+            #!/bin/bash
+            for path in "$@"; do
+              if [ -f "$path/mc-config/protected" ]; then
+                echo "simulated root-owned files: permission denied" >&2
+                exit 1
+              fi
+            done
+            exec /bin/rm "$@"
+            """);
+        File.SetUnixFileMode(rm, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         File.SetUnixFileMode(
             docker,
             UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
@@ -206,11 +259,11 @@ public sealed class MinioVerifyHelperExecutionTests : IDisposable
     }
 
     /// <summary>
-    /// A bind volume that survives teardown must be reported and must not exit 0. The first version
+    /// A host bind cleanup that fails must be reported and must not exit 0. The first version
     /// printed PASS over a failed teardown because every cleanup step ended in <c>|| true</c>.
     /// </summary>
     [Fact]
-    public void A_surviving_bind_volume_is_reported_and_does_not_exit_zero()
+    public void A_failed_bind_cleanup_is_reported_and_does_not_exit_zero()
     {
         var (exit, output) = Run(behavior: "bind-survives");
 
@@ -309,6 +362,28 @@ public sealed class MinioVerifyHelperExecutionTests : IDisposable
             + string.Join(", ", mounts));
 
         Assert.Contains(mounts, m => m.EndsWith("runtime-config", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("server-inspection-error")]
+    [InlineData("network-inspection-error")]
+    public void Inspection_errors_are_not_proof_of_absence(string behavior)
+    {
+        var (exit, output) = Run(behavior);
+        Assert.NotEqual(0, exit);
+        Assert.Contains("CLEANUP FAIL", output, StringComparison.Ordinal);
+        Assert.DoesNotContain("PASS:", output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Cleanup_reaches_host_files_through_a_scoped_bind_not_a_named_volume()
+    {
+        var (exit, output) = Run("default");
+        Assert.True(exit == 0, output);
+        var lines = File.ReadAllLines(_log);
+        Assert.Contains(lines, l => l.StartsWith("CLEANUP_BIND: ", StringComparison.Ordinal));
+        Assert.DoesNotContain(lines, l => l.StartsWith("ARGS: volume create", StringComparison.Ordinal));
+        Assert.Empty(Directory.GetDirectories(_root, "tmp.*"));
     }
 
     // ── harness ──────────────────────────────────────────────────────────────────────────

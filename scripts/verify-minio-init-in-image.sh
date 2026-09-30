@@ -49,13 +49,13 @@ fi
 RUNID=$(date +%s)-$$-${RANDOM}
 NET=zz-minio-verify-$RUNID
 SERVER=zz-minio-server-$RUNID
-BIND=zz-minio-verify-bind-$RUNID
 BUCKET=zz-verify-$RUNID
 AK=zzverify$RUNID
 SK=zz-verify-secret-$RUNID
 ROOT_USER=zzverifyroot
 ROOT_PASS=zz-verify-root-$RUNID
 WORKDIR=$(mktemp -d)
+WORKDIR=$(cd "$WORKDIR" && pwd -P)
 MC_CONFIG="$WORKDIR/mc-config"
 # The scoped probe gets its OWN config directory. Sharing $MC_CONFIG with init.sh would hand the
 # probe the root `comms` alias that init.sh just wrote there, so a probe that is supposed to hold
@@ -68,7 +68,6 @@ mkdir -p "$MC_CONFIG" "$RUNTIME_CONFIG"
 # — a run that failed before `docker network create` must not go looking for a network to delete.
 CREATED_SERVER=0
 CREATED_NETWORK=0
-CREATED_BIND=0
 
 # ⚠️ `-i` IS NOT COSMETIC. Two invocations pipe credentials from the host into the container
 # (`printf … | run_in_image … alias set …`). Without `-i`/`--interactive` Docker never attaches the
@@ -102,44 +101,45 @@ cleanup() {
 
   if [ "$CREATED_SERVER" -eq 1 ]; then
     docker rm -f "$SERVER" >/dev/null 2>&1 || true
-    if docker inspect "$SERVER" >/dev/null 2>&1; then
-      echo "CLEANUP FAIL: server $SERVER still exists" >&2
+    if remaining=$(docker ps -a --filter "name=$SERVER" --format '{{.Names}}'); then
+      while IFS= read -r name; do
+        if [ "$name" = "$SERVER" ]; then
+          echo "CLEANUP FAIL: server $SERVER still exists" >&2
+          CLEANUP_FAILED=1
+        fi
+      done <<< "$remaining"
+    else
+      echo "CLEANUP FAIL: could not inspect remaining containers" >&2
       CLEANUP_FAILED=1
     fi
   fi
 
   if [ "$CREATED_NETWORK" -eq 1 ]; then
     docker network rm "$NET" >/dev/null 2>&1 || true
-    if docker network inspect "$NET" >/dev/null 2>&1; then
-      echo "CLEANUP FAIL: network $NET still exists" >&2
+    if remaining=$(docker network ls --filter "name=$NET" --format '{{.Name}}'); then
+      while IFS= read -r name; do
+        if [ "$name" = "$NET" ]; then
+          echo "CLEANUP FAIL: network $NET still exists" >&2
+          CLEANUP_FAILED=1
+        fi
+      done <<< "$remaining"
+    else
+      echo "CLEANUP FAIL: could not inspect remaining networks" >&2
       CLEANUP_FAILED=1
     fi
   fi
 
-  # Root-owned files from the container are removed BY A CONTAINER, which has the uid to unlink them.
-  # The bind is made here rather than at each run: the mount is named, so an interrupted run cannot
-  # leak a mount, and the removal target is always this run's own directory — never a path supplied
-  # from outside.
+  # An absolute host bind reaches the actual files; a named volume is separate storage.
+  # Mount only this run's mktemp directory, never its parent. Remove fixed children, not the
+  # mount point, then let the host remove its own directory. No interpolated deletion command.
   if [ -d "$WORKDIR" ]; then
-    if docker volume create "$BIND" >/dev/null 2>&1; then
-      CREATED_BIND=1
-    fi
-    # -v goes BEFORE the image. After the image it is argv for the entrypoint, so the mount silently
-    # does not happen and the removal "succeeds" against an empty /work.
-    run_in_image -v "$BIND:$WORKDIR" --entrypoint /bin/sh "$IMAGE" \
-      -c "rm -rf -- '$WORKDIR'" >/dev/null 2>&1 || true
-    # The host-side user still owns the files it made itself, so try that too.
-    rm -rf "$WORKDIR" 2>/dev/null || true
-    if [ -d "$WORKDIR" ]; then
-      echo "CLEANUP FAIL: $WORKDIR still exists — a root-owned temp dir was left on this host" >&2
+    run_in_image --network none -v "$WORKDIR:/work" --entrypoint /bin/sh "$IMAGE" \
+      -c 'rm -rf -- /work/mc-config /work/runtime-config /work/init' || {
+      echo "CLEANUP FAIL: could not remove temporary files through the host bind" >&2
       CLEANUP_FAILED=1
-    fi
-  fi
-
-  if [ "$CREATED_BIND" -eq 1 ]; then
-    docker volume rm "$BIND" >/dev/null 2>&1 || true
-    if docker volume inspect "$BIND" >/dev/null 2>&1; then
-      echo "CLEANUP FAIL: bind volume $BIND still exists" >&2
+    }
+    if ! rm -rf -- "$WORKDIR" || [ -e "$WORKDIR" ]; then
+      echo "CLEANUP FAIL: $WORKDIR still exists or could not be removed" >&2
       CLEANUP_FAILED=1
     fi
   fi
@@ -155,13 +155,13 @@ cleanup() {
   if [ "${VERIFIED:-0}" -eq 1 ] && [ "$CLEANUP_FAILED" -eq 0 ]; then
     echo "PASS: verification succeeded and teardown was confirmed."
     echo "Paste the blocks above into the PR — that is the evidence the review asked for."
-    return 0
+    exit 0
   fi
 
   if [ "${VERIFIED:-0}" -eq 1 ]; then
     echo "INCOMPLETE: verification succeeded but cleanup did not confirm teardown." >&2
   fi
-  return 1
+  exit 1
 }
 # Every exit path tears the disposable stack down, including a failure mid-verification.
 trap cleanup EXIT

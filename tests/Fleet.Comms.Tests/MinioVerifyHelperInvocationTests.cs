@@ -86,7 +86,7 @@ public sealed class MinioVerifyHelperInvocationTests
         foreach (var network in networks)
         {
             Assert.True(
-                network.Contains("RUNID", StringComparison.Ordinal) || network.StartsWith("$", StringComparison.Ordinal),
+                network == "none" || network.Contains("RUNID", StringComparison.Ordinal) || network.StartsWith("$", StringComparison.Ordinal),
                 $"`--network {network}` is a fixed network. It must be the per-run disposable one, "
                 + "so a failed run cannot leave the verifier pointed at shared infrastructure.");
         }

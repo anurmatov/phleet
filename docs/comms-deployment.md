@@ -263,9 +263,21 @@ with no policy and every call answered `Access Denied`, and no check we had coul
 host: it prints the pinned image's identity (image id, `mc` version, and which of `sed`/`awk`/`grep`/
 `envsubst` are actually present), runs the repo's `init.sh` inside the pinned image using the same
 `:/init:ro` mount and `/bin/bash` entrypoint as compose, then lists the bucket with **only** the
-scoped runtime credentials — which is what proves the policy is *attached*, not merely created. It
-uses a throwaway bucket and user and removes both. Run it before enabling media on a new host; CI
-cannot, because MinIO publishes no pullable image.
+scoped runtime credentials — which is what proves the policy is *attached*, not merely created. Run it
+before enabling media on a new host; CI cannot, because MinIO publishes no pullable image.
+
+It creates **its own network and its own MinIO server** and never names the live bucket. That is
+load-bearing: `init.sh` hardcodes the policy name `comms-journal-runtime`, so a verifier pointed at
+the live server would create that policy over the live one and then remove it during cleanup — the
+exact `Access Denied` failure the provisioner exists to prevent. The compose service name is aliased
+inside the container to the disposable server, which is what lets `init.sh` run byte-for-byte
+unmodified. It needs `FLEET_COMMS_VERIFY_SERVER_IMAGE` because `minio/mc` ships the client only.
+
+⚠️ Every docker flag goes **before** the image name. `docker run … "$IMAGE" --entrypoint /bin/bash -c …`
+reads correctly and does nothing of the kind: everything after the image is argv for the container's
+`ENTRYPOINT`, and this image's is `["mc"]`, so the flags are handed to `mc`.
+`MinioVerifyHelperInvocationTests` fails the build on that, on a live network or bucket name, on a
+missing `--entrypoint`, and on a swallowed cleanup error — the four defects the first version had.
 
 ### Keys
 

@@ -29,6 +29,7 @@
         "plus",
         "pro",
         "prolite",
+        "promax",
         "team",
         "self_serve_business_prolite",
         "self_serve_business_usage_based",
@@ -174,6 +175,13 @@
             "null"
           ]
         },
+        "normalModelSlug": {
+          "description": "Normal model whose display name and reasoning options describe this quota alias.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "planType": {
           "anyOf": [
             {
@@ -281,6 +289,13 @@
       "description": "Account associated with this usage snapshot, when supplied by the backend.",
       "type": [
         "string",
+        "null"
+      ]
+    },
+    "ordinaryUsageAllowed": {
+      "description": "Backend permission for ordinary included usage, validated against the active account. Null means unavailable; clients must not infer recovery from percentages or reset times.",
+      "type": [
+        "boolean",
         "null"
       ]
     },

@@ -10,7 +10,7 @@
 # the bucket and the user both looked correctly created. No CI job could see any of it.
 #
 # WHAT COUNTS AS A COMMAND. Comments and the shebang are stripped, quoted strings are removed
-# (they are data, never commands), and continuation lines are joined, so this reads what the shell
+# (literal data is skipped, nested substitutions are commands), and continuation lines are joined, so this reads what the shell
 # reads. A name counts only at a command position — start of line, or after `;` `|` `&` `&&` `||`
 # `$(` or a backtick. Two consequences that matter:
 #
@@ -37,8 +37,29 @@ fi
 
 EXTERNAL=$(
 grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -v '^#!' \
-| sed -E 's/[0-9]*>&?[^ \t)]*/ /g; s/"[^"]*"/STRIPPED/g' \
-| sed -E "s/'[^']*'/STRIPPED/g" \
+| awk '
+    # Remove literal quote contents but retain commands inside $(...) and backticks.
+    function executable(s,    i,c,nextc,q,depth,saved,out) {
+      q = ""; depth = 0; out = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s,i,1); nextc = substr(s,i+1,1)
+        if (c == "\\" && q != "\047") { i++; continue }
+        if (q == "\047") { if (c == "\047") q = ""; continue }
+        if (c == "\047" && q == "") { q = c; out = out " "; continue }
+        if (c == "\042") { q = q == "\042" ? "" : "\042"; out = out " "; continue }
+        if (c == "$" && nextc == "(") {
+          saved[++depth] = q; q = ""; out = out "\n"; i++; continue
+        }
+        if (c == ")" && depth > 0 && q == "") {
+          q = saved[depth--]; out = out "\n"; continue
+        }
+        if (c == "`") { out = out "\n"; q = ""; continue }
+        if (q == "") out = out c
+      }
+      return out
+    }
+    { print executable($0) }
+' \
 | awk '
     BEGIN {
       split("mc set echo printf read cd export local return exit test true false if then else elif fi for while until do done case esac function shift trap wait eval exec getopts alias umask times ulimit command type hash break continue select time :", ok, " ")

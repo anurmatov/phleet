@@ -155,6 +155,7 @@ public sealed class MinioVerifyHelperExecutionTests : IDisposable
               case "$a" in /*:/work)
                 host=${a%:/work}
                 log "CLEANUP_BIND: $host"
+                chmod -R u+rwX "$host/mc-config" "$host/runtime-config" "$host/init"
                 /bin/rm -rf -- "$host/mc-config" "$host/runtime-config" "$host/init"
                 ;;
               esac
@@ -198,17 +199,11 @@ public sealed class MinioVerifyHelperExecutionTests : IDisposable
 
     public void Dispose()
     {
-        try
-        {
-            if (Directory.Exists(_root))
-            {
-                Directory.Delete(_root, recursive: true);
-            }
-        }
-        catch (IOException)
-        {
-            // Scratch directory; a leftover cannot change a verdict.
-        }
+        if (!Directory.Exists(_root)) return;
+        foreach (var directory in Directory.GetDirectories(_root, "*", SearchOption.AllDirectories).Prepend(_root))
+            File.SetUnixFileMode(directory, File.GetUnixFileMode(directory)
+                | UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        Directory.Delete(_root, recursive: true);
     }
 
     /// <summary>

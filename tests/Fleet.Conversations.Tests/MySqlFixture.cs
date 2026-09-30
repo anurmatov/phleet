@@ -92,7 +92,8 @@ public sealed class MySqlFixture : IAsyncLifetime
     {
         if (_database.Length == 0) return;
 
-        var builder = new MySqlConnectionStringBuilder(_adminConnectionString) { Database = string.Empty };
+        await ClearSchemaPoolsAsync(_database);
+        var builder = Pooled(new MySqlConnectionStringBuilder(_adminConnectionString) { Database = string.Empty });
 
         await using var connection = new MySqlConnection(builder.ConnectionString);
         await connection.OpenAsync();
@@ -186,11 +187,22 @@ public sealed class MySqlFixture : IAsyncLifetime
             Password = password,
         };
 
-        return new RestrictedAccount(user, builder.ConnectionString, this);
+        return new RestrictedAccount(user, Pooled(builder).ConnectionString, this);
+    }
+
+    private async Task ClearSchemaPoolsAsync(string name)
+    {
+        foreach (var configured in new[] { _adminConnectionString, Environment.GetEnvironmentVariable(RuntimeVariable) })
+        {
+            if (string.IsNullOrWhiteSpace(configured)) continue;
+            await using var pool = new MySqlConnection(WithDatabase(configured, name));
+            await MySqlConnection.ClearPoolAsync(pool);
+        }
     }
 
     internal async Task DropDatabaseAsync(string name)
     {
+        await ClearSchemaPoolsAsync(name);
         await using var connection = new MySqlConnection(ServerConnectionString());
         await connection.OpenAsync();
         await using var drop = new MySqlCommand($"DROP DATABASE IF EXISTS `{name}`", connection);
@@ -287,6 +299,8 @@ public sealed class MySqlFixture : IAsyncLifetime
     private static MySqlConnectionStringBuilder Pooled(MySqlConnectionStringBuilder builder)
     {
         builder.MaximumPoolSize = 10;
+        builder.ConnectionTimeout = 5;
+        builder.DefaultCommandTimeout = 10;
         return builder;
     }
 }
@@ -311,7 +325,12 @@ public sealed class RestrictedAccount(string user, string connectionString, MySq
 
     public string ConnectionString { get; } = connectionString;
 
-    public ValueTask DisposeAsync() => new(fixture.DropAccountAsync(User));
+    public async ValueTask DisposeAsync()
+    {
+        await using var pool = new MySqlConnection(ConnectionString);
+        await MySqlConnection.ClearPoolAsync(pool);
+        await fixture.DropAccountAsync(User);
+    }
 }
 
 /// <summary>A conversation row lock held by a second connection, released on disposal.</summary>

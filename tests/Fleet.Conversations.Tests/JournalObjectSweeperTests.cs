@@ -44,7 +44,7 @@ public sealed class JournalObjectSweeperTests : IAsyncLifetime
     /// behind in a shared schema is indistinguishable from a sweep bug. A scratch database is the
     /// only way "1 row remains" means what the AC says it means.
     /// </remarks>
-    private static readonly MySqlFixture Shared = new();
+    private readonly MySqlFixture Shared = new();
 
     private FakeBucket _bucket = null!;
     private ManualTime _time = null!;
@@ -72,13 +72,10 @@ public sealed class JournalObjectSweeperTests : IAsyncLifetime
         await _bucket.DisposeAsync();
         await _scratch.DisposeAsync();
 
-        // See the note in `JournalS3UploadTests`: a static fixture is never disposed by xUnit, and
-        // the pool it holds counts against the server's `max_connections`.
-        if (Interlocked.Exchange(ref _sharedDisposed, 1) == 0)
-            await Shared.DisposeAsync();
+        // Each test owns and releases its fixture schema and pools.
+        await Shared.DisposeAsync();
     }
 
-    private static int _sharedDisposed;
 
     private JournalObjectSweeper Sweeper() =>
         new(Db, _bucket, NullLogger.Instance, _stats, _time);

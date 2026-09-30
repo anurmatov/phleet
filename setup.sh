@@ -614,6 +614,19 @@ if [[ "$_comms_enabled" == "true" ]]; then
         case "$_media_answer" in
           [yY]*)
             $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_MEDIA_ENDPOINT" "http://comms-minio:9000"
+
+            # Write the bucket name too, rather than leaving it to compose's default.
+            #
+            # ⚠️ The orchestrator derives the AGENT-side media flag (`Journal:MediaEnabled`) from
+            # this .env file, because nothing on the agent side can know a bucket exists. Compose
+            # defaults `FLEET_COMMS_MEDIA_BUCKET` to `comms-journal` on its own, so the key being
+            # absent here looked harmless — until the orchestrator read it as "no media" and every
+            # agent on a host that had just said YES to media journalled every attachment as
+            # `not_archived(media_disabled)`. Silent, and permanent until reprovisioned.
+            #
+            # Whether the gate reads one key or two, the recorded decision is now complete in the
+            # file: `grep FLEET_COMMS_MEDIA .env` shows the whole choice an operator made.
+            $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_MEDIA_BUCKET" "comms-journal"
             ;;
           *)
             $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_MEDIA_ENDPOINT" ""

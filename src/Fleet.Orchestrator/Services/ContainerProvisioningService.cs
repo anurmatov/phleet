@@ -1445,12 +1445,19 @@ public sealed class ContainerProvisioningService(
             //    the agent journals every attachment as `not_archived(media_disabled)` forever and
             //    the media plane never runs, while Comms happily accepts uploads.
             //
-            //    The deployment's Comms media settings ARE that knowledge, and the orchestrator
-            //    already reads the same `FLEET_COMMS_*` env file for the Codex server URL, so the
-            //    gate is "endpoint and bucket are both set here". The scoped credential pair is NOT
-            //    part of the gate on purpose: an agent must not read a secret to decide a boolean,
-            //    and a half-provisioned bucket is Comms' startup failure to raise, not the agent's
-            //    to guess at.
+            //    The gate is the ENDPOINT ALONE, which is the same key the compose file uses to
+            //    enable media (`Comms__Media__Endpoint=${FLEET_COMMS_MEDIA_ENDPOINT:-}`) and the
+            //    same key `upgrade.sh` uses to decide whether to start the `comms-media` profile.
+            //    There is therefore exactly one switch, and no second condition that can be unset
+            //    while the bucket is running. An earlier version of this also required
+            //    `FLEET_COMMS_MEDIA_BUCKET`, which `setup.sh` never writes — compose defaults it to
+            //    `comms-journal` — so a fresh install that said yes to media provisioned every
+            //    agent with the flag OFF. That is the bug this line exists to avoid, not a
+            //    theoretical one.
+            //
+            //    The bucket name and the scoped credential pair are deliberately NOT part of the
+            //    gate: an agent must not read a secret to decide a boolean, and a half-provisioned
+            //    bucket is Comms' startup failure to raise, not the agent's to guess at.
             MediaEnabled: MediaEndpointIsConfigured());
     }
 
@@ -1462,11 +1469,20 @@ public sealed class ContainerProvisioningService(
     /// the Codex URL — the values are deployment-scoped, and the orchestrator's own process
     /// environment is not where the Comms media settings live.
     /// </remarks>
-    private bool MediaEndpointIsConfigured()
+    /// <summary>
+    /// Whether the deployment's media switch is on, read from the same <c>.env</c> the
+    /// orchestrator reads the Codex server URL from.
+    /// </summary>
+    /// <remarks>
+    /// <c>LoadEnvFile</c> keeps <c>KEY=</c> as an empty value and skips a commented
+    /// <c>#KEY=…</c>, so both "declined media" (<c>setup.sh</c> writes a blank endpoint) and
+    /// "never asked" (the line is commented out in <c>.env.example</c>) read as off. No
+    /// <c>FLEET_COMMS_MEDIA_BUCKET</c> condition: see the caller for why.
+    /// </remarks>
+    internal bool MediaEndpointIsConfigured()
     {
         var env = LoadEnvFile(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env");
-        return HasMeaningfulValue(env, "FLEET_COMMS_MEDIA_ENDPOINT")
-            && HasMeaningfulValue(env, "FLEET_COMMS_MEDIA_BUCKET");
+        return HasMeaningfulValue(env, "FLEET_COMMS_MEDIA_ENDPOINT");
     }
 
     private static bool HasMeaningfulValue(IReadOnlyDictionary<string, string> env, string key) =>

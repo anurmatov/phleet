@@ -206,6 +206,29 @@ else
     fi
   fi
 
+  # A host that opted into media before this key was recorded has an endpoint and no bucket name.
+  # Compose defaults the name, so its own services were always fine — but the ORCHESTRATOR derives
+  # the AGENT-side media flag (`Journal:MediaEnabled`) from this file, and an absent key there meant
+  # every agent journalled attachments as `not_archived(media_disabled)` on a deployment that had a
+  # working bucket. Silent, and it only clears on reprovision.
+  #
+  # Backfilled only when an endpoint is present, and never over a name the operator chose: the
+  # runtime policy is scoped to one exact bucket, so guessing here would grant access to a bucket
+  # that does not exist. Idempotent — after the first upgrade this changes nothing.
+  if [[ -n "$MEDIA_ENDPOINT" ]] && ! grep -qE "^FLEET_COMMS_MEDIA_BUCKET=" "$ENV_FILE"; then
+    [[ -s "$ENV_FILE" && -n "$(tail -c 1 "$ENV_FILE")" ]] && printf '\n' >> "$ENV_FILE"
+    printf 'FLEET_COMMS_MEDIA_BUCKET=comms-journal\n' >> "$ENV_FILE"
+    ok "Recorded FLEET_COMMS_MEDIA_BUCKET=comms-journal for the existing media endpoint"
+  fi
+
+  # The agent-side flag is DERIVED at provisioning time, so a reprovision is what turns an agent's
+  # uploader on — restarting the container does not. Say so rather than let an operator conclude the
+  # upgrade enabled it.
+  if [[ -n "$MEDIA_ENDPOINT" ]]; then
+    warn "Media is enabled: reprovision the agents that journal media to pick up Journal:MediaEnabled."
+    warn "  POST /api/agents/<name>/reprovision, or the dashboard's Reprovision action."
+  fi
+
   (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env "${COMMS_PROFILE_ARGS[@]}" up -d)
   ok "Services started"
 

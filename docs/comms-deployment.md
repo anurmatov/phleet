@@ -214,8 +214,13 @@ have.
 ## Journal media (slice 4)
 
 The journal's object store, for installs that archive attachment bytes. Off unless
-`FLEET_COMMS_MEDIA_ENABLED=true`, and off means the bucket is not deployed, no credentials exist,
-and no service holds any.
+`FLEET_COMMS_MEDIA_ENDPOINT` is set to a non-blank value, and off means the bucket is not deployed,
+no credentials exist, and no service holds any.
+
+⚠️ **There is no `FLEET_COMMS_MEDIA_ENABLED`.** An earlier version of this page named a boolean
+that no script, compose file or setting ever implemented, and an operator who set it would have
+gotten nothing. `FLEET_COMMS_MEDIA_ENDPOINT` is the switch: a blank or absent value is off, exactly
+as it is for Comms and for `upgrade.sh`'s profile decision.
 
 ### What it adds
 
@@ -238,12 +243,15 @@ the repo contains no deployment-specific value.
 
 | Key | What it is |
 |---|---|
-| `FLEET_COMMS_MEDIA_ENABLED` | profile switch; also sets `Comms__Media__Endpoint` |
-| `FLEET_COMMS_MEDIA_ENDPOINT` | the bucket URL on the internal network |
-| `FLEET_COMMS_MEDIA_BUCKET` | default `comms-journal` |
+| `FLEET_COMMS_MEDIA_ENDPOINT` | **the switch.** the bucket URL on the internal network; also derives each agent's `Journal:MediaEnabled` |
+| `FLEET_COMMS_MEDIA_BUCKET` | default `comms-journal`; `setup.sh` records it, compose defaults it |
 | `FLEET_COMMS_MEDIA_ACCESS_KEY` / `_SECRET_KEY` | the **scoped** runtime credentials, not the root ones |
 | `FLEET_COMMS_MINIO_ROOT_USER` / `_PASSWORD` | root credentials, used only by the init container and the sidecar |
 | `FLEET_COMMS_MEDIA_BACKUP_DIR` | host directory the ops container writes `media backup` output to |
+
+Because the agent-side flag is **derived at provisioning**, changing `FLEET_COMMS_MEDIA_ENDPOINT`
+means **reprovisioning** the agents that journal media — restarting a container does not pick it up.
+`upgrade.sh` prints that reminder when media is on.
 
 Only `fleet-comms` and `fleet-comms-ops` receive the media credentials. The config API cannot read
 or write `FLEET_COMMS_MEDIA_*` or `FLEET_COMMS_MINIO_*` — they are on the orchestrator's denylist,

@@ -202,7 +202,7 @@ the old key and recreate again. Its tokens then answer `401`.
 | `FLEET_COMMS_JOURNAL_KEY` | `Comms__Journal__TokenKeys` (`fleet-comms` and `fleet-comms-ops` only) | empty |
 | `FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS` | `Comms__Journal__ExcludedChatIds=${FLEET_GROUP_CHAT_ID},${…}` | empty |
 | `FLEET_COMMS_JOURNAL_RETENTION` | `Comms__Journal__MessageRetention` | `365.00:00:00`, minimum `1.00:00:00` |
-| `FLEET_COMMS_MEDIA_ENDPOINT` + `FLEET_COMMS_MEDIA_BUCKET` | `Journal:MediaEnabled` **on each agent** (see below) | `false` |
+| `FLEET_COMMS_MEDIA_ENDPOINT` | `Journal:MediaEnabled` **on each agent** (see below) | `false` |
 
 ### `Journal:MediaEnabled` — the agent's half of the media switch
 
@@ -215,8 +215,18 @@ Two settings enable media, on two different containers, and only one of them is 
 
 **`Journal:MediaEnabled` is derived at provisioning, never configured per agent.** The orchestrator
 writes it into the agent's `appsettings.json` when — and only when — this deployment's provisioning
-env file sets both `FLEET_COMMS_MEDIA_ENDPOINT` and `FLEET_COMMS_MEDIA_BUCKET` to non-blank values
+env file sets `FLEET_COMMS_MEDIA_ENDPOINT` to a non-blank value
 (`ContainerProvisioningService.MediaEndpointIsConfigured`).
+
+The ENDPOINT ALONE is the gate, because that is the key compose treats as the media switch
+(`Comms__Media__Endpoint=${FLEET_COMMS_MEDIA_ENDPOINT:-}`) and the key `upgrade.sh` uses to decide
+whether to start the `comms-media` profile. One switch, three readers, no way to disagree.
+
+⚠️ It deliberately does **not** also require `FLEET_COMMS_MEDIA_BUCKET`. That key is defaulted by
+compose and was not written by `setup.sh`, so requiring it meant a fresh install that accepted media
+provisioned every agent with the flag **off** — media silently off on a deployment with a working
+bucket. `setup.sh` now records the bucket name too, so `grep FLEET_COMMS_MEDIA .env` shows the whole
+decision, but the gate does not depend on that.
 
 That derivation is the design, not a convenience. Nothing on the agent side can know whether a
 bucket exists, and a flag nobody can set is a flag that is never on: without it the agent journals
@@ -225,9 +235,10 @@ the media plane silently never runs. The agent's own env is denylisted for media
 cannot be the source either — an agent must not read a secret to decide a boolean.
 
 Because it is derived, **changing it means reprovisioning the agent**, not restarting it, and turning
-media off for one agent is not possible without turning it off for the deployment. The scoped
-credential pair is deliberately outside the gate: a half-provisioned bucket is Comms' startup failure
-to raise, not the agent's to guess at.
+media off for one agent is not possible without turning it off for the deployment. `upgrade.sh` prints
+that reminder when media is on. The bucket name and the scoped credential pair are outside the gate
+on purpose: an agent must not read a secret to decide a boolean, and a half-provisioned bucket is
+Comms' startup failure to raise, not the agent's to guess at.
 
 Every `FLEET_COMMS_JOURNAL_` key is denied by the orchestrator config API: it is never returned by
 `/api/config/all` or `/api/config/values` and cannot be written by `set_config_values`. Edit `.env`.

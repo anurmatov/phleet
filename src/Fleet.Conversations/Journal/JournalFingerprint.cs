@@ -81,23 +81,29 @@ public static class JournalFingerprint
             if (!first) b.Append(',');
             first = false;
 
-            // Attachment keys, in ordinal order: byteSize, fileUniqueId, kind, mimeType, objectId,
-            // ordinal.
+            // Attachment keys, in ordinal order: byteSize, fileUniqueId, kind, mimeType, ordinal.
             //
-            // ⚠️ `objectId` was added by slice 4 (#388) and is the ONLY change to this encoding
-            //    since 0004. It is included because an archived attachment and a declined one are
-            //    different messages: two runtimes that disagreed about whether to archive the same
-            //    photo must not answer "duplicate" to each other.
+            // ⚠️ NO object id, and the reason is a conflict that dead-letters real messages.
             //
-            //    It is the SERVER-resolved object id — the committed winner's id, for a dedup loser
-            //    as much as for a winner — never the upload id the caller sent. MySqlJournalStore
-            //    builds the record it fingerprints from the media plan, so both halves of the
-            //    ingest agree on it and a retry of a committed submission replays as `duplicate`
-            //    instead of `conflict`.
+            //    The fingerprint identifies the MESSAGE. Two observers of one Telegram message saw
+            //    the same message, so they must fingerprint it identically — but whether any one of
+            //    them ARCHIVED the photo is a per-agent fact, and it differs for ordinary reasons:
+            //    `upgrade.sh` reprovisions agents one at a time so two of them run different media
+            //    policies for a while, one download failed, one size cap is lower, one saw the file
+            //    id after it expired.
             //
-            //    Every record with no attachment names an object, which is every record any
-            //    deployment could hold before this slice, so `,\"objectId\":null` is what existing
-            //    golden vectors still encode and they are unchanged.
+            //    Slice 4 briefly encoded the server-resolved object id here, on the argument that an
+            //    archived and a declined attachment are different records. They are different rows —
+            //    and that is what the attachment table is for — but encoding the difference made the
+            //    archiver and the non-archiver disagree about the MESSAGE. The second to drain got
+            //    `409 conflict`, the drainer dead-lettered it, and in the order where the
+            //    non-archiver drains first the archiver's proved bytes were never attached and were
+            //    swept 24 h later.
+            //
+            //    So this encoding is main's, unchanged, and that is the property to preserve: no
+            //    field the observers cannot agree on may enter it. `JournalAttachment.ObjectId`
+            //    stays server-resolved and still names the row the attachment points at; it is
+            //    simply not identity.
             b.Append("{\"byteSize\":");
             Integer(b, a.ByteSize);
             b.Append(",\"fileUniqueId\":");
@@ -106,8 +112,6 @@ public static class JournalFingerprint
             String(b, JournalWire.Of(a.Kind));
             b.Append(",\"mimeType\":");
             String(b, a.MimeType);
-            b.Append(",\"objectId\":");
-            String(b, a.ObjectId);
             b.Append(",\"ordinal\":");
             Integer(b, a.Ordinal);
             b.Append('}');

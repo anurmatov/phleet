@@ -779,6 +779,235 @@ public sealed class JournalS3UploadTests(S3Fixture fixture) : IAsyncLifetime
     }
 
     /// <summary>
+    /// Two observers of one message that disagree about archiving it are not a conflict, in either
+    /// drain order.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A Telegram message reaches several bots, and each bot journals it as its own observer. Whether
+    /// any one of them archives the photo on it is a per-agent decision that can differ for entirely
+    /// ordinary reasons: a reprovisioned agent runs a different media policy (<c>upgrade.sh</c>
+    /// reprovisions agents one at a time, so the skew is the documented rollout state), one agent's
+    /// download failed, one agent's size cap is lower, one agent saw the file id after it expired.
+    /// </para>
+    /// <para>
+    /// ⚠️ The fingerprint must not express that disagreement. It identifies the MESSAGE, and the two
+    /// observers saw the same message. Encoding the resolved object id made the archiver and the
+    /// non-archiver fingerprint differently, so the second to drain got <c>409 conflict</c> — and the
+    /// drainer dead-letters a conflict, which means the message is lost to that observer and the
+    /// operator has to replay a queue by hand.
+    /// </para>
+    /// <para>
+    /// The worse half is the other order. If the non-archiver drains first, the message is stored
+    /// with a <c>not_archived</c> attachment; the archiver then conflicts, never attaches, and its
+    /// uploaded object is swept 24 h later. The bytes it paid for and proved are simply gone, and
+    /// nothing in the journal says they ever existed.
+    /// </para>
+    /// <para>
+    /// Both orders are therefore tested, and both must end the same way: two observers, one committed
+    /// object, the attachment pointing at it, and no dead letter.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Observers_that_disagree_about_archiving_still_join_as_observers(bool archiverDrainsFirst)
+    {
+        var photo = new byte[4200];
+        Random.Shared.NextBytes(photo);
+
+        // One message, one attachment slot, two observers with opposite outcomes. A fixed
+        // `messageId` is what makes them observers of the SAME message — the helper's random id
+        // would create two messages and the test would prove nothing.
+        var messageId = Random.Shared.NextInt64(20_000_000, 90_000_000);
+        const long chatId = 9_100_050;
+        const string ArchiverFileUniqueId = "AgAD_same_file_for_both_observers";
+
+        var upload = await _host.UploadAsync(_host.CredentialA.Subject, photo);
+        var sentAt = _host.Time.GetUtcNow();
+
+        JournalRecord Archiving() => ObservedRecord(chatId, messageId, sentAt,
+            new JournalAttachment
+            {
+                Ordinal = 0,
+                Kind = JournalAttachmentKind.Photo,
+                MimeType = "image/jpeg",
+                ByteSize = photo.LongLength,
+                FileUniqueId = ArchiverFileUniqueId,
+                UploadId = upload.UploadId,
+                UploadSha256 = upload.Sha256,
+            });
+
+        JournalRecord Declining() => ObservedRecord(chatId, messageId, sentAt,
+            new JournalAttachment
+            {
+                Ordinal = 0,
+                Kind = JournalAttachmentKind.Photo,
+                MimeType = "image/jpeg",
+                ByteSize = photo.LongLength,
+                // ⚠️ The SAME file id the archiver reports, because that is what the transport sends:
+                //    `AgentTransport` reads `fileUniqueId` off the Telegram message, not off its own
+                //    download, so an agent that declined still names the file it declined. It is the
+                //    only field besides the object id that could split the two observers' view of one
+                //    message, and the fingerprint includes it — so a test that invented a different
+                //    id here would be asserting a conflict the real transport cannot produce.
+                FileUniqueId = ArchiverFileUniqueId,
+                NotArchivedReason = JournalNotArchivedReason.DownloadFailed,
+            });
+
+        // ⚠️ Both must be `observer_added` (the first is `created`), and neither may be `conflict`.
+        var first = archiverDrainsFirst
+            ? await _host.Store.IngestAsync(Archiving(), _host.CredentialA.Subject)
+            : await _host.Store.IngestAsync(Declining(), _host.CredentialB.Subject);
+        var second = archiverDrainsFirst
+            ? await _host.Store.IngestAsync(Declining(), _host.CredentialB.Subject)
+            : await _host.Store.IngestAsync(Archiving(), _host.CredentialA.Subject);
+
+        Assert.Equal(JournalIngestOutcome.Created, first.Outcome);
+        Assert.Equal(JournalIngestOutcome.ObserverAdded, second.Outcome);
+
+        // The attachment ends up committed and pointing at the proved object, whoever drained first.
+        // This is the assertion that fails in the non-archiver-first order without the observer-added
+        // commit: the stored row stays `not_archived` and the object is swept.
+        var state = await _host.ScalarAsync("SELECT state FROM journal_attachments");
+        Assert.Equal("committed", state);
+
+        var objectId = await _host.ScalarAsync("SELECT object_id FROM journal_attachments");
+        Assert.Equal("committed", await _host.ScalarAsync(
+            $"SELECT state FROM journal_objects WHERE id = '{objectId}'"));
+
+        // Exactly one object row for the digest, and exactly one attachment — no second message, no
+        // orphan object created by the disagreement.
+        Assert.Equal("1", await _host.ScalarAsync("SELECT COUNT(*) FROM journal_objects"));
+        Assert.Equal("1", await _host.ScalarAsync("SELECT COUNT(*) FROM journal_attachments"));
+        Assert.Equal("2", await _host.ScalarAsync("SELECT COUNT(*) FROM journal_message_observers"));
+        Assert.Equal("1", await _host.ScalarAsync("SELECT COUNT(*) FROM journal_messages"));
+
+        // The bytes are readable through the pointer the journal now carries.
+        var key = await _host.ScalarAsync($"SELECT object_key FROM journal_objects WHERE id = '{objectId}'");
+        var read = await _bucket.GetAsync(key);
+        Assert.NotNull(read);
+        using var ms = new MemoryStream();
+        using (read!.Content) await read.Content.CopyToAsync(ms);
+        Assert.Equal(photo, ms.ToArray());
+    }
+
+    /// <summary>
+    /// An observer that re-proves bytes another observer already committed attaches to the winner.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The upgrade above must not become a way for a second subject to write over the first one's
+    /// attachment. Two things stop it, and this test pins both: only an ordinal whose stored row is
+    /// <c>not_archived</c> is touched, and the object the attachment is pointed at is the one in
+    /// <c>media.Resolved</c> — which is the dedup WINNER, because a loser this subject proved is
+    /// dropped from <c>Proved</c> and parked for the sweeper.
+    /// </para>
+    /// <para>
+    /// So the second subject's own object must end <c>aborted</c> and the stored attachment must name
+    /// the FIRST subject's committed object. Were the upgrade keyed on the proved id instead of the
+    /// resolved one, the attachment would point at a row the same transaction just parked — a
+    /// pointer to bytes the sweeper is about to delete.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task An_observer_that_re_proves_committed_bytes_attaches_to_the_winner()
+    {
+        var photo = new byte[5100];
+        Random.Shared.NextBytes(photo);
+
+        var messageId = Random.Shared.NextInt64(20_000_000, 90_000_000);
+        const long chatId = 9_100_051;
+        const string SharedFileUniqueId = "AgAD_both_prove_the_same_photo";
+        var sentAt = _host.Time.GetUtcNow();
+
+        // Two subjects, same bytes, two independent uploads — the shape dedup exists for.
+        var uploadA = await _host.UploadAsync(_host.CredentialA.Subject, photo);
+        var uploadB = await _host.UploadAsync(_host.CredentialB.Subject, photo);
+
+        JournalRecord Rec(Uploaded upload) => new()
+        {
+            EventId = Fleet.Protocol.Ulid.NewUlid(),
+            Telegram = new JournalTelegramRef
+            {
+                BotId = 7001, ChatId = chatId, ChatKind = JournalChatKind.Private, MessageId = messageId,
+            },
+            Direction = JournalDirection.Inbound,
+            Sender = new JournalSender { Kind = JournalSenderKind.Human, Id = "111" },
+            SentAt = sentAt,
+            TextFormat = JournalTextFormat.Plain,
+            Origin = JournalRecordOrigin.TelegramUpdate,
+            Attachments =
+            [
+                new JournalAttachment
+                {
+                    Ordinal = 0, Kind = JournalAttachmentKind.Photo, MimeType = "image/jpeg",
+                    ByteSize = photo.LongLength, FileUniqueId = SharedFileUniqueId,
+                    UploadId = upload.UploadId, UploadSha256 = upload.Sha256,
+                },
+            ],
+        };
+
+        var first = await _host.Store.IngestAsync(Rec(uploadA), _host.CredentialA.Subject);
+        var second = await _host.Store.IngestAsync(Rec(uploadB), _host.CredentialB.Subject);
+
+        Assert.Equal(JournalIngestOutcome.Created, first.Outcome);
+        Assert.Equal(JournalIngestOutcome.ObserverAdded, second.Outcome);
+
+        var winnerId = await _host.ScalarAsync("SELECT object_id FROM journal_attachments");
+        Assert.Equal("committed", await _host.ScalarAsync(
+            $"SELECT state FROM journal_objects WHERE id = '{winnerId}'"));
+
+        // The upgrade wrote NOTHING: the stored row was already `committed`, and its object is the
+        // first subject's. One attachment, pointing at the winner.
+        Assert.Equal("1", await _host.ScalarAsync("SELECT COUNT(*) FROM journal_attachments"));
+        Assert.Equal("committed", await _host.ScalarAsync("SELECT state FROM journal_attachments"));
+
+        // Two object rows exist, and that is correct: the loser is parked, not deleted, and the
+        // sweeper removes it after the abandon window. What matters is WHICH row the attachment
+        // names and what state the other one is in — an attachment pointing at the parked row would
+        // be a pointer to bytes about to be deleted, which is the failure this asserts against.
+        Assert.Equal("2", await _host.ScalarAsync("SELECT COUNT(*) FROM journal_objects"));
+        Assert.Equal("1", await _host.ScalarAsync(
+            "SELECT COUNT(*) FROM journal_objects WHERE state = 'aborted'"));
+        // The winner is the one the attachment names, and it is the only committed row.
+        Assert.Equal("committed", await _host.ScalarAsync(
+            $"SELECT state FROM journal_objects WHERE id = '{winnerId}'"));
+        Assert.Equal("1", await _host.ScalarAsync(
+            "SELECT COUNT(*) FROM journal_objects WHERE state = 'committed'"));
+        Assert.Equal("0", await _host.ScalarAsync(
+            "SELECT COUNT(*) FROM journal_attachments WHERE object_id NOT IN "
+            + "(SELECT id FROM journal_objects WHERE state = 'committed')"));
+    }
+
+    /// <summary>
+    /// A record for a FIXED telegram message id, so two submissions are observers of one message.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="UploadRecordWithUpload"/> because that helper mints a fresh message
+    /// id on every call — right for tests that want distinct messages, wrong for the observer case,
+    /// where the shared id is the entire scenario.
+    /// </remarks>
+    private static JournalRecord ObservedRecord(
+        long chatId, long messageId, DateTimeOffset sentAt, JournalAttachment attachment) => new()
+    {
+        EventId = Fleet.Protocol.Ulid.NewUlid(),
+        Telegram = new JournalTelegramRef
+        {
+            BotId = 7001,
+            ChatId = chatId,
+            ChatKind = JournalChatKind.Private,
+            MessageId = messageId,
+        },
+        Direction = JournalDirection.Inbound,
+        Sender = new JournalSender { Kind = JournalSenderKind.Human, Id = "111" },
+        SentAt = sentAt,
+        TextFormat = JournalTextFormat.Plain,
+        Origin = JournalRecordOrigin.TelegramUpdate,
+        Attachments = [attachment],
+    };
+
+    /// <summary>
     /// An object whose deadline passed while an attachment still points at it keeps its BYTES, not
     /// merely its row.
     /// </summary>

@@ -310,9 +310,82 @@ public sealed partial class MySqlJournalStore : IJournalStore
                     await fill.ExecuteNonQueryAsync(ct);
                 }
 
+                // ⚠️ An observer that archived what an earlier observer declined.
+                //
+                //    The stored attachment row is the FIRST observer's answer, and this path used to
+                //    write nothing against it. So when the first observer declined the photo —
+                //    download failed, media off, a lower size cap — and this one proved the bytes,
+                //    the message kept a `not_archived` attachment forever while this subject's
+                //    uploaded object sat unreferenced and was swept 24 h later. The archive kept
+                //    answering "not archived" about bytes that were sitting in the bucket, and the
+                //    sweeper deleted the only copy.
+                //
+                //    So, in THIS transaction: commit the object this subject proved, exactly as the
+                //    insert path commits it — owner-bound, so a subject can never advance someone
+                //    else's row — and then point the stored attachment at it. Both writes or neither:
+                //    an attachment naming an `uploaded` object would be a pointer the sweeper treats
+                //    as abandoned, and a committed object naming nothing is the hole described above.
+                //
+                //    Only at an ordinal whose stored row is `not_archived`. A row already `committed`
+                //    belongs to the observer that got there first: it is left exactly as it is, and
+                //    this subject's own object falls through to the loser path below.
+                //
+                //    This is also why the fingerprint must not encode the object id. The two
+                //    observers legitimately disagree about archiving; the fix is to let the later one
+                //    improve the stored row, not to call the disagreement a conflict.
+                foreach (var ordinal in media.Resolved.Keys)
+                {
+                    var resolvedId = media.Resolved[ordinal];
+                    if (!media.Proved.Contains(resolvedId)) continue;
+
+                    await using (var commit = Command(connection, transaction,
+                        """
+                        UPDATE journal_objects
+                           SET state = 'committed', committed_sha256 = @sha, updated_at = @now
+                         WHERE id = @id AND owner = @owner
+                           AND state IN ('uploading', 'uploaded', 'committed')
+                        """))
+                    {
+                        commit.Parameters.AddWithValue("@id", resolvedId);
+                        commit.Parameters.AddWithValue("@owner", observer);
+                        commit.Parameters.AddWithValue("@sha", media.Digests[resolvedId]);
+                        commit.Parameters.AddWithValue("@now", now);
+
+                        if (await commit.ExecuteNonQueryAsync(ct) != 1)
+                        {
+                            // The row stopped being this subject's live upload between the plan and
+                            // here. Same answer the insert path gives, and nothing above survives it.
+                            await transaction.RollbackAsync(ct);
+                            JournalRuntimeStats.Ingest("upload_incomplete");
+                            return new JournalIngestResult
+                            {
+                                Outcome = JournalIngestOutcome.UploadIncomplete,
+                                UploadOrdinals = record.Attachments
+                                    .Where(a => a.UploadId is not null)
+                                    .Select(a => a.Ordinal)
+                                    .Distinct().Order().ToArray(),
+                            };
+                        }
+                    }
+
+                    await using var upgrade = Command(connection, transaction,
+                        """
+                        UPDATE journal_attachments
+                           SET object_id = @object, state = 'committed', not_archived_reason = NULL,
+                               sha256 = @sha, committed_at = @now
+                         WHERE message_id = @message AND ordinal = @ordinal AND state = 'not_archived'
+                        """);
+                    upgrade.Parameters.AddWithValue("@object", resolvedId);
+                    upgrade.Parameters.AddWithValue("@sha", media.Digests[resolvedId]);
+                    upgrade.Parameters.AddWithValue("@message", messageId);
+                    upgrade.Parameters.AddWithValue("@ordinal", ordinal);
+                    upgrade.Parameters.AddWithValue("@now", now);
+                    await upgrade.ExecuteNonQueryAsync(ct);
+                }
+
                 // A loser this subject proved is parked, not deleted: this path writes no
-                // attachment row, so the row is the only thing that keeps the sweeper able to see
-                // the bytes. See the loser block in the insert path for the full rule.
+                // attachment row for a loser, so the row is the only thing that keeps the sweeper
+                // able to see the bytes. See the loser block in the insert path for the full rule.
                 foreach (var loser in media.Losers)
                 {
                     await using var park = Command(connection, transaction,

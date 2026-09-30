@@ -1462,22 +1462,22 @@ public sealed class ContainerProvisioningService(
     }
 
     /// <summary>
-    /// Whether this deployment gave Comms an object store to archive media into.
+    /// Whether the deployment's media switch is on, read from the same <c>.env</c> the orchestrator
+    /// reads the Codex server URL from.
     /// </summary>
     /// <remarks>
-    /// Read from the provisioning env file the same way <c>DescribeCodexServerUrlFault</c> reads
-    /// the Codex URL — the values are deployment-scoped, and the orchestrator's own process
-    /// environment is not where the Comms media settings live.
-    /// </remarks>
-    /// <summary>
-    /// Whether the deployment's media switch is on, read from the same <c>.env</c> the
-    /// orchestrator reads the Codex server URL from.
-    /// </summary>
-    /// <remarks>
-    /// <c>LoadEnvFile</c> keeps <c>KEY=</c> as an empty value and skips a commented
-    /// <c>#KEY=…</c>, so both "declined media" (<c>setup.sh</c> writes a blank endpoint) and
-    /// "never asked" (the line is commented out in <c>.env.example</c>) read as off. No
-    /// <c>FLEET_COMMS_MEDIA_BUCKET</c> condition: see the caller for why.
+    /// <para>
+    /// Read from the provisioning env file the same way <c>DescribeCodexServerUrlFault</c> reads the
+    /// Codex URL — these values are deployment-scoped, and the orchestrator's own process environment
+    /// is not where the Comms media settings live. <c>LoadEnvFile</c> keeps <c>KEY=</c> as an empty
+    /// value and skips a commented <c>#KEY=…</c>, so both "declined media" (<c>setup.sh</c> writes a
+    /// blank endpoint) and "never asked" (the line is commented out in <c>.env.example</c>) read as
+    /// off.
+    /// </para>
+    /// <para>
+    /// The endpoint alone, with no <c>FLEET_COMMS_MEDIA_BUCKET</c> condition: see the caller for why
+    /// that second condition was the bug.
+    /// </para>
     /// </remarks>
     internal bool MediaEndpointIsConfigured()
     {

@@ -106,6 +106,14 @@ Encoded: the conversation key, `messageId`, `direction`, `sender.kind`, `sender.
 `transcript`, `textFormat`, `chatTitle`, `sender.display`, `notArchivedReason` and `eventId` — so two
 bots that saw one supergroup message agree.
 
+**The rule the exclusion list encodes: no field the observers cannot agree on may enter the
+fingerprint.** Whether any one agent archived an attachment is exactly such a field — it differs for
+ordinary reasons (`upgrade.sh` reprovisions agents one at a time, so two of them run different media
+policies for a while; one download failed; one size cap is lower). Slice 4 briefly encoded the
+server-resolved object id and turned that disagreement into `409 idempotency_conflict`, which the
+drainer dead-letters. An archived and a declined attachment are different rows, and that is what the
+attachment table is for; they are not different messages.
+
 One transaction per record, with the conversation row locked `FOR UPDATE`:
 
 | case | response | writes |
@@ -114,7 +122,7 @@ One transaction per record, with the conversation row locked `FOR UPDATE`:
 | `eventId` already recorded with the same fingerprint | `200 duplicate` | none |
 | `eventId` already recorded with a different fingerprint | `409 idempotency_conflict{event_id_reused}` | none |
 | same natural key and fingerprint, same observer | `200 duplicate` | none — not even a transcript this observer did not send first time |
-| same natural key and fingerprint, new observer | `200 observer_added` | observer row; `transcript` filled only if still null |
+| same natural key and fingerprint, new observer | `200 observer_added` | observer row; `transcript` filled only if still null; an attachment this observer proved and the stored row left `not_archived` is committed and pointed at that object |
 | same natural key, different fingerprint | `409 idempotency_conflict` | none |
 | chat in the exclusion list | `422 excluded_chat` | none |
 | a field violation | `422 invalid_record{field}` | none |

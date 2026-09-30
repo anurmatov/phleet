@@ -53,8 +53,8 @@ public sealed class JournalFingerprintTests
                     new JournalAttachment { Ordinal = 0, Kind = JournalAttachmentKind.Photo, MimeType = "image/jpeg", NotArchivedReason = JournalNotArchivedReason.MediaDisabled },
                 ],
             },
-            """{"attachments":[{"byteSize":null,"fileUniqueId":null,"kind":"photo","mimeType":"image/jpeg","objectId":null,"ordinal":0},{"byteSize":12345,"fileUniqueId":"AgADBQ","kind":"document","mimeType":"application/pdf","objectId":null,"ordinal":1}],"conversationKey":"tg:group:-1001234567890","direction":"inbound","messageId":42,"senderId":"u_1","senderKind":"human","sentAt":"2026-01-02T03:04:05.678Z","text":null}""",
-            "c3e74a5fdb00bd1c5d519dd0c1b0faae542eeaa606d777041a1f35ae7eb263e4"
+            """{"attachments":[{"byteSize":null,"fileUniqueId":null,"kind":"photo","mimeType":"image/jpeg","ordinal":0},{"byteSize":12345,"fileUniqueId":"AgADBQ","kind":"document","mimeType":"application/pdf","ordinal":1}],"conversationKey":"tg:group:-1001234567890","direction":"inbound","messageId":42,"senderId":"u_1","senderKind":"human","sentAt":"2026-01-02T03:04:05.678Z","text":null}""",
+            "cee613f328952b70c21bb0643e9cc0716114ec05aa1d0e3b227aa3c335ec900a"
         },
     };
 

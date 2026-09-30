@@ -212,7 +212,11 @@ public sealed class JournalRetentionTests(MySqlFixture fixture) : IDisposable
         Assert.True(JournalTokens.TryVerify(token, "ingest", JournalTokens.ParseKeys(JournalHttpHost.Key), out var subject));
         Assert.Equal("agent1", subject);
 
-        Assert.Equal(1, (await RunAsync("journal", "token", "--purpose", "read", "--subject", "agent1")).Exit);
+        // `read` has a route since #394; `ingest-service` is still reserved.
+        var read = await RunAsync("journal", "token", "--purpose", "read", "--subject", "agent1");
+        Assert.Equal(0, read.Exit);
+        Assert.True(JournalTokens.TryVerify(read.Stdout.Trim(), "read", JournalTokens.ParseKeys(JournalHttpHost.Key), out _));
+        Assert.Equal(1, (await RunAsync("journal", "token", "--purpose", "ingest-service", "--subject", "agent1")).Exit);
         Assert.Equal(1, (await RunAsync("journal", "token", "--purpose", "ingest", "--subject", "bad.subject")).Exit);
 
         Environment.SetEnvironmentVariable(KeysKey, "short");

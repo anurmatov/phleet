@@ -110,7 +110,7 @@ public sealed class JournalCapture
         try
         {
             if (!Include(JournalDirection.Inbound, message, OutboundOrigin.Human)) return;
-            Write(JournalDirection.Inbound, message, sendGroup: null, SpoolMediaMode.Hardlink);
+            Write(JournalDirection.Inbound, message, sendGroup: null, SpoolMediaMode.Hardlink, JournalRecordOrigin.TelegramUpdate);
         }
         catch (Exception e)
         {
@@ -123,18 +123,26 @@ public sealed class JournalCapture
     /// added and written on <see cref="OutboundBatch.Flush"/>, which gives a reply split into
     /// several messages one shared <c>sendGroup</c>.
     /// </summary>
-    public OutboundBatch Outbound(OutboundOrigin origin) => new(this, origin);
+    /// <param name="origin">The task origin the classifier applies (only <c>Human</c> is kept).</param>
+    /// <param name="recordOrigin">
+    /// The wire <c>origin</c> the records carry: <c>agent_runtime</c> for what the transport sent,
+    /// <c>agent_tool</c> for a message sent through a Telegram MCP tool (#394).
+    /// </param>
+    public OutboundBatch Outbound(OutboundOrigin origin, JournalRecordOrigin recordOrigin = JournalRecordOrigin.AgentRuntime) =>
+        new(this, origin, recordOrigin);
 
     public sealed class OutboundBatch
     {
         private readonly JournalCapture _owner;
         private readonly OutboundOrigin _origin;
+        private readonly JournalRecordOrigin _recordOrigin;
         private readonly List<JournalMessage> _kept = [];
 
-        internal OutboundBatch(JournalCapture owner, OutboundOrigin origin)
+        internal OutboundBatch(JournalCapture owner, OutboundOrigin origin, JournalRecordOrigin recordOrigin)
         {
             _owner = owner;
             _origin = origin;
+            _recordOrigin = recordOrigin;
         }
 
         /// <summary>A message Telegram accepted. Kept only if the classifier includes it.</summary>
@@ -167,7 +175,7 @@ public sealed class JournalCapture
                 var group = groupId is null ? null : new JournalSendGroup { Id = groupId, Part = i + 1, Parts = messages.Length };
                 try
                 {
-                    _owner.Write(JournalDirection.Outbound, messages[i], group, SpoolMediaMode.Copy);
+                    _owner.Write(JournalDirection.Outbound, messages[i], group, SpoolMediaMode.Copy, _recordOrigin);
                 }
                 catch (Exception e)
                 {
@@ -196,7 +204,9 @@ public sealed class JournalCapture
         return false;
     }
 
-    private void Write(JournalDirection direction, JournalMessage message, JournalSendGroup? sendGroup, SpoolMediaMode mode)
+    private void Write(
+        JournalDirection direction, JournalMessage message, JournalSendGroup? sendGroup, SpoolMediaMode mode,
+        JournalRecordOrigin recordOrigin)
     {
         var now = _time.GetUtcNow();
         var attachments = new List<JournalAttachment>();
@@ -253,7 +263,7 @@ public sealed class JournalCapture
             Text = string.IsNullOrEmpty(message.Text) ? null : message.Text,
             TextFormat = string.IsNullOrEmpty(message.Text) ? null : message.TextFormat,
             Transcript = string.IsNullOrEmpty(message.Transcript) ? null : message.Transcript,
-            Origin = direction == JournalDirection.Inbound ? JournalRecordOrigin.TelegramUpdate : JournalRecordOrigin.AgentRuntime,
+            Origin = recordOrigin,
             SendGroup = sendGroup,
             Attachments = attachments,
         };

@@ -1261,6 +1261,12 @@ public sealed class ContainerProvisioningService(
                 ["IngestToken"] = journal.IngestToken,
                 ["ExcludedChatIds"] = string.Join(',', journal.ExcludedChatIds),
             };
+
+            // Written only when true, so an agent in a deployment with no bucket produces the exact
+            // bytes it produced before media existed. Absent means false on the agent side, which is
+            // the safe default and keeps this a one-write rollback.
+            if (journal.MediaEnabled)
+                node["Journal"]!.AsObject()["MediaEnabled"] = true;
         }
         return node.ToJsonString(IndentedJson);
     }
@@ -1432,8 +1438,39 @@ public sealed class ContainerProvisioningService(
             agent.JournalEnabled ? journalTokens.ExcludedChatIds() : [],
             hasJournalEndpoint
                 ? journalTokens.Mint(JournalTokenService.PurposeRead, agent.Name)
-                : null);
+                : null,
+            // ⚠️ Derived, never configured per agent. `Journal:MediaEnabled` is the agent's opt-in
+            //    for archived media, and nothing else on the agent side can know whether a bucket
+            //    exists. Without this key the flag is unreachable from a provisioned deployment:
+            //    the agent journals every attachment as `not_archived(media_disabled)` forever and
+            //    the media plane never runs, while Comms happily accepts uploads.
+            //
+            //    The deployment's Comms media settings ARE that knowledge, and the orchestrator
+            //    already reads the same `FLEET_COMMS_*` env file for the Codex server URL, so the
+            //    gate is "endpoint and bucket are both set here". The scoped credential pair is NOT
+            //    part of the gate on purpose: an agent must not read a secret to decide a boolean,
+            //    and a half-provisioned bucket is Comms' startup failure to raise, not the agent's
+            //    to guess at.
+            MediaEnabled: MediaEndpointIsConfigured());
     }
+
+    /// <summary>
+    /// Whether this deployment gave Comms an object store to archive media into.
+    /// </summary>
+    /// <remarks>
+    /// Read from the provisioning env file the same way <c>DescribeCodexServerUrlFault</c> reads
+    /// the Codex URL — the values are deployment-scoped, and the orchestrator's own process
+    /// environment is not where the Comms media settings live.
+    /// </remarks>
+    private bool MediaEndpointIsConfigured()
+    {
+        var env = LoadEnvFile(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env");
+        return HasMeaningfulValue(env, "FLEET_COMMS_MEDIA_ENDPOINT")
+            && HasMeaningfulValue(env, "FLEET_COMMS_MEDIA_BUCKET");
+    }
+
+    private static bool HasMeaningfulValue(IReadOnlyDictionary<string, string> env, string key) =>
+        env.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value);
 
     /// <summary>
     /// The user-level <c>~/.claude/settings.json</c>. Carries <c>outputStyle</c> only for an agent
@@ -1558,7 +1595,8 @@ public record ProvisionResult(string AgentName, bool Success, string Message)
 internal sealed record JournalProvisioning(
     string? IngestToken,
     IReadOnlyList<long> ExcludedChatIds,
-    string? ReadToken);
+    string? ReadToken,
+    bool MediaEnabled = false);
 
 /// <summary>One assignment's project context, resolved once per provision.</summary>
 /// <param name="ProjectName">The assignment's name — the <c>projects/</c> directory the agent reads.</param>

@@ -202,6 +202,32 @@ the old key and recreate again. Its tokens then answer `401`.
 | `FLEET_COMMS_JOURNAL_KEY` | `Comms__Journal__TokenKeys` (`fleet-comms` and `fleet-comms-ops` only) | empty |
 | `FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS` | `Comms__Journal__ExcludedChatIds=${FLEET_GROUP_CHAT_ID},${…}` | empty |
 | `FLEET_COMMS_JOURNAL_RETENTION` | `Comms__Journal__MessageRetention` | `365.00:00:00`, minimum `1.00:00:00` |
+| `FLEET_COMMS_MEDIA_ENDPOINT` + `FLEET_COMMS_MEDIA_BUCKET` | `Journal:MediaEnabled` **on each agent** (see below) | `false` |
+
+### `Journal:MediaEnabled` — the agent's half of the media switch
+
+Two settings enable media, on two different containers, and only one of them is settable per agent:
+
+| setting | container | what it does |
+|---|---|---|
+| `Comms__Media__Endpoint` | Comms | makes the upload route and the object store exist |
+| `Journal:MediaEnabled` | each agent | makes the agent's drainer upload the bytes it captures |
+
+**`Journal:MediaEnabled` is derived at provisioning, never configured per agent.** The orchestrator
+writes it into the agent's `appsettings.json` when — and only when — this deployment's provisioning
+env file sets both `FLEET_COMMS_MEDIA_ENDPOINT` and `FLEET_COMMS_MEDIA_BUCKET` to non-blank values
+(`ContainerProvisioningService.MediaEndpointIsConfigured`).
+
+That derivation is the design, not a convenience. Nothing on the agent side can know whether a
+bucket exists, and a flag nobody can set is a flag that is never on: without it the agent journals
+every attachment as `not_archived(media_disabled)` forever while Comms happily accepts uploads, and
+the media plane silently never runs. The agent's own env is denylisted for media credentials, so it
+cannot be the source either — an agent must not read a secret to decide a boolean.
+
+Because it is derived, **changing it means reprovisioning the agent**, not restarting it, and turning
+media off for one agent is not possible without turning it off for the deployment. The scoped
+credential pair is deliberately outside the gate: a half-provisioned bucket is Comms' startup failure
+to raise, not the agent's to guess at.
 
 Every `FLEET_COMMS_JOURNAL_` key is denied by the orchestrator config API: it is never returned by
 `/api/config/all` or `/api/config/values` and cannot be written by `set_config_values`. Edit `.env`.
@@ -264,12 +290,25 @@ read through, and an age-based sweep must not delete them.
 
 A missing field exits 1. `HeadBucket` then classifies the answer:
 
-- 403 / `InvalidAccessKeyId` / `SignatureDoesNotMatch` / `NoSuchBucket` → exit 1 naming only the
-  failure class. These need an operator, not a retry.
+- 403 / `InvalidAccessKeyId` / `SignatureDoesNotMatch` / `NoSuchBucket` / `NotFound` /
+  `AccessDenied`, or HTTP 404 → exit 1 naming only the failure class. These need an operator, not a
+  retry.
 - network error or timeout → start **degraded**, re-probe every 30 s, uploads answer
   `503 media_unavailable`.
 - An unsigned `GET {endpoint}/{bucket}?list-type=2` must answer 403. Anything else exits 1 with
   `bucket_public` — a world-readable bucket is not a degraded one.
+
+⚠️ **`HeadBucket`, not `GetBucketLocation`, and the answer is not the error code you expect.**
+`GetBucketLocation` needs `s3:GetBucketLocation`, which the shipped policy does NOT grant — and
+MinIO answers a missing action with `403 AccessDenied`, so a probe using it reports a correctly
+configured deployment as a rejected credential. `HeadBucket` is `s3:ListBucket`, which the policy
+does grant on the bucket ARN.
+
+Then the servers disagree about what a missing bucket means, and the classifier has to know all
+three answers: a missing bucket answers `404 NotFound` with `ErrorCode` **`NotFound`** on SeaweedFS,
+`NoSuchBucket` on real S3, and `AccessDenied` on MinIO. That is why the HTTP status leads and the
+error-code list is a secondary match — matching `NoSuchBucket` alone is a startup that hangs
+"degraded" on the servers that are telling you the bucket is gone.
 
 ### ⚠️ Three S3 facts that cost a full debug cycle
 
@@ -299,14 +338,45 @@ fake-bucket test and failed against a real server.
 A dump that has never been restored is not a backup: `backup → wipe → restore → verify-media` is the
 acceptance, and it is what proves the manifest rather than the manifest's own self-report.
 
-### What the CI fixture does not prove
+### What the CI fixture proves, and what it still does not
 
-`tests/Fleet.Conversations.Tests/S3Fixture.cs` runs SeaweedFS (MinIO publishes no public image
-source) and its requests are **unsigned by construction** — SeaweedFS without a signing key answers
-a signed request with `400 InvalidRequest` instead of the real `403`, so a signed fixture would
-report a **false green** on `credentials_rejected`. The fixture therefore proves the data plane:
-bytes in, identical bytes out, correct digest, correct key. It does not prove the credential
-classes, and no assertion in that file should be quoted as if it did.
+`tests/Fleet.Conversations.Tests/S3Fixture.cs` runs SeaweedFS, because MinIO publishes no public
+image source. CI runs **two** of them:
+
+| fixture | env var | signs? | proves |
+|---|---|---|---|
+| anonymous | `FLEET_COMMS_S3_ENDPOINT` | no | the data plane: bytes in, identical bytes out, correct digest, correct key |
+| signed | `FLEET_COMMS_S3_SIGNED_ENDPOINT` | yes | the credential classes, and the operator CLI |
+
+An earlier version of this section claimed a signed fixture was impossible — that SeaweedFS without
+a signing key answers a signed request with `400 InvalidRequest`, so testing credential rejection
+against it would be a false green. **That claim was wrong and it cost coverage.** SeaweedFS
+authenticates when started with `-s3.iam.config=<file>` naming an identity whose key lookup is
+**exact**, and with it in place a signed PUT succeeds, a wrong secret answers a real
+`403 AccessDenied`, and an unknown key is refused. The suite therefore does prove the classes the
+startup probe classifies, against a server that actually checks the signature.
+
+Three things the signed fixture still does not prove, so do not quote it as if it did:
+
+- **It is SeaweedFS, not MinIO or real S3.** The error-code disagreements above are exactly why the
+  classifier matches several answers; this fixture pins one of them.
+- **The identity is an `Admin` identity**, because SeaweedFS has no IAM policy engine to express the
+  shipped policy's narrower grants. A test that passes here proves the credential is *accepted and
+  checked*, and that `HeadBucket` is an action the deployment's credential can perform — it does
+  NOT prove `deploy/comms-minio-init/comms-runtime-policy.json` is scoped correctly.
+- **MinIO itself has never been the subject of a startup test.** MinIO publishes no pullable image
+  (Docker Hub and quay.io both refuse anonymous pulls, `dl.min.io` returns 410), so no CI job and no
+  local run has ever started the shipped policy against the server it is written for. The
+  `GetBucketLocation`/`HeadBucket` reasoning above is reasoned from the policy document and MinIO's
+  documented behaviour, not measured. **The first deploy to a real MinIO is the proof of that
+  reasoning**, and the thing to watch is `credentials_rejected` at startup on a bucket that exists.
+
+The operator CLI (`media backup`, `media restore`, `journal verify-media`) builds its store through
+the real constructor, which always signs — so those tests run against the **signed** bucket and
+cannot run against the anonymous one. `EnsureSignedBucketAsync` PUTs before it probes: `HeadBucket`
+on a bucket that does not exist answers `404`, and auto-creation happens on the first admin `PUT`.
+A filer `POST /<bucket>/` creates a *filer* directory that S3 does not see, so it is not a way to
+make a bucket.
 
 ## Retention, purge and deletion semantics
 

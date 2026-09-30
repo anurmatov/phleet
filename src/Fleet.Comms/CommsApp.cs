@@ -626,6 +626,37 @@ public static class CommsApp
     /// bucket. <c>Program</c> passes the hosted <see cref="JournalMediaHealth"/>, which is the only
     /// implementation a deployment ever has.
     /// </param>
+    /// <summary>
+    /// Parse one ingest body with the REAL ingest parser and report the outcome.
+    /// </summary>
+    /// <returns>
+    /// <c>(0, null)</c> when the record is accepted; otherwise the status the ingest route would
+    /// answer and the error it would name.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// ⚠️ This exists for ONE reason: <see cref="Routes.JournalRecordParser"/> is internal and
+    /// <c>InternalsVisibleTo</c> names only Fleet.Comms.Tests. The drainer's contract is not "my
+    /// JSON has the field I expect" — it is "the parser that answers real ingests accepts what I
+    /// put on the wire." A test in Fleet.Journal.Client.Tests that re-implemented these rules would
+    /// agree with the drainer by construction and catch nothing; the only honest seam is the same
+    /// code the route calls. Nothing but that test calls this.
+    /// </para>
+    /// <para>
+    /// No media gate is consulted, so this is the parser alone: what a record with upload references
+    /// looks like to the parser on a deployment that HAS a bucket.
+    /// </para>
+    /// </remarks>
+    public static (int Status, string? Error, string? Field) ValidateIngestRecord(
+        ReadOnlyMemory<byte> body, DateTimeOffset now)
+    {
+        var record = Routes.JournalRecordParser.Parse(body, now, out var failure);
+        if (record is not null) return (0, null, null);
+
+        ArgumentNullException.ThrowIfNull(failure);
+        return (failure.Status, failure.Error, failure.Field);
+    }
+
     public sealed record JournalMedia(
         JournalMediaGate Gate, IJournalObjectStore Bytes, MySqlJournalObjectStore Objects);
 

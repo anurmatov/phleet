@@ -160,6 +160,11 @@ static async Task<int> RunServiceAsync(string[] args)
         {
             reachable = await ProbeWithinBudgetAsync(bucket);
         }
+        catch (Fleet.Conversations.Journal.JournalAnonymousAccessException)
+        {
+            await Console.Error.WriteLineAsync("bucket_public: anonymous listing did not return 403.");
+            return 1;
+        }
         catch (Fleet.Conversations.Journal.JournalProbeFailureException)
         {
             // The message is the fixed code; the SDK's own text is deliberately not repeated, and
@@ -173,27 +178,11 @@ static async Task<int> RunServiceAsync(string[] args)
 
         media = new Fleet.Comms.CommsApp.JournalMedia(gate, bucket, objects);
 
-        if (reachable)
-        {
-            gate.MarkStartupState(true);
-        }
-        else
-        {
+        gate.MarkStartupState(reachable);
+        if (!reachable)
             await Console.Error.WriteLineAsync(
-                "media_state=degraded: the journal object store is not reachable; uploads answer "
-                + "503 media_unavailable until it is. The journal itself is unaffected.");
-        }
+                "media_state=degraded: signed reachability and anonymous denial are not both confirmed; uploads answer 503.");
 
-        // ⚠️ The last guard before a listener accepts an upload: the bucket must not be world
-        //    readable. A public bucket would make every archived attachment readable by anyone who
-        //    can guess a key, and the credentials are not what protects the bytes there.
-        if (await BucketIsPublicAsync(options.Media))
-        {
-            await Console.Error.WriteLineAsync(
-                "bucket_public: an unsigned read of the journal bucket did not return 403. The bucket must "
-                + "deny anonymous listing; refusing to start with a public object store.");
-            return 1;
-        }
     }
 
     WebApplication? southApp = null;
@@ -321,34 +310,7 @@ static async Task<bool> ProbeWithinBudgetAsync(Fleet.Conversations.Journal.S3Obj
 {
     // Shorter than the SDK's own 30 s request timeout on purpose.
     using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(8));
-    return await bucket.ProbeAsync(budget.Token);
-}
-
-/// <summary>
-/// The anonymous probe: an unsigned bucket listing must be refused.
-/// </summary>
-/// <remarks>
-/// <b>Not a credentials test.</b> This account's credentials were just accepted one call earlier;
-/// what is being asked here is whether anonymous listing is explicitly denied. Only 403 proves
-/// that. Other HTTP answers fail closed; transport failures leave startup degraded.
-/// </remarks>
-static async Task<bool> BucketIsPublicAsync(Fleet.Comms.Configuration.MediaOptions media)
-{
-    using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-
-    try
-    {
-        var endpoint = media.Endpoint.TrimEnd('/');
-        using var response = await http.GetAsync(
-            $"{endpoint}/{media.Bucket}?list-type=2", HttpCompletionOption.ResponseHeadersRead);
-
-        return response.StatusCode != System.Net.HttpStatusCode.Forbidden;
-    }
-    catch (Exception e) when (e is HttpRequestException or TaskCanceledException)
-    {
-        // A network outage must not stop the text journal from starting degraded.
-        return false;
-    }
+    return await bucket.ProbeAsync(budget.Token) && await bucket.ProbeAnonymousAsync(budget.Token);
 }
 
 /// <summary>Named so the test host can reference the entry-point assembly.</summary>

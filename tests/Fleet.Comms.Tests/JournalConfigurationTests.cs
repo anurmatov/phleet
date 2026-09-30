@@ -368,6 +368,58 @@ public sealed class JournalConfigurationTests : IDisposable
         await stdout;
     }
 
+    [Fact]
+    public async Task Signed_head_success_with_anonymous_transport_failure_starts_degraded()
+    {
+        var endpoint = FreePort();
+        var journal = FreePort();
+        using var listener = new TcpListener(IPAddress.Loopback, endpoint);
+        listener.Start();
+        using var stop = new CancellationTokenSource();
+        var serving = Task.Run(async () =>
+        {
+            try
+            {
+                while (!stop.IsCancellationRequested)
+                {
+                    using var client = await listener.AcceptTcpClientAsync(stop.Token);
+                    using var reader = new StreamReader(client.GetStream());
+                    var firstLine = await reader.ReadLineAsync(stop.Token);
+                    while (await reader.ReadLineAsync(stop.Token) is { Length: > 0 }) { }
+                    if (firstLine?.StartsWith("HEAD ", StringComparison.Ordinal) == true)
+                        await client.GetStream().WriteAsync(System.Text.Encoding.ASCII.GetBytes(
+                            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"), stop.Token);
+                    // GET closes without any HTTP answer: this is a transport failure, not 200/500.
+                }
+            }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+        });
+        var env = MediaEnvironment($"http://127.0.0.1:{endpoint}");
+        env["Comms__Journal__Url"] = $"http://127.0.0.1:{journal}";
+        using var process = Start(env);
+        var stderr = process.StandardError.ReadToEndAsync();
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        try
+        {
+            var deadline = Stopwatch.StartNew();
+            while (!CanConnect(journal))
+            {
+                if (process.HasExited) Assert.Fail(await stderr);
+                Assert.True(deadline.Elapsed < TimeSpan.FromSeconds(15), "journal never started degraded");
+                await Task.Delay(50);
+            }
+        }
+        finally
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            stop.Cancel();
+            await serving;
+        }
+        Assert.Contains("media_state=degraded", await stderr);
+        await stdout;
+    }
+
     [Theory]
     [InlineData(200)]
     [InlineData(404)]

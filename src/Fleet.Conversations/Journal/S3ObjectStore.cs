@@ -58,7 +58,12 @@ public sealed class S3ObjectStore : IJournalObjectStore, IDisposable
 {
     private readonly IAmazonS3 _s3;
     private readonly string _bucket;
+    private readonly string _endpoint = string.Empty;
     private readonly ILogger _logger;
+
+    public Task<bool> ProbeAnonymousAsync(CancellationToken ct = default) =>
+        _endpoint.Length == 0 ? Task.FromResult(false)
+            : JournalAnonymousProbe.CheckAsync(_endpoint, _bucket, ct: ct);
 
     public S3ObjectStore(JournalMediaOptions options, ILogger logger, IAmazonS3? client = null)
     {
@@ -67,6 +72,7 @@ public sealed class S3ObjectStore : IJournalObjectStore, IDisposable
         RequestTimeout = options.RequestTimeout;
 
         _bucket = options.Bucket;
+        _endpoint = options.Endpoint;
         _logger = logger;
 
         _s3 = client ?? new AmazonS3Client(

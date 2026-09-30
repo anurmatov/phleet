@@ -12,7 +12,7 @@ namespace Fleet.Conversations.Journal;
 /// <para>
 /// <b>Three states, and the difference between two of them is the whole design.</b>
 /// <c>disabled</c> means no bucket is configured — no upload route exists at all.
-/// <c>enabled</c> means the probe answered. <c>degraded</c> means the probe could not reach the
+/// <c>enabled</c> means signed reachability and anonymous denial both passed. <c>degraded</c> means the probe could not reach the
 /// bucket, and the service is <b>running</b>: uploads answer <c>503 media_unavailable</c>, the rest
 /// of the journal works, and the container stays healthy.
 /// </para>
@@ -31,7 +31,8 @@ namespace Fleet.Conversations.Journal;
 public sealed class JournalMediaHealth(
     IJournalObjectStore store,
     ILogger logger,
-    TimeProvider? time = null) : BackgroundService, JournalMediaGate
+    TimeProvider? time = null,
+    Func<CancellationToken, Task<bool>>? anonymousProbe = null) : BackgroundService, JournalMediaGate
 {
     /// <summary>How long a probe answer is trusted.</summary>
     public static readonly TimeSpan CacheDuration = TimeSpan.FromSeconds(30);
@@ -69,7 +70,15 @@ public sealed class JournalMediaHealth(
         bool reachable;
         try
         {
-            reachable = await store.ProbeAsync(ct);
+            reachable = await store.ProbeAsync(ct)
+                && await (anonymousProbe is not null
+                    ? anonymousProbe(ct)
+                    : store is S3ObjectStore s3 ? s3.ProbeAnonymousAsync(ct) : Task.FromResult(false));
+        }
+        catch (JournalAnonymousAccessException)
+        {
+            logger.LogWarning("journal media bucket_public");
+            reachable = false;
         }
         catch (JournalProbeFailureException)
         {

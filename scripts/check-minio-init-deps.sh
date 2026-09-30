@@ -25,6 +25,9 @@
 # guard that runs on one file costs nothing when it over-reports.
 set -eu
 
+# Only the provisioner itself is bound by the image's contents. A host-side helper that orchestrates
+# `docker run` legitimately needs `docker` and `date`, so it is out of scope here — the file this
+# guard exists to protect is the one that runs INSIDE the client image.
 SCRIPT=${1:-deploy/comms-minio-init/init.sh}
 
 if [ ! -f "$SCRIPT" ]; then

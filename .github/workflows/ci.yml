@@ -857,7 +857,10 @@ jobs:
       - name: init.sh must call nothing but mc and shell builtins
         # The failure this exists for: `sed` on line 76 of the old script. The pinned release image
         # has no `sed`, so the call exited 127 AFTER the bucket and the runtime user existed.
-        run: ./scripts/check-minio-init-deps.sh
+        #
+        # Scope is deliberately just the provisioner. `scripts/verify-minio-init-in-image.sh` is a
+        # HOST-side helper that drives `docker run` and is not in scope for what the image ships.
+        run: ./scripts/check-minio-init-deps.sh deploy/comms-minio-init/init.sh
 
       - name: The bash-only substitution has a bash to run in
         # `${var//pattern/replacement}` is a bashism; dash answers "Bad substitution" (measured on

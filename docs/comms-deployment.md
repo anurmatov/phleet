@@ -259,6 +259,14 @@ script ever calls a binary other than `mc`. That is stricter than the image requ
 the old `sed` call exited 127 *after* the bucket and the runtime user existed, leaving a scoped user
 with no policy and every call answered `Access Denied`, and no check we had could see it.
 
+`scripts/verify-minio-init-in-image.sh` is the **host-side** proof, and it can only run on the deploy
+host: it prints the pinned image's identity (image id, `mc` version, and which of `sed`/`awk`/`grep`/
+`envsubst` are actually present), runs the repo's `init.sh` inside the pinned image using the same
+`:/init:ro` mount and `/bin/bash` entrypoint as compose, then lists the bucket with **only** the
+scoped runtime credentials — which is what proves the policy is *attached*, not merely created. It
+uses a throwaway bucket and user and removes both. Run it before enabling media on a new host; CI
+cannot, because MinIO publishes no pullable image.
+
 ### Keys
 
 | Key | What it is |

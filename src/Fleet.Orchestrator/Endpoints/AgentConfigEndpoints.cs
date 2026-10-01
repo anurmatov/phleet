@@ -120,6 +120,11 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     if (agent is null)
         return Results.NotFound(new { error = $"Agent '{name}' not found in DB" });
 
+    // Only enabling needs a key. A saved true must remain editable and clearable.
+    if (body.JournalEnabled == true && !agent.JournalEnabled &&
+        scope.ServiceProvider.GetRequiredService<JournalTokenService>().DescribeKeyFault() is { } journalFault)
+        return Results.BadRequest(new { error = "journal_not_configured", detail = journalFault });
+
     // Scalar fields
     if (body.Model is not null) agent.Model = body.Model;
     if (body.MemoryLimitMb is not null) agent.MemoryLimitMb = body.MemoryLimitMb.Value;

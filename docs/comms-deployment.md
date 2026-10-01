@@ -26,16 +26,17 @@ accident.
 ./setup.sh          # answer "y" to "Enable Fleet.Comms?"
 ```
 
-Or on an existing install, in `.env`:
+To opt in on an existing install, including one that previously answered no:
 
 ```bash
-FLEET_COMMS_ENABLED=true
-FLEET_COMMS_BIND=127.0.0.1:3500
-FLEET_COMMS_TRUST_PROXY=false
+./setup.sh --comms
+./upgrade.sh
 ```
 
-then `./upgrade.sh`. The image is built only when `FLEET_COMMS_ENABLED=true`, so leaving it off
-costs nothing.
+`--comms` runs only the Comms question chain, revisits recorded false answers and asks about
+media while its endpoint is blank. It never changes a recorded true, store, bucket or credential.
+It builds and starts nothing, and may be combined only with `--dry-run`.
+The image is built only when `FLEET_COMMS_ENABLED=true`, so declining costs nothing.
 
 The service sits behind a Compose profile. `setup.sh` and `upgrade.sh` pass `--profile comms`
 explicitly when you have enabled it. Driving it by hand:
@@ -215,7 +216,7 @@ have.
 
 The journal's object store, for installs that archive attachment bytes. Off unless
 `FLEET_COMMS_MEDIA_ENDPOINT` is set to a non-blank value, and off means the bucket is not deployed,
-no credentials exist, and no service holds any.
+fresh installs generate no credentials. Disabling removes containers, not saved keys or volumes.
 
 ⚠️ **There is no `FLEET_COMMS_MEDIA_ENABLED`.** An earlier version of this page named a boolean
 that no script, compose file or setting ever implemented, and an operator who set it would have
@@ -224,9 +225,52 @@ as it is for Comms and for `upgrade.sh`'s profile decision.
 
 ### What it adds
 
-`comms-minio` and `comms-minio-init` under the **`comms-media`** profile, on a `comms-media`
-network declared **`internal: true`** with **no published ports**. `fleet-comms` and
-`fleet-comms-ops` join that network; nothing else does.
+Fresh installs use `comms-seaweedfs` and `comms-seaweedfs-init` under
+`comms-media-seaweedfs`. Existing MinIO installs keep `comms-minio` and `comms-minio-init`
+under `comms-media`, with their names, volumes and service bodies unchanged.
+Both use the **internal** `comms-media` network with **no published ports**.
+The runtime pair reaches Comms, its ops CLI and the selected store's identity provisioner;
+it is not an administrative credential.
+
+### SeaweedFS: fresh media
+
+Apache-2.0 image, pinned to the same image tested by CI:
+`chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d`.
+`start.sh` writes exactly one runtime identity, with `Read:<bucket>`, `Write:<bucket>` and
+`List:<bucket>` only, before starting any listener. No anonymous or Admin identity exists.
+Bucket names must match `^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`; credential pairs use
+`^[A-Za-z0-9+/=_-]{8,128}$`, and the signing key uses `^[A-Za-z0-9]{32,128}$`.
+
+`FLEET_COMMS_SEAWEEDFS_SIGNING_KEY` is generated with `openssl rand -hex 32` and passed as
+`WEED_JWT_FILER_SIGNING_KEY` **only** to the server. Without it the S3 administrative gRPC
+handlers would accept unauthenticated mutations; the entrypoint refuses to start without it.
+It is never sent to clients/init and is hidden from the config API.
+
+| Listener | Port(s) | Bind / protection |
+|---|---|---|
+| master HTTP / gRPC | 9333 / 19333 | loopback only |
+| volume HTTP / gRPC | 8080 / 18080 | loopback only |
+| filer HTTP / gRPC | 8888 / 18888 | loopback only |
+| S3 HTTP | 8333 | internal network, SigV4 runtime identity |
+| S3 gRPC | 18333 | internal network, signing-key-authenticated mutations |
+| HTTPS, Iceberg, Lance, metrics, pprof, SFTP, WebDAV, IAM, MQ | none | explicitly disabled |
+
+The init shares the server's network namespace, **not** its filesystem, and holds no keys.
+It checks the bucket through `weed shell`, creates it only when absent, and propagates errors.
+`service_healthy` orders it after the server; `on-failure` retries a failed init.
+
+```bash
+cd <checkout>/fleet
+docker compose --profile comms --profile comms-media-seaweedfs up -d
+```
+
+### MinIO: legacy media only
+
+Keep `FLEET_COMMS_MEDIA_STORE=minio`; no migration is supported. Its images are no longer
+published, so setup/upgrade check the local images **before** stopping anything and never pull them.
+A legacy install without a store key gets a one-time `minio` record when its endpoint or root user
+is present, including one that previously disabled media. Existing objects are never copied,
+re-pointed or deleted automatically.
 
 The internal network is not belt-and-braces. It is what makes "the bucket is not reachable from
 outside the compose project" a property of the network rather than of nobody having remembered a
@@ -283,6 +327,8 @@ missing `--entrypoint`, and on a swallowed cleanup error — the four defects th
 
 | Key | What it is |
 |---|---|
+| `FLEET_COMMS_MEDIA_STORE` | scripts-only choice: `seaweedfs` or legacy `minio`; preserve once recorded |
+| `FLEET_COMMS_SEAWEEDFS_SIGNING_KEY` | SeaweedFS administrative signing key; server only |
 | `FLEET_COMMS_MEDIA_ENDPOINT` | **the switch.** the bucket URL on the internal network; also derives each agent's `Journal:MediaEnabled` |
 | `FLEET_COMMS_MEDIA_BUCKET` | default `comms-journal`; `setup.sh` records it, compose defaults it |
 | `FLEET_COMMS_MEDIA_ACCESS_KEY` / `_SECRET_KEY` | the **scoped** runtime credentials, not the root ones |
@@ -293,17 +339,35 @@ Because the agent-side flag is **derived at provisioning**, changing `FLEET_COMM
 means **reprovisioning** the agents that journal media — restarting a container does not pick it up.
 `upgrade.sh` prints that reminder when media is on.
 
-Only `fleet-comms` and `fleet-comms-ops` receive the media credentials. The config API cannot read
-or write `FLEET_COMMS_MEDIA_*` or `FLEET_COMMS_MINIO_*` — they are on the orchestrator's denylist,
+Only the documented runtime/store consumers receive the scoped pair. The config API cannot read
+or write `FLEET_COMMS_MEDIA_*`, `FLEET_COMMS_MINIO_*` or `FLEET_COMMS_SEAWEEDFS_*` — they are on the orchestrator's denylist,
 because a settings endpoint that can rewrite a bucket credential is a way to move the journal's
 archive without ever touching a shell.
 
 ### Enabling and upgrading
 
-`setup.sh` prompts for the media block only when the journal is on, and adds `--profile
-comms-media`. `upgrade.sh` resolves the same profile before `down`, so an install that turns media
-off does not leave the bucket running. Both scripts unset the media keys when the feature is off
-rather than leaving stale values in the generated file.
+`setup.sh` prompts for media only with the journal on; setup/upgrade select the store profile
+from `FLEET_COMMS_MEDIA_STORE`, but only when Comms is enabled and the endpoint is non-blank.
+SeaweedFS is pulled before any startup/shutdown. A missing legacy image or invalid store stops
+before any lifecycle change. Both scripts print `Media store: seaweedfs|minio|off`.
+The shell `unset` clears **process exports**, never `.env` keys. Disabling removes all inactive
+Comms/media containers without deleting volumes. Re-enabling restores the recorded store and bucket.
+
+The dashboard reports a missing journal key as `disabled`, not a fault. It blocks only enabling an
+unchecked journal checkbox; a checked box can always be turned off. REST/MCP reject false-to-true
+with `journal_not_configured` when the key is missing/invalid, leaving the row unchanged.
+
+### Rollback and acceptance boundary
+
+Revert the change to roll back. For a fresh SeaweedFS install, first set
+`FLEET_COMMS_MEDIA_ENDPOINT=`; older scripts otherwise select MinIO while retaining a SeaweedFS URL.
+Keep all saved keys and `comms_seaweedfs_data`. Legacy installs are unchanged by the revert.
+
+[#399](https://github.com/anurmatov/phleet/issues/399) owns the core share-store replacement.
+Full unmodified cold-host acceptance (AC4b, AC6b, AC11b of #397) is gated on that issue;
+#397 stays open until those pass. Cold-host AC4a explicitly excludes only `fleet-minio` and
+`fleet-minio-init`; cached-image runs are existing-install evidence, never cold-host evidence.
+The deployment smoke tests the pinned image (M1–M9), not a different convenient fixture.
 
 ### Backing it up
 
@@ -686,3 +750,11 @@ The `--profile comms` flag and the generated compose file are both required on e
 | Every auth request is `401` | expected for an unknown or expired credential — all auth failures are deliberately identical, so the response cannot tell you which one |
 | `429` on a valid request | the 30/60s limiter; behind a proxy with trust off, all callers share one bucket |
 | Enrollment code rejected | codes last 15 minutes and register exactly one device |
+
+| `comms-seaweedfs-init` restarting | inspect its restart count and bucket creation error; do not weaken credentials |
+| `start.sh: <KEY>` and exit 1 | missing/invalid runtime credential, bucket or SeaweedFS signing key; fix the named key |
+| Legacy MinIO images missing at upgrade | restore local images or set `FLEET_COMMS_MEDIA_ENDPOINT=`; nothing has been stopped |
+
+Rotate the SeaweedFS signing key: change `FLEET_COMMS_SEAWEEDFS_SIGNING_KEY` in `.env`, then
+`docker compose --profile comms-media-seaweedfs up -d --force-recreate comms-seaweedfs`.
+Do not change the runtime pair or bucket as part of that rotation.

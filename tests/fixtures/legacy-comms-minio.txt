@@ -1,0 +1,24 @@
+  comms-minio:
+    profiles: ["comms-media"]
+    image: minio/minio
+    container_name: comms-minio
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: ${FLEET_COMMS_MINIO_ROOT_USER:-}
+      MINIO_ROOT_PASSWORD: ${FLEET_COMMS_MINIO_ROOT_PASSWORD:-}
+    volumes:
+      - comms_minio_data:/data
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - comms-media
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

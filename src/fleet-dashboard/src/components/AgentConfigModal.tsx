@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type {
   AgentConfig, ConfigEdits, ConfigSaveState, InstructionSummary, McpEndpointEntry, OutputStyleSummary,
   ProjectContextSummary, PromptSizeLimits,
@@ -39,6 +39,20 @@ interface AgentConfigModalProps {
   onClose: () => void
 }
 
+export function JournalToggle({ checked, disabled, onChange }: {
+  checked: boolean; disabled: boolean; onChange: (checked: boolean) => void
+}) {
+  return <div className="config-field">
+    <label className="config-field config-field-checkbox">
+      <input type="checkbox" checked={checked} disabled={!checked && disabled} onChange={e => onChange(e.target.checked)} />
+      <span className="config-label">Journal human Telegram messages</span>
+    </label>
+    <FieldHint>{disabled
+      ? 'Comms journal not enabled — see docs/comms-deployment.md'
+      : <>Records this agent&apos;s DMs and allowed groups in Comms. Needs <code>FLEET_COMMS_JOURNAL_KEY</code>.</>}</FieldHint>
+  </div>
+}
+
 export default function AgentConfigModal({
   agentName,
   configData,
@@ -66,6 +80,18 @@ export default function AgentConfigModal({
     catch { return false }
   })
   const [newProject, setNewProject] = useState('')
+  const [journalDisabled, setJournalDisabled] = useState(false)
+  useEffect(() => {
+    let active = true
+    apiFetch('/api/comms/journal/status')
+      .then(async response => {
+        if (!response.ok) return
+        const status = await response.json()
+        if (active) setJournalDisabled(status.status === 'disabled')
+      })
+      .catch(() => { /* The server guard still applies when status cannot be loaded. */ })
+    return () => { active = false }
+  }, [])
 
   function toggleAdvanced() {
     const next = !showAdvanced
@@ -387,13 +413,8 @@ export default function AgentConfigModal({
                 <FieldHint>Names of <code>.env</code> keys to inject into the container as environment variables. Store key names only — not values (e.g. <code>TELEGRAM_BOT_TOKEN,GITHUB_APP_ID</code>).</FieldHint>
                 <input className="config-input" value={configEdits.envRefs} onChange={e => onEditsChange({ envRefs: e.target.value })} placeholder="comma-separated env key names" />
               </div>
-              <div className="config-field">
-                <label className="config-field config-field-checkbox">
-                  <input type="checkbox" checked={configEdits.journalEnabled} onChange={e => onEditsChange({ journalEnabled: e.target.checked })} />
-                  <span className="config-label">Journal human Telegram messages</span>
-                </label>
-                <FieldHint>Records this agent&apos;s DMs and allowed groups in Comms. Needs <code>FLEET_COMMS_JOURNAL_KEY</code>.</FieldHint>
-              </div>
+              <JournalToggle checked={configEdits.journalEnabled} disabled={journalDisabled}
+                onChange={journalEnabled => onEditsChange({ journalEnabled })} />
               <div className="config-field">
                 <label className="config-field config-field-checkbox">
                   <input type="checkbox" checked={configEdits.telegramSendOnly} onChange={e => onEditsChange({ telegramSendOnly: e.target.checked })} />

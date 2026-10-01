@@ -39,7 +39,7 @@ public sealed class ConfigService : IConfigWriter, IAclChangeNotifier
     /// </summary>
     private static readonly string[] DenylistPrefixes =
         ["MYSQL_", "DB_", "FLEET_MYSQL_", "MINIO_", "CLAUDE_CREDENTIALS_", "CODEX_CREDENTIALS_",
-         "FLEET_COMMS_JOURNAL_", "FLEET_COMMS_MEDIA_", "FLEET_COMMS_MINIO_"];
+         "FLEET_COMMS_JOURNAL_", "FLEET_COMMS_MEDIA_", "FLEET_COMMS_MINIO_", "FLEET_COMMS_SEAWEEDFS_"];
 
     private static readonly HashSet<string> DenylistExact =
         new([

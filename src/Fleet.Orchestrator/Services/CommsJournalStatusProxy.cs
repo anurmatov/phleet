@@ -19,7 +19,9 @@ public sealed class CommsJournalStatusProxy(
         }
         catch (JournalConfigurationException ex)
         {
-            return Unavailable(ex.Code);
+            return ex.Code == "journal_key_missing"
+                ? new JsonObject { ["status"] = "disabled" }
+                : Unavailable(ex.Code);
         }
 
         var url = configuration["Journal:StatusUrl"]

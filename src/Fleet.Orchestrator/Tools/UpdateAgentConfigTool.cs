@@ -68,6 +68,10 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         if (baseUrlError is not null)
             return baseUrlError;
 
+        if (journal_enabled == true && !agent.JournalEnabled &&
+            scope.ServiceProvider.GetRequiredService<JournalTokenService>().DescribeKeyFault() is { } journalFault)
+            return System.Text.Json.JsonSerializer.Serialize(new { error = "journal_not_configured", detail = journalFault });
+
         var changes = new StringBuilder();
 
         if (model is not null && model != agent.Model)

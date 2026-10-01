@@ -350,6 +350,16 @@ Telegram allows only one long-poller per bot token. If two or more agents share 
 
 ## Fleet.Comms — first-party client API (optional)
 
+Comms is optional: every setup question defaults to no, and declining builds no Comms image
+and starts no Comms container. Telegram agents do not need Comms or a journal key.
+To opt in later, run `./setup.sh --comms`, then `./upgrade.sh`; the first command only configures,
+and the second applies the choice. Existing true decisions and media credentials are preserved.
+Fresh journal media uses pinned SeaweedFS; legacy MinIO stays unchanged.
+See [Comms deployment](docs/comms-deployment.md).
+
+Full cold-host setup still depends on [#399](https://github.com/anurmatov/phleet/issues/399)
+replacing the withdrawn core share-store images. The Comms change does not replace that store.
+
 An HTTPS boundary a native client can enroll a device against and authenticate to. **Auth and
 session only** — device enrollment, token mint, self-revocation and session discovery. No chat, no
 WebSocket, no conversation history, no push notifications; an enrolled device holds a valid token

@@ -228,7 +228,8 @@ env file sets `FLEET_COMMS_MEDIA_ENDPOINT` to a non-blank value
 
 The ENDPOINT ALONE is the gate, because that is the key compose treats as the media switch
 (`Comms__Media__Endpoint=${FLEET_COMMS_MEDIA_ENDPOINT:-}`) and the key `upgrade.sh` uses to decide
-whether to start the `comms-media` profile. One switch, three readers, no way to disagree.
+whether to start the selected media profile (`comms-media-seaweedfs` or legacy `comms-media`).
+The endpoint gate itself is unchanged.
 
 ⚠️ It deliberately does **not** also require `FLEET_COMMS_MEDIA_BUCKET`. That key is defaulted by
 compose and was not written by `setup.sh`, so requiring it meant a fresh install that accepted media
@@ -264,6 +265,12 @@ Startup refuses, exiting 1 with a message that never contains a key: `journal_re
 
 `Comms__Media__Endpoint` is the enabling key. Blank means media does not exist: no upload route, no
 object store, no credentials held, and every attachment is `not_archived` exactly as in slice 1.
+
+The store is S3-compatible: pinned SeaweedFS by default for fresh installs, unchanged MinIO
+for existing ones. Setup records `FLEET_COMMS_MEDIA_STORE` and never overwrites a recorded store,
+bucket or credential. Disabling preserves the keys and volumes so re-enabling reaches the same
+objects; no automatic migration exists. Listener/signing-key boundaries and rollback:
+[Comms deployment](comms-deployment.md#seaweedfs-fresh-media).
 
 ### Bytes are always proven
 
@@ -393,8 +400,7 @@ Three things the signed fixture still does not prove, so do not quote it as if i
 
 - **It is SeaweedFS, not MinIO or real S3.** The error-code disagreements above are exactly why the
   classifier matches several answers; this fixture pins one of them.
-- **The identity is an `Admin` identity**, because SeaweedFS has no IAM policy engine to express the
-  shipped policy's narrower grants. A test that passes here proves the credential is *accepted and
+- **The identity is an `Admin` identity**, and does not use the deployment's scoped runtime identity. A test that passes here proves the credential is *accepted and
   checked*, and that `HeadBucket` is an action the deployment's credential can perform — it does
   NOT prove `deploy/comms-minio-init/comms-runtime-policy.json` is scoped correctly.
 - **MinIO itself has never been the subject of a startup test.** MinIO publishes no pullable image
@@ -403,6 +409,10 @@ Three things the signed fixture still does not prove, so do not quote it as if i
   `GetBucketLocation`/`HeadBucket` reasoning above is reasoned from the policy document and MinIO's
   documented behaviour, not measured. **The first deploy to a real MinIO is the proof of that
   reasoning**, and the thing to watch is `credentials_rejected` at startup on a bucket that exists.
+
+The separate `comms-media-store-smoke` job exercises the example compose deployment with its
+scoped Read/Write/List identity and mandatory administrative signing key (M1–M9). That is the
+shipped SeaweedFS deployment boundary; it does not replace legacy MinIO preservation acceptance.
 
 The operator CLI (`media backup`, `media restore`, `journal verify-media`) builds its store through
 the real constructor, which always signs — so those tests run against the **signed** bucket and

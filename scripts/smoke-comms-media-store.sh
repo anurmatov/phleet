@@ -5,13 +5,14 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 : "${SEAWEEDFS_IMAGE:?CI must pass the pinned image}"
 : "${GRPCURL_IMAGE:?CI must pass the pinned image}"
+NETWORK=comms397-smoke_comms-media
 for name in comms-seaweedfs comms-seaweedfs-init comms397-invalid; do
   if docker container inspect "$name" >/dev/null 2>&1; then
     echo "Refusing to touch existing container $name" >&2; exit 1
   fi
 done
 for resource in network volume; do
-  name=comms397-smoke_comms-media
+  name=$NETWORK
   [[ "$resource" != volume ]] || name=comms397-smoke_comms_seaweedfs_data
   if docker "$resource" inspect "$name" >/dev/null 2>&1; then
     echo "Refusing to touch existing $resource $name" >&2; exit 1
@@ -23,8 +24,9 @@ ENV="$FIXTURE/.env"
 # Keep the approved example unchanged and supply both in a disposable project directory.
 cp "$ROOT/docker-compose.example.yml" "$FIXTURE/docker-compose.yml"
 ln -s "$ROOT/deploy" "$FIXTURE/deploy"
-NETWORK=comms397-smoke_comms-media
-compose() { docker compose -p comms397-smoke -f "$FIXTURE/docker-compose.yml" --env-file "$ENV" --profile comms-media-seaweedfs "$@"; }
+# The example has a fixed network name. Override only the disposable fixture, never share it.
+printf 'networks:\n  comms-media:\n    name: %s\n' "$NETWORK" > "$FIXTURE/network.yml"
+compose() { docker compose -p comms397-smoke -f "$FIXTURE/docker-compose.yml" -f "$FIXTURE/network.yml" --env-file "$ENV" --profile comms-media-seaweedfs "$@"; }
 cleanup() {
   compose down >/dev/null 2>&1 || true
   docker rm -f comms397-invalid >/dev/null 2>&1 || true
@@ -36,7 +38,7 @@ ACCESS=$(openssl rand -hex 16)
 SECRET=$(openssl rand -hex 24)
 SIGNING=$(openssl rand -hex 32)
 printf 'FLEET_BASE_DIR=%s\nFLEET_COMMS_MEDIA_BUCKET=comms-journal\nFLEET_COMMS_MEDIA_ACCESS_KEY=%s\nFLEET_COMMS_MEDIA_SECRET_KEY=%s\nFLEET_COMMS_SEAWEEDFS_SIGNING_KEY=%s\n' "$FIXTURE" "$ACCESS" "$SECRET" "$SIGNING" > "$ENV"
-actual=$(compose config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["comms-seaweedfs"]["image"])')
+actual=$(compose config --format json | python3 -c 'import json,sys; config=json.load(sys.stdin); assert config["networks"]["comms-media"]["name"] == sys.argv[1]; print(config["services"]["comms-seaweedfs"]["image"])' "$NETWORK")
 [[ "$actual" == "$SEAWEEDFS_IMAGE" ]]
 docker pull "$SEAWEEDFS_IMAGE"
 docker pull "$GRPCURL_IMAGE" # Failure is fatal, never skipped.

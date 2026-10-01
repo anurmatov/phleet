@@ -656,6 +656,7 @@ services:
   # Keep archived conversation media on a dedicated object store, separate from public storage.
   # Only fleet-comms and fleet-comms-ops access this private bucket through the internal network.
   # No host ports: uploads and backup/verify/restore commands use authenticated internal access.
+  # Legacy; existing installs only; images no longer published.
   comms-minio:
     profiles: ["comms-media"]
     image: minio/minio
@@ -735,6 +736,52 @@ services:
     logging:
       driver: "none"
 
+  # Fresh journal media: Apache-2.0 SeaweedFS, pinned to the CI-tested digest.
+  comms-seaweedfs:
+    profiles: ["comms-media-seaweedfs"]
+    image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    container_name: comms-seaweedfs
+    entrypoint: ["/bin/sh", "/comms-seaweedfs/start.sh"]
+    environment:
+      FLEET_COMMS_MEDIA_ACCESS_KEY: ${FLEET_COMMS_MEDIA_ACCESS_KEY:-}
+      FLEET_COMMS_MEDIA_SECRET_KEY: ${FLEET_COMMS_MEDIA_SECRET_KEY:-}
+      FLEET_COMMS_MEDIA_BUCKET: ${FLEET_COMMS_MEDIA_BUCKET:-comms-journal}
+      WEED_JWT_FILER_SIGNING_KEY: ${FLEET_COMMS_SEAWEEDFS_SIGNING_KEY:-}
+    volumes:
+      - comms_seaweedfs_data:/data
+      - ./deploy/comms-seaweedfs:/comms-seaweedfs:ro
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - comms-media
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  comms-seaweedfs-init:
+    profiles: ["comms-media-seaweedfs"]
+    image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    container_name: comms-seaweedfs-init
+    entrypoint: ["/bin/sh", "/comms-seaweedfs/init-bucket.sh"]
+    network_mode: "service:comms-seaweedfs"
+    depends_on:
+      comms-seaweedfs:
+        condition: service_healthy
+    environment:
+      FLEET_COMMS_MEDIA_BUCKET: ${FLEET_COMMS_MEDIA_BUCKET:-comms-journal}
+    volumes:
+      - ./deploy/comms-seaweedfs:/comms-seaweedfs:ro
+    restart: on-failure
+    logging:
+      driver: "none"
+
   fleet-dashboard:
     build:
       context: .
@@ -763,6 +810,7 @@ volumes:
   # Journal objects. Losing this volume is losing archived media: the journal MESSAGE survives (it
   # is in comms-mysql) but every attachment's bytes are gone and no restore can recreate them.
   # `media backup` exists so this is recoverable — run it before any operation that can drop it.
+  comms_seaweedfs_data:
   comms_minio_data:
   temporal_pg_data:
   fleet_mysql_data:

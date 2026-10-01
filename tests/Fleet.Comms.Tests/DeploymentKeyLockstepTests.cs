@@ -529,6 +529,58 @@ public class DeploymentKeyLockstepTests
     }
 
 
+    [Fact]
+    public void Seaweedfs_keys_are_documented_and_generated_only_on_opt_in()
+    {
+        foreach (var key in new[] { "FLEET_COMMS_MEDIA_STORE", "FLEET_COMMS_SEAWEEDFS_SIGNING_KEY" })
+        {
+            Assert.Contains("#" + key + "=", Read(".env.example"));
+            Assert.Contains(key, Read("setup.sh"));
+            Assert.Contains(key, Read("upgrade.sh"));
+        }
+    }
+
+    [Fact]
+    public void Seaweedfs_is_isolated_and_its_pin_matches_ci()
+    {
+        const string image = "chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d";
+        var compose = Read("docker-compose.example.yml");
+        var server = CommsServiceBlock(compose, "comms-seaweedfs", "comms-seaweedfs-init");
+        var init = CommsServiceBlock(compose, "comms-seaweedfs-init", "fleet-dashboard");
+        Assert.Contains(image, server);
+        Assert.Contains(image, init);
+        Assert.Contains(image, Read(".github/workflows/ci.yml"));
+        Assert.DoesNotContain("ports:", server);
+        Assert.DoesNotContain("fleet-net", server);
+        Assert.Contains("networks:\n      - comms-media", server);
+        Assert.Contains("network_mode: \"service:comms-seaweedfs\"", init);
+        Assert.DoesNotContain("ACCESS_KEY", init);
+        Assert.DoesNotContain("SECRET_KEY", init);
+        Assert.DoesNotContain("SIGNING_KEY", init);
+        var holders = Regex.Matches(compose, @"^  ([a-z0-9-]+):\s*$", RegexOptions.Multiline)
+            .Select(m => (Name: m.Groups[1].Value, Start: m.Index)).ToList();
+        var signingHolders = holders.Select((h, i) => (h.Name, Body: compose[h.Start..(i + 1 < holders.Count ? holders[i + 1].Start : compose.Length)]))
+            .Where(h => h.Body.Contains("${FLEET_COMMS_SEAWEEDFS_SIGNING_KEY"))
+            .Select(h => h.Name).ToArray();
+        Assert.Equal(["comms-seaweedfs"], signingHolders);
+        var runtimeHolders = holders.Select((h, i) => (h.Name, Body: compose[h.Start..(i + 1 < holders.Count ? holders[i + 1].Start : compose.Length)]))
+            .Where(h => h.Body.Contains("${FLEET_COMMS_MEDIA_ACCESS_KEY"))
+            .Select(h => h.Name).Order(StringComparer.Ordinal).ToArray();
+        Assert.Equal(["comms-minio-init", "comms-seaweedfs", "fleet-comms", "fleet-comms-ops"], runtimeHolders);
+    }
+
+    [Fact]
+    public void Legacy_minio_service_bodies_are_byte_identical()
+    {
+        var compose = Read("docker-compose.example.yml");
+        foreach (var name in new[] { "comms-minio", "comms-minio-init" })
+        {
+            var service = Regex.Match(compose, @"^  " + name + @":\n(?:^    [^\n]*\n|^\n)*", RegexOptions.Multiline).Value;
+            // Blank separator lines between services are not part of either body.
+            Assert.Equal(Read("tests/fixtures/legacy-" + name + ".txt"), service.TrimEnd('\n') + "\n");
+        }
+    }
+
     private static string Read(string relativePath) =>
         File.ReadAllText(Path.Combine(RepositoryRoot().FullName, relativePath));
 

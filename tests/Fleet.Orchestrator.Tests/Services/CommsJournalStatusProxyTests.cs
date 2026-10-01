@@ -43,7 +43,7 @@ public sealed class CommsJournalStatusProxyTests
     }
 
     [Fact]
-    public async Task Missing_key_returns_unavailable()
+    public async Task Missing_key_returns_disabled()
     {
         var config = new ConfigurationBuilder().AddInMemoryCollection().Build();
         var proxy = new CommsJournalStatusProxy(
@@ -52,8 +52,23 @@ public sealed class CommsJournalStatusProxyTests
 
         var result = await proxy.GetAsync();
 
+        Assert.Equal("disabled", result["status"]!.GetValue<string>());
+        Assert.Single(result);
+    }
+
+    [Fact]
+    public async Task Invalid_key_remains_unavailable_without_calling_comms()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Journal:TokenKey"] = "invalid",
+        }).Build();
+        var proxy = new CommsJournalStatusProxy(
+            new Factory(new Handler(_ => throw new InvalidOperationException("must not call"))), config,
+            new JournalTokenService(config), NullLogger<CommsJournalStatusProxy>.Instance);
+        var result = await proxy.GetAsync();
         Assert.Equal("unavailable", result["status"]!.GetValue<string>());
-        Assert.Equal("journal_key_missing", result["errorClass"]!.GetValue<string>());
+        Assert.Equal("journal_key_invalid", result["errorClass"]!.GetValue<string>());
     }
 
     private static CommsJournalStatusProxy Create(HttpMessageHandler handler)

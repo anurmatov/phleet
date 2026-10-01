@@ -17,7 +17,7 @@
 #   - `echo "no mc on PATH"` does not report `on`.
 #   - `mc ls` does not report `ls` — `ls` is a MinIO subcommand, not a request for coreutils.
 #
-# `mc` is the only permitted external command. Everything else must be a shell builtin: read a
+# `mc` is the default permitted external command (`--allow weed` selects `weed`). Everything else must be a shell builtin: read a
 # file with $(<file), substitute with ${var//pattern/replacement}, build text with the printf
 # builtin.
 #
@@ -28,6 +28,11 @@ set -eu
 # Only the provisioner itself is bound by the image's contents. A host-side helper that orchestrates
 # `docker run` legitimately needs `docker` and `date`, so it is out of scope here — the file this
 # guard exists to protect is the one that runs INSIDE the client image.
+ALLOW=mc
+if [ "${1:-}" = --allow ]; then
+  [ "$#" -ge 2 ] || { echo '--allow requires a command' >&2; exit 2; }
+  ALLOW=$2; shift 2
+fi
 SCRIPT=${1:-deploy/comms-minio-init/init.sh}
 
 if [ ! -f "$SCRIPT" ]; then
@@ -60,9 +65,9 @@ grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -v '^#!' \
     }
     { print executable($0) }
 ' \
-| awk '
+| awk -v external="$ALLOW" '
     BEGIN {
-      split("mc set echo printf read cd export local return exit test true false if then else elif fi for while until do done case esac function shift trap wait eval exec getopts alias umask times ulimit command type hash break continue select time :", ok, " ")
+      split("set echo printf read cd export local return exit test true false if then else elif fi for while until do done case esac function shift trap wait eval exec getopts alias umask times ulimit command type hash break continue select time :", ok, " ")
       for (i in ok) allowed[ok[i]] = 1
       logical = ""
     }
@@ -89,10 +94,12 @@ grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -v '^#!' \
         if (match(s, /^[A-Za-z_][A-Za-z0-9_]*=/)) continue
         split(s, w, /[ \t]/)
         cmd = w[1]
+        # exec is a builtin, but its first argument is still an image dependency.
+        if (cmd == "exec") { sub(/^exec[ \t]+/, "", s); split(s, w, /[ \t]/); cmd = w[1] }
         if (cmd == "" || cmd == "STRIPPED") continue
         if (match(cmd, /\//)) cmd = substr(cmd, RSTART + 1)
         if (cmd == "") continue
-        if (cmd == "mc") continue
+        if (cmd == external) continue
         if (cmd in allowed) continue
         if (cmd ~ /^[A-Za-z0-9_.-]+$/ && cmd !~ /^[0-9]+$/) print cmd
       }
@@ -101,11 +108,11 @@ grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -v '^#!' \
 )
 
 if [ -n "$EXTERNAL" ]; then
-  echo "$SCRIPT calls binaries the MinIO client image does not ship:" >&2
+  echo "$SCRIPT calls binaries outside the allowed image dependencies:" >&2
   printf '  %s\n' $EXTERNAL >&2
-  echo "Only \`mc\` and shell builtins are available there. Read a file with \$(<file)," >&2
+  echo "Only $ALLOW and shell builtins are allowed here. Read a file with \$(<file)," >&2
   echo "substitute with \${var//pattern/replacement}, build text with the printf builtin." >&2
   exit 1
 fi
 
-echo "$SCRIPT calls only mc and shell builtins."
+echo "$SCRIPT calls only $ALLOW and shell builtins."

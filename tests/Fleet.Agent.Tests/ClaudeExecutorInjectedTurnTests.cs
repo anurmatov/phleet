@@ -141,6 +141,15 @@ public class ClaudeExecutorInjectedTurnTests
         Assert.Equal(["BRAVO", "CHARLIE"], extra.Select(e => e.Progress.FinalResult));
     }
 
+    [Fact]
+    public async Task InitialTurn_DelayedExecutionStillReceivesItsScriptedAnswer()
+    {
+        await using var fixture = Fixture.Start();
+        // Reproduce a worker that starts after the fixture's former 100 ms guess.
+        var result = await fixture.RunTurnAsync("delayed message", "ANSWER", Task.Delay(250));
+        Assert.Equal(["ANSWER"], FinalResults(result));
+    }
+
     private static List<string?> FinalResults(IEnumerable<AgentProgress> events) =>
         events.Where(p => p.FinalResult is not null).Select(p => p.FinalResult).ToList();
 
@@ -190,17 +199,19 @@ public class ClaudeExecutorInjectedTurnTests
         public void Write(ClaudeStreamEvent evt) => Channel.Writer.TryWrite(evt);
 
         /// <summary>One ExecuteAsync turn: send, then the scripted init, answer text and result.</summary>
-        public async Task<List<AgentProgress>> RunTurnAsync(string message, string answer)
+        public async Task<List<AgentProgress>> RunTurnAsync(string message, string answer, Task? beforeSend = null)
         {
             var turn = Task.Run(async () =>
             {
+                if (beforeSend is not null) await beforeSend;
                 var events = new List<AgentProgress>();
                 await foreach (var p in Executor.ExecuteAsync(message, ct: _timeout.Token))
                     events.Add(p);
                 return events;
             });
-            // ExecuteAsync drains the channel and writes to stdin before it reads.
-            await Task.Delay(100, _timeout.Token);
+            // /bin/cat echoes the actual send only after ExecuteAsync drained stale events.
+            // A fixed delay can inject the answer before a busy worker starts, losing it to the drain.
+            Assert.NotNull(await _process.StandardOutput.ReadLineAsync(_timeout.Token));
             Write(Init());
             Write(Text(answer));
             Write(new ClaudeStreamEvent { Type = "result", Result = answer });

@@ -33,6 +33,7 @@ public sealed class ConfigServiceDenylistTests : IDisposable
     private static readonly string[] MediaKeys =
     [
         "FLEET_COMMS_MEDIA_ENABLED",
+        "FLEET_COMMS_SEAWEEDFS_SIGNING_KEY",
         "FLEET_COMMS_MEDIA_ACCESS_KEY",
         "FLEET_COMMS_MEDIA_SECRET_KEY",
         "FLEET_COMMS_MEDIA_BUCKET",
@@ -72,6 +73,8 @@ public sealed class ConfigServiceDenylistTests : IDisposable
     /// already be covered by <c>MINIO_</c>.
     /// </summary>
     [Theory]
+    [InlineData("FLEET_COMMS_SEAWEEDFS_SIGNING_KEY")]
+    [InlineData("fleet_comms_seaweedfs_signing_key")]
     [InlineData("FLEET_COMMS_MEDIA_SECRET_KEY")]
     [InlineData("FLEET_COMMS_MEDIA_ACCESS_KEY")]
     [InlineData("FLEET_COMMS_MINIO_ROOT_USER")]
@@ -144,6 +147,8 @@ public sealed class ConfigServiceDenylistTests : IDisposable
     /// let an agent install its own bucket credential and then read it back.
     /// </summary>
     [Theory]
+    [InlineData("FLEET_COMMS_SEAWEEDFS_SIGNING_KEY")]
+    [InlineData("fleet_comms_seaweedfs_signing_key")]
     [InlineData("FLEET_COMMS_MEDIA_SECRET_KEY")]
     [InlineData("FLEET_COMMS_MINIO_ROOT_PASSWORD")]
     public async Task A_direct_write_of_a_media_key_is_refused_and_the_file_is_unchanged(string key)
@@ -212,6 +217,7 @@ public sealed class ConfigServiceDenylistTests : IDisposable
             + "FLEET_COMMS_JOURNAL_BIND=http://0.0.0.0:8083\n"
             + "FLEET_COMMS_JOURNAL_KEY=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v\n"
             + "FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS=-100111\n"
+            + "FLEET_COMMS_SEAWEEDFS_SIGNING_KEY=synthetic-signing-key\n"
             + "FLEET_COMMS_MEDIA_ENABLED=true\n"
             + "FLEET_COMMS_MEDIA_BUCKET=comms-journal\n"
             + "FLEET_COMMS_MEDIA_ACCESS_KEY=fleet-comms\n"

@@ -8,7 +8,7 @@ interface JournalObserverStatus {
 }
 
 interface JournalStatus {
-  status: 'available' | 'unavailable'
+  status: 'available' | 'unavailable' | 'disabled'
   errorClass?: string
   schemaVersion?: number | null
   observers?: JournalObserverStatus[]
@@ -49,7 +49,9 @@ export default function CommsJournalPanel() {
         <span className="section-title">Comms journal</span>
         <button className="row-btn" onClick={load} disabled={loading}>{loading ? '…' : 'refresh'}</button>
       </div>
-      {status?.status === 'unavailable' ? (
+      {status?.status === 'disabled' ? (
+        <div className="journal-panel-muted">Comms journal not enabled — see docs/comms-deployment.md</div>
+      ) : status?.status === 'unavailable' ? (
         <div className="journal-panel-unavailable">unavailable: {status.errorClass ?? 'unknown'}</div>
       ) : loading && !status ? (
         <div className="journal-panel-muted">loading…</div>

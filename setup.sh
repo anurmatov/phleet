@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fleet — Guided first-time setup script
-# Usage: ./setup.sh [--dry-run] [--skip-build] [--skip-services] [--prompt-local-creds] [--full-setup]
+# Usage: ./setup.sh [--dry-run] [--skip-build] [--skip-services] [--prompt-local-creds] [--full-setup] [--comms]
 set -euo pipefail
 
 # Capture script directory as absolute path (required for symlink later)
@@ -13,17 +13,25 @@ SKIP_SERVICES=false
 PROMPT_LOCAL_CREDS=false
 PROMPT_TELEGRAM=false
 PROMPT_GITHUB=false
+COMMS_ONLY=false
 
 for arg in "$@"; do
   case "$arg" in
+    --comms)              COMMS_ONLY=true ;;
     --dry-run)            DRY_RUN=true ;;
     --skip-build)         SKIP_BUILD=true ;;
     --skip-services)      SKIP_SERVICES=true ;;
     --prompt-local-creds) PROMPT_LOCAL_CREDS=true ;;
     --full-setup)         PROMPT_TELEGRAM=true; PROMPT_GITHUB=true ;;
-    *) echo "Unknown flag: $arg. Valid flags: --dry-run --skip-build --skip-services --prompt-local-creds --full-setup"; exit 1 ;;
+    *) echo "Unknown flag: $arg. Valid flags: --dry-run --skip-build --skip-services --prompt-local-creds --full-setup --comms"; exit 1 ;;
   esac
 done
+
+if $COMMS_ONLY; then
+  for arg in "$@"; do
+    case "$arg" in --comms|--dry-run) ;; *) echo '--comms may be combined only with --dry-run'; exit 1 ;; esac
+  done
+fi
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 GREEN='\033[0;32m'
@@ -83,7 +91,8 @@ unset FLEET_COMMS_JOURNAL_ENABLED FLEET_COMMS_JOURNAL_BIND FLEET_COMMS_JOURNAL_K
 # override what .env records, and a stale export would start an upload route nobody configured.
 unset FLEET_COMMS_MEDIA_ENDPOINT FLEET_COMMS_MEDIA_BUCKET FLEET_COMMS_MEDIA_BACKUP_DIR \
       FLEET_COMMS_MEDIA_ACCESS_KEY FLEET_COMMS_MEDIA_SECRET_KEY \
-      FLEET_COMMS_MINIO_ROOT_USER FLEET_COMMS_MINIO_ROOT_PASSWORD
+      FLEET_COMMS_MINIO_ROOT_USER FLEET_COMMS_MINIO_ROOT_PASSWORD \
+      FLEET_COMMS_MEDIA_STORE FLEET_COMMS_SEAWEEDFS_SIGNING_KEY
 
 ENV_EXAMPLE="$SCRIPT_DIR/.env.example"
 COMPOSE_EXAMPLE="$SCRIPT_DIR/docker-compose.example.yml"
@@ -91,6 +100,9 @@ COMPOSE_FILE="$FLEET_BASE_DIR/docker-compose.yml"
 SEED_FILE="$FLEET_BASE_DIR/seed.json"
 SEED_EXAMPLE="$SCRIPT_DIR/seed.example.json"
 COMPOSE_PROJECT="fleet"
+
+source "$SCRIPT_DIR/scripts/lib/comms-profiles.sh"
+COMMS_DRY_RUN=$DRY_RUN
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -170,7 +182,10 @@ prompt_field() {
     break
   done
 
-  [[ -n "$value" ]] && write_env_var "$file" "$key" "$value"
+  # An optional skip is successful, not a false status that trips set -e.
+  if [[ -n "$value" ]]; then
+    write_env_var "$file" "$key" "$value"
+  fi
 }
 
 # Poll a container's health status until healthy or timeout
@@ -195,6 +210,230 @@ poll_health() {
   fail "$label timed out after ${timeout}s — run: docker compose -p $COMPOSE_PROJECT -f $COMPOSE_FILE logs $label"
   $fatal && exit 1 || return 1
 }
+
+_local_cred_autogenned=false
+
+# Returns 0 (needs generation) if val is empty, a standard placeholder, or a known weak default
+_needs_local_gen() {
+  local val="$1"
+  is_placeholder "$val" && return 0
+  [[ "$val" == "minioadmin" || "$val" == "fleetroot" || "$val" == "fleetpass" ]] && return 0
+  return 1
+}
+
+_autogen_local_cred() {
+  local file="$1" key="$2" gencmd="$3"
+  local val
+  val=$(read_env_var "$file" "$key")
+  # Media choices are durable: even a recorded weak credential is not replaced implicitly.
+  case "$key" in FLEET_COMMS_MEDIA_*|FLEET_COMMS_MINIO_*|FLEET_COMMS_SEAWEEDFS_*) [[ -z "$val" ]] || return 0 ;; esac
+  if _needs_local_gen "$val"; then
+    if $DRY_RUN; then
+      echo -e "  ${YELLOW}[dry-run]${NC} Would auto-generate $key"
+      return
+    fi
+    local newval
+    newval=$(eval "$gencmd") || { echo -e "  ${RED}✗${NC} Failed to generate value for $key — is openssl installed?" >&2; exit 1; }
+    if [[ -z "$newval" ]]; then
+      echo -e "  ${RED}✗${NC} Auto-generation of $key produced an empty value — is openssl installed?" >&2; exit 1
+    fi
+    write_env_var "$file" "$key" "$newval"
+    _local_cred_autogenned=true
+  fi
+}
+
+
+configure_comms() {
+  # Preview library writes on a private copy so subsequent reads see the planned backfill.
+  local ENV_FILE="$ENV_FILE" COMMS_DRY_RUN="$COMMS_DRY_RUN" preview
+  if $DRY_RUN; then
+    preview=$(mktemp)
+    trap "rm -f '$preview'" EXIT
+    if [[ -f "$ENV_FILE" ]]; then
+      cp "$ENV_FILE" "$preview"
+    else
+      cp "$ENV_EXAMPLE" "$preview"
+    fi
+    ENV_FILE="$preview"
+    COMMS_DRY_RUN=false
+    echo '[dry-run] Previewing Comms choices on a temporary env file.'
+  fi
+  _configure_comms
+  if $DRY_RUN; then
+    rm -f "$preview"
+    trap - EXIT
+  fi
+}
+
+_configure_comms() {
+  COMMS_PROFILE_ARGS=()
+  comms_backfill_store_key "$ENV_FILE"
+  _comms_enabled=$(read_env_var "$ENV_FILE" "FLEET_COMMS_ENABLED")
+  if [[ -z "$_comms_enabled" ]] || { $COMMS_ONLY && [[ "$_comms_enabled" == false ]]; }; then
+    echo
+    echo -e "  ${BOLD}Fleet.Comms — first-party client API${NC}"
+    echo "  Device enrollment, tokens and session discovery for a native client."
+    echo "  Auth only: no chat, no conversation history, no push notifications."
+    echo "  Requires your own TLS reverse proxy for anything beyond localhost."
+    echo "  See docs/comms-deployment.md."
+    read -r -p "  Enable Fleet.Comms? [y/N] " _comms_answer
+    case "$_comms_answer" in
+      [yY]*) _comms_enabled=true ;;
+      *)     _comms_enabled=false ;;
+    esac
+    $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_ENABLED" "$_comms_enabled"
+  fi
+
+  if [[ "$_comms_enabled" == "true" ]]; then
+
+    # Loopback by default: a host reverse proxy reaches it, nothing else does.
+    # Change this only once TLS terminates in front of it.
+    prompt_field "$ENV_FILE" "FLEET_COMMS_BIND" "Fleet.Comms bind address" \
+      "host:port for the client API. Keep the loopback default unless a TLS reverse proxy is in front." \
+      n n "127.0.0.1:3500"
+
+    # Off by default. Turning it on while the port is reachable without a proxy
+    # hands every caller the rate limiter's partition key.
+    prompt_field "$ENV_FILE" "FLEET_COMMS_TRUST_PROXY" "Trust X-Forwarded-For from the proxy" \
+      "true only if a reverse proxy is in front AND replaces X-Forwarded-For (never appends). Otherwise false." \
+      n n "false"
+
+    # Durable conversations, asked ONCE and only inside the comms branch. Declining
+    # leaves the install exactly as the auth-only one: the keys stay absent, the six
+    # routes are never mapped, and no database connection is attempted.
+    _conversations_enabled=$(read_env_var "$ENV_FILE" "FLEET_COMMS_CONVERSATIONS_ENABLED")
+    if [[ -z "$_conversations_enabled" ]] || { $COMMS_ONLY && [[ "$_conversations_enabled" == false ]]; }; then
+      echo
+      echo -e "  ${BOLD}Fleet.Comms — durable conversations${NC}"
+      echo "  Conversation history, submissions, catch-up and a WebSocket stream."
+      echo "  Adds a MySQL database (its own container, no published port) and uses"
+      echo "  the broker you already run. Migrations are an operator command with"
+      echo "  their own credential; the service itself can never apply one."
+      echo "  See docs/comms-deployment.md."
+      read -r -p "  Enable durable conversations? [y/N] " _conversations_answer
+      case "$_conversations_answer" in
+        [yY]*) _conversations_enabled=true ;;
+        *)     _conversations_enabled=false ;;
+      esac
+      $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_CONVERSATIONS_ENABLED" "$_conversations_enabled"
+    fi
+
+    if [[ "$_conversations_enabled" == "true" ]]; then
+      # TWO accounts, and the split is the point: the service runs with no DDL
+      # grants, so "the service never migrates on startup" is enforced by the
+      # database rather than by the code being careful.
+      prompt_field "$ENV_FILE" "FLEET_COMMS_MYSQL_ROOT_PASSWORD" "Conversation MySQL root password" \
+        "Used once, to provision the two accounts. Generate one: openssl rand -base64 24" y y
+
+      # The two account passwords, read by the init script on the database's first start. Asked for
+      # rather than defaulted, and never written to a tracked file: a password in the repository is a
+      # password every checkout has.
+      prompt_field "$ENV_FILE" "FLEET_COMMS_MYSQL_DDL_PASSWORD" "Conversation MySQL DDL account password" \
+        "The account 'conversations migrate' runs as. Must match the migration connection string. Generate one: openssl rand -base64 24" y y
+
+      prompt_field "$ENV_FILE" "FLEET_COMMS_MYSQL_RUNTIME_PASSWORD" "Conversation MySQL runtime account password" \
+        "The account the service runs as, with no DDL grants. Must match the runtime connection string. Generate one: openssl rand -base64 24" y y
+
+      prompt_field "$ENV_FILE" "FLEET_COMMS_CONVERSATION_DB" "Conversation runtime connection string" \
+        "The account the SERVICE uses. It must hold SELECT/INSERT/UPDATE/DELETE and no DDL grants." y y
+
+      prompt_field "$ENV_FILE" "FLEET_COMMS_CONVERSATION_MIGRATION_DB" "Conversation migration connection string" \
+        "The DDL account, used only by 'conversations migrate'. Never give this one to the running container." y y
+
+      # No default, deliberately: the south listener carries an administrative
+      # surface and a shipped default credential is a credential everyone has.
+      prompt_field "$ENV_FILE" "FLEET_COMMS_SOUTH_TOKEN" "South listener bearer credential" \
+        "Generate one per deployment: openssl rand -base64 32. Startup fails without it." y y
+
+      prompt_field "$ENV_FILE" "FLEET_COMMS_AGENT_NAME" "Agent name for command routing" \
+        "Becomes a routing key and a queue-name segment: [A-Za-z0-9_-], 1-128 characters. A dot or a slash produces a queue name the consumer cannot address." y n
+
+      prompt_field "$ENV_FILE" "FLEET_COMMS_BROKER" "Broker connection for the outboxes" \
+        "AMQP URI. Without it the outboxes still accumulate correctly and nothing is lost, but nothing is dispatched." n n "amqp://guest:guest@rabbitmq:5672/"
+
+      # The conversation journal, asked ONCE and only with conversations on. Declining
+      # writes false and no key: nothing listens on the journal port.
+      _journal_enabled=$(read_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_ENABLED")
+      if [[ -z "$_journal_enabled" ]] || { $COMMS_ONLY && [[ "$_journal_enabled" == false ]]; }; then
+        echo
+        echo -e "  ${BOLD}Fleet.Comms — conversation journal${NC}"
+        echo "  A durable, text-only record of Telegram messages, written by your own"
+        echo "  agent runtimes to an internal listener that is never published."
+        echo "  See docs/comms-journal.md."
+        read -r -p "  Enable the conversation journal? [y/N] " _journal_answer
+        case "$_journal_answer" in
+          [yY]*) _journal_enabled=true ;;
+          *)     _journal_enabled=false ;;
+        esac
+        $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_ENABLED" "$_journal_enabled"
+      fi
+
+      # The signing key is generated only for a host that opted in, and never replaced: every token
+      # minted with it would stop verifying.
+      if [[ "$_journal_enabled" == "true" && -z "$(read_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_KEY")" ]]; then
+        $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_KEY" \
+          "$(openssl rand 48 | base64 | tr '+/' '-_' | tr -d '=')"
+      fi
+
+      # Journal media, asked ONCE and only with the journal on. There is nothing to attach an
+      # object to without a journal message, so this question does not exist for a host that
+      # declined the one above.
+      #
+      # The endpoint is the enabling key. Declining leaves every recorded media key alone;
+      # a blank endpoint is the same state as never having been asked.
+      if [[ "$_journal_enabled" == "true" ]]; then
+        _media_endpoint=$(read_env_var "$ENV_FILE" "FLEET_COMMS_MEDIA_ENDPOINT")
+        if [[ -z "$_media_endpoint" ]]; then
+          echo
+          echo -e "  ${BOLD}Fleet.Comms — journal media${NC}"
+          echo "  Photos and documents attached to journaled messages, stored in a"
+          echo "  S3-compatible store on an internal Docker network with no published port."
+          echo "  Fresh media uses SeaweedFS. Existing stores are preserved."
+          echo "  See docs/comms-journal.md."
+          read -r -p "  Store journaled media objects? [y/N] " _media_answer
+          case "$_media_answer" in
+            [yY]*)
+              comms_enable_media "$ENV_FILE"
+              ;;
+            *) ;; # Declining never deletes or blanks a recorded key.
+          esac
+        fi
+
+        # Credentials are generated only for a host that opted in, and never replaced: a bucket
+        # already holding objects keeps them only while the runtime key still resolves.
+        if [[ -n "$(read_env_var "$ENV_FILE" "FLEET_COMMS_MEDIA_ENDPOINT")" ]]; then
+          case "$(read_env_var "$ENV_FILE" FLEET_COMMS_MEDIA_STORE)" in
+            minio)
+              _autogen_local_cred "$ENV_FILE" FLEET_COMMS_MINIO_ROOT_USER "openssl rand -hex 12"
+              _autogen_local_cred "$ENV_FILE" FLEET_COMMS_MINIO_ROOT_PASSWORD "openssl rand -base64 24"
+              ;;
+            seaweedfs)
+              _autogen_local_cred "$ENV_FILE" FLEET_COMMS_SEAWEEDFS_SIGNING_KEY "openssl rand -hex 32"
+              ;;
+          esac
+          _autogen_local_cred "$ENV_FILE" "FLEET_COMMS_MEDIA_ACCESS_KEY"     "openssl rand -hex 16"
+          _autogen_local_cred "$ENV_FILE" "FLEET_COMMS_MEDIA_SECRET_KEY"     "openssl rand -base64 24"
+        fi
+      fi
+    fi
+  fi
+
+  resolved=$(comms_resolve_profiles "$ENV_FILE")
+  COMMS_PROFILE_ARGS=()
+  [[ -z "$resolved" ]] || read -r -a COMMS_PROFILE_ARGS <<< "$resolved"
+  _media_store=off
+  if [[ "$_comms_enabled" == true && -n "$(read_env_var "$ENV_FILE" FLEET_COMMS_MEDIA_ENDPOINT)" ]]; then
+    _media_store=$(read_env_var "$ENV_FILE" FLEET_COMMS_MEDIA_STORE)
+  fi
+  echo "Media store: $_media_store"
+}
+
+if $COMMS_ONLY; then
+  [[ -f "$ENV_FILE" ]] || { fail 'Run ./setup.sh first to create .env.'; exit 1; }
+  configure_comms
+  echo 'Run ./upgrade.sh to apply.'
+  exit 0
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 section "[1/7] Checking prerequisites..."
@@ -486,171 +725,7 @@ fi
 # environment; whether it also honours it from `--env-file` was not verified
 # here, and shipping a variable that silently does nothing is worse than a
 # flag that obviously works.
-COMMS_PROFILE_ARGS=()
-_comms_enabled=$(read_env_var "$ENV_FILE" "FLEET_COMMS_ENABLED")
-if [[ -z "$_comms_enabled" ]]; then
-  echo
-  echo -e "  ${BOLD}Fleet.Comms — first-party client API${NC}"
-  echo "  Device enrollment, tokens and session discovery for a native client."
-  echo "  Auth only: no chat, no conversation history, no push notifications."
-  echo "  Requires your own TLS reverse proxy for anything beyond localhost."
-  echo "  See docs/comms-deployment.md."
-  read -r -p "  Enable Fleet.Comms? [y/N] " _comms_answer
-  case "$_comms_answer" in
-    [yY]*) _comms_enabled=true ;;
-    *)     _comms_enabled=false ;;
-  esac
-  $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_ENABLED" "$_comms_enabled"
-fi
-
-if [[ "$_comms_enabled" == "true" ]]; then
-  COMMS_PROFILE_ARGS=(--profile comms)
-
-  # Loopback by default: a host reverse proxy reaches it, nothing else does.
-  # Change this only once TLS terminates in front of it.
-  prompt_field "$ENV_FILE" "FLEET_COMMS_BIND" "Fleet.Comms bind address" \
-    "host:port for the client API. Keep the loopback default unless a TLS reverse proxy is in front." \
-    n n "127.0.0.1:3500"
-
-  # Off by default. Turning it on while the port is reachable without a proxy
-  # hands every caller the rate limiter's partition key.
-  prompt_field "$ENV_FILE" "FLEET_COMMS_TRUST_PROXY" "Trust X-Forwarded-For from the proxy" \
-    "true only if a reverse proxy is in front AND replaces X-Forwarded-For (never appends). Otherwise false." \
-    n n "false"
-
-  # Durable conversations, asked ONCE and only inside the comms branch. Declining
-  # leaves the install exactly as the auth-only one: the keys stay absent, the six
-  # routes are never mapped, and no database connection is attempted.
-  _conversations_enabled=$(read_env_var "$ENV_FILE" "FLEET_COMMS_CONVERSATIONS_ENABLED")
-  if [[ -z "$_conversations_enabled" ]]; then
-    echo
-    echo -e "  ${BOLD}Fleet.Comms — durable conversations${NC}"
-    echo "  Conversation history, submissions, catch-up and a WebSocket stream."
-    echo "  Adds a MySQL database (its own container, no published port) and uses"
-    echo "  the broker you already run. Migrations are an operator command with"
-    echo "  their own credential; the service itself can never apply one."
-    echo "  See docs/comms-deployment.md."
-    read -r -p "  Enable durable conversations? [y/N] " _conversations_answer
-    case "$_conversations_answer" in
-      [yY]*) _conversations_enabled=true ;;
-      *)     _conversations_enabled=false ;;
-    esac
-    $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_CONVERSATIONS_ENABLED" "$_conversations_enabled"
-  fi
-
-  if [[ "$_conversations_enabled" == "true" ]]; then
-    # TWO accounts, and the split is the point: the service runs with no DDL
-    # grants, so "the service never migrates on startup" is enforced by the
-    # database rather than by the code being careful.
-    prompt_field "$ENV_FILE" "FLEET_COMMS_MYSQL_ROOT_PASSWORD" "Conversation MySQL root password" \
-      "Used once, to provision the two accounts. Generate one: openssl rand -base64 24" y y
-
-    # The two account passwords, read by the init script on the database's first start. Asked for
-    # rather than defaulted, and never written to a tracked file: a password in the repository is a
-    # password every checkout has.
-    prompt_field "$ENV_FILE" "FLEET_COMMS_MYSQL_DDL_PASSWORD" "Conversation MySQL DDL account password" \
-      "The account 'conversations migrate' runs as. Must match the migration connection string. Generate one: openssl rand -base64 24" y y
-
-    prompt_field "$ENV_FILE" "FLEET_COMMS_MYSQL_RUNTIME_PASSWORD" "Conversation MySQL runtime account password" \
-      "The account the service runs as, with no DDL grants. Must match the runtime connection string. Generate one: openssl rand -base64 24" y y
-
-    prompt_field "$ENV_FILE" "FLEET_COMMS_CONVERSATION_DB" "Conversation runtime connection string" \
-      "The account the SERVICE uses. It must hold SELECT/INSERT/UPDATE/DELETE and no DDL grants." y y
-
-    prompt_field "$ENV_FILE" "FLEET_COMMS_CONVERSATION_MIGRATION_DB" "Conversation migration connection string" \
-      "The DDL account, used only by 'conversations migrate'. Never give this one to the running container." y y
-
-    # No default, deliberately: the south listener carries an administrative
-    # surface and a shipped default credential is a credential everyone has.
-    prompt_field "$ENV_FILE" "FLEET_COMMS_SOUTH_TOKEN" "South listener bearer credential" \
-      "Generate one per deployment: openssl rand -base64 32. Startup fails without it." y y
-
-    prompt_field "$ENV_FILE" "FLEET_COMMS_AGENT_NAME" "Agent name for command routing" \
-      "Becomes a routing key and a queue-name segment: [A-Za-z0-9_-], 1-128 characters. A dot or a slash produces a queue name the consumer cannot address." y n
-
-    prompt_field "$ENV_FILE" "FLEET_COMMS_BROKER" "Broker connection for the outboxes" \
-      "AMQP URI. Without it the outboxes still accumulate correctly and nothing is lost, but nothing is dispatched." n n "amqp://guest:guest@rabbitmq:5672/"
-
-    # The conversation journal, asked ONCE and only with conversations on. Declining
-    # writes false and no key: nothing listens on the journal port.
-    _journal_enabled=$(read_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_ENABLED")
-    if [[ -z "$_journal_enabled" ]]; then
-      echo
-      echo -e "  ${BOLD}Fleet.Comms — conversation journal${NC}"
-      echo "  A durable, text-only record of Telegram messages, written by your own"
-      echo "  agent runtimes to an internal listener that is never published."
-      echo "  See docs/comms-journal.md."
-      read -r -p "  Enable the conversation journal? [y/N] " _journal_answer
-      case "$_journal_answer" in
-        [yY]*) _journal_enabled=true ;;
-        *)     _journal_enabled=false ;;
-      esac
-      $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_ENABLED" "$_journal_enabled"
-    fi
-
-    # The signing key is generated only for a host that opted in, and never replaced: every token
-    # minted with it would stop verifying.
-    if [[ "$_journal_enabled" == "true" && -z "$(read_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_KEY")" ]]; then
-      $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_KEY" \
-        "$(openssl rand 48 | base64 | tr '+/' '-_' | tr -d '=')"
-    fi
-
-    # Journal media, asked ONCE and only with the journal on. There is nothing to attach an
-    # object to without a journal message, so this question does not exist for a host that
-    # declined the one above.
-    #
-    # Declining writes a BLANK endpoint rather than a `false`: the endpoint is the enabling key,
-    # and a blank value is the same state as never having been asked.
-    if [[ "$_journal_enabled" == "true" ]]; then
-      _media_endpoint=$(read_env_var "$ENV_FILE" "FLEET_COMMS_MEDIA_ENDPOINT")
-      if [[ -z "$_media_endpoint" ]]; then
-        echo
-        echo -e "  ${BOLD}Fleet.Comms — journal media${NC}"
-        echo "  Photos and documents attached to journaled messages, stored in a"
-        echo "  MinIO bucket on an internal Docker network with no published port."
-        echo "  Needs the comms-media profile: docker compose --profile comms"
-        echo "  --profile comms-media up -d. See docs/comms-journal.md."
-        read -r -p "  Store journaled media objects? [y/N] " _media_answer
-        case "$_media_answer" in
-          [yY]*)
-            $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_MEDIA_ENDPOINT" "http://comms-minio:9000"
-
-            # Write the bucket name too, rather than leaving it to compose's default.
-            #
-            # ⚠️ The orchestrator derives the AGENT-side media flag (`Journal:MediaEnabled`) from
-            # this .env file, because nothing on the agent side can know a bucket exists. Compose
-            # defaults `FLEET_COMMS_MEDIA_BUCKET` to `comms-journal` on its own, so the key being
-            # absent here looked harmless — until the orchestrator read it as "no media" and every
-            # agent on a host that had just said YES to media journalled every attachment as
-            # `not_archived(media_disabled)`. Silent, and permanent until reprovisioned.
-            #
-            # Whether the gate reads one key or two, the recorded decision is now complete in the
-            # file: `grep FLEET_COMMS_MEDIA .env` shows the whole choice an operator made.
-            $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_MEDIA_BUCKET" "comms-journal"
-            ;;
-          *)
-            $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_MEDIA_ENDPOINT" ""
-            ;;
-        esac
-      fi
-
-      # Credentials are generated only for a host that opted in, and never replaced: a bucket
-      # already holding objects keeps them only while the runtime key still resolves.
-      if [[ -n "$(read_env_var "$ENV_FILE" "FLEET_COMMS_MEDIA_ENDPOINT")" ]]; then
-        # The profile flag is added HERE rather than through COMPOSE_PROFILES in .env, for the
-        # same reason the comms profile is: whether compose honours COMPOSE_PROFILES from
-        # --env-file was never verified, and a variable that silently does nothing is worse
-        # than a flag that obviously works.
-        COMMS_PROFILE_ARGS+=(--profile comms-media)
-
-        _autogen_local_cred "$ENV_FILE" "FLEET_COMMS_MINIO_ROOT_USER"      "openssl rand -hex 12"
-        _autogen_local_cred "$ENV_FILE" "FLEET_COMMS_MINIO_ROOT_PASSWORD"  "openssl rand -base64 24"
-        _autogen_local_cred "$ENV_FILE" "FLEET_COMMS_MEDIA_ACCESS_KEY"     "openssl rand -hex 16"
-        _autogen_local_cred "$ENV_FILE" "FLEET_COMMS_MEDIA_SECRET_KEY"     "openssl rand -base64 24"
-      fi
-    fi
-  fi
-fi
+configure_comms
 
 _cto_val=$(read_env_var "$ENV_FILE" "FLEET_CTO_AGENT")
 if [[ -z "$_cto_val" || "$_cto_val" == "changeme" || "$_cto_val" == "phleet" ]]; then
@@ -728,34 +803,6 @@ fi
 # .env.example (minioadmin / fleetroot / fleetpass / changeme / your-secret-token-here).
 # Pre-existing real values are always preserved on re-run.
 
-_local_cred_autogenned=false
-
-# Returns 0 (needs generation) if val is empty, a standard placeholder, or a known weak default
-_needs_local_gen() {
-  local val="$1"
-  is_placeholder "$val" && return 0
-  [[ "$val" == "minioadmin" || "$val" == "fleetroot" || "$val" == "fleetpass" ]] && return 0
-  return 1
-}
-
-_autogen_local_cred() {
-  local file="$1" key="$2" gencmd="$3"
-  local val
-  val=$(read_env_var "$file" "$key")
-  if _needs_local_gen "$val"; then
-    if $DRY_RUN; then
-      echo -e "  ${YELLOW}[dry-run]${NC} Would auto-generate $key"
-      return
-    fi
-    local newval
-    newval=$(eval "$gencmd") || { echo -e "  ${RED}✗${NC} Failed to generate value for $key — is openssl installed?" >&2; exit 1; }
-    if [[ -z "$newval" ]]; then
-      echo -e "  ${RED}✗${NC} Auto-generation of $key produced an empty value — is openssl installed?" >&2; exit 1
-    fi
-    write_env_var "$file" "$key" "$newval"
-    _local_cred_autogenned=true
-  fi
-}
 
 if $PROMPT_LOCAL_CREDS; then
   prompt_field "$ENV_FILE" "ORCHESTRATOR_AUTH_TOKEN"  "Orchestrator API auth token"  \
@@ -925,9 +972,9 @@ fi
 # relative to the compose file's new location, so no substitution needed.
 if ! $DRY_RUN; then
   if [[ "$OSTYPE" == "darwin"* ]]; then
-    sed -E 's|^(      context: )\.$|\1..|' "$COMPOSE_EXAMPLE" > "$COMPOSE_FILE"
+    sed -E -e 's|^(      context: )\.$|\1..|' -e 's|\./deploy/comms-seaweedfs:|../deploy/comms-seaweedfs:|' "$COMPOSE_EXAMPLE" > "$COMPOSE_FILE"
   else
-    sed -E 's|^(      context: )\.$|\1..|' "$COMPOSE_EXAMPLE" > "$COMPOSE_FILE"
+    sed -E -e 's|^(      context: )\.$|\1..|' -e 's|\./deploy/comms-seaweedfs:|../deploy/comms-seaweedfs:|' "$COMPOSE_EXAMPLE" > "$COMPOSE_FILE"
   fi
   ok "Generated $COMPOSE_FILE"
 else
@@ -995,6 +1042,9 @@ else
   build_image "fleet:dashboard"       "$SCRIPT_DIR/src/fleet-dashboard/Dockerfile"    "$SCRIPT_DIR" \
     "--build-arg VITE_AUTH_TOKEN=$VITE_TOKEN --build-arg VITE_CONFIG_TOKEN=$CONFIG_TOKEN"
 
+  if [[ "$_comms_enabled" == true ]]; then
+    build_image "fleet:comms" "$SCRIPT_DIR/src/Fleet.Comms/Dockerfile" "$SCRIPT_DIR"
+  fi
   ok "All images built"
 fi
 
@@ -1006,6 +1056,17 @@ if $SKIP_SERVICES; then
   warn "Skipping services (--skip-services)"
 else
   if ! $DRY_RUN; then
+    case "$_media_store" in
+      seaweedfs)
+        (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env --profile comms-media-seaweedfs pull comms-seaweedfs) \
+          || { fail 'Could not pull the pinned comms-seaweedfs image from docker-compose.example.yml'; exit 1; }
+        ;;
+      minio)
+        if ! docker image inspect minio/minio >/dev/null 2>&1 || ! docker image inspect minio/mc:RELEASE.2025-08-13T08-35-41Z >/dev/null 2>&1; then
+          fail 'legacy MinIO media images are not on this host and are no longer published; set FLEET_COMMS_MEDIA_ENDPOINT= to run without media, or restore the images'; exit 1
+        fi
+        ;;
+    esac
     # The auth store is created BEFORE the service starts. It opens the database read-write and
     # will not create it, so starting first means a container that 503s until someone notices.
     if [[ "$_comms_enabled" == "true" ]]; then

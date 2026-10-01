@@ -49,6 +49,7 @@ public sealed class AgentConfigEndpointsWarmupTests : IAsyncLifetime
         builder.WebHost.UseTestServer();
         builder.Logging.ClearProviders();
         builder.Services.AddDbContext<OrchestratorDbContext>(o => o.UseSqlite(_connection));
+        builder.Services.AddSingleton(new JournalTokenService(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Journal:TokenKey"] = Convert.ToBase64String(new byte[32]).TrimEnd('=') }).Build()));
         builder.Services.AddSingleton<IAclChangeNotifier>(new NoopAclChangeNotifier());
         builder.Services.AddSingleton(new AgentConfigPublisherService(
             Options.Create(new RabbitMqOptions()), NullLogger<AgentConfigPublisherService>.Instance));

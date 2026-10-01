@@ -29,7 +29,10 @@ unset FLEET_COMMS_JOURNAL_ENABLED FLEET_COMMS_JOURNAL_BIND FLEET_COMMS_JOURNAL_K
 # way; it is additive.
 unset FLEET_COMMS_MEDIA_ENDPOINT FLEET_COMMS_MEDIA_BUCKET FLEET_COMMS_MEDIA_BACKUP_DIR \
       FLEET_COMMS_MEDIA_ACCESS_KEY FLEET_COMMS_MEDIA_SECRET_KEY \
-      FLEET_COMMS_MINIO_ROOT_USER FLEET_COMMS_MINIO_ROOT_PASSWORD
+      FLEET_COMMS_MINIO_ROOT_USER FLEET_COMMS_MINIO_ROOT_PASSWORD \
+      FLEET_COMMS_MEDIA_STORE FLEET_COMMS_SEAWEEDFS_SIGNING_KEY
+
+source "$SCRIPT_DIR/scripts/lib/comms-profiles.sh"
 
 COMPOSE_EXAMPLE="$SCRIPT_DIR/docker-compose.example.yml"
 COMPOSE_FILE="$FLEET_BASE_DIR/docker-compose.yml"
@@ -82,24 +85,38 @@ section "[1/4] Stopping services..."
 # without the profile, so a running fleet-comms was never stopped — and disabling the service left
 # it running indefinitely. The volume is preserved either way: `down` without -v keeps it.
 COMMS_ENABLED=$(read_env_var "$ENV_FILE" "FLEET_COMMS_ENABLED")
+comms_backfill_store_key "$ENV_FILE"
+resolved=$(comms_resolve_profiles "$ENV_FILE")
 COMMS_PROFILE_ARGS=()
-[[ "$COMMS_ENABLED" == "true" ]] && COMMS_PROFILE_ARGS=(--profile comms)
-# Media's profile follows the ENDPOINT, not a separate boolean — there is no second switch to
-# disagree with the first. A host with an endpoint but no profile flag would come back from an
-# upgrade with its services unable to reach a bucket they are configured to use, so this is
-# resolved here, before `down`, for the same reason COMMS_ENABLED is.
-MEDIA_ENDPOINT=$(read_env_var "$ENV_FILE" "FLEET_COMMS_MEDIA_ENDPOINT")
-[[ -n "$MEDIA_ENDPOINT" ]] && COMMS_PROFILE_ARGS+=(--profile comms-media)
+[[ -z "$resolved" ]] || read -r -a COMMS_PROFILE_ARGS <<< "$resolved"
+MEDIA_ENDPOINT=$(read_env_var "$ENV_FILE" FLEET_COMMS_MEDIA_ENDPOINT)
+MEDIA_STORE=off
+if [[ "$COMMS_ENABLED" == true && -n "$MEDIA_ENDPOINT" ]]; then
+  MEDIA_STORE=$(read_env_var "$ENV_FILE" FLEET_COMMS_MEDIA_STORE)
+fi
+echo "Media store: $MEDIA_STORE"
+# Prepare the current definition beside the runtime .env before pulling, but
+# retain the old generated file for shutdown until preflight succeeds.
+[[ -f "$COMPOSE_EXAMPLE" ]] || { fail 'docker-compose.example.yml not found'; exit 1; }
+COMPOSE_NEXT=$(mktemp "$FLEET_BASE_DIR/.compose-next.XXXXXX")
+trap 'rm -f "$COMPOSE_NEXT"' EXIT
+sed -E -e 's|^(      context: )\.$|\1..|' -e 's|\./deploy/comms-seaweedfs:|../deploy/comms-seaweedfs:|' "$COMPOSE_EXAMPLE" > "$COMPOSE_NEXT"
+case "$MEDIA_STORE" in
+  seaweedfs)
+    (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_NEXT" --env-file .env --profile comms-media-seaweedfs pull comms-seaweedfs) \
+      || { fail 'Could not pull the pinned comms-seaweedfs image from docker-compose.example.yml'; exit 1; }
+    ;;
+  minio)
+    if ! docker image inspect minio/minio >/dev/null 2>&1 || ! docker image inspect minio/mc:RELEASE.2025-08-13T08-35-41Z >/dev/null 2>&1; then
+      fail 'legacy MinIO media images are not on this host and are no longer published; set FLEET_COMMS_MEDIA_ENDPOINT= to run without media, or restore the images'; exit 1
+    fi
+    ;;
+esac
 
 if docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" ps --quiet 2>/dev/null | head -1 | grep -q .; then
   # `--profile comms` on down too, so an enabled service is actually stopped. When disabling, the
   # explicit stop below catches a service the profile no longer selects.
   (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" "${COMMS_PROFILE_ARGS[@]}" down)
-  if [[ "$COMMS_ENABLED" != "true" ]]; then
-    # Disabling: stop and remove the container, keep fleet_comms_auth. Never -v.
-    (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" \
-      --profile comms --profile comms-ops rm -sf fleet-comms fleet-comms-ops 2>/dev/null) || true
-  fi
   ok "Services stopped"
 else
   ok "No running services"
@@ -107,11 +124,21 @@ fi
 
 # ── Regenerate docker-compose.yml ────────────────────────────────────────────
 section "[2/4] Regenerating docker-compose.yml..."
-if [[ ! -f "$COMPOSE_EXAMPLE" ]]; then
-  fail "docker-compose.example.yml not found"; exit 1
-fi
-sed -E 's|^(      context: )\.$|\1..|' "$COMPOSE_EXAMPLE" > "$COMPOSE_FILE"
+mv "$COMPOSE_NEXT" "$COMPOSE_FILE"
 ok "Generated $COMPOSE_FILE"
+
+# The regenerated definition includes SeaweedFS even on a legacy installation.
+remove_comms_services=()
+if [[ "$COMMS_ENABLED" != true ]]; then
+  remove_comms_services=(fleet-comms fleet-comms-ops comms-mysql comms-minio comms-minio-init comms-seaweedfs comms-seaweedfs-init)
+elif [[ -z "$MEDIA_ENDPOINT" ]]; then
+  remove_comms_services=(comms-minio comms-minio-init comms-seaweedfs comms-seaweedfs-init)
+fi
+if [[ ${#remove_comms_services[@]} -gt 0 ]]; then
+  (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env \
+    --profile comms --profile comms-ops --profile comms-media --profile comms-media-seaweedfs \
+    rm -sf "${remove_comms_services[@]}")
+fi
 
 # ── Build images ─────────────────────────────────────────────────────────────
 section "[3/4] Building Docker images..."
@@ -204,21 +231,6 @@ else
         run --rm fleet-comms-ops conversations migrate) \
         || { fail "Could not apply the conversation migrations — see docs/comms-deployment.md"; exit 1; }
     fi
-  fi
-
-  # A host that opted into media before this key was recorded has an endpoint and no bucket name.
-  # Compose defaults the name, so its own services were always fine — but the ORCHESTRATOR derives
-  # the AGENT-side media flag (`Journal:MediaEnabled`) from this file, and an absent key there meant
-  # every agent journalled attachments as `not_archived(media_disabled)` on a deployment that had a
-  # working bucket. Silent, and it only clears on reprovision.
-  #
-  # Backfilled only when an endpoint is present, and never over a name the operator chose: the
-  # runtime policy is scoped to one exact bucket, so guessing here would grant access to a bucket
-  # that does not exist. Idempotent — after the first upgrade this changes nothing.
-  if [[ -n "$MEDIA_ENDPOINT" ]] && ! grep -qE "^FLEET_COMMS_MEDIA_BUCKET=" "$ENV_FILE"; then
-    [[ -s "$ENV_FILE" && -n "$(tail -c 1 "$ENV_FILE")" ]] && printf '\n' >> "$ENV_FILE"
-    printf 'FLEET_COMMS_MEDIA_BUCKET=comms-journal\n' >> "$ENV_FILE"
-    ok "Recorded FLEET_COMMS_MEDIA_BUCKET=comms-journal for the existing media endpoint"
   fi
 
   # The agent-side flag is DERIVED at provisioning time, so a reprovision is what turns an agent's

@@ -960,3 +960,30 @@ jobs:
             exit 1
           fi
           echo "an unsubstituted policy fails closed."
+
+  comms-media-store-smoke:
+    name: Comms media deployment (pinned SeaweedFS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SEAWEEDFS_IMAGE: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+      # CI-only MIT grpcurl, never installed in a runtime service.
+      GRPCURL_IMAGE: fullstorydev/grpcurl:v1.9.3@sha256:085e183ca334eb4e81ca81ee12cbb2b2737505d1d77f5e33dabc5d066593d998
+    steps:
+      - uses: actions/checkout@v4
+      - name: Profile resolver and compose selection
+        run: |
+          bash scripts/test-comms-profiles.sh
+          bash scripts/test-comms-install.sh
+          bash scripts/test-comms-lifecycle-compose.sh
+          bash scripts/test-setup-prompts.sh
+          bash scripts/check-comms-compose.sh
+          bash scripts/test-comms-compose-checker.sh
+          bash scripts/test-comms-smoke-fixture.sh
+          python3 scripts/test-comms-listeners.py
+      - name: Store scripts need only shell and weed
+        run: |
+          bash scripts/check-minio-init-deps.sh --allow weed deploy/comms-seaweedfs/start.sh
+          bash scripts/check-minio-init-deps.sh --allow weed deploy/comms-seaweedfs/init-bucket.sh
+      - name: Exact-image security and object-plane smoke (M1-M9)
+        run: bash scripts/smoke-comms-media-store.sh

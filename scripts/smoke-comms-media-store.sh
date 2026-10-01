@@ -101,15 +101,21 @@ for line in open(sys.argv[1]):
     host,port=address.rsplit(':',1); port=int(port)
     # Approved #397 exception: Docker's embedded DNS is not an application listener.
     if host == '127.0.0.11': continue
-    assert host == '127.0.0.1' or (host == '0.0.0.0' and port in (8333,18333)), address
-    seen.add((host,port))
-assert {('0.0.0.0',8333),('0.0.0.0',18333)} <= seen
+    assert host == '127.0.0.1' or (host in ('0.0.0.0','::','[::]') and port in (8333,18333)), address
+    if host in ('0.0.0.0','::','[::]'): seen.add(port)
+assert {8333,18333} <= seen
 PY
 rm "$ENV.listeners"
+# Use the actual IPv4 address: DNS or an IPv6-only socket cannot satisfy these positive probes.
+IPV4=$(docker inspect -f "{{with index .NetworkSettings.Networks \"$NETWORK\"}}{{.IPAddress}}{{end}}" comms-seaweedfs)
+[[ -n "$IPV4" && "$IPV4" != *:* ]]
 docker run --rm --network "$NETWORK" --entrypoint /bin/sh "$SEAWEEDFS_IMAGE" -c '
+  for port in 8333 18333; do
+    nc -z -w 1 "$1" "$port" || { echo "S3 IPv4 listener unreachable $port" >&2; exit 1; }
+  done
   for port in 9333 19333 8080 18080 8888 18888 8181 9101 6060 2022 7333; do
     if nc -z -w 1 comms-seaweedfs "$port"; then echo "unexpected listener $port" >&2; exit 1; fi
-  done'
+  done' sh "$IPV4"
 echo 'PASS M6 listener boundary'
 # M7: repeat init twice around an object and prove its bytes survive.
 compose run -T --rm --no-deps comms-seaweedfs-init </dev/null

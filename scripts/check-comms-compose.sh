@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+FIXTURE=$(mktemp -d)
+trap 'rm -rf "$FIXTURE"' EXIT
+# Service env_file paths are relative to the YAML, not to --env-file.
+# Copy both examples so validation never needs or writes an operator's .env.
+cp "$ROOT/docker-compose.example.yml" "$FIXTURE/docker-compose.yml"
+cp "$ROOT/.env.example" "$FIXTURE/.env"
 # Empty process environment: exported COMPOSE_PROFILES must not select extra services.
-compose() { env -i PATH="$PATH" HOME="$HOME" FLEET_BASE_DIR="$ROOT" docker compose -f "$ROOT/docker-compose.example.yml" --env-file "$ROOT/.env.example" "$@"; }
+compose() { env -i PATH="$PATH" HOME="$HOME" FLEET_BASE_DIR="$ROOT" docker compose -f "$FIXTURE/docker-compose.yml" --env-file "$FIXTURE/.env" "$@"; }
 base=$(compose config --services)
 images=$(compose config --images)
 if printf '%s\n' "$base" | grep -Eq '^(fleet-comms|comms-mysql|fleet-comms-ops|comms-minio|comms-minio-init|comms-seaweedfs|comms-seaweedfs-init)$'; then exit 1; fi

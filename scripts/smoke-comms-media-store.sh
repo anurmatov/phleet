@@ -17,20 +17,25 @@ for resource in network volume; do
     echo "Refusing to touch existing $resource $name" >&2; exit 1
   fi
 done
-ENV=$(mktemp)
+FIXTURE=$(mktemp -d)
+ENV="$FIXTURE/.env"
+# Compose resolves service env_file and relative binds beside its compose file, not --env-file.
+# Keep the approved example unchanged and supply both in a disposable project directory.
+cp "$ROOT/docker-compose.example.yml" "$FIXTURE/docker-compose.yml"
+ln -s "$ROOT/deploy" "$FIXTURE/deploy"
 NETWORK=comms397-smoke_comms-media
-compose() { docker compose -p comms397-smoke -f "$ROOT/docker-compose.example.yml" --env-file "$ENV" --profile comms-media-seaweedfs "$@"; }
+compose() { docker compose -p comms397-smoke -f "$FIXTURE/docker-compose.yml" --env-file "$ENV" --profile comms-media-seaweedfs "$@"; }
 cleanup() {
   compose down >/dev/null 2>&1 || true
   docker rm -f comms397-invalid >/dev/null 2>&1 || true
   docker volume rm comms397-smoke_comms_seaweedfs_data >/dev/null 2>&1 || true
-  rm -f "$ENV" "$ENV.commands" "$ENV.listeners"
+  rm -rf "$FIXTURE"
 }
 trap cleanup EXIT
 ACCESS=$(openssl rand -hex 16)
 SECRET=$(openssl rand -hex 24)
 SIGNING=$(openssl rand -hex 32)
-printf 'FLEET_BASE_DIR=%s\nFLEET_COMMS_MEDIA_BUCKET=comms-journal\nFLEET_COMMS_MEDIA_ACCESS_KEY=%s\nFLEET_COMMS_MEDIA_SECRET_KEY=%s\nFLEET_COMMS_SEAWEEDFS_SIGNING_KEY=%s\n' "$ROOT" "$ACCESS" "$SECRET" "$SIGNING" > "$ENV"
+printf 'FLEET_BASE_DIR=%s\nFLEET_COMMS_MEDIA_BUCKET=comms-journal\nFLEET_COMMS_MEDIA_ACCESS_KEY=%s\nFLEET_COMMS_MEDIA_SECRET_KEY=%s\nFLEET_COMMS_SEAWEEDFS_SIGNING_KEY=%s\n' "$FIXTURE" "$ACCESS" "$SECRET" "$SIGNING" > "$ENV"
 actual=$(compose config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["comms-seaweedfs"]["image"])')
 [[ "$actual" == "$SEAWEEDFS_IMAGE" ]]
 docker pull "$SEAWEEDFS_IMAGE"

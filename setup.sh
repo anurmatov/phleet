@@ -241,6 +241,24 @@ _autogen_local_cred() {
 
 
 configure_comms() {
+  # Preview library writes on a private copy so subsequent reads see the planned backfill.
+  local ENV_FILE="$ENV_FILE" COMMS_DRY_RUN="$COMMS_DRY_RUN" preview
+  if $DRY_RUN; then
+    preview=$(mktemp)
+    trap "rm -f '$preview'" EXIT
+    cp "$ENV_FILE" "$preview"
+    ENV_FILE="$preview"
+    COMMS_DRY_RUN=false
+    echo '[dry-run] Previewing Comms choices on a temporary env file.'
+  fi
+  _configure_comms
+  if $DRY_RUN; then
+    rm -f "$preview"
+    trap - EXIT
+  fi
+}
+
+_configure_comms() {
   COMMS_PROFILE_ARGS=()
   comms_backfill_store_key "$ENV_FILE"
   _comms_enabled=$(read_env_var "$ENV_FILE" "FLEET_COMMS_ENABLED")

@@ -39,6 +39,20 @@ cp "$ENV" "$DIR/before"
 printf 'n\n' | bash "$DIR/setup.sh" --comms --dry-run > "$DIR/output"
 cmp "$ENV" "$DIR/before"
 echo 'PASS --comms dry-run preserves file'
+# A legacy endpoint with no store must resolve the previewed backfill, not the real file.
+cat > "$ENV" <<'ENV'
+FLEET_COMMS_ENABLED=true
+FLEET_COMMS_BIND=127.0.0.1:3500
+FLEET_COMMS_TRUST_PROXY=false
+FLEET_COMMS_CONVERSATIONS_ENABLED=false
+FLEET_COMMS_MEDIA_ENDPOINT=http://comms-minio:9000
+ENV
+cp "$ENV" "$DIR/before"
+printf 'n\n' | bash "$DIR/setup.sh" --comms --dry-run > "$DIR/output"
+cmp "$ENV" "$DIR/before"
+grep -q 'Media store: minio' "$DIR/output"
+[[ ! -f "$CALLS" ]]
+echo 'PASS legacy dry-run resolves previewed backfill without writes or Docker'
 if bash "$DIR/setup.sh" --comms --skip-services > "$DIR/output" 2>&1; then exit 1; fi
 echo 'PASS --comms rejects other flags'
 # Missing withdrawn images fail before down, rm or up.

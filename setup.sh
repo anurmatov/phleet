@@ -1058,7 +1058,7 @@ else
   if ! $DRY_RUN; then
     case "$_media_store" in
       seaweedfs)
-        docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_EXAMPLE" --env-file "$ENV_FILE" --profile comms-media-seaweedfs pull comms-seaweedfs \
+        (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env --profile comms-media-seaweedfs pull comms-seaweedfs) \
           || { fail 'Could not pull the pinned comms-seaweedfs image from docker-compose.example.yml'; exit 1; }
         ;;
       minio)

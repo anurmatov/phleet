@@ -95,9 +95,15 @@ if [[ "$COMMS_ENABLED" == true && -n "$MEDIA_ENDPOINT" ]]; then
   MEDIA_STORE=$(read_env_var "$ENV_FILE" FLEET_COMMS_MEDIA_STORE)
 fi
 echo "Media store: $MEDIA_STORE"
+# Prepare the current definition beside the runtime .env before pulling, but
+# retain the old generated file for shutdown until preflight succeeds.
+[[ -f "$COMPOSE_EXAMPLE" ]] || { fail 'docker-compose.example.yml not found'; exit 1; }
+COMPOSE_NEXT=$(mktemp "$FLEET_BASE_DIR/.compose-next.XXXXXX")
+trap 'rm -f "$COMPOSE_NEXT"' EXIT
+sed -E -e 's|^(      context: )\.$|\1..|' -e 's|\./deploy/comms-seaweedfs:|../deploy/comms-seaweedfs:|' "$COMPOSE_EXAMPLE" > "$COMPOSE_NEXT"
 case "$MEDIA_STORE" in
   seaweedfs)
-    docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_EXAMPLE" --env-file "$ENV_FILE" --profile comms-media-seaweedfs pull comms-seaweedfs \
+    (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_NEXT" --env-file .env --profile comms-media-seaweedfs pull comms-seaweedfs) \
       || { fail 'Could not pull the pinned comms-seaweedfs image from docker-compose.example.yml'; exit 1; }
     ;;
   minio)
@@ -116,7 +122,12 @@ else
   ok "No running services"
 fi
 
-# Use the current example so legacy generated files need not already know SeaweedFS names.
+# ── Regenerate docker-compose.yml ────────────────────────────────────────────
+section "[2/4] Regenerating docker-compose.yml..."
+mv "$COMPOSE_NEXT" "$COMPOSE_FILE"
+ok "Generated $COMPOSE_FILE"
+
+# The regenerated definition includes SeaweedFS even on a legacy installation.
 remove_comms_services=()
 if [[ "$COMMS_ENABLED" != true ]]; then
   remove_comms_services=(fleet-comms fleet-comms-ops comms-mysql comms-minio comms-minio-init comms-seaweedfs comms-seaweedfs-init)
@@ -124,18 +135,10 @@ elif [[ -z "$MEDIA_ENDPOINT" ]]; then
   remove_comms_services=(comms-minio comms-minio-init comms-seaweedfs comms-seaweedfs-init)
 fi
 if [[ ${#remove_comms_services[@]} -gt 0 ]]; then
-  docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_EXAMPLE" --env-file "$ENV_FILE" \
+  (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env \
     --profile comms --profile comms-ops --profile comms-media --profile comms-media-seaweedfs \
-    rm -sf "${remove_comms_services[@]}"
+    rm -sf "${remove_comms_services[@]}")
 fi
-
-# ── Regenerate docker-compose.yml ────────────────────────────────────────────
-section "[2/4] Regenerating docker-compose.yml..."
-if [[ ! -f "$COMPOSE_EXAMPLE" ]]; then
-  fail "docker-compose.example.yml not found"; exit 1
-fi
-sed -E -e 's|^(      context: )\.$|\1..|' -e 's|\./deploy/comms-seaweedfs:|../deploy/comms-seaweedfs:|' "$COMPOSE_EXAMPLE" > "$COMPOSE_FILE"
-ok "Generated $COMPOSE_FILE"
 
 # ── Build images ─────────────────────────────────────────────────────────────
 section "[3/4] Building Docker images..."

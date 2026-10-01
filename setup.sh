@@ -182,7 +182,10 @@ prompt_field() {
     break
   done
 
-  [[ -n "$value" ]] && write_env_var "$file" "$key" "$value"
+  # An optional skip is successful, not a false status that trips set -e.
+  if [[ -n "$value" ]]; then
+    write_env_var "$file" "$key" "$value"
+  fi
 }
 
 # Poll a container's health status until healthy or timeout

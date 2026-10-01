@@ -975,6 +975,7 @@ jobs:
         run: |
           bash scripts/test-comms-profiles.sh
           bash scripts/test-comms-install.sh
+          bash scripts/test-setup-prompts.sh
           bash scripts/check-comms-compose.sh
           bash scripts/test-comms-compose-checker.sh
           bash scripts/test-comms-smoke-fixture.sh

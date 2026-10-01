@@ -98,7 +98,7 @@ echo -n "$PRIMARY_TOKEN" > /tmp/.github-token-primary
 echo "[gh-auth] Primary account: $PRIMARY_ACCOUNT"
 
 # Install a transparent gh wrapper (idempotent — only runs on first startup, not on cron refreshes).
-# The wrapper routes GH_TOKEN to the correct per-account token file based on --repo or git remote owner,
+# The wrapper routes GH_TOKEN by --repo, then a gh api repos endpoint, then git remote owner,
 # so all gh commands work across multiple accounts without any manual GH_TOKEN overrides.
 GH_BIN=$(command -v gh)
 GH_REAL="${GH_BIN%/*}/gh-real"
@@ -118,6 +118,57 @@ for arg in "$@"; do
     fi
     PREV="$arg"
 done
+
+# Inspect a copy of argv; the original arguments always reach gh-real unchanged.
+if [ -z "$OWNER" ] && [ "${1:-}" = "api" ]; then
+    API_ARGS=("$@")
+    ENDPOINT=""
+    for ((i = 1; i < ${#API_ARGS[@]}; i++)); do
+        arg="${API_ARGS[i]}"
+        case "$arg" in
+            --)
+                ENDPOINT="${API_ARGS[i+1]:-}"
+                break
+                ;;
+            --*)
+                flag="${arg%%=*}"
+                case "$flag" in
+                    --method|--header|--raw-field|--field|--jq|--template|--preview|--input|--hostname|--cache)
+                        # Without '=', the next argument is this flag's value.
+                        [[ "$arg" = *=* ]] || ((i++))
+                        ;;
+                    --include|--paginate|--silent|--slurp|--verbose|--allow-escape-sequences|--help) ;;
+                    *) break ;;
+                esac
+                ;;
+            -?*)
+                cluster="${arg:1}"
+                UNKNOWN_FLAG=0
+                for ((j = 0; j < ${#cluster}; j++)); do
+                    case "${cluster:j:1}" in
+                        i|h) ;;
+                        X|H|f|F|q|t|p)
+                            # Remaining letters are an attached value, not flags.
+                            if ((j + 1 == ${#cluster})); then ((i++)); fi
+                            break
+                            ;;
+                        *) UNKNOWN_FLAG=1; break ;;
+                    esac
+                done
+                [ "$UNKNOWN_FLAG" -eq 0 ] || break
+                ;;
+            *) ENDPOINT="$arg"; break ;;
+        esac
+    done
+    ENDPOINT="${ENDPOINT#https://api.github.com/}"
+    ENDPOINT="${ENDPOINT#/}"
+    if [[ "$ENDPOINT" =~ ^repos/([^/]+)/[^/?#]+ ]]; then
+        ENDPOINT_OWNER="${BASH_REMATCH[1]}"
+        if [[ "$ENDPOINT_OWNER" =~ ^[A-Za-z0-9-]{1,39}$ ]]; then
+            OWNER="$ENDPOINT_OWNER"
+        fi
+    fi
+fi
 
 if [ -z "$OWNER" ]; then
     REMOTE=$(git remote get-url origin 2>/dev/null || true)

@@ -39,6 +39,25 @@ jobs:
           --filter "FullyQualifiedName!~Fleet.Conversations.Tests&FullyQualifiedName!~Fleet.Orchestrator.Tests.Migrations"
           --logger "console;verbosity=normal"
 
+      - name: GitHub API endpoint token routing
+        run: |
+          set -euo pipefail
+          log=$(mktemp)
+          trap 'rm -f "$log"' EXIT
+          bash tests/gh-auth-wrapper/run.sh | tee "$log"
+          # Mode-000 rows must execute on the non-root runner, never skip.
+          if grep -q '^SKIP' "$log"; then
+            echo "ERROR: unreadable-token regressions require a non-root user"
+            exit 1
+          fi
+          set +e
+          WRAPPER=tests/gh-auth-wrapper/wrapper.legacy.sh bash tests/gh-auth-wrapper/run.sh > "$log" 2>&1
+          negative_rc=$?
+          set -e
+          cat "$log"
+          [ "$negative_rc" -eq 1 ]
+          grep -q '^FAIL AC1 row 1: selected token$' "$log"
+
       # #341: proves the dashboard nginx re-resolves fleet-orchestrator per request
       # (Docker DNS) instead of caching one container address at config load.
       - name: Dashboard proxy re-resolves the orchestrator

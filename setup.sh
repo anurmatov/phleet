@@ -246,7 +246,11 @@ configure_comms() {
   if $DRY_RUN; then
     preview=$(mktemp)
     trap "rm -f '$preview'" EXIT
-    cp "$ENV_FILE" "$preview"
+    if [[ -f "$ENV_FILE" ]]; then
+      cp "$ENV_FILE" "$preview"
+    else
+      cp "$ENV_EXAMPLE" "$preview"
+    fi
     ENV_FILE="$preview"
     COMMS_DRY_RUN=false
     echo '[dry-run] Previewing Comms choices on a temporary env file.'

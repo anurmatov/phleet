@@ -108,3 +108,19 @@ rc=0; bash "$DIR/upgrade.sh" > "$DIR/output" 2>&1 || rc=$?
 grep -q ' pull comms-seaweedfs' "$CALLS"
 ! grep -Eq ' down$| rm | up ' "$CALLS"
 echo 'PASS pinned image pull failure leaves lifecycle untouched'
+# A fresh full dry-run has no .env yet. Preview from the example without creating runtime state.
+FRESH="$DIR/fresh"
+mkdir -p "$FRESH/scripts/lib" "$DIR/home/.gemini" "$DIR/previews"
+cp "$ROOT/setup.sh" "$ROOT/.env.example" "$ROOT/docker-compose.example.yml" "$FRESH/"
+cp "$ROOT/scripts/lib/comms-profiles.sh" "$FRESH/scripts/lib/"
+printf '%s\n' '{"refresh_token":"synthetic-fixture-token"}' > "$DIR/home/.gemini/oauth_creds.json"
+cp "$FRESH/.env.example" "$DIR/example-before"
+: > "$CALLS"
+if ! printf '3\nn\n' | HOME="$DIR/home" TMPDIR="$DIR/previews" bash "$FRESH/setup.sh" --dry-run > "$DIR/output" 2>&1; then
+  cat "$DIR/output" >&2; exit 1
+fi
+[[ ! -e "$FRESH/fleet" && ! -e "$FRESH/.env" ]]
+cmp "$FRESH/.env.example" "$DIR/example-before"
+[[ -z "$(ls -A "$DIR/previews")" ]]
+! grep -Eq '^build |^compose .* (pull|up|down|rm|run)|^network create ' "$CALLS"
+echo 'PASS fresh full dry-run exits zero without real config or leftover previews'

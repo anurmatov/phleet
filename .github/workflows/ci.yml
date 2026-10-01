@@ -977,6 +977,7 @@ jobs:
           bash scripts/test-comms-install.sh
           bash scripts/check-comms-compose.sh
           bash scripts/test-comms-smoke-fixture.sh
+          python3 scripts/test-comms-listeners.py
       - name: Store scripts need only shell and weed
         run: |
           bash scripts/check-minio-init-deps.sh --allow weed deploy/comms-seaweedfs/start.sh

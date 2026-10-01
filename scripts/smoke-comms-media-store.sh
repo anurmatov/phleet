@@ -99,6 +99,8 @@ for line in open(sys.argv[1]):
     if not line.startswith('tcp'): continue
     address=line.split()[3]
     host,port=address.rsplit(':',1); port=int(port)
+    # Approved #397 exception: Docker's embedded DNS is not an application listener.
+    if host == '127.0.0.11': continue
     assert host == '127.0.0.1' or (host == '0.0.0.0' and port in (8333,18333)), address
     seen.add((host,port))
 assert {('0.0.0.0',8333),('0.0.0.0',18333)} <= seen

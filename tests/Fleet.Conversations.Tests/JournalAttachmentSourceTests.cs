@@ -1,3 +1,12 @@
+using System.Net;
+using System.Net.Http.Headers;
+using System.Security.Cryptography;
+using System.Text;
+using Fleet.Comms.Routes;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Logging;
 using Fleet.Conversations.Contracts;
 using Fleet.Conversations.Journal;
 using Fleet.Protocol;
@@ -71,4 +80,76 @@ public sealed partial class JournalReadStoreTests
         await fixture.ExecuteAsync($"UPDATE journal_attachments SET state = 'lost' WHERE message_id = '{first}';");
         Assert.Equal("lost", (await source.FindAttachmentAsync(observed, key, first, null, 0))!.AttachmentState);
     }
+    [Fact]
+    public async Task Content_route_intersects_real_SQL_scope_and_binding_without_writes()
+    {
+        var subject = Subject(); var other = Subject(); var a = Chat(); var b = Chat(); var c = Chat();
+        var bytes = Encoding.UTF8.GetBytes("synthetic sentinel");
+        var digest = Convert.ToHexStringLower(SHA256.HashData(bytes));
+        var write = new MySqlJournalStore(Db, NullLogger.Instance);
+        var bucket = new FakeBucket();
+        async Task<string> Seed(long chat, string observer, string mime)
+        {
+            var record = Message(chat, 5, BaseTime(), "synthetic", attachments:
+                [Attachment(0) with { ByteSize = bytes.Length, MimeType = mime }]);
+            var id = (await write.IngestAsync(record, observer)).MessageId!; var objectId = Ulid.NewUlid();
+            await fixture.ExecuteAsync($"""
+                INSERT INTO journal_objects
+                  (id, object_key, owner, sha256, byte_size, mime_type, state, created_at, updated_at)
+                VALUES ('{objectId}', 'synthetic/{objectId}', '{observer}', '{digest}', {bytes.Length},
+                        '{mime}', 'uploaded', UTC_TIMESTAMP(6), UTC_TIMESTAMP(6));
+                UPDATE journal_attachments SET object_id = '{objectId}', state = 'committed',
+                  not_archived_reason = NULL, sha256 = '{digest}' WHERE message_id = '{id}';
+                """);
+            bucket.Objects[$"synthetic/{objectId}"] = bytes;
+            return id;
+        }
+        // The byte store is a double; SQL scope, bindings, authentication and route are real.
+        var first = await Seed(a, subject, "image/png");
+        var second = await Seed(b, subject, "application/pdf");
+        var hidden = await Seed(c, other, "application/pdf");
+        var key = Enumerable.Repeat((byte)42, 32).ToArray();
+        var bindings = new JournalTurnBindings(TimeProvider.System);
+        var builder = WebApplication.CreateBuilder(); builder.WebHost.UseTestServer(); builder.Logging.ClearProviders();
+        await using var app = builder.Build(); var stats = new JournalRuntimeStats();
+        JournalAuth.Use(app, [key], stats);
+        var endpoint = new JournalAttachmentContentEndpoint(new MySqlJournalReadStore(Db, NullLogger.Instance), bucket,
+            new JournalReadGrants(new HashSet<string>()), new JournalBindingScope(bindings, new HashSet<long>()), stats);
+        app.MapPost(JournalAttachmentRequest.ContentPath, endpoint.HandleAsync); await app.StartAsync();
+        using var client = app.GetTestClient();
+        void Bind(long chat, long seq) => bindings.Put(subject, new(Ulid.NewUlid(), seq, "bound", "supergroup", 7001, chat));
+        async Task<HttpResponseMessage> Fetch(string body)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, JournalAttachmentRequest.ContentPath)
+            { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", JournalTokens.Mint(key, "read", subject));
+            return await client.SendAsync(request);
+        }
+        Bind(a, 1);
+        var before = await fixture.ScalarRowAsync("SELECT COUNT(*) FROM journal_messages");
+        var objectsBefore = await fixture.ScalarRowAsync("SELECT COUNT(*) FROM journal_objects");
+        var keysBefore = bucket.Keys.Order().ToArray();
+        for (var i = 0; i < 20; i++)
+        {
+            using var reply = await Fetch("{\"telegram_message_id\":5}");
+            Assert.Equal(HttpStatusCode.OK, reply.StatusCode); Assert.Equal(bytes, await reply.Content.ReadAsByteArrayAsync());
+            Assert.Equal(first, reply.Headers.GetValues("X-Journal-Message-Id").Single());
+        }
+        foreach (var id in new[] { second, hidden, Ulid.NewUlid() })
+        {
+            using var reply = await Fetch($"{{\"message_id\":\"{id}\"}}");
+            Assert.Equal(HttpStatusCode.NotFound, reply.StatusCode);
+            Assert.Equal("{\"error\":\"not_found\"}", await reply.Content.ReadAsStringAsync());
+        }
+        using (var absent = await Fetch("{\"telegram_message_id\":5,\"ordinal\":255}"))
+            Assert.Equal(HttpStatusCode.NotFound, absent.StatusCode);
+        Bind(b, 2);
+        using (var reply = await Fetch("{\"telegram_message_id\":5}"))
+        { Assert.Equal(HttpStatusCode.OK, reply.StatusCode); Assert.Equal("application/pdf", reply.Content.Headers.ContentType!.MediaType);
+          Assert.Equal(second, reply.Headers.GetValues("X-Journal-Message-Id").Single()); }
+        Assert.Equal(before, await fixture.ScalarRowAsync("SELECT COUNT(*) FROM journal_messages"));
+        Assert.Equal(objectsBefore, await fixture.ScalarRowAsync("SELECT COUNT(*) FROM journal_objects"));
+        Assert.Equal(keysBefore, bucket.Keys.Order().ToArray());
+    }
+
 }

@@ -185,6 +185,9 @@ public static class ConversationMetrics
     public static readonly Counter<long> JournalOrphansDeleted =
         Meter.CreateCounter<long>("fleet.journal.orphans_deleted", "objects");
 
+    public static readonly Counter<long> JournalAttachmentFetch = Meter.CreateCounter<long>("fleet_comms_journal_attachment_fetch_total");
+    public static readonly Counter<long> JournalAttachmentFetchBytes = Meter.CreateCounter<long>("fleet_comms_journal_attachment_fetch_bytes_total");
+
     // ── read tools (#394) ─────────────────────────────────────────────────────
     //
     // `tool` here is one of the journal's OWN three read tools — `search_messages`, `get_message`,

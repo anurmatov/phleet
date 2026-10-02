@@ -109,6 +109,7 @@ public static class JournalEndpoints
             {
                 schemaVersion = status.SchemaVersion,
                 turnBindings = new { active = bindings.Active, expired = bindings.Expired },
+                attachmentFetch = new { inFlight = stats.AttachmentFetchInFlight },
                 enabled = true,
                 observers = status.Observers.Select(o => new
                 {

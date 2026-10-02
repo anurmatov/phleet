@@ -630,6 +630,7 @@ public static class CommsApp
 
         // The read tools, behind the same authentication as every route above (#394).
         JournalMcp.Map(app);
+        JournalAttachmentContentEndpoint.Map(app, media?.Bytes, stats, time);
 
         return app;
     }

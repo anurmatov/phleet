@@ -38,4 +38,21 @@ public sealed class AgentProgress
 
     /// <summary>Structured JSON output when --json-schema is used and response validates against schema.</summary>
     public string? StructuredOutput { get; init; }
+
+    /// <summary>
+    /// On a <c>recovered_answer</c>, the preserved stale text split at each stale result and tagged
+    /// by provenance. <see cref="Summary"/> stays the full concatenation; null when not segmented.
+    /// </summary>
+    public IReadOnlyList<RecoveredSegment>? RecoveredSegments { get; init; }
+}
+
+/// <summary>One preserved stale-text segment and the provenance of the turn that produced it.</summary>
+public sealed record RecoveredSegment(string Text, string Origin)
+{
+    /// <summary>Ended by a result whose origin is absent or human: a stdin-started turn.</summary>
+    public const string User = "user";
+    /// <summary>Ended by a result with any other origin, such as a background task notification.</summary>
+    public const string Notification = "notification";
+    /// <summary>No result arrived in the drained events: unknown provenance.</summary>
+    public const string Open = "open";
 }

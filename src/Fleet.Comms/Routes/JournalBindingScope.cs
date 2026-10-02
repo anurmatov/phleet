@@ -11,7 +11,8 @@ public sealed class JournalBindingScope(JournalTurnBindings bindings, IReadOnlyS
         var bound = bindings.Get(subject);
         if (bound is null) return (null, "no_bound_conversation");
         if (excluded.Contains(bound.ChatId!.Value)) return (null, "conversation_not_journaled");
-        JournalWire.TryParse<JournalChatKind>(bound.ChatKind, out var kind);
+        if (!JournalWire.TryParse<JournalChatKind>(bound.ChatKind, out var kind))
+            throw new InvalidOperationException("Turn binding contains an invalid chat kind.");
         return (JournalKeys.ConversationKey(new JournalTelegramRef
         { BotId = bound.BotId!.Value, ChatId = bound.ChatId.Value, ChatKind = kind, MessageId = 0 }), null);
     }

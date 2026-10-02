@@ -202,7 +202,7 @@ public sealed class MySqlJournalReadStore : IJournalReadStore, IJournalAttachmen
         {
             parameters.AddWithValue("@caller", reader.Subject);
             parameters.AddWithValue("@conversation", conversationKey);
-            parameters.AddWithValue("@message", messageId ?? "tg:" + telegramMessageId!.Value.ToString(CultureInfo.InvariantCulture));
+            parameters.AddWithValue("@message", messageId ?? JournalKeys.SourceKey(telegramMessageId!.Value));
             parameters.AddWithValue("@ordinal", ordinal);
         }, async (rows, token) => await rows.ReadAsync(token)
             ? new JournalAttachmentLocator(rows.GetString(0), rows.GetByte(1), rows.GetString(2),

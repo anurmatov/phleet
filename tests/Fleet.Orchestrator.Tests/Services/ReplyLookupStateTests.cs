@@ -51,6 +51,16 @@ public sealed class ReplyLookupStateTests
         Assert.False(generated["Telegram"]!.AsObject().ContainsKey("PrimaryHumanUserId"));
     }
 
+    [Fact]
+    public void Generate_MixedCaseGrantedTool_IsAvailable()
+    {
+        var agent = Build("claude", true);
+        agent.JournalEnabled = true;
+        agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "fleet-comms-journal", TransportType = "http", Url = "http://journal.test" });
+        agent.Tools.Add(new AgentTool { ToolName = "MCP__FLEET-COMMS-JOURNAL__GET_MESSAGE", IsEnabled = true });
+        Assert.Equal("available", ContainerProvisioningService.ReplyLookupState(agent, new JournalProvisioning("ingest", [], null)));
+    }
+
     private static Agent Build(string provider, bool bot)
     {
         var agent = new Agent { Name = "agent1", DisplayName = "Agent1", ContainerName = "fleet-agent1", Role = "role", Model = "model", Provider = provider, WorkDir = "/workspace" };

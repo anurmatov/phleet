@@ -11,6 +11,15 @@ namespace Fleet.Agent.Tests;
 
 public sealed class ExternalReplyTests
 {
+    [Fact]
+    public void Source_ReplyRenderers_HaveNoLegacyQuoteMarker()
+    {
+        var root = Fleet.Agent.Tests.Harness.RepoPaths.Resolve("src/Fleet.Agent");
+        foreach (var file in Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories)
+                     .Where(f => !f.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar)))
+            Assert.DoesNotContain("Replying to", File.ReadAllText(file), StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

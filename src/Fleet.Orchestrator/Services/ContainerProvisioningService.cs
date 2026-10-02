@@ -1383,7 +1383,7 @@ public sealed class ContainerProvisioningService(
         if (!agent.JournalEnabled || journal?.IngestToken is null) return "journal_capture_off";
         if (!SupportsMcpHeaders(agent.Provider)) return "provider_headers_unsupported";
         if (!agent.McpEndpoints.Any(e => string.Equals(e.McpName, JournalMcpServerName, StringComparison.OrdinalIgnoreCase))
-            || !agent.Tools.Any(t => t.IsEnabled && t.ToolName == "mcp__fleet-comms-journal__get_message"))
+            || !agent.Tools.Any(t => t.IsEnabled && string.Equals(t.ToolName, "mcp__fleet-comms-journal__get_message", StringComparison.OrdinalIgnoreCase)))
             return "tool_not_granted";
         return "available";
     }

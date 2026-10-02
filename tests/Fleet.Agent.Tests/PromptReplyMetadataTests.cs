@@ -6,6 +6,17 @@ namespace Fleet.Agent.Tests;
 
 public sealed class PromptReplyMetadataTests
 {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ForDm_ReplyWithoutCurrentId_HasNoLeadingSpace(bool warm)
+    {
+        var executor = Substitute.For<IAgentExecutor>();
+        executor.IsProcessWarm.Returns(warm);
+        var prompt = new PromptAssembler(executor).ForDm(new GroupChatBuffer(), "hi", replyToTelegramMessageId: 5);
+        Assert.Equal(warm ? "[reply_to_message_id: 5]\nhi" : "[New message][reply_to_message_id: 5]\nhi", prompt);
+    }
+
     public static IEnumerable<object[]> Cases =>
         from isGroup in new[] { false, true }
         from warm in new[] { false, true }

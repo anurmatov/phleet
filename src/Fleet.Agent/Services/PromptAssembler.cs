@@ -48,7 +48,7 @@ public sealed class PromptAssembler
         var channelLine = channelAnchor is not null ? $"\n{channelAnchor}" : "";
         var voiceLine = isVoiceTranscription ? $"\n{VoiceTranscriptionMarker}" : "";
         var replyContext = replyToTelegramMessageId is > 0
-            ? $" [reply_to_message_id: {replyToTelegramMessageId}]"
+            ? $"{(msgIdTag.Length > 0 ? " " : "")}[reply_to_message_id: {replyToTelegramMessageId}]"
             : "";
 
         if (_executor.IsProcessWarm)

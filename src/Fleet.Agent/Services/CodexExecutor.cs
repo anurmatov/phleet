@@ -1240,14 +1240,24 @@ public sealed class CodexExecutor : IAgentExecutor
             return null;
         }
 
+        var command = itemType == "commandExecution" ? TryString(item?["command"]) : null;
+        var commandSummary = "Running shell command";
+        if (!string.IsNullOrEmpty(command))
+        {
+            var preview = command.Replace("\r\n", " ").Replace('\r', ' ').Replace('\n', ' ').Trim();
+            if (preview.Length > 80)
+                preview = preview[..TextTruncation.SafeCutIndex(preview, 80)] + "...";
+            commandSummary = $"Running: {preview}";
+        }
+
         AgentProgress? progress = itemType switch
         {
             "commandExecution" => new AgentProgress
             {
                 EventType = "tool_use",
-                Summary = $"Using {item?["command"]?.GetValue<string>() ?? "command"}",
-                ToolName = item?["command"]?.GetValue<string>(),
-                ToolArgs = item?["args"]?.ToJsonString() ?? item?["command"]?.GetValue<string>() ?? "{}",
+                Summary = commandSummary,
+                ToolName = "shell",
+                ToolArgs = item?["args"]?.ToJsonString() ?? (string.IsNullOrEmpty(command) ? "{}" : command),
                 IsSignificant = true,
             },
             "mcpToolCall" => new AgentProgress
@@ -1273,7 +1283,7 @@ public sealed class CodexExecutor : IAgentExecutor
         {
             var toolName = progress.ToolName ?? itemType ?? "unknown";
             var rawArgs = progress.ToolArgs ?? "";
-            var argsPreview = rawArgs.Length > 200 ? rawArgs[..200] + "…" : rawArgs;
+            var argsPreview = rawArgs.Length > 200 ? rawArgs[..TextTruncation.SafeCutIndex(rawArgs, 200)] + "…" : rawArgs;
             _logger.LogInformation("[codex tool_use:{Tool}] {Args}", toolName, argsPreview);
         }
 

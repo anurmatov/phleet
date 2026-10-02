@@ -141,7 +141,7 @@ rendering turn state renders late, and one that treats it as a stream position i
 | S16 | — | — | submission.accepted(ran) → submission.accepted(ran) ‖ turn.started → turn.final(completed) → turn.started → turn.final(completed) | inferred | fixture-only | restart is a local process action; no provider frame acknowledges it |
 | G1 | `tool completion` | `tool_result` | turn.progress(tool) | unsupported | fixture-only | the provider DOES emit a completion frame; the runtime maps it with `IsSignificant = false`, and `TaskManager` publishes `turn.progress` only when `IsSignificant && ToolName is not null`. A client sees a tool START and never a tool FINISH, so a per-tool spinner has no event that clears it. |
 | G2 | `turn/started` + `item/agentMessage/delta` + `item/agentMessage/delta` + `item/agentMessage/delta` + `agentMessage` + `turn/completed` | `assistant`(sig) + `assistant`(sig) + `assistant`(sig) | turn.final(completed) | unsupported | fixture-only | `ConversationEventKind` has no delta kind. Three assistant chunks in, exactly one `turn.final` out — a client cannot begin rendering, or speaking, before the whole answer exists. |
-| G3 | `turn/started` + `commandExecution` + `commandExecution` + `agentMessage` + `turn/completed` | `tool_use`(sig,tool=grep -rn --include=*.cs "synthetic-marker" /workspace/example/src /workspace/example/tests) | turn.progress(tool) | leaky | fixture-only | `ToolName` is the executed shell command, not a tool name. `BoundToolName` only BOUNDS it to 64 UTF-16 units — it does not classify it — so the client receives the first 64 characters of a real command, which routinely contains absolute paths and can contain secret-shaped values. Pinned, deliberately NOT fixed here. |
+| G3 | `turn/started` + `commandExecution` + `commandExecution` + `agentMessage` + `turn/completed` | `tool_use`(sig,tool=shell) | turn.progress(tool) | supported | fixture-only | Stable shell label; command text never becomes a client-visible tool name, fixed by #408 (resolves #287). |
 
 ## gemini
 
@@ -170,10 +170,10 @@ confirmed:
 - **G2 — there is no incremental assistant-text event in v1.** Confirmed. This is a structural
   input to the voice stop/go decision, not a tuning problem: a voice client cannot begin speaking
   before the entire answer exists. Tracked as #286.
-- **G3 — Codex's `ToolName` is not a tool name.** Confirmed, and pinned byte-for-byte. Tracked as
-  #287.
+- **G3 — Codex's `ToolName` leaked shell command text.** Fixed by #408 with `tool=shell`,
+  resolving #287; the fixture-only row now asserts the stable label.
 
-None of the three is fixed here. Each is a behaviour change with its own client-visible
+G1 and G2 remain unfixed here. Each is a behaviour change with its own client-visible
 consequences and its own review; the rows exist so a later fix flips a red test rather than
 silently changing behaviour. The fourth follow-up — a `GeminiExecutor` seam that would let its
 start and terminal rows be observed at L1 instead of `inferred` — is #288.

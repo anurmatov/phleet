@@ -17,6 +17,7 @@ public sealed class TaskManager
     private readonly InjectionOutcomeCounter _injectionCounter;
 
     private const int MaxMidTurnInjectionsPerTurn = 3;
+    private const int MaxToolPreviewChars = 500;
 
     private readonly ConcurrentDictionary<long, ChatTaskState> _chatTasks = new();
     // taskId dedup: tracks bridge taskIds that are currently in-flight
@@ -951,7 +952,7 @@ public sealed class TaskManager
                         if (!_agentConfig.SuppressToolMessages && source is not (TaskSource.CheckIn or TaskSource.DebouncedGroupBatch) && significantUpdates % 5 == 1)
                         {
                             var summaryText = progress.Summary;
-                            if (progress.Summary.StartsWith("Using") && progress.ToolArgs is { } rawArgs)
+                            if (progress.Summary.StartsWith("Using") && progress.ToolArgs is { } rawArgs && _agentConfig.ToolArgsTruncateLength > 0)
                             {
                                 var argsSnippet = TruncateArgs(rawArgs, _agentConfig.ToolArgsTruncateLength);
                                 summaryText = $"{progress.Summary}({argsSnippet})";
@@ -962,10 +963,11 @@ public sealed class TaskManager
                                 var displayName = $"{char.ToUpperInvariant(_agentConfig.ShortName[0])}{_agentConfig.ShortName[1..]}";
                                 htmlPrefix = $"<b>{displayName}:</b>\n";
                             }
+                            summaryText = TruncateArgs(summaryText, MaxToolPreviewChars);
                             var encoded = System.Net.WebUtility.HtmlEncode($"{Prefix()}... {summaryText}");
                             await _sink.SendHtmlTextByOriginAsync(chatId, $"{htmlPrefix}<blockquote expandable>{encoded}</blockquote>", origin);
                         }
-                        OnToolUse?.Invoke(chatId, progress.ToolName, progress.Summary);
+                        OnToolUse?.Invoke(chatId, progress.ToolName, TruncateArgs(progress.Summary, MaxToolPreviewChars));
 
                         // Only the tool NAME leaves the runtime. The Telegram string built a few
                         // lines above appends truncated tool ARGUMENTS, and reusing it here is
@@ -1728,7 +1730,7 @@ public sealed class TaskManager
     }
 
     private static string TruncateArgs(string args, int maxLength = 300) =>
-        args.Length <= maxLength ? args : args[..maxLength] + "...";
+        maxLength <= 0 ? "" : args.Length <= maxLength ? args : args[..Fleet.Shared.TextTruncation.SafeCutIndex(args, maxLength)] + "...";
 
     internal static string FormatRelativeTime(TimeSpan remaining)
     {

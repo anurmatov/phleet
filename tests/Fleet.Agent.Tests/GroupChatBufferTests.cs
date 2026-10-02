@@ -4,6 +4,17 @@ namespace Fleet.Agent.Tests;
 
 public class GroupChatBufferTests
 {
+    [Fact]
+    public void FormatContext_LegacyReplyTo_DoesNotRenderSender()
+    {
+        var buffer = new GroupChatBuffer();
+        buffer.LoadEntries([new SerializedEntry("@u", "hi", "untrusted_sender", DateTimeOffset.UtcNow,
+            TelegramMessageId: 7, ReplyToTelegramMessageId: 5)]);
+        const string expected = "[telegram_message_id: 7] [reply_to_message_id: 5] @u: hi";
+        Assert.Equal(expected, buffer.FormatContext());
+        Assert.Equal(expected, buffer.FormatNewMessages());
+    }
+
     private static GroupChatBuffer BuildBuffer()
     {
         var buffer = new GroupChatBuffer();
@@ -89,7 +100,7 @@ public class GroupChatBufferTests
 
         Assert.Equal(3, lines.Length);
         Assert.Equal("[telegram_message_id: 10] alice: hello", lines[0]);
-        Assert.Equal("[telegram_message_id: 20] [reply_to_message_id: 10] bob → alice: reply here", lines[1]);
+        Assert.Equal("[telegram_message_id: 20] [reply_to_message_id: 10] bob: reply here", lines[1]);
         Assert.Equal("carol: no id message", lines[2]);
     }
 

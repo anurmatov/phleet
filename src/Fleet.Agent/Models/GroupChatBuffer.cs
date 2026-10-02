@@ -95,10 +95,9 @@ public sealed class GroupChatBuffer
 
     private static string FormatEntry(BufferEntry e)
     {
-        var prefix = e.ReplyTo is not null ? $"{e.Sender} → {e.ReplyTo}" : e.Sender;
         var idPrefix = e.TelegramMessageId > 0 ? $"[telegram_message_id: {e.TelegramMessageId}] " : "";
         var replyIdTag = e.ReplyToTelegramMessageId is > 0 ? $"[reply_to_message_id: {e.ReplyToTelegramMessageId}] " : "";
-        return $"{idPrefix}{replyIdTag}{prefix}: {e.Text}";
+        return $"{idPrefix}{replyIdTag}{e.Sender}: {e.Text}";
     }
 
     public bool HasMessagesSinceLastCheck()

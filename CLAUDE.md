@@ -226,6 +226,15 @@ Read the resolved model from the stream-json `init` event's `model` field. For a
 
 When bumping a provider CLI, change every occurrence of that version in the same commit and rerun the provider-specific verification that depends on its wire protocol or flags. For Codex bumps, regenerate `protocols/codex-app-server-v2/` with the new pinned CLI before committing. For Claude bumps, also diff the resolved model for every alias in use — a bump can move an alias silently, and the version assertion in `Dockerfile` does not catch it.
 
+## Telegram Reply Metadata
+
+Task prompts carry `[telegram_message_id: M]` for the current message and
+`[reply_to_message_id: R]` only for a local Telegram reply, including `/new`, voice,
+media groups, queue parts and continuations; channel and current-sender envelopes stay unchanged.
+Replied-to text, caption and sender are never copied into prompts, including legacy buffer entries
+and reaction events; external replies and partial quotes produce no reply metadata.
+`/tts` still reads the replied message for speech synthesis, not prompt assembly.
+
 ## Telegram Image Handling
 
 - **Image-only messages** (no caption): `AgentTransport` passes the photo to `MessageRouter`, which substitutes `TelegramOptions.DefaultImagePrompt` (default: `"(image attached — please analyze)"`) as the task prompt so the executor always receives a non-empty string.

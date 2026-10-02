@@ -40,25 +40,25 @@ public sealed class PromptAssembler
     /// <see cref="VoiceTranscriptionMarker"/> to the prompt metadata.
     /// </param>
     public string ForDm(GroupChatBuffer buffer, string taskText,
-        string? replyToText = null, long telegramMessageId = 0,
+        long? replyToTelegramMessageId = null, long telegramMessageId = 0,
         bool isVoiceTranscription = false)
     {
         var channelAnchor = buffer.RenderHeader();
         var msgIdTag = telegramMessageId > 0 ? $"[telegram_message_id: {telegramMessageId}]" : "";
         var channelLine = channelAnchor is not null ? $"\n{channelAnchor}" : "";
         var voiceLine = isVoiceTranscription ? $"\n{VoiceTranscriptionMarker}" : "";
-        var replyContext = replyToText is not null
-            ? $"\n[Replying to: \"{TruncateReplyText(replyToText, 300)}\"]"
+        var replyContext = replyToTelegramMessageId is > 0
+            ? $" [reply_to_message_id: {replyToTelegramMessageId}]"
             : "";
 
         if (_executor.IsProcessWarm)
         {
-            var meta = string.Concat(msgIdTag, channelLine, voiceLine, replyContext);
+            var meta = string.Concat(msgIdTag, replyContext, channelLine, voiceLine);
             return meta.Length > 0 ? $"{meta}\n{taskText}" : taskText;
         }
 
         var context = buffer.FormatContext();
-        var metaCold = string.Concat(msgIdTag, channelLine, voiceLine, replyContext);
+        var metaCold = string.Concat(msgIdTag, replyContext, channelLine, voiceLine);
         if (context.Length > 0)
         {
             var historySection = channelAnchor is not null ? $"{channelAnchor}\n{context}" : context;
@@ -73,24 +73,19 @@ public sealed class PromptAssembler
     /// For media groups, <paramref name="telegramMessageId"/> is the first photo's message ID.
     /// </summary>
     public string ForGroupMessage(GroupChatBuffer buffer, string sender, string taskText,
-        string? replyToUsername = null, string? replyToText = null, long telegramMessageId = 0,
+        long? replyToTelegramMessageId = null, long telegramMessageId = 0,
         bool isVoiceTranscription = false)
     {
         var channelAnchor = buffer.RenderHeader();
-        var msgIdLine = telegramMessageId > 0 ? $"[telegram_message_id: {telegramMessageId}]\n" : "";
+        var replyTag = replyToTelegramMessageId is > 0 ? $"[reply_to_message_id: {replyToTelegramMessageId}]" : "";
+        var idTags = string.Join(" ", new[]
+        {
+            telegramMessageId > 0 ? $"[telegram_message_id: {telegramMessageId}]" : "", replyTag,
+        }.Where(tag => tag.Length > 0));
+        var msgIdLine = idTags.Length > 0 ? idTags + "\n" : "";
         var channelLine = channelAnchor is not null ? $"{channelAnchor}\n" : "";
         var voiceLine = isVoiceTranscription ? $"{VoiceTranscriptionMarker}\n" : "";
-        var replyContext = replyToUsername is not null && replyToText is not null
-            ? $" [Replying to {replyToUsername}: \"{TruncateReplyText(replyToText, 300)}\"]"
-            : replyToUsername is not null
-                ? $" [Replying to {replyToUsername}]"
-                : "";
-
-        // [telegram_message_id: N]         (optional)
-        // [channel: group ...]             (optional)
-        // [voice_transcription: whisper…]  (optional)
-        // [From: sender][reply]
-        var fromLine = $"[From: {sender}]{replyContext}";
+        var fromLine = $"[From: {sender}]";
         var header = $"{msgIdLine}{channelLine}{voiceLine}{fromLine}";
 
         if (_executor.IsProcessWarm)
@@ -108,9 +103,6 @@ public sealed class PromptAssembler
         result += $"[New message]\n{header} {taskText}";
         return result;
     }
-
-    private static string TruncateReplyText(string text, int maxLength) =>
-        text.Length <= maxLength ? text : text[..maxLength] + "...";
 
     /// <summary>
     /// Build a prompt for a relay directive from another agent.

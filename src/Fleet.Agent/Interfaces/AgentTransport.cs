@@ -1068,8 +1068,6 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             : text.Trim();
 
         var sender = message.From?.Username is { } u ? $"@{u}" : message.From?.FirstName ?? "Unknown";
-        var replyToUsername = message.ReplyToMessage?.From?.Username is { } ru ? $"@{ru}" : null;
-        var replyToText = message.ReplyToMessage?.Text ?? message.ReplyToMessage?.Caption;
 
         // Build the base IncomingMessage (no images/documents yet — filled in below)
         var baseMsg = new IncomingMessage
@@ -1081,8 +1079,6 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             IsGroupChat = isGroupChat,
             TelegramMessageId = message.MessageId,
             ReplyToTelegramMessageId = message.ReplyToMessage?.MessageId is { } rtm ? (long)rtm : null,
-            ReplyToUsername = replyToUsername,
-            ReplyToText = replyToText,
             IsBotMentioned = isMentioned,
             IsReplyToBot = isReplyToMe,
             IsNameMentioned = isNameMentioned,
@@ -1469,19 +1465,15 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         if (added.Count == 0 && removed.Count == 0) return; // no net change
 
         var channelAnchor = BuildChannelAnchorFromChat(reaction.Chat);
-        var buffer = _groupBehavior.GetGroupBuffer(chatId);
-        var hasOriginal = buffer.TryGetByMessageId(messageId, out _, out var origText);
-        var contentSuffix = hasOriginal ? $": \"{TruncateForReaction(origText)}\"" : "";
-
         foreach (var emoji in added)
         {
-            var text = $"{channelAnchor}\n[reaction: {emoji} on message_id={messageId} from user_id={userId}{contentSuffix}]";
+            var text = $"{channelAnchor}\n[reaction: {emoji} on message_id={messageId} from user_id={userId}]";
             _ = _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
         }
 
         foreach (var emoji in removed)
         {
-            var text = $"{channelAnchor}\n[reaction removed: {emoji} on message_id={messageId} from user_id={userId}{contentSuffix}]";
+            var text = $"{channelAnchor}\n[reaction removed: {emoji} on message_id={messageId} from user_id={userId}]";
             _ = _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
         }
     }
@@ -1505,17 +1497,6 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         if (chat.FirstName is { Length: > 0 })
             return $"[channel: dm chat_id={chatId} name=\"{chat.FirstName.Replace("\"", "\\\"")}\"]";
         return $"[channel: dm chat_id={chatId}]";
-    }
-
-    /// <summary>
-    /// Normalizes a buffered message text for inline use in a reaction task:
-    /// replaces line breaks and tabs with a single space, then caps at 200 chars with a trailing ellipsis.
-    /// </summary>
-    internal static string TruncateForReaction(string text)
-    {
-        // Normalize whitespace: CRLF, LF, CR, tab → single space
-        var flat = text.Replace("\r\n", " ").Replace('\r', ' ').Replace('\n', ' ').Replace('\t', ' ');
-        return flat.Length <= 200 ? flat : flat[..200] + "…";
     }
 
     /// <summary>

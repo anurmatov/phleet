@@ -78,7 +78,7 @@ public class TaskManagerQueueNoticeTests
     }
 
     [Fact]
-    public async Task WorkflowDirectiveBusyInTheSameChat_TheFailedInjectionGetsTheNotice_AsToday()
+    public async Task WorkflowDirectiveBusyInTheSameChat_TheHumanMessageGetsTheNormalQueueNotice()
     {
         var (manager, executor, sink) = Build();
         executor.HoldTurn("directive");

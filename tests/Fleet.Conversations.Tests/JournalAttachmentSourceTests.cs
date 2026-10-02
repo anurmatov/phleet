@@ -131,6 +131,9 @@ public sealed partial class JournalReadStoreTests
         Bind(a, 1);
         var before = await fixture.ScalarRowAsync("SELECT COUNT(*) FROM journal_messages");
         var objectsBefore = await fixture.ScalarRowAsync("SELECT COUNT(*) FROM journal_objects");
+        var rowsBefore = new Dictionary<string, string>();
+        foreach (var table in new[] { "journal_conversations", "journal_messages", "journal_message_observers", "journal_attachments", "journal_objects" })
+            rowsBefore[table] = await fixture.ScalarRowAsync($"SELECT COUNT(*) FROM {table}");
         var keysBefore = bucket.Keys.Order().ToArray();
         for (var i = 0; i < 20; i++)
         {
@@ -164,7 +167,60 @@ public sealed partial class JournalReadStoreTests
           Assert.Equal(JournalAttachmentRequest.Unavailable("no_bound_conversation"), await reply.Content.ReadAsStringAsync()); }
         Assert.Equal(before, await fixture.ScalarRowAsync("SELECT COUNT(*) FROM journal_messages"));
         Assert.Equal(objectsBefore, await fixture.ScalarRowAsync("SELECT COUNT(*) FROM journal_objects"));
+        foreach (var (table, count) in rowsBefore) Assert.Equal(count, await fixture.ScalarRowAsync($"SELECT COUNT(*) FROM {table}"));
         Assert.Equal(keysBefore, bucket.Keys.Order().ToArray());
+    }
+
+    [Theory]
+    [InlineData("lost", 409, "attachment_lost")]
+    [InlineData("uploaded", 200, "")]
+    [InlineData("committed", 200, "")]
+    [InlineData("aborted", 409, "object_missing")]
+    [InlineData("deleting", 409, "object_missing")]
+    [InlineData("absent", 409, "object_missing")]
+    [InlineData("not_archived", 422, "over_size_cap")]
+    [InlineData("excluded", 409, "conversation_not_journaled")]
+    public async Task Content_route_real_SQL_state_matrix_applies_to_both_identifiers(string state, int status, string reason)
+    {
+        var subject = Subject(); var chat = Chat(); var bytes = Encoding.UTF8.GetBytes("synthetic state sentinel " + subject);
+        var digest = Convert.ToHexStringLower(SHA256.HashData(bytes)); var objectId = Ulid.NewUlid();
+        var write = new MySqlJournalStore(Db, NullLogger.Instance);
+        var id = (await write.IngestAsync(Message(chat, 5, BaseTime(), "synthetic", attachments:
+            [Attachment(0) with { ByteSize = bytes.Length }]), subject)).MessageId!;
+        if (state != "absent") await fixture.ExecuteAsync($"""
+            INSERT INTO journal_objects
+              (id, object_key, owner, sha256, committed_sha256, byte_size, mime_type, state, created_at, updated_at)
+            VALUES ('{objectId}', 'synthetic/{objectId}', '{subject}', '{digest}', '{digest}', {bytes.Length},
+                    'application/pdf', '{(state is "aborted" or "deleting" or "committed" ? state : "uploaded")}', UTC_TIMESTAMP(6), UTC_TIMESTAMP(6));
+            """);
+        await fixture.ExecuteAsync($"""
+            UPDATE journal_attachments SET object_id = {(state == "absent" ? "NULL" : $"'{objectId}'")},
+              state = '{(state is "lost" or "not_archived" ? state : "committed")}',
+              not_archived_reason = {(state == "not_archived" ? "'over_size_cap'" : "NULL")},
+              sha256 = '{digest}' WHERE message_id = '{id}';
+            """);
+        var bucket = new FakeBucket(); bucket.Objects[$"synthetic/{objectId}"] = bytes;
+        var key = Enumerable.Repeat((byte)42, 32).ToArray(); var stats = new JournalRuntimeStats();
+        var bindings = new JournalTurnBindings(TimeProvider.System);
+        bindings.Put(subject, new(Ulid.NewUlid(), 1, "bound", "supergroup", 7001, chat));
+        var builder = WebApplication.CreateBuilder(); builder.WebHost.UseTestServer(); builder.Logging.ClearProviders();
+        await using var app = builder.Build(); JournalAuth.Use(app, [key], stats);
+        var endpoint = new JournalAttachmentContentEndpoint(new MySqlJournalReadStore(Db, NullLogger.Instance), bucket,
+            new JournalReadGrants(new HashSet<string>()),
+            new JournalBindingScope(bindings, state == "excluded" ? new HashSet<long> { chat } : new HashSet<long>()), stats);
+        app.MapPost(JournalAttachmentRequest.ContentPath, endpoint.HandleAsync); await app.StartAsync();
+        using var client = app.GetTestClient();
+        foreach (var body in new[] { $"{{\"message_id\":\"{id}\"}}", "{\"telegram_message_id\":5}" })
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, JournalAttachmentRequest.ContentPath)
+            { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", JournalTokens.Mint(key, "read", subject));
+            using var reply = await client.SendAsync(request); Assert.Equal(status, (int)reply.StatusCode);
+            if (status == 200) Assert.Equal(bytes, await reply.Content.ReadAsByteArrayAsync());
+            else Assert.Equal(state == "not_archived" ? "{\"error\":\"not_archived\",\"reason\":\"over_size_cap\"}"
+                : JournalAttachmentRequest.Unavailable(reason), await reply.Content.ReadAsStringAsync());
+            Assert.Equal(0, stats.AttachmentFetchInFlight);
+        }
     }
 
 }

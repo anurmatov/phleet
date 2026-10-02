@@ -177,9 +177,11 @@ jobs:
         # (never skips) without a bucket, and a job that ran it would fail for want of a fixture it
         # was never given — the exact shape that tempts someone to make the fixture skip, which is
         # how the media acceptance criteria would stop being evidence while the summary stayed green.
+        # The scoped attachment store test runs in comms-media-store-smoke against that exact
+        # non-Admin identity instead of the separate S3 fixture.
         run: >
           dotnet test tests/Fleet.Conversations.Tests --configuration Release
-          --filter "FullyQualifiedName!~JournalS3"
+          --filter "FullyQualifiedName!~JournalS3&FullyQualifiedName!~JournalScopedAttachmentStoreTests"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=conversations.trx"
           --results-directory ${{ github.workspace }}/testresults
@@ -967,10 +969,17 @@ jobs:
     timeout-minutes: 10
     env:
       SEAWEEDFS_IMAGE: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+      DOTNET_TEST_IMAGE: mcr.microsoft.com/dotnet/sdk:10.0
+      COMMS_SCOPED_TEST_ASSEMBLY: ${{ github.workspace }}/tests/Fleet.Conversations.Tests/bin/Release/net10.0/Fleet.Conversations.Tests.dll
       # CI-only MIT grpcurl, never installed in a runtime service.
       GRPCURL_IMAGE: fullstorydev/grpcurl:v1.9.3@sha256:085e183ca334eb4e81ca81ee12cbb2b2737505d1d77f5e33dabc5d066593d998
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build scoped attachment integration test
+        run: dotnet build tests/Fleet.Conversations.Tests --configuration Release
       - name: Profile resolver and compose selection
         run: |
           bash scripts/test-comms-profiles.sh

@@ -20,14 +20,16 @@ public sealed class JournalFilesProvisioningTests
     [InlineData("claude")]
     [InlineData("codex")]
     [InlineData("gemini")]
-    public async Task ExplicitGrantAndCaptureEmitHeaderlessServerAndRuntimeReadToken(string provider)
+    [InlineData("codex", true)]
+    public async Task ExplicitGrantAndCaptureEmitHeaderlessServerAndRuntimeReadToken(string provider, bool uppercaseGrant = false)
     {
         await using var harness = ProvisioningHarness.Create(Config);
-        await harness.SeedAsync(db => db.Agents.Add(Agent(provider)));
+        await harness.SeedAsync(db => { var agent = Agent(provider); if (uppercaseGrant) agent.Tools[0].ToolName = Grant.ToUpperInvariant(); db.Agents.Add(agent); });
         var result = await harness.Service.ProvisionAsync("agent1"); Assert.True(result.Success, result.Message);
         var dir = harness.GeneratedDir("fleet-agent1");
         using var config = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(dir, "appsettings.json")));
         Assert.True(config.RootElement.GetProperty("Journal").GetProperty("FilesEnabled").GetBoolean());
+        Assert.Contains(config.RootElement.GetProperty("Agent").GetProperty("AllowedTools").EnumerateArray(), t => t.GetString() == Grant);
         Assert.StartsWith("cj1.read.agent1.", config.RootElement.GetProperty("Journal").GetProperty("ReadToken").GetString());
         if (provider != "claude") Assert.False(config.RootElement.GetProperty("Agent").TryGetProperty("McpHeaderSupport", out _));
         using var mcp = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(dir, ".mcp.json")));

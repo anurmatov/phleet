@@ -1,4 +1,6 @@
 using System.Net;
+using System.Collections.Concurrent;
+using Microsoft.Extensions.Logging;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -38,6 +40,16 @@ public sealed class JournalFilesToolTests : IDisposable
         Assert.Equal("Bearer read", handler.Header);
     }
     [Fact]
+    public async Task OtherAttachmentKindReturnsVerifiedPrivateFile()
+    {
+        var handler = new Handler { Kind = "other" };
+        using var http = new HttpClient(handler) { BaseAddress = new("http://journal.test") };
+        var client = new JournalHttpClient(http, "ingest", readToken: "read"); using var binding = Publisher(client); Bind(binding);
+        using var json = JsonDocument.Parse(await Tools(client, binding).FetchAsync(new(TelegramMessageId: 5), default));
+        Assert.Equal("other", json.RootElement.GetProperty("kind").GetString());
+        Assert.Equal(Bytes, await File.ReadAllBytesAsync(json.RootElement.GetProperty("path").GetString()!));
+    }
+    [Fact]
     public async Task RemoteLostBindingResendsIngestAndRetriesExactlyOnce()
     {
         var handler = new Handler { LostBindings = 1 }; using var http = new HttpClient(handler) { BaseAddress = new("http://journal.test") };
@@ -74,8 +86,10 @@ public sealed class JournalFilesToolTests : IDisposable
         Assert.Equal(JournalAttachmentRequest.Unavailable("integrity_failed"), await Tools(client, binding).FetchAsync(new(TelegramMessageId: 5), default));
         Assert.Empty(Directory.GetFiles(Path.Combine(_root, "journal")));
     }
-    [Fact]
-    public async Task ConcurrentCallsAreSerializedAndDeadlineIncludesQueueWait()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ConcurrentCallsAreSerializedAndDeadlineIncludesQueueWait(bool queuedDeadlineFirst)
     {
         var clock = new Clock(); var handler = new Handler { Block = true };
         using var http = new HttpClient(handler) { BaseAddress = new("http://journal.test") };
@@ -84,10 +98,37 @@ public sealed class JournalFilesToolTests : IDisposable
         var first = tool.FetchAsync(new(TelegramMessageId: 5), default);
         await handler.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
         var second = tool.FetchAsync(new(TelegramMessageId: 5), default); Assert.Equal(1, handler.Fetches);
-        clock.Advance(TimeSpan.FromSeconds(50));
+        // Await cancellation of the queued call before the running handler can release
+        // the semaphore. Also exercise a running-handler cancellation first, held
+        // until the queued call's deadline has fired.
+        handler.DelayCancellation = !queuedDeadlineFirst;
+        clock.FireDeadline(queuedDeadlineFirst ? 1 : 0);
+        if (!queuedDeadlineFirst) await handler.CancelObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        else Assert.Equal("{\"error\":\"timeout\",\"retryable\":true}", await second.WaitAsync(TimeSpan.FromSeconds(5)));
+        clock.FireDeadline(queuedDeadlineFirst ? 0 : 1);
+        handler.CancelRelease.TrySetResult();
         var results = await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(5));
         Assert.All(results, body => Assert.Equal("{\"error\":\"timeout\",\"retryable\":true}", body));
         Assert.Equal(1, handler.Fetches);
+    }
+    [Fact]
+    public async Task ElapsedQueuedDeadlineCannotDispatchBeforeItsTimerCallback()
+    {
+        var clock = new Clock(); var handler = new Handler { Block = true };
+        using var http = new HttpClient(handler) { BaseAddress = new("http://journal.test") };
+        var client = new JournalHttpClient(http, "ingest", readToken: "read"); using var binding = Publisher(client); Bind(binding);
+        var tool = new JournalFilesTools(client, binding, new JournalFileStore(_root), new JournalFilesCounter(), NullLogger<JournalFilesTools>.Instance, clock);
+        var first = tool.FetchAsync(new(TelegramMessageId: 5), default);
+        await handler.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var second = tool.FetchAsync(new(TelegramMessageId: 5), default);
+        clock.AdvanceWithoutCallbacks(TimeSpan.FromSeconds(50)); clock.FireDeadline(0);
+        try
+        {
+            Assert.All(await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(2)), body =>
+                Assert.Equal("{\"error\":\"timeout\",\"retryable\":true}", body));
+            Assert.Equal(1, handler.Fetches);
+        }
+        finally { clock.FireDeadline(1); await Task.WhenAll(first, second); }
     }
     [Fact]
     public async Task SuccessfulConcurrentCallsNeverOverlapHTTPOrFileWrites()
@@ -126,12 +167,40 @@ public sealed class JournalFilesToolTests : IDisposable
         Assert.Equal(JournalAttachmentRequest.Unavailable("no_bound_conversation"), await call.WaitAsync(TimeSpan.FromSeconds(5)));
         Assert.Empty(Directory.GetFiles(Path.Combine(_root, "journal")));
     }
+    [Fact]
+    public async Task CapturedFetchLogsContainOnlyFixedDiagnosticFields()
+    {
+        var handler = new Handler(); var logs = new Capture();
+        using var http = new HttpClient(handler) { BaseAddress = new("http://journal.test") };
+        var client = new JournalHttpClient(http, "private-ingest-token", readToken: "private-read-token");
+        using var binding = Publisher(client); Bind(binding);
+        var tool = new JournalFilesTools(client, binding, new JournalFileStore(_root), new JournalFilesCounter(), logs);
+        using var success = JsonDocument.Parse(await tool.FetchAsync(new(TelegramMessageId: 5), default));
+        handler.BadDigest = true; Assert.Contains("integrity_failed", await tool.FetchAsync(new(TelegramMessageId: 5), default));
+        Assert.Equal(2, logs.Lines.Count);
+        foreach (var line in logs.Lines) { Assert.Contains("result=", line); Assert.Contains("kind=", line); Assert.Contains("bytes=", line); Assert.Contains("waitedMs=", line); }
+        var captured = string.Join('\n', logs.Lines);
+        foreach (var forbidden in new[] { Id, _root, "synthetic sentinel", "private-ingest-token", "private-read-token",
+            "http://journal.test", Convert.ToHexStringLower(SHA256.HashData(Bytes)), success.RootElement.GetProperty("path").GetString()! })
+            Assert.DoesNotContain(forbidden, captured);
+    }
+    private sealed class Capture : ILogger<JournalFilesTools>
+    {
+        public ConcurrentQueue<string> Lines { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel level) => true;
+        public void Log<TState>(LogLevel level, EventId id, TState state, Exception? exception, Func<TState, Exception?, string> formatter) => Lines.Enqueue(formatter(state, exception));
+    }
     private sealed class Clock : TimeProvider
     {
         private TimeSpan _elapsed; private readonly List<Timer> _timers = [];
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override long GetTimestamp() => _elapsed.Ticks;
+        public void AdvanceWithoutCallbacks(TimeSpan by) => _elapsed += by;
         public override DateTimeOffset GetUtcNow() => DateTimeOffset.UnixEpoch + _elapsed;
         public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan due, TimeSpan period)
         { var timer = new Timer(this, callback, state, due); _timers.Add(timer); return timer; }
+        public void FireDeadline(int index) => _timers[index].Callback(_timers[index].State);
         public void Advance(TimeSpan by) { _elapsed += by; foreach (var timer in _timers.ToArray()) if (!timer.Disposed && timer.At <= _elapsed) timer.Callback(timer.State); }
         private sealed class Timer(Clock clock, TimerCallback callback, object? state, TimeSpan due) : ITimer
         {
@@ -147,7 +216,10 @@ public sealed class JournalFilesToolTests : IDisposable
     private static void Bind(TurnBindingPublisher binding) { binding.ObserveChat(10, 1, "private"); binding.BeginTurn(10, TaskSource.UserMessage); }
     private sealed class Handler : HttpMessageHandler
     {
-        public int Calls, Fetches, Puts, LostBindings; public bool BadDigest, Block, BlockPuts;
+        public int Calls, Fetches, Puts, LostBindings; public bool BadDigest, Block, BlockPuts, DelayCancellation;
+        public string Kind = "document";
+        public TaskCompletionSource CancelObserved = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource CancelRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource PutStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Started = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously); public int Status = 200; public string? Body, Header, PutHeader;
@@ -155,12 +227,14 @@ public sealed class JournalFilesToolTests : IDisposable
         {
             Calls++; Header = request.Headers.Authorization?.ToString();
             if (request.Method == HttpMethod.Put) { Puts++; PutHeader = Header; PutStarted.TrySetResult(); if (BlockPuts) await Release.Task.WaitAsync(ct); return new HttpResponseMessage(HttpStatusCode.NoContent); }
-            Fetches++; Started.TrySetResult(); if (Block) await Release.Task.WaitAsync(ct);
+            Fetches++; Started.TrySetResult();
+            if (Block) try { await Release.Task.WaitAsync(ct); }
+                catch (OperationCanceledException) { CancelObserved.TrySetResult(); if (DelayCancellation) await CancelRelease.Task; throw; }
             if (Fetches <= LostBindings) return new HttpResponseMessage(HttpStatusCode.Conflict) { Content = new StringContent(JournalAttachmentRequest.Unavailable("no_bound_conversation")) };
             if (Status != 200) return new HttpResponseMessage((HttpStatusCode)Status) { Content = new StringContent(Body ?? "") };
             var reply = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Bytes) };
             reply.Content.Headers.ContentType = new("text/plain");
-            reply.Headers.Add("X-Journal-Message-Id", Id); reply.Headers.Add("X-Journal-Ordinal", "0"); reply.Headers.Add("X-Journal-Kind", "document");
+            reply.Headers.Add("X-Journal-Message-Id", Id); reply.Headers.Add("X-Journal-Ordinal", "0"); reply.Headers.Add("X-Journal-Kind", Kind);
             reply.Headers.Add("X-Journal-Sha256", BadDigest ? new string('0', 64) : Convert.ToHexStringLower(SHA256.HashData(Bytes)));
             return reply;
         }

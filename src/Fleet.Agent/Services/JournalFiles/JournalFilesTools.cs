@@ -32,19 +32,29 @@ public sealed class JournalFilesTools(JournalHttpClient client, TurnBindingPubli
     {
         var started = Stopwatch.GetTimestamp(); var acquired = false; string result = "internal", kind = "none"; long bytes = 0; double waitedMs = 0;
         string Refuse(string reason) { result = reason; return JournalAttachmentRequest.Unavailable(reason); }
+        var deadlineStarted = _time.GetTimestamp();
         using var deadline = new CancellationTokenSource(Deadline, _time);
         using var whole = CancellationTokenSource.CreateLinkedTokenSource(ct, deadline.Token);
+        void CheckDeadline()
+        {
+            whole.Token.ThrowIfCancellationRequested();
+            // A timer callback may lag a semaphore release. Elapsed time is the
+            // authority even when that callback has not cancelled the token yet.
+            if (_time.GetElapsedTime(deadlineStarted) >= Deadline) throw new OperationCanceledException(whole.Token);
+        }
         try
         {
             if (request.Error() is { } error) { result = "invalid_argument"; return error; }
             var turn = binding.Current;
             if (turn.State != "bound") return Refuse("no_bound_conversation");
             await _serial.WaitAsync(whole.Token); acquired = true;
+            CheckDeadline();
             waitedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
             if (binding.Current != turn) return Refuse("no_bound_conversation");
             files.Sweep();
             for (var attempt = 0; attempt < 2; attempt++)
             {
+                CheckDeadline();
                 using var response = await client.OpenAttachmentContentAsync(request, whole.Token);
                 if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized) return Refuse("comms_refused");
                 if (!response.IsSuccessStatusCode)
@@ -67,7 +77,7 @@ public sealed class JournalFilesTools(JournalHttpClient client, TurnBindingPubli
                 var id = Header(response, "X-Journal-Message-Id"); var digest = Header(response, "X-Journal-Sha256");
                 var type = Header(response, "X-Journal-Kind");
                 var ordinalText = Header(response, "X-Journal-Ordinal");
-                if (id is null || digest is null || type is not ("photo" or "document" or "audio" or "voice" or "video" or "video_note" or "animation" or "sticker")
+                if (id is null || digest is null || type is not ("photo" or "document" or "audio" or "voice" or "video" or "video_note" or "animation" or "sticker" or "other")
                     || !int.TryParse(ordinalText, NumberStyles.None, CultureInfo.InvariantCulture, out var ordinal) || ordinal != request.Ordinal
                     || request.MessageId is { } expected && id != expected || response.Content.Headers.ContentLength is not { } length)
                     return Refuse("integrity_failed");

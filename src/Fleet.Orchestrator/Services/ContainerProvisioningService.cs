@@ -21,7 +21,7 @@ public sealed class ContainerProvisioningService(
     internal const string JournalMcpServerName = "fleet-comms-journal";
     internal const string JournalFilesServerName = "fleet-journal-files";
     internal const string JournalFilesGrant = "mcp__fleet-journal-files__fetch_attachment";
-    private static bool HasFilesGrant(Agent agent) => agent.Tools.Any(t => t.IsEnabled && t.ToolName == JournalFilesGrant);
+    private static bool HasFilesGrant(Agent agent) => agent.Tools.Any(t => t.IsEnabled && string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase));
     private static string? FilesWarning(Agent agent) => HasFilesGrant(agent) && (!agent.JournalEnabled || !HasTelegramBot(agent))
         ? "journal_files_unavailable:journal_capture_off" : null;
 
@@ -1155,7 +1155,8 @@ public sealed class ContainerProvisioningService(
         if (DescribeLocalModelFault(agent) is { } localFault)
             throw new InvalidOperationException($"Agent '{agent.Name}' cannot be provisioned: {localFault}");
 
-        var tools = agent.Tools.Where(t => t.IsEnabled).OrderBy(t => t.ToolName).Select(t => t.ToolName).ToList();
+        var tools = agent.Tools.Where(t => t.IsEnabled).OrderBy(t => t.ToolName)
+            .Select(t => string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase) ? JournalFilesGrant : t.ToolName).ToList();
 
         // Codex derives config.toml enabled_tools from AllowedTools (entrypoint.sh).
         // Auto-grant the same baseline tools that GenerateSettingsJson grants for claude/gemini,
@@ -1574,7 +1575,7 @@ public sealed class ContainerProvisioningService(
         var allow = agent.Tools
             .Where(t => t.IsEnabled)
             .OrderBy(t => t.ToolName)
-            .Select(t => t.ToolName)
+            .Select(t => string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase) ? JournalFilesGrant : t.ToolName)
             .ToList();
 
         // Every agent gets memory_get — provisioning-time enforcement of mandatory read access.

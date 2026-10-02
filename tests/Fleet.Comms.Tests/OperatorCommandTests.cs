@@ -1,6 +1,7 @@
 using Fleet.Comms.Auth;
 using Fleet.Comms.Operations;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Data.Sqlite;
 
 namespace Fleet.Comms.Tests;
 
@@ -137,10 +138,29 @@ public sealed class OperatorCommandTests : IDisposable
     /// and cannot self-revoke — it is gone. This is the only path out, and without it the product
     /// has a permanent lockout.
     /// </summary>
-    [Fact]
-    public async Task RevokingALostDeviceInvalidatesItsTokenAndUnblocksAReplacement()
+    [Theory]
+    [InlineData(null)]
+    [InlineData("-AAAAAAAAAAAAAAA")]
+    [InlineData("--AAAAAAAAAAAAAA")]
+    public async Task RevokingALostDeviceInvalidatesItsTokenAndUnblocksAReplacement(string? forcedDeviceId)
     {
         var device = await EnrollAsync();
+        if (forcedDeviceId is not null)
+        {
+            // Deterministic fixture: both handles are valid base64url encodings of 12 bytes.
+            // Rename before any token is minted, preserving the enrollment/device link.
+            await using var connection = new SqliteConnection($"Data Source={DatabasePath}");
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                UPDATE devices SET device_id = $new WHERE device_id = $old;
+                UPDATE enrollments SET device_id = $new WHERE device_id = $old;
+                """;
+            command.Parameters.AddWithValue("$old", device.DeviceId);
+            command.Parameters.AddWithValue("$new", forcedDeviceId);
+            Assert.Equal(2, await command.ExecuteNonQueryAsync());
+            device = device with { DeviceId = forcedDeviceId };
+        }
 
         await using (var host = await NorthTestHost.StartAsync(store: new SqliteAuthStore(DatabasePath, allowCreate: true)))
         {
@@ -155,8 +175,8 @@ public sealed class OperatorCommandTests : IDisposable
             Assert.NotEqual(0, blockedExit);
             Assert.Contains("already has an active device", blockedErr, StringComparison.Ordinal);
 
-            var (exit, stdout, _) = await Run("devices", "revoke", "--device-id", device.DeviceId);
-            Assert.Equal(0, exit);
+            var (exit, stdout, stderr) = await Run("devices", "revoke", "--device-id", device.DeviceId);
+            Assert.True(exit == 0, $"revoke exit={exit} stderr={stderr}");
             Assert.Contains(device.DeviceId, stdout, StringComparison.Ordinal);
 
             // The token the lost phone holds stops working immediately.
@@ -186,6 +206,25 @@ public sealed class OperatorCommandTests : IDisposable
         var (_, list, _) = await Run("devices", "list");
         Assert.Contains($"{device.DeviceId}", list, StringComparison.Ordinal);
         Assert.Contains("active", list, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("--all")]
+    [InlineData("-short")]
+    [InlineData("-AAAAAAAAAAAAAA!")]
+    [InlineData("-AAAAAAAAAAAAAAAextra")]
+    public async Task Revoke_InvalidDashValue_RefusesWithoutRevoking(string value)
+    {
+        var device = await EnrollAsync();
+        var (exit, _, stderr) = await Run("devices", "revoke", "--device-id", value);
+
+        Assert.Equal(1, exit);
+        Assert.Contains("--device-id needs a value.", stderr, StringComparison.Ordinal);
+        using var store = new SqliteAuthStore(DatabasePath);
+        var record = await store.InTransactionAsync(
+            (tx, ct) => tx.FindDeviceAsync(device.DeviceId, ct), CancellationToken.None);
+        Assert.NotNull(record);
+        Assert.True(record.IsActive);
     }
 
     // ── store backup ─────────────────────────────────────────────────────────

@@ -235,6 +235,12 @@ Replied-to text, caption and sender are never copied into prompts, including leg
 and reaction events; external replies and partial quotes produce no reply metadata.
 `/tts` still reads the replied message for speech synthesis, not prompt assembly.
 
+The orchestrator emits `Agent.ReplyLookup` only for bot agents, with precedence
+`journal_capture_off`, `provider_headers_unsupported`, `tool_not_granted`, then `available`.
+`PromptBuilder` renders the same pinned block on every provider; legacy bot agents without the
+field report `tool_not_granted`, and headless agents receive no block.
+Provider header flags remain proof-gated, and this field grants no tool or journal access.
+
 ## Telegram Image Handling
 
 - **Image-only messages** (no caption): `AgentTransport` passes the photo to `MessageRouter`, which substitutes `TelegramOptions.DefaultImagePrompt` (default: `"(image attached — please analyze)"`) as the task prompt so the executor always receives a non-empty string.

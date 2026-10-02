@@ -10,7 +10,8 @@ namespace Fleet.Agent.Services;
 /// Shared service that builds the system prompt from role files and project contexts.
 /// Injected by both ClaudeExecutor and CodexExecutor so both providers use identical prompts.
 /// </summary>
-public sealed class PromptBuilder(IOptions<AgentOptions> config, ILogger<PromptBuilder> logger)
+public sealed class PromptBuilder(
+    IOptions<AgentOptions> config, ILogger<PromptBuilder> logger, IOptions<TelegramOptions>? telegram = null)
 {
     private readonly AgentOptions _config = config.Value;
 
@@ -137,6 +138,13 @@ public sealed class PromptBuilder(IOptions<AgentOptions> config, ILogger<PromptB
             sb.AppendLine("that search alone might miss.");
         }
 
+        // Provisioned bot agents carry the state. Legacy bot agents have only the token.
+        if (_config.ReplyLookup is not null || !string.IsNullOrWhiteSpace(telegram?.Value.BotToken))
+        {
+            if (sb.Length > 0) sb.AppendLine();
+            sb.Append(ReplyLookupBlock(_config.ReplyLookup));
+        }
+
         // The output style, for providers that have no output-style mechanism (#314) and for
         // local-model claude (#365). Cloud claude reads the identical text as a style file, so the
         // orchestrator leaves this empty for it.
@@ -176,6 +184,20 @@ public sealed class PromptBuilder(IOptions<AgentOptions> config, ILogger<PromptB
         }
 
         return sb.ToString();
+    }
+
+    internal static string ReplyLookupBlock(string? state)
+    {
+        const string header = "## Telegram replies\n"
+            + "Each Telegram message carries [telegram_message_id: M]. A reply also carries [reply_to_message_id: R]. Both ids belong to the current conversation. The replied-to text is never included.\n";
+        if (state == "available")
+            return header
+                + "If message R is already in your context, use it. Otherwise call mcp__fleet-comms-journal__get_message with only telegram_message_id set to R. Never pass a chat id.\n"
+                + "If the result is not_found or unavailable, say you cannot see the replied-to message and ask the sender to quote it. Never guess its content.\n";
+
+        var reason = state is "journal_capture_off" or "provider_headers_unsupported" ? state : "tool_not_granted";
+        return header
+            + $"Reply lookup is unavailable on this agent (reason: {reason}). If message R is not in your context, say you cannot see the replied-to message and ask the sender to quote it. Never guess its content.\n";
     }
 
     /// <summary>

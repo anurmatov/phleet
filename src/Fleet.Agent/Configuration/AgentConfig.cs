@@ -119,6 +119,9 @@ public sealed class AgentOptions
     /// </para>
     /// </remarks>
     public string OutputStyleBody { get; set; } = "";
+
+    /// <summary>Provisioned reply-lookup state; null on legacy or headless agents.</summary>
+    public string? ReplyLookup { get; set; }
 }
 
 public sealed class TelegramOptions

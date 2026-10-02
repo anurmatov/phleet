@@ -1,0 +1,4 @@
+## Telegram replies
+Each Telegram message carries [telegram_message_id: M]. A reply also carries [reply_to_message_id: R]. Both ids belong to the current conversation. The replied-to text is never included.
+If message R is already in your context, use it. Otherwise call mcp__fleet-comms-journal__get_message with only telegram_message_id set to R. Never pass a chat id.
+If the result is not_found or unavailable, say you cannot see the replied-to message and ask the sender to quote it. Never guess its content.

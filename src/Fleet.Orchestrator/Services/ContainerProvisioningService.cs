@@ -1236,10 +1236,13 @@ public sealed class ContainerProvisioningService(
         if ((style is null || HasStyleFile(agent))
             && journal?.IngestToken is null
             && journal?.ReadToken is null
-            && !codexLocal)
+            && !codexLocal
+            && !HasTelegramBot(agent))
             return json;
 
         var node = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+        if (HasTelegramBot(agent))
+            node["Agent"]!.AsObject()["ReplyLookup"] = ReplyLookupState(agent, journal);
         if (style is not null && !HasStyleFile(agent))
             node["Agent"]!.AsObject()["OutputStyleBody"] = OutputStyleRenderer.ForPrompt(style);
         if (journal?.ReadToken is not null)
@@ -1369,6 +1372,20 @@ public sealed class ContainerProvisioningService(
         }
 
         return JsonSerializer.Serialize(new { mcpServers }, IndentedJson);
+    }
+
+    private static bool HasTelegramBot(Agent agent) => agent.EnvRefs.Any(e =>
+        e.EnvKeyName.StartsWith("TELEGRAM_", StringComparison.OrdinalIgnoreCase)
+        && e.EnvKeyName.EndsWith("_BOT_TOKEN", StringComparison.OrdinalIgnoreCase));
+
+    internal static string ReplyLookupState(Agent agent, JournalProvisioning? journal)
+    {
+        if (!agent.JournalEnabled || journal?.IngestToken is null) return "journal_capture_off";
+        if (!SupportsMcpHeaders(agent.Provider)) return "provider_headers_unsupported";
+        if (!agent.McpEndpoints.Any(e => string.Equals(e.McpName, JournalMcpServerName, StringComparison.OrdinalIgnoreCase))
+            || !agent.Tools.Any(t => t.IsEnabled && t.ToolName == "mcp__fleet-comms-journal__get_message"))
+            return "tool_not_granted";
+        return "available";
     }
 
     internal static bool SupportsMcpHeaders(string? provider) =>

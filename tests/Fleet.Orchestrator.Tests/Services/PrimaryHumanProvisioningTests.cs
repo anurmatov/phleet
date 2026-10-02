@@ -53,6 +53,10 @@ public sealed class PrimaryHumanProvisioningTests
         while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "CLAUDE.md"))) dir = dir.Parent;
         Assert.NotNull(dir);
         Assert.Contains("FLEET_PRIMARY_HUMAN_USER_ID=", File.ReadAllText(Path.Combine(dir.FullName, ".env.example")));
-        Assert.Contains("FLEET_PRIMARY_HUMAN_USER_ID", File.ReadAllText(Path.Combine(dir.FullName, "setup.sh")));
+        var setup = File.ReadAllText(Path.Combine(dir.FullName, "setup.sh"));
+        var user = setup.IndexOf("prompt_field \"$ENV_FILE\" \"TELEGRAM_USER_ID\"", StringComparison.Ordinal);
+        var primary = setup.IndexOf("prompt_field \"$ENV_FILE\" \"FLEET_PRIMARY_HUMAN_USER_ID\"", StringComparison.Ordinal);
+        Assert.True(user >= 0 && primary > user);
+        Assert.Contains("usually the same as TELEGRAM_USER_ID; blank keeps plain FIFO", setup);
     }
 }

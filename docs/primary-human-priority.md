@@ -26,6 +26,6 @@ This adds one sink call site, for 27 in TaskManager. Client intake cannot classi
 
 ## Diagnostics
 
-`fleet_agent_queue_lane_total{result}` carries fixed outcomes only: `promotion_refused_full`, `priority_overflow_to_routine`, `primary_duplicate_dropped`. No user, chat, message id or text appears in metric labels. Heartbeats report total queued entries, priority queued entries, and each preview's priority; journal-enabled agents also report `bindingFailed` as 0 or 1.
+`fleet_agent_queue_lane_total{result}` carries fixed outcomes only: `priority_enqueued`, `priority_promoted`, `priority_overflow_to_routine`, `promotion_refused_full`, `starvation_guard_dispatch`, `primary_duplicate_dropped`. No user, chat, message id or text appears in metric labels. Heartbeats report total queued entries, priority queued entries, and each preview's priority; journal-enabled agents also report `bindingFailed` as 0 or 1.
 
 Rollback by clearing the key and reprovisioning; no database migration or tool grant is needed. Provider transcript and exact-head container acceptance are separate from deterministic runtime-double tests.

@@ -53,6 +53,7 @@ public sealed class DispatchQueue(QueueLaneCounter? counter = null)
             entry.Priority = TaskPriority.PrimaryHuman;
             entry.Seq = ++_seq;
             _priority.Add(entry);
+            _counter.Increment("priority_promoted");
         }
         return true;
     }
@@ -70,6 +71,7 @@ public sealed class DispatchQueue(QueueLaneCounter? counter = null)
                 Priority = ReferenceEquals(lane, _priority) ? TaskPriority.PrimaryHuman : TaskPriority.Routine,
             };
             lane.Add(entry);
+            if (ReferenceEquals(lane, _priority)) _counter.Increment("priority_enqueued");
             if (part.Source == TaskSource.UserMessage) _pending[chat] = entry;
             position = lane.Count + (ReferenceEquals(lane, _routine) ? _priority.Count : 0);
             return true;
@@ -82,6 +84,8 @@ public sealed class DispatchQueue(QueueLaneCounter? counter = null)
         {
             var lane = _priority.Count > 0 && (_routine.Count == 0 || _consecutivePriority < 3) ? _priority : _routine;
             if (lane.Count == 0) { entry = null; return false; }
+            if (ReferenceEquals(lane, _routine) && _priority.Count > 0 && _consecutivePriority >= 3)
+                _counter.Increment("starvation_guard_dispatch");
             _consecutivePriority = ReferenceEquals(lane, _priority) && _routine.Count > 0 ? _consecutivePriority + 1 : 0;
             entry = lane[0]; lane.RemoveAt(0);
             entry.QueueDispatchLock.Wait();

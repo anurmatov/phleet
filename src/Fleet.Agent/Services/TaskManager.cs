@@ -1653,8 +1653,9 @@ public sealed class TaskManager
 
         var payload = queued.BuildPayload(DateTimeOffset.Now);
 
-        _logger.LogInformation("Draining queued message for chat {ChatId} (source={Source}, parts={Parts})",
-            queued.ChatId, queued.Source, queued.PartCount);
+        _logger.LogInformation("Queue dispatch lane={lane} reason={reason} chat={chat} parts={parts} waitedMs={waitedMs}",
+            queued.Priority == TaskPriority.PrimaryHuman ? "priority" : "routine", "queue_drain",
+            queued.ChatId, queued.PartCount, Math.Max(0, (DateTimeOffset.Now - queued.QueuedAt).TotalMilliseconds));
         if (queued.BusyNoticeSent)
             _ = _sink.SendTextByOriginAsync(queued.ChatId, "Now processing your queued message...", OriginOf(queued.Source));
         OnStatusChanged?.Invoke();

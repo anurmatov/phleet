@@ -736,10 +736,6 @@ if [[ -z "$_cto_val" || "$_cto_val" == "changeme" || "$_cto_val" == "phleet" ]];
 fi
 
 if $PROMPT_TELEGRAM; then
-  prompt_field "$ENV_FILE" "FLEET_PRIMARY_HUMAN_USER_ID" "Primary human Telegram user ID" \
-    "Optional positive integer. This user's authenticated tasks run next without interrupting a turn. Blank disables priority. Changes require agent reprovisioning." \
-    "n" "n" ""
-
   # Optional Telegram group chat ID for group conversation visibility.
   prompt_field "$ENV_FILE" "FLEET_GROUP_CHAT_ID" "Fleet Telegram group chat ID" \
     "Optional. Create a Telegram group, add both bots as members, then forward any message from the group to https://t.me/userinfobot — it replies with the negative integer group ID. Agents use this group for status updates and cross-agent coordination. Leave 0 to skip groups." \
@@ -750,6 +746,9 @@ if $PROMPT_TELEGRAM; then
 
   prompt_field "$ENV_FILE" "TELEGRAM_USER_ID" "Your Telegram user ID (numeric)" \
     "Send any message to @userinfobot on Telegram — it replies with your numeric user ID. This allows agents to DM you directly via the send_to_ceo tool." "y" "n"
+
+  prompt_field "$ENV_FILE" "FLEET_PRIMARY_HUMAN_USER_ID" "Primary human Telegram user ID" \
+    "usually the same as TELEGRAM_USER_ID; blank keeps plain FIFO" "n" "n" ""
 
   prompt_field "$ENV_FILE" "TELEGRAM_CTO_BOT_TOKEN" "Telegram CTO bot token" \
     "Same flow, second bot: https://t.me/BotFather → /newbot. This is the bot you DM your CTO agent through." "y" "y"

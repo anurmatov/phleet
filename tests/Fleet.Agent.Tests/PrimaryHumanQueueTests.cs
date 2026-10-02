@@ -135,3 +135,17 @@ public sealed partial class PrimaryHumanQueueTests
         Assert.Equal(seq, entry.Seq); Assert.Equal(TaskPriority.PrimaryHuman, entry.Priority);
     }
 }
+
+public sealed partial class PrimaryHumanQueueTests
+{
+    [Fact]
+    public void LaneCountersMeasurePromotionEnqueueAndStarvation()
+    {
+        var counters = new QueueLaneCounter(); var q = new DispatchQueue(counters);
+        Add(q, 1, "R"); Add(q, 2, "U"); Assert.True(q.TryAppend(2, Part("P", TaskPriority.PrimaryHuman)));
+        Assert.Equal(1, counters.Count("priority_promoted"));
+        for (var i = 3; i <= 5; i++) Add(q, i, "P", TaskPriority.PrimaryHuman);
+        Assert.Equal(3, counters.Count("priority_enqueued"));
+        Drain(q); Assert.Equal(1, counters.Count("starvation_guard_dispatch"));
+    }
+}

@@ -4,7 +4,25 @@ Set `FLEET_PRIMARY_HUMAN_USER_ID` in the deployment `.env` to one positive Teleg
 
 Only an allowed human's DM, dispatched group message or `/new` qualifies. The runtime checks Telegram `from.id`, `from.is_bot`, `sender_chat` and the live user/group allowlists. Text, usernames and display names do not confer priority. Relay, Bridge, CheckIn, debounced batches, reactions and client submissions stay routine. Commands such as `/stop` and `/cancel` still run before task queueing for every allowed user.
 
-The running turn is never interrupted by priority. Same-chat human messages still use provider injection or the Inbox continuation before global queued work. A human message cannot enter a workflow turn or another chat's turn. An incoming `/new` always creates a separate entry and never injects or merges.
+The running turn is never interrupted by priority. Same-chat human messages still use provider injection or the Inbox continuation before global queued work. An incoming `/new` always creates a separate entry and never injects or merges.
+
+## Human steering of workflow turns
+
+A human message reaches the agent's running turn, whatever the agent is doing, except when that turn is another human's task. Any allowed human qualifies, primary or not, by the same `from.id`, `from.is_bot`, `sender_chat` and live allowlist checks; only the router's regular-message path marks a message eligible. `/new`, reactions, debounced batches, relay/bridge and client submissions never steer.
+
+The message first takes the normal queue path unchanged. Only when it is `Queued` does the runtime also send a text-only steering copy (a fixed header plus the prompt; media waits) into a running Relay or Bridge turn, found across every chat key. The workflow's callback, terminal event, binding and merged submissions do not change. The human's reply comes from their own queued turn in their own chat, prefixed to say the message was already seen.
+
+| running turn | a verified human's message |
+|---|---|
+| `UserMessage` / `DebouncedGroupBatch` in the same chat | injection or Inbox, as before |
+| `UserMessage` / `DebouncedGroupBatch` / `NewCommand` in another chat | queued only |
+| `NewCommand` in the same chat | queued only |
+| CheckIn, any chat | queued only |
+| Relay or Bridge, not yet steered | queued, then steered; the sender becomes the turn's steering owner |
+| Relay or Bridge steered by the same (chat, user) | queued, then steered, up to 3 copies per turn |
+| Relay or Bridge steered by another (chat, user) | queued only (`steer_refused_other_human`) |
+
+Each decision logs `Steered human message into running {Source} task #{TaskId}: {outcome}` with no text. Counters: `steered_non_human_turn`, `steer_not_delivered`, `steer_refused_other_human`, `steer_answer_discarded`. A steering copy that Claude runs as its own turn is drained and discarded before the workflow callback; after a short drain, only `user`-tagged segments of the next turn's leading recovered answer are dropped. Whether the model obeys "do not reply here" is model behavior; the runtime guarantees only the structural split.
 
 ## Queue rules
 

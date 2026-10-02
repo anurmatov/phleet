@@ -779,7 +779,8 @@ A success is one text block containing only
 that private path with its own file tool; the runtime never puts bytes in a
 prompt or forwards the file. Fetch always re-authorizes with Comms, including
 when the same local file already exists. Both identifier forms need the current
-human conversation binding; workflow turns are unbound.
+human conversation binding; workflow turns are unbound. A workflow turn stays
+unbound after a human message steers it; that human's own reply turn binds.
 
 Calls are serialized per agent. The single 50-second deadline includes queue
 wait, HTTP, binding recovery and file writes. Locally unbound calls make no HTTP

@@ -26,7 +26,14 @@ public sealed record QueuedMessagePart(
     ConversationIdentity? Identity = null,
     TaskPriority Priority = TaskPriority.Routine,
     long TelegramMessageId = 0,
-    IReadOnlyList<long>? PrimaryMessageIds = null);
+    IReadOnlyList<long>? PrimaryMessageIds = null)
+{
+    /// <summary>
+    /// Set once a steering copy of this human message entered a running workflow turn (#406), so
+    /// the reply turn tells the model it has already seen it. Set under that turn's dispatch lock.
+    /// </summary>
+    public bool Steered { get; set; }
+}
 
 /// <summary>
 /// A pending FIFO queue entry. User-message entries may accumulate several

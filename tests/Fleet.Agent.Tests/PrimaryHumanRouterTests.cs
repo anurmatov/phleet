@@ -24,7 +24,9 @@ public sealed class PrimaryHumanRouterTests
             Assert.Equal(source, queued.Source); Assert.Equal(priority, queued.Priority);
             Assert.Equal(7, queued.FirstPart.TelegramMessageId); Assert.Equal(user, queued.UserId);
             Assert.Equal(priority == TaskPriority.PrimaryHuman ? 1 : 2, queued.PartCount);
-            Assert.Equal(0, executor.InjectionAttempts);
+            // #406: a verified human's regular message also steers the running Relay turn, once per
+            // queued part; /new never does.
+            Assert.Equal(source == TaskSource.UserMessage ? queued.PartCount : 0, executor.InjectionAttempts);
         });
     }
 

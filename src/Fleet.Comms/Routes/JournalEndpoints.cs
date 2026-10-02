@@ -44,11 +44,14 @@ public static class JournalEndpoints
     /// Object and byte counts for the status route. Null with media off, so the status body gains
     /// no <c>media</c> key at all rather than one full of nulls.
     /// </param>
+    /// <param name="readAllSubjects">
+    /// The subjects granted read scope <c>all</c> (#394), for the status route's <c>read</c> block.
+    /// </param>
     public static void Map(
         WebApplication app, IJournalStore store, JournalRuntimeStats stats,
         IReadOnlySet<long> excludedChatIds, TimeProvider time, ILogger logger,
         JournalMediaGate? media = null, IJournalObjectStore? bytes = null,
-        MySqlJournalObjectStore? objects = null)
+        MySqlJournalObjectStore? objects = null, IReadOnlyList<string>? readAllSubjects = null)
     {
 
         app.MapPost(MessagesPath, async Task<IResult> (HttpContext context, CancellationToken ct) =>
@@ -127,6 +130,14 @@ public static class JournalEndpoints
                     samples = runtime.LatencySamples,
                     p50Ms = runtime.IngestP50Milliseconds,
                     p95Ms = runtime.IngestP95Milliseconds,
+                },
+
+                // The read tools (#394): who holds scope `all`, and calls per tool and result code.
+                // Subjects are runtime names, never tokens.
+                read = new
+                {
+                    allScopeSubjects = readAllSubjects ?? [],
+                    requestsSinceStart = runtime.ReadsSinceStart,
                 },
 
                 // Absent, not null, when the deployment has no bucket — the same rule as the

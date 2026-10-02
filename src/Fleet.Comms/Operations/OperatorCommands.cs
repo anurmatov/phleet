@@ -482,9 +482,9 @@ public static class OperatorCommands
         var purpose = Required(args, "--purpose");
         var subject = Required(args, "--subject");
 
-        if (purpose is not (JournalTokens.PurposeIngest or JournalTokens.PurposeStatus))
+        if (purpose is not (JournalTokens.PurposeIngest or JournalTokens.PurposeStatus or JournalTokens.PurposeRead))
             throw new OperatorCommandException(
-                $"--purpose must be {JournalTokens.PurposeIngest} or {JournalTokens.PurposeStatus}. "
+                $"--purpose must be {JournalTokens.PurposeIngest}, {JournalTokens.PurposeStatus} or {JournalTokens.PurposeRead}. "
                 + "Other purposes are reserved for later slices and no route accepts them.");
 
         if (!JournalTokens.IsValidSubject(subject))

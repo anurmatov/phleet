@@ -12,11 +12,13 @@ public enum JournalTextFormat { Plain, Html, Rich }
 /// classifier takes (<see cref="JournalTaskOrigin"/>).
 /// </summary>
 /// <remarks>
-/// Only these two are accepted in this slice. The schema already carries the values later slices
-/// write (<c>agent_tool</c>, <c>agent_copy</c>, <c>client_submission</c>, <c>client_turn</c>), so those
-/// slices stay additive, but nothing here can produce them.
+/// <c>agent_tool</c> (#394) is a message an agent sent through a Telegram MCP tool
+/// (<c>send_message</c>, <c>send_to_ceo</c>), captured from the tool-send receipt: always outbound,
+/// always an agent sender. The schema already carries the values later slices write
+/// (<c>agent_copy</c>, <c>client_submission</c>, <c>client_turn</c>), so those slices stay additive,
+/// but nothing here can produce them.
 /// </remarks>
-public enum JournalRecordOrigin { TelegramUpdate, AgentRuntime }
+public enum JournalRecordOrigin { TelegramUpdate, AgentRuntime, AgentTool }
 
 public enum JournalAttachmentKind { Photo, Document, Voice, Video, VideoNote, Audio, Animation, Sticker, Other }
 
@@ -224,6 +226,7 @@ public static class JournalWire
     {
         JournalRecordOrigin.TelegramUpdate => "telegram_update",
         JournalRecordOrigin.AgentRuntime => "agent_runtime",
+        JournalRecordOrigin.AgentTool => "agent_tool",
         _ => throw new ArgumentOutOfRangeException(nameof(value)),
     };
 

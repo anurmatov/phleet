@@ -1,0 +1,27 @@
+{
+  "row": "rich-noprefix-stats-reply-to",
+  "callCount": 1,
+  "calls": [
+    {
+      "method": "sendRichMessage",
+      "chatId": 111,
+      "rich": {
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": [
+              "Replying to your question: yes, ",
+              {
+                "type": "bold",
+                "text": "it works"
+              },
+              ".\n(12k in / 340 out | cache: 5k | $2 | ctx: 17%)"
+            ]
+          }
+        ]
+      },
+      "replyTo": 4242,
+      "outcome": "ok"
+    }
+  ]
+}

@@ -101,8 +101,18 @@ public sealed class BotClientFactory
     /// 1. hit in <c>_tokensByAgent</c> → <c>_clientsByToken.GetOrAdd(token, …)</c> → return
     ///    miss → LogWarning(reason=no_bot_token_configured) → return notifier
     /// </summary>
-    public ITelegramBotClient? GetClient(string? agentName)
+    public ITelegramBotClient? GetClient(string? agentName) => GetClient(agentName, out _);
+
+    /// <inheritdoc cref="GetClient(string?)"/>
+    /// <param name="agentName">The calling agent.</param>
+    /// <param name="isAgentBot">
+    /// True only when the client is the agent's own bot. False whenever the notifier fallback was
+    /// returned — decided from the same snapshot as the client, so a concurrent token swap cannot
+    /// make the two disagree. Tool-send receipts (#394) record nothing from a notifier send.
+    /// </param>
+    public ITelegramBotClient? GetClient(string? agentName, out bool isAgentBot)
     {
+        isAgentBot = false;
         if (string.IsNullOrWhiteSpace(agentName))
             return _notifierClient;
 
@@ -118,6 +128,7 @@ public sealed class BotClientFactory
             return _notifierClient;
         }
 
+        isAgentBot = true;
         return _clientsByToken.GetOrAdd(token, _createClient);
     }
 

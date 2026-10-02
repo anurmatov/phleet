@@ -3,8 +3,8 @@ using System.Collections.Concurrent;
 namespace Fleet.Conversations.Journal;
 
 /// <summary>
-/// The in-process half of <c>GET /journal/v1/status</c>: refusals, the retention sweep and ingest
-/// latency since this process started.
+/// The in-process half of <c>GET /journal/v1/status</c>: refusals, the retention sweep, ingest
+/// latency and read-tool calls since this process started.
 /// </summary>
 /// <remarks>
 /// One instance per process, shared by the journal listener and the maintenance loop, so the status
@@ -116,6 +116,22 @@ public sealed class JournalRuntimeStats(TimeProvider? time = null)
         }
     }
 
+    // ── read tools (#394) ─────────────────────────────────────────────────────
+
+    private readonly ConcurrentDictionary<(string Tool, string Result), long> _reads = new();
+
+    /// <summary>Counts one read-tool call by tool and fixed result code, on the status route and the meter.</summary>
+    public void RecordRead(string tool, string result, double milliseconds)
+    {
+        _reads.AddOrUpdate((tool, result), 1, (_, n) => n + 1);
+
+        ConversationMetrics.JournalRead.Add(1,
+            new KeyValuePair<string, object?>("tool", tool),
+            new KeyValuePair<string, object?>("result", result));
+        ConversationMetrics.JournalReadDuration.Record(milliseconds,
+            new KeyValuePair<string, object?>("tool", tool));
+    }
+
     public sealed record Snapshot
     {
         public required IReadOnlyDictionary<string, long> RejectedSinceStart { get; init; }
@@ -137,6 +153,10 @@ public sealed class JournalRuntimeStats(TimeProvider? time = null)
         /// <summary>Upload latency percentiles over the rolling hour. Null when no upload has been sampled.</summary>
         public double? UploadP50Milliseconds { get; init; }
         public double? UploadP95Milliseconds { get; init; }
+
+        /// <summary>Read-tool calls since start: tool → result code → count, both levels sorted.</summary>
+        public IReadOnlyDictionary<string, IReadOnlyDictionary<string, long>> ReadsSinceStart { get; init; } =
+            new SortedDictionary<string, IReadOnlyDictionary<string, long>>(StringComparer.Ordinal);
     }
 
     public Snapshot Read()
@@ -165,6 +185,13 @@ public sealed class JournalRuntimeStats(TimeProvider? time = null)
                 ObjectsOrphansDeleted = _objectsOrphans,
                 ObjectSweepFailures = _objectSweepFailures,
                 UploadSamples = uploadSamples.Length,
+                ReadsSinceStart = new SortedDictionary<string, IReadOnlyDictionary<string, long>>(
+                    _reads.GroupBy(kv => kv.Key.Tool, StringComparer.Ordinal).ToDictionary(
+                        tool => tool.Key,
+                        tool => (IReadOnlyDictionary<string, long>)new SortedDictionary<string, long>(
+                            tool.ToDictionary(kv => kv.Key.Result, kv => kv.Value), StringComparer.Ordinal),
+                        StringComparer.Ordinal),
+                    StringComparer.Ordinal),
             };
         }
 

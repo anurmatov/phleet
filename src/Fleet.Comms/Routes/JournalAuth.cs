@@ -116,6 +116,14 @@ public static class JournalAuth
         if (HttpMethods.IsGet(request.Method) && string.Equals(path, JournalEndpoints.StatusPath, StringComparison.Ordinal))
             return JournalTokens.PurposeStatus;
 
+        // The read tools (#394), on the exact path only. GET and DELETE are the other two verbs of
+        // streamable HTTP; they need a read token too, so an unauthenticated caller gets the one 401
+        // on every verb and an authenticated one gets the route's 405 — never a 401 that would send
+        // an MCP client into an OAuth discovery flow.
+        if ((HttpMethods.IsPost(request.Method) || HttpMethods.IsGet(request.Method) || HttpMethods.IsDelete(request.Method))
+            && string.Equals(path, JournalMcp.Path, StringComparison.Ordinal))
+            return JournalTokens.PurposeRead;
+
         return null;
     }
 

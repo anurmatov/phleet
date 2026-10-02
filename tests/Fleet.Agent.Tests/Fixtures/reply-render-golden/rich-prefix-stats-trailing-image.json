@@ -1,0 +1,43 @@
+{
+  "row": "rich-prefix-stats-trailing-image",
+  "callCount": 3,
+  "calls": [
+    {
+      "method": "sendRichMessage",
+      "chatId": 111,
+      "rich": {
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "Agent1: Here is the chart:"
+          }
+        ]
+      },
+      "replyTo": null,
+      "outcome": "ok"
+    },
+    {
+      "method": "sendPhoto",
+      "chatId": 111,
+      "caption": "Here is the chart:",
+      "parseMode": null,
+      "file": "chart.png",
+      "replyTo": null,
+      "outcome": "ok"
+    },
+    {
+      "method": "sendRichMessage",
+      "chatId": 111,
+      "rich": {
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "Agent1: (12k in / 340 out | cache: 5k | $2 | ctx: 17%)"
+          }
+        ]
+      },
+      "replyTo": null,
+      "outcome": "ok"
+    }
+  ]
+}

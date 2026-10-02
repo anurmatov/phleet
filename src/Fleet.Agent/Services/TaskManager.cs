@@ -79,6 +79,12 @@ public sealed class TaskManager
     /// </summary>
     private readonly string? _telegramAttachmentDir;
 
+    /// <summary>
+    /// The tool-send turn ledger (#394): the origin each executor enumeration runs under. Optional,
+    /// and null without the journal.
+    /// </summary>
+    private readonly TurnOriginLedger? _ledger;
+
     public TaskManager(
         IOptions<AgentOptions> agentConfig,
         IAgentExecutor executor,
@@ -88,8 +94,10 @@ public sealed class TaskManager
         IConversationEventPublisher? events = null,
         IOptions<TelegramOptions>? telegramConfig = null,
         ConversationEventCounters? counters = null,
-        IMessageSink? sink = null)
+        IMessageSink? sink = null,
+        TurnOriginLedger? ledger = null)
     {
+        _ledger = ledger;
         _agentConfig = agentConfig.Value;
         _executor = executor;
         _sessions = sessions;
@@ -715,7 +723,7 @@ public sealed class TaskManager
             return $"\n{stats.Format()}";
         }
 
-        async Task SendWithStatsAsync(string content)
+        async Task SendWithStatsAsync(string content, bool isReply = false)
         {
             // Guarantee: this must NEVER throw. Terminal-state callers rely on it to
             // finish so that OnTaskCompleted runs and the bridge/relay gets its answer.
@@ -725,21 +733,21 @@ public sealed class TaskManager
             {
                 var statsText = StatsSuffix();
                 var toolBlock = stats?.FormatToolBlock() ?? "";
-                if (toolBlock.Length > 0)
+                var htmlPrefix = "";
+                if (toolBlock.Length > 0 && _agentConfig.PrefixMessages && _agentConfig.ShortName.Length > 0)
                 {
-                    var encoded = System.Net.WebUtility.HtmlEncode(content);
-                    var htmlPrefix = "";
-                    if (_agentConfig.PrefixMessages && _agentConfig.ShortName.Length > 0)
-                    {
-                        var displayName = $"{char.ToUpperInvariant(_agentConfig.ShortName[0])}{_agentConfig.ShortName[1..]}";
-                        htmlPrefix = $"<b>{displayName}:</b>\n";
-                    }
-                    await _sink.SendHtmlTextByOriginAsync(chatId, $"{htmlPrefix}{encoded}{statsText}{toolBlock}", origin);
+                    var displayName = $"{char.ToUpperInvariant(_agentConfig.ShortName[0])}{_agentConfig.ShortName[1..]}";
+                    htmlPrefix = $"<b>{displayName}:</b>\n";
                 }
+                var reply = new AgentReply(content, statsText, toolBlock) { HtmlPrefix = htmlPrefix };
+
+                // Only a turn's answer is journaled, and only its body (#394). The status lines that
+                // share this footer ("Task failed", "Task cancelled.", "Done! (no text output)")
+                // go out composed exactly the same way on the sends that never journal.
+                if (isReply)
+                    await _sink.SendReplyByOriginAsync(chatId, reply, origin);
                 else
-                {
-                    await _sink.SendTextByOriginAsync(chatId, $"{content}{statsText}", origin);
-                }
+                    await _sink.SendComposedByOriginAsync(chatId, reply, origin);
             }
             catch (Exception ex)
             {
@@ -755,6 +763,7 @@ public sealed class TaskManager
         async Task DeliverInjectedTurnAnswersAsync(int injectedCount)
         {
             if (injectedCount <= 0) return;
+            using var pendingOrigin = _ledger?.Pending(origin);
             await foreach (var extra in _executor.ReadInjectedTurnAnswersAsync(injectedCount, ct))
             {
                 if (extra.FinalResult is not { Length: > 0 } text || ProtocolSanitizer.IsIdleMarker(text))
@@ -770,7 +779,7 @@ public sealed class TaskManager
                 stats = extra.Stats;
                 toolCalls.Clear();
                 var marker = extra.IsErrorResult ? " [incomplete — executor reported an error]" : "";
-                await SendWithStatsAsync($"{Prefix()}{text}{marker}");
+                await SendWithStatsAsync($"{Prefix()}{text}{marker}", isReply: true);
                 (stats, toolCalls) = (turnStats, turnToolCalls);
 
                 var (extraText, extraTruncated) = ProtocolSanitizer.SanitizeAndBound(
@@ -792,6 +801,8 @@ public sealed class TaskManager
 
             while (true)
             {
+                // #394: the executor tags its lock-held interval with this, once it holds the lock.
+                using var pendingOrigin = _ledger?.Pending(origin);
                 await foreach (var progress in _executor.ExecuteAsync(currentTask, currentImages, currentDocuments, ct))
                 {
                     if (isSessionTask && progress.SessionId is not null)
@@ -828,7 +839,8 @@ public sealed class TaskManager
                     {
                         // Stale answer from the prior turn preserved during drain — deliver
                         // immediately so it reaches the user before the new turn's response.
-                        await _sink.SendTextByOriginAsync(chatId, progress.Summary, origin);
+                        // It is an answer, so it is journaled like one (#394).
+                        await _sink.SendReplyByOriginAsync(chatId, new AgentReply(progress.Summary), origin);
                         var (recoveredText, recoveredTruncated) = ProtocolSanitizer.SanitizeAndBound(
                             progress.Summary, ProtocolLimits.MaxNoticeTextChars, attachmentDir);
                         PublishEvent(chatId, ConversationEventKind.TurnRecoveredAnswer, identity,
@@ -974,7 +986,7 @@ public sealed class TaskManager
                         if (lastResult is not null && !errorResult
                             && !lastResult.Trim().Equals("IDLE", StringComparison.OrdinalIgnoreCase))
                         {
-                            await SendWithStatsAsync($"{Prefix()}{lastResult}");
+                            await SendWithStatsAsync($"{Prefix()}{lastResult}", isReply: true);
                         }
                         // ...then any injected message Claude answered in a turn of its own, so the
                         // merged continuation below does not start while that turn is still running.
@@ -1109,7 +1121,7 @@ public sealed class TaskManager
                 var marker = errorResult ? " [incomplete — executor reported an error]" : "";
                 // Send the final text to Telegram, but relay ALL assistant texts
                 // so that agent addresses from intermediate turns aren't lost
-                await SendWithStatsAsync($"{Prefix()}{lastResult}{marker}");
+                await SendWithStatsAsync($"{Prefix()}{lastResult}{marker}", isReply: true);
                 await DeliverInjectedTurnAnswersAsync(injectedIntoLastTurn);
                 var fullText = string.Join("\n", allAssistantTexts);
                 // errorResult covers max-turns exhaustion (IsErrorResult from executor) — use

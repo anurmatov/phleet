@@ -1,0 +1,29 @@
+{
+  "row": "rich-noprefix-none-trailing-image",
+  "callCount": 2,
+  "calls": [
+    {
+      "method": "sendRichMessage",
+      "chatId": 111,
+      "rich": {
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "Here is the chart:"
+          }
+        ]
+      },
+      "replyTo": null,
+      "outcome": "ok"
+    },
+    {
+      "method": "sendPhoto",
+      "chatId": 111,
+      "caption": "Here is the chart:",
+      "parseMode": null,
+      "file": "chart.png",
+      "replyTo": null,
+      "outcome": "ok"
+    }
+  ]
+}

@@ -48,7 +48,10 @@ public class SendMessageToolTests
         var accessor = Substitute.For<IHttpContextAccessor>();
         accessor.HttpContext.Returns(httpContext);
 
-        return new SendMessageTool(factory, accessor, NullLogger<SendMessageTool>.Instance);
+        // Receipts off: these tests cover the Bot API calls, ToolSendReceiptTests the receipts.
+        var sender = new TelegramSender(new ToolSendReceiptPublisher(null, NullLogger<ToolSendReceiptPublisher>.Instance));
+
+        return new SendMessageTool(factory, accessor, sender, NullLogger<SendMessageTool>.Instance);
     }
 
     // ── Empty message ─────────────────────────────────────────────────────────

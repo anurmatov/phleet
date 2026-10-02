@@ -1,0 +1,22 @@
+{
+  "row": "legacyhtml-prefix-stats-short-parsefail",
+  "callCount": 2,
+  "calls": [
+    {
+      "method": "sendMessage",
+      "chatId": 111,
+      "text": "<b>Agent1:</b>\nHere is the <b>answer</b>: use <code>x &lt; y</code> &amp; keep &lt;b&gt;tags&lt;/b&gt; literal.\n(12k in / 340 out | cache: 5k | $2 | ctx: 17%)",
+      "parseMode": "Html",
+      "replyTo": null,
+      "outcome": "failed"
+    },
+    {
+      "method": "sendMessage",
+      "chatId": 111,
+      "text": "Agent1:\nHere is the answer: use x < y & keep <b>tags</b> literal.\n(12k in / 340 out | cache: 5k | $2 | ctx: 17%)",
+      "parseMode": null,
+      "replyTo": null,
+      "outcome": "ok"
+    }
+  ]
+}

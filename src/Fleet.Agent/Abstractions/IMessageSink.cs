@@ -19,7 +19,8 @@ public interface IMessageSink
         => SendTextAsync(chatId, htmlText, ct);
 
     // The origin overloads. The methods without an origin mean Human, so a sink with no journal
-    // inherits these and behaves exactly as before; only the Telegram transport reads the origin.
+    // inherits these and behaves exactly as before. None of them journals (#394): a notice, a
+    // progress post or command output is never a record, whatever its origin.
 
     Task SendTextAsync(long chatId, string text, OutboundOrigin origin, CancellationToken ct = default)
         => SendTextAsync(chatId, text, ct);
@@ -29,6 +30,29 @@ public interface IMessageSink
 
     Task SendPhotoAsync(long chatId, string filePath, string? caption, OutboundOrigin origin, CancellationToken ct = default)
         => SendPhotoAsync(chatId, filePath, caption, ct);
+
+    /// <summary>
+    /// Sends a turn's answer: the ONLY outbound send the conversation journal records (#394).
+    /// Capture is opt-in by this method, never decided by looking at the text, so a new notice is
+    /// excluded without anyone having to remember it.
+    ///
+    /// The default composes the reply exactly as the task manager did before #394 and sends it on
+    /// the origin methods, so a sink with no journal is unchanged. The Telegram transport renders it
+    /// itself: Telegram gets the same bytes, the journal gets the body without the footer.
+    /// </summary>
+    Task SendReplyAsync(long chatId, AgentReply reply, OutboundOrigin origin, CancellationToken ct = default)
+        => this.SendComposedByOriginAsync(chatId, reply, origin);
+
+    /// <summary>
+    /// True when this sink implements <see cref="SendReplyAsync"/> itself. Callers go through
+    /// <see cref="MessageSinkOriginExtensions.SendReplyByOriginAsync"/>, which asks this first.
+    ///
+    /// Needed because a mocking proxy implements every interface member, default ones included,
+    /// and never runs a default body: without the question, every test double would see one
+    /// <c>SendReplyAsync</c> call instead of the sends it saw before #394 — the same reason the
+    /// origin extensions below exist.
+    /// </summary>
+    bool RendersReplies => false;
 
     /// <summary>
     /// The id of the last message this sink delivered to <paramref name="chatId"/>, or <c>0</c>
@@ -59,4 +83,22 @@ public static class MessageSinkOriginExtensions
 
     public static Task SendHtmlTextByOriginAsync(this IMessageSink sink, long chatId, string htmlText, OutboundOrigin origin) =>
         origin == OutboundOrigin.Human ? sink.SendHtmlTextAsync(chatId, htmlText) : sink.SendHtmlTextAsync(chatId, htmlText, origin);
+
+    /// <summary>
+    /// Sends a turn's answer (#394). A sink that renders replies gets
+    /// <see cref="IMessageSink.SendReplyAsync"/>; any other gets the composed text on exactly the
+    /// calls it got before.
+    /// </summary>
+    public static Task SendReplyByOriginAsync(this IMessageSink sink, long chatId, AgentReply reply, OutboundOrigin origin) =>
+        sink.RendersReplies ? sink.SendReplyAsync(chatId, reply, origin) : sink.SendComposedByOriginAsync(chatId, reply, origin);
+
+    /// <summary>
+    /// Sends <paramref name="reply"/> composed as the task manager always composed it — Path T's
+    /// HTML when there is a tool block, else the text with its stats line — on the origin methods,
+    /// which never journal. The status lines that share a reply's footer go out this way.
+    /// </summary>
+    public static Task SendComposedByOriginAsync(this IMessageSink sink, long chatId, AgentReply reply, OutboundOrigin origin) =>
+        reply.HasToolBlock
+            ? sink.SendHtmlTextByOriginAsync(chatId, reply.ComposeHtml(), origin)
+            : sink.SendTextByOriginAsync(chatId, reply.ComposeText(), origin);
 }

@@ -29,6 +29,15 @@ public sealed class JournalCounters
     public void Upload(string result) => Add($"journal_upload{{result={result}}}");
     public void EndpointMissing() => Add("journal_endpoint_missing");
 
+    // Tool-send receipts (#394), one per receipt: what the agent decided about it.
+    public void ToolSendCaptured() => Add("tool_send_captured");
+    public void ToolSendUnattributed() => Add("tool_send_unattributed");
+    public void ToolSendNonHuman() => Add("tool_send_non_human");
+    public void ToolSendForeignBot() => Add("tool_send_foreign_bot");
+    public void ReceiptClockSkew() => Add("receipt_clock_skew");
+    public void ReceiptDeferredOverflow() => Add("receipt_deferred_overflow");
+    public void ReceiptInvalid() => Add("receipt_invalid");
+
     /// <summary>Records lost on the agent before they reached the spool: spool full or a write error.</summary>
     public long LocallyDropped => Get("journal_spool_dropped{reason=full}") + Get("journal_capture_failed");
 

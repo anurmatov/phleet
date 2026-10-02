@@ -21,7 +21,8 @@ unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY \
 # generates a key for a host that did not opt in. `conversations migrate` below applies 0004 either
 # way; it is additive.
 unset FLEET_COMMS_JOURNAL_ENABLED FLEET_COMMS_JOURNAL_BIND FLEET_COMMS_JOURNAL_KEY \
-      FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS FLEET_COMMS_JOURNAL_RETENTION
+      FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS FLEET_COMMS_JOURNAL_RETENTION \
+      FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS
 # Media likewise: the endpoint in .env is the recorded decision, and an upgrade never turns a
 # bucket on for a host that declined one. Flipping it on would start a second MinIO holding
 # archived conversation media that nobody chose to keep, and flipping it off would leave the

@@ -4,16 +4,21 @@ using Fleet.Shared;
 using Fleet.Telegram.Services;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
-using Telegram.Bot;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 
 namespace Fleet.Telegram.Tools;
 
 [McpServerToolType]
-public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccessor httpContextAccessor, ILogger<SendMessageTool> logger)
+public sealed class SendMessageTool(
+    BotClientFactory factory,
+    IHttpContextAccessor httpContextAccessor,
+    TelegramSender sender,
+    ILogger<SendMessageTool> logger)
 {
-    [McpServerTool(Name = "send_message")]
+    public const string ToolName = "send_message";
+
+    [McpServerTool(Name = ToolName)]
     [Description("Post a text message to a Telegram chat. Supports a permissive Markdown-like subset (**bold**, `inline code`, fenced code blocks, [label](url) links) — automatically escaped and rendered as Telegram HTML. Returns {\"ok\":true,\"message_id\":N} on success, with optional flags: \"fallback\":true (notifier bot used), \"reply_fallback\":true (reply target not found, sent standalone), \"format_fallback\":true (formatting rejected by API, resent as plain text), \"rich_fallback\":true (sendRichMessage failed, fell back to LegacyHtml or PlainText).")]
     public async Task<string> SendAsync(
         [Description("Telegram chat ID as integer or string (e.g. -1001234567890 or \"-1001234567890\" for a group, positive integer for a DM)")] string chat_id,
@@ -32,7 +37,7 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
         if (chat_id != null && (chat_id.StartsWith('"') || chat_id.EndsWith('"')))
             logger.LogWarning("chat_id was passed as a quoted string '{ChatId}' — coerced to long {Parsed}", chat_id, chatIdLong);
 
-        var client = factory.GetClient(agent_name);
+        var client = factory.GetClient(agent_name, out var isAgentBot);
         if (client is null)
         {
             const string err = "No bot client available — notifier bot token not configured";
@@ -44,13 +49,17 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
         if (string.IsNullOrWhiteSpace(text))
             return JsonSerializer.Serialize(new { ok = false, error = "empty message" });
 
+        // What the agent's own bot gets accepted is reported back to the agent as one receipt when
+        // this call ends (#394). requestedAt is taken here, before the first Bot API call.
+        using var call = sender.BeginCall(ToolName, agent_name, client, isAgentBot);
+
         bool forcePlain = parse_mode?.Trim().Equals("PLAIN", StringComparison.OrdinalIgnoreCase) == true;
 
         // ── Rich path: sendRichMessage with LegacyHtml → PlainText fallback ──
         if (formattingMode == Fleet.Shared.FormattingMode.Rich && !forcePlain)
         {
             return await SendRichWithFallbackAsync(
-                client, chatIdLong, text, agent_name, reply_to_message_id, cancellationToken);
+                call, chatIdLong, text, agent_name, reply_to_message_id, cancellationToken);
         }
 
         List<string> chunks;
@@ -105,7 +114,7 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
             if (string.IsNullOrEmpty(chunk)) continue;
 
             var replyId = !replyConsumed ? reply_to_message_id : null;
-            var result = await TrySendAsync(client, chatIdLong, chunk, pm, agent_name, replyId, cancellationToken);
+            var result = await TrySendAsync(call, chatIdLong, chunk, pm, agent_name, replyId, cancellationToken);
 
             if (!result.ok && result.parseEntitiesError && usingHtml)
             {
@@ -126,7 +135,7 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
                 {
                     if (string.IsNullOrEmpty(plainChunk)) continue;
                     var pr = !replyConsumed ? reply_to_message_id : null;
-                    var plainResult = await TrySendAsync(client, chatIdLong, plainChunk, null, agent_name, pr, cancellationToken);
+                    var plainResult = await TrySendAsync(call, chatIdLong, plainChunk, null, agent_name, pr, cancellationToken);
                     if (plainResult.ok) replyConsumed = true; // only mark consumed on success
                     if (!plainResult.ok)
                         return JsonSerializer.Serialize(new { ok = false, error = plainResult.error });
@@ -168,7 +177,7 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
     }
 
     private async Task<string> SendRichWithFallbackAsync(
-        ITelegramBotClient client, long chatId, string text,
+        ToolSendCall call, long chatId, string text,
         string agentName, int? replyToMessageId, CancellationToken ct)
     {
         int lastMessageId = 0;
@@ -185,9 +194,7 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
         {
             var blocks = TelegramRichFormatter.ConvertToRichBlocks(text);
             var richMsg = new InputRichMessage { Blocks = blocks };
-            var m = replyParams is not null
-                ? await client.SendRichMessage(chatId, richMsg, replyParameters: replyParams, cancellationToken: ct)
-                : await client.SendRichMessage(chatId, richMsg, cancellationToken: ct);
+            var m = await sender.SendRichAsync(call, chatId, richMsg, text, replyParams, ct);
             return JsonSerializer.Serialize(new { ok = true, message_id = m.Id });
         }
         catch (Exception ex)
@@ -208,7 +215,7 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
             {
                 if (string.IsNullOrEmpty(chunk)) continue;
                 var rp = !replyConsumed ? replyToMessageId : null;
-                var result = await TrySendAsync(client, chatId, chunk, ParseMode.Html, agentName, rp, ct);
+                var result = await TrySendAsync(call, chatId, chunk, ParseMode.Html, agentName, rp, ct);
                 if (!result.ok)
                     return JsonSerializer.Serialize(new { ok = false, error = result.error });
                 replyConsumed = true;
@@ -234,7 +241,7 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
             {
                 var slice = text.Substring(offset, Math.Min(maxChunk, text.Length - offset));
                 var rp = !replyConsumed ? replyToMessageId : null;
-                var result = await TrySendAsync(client, chatId, slice, null, agentName, rp, ct);
+                var result = await TrySendAsync(call, chatId, slice, null, agentName, rp, ct);
                 if (!result.ok)
                     return JsonSerializer.Serialize(new { ok = false, error = result.error });
                 replyConsumed = true;
@@ -257,7 +264,7 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
     }
 
     private async Task<(bool ok, int messageId, string error, bool fallback, bool replyFallback, bool parseEntitiesError)> TrySendAsync(
-        ITelegramBotClient client,
+        ToolSendCall call,
         long chatId,
         string text,
         ParseMode? parseMode,
@@ -271,11 +278,7 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
 
         try
         {
-            var msg = parseMode.HasValue
-                ? await client.SendMessage(chatId, text, parseMode: parseMode.Value,
-                    replyParameters: replyParams, cancellationToken: ct)
-                : await client.SendMessage(chatId, text,
-                    replyParameters: replyParams, cancellationToken: ct);
+            var msg = await sender.SendTextAsync(call, chatId, text, parseMode, replyParams, ct);
             return (true, msg.Id, string.Empty, false, false, false);
         }
         catch (Exception ex) when (IsParseEntitiesError(ex))
@@ -289,9 +292,7 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
                 replyToMessageId, chatId);
             try
             {
-                var msg = parseMode.HasValue
-                    ? await client.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
-                    : await client.SendMessage(chatId, text, cancellationToken: ct);
+                var msg = await sender.SendTextAsync(call, chatId, text, parseMode, replyParameters: null, ct);
                 return (true, msg.Id, string.Empty, false, true, false);
             }
             catch (Exception fbEx)
@@ -303,16 +304,15 @@ public sealed class SendMessageTool(BotClientFactory factory, IHttpContextAccess
         catch (Exception ex) when (Is403(ex))
         {
             var fallback = factory.GetFallbackClient();
-            if (fallback is not null && fallback != client)
+            if (fallback is not null && fallback != call.Client)
             {
                 logger.LogWarning(
                     "Bot for agent '{AgentName}' got 403 on chat {ChatId} — retrying with fallback bot",
                     agentName, chatId);
                 try
                 {
-                    var msg = parseMode.HasValue
-                        ? await fallback.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
-                        : await fallback.SendMessage(chatId, text, cancellationToken: ct);
+                    // Not recorded: the notifier bot is not in the agent's conversation (#394).
+                    var msg = await sender.SendTextUnrecordedAsync(fallback, chatId, text, parseMode, ct);
                     return (true, msg.Id, string.Empty, true, false, false);
                 }
                 catch (Exception fbEx)

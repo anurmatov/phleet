@@ -57,4 +57,13 @@ public sealed class NullMessageSink : IMessageSink
         _counter?.Suppressed(SinkSuppressionCounter.ReasonNullSink);
         return Task.CompletedTask;
     }
+
+    /// <summary>A reply counts once, as the one composed send it replaces did (#394).</summary>
+    public bool RendersReplies => true;
+
+    public Task SendReplyAsync(long chatId, AgentReply reply, OutboundOrigin origin, CancellationToken ct = default)
+    {
+        _counter?.Suppressed(SinkSuppressionCounter.ReasonNullSink);
+        return Task.CompletedTask;
+    }
 }

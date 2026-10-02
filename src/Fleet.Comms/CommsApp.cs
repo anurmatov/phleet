@@ -549,13 +549,28 @@ public static class CommsApp
     /// <para>
     /// ⚠️ It never migrates. The store reports a schema below 0004 as unavailable instead.
     /// </para>
+    /// <para>
+    /// The read tools (#394) are served here and only here, at <see cref="JournalMcp.Path"/>.
+    /// </para>
     /// </remarks>
+    /// <param name="reads">
+    /// The read store. Null builds the MySQL one over the same connection string the ingest store
+    /// uses; it opens no connection until the first read.
+    /// </param>
     public static WebApplication BuildJournalApp(
         WebApplicationBuilder builder, IJournalStore store, CommsOptions options,
-        JournalRuntimeStats stats, TimeProvider? time = null, JournalMedia? media = null)
+        JournalRuntimeStats stats, TimeProvider? time = null, JournalMedia? media = null,
+        IJournalReadStore? reads = null)
     {
         var keys = options.Journal.Keys();
         var excluded = options.Journal.ExcludedChats();
+        var grants = new JournalReadGrants(options.Journal.AllScopeSubjects());
+
+        JournalMcp.AddServices(builder.Services, grants, stats, reads is not null
+            ? _ => reads
+            : provider => new MySqlJournalReadStore(
+                options.ConversationConnectionString,
+                provider.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal.Read")));
 
         var app = builder.Build();
         var journalLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal");
@@ -611,7 +626,10 @@ public static class CommsApp
 
         JournalEndpoints.Map(
             app, store, stats, excluded, time ?? TimeProvider.System, journalLogger,
-            media?.Gate, media?.Bytes, media?.Objects);
+            media?.Gate, media?.Bytes, media?.Objects, grants.AllScopeSubjects);
+
+        // The read tools, behind the same authentication as every route above (#394).
+        JournalMcp.Map(app);
 
         return app;
     }

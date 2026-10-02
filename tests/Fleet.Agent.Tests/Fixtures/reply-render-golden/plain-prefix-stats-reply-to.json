@@ -1,0 +1,14 @@
+{
+  "row": "plain-prefix-stats-reply-to",
+  "callCount": 1,
+  "calls": [
+    {
+      "method": "sendMessage",
+      "chatId": 111,
+      "text": "<b>Agent1:</b>\nReplying to your question: yes, **it works**.\n(12k in / 340 out | cache: 5k | $2 | ctx: 17%)",
+      "parseMode": "Html",
+      "replyTo": 4242,
+      "outcome": "ok"
+    }
+  ]
+}

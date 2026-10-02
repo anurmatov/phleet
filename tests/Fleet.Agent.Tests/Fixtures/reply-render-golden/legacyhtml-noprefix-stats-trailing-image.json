@@ -1,0 +1,31 @@
+{
+  "row": "legacyhtml-noprefix-stats-trailing-image",
+  "callCount": 3,
+  "calls": [
+    {
+      "method": "sendMessage",
+      "chatId": 111,
+      "text": "Here is the chart:",
+      "parseMode": "Html",
+      "replyTo": null,
+      "outcome": "ok"
+    },
+    {
+      "method": "sendPhoto",
+      "chatId": 111,
+      "caption": "Here is the chart:",
+      "parseMode": null,
+      "file": "chart.png",
+      "replyTo": null,
+      "outcome": "ok"
+    },
+    {
+      "method": "sendMessage",
+      "chatId": 111,
+      "text": "(12k in / 340 out | cache: 5k | $2 | ctx: 17%)",
+      "parseMode": "Html",
+      "replyTo": null,
+      "outcome": "ok"
+    }
+  ]
+}

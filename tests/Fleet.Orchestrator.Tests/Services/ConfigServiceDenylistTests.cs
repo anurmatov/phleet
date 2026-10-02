@@ -23,6 +23,7 @@ public sealed class ConfigServiceDenylistTests : IDisposable
         "FLEET_COMMS_JOURNAL_BIND",
         "FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS",
         "FLEET_COMMS_JOURNAL_RETENTION",
+        "FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS",
     ];
 
     /// <summary>
@@ -52,10 +53,43 @@ public sealed class ConfigServiceDenylistTests : IDisposable
     [InlineData("FLEET_COMMS_JOURNAL_KEY")]
     [InlineData("FLEET_COMMS_JOURNAL_ENABLED")]
     [InlineData("FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS")]
+    [InlineData("FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS")]
     [InlineData("fleet_comms_journal_key")]
+    [InlineData("fleet_comms_journal_read_all_subjects")]
     public void Every_journal_key_is_denylisted(string key)
     {
         Assert.True(ConfigService.IsDenylisted(key));
+    }
+
+    /// <summary>
+    /// The read-tool <c>all</c> grant (#394) is refused on the way in by both write paths. An agent
+    /// that could write it through <c>set_config_values</c> could name itself and read every
+    /// journaled message on the next Comms recreate; that is the widening MUST NOT 9 forbids.
+    /// </summary>
+    [Fact]
+    public async Task The_read_all_grant_cannot_be_written_by_either_config_path()
+    {
+        var service = await ServiceWithJournalKeysAsync();
+        var before = await File.ReadAllTextAsync(_envFile);
+
+        await Assert.ThrowsAsync<DenylistedException>(() => service.PutValuesAsync(
+            new Dictionary<string, string> { ["FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS"] = "example-agent" }));
+
+        var http = new DefaultHttpContext();
+        http.Request.Headers.Authorization = "Bearer config-token";
+        var tool = new SetConfigValuesTool(
+            service,
+            new ConfigurationBuilder().AddInMemoryCollection(
+                [new KeyValuePair<string, string?>("Orchestrator:ConfigToken", "config-token")]).Build(),
+            new HttpContextAccessor { HttpContext = http },
+            NullLogger<SetConfigValuesTool>.Instance);
+
+        var result = JsonDocument.Parse(await tool.SetConfigValuesAsync(JsonSerializer.Serialize(
+            new Dictionary<string, string> { ["FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS"] = "example-agent" })))
+            .RootElement;
+
+        Assert.Equal("denylisted", result.GetProperty("error").GetString());
+        Assert.Equal(before, await File.ReadAllTextAsync(_envFile));
     }
 
     /// <summary>The prefix is exact: neighbouring comms keys are unaffected.</summary>
@@ -224,7 +258,8 @@ public sealed class ConfigServiceDenylistTests : IDisposable
             + "FLEET_COMMS_MEDIA_SECRET_KEY=a-bucket-secret\n"
             + "FLEET_COMMS_MINIO_ROOT_USER=root\n"
             + "FLEET_COMMS_MINIO_ROOT_PASSWORD=a-root-password\n"
-            + "FLEET_COMMS_JOURNAL_RETENTION=365.00:00:00\n");
+            + "FLEET_COMMS_JOURNAL_RETENTION=365.00:00:00\n"
+            + "FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS=example-reviewer\n");
 
         var db = new OrchestratorDbContext(new DbContextOptionsBuilder<OrchestratorDbContext>()
             .UseInMemoryDatabase($"denylist_{Guid.NewGuid():N}").Options);

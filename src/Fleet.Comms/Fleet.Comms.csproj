@@ -30,6 +30,12 @@
       2.1.12, and a transitive vulnerability scan of this project reports clean.
     -->
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
+
+    <!--
+      The journal's read tools (#394): stateless streamable HTTP on the journal listener only.
+      Pinned to the version Fleet.Telegram serves its tools with, so the fleet speaks one MCP SDK.
+    -->
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="0.8.0-preview.1" />
   </ItemGroup>
 
   <ItemGroup>

@@ -4,7 +4,6 @@ using Fleet.Shared;
 using Fleet.Telegram.Services;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
-using Telegram.Bot;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 
@@ -15,9 +14,12 @@ public sealed class SendToCeoTool(
     BotClientFactory factory,
     IHttpContextAccessor httpContextAccessor,
     CeoConfigService ceoConfig,
+    TelegramSender sender,
     ILogger<SendToCeoTool> logger)
 {
-    [McpServerTool(Name = "send_to_ceo")]
+    public const string ToolName = "send_to_ceo";
+
+    [McpServerTool(Name = ToolName)]
     [Description("Send a direct message to the CEO. The CEO's chat ID and sending bot are resolved server-side — neither appears in agent context or logs. Supports a permissive Markdown-like subset (**bold**, `inline code`, fenced code blocks, [label](url) links) — automatically escaped and rendered as Telegram HTML. Returns {\"ok\":true,\"message_id\":N} on success, with optional flags: \"fallback\":true (notifier bot used), \"format_fallback\":true (formatting rejected by API, resent as plain text), \"rich_fallback\":true (sendRichMessage failed, fell back to LegacyHtml or PlainText).")]
     public async Task<string> SendAsync(
         [Description("Message text. Supports **bold**, `inline code`, fenced code blocks, and [label](url) links.")] string text,
@@ -33,7 +35,7 @@ public sealed class SendToCeoTool(
         byte.TryParse(formattingModeRaw, out var formattingModeByte);
         var formattingMode = (Fleet.Shared.FormattingMode)Math.Clamp((int)formattingModeByte, 0, 2);
 
-        var client = factory.GetClient(agent_name);
+        var client = factory.GetClient(agent_name, out var isAgentBot);
         if (client is null)
         {
             const string err = "No bot client available — notifier bot token not configured";
@@ -45,11 +47,14 @@ public sealed class SendToCeoTool(
         if (string.IsNullOrWhiteSpace(text))
             return JsonSerializer.Serialize(new { ok = false, error = "empty message" });
 
+        // One receipt for this call, published when it ends (#394); requestedAt is taken here.
+        using var call = sender.BeginCall(ToolName, agent_name, client, isAgentBot);
+
         bool forcePlain = parse_mode?.Trim().Equals("PLAIN", StringComparison.OrdinalIgnoreCase) == true;
 
         // ── Rich path: sendRichMessage with LegacyHtml → PlainText fallback ──
         if (formattingMode == Fleet.Shared.FormattingMode.Rich && !forcePlain)
-            return await SendRichWithFallbackAsync(client, chatId, text, agent_name, ct);
+            return await SendRichWithFallbackAsync(call, chatId, text, agent_name, ct);
 
         List<string> chunks;
         bool usingHtml;
@@ -92,7 +97,7 @@ public sealed class SendToCeoTool(
             var chunk = chunks[idx];
             if (string.IsNullOrEmpty(chunk)) continue;
 
-            var result = await TrySendAsync(client, chatId, chunk, pm, agent_name, ct);
+            var result = await TrySendAsync(call, chatId, chunk, pm, agent_name, ct);
 
             if (!result.ok && result.parseEntitiesError && usingHtml)
             {
@@ -109,7 +114,7 @@ public sealed class SendToCeoTool(
                 foreach (var plainChunk in plainChunks)
                 {
                     if (string.IsNullOrEmpty(plainChunk)) continue;
-                    var pr = await TrySendAsync(client, chatId, plainChunk, null, agent_name, ct);
+                    var pr = await TrySendAsync(call, chatId, plainChunk, null, agent_name, ct);
                     if (!pr.ok)
                         return JsonSerializer.Serialize(new { ok = false, error = pr.error });
                     lastMessageId = pr.messageId;
@@ -136,7 +141,7 @@ public sealed class SendToCeoTool(
     }
 
     private async Task<string> SendRichWithFallbackAsync(
-        ITelegramBotClient client, long chatId, string text,
+        ToolSendCall call, long chatId, string text,
         string agentName, CancellationToken ct)
     {
         int lastMessageId = 0;
@@ -148,7 +153,7 @@ public sealed class SendToCeoTool(
         {
             var blocks = TelegramRichFormatter.ConvertToRichBlocks(text);
             var richMsg = new InputRichMessage { Blocks = blocks };
-            var m = await client.SendRichMessage(chatId, richMsg, cancellationToken: ct);
+            var m = await sender.SendRichAsync(call, chatId, richMsg, text, replyParameters: null, ct);
             return JsonSerializer.Serialize(new { ok = true, message_id = m.Id });
         }
         catch (Exception ex)
@@ -167,7 +172,7 @@ public sealed class SendToCeoTool(
             foreach (var chunk in chunks)
             {
                 if (string.IsNullOrEmpty(chunk)) continue;
-                var result = await TrySendAsync(client, chatId, chunk, ParseMode.Html, agentName, ct);
+                var result = await TrySendAsync(call, chatId, chunk, ParseMode.Html, agentName, ct);
                 if (!result.ok)
                     return JsonSerializer.Serialize(new { ok = false, error = result.error });
                 lastMessageId = result.messageId;
@@ -189,7 +194,7 @@ public sealed class SendToCeoTool(
             for (int offset = 0; offset < text.Length; offset += maxChunk)
             {
                 var slice = text.Substring(offset, Math.Min(maxChunk, text.Length - offset));
-                var result = await TrySendAsync(client, chatId, slice, null, agentName, ct);
+                var result = await TrySendAsync(call, chatId, slice, null, agentName, ct);
                 if (!result.ok)
                     return JsonSerializer.Serialize(new { ok = false, error = result.error });
                 lastMessageId = result.messageId;
@@ -208,7 +213,7 @@ public sealed class SendToCeoTool(
     }
 
     private async Task<(bool ok, int messageId, string error, bool fallback, bool parseEntitiesError)> TrySendAsync(
-        ITelegramBotClient client,
+        ToolSendCall call,
         long chatId,
         string text,
         ParseMode? parseMode,
@@ -217,9 +222,7 @@ public sealed class SendToCeoTool(
     {
         try
         {
-            var msg = parseMode.HasValue
-                ? await client.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
-                : await client.SendMessage(chatId, text, cancellationToken: ct);
+            var msg = await sender.SendTextAsync(call, chatId, text, parseMode, replyParameters: null, ct);
             return (true, msg.Id, string.Empty, false, false);
         }
         catch (Exception ex) when (IsParseEntitiesError(ex))
@@ -230,16 +233,15 @@ public sealed class SendToCeoTool(
         catch (Exception ex) when (Is403(ex))
         {
             var fallback = factory.GetFallbackClient();
-            if (fallback is not null && fallback != client)
+            if (fallback is not null && fallback != call.Client)
             {
                 logger.LogWarning(
                     "Bot for agent '{AgentName}' got 403 sending to CEO — retrying with fallback bot",
                     agentName);
                 try
                 {
-                    var msg = parseMode.HasValue
-                        ? await fallback.SendMessage(chatId, text, parseMode: parseMode.Value, cancellationToken: ct)
-                        : await fallback.SendMessage(chatId, text, cancellationToken: ct);
+                    // Not recorded: the notifier bot is not in the agent's conversation (#394).
+                    var msg = await sender.SendTextUnrecordedAsync(fallback, chatId, text, parseMode, ct);
                     return (true, msg.Id, string.Empty, true, false);
                 }
                 catch (Exception fbEx)

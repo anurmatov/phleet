@@ -184,4 +184,23 @@ public static class ConversationMetrics
     /// </summary>
     public static readonly Counter<long> JournalOrphansDeleted =
         Meter.CreateCounter<long>("fleet.journal.orphans_deleted", "objects");
+
+    // ── read tools (#394) ─────────────────────────────────────────────────────
+    //
+    // `tool` here is one of the journal's OWN three read tools — `search_messages`, `get_message`,
+    // `get_conversation` — a fixed set this assembly defines. It is not the tool name an agent's turn
+    // called, which the rule at the top of this class keeps off every label.
+
+    /// <summary>
+    /// Read-tool calls, tagged <c>tool</c> and <c>result</c>: <c>ok</c>, <c>not_found</c>,
+    /// <c>ambiguous</c>, <c>invalid_argument</c>, <c>invalid_query</c>, <c>invalid_cursor</c>,
+    /// <c>store_unavailable</c>, and <c>cancelled</c> or <c>internal</c> for a call that did not
+    /// finish. Never a subject, an id or query text.
+    /// </summary>
+    public static readonly Counter<long> JournalRead =
+        Meter.CreateCounter<long>("fleet.journal.read", "calls");
+
+    /// <summary>Time from an authenticated read-tool call to its answer, tagged <c>tool</c>.</summary>
+    public static readonly Histogram<double> JournalReadDuration =
+        Meter.CreateHistogram<double>("fleet.journal.read.duration", "ms");
 }

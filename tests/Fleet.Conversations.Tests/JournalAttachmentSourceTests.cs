@@ -91,7 +91,9 @@ public sealed partial class JournalReadStoreTests
         async Task<string> Seed(long chat, string observer, string mime)
         {
             var record = Message(chat, 5, BaseTime(), "synthetic", attachments:
-                [Attachment(0) with { ByteSize = bytes.Length, MimeType = mime }]);
+                [Attachment(0) with { ByteSize = bytes.Length, MimeType = mime,
+                    Kind = chat == a ? JournalAttachmentKind.Photo : JournalAttachmentKind.Document }]);
+            if (chat == a) record = record with { Telegram = record.Telegram with { ChatKind = JournalChatKind.Private } };
             var id = (await write.IngestAsync(record, observer)).MessageId!; var objectId = Ulid.NewUlid();
             await fixture.ExecuteAsync($"""
                 INSERT INTO journal_objects
@@ -117,7 +119,8 @@ public sealed partial class JournalReadStoreTests
             new JournalReadGrants(new HashSet<string>()), new JournalBindingScope(bindings, new HashSet<long>()), stats);
         app.MapPost(JournalAttachmentRequest.ContentPath, endpoint.HandleAsync); await app.StartAsync();
         using var client = app.GetTestClient();
-        void Bind(long chat, long seq) => bindings.Put(subject, new(Ulid.NewUlid(), seq, "bound", "supergroup", 7001, chat));
+        var epoch = Ulid.NewUlid();
+        void Bind(long chat, long seq) => bindings.Put(subject, new(epoch, seq, "bound", chat == a ? "private" : "supergroup", 7001, chat));
         async Task<HttpResponseMessage> Fetch(string body)
         {
             using var request = new HttpRequestMessage(HttpMethod.Post, JournalAttachmentRequest.ContentPath)
@@ -143,10 +146,22 @@ public sealed partial class JournalReadStoreTests
         }
         using (var absent = await Fetch("{\"telegram_message_id\":5,\"ordinal\":255}"))
             Assert.Equal(HttpStatusCode.NotFound, absent.StatusCode);
-        Bind(b, 2);
+        var openBeforeInvalid = bucket.Keys.Order().ToArray();
+        using (var invalid = await Fetch("{\"telegram_message_id\":5,\"telegram_chat_id\":1}"))
+        { Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+          Assert.Equal(JournalAttachmentRequest.Invalid("telegram_chat_id"), await invalid.Content.ReadAsStringAsync()); }
+        Assert.Equal(openBeforeInvalid, bucket.Keys.Order().ToArray());
+        Bind(c, 2);
+        using (var reply = await Fetch("{\"telegram_message_id\":5}"))
+        { Assert.Equal(HttpStatusCode.NotFound, reply.StatusCode); Assert.Equal("{\"error\":\"not_found\"}", await reply.Content.ReadAsStringAsync()); }
+        Bind(b, 3);
         using (var reply = await Fetch("{\"telegram_message_id\":5}"))
         { Assert.Equal(HttpStatusCode.OK, reply.StatusCode); Assert.Equal("application/pdf", reply.Content.Headers.ContentType!.MediaType);
           Assert.Equal(second, reply.Headers.GetValues("X-Journal-Message-Id").Single()); }
+        bindings.Put(subject, new(epoch, 4, "unbound"));
+        using (var reply = await Fetch("{\"telegram_message_id\":5}"))
+        { Assert.Equal(HttpStatusCode.Conflict, reply.StatusCode);
+          Assert.Equal(JournalAttachmentRequest.Unavailable("no_bound_conversation"), await reply.Content.ReadAsStringAsync()); }
         Assert.Equal(before, await fixture.ScalarRowAsync("SELECT COUNT(*) FROM journal_messages"));
         Assert.Equal(objectsBefore, await fixture.ScalarRowAsync("SELECT COUNT(*) FROM journal_objects"));
         Assert.Equal(keysBefore, bucket.Keys.Order().ToArray());

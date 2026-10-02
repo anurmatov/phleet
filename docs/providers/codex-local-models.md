@@ -212,11 +212,11 @@ Rolling back the #382 release itself needs one step per Codex agent with a URL. 
 
 Telegram replies carry only message ids, never quoted text. Conversation-bound
 reply lookup requires an explicitly granted journal tool and a read-token header.
-The pinned CLI `0.159.2` remains `McpHeaderSupport=false` until an actual CLI
-transcript proves `tools/list`, bound and unbound `get_message`, and Authorization
-on every request. Provisioning refuses a journal endpoint with
-`journal_headers_unsupported`; without the endpoint, the reply prompt reports
-`provider_headers_unsupported`. Entrypoint translation tests alone are not proof.
+The pinned CLI `0.159.2` has `McpHeaderSupport=true` after the actual
+[CLI transcript](../evidence/journal-provider-probes.md) proved `tools/list`,
+bound and unbound `get_message`, and the read bearer on every request. This
+changes no grants; journal endpoints and tools still require explicit per-agent
+authorization and reprovisioning. Entrypoint translation tests alone are not proof.
 
 Primary-human priority changes only the next queued turn, not the running turn
 or its provider frames. Same-chat injection or Inbox fallback runs before global

@@ -37,7 +37,10 @@ public sealed class JournalFileStore(string attachmentDir, TimeProvider? time = 
                 var buffer = new byte[64 * 1024]; long received = 0;
                 while (true)
                 {
-                    var read = await content.ReadAsync(buffer, ct); if (read == 0) break;
+                    int read;
+                    try { read = await content.ReadAsync(buffer, ct); }
+                    catch (IOException) { throw new JournalFileIntegrityException(); }
+                    if (read == 0) break;
                     received += read;
                     if (received > length || received > JournalAttachmentRequest.MaxBytes) throw new JournalFileIntegrityException();
                     hash.AppendData(buffer.AsSpan(0, read));

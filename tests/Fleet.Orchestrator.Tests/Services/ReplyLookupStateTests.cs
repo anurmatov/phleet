@@ -14,7 +14,7 @@ public sealed class ReplyLookupStateTests
     [InlineData(true, true, true, true, "available")]
     public void Generate_BotAgent_UsesPinnedPrecedence(bool capture, bool supported, bool endpoint, bool grant, string expected)
     {
-        var agent = Build(supported ? "claude" : "codex", bot: true);
+        var agent = Build(supported ? "claude" : "gemini", bot: true);
         agent.JournalEnabled = capture;
         if (endpoint) agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "fleet-comms-journal", TransportType = "http", Url = "http://journal.test/journal/v1/mcp" });
         if (grant) agent.Tools.Add(new AgentTool { ToolName = "mcp__fleet-comms-journal__get_message", IsEnabled = true });

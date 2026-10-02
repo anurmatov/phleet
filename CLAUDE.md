@@ -241,6 +241,16 @@ The orchestrator emits `Agent.ReplyLookup` only for bot agents, with precedence
 field report `tool_not_granted`, and headless agents receive no block.
 Provider header flags remain proof-gated, and this field grants no tool or journal access.
 
+The explicitly granted `mcp__fleet-journal-files__fetch_attachment` tool runs on
+`127.0.0.1:8091` only for journal-enabled bot agents. Its headerless MCP server
+uses `ModelContextProtocol.AspNetCore` `0.8.0-preview.1`, matching Comms. The
+runtime uses its read-purpose token to fetch only observed files in the current
+bound human conversation, verifies them into `{AttachmentDir}/journal/`, and
+returns a private path. No byte-store credentials, URLs, automatic grants or
+agent network changes. Files remain untrusted data; only an explicit requester
+instruction permits sharing. See `docs/comms-journal.md` and
+`docs/comms-deployment.md` for limits, errors and rollback.
+
 ## Telegram Image Handling
 
 - **Image-only messages** (no caption): `AgentTransport` passes the photo to `MessageRouter`, which substitutes `TelegramOptions.DefaultImagePrompt` (default: `"(image attached — please analyze)"`) as the task prompt so the executor always receives a non-empty string.

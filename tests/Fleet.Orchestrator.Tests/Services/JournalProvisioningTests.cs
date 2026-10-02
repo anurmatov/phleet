@@ -60,7 +60,7 @@ public sealed class JournalProvisioningTests
 
     [Theory]
     [InlineData("claude", true)]
-    [InlineData("codex", false)]
+    [InlineData("codex", true)]
     [InlineData("gemini", false)]
     public void Header_support_is_compiled_per_provider(string provider, bool expected) =>
         Assert.Equal(expected, ContainerProvisioningService.SupportsMcpHeaders(provider));
@@ -146,7 +146,6 @@ public sealed class JournalProvisioningTests
     }
 
     [Theory]
-    [InlineData("codex")]
     [InlineData("gemini")]
     public async Task Unsupported_header_provider_refuses_before_docker(string provider)
     {

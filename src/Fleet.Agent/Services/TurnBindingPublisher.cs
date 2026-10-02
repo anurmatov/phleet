@@ -21,6 +21,7 @@ public sealed class TurnBindingPublisher(
     private readonly ConcurrentDictionary<string, long> _counts = new(StringComparer.Ordinal);
     private JournalTurnBinding _current = new(Guid.NewGuid().ToString("N"), 1, "unbound");
     private int _failed;
+    private readonly SemaphoreSlim _sendGate = new(1, 1);
 
     public JournalTurnBinding Current { get { lock (_gate) return _current; } }
     public bool BindingFailed => Volatile.Read(ref _failed) != 0;
@@ -60,6 +61,33 @@ public sealed class TurnBindingPublisher(
         }
     }
 
+    /// <summary>One acked re-send of the latest state, bounded including any in-flight renewal.</summary>
+    public async Task<bool> RequestResendAsync(TimeSpan timeout, CancellationToken ct)
+    {
+        using var budget = new CancellationTokenSource(timeout < JournalHttpClient.BindingTimeout ? timeout : JournalHttpClient.BindingTimeout, _time);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, budget.Token);
+        var sent = Current;
+        if (sent.State != "bound") return false;
+        try
+        {
+            var response = await SendAsync(sent, linked.Token);
+            lock (_gate)
+            {
+                if (_current != sent) return false;
+                Volatile.Write(ref _failed, response.Status == 204 ? 0 : 1);
+                return response.Status == 204;
+            }
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return false; }
+    }
+
+    private async Task<JournalSendResult> SendAsync(JournalTurnBinding state, CancellationToken ct)
+    {
+        await _sendGate.WaitAsync(ct);
+        try { return await client.PutTurnBindingAsync(state, ct); }
+        finally { _sendGate.Release(); }
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var backoffSeconds = 1;
@@ -69,7 +97,7 @@ public sealed class TurnBindingPublisher(
             {
                 while (_changed.Reader.TryRead(out _)) { }
                 var sent = Current;
-                var response = await client.PutTurnBindingAsync(sent, stoppingToken);
+                var response = await SendAsync(sent, stoppingToken);
                 var result = response.Status switch
                 {
                     204 => "accepted", 409 => "stale", 401 => "unauthorized", 404 => "route_missing", _ => "failed",

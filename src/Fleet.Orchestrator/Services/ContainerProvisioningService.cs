@@ -19,6 +19,11 @@ public sealed class ContainerProvisioningService(
 {
     private const string DefaultAgentImage = "fleet:agent";
     internal const string JournalMcpServerName = "fleet-comms-journal";
+    internal const string JournalFilesServerName = "fleet-journal-files";
+    internal const string JournalFilesGrant = "mcp__fleet-journal-files__fetch_attachment";
+    private static bool HasFilesGrant(Agent agent) => agent.Tools.Any(t => t.IsEnabled && t.ToolName == JournalFilesGrant);
+    private static string? FilesWarning(Agent agent) => HasFilesGrant(agent) && (!agent.JournalEnabled || !HasTelegramBot(agent))
+        ? "journal_files_unavailable:journal_capture_off" : null;
 
     /// <summary>
     /// Header support is a property of the pinned provider CLI, not something provisioning probes
@@ -28,7 +33,7 @@ public sealed class ContainerProvisioningService(
         new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
         {
             ["claude"] = true,
-            ["codex"] = false,
+            ["codex"] = true,
             ["gemini"] = false,
         };
 
@@ -68,6 +73,8 @@ public sealed class ContainerProvisioningService(
         var diffs   = actual is null
             ? ["container not found — not running"]
             : ComputeDiff(desired, actual);
+
+        if (FilesWarning(agent) is { } warning) diffs = [.. diffs, warning];
 
         logger.LogInformation(
             "Provision preview for {Agent} ({Container}): {DiffCount} diff(s)",
@@ -836,6 +843,7 @@ public sealed class ContainerProvisioningService(
 
         var fleetMemoryMcpUrl = NormalizeFleetMemoryMcpUrl(config["FleetMemory:McpUrl"]);
         var journal = BuildJournalProvisioning(agent);
+        if (FilesWarning(agent) is { } filesWarning) logger.LogWarning("{warning}", filesWarning);
         if (agent.JournalEnabled && journal.IngestToken is null)
             logger.LogInformation(
                 "Journal enabled for '{Agent}', but it has no Telegram bot token ref; omitting Journal config",
@@ -848,7 +856,7 @@ public sealed class ContainerProvisioningService(
         await WriteOutputStyleFileAsync(agent, generatedDir, style);
 
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName, style, journal, PrimaryHumanRawValue()));
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl, journal.ReadToken));
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl, journal.ReadToken, journal.FilesEnabled));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent, ctoAgentName, style));
 
         logger.LogInformation(
@@ -1254,7 +1262,8 @@ public sealed class ContainerProvisioningService(
         }
         if (style is not null && !HasStyleFile(agent))
             node["Agent"]!.AsObject()["OutputStyleBody"] = OutputStyleRenderer.ForPrompt(style);
-        if (journal?.ReadToken is not null)
+        if (journal?.ReadToken is not null && SupportsMcpHeaders(agent.Provider)
+            && agent.McpEndpoints.Any(e => string.Equals(e.McpName, JournalMcpServerName, StringComparison.OrdinalIgnoreCase)))
             node["Agent"]!.AsObject()["McpHeaderSupport"] = true;
 
         // #382: codex local mode only, so every other agent keeps its bytes. The agent sets the URL
@@ -1277,6 +1286,11 @@ public sealed class ContainerProvisioningService(
             // Written only when true, so an agent in a deployment with no bucket produces the exact
             // bytes it produced before media existed. Absent means false on the agent side, which is
             // the safe default and keeps this a one-write rollback.
+            if (journal.FilesEnabled)
+            {
+                node["Journal"]!.AsObject()["ReadToken"] = journal.ReadToken;
+                node["Journal"]!.AsObject()["FilesEnabled"] = true;
+            }
             if (journal.MediaEnabled)
                 node["Journal"]!.AsObject()["MediaEnabled"] = true;
         }
@@ -1332,8 +1346,10 @@ public sealed class ContainerProvisioningService(
     internal static string GenerateMcpJson(
         Agent agent,
         string fleetMemoryMcpUrl,
-        string? journalReadToken = null)
+        string? journalReadToken = null, bool filesEnabled = false)
     {
+        if (agent.McpEndpoints.Any(e => string.Equals(e.McpName, JournalFilesServerName, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException("journal_files_endpoint_reserved");
         var mcpServers = agent.McpEndpoints
             .OrderBy(e => e.McpName)
             .ToDictionary(
@@ -1380,6 +1396,9 @@ public sealed class ContainerProvisioningService(
             mcpServers["fleet-memory"] = new { type = "http", url };
         }
 
+        if (filesEnabled && HasFilesGrant(agent) && agent.JournalEnabled && HasTelegramBot(agent)
+            && !string.IsNullOrWhiteSpace(journalReadToken))
+            mcpServers[JournalFilesServerName] = new { type = "http", url = "http://127.0.0.1:8091/journal-files/v1/mcp" };
         return JsonSerializer.Serialize(new { mcpServers }, IndentedJson);
     }
 
@@ -1453,6 +1472,8 @@ public sealed class ContainerProvisioningService(
 
     private string? DescribeJournalProvisioningFault(Agent agent)
     {
+        if (agent.McpEndpoints.Any(e => string.Equals(e.McpName, JournalFilesServerName, StringComparison.OrdinalIgnoreCase)))
+            return "journal_files_endpoint_reserved";
         var hasJournalEndpoint = agent.McpEndpoints.Any(e =>
             string.Equals(e.McpName, JournalMcpServerName, StringComparison.OrdinalIgnoreCase));
         if (!agent.JournalEnabled && !hasJournalEndpoint) return null;
@@ -1475,12 +1496,13 @@ public sealed class ContainerProvisioningService(
         var hasJournalEndpoint = agent.McpEndpoints.Any(e =>
             string.Equals(e.McpName, JournalMcpServerName, StringComparison.OrdinalIgnoreCase));
 
+        var filesEnabled = HasFilesGrant(agent) && agent.JournalEnabled && hasBotToken;
         return new JournalProvisioning(
             agent.JournalEnabled && hasBotToken
                 ? journalTokens.Mint(JournalTokenService.PurposeIngest, agent.Name)
                 : null,
             agent.JournalEnabled ? journalTokens.ExcludedChatIds() : [],
-            hasJournalEndpoint
+            (hasJournalEndpoint || filesEnabled)
                 ? journalTokens.Mint(JournalTokenService.PurposeRead, agent.Name)
                 : null,
             // ⚠️ Derived, never configured per agent. `Journal:MediaEnabled` is the agent's opt-in
@@ -1502,7 +1524,7 @@ public sealed class ContainerProvisioningService(
             //    The bucket name and the scoped credential pair are deliberately NOT part of the
             //    gate: an agent must not read a secret to decide a boolean, and a half-provisioned
             //    bucket is Comms' startup failure to raise, not the agent's to guess at.
-            MediaEnabled: MediaEndpointIsConfigured());
+            MediaEnabled: MediaEndpointIsConfigured(), FilesEnabled: filesEnabled);
     }
 
     /// <summary>
@@ -1656,7 +1678,8 @@ internal sealed record JournalProvisioning(
     string? IngestToken,
     IReadOnlyList<long> ExcludedChatIds,
     string? ReadToken,
-    bool MediaEnabled = false);
+    bool MediaEnabled = false,
+    bool FilesEnabled = false);
 
 /// <summary>One assignment's project context, resolved once per provision.</summary>
 /// <param name="ProjectName">The assignment's name — the <c>projects/</c> directory the agent reads.</param>

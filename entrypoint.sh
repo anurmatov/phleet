@@ -111,7 +111,9 @@ for name, cfg in servers.items():
     # "transport" or "type" keys; the CLI
     # rejects unknown fields with "Unrecognized key(s) in object" and drops the server.
     if url:
-        gemini_servers[name] = {"url": url}
+        # Only the new stateless files server uses streamable HTTP explicitly.
+        # `url` selects the legacy SSE transport in the pinned Gemini CLI.
+        gemini_servers[name] = {"httpUrl" if name == "fleet-journal-files" else "url": url}
         if headers:
             gemini_servers[name]["headers"] = headers
     else:

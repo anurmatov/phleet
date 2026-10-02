@@ -1,0 +1,94 @@
+using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
+using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Services;
+namespace Fleet.Orchestrator.Tests.Services;
+
+public sealed class JournalFilesProvisioningTests
+{
+    private const string Grant = "mcp__fleet-journal-files__fetch_attachment";
+    private static readonly Dictionary<string, string?> Config = new() { ["Journal:TokenKey"] = Convert.ToBase64String(Enumerable.Repeat((byte)42, 32).ToArray()) };
+    private static Agent Agent(string provider, bool capture = true, bool enabledGrant = true) => new()
+    {
+        Name = "agent1", DisplayName = "Agent1", Role = "test", ContainerName = "fleet-agent1", WorkDir = "/workspace",
+        Provider = provider, Model = "model", JournalEnabled = capture,
+        EnvRefs = [new() { EnvKeyName = "TELEGRAM_AGENT1_BOT_TOKEN" }],
+        Networks = [new() { NetworkName = "fleet-net" }],
+        Tools = [new() { ToolName = Grant, IsEnabled = enabledGrant }],
+    };
+    [Theory]
+    [InlineData("claude")]
+    [InlineData("codex")]
+    [InlineData("gemini")]
+    public async Task ExplicitGrantAndCaptureEmitHeaderlessServerAndRuntimeReadToken(string provider)
+    {
+        await using var harness = ProvisioningHarness.Create(Config);
+        await harness.SeedAsync(db => db.Agents.Add(Agent(provider)));
+        var result = await harness.Service.ProvisionAsync("agent1"); Assert.True(result.Success, result.Message);
+        var dir = harness.GeneratedDir("fleet-agent1");
+        using var config = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(dir, "appsettings.json")));
+        Assert.True(config.RootElement.GetProperty("Journal").GetProperty("FilesEnabled").GetBoolean());
+        Assert.StartsWith("cj1.read.agent1.", config.RootElement.GetProperty("Journal").GetProperty("ReadToken").GetString());
+        if (provider != "claude") Assert.False(config.RootElement.GetProperty("Agent").TryGetProperty("McpHeaderSupport", out _));
+        using var mcp = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(dir, ".mcp.json")));
+        var server = mcp.RootElement.GetProperty("mcpServers").GetProperty("fleet-journal-files");
+        Assert.Equal("http://127.0.0.1:8091/journal-files/v1/mcp", server.GetProperty("url").GetString());
+        Assert.False(server.TryGetProperty("headers", out _));
+    }
+    [Theory]
+    [InlineData("claude")]
+    [InlineData("codex")]
+    [InlineData("gemini")]
+    public async Task DisabledGrantEmitsNeitherListenerNorReadToken(string provider)
+    {
+        await using var harness = ProvisioningHarness.Create(Config);
+        await harness.SeedAsync(db => db.Agents.Add(Agent(provider, enabledGrant: false)));
+        Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
+        var dir = harness.GeneratedDir("fleet-agent1");
+        Assert.DoesNotContain("FilesEnabled", await File.ReadAllTextAsync(Path.Combine(dir, "appsettings.json")));
+        Assert.DoesNotContain("ReadToken", await File.ReadAllTextAsync(Path.Combine(dir, "appsettings.json")));
+        Assert.DoesNotContain("fleet-journal-files", await File.ReadAllTextAsync(Path.Combine(dir, ".mcp.json")));
+    }
+    [Theory]
+    [InlineData("claude", true)]
+    [InlineData("codex", true)]
+    [InlineData("gemini", true)]
+    [InlineData("claude", false)]
+    [InlineData("codex", false)]
+    [InlineData("gemini", false)]
+    public async Task DisabledGrantKeepsEveryGeneratedFileByteIdentical(string provider, bool bot)
+    {
+        await using var harness = ProvisioningHarness.Create(Config);
+        await harness.SeedAsync(db => { var agent = Agent(provider); agent.Tools.Clear(); if (!bot) agent.EnvRefs.Clear(); db.Agents.Add(agent); });
+        Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
+        var dir = harness.GeneratedDir("fleet-agent1");
+        var names = new[] { "appsettings.json", ".mcp.json", "settings.json" };
+        var before = names.ToDictionary(name => name, name => File.ReadAllBytes(Path.Combine(dir, name)));
+        await harness.MutateAsync(async db => { var agent = await db.Agents.SingleAsync(a => a.Name == "agent1");
+            agent!.Tools.Add(new() { ToolName = Grant, IsEnabled = false }); await db.SaveChangesAsync(); });
+        Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
+        foreach (var name in names) Assert.Equal(before[name], await File.ReadAllBytesAsync(Path.Combine(dir, name)));
+    }
+    [Fact]
+    public async Task GrantWithoutCaptureWarnsInPreviewAndLogAndEmitsNothing()
+    {
+        await using var harness = ProvisioningHarness.Create(Config);
+        await harness.SeedAsync(db => db.Agents.Add(Agent("codex", capture: false)));
+        var preview = await harness.Service.PreviewAsync("agent1");
+        Assert.Contains("journal_files_unavailable:journal_capture_off", preview.Diffs);
+        Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
+        Assert.Contains(harness.Logs.Entries, e => e.Message.Contains("journal_files_unavailable:journal_capture_off"));
+        var dir = harness.GeneratedDir("fleet-agent1");
+        Assert.DoesNotContain("fleet-journal-files", await File.ReadAllTextAsync(Path.Combine(dir, ".mcp.json")));
+        Assert.DoesNotContain("\"Journal\"", await File.ReadAllTextAsync(Path.Combine(dir, "appsettings.json")));
+    }
+    [Fact]
+    public async Task ReservedEndpointRefusesBeforeDeprovisionEvenWithCaptureOff()
+    {
+        await using var harness = ProvisioningHarness.Create();
+        await harness.SeedAsync(db => { var agent = Agent("codex", capture: false);
+            agent.McpEndpoints.Add(new() { McpName = "fleet-journal-files", TransportType = "http", Url = "http://untrusted.test" }); db.Agents.Add(agent); });
+        var result = await harness.Service.ReprovisionAsync("agent1");
+        Assert.False(result.Success); Assert.Equal("journal_files_endpoint_reserved", result.Message); Assert.Equal(0, harness.DockerRequestCount);
+    }
+}

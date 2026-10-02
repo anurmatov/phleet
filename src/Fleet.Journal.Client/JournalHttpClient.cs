@@ -36,15 +36,17 @@ public sealed class JournalHttpClient
 
     private readonly HttpClient _http;
     private readonly string _token;
+    private readonly string? _readToken;
     private readonly TimeSpan _timeout;
 
     /// <param name="http">A client whose <see cref="HttpClient.BaseAddress"/> is the journal listener.</param>
     /// <param name="token">The ingest token.</param>
     /// <param name="timeout">The per-request budget; <see cref="RequestTimeout"/> unless a test shortens it.</param>
-    public JournalHttpClient(HttpClient http, string token, TimeSpan? timeout = null)
+    public JournalHttpClient(HttpClient http, string token, TimeSpan? timeout = null, string? readToken = null)
     {
         _http = http;
         _token = token.Trim();
+        _readToken = readToken?.Trim();
         _timeout = timeout ?? RequestTimeout;
     }
 
@@ -53,6 +55,17 @@ public sealed class JournalHttpClient
 
     public Task<JournalSendResult> PutTurnBindingAsync(JournalTurnBinding binding, CancellationToken ct) =>
         SendAsync(HttpMethod.Put, TurnBindingPath, JsonSerializer.SerializeToUtf8Bytes(binding, BindingJson), BindingTimeout, ct);
+
+    /// <summary>Caller owns the response and its streamed body; the runtime's deadline bounds both.</summary>
+    public async Task<HttpResponseMessage> OpenAttachmentContentAsync(JournalAttachmentRequest arguments, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(_readToken)) throw new InvalidOperationException("journal_read_token_missing");
+        using var request = new HttpRequestMessage(HttpMethod.Post, JournalAttachmentRequest.ContentPath)
+        { Content = new ReadOnlyMemoryContent(JsonSerializer.SerializeToUtf8Bytes(arguments)) };
+        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _readToken);
+        return await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+    }
 
     private async Task<JournalSendResult> SendAsync(
         HttpMethod method, string path, ReadOnlyMemory<byte> body, TimeSpan budget, CancellationToken ct)

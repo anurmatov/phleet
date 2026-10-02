@@ -1,9 +1,13 @@
+using Fleet.Agent.Services.JournalFiles;
+using Fleet.Journal.Client;
+using Microsoft.AspNetCore.Hosting;
 using Fleet.Agent;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Services;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -21,7 +25,16 @@ if (isCliMode)
 else
     builder.Services.AddAgentDaemonServices(builder.Configuration);
 
+// Keep the container-network control listener when the private loopback app is enabled.
+if (!isCliMode && builder.Configuration.GetSection(JournalOptions.Section).Get<JournalOptions>()?.FilesEnabled == true)
+    builder.WebHost.ConfigureKestrel(options => options.ListenAnyIP(8080));
+
 var app = builder.Build();
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.Value == JournalFilesListener.Path) { context.Response.StatusCode = 404; return; }
+    await next(context);
+});
 
 // Refuses to start a misconfigured agent, before /health can answer ok for it.
 //

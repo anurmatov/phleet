@@ -17,10 +17,15 @@ public sealed class JournalAttachmentContentTests
     private const string Id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
     private static readonly byte[] Key = Enumerable.Repeat((byte)42, 32).ToArray();
 
+    [Fact]
+    public void AttachmentAndUploadUseOneSharedSizeCap() =>
+        Assert.Equal(Fleet.Comms.Configuration.MediaOptions.MaxObjectBytes, JournalAttachmentRequest.MaxBytes);
+
     [Theory]
     [InlineData(null)]
     [InlineData("ingest")]
     [InlineData("status")]
+    [InlineData("ingest-service")]
     public async Task AuthPrecedesMalformedBodyAndEveryStore(string? purpose)
     {
         await using var host = await Host.Start();

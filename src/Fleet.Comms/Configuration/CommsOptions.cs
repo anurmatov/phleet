@@ -261,7 +261,7 @@ public sealed class CommsOptions
 public sealed class MediaOptions
 {
     /// <summary>Largest object the store accepts, in bytes. Equal to the Telegram Bot API's file cap.</summary>
-    public const long MaxObjectBytes = 20_971_520;
+    public const long MaxObjectBytes = Fleet.Conversations.Contracts.JournalAttachmentRequest.MaxBytes;
 
     /// <summary>An object no upload has completed or committed is deleted after this long.</summary>
     public static readonly TimeSpan AbandonAfter = TimeSpan.FromHours(24);

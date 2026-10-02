@@ -31,7 +31,8 @@ public class EmissionOwnershipInventoryTests
     /// </summary>
     private static readonly Dictionary<string, int> ExpectedSinkCallSites = new()
     {
-        ["Services/TaskManager.cs"] = 26,
+        // #401: protected primary-key capacity uses the same Human-origin queue-full owner.
+        ["Services/TaskManager.cs"] = 27,
         ["Services/CommandDispatcher.cs"] = 7,
         ["Services/MessageRouter.cs"] = 3,
     };

@@ -58,6 +58,10 @@ interface AgentCardProps {
   onClearHighlight: () => void
 }
 
+export function PriorityBadge({ priority }: { priority?: boolean }) {
+  return priority ? <span className="queue-badge" title="primary-human queue lane">priority</span> : null
+}
+
 export default function AgentCard({
   agent, expanded, onExpand,
   taskHistory, historyLoading,
@@ -124,6 +128,9 @@ export default function AgentCard({
           </span>
           {agent.queuedCount > 0 && (
             <span className="agent-row-queue-badge">{agent.queuedCount} queued</span>
+          )}
+          {(agent.priorityQueuedCount ?? 0) > 0 && (
+            <span className="agent-row-queue-badge">{agent.priorityQueuedCount} priority</span>
           )}
           {agent.backgroundTasks && agent.backgroundTasks.length > 0 && (
             <span className="agent-row-bg-badge">{agent.backgroundTasks.length} bg</span>
@@ -326,7 +333,7 @@ export default function AgentCard({
             <span className="row-detail-label">journal</span>
             <span className="row-detail-value">
               {agent.journal
-                ? `spool ${agent.journal.spoolDepth} · oldest ${agent.journal.oldestAgeSeconds == null ? 'n/a' : `${agent.journal.oldestAgeSeconds}s`} · auth ${agent.journal.authFailed !== 0 ? 'failed' : 'ok'} · dropped ${agent.journal.dropped} · dead ${agent.journal.dead}`
+                ? `spool ${agent.journal.spoolDepth} · oldest ${agent.journal.oldestAgeSeconds == null ? 'n/a' : `${agent.journal.oldestAgeSeconds}s`} · auth ${agent.journal.authFailed !== 0 ? 'failed' : 'ok'} · binding ${agent.journal.bindingFailed == null ? 'n/a' : agent.journal.bindingFailed !== 0 ? 'failed' : 'ok'} · dropped ${agent.journal.dropped} · dead ${agent.journal.dead}`
                 : 'n/a'}
             </span>
           </div>
@@ -340,6 +347,7 @@ export default function AgentCard({
                 {agent.queuedMessages && agent.queuedMessages.map((q, i) => (
                   <div key={i} className="queue-item">
                     <span className="queue-source">{q.source}</span>
+                    <PriorityBadge priority={q.priority} />
                     <span className="queue-preview">{q.preview}</span>
                   </div>
                 ))}

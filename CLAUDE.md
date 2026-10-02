@@ -329,3 +329,5 @@ dotnet test --logger "console;verbosity=normal"
 # Run specific test project
 dotnet test tests/Fleet.Agent.Tests/
 ```
+
+`FLEET_PRIMARY_HUMAN_USER_ID` is an optional positive Telegram user id read from the deployment `.env` at provisioning; blank omits `Telegram.PrimaryHumanUserId`, and invalid values refuse before deprovisioning. See `docs/primary-human-priority.md`.

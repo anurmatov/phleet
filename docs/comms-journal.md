@@ -557,6 +557,7 @@ State is keyed by the ordinal verified subject, remembers four epochs, expires a
 
 The runtime publisher is registered only with an ingest token, learns scope from inbound Telegram fields, binds human/check-in/new turns in observed chats, and unbinds relay/bridge/client/unseen turns and completed turns.
 It sends only the latest state, renews every 60 seconds without changing sequence, times out after two seconds and retries with 1–30 second backoff without blocking dispatch or changing bindings during injection.
+The agent heartbeat includes `journal.bindingFailed` as 0 or 1 only when journal capture is enabled; the dashboard shows that flag separately from ingest authentication health. A failed current-state publication sets it, and a successful current-state acknowledgement clears it. A `route_missing` result means Comms lacks the binding route: deploy a matching Comms version before reprovisioning read-enabled agents. An unbound relay/client turn is intentional, not an outage.
 
 The Telegram form of `get_message` derives its conversation key only from the current binding for the verified read-token subject, including the bot id for private chats; `all` scope never broadens that conversation filter.
 A supplied `telegram_chat_id` is rejected before any store access, including when a ULID is supplied; the ULID form otherwise retains the existing observed/all scope.

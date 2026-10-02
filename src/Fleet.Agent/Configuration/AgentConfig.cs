@@ -129,6 +129,7 @@ public sealed class TelegramOptions
     public const string Section = "Telegram";
 
     public string BotToken { get; set; } = string.Empty;
+    public long PrimaryHumanUserId { get; set; }
     public List<long> AllowedUserIds { get; set; } = [];
     public List<long> AllowedGroupIds { get; set; } = [];
     public bool SendOnly { get; set; }

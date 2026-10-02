@@ -14,6 +14,8 @@ Phleet is an open-source, self-hosted multi-agent AI platform built on .NET 10, 
   <em>The fleet dashboard — live agent status, model assignment, and in-flight Temporal workflows.</em>
 </p>
 
+Optional [primary-human priority](docs/primary-human-priority.md) puts addressed human messages ahead of routine queued work without interrupting or entering workflow turns.
+
 ## See it in action
 
 <p align="center">

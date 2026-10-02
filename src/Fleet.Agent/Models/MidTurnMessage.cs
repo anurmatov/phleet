@@ -22,4 +22,6 @@ public sealed record MidTurnMessage(
     IReadOnlyList<MessageDocument>? Documents,
     long UserId,
     DateTimeOffset ArrivedAt,
-    ConversationIdentity? Identity = null);
+    ConversationIdentity? Identity = null,
+    TaskPriority Priority = TaskPriority.Routine,
+    long TelegramMessageId = 0);

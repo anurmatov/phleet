@@ -365,6 +365,7 @@ public static class AgentHostRegistration
         services.AddSingleton<TtsService>();
         services.AddSingleton<RichFallbackCounter>();
         services.AddSingleton<InjectionOutcomeCounter>();
+        services.AddSingleton<QueueLaneCounter>();
 
         services.AddHostedService<WarmupService>();
         services.AddHostedService<OrchestratorHeartbeatService>();

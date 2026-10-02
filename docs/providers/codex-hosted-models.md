@@ -208,3 +208,18 @@ the change means reverting the PR.
 An earlier revision of issue #335 probed these with `DEEPSEEK_API_KEY` and `OPENROUTER_API_KEY`.
 Those names are no longer reserved, so `entrypoint.sh` no longer unsets them. **Detach any such Env
 Refs from your agents and reprovision.**
+
+## Journal replies and priority
+
+Telegram replies carry only message ids, never quoted text. Conversation-bound
+reply lookup requires an explicitly granted journal tool and a read-token header.
+The pinned CLI `0.159.2` remains `McpHeaderSupport=false` until an actual CLI
+transcript proves `tools/list`, bound and unbound `get_message`, and Authorization
+on every request. Provisioning refuses a journal endpoint with
+`journal_headers_unsupported`; without the endpoint, the reply prompt reports
+`provider_headers_unsupported`. Entrypoint translation tests alone are not proof.
+
+Primary-human priority changes only the next queued turn, not the running turn
+or its provider frames. Same-chat injection or Inbox fallback runs before global
+queued work; workflow and cross-chat turns stay isolated. See
+[primary-human priority](../primary-human-priority.md) for configuration and limits.

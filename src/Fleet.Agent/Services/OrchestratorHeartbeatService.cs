@@ -32,6 +32,7 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
     private readonly IFleetConnectionState _connectionState;
     private readonly ILogger<OrchestratorHeartbeatService> _logger;
     private readonly JournalDrainer? _journal;
+    private readonly TurnBindingPublisher? _turnBindings;
 
     private IConnection? _connection;
     private IChannel? _channel;
@@ -44,9 +45,10 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
         TaskManager taskManager,
         IFleetConnectionState connectionState,
         ILogger<OrchestratorHeartbeatService> logger,
-        JournalDrainer? journal = null)
+        JournalDrainer? journal = null, TurnBindingPublisher? turnBindings = null)
     {
         _journal = journal;
+        _turnBindings = turnBindings;
         _agentConfig = agentConfig.Value;
         _rabbitConfig = rabbitConfig.Value;
         _taskManager = taskManager;
@@ -149,7 +151,8 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
             .Select(q => new QueuedMessageInfo(
                 Preview: TaskManager.TruncateText(q.DisplayText, 80),
                 Source: q.Source.ToString().ToLowerInvariant(),
-                QueuedAt: q.QueuedAt))
+                QueuedAt: q.QueuedAt,
+                Priority: q.Priority == Models.TaskPriority.PrimaryHuman))
             .ToArray();
 
         var backgroundTasks = _taskManager.GetActiveBackgroundTasks()
@@ -177,7 +180,8 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
             QueuedMessages: queuedMessages,
             BackgroundTasks: backgroundTasks.Length > 0 ? backgroundTasks : null,
             TelegramConnected: _connectionState.TelegramConnected,
-            Journal: JournalHeartbeat.From(_journal?.Snapshot()));
+            Journal: JournalHeartbeat.From(_journal?.Snapshot(), _turnBindings?.BindingFailed == true),
+            PriorityQueuedCount: queueSnapshot.Count(q => q.Priority == Models.TaskPriority.PrimaryHuman));
 
         var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
         var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent, Expiration = "60000" };
@@ -230,7 +234,8 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
         // Absent, not null, when the journal is off: an agent without an ingest token publishes
         // exactly the heartbeat it published before #377.
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        JournalHeartbeat? Journal = null
+        JournalHeartbeat? Journal = null,
+        int PriorityQueuedCount = 0
     );
 
     /// <summary>The conversation journal on this agent (#377). Counts and ages only.</summary>
@@ -241,14 +246,15 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
         [property: JsonPropertyName("dropped")] long Dropped,
         [property: JsonPropertyName("dead")] int Dead,
         // 1 while the listener refuses the token, 0 otherwise.
-        [property: JsonPropertyName("authFailed")] int AuthFailed)
+        [property: JsonPropertyName("authFailed")] int AuthFailed,
+        [property: JsonPropertyName("bindingFailed")] int BindingFailed)
     {
-        public static JournalHeartbeat? From(JournalHeartbeatSnapshot? s) => s is null
+        public static JournalHeartbeat? From(JournalHeartbeatSnapshot? s, bool bindingFailed) => s is null
             ? null
-            : new(s.Enabled, s.SpoolDepth, s.OldestAgeSeconds, s.Dropped, s.Dead, s.AuthFailed ? 1 : 0);
+            : new(s.Enabled, s.SpoolDepth, s.OldestAgeSeconds, s.Dropped, s.Dead, s.AuthFailed ? 1 : 0, bindingFailed ? 1 : 0);
     }
 
-    private sealed record QueuedMessageInfo(string Preview, string Source, DateTimeOffset QueuedAt);
+    private sealed record QueuedMessageInfo(string Preview, string Source, DateTimeOffset QueuedAt, bool Priority);
 
     private sealed record BackgroundTaskSummary(
         string TaskId,

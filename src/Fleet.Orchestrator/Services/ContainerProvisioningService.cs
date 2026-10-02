@@ -339,6 +339,8 @@ public sealed class ContainerProvisioningService(
         if (agent is null)
             return ProvisionResult.Fail(agentName, "agent not found in DB");
 
+        if (DescribePrimaryHumanFault() is { } priorityFault)
+            return ProvisionResult.Fail(agentName, priorityFault);
         if (DescribeJournalProvisioningFault(agent) is { } journalFault)
             return ProvisionResult.Fail(agentName, journalFault);
 
@@ -495,6 +497,9 @@ public sealed class ContainerProvisioningService(
         IReadOnlyDictionary<string, int>? instructionVersionOverrides = null,
         CancellationToken ct = default)
     {
+        if (DescribePrimaryHumanFault() is { } priorityFault)
+            return ProvisionResult.Fail(agentName, priorityFault);
+
         // Journal faults must be found before DeprovisionAsync. A missing signing key or an
         // unsupported provider therefore leaves the old, working container untouched.
         if (await DescribeJournalProvisioningFaultAsync(agentName, ct) is { } journalFault)
@@ -842,7 +847,7 @@ public sealed class ContainerProvisioningService(
         var style = await ResolveOutputStyleAsync(agent);
         await WriteOutputStyleFileAsync(agent, generatedDir, style);
 
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName, style, journal));
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName, style, journal, PrimaryHumanRawValue()));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl, journal.ReadToken));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent, ctoAgentName, style));
 
@@ -1129,8 +1134,9 @@ public sealed class ContainerProvisioningService(
         Agent agent,
         string ctoAgentName,
         OutputStyle? style = null,
-        JournalProvisioning? journal = null)
+        JournalProvisioning? journal = null, string? primaryHumanUserId = null)
     {
+        var primaryId = ParsePrimaryHumanUserId(primaryHumanUserId);
         if (!string.IsNullOrWhiteSpace(agent.OutputStyle) && style is null)
             throw new InvalidOperationException(
                 $"Agent '{agent.Name}' names output style '{agent.OutputStyle}', which has no row in " +
@@ -1242,7 +1248,10 @@ public sealed class ContainerProvisioningService(
 
         var node = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
         if (HasTelegramBot(agent))
+        {
             node["Agent"]!.AsObject()["ReplyLookup"] = ReplyLookupState(agent, journal);
+            if (primaryId is { } primary) node["Telegram"]!.AsObject()["PrimaryHumanUserId"] = primary;
+        }
         if (style is not null && !HasStyleFile(agent))
             node["Agent"]!.AsObject()["OutputStyleBody"] = OutputStyleRenderer.ForPrompt(style);
         if (journal?.ReadToken is not null)
@@ -1372,6 +1381,24 @@ public sealed class ContainerProvisioningService(
         }
 
         return JsonSerializer.Serialize(new { mcpServers }, IndentedJson);
+    }
+
+    private string? PrimaryHumanRawValue() =>
+        LoadEnvFile(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env").GetValueOrDefault("FLEET_PRIMARY_HUMAN_USER_ID");
+
+    private string? DescribePrimaryHumanFault()
+    {
+        try { ParsePrimaryHumanUserId(PrimaryHumanRawValue()); return null; }
+        catch (InvalidOperationException) { return "primary_human_invalid"; }
+    }
+
+    internal static long? ParsePrimaryHumanUserId(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        if (!long.TryParse(value.Trim(), System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture, out var id) || id <= 0)
+            throw new InvalidOperationException("primary_human_invalid");
+        return id;
     }
 
     private static bool HasTelegramBot(Agent agent) => agent.EnvRefs.Any(e =>

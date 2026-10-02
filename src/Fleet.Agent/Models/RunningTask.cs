@@ -11,6 +11,7 @@ public sealed class RunningTask
     public required CancellationTokenSource Cts { get; init; }
     public required bool IsSessionTask { get; init; }
     public long UserId { get; init; }
+    public HashSet<long> PrimaryMessageIds { get; } = [];
     /// <summary>Bridge taskId (format: {workflowId}/{step}) for Temporal-delegated tasks. Null for Telegram-originated tasks.</summary>
     public string? BridgeTaskId { get; init; }
     /// <summary>Where this task came from; a Relay or Bridge task is not its chat's own work (#369).</summary>

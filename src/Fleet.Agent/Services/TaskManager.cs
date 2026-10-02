@@ -22,13 +22,10 @@ public sealed class TaskManager
     // taskId dedup: tracks bridge taskIds that are currently in-flight
     private readonly ConcurrentDictionary<string, bool> _activeTaskIds = new();
 
-    // Global FIFO queue for messages that arrive while the agent is at capacity.
-    private readonly ConcurrentQueue<QueuedMessage> _messageQueue = new();
-    private readonly ConcurrentDictionary<long, QueuedMessage> _pendingQueueByChat = new();
-    private readonly object _pendingQueueIndexLock = new();
-    // MaxQueueDepth caps queue entries. MaxQueuedPartsPerEntry caps merged user messages
-    // inside one entry; overflowing the parts cap creates a new entry, not a drop.
-    private const int MaxQueueDepth = 20;
+    private readonly DispatchQueue _messageQueue;
+    private readonly PrimaryHumanDedup _primaryDedup = new();
+    private readonly QueueLaneCounter _queueCounter;
+    private const int MaxQueueDepth = DispatchQueue.MaxQueueDepth;
     private const int MaxQueuedPartsPerEntry = QueuedMessage.MaxParts;
 
     // user-level index: userId → list of (chatId, taskId) for cross-chat cancel
@@ -97,8 +94,11 @@ public sealed class TaskManager
         ConversationEventCounters? counters = null,
         IMessageSink? sink = null,
         TurnOriginLedger? ledger = null,
-        TurnBindingPublisher? turnBindings = null)
+        TurnBindingPublisher? turnBindings = null,
+        QueueLaneCounter? queueCounter = null)
     {
+        _queueCounter = queueCounter ?? new();
+        _messageQueue = new DispatchQueue(_queueCounter);
         _ledger = ledger;
         _turnBindings = turnBindings;
         _agentConfig = agentConfig.Value;
@@ -141,7 +141,7 @@ public sealed class TaskManager
 
     public bool HasRunningTasks(long chatId) => GetChatState(chatId).Count > 0;
 
-    public Task<TaskDispatchOutcome> StartTask(long chatId, string task, string displayText, bool isSessionTask,
+    public async Task<TaskDispatchOutcome> StartTask(long chatId, string task, string displayText, bool isSessionTask,
         TaskSource source = TaskSource.UserMessage,
         string? relaySender = null,
         string? correlationId = null,
@@ -149,8 +149,29 @@ public sealed class TaskManager
         IReadOnlyList<MessageImage>? images = null,
         IReadOnlyList<MessageDocument>? documents = null,
         long userId = 0,
-        ConversationIdentity? identity = null) =>
-        StartTaskCore(chatId, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, skipPendingQueueCheck: false, identity: identity);
+        ConversationIdentity? identity = null,
+        TaskPriority priority = TaskPriority.Routine, long telegramMessageId = 0)
+    {
+        if (source is not (TaskSource.UserMessage or TaskSource.NewCommand)) priority = TaskPriority.Routine;
+        var keyed = priority == TaskPriority.PrimaryHuman && telegramMessageId > 0;
+        if (keyed && !_primaryDedup.TryReserve(chatId, telegramMessageId, out var duplicate))
+        {
+            if (duplicate) _queueCounter.Increment("primary_duplicate_dropped");
+            else
+                await _sink.SendTextByOriginAsync(chatId, $"Queue is full ({MaxQueueDepth} messages waiting). Please wait for tasks to complete.", OriginOf(source));
+            return ReportDisposition(chatId, identity ?? SynthesizeIdentity(chatId, source),
+                duplicate ? TaskDispatchOutcome.Dropped : TaskDispatchOutcome.QueueFull);
+        }
+        try
+        {
+            var outcome = await StartTaskCore(chatId, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, skipPendingQueueCheck: false, identity: identity,
+                priority: priority, telegramMessageId: telegramMessageId);
+            if (keyed && outcome is TaskDispatchOutcome.Dropped or TaskDispatchOutcome.QueueFull) _primaryDedup.Complete(chatId, telegramMessageId);
+            return outcome;
+        }
+        catch { if (keyed) _primaryDedup.Complete(chatId, telegramMessageId); throw; }
+    }
+
 
     private async Task<TaskDispatchOutcome> StartTaskCore(long chatId, string task, string displayText, bool isSessionTask,
         TaskSource source = TaskSource.UserMessage,
@@ -163,7 +184,9 @@ public sealed class TaskManager
         bool skipPendingQueueCheck = false,
         bool skipDedupReservationAcquire = false,
         ConversationIdentity? identity = null,
-        IReadOnlyList<string>? mergedSubmissionIds = null)
+        IReadOnlyList<string>? mergedSubmissionIds = null,
+        TaskPriority priority = TaskPriority.Routine, long telegramMessageId = 0,
+        IReadOnlyList<long>? primaryMessageIds = null)
     {
         // A null identity means a caller that predates the seam — synthesize one from the runtime
         // key so every dispatch decision has something to report against, and every existing call
@@ -195,15 +218,20 @@ public sealed class TaskManager
             {
                 if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
                 var message = new MidTurnMessage(task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
-                    images, documents, userId, DateTimeOffset.UtcNow, identity);
-                return ReportDisposition(chatId, identity, await DeliverMidTurnMessageAsync(chatId, runningSession, message));
+                    images, documents, userId, DateTimeOffset.UtcNow, identity, priority, telegramMessageId);
+                if (priority == TaskPriority.PrimaryHuman && telegramMessageId > 0)
+                {
+                    lock (runningSession.PrimaryMessageIds) runningSession.PrimaryMessageIds.Add(telegramMessageId);
+                }
+                var delivered = await DeliverMidTurnMessageAsync(chatId, runningSession, message);
+                return ReportDisposition(chatId, identity, delivered);
             }
 
             if (source == TaskSource.CheckIn)
             {
                 if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
                 var message = new MidTurnMessage(task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
-                    images, documents, userId, DateTimeOffset.UtcNow, identity);
+                    images, documents, userId, DateTimeOffset.UtcNow, identity, priority, telegramMessageId);
                 return ReportDisposition(chatId, identity, await DeferUntilTurnEndAsync(chatId, runningSession, message, notifyUser: false));
             }
 
@@ -211,7 +239,7 @@ public sealed class TaskManager
                 _logger.LogInformation("Not injecting {Source} task into running conversational turn for chat {ChatId}; using normal capacity path", source, chatId);
         }
 
-        var queuedPart = CreateQueuedPart(task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, identity: identity);
+        var queuedPart = CreateQueuedPart(task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, identity: identity, priority: priority, telegramMessageId: telegramMessageId) with { PrimaryMessageIds = primaryMessageIds };
         if (!skipPendingQueueCheck)
         {
             var pendingResult = TryAppendToPendingQueue(chatId, queuedPart);
@@ -286,6 +314,8 @@ public sealed class TaskManager
         // this turn emits derives from this identity via `with` rather than rebuilding it.
         var turnIdentity = identity.WithTurn(Guid.NewGuid().ToString("N"));
         running.Identity = turnIdentity;
+        var keys = primaryMessageIds ?? (priority == TaskPriority.PrimaryHuman && telegramMessageId > 0 ? [telegramMessageId] : []);
+        foreach (var key in keys) { running.PrimaryMessageIds.Add(key); _primaryDedup.Dispatched(chatId, key); }
         if (mergedSubmissionIds is { Count: > 0 })
         {
             // A coalesced entry is ONE turn answering SEVERAL submissions. Without this list the
@@ -325,6 +355,10 @@ public sealed class TaskManager
                     running.Closed = true;
                     DrainInboxToGlobalQueue(chatId, running);
                     state.Remove(running.Id);
+                    lock (running.PrimaryMessageIds)
+                        foreach (var key in running.PrimaryMessageIds)
+                            if (!_messageQueue.Snapshot().Any(e => e.ChatId == chatId && e.Parts.Any(p => KeysOfPart(p).Contains(key))))
+                                _primaryDedup.Complete(chatId, key);
                 }
                 finally
                 {
@@ -994,6 +1028,10 @@ public sealed class TaskManager
                                 EnqueueMessage(chatId, drained[i], notifyUser: false);
                         }
 
+                        foreach (var pending in drained.Take(overflowStart))
+                            if (pending.Priority == TaskPriority.PrimaryHuman && pending.TelegramMessageId > 0)
+                                _primaryDedup.Dispatched(chatId, pending.TelegramMessageId);
+
                         // Deliver the completed turn's result before starting the next merged turn.
                         if (lastResult is not null && !errorResult
                             && !lastResult.Trim().Equals("IDLE", StringComparison.OrdinalIgnoreCase))
@@ -1262,6 +1300,8 @@ public sealed class TaskManager
 
             if (result.Status == MidTurnInjectionStatus.Injected)
             {
+                if (message.Priority == TaskPriority.PrimaryHuman && message.TelegramMessageId > 0)
+                    _primaryDedup.Dispatched(chatId, message.TelegramMessageId);
                 running.InjectionCount++;
                 running.InjectedMessagesForResume.Add(message);
                 // The injected message's answer arrives inside THIS turn's terminal event, so its
@@ -1334,7 +1374,7 @@ public sealed class TaskManager
 
             var relayPart = CreateQueuedPart(message.Task, message.DisplayText, message.IsSessionTask, message.Source,
                 message.RelaySender, message.CorrelationId, message.TaskId, message.Images, message.Documents,
-                message.UserId, message.ArrivedAt, message.Identity);
+                message.UserId, message.ArrivedAt, message.Identity, message.Priority, message.TelegramMessageId);
             var enqueued = EnqueueFreshMessage(chatId, relayPart, notifyUser, completeBridgeOnDrop: true);
             return enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull;
         }
@@ -1373,7 +1413,7 @@ public sealed class TaskManager
     {
         var part = CreateQueuedPart(message.Task, message.DisplayText, message.IsSessionTask, message.Source,
             message.RelaySender, message.CorrelationId, message.TaskId, message.Images, message.Documents, message.UserId,
-            message.ArrivedAt);
+            message.ArrivedAt, message.Identity, message.Priority, message.TelegramMessageId);
 
         var pendingResult = TryAppendToPendingQueue(chatId, part);
         if (pendingResult == PendingQueueResult.Merged)
@@ -1386,48 +1426,29 @@ public sealed class TaskManager
         return EnqueueFreshMessage(chatId, part, notifyUser, completeBridgeOnDrop: false);
     }
 
+    private static IEnumerable<long> KeysOfPart(QueuedMessagePart part) =>
+        (part.PrimaryMessageIds ?? []).Concat(part.Priority == TaskPriority.PrimaryHuman && part.TelegramMessageId > 0 ? [part.TelegramMessageId] : []);
+
     private QueuedMessagePart CreateQueuedPart(string task, string displayText, bool isSessionTask, TaskSource source,
         string? relaySender, string? correlationId, string? taskId, IReadOnlyList<MessageImage>? images,
         IReadOnlyList<MessageDocument>? documents, long userId, DateTimeOffset? arrivedAt = null,
-        ConversationIdentity? identity = null)
+        ConversationIdentity? identity = null, TaskPriority priority = TaskPriority.Routine, long telegramMessageId = 0)
     {
         var senderDisplay = relaySender ?? source.ToString().ToLowerInvariant();
         var arrival = arrivedAt?.ToLocalTime() ?? DateTimeOffset.Now;
         return new QueuedMessagePart(task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
-            images, documents, userId, arrival, senderDisplay, identity);
+            images, documents, userId, arrival, senderDisplay, identity, priority, telegramMessageId);
     }
 
     private PendingQueueResult TryAppendToPendingQueue(long chatId, QueuedMessagePart part)
     {
-        QueuedMessage? pending;
-        lock (_pendingQueueIndexLock)
-        {
-            if (!_pendingQueueByChat.TryGetValue(chatId, out pending))
-                return PendingQueueResult.NoPending;
-        }
-
-        pending.QueueDispatchLock.Wait();
-        try
-        {
-            if (pending.Claimed)
-                return PendingQueueResult.EnqueueFresh;
-
-            if (!pending.TryAppendPart(part))
-                return PendingQueueResult.EnqueueFresh;
-
-            _logger.LogInformation("Merged queued message into pending entry for chat {ChatId} ({Count}/{MaxParts} parts)",
-                chatId, pending.PartCount, MaxQueuedPartsPerEntry);
-            return PendingQueueResult.Merged;
-        }
-        finally
-        {
-            pending.QueueDispatchLock.Release();
-        }
+        if (_messageQueue.TryAppend(chatId, part)) return PendingQueueResult.Merged;
+        return _messageQueue.HasPending(chatId) ? PendingQueueResult.EnqueueFresh : PendingQueueResult.NoPending;
     }
 
     private bool EnqueueFreshMessage(long chatId, QueuedMessagePart part, bool notifyUser, bool completeBridgeOnDrop)
     {
-        if (_messageQueue.Count >= MaxQueueDepth)
+        if (!_messageQueue.TryEnqueue(chatId, part, out var queued, out var queuePos))
         {
             _logger.LogWarning("Message queue full ({Max}) — dropping incoming task from chat {ChatId}", MaxQueueDepth, chatId);
             _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DroppedAtQueueCap);
@@ -1444,15 +1465,6 @@ public sealed class TaskManager
             return false;
         }
 
-        var queued = new QueuedMessage(chatId, part);
-        _messageQueue.Enqueue(queued);
-        if (part.Source == TaskSource.UserMessage)
-        {
-            lock (_pendingQueueIndexLock)
-                _pendingQueueByChat[chatId] = queued;
-        }
-
-        var queuePos = _messageQueue.Count;
         _logger.LogInformation("Message queued (position {Pos}) for chat {ChatId}; queue entries={EntryCount}, max parts per entry={MaxParts}",
             queuePos, chatId, _messageQueue.Count, MaxQueuedPartsPerEntry);
         if (notifyUser && !(_agentConfig.SuppressToolMessages && chatId < 0))
@@ -1481,36 +1493,13 @@ public sealed class TaskManager
                 return true;
         }
 
-        return _messageQueue.Any(q => !IsChatsOwnWork(chatId, q.ChatId, q.Source));
+        return _messageQueue.Snapshot().Any(q => !IsChatsOwnWork(chatId, q.ChatId, q.Source));
     }
 
     private static bool IsChatsOwnWork(long chatId, long workChatId, TaskSource workSource) =>
         workChatId == chatId && workSource is not (TaskSource.Relay or TaskSource.Bridge);
 
-    private void RemovePendingIndexIfCurrent(QueuedMessage queued)
-    {
-        lock (_pendingQueueIndexLock)
-        {
-            if (_pendingQueueByChat.TryGetValue(queued.ChatId, out var current) && ReferenceEquals(current, queued))
-                _pendingQueueByChat.TryRemove(queued.ChatId, out _);
-        }
-    }
-
-    private void RebuildPendingQueueIndex()
-    {
-        lock (_pendingQueueIndexLock)
-        {
-            // Rebuild is a rare cancellation cleanup. Holding the index lock makes it
-            // atomic against fresh enqueue/index writes; a concurrent merge that already
-            // captured an entry still completes under that entry's QueueDispatchLock.
-            _pendingQueueByChat.Clear();
-            foreach (var queued in _messageQueue)
-            {
-                if (queued.Source == TaskSource.UserMessage && !queued.Claimed)
-                    _pendingQueueByChat[queued.ChatId] = queued;
-            }
-        }
-    }
+    private void RemovePendingIndexIfCurrent(QueuedMessage queued) => _messageQueue.RemovePendingIfCurrent(queued);
 
     internal static string FormatInjectedMessage(string original) =>
         """
@@ -1597,29 +1586,14 @@ public sealed class TaskManager
 
         if (!found)
         {
-            // Check the pending queue — drain and re-enqueue non-matching items
-            var retained = new List<QueuedMessage>();
-            try
+            foreach (var item in _messageQueue.RemoveByTaskId(bridgeTaskId, QueueEntryDequeuedForBridgeCancelForTest))
             {
-                while (_messageQueue.TryDequeue(out var item))
+                found = true;
+                foreach (var part in item.Parts)
                 {
-                    retained.Add(item);
-                    QueueEntryDequeuedForBridgeCancelForTest?.Invoke();
-                    if (item.ContainsTaskId(bridgeTaskId))
-                    {
-                        found = true;
-                        retained.RemoveAt(retained.Count - 1);
-                        // Release the dedup reservation so a future re-delivery is not rejected as a duplicate.
-                        if (item.TaskId is not null)
-                            _activeTaskIds.TryRemove(item.TaskId, out _);
-                    }
+                    if (part.TaskId is not null) _activeTaskIds.TryRemove(part.TaskId, out _);
+                    foreach (var key in KeysOfPart(part)) _primaryDedup.Complete(item.ChatId, key);
                 }
-            }
-            finally
-            {
-                foreach (var item in retained)
-                    _messageQueue.Enqueue(item);
-                RebuildPendingQueueIndex();
             }
         }
 
@@ -1642,16 +1616,12 @@ public sealed class TaskManager
         // Drain the queue FIRST so that when cancelling running tasks triggers DrainQueue,
         // there is nothing left to dequeue and no queued reservation is accidentally promoted
         // to a running reservation before we release it.
-        var queued = new List<QueuedMessage>();
-        while (_messageQueue.TryDequeue(out var msg))
-            queued.Add(msg);
-        foreach (var msg in queued)
-        {
-            if (msg.TaskId is not null)
-                _activeTaskIds.TryRemove(msg.TaskId, out _);
-        }
-        lock (_pendingQueueIndexLock)
-            _pendingQueueByChat.Clear();
+        foreach (var msg in _messageQueue.Clear())
+            foreach (var part in msg.Parts)
+            {
+                if (part.TaskId is not null) _activeTaskIds.TryRemove(part.TaskId, out _);
+                foreach (var key in KeysOfPart(part)) _primaryDedup.Complete(msg.ChatId, key);
+            }
 
         // Cancel all running tasks (their finally blocks will call DrainQueue, which now finds
         // an empty queue and returns immediately).
@@ -1679,17 +1649,6 @@ public sealed class TaskManager
         if (_messageQueue.IsEmpty) return;
         if (!_messageQueue.TryDequeue(out var queued)) return;
 
-        queued.QueueDispatchLock.Wait();
-        try
-        {
-            if (queued.Claimed) return;
-            queued.Claimed = true;
-        }
-        finally
-        {
-            queued.QueueDispatchLock.Release();
-        }
-
         QueueEntryClaimedForTest?.Invoke();
 
         var payload = queued.BuildPayload(DateTimeOffset.Now);
@@ -1707,13 +1666,16 @@ public sealed class TaskManager
             payload.Source, payload.RelaySender, payload.CorrelationId, payload.TaskId,
             payload.Images, payload.Documents, payload.UserId,
             skipPendingQueueCheck: true, skipDedupReservationAcquire: true,
-            identity: payload.Identity, mergedSubmissionIds: payload.MergedSubmissionIds);
+            identity: payload.Identity, mergedSubmissionIds: payload.MergedSubmissionIds,
+            priority: queued.Priority,
+            primaryMessageIds: queued.Parts.SelectMany(KeysOfPart).Distinct().ToArray());
 
         RemovePendingIndexIfCurrent(queued);
     }
 
     /// <summary>Returns a snapshot of the current queue for heartbeat/status reporting.</summary>
-    public IReadOnlyList<QueuedMessage> GetQueueSnapshot() => [.. _messageQueue];
+    public IReadOnlyList<QueuedMessage> GetQueueSnapshot() => _messageQueue.Snapshot();
+    public int PriorityQueuedCount => _messageQueue.PriorityCount;
 
     /// <summary>
     /// Returns the current agent status for orchestrator heartbeats.

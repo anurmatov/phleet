@@ -20,7 +20,7 @@ public sealed partial class MidTurnIsolationTests
             await manager.StartTask(ReceiptRig.HumanDm, "original turn", "original", true, source);
             await executor.WaitStarted(1);
             rig.At(95);
-            var delivered = await manager.StartTask(ReceiptRig.HumanDm, "human reply", "reply", true);
+            var delivered = await manager.StartTask(ReceiptRig.HumanDm, "human reply", "reply", true, priority: TaskPriority.PrimaryHuman, telegramMessageId: 7);
             Assert.Equal(source == TaskSource.UserMessage ? TaskDispatchOutcome.Injected : TaskDispatchOutcome.Queued, delivered);
             var interval = Assert.Single(rig.Ledger.SnapshotForTests());
             Assert.Equal(source switch

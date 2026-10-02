@@ -27,6 +27,12 @@ public sealed partial class MidTurnIsolationTests
             yield return [provider[0], provider[1], source];
     }
 
+    public static IEnumerable<object[]> PrimaryNonHumanTurns()
+    {
+        foreach (var row in NonHumanTurns())
+        foreach (var primary in new[] { true, false }) yield return [.. row, primary];
+    }
+
     public static IEnumerable<object[]> HumanTurns()
     {
         foreach (var provider in Providers)
@@ -35,9 +41,9 @@ public sealed partial class MidTurnIsolationTests
     }
 
     [Theory]
-    [MemberData(nameof(NonHumanTurns))]
+    [MemberData(nameof(PrimaryNonHumanTurns))]
     public async Task SameChat_NonHumanOrNewTurn_QueuesWithoutChangingItsCompletion(
-        string provider, MidTurnInjectionStatus status, TaskSource source)
+        string provider, MidTurnInjectionStatus status, TaskSource source, bool primary)
     {
         await using var executor = new ControlledExecutor(status);
         var sink = Substitute.For<IMessageSink>();
@@ -51,9 +57,10 @@ public sealed partial class MidTurnIsolationTests
             Assert.Equal(TaskDispatchOutcome.Ran, await manager.StartTask(101, "workflow-only", "workflow", true,
                 source: source, correlationId: "synthetic-correlation"));
             await executor.WaitStarted(1);
-            Assert.Equal(TaskDispatchOutcome.Queued, await manager.StartTask(101, "human-only", "human", true));
+            Assert.Equal(TaskDispatchOutcome.Queued, await manager.StartTask(101, "human-only", "human", true, priority: primary ? TaskPriority.PrimaryHuman : TaskPriority.Routine));
             Assert.Equal(0, executor.InjectionAttempts);
             Assert.Single(manager.GetQueueSnapshot());
+            Assert.Equal(primary ? TaskPriority.PrimaryHuman : TaskPriority.Routine, manager.GetQueueSnapshot()[0].Priority);
             Assert.Equal(TaskSource.UserMessage, manager.GetQueueSnapshot()[0].Source);
             Assert.Empty(results);
 
@@ -85,9 +92,10 @@ public sealed partial class MidTurnIsolationTests
         {
             await manager.StartTask(101, "other-person", "other", true);
             await executor.WaitStarted(1);
-            Assert.Equal(TaskDispatchOutcome.Queued, await manager.StartTask(202, "new-person", "new", true));
+            Assert.Equal(TaskDispatchOutcome.Queued, await manager.StartTask(202, "new-person", "new", true, priority: TaskPriority.PrimaryHuman));
             Assert.Equal(0, executor.InjectionAttempts);
             Assert.Equal(202, Assert.Single(manager.GetQueueSnapshot()).ChatId);
+            Assert.Equal(TaskPriority.PrimaryHuman, manager.GetQueueSnapshot()[0].Priority);
             executor.Release(); await executor.WaitStarted(2);
             Assert.Equal((101L, "other-person"), Assert.Single(completed));
             Assert.Equal("new-person", executor.Tasks[1]);
@@ -109,7 +117,7 @@ public sealed partial class MidTurnIsolationTests
             await manager.StartTask(101, "human-turn", "first", true, runningSource);
             await executor.WaitStarted(1);
             Assert.Equal(status == MidTurnInjectionStatus.Injected ? TaskDispatchOutcome.Injected : TaskDispatchOutcome.Queued,
-                await manager.StartTask(101, "[reply_to_message_id: 5] same-chat", "second", true));
+                await manager.StartTask(101, "[reply_to_message_id: 5] same-chat", "second", true, priority: TaskPriority.PrimaryHuman));
             Assert.Equal(1, executor.InjectionAttempts);
             Assert.Empty(manager.GetQueueSnapshot());
             Assert.Contains("[reply_to_message_id: 5]", executor.LastInjection);
@@ -225,7 +233,7 @@ public sealed partial class MidTurnIsolationTests
         }
     }
 
-    private static TaskManager Manager(string provider, ControlledExecutor executor, IMessageSink? sink = null,
+    internal static TaskManager Manager(string provider, ControlledExecutor executor, IMessageSink? sink = null,
         InjectionOutcomeCounter? counter = null, TurnBindingPublisher? publisher = null, TurnOriginLedger? ledger = null) => new(
         Options.Create(new AgentOptions { Name = "agent1", Role = "test", WorkDir = "/tmp", Provider = provider }),
         executor, new SessionManager(), NullLogger<TaskManager>.Instance, counter, sink: sink, turnBindings: publisher, ledger: ledger);
@@ -236,7 +244,7 @@ public sealed partial class MidTurnIsolationTests
         while (!condition()) await Task.Delay(10, deadline.Token);
     }
 
-    private sealed class ControlledExecutor(MidTurnInjectionStatus status, TurnOriginLedger? ledger = null) : IAgentExecutor
+    internal sealed class ControlledExecutor(MidTurnInjectionStatus status, TurnOriginLedger? ledger = null) : IAgentExecutor
     {
         private readonly SemaphoreSlim _release = new(0);
         private readonly ConcurrentQueue<string> _tasks = new();

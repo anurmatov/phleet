@@ -49,11 +49,11 @@ public sealed partial class JournalReadMcpTests
             } while (initial.IsError);
             Assert.Equal("group alpha", initial.Json.GetProperty("text").GetString());
             var before = publisher.Current;
-            var disposition = await manager.StartTask(-101, "[reply_to_message_id: 5] reply", "reply", true);
+            var disposition = await manager.StartTask(-101, "[reply_to_message_id: 5] reply", "reply", true, priority: TaskPriority.PrimaryHuman);
             Assert.Equal(injection == MidTurnInjectionStatus.Injected ? TaskDispatchOutcome.Injected : TaskDispatchOutcome.Queued, disposition);
             Assert.Equal(before, publisher.Current);
             Assert.Equal("group alpha", (await host.CallAsync(token, "get_message", new { telegram_message_id = 5 })).Json.GetProperty("text").GetString());
-            Assert.Equal(TaskDispatchOutcome.Queued, await manager.StartTask(-202, "different group", "other", true));
+            Assert.Equal(TaskDispatchOutcome.Queued, await manager.StartTask(-202, "different group", "other", true, priority: TaskPriority.PrimaryHuman));
             Assert.Equal(before, publisher.Current);
             Assert.Equal(-202, Assert.Single(manager.GetQueueSnapshot()).ChatId);
         }

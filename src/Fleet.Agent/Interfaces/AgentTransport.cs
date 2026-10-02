@@ -1081,6 +1081,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         {
             ChatId = chatId,
             UserId = message.From?.Id ?? 0,
+            FromIsBot = message.From?.IsBot ?? true,
+            HasSenderChat = message.SenderChat is not null,
             Text = text,
             Sender = sender,
             IsGroupChat = isGroupChat,

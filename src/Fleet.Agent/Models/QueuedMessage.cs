@@ -23,7 +23,10 @@ public sealed record QueuedMessagePart(
     long UserId,
     DateTimeOffset ArrivedAt,
     string SenderDisplay,
-    ConversationIdentity? Identity = null);
+    ConversationIdentity? Identity = null,
+    TaskPriority Priority = TaskPriority.Routine,
+    long TelegramMessageId = 0,
+    IReadOnlyList<long>? PrimaryMessageIds = null);
 
 /// <summary>
 /// A pending FIFO queue entry. User-message entries may accumulate several
@@ -42,6 +45,8 @@ public sealed class QueuedMessage
     public const int MaxParts = 10;
 
     public long ChatId { get; }
+    public TaskPriority Priority { get; internal set; }
+    public long Seq { get; internal set; }
 
     /// <summary>Serializes append-vs-drain decisions for this pending entry.</summary>
     public SemaphoreSlim QueueDispatchLock { get; } = new(1, 1);

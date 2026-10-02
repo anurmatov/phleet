@@ -56,7 +56,7 @@ if $DRY_RUN; then warn "Running in --dry-run mode — no changes will be made.";
 # ORCHESTRATOR_AUTH_TOKEN in the shell would cause 401s against the orchestrator.
 # Unsetting these
 # makes .env the single source of truth for compose substitution.
-unset FLEET_BASE_DIR FLEET_CTO_AGENT FLEET_GROUP_CHAT_ID \
+unset FLEET_BASE_DIR FLEET_CTO_AGENT FLEET_GROUP_CHAT_ID FLEET_PRIMARY_HUMAN_USER_ID \
       FLEET_MYSQL_ROOT_PASSWORD FLEET_MYSQL_PASSWORD \
       ORCHESTRATOR_AUTH_TOKEN ORCHESTRATOR_CONFIG_TOKEN \
       TELEGRAM_NOTIFIER_BOT_TOKEN \
@@ -736,6 +736,10 @@ if [[ -z "$_cto_val" || "$_cto_val" == "changeme" || "$_cto_val" == "phleet" ]];
 fi
 
 if $PROMPT_TELEGRAM; then
+  prompt_field "$ENV_FILE" "FLEET_PRIMARY_HUMAN_USER_ID" "Primary human Telegram user ID" \
+    "Optional positive integer. This user's authenticated tasks run next without interrupting a turn. Blank disables priority. Changes require agent reprovisioning." \
+    "n" "n" ""
+
   # Optional Telegram group chat ID for group conversation visibility.
   prompt_field "$ENV_FILE" "FLEET_GROUP_CHAT_ID" "Fleet Telegram group chat ID" \
     "Optional. Create a Telegram group, add both bots as members, then forward any message from the group to https://t.me/userinfobot — it replies with the negative integer group ID. Agents use this group for status updates and cross-agent coordination. Leave 0 to skip groups." \

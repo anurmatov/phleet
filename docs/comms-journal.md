@@ -22,7 +22,7 @@ exporter.
 | Address | `Comms__Journal__Url`, default `http://0.0.0.0:8083` |
 | Built | only when `Comms__Journal__Enabled=true`; otherwise nothing is bound, registered or started |
 | Reachable | the container network only. It is **never** published as a host port and never proxied |
-| Routes | `POST /journal/v1/messages` (token purpose `ingest`), `GET /journal/v1/status` (`status`), `POST /journal/v1/mcp` (`read`, see [Read tools](#read-tools-slice-5)) |
+| Routes | `POST /journal/v1/messages` (token purpose `ingest`), `PUT /journal/v1/turn-binding` (`ingest`), `GET /journal/v1/status` (`status`), `POST /journal/v1/mcp` (`read`, see [Read tools](#read-tools-slice-5)) |
 
 It is a separate application from north, south and ops. The journal routes are not mapped on any
 of those, and the south bearer is not a journal credential. Authentication runs before routing and
@@ -533,6 +533,29 @@ cannot run against the anonymous one. `EnsureSignedBucketAsync` PUTs before it p
 on a bucket that does not exist answers `404`, and auto-creation happens on the first admin `PUT`.
 A filer `POST /<bucket>/` creates a *filer* directory that S3 does not see, so it is not a way to
 make a bucket.
+
+## Turn-binding transport (#401, partial)
+
+The journal listener accepts `PUT /journal/v1/turn-binding` with the existing ingest credential and a maximum 1 KiB body, authenticating before reading bytes; other token purposes receive the fixed 401 body.
+
+| field | rule |
+|---|---|
+| `epoch` | nonblank process identifier, at most 128 characters |
+| `seq` | positive int64, increasing on state changes |
+| `state` | `bound` or `unbound` |
+| `chatKind`, `botId`, `chatId` | required only for `bound`: private/group/supergroup, positive bot id, nonzero chat id; omitted for `unbound` |
+
+| condition | response |
+|---|---|
+| malformed, duplicate/unknown fields, oversized body | 400 `invalid_argument` |
+| unseen epoch or higher current-epoch sequence | 204 |
+| same sequence and identical state | 204, renews TTL |
+| previous remembered epoch, lower sequence, conflicting same sequence | 409 `stale`, unchanged |
+| 4,096 live subjects, after expired eviction | 503 `binding_capacity` |
+
+State is keyed by the ordinal verified subject, remembers four epochs, expires after 180 seconds on the Comms clock, and disappears on restart; HTTP status reports bound-state counts as `turnBindings{active,expired}` and the `Fleet.Conversations` meter counts `fleet_comms_journal_turn_binding_total{result}` without identifiers.
+
+**Integration remains pending in this draft:** the runtime does not yet publish or renew bindings, and `get_message` still uses the slice-5 contract below, so this transport alone does not establish current-turn lookup isolation.
 
 ## Read tools (slice 5)
 

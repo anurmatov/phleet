@@ -570,7 +570,7 @@ public static class CommsApp
             ? _ => reads
             : provider => new MySqlJournalReadStore(
                 options.ConversationConnectionString,
-                provider.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal.Read")));
+                provider.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal.Read")), time);
 
         var app = builder.Build();
         var journalLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal");

@@ -103,6 +103,9 @@ public static class JournalAuth
     {
         var path = request.Path.Value;
 
+        if (HttpMethods.IsPut(request.Method) && path == JournalTurnBindings.Path)
+            return JournalTokens.PurposeIngest;
+
         if (HttpMethods.IsPost(request.Method) && string.Equals(path, JournalEndpoints.MessagesPath, StringComparison.Ordinal))
             return JournalTokens.PurposeIngest;
 

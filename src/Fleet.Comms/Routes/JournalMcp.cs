@@ -37,9 +37,10 @@ public static class JournalMcp
     /// </param>
     public static void AddServices(
         IServiceCollection services, JournalReadGrants grants, JournalRuntimeStats stats,
-        Func<IServiceProvider, IJournalReadStore> store)
+        Func<IServiceProvider, IJournalReadStore> store, TimeProvider? time = null)
     {
         services.AddHttpContextAccessor();
+        services.AddSingleton(new JournalTurnBindings(time ?? TimeProvider.System));
         services.AddSingleton(store);
         services.AddSingleton(grants);
         services.AddSingleton(stats);
@@ -74,6 +75,7 @@ public static class JournalMcp
             await next(context);
         });
 
+        JournalTurnBindings.Map(app);
         app.MapMcp(Path);
     }
 }

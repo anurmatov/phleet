@@ -84,6 +84,7 @@ public sealed class TaskManager
     /// and null without the journal.
     /// </summary>
     private readonly TurnOriginLedger? _ledger;
+    private readonly TurnBindingPublisher? _turnBindings;
 
     public TaskManager(
         IOptions<AgentOptions> agentConfig,
@@ -95,9 +96,11 @@ public sealed class TaskManager
         IOptions<TelegramOptions>? telegramConfig = null,
         ConversationEventCounters? counters = null,
         IMessageSink? sink = null,
-        TurnOriginLedger? ledger = null)
+        TurnOriginLedger? ledger = null,
+        TurnBindingPublisher? turnBindings = null)
     {
         _ledger = ledger;
+        _turnBindings = turnBindings;
         _agentConfig = agentConfig.Value;
         _executor = executor;
         _sessions = sessions;
@@ -304,6 +307,7 @@ public sealed class TaskManager
 
         _ = Task.Run(async () =>
         {
+            var bindingSequence = _turnBindings?.BeginTurn(chatId, source);
             try
             {
                 await ProcessTask(chatId, running.Id, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, turnIdentity, cts.Token);
@@ -314,6 +318,7 @@ public sealed class TaskManager
             }
             finally
             {
+                if (bindingSequence is { } sequence) _turnBindings?.EndTurn(sequence);
                 await running.TurnDispatchLock.WaitAsync();
                 try
                 {

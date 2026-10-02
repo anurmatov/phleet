@@ -180,10 +180,55 @@ public sealed class MidTurnIsolationTests
         await manager.CancelAllAsync();
     }
 
+    [Fact]
+    public async Task Binding_HangingPut_DoesNotBlockDispatch_AndInjectionKeepsSequence()
+    {
+        using var handler = new HangingBindingHandler();
+        using var http = new HttpClient(handler) { BaseAddress = new Uri("http://journal.test") };
+        using var publisher = new TurnBindingPublisher(new Fleet.Journal.Client.JournalHttpClient(http, "synthetic-token"),
+            NullLogger<TurnBindingPublisher>.Instance);
+        await publisher.StartAsync(default);
+        await handler.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        publisher.ObserveChat(101, 7001, "private");
+        await using var executor = new ControlledExecutor(MidTurnInjectionStatus.Injected);
+        var manager = Manager("claude", executor, publisher: publisher);
+        try
+        {
+            Assert.Equal(TaskDispatchOutcome.Ran, await manager.StartTask(101, "human-turn", "human", true));
+            await executor.WaitStarted(1);
+            Assert.False(handler.Completed);
+            var bound = publisher.Current;
+            Assert.Equal("bound", bound.State);
+            Assert.Equal(TaskDispatchOutcome.Injected, await manager.StartTask(101, "reply", "reply", true));
+            Assert.Equal(bound, publisher.Current);
+            executor.Release();
+            await Until(() => !manager.HasRunningTasks(101));
+            Assert.Equal("unbound", publisher.Current.State);
+        }
+        finally
+        {
+            await manager.CancelAllAsync();
+            await publisher.StopAsync(default);
+        }
+    }
+
+    private sealed class HangingBindingHandler : HttpMessageHandler
+    {
+        public TaskCompletionSource Started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public bool Completed;
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            Started.TrySetResult();
+            try { await Task.Delay(Timeout.InfiniteTimeSpan, ct); }
+            finally { Completed = true; }
+            return new(System.Net.HttpStatusCode.NoContent);
+        }
+    }
+
     private static TaskManager Manager(string provider, ControlledExecutor executor, IMessageSink? sink = null,
-        InjectionOutcomeCounter? counter = null) => new(
+        InjectionOutcomeCounter? counter = null, TurnBindingPublisher? publisher = null) => new(
         Options.Create(new AgentOptions { Name = "agent1", Role = "test", WorkDir = "/tmp", Provider = provider }),
-        executor, new SessionManager(), NullLogger<TaskManager>.Instance, counter, sink: sink);
+        executor, new SessionManager(), NullLogger<TaskManager>.Instance, counter, sink: sink, turnBindings: publisher);
 
     private static async Task Until(Func<bool> condition)
     {

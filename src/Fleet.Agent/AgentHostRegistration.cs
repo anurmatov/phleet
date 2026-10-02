@@ -404,6 +404,8 @@ public static class AgentHostRegistration
         services.AddSingleton(sp => new JournalSpool(Path.Combine(
             sp.GetRequiredService<IOptions<AgentOptions>>().Value.WorkDir, ".fleet", "journal-spool")));
         services.AddSingleton<JournalCapture>();
+        services.AddSingleton<TurnBindingPublisher>();
+        services.AddHostedService(sp => sp.GetRequiredService<TurnBindingPublisher>());
 
         // Tool-send receipts (#394). The ledger exists only here, so without the journal every
         // executor and TaskManager hold null and record nothing. AddSingleton + factory-AddHostedService,

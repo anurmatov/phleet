@@ -45,6 +45,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     // The conversation journal (#377). Null unless Journal__IngestToken is set, and every capture
     // site is a no-op when it is null — an agent without a token sends exactly what it sent before.
     private readonly JournalCapture? _journal;
+    private readonly TurnBindingPublisher? _turnBindings;
 
     /// <summary>True when the journal was injected (a token is set). For the registration tests.</summary>
     internal bool JournalEnabled => _journal is not null;
@@ -93,9 +94,11 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         MessageSinkHolder sinkHolder,
         RichFallbackCounter? richFallbackCounter = null,
         SinkSuppressionCounter? sinkCounter = null,
-        JournalCapture? journal = null)
+        JournalCapture? journal = null,
+        TurnBindingPublisher? turnBindings = null)
     {
         _journal = journal;
+        _turnBindings = turnBindings;
         _agentConfig = agentConfig.Value;
         _telegramConfig = telegramConfig.Value;
         _allowlist = allowlist;
@@ -1068,6 +1071,10 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             : text.Trim();
 
         var sender = message.From?.Username is { } u ? $"@{u}" : message.From?.FirstName ?? "Unknown";
+
+        // Record platform scope before routing, never from prompt text.
+        if (ChatTypeName(message.Chat.Type) is { } observedKind)
+            _turnBindings?.ObserveChat(chatId, _bot?.BotId ?? 0, observedKind);
 
         // Build the base IncomingMessage (no images/documents yet — filled in below)
         var baseMsg = new IncomingMessage

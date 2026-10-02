@@ -555,7 +555,10 @@ The journal listener accepts `PUT /journal/v1/turn-binding` with the existing in
 
 State is keyed by the ordinal verified subject, remembers four epochs, expires after 180 seconds on the Comms clock, and disappears on restart; HTTP status reports bound-state counts as `turnBindings{active,expired}` and the `Fleet.Conversations` meter counts `fleet_comms_journal_turn_binding_total{result}` without identifiers.
 
-**Integration remains pending in this draft:** the runtime does not yet publish or renew bindings, and `get_message` still uses the slice-5 contract below, so this transport alone does not establish current-turn lookup isolation.
+The runtime publisher is registered only with an ingest token, learns scope from inbound Telegram fields, binds human/check-in/new turns in observed chats, and unbinds relay/bridge/client/unseen turns and completed turns.
+It sends only the latest state, renews every 60 seconds without changing sequence, times out after two seconds and retries with 1–30 second backoff without blocking dispatch or changing bindings during injection.
+
+**Lookup integration remains pending in this draft:** `get_message` still uses the slice-5 contract below, so publishing bindings alone does not establish current-turn lookup isolation.
 
 ## Read tools (slice 5)
 

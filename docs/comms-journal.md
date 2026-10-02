@@ -707,3 +707,53 @@ covers them.
 - **Image rollback** below 0004 is not supported once it has applied: an older image reports the
   schema ahead and `/ready` answers 503. Roll forward, or restore the pre-migration dump and then
   roll back — the existing conversation-migration rule.
+
+## Attachment content delivery
+
+`POST /journal/v1/attachments/content` exists only on the authenticated journal
+listener, including when media is disabled. Its JSON body accepts exactly one
+`message_id` (ULID) or positive `telegram_message_id`, plus `ordinal` (0–255,
+default 0); non-null `telegram_chat_id` is refused. The body limit is 1 KiB.
+
+Checks run in this order, without opening the byte store until the scoped row
+and both download slots have been accepted:
+
+| Check | Refusal |
+|---|---|
+| Read-purpose token | 401 `unauthorized` |
+| Existing subject request cap (8) | 429 `too_many_requests` |
+| Body and argument rules | 400 `invalid_argument` |
+| Media configured | 409 `unavailable:media_disabled` |
+| Live turn binding | 409 `unavailable:no_bound_conversation` |
+| Bound chat not excluded | 409 `unavailable:conversation_not_journaled` |
+| Observed ∩ bound conversation ∩ message and ordinal | 404 `not_found` |
+| Attachment not `not_archived` | 422 `not_archived`, stored reason |
+| Attachment not `lost` | 409 `unavailable:attachment_lost` |
+| Object `uploaded` or `committed` | 409 `unavailable:object_missing` |
+| Download slots (4 global, 1 per subject) | 429 `busy`, retryable |
+| Open byte store within 30 s | 503 `store_unavailable`, retryable |
+| Object exists with the stored length | 409 `unavailable:object_missing` or `integrity_failed` |
+
+The binding narrows all-scope readers too. Hidden, absent, other-conversation and
+absent-ordinal targets have the same 404 bytes. Neither membership nor knowledge
+of a ULID grants access. Authorization precedes body parsing on every request.
+
+A successful response streams the original bytes (maximum 20 MiB), with stored
+MIME, length, `X-Journal-Message-Id`, `X-Journal-Ordinal`, `X-Journal-Kind` and
+`X-Journal-Sha256` headers. SHA-256 is checked during streaming; the final chunk
+is withheld until length and digest match, and a mismatch aborts the response.
+The whole response deadline is 40 s. Fetches write no rows, objects, URLs or files
+in Comms. Digests and locators must never reach a model-facing result or logs.
+
+`fleet_comms_journal_attachment_fetch_total{result}` counts fixed outcome codes;
+`fleet_comms_journal_attachment_fetch_bytes_total` counts successful bytes.
+Journal status includes `attachmentFetch.inFlight`. Nonzero `integrity_failed`
+or `object_missing` indicates table/bucket drift: run `journal verify-media`.
+
+The runtime's protected-file component uses a private `journal/` subdirectory,
+0700 directory / 0600 files, validated ULID/ordinal names and a fixed MIME
+extension table. It checks length and SHA-256 before replacing a file, removes
+failed `.part` files, refuses links, and applies a 24-hour TTL / 200 MiB quota.
+The ordinary attachment sweeper remains top-level only. The model-facing tool,
+loopback listener and provisioning integration are not yet wired; this route
+and file component alone are not the completed attachment feature.

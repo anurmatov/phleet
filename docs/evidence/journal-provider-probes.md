@@ -75,3 +75,40 @@ The new headerless `fleet-journal-files` server uses `httpUrl` only on Gemini:
 that explicitly selects streamable HTTP in the pinned CLI. Existing server
 translations are unchanged. EntrypointMcpHeaderTests pins this exception and
 Codex’s `enabled_tools=["fetch_attachment"]` entry.
+
+## Claude 2.1.280 — partial transport proof, credential blocked
+
+`claude --version` → `2.1.280 (Claude Code)`.
+The actual pinned CLI used `--strict-mcp-config`, an HTTP server with
+`headers.Authorization` containing the fixture read token, and
+`--allowedTools mcp__fleet-comms-journal__get_message`. The prompt requested
+`get_message(telegram_message_id=5)` twice sequentially against the same
+bound-then-unbound fixture used above. No login or production change was made.
+
+The CLI's stream-json initialization reported the journal server `connected`
+and exposed `get_message`, `search_messages` and `get_conversation`.
+Selected fields from the actual transcript (session identifiers and unrelated
+CLI configuration omitted):
+
+```json
+{"type":"system","subtype":"init","claude_code_version":"2.1.280","apiKeySource":"none","mcp_servers":[{"name":"fleet-comms-journal","status":"connected","source":"dynamic"}]}
+{"type":"assistant","error":"authentication_failed","is_api_error_message":true,"message":{"content":[{"type":"text","text":"Not logged in · Please run /login"}]}}
+{"type":"result","is_error":true,"num_turns":1,"result":"Not logged in · Please run /login","terminal_reason":"api_error"}
+```
+
+Exit status: `1`. Authenticated Comms trace from this actual CLI run (only
+bearer equality was logged, never the token):
+
+```json
+{"http":"POST","path":"/journal/v1/mcp","rpc":"server/discover","readHeader":true,"status":200}
+{"http":"POST","path":"/journal/v1/mcp","rpc":"initialize","readHeader":true,"status":200}
+{"http":"POST","path":"/journal/v1/mcp","rpc":"notifications/initialized","readHeader":true,"status":202}
+{"http":"POST","path":"/journal/v1/mcp","rpc":"tools/list","readHeader":true,"status":200}
+```
+
+Every observed request carried the expected read bearer and `tools/list`
+succeeded, but neither requested `tools/call` happened because the container
+has no authorized Claude credential. **AC8's Claude bound-record/unbound-error
+proof remains open**; this failed attempt is not a substitute for it.
+No provider flag changed. An already-authorized operator must complete both
+lookups and capture the per-request bearer proof before the merge gate.

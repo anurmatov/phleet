@@ -20,11 +20,24 @@ The CI configuration builds and runs `JournalScopedAttachmentStoreTests` inside 
 `comms-media-store-smoke` job against that job's existing scoped runtime identity,
 not the Admin-identity S3 fixture. The script requires exactly one passing test
 and zero skipped tests in its TRX result, including 20 content-route reads,
-unchanged real-bucket listing and captured-log checks. It was compiled but not
-executed locally because this development environment has neither a Docker daemon
-nor the Compose plugin; its CI result remains required, not inferred from the
-fake-bucket SQL test or provider transport probes.
+unchanged real-bucket listing and captured-log checks. It was not executed
+locally because this development environment has neither a Docker daemon nor
+the Compose plugin. At implementation head
+`2733e45a1eb947d86def28fac219d7fbfee3ccb1`, the actual
+[scoped-store smoke job](https://github.com/anurmatov/phleet/actions/runs/37008644755/job/110842789594)
+passed and its captured job log contains:
+
+```text
+PASS X9 scoped-store content route: one executed, zero failures/skips
+```
+
+This is X9's scoped-identity integration evidence, not XAC9's maintainer-owned
+provider/container acceptance. `Build and Test` was still pending when checked
+on that head; final-head green checks remain required after this documentation
+revision and were not polled or inferred.
 
 [D3 transport transcripts](journal-provider-probes.md) prove Codex headers and
-record the credential-blocked Gemini probe with its flag still false. Neither
-transcript is final-head AC13/XAC9 evidence.
+record the credential-blocked Gemini probe with its flag still false and the
+partial Claude 2.1.280 probe. Claude bound/unbound AC8 proof and maintainer-owned
+AC13/XAC9/XAC6 exact-head acceptance remain open. None of these transport
+transcripts substitutes for those gates.

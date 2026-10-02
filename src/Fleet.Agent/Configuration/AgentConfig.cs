@@ -44,6 +44,11 @@ public sealed class AgentOptions
     public string? Effort { get; set; }
     public string? JsonSchema { get; set; }
     public string? AgentsJson { get; set; }
+    /// <summary>
+    /// Maximum UTF-16 args units in a progress preview and each tool-block line, before the
+    /// truncation suffix. Non-positive values hide args. The fixed 500-unit whole-preview cap
+    /// takes precedence over larger values; it does not limit tool-block args.
+    /// </summary>
     public int ToolArgsTruncateLength { get; set; } = 300;
     public string Provider { get; set; } = "claude";
     public string? CodexSandboxMode { get; set; }

@@ -90,7 +90,7 @@ public class TaskManagerQueueNoticeTests
         var outcome = await manager.StartTask(Chat, "mine", "mine", isSessionTask: true);
 
         Assert.Equal(TaskDispatchOutcome.Queued, outcome);
-        Assert.Contains(TurnBusyNotice, sink.TextsFor(Chat));
+        Assert.Contains(BusyNotice, sink.TextsFor(Chat));
         executor.ReleaseTurn("directive");
     }
 

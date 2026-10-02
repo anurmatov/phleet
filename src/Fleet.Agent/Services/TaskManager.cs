@@ -178,6 +178,13 @@ public sealed class TaskManager
             return ReportDisposition(chatId, identity, TaskDispatchOutcome.Dropped);
         }
 
+        if (source is TaskSource.UserMessage or TaskSource.DebouncedGroupBatch && isSessionTask
+            && state.Snapshot().Any(t => t.IsSessionTask
+                && t.Source is TaskSource.Relay or TaskSource.Bridge or TaskSource.CheckIn))
+        {
+            _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.NotInjectedWorkflowTurn);
+        }
+
         if (TryGetRunningSessionTask(state, out var runningSession))
         {
             // UserMessage and DebouncedGroupBatch are both injection-eligible for same-chat turns
@@ -1218,7 +1225,11 @@ public sealed class TaskManager
 
     private static bool TryGetRunningSessionTask(ChatTaskState state, out RunningTask running)
     {
-        running = state.Snapshot().FirstOrDefault(t => t.IsSessionTask)!;
+        // State is already scoped by the runtime chat key. Never deliver a human correction
+        // into a workflow, check-in or /new turn, even when it uses a conversational session.
+        // /new arrivals remain queued, as do messages arriving during a /new turn.
+        running = state.Snapshot().FirstOrDefault(t => t.IsSessionTask
+            && t.Source is TaskSource.UserMessage or TaskSource.DebouncedGroupBatch)!;
         return running is not null;
     }
 
@@ -1308,11 +1319,17 @@ public sealed class TaskManager
         // Relay/Bridge merged into the Inbox would lose its callback and hang the caller.
         // Route them directly to the chat-level queue, preserving completeBridgeOnDrop=true
         // so the callback still fires if the queue is full.
-        if (message.Source is TaskSource.Relay or TaskSource.Bridge)
+        if (message.Source is TaskSource.Relay or TaskSource.Bridge
+            || running.Source is not (TaskSource.UserMessage or TaskSource.DebouncedGroupBatch))
         {
+            // Defence in depth: fallback delivery must not turn a workflow's Inbox into
+            // a human continuation, even if a caller reaches this helper directly.
+            if (message.Source == TaskSource.CheckIn)
+                return TaskDispatchOutcome.Dropped;
+
             var relayPart = CreateQueuedPart(message.Task, message.DisplayText, message.IsSessionTask, message.Source,
                 message.RelaySender, message.CorrelationId, message.TaskId, message.Images, message.Documents,
-                message.UserId, message.ArrivedAt);
+                message.UserId, message.ArrivedAt, message.Identity);
             var enqueued = EnqueueFreshMessage(chatId, relayPart, notifyUser, completeBridgeOnDrop: true);
             return enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull;
         }

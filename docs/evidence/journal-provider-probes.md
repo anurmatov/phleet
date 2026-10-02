@@ -76,7 +76,7 @@ that explicitly selects streamable HTTP in the pinned CLI. Existing server
 translations are unchanged. EntrypointMcpHeaderTests pins this exception and
 Codex’s `enabled_tools=["fetch_attachment"]` entry.
 
-## Claude 2.1.280 — partial transport proof, credential blocked
+## Claude 2.1.280 — initial credential-blocked attempt
 
 `claude --version` → `2.1.280 (Claude Code)`.
 The actual pinned CLI used `--strict-mcp-config`, an HTTP server with
@@ -108,7 +108,21 @@ bearer equality was logged, never the token):
 
 Every observed request carried the expected read bearer and `tools/list`
 succeeded, but neither requested `tools/call` happened because the container
-has no authorized Claude credential. **AC8's Claude bound-record/unbound-error
-proof remains open**; this failed attempt is not a substitute for it.
-No provider flag changed. An already-authorized operator must complete both
-lookups and capture the per-request bearer proof before the merge gate.
+had no authorized Claude credential. This initial attempt did not pass AC8
+and is retained as failed evidence; the later operator result is below.
+No provider flag changed during this attempt.
+
+## Claude 2.1.280 — authorized operator proof passed
+
+At final implementation head `a79b89e6`, the actual pinned CLI used an
+already-authorized credential mounted read-only in place, with no credential
+copy or account login. Against the actual Comms auth/binding/MCP application
+and a synthetic in-memory read store, two sequential
+`get_message(telegram_message_id=5)` calls returned the bound synthetic record
+and then `unavailable:no_bound_conversation`; the CLI exited `0`.
+
+All six observed MCP requests carried the expected read bearer, including both
+lookups. [Operator receipt](https://github.com/anurmatov/phleet/pull/402#issuecomment-5953201389).
+This closes the Claude AC8 transport proof only, not real-provider attachment
+reads, database/bucket acceptance or AC13/XAC9. Gemini remains credential-blocked
+and its compiled header-support flag remains false.

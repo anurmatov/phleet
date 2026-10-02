@@ -32,7 +32,7 @@ namespace Fleet.Comms.Routes;
 /// </remarks>
 [McpServerToolType]
 public sealed class JournalReadTools(
-    IJournalReadStore store, JournalReadGrants grants, JournalRuntimeStats stats, IHttpContextAccessor http)
+    IJournalReadStore store, JournalReadGrants grants, JournalRuntimeStats stats, IHttpContextAccessor http, JournalBindingScope bindings)
 {
     public const string SearchTool = "search_messages";
     public const string GetMessageTool = "get_message";
@@ -159,24 +159,23 @@ public sealed class JournalReadTools(
     }
 
     [McpServerTool(Name = GetMessageTool, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
-    [Description(
-        "Get one journaled message in full, by message_id OR by telegram_chat_id plus "
-        + "telegram_message_id (exactly one form). The Telegram form can match one message per bot "
-        + "conversation; when more than one matches you get error 'ambiguous' with candidate "
-        + "message_ids. A message you may not read answers exactly like one that does not exist.")]
+    [Description("Get one journaled message in full, by message_id OR telegram_message_id (exactly one form). "
+        + "Telegram ids resolve only in your current conversation. telegram_chat_id must be omitted. "
+        + "A message you may not read answers exactly like one that does not exist.")]
     public Task<CallToolResult> GetMessageAsync(
         [Description("The journal message id.")]
         string? message_id = null,
-        [Description("Telegram chat id; use together with telegram_message_id.")]
+        [Description("Not accepted. Must be omitted: Telegram ids resolve in your current conversation.")]
         long? telegram_chat_id = null,
-        [Description("Telegram message id within that chat.")]
+        [Description("Telegram message id within your current conversation.")]
         long? telegram_message_id = null,
         CancellationToken cancellationToken = default)
     {
         return RunAsync(GetMessageTool, async reader =>
         {
+            if (telegram_chat_id is not null) return InvalidArgument("telegram_chat_id");
             message_id = Blank(message_id);
-            var telegramForm = telegram_chat_id is not null || telegram_message_id is not null;
+            var telegramForm = telegram_message_id is not null;
 
             if ((message_id is not null) == telegramForm) return InvalidArgument("message_id");
 
@@ -188,18 +187,12 @@ public sealed class JournalReadTools(
                 return record is null ? Refuse("not_found", NotFoundBody) : Ok(Record(record));
             }
 
-            if (telegram_chat_id is not { } chat) return InvalidArgument("telegram_chat_id");
-            if (telegram_message_id is not { } messageId) return InvalidArgument("telegram_message_id");
-
-            var lookup = await store.FindByTelegramAsync(reader, chat, messageId, cancellationToken);
-
-            if (lookup.Candidates.Count > 1)
-            {
-                return Refuse("ambiguous", JsonSerializer.Serialize(
-                    new { error = "ambiguous", candidates = lookup.Candidates }, Json));
-            }
-
-            return lookup.Message is null ? Refuse("not_found", NotFoundBody) : Ok(Record(lookup.Message));
+            var binding = bindings.Resolve(reader.Subject);
+            if (binding.Reason is { } reason)
+                return Refuse(reason, JsonSerializer.Serialize(new { error = "unavailable", reason }, Json));
+            var recordInConversation = await store.FindInConversationAsync(reader, binding.Key!,
+                telegram_message_id!.Value, cancellationToken);
+            return recordInConversation is null ? Refuse("not_found", NotFoundBody) : Ok(Record(recordInConversation));
         }, cancellationToken);
     }
 

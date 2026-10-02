@@ -13,6 +13,13 @@ namespace Fleet.Conversations.Journal;
 /// </remarks>
 public sealed class JournalRuntimeStats(TimeProvider? time = null)
 {
+    private int _attachmentFetchInFlight;
+    public int AttachmentFetchInFlight => Volatile.Read(ref _attachmentFetchInFlight);
+    public void AttachmentFetchEntered() => Interlocked.Increment(ref _attachmentFetchInFlight);
+    public void AttachmentFetchExited() => Interlocked.Decrement(ref _attachmentFetchInFlight);
+    public void AttachmentFetchBytes(long bytes) => ConversationMetrics.JournalAttachmentFetchBytes.Add(bytes);
+    public void RecordAttachmentFetch(string result) => ConversationMetrics.JournalAttachmentFetch.Add(1, new KeyValuePair<string, object?>("result", result));
+
     private static readonly TimeSpan LatencyWindow = TimeSpan.FromHours(1);
 
     /// <summary>Bound on retained samples, so a burst cannot grow the window without limit.</summary>

@@ -120,7 +120,7 @@ public class VoiceTranscriptionMarkerTests
     public void ForDm_VoiceTranscription_MarkerSitsWithTheOtherPromptMetadata()
     {
         var result = MakeAssembler(warm: true).ForDm(
-            DmBuffer(), "call me back", replyToText: "earlier message", telegramMessageId: 42,
+            DmBuffer(), "call me back", replyToTelegramMessageId: 5, telegramMessageId: 42,
             isVoiceTranscription: true);
 
         var idxMsgId   = result.IndexOf("[telegram_message_id: 42]", StringComparison.Ordinal);

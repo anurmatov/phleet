@@ -19,7 +19,8 @@ public sealed record AgentHeartbeat(
     int QueuedCount = 0,
     QueuedMessageInfo[]? QueuedMessages = null,
     BackgroundTaskSummary[]? BackgroundTasks = null,
-    JournalHeartbeat? Journal = null);
+    JournalHeartbeat? Journal = null,
+    int PriorityQueuedCount = 0);
 
 /// <summary>
 /// Optional journal health emitted by S2 agents. Null means an older agent and is displayed as n/a.
@@ -30,10 +31,11 @@ public sealed record JournalHeartbeat(
     long? OldestAgeSeconds,
     long Dropped,
     int Dead,
-    int AuthFailed);
+    int AuthFailed,
+    int BindingFailed = 0);
 
 /// <summary>Snapshot of a queued message waiting to be processed by an agent.</summary>
-public sealed record QueuedMessageInfo(string Preview, string Source, DateTimeOffset QueuedAt);
+public sealed record QueuedMessageInfo(string Preview, string Source, DateTimeOffset QueuedAt, bool Priority = false);
 
 /// <summary>Summary of an active background subagent task, included in heartbeat messages.</summary>
 public sealed record BackgroundTaskSummary(
@@ -68,9 +70,10 @@ public sealed class AgentState
     public DateTimeOffset? TaskStartedAt { get; set; }
     /// <summary>When the agent's container was started (from Docker API State.StartedAt).</summary>
     public DateTimeOffset? ContainerStartedAt { get; set; }
-    /// <summary>Number of messages waiting in the agent's FIFO queue.</summary>
+    /// <summary>Number of messages waiting in the agent's two-lane queue.</summary>
     public int QueuedCount               { get; set; }
-    /// <summary>Preview of up to 5 queued messages (oldest first).</summary>
+    public int PriorityQueuedCount       { get; set; }
+    /// <summary>Preview of up to 5 queued messages (priority lane, then routine lane).</summary>
     public QueuedMessageInfo[]? QueuedMessages { get; set; }
     /// <summary>Active background subagent tasks spawned via the Agent tool with run_in_background=true.</summary>
     public BackgroundTaskSummary[]? BackgroundTasks { get; set; }

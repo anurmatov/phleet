@@ -185,6 +185,9 @@ public static class ConversationMetrics
     public static readonly Counter<long> JournalOrphansDeleted =
         Meter.CreateCounter<long>("fleet.journal.orphans_deleted", "objects");
 
+    public static readonly Counter<long> JournalAttachmentFetch = Meter.CreateCounter<long>("fleet_comms_journal_attachment_fetch_total");
+    public static readonly Counter<long> JournalAttachmentFetchBytes = Meter.CreateCounter<long>("fleet_comms_journal_attachment_fetch_bytes_total");
+
     // ── read tools (#394) ─────────────────────────────────────────────────────
     //
     // `tool` here is one of the journal's OWN three read tools — `search_messages`, `get_message`,
@@ -193,7 +196,8 @@ public static class ConversationMetrics
 
     /// <summary>
     /// Read-tool calls, tagged <c>tool</c> and <c>result</c>: <c>ok</c>, <c>not_found</c>,
-    /// <c>ambiguous</c>, <c>invalid_argument</c>, <c>invalid_query</c>, <c>invalid_cursor</c>,
+    /// <c>no_bound_conversation</c>, <c>conversation_not_journaled</c>, <c>invalid_argument</c>,
+    /// <c>invalid_query</c>, <c>invalid_cursor</c>,
     /// <c>store_unavailable</c>, and <c>cancelled</c> or <c>internal</c> for a call that did not
     /// finish. Never a subject, an id or query text.
     /// </summary>

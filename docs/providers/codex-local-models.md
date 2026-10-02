@@ -207,3 +207,18 @@ one agent — a mid-turn outage surfaces as a failed turn.
 
 Rolling back the #382 release itself needs one step per Codex agent with a URL. See
 `local-models.md` §11.
+
+## Journal replies and priority
+
+Telegram replies carry only message ids, never quoted text. Conversation-bound
+reply lookup requires an explicitly granted journal tool and a read-token header.
+The pinned CLI `0.159.2` has `McpHeaderSupport=true` after the actual
+[CLI transcript](../evidence/journal-provider-probes.md) proved `tools/list`,
+bound and unbound `get_message`, and the read bearer on every request. This
+changes no grants; journal endpoints and tools still require explicit per-agent
+authorization and reprovisioning. Entrypoint translation tests alone are not proof.
+
+Primary-human priority changes only the next queued turn, not the running turn
+or its provider frames. Same-chat injection or Inbox fallback runs before global
+queued work; workflow and cross-chat turns stay isolated. See
+[primary-human priority](../primary-human-priority.md) for configuration and limits.

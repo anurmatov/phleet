@@ -192,13 +192,13 @@ public sealed class ConversationIntake
         //   telegramMessageId: 0  -> no [telegram_message_id:] tag (ForDm gates on > 0)
         //   chatUsername/FirstName null -> ChatLabel stays null, so the anchor comes from
         //                                  ChannelAnchorOverride, never a Telegram DM anchor
-        //   replyToText: null     -> replyToEventId is an EVENT id, not text; resolving it to
-        //                            quoted text is a later issue
+        //   replyToTelegramMessageId: null -> replyToEventId belongs to the client channel,
+        //                                      never to the Telegram message-id namespace
         //   isVoiceTranscription  -> there is no client voice path in Phase 0
         var prompt = _groupBehavior.BuildDmTask(
             chatId: runtimeKey,
             taskText: text,
-            replyToText: null,
+            replyToTelegramMessageId: null,
             telegramMessageId: 0,
             chatUsername: null,
             chatFirstName: null,

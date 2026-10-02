@@ -1,0 +1,3 @@
+## Telegram replies
+Each Telegram message carries [telegram_message_id: M]. A reply also carries [reply_to_message_id: R]. Both ids belong to the current conversation. The replied-to text is never included.
+Reply lookup is unavailable on this agent (reason: provider_headers_unsupported). If message R is not in your context, say you cannot see the replied-to message and ask the sender to quote it. Never guess its content.

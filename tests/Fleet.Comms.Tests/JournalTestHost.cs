@@ -35,9 +35,11 @@ internal sealed class JournalTestHost : IAsyncDisposable
 
     /// <summary>A client with no credential.</summary>
     public HttpClient Client { get; }
+    public TestServer Server => _app.GetTestServer();
+    public IServiceProvider Services => _app.Services;
 
     public static async Task<JournalTestHost> StartAsync(
-        string? keys = null, string excludedChatIds = "", FakeJournalStore? store = null)
+        string? keys = null, string excludedChatIds = "", FakeJournalStore? store = null, TimeProvider? time = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseSetting(WebHostDefaults.ServerUrlsKey, string.Empty);
@@ -58,7 +60,7 @@ internal sealed class JournalTestHost : IAsyncDisposable
 
         store ??= new FakeJournalStore();
         var stats = new JournalRuntimeStats();
-        var app = CommsApp.BuildJournalApp(builder, store, options, stats);
+        var app = CommsApp.BuildJournalApp(builder, store, options, stats, time);
 
         await app.StartAsync();
         return new JournalTestHost(app, store, stats);

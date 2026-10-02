@@ -56,7 +56,7 @@ if $DRY_RUN; then warn "Running in --dry-run mode — no changes will be made.";
 # ORCHESTRATOR_AUTH_TOKEN in the shell would cause 401s against the orchestrator.
 # Unsetting these
 # makes .env the single source of truth for compose substitution.
-unset FLEET_BASE_DIR FLEET_CTO_AGENT FLEET_GROUP_CHAT_ID \
+unset FLEET_BASE_DIR FLEET_CTO_AGENT FLEET_GROUP_CHAT_ID FLEET_PRIMARY_HUMAN_USER_ID \
       FLEET_MYSQL_ROOT_PASSWORD FLEET_MYSQL_PASSWORD \
       ORCHESTRATOR_AUTH_TOKEN ORCHESTRATOR_CONFIG_TOKEN \
       TELEGRAM_NOTIFIER_BOT_TOKEN \
@@ -746,6 +746,9 @@ if $PROMPT_TELEGRAM; then
 
   prompt_field "$ENV_FILE" "TELEGRAM_USER_ID" "Your Telegram user ID (numeric)" \
     "Send any message to @userinfobot on Telegram — it replies with your numeric user ID. This allows agents to DM you directly via the send_to_ceo tool." "y" "n"
+
+  prompt_field "$ENV_FILE" "FLEET_PRIMARY_HUMAN_USER_ID" "Primary human Telegram user ID" \
+    "usually the same as TELEGRAM_USER_ID; blank keeps plain FIFO" "n" "n" ""
 
   prompt_field "$ENV_FILE" "TELEGRAM_CTO_BOT_TOKEN" "Telegram CTO bot token" \
     "Same flow, second bot: https://t.me/BotFather → /newbot. This is the bot you DM your CTO agent through." "y" "y"

@@ -67,7 +67,7 @@ public sealed class MessageRouter
             }
 
             // Buffer ALL allowed group messages for context
-            _groupBehavior.AddAndPersist(msg.ChatId, msg.Sender, msg.Text, msg.ReplyToUsername,
+            _groupBehavior.AddAndPersist(msg.ChatId, msg.Sender, msg.Text, null,
                 telegramMessageId: msg.TelegramMessageId,
                 replyToTelegramMessageId: msg.ReplyToTelegramMessageId);
 
@@ -141,12 +141,14 @@ public sealed class MessageRouter
                 // added below (including the transcription marker) never reaches Telegram.
                 var displayText = task;
                 if (msg.IsGroupChat)
-                    task = _groupBehavior.BuildGroupTask(msg.ChatId, msg.Sender, task, msg.ReplyToUsername, msg.ReplyToText, msg.TelegramMessageId, msg.ChatTitle, msg.IsVoiceTranscription);
+                    task = _groupBehavior.BuildGroupTask(msg.ChatId, msg.Sender, task, msg.ReplyToTelegramMessageId, msg.TelegramMessageId, msg.ChatTitle, msg.IsVoiceTranscription);
                 else
-                    task = _groupBehavior.BuildDmTask(msg.ChatId, task, msg.ReplyToText, msg.TelegramMessageId, msg.ChatUsername, msg.ChatFirstName, msg.IsVoiceTranscription);
+                    task = _groupBehavior.BuildDmTask(msg.ChatId, task, msg.ReplyToTelegramMessageId, msg.TelegramMessageId, msg.ChatUsername, msg.ChatFirstName, msg.IsVoiceTranscription);
                 _ = _taskManager.StartTask(msg.ChatId, task, displayText, isSessionTask: false,
                     source: TaskSource.NewCommand, images: msg.Images.Count > 0 ? msg.Images : null,
-                    documents: msg.Documents.Count > 0 ? msg.Documents : null);
+                    documents: msg.Documents.Count > 0 ? msg.Documents : null,
+                    userId: msg.UserId, priority: PrimaryHumanClassifier.Classify(msg, _telegramConfig, _allowlist),
+                    telegramMessageId: msg.TelegramMessageId);
                 return;
             }
 
@@ -188,15 +190,17 @@ public sealed class MessageRouter
         // messageDisplayText is built above, from the pre-assembly text — the transcription
         // marker is added only here, so it can never reach Telegram via the display path.
         if (msg.IsGroupChat)
-            trimmed = _groupBehavior.BuildGroupTask(msg.ChatId, msg.Sender, trimmed, msg.ReplyToUsername, msg.ReplyToText, msg.TelegramMessageId, msg.ChatTitle, msg.IsVoiceTranscription);
+            trimmed = _groupBehavior.BuildGroupTask(msg.ChatId, msg.Sender, trimmed, msg.ReplyToTelegramMessageId, msg.TelegramMessageId, msg.ChatTitle, msg.IsVoiceTranscription);
         else
-            trimmed = _groupBehavior.BuildDmTask(msg.ChatId, trimmed, msg.ReplyToText, msg.TelegramMessageId, msg.ChatUsername, msg.ChatFirstName, msg.IsVoiceTranscription);
+            trimmed = _groupBehavior.BuildDmTask(msg.ChatId, trimmed, msg.ReplyToTelegramMessageId, msg.TelegramMessageId, msg.ChatUsername, msg.ChatFirstName, msg.IsVoiceTranscription);
 
         // When busy, StartTask enqueues the message and notifies the user automatically.
         // Use /new <task> for parallel tasks, or /cancel to stop the current one.
         _ = _taskManager.StartTask(msg.ChatId, trimmed, messageDisplayText, isSessionTask: true,
             images: msg.Images.Count > 0 ? msg.Images : null,
-            documents: msg.Documents.Count > 0 ? msg.Documents : null);
+            documents: msg.Documents.Count > 0 ? msg.Documents : null,
+            userId: msg.UserId, priority: PrimaryHumanClassifier.Classify(msg, _telegramConfig, _allowlist),
+            telegramMessageId: msg.TelegramMessageId);
     }
 
     private CancellationToken _shutdownToken = CancellationToken.None;

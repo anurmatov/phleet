@@ -1,3 +1,4 @@
+using Fleet.Agent.Services.JournalFiles;
 using Fleet.Agent.Abstractions;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Interfaces;
@@ -141,9 +142,10 @@ public static class AgentHostRegistration
         if (DescribeClaudeLocalModelFault(agent, fileExists ?? File.Exists) is { } localFault)
             Fail(localFault);
 
-        // Registered only with a token, so this runs only when one is set. The fault names the key,
-        // never the value.
-        if (services.GetService<IOptions<JournalOptions>>()?.Value.DescribeFault() is { } journalFault)
+        // Inspect configured files even without a capture registration. Faults name keys,
+        // never credential values.
+        if ((services.GetService<IConfiguration>()?.GetSection(JournalOptions.Section).Get<JournalOptions>()
+            ?? services.GetService<IOptions<JournalOptions>>()?.Value)?.DescribeFault() is { } journalFault)
             Fail(journalFault);
 
         if (agent.Provider != "codex")
@@ -290,6 +292,11 @@ public static class AgentHostRegistration
     public static IServiceCollection AddAgentDaemonServices(
         this IServiceCollection services, IConfiguration configuration)
     {
+        // File listener startup completes before task intake and CLI warmup can start.
+        // Without files, preserve the existing capture service startup order.
+        var journalFilesEnabled = configuration.GetValue<bool>("Journal:FilesEnabled");
+        if (journalFilesEnabled) AddJournal(services, configuration);
+
         // --- Outbound sink seam (#277 D-1) ---------------------------------------------------
         // The holder is dependency-free and IS the thing that breaks the circular DI
         // (AgentTransport -> TaskManager -> sink) that the transport's four self-assignments used
@@ -365,12 +372,13 @@ public static class AgentHostRegistration
         services.AddSingleton<TtsService>();
         services.AddSingleton<RichFallbackCounter>();
         services.AddSingleton<InjectionOutcomeCounter>();
+        services.AddSingleton<QueueLaneCounter>();
 
         services.AddHostedService<WarmupService>();
         services.AddHostedService<OrchestratorHeartbeatService>();
 
         AddConversationSouthSeam(services, configuration);
-        AddJournal(services, configuration);
+        if (!journalFilesEnabled) AddJournal(services, configuration);
 
         // #394. With the journal off an agent declares nothing on the broker; it only removes a
         // receipt queue an earlier journal-on life left behind.
@@ -400,10 +408,22 @@ public static class AgentHostRegistration
             return;
 
         services.Configure<JournalOptions>(section);
+        if (section.Get<JournalOptions>()?.FilesEnabled == true)
+        {
+            services.AddSingleton(sp => new JournalFileStore(sp.GetRequiredService<IOptions<TelegramOptions>>().Value.AttachmentDir));
+            services.AddSingleton<JournalFilesCounter>();
+            services.AddSingleton<JournalFilesTools>();
+            services.AddSingleton<JournalFilesListener>();
+            services.AddHostedService(sp => sp.GetRequiredService<JournalFilesListener>());
+            services.AddHostedService<JournalFilesSweepService>();
+        }
+
         services.AddSingleton<JournalCounters>();
         services.AddSingleton(sp => new JournalSpool(Path.Combine(
             sp.GetRequiredService<IOptions<AgentOptions>>().Value.WorkDir, ".fleet", "journal-spool")));
         services.AddSingleton<JournalCapture>();
+        services.AddSingleton<TurnBindingPublisher>();
+        services.AddHostedService(sp => sp.GetRequiredService<TurnBindingPublisher>());
 
         // Tool-send receipts (#394). The ledger exists only here, so without the journal every
         // executor and TaskManager hold null and record nothing. AddSingleton + factory-AddHostedService,
@@ -432,7 +452,7 @@ public static class AgentHostRegistration
             var options = sp.GetRequiredService<IOptions<JournalOptions>>().Value;
             var http = sp.GetRequiredService<IHttpClientFactory>().CreateClient(JournalHttpClientName);
             http.BaseAddress = new Uri(options.BaseUrl);
-            return new JournalHttpClient(http, options.IngestToken!);
+            return new JournalHttpClient(http, options.IngestToken!, readToken: options.ReadToken);
         });
 
         // The media uploader is registered on the SAME token and the SAME base URL as the message

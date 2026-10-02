@@ -103,6 +103,9 @@ public static class JournalAuth
     {
         var path = request.Path.Value;
 
+        if (HttpMethods.IsPut(request.Method) && path == JournalTurnBindings.Path)
+            return JournalTokens.PurposeIngest;
+
         if (HttpMethods.IsPost(request.Method) && string.Equals(path, JournalEndpoints.MessagesPath, StringComparison.Ordinal))
             return JournalTokens.PurposeIngest;
 
@@ -115,6 +118,9 @@ public static class JournalAuth
 
         if (HttpMethods.IsGet(request.Method) && string.Equals(path, JournalEndpoints.StatusPath, StringComparison.Ordinal))
             return JournalTokens.PurposeStatus;
+
+        if (HttpMethods.IsPost(request.Method) && path == Fleet.Conversations.Contracts.JournalAttachmentRequest.ContentPath)
+            return JournalTokens.PurposeRead;
 
         // The read tools (#394), on the exact path only. GET and DELETE are the other two verbs of
         // streamable HTTP; they need a read token too, so an unauthenticated caller gets the one 401

@@ -777,3 +777,29 @@ The `--profile comms` flag and the generated compose file are both required on e
 Rotate the SeaweedFS signing key: change `FLEET_COMMS_SEAWEEDFS_SIGNING_KEY` in `.env`, then
 `docker compose --profile comms-media-seaweedfs up -d --force-recreate comms-seaweedfs`.
 Do not change the runtime pair or bucket as part of that rotation.
+
+## Journal attachment fetch rollout and rollback
+
+Upgrade Comms first, then agent images, then grant
+`mcp__fleet-journal-files__fetch_attachment` individually with authorized
+reprovisioning. No templates or automatic grants are changed. Before merge,
+verify the exact head in a throwaway stack and an independently identified
+canary: control health/cancel remain on 8080, MCP is loopback-only on 8091,
+Comms 8083 is unpublished, and agents have neither byte-store credentials nor
+`comms-media` membership. Pinned-provider photo/PDF/20 MiB file and timeout
+proof is separate acceptance, not inferred from unit tests.
+
+The rollback lever is removing the grant and reprovisioning; the loopback
+listener, server entry and runtime read token disappear. After an image rollback
+to an older agent, remove only `{AttachmentDir}/journal/` while the agent is
+stopped: its old attachment sweeper does not recurse into that directory. Leave
+the journal database and private bucket untouched. Old agents ignore the new
+Comms route; new agents with old Comms return `comms_refused`, without a retry
+storm.
+
+Healthy fetches grow the fixed `ok` counters. Investigate `integrity_failed` or
+`object_missing` with `journal verify-media` on the Comms operator CLI, not by
+giving agents bucket access. Rising `comms_refused` indicates rollout order or
+read-token problems. Startup, hourly and per-fetch cleanup enforce local TTL and
+quota; cleanup failures log only their exception type and the next fetch tries
+again. No migration, environment key or compose change is needed for fetch.

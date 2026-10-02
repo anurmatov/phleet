@@ -45,6 +45,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     // The conversation journal (#377). Null unless Journal__IngestToken is set, and every capture
     // site is a no-op when it is null — an agent without a token sends exactly what it sent before.
     private readonly JournalCapture? _journal;
+    private readonly TurnBindingPublisher? _turnBindings;
 
     /// <summary>True when the journal was injected (a token is set). For the registration tests.</summary>
     internal bool JournalEnabled => _journal is not null;
@@ -93,9 +94,11 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         MessageSinkHolder sinkHolder,
         RichFallbackCounter? richFallbackCounter = null,
         SinkSuppressionCounter? sinkCounter = null,
-        JournalCapture? journal = null)
+        JournalCapture? journal = null,
+        TurnBindingPublisher? turnBindings = null)
     {
         _journal = journal;
+        _turnBindings = turnBindings;
         _agentConfig = agentConfig.Value;
         _telegramConfig = telegramConfig.Value;
         _allowlist = allowlist;
@@ -1068,21 +1071,23 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             : text.Trim();
 
         var sender = message.From?.Username is { } u ? $"@{u}" : message.From?.FirstName ?? "Unknown";
-        var replyToUsername = message.ReplyToMessage?.From?.Username is { } ru ? $"@{ru}" : null;
-        var replyToText = message.ReplyToMessage?.Text ?? message.ReplyToMessage?.Caption;
+
+        // Record platform scope before routing, never from prompt text.
+        if (ChatTypeName(message.Chat.Type) is { } observedKind)
+            _turnBindings?.ObserveChat(chatId, _bot?.BotId ?? 0, observedKind);
 
         // Build the base IncomingMessage (no images/documents yet — filled in below)
         var baseMsg = new IncomingMessage
         {
             ChatId = chatId,
             UserId = message.From?.Id ?? 0,
+            FromIsBot = message.From?.IsBot ?? true,
+            HasSenderChat = message.SenderChat is not null,
             Text = text,
             Sender = sender,
             IsGroupChat = isGroupChat,
             TelegramMessageId = message.MessageId,
             ReplyToTelegramMessageId = message.ReplyToMessage?.MessageId is { } rtm ? (long)rtm : null,
-            ReplyToUsername = replyToUsername,
-            ReplyToText = replyToText,
             IsBotMentioned = isMentioned,
             IsReplyToBot = isReplyToMe,
             IsNameMentioned = isNameMentioned,
@@ -1469,19 +1474,15 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         if (added.Count == 0 && removed.Count == 0) return; // no net change
 
         var channelAnchor = BuildChannelAnchorFromChat(reaction.Chat);
-        var buffer = _groupBehavior.GetGroupBuffer(chatId);
-        var hasOriginal = buffer.TryGetByMessageId(messageId, out _, out var origText);
-        var contentSuffix = hasOriginal ? $": \"{TruncateForReaction(origText)}\"" : "";
-
         foreach (var emoji in added)
         {
-            var text = $"{channelAnchor}\n[reaction: {emoji} on message_id={messageId} from user_id={userId}{contentSuffix}]";
+            var text = $"{channelAnchor}\n[reaction: {emoji} on message_id={messageId} from user_id={userId}]";
             _ = _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
         }
 
         foreach (var emoji in removed)
         {
-            var text = $"{channelAnchor}\n[reaction removed: {emoji} on message_id={messageId} from user_id={userId}{contentSuffix}]";
+            var text = $"{channelAnchor}\n[reaction removed: {emoji} on message_id={messageId} from user_id={userId}]";
             _ = _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
         }
     }
@@ -1505,17 +1506,6 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         if (chat.FirstName is { Length: > 0 })
             return $"[channel: dm chat_id={chatId} name=\"{chat.FirstName.Replace("\"", "\\\"")}\"]";
         return $"[channel: dm chat_id={chatId}]";
-    }
-
-    /// <summary>
-    /// Normalizes a buffered message text for inline use in a reaction task:
-    /// replaces line breaks and tabs with a single space, then caps at 200 chars with a trailing ellipsis.
-    /// </summary>
-    internal static string TruncateForReaction(string text)
-    {
-        // Normalize whitespace: CRLF, LF, CR, tab → single space
-        var flat = text.Replace("\r\n", " ").Replace('\r', ' ').Replace('\n', ' ').Replace('\t', ' ');
-        return flat.Length <= 200 ? flat : flat[..200] + "…";
     }
 
     /// <summary>

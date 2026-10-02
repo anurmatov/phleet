@@ -74,6 +74,7 @@ public sealed class AgentRegistry
                     LastSeen         = heartbeat.Timestamp,
                     RegisteredAt     = heartbeat.Timestamp,
                     QueuedCount      = heartbeat.QueuedCount,
+                    PriorityQueuedCount = heartbeat.PriorityQueuedCount,
                     QueuedMessages   = heartbeat.QueuedMessages,
                     BackgroundTasks  = heartbeat.BackgroundTasks,
                     Journal          = heartbeat.Journal,
@@ -115,6 +116,7 @@ public sealed class AgentRegistry
                 existing.Version        = heartbeat.Version;
                 existing.LastSeen       = heartbeat.Timestamp;
                 existing.QueuedCount    = heartbeat.QueuedCount;
+                existing.PriorityQueuedCount = heartbeat.PriorityQueuedCount;
                 existing.QueuedMessages = heartbeat.QueuedMessages;
                 existing.BackgroundTasks = heartbeat.BackgroundTasks;
                 existing.Journal         = heartbeat.Journal;
@@ -205,7 +207,8 @@ public sealed class AgentRegistry
             state.Journal?.OldestAgeSeconds,
             state.Journal?.Dropped,
             state.Journal?.Dead,
-            state.Journal?.AuthFailed);
+            state.Journal?.AuthFailed,
+            state.Journal?.BindingFailed, state.PriorityQueuedCount);
         var prev = _lastBroadcast.GetOrAdd(state.AgentName, _ => default);
 
         // Dedup is by count only, not content — summary/elapsed changes within a stable-count
@@ -263,5 +266,7 @@ public sealed class AgentRegistry
         long? JournalOldestAgeSeconds,
         long? JournalDropped,
         long? JournalDead,
-        int? JournalAuthFailed);
+        int? JournalAuthFailed,
+        int? JournalBindingFailed,
+        int PriorityQueuedCount);
 }

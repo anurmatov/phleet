@@ -4,6 +4,7 @@ export interface QueuedMessageInfo {
   preview: string
   source: string
   queuedAt: string
+  priority?: boolean
 }
 
 export interface BackgroundTaskSummary {
@@ -21,6 +22,7 @@ export interface JournalHeartbeat {
   dropped: number
   dead: number
   authFailed: number
+  bindingFailed?: number
 }
 
 export interface AgentState {
@@ -36,6 +38,7 @@ export interface AgentState {
   lastSeen: string
   version: string | null
   queuedCount: number
+  priorityQueuedCount?: number
   queuedMessages: QueuedMessageInfo[] | null
   backgroundTasks: BackgroundTaskSummary[] | null
   containerName: string | null

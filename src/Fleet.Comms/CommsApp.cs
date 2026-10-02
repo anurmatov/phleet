@@ -570,7 +570,7 @@ public static class CommsApp
             ? _ => reads
             : provider => new MySqlJournalReadStore(
                 options.ConversationConnectionString,
-                provider.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal.Read")));
+                provider.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal.Read")), time, excluded);
 
         var app = builder.Build();
         var journalLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal");
@@ -630,6 +630,7 @@ public static class CommsApp
 
         // The read tools, behind the same authentication as every route above (#394).
         JournalMcp.Map(app);
+        JournalAttachmentContentEndpoint.Map(app, media?.Bytes, stats, time);
 
         return app;
     }

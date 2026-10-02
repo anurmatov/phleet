@@ -78,7 +78,7 @@ public class TaskManagerQueueNoticeTests
     }
 
     [Fact]
-    public async Task WorkflowDirectiveBusyInTheSameChat_TheFailedInjectionGetsTheNotice_AsToday()
+    public async Task WorkflowDirectiveBusyInTheSameChat_TheHumanMessageGetsTheNormalQueueNotice()
     {
         var (manager, executor, sink) = Build();
         executor.HoldTurn("directive");
@@ -90,7 +90,7 @@ public class TaskManagerQueueNoticeTests
         var outcome = await manager.StartTask(Chat, "mine", "mine", isSessionTask: true);
 
         Assert.Equal(TaskDispatchOutcome.Queued, outcome);
-        Assert.Contains(TurnBusyNotice, sink.TextsFor(Chat));
+        Assert.Contains(BusyNotice, sink.TextsFor(Chat));
         executor.ReleaseTurn("directive");
     }
 

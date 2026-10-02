@@ -27,7 +27,7 @@ namespace Fleet.Comms.Tests;
 /// half of the rule is asserted against a real database in Fleet.Conversations.Tests'
 /// <c>JournalReadStoreTests</c>; this suite needs no database, like the rest of this project.
 /// </remarks>
-public sealed class JournalReadMcpTests
+public sealed partial class JournalReadMcpTests
 {
     private const string AgentA = "agent-a";
     private const string AgentB = "agent-b";
@@ -142,9 +142,11 @@ public sealed class JournalReadMcpTests
 
         var hiddenById = await host.CallAsync(a, "get_message", new { message_id = world.B1 });
         var missingById = await host.CallAsync(a, "get_message", new { message_id = World.Missing });
-        var hiddenByTelegram = await host.CallAsync(a, "get_message", new { telegram_chat_id = World.ChatB, telegram_message_id = 20 });
-        var missingByTelegram = await host.CallAsync(a, "get_message", new { telegram_chat_id = World.ChatB, telegram_message_id = 99 });
-        var missingChat = await host.CallAsync(a, "get_message", new { telegram_chat_id = 424242, telegram_message_id = 1 });
+        await host.BindAsync(AgentA, "private", World.ChatB);
+        var hiddenByTelegram = await host.CallAsync(a, "get_message", new { telegram_message_id = 20 });
+        var missingByTelegram = await host.CallAsync(a, "get_message", new { telegram_message_id = 99 });
+        await host.BindAsync(AgentA, "private", 424242);
+        var missingChat = await host.CallAsync(a, "get_message", new { telegram_message_id = 1 });
 
         Assert.True(hiddenById.IsError);
         Assert.Equal(JournalReadTools.NotFoundBody, hiddenById.Text);
@@ -290,24 +292,17 @@ public sealed class JournalReadMcpTests
     }
 
     [Fact]
-    public async Task The_telegram_form_is_ambiguous_only_among_visible_matches()
+    public async Task BoundPrivateConversation_SelectsTheRightBotSequence_EvenWithAllScope()
     {
         await using var host = await McpHost.StartAsync();
         var world = World.Seed(host.Reads);
-
-        var reviewer = await host.CallAsync(Token(JournalTokens.PurposeRead, Reviewer), "get_message",
-            new { telegram_chat_id = World.SharedUserChat, telegram_message_id = 7 });
-
-        Assert.True(reviewer.IsError);
-        Assert.Equal("ambiguous", reviewer.Json.GetProperty("error").GetString());
-        Assert.Equal([world.SharedA, world.SharedB],
-            reviewer.Json.GetProperty("candidates").EnumerateArray().Select(c => c.GetString()!).Order(StringComparer.Ordinal).ToArray());
-
-        // Agent A sees only its own bot's copy, so for it the lookup is not ambiguous at all.
-        var a = await host.CallAsync(Token(JournalTokens.PurposeRead, AgentA), "get_message",
-            new { telegram_chat_id = World.SharedUserChat, telegram_message_id = 7 });
-        Assert.False(a.IsError);
-        Assert.Equal(world.SharedA, a.Json.GetProperty("message_id").GetString());
+        var token = Token(JournalTokens.PurposeRead, Reviewer);
+        await host.BindAsync(Reviewer, "private", World.SharedUserChat, 7001);
+        var first = await host.CallAsync(token, "get_message", new { telegram_message_id = 7 });
+        Assert.Equal(world.SharedA, first.Json.GetProperty("message_id").GetString());
+        await host.BindAsync(Reviewer, "private", World.SharedUserChat, 7002);
+        var second = await host.CallAsync(token, "get_message", new { telegram_message_id = 7 });
+        Assert.Equal(world.SharedB, second.Json.GetProperty("message_id").GetString());
     }
 
     // ── the media boundary (AC9, MUST NOT 6) ─────────────────────────────────
@@ -443,8 +438,8 @@ public sealed class JournalReadMcpTests
         { "search_messages", "{\"until\":\"yesterday\"}", "until" },
         { "search_messages", "{\"conversation_id\":\"not-an-id\"}", "conversation_id" },
         { "get_message", "{}", "message_id" },
-        { "get_message", "{\"message_id\":\"01J00000000000000000000000\",\"telegram_chat_id\":1,\"telegram_message_id\":2}", "message_id" },
-        { "get_message", "{\"telegram_chat_id\":1}", "telegram_message_id" },
+        { "get_message", "{\"message_id\":\"01J00000000000000000000000\",\"telegram_chat_id\":1,\"telegram_message_id\":2}", "telegram_chat_id" },
+        { "get_message", "{\"telegram_chat_id\":1}", "telegram_chat_id" },
         { "get_message", "{\"message_id\":\"x\"}", "message_id" },
         { "get_conversation", "{\"conversation_id\":\"x\"}", "conversation_id" },
         { "get_conversation", "{\"conversation_id\":\"01J00000000000000000000000\",\"limit\":201}", "limit" },
@@ -641,7 +636,7 @@ public sealed class JournalReadMcpTests
             var g2 = store.Add(group, "supergroup", GroupChat, 31, t.AddMinutes(6), "bravo only", [AgentB]);
             var g3 = store.Add(group, "supergroup", GroupChat, 32, t.AddMinutes(7), "alpha answers", [AgentA], replyTo: 31);
             var shared1 = store.Add(sharedA, "private", SharedUserChat, 7, t.AddMinutes(8), "same id, bot a", [AgentA]);
-            var shared2 = store.Add(sharedB, "private", SharedUserChat, 7, t.AddMinutes(9), "same id, bot b", [AgentB]);
+            var shared2 = store.Add(sharedB, "private", SharedUserChat, 7, t.AddMinutes(9), "same id, bot b", [AgentB], botId: 7002);
 
             return new World(conversationA, conversationB, group, a1, a2, a3, b1, g1, g2, g3, shared1, shared2);
         }
@@ -663,7 +658,7 @@ public sealed class JournalReadMcpTests
         public FakeJournalReadStore Reads { get; }
         public IServiceProvider Services => _app.Services;
 
-        public static async Task<McpHost> StartAsync(string readAllSubjects = Reviewer)
+        public static async Task<McpHost> StartAsync(string readAllSubjects = Reviewer, TimeProvider? time = null, string excluded = "")
         {
             var builder = WebApplication.CreateBuilder();
             builder.WebHost.UseSetting(WebHostDefaults.ServerUrlsKey, string.Empty);
@@ -678,14 +673,30 @@ public sealed class JournalReadMcpTests
                     Enabled = true,
                     TokenKeys = JournalTestHost.KeyA,
                     ReadAllSubjects = readAllSubjects,
+                    ExcludedChatIds = excluded,
                 },
             };
             options.ValidateJournal();
 
             var reads = new FakeJournalReadStore();
-            var app = CommsApp.BuildJournalApp(builder, new FakeJournalStore(), options, new JournalRuntimeStats(), reads: reads);
+            var app = CommsApp.BuildJournalApp(builder, new FakeJournalStore(), options, new JournalRuntimeStats(), time: time, reads: reads);
             await app.StartAsync();
             return new McpHost(app, reads);
+        }
+
+        public HttpClient CreateClient() => _app.GetTestClient();
+
+        private long _sequence;
+        public async Task BindAsync(string subject, string kind, long chat, long bot = 7001)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Put, JournalTurnBindings.Path)
+            {
+                Content = new StringContent(JsonSerializer.Serialize(new
+                { epoch = "test-epoch", seq = ++_sequence, state = "bound", chatKind = kind, botId = bot, chatId = chat }), Encoding.UTF8, "application/json"),
+            };
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Token(JournalTokens.PurposeIngest, subject));
+            using var response = await _client.SendAsync(request);
+            Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
         }
 
         public Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, string? token)
@@ -762,7 +773,7 @@ internal sealed class FakeJournalReadStore : IJournalReadStore
 {
     private int _calls;
 
-    public sealed record Row(JournalReadMessage Message, long OrderKey, IReadOnlySet<string> Observers);
+    public sealed record Row(JournalReadMessage Message, long OrderKey, IReadOnlySet<string> Observers, string ConversationKey);
 
     public List<Row> Rows { get; } = [];
     public bool Unavailable { get; set; }
@@ -772,7 +783,7 @@ internal sealed class FakeJournalReadStore : IJournalReadStore
 
     public string Add(
         string conversationId, string chatKind, long chatId, long telegramMessageId, DateTimeOffset sentAt,
-        string text, string[] observers, long? replyTo = null, IReadOnlyList<JournalReadAttachment>? attachments = null)
+        string text, string[] observers, long? replyTo = null, IReadOnlyList<JournalReadAttachment>? attachments = null, long botId = 7001)
     {
         var id = Fleet.Protocol.Ulid.NewUlid(sentAt);
         Rows.Add(new Row(new JournalReadMessage
@@ -790,7 +801,8 @@ internal sealed class FakeJournalReadStore : IJournalReadStore
             Origin = "telegram_update",
             DeliveryState = "received",
             Attachments = attachments?.OrderBy(a => a.Ordinal).ToArray() ?? [],
-        }, telegramMessageId, observers.ToHashSet(StringComparer.Ordinal)));
+        }, telegramMessageId, observers.ToHashSet(StringComparer.Ordinal), JournalKeys.ConversationKey(new JournalTelegramRef
+        { BotId = botId, ChatId = chatId, ChatKind = Enum.Parse<JournalChatKind>(chatKind, true), MessageId = telegramMessageId })));
         return id;
     }
 
@@ -845,22 +857,13 @@ internal sealed class FakeJournalReadStore : IJournalReadStore
         return Task.FromResult(row is null ? null : Resolve(reader, row));
     }
 
-    public Task<JournalMessageLookup> FindByTelegramAsync(
-        JournalReader reader, long telegramChatId, long telegramMessageId, CancellationToken ct = default)
+    public Task<JournalReadMessage?> FindInConversationAsync(
+        JournalReader reader, string conversationKey, long telegramMessageId, CancellationToken ct = default)
     {
         Enter(reader);
-        var matches = Visible(reader)
-            .Where(r => r.Message.Conversation.TelegramChatId == telegramChatId && r.Message.TelegramMessageId == telegramMessageId)
-            .OrderBy(r => r.Message.MessageId, StringComparer.Ordinal)
-            .Take(JournalReadLimits.AmbiguousCandidates)
-            .ToList();
-
-        return Task.FromResult(matches.Count switch
-        {
-            0 => new JournalMessageLookup(),
-            1 => new JournalMessageLookup { Message = Resolve(reader, matches[0]) },
-            _ => new JournalMessageLookup { Candidates = matches.Select(m => m.Message.MessageId).ToArray() },
-        });
+        var row = Visible(reader).SingleOrDefault(r => r.ConversationKey == conversationKey
+            && r.Message.TelegramMessageId == telegramMessageId);
+        return Task.FromResult(row is null ? null : Resolve(reader, row));
     }
 
     public Task<JournalConversationPage?> ReadConversationAsync(

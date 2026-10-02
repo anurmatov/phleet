@@ -9,6 +9,8 @@ namespace Fleet.Agent.Services;
 public sealed class InjectionOutcomeCounter
 {
     public const string Injected = "injected";
+    /// <summary>A same-chat human message was queued instead of entering an operational turn.</summary>
+    public const string NotInjectedWorkflowTurn = "not_injected_workflow_turn";
     public const string DegradedToQueue = "degraded_to_queue";
     public const string FailedThenQueued = "failed_then_queued";
     public const string DroppedAtQueueCap = "dropped_at_queue_cap";

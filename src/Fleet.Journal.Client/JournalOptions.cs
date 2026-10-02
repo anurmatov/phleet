@@ -25,6 +25,8 @@ public sealed class JournalOptions
     public const long MaxSpoolBytes = 1L << 30;
 
     public string IngestToken { get; set; } = "";
+    public string ReadToken { get; set; } = "";
+    public bool FilesEnabled { get; set; }
 
     public string BaseUrl { get; set; } = "http://fleet-comms:8083";
 
@@ -60,6 +62,10 @@ public sealed class JournalOptions
     /// </summary>
     public string? DescribeFault()
     {
+        if (FilesEnabled && (!Enabled || !Regex.IsMatch(ReadToken.Trim(),
+            "^cj1\\.read\\.[A-Za-z0-9_-]{1,128}\\.[A-Za-z0-9_-]+={0,2}$", RegexOptions.CultureInvariant)
+            || ReadToken.Trim().Split('.')[2] != Subject))
+            return "Journal:FilesEnabled requires capture and a matching-subject journal read token.";
         if (!Enabled) return null;
 
         if (!TokenShape.IsMatch(IngestToken.Trim()))

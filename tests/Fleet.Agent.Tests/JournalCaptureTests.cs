@@ -454,7 +454,8 @@ public sealed class JournalCaptureTests : IDisposable
         }
 
         public static Rig Build(
-            string root, long botId = 5001, string? transcript = null, bool persist = true, bool journal = true)
+            string root, long botId = 5001, string? transcript = null, bool persist = true, bool journal = true,
+            TurnBindingPublisher? publisher = null)
         {
             var attachments = Path.Combine(root, "attachments");
             var spoolRoot = Path.Combine(root, "spool");
@@ -484,7 +485,7 @@ public sealed class JournalCaptureTests : IDisposable
 
             var allowlist = new AllowlistHolder(telegramOpts);
             var relay = new GroupRelayService(agentOpts, rabbitOpts, NullLogger<GroupRelayService>.Instance);
-            var taskMgr = new TaskManager(agentOpts, executor, new SessionManager(), NullLogger<TaskManager>.Instance);
+            var taskMgr = new TaskManager(agentOpts, executor, new SessionManager(), NullLogger<TaskManager>.Instance, turnBindings: publisher);
             var prompts = new PromptAssembler(executor);
             var commands = new CommandDispatcher(taskMgr, executor, agentOpts, NullLogger<CommandDispatcher>.Instance);
             var voice = new VoiceTranscriptionService(httpFactory, whisperOpts, NullLogger<VoiceTranscriptionService>.Instance);
@@ -507,7 +508,7 @@ public sealed class JournalCaptureTests : IDisposable
             var transport = new AgentTransport(
                 agentOpts, telegramOpts, allowlist, relay, taskMgr, group, router, commands, voice, tts,
                 Substitute.For<IFleetConnectionState>(), NullLogger<AgentTransport>.Instance, holder,
-                journal: capture);
+                journal: capture, turnBindings: publisher);
 
             var bot = new JournalBot(botId);
             transport.BotForTesting = bot;
@@ -662,6 +663,7 @@ public sealed class JournalRegistrationTests : IDisposable
 
         Assert.DoesNotContain(host.Services.GetServices<IHostedService>(), s => s is JournalDrainer);
         Assert.Null(host.Services.GetService<JournalDrainer>());
+        Assert.Null(host.Services.GetService<TurnBindingPublisher>());
         Assert.Null(host.Services.GetService<JournalCapture>());
         Assert.Null(host.Services.GetService<JournalSpool>());
         Assert.Null(host.Services.GetService<JournalHttpClient>());
@@ -681,6 +683,8 @@ public sealed class JournalRegistrationTests : IDisposable
 
         var drainer = Assert.Single(host.Services.GetServices<IHostedService>().OfType<JournalDrainer>());
         Assert.Same(drainer, host.Services.GetRequiredService<JournalDrainer>());
+        var publisher = Assert.Single(host.Services.GetServices<IHostedService>().OfType<TurnBindingPublisher>());
+        Assert.Same(publisher, host.Services.GetRequiredService<TurnBindingPublisher>());
         Assert.True(host.Services.GetServices<IHostedService>().OfType<AgentTransport>().Single().JournalEnabled);
         Assert.True(Directory.Exists(Path.Combine(_workDir, ".fleet", "journal-spool", "pending")));
 

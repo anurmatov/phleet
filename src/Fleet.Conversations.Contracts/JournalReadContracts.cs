@@ -46,9 +46,6 @@ public static class JournalReadLimits
     /// <summary>Longest <c>text_preview</c>, in characters.</summary>
     public const int PreviewChars = 500;
 
-    /// <summary>Most candidate ids an ambiguous Telegram lookup returns.</summary>
-    public const int AmbiguousCandidates = 10;
-
     /// <summary>
     /// A <c>get_conversation</c> page ends early once its text and transcripts reach this many UTF-8
     /// bytes. The first record of a page is always returned, so a traversal cannot stall.
@@ -203,19 +200,4 @@ public sealed record JournalConversationPage
     public required JournalReadConversation Conversation { get; init; }
     public required IReadOnlyList<JournalReadMessage> Items { get; init; }
     public JournalKeyPosition? Next { get; init; }
-}
-
-/// <summary>
-/// The Telegram form of <c>get_message</c>: one visible match, several, or none.
-/// </summary>
-public sealed record JournalMessageLookup
-{
-    /// <summary>The record, when exactly one visible message matches.</summary>
-    public JournalReadMessage? Message { get; init; }
-
-    /// <summary>
-    /// Up to <see cref="JournalReadLimits.AmbiguousCandidates"/> visible ids, when more than one
-    /// matches. Empty otherwise.
-    /// </summary>
-    public IReadOnlyList<string> Candidates { get; init; } = [];
 }

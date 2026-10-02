@@ -6,6 +6,7 @@ using Fleet.Conversations.Journal;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Fleet.Comms.Routes;
 
@@ -101,11 +102,14 @@ public static class JournalEndpoints
             }
 
             var runtime = stats.Read();
+            var bindings = app.Services.GetRequiredService<JournalTurnBindings>().Counts();
 
             // Counts and times only. Never message text.
             return Results.Json(new
             {
                 schemaVersion = status.SchemaVersion,
+                turnBindings = new { active = bindings.Active, expired = bindings.Expired },
+                attachmentFetch = new { inFlight = stats.AttachmentFetchInFlight },
                 enabled = true,
                 observers = status.Observers.Select(o => new
                 {

@@ -158,3 +158,29 @@ intruder=$(docker exec comms-seaweedfs curl -sS --aws-sigv4 'aws:amz:us-east-1:s
 [[ "$(unsigned '/')" == 403 ]]
 [[ "$(signed "$BASE/keep-object")" == preserved-object ]]
 echo 'PASS M9 unauthenticated gRPC cannot gain Admin'
+
+# X9: the Comms content route uses THIS scoped runtime identity, never the Admin fixture.
+: "${DOTNET_TEST_IMAGE:?CI must provide the matching .NET test SDK image}"
+: "${COMMS_SCOPED_TEST_ASSEMBLY:?CI must build the scoped integration assembly}"
+[[ -f "$COMMS_SCOPED_TEST_ASSEMBLY" ]]
+docker pull "$DOTNET_TEST_IMAGE"
+mkdir -p "$FIXTURE/testresults"
+export FLEET_COMMS_SCOPED_ACCESS_KEY="$ACCESS" FLEET_COMMS_SCOPED_SECRET_KEY="$SECRET"
+docker run --rm --network "$NETWORK" --user "$(id -u):$(id -g)" \
+  -e HOME=/tmp -e DOTNET_CLI_HOME=/tmp -e DOTNET_NOLOGO=1 \
+  -e FLEET_COMMS_SCOPED_ENDPOINT=http://comms-seaweedfs:8333 \
+  -e FLEET_COMMS_SCOPED_BUCKET=comms-journal \
+  -e FLEET_COMMS_SCOPED_ACCESS_KEY -e FLEET_COMMS_SCOPED_SECRET_KEY \
+  -v "$(dirname "$COMMS_SCOPED_TEST_ASSEMBLY"):/tests:ro" \
+  -v "$FIXTURE/testresults:/results" "$DOTNET_TEST_IMAGE" \
+  dotnet vstest /tests/Fleet.Conversations.Tests.dll \
+  --TestCaseFilter:FullyQualifiedName~JournalScopedAttachmentStoreTests \
+  '--logger:trx;LogFileName=scoped.trx' --ResultsDirectory:/results
+python3 - "$FIXTURE/testresults/scoped.trx" <<'PYSCOPED'
+import sys, xml.etree.ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+counts = root.find('.//{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}Counters').attrib
+assert counts['executed'] == counts['passed'] == '1', counts
+assert counts['notExecuted'] == '0', counts
+print('PASS X9 scoped-store content route: one executed, zero failures/skips')
+PYSCOPED

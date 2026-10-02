@@ -31,7 +31,8 @@ public class EmissionOwnershipInventoryTests
     /// </summary>
     private static readonly Dictionary<string, int> ExpectedSinkCallSites = new()
     {
-        ["Services/TaskManager.cs"] = 26,
+        // #401: protected primary-key capacity uses the same Human-origin queue-full owner.
+        ["Services/TaskManager.cs"] = 27,
         ["Services/CommandDispatcher.cs"] = 7,
         ["Services/MessageRouter.cs"] = 3,
     };
@@ -170,10 +171,11 @@ public class EmissionOwnershipInventoryTests
     /// process-lifetime only, and BufferBotResponse calls SaveBuffers on every completion, so
     /// without it client text would reach disk through the completion path. #277 §11 records it as
     /// existing behaviour. Pinning it means a future edit to it is visible here instead of being
-    /// absorbed into a number.
+    /// absorbed into a number. #401 adds two non-render binding filters: observing a Telegram
+    /// chat and dispatching its turn must both refuse reserved client keys.
     /// </summary>
     [Fact]
-    public void ReservedKeyGuards_StayInTheTransportAndStayAtFour()
+    public void ReservedKeyGuards_StayAtTheirAuditedBoundaries()
     {
         var guard = new Regex(@"ConversationRegistry\.IsReservedKey\s*\(\s*chatId\s*\)",
             RegexOptions.Compiled);
@@ -187,6 +189,7 @@ public class EmissionOwnershipInventoryTests
         {
             ["Interfaces/AgentTransport.cs"] = 4,   // render-path guards (#274 Constraint 1)
             ["Services/GroupBehavior.cs"] = 1,      // SaveBuffers persistence filter
+            ["Services/TurnBindingPublisher.cs"] = 2, // #401 observed-chat and dispatch binding filters
         }, byFile);
     }
 }

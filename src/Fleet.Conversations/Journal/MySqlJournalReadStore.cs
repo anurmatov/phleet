@@ -28,11 +28,11 @@ namespace Fleet.Conversations.Journal;
 /// consistent read takes no lock, so an ingest transaction held open does not stall a reader.
 /// </para>
 /// <para>
-/// ⚠️ Attachment columns are selected by name, and the object id, digest and platform file id are
-/// not among them. The media boundary holds in the SQL, not only in the serializer.
+/// ⚠️ Public read-tool attachment columns are selected by name without locators or digests.
+/// The separate Comms-only attachment source returns delivery metadata, never a public record.
 /// </para>
 /// </remarks>
-public sealed class MySqlJournalReadStore : IJournalReadStore
+public sealed class MySqlJournalReadStore : IJournalReadStore, IJournalAttachmentSource
 {
     private static readonly TimeSpan SchemaCacheDuration = TimeSpan.FromSeconds(30);
 
@@ -174,6 +174,42 @@ public sealed class MySqlJournalReadStore : IJournalReadStore
             parameters.AddWithValue("@caller", reader.Subject);
             parameters.AddWithValue("@message", messageId);
         }, async (rows, token) => await rows.ReadAsync(token) ? ReadRecord(rows) : null, ct);
+    }
+
+    public Task<JournalAttachmentLocator?> FindAttachmentAsync(
+        JournalReader reader, string conversationKey, string? messageId,
+        long? telegramMessageId, int ordinal, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(reader);
+        ArgumentNullException.ThrowIfNull(conversationKey);
+        if ((messageId is null) == (telegramMessageId is null))
+            throw new ArgumentException("Exactly one message identifier is required.", nameof(messageId));
+        if (messageId is not null && !Fleet.Protocol.Ulid.IsValid(messageId))
+            throw new ArgumentException("A journal message id is required.", nameof(messageId));
+        if (ordinal is < 0 or > 255) throw new ArgumentOutOfRangeException(nameof(ordinal));
+        var identifier = messageId is not null ? "m.id = @message" : "m.source_key = @message";
+        var sql = $"""
+            SELECT m.id, a.ordinal, a.kind, a.mime_type, a.byte_size, a.state,
+                   a.not_archived_reason, a.sha256, o.object_key, o.state, o.byte_size, o.sha256
+              FROM journal_conversations c
+              JOIN journal_messages m ON m.conversation_id = c.id
+              JOIN journal_attachments a ON a.message_id = m.id AND a.ordinal = @ordinal
+              LEFT JOIN journal_objects o ON o.id = a.object_id
+             WHERE c.conversation_key = @conversation AND {identifier} AND {Visible(reader, "m")}
+             LIMIT 1
+            """;
+        return QueryAsync("fetch_attachment", sql, parameters =>
+        {
+            parameters.AddWithValue("@caller", reader.Subject);
+            parameters.AddWithValue("@conversation", conversationKey);
+            parameters.AddWithValue("@message", messageId ?? "tg:" + telegramMessageId!.Value.ToString(CultureInfo.InvariantCulture));
+            parameters.AddWithValue("@ordinal", ordinal);
+        }, async (rows, token) => await rows.ReadAsync(token)
+            ? new JournalAttachmentLocator(rows.GetString(0), rows.GetByte(1), rows.GetString(2),
+                rows.GetString(3), rows.IsDBNull(4) ? null : rows.GetInt64(4), rows.GetString(5),
+                NullableString(rows, 6), NullableString(rows, 7), NullableString(rows, 8),
+                NullableString(rows, 9), rows.IsDBNull(10) ? null : rows.GetInt64(10), NullableString(rows, 11))
+            : null, ct);
     }
 
     public Task<JournalReadMessage?> FindInConversationAsync(

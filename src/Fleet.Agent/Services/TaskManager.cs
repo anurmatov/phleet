@@ -34,6 +34,14 @@ public sealed class TaskManager
 
     private string _botUsername = "";
 
+    /// <summary>
+    /// Agent-level late-result guard (#406): 1 only after a steered turn ended with a terminal
+    /// result and its drain read fewer own-turn answers than steering copies. The next executor
+    /// turn consumes it and, in a leading <c>recovered_answer</c>, drops only <c>user</c> segments.
+    /// </summary>
+    private int _steeringResidue;
+    internal bool SteeringResidueForTest => Volatile.Read(ref _steeringResidue) == 1;
+
     private enum PendingQueueResult
     {
         NoPending,
@@ -151,7 +159,8 @@ public sealed class TaskManager
         IReadOnlyList<MessageDocument>? documents = null,
         long userId = 0,
         ConversationIdentity? identity = null,
-        TaskPriority priority = TaskPriority.Routine, long telegramMessageId = 0)
+        TaskPriority priority = TaskPriority.Routine, long telegramMessageId = 0,
+        bool steeringEligible = false)
     {
         if (source is not (TaskSource.UserMessage or TaskSource.NewCommand)) priority = TaskPriority.Routine;
         var keyed = priority == TaskPriority.PrimaryHuman && telegramMessageId > 0;
@@ -166,7 +175,7 @@ public sealed class TaskManager
         try
         {
             var outcome = await StartTaskCore(chatId, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, skipPendingQueueCheck: false, identity: identity,
-                priority: priority, telegramMessageId: telegramMessageId);
+                priority: priority, telegramMessageId: telegramMessageId, steeringEligible: steeringEligible);
             if (keyed && outcome is TaskDispatchOutcome.Dropped or TaskDispatchOutcome.QueueFull) _primaryDedup.Complete(chatId, telegramMessageId);
             return outcome;
         }
@@ -187,7 +196,8 @@ public sealed class TaskManager
         ConversationIdentity? identity = null,
         IReadOnlyList<string>? mergedSubmissionIds = null,
         TaskPriority priority = TaskPriority.Routine, long telegramMessageId = 0,
-        IReadOnlyList<long>? primaryMessageIds = null)
+        IReadOnlyList<long>? primaryMessageIds = null,
+        bool steeringEligible = false)
     {
         // A null identity means a caller that predates the seam — synthesize one from the runtime
         // key so every dispatch decision has something to report against, and every existing call
@@ -241,6 +251,9 @@ public sealed class TaskManager
         }
 
         var queuedPart = CreateQueuedPart(task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, identity: identity, priority: priority, telegramMessageId: telegramMessageId) with { PrimaryMessageIds = primaryMessageIds };
+        // #406: only the router's verified-human flag makes a message eligible to steer a running
+        // workflow turn, and only after it took today's queue path and was Queued.
+        var steer = steeringEligible && source == TaskSource.UserMessage;
         if (!skipPendingQueueCheck)
         {
             var pendingResult = TryAppendToPendingQueue(chatId, queuedPart);
@@ -251,6 +264,7 @@ public sealed class TaskManager
                 // and the reservation is released by the finally block in Task.Run.
                 _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.MergedIntoQueue);
                 OnStatusChanged?.Invoke();
+                if (steer) await SteerRunningTurnAsync(chatId, userId, queuedPart, images, documents);
                 return ReportDisposition(chatId, identity, TaskDispatchOutcome.Queued);
             }
 
@@ -270,6 +284,7 @@ public sealed class TaskManager
                 // Release the reservation only when enqueue failed — a queued task keeps it.
                 if (!enqueued && taskId is not null)
                     _activeTaskIds.TryRemove(taskId, out _);
+                if (enqueued && steer) await SteerRunningTurnAsync(chatId, userId, queuedPart, images, documents);
                 return ReportDisposition(chatId, identity, enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull);
             }
         }
@@ -300,6 +315,7 @@ public sealed class TaskManager
             // Release the reservation only when enqueue failed — a queued task keeps it.
             if (!enqueued && taskId is not null)
                 _activeTaskIds.TryRemove(taskId, out _);
+            if (enqueued && steer) await SteerRunningTurnAsync(chatId, userId, queuedPart, images, documents);
             return ReportDisposition(chatId, identity, enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull);
         }
 
@@ -836,6 +852,29 @@ public sealed class TaskManager
             }
         }
 
+        // #406: a steering copy that ran as its own Claude turn produced an answer that belongs to
+        // nobody — not the workflow, not the human (who gets a reply turn), not the next task. Read
+        // those turns under this turn's own origin and drop every answer. Only after a terminal
+        // result with a live process: never on cancellation, an exception or process exit.
+        async Task DiscardSteeringTurnAnswersAsync()
+        {
+            var steerCount = state.Get(taskId)?.SteerCount ?? 0;
+            if (steerCount <= 0 || processExitResult) return;
+            var read = 0;
+            using (_ledger?.Pending(origin))
+            {
+                await foreach (var _ in _executor.ReadInjectedTurnAnswersAsync(steerCount, ct))
+                {
+                    read++;
+                    _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.SteerAnswerDiscarded);
+                    _logger.LogInformation("Task #{TaskId}: discarded the answer to a steering message that ran as its own turn", taskId);
+                }
+            }
+            // A steering own turn that did not start in time may still finish before the next send;
+            // its text then arrives as that turn's leading recovered_answer, tagged `user`.
+            if (read < steerCount) Volatile.Write(ref _steeringResidue, 1);
+        }
+
         // Grab the inbox for this task to receive mid-execution messages
         var inboxReader = state.Get(taskId)?.Inbox.Reader;
 
@@ -850,8 +889,13 @@ public sealed class TaskManager
             {
                 // #394: the executor tags its lock-held interval with this, once it holds the lock.
                 using var pendingOrigin = _ledger?.Pending(origin);
+                // #406: this executor turn consumes the late-result guard whatever its first event is.
+                var steeringResidue = Interlocked.Exchange(ref _steeringResidue, 0) == 1;
+                var firstEvent = true;
                 await foreach (var progress in _executor.ExecuteAsync(currentTask, currentImages, currentDocuments, ct))
                 {
+                    var guardsThisEvent = steeringResidue && firstEvent;
+                    firstEvent = false;
                     if (isSessionTask && progress.SessionId is not null)
                         _sessions.SetSession(chatId, progress.SessionId);
 
@@ -887,11 +931,17 @@ public sealed class TaskManager
                         // Stale answer from the prior turn preserved during drain — deliver
                         // immediately so it reaches the user before the new turn's response.
                         // It is an answer, so it is journaled like one (#394).
-                        await _sink.SendReplyByOriginAsync(chatId, new AgentReply(progress.Summary), origin);
-                        var (recoveredText, recoveredTruncated) = ProtocolSanitizer.SanitizeAndBound(
-                            progress.Summary, ProtocolLimits.MaxNoticeTextChars, attachmentDir);
-                        PublishEvent(chatId, ConversationEventKind.TurnRecoveredAnswer, identity,
-                            new TurnRecoveredAnswerPayload { Text = recoveredText, Truncated = recoveredTruncated ? true : null });
+                        // #406: right after a steered turn's short drain, only `user` segments can be
+                        // a steering answer; drop those and deliver the rest exactly as today.
+                        var recovered = guardsThisEvent ? WithoutSteeringSegments(progress, taskId) : progress.Summary;
+                        if (recovered is not null)
+                        {
+                            await _sink.SendReplyByOriginAsync(chatId, new AgentReply(recovered), origin);
+                            var (recoveredText, recoveredTruncated) = ProtocolSanitizer.SanitizeAndBound(
+                                recovered, ProtocolLimits.MaxNoticeTextChars, attachmentDir);
+                            PublishEvent(chatId, ConversationEventKind.TurnRecoveredAnswer, identity,
+                                new TurnRecoveredAnswerPayload { Text = recoveredText, Truncated = recoveredTruncated ? true : null });
+                        }
                     }
                     else if (progress.IsSignificant && progress.ToolName is not null)
                     {
@@ -1043,6 +1093,7 @@ public sealed class TaskManager
                         // ...then any injected message Claude answered in a turn of its own, so the
                         // merged continuation below does not start while that turn is still running.
                         await DeliverInjectedTurnAnswersAsync(completingTask?.InjectionCount ?? 0);
+                        await DiscardSteeringTurnAnswersAsync();
 
                         // ...and terminate it on the event path too, under the OUTGOING identity,
                         // before the new turn is minted below. This turn really did finish and
@@ -1092,6 +1143,7 @@ public sealed class TaskManager
                         if (completingTask is not null)
                         {
                             completingTask.InjectionCount = 0;
+                            completingTask.SteerCount = 0;
                             completingTask.InjectedMessagesForResume.Clear();
                         }
                         // Reset per-turn state but accumulate texts and stats
@@ -1121,6 +1173,7 @@ public sealed class TaskManager
             if (lastResult is not null && lastResult.Trim().Equals("IDLE", StringComparison.OrdinalIgnoreCase))
             {
                 _logger.LogInformation("Result is IDLE-only, suppressing output for chat {ChatId} (source={Source})", chatId, source);
+                await DiscardSteeringTurnAnswersAsync();
                 // Relay/bridge callers have a delegate step waiting — fire OnTaskCompleted with
                 // CompletionKind.Idle so the workflow can advance instead of hanging to retry exhaustion.
                 if (source is TaskSource.Relay or TaskSource.Bridge)
@@ -1175,6 +1228,7 @@ public sealed class TaskManager
                 // so that agent addresses from intermediate turns aren't lost
                 await SendWithStatsAsync($"{Prefix()}{lastResult}{marker}", isReply: true);
                 await DeliverInjectedTurnAnswersAsync(injectedIntoLastTurn);
+                await DiscardSteeringTurnAnswersAsync();
                 var fullText = string.Join("\n", allAssistantTexts);
                 // errorResult covers max-turns exhaustion (IsErrorResult from executor) — use
                 // Incomplete so the workflow continuation loop can retry, not Failed which abandons.
@@ -1202,6 +1256,7 @@ public sealed class TaskManager
                     _sessions.ClearSession(chatId);
                 var errorMsg = $"Task failed: {lastError}";
                 await SendWithStatsAsync($"{Prefix()}{errorMsg}");
+                await DiscardSteeringTurnAnswersAsync();
                 OnTaskCompleted?.Invoke(chatId, errorMsg, relaySender, source, true, correlationId, relayTaskId, CompletionKind.Failed);
 
                 // The client event carries the FIXED message for the code, never lastError.
@@ -1218,12 +1273,14 @@ public sealed class TaskManager
                 var errorMsg = "Task failed: executor reported an error and produced no output";
                 _logger.LogError("Task #{TaskId} for chat {ChatId}: {Error}", taskId, chatId, errorMsg);
                 await SendWithStatsAsync($"{Prefix()}{errorMsg}");
+                await DiscardSteeringTurnAnswersAsync();
                 OnTaskCompleted?.Invoke(chatId, errorMsg, relaySender, source, true, correlationId, relayTaskId, CompletionKind.Failed);
                 PublishTerminalError(chatId, taskId, identity, ProtocolErrorCode.ExecutorError);
             }
             else
             {
                 await SendWithStatsAsync($"{Prefix()}Done! (no text output)");
+                await DiscardSteeringTurnAnswersAsync();
                 OnTaskCompleted?.Invoke(chatId, "Done! (no text output)", relaySender, source, false, correlationId, relayTaskId, CompletionKind.Completed);
                 PublishTerminal(chatId, taskId, ConversationEventKind.TurnFinal, identity,
                     new TurnFinalPayload
@@ -1276,6 +1333,97 @@ public sealed class TaskManager
         running = state.Snapshot().FirstOrDefault(t => t.IsSessionTask
             && t.Source is TaskSource.UserMessage or TaskSource.DebouncedGroupBatch)!;
         return running is not null;
+    }
+
+    /// <summary>
+    /// The one running workflow turn a verified human may steer (#406), across every runtime chat
+    /// key: a relay/bridge turn runs under the relay's chat id, never the human's. One turn runs
+    /// at a time, so several candidates is a broken invariant and steers nothing.
+    /// </summary>
+    private bool TryGetSteerableTurn(out RunningTask running)
+    {
+        var candidates = _chatTasks.Values.SelectMany(s => s.Snapshot())
+            .Where(t => t.Source is TaskSource.Relay or TaskSource.Bridge && t.IsSessionTask && !t.Closed)
+            .Take(2).ToList();
+        if (candidates.Count > 1)
+            _logger.LogWarning("Human steering skipped: more than one running Relay or Bridge turn");
+        running = candidates.Count == 1 ? candidates[0] : null!;
+        return candidates.Count == 1;
+    }
+
+    /// <summary>
+    /// Queue first, then steer (#406): the message is already queued for its own reply turn; this
+    /// only offers a text-only copy to the running workflow turn. It never touches that turn's
+    /// Inbox, resume list, merged submissions, injection count, dedup or binding.
+    /// </summary>
+    private async Task SteerRunningTurnAsync(long chatId, long userId, QueuedMessagePart part,
+        IReadOnlyList<MessageImage>? images, IReadOnlyList<MessageDocument>? documents)
+    {
+        if (!TryGetSteerableTurn(out var running)) return;
+        string outcome;
+        await running.TurnDispatchLock.WaitAsync();
+        try
+        {
+            if (running.Closed) outcome = "closed";
+            else if (running.SteeringOwner is { } owner && owner != (chatId, userId)) outcome = "refused_other_human";
+            else if (running.SteerCount >= MaxMidTurnInjectionsPerTurn) outcome = "cap";
+            else
+            {
+                var attachments = (images?.Count ?? 0) + (documents?.Count ?? 0);
+                var result = await _executor.TryInjectMessageAsync(FormatSteeringMessage(part.Task, attachments),
+                    null, null, running.Cts.Token);
+                outcome = result.Status switch
+                {
+                    MidTurnInjectionStatus.Injected => "injected",
+                    MidTurnInjectionStatus.NoActiveTurn => "no_active_turn",
+                    MidTurnInjectionStatus.Unsupported => "unsupported",
+                    _ => "failed",
+                };
+                if (result.Status == MidTurnInjectionStatus.Injected)
+                {
+                    running.SteeringOwner ??= (chatId, userId);
+                    running.SteerCount++;
+                    part.Steered = true;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            outcome = "failed";
+            _logger.LogWarning("Human steering into task #{TaskId} failed: {Type}", running.Id, ex.GetType().Name);
+        }
+        finally
+        {
+            running.TurnDispatchLock.Release();
+        }
+
+        _injectionCounter.Increment(_agentConfig.Provider, outcome switch
+        {
+            "injected" => InjectionOutcomeCounter.SteeredNonHumanTurn,
+            "refused_other_human" => InjectionOutcomeCounter.SteerRefusedOtherHuman,
+            _ => InjectionOutcomeCounter.SteerNotDelivered,
+        });
+        _logger.LogInformation("Steered human message into running {Source} task #{TaskId}: {Outcome}",
+            running.Source, running.Id, outcome);
+    }
+
+    /// <summary>
+    /// A leading recovered answer right after a steered turn's short drain (#406): drop only the
+    /// segments a stdin-started turn produced: in that window they can only be steering answers. Null when
+    /// nothing remains. Unsegmented text has unknown provenance and is delivered unchanged.
+    /// </summary>
+    private string? WithoutSteeringSegments(AgentProgress progress, int taskId)
+    {
+        if (progress.RecoveredSegments is not { } segments) return progress.Summary;
+        var dropped = segments.Count(s => s.Origin == RecoveredSegment.User);
+        if (dropped == 0) return progress.Summary;
+        for (var i = 0; i < dropped; i++)
+        {
+            _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.SteerAnswerDiscarded);
+            _logger.LogInformation("Task #{TaskId}: discarded a late steering answer from a recovered answer", taskId);
+        }
+        var kept = segments.Where(s => s.Origin != RecoveredSegment.User).Select(s => s.Text).ToList();
+        return kept.Count > 0 ? string.Join("\n", kept) : null;
     }
 
     private async Task<TaskDispatchOutcome> DeliverMidTurnMessageAsync(long chatId, RunningTask running, MidTurnMessage message)
@@ -1511,6 +1659,41 @@ public sealed class TaskManager
 
         """ + original;
 
+    /// <summary>Fixed header of a steering copy (#406). <see cref="FormatInjectedMessage"/> is not applied.</summary>
+    internal const string SteeringHeader =
+        """
+        [HUMAN MESSAGE — a person wrote to you
+        while you are doing workflow work. You
+        may adjust or stop the current work
+        because of it. Do not reply to the
+        person here: this turn's final answer
+        still goes only to the workflow. After
+        this turn ends you get a separate turn
+        in that person's chat to reply.]
+        """;
+
+    /// <summary>Prefix each steered part gets when its queued entry is drained into the reply turn.</summary>
+    internal const string SteeredPartPrefix =
+        "[You already saw this message during workflow work. That turn has ended. Reply to the person now.]";
+
+    /// <summary>The steering header, then the already-formatted human prompt. Text only: media waits for the reply turn.</summary>
+    internal static string FormatSteeringMessage(string prompt, int attachments) =>
+        SteeringHeader + "\n\n" + prompt
+        + (attachments > 0 ? $"\n\n({attachments} attachments will be available in the reply turn.)" : "");
+
+    /// <summary>A copy of the entry with each steered part prefixed; the entry itself when none is.</summary>
+    private static QueuedMessage WithSteeredPrefix(QueuedMessage queued)
+    {
+        var parts = queued.Parts;
+        if (!parts.Any(p => p.Steered)) return queued;
+        static QueuedMessagePart Prefixed(QueuedMessagePart p) =>
+            p.Steered ? p with { Task = SteeredPartPrefix + "\n\n" + p.Task } : p;
+        var rebuilt = new QueuedMessage(queued.ChatId, Prefixed(parts[0]));
+        foreach (var part in parts.Skip(1))
+            if (!rebuilt.TryAppendPart(Prefixed(part))) return queued;
+        return rebuilt;
+    }
+
     private async Task RunTypingLoopAsync(long chatId, CancellationToken ct, ConversationIdentity? identity = null)
     {
         try
@@ -1653,7 +1836,7 @@ public sealed class TaskManager
 
         QueueEntryClaimedForTest?.Invoke();
 
-        var payload = queued.BuildPayload(DateTimeOffset.Now);
+        var payload = WithSteeredPrefix(queued).BuildPayload(DateTimeOffset.Now);
 
         _logger.LogInformation("Queue dispatch lane={lane} reason={reason} chat={chat} parts={parts} waitedMs={waitedMs}",
             queued.Priority == TaskPriority.PrimaryHuman ? "priority" : "routine", "queue_drain",

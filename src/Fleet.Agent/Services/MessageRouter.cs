@@ -200,7 +200,8 @@ public sealed class MessageRouter
             images: msg.Images.Count > 0 ? msg.Images : null,
             documents: msg.Documents.Count > 0 ? msg.Documents : null,
             userId: msg.UserId, priority: PrimaryHumanClassifier.Classify(msg, _telegramConfig, _allowlist),
-            telegramMessageId: msg.TelegramMessageId);
+            telegramMessageId: msg.TelegramMessageId,
+            steeringEligible: PrimaryHumanClassifier.IsVerifiedHuman(msg, _allowlist));
     }
 
     private CancellationToken _shutdownToken = CancellationToken.None;

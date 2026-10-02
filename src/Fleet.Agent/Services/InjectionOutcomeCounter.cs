@@ -18,6 +18,14 @@ public sealed class InjectionOutcomeCounter
     public const string MergedIntoQueue = "merged_into_queue";
     /// <summary>An injected message ran as its own provider turn and its answer was delivered at once (#369).</summary>
     public const string AnsweredAsSeparateTurn = "answered_as_separate_turn";
+    /// <summary>A verified human's steering copy entered a running Relay/Bridge turn (#406).</summary>
+    public const string SteeredNonHumanTurn = "steered_non_human_turn";
+    /// <summary>A steering copy was not delivered (no active turn, unsupported, failed, cap, closed); the message stays queued.</summary>
+    public const string SteerNotDelivered = "steer_not_delivered";
+    /// <summary>A second human tried to steer a turn another (chat, user) already steered; queued only.</summary>
+    public const string SteerRefusedOtherHuman = "steer_refused_other_human";
+    /// <summary>An answer produced only by a steering copy was dropped, never delivered.</summary>
+    public const string SteerAnswerDiscarded = "steer_answer_discarded";
 
     private readonly ConcurrentDictionary<(string provider, string outcome), long> _counts = new();
 

@@ -36,6 +36,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
     // can be delivered out-of-band at the start of the next turn without going through
     // ParseAssistantEvent (which would set _turnCommittedToFinalAnswer prematurely).
     private string? _preservedDrainedAnswerText;
+    // The same preserved text split at each stale result and tagged by provenance (#406).
+    // Additive: _preservedDrainedAnswerText and the recovered_answer Summary are unchanged.
+    private List<RecoveredSegment>? _preservedDrainedSegments;
     // Top-level assistant text is buffered until the matching terminal result event. The
     // result event is the only owner of AgentProgress.FinalResult, so TaskManager sees one
     // completion per logical turn even though Claude emits both assistant and result events.
@@ -171,6 +174,8 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 if (_preservedDrainedAnswerText is string preserved)
                 {
                     _preservedDrainedAnswerText = null;
+                    var segments = _preservedDrainedSegments;
+                    _preservedDrainedSegments = null;
                     _logger.LogInformation(
                         "Delivering {Length}-char preserved stale answer text out-of-band before new turn",
                         preserved.Length);
@@ -179,6 +184,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                         IsSignificant = true,
                         Summary = preserved,
                         EventType = "recovered_answer",
+                        RecoveredSegments = segments,
                     };
                 }
 
@@ -607,6 +613,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
     internal void SetEventChannelForTests(System.Threading.Channels.Channel<ClaudeStreamEvent> channel) => _eventChannel = channel;
     internal void DrainStaleTurnEventsForTests() => DrainStaleTurnEvents();
     internal string? PreservedDrainedAnswerTextForTests => _preservedDrainedAnswerText;
+    internal IReadOnlyList<RecoveredSegment>? PreservedDrainedSegmentsForTests => _preservedDrainedSegments;
 
     /// <summary>
     /// Starts the background stdout reader over <paramref name="stdout"/>, as EnsureProcess does for
@@ -641,8 +648,18 @@ public sealed class ClaudeExecutor : IAgentExecutor
     {
         if (_eventChannel is null) return;
         var discardedByType = new Dictionary<string, int>();
+        // Text since the last stale result: a segment ends at each result, tagged by its origin.
+        string? open = null;
+        void EndSegment(string origin)
+        {
+            if (open is null) return;
+            (_preservedDrainedSegments ??= []).Add(new RecoveredSegment(open, origin));
+            open = null;
+        }
         while (_eventChannel.Reader.TryRead(out var stale))
         {
+            if (stale.Type == "result")
+                EndSegment(IsCurrentTurnResult(stale) ? RecoveredSegment.User : RecoveredSegment.Notification);
             if (stale.Type == "assistant")
             {
                 // Extract text without going through ParseAssistantEvent so
@@ -659,6 +676,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                         _preservedDrainedAnswerText = _preservedDrainedAnswerText is null
                             ? text
                             : _preservedDrainedAnswerText + "\n" + text;
+                        open = open is null ? text : open + "\n" + text;
                         _logger.LogInformation(
                             "Preserved {Length}-char stale assistant answer text for out-of-band delivery",
                             text.Length);
@@ -670,6 +688,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 discardedByType[stale.Type] = discardedByType.GetValueOrDefault(stale.Type) + 1;
             }
         }
+        EndSegment(RecoveredSegment.Open);
         if (discardedByType.Count > 0)
         {
             var summary = string.Join(", ", discardedByType.Select(kv => $"{kv.Key}×{kv.Value}"));
@@ -892,6 +911,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
         // Clear any preserved stale answer — text from one conversation must not surface
         // in a later unrelated conversation when the process is restarted.
         _preservedDrainedAnswerText = null;
+        _preservedDrainedSegments = null;
         _currentTurnAssistantText = null;
 
         if (_process is null) return;
@@ -1024,6 +1044,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
             // answer it must be discarded here — not carried into the next ExecuteAsync turn
             // where it would surface as a recovered_answer event in an unrelated conversation.
             _preservedDrainedAnswerText = null;
+            _preservedDrainedSegments = null;
             _currentTurnAssistantText = null;
 
             // Wrap as a user message containing the slash command

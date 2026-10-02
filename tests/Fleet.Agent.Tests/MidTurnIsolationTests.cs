@@ -52,13 +52,18 @@ public sealed partial class MidTurnIsolationTests
         var results = new ConcurrentQueue<(TaskSource Source, string Result, string? Correlation)>();
         manager.OnTaskCompleted += (_, result, _, completedSource, _, correlation, _, _) =>
             results.Enqueue((completedSource, result, correlation));
+        // #406: a verified human steers a running Relay/Bridge turn (one text-only copy) and still
+        // gets its own queued reply turn; CheckIn and /new turns are never steered.
+        var workflow = source is TaskSource.Relay or TaskSource.Bridge;
+        var human = workflow && status == MidTurnInjectionStatus.Injected ? $"{TaskManager.SteeredPartPrefix}\n\nhuman-only" : "human-only";
         try
         {
             Assert.Equal(TaskDispatchOutcome.Ran, await manager.StartTask(101, "workflow-only", "workflow", true,
                 source: source, correlationId: "synthetic-correlation"));
             await executor.WaitStarted(1);
-            Assert.Equal(TaskDispatchOutcome.Queued, await manager.StartTask(101, "human-only", "human", true, priority: primary ? TaskPriority.PrimaryHuman : TaskPriority.Routine));
-            Assert.Equal(0, executor.InjectionAttempts);
+            Assert.Equal(TaskDispatchOutcome.Queued, await manager.StartTask(101, "human-only", "human", true, priority: primary ? TaskPriority.PrimaryHuman : TaskPriority.Routine,
+                steeringEligible: workflow));
+            Assert.Equal(workflow ? 1 : 0, executor.InjectionAttempts);
             Assert.Single(manager.GetQueueSnapshot());
             Assert.Equal(primary ? TaskPriority.PrimaryHuman : TaskPriority.Routine, manager.GetQueueSnapshot()[0].Priority);
             Assert.Equal(TaskSource.UserMessage, manager.GetQueueSnapshot()[0].Source);
@@ -70,12 +75,12 @@ public sealed partial class MidTurnIsolationTests
             Assert.Equal(source, completion.Source);
             Assert.Equal("workflow-only", completion.Result);
             Assert.Equal("synthetic-correlation", completion.Correlation);
-            Assert.Equal("human-only", executor.Tasks[1]);
+            Assert.Equal(human, executor.Tasks[1]);
             Assert.Equal(source is TaskSource.Relay or TaskSource.Bridge or TaskSource.CheckIn ? 1 : 0,
                 counter.GetCount(provider, "not_injected_workflow_turn"));
             executor.Release();
             await Until(() => results.Count == 2 && !manager.HasRunningTasks(101));
-            Assert.Equal((TaskSource.UserMessage, "human-only", (string?)null), results.Last());
+            Assert.Equal((TaskSource.UserMessage, human, (string?)null), results.Last());
         }
         finally { await manager.CancelAllAsync(); }
     }

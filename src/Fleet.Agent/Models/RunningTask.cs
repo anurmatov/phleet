@@ -30,6 +30,15 @@ public sealed class RunningTask
     /// <summary>Number of successful live injections accepted into this turn.</summary>
     public int InjectionCount { get; set; }
 
+    /// <summary>
+    /// Human steering copies accepted (<c>Injected</c>) into this Relay/Bridge turn (#406). Never
+    /// counted in <see cref="InjectionCount"/>: a steering answer is not a reply to deliver.
+    /// </summary>
+    public int SteerCount { get; set; }
+
+    /// <summary>The first (chat, user) whose steering copy entered this turn; only it may steer again.</summary>
+    public (long ChatId, long UserId)? SteeringOwner { get; set; }
+
     /// <summary>Injected messages to redeliver if the process dies before the turn completes cleanly.</summary>
     public List<MidTurnMessage> InjectedMessagesForResume { get; } = [];
 

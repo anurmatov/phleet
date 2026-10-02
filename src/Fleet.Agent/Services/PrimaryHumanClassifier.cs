@@ -13,4 +13,15 @@ public static class PrimaryHumanClassifier
             && (!message.IsGroupChat || allowed.GroupIds.Contains(message.ChatId))
             ? TaskPriority.PrimaryHuman : TaskPriority.Routine;
     }
+
+    /// <summary>
+    /// An allowed human, primary or not: the same tests as <see cref="Classify"/> minus the
+    /// primary-id match. Only this decides human-steering eligibility (#406).
+    /// </summary>
+    public static bool IsVerifiedHuman(IncomingMessage message, AllowlistHolder allowlist)
+    {
+        var allowed = allowlist.JournalSnapshot();
+        return message.UserId != 0 && !message.FromIsBot && !message.HasSenderChat && allowed.UserIds.Contains(message.UserId)
+            && (!message.IsGroupChat || allowed.GroupIds.Contains(message.ChatId));
+    }
 }

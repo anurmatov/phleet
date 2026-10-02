@@ -377,21 +377,26 @@ public static class OperatorCommands
 
     /// <param name="allowNegativeNumber">
     /// Only <c>--telegram-chat</c> takes one: basic-group and supergroup chat ids are negative.
-    /// Every other option keeps refusing a value that starts with <c>-</c>, which is how a
-    /// forgotten value followed by the next flag is caught.
+    /// Device handles may also start with <c>-</c>: they are unpadded base64url. Only
+    /// <c>--device-id</c> accepts that exact shape; other flags still cannot become values.
     /// </param>
     private static string? Optional(string[] args, string name, bool allowNegativeNumber = false)
     {
         var index = Array.IndexOf(args, name);
         if (index < 0)
             return null;
-        if (index + 1 >= args.Length
-            || (args[index + 1].StartsWith('-')
-                && !(allowNegativeNumber && long.TryParse(args[index + 1],
-                    System.Globalization.NumberStyles.AllowLeadingSign,
-                    System.Globalization.CultureInfo.InvariantCulture, out _))))
+        if (index + 1 >= args.Length)
             throw new OperatorCommandException($"{name} needs a value.");
-        return args[index + 1];
+        var value = args[index + 1];
+        var deviceId = name == "--device-id"
+            && value.Length == (Credentials.RecordIdBytes * 8 + 5) / 6
+            && value.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_');
+        if (value.StartsWith('-') && !deviceId
+            && !(allowNegativeNumber && long.TryParse(value,
+                System.Globalization.NumberStyles.AllowLeadingSign,
+                System.Globalization.CultureInfo.InvariantCulture, out _)))
+            throw new OperatorCommandException($"{name} needs a value.");
+        return value;
     }
 
 

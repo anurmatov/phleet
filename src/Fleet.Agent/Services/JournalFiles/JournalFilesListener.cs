@@ -23,9 +23,12 @@ public sealed class JournalFilesListener(JournalFilesTools tools, ILoggerFactory
             var builder = WebApplication.CreateEmptyBuilder(new WebApplicationOptions());
             builder.Services.AddSingleton(logs);
             builder.Services.AddSingleton(typeof(ILogger<>), typeof(Logger<>));
-            builder.Services.AddRouting(); builder.Services.AddSingleton(tools);
+            builder.Services.AddRouting();
+            // Target-instance overload: every call runs on the one parent-owned instance, so its
+            // serialization, deadline and counters hold. The parameterless generic overload
+            // would construct a new instance per call against this child container.
             builder.Services.AddMcpServer(options => options.ServerInfo = new Implementation { Name = ServerName, Version = "1" })
-                .WithHttpTransport(options => options.Stateless = true).WithTools<JournalFilesTools>();
+                .WithHttpTransport(options => options.Stateless = true).WithTools(tools);
             builder.WebHost.UseKestrelCore().ConfigureKestrel(options =>
             { options.AddServerHeader = false; options.Listen(IPAddress.Loopback, 8091); });
             _app = builder.Build();

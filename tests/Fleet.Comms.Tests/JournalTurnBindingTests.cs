@@ -175,6 +175,10 @@ public sealed class JournalTurnBindingTests
         Assert.Equal("{\"error\":\"binding_capacity\"}", await response.Content.ReadAsStringAsync());
     }
 
+    [Fact]
+    public Task TwoSubjects_OneBinding_DoesNotAffectTheOtherReadToken() =>
+        JournalReadMcpTests.AssertTwoSubjectIsolationAsync();
+
     private static JournalTurnBinding Bound(string epoch, long seq) =>
         new(epoch, seq, "bound", "private", 7001, 101);
 

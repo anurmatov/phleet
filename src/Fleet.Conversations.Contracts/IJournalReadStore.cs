@@ -27,12 +27,9 @@ public interface IJournalReadStore
     /// <summary>One visible message by journal id; null when it is absent or not visible.</summary>
     Task<JournalReadMessage?> GetMessageAsync(JournalReader reader, string messageId, CancellationToken ct = default);
 
-    /// <summary>
-    /// Visible messages carrying this platform chat and message id. One conversation per bot can
-    /// share a chat id, so more than one can match.
-    /// </summary>
-    Task<JournalMessageLookup> FindByTelegramAsync(
-        JournalReader reader, long telegramChatId, long telegramMessageId, CancellationToken ct = default);
+    /// <summary>One visible message in the server-bound conversation; hidden and missing are null.</summary>
+    Task<JournalReadMessage?> FindInConversationAsync(
+        JournalReader reader, string conversationKey, long telegramMessageId, CancellationToken ct = default);
 
     /// <summary>
     /// One page of a conversation in <c>(order_key, id)</c> order. Null when the conversation does

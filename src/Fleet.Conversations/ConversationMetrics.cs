@@ -193,7 +193,8 @@ public static class ConversationMetrics
 
     /// <summary>
     /// Read-tool calls, tagged <c>tool</c> and <c>result</c>: <c>ok</c>, <c>not_found</c>,
-    /// <c>ambiguous</c>, <c>invalid_argument</c>, <c>invalid_query</c>, <c>invalid_cursor</c>,
+    /// <c>no_bound_conversation</c>, <c>conversation_not_journaled</c>, <c>invalid_argument</c>,
+    /// <c>invalid_query</c>, <c>invalid_cursor</c>,
     /// <c>store_unavailable</c>, and <c>cancelled</c> or <c>internal</c> for a call that did not
     /// finish. Never a subject, an id or query text.
     /// </summary>

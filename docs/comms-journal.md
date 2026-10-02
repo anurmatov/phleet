@@ -534,7 +534,7 @@ on a bucket that does not exist answers `404`, and auto-creation happens on the 
 A filer `POST /<bucket>/` creates a *filer* directory that S3 does not see, so it is not a way to
 make a bucket.
 
-## Turn-binding transport (#401, partial)
+## Turn-binding transport (#401)
 
 The journal listener accepts `PUT /journal/v1/turn-binding` with the existing ingest credential and a maximum 1 KiB body, authenticating before reading bytes; other token purposes receive the fixed 401 body.
 
@@ -558,7 +558,17 @@ State is keyed by the ordinal verified subject, remembers four epochs, expires a
 The runtime publisher is registered only with an ingest token, learns scope from inbound Telegram fields, binds human/check-in/new turns in observed chats, and unbinds relay/bridge/client/unseen turns and completed turns.
 It sends only the latest state, renews every 60 seconds without changing sequence, times out after two seconds and retries with 1–30 second backoff without blocking dispatch or changing bindings during injection.
 
-**Lookup integration remains pending in this draft:** `get_message` still uses the slice-5 contract below, so publishing bindings alone does not establish current-turn lookup isolation.
+The Telegram form of `get_message` derives its conversation key only from the current binding for the verified read-token subject, including the bot id for private chats; `all` scope never broadens that conversation filter.
+A supplied `telegram_chat_id` is rejected before any store access, including when a ULID is supplied; the ULID form otherwise retains the existing observed/all scope.
+Binding publication uses a trusted runtime's ingest credential: an actor holding another subject's credential can impersonate it, which is outside this boundary.
+
+| lookup condition | fixed error body (`isError`) |
+|---|---|
+| caller supplies `telegram_chat_id` | `{"error":"invalid_argument","field":"telegram_chat_id"}` |
+| absent, expired or unbound binding | `{"error":"unavailable","reason":"no_bound_conversation"}` |
+| bound excluded chat | `{"error":"unavailable","reason":"conversation_not_journaled"}` |
+| hidden or missing message in the bound conversation | `{"error":"not_found"}` |
+| store failure | `{"error":"store_unavailable","retryable":true}` |
 
 ## Read tools (slice 5)
 
@@ -594,7 +604,7 @@ never printed). Scope is never encoded in the token.
 | tool | input | output |
 |---|---|---|
 | `search_messages` | `query?` (≤ 256 chars over `text` + `transcript`; operators `+-<>()~*"@` stripped, every term required, short terms and stopwords dropped, nothing left → `invalid_query`), `conversation_id?`, `sender_kind?`, `sender_id?`, `direction?`, `since?` / `until?` (ISO-8601 with offset on `sent_at`, half-open), `limit` 1–100 (20), `cursor?` | `items[]` with `text_preview` (≤ 500 chars), `text_truncated`, `has_transcript`, `attachment_count`; `next_cursor`. Newest first |
-| `get_message` | `message_id`, or `telegram_chat_id` + `telegram_message_id` | the full record. The Telegram form with several in-scope matches → `ambiguous` with up to 10 candidate ids |
+| `get_message` | `message_id`, or `telegram_message_id` alone (`telegram_chat_id` forbidden) | the full record. Telegram lookup is restricted to the subject's bound conversation |
 | `get_conversation` | `conversation_id`, `from_message_id?` (exclusive), `direction` `forward` (default) or `backward`, `limit` 1–200 (50), `cursor?` | `conversation{…}`, full records, `next_cursor`. A page also ends at 262,144 bytes of text + transcript, with at least one record |
 
 Attachments are metadata only (`ordinal, kind, mime_type, byte_size, file_name, state,

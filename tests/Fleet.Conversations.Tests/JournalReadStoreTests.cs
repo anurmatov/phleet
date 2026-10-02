@@ -29,7 +29,7 @@ namespace Fleet.Conversations.Tests;
 /// rows are out of its scope by construction rather than by cleanup.
 /// </remarks>
 [Collection("mysql")]
-public sealed class JournalReadStoreTests(MySqlFixture fixture)
+public sealed partial class JournalReadStoreTests(MySqlFixture fixture)
 {
     private const int Page = 20;
 
@@ -58,11 +58,12 @@ public sealed class JournalReadStoreTests(MySqlFixture fixture)
         async Task<string[]> ReadAllAsync(ReadHost host, string? searchCursor, string? replayCursor)
         {
             var token = host.ReadToken(reader);
+            await host.BindAsync(reader, chat);
             return
             [
                 (await host.CallAsync(token, "search_messages", new { conversation_id = conversation, limit = 2, cursor = searchCursor })).Text,
                 (await host.CallAsync(token, "get_message", new { message_id = firstId })).Text,
-                (await host.CallAsync(token, "get_message", new { telegram_chat_id = chat, telegram_message_id = 3 })).Text,
+                (await host.CallAsync(token, "get_message", new { telegram_message_id = 3 })).Text,
                 (await host.CallAsync(token, "get_conversation", new { conversation_id = conversation, limit = 2, cursor = replayCursor })).Text,
             ];
         }
@@ -396,6 +397,7 @@ public sealed class JournalReadStoreTests(MySqlFixture fixture)
 
         await using var host = await ReadHost.StartAsync(Db, readAllSubjects: b);
         var token = host.ReadToken(a);
+        await host.BindAsync(a, chat);
 
         // get_message, both forms.
         var missingMessage = await host.CallAsync(token, "get_message", new { message_id = missing });
@@ -404,12 +406,12 @@ public sealed class JournalReadStoreTests(MySqlFixture fixture)
 
         var notFound = missingMessage.Body;
         Assert.Equal(notFound, (await host.CallAsync(token, "get_message", new { message_id = hidden })).Body);
-        Assert.Equal(notFound, (await host.CallAsync(token, "get_message", new { telegram_chat_id = chat, telegram_message_id = 2 })).Body);
-        Assert.Equal(notFound, (await host.CallAsync(token, "get_message", new { telegram_chat_id = chat, telegram_message_id = 99 })).Body);
+        Assert.Equal(notFound, (await host.CallAsync(token, "get_message", new { telegram_message_id = 2 })).Body);
+        Assert.Equal(notFound, (await host.CallAsync(token, "get_message", new { telegram_message_id = 99 })).Body);
 
         // reply_to: hidden target and missing target are the same null.
-        var toHidden = (await host.CallAsync(token, "get_message", new { telegram_chat_id = chat, telegram_message_id = 3 })).Json.GetProperty("reply_to");
-        var toMissing = (await host.CallAsync(token, "get_message", new { telegram_chat_id = chat, telegram_message_id = 4 })).Json.GetProperty("reply_to");
+        var toHidden = (await host.CallAsync(token, "get_message", new { telegram_message_id = 3 })).Json.GetProperty("reply_to");
+        var toMissing = (await host.CallAsync(token, "get_message", new { telegram_message_id = 4 })).Json.GetProperty("reply_to");
         Assert.Equal(JsonValueKind.Null, toHidden.GetProperty("message_id").ValueKind);
         Assert.Equal(JsonValueKind.Null, toMissing.GetProperty("message_id").ValueKind);
         Assert.Equal(2, toHidden.GetProperty("telegram_message_id").GetInt64());
@@ -434,11 +436,12 @@ public sealed class JournalReadStoreTests(MySqlFixture fixture)
 
         // Scope `all` sees what a could not, reply target included.
         var reviewer = host.ReadToken(b);
+        await host.BindAsync(b, chat);
         Assert.Equal(new long[] { 1, 2, 3, 4 },
             (await host.CallAsync(reviewer, "get_conversation", new { conversation_id = conversation })).Json
                 .GetProperty("items").EnumerateArray().Select(i => i.GetProperty("telegram_message_id").GetInt64()).ToArray());
         Assert.Equal(hidden,
-            (await host.CallAsync(reviewer, "get_message", new { telegram_chat_id = chat, telegram_message_id = 3 })).Json
+            (await host.CallAsync(reviewer, "get_message", new { telegram_message_id = 3 })).Json
                 .GetProperty("reply_to").GetProperty("message_id").GetString());
     }
 
@@ -654,6 +657,7 @@ public sealed class JournalReadStoreTests(MySqlFixture fixture)
 
         private readonly WebApplication _app;
         private readonly HttpClient _client;
+        private long _bindingSeq;
 
         private ReadHost(WebApplication app)
         {
@@ -661,7 +665,7 @@ public sealed class JournalReadStoreTests(MySqlFixture fixture)
             _client = app.GetTestClient();
         }
 
-        public static async Task<ReadHost> StartAsync(string connectionString, string readAllSubjects = "")
+        public static async Task<ReadHost> StartAsync(string connectionString, string readAllSubjects = "", TimeProvider? time = null, string excluded = "")
         {
             var builder = WebApplication.CreateBuilder();
             builder.WebHost.UseSetting(WebHostDefaults.ServerUrlsKey, string.Empty);
@@ -671,15 +675,31 @@ public sealed class JournalReadStoreTests(MySqlFixture fixture)
             var options = new CommsOptions
             {
                 ConversationConnectionString = connectionString,
-                Journal = new JournalOptions { Enabled = true, TokenKeys = Key, ReadAllSubjects = readAllSubjects },
+                Journal = new JournalOptions { Enabled = true, TokenKeys = Key, ReadAllSubjects = readAllSubjects, ExcludedChatIds = excluded },
             };
             options.ValidateJournal();
 
             // No read store is passed: the composition builds the MySQL one, as it does in production.
             var app = CommsApp.BuildJournalApp(
-                builder, new MySqlJournalStore(connectionString, NullLogger.Instance), options, new JournalRuntimeStats());
+                builder, new MySqlJournalStore(connectionString, NullLogger.Instance), options, new JournalRuntimeStats(), time: time);
             await app.StartAsync();
             return new ReadHost(app);
+        }
+
+        public async Task BindAsync(string subject, long chat, string kind = "supergroup", long bot = 7001)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Put, "/journal/v1/turn-binding")
+            {
+                Content = new StringContent(JsonSerializer.Serialize(new
+                {
+                    epoch = "test-epoch", seq = ++_bindingSeq, state = "bound",
+                    chatKind = kind, botId = bot, chatId = chat,
+                }), Encoding.UTF8, "application/json"),
+            };
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer",
+                JournalTokens.Mint(JournalTokens.ParseKeys(Key)[0], JournalTokens.PurposeIngest, subject));
+            using var response = await _client.SendAsync(request);
+            Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
         }
 
         public string ReadToken(string subject) =>

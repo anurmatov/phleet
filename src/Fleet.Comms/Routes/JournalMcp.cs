@@ -37,10 +37,12 @@ public static class JournalMcp
     /// </param>
     public static void AddServices(
         IServiceCollection services, JournalReadGrants grants, JournalRuntimeStats stats,
-        Func<IServiceProvider, IJournalReadStore> store, TimeProvider? time = null)
+        Func<IServiceProvider, IJournalReadStore> store, TimeProvider? time = null, IReadOnlySet<long>? excluded = null)
     {
         services.AddHttpContextAccessor();
         services.AddSingleton(new JournalTurnBindings(time ?? TimeProvider.System));
+        services.AddSingleton(provider => new JournalBindingScope(
+            provider.GetRequiredService<JournalTurnBindings>(), excluded ?? new HashSet<long>()));
         services.AddSingleton(store);
         services.AddSingleton(grants);
         services.AddSingleton(stats);

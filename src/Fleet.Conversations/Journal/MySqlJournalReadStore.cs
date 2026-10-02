@@ -176,38 +176,25 @@ public sealed class MySqlJournalReadStore : IJournalReadStore
         }, async (rows, token) => await rows.ReadAsync(token) ? ReadRecord(rows) : null, ct);
     }
 
-    public Task<JournalMessageLookup> FindByTelegramAsync(
-        JournalReader reader, long telegramChatId, long telegramMessageId, CancellationToken ct = default)
+    public Task<JournalReadMessage?> FindInConversationAsync(
+        JournalReader reader, string conversationKey, long telegramMessageId, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(reader);
-
-        // Ordered by id so the candidate list is the same list on every call.
+        ArgumentNullException.ThrowIfNull(conversationKey);
+        // uq_source makes the conversation/source intersection unique, even with scope all.
         var sql = $"""
             SELECT {RecordColumns(reader)}
               FROM journal_conversations c
               JOIN journal_messages m ON m.conversation_id = c.id
-             WHERE c.telegram_chat_id = @chat AND m.source_key = @source AND {Visible(reader, "m")}
-             ORDER BY m.id
-             LIMIT {JournalReadLimits.AmbiguousCandidates}
+             WHERE c.conversation_key = @conversation AND m.source_key = @source AND {Visible(reader, "m")}
+             LIMIT 1
             """;
-
         return QueryAsync("get_message", sql, parameters =>
         {
             parameters.AddWithValue("@caller", reader.Subject);
-            parameters.AddWithValue("@chat", telegramChatId);
+            parameters.AddWithValue("@conversation", conversationKey);
             parameters.AddWithValue("@source", JournalKeys.SourceKey(telegramMessageId));
-        }, async (rows, token) =>
-        {
-            var matches = new List<JournalReadMessage>();
-            while (await rows.ReadAsync(token)) matches.Add(ReadRecord(rows));
-
-            return matches.Count switch
-            {
-                0 => new JournalMessageLookup(),
-                1 => new JournalMessageLookup { Message = matches[0] },
-                _ => new JournalMessageLookup { Candidates = matches.Select(m => m.MessageId).ToArray() },
-            };
-        }, ct);
+        }, async (rows, token) => await rows.ReadAsync(token) ? ReadRecord(rows) : null, ct);
     }
 
     // ── replay ───────────────────────────────────────────────────────────────

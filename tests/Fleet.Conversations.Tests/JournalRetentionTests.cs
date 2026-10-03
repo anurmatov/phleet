@@ -240,7 +240,7 @@ public sealed class JournalRetentionTests(MySqlFixture fixture) : IDisposable
         var run = await RunAsync("journal", "status");
 
         Assert.Equal(0, run.Exit);
-        Assert.Contains("schema version: 5", run.Stdout, StringComparison.Ordinal);
+        Assert.Contains("schema version: 6", run.Stdout, StringComparison.Ordinal);
         Assert.Matches(@"agent1\s+2 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}Z", run.Stdout);
         Assert.Matches(@"agent2\s+1 ", run.Stdout);
     }

@@ -322,7 +322,7 @@ public sealed class JournalStoreTests(MySqlFixture fixture)
             + "VALUES ('01J0000000000000000000000A', 'c_1', 'p_1', 'ref-1'), ('01J0000000000000000000000B', 'c_1', 'p_1', 'ref-2')");
 
         // Every table 0001-0003 created. schema_migrations is the runner's bookkeeping and gains
-        // exactly the rows for 0004 and 0005.
+        // exactly the rows for 0004, 0005 and 0006.
         var tables = (await TablesAsync(scratch.ConnectionString)).Where(t => t != "schema_migrations").ToList();
         Assert.DoesNotContain("journal_messages", tables);
         Assert.DoesNotContain("journal_objects", tables);
@@ -331,7 +331,7 @@ public sealed class JournalStoreTests(MySqlFixture fixture)
 
         var applied = await new MigrationRunner(scratch.ConnectionString).MigrateAsync();
 
-        Assert.Equal([4, 5], applied);
+        Assert.Equal([4, 5, 6], applied);
         Assert.Equal(before, await RowCountsAsync(scratch.ConnectionString, tables));
         Assert.True((await new MigrationRunner(scratch.ConnectionString).GetStatusAsync()).Matches);
 

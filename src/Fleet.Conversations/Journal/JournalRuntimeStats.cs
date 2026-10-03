@@ -174,7 +174,9 @@ public sealed class JournalRuntimeStats(TimeProvider? time = null)
 
         lock (_gate)
         {
-            Prune(_time.GetUtcNow());
+            var now = _time.GetUtcNow();
+            Prune(_latency, now);
+            Prune(_uploadLatency, now);
             samples = _latency.Select(s => s.Milliseconds).ToArray();
             uploadSamples = _uploadLatency.Select(s => s.Milliseconds).ToArray();
             partial = new Snapshot

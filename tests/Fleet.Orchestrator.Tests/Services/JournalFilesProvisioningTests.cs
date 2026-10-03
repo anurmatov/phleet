@@ -126,13 +126,21 @@ public sealed class JournalFilesProvisioningTests
         await harness.SeedAsync(db =>
         {
             var agent = Agent("codex", capture);
-            agent.JournalCrossChatEnabled = true;
+            agent.JournalCrossChatEnabled = false;
             agent.Tools.Clear();
             if (grant != "none") agent.Tools.Add(new() { ToolName = grant == "send" ? JournalGrants.SendGrant : Grant });
             db.Agents.Add(agent);
         });
         Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
-        var generated = await File.ReadAllTextAsync(Path.Combine(harness.GeneratedDir("fleet-agent1"), "appsettings.json"));
+        var dir = harness.GeneratedDir("fleet-agent1"); var names = new[] { "appsettings.json", ".mcp.json", "settings.json" };
+        var before = names.ToDictionary(n => n, n => File.ReadAllBytes(Path.Combine(dir, n)));
+        await harness.MutateAsync(async db => { (await db.Agents.SingleAsync()).JournalCrossChatEnabled = true; await db.SaveChangesAsync(); });
+        var preview = await harness.Service.PreviewAsync("agent1");
+        Assert.Contains("journal_cross_chat_unavailable:" + (capture ? "send_grant_missing" : "journal_capture_off"), preview.Diffs);
+        if (!capture) Assert.Contains("journal_send_unavailable:journal_capture_off", preview.Diffs);
+        Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
+        foreach (var name in names) Assert.Equal(before[name], File.ReadAllBytes(Path.Combine(dir, name)));
+        var generated = await File.ReadAllTextAsync(Path.Combine(dir, "appsettings.json"));
         Assert.DoesNotContain("SendEnabled", generated);
         Assert.DoesNotContain("CrossChatEnabled", generated);
         Assert.DoesNotContain("CrossChatToken", generated);

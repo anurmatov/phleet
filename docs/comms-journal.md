@@ -821,11 +821,19 @@ headless probe could not authenticate. Exact-head AC13/XAC9 stack acceptance,
 including each provider's native file reads and MCP timeout, remains required
 before merge; transport probes do not replace it.
 
-## Attachment copying and cross-chat switch (implementation in progress)
+## Attachment copying and cross-chat switch (acceptance-gated draft)
 
 The draft now includes the send runtime, Comms routes and live authorization
 client. Do not grant or deploy attachment copying until the remaining acceptance
 gates pass.
+Journal sends use a separate client with the same bot credential and no retries;
+ordinary replies retain the SDK's default retry policy. Send-originated content
+uses `X-Journal-Send: 1` on the bound same-conversation route (or the cross route)
+with the stricter send resolver, and streams objects during deleting grace;
+`fetch_attachment` without the marker keeps its existing behaviour.
+A concurrent active task anywhere, including a check-in in another chat, causes
+`not_a_human_request` because the runtime requires one unambiguous human turn.
+
 Delivery is always the currently verified private human requester's chat, never
 a caller-supplied destination. Cross-chat lookup uses a journal message ULID;
 Telegram message IDs remain restricted to the current binding. Existing journal

@@ -17,6 +17,10 @@ public sealed class JournalVerifyingUploadTests
         Assert.Equal(body.Length, content.Headers.ContentLength);
         Assert.Contains("name=chat_id", text); Assert.Contains(photo ? "name=photo" : "name=document", text);
         Assert.DoesNotContain("caption", text); Assert.DoesNotContain("../../", text);
+        var boundary = content.Headers.ContentType!.Parameters.Single(p => p.Name == "boundary").Value!.Trim('"');
+        var golden = text.Replace(boundary, "@boundary", StringComparison.Ordinal);
+        Assert.Equal(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "journal-send", "413-multipart-" + (photo ? "photo" : "document") + ".txt")), golden);
+        Assert.Equal(2, text.Split("Content-Disposition:").Length - 1);
         Assert.True(request.TerminatorWritten);
     }
     [Theory]

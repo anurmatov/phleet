@@ -47,10 +47,13 @@ public sealed class JournalAttachmentContentEndpoint(IJournalAttachmentSource? s
             if (request is null) { await Refuse(400, JournalAttachmentRequest.Invalid("body"), "invalid_argument"); return; }
             if (request.Error() is { } error) { await Refuse(400, error, "invalid_argument"); return; }
             JournalAttachmentLocator? row;
-            if (context.Request.Path == JournalAttachmentSendEndpoints.CrossContentPath)
+            var crossSend = context.Request.Path == JournalAttachmentSendEndpoints.CrossContentPath;
+            var sendOrigin = crossSend || context.Request.Headers["X-Journal-Send"] == "1";
+            if (sendOrigin)
             {
-                if (request.TelegramMessageId is not null) { await Refuse(400, JournalAttachmentRequest.Invalid("telegram_message_id"), "invalid_argument"); return; }
-                var resolved = await send!.ResolveAsync(subject, request, true, ct);
+                if (crossSend && request.TelegramMessageId is not null) { await Refuse(400, JournalAttachmentRequest.Invalid("telegram_message_id"), "invalid_argument"); return; }
+                if (send is null) { await Refuse(503, "{\"error\":\"store_unavailable\",\"retryable\":true}", "store_unavailable"); return; }
+                var resolved = await send.ResolveAsync(subject, request, crossSend, ct);
                 if (resolved.Error is not null) { await Refuse(resolved.Status, resolved.Error, "send_refused"); return; }
                 row = resolved.Source!.Attachment;
                 if (objects is null) { await Unavailable("media_disabled"); return; }
@@ -68,7 +71,7 @@ public sealed class JournalAttachmentContentEndpoint(IJournalAttachmentSource? s
             { await Refuse(422, JsonSerializer.Serialize(new { error = "not_archived", reason = row.NotArchivedReason }), "not_archived"); return; }
             if (row.AttachmentState == "lost") { await Unavailable("attachment_lost"); return; }
             if ((row.ObjectState is not ("uploaded" or "committed")
-                && !(context.Request.Path == JournalAttachmentSendEndpoints.CrossContentPath && row.ObjectState == "deleting")) || row.ObjectKey is null)
+                && !(sendOrigin && row.ObjectState == "deleting")) || row.ObjectKey is null)
             { await Unavailable("object_missing"); return; }
             if (!_subjects.TryAdd(subject, 0)) { await Refuse(429, "{\"error\":\"busy\",\"retryable\":true}", "busy"); return; }
             var global = false;

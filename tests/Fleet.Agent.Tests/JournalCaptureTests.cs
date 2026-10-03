@@ -703,7 +703,21 @@ public sealed class JournalRegistrationTests : IDisposable
         Assert.DoesNotContain(token, error.Message, StringComparison.Ordinal);
     }
 
-    private IHost BuildHost(string? token)
+    [Fact]
+    public void SendGrant_UsesSeparateNoRetryClientAndPreservesOrdinaryReplyPolicy()
+    {
+        using var host = BuildHost(JournalCaptureTests.Token, send: true);
+        var transport = host.Services.GetServices<IHostedService>().OfType<AgentTransport>().Single();
+        var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var normal = (TelegramBotClient)typeof(AgentTransport).GetField("_bot", flags)!.GetValue(transport)!;
+        var sending = (TelegramBotClient)typeof(AgentTransport).GetField("_journalSendBot", flags)!.GetValue(transport)!;
+        Assert.NotSame(normal, sending); Assert.Equal(normal.Token, sending.Token);
+        var options = typeof(TelegramBotClient).GetField("_options", flags)!;
+        Assert.Equal(3, ((TelegramBotClientOptions)options.GetValue(normal)!).RetryCount);
+        Assert.Equal(0, ((TelegramBotClientOptions)options.GetValue(sending)!).RetryCount);
+    }
+
+    private IHost BuildHost(string? token, bool send = false)
     {
         Directory.CreateDirectory(_workDir);
         var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings { DisableDefaults = true });
@@ -715,6 +729,8 @@ public sealed class JournalRegistrationTests : IDisposable
             ["Agent:Provider"] = "claude",
             ["Telegram:BotToken"] = BotToken,
             ["Journal:IngestToken"] = token,
+            ["Journal:SendEnabled"] = send ? "true" : "false",
+            ["Journal:ReadToken"] = send ? "cj1.read.agent1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" : null,
         });
         builder.Services.AddLogging();
         builder.Services.AddAgentCoreServices(builder.Configuration);

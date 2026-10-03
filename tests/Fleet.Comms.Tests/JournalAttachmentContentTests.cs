@@ -227,8 +227,39 @@ public sealed class JournalAttachmentContentTests
         "archived", null, Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("synthetic"))),
         "private-key", "committed", 9, Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("synthetic"))));
 
-    private sealed class Source : IJournalAttachmentSource
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SendContent_StreamsDeletingGraceWithoutChangingFetch(bool cross)
     {
+        await using var host = await Host.Start(); host.Source.Row = Row() with { ObjectState = "deleting" };
+        using var send = await host.Send("{\"message_id\":\"" + Id + "\"}", cross ? "read-cross-chat" : "read", sendOrigin: true, cross: cross);
+        Assert.Equal(HttpStatusCode.OK, send.StatusCode); Assert.Equal(Encoding.UTF8.GetBytes("synthetic"), await send.Content.ReadAsByteArrayAsync());
+        using var fetch = await host.Send(); Assert.Equal(HttpStatusCode.Conflict, fetch.StatusCode);
+        Assert.Equal(JournalAttachmentRequest.Unavailable("object_missing"), await fetch.Content.ReadAsStringAsync());
+    }
+    [Fact]
+    public async Task FetchAndCrossSend_ShareSubjectAndGlobalSlots()
+    {
+        await using var host = await Host.Start(); host.Objects.Wait = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var first = host.Send(); await host.Objects.Opened.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        using var same = await host.Send("{\"message_id\":\"" + Id + "\"}", "read-cross-chat", cross: true);
+        Assert.Equal(HttpStatusCode.TooManyRequests, same.StatusCode); Assert.Equal(1, host.Objects.Calls);
+        var others = Enumerable.Range(2, 3).Select(i => host.Send("{\"message_id\":\"" + Id + "\"}", "read-cross-chat", subject: $"agent{i}", cross: true)).ToArray();
+        await host.Objects.FourOpened.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        using var fifth = await host.Send(subject: "agent5"); Assert.Equal(HttpStatusCode.TooManyRequests, fifth.StatusCode);
+        host.Objects.Wait.SetResult(); using var completed = await first; foreach (var pending in others) (await pending).Dispose();
+        Assert.Equal(0, host.Stats.AttachmentFetchInFlight);
+        using var again = await host.Send("{\"message_id\":\"" + Id + "\"}", "read-cross-chat", cross: true); Assert.Equal(HttpStatusCode.OK, again.StatusCode);
+    }
+    private sealed class Auth : IJournalCrossChatAuthorization
+    {
+        public Task<(bool Available, bool Effective, string? Member)> CheckAsync(string subject, long botId, long? chatId, long? userId, CancellationToken ct) => Task.FromResult((true, true, (string?)"member"));
+    }
+    private sealed class Source : IJournalAttachmentSource, IJournalSendSource
+    {
+        public Task<JournalSendSource?> FindSendSourceAsync(string subject, string boundKey, long requester, string? messageId, long? telegramMessageId, int ordinal, CancellationToken ct = default) =>
+            Task.FromResult(Row is null ? null : new JournalSendSource(Row, boundKey, "private", requester, true, null, null));
         public int Calls; public JournalAttachmentLocator? Row = JournalAttachmentContentTests.Row();
         public JournalReader? Reader; public string? ConversationKey;
         public Task<JournalAttachmentLocator?> FindAttachmentAsync(JournalReader reader, string key, string? id, long? telegramId, int ordinal, CancellationToken ct = default)
@@ -265,14 +296,16 @@ public sealed class JournalAttachmentContentTests
             if (bound) for (var i = 1; i <= 5; i++) bindings.Put($"agent{i}", new("synthetic-epoch", 1, "bound", "private", 1, 10));
             var source = new Source(); var objects = new Objects();
             var endpoint = new JournalAttachmentContentEndpoint(source, media ? objects : null,
-                new JournalReadGrants(new HashSet<string>()), new JournalBindingScope(bindings, excluded ? new HashSet<long> { 10 } : new HashSet<long>()), stats, time);
-            app.MapPost(JournalAttachmentRequest.ContentPath, endpoint.HandleAsync); await app.StartAsync();
+                new JournalReadGrants(new HashSet<string>()), new JournalBindingScope(bindings, excluded ? new HashSet<long> { 10 } : new HashSet<long>()), stats, time,
+                new JournalSendSourceResolver(source, new(bindings, new HashSet<long>()), new Auth()));
+            app.MapPost(JournalAttachmentRequest.ContentPath, endpoint.HandleAsync); app.MapPost(JournalAttachmentSendEndpoints.CrossContentPath, endpoint.HandleAsync); await app.StartAsync();
             return new(app, app.GetTestClient(), source, objects, stats);
         }
-        public Task<HttpResponseMessage> Send(string body = "{\"telegram_message_id\":5}", string? purpose = "read", string subject = "agent1")
+        public Task<HttpResponseMessage> Send(string body = "{\"telegram_message_id\":5}", string? purpose = "read", string subject = "agent1", bool sendOrigin = false, bool cross = false)
         {
-            var request = new HttpRequestMessage(HttpMethod.Post, JournalAttachmentRequest.ContentPath) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+            var request = new HttpRequestMessage(HttpMethod.Post, cross ? JournalAttachmentSendEndpoints.CrossContentPath : JournalAttachmentRequest.ContentPath) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
             if (purpose is not null) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", JournalTokens.Mint(Key, purpose, subject));
+            if (sendOrigin) request.Headers.Add("X-Journal-Send", "1");
             return client.SendAsync(request);
         }
         public async ValueTask DisposeAsync() { client.Dispose(); await app.DisposeAsync(); }

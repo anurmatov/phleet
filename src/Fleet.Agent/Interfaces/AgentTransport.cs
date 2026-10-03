@@ -70,6 +70,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
     private Task RouteAsync(IncomingMessage msg)
         => (RouterHookForTesting ?? _router.HandleAsync)(msg);
 
+    private readonly ITelegramBotClient? _journalSendBot;
     private string _botUsername = "";
     private readonly MediaGroupBuffer _mediaGroupBuffer;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _groupSizeCapped = new();
@@ -130,10 +131,10 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
         {
             try
             {
-                // SDK defaults to three 429 retries. Granted send must never retry an irreversible operation.
-                _bot = journal?.SendEnabled == true
-                    ? new TelegramBotClient(new TelegramBotClientOptions(telegramConfig.Value.BotToken) { RetryCount = 0 })
-                    : new TelegramBotClient(telegramConfig.Value.BotToken);
+                _bot = new TelegramBotClient(telegramConfig.Value.BotToken);
+                // The same credential, separate request policy: ordinary replies retain SDK retries.
+                if (journal?.SendEnabled == true)
+                    _journalSendBot = new TelegramBotClient(new TelegramBotClientOptions(telegramConfig.Value.BotToken) { RetryCount = 0 });
                 sinkCounter?.SetStartupTelegramState(SinkSuppressionCounter.TelegramConfigured);
             }
             catch (Exception ex)
@@ -1346,7 +1347,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
         var field = kind == "other" ? "document" : kind;
         var method = field switch { "photo" => "sendPhoto", "video" => "sendVideo", "audio" => "sendAudio",
             "voice" => "sendVoice", "video_note" => "sendVideoNote", "animation" => "sendAnimation", "sticker" => "sendSticker", _ => "sendDocument" };
-        try { return CopiedMessage(await _bot.SendRequest(new JournalFileIdRequest(method, chatId, field, fileId), ct), chatId); }
+        try { return CopiedMessage(await (_journalSendBot ?? _bot).SendRequest(new JournalFileIdRequest(method, chatId, field, fileId), ct), chatId); }
         catch (Telegram.Bot.Exceptions.ApiRequestException e)
         { throw new JournalTelegramException(e.ErrorCode, e.ErrorCode == 400 && (e.Message.Contains("wrong file identifier", StringComparison.OrdinalIgnoreCase)
             || e.Message.Contains("file_id", StringComparison.OrdinalIgnoreCase) || e.Message.Contains("type of file", StringComparison.OrdinalIgnoreCase)), e.Parameters?.RetryAfter); }
@@ -1356,7 +1357,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
     {
         if (_bot is null) throw new JournalTelegramException(403);
         var request = new JournalUploadRequest(chatId, photo, content, fileName);
-        try { return CopiedMessage(await _bot.SendRequest(request, ct), chatId); }
+        try { return CopiedMessage(await (_journalSendBot ?? _bot).SendRequest(request, ct), chatId); }
         catch (Telegram.Bot.Exceptions.ApiRequestException e) { throw new JournalTelegramException(e.ErrorCode, retryAfter: e.Parameters?.RetryAfter); }
         catch (OperationCanceledException) { throw new JournalTelegramException(request.TerminatorWritten ? 0 : -1); }
         catch (Exception e) when (e is HttpRequestException or IOException && !HasIntegrityFailure(e)) { throw new JournalTelegramException(request.TerminatorWritten ? 0 : -2); }

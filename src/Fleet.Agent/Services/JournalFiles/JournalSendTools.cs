@@ -146,7 +146,7 @@ public sealed class JournalSendTools(JournalHttpClient client, TurnBindingPublis
         }
         string Remote(HttpResponseMessage response, byte[] body, bool cross)
         {
-            if (response.StatusCode == HttpStatusCode.Unauthorized) return Result("source_denied", cross ? "cross_chat_disabled" : "not_private_binding");
+            if (response.StatusCode == HttpStatusCode.Unauthorized) return cross ? Result("source_denied", "cross_chat_disabled") : Result("source_unavailable");
             using var json = JsonDocument.Parse(body);
             var root = json.RootElement;
             if (!root.TryGetProperty("error", out var error) || error.ValueKind != JsonValueKind.String || !Errors.Contains(error.GetString()!)) return Result("source_unavailable");

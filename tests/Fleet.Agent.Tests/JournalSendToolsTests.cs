@@ -14,21 +14,43 @@ using Microsoft.Extensions.Options;
 namespace Fleet.Agent.Tests;
 public sealed class JournalSendToolsTests
 {
-    private const string Id = "01K00000000000000000000000";
-    private sealed class Sender : ITelegramMediaSender
+    internal const string Id = "01K00000000000000000000000";
+    internal sealed class Sender : ITelegramMediaSender
     {
         public long? BotId { get; set; } = 1;
         public int Sends, Uploads; public Exception? FailFile, FailUpload;
+        public bool BlockUpload, BlockFile, TerminatorWritten;
+        public TaskCompletionSource FileStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource UploadStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public async Task<JournalMessage> SendUploadAsync(long chat, bool photo, HttpContent content, string fileName, CancellationToken ct)
-        { Uploads++; if (FailUpload is not null) throw FailUpload; await content.CopyToAsync(Stream.Null, ct); return Sent(chat); }
-        public Task<JournalMessage> SendFileIdAsync(long chat, string kind, string id, CancellationToken ct)
-        { Sends++; if (FailFile is not null) throw FailFile; return Task.FromResult(Sent(chat)); }
+        {
+            Uploads++; if (FailUpload is not null) throw FailUpload;
+            if (BlockUpload)
+            {
+                if (TerminatorWritten) await content.CopyToAsync(Stream.Null, ct);
+                UploadStarted.TrySetResult();
+                try { await Task.Delay(Timeout.Infinite, ct); }
+                catch (OperationCanceledException) { throw new JournalTelegramException(TerminatorWritten ? 0 : -1); }
+            }
+            await content.CopyToAsync(Stream.Null, ct); return Sent(chat);
+        }
+        public async Task<JournalMessage> SendFileIdAsync(long chat, string kind, string id, CancellationToken ct)
+        { Sends++; if (FailFile is not null) throw FailFile; if (BlockFile) { FileStarted.TrySetResult(); await Task.Delay(Timeout.Infinite, ct); } return Sent(chat); }
         private static JournalMessage Sent(long chat) => new() { BotId = 1, ChatId = chat, ChatType = "private", MessageId = 99, SenderKind = JournalSenderKind.Agent, SenderId = "1", Media = [new(JournalAttachmentKind.Document, "text/plain", 3, "file.txt", "unique", FileId: "private-file")] };
     }
-    private sealed class Handler : HttpMessageHandler
+    internal sealed class Handler : HttpMessageHandler
     {
         public int Calls, CrossHandles; public bool Cross, Drift, BadDigest, Archived = true, FileId = true;
         public Action? OnFirstHandle;
+        public bool BlockContent; public int ContentCalls, ActiveContent, MaxActiveContent;
+        public TaskCompletionSource ContentStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ContentRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private async Task<HttpResponseMessage> Blocked(HttpResponseMessage reply, CancellationToken ct)
+        {
+            var active = Interlocked.Increment(ref ActiveContent); MaxActiveContent = Math.Max(MaxActiveContent, active); ContentStarted.TrySetResult();
+            try { await ContentRelease.Task.WaitAsync(ct); return reply; }
+            finally { Interlocked.Decrement(ref ActiveContent); }
+        }
         public string Kind = "document";
         public HttpStatusCode? SecondStatus, ContentStatus;
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage r, CancellationToken ct)
@@ -36,12 +58,13 @@ public sealed class JournalSendToolsTests
             Calls++;
             if (r.RequestUri!.AbsolutePath.EndsWith("/content"))
             {
+                ContentCalls++;
                 if (ContentStatus is { } status) return Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent("{\"error\":\"not_found\"}") });
                 var bytes = Encoding.UTF8.GetBytes("abc");
                 var content = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
                 content.Headers.Add("X-Journal-Message-Id", Id); content.Headers.Add("X-Journal-Ordinal", "0"); content.Headers.Add("X-Journal-Kind", Kind);
                 content.Headers.Add("X-Journal-Sha256", BadDigest ? new string('0', 64) : Convert.ToHexStringLower(SHA256.HashData(bytes)));
-                return Task.FromResult(content);
+                return BlockContent ? Blocked(content, ct) : Task.FromResult(content);
             }
             if (Cross && !r.RequestUri.AbsolutePath.Contains("cross-chat"))
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden) { Content = new StringContent("{\"error\":\"source_denied\",\"reason\":\"cross_chat_disabled\"}") });
@@ -55,7 +78,7 @@ public sealed class JournalSendToolsTests
             return Task.FromResult(reply);
         }
     }
-    private sealed class Rig : IDisposable
+    internal sealed class Rig : IDisposable
     {
         public readonly Handler Handler = new(); public readonly Sender Sender = new();
         public readonly RunningTask Owner = new() { Id = 1, Description = "synthetic", StartedAt = DateTimeOffset.UtcNow, Cts = new(), IsSessionTask = true, UserId = 10,
@@ -64,14 +87,14 @@ public sealed class JournalSendToolsTests
         public readonly JournalOptions Options = new() { IngestToken = "cj1.ingest.agent1.signature", ReadToken = "cj1.read.agent1.signature", SendEnabled = true, CrossChatEnabled = true, CrossChatToken = "cj1.read-cross-chat.agent1.signature" };
         public readonly JournalFilesGate Gate = new();
         private readonly HttpClient _http; public readonly TurnBindingPublisher Binding; public readonly JournalSendTools Tools;
-        public Rig()
+        public Rig(TimeProvider? clock = null)
         {
             _http = new(Handler) { BaseAddress = new("http://journal.test") };
             var client = new JournalHttpClient(_http, "ingest", readToken: "read", crossChatToken: "cross");
             Binding = new(client, NullLogger<TurnBindingPublisher>.Instance);
             Binding.ObserveChat(10, 1, "private"); Binding.BeginTurn(10, TaskSource.UserMessage);
             Tools = new(client, Binding, Gate, Allowlist, Microsoft.Extensions.Options.Options.Create(Options), _ => Owner,
-                () => Sender, null, NullLogger<JournalSendTools>.Instance);
+                () => Sender, null, NullLogger<JournalSendTools>.Instance, clock);
         }
         public async Task<JsonElement> Run() => JsonDocument.Parse(await Tools.SendAsync(new(Id), default)).RootElement.Clone();
         public void Dispose() { Binding.Dispose(); Gate.Dispose(); Owner.Cts.Dispose(); _http.Dispose(); }
@@ -194,6 +217,56 @@ public sealed class JournalSendToolsTests
     {
         using var rig = new Rig(); rig.Sender.FailFile = new JournalTelegramException(429, retryAfter: 31);
         var result = await rig.Run(); Assert.Equal("retry_after=31", result.GetProperty("reason").GetString());
+        Assert.Equal(1, rig.Sender.Sends); Assert.Equal(0, rig.Sender.Uploads);
+    }
+    [Fact]
+    public async Task FakeClockDeadline_IncludesGateWaitAndMakesNoHttpCall()
+    {
+        var clock = new JournalFilesTestDoubles.Clock(); using var rig = new Rig(clock);
+        await rig.Gate.Serial.WaitAsync();
+        var sending = rig.Tools.SendAsync(new(Id), default); Assert.False(sending.IsCompleted);
+        clock.Advance(TimeSpan.FromSeconds(50));
+        Assert.Contains("cancelled", await sending.WaitAsync(TimeSpan.FromSeconds(2))); Assert.Equal(0, rig.Handler.Calls);
+        rig.Gate.Serial.Release();
+    }
+    [Theory]
+    [InlineData(false, "cancelled")]
+    [InlineData(true, "ambiguous")]
+    public async Task FakeClockDeadline_DistinguishesBeforeAndAfterUploadTerminator(bool written, string outcome)
+    {
+        var clock = new JournalFilesTestDoubles.Clock(); using var rig = new Rig(clock); rig.Handler.FileId = false;
+        rig.Sender.BlockUpload = true; rig.Sender.TerminatorWritten = written;
+        var sending = rig.Run(); await rig.Sender.UploadStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        clock.Advance(TimeSpan.FromSeconds(50));
+        Assert.Equal(outcome, (await sending.WaitAsync(TimeSpan.FromSeconds(2))).GetProperty("outcome").GetString());
+        Assert.Equal(1, rig.Sender.Uploads); Assert.Equal(0, rig.Sender.Sends);
+    }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FetchAndSend_ActuallySerializeContentInBothDirections(bool sendFirst)
+    {
+        using var rig = new Rig(); rig.Handler.FileId = false; rig.Handler.BlockContent = true;
+        using var http = new HttpClient(rig.Handler) { BaseAddress = new("http://journal.test") };
+        var root = Path.Combine(Path.GetTempPath(), "gate-content-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var fetch = new JournalFilesTools(new(http, "ingest", readToken: "read"), rig.Binding, new(root), new(), NullLogger<JournalFilesTools>.Instance, gate: rig.Gate);
+            var first = sendFirst ? rig.Tools.SendAsync(new(Id), default) : fetch.FetchAsync(new(Id), default);
+            await rig.Handler.ContentStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            var second = sendFirst ? fetch.FetchAsync(new(Id), default) : rig.Tools.SendAsync(new(Id), default);
+            Assert.False(second.IsCompleted); Assert.Equal(1, rig.Handler.ContentCalls);
+            rig.Handler.ContentRelease.TrySetResult(); await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(2, rig.Handler.ContentCalls); Assert.Equal(1, rig.Handler.MaxActiveContent); Assert.Equal(1, rig.Sender.Uploads);
+        }
+        finally { rig.Handler.ContentRelease.TrySetResult(); if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+    [Fact]
+    public async Task FakeClockDeadline_FileIdTimeoutIsAmbiguousWithoutFallback()
+    {
+        var clock = new JournalFilesTestDoubles.Clock(); using var rig = new Rig(clock); rig.Sender.BlockFile = true;
+        var sending = rig.Run(); await rig.Sender.FileStarted.Task.WaitAsync(TimeSpan.FromSeconds(2)); clock.Advance(TimeSpan.FromSeconds(50));
+        Assert.Equal("ambiguous", (await sending.WaitAsync(TimeSpan.FromSeconds(2))).GetProperty("outcome").GetString());
         Assert.Equal(1, rig.Sender.Sends); Assert.Equal(0, rig.Sender.Uploads);
     }
     [Fact]

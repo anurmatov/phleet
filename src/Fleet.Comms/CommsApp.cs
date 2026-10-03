@@ -572,9 +572,8 @@ public static class CommsApp
                 options.ConversationConnectionString,
                 provider.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal.Read")), time, excluded);
 
-        builder.Services.AddSingleton(new HttpClient { Timeout = Timeout.InfiniteTimeSpan });
         builder.Services.AddSingleton<IJournalCrossChatAuthorization>(sp => new JournalCrossChatAuthorizationClient(
-            sp.GetRequiredService<HttpClient>(), options.Journal.OrchestratorUrl, keys[0]));
+            new HttpClient { Timeout = Timeout.InfiniteTimeSpan }, options.Journal.OrchestratorUrl, keys[0]));
         var app = builder.Build();
         var journalLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal");
 

@@ -9,8 +9,9 @@ public interface IJournalCrossChatAuthorization
         long? chatId, long? userId, CancellationToken ct);
 }
 /// <summary>Comms holds only its derived service credential, never Telegram secrets.</summary>
-public sealed class JournalCrossChatAuthorizationClient(HttpClient http, string url, byte[] key) : IJournalCrossChatAuthorization
+public sealed class JournalCrossChatAuthorizationClient(HttpClient http, string url, byte[] key) : IJournalCrossChatAuthorization, IDisposable
 {
+    public void Dispose() => http.Dispose();
     private readonly string _token = JournalTokens.Mint(key, JournalTokens.PurposeCrossChatAuthz, "fleet-comms");
     public async Task<(bool Available, bool Effective, string? Member)> CheckAsync(string subject, long botId, long? chatId, long? userId, CancellationToken ct)
     {

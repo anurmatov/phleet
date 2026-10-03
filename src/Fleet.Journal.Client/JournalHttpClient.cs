@@ -77,6 +77,7 @@ public sealed class JournalHttpClient
         { Content = new ReadOnlyMemoryContent(JsonSerializer.SerializeToUtf8Bytes(arguments)) };
         request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", cross ? _crossChatToken : _readToken);
+        if (content) request.Headers.Add("X-Journal-Send", "1");
         return await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
     }
 

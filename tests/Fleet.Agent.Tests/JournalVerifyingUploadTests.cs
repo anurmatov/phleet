@@ -19,7 +19,7 @@ public sealed class JournalVerifyingUploadTests
         Assert.DoesNotContain("caption", text); Assert.DoesNotContain("../../", text);
         var boundary = content.Headers.ContentType!.Parameters.Single(p => p.Name == "boundary").Value!.Trim('"');
         var golden = text.Replace(boundary, "@boundary", StringComparison.Ordinal);
-        Assert.Equal(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "journal-send", "413-multipart-" + (photo ? "photo" : "document") + ".txt")), golden);
+        Assert.Equal(System.Text.Json.JsonSerializer.Deserialize<string>(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "journal-send", "413-multipart-" + (photo ? "photo" : "document") + ".json"))), golden);
         Assert.Equal(2, text.Split("Content-Disposition:").Length - 1);
         Assert.True(request.TerminatorWritten);
     }

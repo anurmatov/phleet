@@ -1,0 +1,1 @@
+"--@boundary\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Disposition: form-data; name=chat_id\r\n\r\n101\r\n--@boundary\r\nContent-Length: 15\r\nContent-Type: application/octet-stream\r\nContent-Disposition: form-data; name=document; filename=unsafename.pdf; filename*=utf-8''unsafename.pdf\r\n\r\nsynthetic bytes\r\n--@boundary--\r\n"

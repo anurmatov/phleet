@@ -59,7 +59,7 @@ internal static class JournalRecordParser
     /// </remarks>
     private static readonly string[] AttachmentFields =
         ["ordinal", "kind", "mimeType", "byteSize", "fileName", "fileUniqueId", "notArchivedReason",
-         "uploadId", "uploadSha256"];
+         "uploadId", "uploadSha256", "fileId", "copiedFrom"];
 
     /// <summary>
     /// Fields that would reference stored bytes. <c>uploadId</c> is the one media slice 4 accepts;
@@ -236,6 +236,16 @@ internal static class JournalRecordParser
             }
         }
 
+        if (origin == JournalRecordOrigin.AgentCopy)
+        {
+            if (direction != JournalDirection.Outbound || sender.Kind != JournalSenderKind.Agent
+                || text is not null || attachments.Count == 0
+                || attachments.Any(a => a.NotArchivedReason != JournalNotArchivedReason.Copied || a.CopiedFrom is null))
+                throw Refuse("origin");
+        }
+        else if (attachments.Any(a => a.CopiedFrom is not null || a.NotArchivedReason == JournalNotArchivedReason.Copied))
+            throw Refuse("origin");
+
         return new JournalRecord
         {
             EventId = eventId.ToUpperInvariant(),
@@ -367,6 +377,26 @@ internal static class JournalRecordParser
             if (!AsciiIdPattern.IsMatch(fileUniqueId)) throw Refuse(path + ".fileUniqueId");
         }
 
+        string? fileId = null;
+        if (fields.TryGetValue("fileId", out var file) && file.ValueKind != JsonValueKind.Null)
+        {
+            fileId = StringAt(file, path + ".fileId");
+            if (fileId.Length is < 1 or > 255 || fileId.Any(c => c is < '\x21' or > '\x7e'))
+                throw Refuse(path + ".fileId");
+        }
+
+        JournalCopiedFrom? copiedFrom = null;
+        if (fields.TryGetValue("copiedFrom", out var copy) && copy.ValueKind != JsonValueKind.Null)
+        {
+            var copyFields = Fields(copy, ["messageId", "ordinal"], path + ".copiedFrom.");
+            var messageId = RequiredString(copyFields, "messageId").ToUpperInvariant();
+            if (!Ulid.IsValid(messageId)) throw Refuse(path + ".copiedFrom.messageId");
+            if (!copyFields.TryGetValue("ordinal", out var sourceOrdinal)) throw Refuse(path + ".copiedFrom.ordinal");
+            var ordinalValue = Int32At(sourceOrdinal, path + ".copiedFrom.ordinal");
+            if (ordinalValue is < 0 or > 255) throw Refuse(path + ".copiedFrom.ordinal");
+            copiedFrom = new JournalCopiedFrom { MessageId = messageId, Ordinal = ordinalValue };
+        }
+
         // ── exactly one of: a reason, or an upload ──────────────────────────────
         //
         // `notArchivedReason` and `uploadId` are mutually exclusive and one is required. A record
@@ -389,6 +419,8 @@ internal static class JournalRecordParser
                 ByteSize = byteSize,
                 FileName = OptionalString(fields, "fileName", path + ".fileName", maxCodePoints: 255),
                 FileUniqueId = fileUniqueId,
+                FileId = fileId,
+                CopiedFrom = copiedFrom,
                 NotArchivedReason = RequiredEnum<JournalNotArchivedReason>(
                     fields, "notArchivedReason", path + ".notArchivedReason"),
             };
@@ -415,6 +447,8 @@ internal static class JournalRecordParser
             ByteSize = byteSize,
             FileName = OptionalString(fields, "fileName", path + ".fileName", maxCodePoints: 255),
             FileUniqueId = fileUniqueId,
+            FileId = fileId,
+            CopiedFrom = copiedFrom,
             UploadId = uploadId,
             UploadSha256 = shaNode.GetString(),
         };

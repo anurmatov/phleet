@@ -43,13 +43,12 @@ public sealed partial class MySqlJournalStore : IJournalStore
     public MySqlJournalObjectStore? Objects { get; init; }
 
     /// <summary>
-    /// The schema version this binary needs. <b>5, not 4:</b> slice 4 (#388) adds
-    /// <c>journal_objects</c> and the attachment→object key, and a record with an
-    /// <c>uploadId</c> cannot be written against 0004. Refusing a schema behind this binary is the
-    /// existing rule; raising the number is what makes an unmigrated database answer
+    /// The schema version this binary needs. Migration 0006 adds bot-scoped resend credentials
+    /// and source audit links; attachment inserts cannot run against 0005. Refusing a schema behind
+    /// this binary is the existing rule; raising the number is what makes an unmigrated database answer
     /// <c>503 schema_behind</c> rather than failing mid-transaction.
     /// </summary>
-    public const int RequiredSchemaVersion = 5;
+    public const int RequiredSchemaVersion = 6;
 
     private static readonly TimeSpan SchemaCacheDuration = TimeSpan.FromSeconds(30);
 
@@ -508,9 +507,10 @@ public sealed partial class MySqlJournalStore : IJournalStore
             insert.Parameters.AddWithValue("@truncated", record.TranscriptTruncated);
             insert.Parameters.AddWithValue("@origin", JournalWire.Of(record.Origin));
 
-            // Derived, never requested: `copied` belongs to a later slice.
+            // Derived, never requested: attachment resends are copies, not new archived bytes.
             insert.Parameters.AddWithValue("@delivery",
-                record.Direction == JournalDirection.Inbound ? "received" : "sent");
+                record.Direction == JournalDirection.Inbound ? "received"
+                : record.Origin == JournalRecordOrigin.AgentCopy ? "copied" : "sent");
             insert.Parameters.AddWithValue("@sendGroup", record.SendGroup?.Id);
             insert.Parameters.AddWithValue("@sendPart", record.SendGroup?.Part);
             insert.Parameters.AddWithValue("@sendParts", record.SendGroup?.Parts);
@@ -609,10 +609,13 @@ public sealed partial class MySqlJournalStore : IJournalStore
                 """
                 INSERT INTO journal_attachments
                     (id, message_id, ordinal, kind, mime_type, byte_size, sha256, original_file_name,
-                     telegram_file_unique_id, object_id, state, not_archived_reason, created_at, committed_at)
+                     telegram_file_unique_id, telegram_file_id, telegram_file_id_bot_id,
+                     copied_from_message_id, copied_from_ordinal,
+                     object_id, state, not_archived_reason, created_at, committed_at)
                 VALUES
                     (@id, @message, @ordinal, @kind, @mime, @size, @sha, @fileName,
-                     @fileUniqueId, @object, @state, @reason, @now, @committedAt)
+                     @fileUniqueId, @fileId, @fileIdBotId, @copiedFromMessage, @copiedFromOrdinal,
+                     @object, @state, @reason, @now, @committedAt)
                 """);
             attach.Parameters.AddWithValue("@id", Ulid.NewUlid(_time.GetUtcNow()));
             attach.Parameters.AddWithValue("@message", newMessageId);
@@ -624,6 +627,10 @@ public sealed partial class MySqlJournalStore : IJournalStore
                 committed && media.Digests.TryGetValue(attachmentObject!, out var digest) ? digest : null);
             attach.Parameters.AddWithValue("@fileName", attachment.FileName);
             attach.Parameters.AddWithValue("@fileUniqueId", attachment.FileUniqueId);
+            attach.Parameters.AddWithValue("@fileId", attachment.FileId);
+            attach.Parameters.AddWithValue("@fileIdBotId", attachment.FileId is null ? null : (object)record.Telegram.BotId);
+            attach.Parameters.AddWithValue("@copiedFromMessage", attachment.CopiedFrom?.MessageId);
+            attach.Parameters.AddWithValue("@copiedFromOrdinal", attachment.CopiedFrom?.Ordinal);
             attach.Parameters.AddWithValue("@object", committed ? (object?)attachmentObject : null);
             attach.Parameters.AddWithValue("@state", committed ? "committed" : "not_archived");
             attach.Parameters.AddWithValue("@reason", committed ? null

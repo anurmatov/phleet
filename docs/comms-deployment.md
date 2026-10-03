@@ -803,3 +803,64 @@ giving agents bucket access. Rising `comms_refused` indicates rollout order or
 read-token problems. Startup, hourly and per-fetch cleanup enforce local TTL and
 quota; cleanup failures log only their exception type and the next fetch tries
 again. No migration, environment key or compose change is needed for fetch.
+
+## Attachment send rollout (pending full implementation)
+
+The schema-6 storage and cross-chat configuration foundation is not a deployable
+feature by itself. Keep its PR draft until runtime send, Comms authorization and
+content routes, and the acceptance suite are complete. Do not grant
+`mcp__fleet-journal-files__send_attachment` or enable the cross-chat switch early.
+The following operator sequence applies only after the complete feature is ready.
+
+1. Before migration `0006`, take a conversation-schema dump:
+
+   ```bash
+   mysqldump \
+     --defaults-extra-file=<client> \
+     --single-transaction \
+     --skip-lock-tables \
+     --no-tablespaces \
+     <schema> > <dump>
+   ```
+   Keep credentials in that protected client file, not command arguments or logs.
+   Restore the dump into an isolated schema and compare its base-table count
+   with `information_schema.tables` in the source schema. Stop if the counts
+   differ or any restore/query fails; dump size alone is not verification.
+2. Deploy Comms with the complete parser, migration and new authenticated routes
+   first. The older binary refuses a database ahead of its supported schema;
+   reverting an image alone is not a schema rollback.
+3. Deploy the orchestrator and dashboard, applying the additive EF migration,
+   then the complete agent image. Keep grants and switches off during this step.
+4. Explicitly grant send to approved agents only. Reprovision and verify same-chat
+   acceptance before saving the default-off cross-chat switch. Reprovision again
+   for switch-on, then verify live authorized group-to-private delivery.
+
+Comms' **first** `Comms__Journal__TokenKeys` key signs its internal
+`cross-chat-authz` credential. That key must remain in the orchestrator's
+`Journal__TokenKey` verification set throughout rotation. Stage the verification
+set first, then switch Comms' first key, then retire the old key after every
+consumer has rotated. If they do not match, internal authorization gets 401 and
+Comms must return **503 `authorization_unavailable`**, never relax authorization.
+Comms' orchestrator URL is a static service route, not an agent-controlled URL.
+A blank URL, timeout or non-200 authorization response also fails closed.
+
+The orchestrator needs outbound HTTPS to Telegram for `getMe` and
+`getChatMember`; Comms must never receive a bot token. A cached `getMe` is only
+bot identity, not group membership: membership is checked on each authorization
+request with a shared four-second budget and at most eight concurrent requests.
+No Telegram URL, token, chat id or user id belongs in authorization logs.
+
+Rollback starts by clearing the cross-chat switch and removing the send grant,
+then reprovisioning. Stop writers before restoring the verified pre-migration
+conversation dump into a clean schema and starting the old Comms binary.
+Records captured after that dump are lost on schema rollback; obtain operator
+approval for that loss. Restore the prior orchestrator version only after the
+new EF column is no longer used, following its migration rollback procedure.
+
+Exact-image and real-provider acceptance is operator-owned and **UNRUN** until
+recorded: isolated schema-6 conversation storage and media credentials, the
+matching orchestrator route and EF schema, one test bot, a test group with two
+allowed private requesters plus an unrelated account, and an exact-image
+real-provider agent with send grant off then on. Verify same-chat, authorized
+group-to-private, no caption, group/workflow refusal, member leave, switch-off
+and copied-token revocation. Unit tests and CI do not replace this check.

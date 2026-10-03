@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Fleet.Orchestrator.Endpoints;
 
@@ -72,6 +73,7 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         agent.HostPort,
         agent.AutoMemoryEnabled,
         agent.JournalEnabled,
+        agent.JournalCrossChatEnabled,
         agent.Provider,
         agent.CodexSandboxMode,
         agent.OutputStyle,
@@ -125,6 +127,8 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
         scope.ServiceProvider.GetRequiredService<JournalTokenService>().DescribeKeyFault() is { } journalFault)
         return Results.BadRequest(new { error = "journal_not_configured", detail = journalFault });
 
+    var oldCrossChat = agent.JournalCrossChatEnabled;
+
     // Scalar fields
     if (body.Model is not null) agent.Model = body.Model;
     if (body.MemoryLimitMb is not null) agent.MemoryLimitMb = body.MemoryLimitMb.Value;
@@ -163,6 +167,7 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     if (body.AgentsJson is not null) agent.AgentsJson = body.AgentsJson == "" ? null : body.AgentsJson;
     if (body.AutoMemoryEnabled is not null) agent.AutoMemoryEnabled = body.AutoMemoryEnabled.Value;
     if (body.JournalEnabled is not null) agent.JournalEnabled = body.JournalEnabled.Value;
+    if (body.JournalCrossChatEnabled is not null) agent.JournalCrossChatEnabled = body.JournalCrossChatEnabled.Value;
     if (body.Provider is not null) agent.Provider = body.Provider;
     if (body.CodexSandboxMode is not null)
     {
@@ -316,6 +321,9 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
         return Results.BadRequest(new { error = localModelFault });
 
     await db.SaveChangesAsync();
+    if (oldCrossChat != agent.JournalCrossChatEnabled)
+        app.Logger.LogInformation("Agent config changed: agent={name} field=journal_cross_chat_enabled old={old} new={new} via=rest",
+            agent.Name, oldCrossChat, agent.JournalCrossChatEnabled);
 
     // Project assignment IS the memory-ACL grant. Sync after the save so the hook sees the
     // committed assignment list, and only when the caller actually touched projects.
@@ -389,4 +397,5 @@ internal sealed record AgentConfigUpdateRequest(
     string? OutputStyle,
     string? AnthropicBaseUrl,
     int? ContextWindow,
-    string? LocalBaseUrl = null);
+    string? LocalBaseUrl = null,
+    bool? JournalCrossChatEnabled = null);

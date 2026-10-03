@@ -6,12 +6,12 @@ using MySqlConnector;
 
 namespace Fleet.Orchestrator.Tests.Migrations;
 
-/// <summary>Verifies AddAgentJournalEnabled against real MySQL 8.0.</summary>
-public sealed class AddAgentJournalEnabledMigrationTests : IAsyncLifetime
+/// <summary>Verifies AddAgentJournalCrossChatEnabled against real MySQL 8.0.</summary>
+public sealed class AddAgentJournalCrossChatEnabledMigrationTests : IAsyncLifetime
 {
     public const string ConnectionVariable = "FLEET_ORCHESTRATOR_MIGRATION_CONNECTION";
-    private const string Before = "20260926173913_AddAgentContextWindow";
-    private const string Target = "20260927130818_AddAgentJournalEnabled";
+    private const string Before = "20260927130818_AddAgentJournalEnabled";
+    private const string Target = "20261003103013_AddAgentJournalCrossChatEnabled";
     private string _admin = "";
     private string _database = "";
     private string _connectionString = "";
@@ -44,14 +44,14 @@ public sealed class AddAgentJournalEnabledMigrationTests : IAsyncLifetime
         Assert.Equal("tinyint(1)|NO|0", await ScalarAsync<string>("""
             SELECT CONCAT(COLUMN_TYPE, '|', IS_NULLABLE, '|', COLUMN_DEFAULT)
             FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'agents' AND COLUMN_NAME = 'journal_enabled'
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'agents' AND COLUMN_NAME = 'journal_cross_chat_enabled'
             """));
         Assert.Equal(1L, await ScalarAsync<long>(
-            "SELECT COUNT(*) FROM agents WHERE Name = 'old-agent' AND journal_enabled = 0"));
+            "SELECT COUNT(*) FROM agents WHERE Name = 'old-agent' AND journal_cross_chat_enabled = 0"));
 
         await InsertAgentAsync("new-agent");
         Assert.Equal(1L, await ScalarAsync<long>(
-            "SELECT COUNT(*) FROM agents WHERE Name = 'new-agent' AND journal_enabled = 0"));
+            "SELECT COUNT(*) FROM agents WHERE Name = 'new-agent' AND journal_cross_chat_enabled = 0"));
     }
 
     [Fact]
@@ -71,12 +71,12 @@ public sealed class AddAgentJournalEnabledMigrationTests : IAsyncLifetime
         await MigrateAsync(Before);
         Assert.Equal(0L, await ScalarAsync<long>("""
             SELECT COUNT(*) FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'agents' AND COLUMN_NAME = 'journal_enabled'
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'agents' AND COLUMN_NAME = 'journal_cross_chat_enabled'
             """));
         await MigrateAsync(Target);
         Assert.Equal(1L, await ScalarAsync<long>("""
             SELECT COUNT(*) FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'agents' AND COLUMN_NAME = 'journal_enabled'
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'agents' AND COLUMN_NAME = 'journal_cross_chat_enabled'
             """));
     }
 

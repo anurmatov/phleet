@@ -42,6 +42,12 @@ public sealed class JournalAgentConfigToolTests
 
         Assert.Contains("journal_enabled: False → True", changed);
         Assert.Contains("Journal enabled: True", current);
+        Assert.Contains("Journal cross-chat attachments: False", current);
+        using var changedScope = provider.CreateScope();
+        var changedDb = changedScope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        var agent = await changedDb.Agents.SingleAsync();
+        agent.JournalCrossChatEnabled = true; await changedDb.SaveChangesAsync();
+        Assert.Contains("Journal cross-chat attachments: True", await get.GetAgentConfigAsync("agent1"));
     }
 
     [Theory]
@@ -75,6 +81,14 @@ public sealed class JournalAgentConfigToolTests
         var stored = await readScope.ServiceProvider.GetRequiredService<OrchestratorDbContext>().Agents.AsNoTracking().SingleAsync();
         Assert.Equal(fault is null ? requested : before, stored.JournalEnabled);
         Assert.Equal(fault is not null, stored.ShowStats);
+    }
+
+    [Fact]
+    public void CrossChatSwitch_HasNoMcpWriteParameter()
+    {
+        foreach (var type in new[] { typeof(UpdateAgentConfigTool), typeof(CreateAgentTool), typeof(Fleet.Orchestrator.Tools.SetConfigValuesTool) })
+            Assert.DoesNotContain(type.GetMethods().SelectMany(m => m.GetParameters()),
+                p => p.Name!.Contains("cross_chat", StringComparison.OrdinalIgnoreCase) || p.Name.Contains("CrossChat", StringComparison.OrdinalIgnoreCase));
     }
 
     private sealed class NoOpAclChangeNotifier : IAclChangeNotifier

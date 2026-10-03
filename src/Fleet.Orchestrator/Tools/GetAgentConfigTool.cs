@@ -56,6 +56,7 @@ public sealed class GetAgentConfigTool(IServiceScopeFactory scopeFactory)
                 : " (ignored: local model off)"));
         sb.AppendLine($"- Auto memory: {agent.AutoMemoryEnabled}");
         sb.AppendLine($"- Journal enabled: {agent.JournalEnabled}");
+        sb.AppendLine($"- Journal cross-chat attachments: {agent.JournalCrossChatEnabled}");
         sb.AppendLine($"- Mount Docker socket: {agent.MountDockerSock}");
         sb.AppendLine();
 

@@ -35,3 +35,23 @@ for (const checked of [false, true]) {
     })
   }
 }
+
+const crossSource = declaration('./components/FieldHint.tsx', 'FieldHint') + '\n' +
+  declaration('./components/AgentConfigModal.tsx', 'CrossChatToggle') + '\nexports.CrossChatToggle = CrossChatToggle'
+const crossCompiled = ts.transpileModule(crossSource, {
+  compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS },
+}).outputText
+const crossExports: { CrossChatToggle?: React.ComponentType<{ checked: boolean; reason: string | null; onChange: () => void }> } = {}
+new Function('require', 'exports', crossCompiled)(createRequire(import.meta.url), crossExports)
+assert.ok(crossExports.CrossChatToggle)
+const CrossToggle = crossExports.CrossChatToggle
+for (const checked of [false, true]) {
+  for (const reason of [null, 'Needs journal capture.', 'Needs the send_attachment grant.']) {
+    test(`cross-chat toggle checked=${checked}, reason=${reason}`, () => {
+      const html = renderToStaticMarkup(createElement(CrossToggle, { checked, reason, onChange: () => {} }))
+      assert.equal(/disabled=""/.test(html), !checked && reason !== null)
+      assert.equal(/checked=""/.test(html), checked)
+      if (reason) assert.ok(html.includes(reason))
+    })
+  }
+}

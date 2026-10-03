@@ -183,6 +183,7 @@ export interface AgentConfig {
   agentsJson: string
   autoMemoryEnabled: boolean
   journalEnabled: boolean
+  journalCrossChatEnabled: boolean
   hostPort: number | null
   telegramSendOnly: boolean
   provider: string
@@ -230,6 +231,7 @@ export interface ConfigEdits {
   agentsJson: string
   autoMemoryEnabled: boolean
   journalEnabled: boolean
+  journalCrossChatEnabled: boolean
   hostPort: string
   telegramSendOnly: boolean
   provider?: string

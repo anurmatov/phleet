@@ -4,6 +4,7 @@ import type {
   ProjectContextSummary, PromptSizeLimits,
 } from '../types'
 import { ADVANCED_DEFAULTS, countCustomized, CLAUDE_PERMISSION_MODES, CODEX_SANDBOX_MODES } from '../constants'
+import { crossChatDisabledReason, editedTools } from '../journalCrossChat'
 import { effortChoices, switchProvider } from '../localModel'
 import { apiFetch } from '../utils'
 import ModelSelector from './ModelSelector'
@@ -50,6 +51,18 @@ export function JournalToggle({ checked, disabled, onChange }: {
     <FieldHint>{disabled
       ? 'Comms journal not enabled — see docs/comms-deployment.md'
       : <>Records this agent&apos;s DMs and allowed groups in Comms. Needs <code>FLEET_COMMS_JOURNAL_KEY</code>.</>}</FieldHint>
+  </div>
+}
+
+export function CrossChatToggle({ checked, reason, onChange }: {
+  checked: boolean; reason: string | null; onChange: (checked: boolean) => void
+}) {
+  return <div className="config-field">
+    <label className="config-field config-field-checkbox">
+      <input type="checkbox" checked={checked} disabled={!checked && reason !== null} onChange={e => onChange(e.target.checked)} />
+      <span className="config-label">Cross-chat attachments</span>
+    </label>
+    <FieldHint>{reason && <>{reason} </>}Lets this agent send the requester, in their private chat, a file from a group both are in. Needs journal capture and the send_attachment grant. Off takes effect immediately; on takes effect on reprovision.</FieldHint>
   </div>
 }
 
@@ -415,6 +428,10 @@ export default function AgentConfigModal({
               </div>
               <JournalToggle checked={configEdits.journalEnabled} disabled={journalDisabled}
                 onChange={journalEnabled => onEditsChange({ journalEnabled })} />
+              <CrossChatToggle checked={configEdits.journalCrossChatEnabled}
+                reason={crossChatDisabledReason(configEdits.journalEnabled,
+                  editedTools(configEdits.tools, configData?.tools ?? []))}
+                onChange={journalCrossChatEnabled => onEditsChange({ journalCrossChatEnabled })} />
               <div className="config-field">
                 <label className="config-field config-field-checkbox">
                   <input type="checkbox" checked={configEdits.telegramSendOnly} onChange={e => onEditsChange({ telegramSendOnly: e.target.checked })} />

@@ -341,3 +341,10 @@ dotnet test tests/Fleet.Agent.Tests/
 ```
 
 `FLEET_PRIMARY_HUMAN_USER_ID` is an optional positive Telegram user id read from the deployment `.env` at provisioning; blank omits `Telegram.PrimaryHumanUserId`, and invalid values refuse before deprovisioning. See `docs/primary-human-priority.md`.
+
+The journal attachment-send foundation is draft-only until the runtime, Comms
+live authorization/content routes and acceptance tests land together. The
+cross-chat switch is a REST/dashboard-only, default-off agent DB field; no MCP
+write or automatic grant is allowed. See `docs/comms-journal.md` and
+`docs/comms-deployment.md` for the send trust boundary, dump-first rollout,
+rotation key alignment and operator-owned exact-image acceptance prerequisites.

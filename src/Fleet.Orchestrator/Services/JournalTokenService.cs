@@ -14,6 +14,8 @@ public sealed class JournalTokenService(IConfiguration configuration)
     public const string PurposeIngest = "ingest";
     public const string PurposeRead = "read";
     public const string PurposeStatus = "status";
+    public const string PurposeReadCrossChat = "read-cross-chat";
+    public const string PurposeCrossChatAuthz = "cross-chat-authz";
     public const int MinimumKeyBytes = 32;
 
     private static readonly Regex SubjectPattern =
@@ -51,6 +53,23 @@ public sealed class JournalTokenService(IConfiguration configuration)
         var payload = Encoding.UTF8.GetBytes($"cj1|{purpose}|{subject}");
         var mac = EncodeBase64Url(HMACSHA256.HashData(key, payload));
         return $"cj1.{purpose}.{subject}.{mac}";
+    }
+
+    public bool TryVerify(string? token, string purpose, out string subject)
+    {
+        subject = "";
+        var parts = (token ?? "").Split('.');
+        var valid = parts.Length == 4 && parts[0] == "cj1" && PurposePattern.IsMatch(parts[1]) && SubjectPattern.IsMatch(parts[2]);
+        if (DescribeKeyFault() is not null) return false;
+        var matched = false;
+        foreach (var key in ParseKeys(configuration["Journal:TokenKey"]!))
+        {
+            var expected = HMACSHA256.HashData(key, Encoding.UTF8.GetBytes($"cj1|{(valid ? parts[1] : "")}|{(valid ? parts[2] : "")}"));
+            matched |= CryptographicOperations.FixedTimeEquals(expected, valid ? DecodeBase64Url(parts[3]) ?? [] : []);
+        }
+        if (!valid || !matched || parts[1] != purpose) return false;
+        subject = parts[2];
+        return true;
     }
 
     /// <summary>Union configured by the operator; blanks are ignored and duplicates collapse.</summary>

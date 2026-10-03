@@ -820,3 +820,56 @@ Codex's journal headers are proved; Gemini remains false because the actual
 headless probe could not authenticate. Exact-head AC13/XAC9 stack acceptance,
 including each provider's native file reads and MCP timeout, remains required
 before merge; transport probes do not replace it.
+
+## Attachment copying and cross-chat switch (implementation in progress)
+
+The storage/configuration foundation is draft-only; the complete send runtime
+and Comms routes must land before granting or deploying attachment copying.
+Delivery is always the currently verified private human requester's chat, never
+a caller-supplied destination. Cross-chat lookup uses a journal message ULID;
+Telegram message IDs remain restricted to the current binding. Existing journal
+read-tool JSON and scope remain unchanged.
+
+The old content endpoint is **bound-only**. A forged private binding did not
+already authorize content from unrelated groups. The new cross-chat routes
+extend the available content scope, so they require a distinct token purpose,
+an uncached effective-switch check, observed source access (never read-all),
+exclusions, prior observed requester participation and live bot-verified group
+membership. Other private conversations remain inaccessible. Holding a bot
+token still permits Telegram API actions; that residual token risk is not a
+claim that cross-chat content scope was already available.
+
+The dashboard saves `journalCrossChatEnabled` through REST only; MCP can display
+it but cannot write it. Off defaults to false and revokes cross-chat access at
+Comms' next live authorization call. On requires reprovision to supply the
+runtime flag and derived token. Journal capture and an enabled canonical send
+grant are required for effectiveness. A saved true can always be cleared.
+
+Successful copies have `origin=agent_copy`, null text, `delivery_state=copied`,
+and one audit link per attachment. Operators can inspect those links privately:
+
+```sql
+SELECT message_id, ordinal,
+       copied_from_message_id,
+       copied_from_ordinal
+FROM journal_attachments
+WHERE copied_from_message_id IS NOT NULL;
+```
+
+Do not expose bot-scoped file IDs, digests, object paths or destination IDs to
+models or logs. `fileId` and copy emission must be gated by `Journal.SendEnabled`;
+no-grant records must remain byte-identical to the pre-feature format.
+
+| Outcome / reason | Operator action |
+|---|---|
+| `source_denied:cross_chat_disabled` | Check the saved switch, effective grant and reprovision; never widen read scope |
+| `source_denied:requester_not_member` | Requester must regain legitimate group membership; do not retry around the denial |
+| `authorization_unavailable` | Check Comms' static orchestrator route, aligned signing/verification keys, DB and Telegram egress |
+| `source_changed` | Source metadata changed between authorization handles; make a new explicit request |
+| `ambiguous` | Delivery may have happened; no retry or stream fallback |
+| `telegram_rejected` | Definite Telegram rejection; stream-photo 400 never triggers another upload |
+| `cancelled` | The shared 50-second budget includes queueing and upload; large files on slow uplinks may exceed it |
+
+The stream ceiling is 20 MiB. Agent and Comms per-call log lines are the operator
+signal; test counters are not exported production metrics. Never treat an
+unimplemented path or synthetic CI as successful real-provider acceptance.

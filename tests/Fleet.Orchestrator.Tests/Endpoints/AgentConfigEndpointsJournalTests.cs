@@ -24,6 +24,7 @@ public sealed class AgentConfigEndpointsJournalTests : IAsyncLifetime
     private SqliteConnection _connection = null!;
     private WebApplication _app = null!;
     private HttpClient _client = null!;
+    private readonly AuditProvider _audit = new();
 
     public async Task InitializeAsync()
     {
@@ -38,6 +39,7 @@ public sealed class AgentConfigEndpointsJournalTests : IAsyncLifetime
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Logging.ClearProviders();
+        builder.Logging.AddProvider(_audit);
         builder.Services.AddDbContext<OrchestratorDbContext>(o => o.UseSqlite(_connection));
         var journalConfig = new ConfigurationBuilder().AddInMemoryCollection().Build();
         builder.Services.AddSingleton(new JournalTokenService(journalConfig));
@@ -113,6 +115,39 @@ public sealed class AgentConfigEndpointsJournalTests : IAsyncLifetime
         var stored = await readScope.ServiceProvider.GetRequiredService<OrchestratorDbContext>().Agents.AsNoTracking().SingleAsync();
         Assert.Equal(fault is null ? requested : before, stored.JournalEnabled);
         Assert.Equal(fault is not null, stored.ShowStats);
+    }
+
+    [Fact]
+    public async Task CrossChatSave_IsIndependentOfEffectiveGrant_AndAlwaysClearable()
+    {
+        var initial = await _client.GetFromJsonAsync<JsonElement>("/api/agents/agent1/config");
+        Assert.False(initial.GetProperty("journalCrossChatEnabled").GetBoolean());
+        foreach (var value in new[] { true, true, false })
+        {
+            var response = await _client.PutAsJsonAsync("/api/agents/agent1/config", new { journalCrossChatEnabled = value });
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var saved = await _client.GetFromJsonAsync<JsonElement>("/api/agents/agent1/config");
+            Assert.Equal(value, saved.GetProperty("journalCrossChatEnabled").GetBoolean());
+            Assert.False(saved.GetProperty("journalEnabled").GetBoolean());
+        }
+        var changes = _audit.Messages.Where(m => m.Contains("field=journal_cross_chat_enabled")).ToArray();
+        Assert.Equal(2, changes.Length);
+        Assert.Contains("old=False new=True via=rest", changes[0]);
+        Assert.Contains("old=True new=False via=rest", changes[1]);
+    }
+
+    private sealed class AuditProvider : ILoggerProvider
+    {
+        public readonly System.Collections.Concurrent.ConcurrentQueue<string> Messages = new();
+        public ILogger CreateLogger(string categoryName) => new AuditLogger(Messages);
+        public void Dispose() { }
+        private sealed class AuditLogger(System.Collections.Concurrent.ConcurrentQueue<string> messages) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+            public bool IsEnabled(LogLevel level) => true;
+            public void Log<TState>(LogLevel level, EventId id, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            { if (level == LogLevel.Information) messages.Enqueue(formatter(state, exception)); }
+        }
     }
 
     private sealed record JournalTokenServiceConfig(IConfiguration Config);

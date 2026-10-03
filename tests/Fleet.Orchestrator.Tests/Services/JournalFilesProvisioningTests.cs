@@ -84,6 +84,38 @@ public sealed class JournalFilesProvisioningTests
         Assert.DoesNotContain("fleet-journal-files", await File.ReadAllTextAsync(Path.Combine(dir, ".mcp.json")));
         Assert.DoesNotContain("\"Journal\"", await File.ReadAllTextAsync(Path.Combine(dir, "appsettings.json")));
     }
+    [Theory]
+    [InlineData("claude", false)]
+    [InlineData("claude", true)]
+    [InlineData("codex", false)]
+    [InlineData("codex", true)]
+    [InlineData("gemini", false)]
+    [InlineData("gemini", true)]
+    public async Task SendGrantAndSwitch_EmitOnlyEffectiveKeys(string provider, bool cross)
+    {
+        await using var harness = ProvisioningHarness.Create(Config);
+        await harness.SeedAsync(db =>
+        {
+            var agent = Agent(provider);
+            agent.Tools = [new() { ToolName = " MCP__FLEET-JOURNAL-FILES__SEND_ATTACHMENT " }];
+            agent.JournalCrossChatEnabled = cross;
+            db.Agents.Add(agent);
+        });
+        Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
+        var dir = harness.GeneratedDir("fleet-agent1");
+        using var config = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(dir, "appsettings.json")));
+        var journal = config.RootElement.GetProperty("Journal");
+        Assert.True(journal.GetProperty("SendEnabled").GetBoolean());
+        Assert.False(journal.TryGetProperty("FilesEnabled", out _));
+        Assert.StartsWith("cj1.read.agent1.", journal.GetProperty("ReadToken").GetString());
+        Assert.Equal(cross, journal.TryGetProperty("CrossChatEnabled", out _));
+        Assert.Equal(cross, journal.TryGetProperty("CrossChatToken", out _));
+        if (cross) Assert.StartsWith("cj1.read-cross-chat.agent1.", journal.GetProperty("CrossChatToken").GetString());
+        Assert.Contains(config.RootElement.GetProperty("Agent").GetProperty("AllowedTools").EnumerateArray(), t => t.GetString() == JournalGrants.SendGrant);
+        using var mcp = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(dir, ".mcp.json")));
+        Assert.True(mcp.RootElement.GetProperty("mcpServers").TryGetProperty("fleet-journal-files", out _));
+    }
+
     [Fact]
     public async Task ReservedEndpointRefusesBeforeDeprovisionEvenWithCaptureOff()
     {

@@ -72,12 +72,11 @@ public sealed class JournalHttpClient
     public async Task<HttpResponseMessage> OpenSendAsync(JournalAttachmentRequest arguments, bool cross, bool content, CancellationToken ct)
     {
         var path = cross ? (content ? "/journal/v1/attachments/cross-chat/content" : "/journal/v1/attachments/cross-chat/send-handle")
-            : content ? JournalAttachmentRequest.ContentPath : "/journal/v1/attachments/send-handle";
+            : content ? "/journal/v1/attachments/send-content" : "/journal/v1/attachments/send-handle";
         using var request = new HttpRequestMessage(HttpMethod.Post, path)
         { Content = new ReadOnlyMemoryContent(JsonSerializer.SerializeToUtf8Bytes(arguments)) };
         request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", cross ? _crossChatToken : _readToken);
-        if (content) request.Headers.Add("X-Journal-Send", "1");
         return await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
     }
 

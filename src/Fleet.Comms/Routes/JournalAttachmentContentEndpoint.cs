@@ -23,7 +23,11 @@ public sealed class JournalAttachmentContentEndpoint(IJournalAttachmentSource? s
         var endpoint = new JournalAttachmentContentEndpoint(app.Services.GetRequiredService<IJournalReadStore>() as IJournalAttachmentSource,
             objects, app.Services.GetRequiredService<JournalReadGrants>(), app.Services.GetRequiredService<JournalBindingScope>(), stats, time, send);
         app.MapPost(JournalAttachmentRequest.ContentPath, endpoint.HandleAsync);
-        if (send is not null) app.MapPost(JournalAttachmentSendEndpoints.CrossContentPath, endpoint.HandleAsync);
+        if (send is not null)
+        {
+            app.MapPost(JournalAttachmentSendEndpoints.ContentPath, endpoint.HandleAsync);
+            app.MapPost(JournalAttachmentSendEndpoints.CrossContentPath, endpoint.HandleAsync);
+        }
     }
     public async Task HandleAsync(HttpContext context)
     {
@@ -48,7 +52,7 @@ public sealed class JournalAttachmentContentEndpoint(IJournalAttachmentSource? s
             if (request.Error() is { } error) { await Refuse(400, error, "invalid_argument"); return; }
             JournalAttachmentLocator? row;
             var crossSend = context.Request.Path == JournalAttachmentSendEndpoints.CrossContentPath;
-            var sendOrigin = crossSend || context.Request.Headers["X-Journal-Send"] == "1";
+            var sendOrigin = crossSend || context.Request.Path == JournalAttachmentSendEndpoints.ContentPath;
             if (sendOrigin)
             {
                 if (crossSend && request.TelegramMessageId is not null) { await Refuse(400, JournalAttachmentRequest.Invalid("telegram_message_id"), "invalid_argument"); return; }

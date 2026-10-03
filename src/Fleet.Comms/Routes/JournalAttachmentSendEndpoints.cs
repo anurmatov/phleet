@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging;
 namespace Fleet.Comms.Routes;
 public static class JournalAttachmentSendEndpoints
 {
+    public const string ContentPath = "/journal/v1/attachments/send-content";
     public const string HandlePath = "/journal/v1/attachments/send-handle";
     public const string CrossHandlePath = "/journal/v1/attachments/cross-chat/send-handle";
     public const string CrossContentPath = "/journal/v1/attachments/cross-chat/content";

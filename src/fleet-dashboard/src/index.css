@@ -5547,3 +5547,4 @@ body {
 .journal-panel-stats { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 10px; color: var(--muted); font-size: 13px; }
 .journal-panel-unavailable { margin-top: 10px; color: var(--red); }
 .journal-panel-muted { margin-top: 10px; color: var(--muted); }
+.journal-panel-warn { color: var(--amber); }

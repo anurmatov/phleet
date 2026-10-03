@@ -49,6 +49,35 @@ public sealed class TurnBindingHttpClientTests
         Assert.Equal("timeout", result.Error);
     }
 
+    [Theory]
+    [InlineData(false, false, "/journal/v1/attachments/send-handle", "read-token")]
+    [InlineData(false, true, "/journal/v1/attachments/send-content", "read-token")]
+    [InlineData(true, false, "/journal/v1/attachments/cross-chat/send-handle", "cross-token")]
+    [InlineData(true, true, "/journal/v1/attachments/cross-chat/content", "cross-token")]
+    public async Task Send_UsesDedicatedPathAndPurposeWithoutMarker(bool cross, bool content, string path, string token)
+    {
+        var handler = new Handler();
+        using var http = new HttpClient(handler) { BaseAddress = new Uri("http://journal.test") };
+        var client = new JournalHttpClient(http, "ingest-token", readToken: "read-token", crossChatToken: "cross-token");
+        using var response = await client.OpenSendAsync(new() { MessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV" }, cross, content, default);
+        Assert.Equal(HttpMethod.Post, handler.Method);
+        Assert.Equal(path, handler.Path);
+        Assert.Equal("Bearer " + token, handler.Authorization);
+        Assert.False(handler.SendMarker);
+    }
+
+    [Fact]
+    public async Task Fetch_KeepsOriginalContentPathAndReadPurpose()
+    {
+        var handler = new Handler();
+        using var http = new HttpClient(handler) { BaseAddress = new Uri("http://journal.test") };
+        var client = new JournalHttpClient(http, "ingest-token", readToken: "read-token");
+        using var response = await client.OpenAttachmentContentAsync(new() { TelegramMessageId = 5 }, default);
+        Assert.Equal("/journal/v1/attachments/content", handler.Path);
+        Assert.Equal("Bearer read-token", handler.Authorization);
+        Assert.False(handler.SendMarker);
+    }
+
     private sealed class HangingHandler : HttpMessageHandler
     {
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
@@ -64,8 +93,10 @@ public sealed class TurnBindingHttpClientTests
         public string ResponseBody = "";
         public HttpMethod? Method;
         public string? Path, Authorization, Body;
+        public bool SendMarker;
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
+            SendMarker = request.Headers.Contains("X-Journal-Send");
             Method = request.Method;
             Path = request.RequestUri!.AbsolutePath;
             Authorization = request.Headers.Authorization!.ToString();

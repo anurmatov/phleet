@@ -55,13 +55,13 @@ public sealed class AddAgentJournalEnabledMigrationTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Every_migration_applies_and_this_one_is_last()
+    public async Task Every_migration_applies_and_contains_this_one()
     {
         await using var db = NewContext();
         await db.Database.MigrateAsync();
 
         Assert.Empty(await db.Database.GetPendingMigrationsAsync());
-        Assert.Equal(Target, (await db.Database.GetAppliedMigrationsAsync()).Last());
+        Assert.Contains(Target, await db.Database.GetAppliedMigrationsAsync());
     }
 
     [Fact]

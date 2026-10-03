@@ -6,6 +6,8 @@ namespace Fleet.Comms.Routes;
 /// <summary>A binding only narrows the caller's observed/all scope, never replaces it.</summary>
 public sealed class JournalBindingScope(JournalTurnBindings bindings, IReadOnlySet<long> excluded)
 {
+    public JournalTurnBinding? Get(string subject) => bindings.Get(subject);
+    public bool IsExcluded(long chatId) => excluded.Contains(chatId);
     public (string? Key, string? Reason) Resolve(string subject)
     {
         var bound = bindings.Get(subject);

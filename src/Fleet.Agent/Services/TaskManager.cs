@@ -147,6 +147,21 @@ public sealed class TaskManager
 
     public void SetBotUsername(string username) => _botUsername = username;
 
+    /// <summary>A single real Telegram human turn, never a steered relay/client turn.</summary>
+    public bool TryGetCurrentHumanTurn(long privateChatId, out RunningTask? turn)
+    {
+        turn = null;
+        var active = _chatTasks.SelectMany(pair => pair.Value.Snapshot().Select(t => (Chat: pair.Key, Task: t)))
+            .Where(pair => !pair.Task.Closed && !pair.Task.Cts.IsCancellationRequested).ToArray();
+        if (active.Length != 1) return false;
+        var candidate = active[0];
+        if (candidate.Chat != privateChatId || candidate.Task.UserId != privateChatId
+            || candidate.Task.Source is not (TaskSource.UserMessage or TaskSource.NewCommand)
+            || candidate.Task.Identity?.ChannelId != ChannelIds.Telegram) return false;
+        turn = candidate.Task;
+        return true;
+    }
+
     public bool HasRunningTasks(long chatId) => GetChatState(chatId).Count > 0;
 
     public async Task<TaskDispatchOutcome> StartTask(long chatId, string task, string displayText, bool isSessionTask,

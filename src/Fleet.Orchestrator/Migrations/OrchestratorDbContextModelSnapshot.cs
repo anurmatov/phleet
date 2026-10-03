@@ -33,10 +33,6 @@ namespace Fleet.Orchestrator.Migrations
                     b.Property<string>("AgentsJson")
                         .HasColumnType("longtext");
 
-                    b.Property<string>("AnthropicBaseUrl")
-                        .HasMaxLength(500)
-                        .HasColumnType("varchar(500)");
-
                     b.Property<bool>("AutoMemoryEnabled")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("tinyint(1)")
@@ -91,6 +87,12 @@ namespace Fleet.Orchestrator.Migrations
                     b.Property<bool>("IsEnabled")
                         .HasColumnType("tinyint(1)");
 
+                    b.Property<bool>("JournalCrossChatEnabled")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("tinyint(1)")
+                        .HasDefaultValue(false)
+                        .HasColumnName("journal_cross_chat_enabled");
+
                     b.Property<bool>("JournalEnabled")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("tinyint(1)")
@@ -99,6 +101,11 @@ namespace Fleet.Orchestrator.Migrations
 
                     b.Property<string>("JsonSchema")
                         .HasColumnType("longtext");
+
+                    b.Property<string>("LocalBaseUrl")
+                        .HasMaxLength(500)
+                        .HasColumnType("varchar(500)")
+                        .HasColumnName("AnthropicBaseUrl");
 
                     b.Property<int>("MaxTurns")
                         .ValueGeneratedOnAdd()

@@ -9,7 +9,7 @@ using ModelContextProtocol.Protocol;
 namespace Fleet.Agent.Services.JournalFiles;
 
 /// <summary>Own loopback-only Kestrel app, started before any task intake or CLI warmup.</summary>
-public sealed class JournalFilesListener(JournalFilesTools tools, ILoggerFactory logs) : IHostedService, IAsyncDisposable
+public sealed class JournalFilesListener(JournalFilesTools? tools, ILoggerFactory logs, JournalSendTools? send = null) : IHostedService, IAsyncDisposable
 {
     public const string ServerName = "fleet-journal-files";
     public const string Path = "/journal-files/v1/mcp";
@@ -27,8 +27,10 @@ public sealed class JournalFilesListener(JournalFilesTools tools, ILoggerFactory
             // Target-instance overload: every call runs on the one parent-owned instance, so its
             // serialization, deadline and counters hold. The parameterless generic overload
             // would construct a new instance per call against this child container.
-            builder.Services.AddMcpServer(options => options.ServerInfo = new Implementation { Name = ServerName, Version = "1" })
-                .WithHttpTransport(options => options.Stateless = true).WithTools(tools);
+            var server = builder.Services.AddMcpServer(options => options.ServerInfo = new Implementation { Name = ServerName, Version = "1" })
+                .WithHttpTransport(options => options.Stateless = true);
+            if (tools is not null) server.WithTools(tools);
+            if (send is not null) server.WithTools([send.CreateTool()]);
             builder.WebHost.UseKestrelCore().ConfigureKestrel(options =>
             { options.AddServerHeader = false; options.Listen(IPAddress.Loopback, 8091); });
             _app = builder.Build();

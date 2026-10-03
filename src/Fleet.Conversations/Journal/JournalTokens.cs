@@ -34,6 +34,8 @@ public static class JournalTokens
     /// what a subject may read is the deployment's decision, made on the server.
     /// </summary>
     public const string PurposeRead = "read";
+    public const string PurposeReadCrossChat = "read-cross-chat";
+    public const string PurposeCrossChatAuthz = "cross-chat-authz";
 
     /// <summary>Reserved for the service-publisher slice. Refused by every route in this slice.</summary>
     public const string PurposeIngestService = "ingest-service";

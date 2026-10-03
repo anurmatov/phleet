@@ -15,17 +15,17 @@ public enum JournalTextFormat { Plain, Html, Rich }
 /// <c>agent_tool</c> (#394) is a message an agent sent through a Telegram MCP tool
 /// (<c>send_message</c>, <c>send_to_ceo</c>), captured from the tool-send receipt: always outbound,
 /// always an agent sender. The schema already carries the values later slices write
-/// (<c>agent_copy</c>, <c>client_submission</c>, <c>client_turn</c>), so those slices stay additive,
-/// but nothing here can produce them.
+/// (<c>client_submission</c>, <c>client_turn</c>), so those slices stay additive.
+/// <c>agent_copy</c> identifies an outbound attachment resend with an operator-only source link.
 /// </remarks>
-public enum JournalRecordOrigin { TelegramUpdate, AgentRuntime, AgentTool }
+public enum JournalRecordOrigin { TelegramUpdate, AgentRuntime, AgentTool, AgentCopy }
 
 public enum JournalAttachmentKind { Photo, Document, Voice, Video, VideoNote, Audio, Animation, Sticker, Other }
 
 /// <summary>Why an attachment's bytes are not in the journal. Required on every attachment in this slice.</summary>
 public enum JournalNotArchivedReason
 {
-    MediaDisabled, OverBotApiLimit, OverSizeCap, UnsupportedKind, DownloadFailed, SourceExpired,
+    MediaDisabled, OverBotApiLimit, OverSizeCap, UnsupportedKind, DownloadFailed, SourceExpired, Copied,
 }
 
 public sealed record JournalSender
@@ -47,6 +47,12 @@ public sealed record JournalSendGroup
 /// One attachment in a record: its metadata, and either a reason its bytes are not archived or the
 /// id of an upload the caller already proved bytes for.
 /// </summary>
+public sealed record JournalCopiedFrom
+{
+    public required string MessageId { get; init; }
+    public required int Ordinal { get; init; }
+}
+
 public sealed record JournalAttachment
 {
     public required int Ordinal { get; init; }
@@ -55,6 +61,12 @@ public sealed record JournalAttachment
     public long? ByteSize { get; init; }
     public string? FileName { get; init; }
     public string? FileUniqueId { get; init; }
+
+    /// <summary>Bot-scoped resend credential. Never exposed in read-tool responses or fingerprints.</summary>
+    public string? FileId { get; init; }
+
+    /// <summary>Operator-only audit link; retention does not depend on the source row.</summary>
+    public JournalCopiedFrom? CopiedFrom { get; init; }
 
     /// <summary>
     /// The upload whose bytes this attachment names, when the caller proved them. Null exactly when
@@ -227,6 +239,7 @@ public static class JournalWire
         JournalRecordOrigin.TelegramUpdate => "telegram_update",
         JournalRecordOrigin.AgentRuntime => "agent_runtime",
         JournalRecordOrigin.AgentTool => "agent_tool",
+        JournalRecordOrigin.AgentCopy => "agent_copy",
         _ => throw new ArgumentOutOfRangeException(nameof(value)),
     };
 
@@ -252,6 +265,7 @@ public static class JournalWire
         JournalNotArchivedReason.UnsupportedKind => "unsupported_kind",
         JournalNotArchivedReason.DownloadFailed => "download_failed",
         JournalNotArchivedReason.SourceExpired => "source_expired",
+        JournalNotArchivedReason.Copied => "copied",
         _ => throw new ArgumentOutOfRangeException(nameof(value)),
     };
 

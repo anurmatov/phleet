@@ -103,6 +103,11 @@ public static class JournalAuth
     {
         var path = request.Path.Value;
 
+        if (HttpMethods.IsPost(request.Method) && path is JournalAttachmentSendEndpoints.CrossHandlePath or JournalAttachmentSendEndpoints.CrossContentPath)
+            return JournalTokens.PurposeReadCrossChat;
+        if (HttpMethods.IsPost(request.Method) && path is JournalAttachmentSendEndpoints.HandlePath or JournalAttachmentSendEndpoints.ContentPath)
+            return JournalTokens.PurposeRead;
+
         if (HttpMethods.IsPut(request.Method) && path == JournalTurnBindings.Path)
             return JournalTokens.PurposeIngest;
 

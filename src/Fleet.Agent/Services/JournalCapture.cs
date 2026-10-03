@@ -58,7 +58,7 @@ public sealed record JournalMediaItem(
     /// attachment journals that reason instead of waiting for the drain to discover the file is
     /// missing.
     /// </summary>
-    JournalMediaReason? Declined = null);
+    JournalMediaReason? Declined = null, string? FileId = null, JournalCopiedFrom? CopiedFrom = null);
 
 /// <summary>
 /// Turns what the Telegram transport sent and received into journal records in the spool
@@ -81,6 +81,8 @@ public sealed class JournalCapture
     private static readonly TimeSpan SpoolFullWarnInterval = TimeSpan.FromMinutes(1);
 
     private readonly JournalSpool _spool;
+    private readonly bool _sendEnabled;
+    public bool SendEnabled => _sendEnabled;
     private readonly JournalCounters _counters;
     private readonly AllowlistHolder _allowlist;
     private readonly IReadOnlySet<long> _excluded;
@@ -97,6 +99,7 @@ public sealed class JournalCapture
         TimeProvider? time = null)
     {
         _spool = spool;
+        _sendEnabled = options.Value.SendEnabled;
         _counters = counters;
         _allowlist = allowlist;
         _excluded = JournalOptions.ParseExcludedChatIds(options.Value.ExcludedChatIds);
@@ -137,6 +140,7 @@ public sealed class JournalCapture
         private readonly OutboundOrigin _origin;
         private readonly JournalRecordOrigin _recordOrigin;
         private readonly List<JournalMessage> _kept = [];
+        public bool SpoolSucceeded { get; private set; }
 
         internal OutboundBatch(JournalCapture owner, OutboundOrigin origin, JournalRecordOrigin recordOrigin)
         {
@@ -150,7 +154,7 @@ public sealed class JournalCapture
         {
             try
             {
-                if (_owner.Include(JournalDirection.Outbound, message, _origin)) _kept.Add(message);
+                if ((_recordOrigin != JournalRecordOrigin.AgentCopy || _owner._sendEnabled) && _owner.Include(JournalDirection.Outbound, message, _origin)) _kept.Add(message);
             }
             catch (Exception e)
             {
@@ -175,7 +179,7 @@ public sealed class JournalCapture
                 var group = groupId is null ? null : new JournalSendGroup { Id = groupId, Part = i + 1, Parts = messages.Length };
                 try
                 {
-                    _owner.Write(JournalDirection.Outbound, messages[i], group, SpoolMediaMode.Copy, _recordOrigin);
+                    SpoolSucceeded |= _owner.Write(JournalDirection.Outbound, messages[i], group, SpoolMediaMode.Copy, _recordOrigin);
                 }
                 catch (Exception e)
                 {
@@ -204,7 +208,7 @@ public sealed class JournalCapture
         return false;
     }
 
-    private void Write(
+    private bool Write(
         JournalDirection direction, JournalMessage message, JournalSendGroup? sendGroup, SpoolMediaMode mode,
         JournalRecordOrigin recordOrigin)
     {
@@ -223,6 +227,8 @@ public sealed class JournalCapture
                 ByteSize = item.ByteSize ?? item.Bytes?.LongLength,
                 FileName = item.FileName,
                 FileUniqueId = item.FileUniqueId,
+                FileId = _sendEnabled ? item.FileId : null,
+                CopiedFrom = _sendEnabled && recordOrigin == JournalRecordOrigin.AgentCopy ? item.CopiedFrom : null,
                 // The wire contract requires exactly one of `notArchivedReason` or `uploadId` on
                 // every attachment, so capture states which one it is leaving to the drainer:
                 // `media_disabled` is the placeholder for "this has no upload yet and no known
@@ -230,7 +236,7 @@ public sealed class JournalCapture
                 // bytes. A record that reaches the listener with the placeholder still on it is
                 // stored as not-archived, which is the honest answer for a deployment with no
                 // bucket — and it is why a pre-drain record is postable at all.
-                NotArchivedReason = item.Declined is { } declined && declined != JournalMediaReason.Uploaded
+                NotArchivedReason = _sendEnabled && recordOrigin == JournalRecordOrigin.AgentCopy ? JournalNotArchivedReason.Copied : item.Declined is { } declined && declined != JournalMediaReason.Uploaded
                     ? WireReason(declined)
                     : JournalNotArchivedReason.MediaDisabled,
             });
@@ -275,17 +281,17 @@ public sealed class JournalCapture
         {
             case SpoolWriteOutcome.Written:
                 _counters.Captured(directionCode);
-                break;
+                return true;
 
             case SpoolWriteOutcome.Full:
                 _counters.SpoolFull();
                 WarnSpoolFull();
-                break;
+                return false;
 
             default:
                 _counters.CaptureFailed();
                 _logger.LogWarning("journal capture could not write to the spool; the record is lost, the turn continues");
-                break;
+                return false;
         }
     }
 

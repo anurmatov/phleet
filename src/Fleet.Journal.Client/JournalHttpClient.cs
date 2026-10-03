@@ -37,16 +37,18 @@ public sealed class JournalHttpClient
     private readonly HttpClient _http;
     private readonly string _token;
     private readonly string? _readToken;
+    private readonly string? _crossChatToken;
     private readonly TimeSpan _timeout;
 
     /// <param name="http">A client whose <see cref="HttpClient.BaseAddress"/> is the journal listener.</param>
     /// <param name="token">The ingest token.</param>
     /// <param name="timeout">The per-request budget; <see cref="RequestTimeout"/> unless a test shortens it.</param>
-    public JournalHttpClient(HttpClient http, string token, TimeSpan? timeout = null, string? readToken = null)
+    public JournalHttpClient(HttpClient http, string token, TimeSpan? timeout = null, string? readToken = null, string? crossChatToken = null)
     {
         _http = http;
         _token = token.Trim();
         _readToken = readToken?.Trim();
+        _crossChatToken = crossChatToken?.Trim();
         _timeout = timeout ?? RequestTimeout;
     }
 
@@ -64,6 +66,17 @@ public sealed class JournalHttpClient
         { Content = new ReadOnlyMemoryContent(JsonSerializer.SerializeToUtf8Bytes(arguments)) };
         request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _readToken);
+        return await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+    }
+
+    public async Task<HttpResponseMessage> OpenSendAsync(JournalAttachmentRequest arguments, bool cross, bool content, CancellationToken ct)
+    {
+        var path = cross ? (content ? "/journal/v1/attachments/cross-chat/content" : "/journal/v1/attachments/cross-chat/send-handle")
+            : content ? "/journal/v1/attachments/send-content" : "/journal/v1/attachments/send-handle";
+        using var request = new HttpRequestMessage(HttpMethod.Post, path)
+        { Content = new ReadOnlyMemoryContent(JsonSerializer.SerializeToUtf8Bytes(arguments)) };
+        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", cross ? _crossChatToken : _readToken);
         return await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
     }
 

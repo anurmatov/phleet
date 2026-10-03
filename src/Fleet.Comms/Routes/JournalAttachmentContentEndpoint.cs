@@ -12,17 +12,22 @@ namespace Fleet.Comms.Routes;
 
 /// <summary>Read-authorized, bound, streamed delivery. Never writes rows, files or URLs.</summary>
 public sealed class JournalAttachmentContentEndpoint(IJournalAttachmentSource? source, IJournalObjectStore? objects,
-    JournalReadGrants grants, JournalBindingScope scope, JournalRuntimeStats stats, TimeProvider? time = null)
+    JournalReadGrants grants, JournalBindingScope scope, JournalRuntimeStats stats, TimeProvider? time = null, JournalSendSourceResolver? send = null)
 {
     private readonly SemaphoreSlim _global = new(4, 4);
     private readonly ConcurrentDictionary<string, byte> _subjects = new(StringComparer.Ordinal);
     private readonly TimeProvider _time = time ?? TimeProvider.System;
     private static readonly JsonSerializerOptions Json = new() { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow };
-    public static void Map(WebApplication app, IJournalObjectStore? objects, JournalRuntimeStats stats, TimeProvider? time = null)
+    public static void Map(WebApplication app, IJournalObjectStore? objects, JournalRuntimeStats stats, TimeProvider? time = null, JournalSendSourceResolver? send = null)
     {
         var endpoint = new JournalAttachmentContentEndpoint(app.Services.GetRequiredService<IJournalReadStore>() as IJournalAttachmentSource,
-            objects, app.Services.GetRequiredService<JournalReadGrants>(), app.Services.GetRequiredService<JournalBindingScope>(), stats, time);
+            objects, app.Services.GetRequiredService<JournalReadGrants>(), app.Services.GetRequiredService<JournalBindingScope>(), stats, time, send);
         app.MapPost(JournalAttachmentRequest.ContentPath, endpoint.HandleAsync);
+        if (send is not null)
+        {
+            app.MapPost(JournalAttachmentSendEndpoints.ContentPath, endpoint.HandleAsync);
+            app.MapPost(JournalAttachmentSendEndpoints.CrossContentPath, endpoint.HandleAsync);
+        }
     }
     public async Task HandleAsync(HttpContext context)
     {
@@ -45,16 +50,32 @@ public sealed class JournalAttachmentContentEndpoint(IJournalAttachmentSource? s
                 try { request = JsonSerializer.Deserialize<JournalAttachmentRequest>(bytes.AsSpan(0, count), Json); } catch (JsonException) { }
             if (request is null) { await Refuse(400, JournalAttachmentRequest.Invalid("body"), "invalid_argument"); return; }
             if (request.Error() is { } error) { await Refuse(400, error, "invalid_argument"); return; }
-            if (objects is null) { await Unavailable("media_disabled"); return; }
-            var binding = scope.Resolve(subject);
-            if (binding.Reason is { } reason) { await Unavailable(reason); return; }
-            if (source is null) { await Refuse(503, "{\"error\":\"store_unavailable\",\"retryable\":true}", "store_unavailable"); return; }
-            var row = await source.FindAttachmentAsync(grants.ReaderFor(subject), binding.Key!, request.MessageId, request.TelegramMessageId, request.Ordinal, ct);
-            if (row is null) { await Refuse(404, "{\"error\":\"not_found\"}", "not_found"); return; }
+            JournalAttachmentLocator? row;
+            var crossSend = context.Request.Path == JournalAttachmentSendEndpoints.CrossContentPath;
+            var sendOrigin = crossSend || context.Request.Path == JournalAttachmentSendEndpoints.ContentPath;
+            if (sendOrigin)
+            {
+                if (crossSend && request.TelegramMessageId is not null) { await Refuse(400, JournalAttachmentRequest.Invalid("telegram_message_id"), "invalid_argument"); return; }
+                if (send is null) { await Refuse(503, "{\"error\":\"store_unavailable\",\"retryable\":true}", "store_unavailable"); return; }
+                var resolved = await send.ResolveAsync(subject, request, crossSend, ct);
+                if (resolved.Error is not null) { await Refuse(resolved.Status, resolved.Error, "send_refused"); return; }
+                row = resolved.Source!.Attachment;
+                if (objects is null) { await Unavailable("media_disabled"); return; }
+            }
+            else
+            {
+                if (objects is null) { await Unavailable("media_disabled"); return; }
+                var binding = scope.Resolve(subject);
+                if (binding.Reason is { } reason) { await Unavailable(reason); return; }
+                if (source is null) { await Refuse(503, "{\"error\":\"store_unavailable\",\"retryable\":true}", "store_unavailable"); return; }
+                row = await source.FindAttachmentAsync(grants.ReaderFor(subject), binding.Key!, request.MessageId, request.TelegramMessageId, request.Ordinal, ct);
+                if (row is null) { await Refuse(404, "{\"error\":\"not_found\"}", "not_found"); return; }
+            }
             if (row.AttachmentState == "not_archived")
             { await Refuse(422, JsonSerializer.Serialize(new { error = "not_archived", reason = row.NotArchivedReason }), "not_archived"); return; }
             if (row.AttachmentState == "lost") { await Unavailable("attachment_lost"); return; }
-            if (row.ObjectState is not ("uploaded" or "committed") || row.ObjectKey is null)
+            if ((row.ObjectState is not ("uploaded" or "committed")
+                && !(sendOrigin && row.ObjectState == "deleting")) || row.ObjectKey is null)
             { await Unavailable("object_missing"); return; }
             if (!_subjects.TryAdd(subject, 0)) { await Refuse(429, "{\"error\":\"busy\",\"retryable\":true}", "busy"); return; }
             var global = false;

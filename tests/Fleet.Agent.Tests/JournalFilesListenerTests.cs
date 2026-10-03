@@ -17,6 +17,31 @@ public sealed class JournalFilesListenerTests : IDisposable
     private readonly string _root = Path.Combine(Path.GetTempPath(), "journal-listener-" + Guid.NewGuid().ToString("N"));
 
     [Fact]
+    public async Task SendTool_RealHttpCallsSameCrossAndDeniedUseParentInstance()
+    {
+        using var rig = new JournalSendToolsTests.Rig();
+        await using var listener = new JournalFilesListener(null, NullLoggerFactory.Instance, rig.Tools);
+        await listener.StartAsync(default); Assert.True(listener.Ready);
+        var arguments = JsonSerializer.Serialize(new { message_id = JournalSendToolsTests.Id });
+        var same = await CallAsync(101, "send_attachment", arguments); Assert.Contains("sent", Text(same));
+        rig.Handler.Cross = true;
+        var cross = await CallAsync(102, "send_attachment", arguments); Assert.Contains("sent", Text(cross));
+        rig.Handler.CrossHandles = 0; rig.Handler.SecondStatus = HttpStatusCode.Forbidden;
+        var denied = await CallAsync(103, "send_attachment", arguments); Assert.Contains("requester_not_member", Text(denied));
+        Assert.Equal(2, rig.Sender.Sends); Assert.Equal(0, rig.Sender.Uploads);
+    }
+    [Fact]
+    public async Task NoSendGrant_RealHttpCallIsUnknownAndMakesNoHttpRequest()
+    {
+        var handler = new Handler(); using var http = new HttpClient(handler) { BaseAddress = new("http://journal.test") };
+        var client = new JournalHttpClient(http, "ingest", readToken: "read"); using var binding = Publisher(client); Bind(binding);
+        var tools = new JournalFilesTools(client, binding, new JournalFileStore(_root), new(), NullLogger<JournalFilesTools>.Instance);
+        await using var listener = new JournalFilesListener(tools, NullLoggerFactory.Instance);
+        await listener.StartAsync(default); Assert.True(listener.Ready);
+        var unknown = await CallAsync(104, "send_attachment", "{}");
+        Assert.True(unknown.TryGetProperty("code", out _) || IsError(unknown)); Assert.Equal(0, handler.Calls);
+    }
+    [Fact]
     public async Task LoopbackOnlyServerIsReadyBeforeStartReturnsAndUnrelatedRoutesAre404()
     {
         using var http = new HttpClient { BaseAddress = new("http://journal.test") };
@@ -159,10 +184,10 @@ public sealed class JournalFilesListenerTests : IDisposable
         return listener;
     }
 
-    private static async Task<JsonElement> CallAsync(int id)
+    private static async Task<JsonElement> CallAsync(int id, string name = "fetch_attachment", string? arguments = null)
     {
         using var loopback = new HttpClient { BaseAddress = new("http://127.0.0.1:8091"), Timeout = TimeSpan.FromSeconds(30) };
-        var body = "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"method\":\"tools/call\",\"params\":{\"name\":\"fetch_attachment\",\"arguments\":{\"telegram_message_id\":5}}}";
+        var body = JsonSerializer.Serialize(new { jsonrpc = "2.0", id, method = "tools/call", @params = new { name, arguments = JsonDocument.Parse(arguments ?? "{\"telegram_message_id\":5}").RootElement } });
         using var request = new HttpRequestMessage(HttpMethod.Post, JournalFilesListener.Path) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
         request.Headers.Accept.ParseAdd("application/json"); request.Headers.Accept.ParseAdd("text/event-stream");
         using var reply = await loopback.SendAsync(request);
@@ -172,7 +197,7 @@ public sealed class JournalFilesListenerTests : IDisposable
         var payload = text.TrimStart().StartsWith('{') ? text
             : text.Split('\n').Select(l => l.TrimEnd('\r')).Single(l => l.StartsWith("data:", StringComparison.Ordinal))["data:".Length..].Trim();
         using var json = JsonDocument.Parse(payload);
-        return json.RootElement.GetProperty("result").Clone();
+        return (json.RootElement.TryGetProperty("result", out var result) ? result : json.RootElement.GetProperty("error")).Clone();
     }
 
     private static bool IsError(JsonElement result) => result.TryGetProperty("isError", out var e) && e.ValueKind == JsonValueKind.True;

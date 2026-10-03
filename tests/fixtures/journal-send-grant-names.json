@@ -1,0 +1,47 @@
+[
+  {
+    "name": "mcp__fleet-journal-files__send_attachment",
+    "enabled": true,
+    "present": true
+  },
+  {
+    "name": "MCP__FLEET-JOURNAL-FILES__SEND_ATTACHMENT",
+    "enabled": true,
+    "present": true
+  },
+  {
+    "name": " mcp__fleet-journal-files__send_attachment ",
+    "enabled": true,
+    "present": true
+  },
+  {
+    "name": "mcp__fleet-journal-files__send_attachment",
+    "enabled": false,
+    "present": false
+  },
+  {
+    "name": "mcp__fleet-journal-files__fetch_attachment",
+    "enabled": true,
+    "present": false
+  },
+  {
+    "name": "mcp__fleet-journal-files__send_attachments",
+    "enabled": true,
+    "present": false
+  },
+  {
+    "name": "\u0085mcp__fleet-journal-files__send_attachment\u0085",
+    "enabled": true,
+    "present": true
+  },
+  {
+    "name": "\ufeffmcp__fleet-journal-files__send_attachment",
+    "enabled": true,
+    "present": false
+  },
+  {
+    "name": "mcp__fleet-journal-files__send_\u0430ttachment",
+    "enabled": true,
+    "present": false
+  }
+]

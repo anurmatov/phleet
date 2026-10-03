@@ -350,6 +350,7 @@ public sealed class JournalOptions
 
     public static readonly TimeSpan MinimumMessageRetention = TimeSpan.FromDays(1);
 
+    public string OrchestratorUrl { get; set; } = "";
     public bool Enabled { get; set; }
 
     /// <summary>

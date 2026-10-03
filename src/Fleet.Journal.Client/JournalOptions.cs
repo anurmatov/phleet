@@ -27,6 +27,9 @@ public sealed class JournalOptions
     public string IngestToken { get; set; } = "";
     public string ReadToken { get; set; } = "";
     public bool FilesEnabled { get; set; }
+    public bool SendEnabled { get; set; }
+    public bool CrossChatEnabled { get; set; }
+    public string CrossChatToken { get; set; } = "";
 
     public string BaseUrl { get; set; } = "http://fleet-comms:8083";
 
@@ -62,7 +65,11 @@ public sealed class JournalOptions
     /// </summary>
     public string? DescribeFault()
     {
-        if (FilesEnabled && (!Enabled || !Regex.IsMatch(ReadToken.Trim(),
+        if (CrossChatEnabled && (!SendEnabled || !Regex.IsMatch(CrossChatToken.Trim(),
+            "^cj1\\.read-cross-chat\\.[A-Za-z0-9_-]{1,128}\\.[A-Za-z0-9_-]+={0,2}$", RegexOptions.CultureInvariant)
+            || CrossChatToken.Trim().Split('.')[2] != Subject))
+            return "Journal:CrossChatEnabled requires send and a matching-subject cross-chat token.";
+        if ((FilesEnabled || SendEnabled) && (!Enabled || !Regex.IsMatch(ReadToken.Trim(),
             "^cj1\\.read\\.[A-Za-z0-9_-]{1,128}\\.[A-Za-z0-9_-]+={0,2}$", RegexOptions.CultureInvariant)
             || ReadToken.Trim().Split('.')[2] != Subject))
             return "Journal:FilesEnabled requires capture and a matching-subject journal read token.";

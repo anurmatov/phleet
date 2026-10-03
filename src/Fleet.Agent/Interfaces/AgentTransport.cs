@@ -4,6 +4,7 @@ using Fleet.Agent.Configuration;
 using Fleet.Shared;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services;
+using Fleet.Agent.Services.JournalFiles;
 using Fleet.Conversations.Contracts;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -22,7 +23,7 @@ namespace Fleet.Agent.Interfaces;
 /// When TELEGRAM_BOT_TOKEN is missing or empty the service enters headless mode:
 /// RabbitMQ + MCP remain fully functional; Telegram poller is disabled.
 /// </summary>
-public sealed class AgentTransport : BackgroundService, IMessageSink
+public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramMediaSender
 {
     private ITelegramBotClient? _bot;
 
@@ -52,6 +53,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
 
     /// <summary>This agent's own bot id, or null without a bot. The tool-send receipt check (#394).</summary>
     internal long? BotId => _bot?.BotId;
+    long? ITelegramMediaSender.BotId => BotId;
 
     // DocumentDownloadHelper wraps IDocumentDownloader so the download+persist path
     // can be unit-tested by injecting a fake downloader. Exposed as internal so tests
@@ -68,6 +70,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
     private Task RouteAsync(IncomingMessage msg)
         => (RouterHookForTesting ?? _router.HandleAsync)(msg);
 
+    private readonly ITelegramBotClient? _journalSendBot;
     private string _botUsername = "";
     private readonly MediaGroupBuffer _mediaGroupBuffer;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _groupSizeCapped = new();
@@ -129,6 +132,9 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             try
             {
                 _bot = new TelegramBotClient(telegramConfig.Value.BotToken);
+                // The same credential, separate request policy: ordinary replies retain SDK retries.
+                if (journal?.SendEnabled == true)
+                    _journalSendBot = new TelegramBotClient(new TelegramBotClientOptions(telegramConfig.Value.BotToken) { RetryCount = 0 });
                 sinkCounter?.SetStartupTelegramState(SinkSuppressionCounter.TelegramConfigured);
             }
             catch (Exception ex)
@@ -771,7 +777,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
             // The bytes Telegram received, copied now: a workspace file can be overwritten later.
             JournalSent(journal, chatId, sent, journalCaption, JournalTextFormat.Plain, new JournalMediaItem(
                 JournalAttachmentKind.Photo, InferMimeType(ExtractSafeExtension(filePath, ".jpg")), bytes.LongLength,
-                Path.GetFileName(filePath), sent.Photo?.LastOrDefault()?.FileUniqueId, Bytes: bytes));
+                Path.GetFileName(filePath), sent.Photo?.LastOrDefault()?.FileUniqueId, Bytes: bytes, FileId: sent.Photo?.LastOrDefault()?.FileId));
         }
         catch (Exception ex)
         {
@@ -951,7 +957,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                                 replyParameters: new Telegram.Bot.Types.ReplyParameters { MessageId = replied.MessageId });
                             JournalSentAlone(message.Chat.Id, voice, null, JournalTextFormat.Plain, new JournalMediaItem(
                                 JournalAttachmentKind.Voice, "audio/ogg", audioBytes.LongLength, "response.ogg",
-                                voice.Voice?.FileUniqueId, Bytes: audioBytes));
+                                voice.Voice?.FileUniqueId, Bytes: audioBytes, FileId: voice.Voice?.FileId));
                             _logger.LogInformation("TTS voice sent for message {MsgId} ({Chars} chars)", replied.MessageId, sourceText.Length);
                         }
                     }
@@ -1233,7 +1239,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                 var largest = photos.OrderByDescending(p => p.FileSize ?? 0).First();
                 items.Add(new JournalMediaItem(JournalAttachmentKind.Photo, "image/jpeg", largest.FileSize,
                     FileName: null, largest.FileUniqueId, LocalPath: photoPath,
-                    Declined: photoPath is null ? photoDecline : null));
+                    Declined: photoPath is null ? photoDecline : null, FileId: largest.FileId));
             }
 
             if (TelegramMediaMapper.TryMap(message) is { } file)
@@ -1245,7 +1251,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
                     file.FileName,
                     FileUniqueIdOf(message, file.Kind),
                     LocalPath: mediaPath,
-                    Declined: mediaPath is null ? mediaDecline : null));
+                    Declined: mediaPath is null ? mediaDecline : null, FileId: FileIdOf(message, file.Kind)));
             }
 
             // A media type the mapper declines has no download path at all, so there is nothing to
@@ -1322,6 +1328,58 @@ public sealed class AgentTransport : BackgroundService, IMessageSink
         message.Contact is not null || message.Location is not null || message.Poll is not null
         || message.Venue is not null || message.Game is not null || message.ProximityAlertTriggered is not null
         || message.Invoice is not null || message.SuccessfulPayment is not null;
+
+    private static string? FileIdOf(Message message, TelegramMediaKind kind) => kind switch
+    {
+        TelegramMediaKind.Animation => message.Animation?.FileId,
+        TelegramMediaKind.Document => message.Document?.FileId,
+        TelegramMediaKind.Video => message.Video?.FileId,
+        TelegramMediaKind.VideoNote => message.VideoNote?.FileId,
+        TelegramMediaKind.Audio => message.Audio?.FileId,
+        TelegramMediaKind.Voice => message.Voice?.FileId,
+        TelegramMediaKind.Sticker => message.Sticker?.FileId,
+        _ => null,
+    };
+
+    public async Task<JournalMessage> SendFileIdAsync(long chatId, string kind, string fileId, CancellationToken ct)
+    {
+        if (_bot is null) throw new JournalTelegramException(403);
+        var field = kind == "other" ? "document" : kind;
+        var method = field switch { "photo" => "sendPhoto", "video" => "sendVideo", "audio" => "sendAudio",
+            "voice" => "sendVoice", "video_note" => "sendVideoNote", "animation" => "sendAnimation", "sticker" => "sendSticker", _ => "sendDocument" };
+        try { return CopiedMessage(await (_journalSendBot ?? _bot).SendRequest(new JournalFileIdRequest(method, chatId, field, fileId), ct), chatId); }
+        catch (Telegram.Bot.Exceptions.ApiRequestException e)
+        { throw new JournalTelegramException(e.ErrorCode, e.ErrorCode == 400 && (e.Message.Contains("wrong file identifier", StringComparison.OrdinalIgnoreCase)
+            || e.Message.Contains("file_id", StringComparison.OrdinalIgnoreCase) || e.Message.Contains("type of file", StringComparison.OrdinalIgnoreCase)), e.Parameters?.RetryAfter); }
+    }
+
+    public async Task<JournalMessage> SendUploadAsync(long chatId, bool photo, HttpContent content, string fileName, CancellationToken ct)
+    {
+        if (_bot is null) throw new JournalTelegramException(403);
+        var request = new JournalUploadRequest(chatId, photo, content, fileName);
+        try { return CopiedMessage(await (_journalSendBot ?? _bot).SendRequest(request, ct), chatId); }
+        catch (Telegram.Bot.Exceptions.ApiRequestException e) { throw new JournalTelegramException(e.ErrorCode, retryAfter: e.Parameters?.RetryAfter); }
+        catch (OperationCanceledException) { throw new JournalTelegramException(request.TerminatorWritten ? 0 : -1); }
+        catch (Exception e) when (e is HttpRequestException or IOException && !HasIntegrityFailure(e)) { throw new JournalTelegramException(request.TerminatorWritten ? 0 : -2); }
+    }
+    private static bool HasIntegrityFailure(Exception e) => e is JournalUploadIntegrityException || e.InnerException is not null && HasIntegrityFailure(e.InnerException);
+    private JournalMessage CopiedMessage(Message sent, long chatId)
+    {
+        JournalMediaItem? media = null;
+        if (sent.Photo?.LastOrDefault() is { } photo)
+            media = new(JournalAttachmentKind.Photo, "image/jpeg", photo.FileSize, null, photo.FileUniqueId, FileId: photo.FileId);
+        else if (TelegramMediaMapper.TryMap(sent) is { } file)
+            media = new(JournalKind(file.Kind), file.MimeType ?? "application/octet-stream", file.FileSize, file.FileName,
+                FileUniqueIdOf(sent, file.Kind), FileId: FileIdOf(sent, file.Kind));
+        return new JournalMessage { BotId = _bot!.BotId, ChatId = sent.Chat.Id, ChatType = ChatTypeName(sent.Chat.Type),
+            MessageId = sent.Id, Date = sent.Date, SenderKind = JournalSenderKind.Agent,
+            SenderId = _bot.BotId.ToString(System.Globalization.CultureInfo.InvariantCulture), Text = null, Media = media is null ? [] : [media] };
+    }
+    private sealed class JournalFileIdRequest(string method, long chatId, string field, string fileId) : Telegram.Bot.Requests.FileRequestBase<Message>(method)
+    {
+        public override HttpContent ToHttpContent() => new FormUrlEncodedContent(new Dictionary<string, string>
+        { ["chat_id"] = chatId.ToString(System.Globalization.CultureInfo.InvariantCulture), [field] = fileId });
+    }
 
     /// <summary>The file_unique_id the descriptor does not carry, read from the raw message.</summary>
     private static string? FileUniqueIdOf(Message message, TelegramMediaKind kind) => kind switch

@@ -47,6 +47,7 @@ public class Agent
     /// byte-identical while false; enabling it requires the journal signing key.
     /// </summary>
     public bool JournalEnabled { get; set; } = false;
+    public bool JournalCrossChatEnabled { get; set; } = false;
     [MaxLength(30)]
     public string? CodexSandboxMode { get; set; }
 

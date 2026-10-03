@@ -134,6 +134,13 @@ public static class JournalRecordJson
                 if (Clamp(a.FileName, 255) is { Length: > 0 } name) w.WriteString("fileName", name);
                 if (a.FileUniqueId is { } unique && AsciiId.IsMatch(unique)) w.WriteString("fileUniqueId", unique);
 
+                if (a.FileId is { Length: > 0 and <= 255 } fileId && fileId.All(c => c is >= ' ' and <= '~')) w.WriteString("fileId", fileId);
+                if (a.CopiedFrom is { } copied)
+                {
+                    w.WriteStartObject("copiedFrom"); w.WriteString("messageId", copied.MessageId);
+                    w.WriteNumber("ordinal", copied.Ordinal); w.WriteEndObject();
+                }
+
                 // Exactly one of the two, mirroring the contract: a declined attachment names its
                 // reason, an archived one names its upload and the digest the server must match.
                 // Writing both would be a record the listener refuses.

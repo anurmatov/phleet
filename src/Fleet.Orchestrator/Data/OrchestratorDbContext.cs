@@ -69,6 +69,7 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.Property(x => x.LocalBaseUrl).HasColumnName("AnthropicBaseUrl").HasMaxLength(500);
             e.Property(x => x.AutoMemoryEnabled).HasDefaultValue(true);
             e.Property(x => x.JournalEnabled).HasColumnName("journal_enabled").HasDefaultValue(false);
+            e.Property(x => x.JournalCrossChatEnabled).HasColumnName("journal_cross_chat_enabled").HasDefaultValue(false);
             e.Property(x => x.CanReceiveChatRequests).HasDefaultValue(false);
             e.Property(x => x.RequestReceivedMessage).HasMaxLength(500);
             e.HasIndex(x => x.Name).IsUnique();

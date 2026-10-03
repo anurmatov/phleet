@@ -22,6 +22,13 @@ public sealed class ContainerProvisioningService(
     internal const string JournalFilesServerName = "fleet-journal-files";
     internal const string JournalFilesGrant = "mcp__fleet-journal-files__fetch_attachment";
     private static bool HasFilesGrant(Agent agent) => agent.Tools.Any(t => t.IsEnabled && string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase));
+    private static IEnumerable<string> SendWarnings(Agent agent)
+    {
+        if (JournalGrants.HasSendGrant(agent) && !JournalGrants.SendEffective(agent))
+            yield return "journal_send_unavailable:journal_capture_off";
+        if (agent.JournalCrossChatEnabled && !JournalGrants.CrossChatEffective(agent))
+            yield return "journal_cross_chat_unavailable:" + (JournalGrants.HasSendGrant(agent) ? "journal_capture_off" : "send_grant_missing");
+    }
     private static string? FilesWarning(Agent agent) => HasFilesGrant(agent) && (!agent.JournalEnabled || !HasTelegramBot(agent))
         ? "journal_files_unavailable:journal_capture_off" : null;
 
@@ -75,6 +82,7 @@ public sealed class ContainerProvisioningService(
             : ComputeDiff(desired, actual);
 
         if (FilesWarning(agent) is { } warning) diffs = [.. diffs, warning];
+        diffs = [.. diffs, .. SendWarnings(agent)];
 
         logger.LogInformation(
             "Provision preview for {Agent} ({Container}): {DiffCount} diff(s)",
@@ -111,9 +119,11 @@ public sealed class ContainerProvisioningService(
             // Only *_BOT_TOKEN-shaped TELEGRAM_* keys map to the Telegram__BotToken ASP.NET config key.
             // Other TELEGRAM_* keys (e.g. TELEGRAM_USER_ID, TELEGRAM_GROUP_ID) pass through as-is
             // so they can be used as normal env vars without colliding with the bot token config slot.
-            if (envRef.EnvKeyName.StartsWith("TELEGRAM_", StringComparison.OrdinalIgnoreCase) &&
-                envRef.EnvKeyName.EndsWith("_BOT_TOKEN", StringComparison.OrdinalIgnoreCase))
-                env.Add($"Telegram__BotToken={value}");
+            if (JournalGrants.IsBotRef(envRef.EnvKeyName))
+            {
+                if (envRef.EnvKeyName == JournalGrants.BotRef(agent))
+                    env.Add($"Telegram__BotToken={JournalGrants.ResolveBotToken(agent, envValues) ?? "<secret>"}");
+            }
             else
                 env.Add($"{envRef.EnvKeyName}={value}");
         }
@@ -791,7 +801,7 @@ public sealed class ContainerProvisioningService(
         _           => $"{bytes}B",
     };
 
-    private static Dictionary<string, string> LoadEnvFile(string path)
+    internal static Dictionary<string, string> LoadEnvFile(string path)
     {
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
         if (!File.Exists(path)) return result;
@@ -844,6 +854,7 @@ public sealed class ContainerProvisioningService(
         var fleetMemoryMcpUrl = NormalizeFleetMemoryMcpUrl(config["FleetMemory:McpUrl"]);
         var journal = BuildJournalProvisioning(agent);
         if (FilesWarning(agent) is { } filesWarning) logger.LogWarning("{warning}", filesWarning);
+        foreach (var warning in SendWarnings(agent)) logger.LogWarning("{warning}", warning);
         if (agent.JournalEnabled && journal.IngestToken is null)
             logger.LogInformation(
                 "Journal enabled for '{Agent}', but it has no Telegram bot token ref; omitting Journal config",
@@ -856,7 +867,7 @@ public sealed class ContainerProvisioningService(
         await WriteOutputStyleFileAsync(agent, generatedDir, style);
 
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName, style, journal, PrimaryHumanRawValue()));
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl, journal.ReadToken, journal.FilesEnabled));
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl, journal.ReadToken, journal.FilesEnabled || journal.SendEnabled));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent, ctoAgentName, style));
 
         logger.LogInformation(
@@ -1156,7 +1167,7 @@ public sealed class ContainerProvisioningService(
             throw new InvalidOperationException($"Agent '{agent.Name}' cannot be provisioned: {localFault}");
 
         var tools = agent.Tools.Where(t => t.IsEnabled).OrderBy(t => t.ToolName)
-            .Select(t => string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase) ? JournalFilesGrant : t.ToolName).ToList();
+            .Select(t => JournalGrants.IsSendGrant(t.ToolName) ? JournalGrants.SendGrant : string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase) ? JournalFilesGrant : t.ToolName).ToList();
 
         // Codex derives config.toml enabled_tools from AllowedTools (entrypoint.sh).
         // Auto-grant the same baseline tools that GenerateSettingsJson grants for claude/gemini,
@@ -1287,10 +1298,16 @@ public sealed class ContainerProvisioningService(
             // Written only when true, so an agent in a deployment with no bucket produces the exact
             // bytes it produced before media existed. Absent means false on the agent side, which is
             // the safe default and keeps this a one-write rollback.
-            if (journal.FilesEnabled)
+            if (journal.FilesEnabled || journal.SendEnabled)
             {
                 node["Journal"]!.AsObject()["ReadToken"] = journal.ReadToken;
-                node["Journal"]!.AsObject()["FilesEnabled"] = true;
+                if (journal.FilesEnabled) node["Journal"]!.AsObject()["FilesEnabled"] = true;
+                if (journal.SendEnabled) node["Journal"]!.AsObject()["SendEnabled"] = true;
+            }
+            if (journal.CrossChatToken is not null)
+            {
+                node["Journal"]!.AsObject()["CrossChatEnabled"] = true;
+                node["Journal"]!.AsObject()["CrossChatToken"] = journal.CrossChatToken;
             }
             if (journal.MediaEnabled)
                 node["Journal"]!.AsObject()["MediaEnabled"] = true;
@@ -1397,7 +1414,7 @@ public sealed class ContainerProvisioningService(
             mcpServers["fleet-memory"] = new { type = "http", url };
         }
 
-        if (filesEnabled && HasFilesGrant(agent) && agent.JournalEnabled && HasTelegramBot(agent)
+        if (filesEnabled && (HasFilesGrant(agent) || JournalGrants.HasSendGrant(agent)) && agent.JournalEnabled && HasTelegramBot(agent)
             && !string.IsNullOrWhiteSpace(journalReadToken))
             mcpServers[JournalFilesServerName] = new { type = "http", url = "http://127.0.0.1:8091/journal-files/v1/mcp" };
         return JsonSerializer.Serialize(new { mcpServers }, IndentedJson);
@@ -1498,12 +1515,13 @@ public sealed class ContainerProvisioningService(
             string.Equals(e.McpName, JournalMcpServerName, StringComparison.OrdinalIgnoreCase));
 
         var filesEnabled = HasFilesGrant(agent) && agent.JournalEnabled && hasBotToken;
+        var sendEnabled = JournalGrants.SendEffective(agent);
         return new JournalProvisioning(
             agent.JournalEnabled && hasBotToken
                 ? journalTokens.Mint(JournalTokenService.PurposeIngest, agent.Name)
                 : null,
             agent.JournalEnabled ? journalTokens.ExcludedChatIds() : [],
-            (hasJournalEndpoint || filesEnabled)
+            (hasJournalEndpoint || filesEnabled || sendEnabled)
                 ? journalTokens.Mint(JournalTokenService.PurposeRead, agent.Name)
                 : null,
             // ⚠️ Derived, never configured per agent. `Journal:MediaEnabled` is the agent's opt-in
@@ -1525,7 +1543,10 @@ public sealed class ContainerProvisioningService(
             //    The bucket name and the scoped credential pair are deliberately NOT part of the
             //    gate: an agent must not read a secret to decide a boolean, and a half-provisioned
             //    bucket is Comms' startup failure to raise, not the agent's to guess at.
-            MediaEnabled: MediaEndpointIsConfigured(), FilesEnabled: filesEnabled);
+            MediaEnabled: MediaEndpointIsConfigured(), FilesEnabled: filesEnabled,
+            SendEnabled: sendEnabled,
+            CrossChatToken: JournalGrants.CrossChatEffective(agent)
+                ? journalTokens.Mint(JournalTokenService.PurposeReadCrossChat, agent.Name) : null);
     }
 
     /// <summary>
@@ -1575,7 +1596,7 @@ public sealed class ContainerProvisioningService(
         var allow = agent.Tools
             .Where(t => t.IsEnabled)
             .OrderBy(t => t.ToolName)
-            .Select(t => string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase) ? JournalFilesGrant : t.ToolName)
+            .Select(t => JournalGrants.IsSendGrant(t.ToolName) ? JournalGrants.SendGrant : string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase) ? JournalFilesGrant : t.ToolName)
             .ToList();
 
         // Every agent gets memory_get — provisioning-time enforcement of mandatory read access.
@@ -1680,7 +1701,9 @@ internal sealed record JournalProvisioning(
     IReadOnlyList<long> ExcludedChatIds,
     string? ReadToken,
     bool MediaEnabled = false,
-    bool FilesEnabled = false);
+    bool FilesEnabled = false,
+    bool SendEnabled = false,
+    string? CrossChatToken = null);
 
 /// <summary>One assignment's project context, resolved once per provision.</summary>
 /// <param name="ProjectName">The assignment's name — the <c>projects/</c> directory the agent reads.</param>

@@ -804,13 +804,14 @@ read-token problems. Startup, hourly and per-fetch cleanup enforce local TTL and
 quota; cleanup failures log only their exception type and the next fetch tries
 again. No migration, environment key or compose change is needed for fetch.
 
-## Attachment send rollout (pending full implementation)
+## Attachment send rollout (operator-gated)
 
-The schema-6 storage and cross-chat configuration foundation is not a deployable
-feature by itself. Keep its PR draft until runtime send, Comms authorization and
-content routes, and the acceptance suite are complete. Do not grant
-`mcp__fleet-journal-files__send_attachment` or enable the cross-chat switch early.
-The following operator sequence applies only after the complete feature is ready.
+The send runtime, schema-6 storage, cross-chat configuration and live Comms
+routes are implemented. Operator-owned exact-image and real-provider acceptance
+(AC13) remains UNRUN; source merge and CI are not live rollout evidence.
+Use an explicitly authorized operator rollout plan for the sequence below.
+Do not grant `mcp__fleet-journal-files__send_attachment` or enable cross-chat
+before that plan permits it.
 
 1. Before migration `0006`, take a conversation-schema dump:
 

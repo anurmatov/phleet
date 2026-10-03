@@ -516,6 +516,7 @@ services:
       # Off unless FLEET_COMMS_JOURNAL_ENABLED=true. Its listener is on the Docker network only and
       # is NEVER in the `ports:` block above: publishers are containers on fleet-net. The workflow
       # activity group is always excluded; the extra list is appended to it.
+      - Comms__Journal__OrchestratorUrl=http://fleet-orchestrator:3600
       - Comms__Journal__Enabled=${FLEET_COMMS_JOURNAL_ENABLED:-false}
       - Comms__Journal__Url=${FLEET_COMMS_JOURNAL_BIND:-http://0.0.0.0:8083}
       - Comms__Journal__TokenKeys=${FLEET_COMMS_JOURNAL_KEY:-}

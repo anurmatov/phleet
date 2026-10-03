@@ -18,7 +18,7 @@ public interface IJournalAttachmentSource
 public sealed record JournalAttachmentLocator(
     string MessageId, int Ordinal, string Kind, string MimeType, long? ByteSize,
     string AttachmentState, string? NotArchivedReason, string? Sha256,
-    string? ObjectKey, string? ObjectState, long? ObjectByteSize, string? ObjectSha256)
+    string? ObjectKey, string? ObjectState, long? ObjectByteSize, string? ObjectSha256, string? FileName = null)
 {
     // A diagnostic interpolation must not accidentally expose a locator or digest.
     public override string ToString() => nameof(JournalAttachmentLocator);

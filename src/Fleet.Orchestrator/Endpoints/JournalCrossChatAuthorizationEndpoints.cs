@@ -61,9 +61,7 @@ public static class JournalCrossChatAuthorizationEndpoints
             if (effective && body.ChatId is long chat && body.UserId is long user)
             {
                 var env = ContainerProvisioningService.LoadEnvFile(configuration["Provisioning:EnvFilePath"] ?? "/app/deploy/.env");
-                var token = agent!.EnvRefs.Where(e => e.EnvKeyName.StartsWith("TELEGRAM_", StringComparison.OrdinalIgnoreCase)
-                    && e.EnvKeyName.EndsWith("_BOT_TOKEN", StringComparison.OrdinalIgnoreCase))
-                    .Select(e => env.GetValueOrDefault(e.EnvKeyName)).FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
+                var token = JournalGrants.ResolveBotToken(agent!, env);
                 member = await telegram.CheckAsync(token, body.BotId, chat, user, request.HttpContext.RequestAborted);
             }
             app.Logger.LogInformation("Journal cross-chat authorization: subject={subject} switch={s} member={m} elapsed_ms={t}",

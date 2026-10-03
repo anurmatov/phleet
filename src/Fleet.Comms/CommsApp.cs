@@ -572,6 +572,9 @@ public static class CommsApp
                 options.ConversationConnectionString,
                 provider.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal.Read")), time, excluded);
 
+        builder.Services.AddSingleton(new HttpClient { Timeout = Timeout.InfiniteTimeSpan });
+        builder.Services.AddSingleton<IJournalCrossChatAuthorization>(sp => new JournalCrossChatAuthorizationClient(
+            sp.GetRequiredService<HttpClient>(), options.Journal.OrchestratorUrl, keys[0]));
         var app = builder.Build();
         var journalLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal");
 
@@ -630,7 +633,10 @@ public static class CommsApp
 
         // The read tools, behind the same authentication as every route above (#394).
         JournalMcp.Map(app);
-        JournalAttachmentContentEndpoint.Map(app, media?.Bytes, stats, time);
+        var send = new JournalSendSourceResolver(app.Services.GetRequiredService<IJournalReadStore>() as IJournalSendSource,
+            app.Services.GetRequiredService<JournalBindingScope>(), app.Services.GetRequiredService<IJournalCrossChatAuthorization>());
+        JournalAttachmentSendEndpoints.Map(app, send);
+        JournalAttachmentContentEndpoint.Map(app, media?.Bytes, stats, time, send);
 
         return app;
     }

@@ -116,6 +116,28 @@ public sealed class JournalFilesProvisioningTests
         Assert.True(mcp.RootElement.GetProperty("mcpServers").TryGetProperty("fleet-journal-files", out _));
     }
 
+    [Theory]
+    [InlineData("none", true)]
+    [InlineData("send", false)]
+    [InlineData("fetch", true)]
+    public async Task SwitchWithoutEffectiveSendGrant_EmitsNoCrossKeys(string grant, bool capture)
+    {
+        await using var harness = ProvisioningHarness.Create(Config);
+        await harness.SeedAsync(db =>
+        {
+            var agent = Agent("codex", capture);
+            agent.JournalCrossChatEnabled = true;
+            agent.Tools.Clear();
+            if (grant != "none") agent.Tools.Add(new() { ToolName = grant == "send" ? JournalGrants.SendGrant : Grant });
+            db.Agents.Add(agent);
+        });
+        Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
+        var generated = await File.ReadAllTextAsync(Path.Combine(harness.GeneratedDir("fleet-agent1"), "appsettings.json"));
+        Assert.DoesNotContain("SendEnabled", generated);
+        Assert.DoesNotContain("CrossChatEnabled", generated);
+        Assert.DoesNotContain("CrossChatToken", generated);
+    }
+
     [Fact]
     public async Task ReservedEndpointRefusesBeforeDeprovisionEvenWithCaptureOff()
     {

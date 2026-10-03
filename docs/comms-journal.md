@@ -823,8 +823,9 @@ before merge; transport probes do not replace it.
 
 ## Attachment copying and cross-chat switch (implementation in progress)
 
-The storage/configuration foundation is draft-only; the complete send runtime
-and Comms routes must land before granting or deploying attachment copying.
+The draft now includes the send runtime, Comms routes and live authorization
+client. Do not grant or deploy attachment copying until the remaining acceptance
+gates pass.
 Delivery is always the currently verified private human requester's chat, never
 a caller-supplied destination. Cross-chat lookup uses a journal message ULID;
 Telegram message IDs remain restricted to the current binding. Existing journal

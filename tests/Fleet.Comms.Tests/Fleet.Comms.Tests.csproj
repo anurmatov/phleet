@@ -26,4 +26,7 @@
     <ProjectReference Include="..\..\src\Fleet.Agent\Fleet.Agent.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="../Fleet.Agent.Tests/Fixtures/journal-send/*.json" Link="Fixtures/journal-send/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

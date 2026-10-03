@@ -294,7 +294,7 @@ public static class AgentHostRegistration
     {
         // File listener startup completes before task intake and CLI warmup can start.
         // Without files, preserve the existing capture service startup order.
-        var journalFilesEnabled = configuration.GetValue<bool>("Journal:FilesEnabled");
+        var journalFilesEnabled = configuration.GetValue<bool>("Journal:FilesEnabled") || configuration.GetValue<bool>("Journal:SendEnabled");
         if (journalFilesEnabled) AddJournal(services, configuration);
 
         // --- Outbound sink seam (#277 D-1) ---------------------------------------------------
@@ -408,14 +408,25 @@ public static class AgentHostRegistration
             return;
 
         services.Configure<JournalOptions>(section);
-        if (section.Get<JournalOptions>()?.FilesEnabled == true)
+        var fileOptions = section.Get<JournalOptions>();
+        if (fileOptions?.FilesEnabled == true || fileOptions?.SendEnabled == true)
         {
-            services.AddSingleton(sp => new JournalFileStore(sp.GetRequiredService<IOptions<TelegramOptions>>().Value.AttachmentDir));
-            services.AddSingleton<JournalFilesCounter>();
-            services.AddSingleton<JournalFilesTools>();
-            services.AddSingleton<JournalFilesListener>();
+            services.AddSingleton<JournalFilesGate>();
+            if (fileOptions.FilesEnabled)
+            {
+                services.AddSingleton(sp => new JournalFileStore(sp.GetRequiredService<IOptions<TelegramOptions>>().Value.AttachmentDir));
+                services.AddSingleton<JournalFilesCounter>();
+                services.AddSingleton<JournalFilesTools>();
+                services.AddHostedService<JournalFilesSweepService>();
+            }
+            if (fileOptions.SendEnabled)
+                services.AddSingleton(sp => new JournalSendTools(sp.GetRequiredService<JournalHttpClient>(), sp.GetRequiredService<TurnBindingPublisher>(),
+                    sp.GetRequiredService<JournalFilesGate>(), sp.GetRequiredService<AllowlistHolder>(), sp.GetRequiredService<IOptions<JournalOptions>>(),
+                    chat => sp.GetRequiredService<TaskManager>().TryGetCurrentHumanTurn(chat, out var turn) ? turn : null,
+                    () => sp.GetServices<IHostedService>().OfType<AgentTransport>().FirstOrDefault(),
+                    sp.GetRequiredService<JournalCapture>(), sp.GetRequiredService<ILogger<JournalSendTools>>()));
+            services.AddSingleton(sp => new JournalFilesListener(sp.GetService<JournalFilesTools>(), sp.GetRequiredService<ILoggerFactory>(), sp.GetService<JournalSendTools>()));
             services.AddHostedService(sp => sp.GetRequiredService<JournalFilesListener>());
-            services.AddHostedService<JournalFilesSweepService>();
         }
 
         services.AddSingleton<JournalCounters>();
@@ -452,7 +463,7 @@ public static class AgentHostRegistration
             var options = sp.GetRequiredService<IOptions<JournalOptions>>().Value;
             var http = sp.GetRequiredService<IHttpClientFactory>().CreateClient(JournalHttpClientName);
             http.BaseAddress = new Uri(options.BaseUrl);
-            return new JournalHttpClient(http, options.IngestToken!, readToken: options.ReadToken);
+            return new JournalHttpClient(http, options.IngestToken!, readToken: options.ReadToken, crossChatToken: options.CrossChatToken);
         });
 
         // The media uploader is registered on the SAME token and the SAME base URL as the message

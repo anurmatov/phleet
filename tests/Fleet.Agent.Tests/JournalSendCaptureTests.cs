@@ -1,0 +1,60 @@
+using System.Text.Json;
+using Fleet.Agent.Abstractions;
+using Fleet.Agent.Configuration;
+using Fleet.Agent.Services;
+using Fleet.Conversations.Contracts;
+using Fleet.Journal.Client;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+namespace Fleet.Agent.Tests;
+public sealed class JournalSendCaptureTests
+{
+    // Frozen attachment-field allowlist from the pre-feature parser at 205a55f.
+    private static readonly string[] OldFields = ["ordinal", "kind", "mimeType", "byteSize", "fileName", "fileUniqueId", "uploadId", "sha256", "notArchivedReason"];
+    [Theory]
+    [InlineData("inbound-photo")]
+    [InlineData("reply-photo")]
+    [InlineData("tts-voice")]
+    public void PreFeatureGoldens_KeepExactBytesAndOldFieldAllowlist(string name)
+    {
+        var bytes = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "journal-send", name + ".json"));
+        using var document = JsonDocument.Parse(bytes);
+        var kind = name == "tts-voice" ? JournalAttachmentKind.Voice : JournalAttachmentKind.Photo;
+        var record = new JournalRecord { EventId = "01K00000000000000000000000", Telegram = new() { BotId = 5005, ChatId = 1001, ChatKind = JournalChatKind.Private, MessageId = 42 },
+            Direction = name == "inbound-photo" ? JournalDirection.Inbound : JournalDirection.Outbound,
+            Origin = name == "inbound-photo" ? JournalRecordOrigin.TelegramUpdate : JournalRecordOrigin.AgentRuntime,
+            Sender = new() { Kind = name == "inbound-photo" ? JournalSenderKind.Human : JournalSenderKind.Agent, Id = "1001" },
+            SentAt = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero), Text = null,
+            Attachments = [new() { Ordinal = 0, Kind = kind, MimeType = kind == JournalAttachmentKind.Photo ? "image/jpeg" : "audio/ogg", ByteSize = 9,
+                FileUniqueId = "synthetic-unique", NotArchivedReason = JournalNotArchivedReason.MediaDisabled }] };
+        Assert.Equal(bytes, JournalRecordJson.Serialize(record));
+        foreach (var field in document.RootElement.GetProperty("attachments")[0].EnumerateObject()) Assert.Contains(field.Name, OldFields);
+        Assert.DoesNotContain("fileId", OldFields); Assert.DoesNotContain("copiedFrom", OldFields);
+    }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Capture_EmitsFileIdAndCopyLinkOnlyWithSendEnabled(bool send)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "copy-capture-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var spool = new JournalSpool(root);
+            var capture = new JournalCapture(spool, new(), new(Options.Create(new TelegramOptions { AllowedUserIds = [1001] })),
+                Options.Create(new JournalOptions { SendEnabled = send }), NullLogger<JournalCapture>.Instance);
+            var copy = capture.Outbound(OutboundOrigin.Human, JournalRecordOrigin.AgentCopy);
+            copy.Add(new() { BotId = 5005, ChatId = 1001, ChatType = "private", MessageId = 42, SenderKind = JournalSenderKind.Agent, SenderId = "5005",
+                Media = [new(JournalAttachmentKind.Document, "application/pdf", 9, "synthetic.pdf", "unique", FileId: "synthetic-file",
+                    CopiedFrom: new() { MessageId = "01K00000000000000000000000", Ordinal = 0 })] });
+            copy.Flush(); copy.Flush(); Assert.Equal(send, copy.SpoolSucceeded);
+            if (!send) { Assert.Empty(spool.Pending()); return; }
+            var entry = Assert.Single(spool.Pending()); Assert.Equal("agent_copy", entry.Record["origin"]!.GetValue<string>());
+            Assert.Null(entry.Record["text"]); var attachment = entry.Record["attachments"]![0]!;
+            Assert.Equal("copied", attachment["notArchivedReason"]!.GetValue<string>());
+            Assert.Equal("synthetic-file", attachment["fileId"]!.GetValue<string>());
+            Assert.Equal("01K00000000000000000000000", attachment["copiedFrom"]!["messageId"]!.GetValue<string>());
+            Assert.Empty(entry.MediaOrdinals);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+}

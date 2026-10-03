@@ -24,6 +24,16 @@ public sealed class JournalCopyRecordTests
     private static JournalRecord? Parse(JsonObject node, out JournalRecordParser.Failure? failure) =>
         JournalRecordParser.Parse(Encoding.UTF8.GetBytes(node.ToJsonString()), Now, out failure);
 
+    [Theory]
+    [InlineData("inbound-photo")]
+    [InlineData("reply-photo")]
+    [InlineData("tts-voice")]
+    public void FrozenPreFeatureGoldens_AreAcceptedWithoutNewFields(string name)
+    {
+        var bytes = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "journal-send", name + ".json"));
+        Assert.NotNull(JournalRecordParser.Parse(bytes, Now, out var failure)); Assert.Null(failure);
+    }
+
     [Fact]
     public void CopyRecord_Valid_ParsesAuditLinkAndFileId()
     {

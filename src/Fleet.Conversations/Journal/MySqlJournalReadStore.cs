@@ -32,7 +32,7 @@ namespace Fleet.Conversations.Journal;
 /// The separate Comms-only attachment source returns delivery metadata, never a public record.
 /// </para>
 /// </remarks>
-public sealed class MySqlJournalReadStore : IJournalReadStore, IJournalAttachmentSource
+public sealed class MySqlJournalReadStore : IJournalReadStore, IJournalAttachmentSource, IJournalSendSource
 {
     private static readonly TimeSpan SchemaCacheDuration = TimeSpan.FromSeconds(30);
 
@@ -174,6 +174,50 @@ public sealed class MySqlJournalReadStore : IJournalReadStore, IJournalAttachmen
             parameters.AddWithValue("@caller", reader.Subject);
             parameters.AddWithValue("@message", messageId);
         }, async (rows, token) => await rows.ReadAsync(token) ? ReadRecord(rows) : null, ct);
+    }
+
+    public Task<JournalSendSource?> FindSendSourceAsync(string subject, string boundKey, long requester,
+        string? messageId, long? telegramMessageId, int ordinal, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(subject);
+        ArgumentNullException.ThrowIfNull(boundKey);
+        if ((messageId is null) == (telegramMessageId is null))
+            throw new ArgumentException("Exactly one message identifier is required.", nameof(messageId));
+        if (messageId is not null && !Fleet.Protocol.Ulid.IsValid(messageId))
+            throw new ArgumentException("A journal message id is required.", nameof(messageId));
+        if (ordinal is < 0 or > 255) throw new ArgumentOutOfRangeException(nameof(ordinal));
+        var reader = new JournalReader(subject, JournalReadScope.Observed);
+        var identifier = messageId is not null ? "m.id = @message" : "c.conversation_key = @bound AND m.source_key = @message";
+        var sql = $"""
+            SELECT m.id, a.ordinal, a.kind, a.mime_type, a.byte_size, a.state,
+                   a.not_archived_reason, a.sha256, o.object_key, o.state, o.byte_size, o.sha256,
+                   c.conversation_key, c.chat_kind, c.telegram_chat_id,
+                   EXISTS(SELECT 1 FROM journal_messages p
+                          JOIN journal_message_observers po ON po.message_id = p.id AND po.observer = @caller
+                          WHERE p.conversation_id = c.id AND p.sender_kind = 'human'
+                            AND p.sender_id = @requester AND p.sent_at <= m.sent_at),
+                   a.telegram_file_id, a.telegram_file_id_bot_id, a.original_file_name
+              FROM journal_conversations c
+              JOIN journal_messages m ON m.conversation_id = c.id
+              JOIN journal_attachments a ON a.message_id = m.id AND a.ordinal = @ordinal
+              LEFT JOIN journal_objects o ON o.id = a.object_id
+             WHERE {identifier} AND {Visible(reader, "m")}
+             LIMIT 1
+            """;
+        return QueryAsync("send_attachment", sql, parameters =>
+        {
+            parameters.AddWithValue("@caller", subject);
+            parameters.AddWithValue("@bound", boundKey);
+            parameters.AddWithValue("@message", messageId ?? JournalKeys.SourceKey(telegramMessageId!.Value));
+            parameters.AddWithValue("@ordinal", ordinal);
+            parameters.AddWithValue("@requester", requester.ToString(CultureInfo.InvariantCulture));
+        }, async (rows, token) => await rows.ReadAsync(token)
+            ? new JournalSendSource(new JournalAttachmentLocator(rows.GetString(0), rows.GetByte(1), rows.GetString(2),
+                rows.GetString(3), rows.IsDBNull(4) ? null : rows.GetInt64(4), rows.GetString(5),
+                NullableString(rows, 6), NullableString(rows, 7), NullableString(rows, 8), NullableString(rows, 9),
+                rows.IsDBNull(10) ? null : rows.GetInt64(10), NullableString(rows, 11), NullableString(rows, 18)),
+                rows.GetString(12), rows.GetString(13), rows.GetInt64(14), rows.GetBoolean(15), NullableString(rows, 16),
+                rows.IsDBNull(17) ? null : rows.GetInt64(17)) : null, ct);
     }
 
     public Task<JournalAttachmentLocator?> FindAttachmentAsync(

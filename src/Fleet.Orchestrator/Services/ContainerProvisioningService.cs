@@ -119,9 +119,11 @@ public sealed class ContainerProvisioningService(
             // Only *_BOT_TOKEN-shaped TELEGRAM_* keys map to the Telegram__BotToken ASP.NET config key.
             // Other TELEGRAM_* keys (e.g. TELEGRAM_USER_ID, TELEGRAM_GROUP_ID) pass through as-is
             // so they can be used as normal env vars without colliding with the bot token config slot.
-            if (envRef.EnvKeyName.StartsWith("TELEGRAM_", StringComparison.OrdinalIgnoreCase) &&
-                envRef.EnvKeyName.EndsWith("_BOT_TOKEN", StringComparison.OrdinalIgnoreCase))
-                env.Add($"Telegram__BotToken={value}");
+            if (JournalGrants.IsBotRef(envRef.EnvKeyName))
+            {
+                if (envRef.EnvKeyName == JournalGrants.BotRef(agent))
+                    env.Add($"Telegram__BotToken={JournalGrants.ResolveBotToken(agent, envValues) ?? "<secret>"}");
+            }
             else
                 env.Add($"{envRef.EnvKeyName}={value}");
         }

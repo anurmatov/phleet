@@ -26,7 +26,7 @@ else
     builder.Services.AddAgentDaemonServices(builder.Configuration);
 
 // Keep the container-network control listener when the private loopback app is enabled.
-if (!isCliMode && builder.Configuration.GetSection(JournalOptions.Section).Get<JournalOptions>()?.FilesEnabled == true)
+if (!isCliMode && (builder.Configuration.GetValue<bool>("Journal:FilesEnabled") || builder.Configuration.GetValue<bool>("Journal:SendEnabled")))
     builder.WebHost.ConfigureKestrel(options => options.ListenAnyIP(8080));
 
 var app = builder.Build();

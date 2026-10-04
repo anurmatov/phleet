@@ -12,6 +12,8 @@ A human message reaches the agent's running turn, whatever the agent is doing, e
 
 The message first takes the normal queue path unchanged. Only when it is `Queued` does the runtime also send a text-only steering copy (a fixed header plus the prompt; media waits) into a running Relay or Bridge turn, found across every chat key. The workflow's callback, terminal event, binding and merged submissions do not change. The human's reply comes from their own queued turn in their own chat, prefixed to say the message was already seen.
 
+For a fresh steering-eligible queue entry, the notice is chosen after the attempt: only a confirmed provider delivery gets `message delivered to my current task, reply pending here.`; every non-delivery keeps the existing busy text and enqueue-time position. Merged entries and suppressed groups get no extra notice, and an entry claimed before the notice is skipped. Each entry gets at most one notice attempt: send, lock-wait and logging failures are non-fatal, with no retry or busy fallback after a failed delivered notice. The send starts under the entry lock but is awaited after releasing it; steering-eligible `StartTask` completes after the transport's send timeout or completion, with no new timeout. The router discards that task, and existing awaiting callers do not enable steering; a future awaiting caller that does will see the notice latency. Delivery does not prove the model read or followed the message.
+
 | running turn | a verified human's message |
 |---|---|
 | `UserMessage` / `DebouncedGroupBatch` in the same chat | injection or Inbox, as before |
@@ -40,7 +42,9 @@ Primary `(chatId, telegramMessageId)` keys protect queued and running parts. Dup
 |---|---|---|
 | Protected primary-key cache full | `TaskManager.StartTask` → `IMessageSink.SendTextByOriginAsync`, Human origin, existing queue-full text | `submission.accepted { queue_full }` |
 
-This adds one sink call site, for 27 in TaskManager. Client intake cannot classify a submission as primary, and the reserved-key sink guard remains in force.
+| Fresh steering-eligible queue notice | `TaskManager.SendSteeringQueueNoticeAsync` → `IMessageSink.SendTextByOriginAsync`, Human origin, delivered receipt or existing busy text | none (non-journaled notice; disposition remains `queued`) |
+
+These extensions add two sink call sites, for 28 in TaskManager. Client intake cannot classify a submission as primary, and the reserved-key sink guard remains in force.
 
 ## Diagnostics
 

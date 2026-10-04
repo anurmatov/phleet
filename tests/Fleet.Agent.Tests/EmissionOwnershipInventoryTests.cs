@@ -31,8 +31,8 @@ public class EmissionOwnershipInventoryTests
     /// </summary>
     private static readonly Dictionary<string, int> ExpectedSinkCallSites = new()
     {
-        // #401: protected primary-key capacity uses the same Human-origin queue-full owner.
-        ["Services/TaskManager.cs"] = 27,
+        // #401: primary-key capacity; #411: deferred steering notice uses the Human text owner.
+        ["Services/TaskManager.cs"] = 28,
         ["Services/CommandDispatcher.cs"] = 7,
         ["Services/MessageRouter.cs"] = 3,
     };

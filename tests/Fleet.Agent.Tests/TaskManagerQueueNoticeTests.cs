@@ -94,6 +94,23 @@ public class TaskManagerQueueNoticeTests
         executor.ReleaseTurn("directive");
     }
 
+    [Fact]
+    public async Task RelayRunning_IneligibleHuman_KeepsBusyNoticeBeforeDrain()
+    {
+        var (manager, executor, sink) = Build();
+        executor.HoldTurn("directive");
+        await manager.StartTask(OtherChat, "directive", "directive", true,
+            source: TaskSource.Relay, relaySender: "workflow");
+        await executor.WaitUntilAsync(() => executor.Executed.Contains("directive"));
+        Assert.Equal(TaskDispatchOutcome.Queued,
+            await manager.StartTask(Chat, "mine", "mine", true, steeringEligible: false));
+        Assert.Equal([BusyNotice], sink.TextsFor(Chat));
+        Assert.Equal(0, executor.InjectedCount);
+        executor.ReleaseTurn("directive");
+        await sink.WaitForAsync(Chat, "answer to mine");
+        Assert.Equal([BusyNotice, NowProcessing, "answer to mine"], sink.TextsFor(Chat));
+    }
+
     private static (TaskManager, GatedExecutor, ChatRecordingSink) Build()
     {
         var executor = new GatedExecutor();

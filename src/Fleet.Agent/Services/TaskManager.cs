@@ -68,6 +68,12 @@ public sealed class TaskManager
         CompletionKind kind = CompletionKind.Completed) =>
         OnTaskCompleted?.Invoke(chatId, result, relaySender, source, isPartial, correlationId, taskId, kind);
 
+    internal Action? SteeringNoticePendingForTest { get; set; }
+    internal Action? SteerAttemptStartingForTest { get; set; }
+    internal Action? NoticeLockWaitThrowsForTest { get; set; }
+    internal int ActiveTaskIdCountForTest => _activeTaskIds.Count;
+    internal int PrimaryDedupCountForTest => _primaryDedup.Count;
+
     internal Action? QueueEntryClaimedForTest { get; set; }
     internal Action? QueueEntryDequeuedForBridgeCancelForTest { get; set; }
 
@@ -291,14 +297,16 @@ public sealed class TaskManager
                     _logger.LogDebug("Check-in skipped — agent already has a pending queued entry for chat {ChatId}", chatId);
                     return ReportDisposition(chatId, identity, TaskDispatchOutcome.Dropped);
                 }
-                var enqueued = EnqueueFreshMessage(chatId, queuedPart,
-                    notifyUser: source is not (TaskSource.CheckIn or TaskSource.DebouncedGroupBatch)
-                        && BusyNoticeApplies(chatId, source),
-                    completeBridgeOnDrop: true);
+                var notifyUser = source is not (TaskSource.CheckIn or TaskSource.DebouncedGroupBatch)
+                    && BusyNoticeApplies(chatId, source);
+                var enqueued = EnqueueFreshMessage(chatId, queuedPart, notifyUser,
+                    completeBridgeOnDrop: true, out var entry, out var position, deferNotice: steer);
                 // Release the reservation only when enqueue failed — a queued task keeps it.
                 if (!enqueued && taskId is not null)
                     _activeTaskIds.TryRemove(taskId, out _);
-                if (enqueued && steer) await SteerRunningTurnAsync(chatId, userId, queuedPart, images, documents);
+                if (enqueued && steer)
+                    await SteerAndNotifyAsync(chatId, userId, queuedPart, images, documents, entry!, position,
+                        notifyUser && !(_agentConfig.SuppressToolMessages && chatId < 0));
                 return ReportDisposition(chatId, identity, enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull);
             }
         }
@@ -323,13 +331,15 @@ public sealed class TaskManager
             // CheckIn. The FIFO preserves ordering with other queued work.
             // DebouncedGroupBatch is silent: sending "I'm busy" for automated group checks is noise.
             // So is a chat message queued behind that chat's own turn (#369).
-            var enqueued = EnqueueFreshMessage(chatId, queuedPart,
-                notifyUser: source != TaskSource.DebouncedGroupBatch && BusyNoticeApplies(chatId, source),
-                completeBridgeOnDrop: true);
+            var notifyUser = source != TaskSource.DebouncedGroupBatch && BusyNoticeApplies(chatId, source);
+            var enqueued = EnqueueFreshMessage(chatId, queuedPart, notifyUser,
+                completeBridgeOnDrop: true, out var entry, out var position, deferNotice: steer);
             // Release the reservation only when enqueue failed — a queued task keeps it.
             if (!enqueued && taskId is not null)
                 _activeTaskIds.TryRemove(taskId, out _);
-            if (enqueued && steer) await SteerRunningTurnAsync(chatId, userId, queuedPart, images, documents);
+            if (enqueued && steer)
+                await SteerAndNotifyAsync(chatId, userId, queuedPart, images, documents, entry!, position,
+                    notifyUser && !(_agentConfig.SuppressToolMessages && chatId < 0));
             return ReportDisposition(chatId, identity, enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull);
         }
 
@@ -1372,6 +1382,7 @@ public sealed class TaskManager
     private async Task SteerRunningTurnAsync(long chatId, long userId, QueuedMessagePart part,
         IReadOnlyList<MessageImage>? images, IReadOnlyList<MessageDocument>? documents)
     {
+        SteerAttemptStartingForTest?.Invoke();
         if (!TryGetSteerableTurn(out var running)) return;
         string outcome;
         await running.TurnDispatchLock.WaitAsync();
@@ -1609,9 +1620,13 @@ public sealed class TaskManager
         return _messageQueue.HasPending(chatId) ? PendingQueueResult.EnqueueFresh : PendingQueueResult.NoPending;
     }
 
-    private bool EnqueueFreshMessage(long chatId, QueuedMessagePart part, bool notifyUser, bool completeBridgeOnDrop)
+    private bool EnqueueFreshMessage(long chatId, QueuedMessagePart part, bool notifyUser, bool completeBridgeOnDrop) =>
+        EnqueueFreshMessage(chatId, part, notifyUser, completeBridgeOnDrop, out _, out _);
+
+    private bool EnqueueFreshMessage(long chatId, QueuedMessagePart part, bool notifyUser, bool completeBridgeOnDrop,
+        out QueuedMessage? queued, out int queuePos, bool deferNotice = false)
     {
-        if (!_messageQueue.TryEnqueue(chatId, part, out var queued, out var queuePos))
+        if (!_messageQueue.TryEnqueue(chatId, part, out queued, out queuePos))
         {
             _logger.LogWarning("Message queue full ({Max}) — dropping incoming task from chat {ChatId}", MaxQueueDepth, chatId);
             _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DroppedAtQueueCap);
@@ -1630,13 +1645,76 @@ public sealed class TaskManager
 
         _logger.LogInformation("Message queued (position {Pos}) for chat {ChatId}; queue entries={EntryCount}, max parts per entry={MaxParts}",
             queuePos, chatId, _messageQueue.Count, MaxQueuedPartsPerEntry);
-        if (notifyUser && !(_agentConfig.SuppressToolMessages && chatId < 0))
+        if (!deferNotice && notifyUser && !(_agentConfig.SuppressToolMessages && chatId < 0))
         {
             queued.BusyNoticeSent = true;
             _ = _sink.SendTextByOriginAsync(chatId, $"I'm busy right now — your message is queued (position {queuePos}). I'll get to it once my current task finishes.", OriginOf(part.Source));
         }
         OnStatusChanged?.Invoke();
         return true;
+    }
+
+    private async Task SteerAndNotifyAsync(long chatId, long userId, QueuedMessagePart part,
+        IReadOnlyList<MessageImage>? images, IReadOnlyList<MessageDocument>? documents,
+        QueuedMessage entry, int position, bool noticeDue)
+    {
+        try
+        {
+            await SteerRunningTurnAsync(chatId, userId, part, images, documents);
+        }
+        catch (Exception ex)
+        {
+            TryLog(LogLevel.Warning, ex, "Human steering attempt for chat {ChatId} escaped its handler", chatId);
+        }
+        finally
+        {
+            SteeringNoticePendingForTest?.Invoke();
+            if (noticeDue) await SendSteeringQueueNoticeAsync(entry, chatId, position, part.Source);
+        }
+    }
+
+    private async Task SendSteeringQueueNoticeAsync(QueuedMessage entry, long chatId, int position, TaskSource source)
+    {
+        var acquired = false;
+        Task? send = null;
+        try
+        {
+            NoticeLockWaitThrowsForTest?.Invoke();
+            await entry.QueueDispatchLock.WaitAsync();
+            acquired = true;
+            if (entry.Claimed)
+                TryLog(LogLevel.Information, null, "Steering notice skipped: queue entry already dispatched");
+            else
+            {
+                var text = entry.FirstPart.Steered ? SteeringDeliveredNotice
+                    : $"I'm busy right now — your message is queued (position {position}). I'll get to it once my current task finishes.";
+                entry.BusyNoticeSent = true;
+                send = _sink.SendTextByOriginAsync(chatId, text, OriginOf(source));
+            }
+        }
+        catch (Exception ex)
+        {
+            TryLog(LogLevel.Warning, ex, "Failed to send steering queue notice for chat {ChatId}", chatId);
+        }
+        finally
+        {
+            if (acquired) entry.QueueDispatchLock.Release();
+        }
+        // A pre-send throw leaves send null: there is no retry or fallback notice.
+        if (send is not null)
+        {
+            try { await send; }
+            catch (Exception ex)
+            {
+                TryLog(LogLevel.Warning, ex, "Failed to send steering queue notice for chat {ChatId}", chatId);
+            }
+        }
+    }
+
+    private void TryLog(LogLevel level, Exception? ex, string template, params object?[] args)
+    {
+        try { _logger.Log(level, ex, template, args); }
+        catch { /* Best effort only: no logging, notice retry or state change. */ }
     }
 
     /// <summary>
@@ -1671,6 +1749,9 @@ public sealed class TaskManager
         current step, adjust your plan, or stop and address this first.]
 
         """ + original;
+
+    /// <summary>Delivery receipt only; does not claim the model read or followed the message.</summary>
+    internal const string SteeringDeliveredNotice = "message delivered to my current task, reply pending here.";
 
     /// <summary>Fixed header of a steering copy (#406). <see cref="FormatInjectedMessage"/> is not applied.</summary>
     internal const string SteeringHeader =

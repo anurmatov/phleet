@@ -51,6 +51,37 @@ public static class WorkflowDefinitionValidator
                     $"approver-only gate. These signals resolve a human approval and may only be sent " +
                     $"from the dashboard: {CeoGateSignals.Joined}.");
             }
+
+            // statusVar is a variable NAME, like outputVar. A blank name or a template has no
+            // meaning, and the definition would silently read nothing back (#424).
+            if (step is DelegateStep { StatusVar: { } statusVar } delegateStep
+                && (string.IsNullOrWhiteSpace(statusVar) || statusVar.Contains("{{", StringComparison.Ordinal)))
+            {
+                throw new InvalidOperationException(
+                    $"Workflow definition '{workflowTypeName}' is invalid: delegate step " +
+                    $"'{delegateStep.Name ?? delegateStep.Target}' has statusVar '{statusVar}'. " +
+                    "statusVar must be a literal, non-blank variable name, never a template.");
+            }
+
+            if (step is FailStep fail)
+            {
+                if (string.IsNullOrWhiteSpace(fail.Message))
+                {
+                    throw new InvalidOperationException(
+                        $"Workflow definition '{workflowTypeName}' is invalid: fail step " +
+                        $"'{fail.Name ?? "(unnamed)"}' has no 'message'. A fail step must say why the run failed.");
+                }
+
+                // The fail step's own ignoreFailure is a no-op — nothing can swallow it — so the
+                // flag can only mislead whoever reads the definition.
+                if (fail.IgnoreFailure)
+                {
+                    throw new InvalidOperationException(
+                        $"Workflow definition '{workflowTypeName}' is invalid: fail step " +
+                        $"'{fail.Name ?? "(unnamed)"}' sets 'ignoreFailure', which has no effect: " +
+                        "a fail step cannot be suppressed by any ignoreFailure in the same run.");
+                }
+            }
         }
     }
 

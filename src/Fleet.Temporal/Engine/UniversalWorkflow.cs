@@ -1,5 +1,6 @@
 namespace Fleet.Temporal.Engine;
 
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using Fleet.Temporal.Activities;
 using Fleet.Temporal.Configuration;
@@ -50,6 +51,16 @@ public class UniversalWorkflow
     /// is not an authorization check.
     /// </summary>
     internal const string ReservedSignalErrorType = "ReservedSignalName";
+
+    /// <summary>
+    /// Error type stamped on a deliberate <c>fail</c> step (#424). Like the refusal, it is excluded
+    /// from the <c>ignoreFailure</c> catch by TYPE, never by message, so no ancestor in the same run
+    /// can turn a deliberate failure into success.
+    /// </summary>
+    internal const string ExplicitFailErrorType = "ExplicitFail";
+
+    /// <summary>Value of a delegate's <c>statusVar</c> before the attempt returns a status (#424).</summary>
+    internal const string UnknownStatus = "unknown";
 
     /// <summary>A signal that arrived with no waiter registered, plus its arrival ordinal.</summary>
     private readonly record struct BufferedSignal(JsonElement Payload, long Seq);
@@ -165,12 +176,12 @@ public class UniversalWorkflow
     }
 
     /// <summary>
-    /// True for a failure the engine raised as a REFUSAL rather than an error — currently only the
-    /// approver-only signal guard. Matched on the error type, not the message, so rewording the
-    /// message cannot quietly make it suppressible again.
+    /// True for a failure no <c>ignoreFailure</c> may swallow: the approver-only signal REFUSAL,
+    /// and a deliberate <c>fail</c> step (#424). Matched on the error type, not the message, so
+    /// rewording a message cannot quietly make it suppressible.
     /// </summary>
-    private static bool IsRefusal(Exception ex) =>
-        ex is ApplicationFailureException { ErrorType: ReservedSignalErrorType };
+    private static bool IsUnsuppressible(Exception ex) =>
+        ex is ApplicationFailureException { ErrorType: ReservedSignalErrorType or ExplicitFailErrorType };
 
     private void BufferSignal(string signalName, JsonElement payload, long seq)
     {
@@ -242,14 +253,17 @@ public class UniversalWorkflow
                 CrossNamespaceStartStep s                              => await ExecuteCrossNamespaceStartAsync(s),
                 SleepStep s                                            => await ExecuteSleepAsync(s),
                 SignalWorkflowStep s                                   => await ExecuteSignalWorkflowAsync(s),
+                FailStep s                                             => await ExecuteFailAsync(s),
                 _                                                      => throw new InvalidOperationException(
                                                                               $"Unknown step type: {step.GetType().Name}")
             };
         }
-        // ignoreFailure suppresses FAILURES, not refusals. A step that was denied permission to do
-        // something must not be silenced by the definition that asked for it — otherwise the
-        // approver-only guard below would be one JSON flag away from being switched off (#280).
-        catch (Exception ex) when (step.IgnoreFailure && !IsRefusal(ex))
+        // ignoreFailure suppresses FAILURES, not refusals or deliberate fails. A step that was
+        // denied permission to do something must not be silenced by the definition that asked for
+        // it — otherwise the approver-only guard below would be one JSON flag away from being
+        // switched off (#280). A `fail` step is the definition saying the run must fail; an
+        // ancestor's ignoreFailure must not undo that (#424).
+        catch (Exception ex) when (step.IgnoreFailure && !IsUnsuppressible(ex))
         {
             return null;
         }
@@ -275,7 +289,7 @@ public class UniversalWorkflow
         if (step.Steps is { Length: > 0 })
         {
             // Static parallel: all branches run concurrently
-            await Workflow.WhenAllAsync(step.Steps.Select(s => ExecuteStepAsync(s)));
+            await WhenAllBranchesAsync(step.Steps.Select(s => (Task)ExecuteStepAsync(s)).ToList());
             return null;
         }
 
@@ -299,7 +313,7 @@ public class UniversalWorkflow
                 results[idx] = result;
             }));
 
-            await Workflow.WhenAllAsync(tasks.Select(t => t()));
+            await WhenAllBranchesAsync(tasks.Select(t => t()).ToList());
 
             // Collect results into vars.{step.Name}
             if (step.Name != null)
@@ -310,6 +324,33 @@ public class UniversalWorkflow
 
         return null;
     }
+
+    /// <summary>
+    /// Awaits every branch, as <c>Workflow.WhenAllAsync</c> always did.
+    /// Branches already started run to completion; none is cancelled.
+    ///
+    /// WhenAll rethrows the FIRST faulted branch in branch order. If an earlier branch failed
+    /// ordinarily and a later one hit a <c>fail</c> step or the refusal, the parallel step's own
+    /// <c>ignoreFailure</c> would see only the ordinary failure and swallow the run's unsuppressible
+    /// one (#424). Every branch has finished when WhenAll throws, so the first unsuppressible
+    /// failure in branch order is picked instead — deterministic, and no command changes.
+    /// </summary>
+    private static async Task WhenAllBranchesAsync(IReadOnlyList<Task> branches)
+    {
+        try
+        {
+            await Workflow.WhenAllAsync(branches);
+        }
+        catch (Exception) when (FirstUnsuppressible(branches) is { } unsuppressible)
+        {
+            ExceptionDispatchInfo.Capture(unsuppressible).Throw();
+        }
+    }
+
+    private static Exception? FirstUnsuppressible(IReadOnlyList<Task> branches) =>
+        branches
+            .SelectMany(b => b.Exception?.InnerExceptions ?? Enumerable.Empty<Exception>())
+            .FirstOrDefault(IsUnsuppressible);
 
     private async Task<object?> ExecuteLoopAsync(LoopStep step)
     {
@@ -353,6 +394,12 @@ public class UniversalWorkflow
 
     private async Task<object?> ExecuteDelegateAsync(DelegateStep step)
     {
+        // Reset first, before anything that can throw, so an attempt that never returns a status
+        // reads "unknown" rather than a previous attempt's value (#424). Only a workflow variable
+        // is written; the command sequence is unchanged.
+        if (step.StatusVar != null)
+            SetVar(step.StatusVar, UnknownStatus);
+
         var target = _template.ResolveString(step.Target);
         var instruction = await ResolveInstructionAsync(step);
         var taskId = $"{Workflow.Info.WorkflowId}/{step.Name ?? "delegate"}";
@@ -381,8 +428,19 @@ public class UniversalWorkflow
         if (step.OutputVar != null)
             SetVar(step.OutputVar, ResolveOutputVar(result));
 
+        if (step.StatusVar != null)
+            SetVar(step.StatusVar, NormalizeStatus(result.Status));
+
         return result.Text;
     }
+
+    /// <summary>
+    /// The status a definition sees in <c>statusVar</c>: the relay token trimmed and lower-cased,
+    /// with null or blank as <c>unknown</c>. No mapping and no allow-list — an unrecognised token
+    /// is stored as-is, because the definition must see what the agent actually reported (#424).
+    /// </summary>
+    internal static string NormalizeStatus(string? status) =>
+        string.IsNullOrWhiteSpace(status) ? UnknownStatus : status.Trim().ToLowerInvariant();
 
     /// <summary>
     /// Returns the value to store in outputVar from a delegate result.
@@ -936,6 +994,23 @@ public class UniversalWorkflow
 
         await Workflow.DelayAsync(TimeSpan.FromSeconds(seconds));
         return null;
+    }
+
+    /// <summary>
+    /// Fails the run on purpose (#424). Schedules nothing: no activity, timer or command. The
+    /// <c>ExplicitFail</c> type is what makes every ancestor's <c>ignoreFailure</c> rethrow it, so
+    /// the run closes Failed. Workflow.Logger is replay-safe, so the line is logged once.
+    /// </summary>
+    private Task<object?> ExecuteFailAsync(FailStep step)
+    {
+        var message = _template.ResolveString(step.Message);
+        var stepName = step.Name ?? "(unnamed)";
+
+        Workflow.Logger.LogWarning(
+            "UWE explicit fail in {WorkflowId} at step {Step}: {Message}",
+            Workflow.Info.WorkflowId, stepName, message);
+
+        throw new ApplicationFailureException(message, errorType: ExplicitFailErrorType, nonRetryable: true);
     }
 
     // -------------------------------------------------------------------------

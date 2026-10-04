@@ -57,6 +57,44 @@ public sealed class LoadWorkflowDefinitionValidationTests
         Assert.Equal("resume", wait.OutputVar);
     }
 
+    // ── #424: statusVar and fail ─────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("""{"type":"delegate","name":"named_step","target":"agent1","instruction":"x","statusVar":""}""")]
+    [InlineData("""{"type":"delegate","name":"named_step","target":"agent1","instruction":"x","statusVar":"  "}""")]
+    [InlineData("""{"type":"delegate","name":"named_step","target":"agent1","instruction":"x","statusVar":"{{vars.x}}"}""")]
+    [InlineData("""{"type":"fail","name":"named_step"}""")]
+    [InlineData("""{"type":"fail","name":"named_step","message":" "}""")]
+    [InlineData("""{"type":"fail","name":"named_step","message":"stop","ignoreFailure":true}""")]
+    public async Task AnInvalidStatusVarOrFailStep_FailsToLoad_NamingTheStep(string step)
+    {
+        var definition = $$"""{"type":"sequence","steps":[{{step}}]}""";
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => BuildActivity(definition).LoadAsync("ExampleWorkflow"));
+
+        Assert.Contains("named_step", ex.Message);
+    }
+
+    [Fact]
+    public async Task ValidStatusVarAndFailSteps_Load()
+    {
+        var definition = """
+            {"type":"sequence","steps":[
+              {"type":"delegate","name":"work","target":"agent1","instruction":"x","statusVar":"work_status"},
+              {"type":"branch","on":"{{vars.work_status}}","cases":{
+                "failed":{"type":"fail","name":"stop","message":"work reported {{vars.work_status}}"}}}
+            ]}
+            """;
+
+        var model = await BuildActivity(definition).LoadAsync("ExampleWorkflow");
+
+        var root = Assert.IsType<SequenceStep>(model.Root);
+        Assert.Equal("work_status", Assert.IsType<DelegateStep>(root.Steps[0]).StatusVar);
+        var fail = Assert.IsType<FailStep>(Assert.IsType<BranchStep>(root.Steps[1]).Cases["failed"]);
+        Assert.Equal("work reported {{vars.work_status}}", fail.Message);
+    }
+
     private static LoadWorkflowDefinitionActivity BuildActivity(string definitionJson)
     {
         var body = JsonSerializer.Serialize(new

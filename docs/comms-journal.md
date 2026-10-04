@@ -678,6 +678,18 @@ the last sweep and what it deleted, and ingest p50/p95 over the last hour. Never
 The route also reports `read.allScopeSubjects` (sorted) and `read.requestsSinceStart` (tool → result
 → count). The `journal status` CLI is a one-shot process and has no in-process counts.
 
+The dashboard Comms journal panel reads the existing `/api/comms/journal/status` proxy.
+When `media` is an object, a second row shows five indicators in this order:
+media state, stored bytes, orphans deleted, sweep failures, and upload p95.
+A `degraded` state appears in amber. Stored bytes use IEC units; the tooltip shows
+an exact comma-separated byte count. Upload p95 is rounded to whole milliseconds
+and measures upload duration, not attachment-read or download latency.
+
+An absent, null, or non-object `media` value hides the row. Missing or invalid
+numeric values show `n/a`, not an invented zero; valid zero counts remain visible.
+A missing or empty state shows `media n/a`. Zero upload samples or an invalid p95
+shows `upload p95 n/a`. These indicators need no new API, configuration, or grant.
+
 Under the `Fleet.Conversations` meter: `fleet.journal.ingest{result}` (`created`, `duplicate`,
 `observer_added`, `conflict`, `invalid`, `excluded`, `unavailable`), `fleet.journal.rejected{reason}`,
 `fleet.journal.gc.deleted{kind}`, `fleet.journal.read{tool,result}` and the histograms

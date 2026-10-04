@@ -27,12 +27,20 @@ public sealed class WorkflowGateStateReader : IWorkflowGateStateReader
 {
     private static readonly SearchAttributeKey<string> PhaseKey = SearchAttributeKey.CreateKeyword("Phase");
 
+    /// <summary>
+    /// Upper bound on the describe. A hung lookup then fails closed in seconds, as a blocked
+    /// feedback, instead of holding the MCP call open.
+    /// </summary>
+    internal static readonly TimeSpan DescribeTimeout = TimeSpan.FromSeconds(10);
+
+    internal static WorkflowDescribeOptions BuildDescribeOptions(CancellationToken cancellationToken) =>
+        new() { Rpc = new RpcOptions { Timeout = DescribeTimeout, CancellationToken = cancellationToken } };
+
     public async Task<(WorkflowExecutionStatus Status, string? Phase)> ReadAsync(
         WorkflowHandle handle,
         CancellationToken cancellationToken = default)
     {
-        var description = await handle.DescribeAsync(
-            new WorkflowDescribeOptions { Rpc = new RpcOptions { CancellationToken = cancellationToken } });
+        var description = await handle.DescribeAsync(BuildDescribeOptions(cancellationToken));
 
         var phase = description.TypedSearchAttributes.TryGetValue(PhaseKey, out var value) ? value : null;
         return (description.Status, phase);

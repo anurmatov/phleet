@@ -527,6 +527,46 @@ public sealed class TemporalWorkflowToolsTests
         AssertBlockedDesignWarning(context);
     }
 
+    /// <summary>
+    /// CEO feedback F1. A describe that times out (the reader's 10-second RPC deadline, or a
+    /// client-side timeout) is refused like any other failed lookup: no signal, one Warning, and
+    /// neither the error detail nor the Comment in the return or any log line.
+    /// </summary>
+    public static TheoryData<Exception, string> DescribeTimeouts => new()
+    {
+        {
+            new Temporalio.Exceptions.RpcException(
+                Temporalio.Exceptions.RpcException.StatusCode.DeadlineExceeded,
+                "timeout-detail-must-not-be-echoed",
+                Array.Empty<byte>()),
+            "RpcException"
+        },
+        { new TimeoutException("timeout-detail-must-not-be-echoed"), "TimeoutException" },
+    };
+
+    [Theory]
+    [MemberData(nameof(DescribeTimeouts))]
+    public async Task SignalWorkflowAsync_DesignGateLookupTimesOut_BlocksWithZeroSignals(
+        Exception timeout,
+        string expectedType)
+    {
+        var context = BuildTool();
+        context.GateReader.Throws = timeout;
+
+        var result = await context.Tool.SignalWorkflowAsync("workflow-1", "design-approval", ExactDesignFeedback);
+
+        Assert.Contains($"the workflow gate could not be verified ({expectedType})", result);
+        Assert.DoesNotContain("timeout-detail-must-not-be-echoed", result);
+        Assert.DoesNotContain(FeedbackNonce, result);
+        Assert.Null(context.SentSignal);
+        await context.Handle.DidNotReceiveWithAnyArgs().SignalAsync(default!, default!, default);
+        Assert.Single(context.Logger.Entries, entry =>
+            entry.Level == LogLevel.Warning &&
+            entry.Message.StartsWith("Blocked design-approval signal for workflow workflow-1;", StringComparison.Ordinal));
+        Assert.DoesNotContain(context.Logger.Entries, entry => entry.Message.Contains("timeout-detail-must-not-be-echoed"));
+        AssertNonceNeverLogged(context);
+    }
+
     /// <summary>AC2b. merge-approval never describes the workflow, whatever its state would say.</summary>
     [Fact]
     public async Task SignalWorkflowAsync_MergeFeedback_NeverReadsGateState()

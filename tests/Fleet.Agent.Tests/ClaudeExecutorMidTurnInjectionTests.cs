@@ -5,6 +5,7 @@ using System.Threading.Channels;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
@@ -83,6 +84,7 @@ public class ClaudeExecutorMidTurnInjectionTests
     public void TextOnlyAssistantEvent_SetsCommittedFlag()
     {
         var executor = BuildExecutor();
+        executor.OpenTurnForTests();
         Assert.False(executor.TurnCommittedToFinalAnswerForTests);
 
         executor.ParseProgressForTests(TextOnlyAssistantEvent());
@@ -94,6 +96,7 @@ public class ClaudeExecutorMidTurnInjectionTests
     public void ToolUseAssistantEvent_DoesNotSetCommittedFlag()
     {
         var executor = BuildExecutor();
+        executor.OpenTurnForTests();
 
         executor.ParseProgressForTests(ToolUseAssistantEvent());
 
@@ -113,12 +116,27 @@ public class ClaudeExecutorMidTurnInjectionTests
         Assert.Contains("final answer", result.Error, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// AC0 (S0), replacing the former <c>CommittedFlag_IsFalseOnFreshExecutor</c> on purpose (#429):
+    /// no turn is open before the first turn start, so both flags start closed and nothing is
+    /// written. The first turn stays injectable because its turn start opens the flags.
+    /// </summary>
     [Fact]
-    public void CommittedFlag_IsFalseOnFreshExecutor()
+    public async Task FreshExecutor_BothFlagsClosed_InjectionRefusedWithNothingWritten()
     {
-        // The flag must start cleared so the first turn is always injectable.
-        var executor = BuildExecutor();
-        Assert.False(executor.TurnCommittedToFinalAnswerForTests);
+        var logs = new ClaudeExecutorLogRecorder();
+        var executor = BuildExecutor(logs);
+        var stdin = new StringWriter();
+        executor.SetStdinForTests(stdin);
+
+        Assert.True(executor.TurnCommittedToFinalAnswerForTests);
+        Assert.True(executor.CurrentTurnResultSeenForTests);
+
+        var result = await executor.TryInjectMessageAsync("too early");
+
+        Assert.Equal(MidTurnInjectionStatus.NoActiveTurn, result.Status);
+        Assert.Equal("", stdin.ToString());
+        Assert.Contains("Mid-turn injection refused: gate_closed", logs.Information);
     }
 
     [Fact]
@@ -137,6 +155,7 @@ public class ClaudeExecutorMidTurnInjectionTests
             var executor = BuildExecutor();
             executor.SetProcessForTests(process);
             executor.SetStdinForTests(process.StandardInput);
+            executor.OpenTurnForTests();
             executor.ParseProgressForTests(ToolUseAssistantEvent());
             Assert.False(executor.TurnCommittedToFinalAnswerForTests);
 
@@ -228,6 +247,7 @@ public class ClaudeExecutorMidTurnInjectionTests
         // A background subtask's "result" event arrives between turns and must be consumed
         // by the drain so the new turn's read loop cannot see it and exit prematurely.
         var executor = BuildExecutor();
+        executor.OpenTurnForTests();
         var channel = Channel.CreateUnbounded<ClaudeStreamEvent>();
         executor.SetEventChannelForTests(channel);
         channel.Writer.TryWrite(new ClaudeStreamEvent { Type = "result", Result = "background result" });
@@ -260,6 +280,7 @@ public class ClaudeExecutorMidTurnInjectionTests
     {
         // Arrange: an assistant text event in the channel (the previous turn's lost answer).
         var executor = BuildExecutor();
+        executor.OpenTurnForTests();
         var channel = Channel.CreateUnbounded<ClaudeStreamEvent>();
         executor.SetEventChannelForTests(channel);
         channel.Writer.TryWrite(TextOnlyAssistantEvent("stale answer from prior turn"));
@@ -355,7 +376,7 @@ public class ClaudeExecutorMidTurnInjectionTests
         }
     }
 
-    private static ClaudeExecutor BuildExecutor()
+    private static ClaudeExecutor BuildExecutor(ILogger<ClaudeExecutor>? logger = null)
     {
         var options = Options.Create(new AgentOptions
         {
@@ -365,7 +386,7 @@ public class ClaudeExecutorMidTurnInjectionTests
             Provider = "claude",
         });
         var promptBuilder = new PromptBuilder(options, NullLogger<PromptBuilder>.Instance);
-        return new ClaudeExecutor(options, NullLogger<ClaudeExecutor>.Instance, promptBuilder);
+        return new ClaudeExecutor(options, logger ?? NullLogger<ClaudeExecutor>.Instance, promptBuilder);
     }
 
     private sealed class SlowChunkingTextWriter : TextWriter
@@ -403,4 +424,25 @@ public class ClaudeExecutorMidTurnInjectionTests
 
         public override string ToString() => _buffer.ToString();
     }
+}
+
+/// <summary>Records rendered <see cref="ClaudeExecutor"/> log lines by level (#429 reason and reopen logs).</summary>
+internal sealed class ClaudeExecutorLogRecorder : ILogger<ClaudeExecutor>
+{
+    private readonly System.Collections.Concurrent.ConcurrentQueue<(LogLevel Level, string Message)> _entries = new();
+
+    public IReadOnlyList<(LogLevel Level, string Message)> Entries => _entries.ToArray();
+    public IReadOnlyList<string> Information => Of(LogLevel.Information);
+    public IReadOnlyList<string> Warnings => Of(LogLevel.Warning);
+
+    private IReadOnlyList<string> Of(LogLevel level) =>
+        _entries.Where(entry => entry.Level == level).Select(entry => entry.Message).ToArray();
+
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+    public bool IsEnabled(LogLevel logLevel) => true;
+
+    public void Log<TState>(
+        LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+        _entries.Enqueue((logLevel, formatter(state, exception)));
 }

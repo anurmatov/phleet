@@ -31,7 +31,20 @@ public sealed class ClaudeExecutor : IAgentExecutor
     private int _messageCount;
     private DateTimeOffset _lastActivity = DateTimeOffset.MinValue;
     private volatile bool _restartRequested;
-    private volatile bool _turnCommittedToFinalAnswer;
+    // The final-answer gate and its partner flag (#429). Both start closed: no turn is open until
+    // the turn-start helper opens them immediately before the task write. They change together
+    // through OpenTurnFlags/CloseTurnFlags; only the set rule and the reopen rule in
+    // ParseAssistantEvent move the gate alone.
+    private volatile bool _turnCommittedToFinalAnswer = true;
+    // True once the turn's own result was handled, or whenever no turn is open. While it is
+    // true a top-level tool call can never reopen the gate (#236, #370).
+    private volatile bool _currentTurnResultSeen = true;
+    private int _gateReopenCount;
+    // Teardown detection for injections (#429 §5/§5b). The marker is a counter so an overlapping
+    // kill (DisposeAsync is not under the send lock) cannot clear another kill's marker; only the
+    // kill's own finally decrements it. The generation advances once per kill.
+    private int _teardownsInProgress;
+    private int _teardownGeneration;
     // Text extracted from a stale assistant event during DrainStaleTurnEvents so it
     // can be delivered out-of-band at the start of the next turn without going through
     // ParseAssistantEvent (which would set _turnCommittedToFinalAnswer prematurely).
@@ -92,7 +105,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
         if (await _stdinWriteLock.WaitAsync(TimeSpan.Zero))
         {
             try { await WriteStdinLineUnlockedAsync(message, ct); }
-            finally { _stdinWriteLock.Release(); }
+            finally { ReleaseStdinWriteLock(); }
         }
         else
         {
@@ -197,7 +210,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                     if (messageBytes > 10_000)
                         _logger.LogWarning("Large input detected ({Size} bytes, message #{Num})",
                             messageBytes, _messageCount + 1);
-                    _turnCommittedToFinalAnswer = false;
+                    OpenTurnFlags();
                     _currentTurnAssistantText = null;
                     await WriteStdinLineAsync(message, ct);
                 }
@@ -447,6 +460,15 @@ public sealed class ClaudeExecutor : IAgentExecutor
         }
     }
 
+    private const string FinalAnswerRefusal = "Claude has already begun emitting its final answer for this turn.";
+    private const string ProcessNotRunningRefusal = "Claude process is not running.";
+
+    /// <summary>
+    /// Writes a message into the running turn, or refuses with a reason (#429 §5). Every field is
+    /// read once per check phase and only the captured locals are used afterwards, the gate is
+    /// re-read under the stdin lock before writing, and a kill that overtakes the write is detected
+    /// by the teardown marker and generation, never by the gate or an assumed dead pipe.
+    /// </summary>
     public async Task<MidTurnInjectionResult> TryInjectMessageAsync(
         string task,
         IReadOnlyList<MessageImage>? images = null,
@@ -454,29 +476,130 @@ public sealed class ClaudeExecutor : IAgentExecutor
         CancellationToken ct = default)
     {
         if (_turnCommittedToFinalAnswer)
-            return MidTurnInjectionResult.NoActiveTurn("Claude has already begun emitting its final answer for this turn.");
+            return RefuseInjection("gate_closed", FinalAnswerRefusal);
 
-        if (_process is null || _process.HasExited || _stdin is null)
-            return MidTurnInjectionResult.NoActiveTurn("Claude process is not running.");
+        if (!IsLive(_process, _stdin))
+            return RefuseInjection("process_not_running", ProcessNotRunningRefusal);
 
+        await InjectionCheckpointAsync("early_checks_passed");
         var message = await BuildUserMessageJsonAsync(task, images, documents, ct);
-        if (!await _stdinWriteLock.WaitAsync(TimeSpan.FromSeconds(2), ct))
-            return MidTurnInjectionResult.Failed("Timed out waiting to write to Claude stdin.");
 
+        var acquired = false;
         try
         {
-            await WriteStdinLineUnlockedAsync(message, ct);
+            try
+            {
+                acquired = await _stdinWriteLock.WaitAsync(TimeSpan.FromSeconds(2), ct);
+            }
+            catch (ObjectDisposedException)
+            {
+                return RefuseInjection("process_not_running", ProcessNotRunningRefusal);
+            }
+
+            if (!acquired)
+                return MidTurnInjectionResult.Failed("Timed out waiting to write to Claude stdin.");
+
+            // Final text parsed while this call waited closes the turn: nothing may be written.
+            if (_turnCommittedToFinalAnswer)
+                return RefuseInjection("gate_closed_under_lock", FinalAnswerRefusal);
+
+            // Checked before the generation is captured, so a kill that has already started
+            // cannot hand this write its new generation.
+            if (Volatile.Read(ref _teardownsInProgress) > 0)
+                return RefuseInjection("teardown_in_progress", "Claude process is being stopped.");
+
+            await InjectionCheckpointAsync("under_lock_gate_passed");
+
+            var generation = Volatile.Read(ref _teardownGeneration);
+            var process = _process;
+            var stdin = _stdin;
+            await InjectionCheckpointAsync("captured");
+
+            if (!IsLive(process, stdin))
+                return RefuseInjection("process_not_running", ProcessNotRunningRefusal);
+
+            await InjectionCheckpointAsync("validated");
+
+            try
+            {
+                await stdin!.WriteLineAsync(message.AsMemory(), ct);
+                await stdin.FlushAsync();
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
+            {
+                return MidTurnInjectionResult.Failed(ex.Message);
+            }
+
+            // The gate is deliberately not re-read here: bytes written to a live process are
+            // answered by the CLI, and a Failed would queue a second copy (#429 S18).
+            if (Volatile.Read(ref _teardownsInProgress) > 0 ||
+                Volatile.Read(ref _teardownGeneration) != generation)
+            {
+                _logger.LogInformation("Mid-turn injection failed: {Reason}", "teardown_during_write");
+                return MidTurnInjectionResult.Failed("Claude process was stopped during the write.");
+            }
+
             _lastActivity = DateTimeOffset.UtcNow;
             return MidTurnInjectionResult.Injected;
         }
-        catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
-        {
-            return MidTurnInjectionResult.Failed(ex.Message);
-        }
         finally
         {
-            _stdinWriteLock.Release();
+            if (acquired)
+                ReleaseStdinWriteLock();
         }
+    }
+
+    private MidTurnInjectionResult RefuseInjection(string reason, string error)
+    {
+        _logger.LogInformation("Mid-turn injection refused: {Reason}", reason);
+        return MidTurnInjectionResult.NoActiveTurn(error);
+    }
+
+    /// <summary>
+    /// Validates captured locals only. A disposed or never-started <see cref="Process"/> throws
+    /// from <see cref="Process.HasExited"/>; that means "not running", never an escaping exception.
+    /// </summary>
+    private static bool IsLive(Process? process, TextWriter? stdin)
+    {
+        if (process is null || stdin is null)
+            return false;
+
+        try
+        {
+            return !process.HasExited;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or NullReferenceException)
+        {
+            return false;
+        }
+    }
+
+    private Task InjectionCheckpointAsync(string name) =>
+        InjectionCheckpointForTests is { } checkpoint ? checkpoint(name) : Task.CompletedTask;
+
+    /// <summary>
+    /// The only release path for <see cref="_stdinWriteLock"/>. After a kill's lock bound expires,
+    /// <see cref="DisposeAsync"/> can dispose the lock while an injection still holds it; the
+    /// release must not then throw out of a <c>finally</c> and replace the caller's result.
+    /// </summary>
+    private void ReleaseStdinWriteLock()
+    {
+        try { _stdinWriteLock.Release(); }
+        catch (ObjectDisposedException) { }
+    }
+
+    // The only opening site is the turn start, immediately before the task write (#429 §2).
+    private void OpenTurnFlags()
+    {
+        _turnCommittedToFinalAnswer = false;
+        _currentTurnResultSeen = false;
+        _gateReopenCount = 0;
+    }
+
+    private void CloseTurnFlags()
+    {
+        _currentTurnResultSeen = true;
+        _turnCommittedToFinalAnswer = true;
     }
 
     /// <summary>
@@ -589,7 +712,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
     {
         await _stdinWriteLock.WaitAsync(ct);
         try { await WriteStdinLineUnlockedAsync(message, ct); }
-        finally { _stdinWriteLock.Release(); }
+        finally { ReleaseStdinWriteLock(); }
     }
 
     private async Task WriteStdinLineUnlockedAsync(string message, CancellationToken ct)
@@ -609,6 +732,22 @@ public sealed class ClaudeExecutor : IAgentExecutor
     internal AgentProgress ParseProgressForTests(ClaudeStreamEvent evt) => ParseProgress(evt);
     internal string BuildArgsForTests(string? resumeSessionId = null) => BuildArgs(resumeSessionId);
     internal bool TurnCommittedToFinalAnswerForTests => _turnCommittedToFinalAnswer;
+    internal bool CurrentTurnResultSeenForTests => _currentTurnResultSeen;
+    internal int GateReopenCountForTests => _gateReopenCount;
+    internal SemaphoreSlim StdinWriteLockForTests => _stdinWriteLock;
+    internal int TeardownGenerationForTests => Volatile.Read(ref _teardownGeneration);
+    internal int TeardownInProgressForTests => Volatile.Read(ref _teardownsInProgress);
+    /// <summary>Calls the same opening helper as the turn start in <see cref="ExecuteAsync"/>.</summary>
+    internal void OpenTurnForTests() => OpenTurnFlags();
+    internal Task KillProcessForTestsAsync() => KillProcessAsync();
+    /// <summary>Invoked by the kill after its closing helper, before the stdin lock wait.</summary>
+    internal Action? KillCleanupStartingForTests { get; set; }
+    /// <summary>Awaited by the kill after <see cref="KillCleanupStartingForTests"/>, before the lock wait.</summary>
+    internal Func<Task>? KillBeforeLockWaitForTests { get; set; }
+    /// <summary>Awaited after the kill's lock-timeout Warning, before the reader cancel.</summary>
+    internal Func<Task>? KillProceedingWithoutLockForTests { get; set; }
+    /// <summary>Awaited, with the checkpoint name, at the four §5 checkpoints of an injection.</summary>
+    internal Func<string, Task>? InjectionCheckpointForTests { get; set; }
     internal void SetProcessForTests(Process? process) => _process = process;
     internal void SetEventChannelForTests(System.Threading.Channels.Channel<ClaudeStreamEvent> channel) => _eventChannel = channel;
     internal void DrainStaleTurnEventsForTests() => DrainStaleTurnEvents();
@@ -801,6 +940,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
         if (_process is not null && !_process.HasExited)
             return;
 
+        // A fresh process has no open turn, including after a process that died without a kill.
+        CloseTurnFlags();
+
         // Process died or first start — clean up old state
         var resumeId = _lastSessionId;
         _process?.Dispose();
@@ -906,7 +1048,63 @@ public sealed class ClaudeExecutor : IAgentExecutor
             env[name] = value;
     }
 
+    /// <summary>
+    /// How long a kill waits for an in-flight injection write before proceeding without the
+    /// stdin lock (#429 §5b). A kill must never hang behind a stuck write.
+    /// </summary>
+    internal TimeSpan KillStdinLockWait { get; set; } = TimeSpan.FromSeconds(2);
+
     private async Task KillProcessAsync()
+    {
+        // First operation: mark the teardown, so an injection that has not captured its
+        // generation yet is refused, and one that has is failed after its write (#429 §5b).
+        Interlocked.Increment(ref _teardownsInProgress);
+        try
+        {
+            Interlocked.Increment(ref _teardownGeneration);
+
+            // Closed from here on, and NOT reopened after cleanup: the next ExecuteAsync may yield a
+            // recovered answer before its turn start, and an injection written then would be
+            // answered as the task's result (#254).
+            CloseTurnFlags();
+            KillCleanupStartingForTests?.Invoke();
+            if (KillBeforeLockWaitForTests is { } beforeLockWait)
+                await beforeLockWait();
+
+            bool lockAcquired;
+            try
+            {
+                lockAcquired = await _stdinWriteLock.WaitAsync(KillStdinLockWait);
+                if (!lockAcquired)
+                {
+                    _logger.LogWarning(
+                        "Kill proceeding without the stdin lock after {Seconds}s", KillStdinLockWait.TotalSeconds);
+                    if (KillProceedingWithoutLockForTests is { } proceeding)
+                        await proceeding();
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                lockAcquired = false;
+            }
+
+            try
+            {
+                await KillProcessUnderLockAsync();
+            }
+            finally
+            {
+                if (lockAcquired)
+                    ReleaseStdinWriteLock();
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _teardownsInProgress);
+        }
+    }
+
+    private async Task KillProcessUnderLockAsync()
     {
         // Clear any preserved stale answer — text from one conversation must not surface
         // in a later unrelated conversation when the process is restarted.
@@ -1046,6 +1244,8 @@ public sealed class ClaudeExecutor : IAgentExecutor
             _preservedDrainedAnswerText = null;
             _preservedDrainedSegments = null;
             _currentTurnAssistantText = null;
+            // A raw command is never steerable, and its tool_use events cannot reopen the gate.
+            CloseTurnFlags();
 
             // Wrap as a user message containing the slash command
             var message = JsonSerializer.Serialize(new
@@ -1289,6 +1489,20 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 : "{}";
             self._logger.LogInformation("Tool call: {ToolName}({Args})", toolUse.Name ?? "unknown", argsJson);
 
+            // #429 reopen rule: a top-level, current-origin tool call means the text-only event
+            // before it was narration, not the final answer, so the turn accepts input again. Never
+            // after the turn's own result, and never for nested or background events (#236, #254).
+            if (self._turnCommittedToFinalAnswer &&
+                evt.ParentToolUseId is null &&
+                IsCurrentOrigin(evt) &&
+                !self._currentTurnResultSeen)
+            {
+                self._turnCommittedToFinalAnswer = false;
+                self._gateReopenCount++;
+                self._logger.LogDebug(
+                    "Final-answer gate reopened by a tool call ({Count} this turn)", self._gateReopenCount);
+            }
+
             return new AgentProgress
             {
                 IsSignificant = true,
@@ -1345,12 +1559,16 @@ public sealed class ClaudeExecutor : IAgentExecutor
             };
         }
 
-        // _turnCommittedToFinalAnswer is intentionally NOT reset here. Clearing it on the result
-        // event would open a window between result-parse and TaskManager.Closed=true (which includes
-        // sending the reply) during which TryInjectMessageAsync would pass all checks, write to the
-        // live process stdin, and return Injected — only for the injected message to be discarded by
-        // DrainStaleTurnEvents at the start of the next turn. The sticky flag is the correct gate.
-        // The flag is cleared at the start of the next turn via ExecuteAsync, before the next write.
+        // The result closes the gate and never reopens it. Clearing it here would open a window
+        // between result-parse and TaskManager.Closed=true (which includes sending the reply) during
+        // which TryInjectMessageAsync would pass all checks, write to the live process stdin, and
+        // return Injected — only for the injected message to be discarded by DrainStaleTurnEvents at
+        // the start of the next turn. Closing also covers a turn that ended with no final text
+        // (max turns, an error). The flags open again only at the next turn start (#236, #429).
+        if (!_currentTurnResultSeen && _gateReopenCount > 0)
+            _logger.LogInformation("Final-answer gate reopened {Count} time(s) this turn", _gateReopenCount);
+        CloseTurnFlags();
+
         var finalResult = !string.IsNullOrEmpty(evt.Result)
             ? evt.Result
             : _currentTurnAssistantText;
@@ -1373,8 +1591,10 @@ public sealed class ClaudeExecutor : IAgentExecutor
     }
 
     private static bool IsCurrentTurnResult(ClaudeStreamEvent evt) =>
-        evt.Type == "result"
-        && (evt.Origin is null || string.Equals(evt.Origin.Kind, "human", StringComparison.Ordinal));
+        evt.Type == "result" && IsCurrentOrigin(evt);
+
+    private static bool IsCurrentOrigin(ClaudeStreamEvent evt) =>
+        evt.Origin is null || string.Equals(evt.Origin.Kind, "human", StringComparison.Ordinal);
 
     private static string DescribeToolUse(string name, Dictionary<string, object>? input)
     {

@@ -164,7 +164,7 @@ the `merge-approval` signal accepts a structured payload:
 {"Decision":"rejected","Comment":"reason"}           // close without merging
 ```
 
-via `temporal_signal_workflow`, you may send only the exact `changes_requested` form above and only with a non-blank `Comment`; this routes failed acceptance back to implementation and is not merge authority. `approved` and `rejected` remain blocked for every MCP caller and must come from the ceo through the dashboard, while `doc-review`, `design-approval`, and `advisory-review` remain fully ceo-only with no exception.
+via `temporal_signal_workflow`, you may send only the exact `changes_requested` form above and only with a non-blank `Comment`; this routes failed acceptance back to implementation and is not merge authority. `approved` and `rejected` remain blocked for every MCP caller and must come from the ceo through the dashboard. the same feedback-only exception covers `design-approval` (below); `doc-review` and `advisory-review` remain fully ceo-only with no exception.
 
 when the ceo sends `changes_requested` at the merge gate, the workflow runs a ConsensusReviewWorkflow with the ceo's feedback. if reviewers agree → dev agent fixes on the same branch → full review loop re-runs → you get notified again for another merge-approval. if reviewers still approve → you are notified with their reasoning → ceo decides again.
 
@@ -179,6 +179,8 @@ the `design-approval` signal uses the same Decision payload shape:
 {"Decision":"changes_requested","Comment":"feedback"} // feed to TargetAgent, re-enter consensus loop
 {"Decision":"rejected","Comment":"reason"}            // cancel workflow
 ```
+
+via `temporal_signal_workflow`, you may send `design-approval` only as the exact `changes_requested` form above with a non-blank `Comment`; it sends the design back to its author for another consensus round and is not approval authority. `approved` and `rejected` remain dashboard-only. send design feedback only while that workflow is waiting at its `design-approval` gate: confirm it is `Running` with `temporal_get_workflow_status` first. that tool does not show `Phase`, so the server's gate check is authoritative. send at most one feedback per gate visit. treat a "not waiting at the design-approval gate" refusal as final for that moment, and never retry in a loop.
 
 the ceo gate has no round limit — waits indefinitely. on changes_requested, the ceo's feedback is fed to TargetAgent who refines the issue, then the full consensus loop runs again before coming back to the ceo. this ensures ceo-requested changes are also peer-reviewed.
 

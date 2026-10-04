@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Fleet.Temporal.Engine;
+using Microsoft.Extensions.Logging;
 using Fleet.Temporal.Models;
 using Temporalio.Activities;
 using Temporalio.Api.Enums.V1;
@@ -822,6 +823,79 @@ public sealed class SignalBufferTests
         Assert.Equal($"{workflowId}|spoofed|example-workflow", result);
     }
 
+    // ── #430 AC-E1: an off-gate design-approval is consumed at the next gate ──
+
+    /// <summary>
+    /// #430 AC-E1. Observes, without changing the engine, the hazard the MCP gate-phase check
+    /// exists for: a <c>design-approval</c> changes_requested that arrives while the workflow is
+    /// elsewhere (here, a sleep standing in for consensus or revision) is buffered and handed to
+    /// the next <c>design-approval</c> wait at entry. That wait returns it without parking, so it
+    /// never sets its gate <c>Phase</c> or notifies anyone: the gate visit the CEO should have seen
+    /// does not happen. The MCP tool therefore refuses design feedback unless the workflow reports
+    /// the gate phase.
+    ///
+    /// Asserted on the engine's own "resuming without parking" line and on the timer count, not on
+    /// a <c>Phase</c> value, which the time-skipping test server need not keep.
+    /// </summary>
+    [Fact]
+    public async Task DesignFeedbackSentBeforeTheGate_IsConsumedAtGateEntryWithoutParking()
+    {
+        const string gate = "design-approval";
+        var definition = Definition(new SequenceStep
+        {
+            Steps =
+            [
+                new SleepStep { Name = "before_gate", Seconds = 30 },
+                new WaitForSignalStep
+                {
+                    Name = "design_gate",
+                    SignalName = gate,
+                    Phase = gate,
+                    OutputVar = "feedback",
+                    TimeoutMinutes = 60,
+                    MaxReminders = 0,
+                    AutoCompleteOnTimeout = true,
+                },
+                new SetVariableStep
+                {
+                    Vars = new() { ["_result"] = "{{vars.feedback.Decision | default: 'none'}}|{{vars.feedback.Comment | default: 'none'}}" },
+                },
+            ],
+        });
+
+        await using var env = await WorkflowEnvironment.StartTimeSkippingAsync();
+        var (taskQueue, workflowId) = Ids("design-pre-gate");
+        var activities = new EngineTestActivities(definition);
+        var logs = new RecordingLoggerProvider();
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddProvider(logs));
+
+        string? result = null;
+        using var worker = new TemporalWorker(
+            env.Client,
+            new TemporalWorkerOptions(taskQueue) { LoggerFactory = loggerFactory }
+                .AddWorkflow<UniversalWorkflow>()
+                .AddAllActivities(activities.GetType(), activities));
+        await worker.ExecuteAsync(async () =>
+        {
+            var handle = await Start(env, taskQueue, workflowId);
+
+            // The sleep's timer is the window: no design-approval waiter is registered yet. Time
+            // does not skip until the result is awaited, so the signal lands inside the sleep.
+            await WaitForParkAsync(handle);
+            await handle.SignalAsync(gate, [JsonSerializer.SerializeToElement(new { Decision = "changes_requested", Comment = "x" })]);
+
+            result = await handle.GetResultAsync<string>();
+        });
+
+        Assert.Equal("changes_requested|x", result);
+        Assert.Contains(logs.Messages, message =>
+            message == $"Signal '{gate}' was already buffered — resuming without parking");
+
+        // One timer only: the sleep's. A wait that parked would have started its own timeout timer.
+        var history = await env.Client.GetWorkflowHandle(workflowId).FetchHistoryAsync();
+        Assert.Single(history.Events, e => e.EventType == EventType.TimerStarted);
+    }
+
     // ── shared scenario ──────────────────────────────────────────────────────
 
     /// <summary>
@@ -967,4 +1041,36 @@ file sealed class EngineTestActivities(WorkflowDefinitionModel definition)
     // DelegateToAgentActivity builds taskId as "{workflowId}/{stepName}".
     private static string TaskName(string taskId) =>
         taskId.Split('/').LastOrDefault() ?? taskId;
+}
+
+/// <summary>Captures rendered log lines from the worker, including the workflow logger.</summary>
+file sealed class RecordingLoggerProvider : ILoggerProvider
+{
+    private readonly List<string> _messages = [];
+
+    public IReadOnlyList<string> Messages
+    {
+        get { lock (_messages) return _messages.ToList(); }
+    }
+
+    public ILogger CreateLogger(string categoryName) => new RecordingLogger(this);
+
+    public void Dispose() { }
+
+    private sealed class RecordingLogger(RecordingLoggerProvider owner) : ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            lock (owner._messages) owner._messages.Add(formatter(state, exception));
+        }
+    }
 }

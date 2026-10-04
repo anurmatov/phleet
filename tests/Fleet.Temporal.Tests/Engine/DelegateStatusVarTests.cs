@@ -201,6 +201,47 @@ public sealed class DelegateStatusVarTests
         Assert.Equal(decision == "retry" ? 2 : 1, activities.Calls.Count(name => name == "flaky_step"));
     }
 
+    // ── AC11: a recorded statusVar + fail history replays ───────────────────
+
+    private static WorkflowHistory StatusVarFixture() =>
+        WorkflowHistory.FromJson(
+            DelegateStatusVarHistoryScenario.WorkflowId,
+            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, DelegateStatusVarHistoryScenario.FixturePath)));
+
+    /// <summary>
+    /// The fixture is what it claims: its recorded definition uses <c>statusVar</c> and a
+    /// <c>fail</c> step, one delegation ran, the post-parent delegate never did, and the run closed
+    /// Failed with <c>ExplicitFail</c> despite the <c>ignoreFailure</c> ancestor.
+    /// </summary>
+    [Fact]
+    public void TheStatusVarFixture_RecordsAnUnsuppressedExplicitFail()
+    {
+        var history = StatusVarFixture();
+
+        var definitionJson = history.Events
+            .Where(e => e.ActivityTaskCompletedEventAttributes is not null)
+            .Select(e => e.ActivityTaskCompletedEventAttributes.Result.Payloads_[0].Data.ToStringUtf8())
+            .First(json => json.Contains("statusVar", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("\"fail\"", definitionJson, StringComparison.Ordinal);
+
+        Assert.Single(DelegateInputs(history));
+
+        var close = history.Events.Last();
+        Assert.Equal(EventType.WorkflowExecutionFailed, close.EventType);
+        Assert.Equal(UniversalWorkflow.ExplicitFailErrorType,
+            close.WorkflowExecutionFailedEventAttributes.Failure.ApplicationFailureInfo.Type);
+        Assert.Equal("implement reported failed", close.WorkflowExecutionFailedEventAttributes.Failure.Message);
+    }
+
+    [Fact]
+    public async Task AStatusVarAndFailHistory_ReplaysCleanlyAgainstTheCurrentEngine()
+    {
+        var replayer = new WorkflowReplayer(
+            new WorkflowReplayerOptions().AddWorkflow<UniversalWorkflow>());
+
+        await replayer.ReplayWorkflowAsync(StatusVarFixture());
+    }
+
     // ── harness ──────────────────────────────────────────────────────────────
 
     private static DelegateStep Delegate(string name, string? outputVar = null, string? statusVar = null) => new()

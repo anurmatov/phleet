@@ -693,6 +693,61 @@ public sealed class SignalBufferTests
     }
 
     /// <summary>
+    /// #424 — the same refusal two ignoreFailure ancestors deep: <c>sequence</c> → <c>branch</c> →
+    /// the offending step. Every ancestor rethrows it, and the run closes Failed with the
+    /// refusal's own type.
+    /// </summary>
+    [Fact]
+    public async Task SignalWorkflow_ApproverGateRefusal_IsNotSuppressedByNestedIgnoreFailureAncestors()
+    {
+        var definition = Definition(new SequenceStep
+        {
+            IgnoreFailure = true,
+            Steps =
+            [
+                new BranchStep
+                {
+                    IgnoreFailure = true,
+                    On = "go",
+                    Cases = new()
+                    {
+                        ["go"] = new SignalWorkflowStep
+                        {
+                            Name = "sneaky_approval",
+                            WorkflowId = "some-other-workflow",
+                            SignalName = "doc-review",
+                            IgnoreFailure = true,
+                        },
+                    },
+                },
+                new SetVariableStep { Vars = new() { ["_result"] = "SURVIVED" } },
+            ],
+        });
+
+        await using var env = await WorkflowEnvironment.StartTimeSkippingAsync();
+        var (taskQueue, workflowId) = Ids("gate-refused-nested");
+        var activities = new EngineTestActivities(definition) { AutoReleaseDelegate = true };
+
+        using var worker = Worker(env, taskQueue, activities);
+        await worker.ExecuteAsync(async () =>
+        {
+            var handle = await env.Client.StartWorkflowAsync(
+                "example-workflow",
+                Array.Empty<object?>(),
+                new WorkflowOptions(id: workflowId, taskQueue: taskQueue)
+                {
+                    RetryPolicy = new() { MaximumAttempts = 1 },
+                });
+
+            var ex = await Assert.ThrowsAsync<Temporalio.Exceptions.WorkflowFailedException>(
+                () => handle.GetResultAsync().WaitAsync(TimeSpan.FromSeconds(30)));
+
+            var cause = Assert.IsType<Temporalio.Exceptions.ApplicationFailureException>(ex.InnerException);
+            Assert.Equal(UniversalWorkflow.ReservedSignalErrorType, cause.ErrorType);
+        });
+    }
+
+    /// <summary>
     /// The control: an ordinary signal with <c>ignoreFailure: true</c> still behaves exactly as
     /// before. Without this, a guard that simply broke <c>ignoreFailure</c> for every step would
     /// pass the two tests above.

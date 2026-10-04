@@ -26,6 +26,7 @@ using System.Text.Json.Serialization;
 [JsonDerivedType(typeof(CrossNamespaceStartStep), "cross_namespace_start")]
 [JsonDerivedType(typeof(SleepStep), "sleep")]
 [JsonDerivedType(typeof(SignalWorkflowStep), "signal_workflow")]
+[JsonDerivedType(typeof(FailStep), "fail")]
 public abstract record StepDefinition
 {
     /// <summary>Human-readable step name; also used as key when storing step output in vars.</summary>
@@ -120,6 +121,23 @@ public sealed record SleepStep : StepDefinition
     public long? Seconds { get; init; }
 }
 
+/// <summary>
+/// Fails the run on purpose (#424). Throws a non-retryable <c>ExplicitFail</c> application
+/// failure that no <c>ignoreFailure</c> in the same run can swallow, at any depth.
+///
+/// Failure is per run: a <c>fail</c> inside a child workflow fails that child, and the parent's
+/// <c>child_workflow</c> step handles the child failure exactly as before.
+/// </summary>
+public sealed record FailStep : StepDefinition
+{
+    /// <summary>
+    /// Failure message (supports {{template}}). Nullable on purpose: a missing <c>message</c> still
+    /// deserializes, so the load-time validator can reject it with the step named. A
+    /// <c>required</c> property would fail deserialization first with only a JSON path.
+    /// </summary>
+    public string? Message { get; init; }
+}
+
 // --- Agent delegation steps ---
 
 public record DelegateStep : StepDefinition
@@ -142,6 +160,15 @@ public record DelegateStep : StepDefinition
     /// existed. Malformed values are dropped by the activity with a warning.
     /// </summary>
     public string? Repo { get; init; }
+
+    /// <summary>
+    /// Optional variable that receives the delegation's completion status (#424): the relay token
+    /// trimmed and lower-cased (<c>completed</c>, <c>incomplete</c>, <c>failed</c>, <c>idle</c>, or
+    /// any other token), never mapped. Set to <c>unknown</c> before each attempt, so an attempt
+    /// that throws never leaves a previous attempt's value behind. A literal name, never a
+    /// template. Omitted → nothing is written.
+    /// </summary>
+    public string? StatusVar { get; init; }
 }
 
 public sealed record DelegateWithEscalationStep : DelegateStep

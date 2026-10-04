@@ -15,12 +15,13 @@ public sealed class GetUweReferenceTool
 
         ---
 
-        ## Step Types (17 total)
+        ## Step Types (19 total)
 
         All steps support these base fields (optional):
         - `name`: string — human label; also used as key when storing step output in vars
         - `outputVar`: string — variable name to store step result (literal, not a template)
-        - `ignoreFailure`: bool — swallow exceptions and continue (default false)
+        - `ignoreFailure`: bool — swallow exceptions and continue (default false). It never swallows
+          a `fail` step or the approver-gate refusal, at any depth.
 
         ---
 
@@ -117,6 +118,14 @@ public sealed class GetUweReferenceTool
         - `repo` (optional): `owner/name` this delegation is about — supports `{{template}}`. Carried to
           the agent as the relay message's `Repo` field, as metadata only: the agent ignores it. Kept so
           existing definitions and recorded workflows stay valid.
+        - `statusVar` (optional): literal variable name that receives the completion status — the
+          relay token trimmed and lower-cased: `completed`, `incomplete`, `failed`, `idle`, or any
+          other token as sent. Never mapped. It is set to `unknown` before each attempt, so an attempt
+          that throws (timeout, heartbeat loss, cancellation) reads `unknown`, never an earlier
+          value. With `retryOnIncomplete`, it holds the final status after the activity's own
+          retries. `outputVar` is unchanged. Caveat: when the agent sends no `[status: …]` prefix the
+          relay infers `completed` for a final message, so also require your own completion marker
+          in the output before treating the work as done. Blank or templated values fail at load.
 
         ### 9. delegate_with_escalation
         Same as `delegate` but wraps execution with an escalation pattern.
@@ -329,6 +338,39 @@ public sealed class GetUweReferenceTool
           an authorization check. `human-review` and `escalation-decision` are not gates and stay
           sendable.
 
+        ### 19. fail
+        Fails the run on purpose, with a message. Use it after a check (for example a `branch` on
+        `statusVar`) when continuing would treat a failure as success.
+        ```json
+        { "type": "fail", "name": "stop_on_failed_delegate", "message": "implementation reported {{vars.impl_status}}" }
+        ```
+        - `message` (required): supports `{{template}}`. Missing or blank fails at load, naming the step.
+        - Throws a non-retryable failure of type `ExplicitFail`. No activity, timer or command is scheduled.
+        - **Unsuppressible within its run.** No `ignoreFailure` on any ancestor (`sequence`, `branch`,
+          `loop`, `parallel`), at any depth, swallows it: the run closes Failed. `ignoreFailure: true`
+          on the fail step itself is rejected at load.
+        - **Per run.** A `fail` inside a child workflow fails that child. The parent's `child_workflow`
+          step treats it like any child failure, so the parent's `ignoreFailure` still applies there.
+          `fire_and_forget` children are not awaited and are unaffected.
+        - **`parallel`.** Branches already started run to completion first, then the run fails;
+          nothing after the `parallel` runs. Started siblings are not cancelled.
+        - Ordinary failures are unchanged: anything other than `ExplicitFail` or the refusal is still
+          swallowed by `ignoreFailure: true`.
+
+        **Detecting an explicit fail.** Temporal visibility cannot filter by failure type, so:
+        1. List Failed runs: `temporal workflow list --query "WorkflowType='<type>' AND ExecutionStatus='Failed'"`.
+        2. Inspect one: `temporal workflow show --workflow-id <id>`. The last event is
+           `WorkflowExecutionFailed` with `applicationFailureInfo.type = "ExplicitFail"` and the
+           resolved message. The Temporal UI shows the same close event.
+        3. Worker log: `UWE explicit fail in <id> at step <name>: <message>` names the step.
+        4. Type `ReservedSignalName` is the approver-gate refusal; any other type is an ordinary failure.
+
+        **Rollback order.** An engine without `fail` cannot load a definition containing it, nor replay
+        a history that loaded one, and it silently ignores `statusVar`. So: (1) find every definition
+        using `statusVar` or a `fail` step; (2) save versions without them; (3) let Running runs of those
+        types that started earlier complete, or terminate them by operator decision; (4) only then
+        revert the engine; (5) verify 0 Running runs of those types and that a new run loads.
+
         ---
 
         ## Template Engine
@@ -433,6 +475,6 @@ public sealed class GetUweReferenceTool
         """;
 
     [McpServerTool(Name = "get_uwe_reference")]
-    [Description("Returns the full UWE (Universal Workflow Engine) reference: all 18 step types with exact JSON property names, template engine syntax, scopes, filters, config keys, and JSON conventions. Use this before designing or editing any UWE workflow definition.")]
+    [Description("Returns the full UWE (Universal Workflow Engine) reference: all 19 step types with exact JSON property names, template engine syntax, scopes, filters, config keys, and JSON conventions. Use this before designing or editing any UWE workflow definition.")]
     public string GetUweReference() => Reference;
 }

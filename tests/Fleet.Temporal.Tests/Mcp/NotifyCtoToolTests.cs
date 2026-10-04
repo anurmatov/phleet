@@ -175,4 +175,49 @@ public sealed class NotifyCtoToolTests
                 s.Contains("Triage as follows")),
             Arg.Any<CancellationToken>());
     }
+
+    [Fact]
+    public async Task NotifyAsync_Directive_AsksForAShortVerifiedSummary_NotABulletMenu()
+    {
+        string? directive = null;
+        var dispatcher = Substitute.For<IWorkflowDispatcher>();
+        dispatcher.FireAndForgetAsync(Arg.Any<string>(), Arg.Do<string>(d => directive = d), Arg.Any<CancellationToken>())
+            .Returns("wf-1");
+
+        var tool = BuildTool(ctoAgent: "cto-agent", dispatcher: dispatcher, agentQueryParam: "agent1");
+
+        await tool.NotifyAsync("tests passed on my branch");
+
+        Assert.NotNull(directive);
+        Assert.StartsWith("[notification from agent1] tests passed on my branch\n\n", directive);
+
+        const string step1 = "1. Analyze the notification — what is the sender asking for, why, what's the impact, urgency, risks.\n";
+        const string step2 =
+            "2. DM the CEO via the send_to_ceo MCP tool in 1–3 plain sentences: distinguish the sender’s report from " +
+            "verified done, give the concrete next action and owner, and request one exact human decision only when " +
+            "needed. Give one recommendation and usable feedback, not a generic decision menu. Dispatched work is not " +
+            "completed work.\n";
+        const string step3 = "3. Wait for the CEO's reply (approve / reject / direction). Then act on the decision and report back.";
+
+        // Sentence limit, evidence distinction, next owner and conditional ask, in that exact wording.
+        Assert.Contains(step2, directive);
+        Assert.Contains("1–3 plain sentences", directive);
+        Assert.Contains("distinguish the sender’s report from verified done", directive);
+        Assert.Contains("concrete next action and owner", directive);
+        Assert.Contains("one exact human decision only when needed", directive);
+
+        // Triage steps 1 and 3 are unchanged and stay in order around the new step 2.
+        var i1 = directive.IndexOf(step1, StringComparison.Ordinal);
+        var i2 = directive.IndexOf(step2, StringComparison.Ordinal);
+        var i3 = directive.IndexOf(step3, StringComparison.Ordinal);
+        Assert.True(i1 >= 0 && i1 < i2 && i2 < i3, "triage steps must stay 1 → 2 → 3");
+        Assert.EndsWith(step3, directive);
+
+        // The old structured bullet menu is gone.
+        Assert.DoesNotContain("•", directive);
+        Assert.DoesNotContain("structured summary", directive);
+        Assert.DoesNotContain("what they want:", directive);
+        Assert.DoesNotContain("approve / reject / counter-proposal", directive);
+        Assert.DoesNotContain("{sender}", directive);
+    }
 }

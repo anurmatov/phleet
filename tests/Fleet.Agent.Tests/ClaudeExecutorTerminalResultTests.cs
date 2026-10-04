@@ -172,6 +172,45 @@ public class ClaudeExecutorTerminalResultTests
         Assert.DoesNotContain(second, progress => progress.FinalResult is not null);
     }
 
+    /// <summary>
+    /// #254 under #429 S1/S2: narration before foreground tool calls reopens injection, but the
+    /// terminal result still owns the one final answer, and nested or background events still
+    /// cannot supply it.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_NarratedToolCalls_ResultStillOwnsTheOneFinalAnswer()
+    {
+        var events = await RunEventsAsync(
+            TextAssistant("NARRATION-ONE"),
+            ToolUseAssistant(),
+            TextAssistant("NESTED-MUST-NOT-RELAY", parentToolUseId: "toolu-nested"),
+            new ClaudeStreamEvent
+            {
+                Type = "result",
+                Result = "BACKGROUND-MUST-NOT-RELAY",
+                Origin = new ClaudeMessageOrigin { Kind = "task-notification" },
+                NumTurns = 1,
+            },
+            TextAssistant("NARRATION-TWO"),
+            ToolUseAssistant(),
+            TextAssistant("FINAL-ANSWER"),
+            new ClaudeStreamEvent { Type = "result", Result = "", NumTurns = 1 });
+
+        var final = Assert.Single(events, progress => progress.FinalResult is not null);
+        Assert.Equal("result", final.EventType);
+        Assert.Equal("FINAL-ANSWER", final.FinalResult);
+    }
+
+    private static ClaudeStreamEvent ToolUseAssistant() =>
+        new()
+        {
+            Type = "assistant",
+            Message = new ClaudeMessage
+            {
+                Content = [new ClaudeContentBlock { Type = "tool_use", Name = "Bash", Id = "toolu-call" }],
+            },
+        };
+
     private static ClaudeStreamEvent TextAssistant(string text, string? parentToolUseId = null) =>
         new()
         {

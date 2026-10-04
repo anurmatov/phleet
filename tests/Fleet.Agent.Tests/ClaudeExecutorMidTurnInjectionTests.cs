@@ -376,6 +376,253 @@ public class ClaudeExecutorMidTurnInjectionTests
         }
     }
 
+    // --- #429: the final-answer gate during foreground tool calls ---
+
+    private static ClaudeStreamEvent Narration(string text = "Running the next call now.", string? parent = null, string? origin = null) =>
+        new()
+        {
+            Type = "assistant",
+            ParentToolUseId = parent,
+            Origin = origin is null ? null : new ClaudeMessageOrigin { Kind = origin },
+            Message = new ClaudeMessage { Content = [new ClaudeContentBlock { Type = "text", Text = text }] },
+        };
+
+    private static ClaudeStreamEvent ToolCall(string? parent = null, string? origin = null) =>
+        new()
+        {
+            Type = "assistant",
+            ParentToolUseId = parent,
+            Origin = origin is null ? null : new ClaudeMessageOrigin { Kind = origin },
+            Message = new ClaudeMessage { Content = [new ClaudeContentBlock { Type = "tool_use", Name = "Bash", Id = "x" }] },
+        };
+
+    private static ClaudeStreamEvent NarrationWithToolCall() =>
+        new()
+        {
+            Type = "assistant",
+            Message = new ClaudeMessage
+            {
+                Content =
+                [
+                    new ClaudeContentBlock { Type = "text", Text = "Running the next call now." },
+                    new ClaudeContentBlock { Type = "tool_use", Name = "Bash", Id = "x" },
+                ],
+            },
+        };
+
+    private static ClaudeStreamEvent CurrentResult(string? result = "done") =>
+        new() { Type = "result", Result = result };
+
+    /// <summary>A live /bin/cat process with a <see cref="StringWriter"/> standing in for its stdin.</summary>
+    private sealed class LiveExecutor : IDisposable
+    {
+        private readonly System.Diagnostics.Process _process;
+
+        public ClaudeExecutor Executor { get; }
+        public StringWriter Stdin { get; } = new();
+        public ClaudeExecutorLogRecorder Logs { get; } = new();
+
+        public LiveExecutor()
+        {
+            _process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "/bin/cat",
+                RedirectStandardInput = true,
+                UseShellExecute = false,
+            })!;
+            Executor = BuildExecutor(Logs);
+            Executor.SetProcessForTests(_process);
+            Executor.SetStdinForTests(Stdin);
+        }
+
+        public string[] Lines => Stdin.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+
+        public void Dispose()
+        {
+            try { _process.Kill(); } catch (InvalidOperationException) { }
+            _process.Dispose();
+        }
+    }
+
+    /// <summary>AC1 (S1/S4): narration, then its tool call, reopens the gate once.</summary>
+    [Fact]
+    public async Task Narration_ThenToolUse_ReopensGate_InjectionSucceeds()
+    {
+        using var live = new LiveExecutor();
+        live.Executor.OpenTurnForTests();
+
+        live.Executor.ParseProgressForTests(Narration());
+        Assert.True(live.Executor.TurnCommittedToFinalAnswerForTests);
+        live.Executor.ParseProgressForTests(ToolCall());
+
+        Assert.False(live.Executor.TurnCommittedToFinalAnswerForTests);
+        Assert.Equal(1, live.Executor.GateReopenCountForTests);
+        var result = await live.Executor.TryInjectMessageAsync("steer");
+        Assert.Equal(MidTurnInjectionStatus.Injected, result.Status);
+        Assert.Single(live.Lines);
+    }
+
+    /// <summary>AC2 (S2): the E1 shape, 40 narrated foreground calls.</summary>
+    [Fact]
+    public async Task FortyNarratedToolCalls_InjectableDuringEachTool_RefusedInEachGap_OneReopenLine()
+    {
+        using var live = new LiveExecutor();
+        live.Executor.OpenTurnForTests();
+
+        for (var call = 1; call <= 40; call++)
+        {
+            live.Executor.ParseProgressForTests(Narration($"Running call {call} now."));
+            var inGap = await live.Executor.TryInjectMessageAsync("steer");
+            Assert.Equal(MidTurnInjectionStatus.NoActiveTurn, inGap.Status);
+
+            live.Executor.ParseProgressForTests(ToolCall());
+            var duringTool = await live.Executor.TryInjectMessageAsync("steer");
+            Assert.Equal(MidTurnInjectionStatus.Injected, duringTool.Status);
+        }
+
+        Assert.Equal(40, live.Executor.GateReopenCountForTests);
+        live.Executor.ParseProgressForTests(Narration("All 40 calls finished."));
+        live.Executor.ParseProgressForTests(CurrentResult());
+
+        Assert.Single(live.Logs.Information, line => line == "Final-answer gate reopened 40 time(s) this turn");
+    }
+
+    /// <summary>AC2 (S3): text and tool_use in one event never set the gate and count no reopen.</summary>
+    [Fact]
+    public void FortyCombinedTextAndToolEvents_GateNeverSet_NoReopenLine()
+    {
+        var logs = new ClaudeExecutorLogRecorder();
+        var executor = BuildExecutor(logs);
+        executor.OpenTurnForTests();
+
+        for (var call = 1; call <= 40; call++)
+        {
+            executor.ParseProgressForTests(NarrationWithToolCall());
+            Assert.False(executor.TurnCommittedToFinalAnswerForTests);
+        }
+
+        Assert.Equal(0, executor.GateReopenCountForTests);
+        executor.ParseProgressForTests(CurrentResult());
+        Assert.DoesNotContain(logs.Information, line => line.StartsWith("Final-answer gate reopened", StringComparison.Ordinal));
+    }
+
+    /// <summary>AC3 (S5/S7): true final text, then the current result — the #236 gate holds.</summary>
+    [Fact]
+    public async Task FinalTextThenResult_GateStaysClosed_LaterToolUseDoesNotReopen()
+    {
+        using var live = new LiveExecutor();
+        live.Executor.OpenTurnForTests();
+        live.Executor.ParseProgressForTests(ToolCall());
+        live.Executor.ParseProgressForTests(Narration("Here is the answer."));
+
+        // S7: final text, no result yet.
+        var beforeResult = await live.Executor.TryInjectMessageAsync("late");
+        Assert.Equal(MidTurnInjectionStatus.NoActiveTurn, beforeResult.Status);
+
+        live.Executor.ParseProgressForTests(CurrentResult());
+        live.Executor.ParseProgressForTests(ToolCall());
+
+        Assert.True(live.Executor.TurnCommittedToFinalAnswerForTests);
+        Assert.True(live.Executor.CurrentTurnResultSeenForTests);
+        var result = await live.Executor.TryInjectMessageAsync("late");
+        Assert.Equal(MidTurnInjectionStatus.NoActiveTurn, result.Status);
+        Assert.Contains("final answer", result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Mid-turn injection refused: gate_closed", live.Logs.Information);
+        Assert.Empty(live.Lines);
+    }
+
+    /// <summary>A turn that ends with a result but no final text still closes (max turns, error).</summary>
+    [Fact]
+    public async Task ResultWithoutFinalText_ClosesBothFlags()
+    {
+        using var live = new LiveExecutor();
+        live.Executor.OpenTurnForTests();
+        live.Executor.ParseProgressForTests(ToolCall());
+
+        live.Executor.ParseProgressForTests(new ClaudeStreamEvent { Type = "result", Subtype = "error_max_turns", IsError = true });
+
+        Assert.True(live.Executor.TurnCommittedToFinalAnswerForTests);
+        Assert.True(live.Executor.CurrentTurnResultSeenForTests);
+        Assert.Equal(MidTurnInjectionStatus.NoActiveTurn, (await live.Executor.TryInjectMessageAsync("late")).Status);
+        Assert.Empty(live.Lines);
+    }
+
+    /// <summary>AC5 (S8): nested events neither set nor clear the gate.</summary>
+    [Fact]
+    public void NestedEvents_NeverSetOrClearTheGate()
+    {
+        var executor = BuildExecutor();
+        executor.OpenTurnForTests();
+
+        executor.ParseProgressForTests(Narration("subagent text", parent: "toolu_parent"));
+        Assert.False(executor.TurnCommittedToFinalAnswerForTests);
+
+        executor.ParseProgressForTests(Narration("Here is the answer."));
+        executor.ParseProgressForTests(ToolCall(parent: "toolu_parent"));
+
+        Assert.True(executor.TurnCommittedToFinalAnswerForTests);
+        Assert.Equal(0, executor.GateReopenCountForTests);
+    }
+
+    /// <summary>AC6 (S9): background-origin events do not reopen the gate or close the turn.</summary>
+    [Fact]
+    public void NonCurrentOriginEvents_DoNotReopenOrMarkTheResultSeen()
+    {
+        var executor = BuildExecutor();
+        executor.OpenTurnForTests();
+        executor.ParseProgressForTests(Narration("Here is the answer."));
+
+        executor.ParseProgressForTests(ToolCall(origin: "task-notification"));
+        Assert.True(executor.TurnCommittedToFinalAnswerForTests);
+        Assert.Equal(0, executor.GateReopenCountForTests);
+
+        executor.ParseProgressForTests(new ClaudeStreamEvent
+        {
+            Type = "result",
+            Result = "background",
+            Origin = new ClaudeMessageOrigin { Kind = "task-notification" },
+        });
+        Assert.False(executor.CurrentTurnResultSeenForTests);
+    }
+
+    /// <summary>AC9 (S12): final text parsed while the injection waits for the stdin lock.</summary>
+    [Fact]
+    public async Task FinalTextWhileWaitingForTheLock_RefusedUnderLock_NothingWritten()
+    {
+        using var live = new LiveExecutor();
+        live.Executor.OpenTurnForTests();
+        live.Executor.ParseProgressForTests(ToolCall());
+
+        await live.Executor.StdinWriteLockForTests.WaitAsync();
+        var injection = live.Executor.TryInjectMessageAsync("steer");
+        live.Executor.ParseProgressForTests(Narration("Here is the answer."));
+        live.Executor.StdinWriteLockForTests.Release();
+        var result = await injection;
+
+        Assert.Equal(MidTurnInjectionStatus.NoActiveTurn, result.Status);
+        Assert.Contains("Mid-turn injection refused: gate_closed_under_lock", live.Logs.Information);
+        Assert.Empty(live.Lines);
+        Assert.Equal(1, live.Executor.StdinWriteLockForTests.CurrentCount);
+    }
+
+    /// <summary>AC9, second case: the lock is released without final text, so one line is written.</summary>
+    [Fact]
+    public async Task LockReleasedWithoutFinalText_Injected_OneLineWritten()
+    {
+        using var live = new LiveExecutor();
+        live.Executor.OpenTurnForTests();
+        live.Executor.ParseProgressForTests(ToolCall());
+
+        await live.Executor.StdinWriteLockForTests.WaitAsync();
+        var injection = live.Executor.TryInjectMessageAsync("steer");
+        live.Executor.StdinWriteLockForTests.Release();
+        var result = await injection;
+
+        Assert.Equal(MidTurnInjectionStatus.Injected, result.Status);
+        Assert.Single(live.Lines);
+        Assert.Equal(1, live.Executor.StdinWriteLockForTests.CurrentCount);
+    }
+
     private static ClaudeExecutor BuildExecutor(ILogger<ClaudeExecutor>? logger = null)
     {
         var options = Options.Create(new AgentOptions

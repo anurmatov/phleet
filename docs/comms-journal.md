@@ -829,15 +829,16 @@ contain only `result`, `kind`, `bytes` and `waitedMs`, never locators or content
 Pinned transport evidence is in
 [`journal-provider-probes.md`](evidence/journal-provider-probes.md).
 Codex's journal headers are proved; Gemini remains false because the actual
-headless probe could not authenticate. Exact-head AC13/XAC9 stack acceptance,
-including each provider's native file reads and MCP timeout, remains required
-before merge; transport probes do not replace it.
+headless probe could not authenticate. These probes do not establish exact-head
+AC13/XAC9 stack acceptance, including each provider's native file reads and MCP
+timeout; they do not replace operator acceptance.
 
-## Attachment copying and cross-chat switch (acceptance-gated draft)
+## Attachment copying and cross-chat switch (operator-gated)
 
-The draft now includes the send runtime, Comms routes and live authorization
-client. Do not grant or deploy attachment copying until the remaining acceptance
-gates pass.
+The send runtime, Comms routes and live authorization client are implemented.
+Operator-owned exact-image and real-provider acceptance (AC13) remains UNRUN;
+source merge does not prove live delivery. Deployment and grants require an
+explicitly authorized operator rollout plan.
 Journal sends use a separate client with the same bot credential and no retries;
 ordinary replies retain the SDK's default retry policy. Send-originated content
 uses the dedicated read-purpose `POST /journal/v1/attachments/send-content`

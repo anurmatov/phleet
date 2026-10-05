@@ -61,6 +61,59 @@ public class CodexExecutorAbandonTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task CleanupInFlight_OppositeTurnStart_WaitsAndKeepsItsOwnFrames(bool abandonedCommand)
+    {
+        await using var server = new AbandonAppServer();
+        server.OnTurn = async id =>
+        {
+            await server.NotifyAsync(AbandonAppServer.Started(id));
+            if (id == "turn-2")
+            {
+                await server.NotifyAsync(new JsonObject
+                {
+                    ["method"] = "item/agentMessage/delta",
+                    ["params"] = new JsonObject { ["turnId"] = id, ["delta"] = "own-progress" },
+                });
+                await server.NotifyAsync(AbandonAppServer.Completed(id, "own-answer"));
+            }
+        };
+        var finish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        server.OnInterrupt = async id =>
+        {
+            await finish.Task;
+            await server.NotifyAsync(AbandonAppServer.Completed(id, "abandoned-answer"));
+        };
+        var first = (abandonedCommand ? server.Executor.SendCommandAsync("first-command")
+            : server.Executor.ExecuteAsync("first-task")).GetAsyncEnumerator();
+        Assert.True(await first.MoveNextAsync());
+        var cleanup = first.DisposeAsync().AsTask();
+        try
+        {
+            await server.InterruptWritten.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var next = CollectAsync(abandonedCommand ? server.Executor.ExecuteAsync("next-task")
+                : server.Executor.SendCommandAsync("next-command"));
+            Assert.False(next.IsCompleted);
+            Assert.Single(server.Requests, r => (string?)r["method"] is "turn/start" or "thread/shellCommand");
+            Assert.Equal(0, server.Executor.TurnLockForTests.CurrentCount);
+            finish.TrySetResult();
+            await cleanup.WaitAsync(TimeSpan.FromSeconds(5));
+            var progress = await next.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Contains(progress, p => p.Summary == "own-progress");
+            Assert.Equal("own-answer", Assert.Single(progress, p => p.FinalResult is not null).FinalResult);
+            Assert.DoesNotContain(progress, p => p.Summary.Contains("abandoned"));
+            Assert.False(server.Executor.RestartRequestedForTests);
+            Assert.Null(server.Executor.CommandTurnIdForTests);
+        }
+        finally
+        {
+            finish.TrySetResult();
+            await cleanup.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task ExecuteAsync_MalformedCompletion_ReturnsErrorWithoutRestart(bool nonObject)
     {
         await using var server = new AbandonAppServer();
@@ -175,6 +228,65 @@ public class CodexExecutorAbandonTests
         await server.NotifyAsync(AbandonAppServer.Completed("turn-2", "second-command"));
         Assert.True(await second.MoveNextAsync());
         Assert.Equal("second-command", second.Current.FinalResult);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Cleanup_SendLockUnavailable_SkipsDrainAndDefersRestartWithinBudget(bool command)
+    {
+        var starts = 0;
+        var ledger = new TurnOriginLedger();
+        await using var server = new AbandonAppServer(ledger, _ => { starts++; return StartFreshPeer(); });
+        server.OnTurn = id => server.NotifyAsync(AbandonAppServer.Started(id));
+        using var caller = new CancellationTokenSource();
+        var first = (command ? server.Executor.SendCommandAsync("first", caller.Token)
+            : server.Executor.ExecuteAsync("first", ct: caller.Token)).GetAsyncEnumerator();
+        Assert.True(await first.MoveNextAsync());
+        await server.Executor.SendLockForTests.WaitAsync();
+        try
+        {
+            caller.Cancel();
+            var clock = Stopwatch.StartNew();
+            await first.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.InRange(clock.Elapsed.TotalSeconds, 2.8, 5);
+            Assert.True(server.Executor.RestartRequestedForTests);
+            Assert.Null(server.Executor.ActiveTurnIdForTests);
+            Assert.Null(server.Executor.CommandTurnIdForTests);
+            Assert.Equal(1, server.Executor.TurnLockForTests.CurrentCount);
+            Assert.DoesNotContain(server.Requests, r => (string?)r["method"] == "turn/interrupt");
+            Assert.Contains(server.Logs, l => l.Contains("cleanupLock=send") && l.Contains("restartRequested=true"));
+            Assert.Contains(ledger.SnapshotForTests(), i => i.Origin == TurnOrigin.Unknown && !i.LockHeld && i.End is null);
+        }
+        finally { server.Executor.SendLockForTests.Release(); }
+        var next = await CollectAsync(server.Executor.ExecuteAsync("next"));
+        Assert.Equal("answer-2", Assert.Single(next).FinalResult);
+        Assert.Equal(1, starts);
+    }
+
+    [Fact]
+    public async Task SendCommandAsync_CleanupTurnLockUnavailable_DoesNotInvertLocksOrDrain()
+    {
+        var starts = 0;
+        await using var server = new AbandonAppServer(starter: _ => { starts++; return StartFreshPeer(); });
+        server.OnTurn = id => server.NotifyAsync(AbandonAppServer.Started(id));
+        var first = server.Executor.SendCommandAsync("first").GetAsyncEnumerator();
+        Assert.True(await first.MoveNextAsync());
+        await server.Executor.TurnLockForTests.WaitAsync();
+        try
+        {
+            await first.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(1, server.Executor.SendLockForTests.CurrentCount);
+            Assert.Null(server.Executor.ActiveTurnIdForTests);
+            Assert.Null(server.Executor.CommandTurnIdForTests);
+            Assert.True(server.Executor.RestartRequestedForTests);
+            Assert.DoesNotContain(server.Requests, r => (string?)r["method"] == "turn/interrupt");
+            Assert.Contains(server.Logs, l => l.Contains("cleanupLock=turn"));
+        }
+        finally { server.Executor.TurnLockForTests.Release(); }
+        var next = await CollectAsync(server.Executor.ExecuteAsync("next"));
+        Assert.Equal("answer-2", Assert.Single(next).FinalResult);
+        Assert.Equal(1, starts);
     }
 
     [Theory]

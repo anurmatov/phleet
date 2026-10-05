@@ -224,8 +224,8 @@ public sealed class CodexExecutor : IAgentExecutor
                         throw new InvalidOperationException("CodexExecutor: _activeTurnId non-null despite _turnLock held — state corruption.");
 
                     _logger.LogError("codex_stale_turn_at_start: turnId={TurnId} path=task", staleTurnId);
-                    await AbandonTurnAsync(staleTurnId, "task", "stale_at_start");
                     RequestRestart();
+                    await AbandonTurnAsync(staleTurnId, "task", "stale_at_start");
                     await EnsureProcessReadyAsync(ct);
                 }
 
@@ -299,7 +299,7 @@ public sealed class CodexExecutor : IAgentExecutor
         finally
         {
             if (turnId is not null && _activeTurnId == turnId)
-                await AbandonTurnAsync(turnId, "task", abandonReason);
+                await AbandonOwnedTurnAsync(turnId, "task", abandonReason, acquireTurnLock: false);
             turnInterval?.Close();
             _turnLock.Release();
         }
@@ -388,8 +388,8 @@ public sealed class CodexExecutor : IAgentExecutor
                     if (staleTurnId == _commandTurnId)
                         throw new InvalidOperationException("CodexExecutor refused to start a shell command while a turn is already active.");
                     _logger.LogError("codex_stale_turn_at_start: turnId={TurnId} path=run", staleTurnId);
-                    await AbandonTurnAsync(staleTurnId, "run", "stale_at_start");
                     RequestRestart();
+                    await AbandonTurnAsync(staleTurnId, "run", "stale_at_start");
                     await EnsureProcessReadyAsync(ct);
                 }
                 finally { _turnLock.Release(); }
@@ -468,8 +468,8 @@ public sealed class CodexExecutor : IAgentExecutor
         {
             try
             {
-                if (commandTurnId is not null && _activeTurnId == commandTurnId)
-                    await AbandonTurnAsync(commandTurnId, "run", abandonReason);
+                if (commandTurnId is not null)
+                    await AbandonOwnedTurnAsync(commandTurnId, "run", abandonReason, acquireTurnLock: true);
             }
             finally
             {
@@ -542,6 +542,7 @@ public sealed class CodexExecutor : IAgentExecutor
     internal bool RestartRequestedForTests => _restartRequested;
 
     internal SemaphoreSlim TurnLockForTests => _turnLock;
+    internal SemaphoreSlim SendLockForTests => _sendLock;
 
     internal AgentProgress? BuildItemStartedProgressForTests(JsonObject @params) =>
         BuildItemStartedProgress(@params);
@@ -1487,14 +1488,80 @@ public sealed class CodexExecutor : IAgentExecutor
 
     private enum DrainOutcome { Completed, Timeout, ChannelClosed, WriteFailed }
 
+    /// <summary>Keep the channel single-reader until cleanup ends, including both start paths.</summary>
+    private async Task AbandonOwnedTurnAsync(string turnId, string path, string reason, bool acquireTurnLock)
+    {
+        if (_activeTurnId != turnId)
+            return;
+
+        // Only our own deadline, never the caller's cancellation. Locks and drain share the
+        // existing three-second budget, so contention cannot turn disposal into a long wait.
+        using var cleanupCts = new CancellationTokenSource(InterruptDrainTimeout);
+        var turnLockTaken = false;
+        var sendLockTaken = false;
+        var waitingFor = "turn";
+        try
+        {
+            // /run has released _sendLock before reaching its streaming finally. Acquire in
+            // the same order as task startup; D1 already owns _turnLock.
+            if (acquireTurnLock)
+            {
+                turnLockTaken = await _turnLock.WaitAsync(InterruptDrainTimeout, cleanupCts.Token);
+                if (!turnLockTaken)
+                {
+                    DeferAbandonedTurnRestart(turnId, path, reason, waitingFor);
+                    return;
+                }
+            }
+            waitingFor = "send";
+            sendLockTaken = await _sendLock.WaitAsync(InterruptDrainTimeout, cleanupCts.Token);
+            if (!sendLockTaken)
+            {
+                DeferAbandonedTurnRestart(turnId, path, reason, waitingFor);
+                return;
+            }
+
+            // Another enumeration may own the id by the time both locks are acquired.
+            if (_activeTurnId == turnId)
+                await AbandonTurnAsync(turnId, path, reason, cleanupCts.Token);
+        }
+        catch (Exception)
+        {
+            // No second channel reader when locking fails, and never mask the consumer error.
+            DeferAbandonedTurnRestart(turnId, path, reason, waitingFor);
+        }
+        finally
+        {
+            if (sendLockTaken) _sendLock.Release();
+            if (turnLockTaken) _turnLock.Release();
+        }
+    }
+
+    private void DeferAbandonedTurnRestart(string turnId, string path, string reason, string cleanupLock)
+    {
+        if (_activeTurnId != turnId)
+            return;
+        _activeTurnId = null;
+        _turnHasFinalAnswerPhase = false;
+        RequestRestart();
+        try
+        {
+            _ledger?.OpenUntilTurnEnds(_activity, turnId);
+            _logger.LogWarning(
+                "codex_turn_abandoned: turnId={TurnId} path={Path} reason={Reason} drain=write_failed restartRequested=true cleanupLock={CleanupLock}",
+                turnId, path, reason, cleanupLock);
+        }
+        catch { } // Cleanup diagnostics cannot replace the original consumer exception.
+    }
+
     /// <summary>Cleanup cannot replace the consumer's original exception or replay its task.</summary>
-    private async Task AbandonTurnAsync(string turnId, string path, string reason)
+    private async Task AbandonTurnAsync(string turnId, string path, string reason, CancellationToken cleanupToken = default)
     {
         _activeTurnId = null;
         _turnHasFinalAnswerPhase = false;
         try
         {
-            var outcome = await DrainInterruptedTurnAsync(turnId);
+            var outcome = await DrainInterruptedTurnAsync(turnId, cleanupToken);
             if (outcome != DrainOutcome.Completed)
                 RequestRestart();
             var drain = outcome switch
@@ -1506,7 +1573,7 @@ public sealed class CodexExecutor : IAgentExecutor
             };
             _logger.LogWarning(
                 "codex_turn_abandoned: turnId={TurnId} path={Path} reason={Reason} drain={Drain} restartRequested={RestartRequested}",
-                turnId, path, reason, drain, _restartRequested || reason == "stale_at_start");
+                turnId, path, reason, drain, _restartRequested);
         }
         catch (Exception ex)
         {
@@ -1521,11 +1588,12 @@ public sealed class CodexExecutor : IAgentExecutor
         }
     }
 
-    private async Task<DrainOutcome> DrainInterruptedTurnAsync(string turnId)
+    private async Task<DrainOutcome> DrainInterruptedTurnAsync(string turnId, CancellationToken cleanupToken = default)
     {
         _activeTurnId = null;
         _turnHasFinalAnswerPhase = false;
-        using var drainCts = new CancellationTokenSource(InterruptDrainTimeout);
+        using var drainCts = CancellationTokenSource.CreateLinkedTokenSource(cleanupToken);
+        drainCts.CancelAfter(InterruptDrainTimeout);
         var written = false;
         try
         {

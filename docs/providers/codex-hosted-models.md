@@ -148,7 +148,9 @@ property.
 for example after an outbound progress-send failure. Cleanup interrupts and drains that turn for
 up to three seconds; `drain=completed` preserves the process and thread, while `timeout`,
 `channel_closed` or `write_failed` requests a fresh app-server before the next turn without
-replaying the failed task. The next task can run without reprovisioning; `codex_stale_turn_at_start`
+replaying the failed task. Cleanup locks share the same three-second budget; if a lock cannot be
+obtained, cleanup skips the drain and requests a restart with a `cleanupLock` log field.
+The next task can run without reprovisioning; `codex_stale_turn_at_start`
 means an unexpected ownerless id required a forced restart, and repeated abandonment restarts or
 any stale-start event should be reported with the turn-id, path, reason and drain fields only.
 

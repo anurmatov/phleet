@@ -62,8 +62,8 @@ public sealed class QueuedMessage
     public bool Claimed { get; set; }
 
     /// <summary>
-    /// True when the busy notice was sent for this entry at enqueue time. DrainQueue sends
-    /// "Now processing" only then, so a silently queued message stays silent (#369).
+    /// True once a busy or steering-delivered notice send was attempted for this entry, even if
+    /// the send failed. DrainQueue sends "Now processing" only then; skipped notices stay silent.
     /// </summary>
     public bool BusyNoticeSent { get; set; }
 

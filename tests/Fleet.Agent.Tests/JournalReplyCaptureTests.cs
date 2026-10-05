@@ -93,6 +93,7 @@ public sealed class JournalReplyCaptureTests : IDisposable
         "status-notice",
         "reset-notice",
         "busy-and-queue-notices",
+        "steering-delivered-notice",
         "router-usage-notice",
         "command-notice",
         "image-skip-notice",
@@ -184,6 +185,10 @@ public sealed class JournalReplyCaptureTests : IDisposable
             case "busy-and-queue-notices":
                 await RunQueuedBehindAnotherChatAsync(rig);
                 expected = ["I'm busy right now", "Now processing your queued message...", "Done! (no text output)"];
+                break;
+            case "steering-delivered-notice":
+                await rig.Holder.SendTextByOriginAsync(User, TaskManager.SteeringDeliveredNotice, OutboundOrigin.Human);
+                expected = [TaskManager.SteeringDeliveredNotice];
                 break;
             case "router-usage-notice":
                 rig.Transport.RouterHookForTesting = null;

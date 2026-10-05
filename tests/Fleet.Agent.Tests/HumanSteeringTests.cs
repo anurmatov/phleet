@@ -8,6 +8,7 @@ using Fleet.Agent.Services.JournalFiles;
 using Fleet.Conversations.Contracts;
 using Fleet.Journal.Client;
 using Fleet.Protocol;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
@@ -57,6 +58,11 @@ public sealed class HumanSteeringTests
         var document = new MessageDocument("synthetic-file", "application/pdf", 3, "synthetic.pdf");
         Assert.Equal(TaskDispatchOutcome.Queued, await h.DmAsync(U1Chat, U1, images: [image], documents: [document]));
 
+        var notice = Assert.Single(h.Sink.Sent, s => s.ChatId == U1Chat);
+        Assert.Equal(status == MidTurnInjectionStatus.Injected
+            ? "message delivered to my current task, reply pending here."
+            : "I'm busy right now — your message is queued (position 1). I'll get to it once my current task finishes.", notice.Text);
+
         var injection = Assert.Single(h.Executor.Injections);
         Assert.StartsWith(TaskManager.SteeringHeader, injection.Text);
         Assert.Contains(Dm, injection.Text);
@@ -68,6 +74,8 @@ public sealed class HumanSteeringTests
         Assert.Equal(0, h.Count(InjectionOutcomeCounter.Injected));
         Assert.Single(h.Manager.GetQueueSnapshot());
         await h.FinishAsync();
+        Assert.Single(h.Sink.Sent, e => e.ChatId == U1Chat && e.Text == "Now processing your queued message...");
+        Assert.Single(h.Sink.Replies, e => e.ChatId == U1Chat);
     }
 
     // --- S2 / S4: workflow callback integrity ---
@@ -142,6 +150,7 @@ public sealed class HumanSteeringTests
             Assert.Equal(TaskDispatchOutcome.Queued, await h.DmAsync(U1Chat, U1));
             Assert.Empty(h.Executor.Injections);
             Assert.Equal(0, h.SteeringCounts());
+            Assert.Equal(BusyAtOne, Assert.Single(h.Sink.NoticeAttempts).Text);
             h.Executor.Release();
             await h.Executor.WaitStarted(2);
             // 202's Inbox stayed empty: its turn completed on its own text, no continuation ran.
@@ -162,6 +171,7 @@ public sealed class HumanSteeringTests
         Assert.Equal(TaskDispatchOutcome.Queued, await h.DmAsync(U2Chat, U2, task: "[telegram_message_id: 12] second-human", messageId: 12));
         Assert.Single(h.Executor.Injections);
         Assert.Equal(1, h.Count(InjectionOutcomeCounter.SteerRefusedOtherHuman));
+        Assert.Contains("(position 2)", Assert.Single(h.Sink.NoticeAttempts, e => e.ChatId == U2Chat).Text);
         Assert.Equal(TaskDispatchOutcome.Queued, await h.DmAsync(U1Chat, U1, task: "[telegram_message_id: 13] again", messageId: 13));
         Assert.Equal(2, h.Executor.Injections.Count);
         Assert.Equal(2, h.Count(InjectionOutcomeCounter.SteeredNonHumanTurn));
@@ -260,6 +270,13 @@ public sealed class HumanSteeringTests
                 Assert.Single(h.Executor.Injections);
                 Assert.Equal(1, h.Count(InjectionOutcomeCounter.SteerNotDelivered));
                 break;
+        }
+        if (guard is "final_answer_gate" or "no_active_turn" or "unsupported" or "failed" or "exception")
+            Assert.Equal(BusyAtOne, Assert.Single(h.Sink.NoticeAttempts, e => e.ChatId == U1Chat).Text);
+        if (guard == "queue_full")
+        {
+            Assert.DoesNotContain(h.Sink.NoticeAttempts, e => e.ChatId == U1Chat);
+            Assert.Single(h.Sink.Sent, e => e.ChatId == U1Chat && e.Text.StartsWith("Queue is full"));
         }
         if (guard is not ("queue_full" or "closed"))
             Assert.Contains(h.Manager.GetQueueSnapshot(), e => e.ChatId == U1Chat);
@@ -470,6 +487,197 @@ public sealed class HumanSteeringTests
         Assert.Equal(steered ? 1 : 0, h.Count(InjectionOutcomeCounter.SteerAnswerDiscarded));
     }
 
+    private const string BusyAtOne = "I'm busy right now — your message is queued (position 1). I'll get to it once my current task finishes.";
+    private const string BusyAtTwo = "I'm busy right now — your message is queued (position 2). I'll get to it once my current task finishes.";
+    private const string NoticeFailure = "Failed to send steering queue notice for chat {ChatId}";
+    private const string SteerFailure = "Human steering attempt for chat {ChatId} escaped its handler";
+    private const string NoticeSkipped = "Steering notice skipped: queue entry already dispatched";
+
+    public static IEnumerable<object[]> NoticeFailures()
+    {
+        foreach (var status in new[] { MidTurnInjectionStatus.Injected, MidTurnInjectionStatus.NoActiveTurn })
+        foreach (var failure in new[] { "sync", "fault", "steer", "lock" })
+        foreach (var throwingLogger in new[] { false, true })
+        foreach (var primary in new[] { false, true })
+            yield return [status, failure, throwingLogger, primary];
+    }
+
+    [Theory]
+    [MemberData(nameof(NoticeFailures))]
+    public async Task SteeringNotice_Failure_PreservesQueueReservationsLocksAndExactlyOnceReply(
+        MidTurnInjectionStatus status, string failure, bool throwingLogger, bool primary)
+    {
+        var priority = primary ? TaskPriority.PrimaryHuman : TaskPriority.Routine;
+        await using var control = new Harness("claude", status);
+        await control.StartWorkflowAsync(TaskSource.Relay);
+        await control.DmAsync(U1Chat, U1, priority: priority, steeringEligible: false, taskId: "human-entry");
+        var expected = control.Manager.GetQueueSnapshot().Select(e => (e.ChatId, e.Priority, e.PartCount)).ToArray();
+        var reservations = (control.Manager.ActiveTaskIdCountForTest, control.Manager.PrimaryDedupCountForTest);
+        await control.FinishAsync();
+
+        var logger = new CapturingLogger();
+        if (throwingLogger) logger.ThrowOnTemplates.UnionWith([NoticeFailure, SteerFailure, NoticeSkipped]);
+        await using var h = new Harness("claude", status, logger);
+        await h.StartWorkflowAsync(TaskSource.Relay);
+        h.Sink.ThrowOnNotice = failure == "sync";
+        h.Sink.FaultOnNotice = failure == "fault";
+        if (failure == "steer") h.Manager.SteerAttemptStartingForTest = () => throw new InvalidOperationException("synthetic");
+        if (failure == "lock") h.Manager.NoticeLockWaitThrowsForTest = () => throw new InvalidOperationException("synthetic");
+        Assert.Equal(TaskDispatchOutcome.Queued,
+            await h.DmAsync(U1Chat, U1, priority: priority, taskId: "human-entry"));
+        var entry = Assert.Single(h.Manager.GetQueueSnapshot());
+        Assert.Equal(expected, h.Manager.GetQueueSnapshot().Select(e => (e.ChatId, e.Priority, e.PartCount)).ToArray());
+        Assert.Equal(reservations, (h.Manager.ActiveTaskIdCountForTest, h.Manager.PrimaryDedupCountForTest));
+        Assert.Equal(1, entry.QueueDispatchLock.CurrentCount);
+        var warning = Assert.Single(logger.Entries, e => e.Level == LogLevel.Warning);
+        Assert.Equal(failure == "steer" ? SteerFailure : NoticeFailure, warning.Template);
+        Assert.Equal(throwingLogger ? 1 : 0, logger.Throws);
+        var attempts = h.Sink.NoticeAttempts.Where(e => e.ChatId == U1Chat).ToArray();
+        if (failure == "lock") Assert.Empty(attempts);
+        else
+            Assert.Equal(status == MidTurnInjectionStatus.Injected && failure != "steer"
+                ? TaskManager.SteeringDeliveredNotice : BusyAtOne, Assert.Single(attempts).Text);
+
+        // Subsequent work still reaches both dispatch locks. A delivered copy from 101 makes it the
+        // turn's owner, so 202 is refused; otherwise 202 makes its own injection attempt.
+        h.Manager.SteerAttemptStartingForTest = null;
+        h.Manager.NoticeLockWaitThrowsForTest = null;
+        h.Sink.ThrowOnNotice = h.Sink.FaultOnNotice = false;
+        var u1Owns = status == MidTurnInjectionStatus.Injected && failure != "steer";
+        var u2Injected = status == MidTurnInjectionStatus.Injected && failure == "steer";
+        var before = (Injections: h.Executor.Injections.Count, Steered: h.Count(InjectionOutcomeCounter.SteeredNonHumanTurn),
+            NotDelivered: h.Count(InjectionOutcomeCounter.SteerNotDelivered), Refused: h.Count(InjectionOutcomeCounter.SteerRefusedOtherHuman));
+        Assert.Equal(TaskDispatchOutcome.Queued, await h.DmAsync(U2Chat, U2, task: "second-human", messageId: 12));
+        Assert.Equal((u1Owns ? 0 : 1, u2Injected ? 1L : 0, status == MidTurnInjectionStatus.NoActiveTurn ? 1L : 0, u1Owns ? 1L : 0),
+            (h.Executor.Injections.Count - before.Injections, h.Count(InjectionOutcomeCounter.SteeredNonHumanTurn) - before.Steered,
+                h.Count(InjectionOutcomeCounter.SteerNotDelivered) - before.NotDelivered,
+                h.Count(InjectionOutcomeCounter.SteerRefusedOtherHuman) - before.Refused));
+        Assert.Equal(u2Injected ? TaskManager.SteeringDeliveredNotice : BusyAtTwo,
+            Assert.Single(h.Sink.NoticeAttempts, e => e.ChatId == U2Chat).Text);
+        await h.FinishAsync();
+        Assert.Single(h.Completions, e => e.ChatId == U1Chat);
+        Assert.Single(h.Sink.Replies, e => e.ChatId == U1Chat);
+        Assert.Equal(1, h.Executor.Tasks.Count(t => t.Contains(Dm)));
+        Assert.Equal(failure == "lock" ? 0 : 1,
+            h.Sink.Sent.Count(e => e.ChatId == U1Chat && e.Text == "Now processing your queued message..."));
+        Assert.Equal(attempts, h.Sink.NoticeAttempts.Where(e => e.ChatId == U1Chat).ToArray());
+        Assert.Equal(1, entry.QueueDispatchLock.CurrentCount);
+        Assert.Equal(0, h.Manager.ActiveTaskIdCountForTest);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SteeringNotice_ClaimedBeforeNotice_SkipsNoticeAndReleasesLock(bool throwingLogger)
+    {
+        await using var control = new Harness("claude", MidTurnInjectionStatus.Injected);
+        await control.StartWorkflowAsync(TaskSource.Relay);
+        await control.DmAsync(U1Chat, U1, steeringEligible: false, taskId: "human-entry");
+        var expected = control.Manager.GetQueueSnapshot().Select(e => (e.ChatId, e.Priority, e.PartCount)).ToArray();
+        var reservations = (control.Manager.ActiveTaskIdCountForTest, control.Manager.PrimaryDedupCountForTest);
+        await control.FinishAsync();
+        var logger = new CapturingLogger();
+        if (throwingLogger) logger.ThrowOnTemplates.Add(NoticeSkipped);
+        await using var h = new Harness("claude", MidTurnInjectionStatus.Injected, logger);
+        await h.StartWorkflowAsync(TaskSource.Relay);
+        QueuedMessage? entry = null;
+        h.Manager.SteeringNoticePendingForTest = () =>
+        {
+            entry = Assert.Single(h.Manager.GetQueueSnapshot());
+            Assert.Equal(expected, h.Manager.GetQueueSnapshot().Select(e => (e.ChatId, e.Priority, e.PartCount)).ToArray());
+            Assert.Equal(reservations, (h.Manager.ActiveTaskIdCountForTest, h.Manager.PrimaryDedupCountForTest));
+            Assert.False(entry.BusyNoticeSent);
+            h.Executor.Release();
+            h.Executor.WaitStarted(2).GetAwaiter().GetResult();
+        };
+        Assert.Equal(TaskDispatchOutcome.Queued, await h.DmAsync(U1Chat, U1, taskId: "human-entry"));
+        Assert.True(entry!.Claimed);
+        Assert.False(entry.BusyNoticeSent);
+        Assert.Equal(1, entry.QueueDispatchLock.CurrentCount);
+        Assert.Empty(h.Sink.NoticeAttempts);
+        Assert.Single(logger.Entries, e => e.Template == NoticeSkipped);
+        Assert.Equal(throwingLogger ? 1 : 0, logger.Throws);
+        h.Manager.SteeringNoticePendingForTest = null;
+        await h.FinishAsync();
+        Assert.Single(h.Completions, e => e.ChatId == U1Chat);
+        Assert.Single(h.Sink.Replies, e => e.ChatId == U1Chat);
+        Assert.DoesNotContain(h.Sink.Sent, e => e.Text == "Now processing your queued message...");
+    }
+
+    [Theory]
+    [InlineData(MidTurnInjectionStatus.Injected)]
+    [InlineData(MidTurnInjectionStatus.NoActiveTurn)]
+    public async Task SteeringNotice_MergedPartsAndFreshOverflow_NoticeOnlyForFreshEntries(MidTurnInjectionStatus status)
+    {
+        await using var h = new Harness("claude", status);
+        await h.StartWorkflowAsync(TaskSource.Bridge);
+        for (var i = 0; i < QueuedMessage.MaxParts; i++)
+            await h.DmAsync(U1Chat, U1, task: $"part-{i}", messageId: 100 + i);
+        Assert.Single(h.Sink.NoticeAttempts);
+        Assert.Equal(QueuedMessage.MaxParts, Assert.Single(h.Manager.GetQueueSnapshot()).PartCount);
+        await h.DmAsync(U1Chat, U1, task: "fresh-overflow", messageId: 200);
+        Assert.Equal(2, h.Manager.GetQueueSnapshot().Count);
+        Assert.Equal(2, h.Sink.NoticeAttempts.Count);
+        // The first entry hit the steering cap: the fresh overflow remains queued and gets busy text.
+        Assert.Contains("(position 2)", h.Sink.NoticeAttempts.Last().Text);
+        await h.FinishAsync();
+    }
+
+    [Fact]
+    public async Task SteeringNotice_SuppressedGroup_NoNoticeEvenWhenInjected()
+    {
+        await using var h = new Harness("claude", MidTurnInjectionStatus.Injected, suppressToolMessages: true);
+        await h.StartWorkflowAsync(TaskSource.Relay);
+        Assert.Equal(TaskDispatchOutcome.Queued, await h.DmAsync(Group, U1));
+        Assert.Single(h.Executor.Injections);
+        Assert.Empty(h.Sink.NoticeAttempts);
+        await h.FinishAsync();
+        Assert.DoesNotContain(h.Sink.Sent, e => e.ChatId == Group && e.Text == "Now processing your queued message...");
+    }
+
+    [Fact]
+    public async Task SteeringNotice_AwaitedSend_ReleasesEntryLockBeforeWaiting()
+    {
+        await using var h = new Harness("claude", MidTurnInjectionStatus.Injected);
+        await h.StartWorkflowAsync(TaskSource.Relay);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        h.Sink.NoticeGate = gate.Task;
+        var dispatch = h.DmAsync(U1Chat, U1);
+        var entry = Assert.Single(h.Manager.GetQueueSnapshot());
+        Assert.Single(h.Sink.NoticeAttempts);
+        Assert.False(dispatch.IsCompleted);
+        Assert.Equal(1, entry.QueueDispatchLock.CurrentCount);
+        h.Executor.Release();
+        await h.Executor.WaitStarted(2);
+        Assert.True(entry.Claimed);
+        Assert.Single(h.Sink.Sent, e => e.ChatId == U1Chat && e.Text == "Now processing your queued message...");
+        gate.SetResult();
+        Assert.Equal(TaskDispatchOutcome.Queued, await dispatch);
+        await h.FinishAsync();
+        Assert.Single(h.Sink.Replies, e => e.ChatId == U1Chat);
+    }
+
+    private sealed class CapturingLogger : ILogger<TaskManager>
+    {
+        public HashSet<string> ThrowOnTemplates { get; } = [];
+        public ConcurrentQueue<(LogLevel Level, string Template)> Entries { get; } = new();
+        public int Throws;
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel level) => true;
+        public void Log<TState>(LogLevel level, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            var template = (state as IEnumerable<KeyValuePair<string, object?>>)?
+                .FirstOrDefault(e => e.Key == "{OriginalFormat}").Value?.ToString() ?? "";
+            Entries.Enqueue((level, template));
+            if (ThrowOnTemplates.Contains(template))
+            {
+                Interlocked.Increment(ref Throws);
+                throw new InvalidOperationException("synthetic logger failure");
+            }
+        }
+    }
+
     // --- #429: executor outcomes at the steering harness ---
 
     /// <summary>
@@ -598,15 +806,15 @@ public sealed class HumanSteeringTests
         public bool ThrowOnInject { set => Executor.ThrowOnInject = value; }
         private readonly string _provider;
 
-        public Harness(string provider, MidTurnInjectionStatus status)
+        public Harness(string provider, MidTurnInjectionStatus status, ILogger<TaskManager>? logger = null, bool suppressToolMessages = false)
         {
             _provider = provider;
             Executor = new SteeringExecutor(status, Ledger);
             Binding = new TurnBindingPublisher(new JournalHttpClient(_http, "ingest", readToken: "read"), NullLogger<TurnBindingPublisher>.Instance);
             foreach (var chat in new[] { U1Chat, U2Chat }) Binding.ObserveChat(chat, 1, "private");
             Manager = new TaskManager(
-                Options.Create(new AgentOptions { Name = "agent1", Role = "test", WorkDir = "/tmp", Provider = provider, ShowStats = false }),
-                Executor, new SessionManager(), NullLogger<TaskManager>.Instance, Counter, Events, sink: Sink, ledger: Ledger, turnBindings: Binding);
+                Options.Create(new AgentOptions { Name = "agent1", Role = "test", WorkDir = "/tmp", Provider = provider, ShowStats = false, SuppressToolMessages = suppressToolMessages }),
+                Executor, new SessionManager(), logger ?? NullLogger<TaskManager>.Instance, Counter, Events, sink: Sink, ledger: Ledger, turnBindings: Binding);
             Manager.OnTaskCompleted += (chat, result, sender, source, partial, correlation, taskId, kind) =>
                 Completions.Enqueue(new(chat, result, sender, source, partial, correlation, taskId, kind));
         }
@@ -625,9 +833,9 @@ public sealed class HumanSteeringTests
 
         public Task<TaskDispatchOutcome> DmAsync(long chat, long user, string task = Dm, long messageId = 11,
             TaskPriority priority = TaskPriority.Routine, bool steeringEligible = true,
-            IReadOnlyList<MessageImage>? images = null, IReadOnlyList<MessageDocument>? documents = null) =>
+            IReadOnlyList<MessageImage>? images = null, IReadOnlyList<MessageDocument>? documents = null, string? taskId = null) =>
             Manager.StartTask(chat, task, "human", true, images: images, documents: documents, userId: user,
-                identity: Identity(chat, $"submission-{chat}"), priority: priority, telegramMessageId: messageId,
+                taskId: taskId, identity: Identity(chat, $"submission-{chat}"), priority: priority, telegramMessageId: messageId,
                 steeringEligible: steeringEligible);
 
         /// <summary>Releases every turn until the runtime is idle and the queue empty.</summary>
@@ -655,7 +863,29 @@ public sealed class HumanSteeringTests
     internal sealed class RecordingSink : IMessageSink
     {
         public ConcurrentQueue<(long ChatId, string Text)> Sent { get; } = new();
-        public Task SendTextAsync(long chatId, string text, CancellationToken ct = default) { Sent.Enqueue((chatId, text)); return Task.CompletedTask; }
+        public ConcurrentQueue<(long ChatId, string Text)> NoticeAttempts { get; } = new();
+        public ConcurrentQueue<(long ChatId, string Text)> Replies { get; } = new();
+        public bool ThrowOnNotice { get; set; }
+        public bool FaultOnNotice { get; set; }
+        public Task? NoticeGate { get; set; }
+        public bool RendersReplies => true;
+        public Task SendReplyAsync(long chatId, AgentReply reply, OutboundOrigin origin, CancellationToken ct = default)
+        {
+            Replies.Enqueue((chatId, reply.ComposeText()));
+            return SendTextAsync(chatId, reply.ComposeText(), ct);
+        }
+        public Task SendTextAsync(long chatId, string text, CancellationToken ct = default)
+        {
+            if (text == TaskManager.SteeringDeliveredNotice || text.StartsWith("I'm busy right now — your message is queued (position"))
+            {
+                NoticeAttempts.Enqueue((chatId, text));
+                if (ThrowOnNotice) throw new InvalidOperationException("synthetic send failure");
+                if (FaultOnNotice) return Task.FromException(new InvalidOperationException("synthetic send failure"));
+                if (NoticeGate is not null) { Sent.Enqueue((chatId, text)); return NoticeGate; }
+            }
+            Sent.Enqueue((chatId, text));
+            return Task.CompletedTask;
+        }
         public Task SendTypingAsync(long chatId, CancellationToken ct = default) => Task.CompletedTask;
         public Task SendPhotoAsync(long chatId, string filePath, string? caption, CancellationToken ct = default) => Task.CompletedTask;
     }

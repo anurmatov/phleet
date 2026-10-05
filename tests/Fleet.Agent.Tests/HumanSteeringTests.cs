@@ -275,7 +275,7 @@ public sealed class HumanSteeringTests
             Assert.Equal(BusyAtOne, Assert.Single(h.Sink.NoticeAttempts, e => e.ChatId == U1Chat).Text);
         if (guard == "queue_full")
         {
-            Assert.Empty(h.Sink.NoticeAttempts.Where(e => e.ChatId == U1Chat));
+            Assert.DoesNotContain(h.Sink.NoticeAttempts, e => e.ChatId == U1Chat);
             Assert.Single(h.Sink.Sent, e => e.ChatId == U1Chat && e.Text.StartsWith("Queue is full"));
         }
         if (guard is not ("queue_full" or "closed"))
@@ -488,6 +488,7 @@ public sealed class HumanSteeringTests
     }
 
     private const string BusyAtOne = "I'm busy right now — your message is queued (position 1). I'll get to it once my current task finishes.";
+    private const string BusyAtTwo = "I'm busy right now — your message is queued (position 2). I'll get to it once my current task finishes.";
     private const string NoticeFailure = "Failed to send steering queue notice for chat {ChatId}";
     private const string SteerFailure = "Human steering attempt for chat {ChatId} escaped its handler";
     private const string NoticeSkipped = "Steering notice skipped: queue entry already dispatched";
@@ -537,12 +538,22 @@ public sealed class HumanSteeringTests
             Assert.Equal(status == MidTurnInjectionStatus.Injected && failure != "steer"
                 ? TaskManager.SteeringDeliveredNotice : BusyAtOne, Assert.Single(attempts).Text);
 
-        // Subsequent work still reaches both dispatch locks; another sender may be refused by ownership.
+        // Subsequent work still reaches both dispatch locks. A delivered copy from 101 makes it the
+        // turn's owner, so 202 is refused; otherwise 202 makes its own injection attempt.
         h.Manager.SteerAttemptStartingForTest = null;
         h.Manager.NoticeLockWaitThrowsForTest = null;
         h.Sink.ThrowOnNotice = h.Sink.FaultOnNotice = false;
+        var u1Owns = status == MidTurnInjectionStatus.Injected && failure != "steer";
+        var u2Injected = status == MidTurnInjectionStatus.Injected && failure == "steer";
+        var before = (Injections: h.Executor.Injections.Count, Steered: h.Count(InjectionOutcomeCounter.SteeredNonHumanTurn),
+            NotDelivered: h.Count(InjectionOutcomeCounter.SteerNotDelivered), Refused: h.Count(InjectionOutcomeCounter.SteerRefusedOtherHuman));
         Assert.Equal(TaskDispatchOutcome.Queued, await h.DmAsync(U2Chat, U2, task: "second-human", messageId: 12));
-        Assert.Single(h.Sink.NoticeAttempts, e => e.ChatId == U2Chat);
+        Assert.Equal((u1Owns ? 0 : 1, u2Injected ? 1L : 0, status == MidTurnInjectionStatus.NoActiveTurn ? 1L : 0, u1Owns ? 1L : 0),
+            (h.Executor.Injections.Count - before.Injections, h.Count(InjectionOutcomeCounter.SteeredNonHumanTurn) - before.Steered,
+                h.Count(InjectionOutcomeCounter.SteerNotDelivered) - before.NotDelivered,
+                h.Count(InjectionOutcomeCounter.SteerRefusedOtherHuman) - before.Refused));
+        Assert.Equal(u2Injected ? TaskManager.SteeringDeliveredNotice : BusyAtTwo,
+            Assert.Single(h.Sink.NoticeAttempts, e => e.ChatId == U2Chat).Text);
         await h.FinishAsync();
         Assert.Single(h.Completions, e => e.ChatId == U1Chat);
         Assert.Single(h.Sink.Replies, e => e.ChatId == U1Chat);

@@ -363,7 +363,65 @@ public class CodexExecutorTests
         Assert.NotNull(progress);
         Assert.Equal("tool_use", progress.EventType);
 
-        Assert.Contains(capturer.Messages, m => m.Contains("[codex tool_use:Bash"));
+        Assert.Contains(capturer.Messages, m => m.Contains("[codex tool_use:shell"));
+    }
+
+    [Fact]
+    public void BuildItemStartedProgress_LongScript_UsesBoundedShellSummary()
+    {
+        var command = "  python3 - <<'EOF'\r\nprint('synthetic-sentinel')\n" + new string('x', 20_000) + "\nEOF  ";
+        var progress = CreateExecutor().BuildItemStartedProgressForTests(new JsonObject
+        {
+            ["item"] = new JsonObject { ["type"] = "commandExecution", ["command"] = command },
+        })!;
+
+        var singleLine = command.Replace("\r\n", " ").Replace('\r', ' ').Replace('\n', ' ').Trim();
+        Assert.Equal("shell", progress.ToolName);
+        Assert.Equal("Running: " + singleLine[..80] + "...", progress.Summary);
+        Assert.True(progress.Summary.Length <= 92);
+        Assert.Equal(command, progress.ToolArgs);
+    }
+
+    public static TheoryData<string?, bool> AbsentCommands() => new()
+    {
+        { null, false }, { "null", false }, { "\"\"", false }, { "42", false }, { "[]", false },
+        { null, true }, { "null", true }, { "\"\"", true }, { "42", true }, { "[]", true },
+        { "\"synthetic-command\"", true },
+    };
+
+    [Theory]
+    [MemberData(nameof(AbsentCommands))]
+    public void BuildItemStartedProgress_AbsentOrNonStringCommand_UsesSafeFallback(string? json, bool withArgs)
+    {
+        var item = new JsonObject { ["type"] = "commandExecution" };
+        if (json is not null) item["command"] = JsonNode.Parse(json);
+        if (withArgs) item["args"] = new JsonArray { "synthetic-arg" };
+        var progress = CreateExecutor().BuildItemStartedProgressForTests(new JsonObject { ["item"] = item })!;
+
+        Assert.Equal("shell", progress.ToolName);
+        Assert.Equal(json == "\"synthetic-command\"" ? "Running: synthetic-command" : "Running shell command", progress.Summary);
+        Assert.Equal(withArgs ? "[\"synthetic-arg\"]" : "{}", progress.ToolArgs);
+    }
+
+    [Theory]
+    [InlineData(80)]
+    [InlineData(200)]
+    public void BuildItemStartedProgress_UnicodeAtCut_IsSurrogateSafe(int boundary)
+    {
+        var command = new string('x', boundary - 1) + "😀" + new string('y', 300);
+        var logger = new CapturingLogger<CodexExecutor>();
+        var progress = CreateExecutor(logger: logger).BuildItemStartedProgressForTests(new JsonObject
+        {
+            ["item"] = new JsonObject { ["type"] = "commandExecution", ["command"] = command },
+        })!;
+        var utf8 = new System.Text.UTF8Encoding(false, true);
+        utf8.GetBytes(progress.Summary);
+        var log = Assert.Single(logger.Messages);
+        utf8.GetBytes(log);
+        var expected = command[..(boundary == 200 ? 199 : 200)] + "…";
+        Assert.Equal("[codex tool_use:shell] " + expected, log);
+        if (boundary == 80) Assert.Equal("Running: " + new string('x', 79) + "...", progress.Summary);
+        Assert.Equal(command, progress.ToolArgs);
     }
 
     private static JsonObject AgentMessageParams(string? phase, string? text = null) =>

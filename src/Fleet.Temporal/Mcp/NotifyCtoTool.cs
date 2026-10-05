@@ -44,12 +44,7 @@ public sealed class NotifyCtoTool(
             var directive = $"[notification from {sender}] {message}\n\n" +
                 "ACTION: do NOT forward verbatim. Triage as follows:\n" +
                 "1. Analyze the notification — what is the sender asking for, why, what's the impact, urgency, risks.\n" +
-                "2. DM the CEO via the send_to_ceo MCP tool with a structured summary:\n" +
-                "   • who: {sender}\n" +
-                "   • what they want: <one sentence>\n" +
-                "   • why it matters / impact: <one sentence>\n" +
-                "   • your recommendation: approve / reject / counter-proposal\n" +
-                "   • reasoning: <one or two sentences>\n" +
+                "2. DM the CEO via the send_to_ceo MCP tool in 1–3 plain sentences: distinguish the sender’s report from verified done, give the concrete next action and owner, and request one exact human decision only when needed. Give one recommendation and usable feedback, not a generic decision menu. Dispatched work is not completed work.\n" +
                 "3. Wait for the CEO's reply (approve / reject / direction). Then act on the decision and report back.";
             var workflowId = await dispatcher.FireAndForgetAsync(
                 ctoAgent,

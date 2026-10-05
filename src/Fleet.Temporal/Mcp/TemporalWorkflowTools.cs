@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Fleet.Temporal.Configuration;
 using ModelContextProtocol.Server;
+using Temporalio.Api.Enums.V1;
 using Temporalio.Client;
 
 namespace Fleet.Temporal.Mcp;
@@ -12,12 +13,24 @@ public sealed class TemporalWorkflowTools(
     ITemporalClientFactory clientFactory,
     WorkflowTypeRegistry registry,
     CtoAgentConfigService ctoAgentConfig,
+    IWorkflowGateStateReader gateStateReader,
     IHttpContextAccessor httpContextAccessor,
     ILogger<TemporalWorkflowTools> logger)
 {
     private const string DefaultNamespace = "fleet";
     private const string MergeApprovalSignal = "merge-approval";
+    private const string DesignApprovalSignal = "design-approval";
     private const string ChangesRequestedDecision = "changes_requested";
+
+    /// <summary>
+    /// CEO-only gates that the configured CTO agent may return for revision through this tool, and
+    /// only with the exact changes-requested payload (#259, #430).
+    ///
+    /// Deliberately private to this MCP tool and NOT a member of <see cref="CeoGateSignals"/>:
+    /// definitions are agent-authored, so any engine path to a reserved signal would let an agent
+    /// approve its own work (#280).
+    /// </summary>
+    private static readonly string[] FeedbackEligibleGates = [MergeApprovalSignal, DesignApprovalSignal];
 
     /// <summary>
     /// Signals that are exclusively for CEO approval, apart from the narrow CTO changes-requested exception.
@@ -171,15 +184,22 @@ public sealed class TemporalWorkflowTools(
         "(2) 'escalation-decision' — {\"Decision\":\"retry|skip|continue\",\"UpdatedInstruction\":\"...\"}. " +
         "IMPORTANT — CEO-only signals are BLOCKED and cannot be sent via this tool: " +
         "'merge-approval', 'doc-review', 'design-approval', 'advisory-review'. " +
-        "The only exception is 'merge-approval' with Decision exactly 'changes_requested' and a nonblank Comment, sent by the currently configured CTO agent resolved from the MCP request. " +
-        "Approval and rejection decisions remain CEO-only. All other CEO-only gates must be sent from the fleet dashboard by the CEO.")]
+        "The only exception is 'merge-approval' or 'design-approval' with Decision exactly 'changes_requested' and a nonblank Comment, sent by the currently configured CTO agent resolved from the MCP request. " +
+        "'design-approval' feedback is accepted only while the workflow is Running and waiting at its design-approval gate (Phase 'design-approval'); otherwise it is refused and nothing is sent. " +
+        "Approval and rejection decisions remain CEO-only for both gates. 'doc-review' and 'advisory-review' have no exception. All other CEO-only gate decisions must be sent from the fleet dashboard by the CEO.")]
     public async Task<string> SignalWorkflowAsync(
         [Description("Workflow ID to signal")] string workflow_id,
         [Description("Signal name (e.g. human-review, merge-approval)")] string signal_name,
-        [Description("Signal payload as a JSON object string. For 'human-review': {\"Decision\":\"approved\"} or {\"Decision\":\"changes_requested\",\"Comment\":\"your feedback\"}. For the CTO 'merge-approval' exception: {\"Decision\":\"changes_requested\",\"Comment\":\"required feedback\"}.")] string? args = null,
+        [Description("Signal payload as a JSON object string. For 'human-review': {\"Decision\":\"approved\"} or {\"Decision\":\"changes_requested\",\"Comment\":\"your feedback\"}. For the CTO 'merge-approval' or 'design-approval' exception: {\"Decision\":\"changes_requested\",\"Comment\":\"required feedback\"}.")] string? args = null,
         [Description("Temporal namespace. Default: fleet.")] string @namespace = DefaultNamespace)
     {
-        if (string.Equals(signal_name, MergeApprovalSignal, StringComparison.OrdinalIgnoreCase))
+        // Matched exactly as before: case-insensitive but untrimmed, so a padded name falls through
+        // to the reserved-list refusal below instead of reaching the exception.
+        var feedbackGate = Array.Find(
+            FeedbackEligibleGates,
+            gate => string.Equals(signal_name, gate, StringComparison.OrdinalIgnoreCase));
+
+        if (feedbackGate is not null)
         {
             var caller = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
             var configuredCto = ctoAgentConfig.GetCtoAgent();
@@ -193,7 +213,7 @@ public sealed class TemporalWorkflowTools(
                 }
                 catch (JsonException ex)
                 {
-                    LogBlockedMergeApproval(workflow_id, signal_name, "unavailable", caller);
+                    LogBlockedFeedback(feedbackGate, workflow_id, signal_name, "unavailable", caller);
                     return $"Error: invalid JSON in args — {ex.Message}";
                 }
             }
@@ -217,27 +237,33 @@ public sealed class TemporalWorkflowTools(
 
             if (blockReason is not null)
             {
-                LogBlockedMergeApproval(workflow_id, signal_name, decision, caller);
-                return $"Error: '{MergeApprovalSignal}' remains a CEO-only gate because {blockReason}. " +
-                       $"Only the configured CTO agent may send Decision '{ChangesRequestedDecision}' with a nonblank Comment via this tool.";
+                LogBlockedFeedback(feedbackGate, workflow_id, signal_name, decision, caller);
+                return FeedbackBlockedError(feedbackGate, blockReason);
             }
 
             try
             {
                 var client = await clientFactory.GetClientAsync(@namespace);
                 var handle = client.GetWorkflowHandle(workflow_id);
-                logger.LogInformation(
-                    "Allowed merge-approval signal for workflow {WorkflowId}; signal={Signal}; decision={Decision}; caller={Caller}",
-                    workflow_id,
-                    signal_name,
-                    decision,
-                    caller);
-                await handle.SignalAsync(MergeApprovalSignal, [argsElement.GetValueOrDefault()]);
+
+                // design-approval only. merge-approval gets no describe and stays byte-identical.
+                if (feedbackGate == DesignApprovalSignal)
+                {
+                    var gateBlockReason = await GetDesignGateBlockReasonAsync(handle);
+                    if (gateBlockReason is not null)
+                    {
+                        LogBlockedFeedback(feedbackGate, workflow_id, signal_name, decision, caller);
+                        return FeedbackBlockedError(feedbackGate, gateBlockReason);
+                    }
+                }
+
+                LogAllowedFeedback(feedbackGate, workflow_id, signal_name, decision, caller);
+                await handle.SignalAsync(feedbackGate, [argsElement.GetValueOrDefault()]);
 
                 return JsonSerializer.Serialize(new
                 {
                     workflowId = workflow_id,
-                    signalName = MergeApprovalSignal,
+                    signalName = feedbackGate,
                     status = "signalled"
                 });
             }
@@ -299,18 +325,96 @@ public sealed class TemporalWorkflowTools(
         return property.GetString();
     }
 
-    private void LogBlockedMergeApproval(
+    private static string FeedbackBlockedError(string gate, string blockReason) =>
+        $"Error: '{gate}' remains a CEO-only gate because {blockReason}. " +
+        $"Only the configured CTO agent may send Decision '{ChangesRequestedDecision}' with a nonblank Comment via this tool.";
+
+    /// <summary>
+    /// Returns null only when the workflow is Running and reports <c>Phase == "design-approval"</c>.
+    /// Any lookup failure blocks: a feedback sent while the workflow is not parked at the gate is
+    /// buffered by the engine and consumed at the next gate entry, before the CEO is notified (#430).
+    /// The exception message is never echoed, only its type name.
+    /// </summary>
+    private async Task<string?> GetDesignGateBlockReasonAsync(WorkflowHandle handle)
+    {
+        WorkflowExecutionStatus status;
+        string? phase;
+        try
+        {
+            (status, phase) = await gateStateReader.ReadAsync(handle);
+        }
+        catch (Exception ex)
+        {
+            return $"the workflow gate could not be verified ({ex.GetType().Name})";
+        }
+
+        if (status == WorkflowExecutionStatus.Running &&
+            string.Equals(phase, DesignApprovalSignal, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return $"the workflow is not waiting at the design-approval gate " +
+               $"(status={status}, phase={(string.IsNullOrEmpty(phase) ? "missing" : phase)})";
+    }
+
+    // Two literal templates per log line, selected by gate, so both the rendered text and the
+    // structured template for merge-approval stay exactly as they were before #430.
+    private void LogBlockedFeedback(
+        string gate,
         string workflowId,
         string signalName,
         string? decision,
         string? caller)
     {
-        logger.LogWarning(
-            "Blocked merge-approval signal for workflow {WorkflowId}; signal={Signal}; decision={Decision}; caller={Caller}",
-            workflowId,
-            signalName,
-            decision ?? "unavailable",
-            string.IsNullOrWhiteSpace(caller) ? "unresolved" : caller);
+        var loggedDecision = decision ?? "unavailable";
+        var loggedCaller = string.IsNullOrWhiteSpace(caller) ? "unresolved" : caller;
+
+        if (gate == MergeApprovalSignal)
+        {
+            logger.LogWarning(
+                "Blocked merge-approval signal for workflow {WorkflowId}; signal={Signal}; decision={Decision}; caller={Caller}",
+                workflowId,
+                signalName,
+                loggedDecision,
+                loggedCaller);
+        }
+        else
+        {
+            logger.LogWarning(
+                "Blocked design-approval signal for workflow {WorkflowId}; signal={Signal}; decision={Decision}; caller={Caller}",
+                workflowId,
+                signalName,
+                loggedDecision,
+                loggedCaller);
+        }
+    }
+
+    private void LogAllowedFeedback(
+        string gate,
+        string workflowId,
+        string signalName,
+        string? decision,
+        string? caller)
+    {
+        if (gate == MergeApprovalSignal)
+        {
+            logger.LogInformation(
+                "Allowed merge-approval signal for workflow {WorkflowId}; signal={Signal}; decision={Decision}; caller={Caller}",
+                workflowId,
+                signalName,
+                decision,
+                caller);
+        }
+        else
+        {
+            logger.LogInformation(
+                "Allowed design-approval signal for workflow {WorkflowId}; signal={Signal}; decision={Decision}; caller={Caller}",
+                workflowId,
+                signalName,
+                decision,
+                caller);
+        }
     }
 
     [McpServerTool(Name = "temporal_cancel_workflow")]

@@ -667,6 +667,62 @@ public sealed class HumanSteeringTests
         }
     }
 
+    // --- #429: executor outcomes at the steering harness ---
+
+    /// <summary>
+    /// #429 AC7f (S18): final text parsed during the injection's flush still reports Injected, and
+    /// the CLI may answer the steer in an extra turn. The human still gets exactly one answer, from
+    /// the queued reply turn, and the extra-turn answer is discarded.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Issue429_InjectedSteerAnsweredInAnExtraTurn_HumanGetsExactlyOneAnswer(bool asRecoveredSegment)
+    {
+        await using var h = new Harness("claude", MidTurnInjectionStatus.Injected);
+        if (asRecoveredSegment)
+            h.Executor.Leading[1] = Recovered((RecoveredSegment.User, "STEER-EXTRA-TURN"));
+        else
+            h.Executor.OwnTurnAnswers.Enqueue("STEER-EXTRA-TURN");
+        await h.StartWorkflowAsync(TaskSource.Relay);
+
+        Assert.Equal(TaskDispatchOutcome.Queued, await h.DmAsync(U1Chat, U1));
+        await h.FinishAsync();
+
+        Assert.Single(h.Executor.Injections);
+        Assert.Equal(1, h.Count(InjectionOutcomeCounter.SteeredNonHumanTurn));
+        Assert.Equal(["workflow-only", $"{TaskManager.SteeredPartPrefix}\n\n{Dm}"], h.Executor.Tasks);
+        Assert.Equal(1, h.Count(InjectionOutcomeCounter.SteerAnswerDiscarded));
+        Assert.Equal(0, h.Count(InjectionOutcomeCounter.AnsweredAsSeparateTurn));
+        Assert.DoesNotContain(h.Sink.Sent, s => s.Text.Contains("STEER-EXTRA-TURN"));
+        Assert.DoesNotContain(h.Events.RecoveredTexts(), t => t.Contains("STEER-EXTRA-TURN"));
+        Assert.Single(h.Completions, c => c.ChatId == U1Chat);
+        Assert.Single(h.Sink.Sent, s => s.ChatId == U1Chat && s.Text.Contains("human-only"));
+    }
+
+    /// <summary>
+    /// #429 AC7g (S19): a kill overtook the injection's write, so the executor reports Failed. The
+    /// message is not recorded as steered, is queued once, and is answered once by its own turn.
+    /// </summary>
+    [Fact]
+    public async Task Issue429_SteerOvertakenByTeardown_QueuedOnceAndAnsweredOnceWithoutThePrefix()
+    {
+        await using var h = new Harness("claude", MidTurnInjectionStatus.Failed);
+        await h.StartWorkflowAsync(TaskSource.Relay);
+
+        Assert.Equal(TaskDispatchOutcome.Queued, await h.DmAsync(U1Chat, U1));
+        await h.FinishAsync();
+
+        Assert.Single(h.Executor.Injections);
+        Assert.Equal(0, h.Count(InjectionOutcomeCounter.SteeredNonHumanTurn));
+        Assert.Equal(1, h.Count(InjectionOutcomeCounter.SteerNotDelivered));
+        Assert.Equal(["workflow-only", Dm], h.Executor.Tasks);
+        Assert.Empty(h.Executor.ReadCalls);
+        Assert.Empty(h.Events.RecoveredTexts());
+        Assert.Single(h.Completions, c => c.ChatId == U1Chat && c.Result == Dm);
+        Assert.Single(h.Sink.Sent, s => s.ChatId == U1Chat && s.Text.Contains("human-only"));
+    }
+
     // --- helpers ---
 
     private static IEnumerable<(string, MidTurnInjectionStatus)> ProviderPairs() =>

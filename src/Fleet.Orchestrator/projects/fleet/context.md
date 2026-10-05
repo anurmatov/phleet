@@ -68,7 +68,7 @@ tool access is controlled in multiple locations. missing one causes tool-not-fou
 
 4. **MCP server source** — where tools are actually defined (`@mcp.tool` in python, `[McpTool]` in C#)
 
-5. **CEO-only signal blocklist** — `temporal_signal_workflow` MCP tool blocks CEO-gate signals (`merge-approval`, `doc-review`, `design-approval`, `advisory-review`) server-side. one narrow exception lets the configured CTO agent send `merge-approval` only with the exact payload decision `changes_requested` and a non-blank `Comment`, which requests more implementation work and grants no merge authority. `approved` and `rejected` remain blocked for every MCP caller, and the other three CEO gates remain fully dashboard-only (orchestrator REST API `POST /api/workflows/{ns}/signal/{id}`, auth-gated). `human-review` and `escalation-decision` remain agent-sendable.
+5. **CEO-only signal blocklist** — `temporal_signal_workflow` MCP tool blocks CEO-gate signals (`merge-approval`, `doc-review`, `design-approval`, `advisory-review`) server-side. one narrow exception lets the configured CTO agent send `merge-approval` or `design-approval` only with the exact payload decision `changes_requested` and a non-blank `Comment`, which requests more implementation or design work and grants no approval authority. `design-approval` feedback is accepted only while the workflow is `Running` and waiting at its gate (`Phase` `design-approval`); send it only at the gate, at most once per gate visit, and never retry a refusal in a loop. `approved` and `rejected` remain blocked for every MCP caller, and `doc-review` and `advisory-review` remain fully dashboard-only (orchestrator REST API `POST /api/workflows/{ns}/signal/{id}`, auth-gated). `human-review` and `escalation-decision` remain agent-sendable.
 
 deploy order when removing tools: fleet first (stop referencing) → MCP server second (remove tool)
 
@@ -137,7 +137,7 @@ UniversalWorkflow — `[Workflow(Dynamic = true)]` handler registered on namespa
   - after merge: `UweDocMaintenanceWorkflow` fires as fire-and-forget child (Phase 5)
 - UweDesignWorkflow — creates or refines a well-specified GitHub issue with multi-agent consensus review, then gates on CEO design-approval. target agent creates/refines the issue, then `ConsensusReviewWorkflow` runs as a child with configurable reviewers. once consensus approves, goes to CEO gate.
   - input: `Description` (required), `ExistingIssueNumber` (optional — refine instead of create), `Repo` (required), `TargetAgent` (required), `ConsensusAgents` (required), `MaxConsensusRounds` (default: 3)
-  - signal: `design-approval` `{"Decision":"approved|changes_requested|rejected","Comment":"..."}`
+  - signal: `design-approval` `{"Decision":"approved|changes_requested|rejected","Comment":"..."}` — the configured CTO may send only `changes_requested` via MCP, and only while the workflow waits at the gate; approve and reject stay dashboard-only
   - consensus loop: target creates/refines → `ConsensusReviewWorkflow` reviews → if `changes_requested`, feed reasoning back to target and loop (max `MaxConsensusRounds`). on exhaustion → cancel
   - CEO gate (no round limit): on `changes_requested`, feed feedback to target and re-enter consensus loop. hourly reminders, never auto-cancels
 - UweDesignToPrWorkflow — thin orchestrator: `UweDesignWorkflow` child → `UwePrImplementationWorkflow` abandoned child. use for tasks that need a well-specified issue before implementation begins.

@@ -69,6 +69,7 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<TaskCompletionRegistry>();
 builder.Services.AddSingleton<WorkflowTypeRegistry>();
 builder.Services.AddSingleton<CtoAgentConfigService>();
+builder.Services.AddSingleton<IWorkflowGateStateReader, WorkflowGateStateReader>();
 builder.Services.AddSingleton<IWorkflowDispatcher, TemporalWorkflowDispatcher>();
 
 // Peer config — fetches FLEET_CTO_AGENT and other keys from orchestrator on startup

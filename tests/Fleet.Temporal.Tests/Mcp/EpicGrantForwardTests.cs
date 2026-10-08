@@ -503,7 +503,10 @@ public sealed class EpicGrantForwardTests
 
         Assert.StartsWith("Error: the delegated 'merge-approval' approval could not be forwarded to the orchestrator", result);
         Assert.Contains("HttpRequestException", result);
-        Assert.Contains("Nothing was sent", result);
+        // Honest about a timeout: the bridge sent nothing and did not retry, but the orchestrator
+        // may have; the caller is pointed at the decisions table instead of told "nothing was sent".
+        Assert.Contains("This tool sent no signal and made no retry", result);
+        Assert.Contains("decisions table", result);
         Assert.DoesNotContain("transport-detail-must-not-be-echoed", result);
         Assert.DoesNotContain("transport-detail-must-not-be-echoed", context.AllLogText);
         Assert.Single(handler.Requests);   // one attempt, no retry

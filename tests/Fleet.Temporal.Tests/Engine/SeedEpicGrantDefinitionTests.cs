@@ -131,7 +131,7 @@ public sealed class SeedEpicGrantDefinitionTests
             "revise_ceo_feedback" => $"fixed\nHEAD_SHA: {head}",
             // The CEO-feedback round has a dissent, so it goes to the synthesizer.
             "synthesis" => "the CEO's concern holds\nVERDICT: changes_requested",
-            "verify_merge_status" => "MERGED",
+            "verify_merge_status" => PrState(merged: true),
             "prepare" => "PREP: NO_DOC",
             $"review-{Reviewer}" when call.Instruction.Contains("The CEO has reviewed") =>
                 Review("changes_requested", blocker: "apply the CEO's fix"),
@@ -167,7 +167,7 @@ public sealed class SeedEpicGrantDefinitionTests
             "phase1_implement" => $"done\nPR_URL: {PrUrl}\nHEAD_SHA: {HeadA}",
             // The mocked GitHub merge: the head moved after review.
             "phase4_merge_pinned" => "error: Head branch was modified. Review and try the merge again.",
-            "verify_merge_status" => "FAILED",
+            "verify_merge_status" => PrState(merged: false),
             $"review-{Reviewer}" => Review("approved", reviewedRef: HeadA, scrub: "pass"),
             _ => "ok",
         };
@@ -191,7 +191,7 @@ public sealed class SeedEpicGrantDefinitionTests
         static string Respond(Call call) => call.Step switch
         {
             "phase1_implement" => $"done\nPR_URL: {PrUrl}\nHEAD_SHA: {HeadA}",
-            "verify_merge_status" => "MERGED",
+            "verify_merge_status" => PrState(merged: true),
             "prepare" => "PREP: NO_DOC",
             $"review-{Reviewer}" => Review("approved", reviewedRef: HeadA),
             _ => "ok",
@@ -220,7 +220,7 @@ public sealed class SeedEpicGrantDefinitionTests
         static string Respond(Call call) => call.Step switch
         {
             "phase1_implement" => $"done\nPR_URL: {PrUrl}\nHEAD_SHA: {HeadA}",
-            "verify_merge_status" => "MERGED",
+            "verify_merge_status" => PrState(merged: true),
             "prepare" => "PREP: NO_DOC",
             $"review-{Reviewer}" => Review("approved", reviewedRef: null, scrub: "pass"),
             _ => "ok",
@@ -257,7 +257,78 @@ public sealed class SeedEpicGrantDefinitionTests
         static string Respond(Call call) => call.Step switch
         {
             "phase1_implement" => $"done\nPR_URL: {PrUrl}\nHEAD_SHA: {HeadA}",
-            "verify_merge_status" => "MERGED",
+            "verify_merge_status" => PrState(merged: true),
+            "prepare" => "PREP: NO_DOC",
+            $"review-{Reviewer}" => Review("approved", reviewedRef: HeadA),
+            _ => "ok",
+        };
+    }
+
+    // ── PR definition: merge verification (CEO feedback on PR #437) ──────────
+
+    /// <summary>
+    /// The shipped verifier asks only for fields gh supports. `--json state,merged` exits 1 with
+    /// <c>Unknown JSON field: "merged"</c>, which reported every real merge FAILED and skipped the
+    /// doc handoff.
+    /// </summary>
+    [Fact]
+    public void Pr_MergeVerifier_UsesOnlySupportedGhFields()
+    {
+        var verify = WorkflowDefinitionValidator.Walk(SeedHarness.Parse("UwePrImplementationWorkflow"))
+            .OfType<DelegateStep>().Single(d => d.Name == "verify_merge_status");
+
+        Assert.Contains("--json state,mergedAt,mergeCommit", verify.Instruction);
+        Assert.DoesNotMatch(@"state,merged(?!At)", verify.Instruction!);
+        Assert.DoesNotMatch(@"--json[^\n]*\bmerged\b(?!At)", verify.Instruction!);
+    }
+
+    public static TheoryData<string, string, bool> VerifierReplies => new()
+    {
+        { "gh JSON, merged", "PR_STATE_JSON: {\"mergeCommit\":{\"oid\":\"" + new string('a', 40) + "\"},\"mergedAt\":\"2026-10-08T12:00:00Z\",\"state\":\"MERGED\"}", true },
+        { "spaced JSON, other key order", "checked\nPR_STATE_JSON: {\"state\": \"MERGED\", \"mergedAt\": \"2026-10-08T12:00:00Z\", \"mergeCommit\": {\"oid\": \"abc\"}}", true },
+        { "MERGED with null mergedAt", "PR_STATE_JSON: {\"mergeCommit\":null,\"mergedAt\":null,\"state\":\"MERGED\"}", false },
+        { "open PR", "PR_STATE_JSON: {\"mergeCommit\":null,\"mergedAt\":null,\"state\":\"OPEN\"}", false },
+        { "closed unmerged with a timestamp-looking field", "PR_STATE_JSON: {\"mergeCommit\":null,\"mergedAt\":null,\"state\":\"CLOSED\",\"closedAt\":\"2026-10-08T12:00:00Z\"}", false },
+        { "command error", "PR_STATE_JSON: ERROR", false },
+        { "the old invalid field's error", "Unknown JSON field: \"merged\"\nAvailable fields: ...", false },
+        { "a bare verdict from the old contract", "MERGED", false },
+        { "pretty-printed across lines", "PR_STATE_JSON: {\n  \"state\": \"MERGED\",\n  \"mergedAt\": \"2026-10-08T12:00:00Z\"\n}", false },
+    };
+
+    /// <summary>
+    /// The granted seed's real verifier, on the delegated (pinned-merge) path: MERGED needs state
+    /// MERGED and a non-null mergedAt, and only then does doc maintenance start; every other reply,
+    /// including an error, takes the failure path with its notice.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(VerifierReplies))]
+    public async Task Pr_GrantedMerge_DocHandoffOnlyOnMergedWithMergedAt(string _, string verifierReply, bool merged)
+    {
+        var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", PrInput(), Respond, async (handle, h) =>
+        {
+            await h.WaitForGateVisitAsync(handle, "merge-approval:1");
+            await handle.SignalAsync("merge-approval", [Delegated("merge-approval:1", HeadA)]);
+        });
+
+        var verify = Assert.Single(run.Calls, c => c.Step == "verify_merge_status");
+        Assert.Contains("--json state,mergedAt,mergeCommit", verify.Instruction);
+        Assert.Single(run.Calls, c => c.Step == "phase4_merge_pinned");
+
+        if (merged)
+        {
+            Assert.Single(run.ChildStarts("UweDocMaintenanceWorkflow"));
+            Assert.DoesNotContain(run.Calls, c => c.Step == "notify_merge_failed");
+        }
+        else
+        {
+            Assert.Empty(run.ChildStarts("UweDocMaintenanceWorkflow"));
+            Assert.Single(run.Calls, c => c.Step == "notify_merge_failed");
+        }
+
+        string Respond(Call call) => call.Step switch
+        {
+            "phase1_implement" => $"done\nPR_URL: {PrUrl}\nHEAD_SHA: {HeadA}",
+            "verify_merge_status" => verifierReply,
             "prepare" => "PREP: NO_DOC",
             $"review-{Reviewer}" => Review("approved", reviewedRef: HeadA),
             _ => "ok",
@@ -485,6 +556,11 @@ public sealed class SeedEpicGrantDefinitionTests
         $"review-{Reviewer}" => Review("approved", reviewedRef: ArtifactE),
         _ => "ok",
     };
+
+    /// <summary>What the verifier relays: gh's JSON for the supported fields, or the error line.</summary>
+    private static string PrState(bool merged) => merged
+        ? "PR_STATE_JSON: {\"mergeCommit\":{\"oid\":\"" + new string('a', 40) + "\"},\"mergedAt\":\"2026-10-08T12:00:00Z\",\"state\":\"MERGED\"}"
+        : "PR_STATE_JSON: ERROR";
 
     private static string Review(string verdict, string? reviewedRef = null, string? blocker = null, string? scrub = null)
     {

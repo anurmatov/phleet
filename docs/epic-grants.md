@@ -41,7 +41,7 @@ What the feature does guarantee:
 
 | definition | author's ref line | after a grant approval |
 |---|---|---|
-| `UwePrImplementationWorkflow` | `HEAD_SHA: <40 hex>` from `TargetAgent` (implement and every revise step) | merge with `gh pr merge --squash --match-head-commit <review_ref>`; a push after review that was not re-reviewed cannot merge (failure path + notice). The doc start passes `IssueNumber`, `ConsensusAgents` and `PrepAgent` (from optional input `DocPrepAgent`) |
+| `UwePrImplementationWorkflow` | `HEAD_SHA: <40 hex>` from `TargetAgent` (implement and every revise step) | merge with `gh pr merge --squash --match-head-commit <review_ref>`; a push after review that was not re-reviewed cannot merge (failure path + notice). Merge verification relays `gh pr view --json state,mergedAt,mergeCommit`; only `state` MERGED with a non-null `mergedAt` counts as merged and starts doc maintenance, anything else (including an error) is the failure path. The doc start passes `IssueNumber`, `ConsensusAgents` and `PrepAgent` (from optional input `DocPrepAgent`) |
 | `UweDesignWorkflow` | `BODY_SHA256: <64 hex>` = `gh issue view <n> --repo <r> --json body \| jq -j .body \| sha256sum` | `verify_approved_body` recomputes the hash; a mismatch (or no hash) ends the run with `ERROR:approved_artifact_changed`. Human approvals skip it |
 | `UweDocMaintenanceWorkflow` | `ARTIFACT_SHA256: <64 hex>` of the artifact body from `PrepAgent` | `apply` writes exactly the reviewed artifact and must return the same `APPLIED_ARTIFACT_SHA256` |
 

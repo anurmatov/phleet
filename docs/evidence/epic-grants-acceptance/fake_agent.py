@@ -91,7 +91,15 @@ def answer(agent, step, text):
             return ("gh pr merge failed: GraphQL: Head branch was modified. Review and try the merge again. "
                     f"(pinned {pinned}, head {s['heads'].get(pr)}). Not retried.")
         if step == "verify_merge_status":
-            return "MERGED" if s["merged"].get(pr) else "FAILED"
+            # Behaves like the real gh CLI: an unsupported `merged` field is a hard error, and the
+            # supported fields come back as JSON for the definition to judge.
+            fields = num(r"--json\s+(\S+)", text) or ""
+            if "merged" in fields.split(","):
+                return 'Unknown JSON field: "merged"\nAvailable fields: ... mergeCommit mergedAt ... state ...'
+            if s["merged"].get(pr):
+                return ('PR_STATE_JSON: {"mergeCommit":{"oid":"%s"},"mergedAt":"%s","state":"MERGED"}'
+                        % (s["heads"].get(pr), datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
+            return 'PR_STATE_JSON: {"mergeCommit":null,"mergedAt":null,"state":"OPEN"}'
         if step == "create_or_refine":
             issue = num(r"ExistingIssueNumber from input: (\d+)", text)
             s["bodies"].setdefault(issue, sha(f"issue{issue}-v1", 64))

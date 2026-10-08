@@ -242,6 +242,9 @@ pinned = [c for c in calls("accept436-pr-201") if c["step"] == "phase4_merge_pin
 check("3 merged with --match-head-commit of the reviewed head",
       state()["merged"].get("201") is True and len(pinned) == 1 and f"--match-head-commit {ref}" in pinned[0]["text"]
       and "phase4_merge" not in steps("accept436-pr-201"))
+verify = [c for c in calls("accept436-pr-201") if c["step"] == "verify_merge_status"]
+check("3 merge verified with gh's supported fields (state,mergedAt,mergeCommit) and judged MERGED",
+      len(verify) == 1 and "--json state,mergedAt,mergeCommit" in verify[0]["text"] and '"state":"MERGED"' in verify[0]["reply"])
 doc = [c for c in calls(prefix="UweDocMaintenanceWorkflow:") if c["step"] == "prepare" and "PR #201 " in c["text"]]
 check("3 doc maintenance started and prepared by PrepAgent (prep-agent)", len(doc) == 1 and doc[0]["agent"] == "prep-agent",
       doc[0]["wf"] if doc else "no doc run")

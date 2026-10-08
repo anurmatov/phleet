@@ -75,17 +75,31 @@ from `127.0.0.1`: `fleet-orchestrator`, `fleet-temporal-bridge`, `fleet-peer-con
 bridge's config subscriber) and the scripted agent. The scripted agent, which only connects to
 127.0.0.1, answered all 43 delegations.
 
-**Earlier run (`53a830d`).** That `stack.sh` sourced the env file into the launching shell's
-environment instead of an empty one. The launching container carries a broker host for the
-production broker (`RabbitMq__Host`) and other agent variables. Reproducing that launch with a
-harmless child process shows the env file's `RabbitMq__Host=127.0.0.1` replaced the inherited
-value. The inherited `Telegram__BotToken`, `Tts__ServiceUrl`, `Whisper__ServiceUrl`,
-`ASPNETCORE_HTTP_PORTS` and `FLEET_BUILD_COMMIT` were present but unused: the orchestrator and
-bridge read none of them (the orchestrator only writes the first three into agents it provisions,
-and none was provisioned). The container sets no `PEER_CONFIG_KEYS` or `ORCHESTRATOR_URL`. Every
-directive in that run was answered by the scripted agent, which only listens on 127.0.0.1, so the
-bridge published and consumed on the local broker. That run's full process logs were deleted at
-cleanup, so it has no broker connection listing; the recorded run above has one.
+**Earlier run (`53a830d`) — relay local, peer-config subscriber unverified.** That `stack.sh`
+sourced the env file into the launching shell's environment instead of an empty one, and the
+launching agent container carries the production broker host as `RabbitMq__Host` plus other agent
+variables. The bridge has two broker clients that read different settings:
+
+- **Relay (directives and replies) — local broker, observed.** It reads `RabbitMq__Host`.
+  Reproducing that launch with a harmless child process shows the env file's
+  `RabbitMq__Host=127.0.0.1` replaced the inherited value. Every directive was answered by the
+  scripted agent, which only listens on 127.0.0.1, so the relay published and consumed locally.
+- **Peer-config subscriber (`fleet-peer-config-sub`) — destination unverified, likely
+  production.** It reads `RABBITMQ_HOST`, then `RABBITMQ_URL`, else the default
+  `amqp://rabbitmq:5672/`. That run set neither variable, and the name `rabbitmq` resolves from the
+  container on the shared network. So the subscriber most likely connected to the production
+  broker. This is an inference, not an observation: that run's process logs were deleted at
+  cleanup and no connection listing was taken. If it connected, it declared the existing
+  `fleet.orchestrator` topic exchange, plus an exclusive, auto-delete, server-named queue bound to
+  `config.changed`, for the bridge's lifetime (four short runs). With `PEER_CONFIG_KEYS` empty, no
+  broadcast matches, so it fetched nothing and changed nothing. It published nothing.
+
+The other inherited variables (`Telegram__BotToken`, `Tts__ServiceUrl`, `Whisper__ServiceUrl`,
+`ASPNETCORE_HTTP_PORTS`, `FLEET_BUILD_COMMIT`) were present but unread: the orchestrator and bridge
+read none of them, and the orchestrator only writes the first three into agents it provisions, of
+which there were none. The container sets no `PEER_CONFIG_KEYS` or `ORCHESTRATOR_URL`. The recorded
+run above closes this gap: `RABBITMQ_HOST=127.0.0.1` and an empty environment, and its connection
+listing shows `fleet-peer-config-sub` from 127.0.0.1.
 
 ## Reproduce
 

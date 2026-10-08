@@ -1984,15 +1984,43 @@
                     "type": "delegate",
                     "target": "{{config.CtoAgent}}",
                     "outputVar": "merge_verification",
-                    "instruction": "Verify the PR at {{vars.pr_url}} in repo {{input.Repo}} was actually merged. Run: gh pr view $(echo '{{vars.pr_url}}' | grep -o '[0-9]*$') --repo {{input.Repo}} --json state,merged\n\nIf the state is MERGED, output exactly: MERGED\nIf not merged (open, closed without merge, or any error), output exactly: FAILED",
+                    "instruction": "Verify whether the PR at {{vars.pr_url}} in repo {{input.Repo}} was actually merged. Run exactly:\ngh pr view {{vars.pr_url}} --repo {{input.Repo}} --json state,mergedAt,mergeCommit\n\n(Never use a `merged` field: gh has no such JSON field and exits 1.)\n\nOutput the command's JSON verbatim on one line prefixed with `PR_STATE_JSON: `. If the command fails for any reason (non-zero exit, error text, no output), output exactly `PR_STATE_JSON: ERROR`. Do not decide whether it merged — the workflow reads the JSON. Put nothing else on a PR_STATE_JSON line.",
                     "ignoreFailure": true,
                     "timeoutMinutes": 5
+                  },
+                  {
+                    "name": "capture_pr_state",
+                    "type": "set_variable",
+                    "vars": {
+                      "pr_state_json": "{{vars.merge_verification | extract: 'PR_STATE_JSON:[ \\t]*([^\\n]*)' | default: ''}}"
+                    }
+                  },
+                  {
+                    "name": "capture_pr_state_merged",
+                    "type": "set_variable",
+                    "vars": {
+                      "pr_state_merged": "{{vars.pr_state_json | extract: '[{,]\\s*\"state\"\\s*:\\s*\"(MERGED)\"\\s*[,}]' | default: ''}}"
+                    }
+                  },
+                  {
+                    "name": "capture_pr_merged_at",
+                    "type": "set_variable",
+                    "vars": {
+                      "pr_merged_at": "{{vars.pr_state_json | extract: '[{,]\\s*\"mergedAt\"\\s*:\\s*\"([^\"]+)\"\\s*[,}]' | default: ''}}"
+                    }
+                  },
+                  {
+                    "name": "compose_merge_check",
+                    "type": "set_variable",
+                    "vars": {
+                      "merge_check": "{{vars.pr_state_merged}}|{{vars.pr_merged_at}}"
+                    }
                   },
                   {
                     "name": "check_merge_state",
                     "type": "set_variable",
                     "vars": {
-                      "merge_state": "{{vars.merge_verification | extract: '(MERGED|FAILED)' | default: 'FAILED'}}"
+                      "merge_state": "{{vars.merge_check | extract: '^(MERGED)\\|[^|]+$' | default: 'FAILED'}}"
                     }
                   },
                   {

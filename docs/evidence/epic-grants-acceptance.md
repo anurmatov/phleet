@@ -70,7 +70,7 @@ Fleet.Orchestrator.dll RabbitMq__Host=127.0.0.1 inherited_names=none
 Fleet.Temporal.dll RabbitMq__Host=127.0.0.1 inherited_names=none
 ```
 
-While the run's workflows were finished, the local RabbitMQ listed four client connections, all
+After the run, with the stack still up, the local RabbitMQ listed four client connections, all
 from `127.0.0.1`: `fleet-orchestrator`, `fleet-temporal-bridge`, `fleet-peer-config-sub` (the
 bridge's config subscriber) and the scripted agent. The scripted agent, which only connects to
 127.0.0.1, answered all 43 delegations.

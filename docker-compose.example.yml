@@ -429,6 +429,10 @@ services:
       - Orchestrator__ConfigToken=${ORCHESTRATOR_CONFIG_TOKEN}
       - Journal__TokenKey=${FLEET_COMMS_JOURNAL_KEY:-}
       - Journal__ExcludedChatIds=${FLEET_GROUP_CHAT_ID:-},${FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS:-}
+      # Epic grants (#436): off unless FLEET_EPIC_GRANTS_ENABLED=true. See docs/epic-grants.md.
+      - EpicGrants__Enabled=${FLEET_EPIC_GRANTS_ENABLED:-false}
+      - EpicGrants__MaxDays=${FLEET_EPIC_GRANTS_MAX_DAYS:-14}
+      - EpicGrants__DeniedRepos=${FLEET_EPIC_GRANTS_DENIED_REPOS:-}
     mem_limit: 512m
     restart: unless-stopped
     depends_on:

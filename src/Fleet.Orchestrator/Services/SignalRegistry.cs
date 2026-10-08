@@ -3,6 +3,14 @@ namespace Fleet.Orchestrator.Services;
 /// <summary>
 /// Static registry of workflow signal definitions.
 /// Maps workflow type name → available signals with predefined button payloads.
+///
+/// <para>
+/// The buttons are the human path and carry no <c>GrantId</c>, so a gate's
+/// <c>delegatedGuard</c> always accepts them (#436). A delegated approval under an epic grant has
+/// exactly five fields — <c>{"Decision":"approved","GrantId","VisitId","ArtifactRef","Evidence"}</c> —
+/// and is sent only by the orchestrator's <c>POST /api/epic-grants/{id}/decisions</c> path, never
+/// from a button here.
+/// </para>
 /// </summary>
 public static class SignalRegistry
 {

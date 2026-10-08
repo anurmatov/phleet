@@ -17,6 +17,8 @@ ENV_FILE="$FLEET_BASE_DIR/.env"
 # Unset them here: .env is the record of the decision.
 unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY \
       FLEET_COMMS_AGENT_LABEL FLEET_COMMS_STORE_PROVISIONED
+# Epic grants (#436): .env is the record of the decision, never a stale shell export.
+unset FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS
 # The journal decision in .env is preserved as it is: upgrade never asks, never flips it, and never
 # generates a key for a host that did not opt in. `conversations migrate` below applies 0004 either
 # way; it is additive.
@@ -79,6 +81,20 @@ read_env_var() {
   [[ -f "$file" ]] || return 0
   grep "^${key}=" "$file" 2>/dev/null | head -1 | cut -d= -f2- || true
 }
+
+# ── Epic grant keys (#436) ───────────────────────────────────────────────────
+# Added with their defaults when missing and never changed when present, so an upgrade never
+# turns the feature on. Newline-safe: a hand-edited .env often lacks a trailing newline.
+add_missing_env_var() {
+  local key="$1" value="$2"
+  grep -qE "^${key}=" "$ENV_FILE" && return 0
+  [[ -s "$ENV_FILE" && -n "$(tail -c 1 "$ENV_FILE")" ]] && printf '\n' >> "$ENV_FILE"
+  printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+  ok "Added ${key}=${value} to .env"
+}
+add_missing_env_var FLEET_EPIC_GRANTS_ENABLED false
+add_missing_env_var FLEET_EPIC_GRANTS_MAX_DAYS 14
+add_missing_env_var FLEET_EPIC_GRANTS_DENIED_REPOS ""
 
 # ── Stop services ────────────────────────────────────────────────────────────
 section "[1/4] Stopping services..."

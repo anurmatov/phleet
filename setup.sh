@@ -64,7 +64,8 @@ unset FLEET_BASE_DIR FLEET_CTO_AGENT FLEET_GROUP_CHAT_ID FLEET_PRIMARY_HUMAN_USE
       FLEET_MEMORY_EMBEDDING_PROVIDER FLEET_MEMORY_EMBEDDING_DIMENSIONS \
       FLEET_MEMORY_OLLAMA_URL FLEET_MEMORY_OLLAMA_MODEL \
       FLEET_MEMORY_EMBEDDING_INPUT_GUIDANCE_BYTES \
-      AUTHTOKENREFRESH__CLAUDECLIENTID AUTHTOKENREFRESH__CODEXCLIENTID
+      AUTHTOKENREFRESH__CLAUDECLIENTID AUTHTOKENREFRESH__CODEXCLIENTID \
+      FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS
 
 # ── Canonical paths ───────────────────────────────────────────────────────────
 # FLEET_BASE_DIR is hardcoded to $SCRIPT_DIR/fleet — a nested, gitignored subdir
@@ -696,6 +697,14 @@ fi
 if ! $DRY_RUN; then
   write_env_var "$ENV_FILE" "FLEET_BASE_DIR" "$FLEET_BASE_DIR"
 fi
+
+# Epic grants (#436): a fresh .env already has these from .env.example. An older .env gets the
+# defaults (feature off) when a key is missing; a present value is never changed. No prompts.
+for _epic_default in FLEET_EPIC_GRANTS_ENABLED=false FLEET_EPIC_GRANTS_MAX_DAYS=14 FLEET_EPIC_GRANTS_DENIED_REPOS=; do
+  if ! grep -q "^${_epic_default%%=*}=" "$ENV_FILE" 2>/dev/null; then
+    write_env_var "$ENV_FILE" "${_epic_default%%=*}" "${_epic_default#*=}"
+  fi
+done
 
 echo
 echo "  Fill in required configuration (press Enter to keep existing values):"

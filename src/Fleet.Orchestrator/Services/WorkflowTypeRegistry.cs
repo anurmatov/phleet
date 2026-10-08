@@ -33,7 +33,9 @@ public static class WorkflowTypeRegistry
                     "ReviewPrompt": { "type": "string", "description": "Base prompt given to all reviewer agents. Required." },
                     "ReviewerAgents": { "type": "array", "items": { "type": "string" }, "description": "Agent names. Required." },
                     "AgentPerspectives": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Optional per-agent perspective text keyed by agent name." },
-                    "Synthesizer": { "type": "string", "description": "Agent that synthesizes divergent reviews. Required." }
+                    "Synthesizer": { "type": "string", "description": "Agent that synthesizes divergent reviews. Required." },
+                    "ExcludedAgents": { "type": "array", "items": { "type": "string" }, "description": "Optional agents that may not review (author, decider); CSV accepted. A listed reviewer fails the run with ReviewerNotIndependent before any review." },
+                    "ReviewRef": { "type": "string", "description": "Optional commit SHA or SHA-256 under review. Output AttestedRef equals it only on a unanimous approval where every review has the line REVIEWED_REF: <ReviewRef>." }
                   },
                   "required": ["Subject", "ReviewPrompt", "ReviewerAgents", "Synthesizer"]
                 }

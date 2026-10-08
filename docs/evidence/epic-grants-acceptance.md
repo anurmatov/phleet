@@ -1,12 +1,12 @@
 # Epic grants (#436) — isolated acceptance run
 
-**Result: 25/25 checks passed** on 2026-10-08, against the code at `2b6f51b` (PR #437), with every
-process started from an empty environment (`env -i`). An earlier recorded run at `53a830d` also
-passed 25/25; see "Broker isolation" for what it inherited. The only code change between the two is
-a comment moved in `EpicGrantService.cs`. Before those, two runs exposed harness bugs (a null-result
-check, then result decoding), not product defects. Each recorded run started from an empty Temporal
-database and an empty orchestrator database and used the committed harness in
-[`epic-grants-acceptance/`](epic-grants-acceptance/).
+**Result: 26/26 checks passed** on 2026-10-08, against the code at `3e6b71f` (PR #437), with every
+process started from an empty environment (`env -i`) and the merge verifier answering like the real
+`gh` CLI. Earlier runs: `2b6f51b` passed 25/25 (clean environment, old verifier contract), and
+`53a830d` passed 25/25 (inherited environment; see "Broker isolation"). Before those, two runs
+exposed harness bugs (a null-result check, then result decoding), not product defects. Each
+recorded run started from an empty Temporal database and an empty orchestrator database and used
+the committed harness in [`epic-grants-acceptance/`](epic-grants-acceptance/).
 
 ## What was real and what was simulated
 
@@ -15,12 +15,12 @@ database and an empty orchestrator database and used the committed harness in
 | Temporal | real: `temporal server start-dev` 1.9.1 (Server 1.32.0), a separate server instance on 127.0.0.1, SQLite file deleted afterwards |
 | orchestrator database | real: MySQL 8.0.46 on 127.0.0.1, database `orch_accept436` created by the orchestrator's own migrations (`AddEpicGrants` applied) |
 | broker | real: RabbitMQ 3.12.1 on 127.0.0.1 (distribution port pinned to loopback) |
-| orchestrator, bridge | real: `Fleet.Orchestrator.dll` and `Fleet.Temporal.dll`, Release build of `2b6f51b`, `EpicGrants__Enabled=true` |
+| orchestrator, bridge | real: `Fleet.Orchestrator.dll` and `Fleet.Temporal.dll`, Release build of `3e6b71f`, `EpicGrants__Enabled=true` |
 | definitions | real: the seed definitions as the orchestrator seeded them (version 1), pinned by the SHA-256 of the stored text |
 | CTO decisions | real path: the bridge MCP tool `temporal_signal_workflow` with `?agent=cto-agent` → `POST /api/epic-grants/{id}/decisions` → signal |
 | human decisions | real path: the dashboard's REST route `POST /api/workflows/fleet/signal/{id}` |
 | agents | **simulated**: `fake_agent.py` answers every delegation by step name over RabbitMQ |
-| GitHub | **simulated**: `github_stub.py` (the configurable `GitHubApiBaseUrl`) serves repo visibility; PR heads, merges and issue bodies live in the agent's `state.json`, and `--match-head-commit` is enforced by the simulated merge |
+| GitHub | **simulated**: `github_stub.py` (the configurable `GitHubApiBaseUrl`) serves repo visibility; PR heads, merges and issue bodies live in the agent's `state.json`; `--match-head-commit` is enforced by the simulated merge, and the simulated `gh pr view` rejects a `merged` field like the real CLI and returns `state,mergedAt,mergeCommit` JSON |
 
 The Temporal namespace is `fleet` because the seed definitions start their children on task queue
 `fleet`; the separate server instance is the isolation. No production service, repository or
@@ -33,7 +33,7 @@ owner's approval, so real `gh pr merge --match-head-commit` behaviour is simulat
 |---|---|
 | 1 create a grant | validate report valid; a denied repo with `allowPublic` refused (`target … is on the deny list`), nothing stored; grant created `active`; exactly one grant stored |
 | 2 design approved by delegation | gate parked at `design-approval:1` with `ReviewRef` = the attested body hash; CTO decision `sent`; `verify_approved_body` ran; run result `{"IssueNumber": 101}` |
-| 3 PR approved, merged pinned | gate parked with `ReviewRef` = PR head; decision `sent`; `phase4_merge_pinned` ran `--match-head-commit <reviewed head>` and merged; doc maintenance started and was prepared by `PrepAgent` |
+| 3 PR approved, merged pinned | gate parked with `ReviewRef` = PR head; decision `sent`; `phase4_merge_pinned` ran `--match-head-commit <reviewed head>` and merged; verification asked for `state,mergedAt,mergeCommit` and judged MERGED; doc maintenance started and was prepared by `PrepAgent` |
 | 4 push + re-review | human `changes_requested` → new head re-reviewed → new visit `merge-approval:2`, new `ReviewRef`; old ref refused `stale_artifact`, old visit refused `stale_visit`; human rejection, nothing merged |
 | 4 push, no re-review | decision `sent` (ref still the reviewed head); pinned merge refused ("Head branch was modified"), `notify_merge_failed`, no merge, no doc run |
 | 4b body edit after review | decision `sent`; `verify_approved_body` saw a different hash → `notify_approved_body_changed`, no approval emitted, null result, driver told `cancelled` |
@@ -61,7 +61,7 @@ times, all unauthenticated (`auth=no`), each a 404 for the private target.
 
 ## Broker isolation
 
-**Recorded run (`2b6f51b`).** `stack.sh` launches every process with `env -i` plus its env file
+**Recorded run (`3e6b71f`, same harness at `2b6f51b`).** `stack.sh` launches every process with `env -i` plus its env file
 (`RabbitMq__Host` and `RABBITMQ_HOST` = `127.0.0.1`) and, before declaring the stack ready, reads each
 .NET process's `/proc/<pid>/environ`:
 
@@ -132,5 +132,6 @@ After each recorded run: every service stopped; `mysql-server`, `mysql-client`, 
 
 - Real agents and real GitHub (repositories, branch protection, `gh pr merge --match-head-commit`
   refusing a moved head). That acceptance is owned by the maintainer's operator before merge.
-- Exact-image containers, the deployment compose file, and a production-like network.
+- Exact-image containers, the deployment compose file, and a production-like network — also owned
+  by the maintainer's operator before merge.
 - The dashboard view in a browser.

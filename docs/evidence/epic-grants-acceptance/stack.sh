@@ -15,7 +15,7 @@
 # unless the broker is 127.0.0.1 and no inherited name is present.
 set -u
 ACCEPT_DIR=${ACCEPT_DIR:-/tmp/epic-grants-accept}
-CLEAN=(env -i "PATH=/usr/local/bin:/usr/bin:/bin:$(dirname "$(command -v dotnet)")" "HOME=$ACCEPT_DIR" "DOTNET_CLI_HOME=$ACCEPT_DIR")
+CLEAN=(env -i "PATH=/usr/local/bin:/usr/bin:/bin:$(dirname "$(command -v dotnet)")" "HOME=$ACCEPT_DIR" "DOTNET_CLI_HOME=$ACCEPT_DIR" "ACCEPT_DIR=$ACCEPT_DIR")
 REPO_ROOT=${REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}
 cd "$ACCEPT_DIR"
 
@@ -99,7 +99,7 @@ check_env() {
     pid=$(pgrep -f "^dotnet $dll" | head -1)
     [[ -n "$pid" ]] || { echo "$dll is not running"; exit 1; }
     names=$(tr '\0' '\n' < "/proc/$pid/environ" | cut -d= -f1 | sort -u)
-    allowed=$( { printf '%s\n' PATH HOME DOTNET_CLI_HOME PWD SHLVL OLDPWD _; cut -d= -f1 "$file"; } | sort -u)
+    allowed=$( { printf '%s\n' PATH HOME DOTNET_CLI_HOME ACCEPT_DIR PWD SHLVL OLDPWD _; cut -d= -f1 "$file"; } | sort -u)
     extra=$(comm -23 <(echo "$names") <(echo "$allowed"))
     broker=$(tr '\0' '\n' < "/proc/$pid/environ" | grep '^RabbitMq__Host=' | cut -d= -f2-)
     echo "$dll pid=$pid RabbitMq__Host=$broker inherited_names=${extra:-none}" | tee -a env-check.log

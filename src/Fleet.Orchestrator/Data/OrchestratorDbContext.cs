@@ -42,6 +42,10 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
     // Named output styles (per-agent tone/register, rendered per provider)
     public DbSet<OutputStyle> OutputStyles => Set<OutputStyle>();
 
+    // Epic grants (#436): human-approved grant scopes and the permanent per-visit decision record.
+    public DbSet<EpicGrant> EpicGrants => Set<EpicGrant>();
+    public DbSet<EpicGrantDecision> EpicGrantDecisions => Set<EpicGrantDecision>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<Agent>(e =>
@@ -324,6 +328,44 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.Property(x => x.Description).HasMaxLength(500);
         });
 
+        modelBuilder.Entity<EpicGrant>(e =>
+        {
+            e.ToTable("epic_grants");
+            e.HasKey(x => x.Id);
+            // Guid → char(36), Pomelo's native GUID column.
+            e.Property(x => x.Id).ValueGeneratedNever();
+            e.Property(x => x.Status).HasMaxLength(16).IsRequired();
+            e.Property(x => x.ScopeJson).HasColumnType("longtext").IsRequired();
+            e.Property(x => x.ScopeSha256).HasMaxLength(64).IsFixedLength().IsRequired();
+            e.Property(x => x.DriverNamespace).HasMaxLength(64).IsRequired();
+            e.Property(x => x.DriverWorkflowId).HasMaxLength(255).IsRequired();
+            e.Property(x => x.DriverRunId).HasMaxLength(36).IsRequired();
+            e.Property(x => x.CtoAgent).HasMaxLength(128).IsRequired();
+            e.Property(x => x.RevokeReason).HasMaxLength(500);
+        });
+
+        modelBuilder.Entity<EpicGrantDecision>(e =>
+        {
+            e.ToTable("epic_grant_decisions");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).ValueGeneratedOnAdd();
+            e.Property(x => x.Namespace).HasMaxLength(64).IsRequired();
+            e.Property(x => x.WorkflowId).HasMaxLength(255).IsRequired();
+            e.Property(x => x.RunId).HasMaxLength(36).IsRequired();
+            e.Property(x => x.Gate).HasMaxLength(32).IsRequired();
+            e.Property(x => x.VisitId).HasMaxLength(64).IsRequired();
+            e.Property(x => x.ArtifactRef).HasMaxLength(64).IsRequired();
+            e.Property(x => x.Evidence).HasMaxLength(500).IsRequired();
+            e.Property(x => x.Caller).HasMaxLength(128).IsRequired();
+            e.Property(x => x.Status).HasMaxLength(16).IsRequired();
+            // The at-most-once guard: one delegated decision per gate visit, forever.
+            e.HasIndex(x => new { x.Namespace, x.WorkflowId, x.RunId, x.Gate, x.VisitId }).IsUnique();
+            e.HasIndex(x => x.GrantId);
+            e.HasOne(x => x.Grant)
+             .WithMany()
+             .HasForeignKey(x => x.GrantId)
+             .OnDelete(DeleteBehavior.Restrict);
+        });
     }
 }
 

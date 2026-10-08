@@ -188,6 +188,20 @@ public sealed class GetUweReferenceTool
         - A signal that arrives while this workflow is busy elsewhere is buffered (16 entries,
           oldest evicted with a warning) and consumed by the next matching wait, which then returns
           immediately without parking or notifying.
+        - `visitVar` (optional, epic grants #436): a LITERAL variable name. On each entry the engine
+          stores the visit id `"<signalName>:<n>"` there (`n` counts entries into every `visitVar`
+          wait of the run, from 1). A wait that parks upserts the Keyword attribute `GateVisit` to
+          it before `Phase`, and clears it to `""` when the wait ends. Omitted → no counter, no
+          variable, no command: the wait behaves exactly as before.
+        - `delegatedGuard` (optional, requires `visitVar`):
+          `{"marker":"GrantId","require":{"VisitId":"{{vars.<visitVar>}}","ArtifactRef":"{{vars.review_ref}}"}}`.
+          Rendered once at wait entry and applied to EVERY payload the wait consumes (buffered,
+          live or drained). A payload without the marker property (any casing) is the human path
+          and is accepted as today. A payload with it is accepted only if every `require` field is
+          a string ordinal-equal to its non-empty rendered value; otherwise it is discarded with
+          the warning `delegated signal discarded: stale visit or artifact` and the wait keeps
+          waiting — same slice end, same reminder count, same total timeout. `require` must
+          contain `VisitId`; `marker` must be non-blank.
 
         ### 11. child_workflow
         Starts a child workflow and waits for it to complete.
@@ -205,6 +219,14 @@ public sealed class GetUweReferenceTool
         - `args`: object passed as workflow input; values support template expressions
         - `namespace`: optional namespace override (defaults to current workflow namespace)
         - `taskQueue`: optional task queue override
+        - `ConsensusReviewWorkflow` (#436) also takes optional `ReviewRef` (the commit SHA or
+          SHA-256 under review, named to every reviewer) and `ExcludedAgents` (CSV or array; a
+          listed reviewer fails the child non-retryably with `ReviewerNotIndependent` before any
+          review). Its output adds `AttestedRef` (= `ReviewRef` only when every reviewer approved
+          and every review has the exact line `REVIEWED_REF: <ReviewRef>`, else `""`) and
+          `ScrubAttested` (an approving `PUBLIC_SCRUB: pass` and no `PUBLIC_SCRUB: fail`). Publish
+          `AttestedRef` as `vars.review_ref` and the `ReviewRef` attribute only when
+          `FinalVerdict == approved`; see `docs/epic-grants.md`.
 
         ### 12. fire_and_forget
         Starts a child workflow without waiting for the result (ParentClosePolicy = Abandon).

@@ -221,7 +221,7 @@
       "name": "UweDesignWorkflow",
       "namespace": "fleet",
       "taskQueue": "fleet",
-      "description": "Creates or refines a well-specified GitHub issue with multi-agent consensus review, then gates on CEO design-approval. Consensus loop (max 3 rounds) — if exhausted or needs_human_review, escalates to CEO gate instead of cancelling. CEO wait loop (hourly reminders, no auto-cancel). Returns {IssueNumber: N} on approval. Replaces compiled DesignWorkflow.",
+      "description": "Creates or refines a well-specified GitHub issue with multi-agent consensus review, then gates on CEO design-approval. Consensus loop (max 3 rounds) — if exhausted or needs_human_review, escalates to CEO gate instead of cancelling. CEO wait loop (hourly reminders, no auto-cancel). Returns {IssueNumber: N} on approval. Replaces compiled DesignWorkflow. Epic grants (#436): the author outputs BODY_SHA256, consensus attests it (author and CTO excluded), it is published as ReviewRef only after a unanimous attested approval, the design gate is visit-guarded, and a grant decision re-hashes the issue body (verify_approved_body) and fails with ERROR:approved_artifact_changed on a mismatch. Human approvals skip the re-hash.",
       "definition": {
         "name": "root",
         "type": "sequence",
@@ -246,7 +246,7 @@
                     "type": "delegate",
                     "target": "{{input.TargetAgent}}",
                     "outputVar": "issue_result",
-                    "instruction": "Your task is to create or refine a GitHub issue in repo {{input.Repo}}.\n\nDetermine which action to take by checking in priority order:\n1. Prior issue number from previous iteration: {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)' | default: 'none'}} — if this is a number, REFINE that issue.\n2. ExistingIssueNumber from input: {{input.ExistingIssueNumber | default: 'none'}} — if this is a number, REFINE that issue.\n3. If neither is set — CREATE a new well-specified GitHub issue for: {{input.Description}}.\n\nFor CREATE: use `gh issue create --repo {{input.Repo}}`.\nFor REFINE: use `gh issue edit <N> --repo {{input.Repo}}`.\n\nIncorporate this prior consensus feedback (if any):\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nIncorporate this prior CEO feedback (if any):\n{{vars.approval_signal.Comment | default: 'none'}}\n\nCEO consensus direction (if any):\n{{vars.ceo_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nAt the end of your response, output exactly: ISSUE_NUMBER: <number>\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nEvery spec MUST include:\n- A 'Files to Touch' section enumerating each file/path the implementer will modify.\n- An 'Acceptance Criteria' section with testable assertions (not vague goals).\n- A 'Constraints / MUST NOT' section listing at least 3 domain-specific dangers the implementation must avoid. Not generic boilerplate — concrete, workflow-specific MUST-NOTs.\n- Every external dependency (DB, file, HTTP call, process) must have an explicit failure path stated.",
+                    "instruction": "Your task is to create or refine a GitHub issue in repo {{input.Repo}}.\n\nDetermine which action to take by checking in priority order:\n1. Prior issue number from previous iteration: {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)' | default: 'none'}} — if this is a number, REFINE that issue.\n2. ExistingIssueNumber from input: {{input.ExistingIssueNumber | default: 'none'}} — if this is a number, REFINE that issue.\n3. If neither is set — CREATE a new well-specified GitHub issue for: {{input.Description}}.\n\nFor CREATE: use `gh issue create --repo {{input.Repo}}`.\nFor REFINE: use `gh issue edit <N> --repo {{input.Repo}}`.\n\nIncorporate this prior consensus feedback (if any):\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nIncorporate this prior CEO feedback (if any):\n{{vars.approval_signal.Comment | default: 'none'}}\n\nCEO consensus direction (if any):\n{{vars.ceo_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nAt the end of your response, output exactly: ISSUE_NUMBER: <number>\nAfter your last edit, also output the SHA-256 of the issue body bytes on its own line, computed with `gh issue view <number> --repo {{input.Repo}} --json body | jq -j .body | sha256sum` (first field):\nBODY_SHA256: <64-hex>\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nEvery spec MUST include:\n- A 'Files to Touch' section enumerating each file/path the implementer will modify.\n- An 'Acceptance Criteria' section with testable assertions (not vague goals).\n- A 'Constraints / MUST NOT' section listing at least 3 domain-specific dangers the implementation must avoid. Not generic boilerplate — concrete, workflow-specific MUST-NOTs.\n- Every external dependency (DB, file, HTTP call, process) must have an explicit failure path stated.",
                     "timeoutMinutes": 15
                   },
                   {
@@ -260,11 +260,30 @@
                     "ignoreFailure": true
                   },
                   {
+                    "name": "design_prepare_review_ref",
+                    "type": "set_variable",
+                    "vars": {
+                      "body_sha": "{{vars.issue_result | extract: 'BODY_SHA256:\\s*([0-9a-f]{64})' | default: ''}}",
+                      "review_ref": "",
+                      "review_scrub": ""
+                    }
+                  },
+                  {
+                    "name": "design_clear_review_attrs",
+                    "type": "set_attribute",
+                    "attributes": {
+                      "ReviewRef": "",
+                      "ReviewScrub": ""
+                    }
+                  },
+                  {
                     "args": {
                       "Subject": "Issue {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} design spec in {{input.Repo}}",
                       "Synthesizer": "{{config.EscalationTarget}}",
-                      "ReviewPrompt": "Review the design spec for GitHub issue {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} in repo {{input.Repo}}. Fetch it with: gh issue view {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} --repo {{input.Repo}}\n\nEvaluate whether the spec is complete and unambiguous enough to implement without guessing. Check: are all edge cases covered? Are the code changes described precisely enough for an implementer to follow without design decisions of their own?\n\nReview discipline:\n- Fetch the current spec/PR fresh — do NOT summarize prior rounds.\n- Verify each prior finding against the current text before reporting.\n- Give structured findings with severity (blocker, high, medium, low).\n- End your response with exactly one verdict line: VERDICT: approved | changes_requested | needs_human_review.\n\nEVIDENCE MIRROR (best-effort, optional).\nPost your full technical review as a comment on that GitHub issue/PR, then put the resulting comment URL on your EVIDENCE: line.\n- Before posting, remove private identities, internal IDs, hostnames, workflow-run identifiers, and private incident or configuration details. The repository may be public. Your unsanitized response is retained in durable workflow history regardless.\n- If the GitHub CLI, auth, API, or the comment post fails for any reason, write `EVIDENCE: none`, mention the mirror failure in one short clause in SUMMARY:, and still return every BLOCKER: line and your VERDICT:. A failed mirror never downgrades or fails the review — durable history is the source of truth, the comment is a convenience copy.\n- If you are continuing a response that was cut off and the earlier part already contains an `EVIDENCE: https://...` URL, reuse that URL and do NOT post a second comment.",
-                      "ReviewerAgents": "{{input.ConsensusAgents}}"
+                      "ReviewPrompt": "Review the design spec for GitHub issue {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} in repo {{input.Repo}}. Fetch it with: gh issue view {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} --repo {{input.Repo}}\n\nEvaluate whether the spec is complete and unambiguous enough to implement without guessing. Check: are all edge cases covered? Are the code changes described precisely enough for an implementer to follow without design decisions of their own?\n\nReview discipline:\n- Fetch the current spec/PR fresh — do NOT summarize prior rounds.\n- Verify each prior finding against the current text before reporting.\n- Give structured findings with severity (blocker, high, medium, low).\n- End your response with exactly one verdict line: VERDICT: approved | changes_requested | needs_human_review.\n\nEVIDENCE MIRROR (best-effort, optional).\nPost your full technical review as a comment on that GitHub issue/PR, then put the resulting comment URL on your EVIDENCE: line.\n- Before posting, remove private identities, internal IDs, hostnames, workflow-run identifiers, and private incident or configuration details. The repository may be public. Your unsanitized response is retained in durable workflow history regardless.\n- If the GitHub CLI, auth, API, or the comment post fails for any reason, write `EVIDENCE: none`, mention the mirror failure in one short clause in SUMMARY:, and still return every BLOCKER: line and your VERDICT:. A failed mirror never downgrades or fails the review — durable history is the source of truth, the comment is a convenience copy.\n- If you are continuing a response that was cut off and the earlier part already contains an `EVIDENCE: https://...` URL, reuse that URL and do NOT post a second comment.\n\nIssue body under review (ReviewRef): SHA-256 {{vars.body_sha | default: 'unknown'}}. Recompute it with `gh issue view {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} --repo {{input.Repo}} --json body | jq -j .body | sha256sum` (first field) and request changes if it differs.\n\nReviewed-ref attestation (#436):\n- End your review with `REVIEWED_REF: <ref>` for the ref you actually checked.\n- If `{{input.Repo}}` is public, check that no private names, internal URLs, hosts, credentials or private links are present, and add `PUBLIC_SCRUB: pass` or `PUBLIC_SCRUB: fail`.",
+                      "ReviewerAgents": "{{input.ConsensusAgents}}",
+                      "ReviewRef": "{{vars.body_sha}}",
+                      "ExcludedAgents": "{{input.TargetAgent}},{{config.CtoAgent}}"
                     },
                     "name": "consensus_review",
                     "type": "child_workflow",
@@ -359,6 +378,76 @@
                 }
               },
               {
+                "name": "design_publish_review_ref",
+                "type": "branch",
+                "on": "{{vars.consensus_out.FinalVerdict | default: 'none'}}",
+                "cases": {
+                  "approved": {
+                    "type": "sequence",
+                    "steps": [
+                      {
+                        "type": "set_variable",
+                        "vars": {
+                          "review_ref": "{{vars.consensus_out.AttestedRef | default: ''}}"
+                        }
+                      },
+                      {
+                        "type": "branch",
+                        "on": "{{vars.review_ref | default: 'none'}}",
+                        "cases": {
+                          "none": {
+                            "type": "set_variable",
+                            "vars": {
+                              "review_scrub": ""
+                            }
+                          }
+                        },
+                        "default": {
+                          "name": "design_publish_scrub",
+                          "type": "branch",
+                          "on": "{{vars.consensus_out.ScrubAttested | default: 'false'}}",
+                          "cases": {
+                            "True": {
+                              "type": "set_variable",
+                              "vars": {
+                                "review_scrub": "pass"
+                              }
+                            },
+                            "true": {
+                              "type": "set_variable",
+                              "vars": {
+                                "review_scrub": "pass"
+                              }
+                            }
+                          },
+                          "default": {
+                            "type": "set_variable",
+                            "vars": {
+                              "review_scrub": ""
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                },
+                "default": {
+                  "type": "set_variable",
+                  "vars": {
+                    "review_ref": "",
+                    "review_scrub": ""
+                  }
+                }
+              },
+              {
+                "name": "design_publish_review_attrs",
+                "type": "set_attribute",
+                "attributes": {
+                  "ReviewRef": "{{vars.review_ref}}",
+                  "ReviewScrub": "{{vars.review_scrub}}"
+                }
+              },
+              {
                 "name": "set_ceo_phase",
                 "type": "set_attribute",
                 "attributes": {
@@ -378,13 +467,21 @@
                     "notifyStep": {
                       "type": "delegate",
                       "target": "{{config.CtoAgent}}",
-                      "instruction": "Post to Telegram group: Design spec for issue {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} ({{input.Repo}}) approved by consensus and is awaiting your decision.\n\nContext for your decision:\n- Issue: #{{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} in {{input.Repo}} — run `gh issue view {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} --repo {{input.Repo}}` to review the full spec\n- Consensus: reviewers approved the spec as complete and implementable\n- approved → implementation starts immediately; changes_requested → spec returns to the design agent for another revision round; rejected → workflow cancelled\n\nSend design-approval signal to workflow `{{config.WorkflowId | default: 'this workflow'}}`:\n  {\"Decision\":\"approved\"} — approve the design spec\n  {\"Decision\":\"changes_requested\",\"Comment\":\"your feedback\"} — request refinement\n  {\"Decision\":\"rejected\",\"Comment\":\"reason\"} — cancel",
+                      "instruction": "Post to Telegram group: Design spec for issue {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} ({{input.Repo}}) approved by consensus and is awaiting your decision.\n\nContext for your decision:\n- Issue: #{{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} in {{input.Repo}} — run `gh issue view {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} --repo {{input.Repo}}` to review the full spec\n- Consensus: reviewers approved the spec as complete and implementable\n- approved → implementation starts immediately; changes_requested → spec returns to the design agent for another revision round; rejected → workflow cancelled\n\nSend design-approval signal to workflow `{{config.WorkflowId | default: 'this workflow'}}`:\n  {\"Decision\":\"approved\"} — approve the design spec\n  {\"Decision\":\"changes_requested\",\"Comment\":\"your feedback\"} — request refinement\n  {\"Decision\":\"rejected\",\"Comment\":\"reason\"} — cancel\n\nEpic grant (#436): gate visit `{{vars.design_visit}}`, reviewed ref `{{vars.review_ref | default: 'none'}}`. With no reviewed ref this gate is a human decision only. Under an active epic grant the configured CTO agent may approve this exact visit after an independent review with {\"Decision\":\"approved\",\"GrantId\":\"<grant id>\",\"VisitId\":\"<this visit>\",\"ArtifactRef\":\"<reviewed ref>\",\"Evidence\":\"<https url>\"}; the orchestrator checks the grant and sends it, and the workflow discards any approval naming another visit or ref.",
                       "ignoreFailure": true,
                       "timeoutMinutes": 5
                     },
                     "signalName": "design-approval",
                     "timeoutMinutes": 60,
-                    "autoCompleteOnTimeout": true
+                    "autoCompleteOnTimeout": true,
+                    "visitVar": "design_visit",
+                    "delegatedGuard": {
+                      "marker": "GrantId",
+                      "require": {
+                        "VisitId": "{{vars.design_visit}}",
+                        "ArtifactRef": "{{vars.review_ref}}"
+                      }
+                    }
                   },
                   {
                     "on": "{{vars.approval_signal.Decision | default: 'timeout'}}",
@@ -397,6 +494,83 @@
                       "approved": {
                         "type": "sequence",
                         "steps": [
+                          {
+                            "name": "grant_body_check",
+                            "type": "branch",
+                            "on": "{{vars.approval_signal.GrantId | default: 'none'}}",
+                            "cases": {
+                              "none": {
+                                "type": "noop"
+                              }
+                            },
+                            "default": {
+                              "type": "sequence",
+                              "steps": [
+                                {
+                                  "name": "verify_approved_body",
+                                  "type": "delegate",
+                                  "target": "{{config.CtoAgent}}",
+                                  "outputVar": "body_verify",
+                                  "instruction": "Recompute the SHA-256 of the current body of issue {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} in repo {{input.Repo}}, exactly as the review did:\ngh issue view {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} --repo {{input.Repo}} --json body | jq -j .body | sha256sum\n\nDo not edit the issue. Output exactly one line with the first field of that output:\nBODY_SHA256_NOW: <64-hex>",
+                                  "timeoutMinutes": 5
+                                },
+                                {
+                                  "name": "capture_body_now",
+                                  "type": "set_variable",
+                                  "vars": {
+                                    "body_now": "{{vars.body_verify | extract: 'BODY_SHA256_NOW:\\s*([0-9a-f]{64})' | default: ''}}"
+                                  }
+                                },
+                                {
+                                  "name": "compose_body_check",
+                                  "type": "set_variable",
+                                  "vars": {
+                                    "body_check": "{{vars.review_ref}}={{vars.body_now}}"
+                                  }
+                                },
+                                {
+                                  "name": "approved_body_branch",
+                                  "type": "branch",
+                                  "on": "{{vars.body_check | extract: '^([0-9a-f]{64})=\\1$' | default: 'MISMATCH'}}",
+                                  "cases": {
+                                    "MISMATCH": {
+                                      "type": "sequence",
+                                      "steps": [
+                                        {
+                                          "name": "notify_approved_body_changed",
+                                          "type": "delegate",
+                                          "target": "{{config.CtoAgent}}",
+                                          "instruction": "Post to Telegram group: the grant-delegated design approval for issue {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} in {{input.Repo}} was NOT applied. The issue body no longer matches the reviewed body (reviewed {{vars.review_ref}}, now {{vars.body_now | default: 'unknown'}}). The design is not approved; a human decides how to proceed.",
+                                          "ignoreFailure": true,
+                                          "timeoutMinutes": 5
+                                        },
+                                        {
+                                          "name": "emit_approved_artifact_changed",
+                                          "type": "set_variable",
+                                          "vars": {
+                                            "workflow_result": "ERROR:approved_artifact_changed"
+                                          }
+                                        }
+                                      ]
+                                    }
+                                  },
+                                  "default": {
+                                    "type": "noop"
+                                  }
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "name": "exit_if_approved_body_changed",
+                            "type": "branch",
+                            "on": "{{vars.workflow_result | extract: '^(ERROR:approved_artifact_changed)' | default: ''}}",
+                            "cases": {
+                              "ERROR:approved_artifact_changed": {
+                                "type": "break"
+                              }
+                            }
+                          },
                           {
                             "name": "notify_ceo_approved",
                             "type": "delegate",
@@ -465,6 +639,22 @@
                       "changes_requested": {
                         "type": "sequence",
                         "steps": [
+                          {
+                            "name": "design_withdraw_review_ref",
+                            "type": "set_variable",
+                            "vars": {
+                              "review_ref": "",
+                              "review_scrub": ""
+                            }
+                          },
+                          {
+                            "name": "design_withdraw_review_attrs",
+                            "type": "set_attribute",
+                            "attributes": {
+                              "ReviewRef": "",
+                              "ReviewScrub": ""
+                            }
+                          },
                           {
                             "args": {
                               "Subject": "Issue {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} design spec in {{input.Repo}} (CEO review)",
@@ -622,7 +812,7 @@
       "name": "UweDocMaintenanceWorkflow",
       "namespace": "fleet",
       "taskQueue": "fleet",
-      "description": "Post-merge documentation maintenance. Reviews PR diff, updates project contexts/memory/instructions, gates on CEO doc-review signal. Max 2 revision rounds with cleanup on exhaustion.",
+      "description": "Post-merge documentation maintenance (#436): prepare (read-only artifact with ARTIFACT_SHA256), deterministic classify (only memory and repo_doc targets are delegable), consensus review of the exact artifact (PrepAgent and CTO excluded; skipped without ConsensusAgents), publish ReviewRef only after a unanimous attested approval of a delegable artifact, a visit-guarded doc-review gate, then apply exactly the approved artifact and check APPLIED_ARTIFACT_SHA256. Nothing is written before the gate. Max 2 rounds. Inputs: Repo, PrNumber, BranchName, MergeSummary, optional IssueNumber, ConsensusAgents and PrepAgent (empty → the CTO, which makes the gate human-only).",
       "definition": {
         "type": "sequence",
         "steps": [
@@ -635,220 +825,403 @@
             }
           },
           {
-            "type": "delegate",
-            "target": "{{config.CtoAgent}}",
-            "outputVar": "assess_result",
-            "instruction": "Review the merged PR diff for PR #{{input.PrNumber}} on branch `{{input.BranchName}}` in repo {{input.Repo}} and determine whether any project documentation needs updating.\n\nMerge summary: {{input.MergeSummary}}\n\nSteps:\n1. Fetch the diff: `gh pr diff {{input.PrNumber}} --repo {{input.Repo}}`\n2. Check whether the changes touch: architecture, config, ports, services, schemas, tool mappings, docker config, CI/CD, or infrastructure.\n3. If no doc-relevant changes — respond with exactly: NO_DOC_UPDATES_NEEDED\n4. Otherwise, list what needs updating across:\n   - project contexts in orchestrator DB (update_project_context MCP tool — no PR needed)\n   - fleet-memory entries (memory_store / memory_update — no PR needed)\n   - agent instructions in orchestrator DB (update_instruction MCP tool — no PR needed)\n   - operational context memories: search fleet-memory for relevant WorkflowType operational context entries and list any that need updating (new gotchas, changed behavior, updated limits)",
-            "timeoutMinutes": 15
-          },
-          {
-            "on": "{{vars.assess_result | extract:'(NO_DOC_UPDATES_NEEDED)'}}",
+            "name": "resolve_prep_agent",
             "type": "branch",
+            "on": "{{input.PrepAgent | default: 'none'}}",
             "cases": {
-              "NO_DOC_UPDATES_NEEDED": {
-                "type": "sequence",
-                "steps": [
-                  {
-                    "type": "set_attribute",
-                    "attributes": {
-                      "Phase": "complete-no-updates"
-                    }
-                  },
-                  {
-                    "name": "decision_no_updates",
-                    "type": "set_variable",
-                    "vars": {
-                      "terminal_decision": "approved"
-                    }
-                  }
-                ]
+              "none": {
+                "type": "set_variable",
+                "vars": {
+                  "prep_agent": "{{config.CtoAgent}}"
+                }
               }
             },
             "default": {
-              "type": "sequence",
-              "steps": [
-                {
-                  "type": "delegate",
-                  "target": "{{config.CtoAgent}}",
-                  "outputVar": "update_round1",
-                  "instruction": "Based on the impact assessment below, update the relevant documentation for PR #{{input.PrNumber}} on branch `{{input.BranchName}}` in repo {{input.Repo}}.\n\nWhat needs updating:\n{{vars.assess_result}}\n\nActions:\n1. Project context changes: use list_project_contexts to check current versions, then update_project_context to create a new version. Do NOT reprovision agents yet — that happens after CEO approval.\n2. fleet-memory entries: update directly using memory_store / memory_update. Include operational context memories (titled 'WorkflowType — operational context') — add new gotchas, behavioral changes, or updated limits introduced by this PR.\n3. Agent instruction changes: use list_instruction_versions to check current content, then update_instruction to create a new version. Do NOT reprovision agents yet.\n\nAt the end of your response, output BOTH lines in exactly this format:\nDOC_PRS: org/repo#N [org/repo#M ...]  or  DOC_PRS: none\nINSTRUCTION_UPDATES: instruction_name1 [instruction_name2 ...]  or  INSTRUCTION_UPDATES: none",
-                  "timeoutMinutes": 20
-                },
-                {
-                  "type": "set_attribute",
-                  "attributes": {
-                    "Phase": "doc-review",
-                    "DocPrs": "{{vars.update_round1 | extract:'DOC_PRS:\\s*(.+)'}}"
-                  }
-                },
-                {
-                  "type": "wait_for_signal",
-                  "phase": "doc-review",
-                  "outputVar": "doc_review_1",
-                  "notifyStep": {
-                    "type": "delegate",
-                    "target": "{{config.CtoAgent}}",
-                    "instruction": "Post to the Telegram group:\n\nDoc maintenance complete for PR #{{input.PrNumber}} in {{input.Repo}} (round 1/2).\n\nPR: {{input.Repo}} #{{input.PrNumber}}\nMerge summary: {{input.MergeSummary}}\n\nChanges made:\n{{vars.update_round1}}\n\nDecision impact:\n- approved: merges all doc PRs and reprovisioning agents — takes effect immediately\n- changes_requested: agent revises docs (1 more round available)\n- rejected: closes all doc PRs and rolls back all instruction versions\n\nPlease review and signal the workflow with 'doc-review':\n  {\"Decision\":\"approved\"} — merge all doc PRs + reprovision agents with updated instructions\n  {\"Decision\":\"changes_requested\",\"Comment\":\"your feedback\"} — request revisions (1 more round available)\n  {\"Decision\":\"rejected\",\"Comment\":\"reason\"} — close all doc PRs + rollback instruction versions",
-                    "ignoreFailure": true,
-                    "timeoutMinutes": 5
-                  },
-                  "signalName": "doc-review",
-                  "maxReminders": 2,
-                  "timeoutMinutes": 240,
-                  "autoCompleteOnTimeout": true,
-                  "reminderIntervalMinutes": 120
-                },
-                {
-                  "on": "{{vars.doc_review_1 | extract:'Decision.*?(approved|rejected|changes_requested|timeout)'}}",
-                  "type": "branch",
-                  "cases": {
-                    "timeout": {
-                      "type": "sequence",
-                      "steps": [
-                        {
-                          "type": "set_attribute",
-                          "attributes": {
-                            "Phase": "complete-timeout-r1"
-                          }
-                        },
-                        {
-                          "name": "decision_timeout",
-                          "type": "set_variable",
-                          "vars": {
-                            "terminal_decision": "cancelled"
-                          }
-                        }
-                      ]
-                    },
-                    "approved": {
-                      "type": "sequence",
-                      "steps": [
-                        {
-                          "type": "delegate",
-                          "target": "{{config.CtoAgent}}",
-                          "outputVar": "finalize_result",
-                          "instruction": "The CEO approved the doc maintenance changes for PR #{{input.PrNumber}} in {{input.Repo}}.\n\nFull round-1 update result (contains DOC_PRS and INSTRUCTION_UPDATES lines):\n{{vars.update_round1}}\n\nActions:\n1. Find the DOC_PRS line. For each listed PR (format org/repo#N): `gh pr merge <N> --repo <org/repo> --squash --delete-branch`. Skip if value is 'none'.\n2. Find the INSTRUCTION_UPDATES line. For each listed instruction: use list_instruction_versions to confirm which agents use it, then call reprovision_agent for each affected agent. Skip if value is 'none'.\n\nReport which PRs were merged and which agents were reprovisioned.",
-                          "ignoreFailure": true,
-                          "timeoutMinutes": 15
-                        },
-                        {
-                          "type": "set_attribute",
-                          "attributes": {
-                            "Phase": "complete-approved"
-                          }
-                        },
-                        {
-                          "name": "decision_approved",
-                          "type": "set_variable",
-                          "vars": {
-                            "terminal_decision": "approved"
-                          }
-                        }
-                      ]
-                    },
-                    "rejected": {
-                      "type": "sequence",
-                      "steps": [
-                        {
-                          "type": "delegate",
-                          "target": "{{config.CtoAgent}}",
-                          "outputVar": "reject_result",
-                          "instruction": "The CEO rejected the doc maintenance changes for PR #{{input.PrNumber}} in {{input.Repo}}.\n\nCEO decision signal (parse for Comment): {{vars.doc_review_1}}\n\nFull round-1 update result (contains DOC_PRS and INSTRUCTION_UPDATES lines):\n{{vars.update_round1}}\n\nActions:\n1. Find the DOC_PRS line. For each listed PR: `gh pr close <N> --repo <org/repo> --delete-branch`. Skip if 'none'.\n2. Find the INSTRUCTION_UPDATES line. For each listed instruction: use list_instruction_versions to find the version created during this workflow, then use rollback_instruction to revert to the prior version. Skip if 'none'.\n\nReport which PRs were closed and which instructions were rolled back.",
-                          "ignoreFailure": true,
-                          "timeoutMinutes": 15
-                        },
-                        {
-                          "type": "set_attribute",
-                          "attributes": {
-                            "Phase": "complete-rejected"
-                          }
-                        },
-                        {
-                          "name": "decision_rejected",
-                          "type": "set_variable",
-                          "vars": {
-                            "terminal_decision": "rejected"
-                          }
-                        }
-                      ]
-                    }
-                  },
-                  "default": {
+              "type": "set_variable",
+              "vars": {
+                "prep_agent": "{{input.PrepAgent}}"
+              }
+            }
+          },
+          {
+            "name": "doc_round_loop",
+            "type": "loop",
+            "maxIterations": 2,
+            "steps": [
+              {
+                "name": "doc_prepare_review_ref",
+                "type": "set_variable",
+                "vars": {
+                  "review_ref": "",
+                  "review_scrub": ""
+                }
+              },
+              {
+                "name": "doc_clear_review_attrs",
+                "type": "set_attribute",
+                "attributes": {
+                  "ReviewRef": "",
+                  "ReviewScrub": "",
+                  "Phase": "preparing"
+                }
+              },
+              {
+                "name": "prepare",
+                "type": "delegate",
+                "target": "{{vars.prep_agent}}",
+                "outputVar": "prep_result",
+                "instruction": "Prepare the documentation changes for merged PR #{{input.PrNumber}} on branch `{{input.BranchName}}` in repo {{input.Repo}}.\n\nThis step READS ONLY. Do not write fleet-memory, project contexts, instructions, repository files, branches or PRs. Nothing is written before the doc-review gate; after approval exactly the artifact you return is applied.\n\nMerge summary: {{input.MergeSummary}}\n\nGate feedback on the previous artifact (if any):\n{{vars.doc_review | default: 'none'}}\n\nReview feedback on the previous artifact (if any):\n{{vars.doc_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nSteps:\n1. Fetch the diff: `gh pr diff {{input.PrNumber}} --repo {{input.Repo}}`\n2. Decide whether any documentation must change: architecture, config, ports, services, schemas, tool mappings, docker config, CI/CD or infrastructure, as described in fleet-memory entries (including 'WorkflowType — operational context' memories), repository docs, project contexts or agent instructions.\n3. If nothing must change, output exactly the line: PREP: NO_DOC\n4. Otherwise output, in this order:\nPREP: ARTIFACT\nTARGET: <type> <id>   (one line per target; type is memory, repo_doc, project_context or instruction; id is the memory id or 'new', owner/repo:path, the context name or the instruction name)\nARTIFACT_SHA256: <64-hex>\n-----BEGIN DOC ARTIFACT-----\n<the complete new content for every target, each section headed by its TARGET line>\n-----END DOC ARTIFACT-----\n\nThe artifact hash is the SHA-256 of the artifact body: every line strictly between the two marker lines, each terminated by a single LF, UTF-8. Compute it with:\nawk '/^-----BEGIN DOC ARTIFACT-----$/{f=1;next}/^-----END DOC ARTIFACT-----$/{f=0}f' <file> | sha256sum",
+                "timeoutMinutes": 20
+              },
+              {
+                "name": "prep_outcome",
+                "type": "branch",
+                "on": "{{vars.prep_result | extract: 'PREP:\\s*(NO_DOC|ARTIFACT)' | default: 'INVALID'}}",
+                "cases": {
+                  "NO_DOC": {
                     "type": "sequence",
                     "steps": [
                       {
+                        "type": "set_attribute",
+                        "attributes": {
+                          "Phase": "complete-no-updates"
+                        }
+                      },
+                      {
+                        "name": "decision_no_updates",
+                        "type": "set_variable",
+                        "vars": {
+                          "terminal_decision": "approved"
+                        }
+                      },
+                      {
+                        "type": "break"
+                      }
+                    ]
+                  },
+                  "ARTIFACT": {
+                    "type": "noop"
+                  }
+                },
+                "default": {
+                  "type": "sequence",
+                  "steps": [
+                    {
+                      "name": "notify_prepare_invalid",
+                      "type": "delegate",
+                      "target": "{{config.CtoAgent}}",
+                      "instruction": "Post to the Telegram group: doc maintenance for PR #{{input.PrNumber}} in {{input.Repo}} stopped: the prepare step returned neither PREP: NO_DOC nor PREP: ARTIFACT. Nothing was written.",
+                      "ignoreFailure": true,
+                      "timeoutMinutes": 5
+                    },
+                    {
+                      "type": "set_attribute",
+                      "attributes": {
+                        "Phase": "complete-prepare-invalid"
+                      }
+                    },
+                    {
+                      "name": "decision_prepare_invalid",
+                      "type": "set_variable",
+                      "vars": {
+                        "terminal_decision": "cancelled"
+                      }
+                    },
+                    {
+                      "type": "break"
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "capture_artifact",
+                "type": "set_variable",
+                "vars": {
+                  "artifact_sha": "{{vars.prep_result | extract: 'ARTIFACT_SHA256:\\s*([0-9a-f]{64})' | default: ''}}",
+                  "undelegable_target": "{{vars.prep_result | extract: '(?m)^\\s*TARGET:\\s*(?!(?:memory|repo_doc)\\b)(\\S+)' | default: ''}}",
+                  "first_target": "{{vars.prep_result | extract: '(?m)^\\s*TARGET:\\s*(\\S+)' | default: ''}}"
+                }
+              },
+              {
+                "name": "classify",
+                "type": "branch",
+                "on": "{{vars.undelegable_target | default: 'none'}}",
+                "cases": {
+                  "none": {
+                    "type": "branch",
+                    "on": "{{vars.first_target | default: 'none'}}",
+                    "cases": {
+                      "none": {
+                        "type": "set_variable",
+                        "vars": {
+                          "delegable": "no"
+                        }
+                      }
+                    },
+                    "default": {
+                      "type": "set_variable",
+                      "vars": {
+                        "delegable": "yes"
+                      }
+                    }
+                  }
+                },
+                "default": {
+                  "type": "set_variable",
+                  "vars": {
+                    "delegable": "no"
+                  }
+                }
+              },
+              {
+                "name": "doc_reset_consensus",
+                "type": "set_variable",
+                "vars": {
+                  "doc_consensus_out": ""
+                }
+              },
+              {
+                "type": "set_attribute",
+                "attributes": {
+                  "Phase": "doc-consensus-review"
+                }
+              },
+              {
+                "name": "doc_review_consensus",
+                "type": "branch",
+                "on": "{{input.ConsensusAgents | default: 'none'}}",
+                "cases": {
+                  "none": {
+                    "type": "noop"
+                  }
+                },
+                "default": {
+                  "name": "doc_consensus_review",
+                  "type": "child_workflow",
+                  "workflowType": "ConsensusReviewWorkflow",
+                  "taskQueue": "fleet",
+                  "outputVar": "doc_consensus_out",
+                  "ignoreFailure": true,
+                  "args": {
+                    "Subject": "Documentation artifact for PR #{{input.PrNumber}} in {{input.Repo}}",
+                    "Synthesizer": "{{config.EscalationTarget}}",
+                    "ReviewerAgents": "{{input.ConsensusAgents}}",
+                    "ReviewRef": "{{vars.artifact_sha}}",
+                    "ExcludedAgents": "{{vars.prep_agent}},{{config.CtoAgent}}",
+                    "ReviewPrompt": "Review the documentation artifact prepared for merged PR #{{input.PrNumber}} in repo {{input.Repo}}. Nothing has been written yet; after approval exactly this artifact is applied.\n\nPrepared output (the artifact is between the marker lines):\n{{vars.prep_result}}\n\nCheck it against the PR diff (`gh pr diff {{input.PrNumber}} --repo {{input.Repo}}`): accurate, complete, and limited to documentation.\n\nArtifact under review (ReviewRef): ARTIFACT_SHA256 {{vars.artifact_sha | default: 'unknown'}}. Recompute it from the artifact text and request changes if it differs. The artifact hash is the SHA-256 of the artifact body: every line strictly between the two marker lines, each terminated by a single LF, UTF-8. Compute it with:\nawk '/^-----BEGIN DOC ARTIFACT-----$/{f=1;next}/^-----END DOC ARTIFACT-----$/{f=0}f' <file> | sha256sum\n\nReview discipline:\n- Give structured findings with severity (blocker, high, medium, low).\n- End your response with exactly one verdict line: VERDICT: approved | changes_requested | needs_human_review.\n\nReviewed-ref attestation (#436):\n- End your review with `REVIEWED_REF: <ref>` for the ref you actually checked.\n- If `{{input.Repo}}` is public, check that no private names, internal URLs, hosts, credentials or private links are present, and add `PUBLIC_SCRUB: pass` or `PUBLIC_SCRUB: fail`."
+                  }
+                }
+              },
+              {
+                "name": "doc_publish_review_ref",
+                "type": "branch",
+                "on": "{{vars.doc_consensus_out.FinalVerdict | default: 'none'}}",
+                "cases": {
+                  "approved": {
+                    "type": "branch",
+                    "on": "{{vars.delegable}}",
+                    "cases": {
+                      "yes": {
+                        "type": "sequence",
+                        "steps": [
+                          {
+                            "type": "set_variable",
+                            "vars": {
+                              "review_ref": "{{vars.doc_consensus_out.AttestedRef | default: ''}}"
+                            }
+                          },
+                          {
+                            "type": "branch",
+                            "on": "{{vars.review_ref | default: 'none'}}",
+                            "cases": {
+                              "none": {
+                                "type": "set_variable",
+                                "vars": {
+                                  "review_scrub": ""
+                                }
+                              }
+                            },
+                            "default": {
+                              "name": "doc_publish_scrub",
+                              "type": "branch",
+                              "on": "{{vars.doc_consensus_out.ScrubAttested | default: 'false'}}",
+                              "cases": {
+                                "True": {
+                                  "type": "set_variable",
+                                  "vars": {
+                                    "review_scrub": "pass"
+                                  }
+                                },
+                                "true": {
+                                  "type": "set_variable",
+                                  "vars": {
+                                    "review_scrub": "pass"
+                                  }
+                                }
+                              },
+                              "default": {
+                                "type": "set_variable",
+                                "vars": {
+                                  "review_scrub": ""
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    },
+                    "default": {
+                      "type": "set_variable",
+                      "vars": {
+                        "review_ref": "",
+                        "review_scrub": ""
+                      }
+                    }
+                  }
+                },
+                "default": {
+                  "type": "set_variable",
+                  "vars": {
+                    "review_ref": "",
+                    "review_scrub": ""
+                  }
+                }
+              },
+              {
+                "name": "doc_publish_review_attrs",
+                "type": "set_attribute",
+                "attributes": {
+                  "ReviewRef": "{{vars.review_ref}}",
+                  "ReviewScrub": "{{vars.review_scrub}}"
+                }
+              },
+              {
+                "name": "doc_review_gate",
+                "type": "wait_for_signal",
+                "signalName": "doc-review",
+                "phase": "doc-review",
+                "outputVar": "doc_review",
+                "visitVar": "doc_visit",
+                "delegatedGuard": {
+                  "marker": "GrantId",
+                  "require": {
+                    "VisitId": "{{vars.doc_visit}}",
+                    "ArtifactRef": "{{vars.review_ref}}"
+                  }
+                },
+                "timeoutMinutes": 240,
+                "reminderIntervalMinutes": 120,
+                "maxReminders": 2,
+                "autoCompleteOnTimeout": true,
+                "notifyStep": {
+                  "name": "notify_doc_review",
+                  "type": "delegate",
+                  "target": "{{config.CtoAgent}}",
+                  "instruction": "Post to the Telegram group:\n\nDocumentation artifact ready for PR #{{input.PrNumber}} in {{input.Repo}}. Nothing has been written yet.\n\nPrepared output:\n{{vars.prep_result}}\n\nReview: {{vars.doc_consensus_out.FinalVerdict | default: 'not run'}}\n{{vars.doc_consensus_out.ConsolidatedReasoning | default: ''}}\nDelegable (memory and repo_doc targets only): {{vars.delegable}}\n\nDecision impact:\n- approved: exactly this artifact is applied\n- changes_requested: a new artifact is prepared and reviewed (2 rounds in total)\n- rejected: nothing is applied, and there is nothing to clean up\n\nPlease review and signal the workflow with 'doc-review':\n  {\"Decision\":\"approved\"} — apply the artifact\n  {\"Decision\":\"changes_requested\",\"Comment\":\"your feedback\"} — prepare a new artifact\n  {\"Decision\":\"rejected\",\"Comment\":\"reason\"} — apply nothing\n\nEpic grant (#436): gate visit `{{vars.doc_visit}}`, reviewed ref `{{vars.review_ref | default: 'none'}}`. With no reviewed ref this gate is a human decision only. Under an active epic grant the configured CTO agent may approve this exact visit after an independent review with {\"Decision\":\"approved\",\"GrantId\":\"<grant id>\",\"VisitId\":\"<this visit>\",\"ArtifactRef\":\"<reviewed ref>\",\"Evidence\":\"<https url>\"}; the orchestrator checks the grant and sends it, and the workflow discards any approval naming another visit or ref.",
+                  "ignoreFailure": true,
+                  "timeoutMinutes": 5
+                }
+              },
+              {
+                "name": "doc_decision_branch",
+                "type": "branch",
+                "on": "{{vars.doc_review | extract:'Decision.*?(approved|rejected|changes_requested|timeout)'}}",
+                "cases": {
+                  "timeout": {
+                    "type": "sequence",
+                    "steps": [
+                      {
+                        "type": "set_attribute",
+                        "attributes": {
+                          "Phase": "complete-timeout"
+                        }
+                      },
+                      {
+                        "name": "decision_timeout",
+                        "type": "set_variable",
+                        "vars": {
+                          "terminal_decision": "cancelled"
+                        }
+                      },
+                      {
+                        "type": "break"
+                      }
+                    ]
+                  },
+                  "approved": {
+                    "type": "sequence",
+                    "steps": [
+                      {
+                        "type": "set_attribute",
+                        "attributes": {
+                          "Phase": "applying"
+                        }
+                      },
+                      {
+                        "name": "apply",
                         "type": "delegate",
                         "target": "{{config.CtoAgent}}",
-                        "outputVar": "update_round2",
-                        "instruction": "Apply the CEO's feedback on the documentation changes for PR #{{input.PrNumber}} in {{input.Repo}} (revision round 2/2 — final).\n\nCEO decision signal (parse for Comment): {{vars.doc_review_1}}\n\nRound-1 update result (contains DOC_PRS and INSTRUCTION_UPDATES lines):\n{{vars.update_round1}}\n\nActions:\n1. For project context changes: use update_project_context to create a revised version addressing CEO feedback.\n2. For fleet-memory changes: update entries directly.\n3. For instruction changes: use update_instruction to create a revised version — do NOT reprovision yet.\n\nAt the end of your response, output this line:\nINSTRUCTION_UPDATES: instruction_name1 [instruction_name2 ...]  or  INSTRUCTION_UPDATES: none\n\n(DOC_PRS are the same as round 1 — no new PRs are opened in revision.)\n\nReport what was changed.",
+                        "outputVar": "apply_result",
+                        "instruction": "The doc-review gate approved the documentation artifact for PR #{{input.PrNumber}} in {{input.Repo}}. Apply EXACTLY the artifact below — nothing else and no extra edits.\n\nPrepared output (the artifact is between the marker lines):\n{{vars.prep_result}}\n\nFor each TARGET:\n- memory: memory_store / memory_update with exactly the artifact content.\n- repo_doc: open a PR with exactly the artifact content for that path, then merge it (squash).\n- project_context: update_project_context with exactly the artifact content.\n- instruction: update_instruction with exactly the artifact content, then reprovision_agent for each agent that uses it.\n\nThen recompute the hash of the artifact you applied. The artifact hash is the SHA-256 of the artifact body: every line strictly between the two marker lines, each terminated by a single LF, UTF-8. Compute it with:\nawk '/^-----BEGIN DOC ARTIFACT-----$/{f=1;next}/^-----END DOC ARTIFACT-----$/{f=0}f' <file> | sha256sum\n\nOutput exactly one line with it:\nAPPLIED_ARTIFACT_SHA256: <64-hex>",
                         "timeoutMinutes": 20
                       },
                       {
-                        "type": "wait_for_signal",
-                        "phase": "doc-review",
-                        "outputVar": "doc_review_2",
-                        "notifyStep": {
-                          "type": "delegate",
-                          "target": "{{config.CtoAgent}}",
-                          "instruction": "Post to the Telegram group:\n\nDoc maintenance revision complete for PR #{{input.PrNumber}} in {{input.Repo}} (round 2/2 — final).\n\nPR: {{input.Repo}} #{{input.PrNumber}}\n\nChanges made in revision:\n{{vars.update_round2}}\n\nDecision impact:\n- approved: merges all doc PRs and reprovisioning agents\n- rejected: closes all doc PRs and rolls back all instruction versions\n(Note: this is the final round — any further changes_requested triggers cleanup without another revision)\n\nPlease review and signal the workflow with 'doc-review':\n  {\"Decision\":\"approved\"} — merge all doc PRs + reprovision agents\n  {\"Decision\":\"rejected\",\"Comment\":\"reason\"} — close all doc PRs + rollback\n  (Note: this is the final round — any further changes_requested will trigger cleanup without another revision)",
-                          "ignoreFailure": true,
-                          "timeoutMinutes": 5
-                        },
-                        "signalName": "doc-review",
-                        "maxReminders": 2,
-                        "timeoutMinutes": 240,
-                        "autoCompleteOnTimeout": true,
-                        "reminderIntervalMinutes": 120
+                        "name": "capture_applied",
+                        "type": "set_variable",
+                        "vars": {
+                          "applied_sha": "{{vars.apply_result | extract: 'APPLIED_ARTIFACT_SHA256:\\s*([0-9a-f]{64})' | default: ''}}"
+                        }
                       },
                       {
-                        "on": "{{vars.doc_review_2 | extract:'Decision.*?(approved|rejected)'}}",
+                        "name": "expected_artifact",
                         "type": "branch",
+                        "on": "{{vars.review_ref | default: 'none'}}",
                         "cases": {
-                          "approved": {
+                          "none": {
+                            "type": "set_variable",
+                            "vars": {
+                              "expected_sha": "{{vars.artifact_sha}}"
+                            }
+                          }
+                        },
+                        "default": {
+                          "type": "set_variable",
+                          "vars": {
+                            "expected_sha": "{{vars.review_ref}}"
+                          }
+                        }
+                      },
+                      {
+                        "name": "compose_apply_check",
+                        "type": "set_variable",
+                        "vars": {
+                          "apply_check": "{{vars.expected_sha}}={{vars.applied_sha}}"
+                        }
+                      },
+                      {
+                        "name": "apply_check_branch",
+                        "type": "branch",
+                        "on": "{{vars.apply_check | extract: '^([0-9a-f]{64})=\\1$' | default: 'MISMATCH'}}",
+                        "cases": {
+                          "MISMATCH": {
                             "type": "sequence",
                             "steps": [
                               {
+                                "name": "notify_apply_mismatch",
                                 "type": "delegate",
                                 "target": "{{config.CtoAgent}}",
-                                "outputVar": "finalize_result",
-                                "instruction": "The CEO approved the doc maintenance changes for PR #{{input.PrNumber}} in {{input.Repo}} (after revision).\n\nRound-1 update result (DOC_PRS and round-1 INSTRUCTION_UPDATES):\n{{vars.update_round1}}\n\nRound-2 update result (additional INSTRUCTION_UPDATES from revision, if any):\n{{vars.update_round2}}\n\nActions:\n1. Find the DOC_PRS line in round-1 result. For each listed PR: `gh pr merge <N> --repo <org/repo> --squash --delete-branch`. Skip if 'none'.\n2. Find INSTRUCTION_UPDATES in BOTH round-1 and round-2 results. Combine the lists (dedup by name). For each instruction: use list_instruction_versions to confirm which agents use it, then call reprovision_agent for each affected agent. Skip if both are 'none'.\n\nReport which PRs were merged and which agents were reprovisioned.",
+                                "instruction": "Post to the Telegram group: doc maintenance for PR #{{input.PrNumber}} in {{input.Repo}} FAILED its apply check. The applied artifact hash ({{vars.applied_sha | default: 'missing'}}) does not match the approved artifact ({{vars.expected_sha | default: 'missing'}}). Check what was written; no retry was made.",
                                 "ignoreFailure": true,
-                                "timeoutMinutes": 15
+                                "timeoutMinutes": 5
                               },
                               {
                                 "type": "set_attribute",
                                 "attributes": {
-                                  "Phase": "complete-approved"
+                                  "Phase": "complete-apply-mismatch"
                                 }
                               },
                               {
-                                "name": "decision_approved",
-                                "type": "set_variable",
-                                "vars": {
-                                  "terminal_decision": "approved"
-                                }
-                              }
-                            ]
-                          },
-                          "rejected": {
-                            "type": "sequence",
-                            "steps": [
-                              {
-                                "type": "delegate",
-                                "target": "{{config.CtoAgent}}",
-                                "outputVar": "reject_result",
-                                "instruction": "The CEO rejected the doc maintenance changes for PR #{{input.PrNumber}} in {{input.Repo}} (after revision).\n\nCEO decision signal: {{vars.doc_review_2}}\n\nRound-1 update result (DOC_PRS and round-1 INSTRUCTION_UPDATES):\n{{vars.update_round1}}\n\nRound-2 update result (additional INSTRUCTION_UPDATES from revision, if any):\n{{vars.update_round2}}\n\nActions:\n1. Find the DOC_PRS line in round-1 result. For each listed PR: `gh pr close <N> --repo <org/repo> --delete-branch`. Skip if 'none'.\n2. Find INSTRUCTION_UPDATES in BOTH round-1 and round-2 results. Combine the lists (dedup by name). For each instruction: use rollback_instruction to revert to the pre-workflow version. Skip if both are 'none'.\n\nReport which PRs were closed and which instructions were rolled back.",
-                                "ignoreFailure": true,
-                                "timeoutMinutes": 15
-                              },
-                              {
-                                "type": "set_attribute",
-                                "attributes": {
-                                  "Phase": "complete-rejected"
-                                }
-                              },
-                              {
-                                "name": "decision_rejected",
+                                "name": "decision_apply_mismatch",
                                 "type": "set_variable",
                                 "vars": {
                                   "terminal_decision": "rejected"
@@ -861,33 +1234,80 @@
                           "type": "sequence",
                           "steps": [
                             {
-                              "type": "delegate",
-                              "target": "{{config.CtoAgent}}",
-                              "outputVar": "cleanup_result",
-                              "instruction": "Doc maintenance for PR #{{input.PrNumber}} in {{input.Repo}} has exhausted both revision rounds without a final CEO decision (timeout or unexpected signal).\n\nRound-1 update result (DOC_PRS and round-1 INSTRUCTION_UPDATES):\n{{vars.update_round1}}\n\nRound-2 update result (additional INSTRUCTION_UPDATES from revision, if any):\n{{vars.update_round2}}\n\nActions — clean up dangling changes:\n1. Find the DOC_PRS line in round-1 result. For each listed PR: `gh pr close <N> --repo <org/repo> --delete-branch`. Skip if 'none'.\n2. Find INSTRUCTION_UPDATES in BOTH round-1 and round-2 results. Combine the lists (dedup by name). For each instruction: use rollback_instruction to revert to the pre-workflow version. Skip if both are 'none'.\n\nPost to Telegram group: Doc maintenance for PR #{{input.PrNumber}} in {{input.Repo}} timed out after 2 rounds. Open PRs closed and instruction versions rolled back. Manual review may be needed.",
-                              "ignoreFailure": true,
-                              "timeoutMinutes": 15
-                            },
-                            {
                               "type": "set_attribute",
                               "attributes": {
-                                "Phase": "complete-max-rounds"
+                                "Phase": "complete-approved"
                               }
                             },
                             {
-                              "name": "decision_max_rounds",
+                              "name": "decision_approved",
                               "type": "set_variable",
                               "vars": {
-                                "terminal_decision": "cancelled"
+                                "terminal_decision": "approved"
                               }
                             }
                           ]
                         }
+                      },
+                      {
+                        "type": "break"
+                      }
+                    ]
+                  },
+                  "rejected": {
+                    "type": "sequence",
+                    "steps": [
+                      {
+                        "type": "set_attribute",
+                        "attributes": {
+                          "Phase": "complete-rejected"
+                        }
+                      },
+                      {
+                        "name": "decision_rejected",
+                        "type": "set_variable",
+                        "vars": {
+                          "terminal_decision": "rejected"
+                        }
+                      },
+                      {
+                        "type": "break"
                       }
                     ]
                   }
+                },
+                "default": {
+                  "type": "set_attribute",
+                  "attributes": {
+                    "Phase": "revising"
+                  }
                 }
-              ]
+              }
+            ]
+          },
+          {
+            "name": "rounds_exhausted",
+            "type": "branch",
+            "on": "{{vars.terminal_decision | default: 'none'}}",
+            "cases": {
+              "none": {
+                "type": "sequence",
+                "steps": [
+                  {
+                    "type": "set_attribute",
+                    "attributes": {
+                      "Phase": "complete-max-rounds"
+                    }
+                  },
+                  {
+                    "name": "decision_max_rounds",
+                    "type": "set_variable",
+                    "vars": {
+                      "terminal_decision": "cancelled"
+                    }
+                  }
+                ]
+              }
             }
           },
           {
@@ -908,7 +1328,7 @@
       "name": "UwePrImplementationWorkflow",
       "namespace": "fleet",
       "taskQueue": "fleet",
-      "description": "Implements a GitHub issue on a branch, opens PR, runs consensus review loop (max 5 rounds), CEO merge-approval gate (max 5 rounds with changes_requested loop), merges, and fires DocMaintenanceWorkflow. Replaces compiled PrImplementationWorkflow.",
+      "description": "Implements a GitHub issue on a branch, opens PR, runs consensus review loop (max 5 rounds), CEO merge-approval gate (max 5 rounds with changes_requested loop), merges, and fires DocMaintenanceWorkflow. Replaces compiled PrImplementationWorkflow. Epic grants (#436): the reviewed PR head is pinned (HEAD_SHA → consensus ReviewRef, author and CTO excluded), published as ReviewRef only after a unanimous attested approval, the merge gate is visit-guarded, a grant decision merges with --match-head-commit, and doc maintenance receives IssueNumber, ConsensusAgents and PrepAgent (optional input DocPrepAgent).",
       "definition": {
         "name": "root",
         "type": "sequence",
@@ -948,7 +1368,7 @@
             "type": "delegate",
             "target": "{{input.TargetAgent}}",
             "outputVar": "impl_result",
-            "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nImplement the following task in repo {{input.Repo}}. When done, open a PR against main.\n\nTask:\n  Issue number: {{input.IssueNumber | default: 'N/A'}}\n  Description: {{input.Description | default: 'none'}}\n\nBranch name: Use `{{input.BranchName}}` if it is provided and non-empty. Otherwise, auto-generate: use `feat/issue-{{input.IssueNumber}}` if an issue number is provided, or a short `feat/<description-slug>` for description-only tasks.\n\nIMPORTANT: If an issue number is provided, always fetch the latest issue details before starting — run `gh issue view {{input.IssueNumber}} --repo {{input.Repo}} --comments` as your first step and use THAT content as your spec.\n\nAt the end of your response, output the PR URL on its own line:\nPR_URL: https://github.com/{{input.Repo}}/pull/NNN",
+            "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nImplement the following task in repo {{input.Repo}}. When done, open a PR against main.\n\nTask:\n  Issue number: {{input.IssueNumber | default: 'N/A'}}\n  Description: {{input.Description | default: 'none'}}\n\nBranch name: Use `{{input.BranchName}}` if it is provided and non-empty. Otherwise, auto-generate: use `feat/issue-{{input.IssueNumber}}` if an issue number is provided, or a short `feat/<description-slug>` for description-only tasks.\n\nIMPORTANT: If an issue number is provided, always fetch the latest issue details before starting — run `gh issue view {{input.IssueNumber}} --repo {{input.Repo}} --comments` as your first step and use THAT content as your spec.\n\nAt the end of your response, output the PR URL on its own line:\nPR_URL: https://github.com/{{input.Repo}}/pull/NNN\n\nThen output the PR head commit you pushed, on its own line (from `gh pr view <PR> --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>",
             "timeoutMinutes": 30
           },
           {
@@ -997,11 +1417,30 @@
                       "type": "loop",
                       "steps": [
                         {
+                          "name": "pr_prepare_review_ref",
+                          "type": "set_variable",
+                          "vars": {
+                            "head_sha": "{{vars.impl_result | extract: 'HEAD_SHA:\\s*([0-9a-f]{40})' | default: ''}}",
+                            "review_ref": "",
+                            "review_scrub": ""
+                          }
+                        },
+                        {
+                          "name": "pr_clear_review_attrs",
+                          "type": "set_attribute",
+                          "attributes": {
+                            "ReviewRef": "",
+                            "ReviewScrub": ""
+                          }
+                        },
+                        {
                           "args": {
                             "Subject": "PR for issue #{{input.IssueNumber | default: 'N/A'}} in {{input.Repo}}",
                             "Synthesizer": "{{config.EscalationTarget}}",
-                            "ReviewPrompt": "Review the PR in repo {{input.Repo}} that implements:\n  Issue number: {{input.IssueNumber | default: 'N/A'}}\n  Description: {{input.Description | default: 'none'}}\n\nIf an issue number is provided, run `gh issue view {{input.IssueNumber}} --repo {{input.Repo}} --comments` to read the full spec and verify the implementation matches.\n\nImplementation summary from {{input.TargetAgent}}:\n{{vars.impl_result}}\n\nPrior consensus feedback (if any):\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nCEO feedback incorporated (if any):\n{{vars.ceo_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nReview discipline:\n- Fetch the current spec/PR fresh — do NOT summarize prior rounds.\n- Verify each prior finding against the current text before reporting.\n- Give structured findings with severity (blocker, high, medium, low).\n- End your response with exactly one verdict line: VERDICT: approved | changes_requested | needs_human_review.\n\nEVIDENCE MIRROR (best-effort, optional).\nPost your full technical review as a comment on that GitHub issue/PR, then put the resulting comment URL on your EVIDENCE: line.\n- Before posting, remove private identities, internal IDs, hostnames, workflow-run identifiers, and private incident or configuration details. The repository may be public. Your unsanitized response is retained in durable workflow history regardless.\n- If the GitHub CLI, auth, API, or the comment post fails for any reason, write `EVIDENCE: none`, mention the mirror failure in one short clause in SUMMARY:, and still return every BLOCKER: line and your VERDICT:. A failed mirror never downgrades or fails the review — durable history is the source of truth, the comment is a convenience copy.\n- If you are continuing a response that was cut off and the earlier part already contains an `EVIDENCE: https://...` URL, reuse that URL and do NOT post a second comment.",
-                            "ReviewerAgents": "{{input.ConsensusAgents}}"
+                            "ReviewPrompt": "Review the PR in repo {{input.Repo}} that implements:\n  Issue number: {{input.IssueNumber | default: 'N/A'}}\n  Description: {{input.Description | default: 'none'}}\n\nIf an issue number is provided, run `gh issue view {{input.IssueNumber}} --repo {{input.Repo}} --comments` to read the full spec and verify the implementation matches.\n\nImplementation summary from {{input.TargetAgent}}:\n{{vars.impl_result}}\n\nPrior consensus feedback (if any):\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nCEO feedback incorporated (if any):\n{{vars.ceo_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nReview discipline:\n- Fetch the current spec/PR fresh — do NOT summarize prior rounds.\n- Verify each prior finding against the current text before reporting.\n- Give structured findings with severity (blocker, high, medium, low).\n- End your response with exactly one verdict line: VERDICT: approved | changes_requested | needs_human_review.\n\nEVIDENCE MIRROR (best-effort, optional).\nPost your full technical review as a comment on that GitHub issue/PR, then put the resulting comment URL on your EVIDENCE: line.\n- Before posting, remove private identities, internal IDs, hostnames, workflow-run identifiers, and private incident or configuration details. The repository may be public. Your unsanitized response is retained in durable workflow history regardless.\n- If the GitHub CLI, auth, API, or the comment post fails for any reason, write `EVIDENCE: none`, mention the mirror failure in one short clause in SUMMARY:, and still return every BLOCKER: line and your VERDICT:. A failed mirror never downgrades or fails the review — durable history is the source of truth, the comment is a convenience copy.\n- If you are continuing a response that was cut off and the earlier part already contains an `EVIDENCE: https://...` URL, reuse that URL and do NOT post a second comment.\n\nPR head under review (ReviewRef): {{vars.head_sha | default: 'unknown'}}. Run `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid` and request changes if the head differs from it.\n\nReviewed-ref attestation (#436):\n- End your review with `REVIEWED_REF: <ref>` for the ref you actually checked.\n- If `{{input.Repo}}` is public, check that no private names, internal URLs, hosts, credentials or private links are present, and add `PUBLIC_SCRUB: pass` or `PUBLIC_SCRUB: fail`.",
+                            "ReviewerAgents": "{{input.ConsensusAgents}}",
+                            "ReviewRef": "{{vars.head_sha}}",
+                            "ExcludedAgents": "{{input.TargetAgent}},{{config.CtoAgent}}"
                           },
                           "name": "consensus_review",
                           "type": "child_workflow",
@@ -1106,7 +1545,7 @@
                                     "type": "delegate",
                                     "target": "{{input.TargetAgent}}",
                                     "outputVar": "impl_result",
-                                    "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nApply the following human reviewer feedback on the PR in repo {{input.Repo}}:\n\nFeedback: {{vars.human_decision.Comment | default: 'changes requested'}}\n\nPrior consensus feedback:\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.",
+                                    "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nApply the following human reviewer feedback on the PR in repo {{input.Repo}}:\n\nFeedback: {{vars.human_decision.Comment | default: 'changes requested'}}\n\nPrior consensus feedback:\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nAt the end of your response, output the PR head commit after your push, on its own line (from `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>",
                                     "timeoutMinutes": 30
                                   }
                                 }
@@ -1118,7 +1557,7 @@
                             "type": "delegate",
                             "target": "{{input.TargetAgent}}",
                             "outputVar": "impl_result",
-                            "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nRevise the PR in repo {{input.Repo}} based on review feedback.\n\nFull feedback (apply all):\n{{vars.consensus_out.ConsolidatedReasoning}}\n\nPrior CEO feedback (if any):\n{{vars.ceo_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.",
+                            "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nRevise the PR in repo {{input.Repo}} based on review feedback.\n\nFull feedback (apply all):\n{{vars.consensus_out.ConsolidatedReasoning}}\n\nPrior CEO feedback (if any):\n{{vars.ceo_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nAt the end of your response, output the PR head commit after your push, on its own line (from `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>",
                             "timeoutMinutes": 30
                           }
                         },
@@ -1194,6 +1633,76 @@
                       "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nCheck the PR at {{vars.pr_url}} in repo {{input.Repo}} for any unresolved review comments (use `gh pr view --json reviews,reviewRequests` and `gh api repos/{{input.Repo}}/pulls` to inspect). If there are unresolved inline comments or review threads, address each one — push any fixes to the branch. If there are none, confirm all review comments have been addressed. Report: either 'no unresolved comments' or a summary of what was fixed.",
                       "ignoreFailure": true,
                       "timeoutMinutes": 20
+                    },
+                    {
+                      "name": "pr_publish_review_ref",
+                      "type": "branch",
+                      "on": "{{vars.consensus_out.FinalVerdict | default: 'none'}}",
+                      "cases": {
+                        "approved": {
+                          "type": "sequence",
+                          "steps": [
+                            {
+                              "type": "set_variable",
+                              "vars": {
+                                "review_ref": "{{vars.consensus_out.AttestedRef | default: ''}}"
+                              }
+                            },
+                            {
+                              "type": "branch",
+                              "on": "{{vars.review_ref | default: 'none'}}",
+                              "cases": {
+                                "none": {
+                                  "type": "set_variable",
+                                  "vars": {
+                                    "review_scrub": ""
+                                  }
+                                }
+                              },
+                              "default": {
+                                "name": "pr_publish_scrub",
+                                "type": "branch",
+                                "on": "{{vars.consensus_out.ScrubAttested | default: 'false'}}",
+                                "cases": {
+                                  "True": {
+                                    "type": "set_variable",
+                                    "vars": {
+                                      "review_scrub": "pass"
+                                    }
+                                  },
+                                  "true": {
+                                    "type": "set_variable",
+                                    "vars": {
+                                      "review_scrub": "pass"
+                                    }
+                                  }
+                                },
+                                "default": {
+                                  "type": "set_variable",
+                                  "vars": {
+                                    "review_scrub": ""
+                                  }
+                                }
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      "default": {
+                        "type": "set_variable",
+                        "vars": {
+                          "review_ref": "",
+                          "review_scrub": ""
+                        }
+                      }
+                    },
+                    {
+                      "name": "pr_publish_review_attrs",
+                      "type": "set_attribute",
+                      "attributes": {
+                        "ReviewRef": "{{vars.review_ref}}",
+                        "ReviewScrub": "{{vars.review_scrub}}"
+                      }
                     }
                   ]
                 }
@@ -1230,7 +1739,7 @@
                 "notifyStep": {
                   "type": "delegate",
                   "target": "{{config.CtoAgent}}",
-                  "instruction": "Post to Telegram group: PR for issue #{{input.IssueNumber | default: 'N/A'}} in repo {{input.Repo}} ({{vars.pr_url}}) has been approved by consensus and is ready to merge.\n\nContext for your decision:\n- PR: {{vars.pr_url}}\n- Consensus: reviewers approved the implementation as correct and complete\n- Consensus reasoning: {{vars.consensus_out.ConsolidatedReasoning | default: 'see PR review'}}\n- approved → PR is merged immediately and doc maintenance runs; changes_requested → re-enters consensus review loop; rejected → PR is closed without merging\n\nSend the 'merge-approval' signal to this workflow:\n  {\"Decision\":\"approved\"} — approve and merge\n  {\"Decision\":\"changes_requested\",\"Comment\":\"feedback\"} — request changes before merging\n  {\"Decision\":\"rejected\",\"Comment\":\"reason\"} — reject and close without merging",
+                  "instruction": "Post to Telegram group: PR for issue #{{input.IssueNumber | default: 'N/A'}} in repo {{input.Repo}} ({{vars.pr_url}}) has been approved by consensus and is ready to merge.\n\nContext for your decision:\n- PR: {{vars.pr_url}}\n- Consensus: reviewers approved the implementation as correct and complete\n- Consensus reasoning: {{vars.consensus_out.ConsolidatedReasoning | default: 'see PR review'}}\n- approved → PR is merged immediately and doc maintenance runs; changes_requested → re-enters consensus review loop; rejected → PR is closed without merging\n\nSend the 'merge-approval' signal to this workflow:\n  {\"Decision\":\"approved\"} — approve and merge\n  {\"Decision\":\"changes_requested\",\"Comment\":\"feedback\"} — request changes before merging\n  {\"Decision\":\"rejected\",\"Comment\":\"reason\"} — reject and close without merging\n\nEpic grant (#436): gate visit `{{vars.merge_visit}}`, reviewed ref `{{vars.review_ref | default: 'none'}}`. With no reviewed ref this gate is a human decision only. Under an active epic grant the configured CTO agent may approve this exact visit after an independent review with {\"Decision\":\"approved\",\"GrantId\":\"<grant id>\",\"VisitId\":\"<this visit>\",\"ArtifactRef\":\"<reviewed ref>\",\"Evidence\":\"<https url>\"}; the orchestrator checks the grant and sends it, and the workflow discards any approval naming another visit or ref.",
                   "ignoreFailure": true,
                   "timeoutMinutes": 5
                 },
@@ -1238,7 +1747,15 @@
                 "maxReminders": 2,
                 "timeoutMinutes": 180,
                 "autoCompleteOnTimeout": true,
-                "reminderIntervalMinutes": 60
+                "reminderIntervalMinutes": 60,
+                "visitVar": "merge_visit",
+                "delegatedGuard": {
+                  "marker": "GrantId",
+                  "require": {
+                    "VisitId": "{{vars.merge_visit}}",
+                    "ArtifactRef": "{{vars.review_ref}}"
+                  }
+                }
               },
               {
                 "on": "{{vars.merge_decision.Decision | default: 'timeout'}}",
@@ -1297,6 +1814,22 @@
                     "type": "sequence",
                     "steps": [
                       {
+                        "name": "pr_withdraw_review_ref",
+                        "type": "set_variable",
+                        "vars": {
+                          "review_ref": "",
+                          "review_scrub": ""
+                        }
+                      },
+                      {
+                        "name": "pr_withdraw_review_attrs",
+                        "type": "set_attribute",
+                        "attributes": {
+                          "ReviewRef": "",
+                          "ReviewScrub": ""
+                        }
+                      },
+                      {
                         "name": "set_revision_phase",
                         "type": "set_attribute",
                         "attributes": {
@@ -1327,7 +1860,7 @@
                             "type": "delegate",
                             "target": "{{input.TargetAgent}}",
                             "outputVar": "impl_result",
-                            "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nThe CEO requested changes before merging the PR in repo {{input.Repo}}.\n\nCEO feedback: {{vars.merge_decision.Comment | default: 'no specific comment'}}\n\nReviewers have confirmed the CEO's concerns are valid. Apply the necessary changes and push to the branch.\n\nReviewer consensus on CEO feedback:\n{{vars.ceo_consensus_out.ConsolidatedReasoning}}\n\nPrior feedback:\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.",
+                            "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nThe CEO requested changes before merging the PR in repo {{input.Repo}}.\n\nCEO feedback: {{vars.merge_decision.Comment | default: 'no specific comment'}}\n\nReviewers have confirmed the CEO's concerns are valid. Apply the necessary changes and push to the branch.\n\nReviewer consensus on CEO feedback:\n{{vars.ceo_consensus_out.ConsolidatedReasoning}}\n\nPrior feedback:\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nAt the end of your response, output the PR head commit after your push, on its own line (from `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>",
                             "timeoutMinutes": 30
                           },
                           "needs_human_review": {
@@ -1423,27 +1956,71 @@
                 "type": "sequence",
                 "steps": [
                   {
-                    "name": "phase4_merge",
-                    "type": "delegate_with_escalation",
-                    "target": "{{config.CtoAgent}}",
-                    "outputVar": "merge_result",
-                    "instruction": "Merge the PR at {{vars.pr_url}} in repo {{input.Repo}}. Do not force-push. Confirm once merged.",
-                    "timeoutMinutes": 10
+                    "name": "phase4_merge_mode",
+                    "type": "branch",
+                    "on": "{{vars.merge_decision.GrantId | default: 'none'}}",
+                    "cases": {
+                      "none": {
+                        "name": "phase4_merge",
+                        "type": "delegate_with_escalation",
+                        "target": "{{config.CtoAgent}}",
+                        "outputVar": "merge_result",
+                        "instruction": "Merge the PR at {{vars.pr_url}} in repo {{input.Repo}}. Do not force-push. Confirm once merged.",
+                        "timeoutMinutes": 10
+                      }
+                    },
+                    "default": {
+                      "name": "phase4_merge_pinned",
+                      "type": "delegate",
+                      "target": "{{config.CtoAgent}}",
+                      "outputVar": "merge_result",
+                      "instruction": "Merge the PR at {{vars.pr_url}} in repo {{input.Repo}}, approved under an epic grant for the reviewed head {{vars.review_ref}}. Run exactly:\ngh pr merge {{vars.pr_url}} --repo {{input.Repo}} --squash --match-head-commit {{vars.review_ref}}\n\nIf it fails (for example because the head moved after review), do NOT retry, force-push or merge any other way. Report the error. Confirm once merged.",
+                      "ignoreFailure": true,
+                      "timeoutMinutes": 10
+                    }
                   },
                   {
                     "name": "verify_merge_status",
                     "type": "delegate",
                     "target": "{{config.CtoAgent}}",
                     "outputVar": "merge_verification",
-                    "instruction": "Verify the PR at {{vars.pr_url}} in repo {{input.Repo}} was actually merged. Run: gh pr view $(echo '{{vars.pr_url}}' | grep -o '[0-9]*$') --repo {{input.Repo}} --json state,merged\n\nIf the state is MERGED, output exactly: MERGED\nIf not merged (open, closed without merge, or any error), output exactly: FAILED",
+                    "instruction": "Verify whether the PR at {{vars.pr_url}} in repo {{input.Repo}} was actually merged. Run exactly:\ngh pr view {{vars.pr_url}} --repo {{input.Repo}} --json state,mergedAt,mergeCommit\n\n(Never use a `merged` field: gh has no such JSON field and exits 1.)\n\nOutput the command's JSON verbatim on one line prefixed with `PR_STATE_JSON: `. If the command fails for any reason (non-zero exit, error text, no output), output exactly `PR_STATE_JSON: ERROR`. Do not decide whether it merged — the workflow reads the JSON. Put nothing else on a PR_STATE_JSON line.",
                     "ignoreFailure": true,
                     "timeoutMinutes": 5
+                  },
+                  {
+                    "name": "capture_pr_state",
+                    "type": "set_variable",
+                    "vars": {
+                      "pr_state_json": "{{vars.merge_verification | extract: 'PR_STATE_JSON:[ \\t]*([^\\n]*)' | default: ''}}"
+                    }
+                  },
+                  {
+                    "name": "capture_pr_state_merged",
+                    "type": "set_variable",
+                    "vars": {
+                      "pr_state_merged": "{{vars.pr_state_json | extract: '[{,]\\s*\"state\"\\s*:\\s*\"(MERGED)\"\\s*[,}]' | default: ''}}"
+                    }
+                  },
+                  {
+                    "name": "capture_pr_merged_at",
+                    "type": "set_variable",
+                    "vars": {
+                      "pr_merged_at": "{{vars.pr_state_json | extract: '[{,]\\s*\"mergedAt\"\\s*:\\s*\"([^\"]+)\"\\s*[,}]' | default: ''}}"
+                    }
+                  },
+                  {
+                    "name": "compose_merge_check",
+                    "type": "set_variable",
+                    "vars": {
+                      "merge_check": "{{vars.pr_state_merged}}|{{vars.pr_merged_at}}"
+                    }
                   },
                   {
                     "name": "check_merge_state",
                     "type": "set_variable",
                     "vars": {
-                      "merge_state": "{{vars.merge_verification | extract: '(MERGED|FAILED)' | default: 'FAILED'}}"
+                      "merge_state": "{{vars.merge_check | extract: '^(MERGED)\\|[^|]+$' | default: 'FAILED'}}"
                     }
                   },
                   {
@@ -1456,7 +2033,10 @@
                           "Repo": "{{input.Repo}}",
                           "PrNumber": "{{vars.pr_url | extract: '/pull/([0-9]+)'}}",
                           "BranchName": "{{input.BranchName | default: 'feat/issue-{{input.IssueNumber | default: task}}'}}",
-                          "MergeSummary": "{{vars.merge_result | default: ''}}"
+                          "MergeSummary": "{{vars.merge_result | default: ''}}",
+                          "IssueNumber": "{{input.IssueNumber}}",
+                          "ConsensusAgents": "{{input.ConsensusAgents}}",
+                          "PrepAgent": "{{input.DocPrepAgent | default: ''}}"
                         },
                         "name": "fire_doc_maintenance",
                         "type": "fire_and_forget",

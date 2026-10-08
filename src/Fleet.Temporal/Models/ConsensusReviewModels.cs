@@ -38,7 +38,25 @@ public sealed record ConsensusReviewInput(
     /// Set this only to override a deployment-wide value for one review. Raising it does not make
     /// reviewers faster; it stops a slow-but-working review from being killed mid-turn.
     /// </summary>
-    int? AgentBudgetSeconds = null);
+    int? AgentBudgetSeconds = null,
+
+    /// <summary>
+    /// Optional agents that may not review this artifact: its author and the agent that will
+    /// decide on it (#436). When any <see cref="ReviewerAgents"/> entry is listed here (trimmed,
+    /// case-insensitive, blank entries ignored), the workflow fails non-retryably with
+    /// <c>ReviewerNotIndependent</c> before any reviewer is delegated to.
+    /// Accepts a JSON array or a comma-separated string, like <see cref="ReviewerAgents"/>.
+    /// </summary>
+    [property: JsonConverter(typeof(FlexibleStringArrayConverter))]
+    string[]? ExcludedAgents = null,
+
+    /// <summary>
+    /// Optional exact artifact under review: a commit SHA or an artifact SHA-256 (#436). When
+    /// non-blank it is named in front of every reviewer instruction, and it is the only value
+    /// <see cref="ConsensusReviewOutput.AttestedRef"/> can ever carry. When blank, reviewer
+    /// instructions are byte-identical to the pre-#436 text.
+    /// </summary>
+    string? ReviewRef = null);
 
 /// <summary>Output produced by the ConsensusReviewWorkflow.</summary>
 public sealed record ConsensusReviewOutput(
@@ -49,4 +67,19 @@ public sealed record ConsensusReviewOutput(
     string ConsolidatedReasoning,
 
     /// <summary>Per-agent verdicts from the review round.</summary>
-    AgentReview[] PerAgentVerdicts);
+    AgentReview[] PerAgentVerdicts,
+
+    /// <summary>
+    /// The input <c>ReviewRef</c>, only when the round attests it (#436): the final verdict is
+    /// approved, every reviewer approved (unanimous — a synthesizer-approved split round never
+    /// attests), and every reviewer's text has the exact line <c>REVIEWED_REF: &lt;ReviewRef&gt;</c>.
+    /// Otherwise empty. Defaulted so outputs recorded before #436 deserialize unchanged.
+    /// </summary>
+    string AttestedRef = "",
+
+    /// <summary>
+    /// True when at least one approving reviewer wrote the line <c>PUBLIC_SCRUB: pass</c> and no
+    /// reviewer, whatever its verdict, wrote <c>PUBLIC_SCRUB: fail</c> (#436). Defaulted so outputs
+    /// recorded before #436 deserialize unchanged.
+    /// </summary>
+    bool ScrubAttested = false);

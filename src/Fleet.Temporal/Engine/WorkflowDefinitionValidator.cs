@@ -39,6 +39,9 @@ public static class WorkflowDefinitionValidator
                     "required whenever bindTo is present.");
             }
 
+            if (step is WaitForSignalStep gateWait)
+                ValidateGateVisit(gateWait, workflowTypeName);
+
             // An approver-only gate written as a literal is refused before the definition can ever
             // run. The engine checks again at execution — a templated signal name is unknowable
             // here — but catching the literal case at load means the answer arrives when someone
@@ -82,6 +85,54 @@ public static class WorkflowDefinitionValidator
                         "a fail step cannot be suppressed by any ignoreFailure in the same run.");
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// #436 — <c>visitVar</c> and <c>delegatedGuard</c>. The guard is what stops a stale or
+    /// misaddressed delegated approval at consumption, so a guard that cannot tie a payload to the
+    /// current visit is refused here rather than run as a check that checks nothing.
+    /// </summary>
+    private static void ValidateGateVisit(WaitForSignalStep wait, string workflowTypeName)
+    {
+        var label = wait.Name ?? wait.SignalName;
+
+        // A variable NAME, like outputVar and statusVar: the visit id must land somewhere the guard
+        // and later steps can read by a fixed name.
+        if (wait.VisitVar is { } visitVar
+            && (string.IsNullOrWhiteSpace(visitVar) || visitVar.Contains("{{", StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException(
+                $"Workflow definition '{workflowTypeName}' is invalid: wait_for_signal step " +
+                $"'{label}' has visitVar '{visitVar}'. visitVar must be a literal, non-blank " +
+                "variable name, never a template.");
+        }
+
+        if (wait.DelegatedGuard is not { } guard) return;
+
+        if (wait.VisitVar is null)
+        {
+            throw new InvalidOperationException(
+                $"Workflow definition '{workflowTypeName}' is invalid: wait_for_signal step " +
+                $"'{label}' sets 'delegatedGuard' but has no 'visitVar'. The guard ties a delegated " +
+                "approval to the current gate visit, so visitVar is required whenever delegatedGuard is present.");
+        }
+
+        if (string.IsNullOrWhiteSpace(guard.Marker))
+        {
+            throw new InvalidOperationException(
+                $"Workflow definition '{workflowTypeName}' is invalid: wait_for_signal step " +
+                $"'{label}' has a delegatedGuard with a blank 'marker'. The marker names the payload " +
+                "property that identifies a delegated approval (e.g. \"GrantId\").");
+        }
+
+        if (guard.Require is null || !guard.Require.ContainsKey("VisitId"))
+        {
+            throw new InvalidOperationException(
+                $"Workflow definition '{workflowTypeName}' is invalid: wait_for_signal step " +
+                $"'{label}' has a delegatedGuard whose 'require' has no 'VisitId'. A delegated " +
+                "approval must name the gate visit it was decided for, e.g. " +
+                "\"VisitId\": \"{{vars.<visitVar>}}\".");
         }
     }
 

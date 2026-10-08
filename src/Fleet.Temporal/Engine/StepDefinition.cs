@@ -223,6 +223,59 @@ public sealed record WaitForSignalStep : StepDefinition
 
     /// <summary>Payload property compared against <see cref="BindTo"/>. Default <c>blockerRef</c>.</summary>
     public string? BindField { get; init; }
+
+    /// <summary>
+    /// Variable that receives this wait's gate visit id (#436). A literal name, never a template.
+    ///
+    /// On every ENTRY to the wait the engine stores <c>"&lt;signalName&gt;:&lt;n&gt;"</c> in it, where
+    /// <c>n</c> counts entries into any wait of the run that sets this field, starting at 1. It is
+    /// replay-stable because step order is deterministic, and writing it emits no command. While
+    /// the wait is parked the engine also upserts the <c>GateVisit</c> search attribute to the same
+    /// value, and clears it to <c>""</c> when the wait ends. A wait resolved from the signal buffer
+    /// never parks, so it never upserts.
+    ///
+    /// Omitted → no variable, no counter step and no new command: every definition written before
+    /// the field existed replays byte-identically.
+    /// </summary>
+    public string? VisitVar { get; init; }
+
+    /// <summary>
+    /// Consumption guard for delegated approvals (#436). Requires <see cref="VisitVar"/>.
+    ///
+    /// Applied to every payload the wait consumes — buffered, live, or drained after a discard. A
+    /// payload without the <see cref="Engine.DelegatedGuard.Marker"/> property is accepted exactly as
+    /// before (the human path). One with it is accepted only when it matches every
+    /// <see cref="Engine.DelegatedGuard.Require"/> entry; otherwise it is discarded, logged, and the
+    /// wait keeps waiting with its timers unchanged.
+    ///
+    /// Omitted → the wait runs exactly the code it ran before the field existed.
+    /// </summary>
+    public DelegatedGuard? DelegatedGuard { get; init; }
+}
+
+/// <summary>
+/// What a delegated approval must carry to be accepted by a guarded wait (#436).
+///
+/// Delegation is opt-in per payload, and detected fail-safe: ANY property whose name equals
+/// <see cref="Marker"/> ignoring case marks the payload as delegated, whatever its value. A payload
+/// that is not a JSON object, or has no such property, is not delegated and is never discarded.
+/// </summary>
+public sealed record DelegatedGuard
+{
+    /// <summary>
+    /// Property whose presence marks a payload as delegated, e.g. <c>GrantId</c>. Must be non-blank;
+    /// the definition validator refuses a blank one.
+    /// </summary>
+    public string? Marker { get; init; }
+
+    /// <summary>
+    /// Payload property → expected value (supports {{template}}, rendered once at wait entry, after
+    /// the visit id is stored). A delegated payload is accepted only when every key is present
+    /// (exact name first, then ignoring case) with a JSON string value ordinal-equal to its
+    /// rendered expectation, and no rendered expectation is blank. Must contain <c>VisitId</c>.
+    /// Example: <c>{"VisitId": "{{vars.merge_visit}}", "ArtifactRef": "{{vars.review_ref}}"}</c>.
+    /// </summary>
+    public Dictionary<string, string>? Require { get; init; }
 }
 
 /// <summary>

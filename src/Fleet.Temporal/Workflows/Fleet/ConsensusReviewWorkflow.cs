@@ -18,6 +18,10 @@ namespace Fleet.Temporal.Workflows.Fleet;
 ///   3. Assemble the verbatim blocker list in code, and overflow-check it.
 ///   4. Fail-closed / unanimous-approval paths return without synthesis.
 ///   5. Otherwise the synthesizer consolidates the COMPACT reviews into a single verdict.
+///   6. AttestedRef / ScrubAttested are derived from the returned output (#436).
+///
+/// Before step 1, a reviewer listed in ExcludedAgents (the author or the decider) fails the
+/// round non-retryably with ReviewerNotIndependent, with no reviewer delegated to (#436).
 ///
 /// This workflow is single-pass. Callers drive the revision loop — they re-invoke this
 /// workflow after applying changes.
@@ -104,6 +108,20 @@ public class ConsensusReviewWorkflow
     private const string BlockerMarker  = "BLOCKER:";
     private const string VerdictMarker  = "VERDICT:";
 
+    /// <summary>Failure type when a reviewer is also the author or the decider (#436).</summary>
+    internal const string ReviewerNotIndependentErrorType = "ReviewerNotIndependent";
+
+    /// <summary>The one line put in front of every reviewer instruction when ReviewRef is set (#436).</summary>
+    internal const string ReviewRefLinePrefix = "Artifact under review (ReviewRef): ";
+
+    /// <summary>Reviewer attestation line: <c>REVIEWED_REF: &lt;ref&gt;</c>, a whole trimmed line, ordinal.</summary>
+    internal const string ReviewedRefMarker = "REVIEWED_REF:";
+
+    /// <summary>Public-scrub attestation lines (#436).</summary>
+    internal const string PublicScrubMarker = "PUBLIC_SCRUB:";
+    internal const string PublicScrubPassLine = "PUBLIC_SCRUB: pass";
+    private const string PublicScrubFailValue = "fail";
+
     [WorkflowRun]
     public async Task<ConsensusReviewOutput> RunAsync(ConsensusReviewInput input)
     {
@@ -112,8 +130,32 @@ public class ConsensusReviewWorkflow
         if (string.IsNullOrWhiteSpace(input.Synthesizer))
             throw new ArgumentException("Synthesizer is required.", nameof(input));
 
-        var reviewers = input.ReviewerAgents;
-        var synthesizer = input.Synthesizer;
+        // ── Independence (#436) ──────────────────────────────────────────────────
+        // Checked BEFORE any patch marker or activity, so a refused round records no command at
+        // all and no reviewer is ever delegated to. An input without ExcludedAgents finds nothing
+        // here and continues exactly as before, so existing histories replay unchanged.
+        var notIndependent = FindNonIndependentReviewers(input.ReviewerAgents, input.ExcludedAgents);
+        if (notIndependent.Length > 0)
+        {
+            throw new Temporalio.Exceptions.ApplicationFailureException(
+                $"Reviewer(s) {string.Join(", ", notIndependent)} are listed in ExcludedAgents " +
+                "(the author or the decider of the artifact) and cannot review it independently. " +
+                "No reviewer was delegated to.",
+                errorType: ReviewerNotIndependentErrorType,
+                nonRetryable: true);
+        }
+
+        var output = await RunReviewRoundAsync(input);
+
+        // One pure step over whichever output the round produced — compact or legacy, fast path,
+        // fail-closed, overflow or synthesized — so no return path can skip the attestation rules.
+        return ApplyAttestation(output, input.ReviewRef);
+    }
+
+    private static async Task<ConsensusReviewOutput> RunReviewRoundAsync(ConsensusReviewInput input)
+    {
+        var reviewers = input.ReviewerAgents!;
+        var synthesizer = input.Synthesizer!;
         var workflowId = Workflow.Info.WorkflowId;
 
         // Gate BEFORE the reviewer instruction is assembled or any activity is scheduled —
@@ -142,9 +184,11 @@ public class ConsensusReviewWorkflow
             .Select(agent =>
             {
                 var perspective = input.AgentPerspectives?.GetValueOrDefault(agent);
-                var instruction = string.IsNullOrWhiteSpace(perspective)
-                    ? input.ReviewPrompt + instructionSuffix
-                    : input.ReviewPrompt + "\n\n" + perspective + instructionSuffix;
+                var instruction = PrefixReviewRef(
+                    string.IsNullOrWhiteSpace(perspective)
+                        ? input.ReviewPrompt + instructionSuffix
+                        : input.ReviewPrompt + "\n\n" + perspective + instructionSuffix,
+                    input.ReviewRef);
 
                 return Workflow.ExecuteActivityAsync<AgentTaskResult>(
                     DelegateToAgentActivity.ActivityName,
@@ -644,6 +688,107 @@ public class ConsensusReviewWorkflow
 
         return new ConsensusReviewOutput(finalVerdict, reasoning, reviews);
     }
+
+    // ── Independence and attestation (#436) ───────────────────────────────────────
+
+    /// <summary>
+    /// Reviewers that also appear in <paramref name="excluded"/>, in reviewer order, each once.
+    /// Both sides are trimmed and compared case-insensitively; blank entries on either side are
+    /// ignored. Empty when nothing is excluded — the pre-#436 input shape.
+    /// </summary>
+    internal static string[] FindNonIndependentReviewers(string[]? reviewers, string[]? excluded)
+    {
+        if (reviewers is not { Length: > 0 } || excluded is not { Length: > 0 }) return [];
+
+        var excludedNames = new HashSet<string>(
+            excluded.Where(e => !string.IsNullOrWhiteSpace(e)).Select(e => e.Trim()),
+            StringComparer.OrdinalIgnoreCase);
+        if (excludedNames.Count == 0) return [];
+
+        return reviewers
+            .Where(r => !string.IsNullOrWhiteSpace(r) && excludedNames.Contains(r.Trim()))
+            .Select(r => r.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    /// <summary>
+    /// Names the artifact in front of a reviewer instruction. A blank ref returns the instruction
+    /// unchanged — byte-identical to the pre-#436 text.
+    /// </summary>
+    internal static string PrefixReviewRef(string instruction, string? reviewRef) =>
+        string.IsNullOrWhiteSpace(reviewRef)
+            ? instruction
+            : ReviewRefLinePrefix + reviewRef + "\n\n" + instruction;
+
+    /// <summary>
+    /// Sets <see cref="ConsensusReviewOutput.AttestedRef"/> and
+    /// <see cref="ConsensusReviewOutput.ScrubAttested"/> from the round's own output. Pure and
+    /// deterministic: it reads only the verdicts and the durable review texts.
+    /// </summary>
+    internal static ConsensusReviewOutput ApplyAttestation(ConsensusReviewOutput output, string? reviewRef) =>
+        output with
+        {
+            AttestedRef = ComputeAttestedRef(output, reviewRef),
+            ScrubAttested = ComputeScrubAttested(output.PerAgentVerdicts),
+        };
+
+    /// <summary>
+    /// <paramref name="reviewRef"/> only when it is non-blank, the final verdict is approved,
+    /// every reviewer verdict is approved (the synthesizer cannot make a split round attest), and
+    /// every review text has a line that, trimmed, is ordinal-equal to
+    /// <c>REVIEWED_REF: &lt;reviewRef&gt;</c>. Otherwise empty. Nothing is inferred from anything else.
+    /// </summary>
+    internal static string ComputeAttestedRef(ConsensusReviewOutput output, string? reviewRef)
+    {
+        if (string.IsNullOrWhiteSpace(reviewRef)) return "";
+        if (!string.Equals(output.FinalVerdict, ReviewVerdict.Approved, StringComparison.Ordinal)) return "";
+        if (output.PerAgentVerdicts is not { Length: > 0 } reviews) return "";
+
+        var expectedLine = ReviewedRefMarker + " " + reviewRef;
+        foreach (var review in reviews)
+        {
+            if (review is null) return "";
+            if (!string.Equals(review.Verdict, ReviewVerdict.Approved, StringComparison.Ordinal)) return "";
+            if (!TrimmedLines(review.ReviewText).Any(line => string.Equals(line, expectedLine, StringComparison.Ordinal)))
+                return "";
+        }
+
+        return reviewRef;
+    }
+
+    /// <summary>
+    /// True when at least one APPROVING review has the exact trimmed line <c>PUBLIC_SCRUB: pass</c>
+    /// and no review of any verdict has a <c>PUBLIC_SCRUB:</c> line whose value is <c>fail</c>
+    /// (case-insensitive, trimmed). A fail anywhere wins.
+    /// </summary>
+    internal static bool ComputeScrubAttested(AgentReview[]? reviews)
+    {
+        if (reviews is not { Length: > 0 }) return false;
+
+        var approvedPass = false;
+        foreach (var review in reviews)
+        {
+            if (review is null) continue;
+            var approving = string.Equals(review.Verdict, ReviewVerdict.Approved, StringComparison.Ordinal);
+
+            foreach (var line in TrimmedLines(review.ReviewText))
+            {
+                if (IsScrubFailLine(line)) return false;
+                if (approving && string.Equals(line, PublicScrubPassLine, StringComparison.Ordinal))
+                    approvedPass = true;
+            }
+        }
+
+        return approvedPass;
+    }
+
+    private static bool IsScrubFailLine(string trimmedLine) =>
+        trimmedLine.StartsWith(PublicScrubMarker, StringComparison.OrdinalIgnoreCase) &&
+        trimmedLine[PublicScrubMarker.Length..].Trim().Equals(PublicScrubFailValue, StringComparison.OrdinalIgnoreCase);
+
+    private static IEnumerable<string> TrimmedLines(string? text) =>
+        (text ?? "").Split('\n').Select(line => line.Trim());
 
     private static string Truncate(string text, int max, string suffix)
     {

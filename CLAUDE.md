@@ -292,6 +292,19 @@ events — locations, contacts, polls, venue shares — are not attachments.
   attachment only — the caption or placeholder still reaches the agent, and
   `HasMediaAttachment` stays set so group media is not lost behind the mention gate.
 
+## Epic grants
+
+Opt-in (`FLEET_EPIC_GRANTS_ENABLED`, default false) run-scoped delegation of `design-approval`,
+`merge-approval` and `doc-review` to the configured CTO agent (#436). A `wait_for_signal` with
+`visitVar` publishes the `GateVisit` attribute; its `delegatedGuard` discards any payload carrying
+`GrantId` whose `VisitId`/`ArtifactRef` miss the current visit and `vars.review_ref`. Consensus
+`AttestedRef` (unanimous + `REVIEWED_REF:` lines, author and CTO excluded) is the only source of
+`review_ref`/`ReviewRef`. The bridge forwards the CTO's `approved` + `GrantId` to the orchestrator
+(`EpicGrantService`, D1–D11, unique visit key, one send, no retry); no MCP tool creates or revokes
+grants. A payload without `GrantId`, a wait without `visitVar` and a run outside an active grant
+behave exactly as before. See `docs/epic-grants.md` (threat model, scope, checks, deploy rule:
+no bridge restart during consensus).
+
 ## Code Conventions
 
 - .NET 10, C# latest features

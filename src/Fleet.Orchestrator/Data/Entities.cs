@@ -417,6 +417,93 @@ public class OutputStyle
     public string? Description { get; set; }
 }
 
+// ─── Epic Grants (#436) ───────────────────────────────────────────────────────
+
+/// <summary>
+/// One human-approved, run-scoped epic grant: while it is active and unexpired, the configured CTO
+/// agent may send <c>approved</c> on the in-scope delegable gates of runs linked to one driver run.
+/// </summary>
+/// <remarks>
+/// <see cref="ScopeJson"/> is the request body exactly as the operator submitted it and is never
+/// edited; <see cref="ScopeSha256"/> is its lowercase hex SHA-256 and is re-checked on every
+/// decision. The driver columns are derived copies for listing. The only mutation after creation is
+/// revocation (<see cref="Status"/>, <see cref="RevokedAt"/>, <see cref="RevokeReason"/>), and only
+/// from <see cref="EpicGrantStatus.Active"/>. Expiry is computed, never written.
+/// </remarks>
+public class EpicGrant
+{
+    /// <summary>
+    /// Grant id, stored <c>char(36)</c>. A <see cref="Guid"/> rather than a string because Pomelo
+    /// reserves the <c>char(36)</c> store type for GUIDs; the API carries it in its <c>D</c> form.
+    /// </summary>
+    public Guid Id { get; set; }
+
+    /// <summary><see cref="EpicGrantStatus.Active"/> or <see cref="EpicGrantStatus.Revoked"/>.</summary>
+    public required string Status { get; set; }
+
+    public required string ScopeJson { get; set; }
+    public required string ScopeSha256 { get; set; }
+    public required string DriverNamespace { get; set; }
+    public required string DriverWorkflowId { get; set; }
+    public required string DriverRunId { get; set; }
+
+    /// <summary>The configured <c>FLEET_CTO_AGENT</c> when the grant was created.</summary>
+    public required string CtoAgent { get; set; }
+
+    public DateTime CreatedAt { get; set; }
+    public DateTime ExpiresAt { get; set; }
+    public DateTime? RevokedAt { get; set; }
+    public string? RevokeReason { get; set; }
+}
+
+/// <summary>Valid values for <see cref="EpicGrant.Status"/>.</summary>
+public static class EpicGrantStatus
+{
+    public const string Active = "active";
+    public const string Revoked = "revoked";
+}
+
+/// <summary>
+/// The permanent at-most-once record of one delegated decision per gate visit.
+/// </summary>
+/// <remarks>
+/// The UNIQUE key (<see cref="Namespace"/>, <see cref="WorkflowId"/>, <see cref="RunId"/>,
+/// <see cref="Gate"/>, <see cref="VisitId"/>) is the only guard against a second decision for the
+/// same visit. A row is inserted <see cref="EpicGrantDecisionStatus.Reserved"/> and may move only
+/// to <see cref="EpicGrantDecisionStatus.Sent"/> or <see cref="EpicGrantDecisionStatus.SendFailed"/>.
+/// It is never deleted, released or set back to reserved: a crash leaves it reserved, which means
+/// "delivery unknown", and a new decision needs a new visit.
+/// </remarks>
+public class EpicGrantDecision
+{
+    public long Id { get; set; }
+    public Guid GrantId { get; set; }
+    public required string Namespace { get; set; }
+    public required string WorkflowId { get; set; }
+    public required string RunId { get; set; }
+    public required string Gate { get; set; }
+    public required string VisitId { get; set; }
+    public required string ArtifactRef { get; set; }
+    public required string Evidence { get; set; }
+    public required string Caller { get; set; }
+
+    /// <summary>One of <see cref="EpicGrantDecisionStatus"/>.</summary>
+    public required string Status { get; set; }
+
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+
+    public EpicGrant Grant { get; set; } = null!;
+}
+
+/// <summary>Valid values for <see cref="EpicGrantDecision.Status"/>.</summary>
+public static class EpicGrantDecisionStatus
+{
+    public const string Reserved = "reserved";
+    public const string Sent = "sent";
+    public const string SendFailed = "send_failed";
+}
+
 // ─── Credentials Audit ────────────────────────────────────────────────────────
 
 /// <summary>

@@ -324,7 +324,7 @@ export type StopStartState = 'idle' | 'confirming' | 'pending' | 'success' | 'er
 export type WfActionState = 'idle' | 'confirming-cancel' | 'confirming-restart' | 'confirming-terminate' | 'pending' | 'success' | 'error'
 export type CancelState = 'idle' | 'confirming' | 'cancelling' | 'success' | 'error'
 export type ConfigSaveState = 'idle' | 'saving' | 'success' | 'error'
-export type ActiveView = 'agents' | 'workflows' | 'instructions' | 'project-contexts' | 'output-styles' | 'wf-definitions' | 'alerts' | 'schedules' | 'namespaces' | 'repositories' | 'credentials' | 'memory'
+export type ActiveView = 'agents' | 'workflows' | 'instructions' | 'project-contexts' | 'output-styles' | 'wf-definitions' | 'alerts' | 'schedules' | 'namespaces' | 'repositories' | 'credentials' | 'memory' | 'epic-grants'
 
 // ── Memory types ──────────────────────────────────────────────────────────────
 
@@ -489,4 +489,83 @@ export interface WorkflowTypeInfo {
   namespace: string
   taskQueue: string
   inputSchema: string | null
+}
+
+// ── Epic grants (#436) — orchestrator `/api/epic-grants`, JSON camelCase ─────────
+
+export type EpicGrantStatus = 'active' | 'revoked'
+/** `revoked` if revoked, else `expired` once now ≥ expiresAt (orchestrator clock), else `active`. */
+export type EpicGrantEffectiveStatus = 'active' | 'expired' | 'revoked'
+
+export interface EpicGrantView {
+  id: string
+  status: EpicGrantStatus
+  effectiveStatus: EpicGrantEffectiveStatus
+  scopeSha256: string
+  driverNamespace: string
+  driverWorkflowId: string
+  driverRunId: string
+  ctoAgent: string
+  createdAt: string
+  expiresAt: string
+  revokedAt: string | null
+  revokeReason: string | null
+}
+
+export type EpicGrantDecisionStatus = 'reserved' | 'sent' | 'send_failed'
+
+export interface EpicGrantDecisionView {
+  id: number
+  grantId: string
+  namespace: string
+  workflowId: string
+  runId: string
+  gate: string
+  visitId: string
+  artifactRef: string
+  evidence: string
+  caller: string
+  status: EpicGrantDecisionStatus
+  createdAt: string
+  updatedAt: string
+}
+
+export interface EpicGrantDetail extends EpicGrantView {
+  scope: object
+  decisions: EpicGrantDecisionView[]
+}
+
+export interface ScopeValidationDriver {
+  namespace: string
+  workflowId: string
+  runId: string
+  status: string
+}
+
+export interface ScopeValidationWorkflow {
+  type: string
+  version: number
+  sha256: string
+  hashMatches: boolean
+  delegationCapable: boolean
+  gates: string[]
+}
+
+export interface ScopeValidationTarget {
+  repo: string
+  issues: number[]
+  allowPublic: boolean
+  visibility: 'public' | 'private' | 'unknown'
+  denied: boolean
+}
+
+/** `POST /api/epic-grants/validate` (200), and the 400 body of `POST /api/epic-grants`. */
+export interface ScopeValidationReport {
+  valid: boolean
+  errors: string[]
+  scopeSha256: string | null
+  driver: ScopeValidationDriver | null
+  workflows: ScopeValidationWorkflow[]
+  targets: ScopeValidationTarget[]
+  expiresAt: string | null
 }

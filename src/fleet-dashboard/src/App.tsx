@@ -57,6 +57,7 @@ import StartWorkflowModal from './components/StartWorkflowModal'
 import SchedulesView from './components/SchedulesView'
 import NamespacesView from './components/NamespacesView'
 import RepositoriesView from './components/RepositoriesView'
+import EpicGrantsView from './components/EpicGrantsView'
 import OutputStylesView from './components/OutputStylesView'
 import CredentialsView from './components/CredentialsView'
 import MemoryView from './components/MemoryView'
@@ -238,7 +239,7 @@ export default function App() {
   const [deleteMsg, setDeleteMsg] = useState<Record<string, string>>({})
 
   // Navigation state — synced with URL hash
-  const VALID_VIEWS: ActiveView[] = ['agents', 'workflows', 'instructions', 'project-contexts', 'output-styles', 'wf-definitions', 'alerts', 'schedules', 'namespaces', 'repositories', 'credentials']
+  const VALID_VIEWS: ActiveView[] = ['agents', 'workflows', 'instructions', 'project-contexts', 'output-styles', 'wf-definitions', 'alerts', 'schedules', 'namespaces', 'repositories', 'credentials', 'epic-grants']
   // `#view` or `#view/param`. The second segment exists so a link can name a row rather than
   // only a page — without it `#output-styles/alpha` matches no view and silently lands on agents.
   // `#view` or `#view/param`. The second segment exists so a link can name a row rather than
@@ -2107,6 +2108,10 @@ export default function App() {
 
         {activeView === 'repositories' && (
           <RepositoriesView />
+        )}
+
+        {activeView === 'epic-grants' && (
+          <EpicGrantsView />
         )}
 
         {activeView === 'credentials' && (

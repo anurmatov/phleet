@@ -35,6 +35,9 @@ public sealed class SearchAttributeInitializer(
             ["DocPrs"]      = IndexedValueType.Keyword,
             ["Phase"]       = IndexedValueType.Keyword,
             ["ReviewDate"]  = IndexedValueType.Keyword,
+            ["GateVisit"]   = IndexedValueType.Keyword,   // #436
+            ["ReviewRef"]   = IndexedValueType.Keyword,   // #436
+            ["ReviewScrub"] = IndexedValueType.Keyword,   // #436
         };
 
     public async Task StartAsync(CancellationToken cancellationToken)

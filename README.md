@@ -16,6 +16,8 @@ Phleet is an open-source, self-hosted multi-agent AI platform built on .NET 10, 
 
 Optional [primary-human priority](docs/primary-human-priority.md) puts addressed human messages ahead of routine queued work without interrupting or entering workflow turns.
 
+Optional [epic grants](docs/epic-grants.md) (off by default) let a human approve one bounded scope in the dashboard, inside which the configured CTO agent may approve design, merge and doc gates — only for the exact artifact an independent, unanimous review attested, at the current gate visit.
+
 ## See it in action
 
 <p align="center">

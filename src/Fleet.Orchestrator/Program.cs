@@ -9,12 +9,14 @@ using Fleet.Orchestrator.Services;
 using Fleet.Shared;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Configuration
 builder.Services.Configure<RabbitMqOptions>(builder.Configuration.GetSection(RabbitMqOptions.Section));
 builder.Services.Configure<TemporalOptions>(builder.Configuration.GetSection(TemporalOptions.Section));
+builder.Services.Configure<EpicGrantOptions>(builder.Configuration.GetSection(EpicGrantOptions.Section));
 
 // Database
 var connectionString = builder.Configuration.GetConnectionString("OrchestratorDb");
@@ -89,6 +91,12 @@ builder.Services.AddSingleton<WorkflowStore>();
 builder.Services.AddSingleton<TemporalClientRegistry>();
 builder.Services.AddHostedService<TemporalPollerService>();
 
+// Epic grants (#436): opt-in, run-scoped delegated gate approvals. Off unless EpicGrants:Enabled.
+builder.Services.TryAddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<IEpicGrantTemporal, TemporalEpicGrantClient>();
+builder.Services.AddHttpClient<RepoVisibilityReader>(c => c.Timeout = RepoVisibilityReader.Timeout);
+builder.Services.AddScoped<EpicGrantService>();
+
 // MCP server (HTTP transport — same port as REST, path /mcp)
 builder.Services
     .AddMcpServer()
@@ -129,6 +137,12 @@ if (!string.IsNullOrEmpty(connectionString))
         Console.Error.WriteLine($"Fleet.Orchestrator startup aborted, exiting 1: {ex.Message}");
         Environment.Exit(1);
     }
+
+    // Epic grants (#436): report the switch once at startup, so `epic_grants_misconfigured`
+    // (Enabled with MaxDays <= 0) is visible before the first decision is refused.
+    using var epicGrantScope = app.Services.CreateScope();
+    var epicGrants = epicGrantScope.ServiceProvider.GetRequiredService<EpicGrantService>();
+    app.Logger.LogInformation("Epic grants are {State}", epicGrants.IsEnabled ? "enabled" : "disabled");
 }
 
 // WebSocket support
@@ -328,6 +342,10 @@ app.MapPromptSizePolicyEndpoints();
 // toggle-active. Mapped from Endpoints/ so the endpoint tests exercise the same handlers a live
 // orchestrator serves rather than a copy of them.
 app.MapProjectContextEndpoints();
+
+// REST: the /api/epic-grants surface (#436) — list, detail, validate, create, revoke, and the
+// bridge-only decisions route. Mapped from Endpoints/EpicGrantEndpoints.cs.
+app.MapEpicGrantEndpoints();
 
 // REST: active workflows across all Temporal namespaces
 app.MapGet("/api/workflows", (WorkflowStore workflows) =>

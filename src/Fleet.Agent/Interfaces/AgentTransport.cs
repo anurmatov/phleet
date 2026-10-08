@@ -1,3 +1,4 @@
+using Fleet.Agent.Services.MessageCopy;
 using System.Text.RegularExpressions;
 using Fleet.Agent.Abstractions;
 using Fleet.Agent.Configuration;
@@ -23,12 +24,12 @@ namespace Fleet.Agent.Interfaces;
 /// When TELEGRAM_BOT_TOKEN is missing or empty the service enters headless mode:
 /// RabbitMQ + MCP remain fully functional; Telegram poller is disabled.
 /// </summary>
-public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramMediaSender
+public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramMediaSender, ITelegramCopyClient
 {
     private ITelegramBotClient? _bot;
 
     /// <summary>Allows tests to inject a fake bot without a real token.</summary>
-    internal ITelegramBotClient? BotForTesting { set => _bot = value; }
+    internal ITelegramBotClient? BotForTesting { set => SetPollingBot(value); }
     private readonly AgentOptions _agentConfig;
     private readonly TelegramOptions _telegramConfig;
     private readonly AllowlistHolder _allowlist;
@@ -71,6 +72,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
         => (RouterHookForTesting ?? _router.HandleAsync)(msg);
 
     private readonly ITelegramBotClient? _journalSendBot;
+    private readonly MessageCopyCoordinator? _messageCopy;
     private string _botUsername = "";
     private readonly MediaGroupBuffer _mediaGroupBuffer;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _groupSizeCapped = new();
@@ -98,8 +100,10 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
         RichFallbackCounter? richFallbackCounter = null,
         SinkSuppressionCounter? sinkCounter = null,
         JournalCapture? journal = null,
-        TurnBindingPublisher? turnBindings = null)
+        TurnBindingPublisher? turnBindings = null,
+        MessageCopyCoordinator? messageCopy = null)
     {
+        _messageCopy = messageCopy;
         _journal = journal;
         _turnBindings = turnBindings;
         _agentConfig = agentConfig.Value;
@@ -131,8 +135,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
         {
             try
             {
-                _bot = new TelegramBotClient(telegramConfig.Value.BotToken);
-                // The same credential, separate request policy: ordinary replies retain SDK retries.
+                SetPollingBot(new TelegramBotClient(telegramConfig.Value.BotToken));
+                // Attachment sends keep their separate no-retry client; copy always uses _bot.
                 if (journal?.SendEnabled == true)
                     _journalSendBot = new TelegramBotClient(new TelegramBotClientOptions(telegramConfig.Value.BotToken) { RetryCount = 0 });
                 sinkCounter?.SetStartupTelegramState(SinkSuppressionCounter.TelegramConfigured);
@@ -183,6 +187,78 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
             _telegramConfig,
             (chatId, text) => SendTextAsync(chatId, text),
             logger);
+    }
+
+    private void SetPollingBot(ITelegramBotClient? bot)
+    {
+        if (_bot is not null && _telegramConfig.MessageCopyEnabled)
+            _bot.OnApiResponseReceived -= RejectCopyRetry;
+        _bot = bot;
+        if (bot is not null && _telegramConfig.MessageCopyEnabled)
+            bot.OnApiResponseReceived += RejectCopyRetry;
+    }
+
+    private static async ValueTask RejectCopyRetry(ITelegramBotClient bot, Telegram.Bot.Args.ApiResponseEventArgs args, CancellationToken ct)
+    {
+        // This SDK event runs before its 429 retry loop. Reject only copyMessage's
+        // rate limit here, without another client or changing any shared retry options.
+        // Ordinary replies, polling and prompt/cleanup calls retain the SDK policy.
+        if (args.ApiRequestEventArgs.Request.MethodName != "copyMessage" || args.ResponseMessage.IsSuccessStatusCode) return;
+        using var response = System.Text.Json.JsonDocument.Parse(await args.ResponseMessage.Content.ReadAsStringAsync(ct));
+        var error = response.RootElement;
+        if (error.GetProperty("error_code").GetInt32() != 429) return;
+        int? retryAfter = error.TryGetProperty("parameters", out var parameters)
+            && parameters.TryGetProperty("retry_after", out var retry) ? retry.GetInt32() : null;
+        throw new Telegram.Bot.Exceptions.ApiRequestException(error.GetProperty("description").GetString() ?? "Too Many Requests",
+            429, new ResponseParameters { RetryAfter = retryAfter });
+    }
+
+    private ITelegramBotClient CopyBot => _telegramConfig.MessageCopyEnabled && _bot is not null
+        ? _bot : throw new InvalidOperationException("Message copy unavailable");
+
+    async Task<string> ITelegramCopyClient.GetChatAsync(long chatId, CancellationToken ct)
+    {
+        var chat = await CopyCall(() => CopyBot.GetChat(chatId, ct));
+        return chat.Title ?? string.Join(" ", new[] { chat.FirstName, chat.LastName }.Where(s => !string.IsNullOrEmpty(s)));
+    }
+
+    async Task<int> ITelegramCopyClient.SendPromptAsync(long chatId, int messageId, string label, string nonce, CancellationToken ct)
+    {
+        var message = await CopyCall(() => CopyBot.SendRequest(new CopyPromptRequest(chatId, messageId, label, nonce), ct));
+        return message.Id;
+    }
+
+    // The SDK omits default false values, but this prompt's golden contract requires an
+    // explicit allow_sending_without_reply:false. Keep its small wire shape closed here.
+    private sealed class CopyPromptRequest(long chatId, int messageId, string label, string nonce)
+        : Telegram.Bot.Requests.RequestBase<Message>("sendMessage")
+    {
+        public override HttpContent ToHttpContent() => new StringContent(System.Text.Json.JsonSerializer.Serialize(new
+        {
+            chat_id = chatId, text = $"Copy this message to {label}?",
+            reply_parameters = new { message_id = messageId, allow_sending_without_reply = false },
+            reply_markup = new { inline_keyboard = new[] { new[]
+            {
+                new { text = "Copy", callback_data = $"cp1:{nonce}:y" },
+                new { text = "Cancel", callback_data = $"cp1:{nonce}:n" },
+            } } },
+        }), System.Text.Encoding.UTF8, "application/json");
+    }
+
+    async Task<int> ITelegramCopyClient.CopyMessageAsync(long chatId, long sourceChatId, int messageId, CancellationToken ct) =>
+        (await CopyCall(() => CopyBot.CopyMessage(chatId, sourceChatId, messageId, cancellationToken: ct))).Id;
+
+    async Task ITelegramCopyClient.AnswerCallbackAsync(string callbackId, string text, CancellationToken ct) =>
+        await CopyCall(async () => { await CopyBot.AnswerCallbackQuery(callbackId, text, cancellationToken: ct); return true; });
+
+    async Task ITelegramCopyClient.EditPromptAsync(long chatId, int messageId, string text, CancellationToken ct) =>
+        await CopyCall(() => CopyBot.EditMessageText(chatId, messageId, text,
+            replyMarkup: new Telegram.Bot.Types.ReplyMarkups.InlineKeyboardMarkup(Array.Empty<Telegram.Bot.Types.ReplyMarkups.InlineKeyboardButton[]>()), cancellationToken: ct));
+
+    private static async Task<T> CopyCall<T>(Func<Task<T>> call)
+    {
+        try { return await call(); }
+        catch (Telegram.Bot.Exceptions.ApiRequestException e) { throw new TelegramCopyException(e.ErrorCode, e.Message, e.Parameters?.RetryAfter); }
     }
 
     // ── IDocumentDownloader implementations (private, nested) ────────────────
@@ -855,11 +931,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
                 errorHandler: (_, ex, source, _) => OnError(ex, source),
                 receiverOptions: new ReceiverOptions
                 {
-                    AllowedUpdates =
-                    [
-                        UpdateType.Message,
-                        UpdateType.MessageReaction,
-                    ]
+                    AllowedUpdates = PollingUpdates
                 },
                 cancellationToken: stoppingToken);
 
@@ -1479,8 +1551,28 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
     /// - <c>MessageReactionCount</c>: logged and skipped (aggregate counts, out of scope).
     /// All other update types are ignored (messages are handled by <see cref="OnMessage"/>).
     /// </summary>
+    internal UpdateType[] PollingUpdates => _telegramConfig.MessageCopyEnabled
+        ? [UpdateType.Message, UpdateType.MessageReaction, UpdateType.CallbackQuery]
+        : [UpdateType.Message, UpdateType.MessageReaction];
+
+    private async Task HandleCopyCallbackAsync(CallbackQuery callback)
+    {
+        if (!_telegramConfig.MessageCopyEnabled || _bot is null) return;
+        if (callback.Data?.StartsWith("cp1:", StringComparison.Ordinal) == true && _messageCopy is not null)
+        {
+            await _messageCopy.HandleCallbackAsync(new(callback.Id, callback.From.Id,
+                callback.Message?.Chat.Id ?? 0, callback.Message?.Id ?? 0, callback.Data));
+            return;
+        }
+        using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        try { await _bot.AnswerCallbackQuery(callback.Id, cancellationToken: limit.Token); }
+        catch (Exception) { _logger.LogWarning("Message copy unrelated callback answer failed"); }
+    }
+
     private Task OnUpdate(Update update)
     {
+        if (update.Type == UpdateType.CallbackQuery && update.CallbackQuery is { } callback)
+            return HandleCopyCallbackAsync(callback);
         if (update.Type == UpdateType.MessageReactionCount)
         {
             _logger.LogWarning("Received MessageReactionCount update — skipping (not supported)");

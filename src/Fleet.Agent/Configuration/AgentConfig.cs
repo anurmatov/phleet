@@ -133,6 +133,7 @@ public sealed class TelegramOptions
     public List<long> AllowedUserIds { get; set; } = [];
     public List<long> AllowedGroupIds { get; set; } = [];
     public bool SendOnly { get; set; }
+    public bool MessageCopyEnabled { get; set; }
 
     /// <summary>Prompt injected when a message has images but no caption text. Default: "(image attached — please analyze)".</summary>
     public string DefaultImagePrompt { get; set; } = "(image attached — please analyze)";

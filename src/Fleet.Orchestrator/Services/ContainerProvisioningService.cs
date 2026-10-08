@@ -21,6 +21,13 @@ public sealed class ContainerProvisioningService(
     internal const string JournalMcpServerName = "fleet-comms-journal";
     internal const string JournalFilesServerName = "fleet-journal-files";
     internal const string JournalFilesGrant = "mcp__fleet-journal-files__fetch_attachment";
+    internal const string MessageCopyServerName = "fleet-telegram-copy";
+    internal const string MessageCopyGrant = "mcp__fleet-telegram-copy__copy_message";
+    private static bool IsCopyGrant(string name) => string.Equals(name.Trim(), MessageCopyGrant, StringComparison.OrdinalIgnoreCase);
+    private static bool HasCopyGrant(Agent agent) => agent.Tools.Any(t => t.IsEnabled && IsCopyGrant(t.ToolName));
+    private static bool CopyEnabled(Agent agent) => HasCopyGrant(agent) && HasTelegramBot(agent);
+    private static string? CopyWarning(Agent agent) => HasCopyGrant(agent) && !HasTelegramBot(agent)
+        ? "message_copy_unavailable:no_telegram_bot" : null;
     private static bool HasFilesGrant(Agent agent) => agent.Tools.Any(t => t.IsEnabled && string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase));
     private static IEnumerable<string> SendWarnings(Agent agent)
     {
@@ -83,6 +90,7 @@ public sealed class ContainerProvisioningService(
 
         if (FilesWarning(agent) is { } warning) diffs = [.. diffs, warning];
         diffs = [.. diffs, .. SendWarnings(agent)];
+        if (CopyWarning(agent) is { } copyWarning) diffs = [.. diffs, copyWarning];
 
         logger.LogInformation(
             "Provision preview for {Agent} ({Container}): {DiffCount} diff(s)",
@@ -855,6 +863,7 @@ public sealed class ContainerProvisioningService(
         var journal = BuildJournalProvisioning(agent);
         if (FilesWarning(agent) is { } filesWarning) logger.LogWarning("{warning}", filesWarning);
         foreach (var warning in SendWarnings(agent)) logger.LogWarning("{warning}", warning);
+        if (CopyWarning(agent) is { } copyWarning) logger.LogWarning("{warning}", copyWarning);
         if (agent.JournalEnabled && journal.IngestToken is null)
             logger.LogInformation(
                 "Journal enabled for '{Agent}', but it has no Telegram bot token ref; omitting Journal config",
@@ -1167,7 +1176,7 @@ public sealed class ContainerProvisioningService(
             throw new InvalidOperationException($"Agent '{agent.Name}' cannot be provisioned: {localFault}");
 
         var tools = agent.Tools.Where(t => t.IsEnabled).OrderBy(t => t.ToolName)
-            .Select(t => JournalGrants.IsSendGrant(t.ToolName) ? JournalGrants.SendGrant : string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase) ? JournalFilesGrant : t.ToolName).ToList();
+            .Select(t => IsCopyGrant(t.ToolName) ? MessageCopyGrant : JournalGrants.IsSendGrant(t.ToolName) ? JournalGrants.SendGrant : string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase) ? JournalFilesGrant : t.ToolName).ToList();
 
         // Codex derives config.toml enabled_tools from AllowedTools (entrypoint.sh).
         // Auto-grant the same baseline tools that GenerateSettingsJson grants for claude/gemini,
@@ -1270,6 +1279,7 @@ public sealed class ContainerProvisioningService(
         if (HasTelegramBot(agent))
         {
             node["Agent"]!.AsObject()["ReplyLookup"] = ReplyLookupState(agent, journal);
+            if (CopyEnabled(agent)) node["Telegram"]!.AsObject()["MessageCopyEnabled"] = true;
             if (primaryId is { } primary) node["Telegram"]!.AsObject()["PrimaryHumanUserId"] = primary;
         }
         if (style is not null && !HasStyleFile(agent))
@@ -1366,6 +1376,8 @@ public sealed class ContainerProvisioningService(
         string fleetMemoryMcpUrl,
         string? journalReadToken = null, bool filesEnabled = false)
     {
+        if (agent.McpEndpoints.Any(e => string.Equals(e.McpName.Trim(), MessageCopyServerName, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException("message_copy_endpoint_reserved");
         if (agent.McpEndpoints.Any(e => string.Equals(e.McpName, JournalFilesServerName, StringComparison.OrdinalIgnoreCase)))
             throw new InvalidOperationException("journal_files_endpoint_reserved");
         var mcpServers = agent.McpEndpoints
@@ -1417,6 +1429,8 @@ public sealed class ContainerProvisioningService(
         if (filesEnabled && (HasFilesGrant(agent) || JournalGrants.HasSendGrant(agent)) && agent.JournalEnabled && HasTelegramBot(agent)
             && !string.IsNullOrWhiteSpace(journalReadToken))
             mcpServers[JournalFilesServerName] = new { type = "http", url = "http://127.0.0.1:8091/journal-files/v1/mcp" };
+        if (CopyEnabled(agent))
+            mcpServers[MessageCopyServerName] = new { type = "http", url = "http://127.0.0.1:8092/telegram-copy/v1/mcp" };
         return JsonSerializer.Serialize(new { mcpServers }, IndentedJson);
     }
 
@@ -1490,6 +1504,8 @@ public sealed class ContainerProvisioningService(
 
     private string? DescribeJournalProvisioningFault(Agent agent)
     {
+        if (agent.McpEndpoints.Any(e => string.Equals(e.McpName.Trim(), MessageCopyServerName, StringComparison.OrdinalIgnoreCase)))
+            return "message_copy_endpoint_reserved";
         if (agent.McpEndpoints.Any(e => string.Equals(e.McpName, JournalFilesServerName, StringComparison.OrdinalIgnoreCase)))
             return "journal_files_endpoint_reserved";
         var hasJournalEndpoint = agent.McpEndpoints.Any(e =>
@@ -1596,7 +1612,7 @@ public sealed class ContainerProvisioningService(
         var allow = agent.Tools
             .Where(t => t.IsEnabled)
             .OrderBy(t => t.ToolName)
-            .Select(t => JournalGrants.IsSendGrant(t.ToolName) ? JournalGrants.SendGrant : string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase) ? JournalFilesGrant : t.ToolName)
+            .Select(t => IsCopyGrant(t.ToolName) ? MessageCopyGrant : JournalGrants.IsSendGrant(t.ToolName) ? JournalGrants.SendGrant : string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase) ? JournalFilesGrant : t.ToolName)
             .ToList();
 
         // Every agent gets memory_get — provisioning-time enforcement of mandatory read access.

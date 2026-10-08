@@ -156,17 +156,29 @@ public sealed class TaskManager
     /// <summary>A single real Telegram human turn, never a steered relay/client turn.</summary>
     public bool TryGetCurrentHumanTurn(long privateChatId, out RunningTask? turn)
     {
+        if (!TryGetCurrentHumanTurn(out var chatId, out turn) || chatId != privateChatId)
+        { turn = null; return false; }
+        return true;
+    }
+
+    public bool TryGetCurrentHumanTurn(out long chatId, out RunningTask? turn)
+    {
+        chatId = 0;
         turn = null;
         var active = _chatTasks.SelectMany(pair => pair.Value.Snapshot().Select(t => (Chat: pair.Key, Task: t)))
             .Where(pair => !pair.Task.Closed && !pair.Task.Cts.IsCancellationRequested).ToArray();
         if (active.Length != 1) return false;
         var candidate = active[0];
-        if (candidate.Chat != privateChatId || candidate.Task.UserId != privateChatId
-            || candidate.Task.Source is not (TaskSource.UserMessage or TaskSource.NewCommand)
-            || candidate.Task.Identity?.ChannelId != ChannelIds.Telegram) return false;
+        if (!IsPrivateHumanTurn(candidate.Chat, candidate.Task)) return false;
+        chatId = candidate.Chat;
         turn = candidate.Task;
         return true;
     }
+
+    private static bool IsPrivateHumanTurn(long chatId, RunningTask task) =>
+        chatId > 0 && chatId == task.UserId
+        && task.Source is TaskSource.UserMessage or TaskSource.NewCommand
+        && task.Identity?.ChannelId == ChannelIds.Telegram;
 
     public bool HasRunningTasks(long chatId) => GetChatState(chatId).Count > 0;
 

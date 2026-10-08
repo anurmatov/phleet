@@ -201,6 +201,7 @@ excluded without anyone having to list it.
 | The final reply, the merged-turn reply, an injected turn's answer, a recovered answer | yes, body only |
 | Photos from `[IMAGE:]` markers inside a reply | yes, with media |
 | The TTS voice reply | yes |
+| Runtime `copy_message` prompts, callbacks and copies | no; no copy-record contract or receipt ([message copying](message-copy.md)) |
 | Tool-progress blockquotes, the provider warning, "Task failed", "Error:", "Task cancelled.", "Done! (no text output)" | no |
 | Queue, busy, cancel and command notices; image-skip notices | no |
 | The photo-missing hint and the photo-failed notice inside a reply (they carry a local path) | no |

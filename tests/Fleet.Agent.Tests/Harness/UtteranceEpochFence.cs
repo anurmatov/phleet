@@ -184,17 +184,47 @@ internal sealed class UtteranceEpochFence
 internal sealed class ManualTimeProvider : TimeProvider
 {
     private DateTimeOffset _now;
+    private readonly object _lock = new();
+    private readonly List<ManualTimer> _timers = [];
+    public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+    {
+        lock (_lock)
+        {
+            var timer = new ManualTimer(this, callback, state);
+            _timers.Add(timer); timer.Change(dueTime, period); return timer;
+        }
+    }
+    private sealed class ManualTimer(ManualTimeProvider owner, TimerCallback callback, object? state) : ITimer
+    {
+        public DateTimeOffset? Due { get; private set; }
+        private TimeSpan _period;
+        public bool Change(TimeSpan dueTime, TimeSpan period)
+        {
+            lock (owner._lock) { Due = dueTime == Timeout.InfiniteTimeSpan ? null : owner._now + dueTime; _period = period; return true; }
+        }
+        public void Fire()
+        {
+            Due = _period > TimeSpan.Zero ? owner._now + _period : null;
+            callback(state);
+        }
+        public void Dispose() { lock (owner._lock) { Due = null; owner._timers.Remove(this); } }
+        public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
+    }
 
     public ManualTimeProvider(DateTimeOffset? start = null) =>
         _now = start ?? new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
-    public override DateTimeOffset GetUtcNow() => _now;
+    public override DateTimeOffset GetUtcNow() { lock (_lock) return _now; }
 
     /// <summary>Move the clock forward. Never backwards — a monotonic clock is part of the contract.</summary>
     public void Advance(TimeSpan delta)
     {
         if (delta < TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(delta), "The fence's clock is monotonic.");
-        _now += delta;
+        lock (_lock)
+        {
+            _now += delta;
+            foreach (var timer in _timers.Where(t => t.Due <= _now).ToArray()) timer.Fire();
+        }
     }
 }

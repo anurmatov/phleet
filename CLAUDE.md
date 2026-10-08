@@ -251,6 +251,13 @@ agent network changes. Files remain untrusted data; only an explicit requester
 instruction permits sharing. See `docs/comms-journal.md` and
 `docs/comms-deployment.md` for limits, errors and rollback.
 
+The explicitly granted `mcp__fleet-telegram-copy__copy_message` runs on
+`127.0.0.1:8092` using the agent's own polling bot, only for a current private
+human turn and an allowlisted destination after a single-use requester tap.
+No content read, journal row, receipt or retry; ambiguous delivery requires a
+human destination check first, and rollout requires both new images before
+operator grant/reprovision. See `docs/message-copy.md`.
+
 ## Telegram Image Handling
 
 - **Image-only messages** (no caption): `AgentTransport` passes the photo to `MessageRouter`, which substitutes `TelegramOptions.DefaultImagePrompt` (default: `"(image attached — please analyze)"`) as the task prompt so the executor always receives a non-empty string.

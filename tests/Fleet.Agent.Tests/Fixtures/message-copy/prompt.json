@@ -1,0 +1,1 @@
+{"chat_id":1001,"text":"Copy this message to Synthetic recipient?","reply_parameters":{"message_id":77,"allow_sending_without_reply":false},"reply_markup":{"inline_keyboard":[[{"text":"Copy","callback_data":"cp1:NONCE:y"},{"text":"Cancel","callback_data":"cp1:NONCE:n"}]]}}

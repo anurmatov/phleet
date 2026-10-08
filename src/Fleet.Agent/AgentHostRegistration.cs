@@ -1,3 +1,4 @@
+using Fleet.Agent.Services.MessageCopy;
 using Fleet.Agent.Services.JournalFiles;
 using Fleet.Agent.Abstractions;
 using Fleet.Agent.Configuration;
@@ -135,6 +136,9 @@ public static class AgentHostRegistration
         Func<string, bool>? fileExists = null)
     {
         var agent = services.GetRequiredService<IOptions<AgentOptions>>().Value;
+        var telegram = services.GetRequiredService<IOptions<TelegramOptions>>().Value;
+        if (telegram.MessageCopyEnabled && string.IsNullOrWhiteSpace(telegram.BotToken))
+            Fail("message_copy_unavailable:no_telegram_bot");
 
         if (DescribeHostedProviderFault(services, agent) is { } hostedFault)
             Fail(hostedFault);
@@ -292,6 +296,22 @@ public static class AgentHostRegistration
     public static IServiceCollection AddAgentDaemonServices(
         this IServiceCollection services, IConfiguration configuration)
     {
+        // Own loopback listener starts before intake and warmup. Lazy client breaks the
+        // transport/coordinator dependency cycle without constructing a second bot.
+        if (configuration.GetValue<bool>("Telegram:MessageCopyEnabled")
+            && !string.IsNullOrWhiteSpace(configuration["Telegram:BotToken"]))
+        {
+            services.AddSingleton<MessageCopyCounter>();
+            services.AddSingleton(sp => new MessageCopyCoordinator(
+                () => sp.GetRequiredService<TaskManager>().TryGetCurrentHumanTurn(out var chat, out var turn) ? (chat, turn) : (0, null),
+                sp.GetRequiredService<AllowlistHolder>(),
+                () => sp.GetServices<IHostedService>().OfType<AgentTransport>().FirstOrDefault(),
+                sp.GetRequiredService<MessageCopyCounter>(), sp.GetRequiredService<ILogger<MessageCopyCoordinator>>()));
+            services.AddSingleton<MessageCopyTools>();
+            services.AddSingleton<MessageCopyListener>();
+            services.AddHostedService(sp => sp.GetRequiredService<MessageCopyListener>());
+        }
+
         // File listener startup completes before task intake and CLI warmup can start.
         // Without files, preserve the existing capture service startup order.
         var journalFilesEnabled = configuration.GetValue<bool>("Journal:FilesEnabled") || configuration.GetValue<bool>("Journal:SendEnabled");

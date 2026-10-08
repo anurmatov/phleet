@@ -1,3 +1,4 @@
+using Fleet.Agent.Services.MessageCopy;
 using Fleet.Agent.Services.JournalFiles;
 using Fleet.Journal.Client;
 using Microsoft.AspNetCore.Hosting;
@@ -26,13 +27,13 @@ else
     builder.Services.AddAgentDaemonServices(builder.Configuration);
 
 // Keep the container-network control listener when the private loopback app is enabled.
-if (!isCliMode && (builder.Configuration.GetValue<bool>("Journal:FilesEnabled") || builder.Configuration.GetValue<bool>("Journal:SendEnabled")))
+if (!isCliMode && (builder.Configuration.GetValue<bool>("Journal:FilesEnabled") || builder.Configuration.GetValue<bool>("Journal:SendEnabled") || builder.Configuration.GetValue<bool>("Telegram:MessageCopyEnabled")))
     builder.WebHost.ConfigureKestrel(options => options.ListenAnyIP(8080));
 
 var app = builder.Build();
 app.Use(async (context, next) =>
 {
-    if (context.Request.Path.Value == JournalFilesListener.Path) { context.Response.StatusCode = 404; return; }
+    if (context.Request.Path.Value == JournalFilesListener.Path || context.Request.Path.Value == MessageCopyListener.Path) { context.Response.StatusCode = 404; return; }
     await next(context);
 });
 

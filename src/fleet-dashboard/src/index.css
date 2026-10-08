@@ -5548,3 +5548,30 @@ body {
 .journal-panel-unavailable { margin-top: 10px; color: var(--red); }
 .journal-panel-muted { margin-top: 10px; color: var(--muted); }
 .journal-panel-warn { color: var(--amber); }
+/* ── Epic grants (#436) ─────────────────────────────────────────────────── */
+.eg-mono { font-family: monospace; font-size: 12px; overflow-wrap: anywhere; }
+.eg-muted { color: var(--muted); font-size: 12px; }
+.eg-ok { color: var(--accent); }
+.eg-bad { color: var(--red); font-weight: 600; }
+.eg-report { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+.eg-report-stale { opacity: 0.6; }
+.eg-report-grid { display: grid; grid-template-columns: 120px 1fr; gap: 4px 12px; margin-top: 10px; font-size: 12px; }
+.eg-report-label { color: var(--muted); }
+.eg-subtitle { display: flex; align-items: center; gap: 8px; margin: 12px 0 4px; font-size: 12px; font-weight: 600; }
+.eg-inline-btn { margin-left: 4px; }
+.eg-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.eg-table th { font-size: 10px; font-weight: 500; color: var(--muted); text-align: left; padding: 2px 6px 4px; border-bottom: 1px solid var(--border); }
+.eg-table td { padding: 4px 6px; vertical-align: top; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.eg-row-public td { background: rgba(245, 158, 11, 0.10); }
+.eg-row-public td:first-child { box-shadow: inset 3px 0 0 var(--amber); }
+.eg-row-bad td { background: rgba(248, 113, 113, 0.08); }
+.eg-badge { font-size: 10px; padding: 1px 6px; border-radius: 8px; font-weight: 600; }
+.eg-badge-public { background: rgba(245, 158, 11, 0.18); color: var(--amber); }
+.eg-badge-bad { background: rgba(248, 113, 113, 0.15); color: var(--red); }
+.eg-status-active { background: rgba(74, 222, 128, 0.12); color: var(--accent); }
+.eg-status-expired { background: rgba(136, 136, 136, 0.15); color: var(--muted); }
+.eg-status-revoked { background: rgba(248, 113, 113, 0.12); color: var(--red); }
+.eg-selected { border-color: var(--grey); }
+.eg-revoke-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 12px; font-size: 12px; color: var(--amber); border-top: 1px solid var(--border); }
+.eg-revoke-confirm .config-input { width: 260px; }
+.eg-detail { padding: 8px 12px 12px; border-top: 1px solid var(--border); }

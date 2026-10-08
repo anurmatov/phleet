@@ -132,6 +132,13 @@ export default function Sidenav({
         </button>
 
         <button
+          className={`sidenav-item${activeView === 'epic-grants' ? ' active' : ''}`}
+          onClick={() => { onNavigate('epic-grants'); onNavClose() }}
+        >
+          <span className="sidenav-item-label">Epic Grants</span>
+        </button>
+
+        <button
           className={`sidenav-item${activeView === 'alerts' ? ' active' : ''}`}
           onClick={() => { onNavigate('alerts'); onNavClose() }}
         >

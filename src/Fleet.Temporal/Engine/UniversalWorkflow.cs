@@ -62,8 +62,33 @@ public class UniversalWorkflow
     /// <summary>Value of a delegate's <c>statusVar</c> before the attempt returns a status (#424).</summary>
     internal const string UnknownStatus = "unknown";
 
+    /// <summary>
+    /// Keyword search attribute naming the gate visit a parked <c>visitVar</c> wait is serving, or
+    /// <c>""</c> when none is (#436). The orchestrator compares it with a delegated decision's
+    /// <c>VisitId</c> before sending; the wait's guard re-checks at consumption.
+    /// </summary>
+    internal const string GateVisitAttribute = "GateVisit";
+
+    /// <summary>
+    /// The guard's discard warning, as a message template (#436). Operators search for the leading
+    /// text. Only the signal name and the wait's own visit id are logged — never the payload, which
+    /// carries the decision's evidence.
+    /// </summary>
+    internal const string DelegatedDiscardLogTemplate =
+        "delegated signal discarded: stale visit or artifact (signal={Signal} visit={Visit})";
+
     /// <summary>A signal that arrived with no waiter registered, plus its arrival ordinal.</summary>
     private readonly record struct BufferedSignal(JsonElement Payload, long Seq);
+
+    /// <summary>
+    /// A wait's <c>delegatedGuard</c> with its expectations rendered (#436), resolved ONCE at wait
+    /// entry like <c>bindTo</c>, so nothing that runs during the wait can move what it accepts.
+    /// </summary>
+    private sealed record ConsumptionGuard(
+        string? Marker,
+        IReadOnlyList<KeyValuePair<string, string>> Expected,
+        string SignalName,
+        string? VisitId);
 
     private readonly Dictionary<string, object?> _variables = new();
     private readonly Dictionary<string, TaskCompletionSource<JsonElement>> _signalWaiters = new();
@@ -83,6 +108,14 @@ public class UniversalWorkflow
     /// mean anything (MUST NOT 9).
     /// </summary>
     private long _signalArrivalSeq;
+
+    /// <summary>
+    /// Entries into waits that set <c>visitVar</c>, across the whole run (#436). One counter for
+    /// every such wait, so a visit id is unique within the run whatever its signal name. Workflow
+    /// state, not a command: it is rebuilt identically on replay because step order is
+    /// deterministic.
+    /// </summary>
+    private int _gateVisitCount;
 
     private TemplateEngine _template = null!;
     private bool _skipRemaining;
@@ -580,21 +613,49 @@ public class UniversalWorkflow
     {
         var signalName = _template.ResolveString(step.SignalName);
 
+        // Gate visit (#436), minted FIRST: before the buffer fast path, so a buffered payload is
+        // judged against the visit that consumes it, and before the guard renders, so
+        // {{vars.<visitVar>}} sees it. A variable write, not a command. No visitVar → no counter
+        // step, no variable and no command, exactly as before the field existed.
+        string? visitId = null;
+        if (step.VisitVar != null)
+        {
+            visitId = $"{signalName}:{++_gateVisitCount}";
+            SetVar(step.VisitVar, visitId);
+        }
+
         // Resolved ONCE, here at wait entry, so a later change to the variable it reads cannot
         // move the target mid-wait (#280 D-6).
         var bindTo = step.BindTo is null ? null : _template.ResolveString(step.BindTo);
+
+        // Rendered ONCE, for the same reason (#436). Null for an unguarded wait, which then takes
+        // none of the guarded branches below.
+        var guard = step.DelegatedGuard is null ? null : RenderGuard(step.DelegatedGuard, signalName, visitId);
 
         // Buffer fast path, at the head: a wakeup that arrived while this workflow was mid-tick
         // is already here, so there is nothing to park on. Deliberately BEFORE the Phase upsert
         // and the notification — a park that never happens must not announce itself as parked or
         // ask a human to act on something already resolved (#280 D-2, F1/F2).
-        if (TryTakeBufferedSignal(signalName, afterSeq: 0, out var bufferedPayload))
+        //
+        // A guarded wait judges the entry first (#436). The entry is removed either way: a stale
+        // delegated approval left in the buffer would only be judged again by the next visit. A
+        // discarded entry falls through to the normal park.
+        if (TryTakeBufferedSignal(signalName, afterSeq: 0, out var bufferedPayload)
+            && (guard is null || GuardAccepts(guard, bufferedPayload)))
         {
             Workflow.Logger.LogInformation(
                 "Signal '{Signal}' was already buffered — resuming without parking", signalName);
             WriteBindMatch(step, bindTo, bufferedPayload, engineTimeout: false);
             if (step.OutputVar != null) SetVar(step.OutputVar, bufferedPayload);
             return bufferedPayload;
+        }
+
+        // The visit is announced only by a wait that actually parks, and before Phase, so an
+        // observer that sees the gate phase also sees which visit it is (#436).
+        if (visitId != null)
+        {
+            try { UpsertGateVisitAttribute(visitId); }
+            catch { /* non-fatal */ }
         }
 
         if (step.Phase != null)
@@ -620,7 +681,10 @@ public class UniversalWorkflow
         if (step.TimeoutMinutes == null)
         {
             // Wait indefinitely
-            await Workflow.WaitConditionAsync(() => tcs.Task.IsCompleted);
+            if (guard is null)
+                await Workflow.WaitConditionAsync(() => tcs.Task.IsCompleted);
+            else
+                (_, tcs) = await WaitGuardedAsync(signalName, tcs, guard, waitSlice: null);
         }
         else
         {
@@ -637,8 +701,18 @@ public class UniversalWorkflow
                 var waitSlice = TimeSpan.FromTicks(
                     Math.Min(reminderInterval.Ticks, (totalTimeout - elapsed).Ticks));
 
-                var received = await Workflow.WaitConditionAsync(
-                    () => tcs.Task.IsCompleted, waitSlice);
+                bool received;
+                if (guard is null)
+                {
+                    received = await Workflow.WaitConditionAsync(
+                        () => tcs.Task.IsCompleted, waitSlice);
+                }
+                else
+                {
+                    // A discard re-waits inside THIS slice, so elapsed and remindersSent below are
+                    // untouched by it: no reminder fires early and the total never extends (#436).
+                    (received, tcs) = await WaitGuardedAsync(signalName, tcs, guard, waitSlice);
+                }
 
                 if (received) break;
 
@@ -657,6 +731,7 @@ public class UniversalWorkflow
             if (!tcs.Task.IsCompleted)
             {
                 _signalWaiters.Remove(signalName);
+                if (visitId != null) ClearGateVisitAttribute();
                 if (step.AutoCompleteOnTimeout)
                 {
                     var timeoutPayload = JsonSerializer.SerializeToElement(new { Decision = "timeout" });
@@ -675,10 +750,131 @@ public class UniversalWorkflow
 
         var payload = tcs.Task.Result;
         _signalWaiters.Remove(signalName);
+        if (visitId != null) ClearGateVisitAttribute();
 
         WriteBindMatch(step, bindTo, payload, engineTimeout: false);
         if (step.OutputVar != null) SetVar(step.OutputVar, payload);
         return payload;
+    }
+
+    // -------------------------------------------------------------------------
+    // Delegated-approval guard (#436)
+    // -------------------------------------------------------------------------
+
+    private ConsumptionGuard RenderGuard(DelegatedGuard guard, string signalName, string? visitId)
+    {
+        var expected = new List<KeyValuePair<string, string>>();
+        foreach (var (field, template) in guard.Require ?? [])
+            expected.Add(new(field, _template.ResolveString(template)));
+        return new ConsumptionGuard(guard.Marker, expected, signalName, visitId);
+    }
+
+    /// <summary>
+    /// Waits on a guarded wait's waiter until a payload the guard accepts completes it, or the
+    /// slice runs out (#436). Returns the waiter that is current afterwards: a discard replaces it.
+    ///
+    /// <para>
+    /// On a discard, three steps with no <c>await</c> between them, so no signal can slip past:
+    /// (a) a fresh waiter replaces the completed one in <c>_signalWaiters</c>; (b) the buffer is
+    /// drained — a signal that arrived after the stale one found the waiter already completed and
+    /// went there — and each drained entry is judged in turn; (c) the wait resumes against the
+    /// slice's ORIGINAL end, recorded when the slice started. A remainder of zero or less is the
+    /// slice timing out. An indefinite wait (<paramref name="waitSlice"/> null) loops without
+    /// timers.
+    /// </para>
+    ///
+    /// <para>
+    /// "Received" is read from the waiter, not from the wait's return value: a payload that lands in
+    /// the same workflow task as the slice's timer completes the waiter even when the timer wins,
+    /// and it must be judged here — returning it unjudged would let the caller accept it.
+    /// </para>
+    /// </summary>
+    private async Task<(bool Received, TaskCompletionSource<JsonElement> Waiter)> WaitGuardedAsync(
+        string signalName,
+        TaskCompletionSource<JsonElement> waiter,
+        ConsumptionGuard guard,
+        TimeSpan? waitSlice)
+    {
+        DateTime? sliceEnd = waitSlice is { } slice ? Workflow.UtcNow + slice : null;
+        var remaining = waitSlice;
+
+        while (true)
+        {
+            var current = waiter;
+            if (remaining is { } wait)
+                await Workflow.WaitConditionAsync(() => current.Task.IsCompleted, wait);
+            else
+                await Workflow.WaitConditionAsync(() => current.Task.IsCompleted);
+
+            if (!current.Task.IsCompleted) return (false, waiter);
+            if (GuardAccepts(guard, current.Task.Result)) return (true, waiter);
+
+            // (a) Re-register synchronously.
+            waiter = new TaskCompletionSource<JsonElement>();
+            _signalWaiters[signalName] = waiter;
+
+            // (b) Drain. Every taken entry is removed, accepted or not.
+            while (TryTakeBufferedSignal(signalName, afterSeq: 0, out var buffered))
+            {
+                if (!GuardAccepts(guard, buffered)) continue;
+                waiter.TrySetResult(buffered);
+                return (true, waiter);
+            }
+
+            // (c) Same slice, original end.
+            if (sliceEnd is { } end)
+            {
+                var left = end - Workflow.UtcNow;
+                if (left <= TimeSpan.Zero) return (false, waiter);
+                remaining = left;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The guard's verdict on one payload (#436); logs the discard. A payload that is not an
+    /// object, or carries no marker property (name compared ignoring case, any value), is the human
+    /// path and is always accepted. A marked payload must match every rendered expectation.
+    /// </summary>
+    private static bool GuardAccepts(ConsumptionGuard guard, JsonElement payload)
+    {
+        if (!IsDelegated(guard.Marker, payload)) return true;
+
+        // An empty requirement list proves nothing about the visit; validation refuses it, and a
+        // marked payload is discarded here rather than waved through.
+        if (guard.Expected.Count > 0
+            && guard.Expected.All(e => RequirementMet(payload, e.Key, e.Value)))
+            return true;
+
+        Workflow.Logger.LogWarning(DelegatedDiscardLogTemplate, guard.SignalName, guard.VisitId);
+        return false;
+    }
+
+    private static bool IsDelegated(string? marker, JsonElement payload) =>
+        marker is not null
+        && payload.ValueKind == JsonValueKind.Object
+        && payload.EnumerateObject().Any(p => string.Equals(p.Name, marker, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// One expectation: the property (exact name first, then ignoring case, as in
+    /// <see cref="CompareBind"/>) is a JSON string ordinal-equal to <paramref name="expected"/>, and
+    /// <paramref name="expected"/> is not blank — a blank rendering (no review published yet) can
+    /// never be matched, whatever the payload says.
+    /// </summary>
+    private static bool RequirementMet(JsonElement payload, string field, string expected)
+    {
+        if (string.IsNullOrWhiteSpace(expected)) return false;
+
+        if (!payload.TryGetProperty(field, out var value))
+        {
+            value = payload.EnumerateObject()
+                .Where(p => string.Equals(p.Name, field, StringComparison.OrdinalIgnoreCase))
+                .Select(p => p.Value)
+                .FirstOrDefault();
+        }
+
+        return value.ValueKind == JsonValueKind.String
+            && string.Equals(value.GetString(), expected, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -1036,6 +1232,21 @@ public class UniversalWorkflow
     {
         Workflow.UpsertTypedSearchAttributes(
             SearchAttributeKey.CreateKeyword("Phase").ValueSet(phase));
+    }
+
+    private static void UpsertGateVisitAttribute(string visitId) =>
+        Workflow.UpsertTypedSearchAttributes(
+            SearchAttributeKey.CreateKeyword(GateVisitAttribute).ValueSet(visitId));
+
+    /// <summary>
+    /// Clears <c>GateVisit</c> to <c>""</c> when a parked visit ends (#436) — accepted, timed out
+    /// with auto-complete, or timed out and thrown — so a decision addressed to it is refused
+    /// before it is sent. Non-fatal, like the Phase upsert.
+    /// </summary>
+    private static void ClearGateVisitAttribute()
+    {
+        try { UpsertGateVisitAttribute(""); }
+        catch { /* non-fatal */ }
     }
 
     /// <summary>

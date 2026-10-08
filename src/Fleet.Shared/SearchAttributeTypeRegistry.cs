@@ -19,6 +19,11 @@ public static class SearchAttributeTypeRegistry
         ["Repo"]        = AttributeType.Keyword,
         ["DocPrs"]      = AttributeType.Keyword,
         ["ReviewDate"]  = AttributeType.Keyword,
+        // #436 epic grants: the parked gate visit, the attested review ref and the public-scrub
+        // verdict a delegated decision is checked against.
+        ["GateVisit"]   = AttributeType.Keyword,
+        ["ReviewRef"]   = AttributeType.Keyword,
+        ["ReviewScrub"] = AttributeType.Keyword,
     };
 
     /// <summary>Returns the registered type for the attribute name, or null if unknown.</summary>

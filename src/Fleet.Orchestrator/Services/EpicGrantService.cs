@@ -977,7 +977,10 @@ public sealed class EpicGrantService(
         static (EpicGrantDecisionResult, Exception?) Refuse(string reason, Exception? ex = null) =>
             (EpicGrantDecisionResult.Refused(reason), ex);
 
-        // The grant first: an unknown id is an inactive grant.
+        // D1 starts with the switch, so a disabled feature answers `disabled` whatever the id.
+        if (!IsEnabled) return Refuse(EpicGrantRefusal.Disabled);
+
+        // Then the grant: an unknown id is an inactive grant.
         if (ParseId(grantId) is not { } id) return Refuse(EpicGrantRefusal.GrantInactive);
         EpicGrant? grant;
         try
@@ -990,8 +993,7 @@ public sealed class EpicGrantService(
         }
         if (grant is null) return Refuse(EpicGrantRefusal.GrantInactive);
 
-        // D1 — feature, caller, request shape.
-        if (!IsEnabled) return Refuse(EpicGrantRefusal.Disabled);
+        // D1 — caller, request shape.
         var cto = ConfiguredCto;
         if (cto is null
             || !string.Equals(request.Caller?.Trim(), cto, StringComparison.OrdinalIgnoreCase)

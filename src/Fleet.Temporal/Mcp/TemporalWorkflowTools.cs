@@ -530,8 +530,11 @@ public sealed class TemporalWorkflowTools(
         if (outcome.Error is not null)
         {
             LogDelegatedApproval(LogLevel.Warning, gate, workflowId, caller, grantId, "forward_failed", outcome.Error);
+            // Not "nothing was sent": a timeout can land after the orchestrator reserved and sent.
+            // The decisions table is the record, and a resend would only be refused already_decided.
             return $"Error: the delegated '{gate}' approval could not be forwarded to the orchestrator because " +
-                   $"{outcome.Error}. Nothing was sent; the gate is unchanged.";
+                   $"{outcome.Error}. This tool sent no signal and made no retry. If the request reached the " +
+                   "orchestrator, check the grant's decisions table for the outcome before acting; do not resend.";
         }
 
         LogDelegatedApproval(LogLevel.Information, gate, workflowId, caller, grantId, outcome.Result, outcome.Reason);

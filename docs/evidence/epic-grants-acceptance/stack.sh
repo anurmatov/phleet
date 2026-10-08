@@ -8,8 +8,14 @@
 # run on loopback; see docs/evidence/epic-grants-acceptance.md. Everything binds 127.0.0.1 except the
 # bridge, whose MCP port 3001 is hard-coded to all interfaces — run this only on a disposable host.
 # Every credential below is a throwaway value for this stack, never a deployment secret.
+#
+# Every process starts from an EMPTY environment (env -i) plus its env file, so nothing inherited
+# from the launching host or container — a broker host, a bot token, a peer-config key — can reach
+# it. `start` then reads each .NET process's real environment from /proc and refuses to continue
+# unless the broker is 127.0.0.1 and no inherited name is present.
 set -u
 ACCEPT_DIR=${ACCEPT_DIR:-/tmp/epic-grants-accept}
+CLEAN=(env -i "PATH=/usr/local/bin:/usr/bin:/bin:$(dirname "$(command -v dotnet)")" "HOME=$ACCEPT_DIR" "DOTNET_CLI_HOME=$ACCEPT_DIR")
 REPO_ROOT=${REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}
 cd "$ACCEPT_DIR"
 
@@ -36,6 +42,7 @@ ConnectionStrings__OrchestratorDb='Server=127.0.0.1;Port=3306;Database=orch_acce
 Temporal__Address=127.0.0.1:7233
 Temporal__Namespaces__0=fleet
 RabbitMq__Host=127.0.0.1
+RABBITMQ_HOST=127.0.0.1
 Orchestrator__AuthToken=accept436-admin-token
 Orchestrator__ConfigToken=accept436-config-token
 Provisioning__SeedFilePath=$REPO_ROOT/seed.example.json
@@ -59,25 +66,45 @@ TemporalBridge__OrchestratorUrl=http://127.0.0.1:3600
 TemporalBridge__OrchestratorAuthToken=accept436-admin-token
 TemporalBridge__AgentTimeoutSeconds=300
 RabbitMq__Host=127.0.0.1
+RABBITMQ_HOST=127.0.0.1
 FleetWorkflows__CtoAgent=cto-agent
 EOF
 
   # The seed starts its children on task queue "fleet", so the throwaway server's namespace is
   # "fleet" too; the separate server instance is the isolation.
-  setsid nohup ./temporal server start-dev --ip 127.0.0.1 --port 7233 --ui-port 8233 --namespace fleet \
+  setsid nohup "${CLEAN[@]}" ./temporal server start-dev --ip 127.0.0.1 --port 7233 --ui-port 8233 --namespace fleet \
     --db-filename "$ACCEPT_DIR/temporal.db" --log-level warn > temporal.log 2>&1 < /dev/null &
-  setsid nohup python3 github_stub.py > github_stub.log 2>&1 < /dev/null &
+  setsid nohup "${CLEAN[@]}" python3 github_stub.py > github_stub.log 2>&1 < /dev/null &
   sleep 6
-  (set -a; . ./orch.env; set +a; cd "$REPO_ROOT/src/Fleet.Orchestrator/bin/Release/net10.0" && \
-    setsid nohup dotnet Fleet.Orchestrator.dll > "$ACCEPT_DIR/orchestrator.log" 2>&1 < /dev/null &)
+  setsid nohup "${CLEAN[@]}" bash -c "set -a; . '$ACCEPT_DIR/orch.env'; set +a; cd '$REPO_ROOT/src/Fleet.Orchestrator/bin/Release/net10.0' && exec dotnet Fleet.Orchestrator.dll" \
+    > "$ACCEPT_DIR/orchestrator.log" 2>&1 < /dev/null &
   for _ in $(seq 1 60); do curl -sf http://127.0.0.1:3600/api/epic-grants >/dev/null 2>&1 && break; sleep 1; done
-  (set -a; . ./bridge.env; set +a; cd "$REPO_ROOT/src/Fleet.Temporal/bin/Release/net10.0" && \
-    setsid nohup dotnet Fleet.Temporal.dll > "$ACCEPT_DIR/bridge.log" 2>&1 < /dev/null &)
+  setsid nohup "${CLEAN[@]}" bash -c "set -a; . '$ACCEPT_DIR/bridge.env'; set +a; cd '$REPO_ROOT/src/Fleet.Temporal/bin/Release/net10.0' && exec dotnet Fleet.Temporal.dll" \
+    > "$ACCEPT_DIR/bridge.log" 2>&1 < /dev/null &
   sleep 10
-  setsid nohup ./venv/bin/python fake_agent.py > fake_agent.out 2>&1 < /dev/null &
+  setsid nohup "${CLEAN[@]}" ./venv/bin/python fake_agent.py > fake_agent.out 2>&1 < /dev/null &
   sleep 3
   grep -q "Epic grants are enabled" orchestrator.log && grep -q "Registered search attributes" bridge.log \
-    && grep -q "fake agent ready" fake_agent.log && echo "stack ready" || { echo "stack NOT ready"; exit 1; }
+    && grep -q "fake agent ready" fake_agent.log || { echo "stack NOT ready"; exit 1; }
+  check_env
+  echo "stack ready"
+}
+
+# The real environment of each running .NET process, read from /proc: the broker must be loopback,
+# and only the clean base plus the env file's own names may be present.
+check_env() {
+  : > env-check.log
+  for spec in "Fleet.Orchestrator.dll:orch.env" "Fleet.Temporal.dll:bridge.env"; do
+    local dll=${spec%%:*} file=${spec#*:} pid allowed names extra
+    pid=$(pgrep -f "^dotnet $dll" | head -1)
+    [[ -n "$pid" ]] || { echo "$dll is not running"; exit 1; }
+    names=$(tr '\0' '\n' < "/proc/$pid/environ" | cut -d= -f1 | sort -u)
+    allowed=$( { printf '%s\n' PATH HOME DOTNET_CLI_HOME PWD SHLVL OLDPWD _; cut -d= -f1 "$file"; } | sort -u)
+    extra=$(comm -23 <(echo "$names") <(echo "$allowed"))
+    broker=$(tr '\0' '\n' < "/proc/$pid/environ" | grep '^RabbitMq__Host=' | cut -d= -f2-)
+    echo "$dll pid=$pid RabbitMq__Host=$broker inherited_names=${extra:-none}" | tee -a env-check.log
+    [[ "$broker" == 127.0.0.1 && -z "$extra" ]] || { echo "$dll environment is not isolated"; exit 1; }
+  done
 }
 
 case "${1:-}" in

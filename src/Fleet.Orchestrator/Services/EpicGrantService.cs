@@ -1208,6 +1208,10 @@ public sealed class EpicGrantService(
                 if (!(now < AsUtc(grant.ExpiresAt)))
                     return new Reservation(null, EpicGrantRefusal.Expired, null);
 
+                // From the insert onward the caller's token is not honoured: a cancellation
+                // between a committed insert and the send would leave a `reserved` row with nothing
+                // sent and the visit undecidable by delegation. A request aborted before this point
+                // has written nothing.
                 var row = new EpicGrantDecision
                 {
                     GrantId = grantId,
@@ -1223,10 +1227,6 @@ public sealed class EpicGrantService(
                     CreatedAt = now,
                     UpdatedAt = now,
                 };
-                // From the insert onward the caller's token is not honoured: a cancellation
-                // between a committed insert and the send would leave a `reserved` row with nothing
-                // sent and the visit undecidable by delegation. A request aborted before this point
-                // has written nothing.
                 db.EpicGrantDecisions.Add(row);
                 await db.SaveChangesAsync(CancellationToken.None);
                 await tx.CommitAsync(CancellationToken.None);

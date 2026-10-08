@@ -82,6 +82,13 @@ leaves the gate human-only.
 }
 ```
 
+A definition is delegation-capable for a gate only when **every** `wait_for_signal` on that gate
+has a literal `visitVar` and a `delegatedGuard` with marker exactly `GrantId`,
+`require.VisitId` exactly `{{vars.<that visitVar>}}` and `require.ArtifactRef` exactly
+`{{vars.review_ref}}`. One unguarded or differently guarded wait on the gate disqualifies the
+gate, and a wait with a templated `signalName` disqualifies the whole definition. Grant creation
+and D5 apply the same rule.
+
 Only these fields are allowed. At creation, any failure stores nothing:
 
 - the driver run is Running at that exact run id;
@@ -112,10 +119,12 @@ temporal_signal_workflow
          "Evidence":"https://..."}
 ```
 
-The bridge forwards it to `POST /api/epic-grants/{id}/decisions` and returns `status: delegated`
-with the orchestrator's `result` (`sent`, `refused`, `send_failed`) and `reason`. A forward that
-fails or times out sends nothing from the bridge and is not retried; if the request may have
-reached the orchestrator, read the grant's decisions table before acting.
+The bridge forwards it to `POST /api/epic-grants/{id}/decisions` (its own HTTP client, 120 s
+timeout) and returns `status: delegated` with the orchestrator's `result` (`sent`, `refused`,
+`send_failed`) and `reason`. A forward that fails or times out sends nothing from the bridge and is
+not retried; if the request may have reached the orchestrator, read the grant's decisions table
+before acting. Once D11 starts its insert, the orchestrator finishes the reservation and the send
+even if the caller has gone.
 
 The orchestrator stops at the first failing check and sends nothing:
 
@@ -138,8 +147,14 @@ the pinned run id with exactly `Decision`, `GrantId`, `VisitId`, `ArtifactRef`, 
 row becomes `sent` or `send_failed`. A crash leaves it `reserved` ("delivery unknown"). A new
 decision is possible only at a new gate visit.
 
-Do not put `GrantId` on `changes_requested` feedback: a guarded gate treats any payload carrying
-`GrantId` as delegated and discards it unless it names the current visit and ref.
+A payload carrying `GrantId` with any decision other than `approved` is refused by the bridge and
+not sent: a guarded gate would treat it as delegated and discard it, losing the feedback. Send
+feedback without `GrantId`.
+
+A human `changes_requested` at a PR or design gate withdraws the published ref (`review_ref` and
+`ReviewRef` become empty). If the follow-up review finds the concern unwarranted and the gate is
+re-entered without a new review, that visit is a human decision only; delegation resumes after the
+next attested review.
 
 ## Expiry and revocation
 

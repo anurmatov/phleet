@@ -62,6 +62,22 @@ builder.Services.AddHttpClient("orchestrator", (sp, client) =>
     client.Timeout = TimeSpan.FromSeconds(30);
 });
 
+// #436: the epic grant decision forward — same base address and bearer as "orchestrator", with a
+// timeout above the orchestrator's bounded decision path, so a slow but successful decision is not
+// reported to the caller as "delivery unknown".
+builder.Services.AddHttpClient(OrchestratorEpicGrantForwarder.HttpClientName, (sp, client) =>
+{
+    var opts = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<TemporalBridgeOptions>>().Value;
+    if (!string.IsNullOrEmpty(opts.OrchestratorUrl))
+    {
+        client.BaseAddress = new Uri(opts.OrchestratorUrl.TrimEnd('/') + '/');
+        if (!string.IsNullOrEmpty(opts.OrchestratorAuthToken))
+            client.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", opts.OrchestratorAuthToken);
+    }
+    client.Timeout = OrchestratorEpicGrantForwarder.Timeout;
+});
+
 // HTTP context accessor — needed by NotifyCtoTool to read the ?agent= query param
 builder.Services.AddHttpContextAccessor();
 

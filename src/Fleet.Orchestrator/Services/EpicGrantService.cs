@@ -638,47 +638,83 @@ internal static class EpicJson
         }
     }
 
+    /// <summary>The only marker a delegation-capable guard may use: the field the orchestrator sends.</summary>
+    internal const string GuardMarker = "GrantId";
+
     /// <summary>
-    /// Delegable gates that a stored definition guards: every <c>wait_for_signal</c> node whose
-    /// <c>signalName</c> is a delegable gate (case-insensitive), with a non-blank <c>visitVar</c> and
-    /// an object <c>delegatedGuard</c>. Walks the JSON tree generically; an unparsable definition
-    /// guards nothing.
+    /// Delegable gates that a stored definition FULLY guards (#436). A gate counts only when the
+    /// tree has at least one <c>wait_for_signal</c> on it and EVERY wait on it is guarded the way
+    /// the orchestrator's signal is checked at consumption:
+    /// <list type="bullet">
+    /// <item>a literal, non-blank <c>visitVar</c>;</item>
+    /// <item><c>delegatedGuard.marker</c> exactly <c>GrantId</c>;</item>
+    /// <item><c>delegatedGuard.require.VisitId</c> exactly <c>{{vars.&lt;that visitVar&gt;}}</c>, so the
+    /// guard checks the visit this wait mints;</item>
+    /// <item><c>delegatedGuard.require.ArtifactRef</c> exactly <c>{{vars.review_ref}}</c>, the variable
+    /// the definition publishes as <c>ReviewRef</c>.</item>
+    /// </list>
+    /// One unguarded or differently guarded wait on a gate makes that whole gate not delegable: it
+    /// could consume a delegated approval the orchestrator checked against a different visit. A
+    /// wait whose <c>signalName</c> is a template could resolve to any gate at run time, so its
+    /// presence makes the definition guard nothing. Walks the JSON tree generically; an
+    /// unparsable definition guards nothing.
     /// </summary>
     public static IReadOnlyList<string> GuardedGates(string definitionJson)
     {
-        var gates = new SortedSet<string>(StringComparer.Ordinal);
+        var verdicts = new Dictionary<string, bool>(StringComparer.Ordinal);
+        var templatedWait = false;
         try
         {
             using var doc = JsonDocument.Parse(definitionJson);
-            Walk(doc.RootElement, gates);
+            Walk(doc.RootElement);
         }
         catch (JsonException)
         {
             return [];
         }
-        return [.. gates];
+        if (templatedWait) return [];
+        return [.. verdicts.Where(v => v.Value).Select(v => v.Key).Order(StringComparer.Ordinal)];
 
-        static void Walk(JsonElement element, SortedSet<string> gates)
+        void Walk(JsonElement element)
         {
             switch (element.ValueKind)
             {
                 case JsonValueKind.Object:
                     if (element.TryGetProperty("type", out var type)
                         && type.ValueKind == JsonValueKind.String
-                        && type.GetString() == "wait_for_signal"
-                        && EpicGrantGates.Canonical(String(element, "signalName")) is { } gate
-                        && !string.IsNullOrWhiteSpace(String(element, "visitVar"))
-                        && Property(element, "delegatedGuard") is { ValueKind: JsonValueKind.Object })
-                        gates.Add(gate);
+                        && type.GetString() == "wait_for_signal")
+                    {
+                        var signalName = String(element, "signalName") ?? "";
+                        if (signalName.Contains("{{", StringComparison.Ordinal))
+                            templatedWait = true;
+                        else if (EpicGrantGates.Canonical(signalName) is { } gate)
+                            verdicts[gate] = (!verdicts.TryGetValue(gate, out var sofar) || sofar) && IsFullyGuarded(element);
+                    }
                     foreach (var property in element.EnumerateObject())
-                        Walk(property.Value, gates);
+                        Walk(property.Value);
                     break;
                 case JsonValueKind.Array:
                     foreach (var item in element.EnumerateArray())
-                        Walk(item, gates);
+                        Walk(item);
                     break;
             }
         }
+    }
+
+    private static bool IsFullyGuarded(JsonElement wait)
+    {
+        var visitVar = String(wait, "visitVar");
+        if (string.IsNullOrWhiteSpace(visitVar) || visitVar.Contains("{{", StringComparison.Ordinal)) return false;
+        if (Property(wait, "delegatedGuard") is not { ValueKind: JsonValueKind.Object } guard) return false;
+        if (!string.Equals(String(guard, "marker"), GuardMarker, StringComparison.Ordinal)) return false;
+        if (Property(guard, "require") is not { ValueKind: JsonValueKind.Object } require) return false;
+
+        return require.TryGetProperty("VisitId", out var visit)
+            && visit.ValueKind == JsonValueKind.String
+            && visit.GetString() == "{{vars." + visitVar + "}}"
+            && require.TryGetProperty("ArtifactRef", out var artifact)
+            && artifact.ValueKind == JsonValueKind.String
+            && artifact.GetString() == "{{vars.review_ref}}";
     }
 }
 
@@ -1187,9 +1223,13 @@ public sealed class EpicGrantService(
                     CreatedAt = now,
                     UpdatedAt = now,
                 };
+                // From the insert onward the caller's token is not honoured: a cancellation
+                // between a committed insert and the send would leave a `reserved` row with nothing
+                // sent and the visit undecidable by delegation. A request aborted before this point
+                // has written nothing.
                 db.EpicGrantDecisions.Add(row);
-                await db.SaveChangesAsync(ct);
-                await tx.CommitAsync(ct);
+                await db.SaveChangesAsync(CancellationToken.None);
+                await tx.CommitAsync(CancellationToken.None);
                 return new Reservation(row.Id, null, null);
             }
             catch (Exception ex)

@@ -220,6 +220,20 @@ public sealed class TemporalWorkflowTools(
         if (delegatedGate is not null && TryReadDelegatedApproval(args, out var delegatedArgs))
             return await ForwardDelegatedApprovalAsync(workflow_id, delegatedGate, delegatedArgs, @namespace);
 
+        // A GrantId on anything but 'approved' is refused, never signalled: a guarded gate treats
+        // every payload carrying GrantId as delegated and would discard it, so feedback sent this
+        // way would be lost while the tool reported success. Payload shapes without GrantId — every
+        // shape that existed before #436 — never reach this check.
+        if (delegatedGate is not null && CarriesGrantId(args, out var strayDecision))
+        {
+            var strayCaller = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+            LogDelegatedApproval(LogLevel.Warning, delegatedGate, workflow_id, strayCaller, null, "blocked", "grant_id_without_approved",
+                decision: strayDecision ?? "unavailable");
+            return $"Error: '{delegatedGate}' was not sent because the payload carries {GrantIdField} with Decision " +
+                   $"'{strayDecision ?? "missing"}'. {GrantIdField} is only for a delegated '{ApprovedDecision}'; send feedback " +
+                   "without it. Nothing was sent.";
+        }
+
         // Matched exactly as before: case-insensitive but untrimmed, so a padded name falls through
         // to the reserved-list refusal below instead of reaching the exception.
         var feedbackGate = Array.Find(
@@ -477,6 +491,33 @@ public sealed class TemporalWorkflowTools(
     }
 
     /// <summary>
+    /// True when <paramref name="args"/> is a JSON object with a property named <c>GrantId</c> in
+    /// any casing, whatever its value. Reports the string <c>Decision</c>, if any.
+    /// </summary>
+    private static bool CarriesGrantId(string? args, out string? decision)
+    {
+        decision = null;
+        if (string.IsNullOrWhiteSpace(args)) return false;
+
+        JsonElement parsed;
+        try
+        {
+            parsed = JsonSerializer.Deserialize<JsonElement>(args);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+
+        if (parsed.ValueKind != JsonValueKind.Object) return false;
+        if (!parsed.EnumerateObject().Any(p => string.Equals(p.Name, GrantIdField, StringComparison.OrdinalIgnoreCase)))
+            return false;
+
+        decision = GetStringProperty(parsed, "Decision");
+        return true;
+    }
+
+    /// <summary>
     /// Checks the caller exactly like the feedback exception (CTO configured, caller resolved,
     /// equal ignoring case), then a nonblank string GrantId, then forwards once. The bridge never
     /// signals the workflow on this path — only the orchestrator does, after its own checks.
@@ -584,14 +625,15 @@ public sealed class TemporalWorkflowTools(
         string? caller,
         string? grantId,
         string? outcome,
-        string? reason)
+        string? reason,
+        string decision = ApprovedDecision)
     {
         logger.Log(
             level,
             "Delegated {Gate} approval for workflow {WorkflowId}; decision={Decision}; caller={Caller}; grant={GrantId}; outcome={Outcome}; reason={Reason}",
             gate,
             workflowId,
-            ApprovedDecision,
+            decision,
             string.IsNullOrWhiteSpace(caller) ? "unresolved" : caller,
             string.IsNullOrWhiteSpace(grantId) ? "missing" : grantId,
             outcome ?? "unknown",

@@ -1116,6 +1116,38 @@ public sealed class EpicGrantServiceTests : IAsyncLifetime
         Assert.Equal(before, await db.EpicGrants.CountAsync());
     }
 
+    /// <summary>
+    /// Review round 1, finding 3: a pinned definition whose gate has a second, unguarded wait is
+    /// not delegation-capable, so the grant is refused at creation (and D5 uses the same check).
+    /// </summary>
+    [Fact]
+    public async Task Creation_rejects_a_definition_with_a_second_unguarded_wait_on_its_gate()
+    {
+        var unguarded = EpicGrantWorld.Wait("merge-approval", null, guarded: false);
+        unguarded["name"] = "second_merge_gate";
+        await _world.ExecAsync(async db =>
+        {
+            var main = await db.WorkflowDefinitions.SingleAsync(d => d.Name == EpicGrantWorld.PrType);
+            db.WorkflowDefinitionVersions.Add(new WorkflowDefinitionVersion { WorkflowDefinitionId = main.Id, Version = 21, Definition = main.Definition });
+            main.Definition = EpicGrantWorld.Definition(EpicGrantWorld.Wait("merge-approval", "merge_visit", guarded: true), unguarded);
+            main.Version = 22;
+            await db.SaveChangesAsync();
+        });
+        await _world.RefreshHashesAsync();
+
+        var scope = _world.Scope();
+        scope["workflows"]![0]!["version"] = 22;
+        scope["workflows"]![0]!["sha256"] = _world.Hashes[(EpicGrantWorld.PrType, 22)];
+
+        await using var db = _world.NewDb();
+        var created = await _world.Service(db).CreateAsync(scope.ToJsonString(), default);
+
+        Assert.Null(created.Grant);
+        var pr = Assert.Single(created.Report.Workflows, w => w.Type == EpicGrantWorld.PrType);
+        Assert.True(pr.HashMatches);
+        Assert.False(pr.DelegationCapable);
+    }
+
     [Fact]
     public async Task Creation_rejects_a_duplicate_field()
     {

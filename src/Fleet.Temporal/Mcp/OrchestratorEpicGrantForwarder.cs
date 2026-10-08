@@ -4,8 +4,11 @@ using System.Text.Json;
 namespace Fleet.Temporal.Mcp;
 
 /// <summary>
-/// Default <see cref="IEpicGrantDecisionForwarder"/>: one POST on the named <c>"orchestrator"</c>
-/// HttpClient, which already carries the base address and the admin bearer (see <c>Program.cs</c>).
+/// Default <see cref="IEpicGrantDecisionForwarder"/>: one POST on the named
+/// <c>"orchestrator-epic-grants"</c> HttpClient — the same base address and admin bearer as the
+/// <c>"orchestrator"</c> client, with <see cref="Timeout"/> instead of 30 s, because the decision
+/// path can legitimately take longer (bounded Temporal describes and history reads, a GitHub read,
+/// the database). A longer bound keeps "delivery unknown" rare (see <c>Program.cs</c>).
 ///
 /// <para>One attempt and no retry: a retried decision could be applied to a later gate visit, and
 /// the orchestrator's unique decision key already makes a repeat pointless. The client's own
@@ -14,7 +17,13 @@ namespace Fleet.Temporal.Mcp;
 /// </summary>
 public sealed class OrchestratorEpicGrantForwarder(IHttpClientFactory httpClientFactory) : IEpicGrantDecisionForwarder
 {
-    internal const string HttpClientName = "orchestrator";
+    internal const string HttpClientName = "orchestrator-epic-grants";
+
+    /// <summary>
+    /// Above the orchestrator's worst case: up to six 10 s Temporal reads (driver, target, history,
+    /// two parents), a 10 s GitHub read and the database, plus the one send.
+    /// </summary>
+    internal static readonly TimeSpan Timeout = TimeSpan.FromSeconds(120);
 
     private static readonly JsonSerializerOptions WebOptions = new(JsonSerializerDefaults.Web);
 

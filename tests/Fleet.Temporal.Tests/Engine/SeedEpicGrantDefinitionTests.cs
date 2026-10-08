@@ -106,7 +106,8 @@ public sealed class SeedEpicGrantDefinitionTests
             await handle.SignalAsync("merge-approval", [Delegated("merge-approval:2", HeadB)]);
         });
 
-        Assert.Equal(["", HeadA, "", HeadB], run.Upserts("ReviewRef"));
+        // round 1 clear, A published, withdrawn by the human changes_requested, round 2 clear, B.
+        Assert.Equal(["", HeadA, "", "", HeadB], run.Upserts("ReviewRef"));
         Assert.Equal(2, run.Discards);
 
         var pinned = Assert.Single(run.Calls, c => c.Step == "phase4_merge_pinned");
@@ -226,6 +227,43 @@ public sealed class SeedEpicGrantDefinitionTests
         };
     }
 
+    /// <summary>
+    /// Review round 1, finding 2: a human <c>changes_requested</c> withdraws the published ref. When
+    /// the follow-up review finds the concern unwarranted, the gate is re-entered WITHOUT a new
+    /// review, so it must be human-only: a delegated approval naming the old ref (even for the new
+    /// visit) is discarded, and only a human can approve.
+    /// </summary>
+    [Fact]
+    public async Task Pr_HumanChangesRequested_ThenTheReviewDisagrees_ReparksHumanOnly()
+    {
+        var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", PrInput(), Respond, async (handle, h) =>
+        {
+            await h.WaitForGateVisitAsync(handle, "merge-approval:1");
+            await handle.SignalAsync("merge-approval", [Json("""{"Decision":"changes_requested","Comment":"is this safe?"}""")]);
+
+            await h.WaitForGateVisitAsync(handle, "merge-approval:2");
+            Assert.Equal("", h.LastUpsert(await handle.FetchHistoryAsync(), "ReviewRef"));
+            await handle.SignalAsync("merge-approval", [Delegated("merge-approval:2", HeadA)]);
+            await handle.SignalAsync("merge-approval", [Json("""{"Decision":"approved"}""")]);
+        });
+
+        Assert.Equal(["", HeadA, ""], run.Upserts("ReviewRef"));
+        Assert.Equal(1, run.Discards);
+        Assert.Single(run.Calls, c => c.Step == "phase4_merge");
+        Assert.DoesNotContain(run.Calls, c => c.Step == "phase4_merge_pinned");
+        // No second PR review ran: the gate was re-entered on the CEO-feedback review's approval.
+        Assert.Single(run.ConsensusInputs, i => i.ReviewRef is not null);
+
+        static string Respond(Call call) => call.Step switch
+        {
+            "phase1_implement" => $"done\nPR_URL: {PrUrl}\nHEAD_SHA: {HeadA}",
+            "verify_merge_status" => "MERGED",
+            "prepare" => "PREP: NO_DOC",
+            $"review-{Reviewer}" => Review("approved", reviewedRef: HeadA),
+            _ => "ok",
+        };
+    }
+
     // ── Design definition ────────────────────────────────────────────────────
 
     /// <summary>
@@ -280,6 +318,27 @@ public sealed class SeedEpicGrantDefinitionTests
         Assert.Equal(["design-agent", Cto], review.ExcludedAgents);
     }
 
+    /// <summary>Review round 1, finding 2, design gate: the same withdrawal after a human changes-request.</summary>
+    [Fact]
+    public async Task Design_HumanChangesRequested_ThenTheReviewDisagrees_ReparksHumanOnly()
+    {
+        var run = await SeedHarness.RunAsync("UweDesignWorkflow", DesignInput(), DesignResponder(BodyC), async (handle, h) =>
+        {
+            await h.WaitForGateVisitAsync(handle, "design-approval:1");
+            await handle.SignalAsync("design-approval", [Json("""{"Decision":"changes_requested","Comment":"is this complete?"}""")]);
+
+            await h.WaitForGateVisitAsync(handle, "design-approval:2");
+            Assert.Equal("", h.LastUpsert(await handle.FetchHistoryAsync(), "ReviewRef"));
+            await handle.SignalAsync("design-approval", [Delegated("design-approval:2", BodyC)]);
+            await handle.SignalAsync("design-approval", [Json("""{"Decision":"approved"}""")]);
+        });
+
+        Assert.Equal(["", BodyC, ""], run.Upserts("ReviewRef"));
+        Assert.Equal(1, run.Discards);
+        Assert.DoesNotContain(run.Calls, c => c.Step == "verify_approved_body");
+        Assert.Single(run.Calls, c => c.Step == "emit_approved_result");
+    }
+
     // ── Doc definition ───────────────────────────────────────────────────────
 
     /// <summary>
@@ -325,11 +384,16 @@ public sealed class SeedEpicGrantDefinitionTests
         Assert.Contains("complete-approved", run.Upserts("Phase"));
     }
 
-    /// <summary>AC-D4: an instruction target is never delegable — the approved review publishes no ref.</summary>
-    [Fact]
-    public async Task Doc_InstructionTarget_PublishesNoRef_AndTheDelegatedApprovalIsDiscarded()
+    /// <summary>
+    /// AC-D4: instruction and project-context targets are never delegable — the approved review
+    /// publishes no ref.
+    /// </summary>
+    [Theory]
+    [InlineData("instruction example-instruction")]
+    [InlineData("project_context example-project")]
+    public async Task Doc_UndelegableTarget_PublishesNoRef_AndTheDelegatedApprovalIsDiscarded(string target)
     {
-        var run = await SeedHarness.RunAsync("UweDocMaintenanceWorkflow", DocInput(), DocResponder("instruction example-instruction", ArtifactE), async (handle, h) =>
+        var run = await SeedHarness.RunAsync("UweDocMaintenanceWorkflow", DocInput(), DocResponder(target, ArtifactE), async (handle, h) =>
         {
             await h.WaitForGateVisitAsync(handle, "doc-review:1");
             await handle.SignalAsync("doc-review", [Delegated("doc-review:1", ArtifactE)]);

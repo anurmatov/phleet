@@ -640,6 +640,22 @@
                         "type": "sequence",
                         "steps": [
                           {
+                            "name": "design_withdraw_review_ref",
+                            "type": "set_variable",
+                            "vars": {
+                              "review_ref": "",
+                              "review_scrub": ""
+                            }
+                          },
+                          {
+                            "name": "design_withdraw_review_attrs",
+                            "type": "set_attribute",
+                            "attributes": {
+                              "ReviewRef": "",
+                              "ReviewScrub": ""
+                            }
+                          },
+                          {
                             "args": {
                               "Subject": "Issue {{vars.issue_result | extract: 'ISSUE_NUMBER:\\s*(\\d+)'}} design spec in {{input.Repo}} (CEO review)",
                               "Synthesizer": "{{config.EscalationTarget}}",
@@ -1617,6 +1633,76 @@
                       "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nCheck the PR at {{vars.pr_url}} in repo {{input.Repo}} for any unresolved review comments (use `gh pr view --json reviews,reviewRequests` and `gh api repos/{{input.Repo}}/pulls` to inspect). If there are unresolved inline comments or review threads, address each one — push any fixes to the branch. If there are none, confirm all review comments have been addressed. Report: either 'no unresolved comments' or a summary of what was fixed.",
                       "ignoreFailure": true,
                       "timeoutMinutes": 20
+                    },
+                    {
+                      "name": "pr_publish_review_ref",
+                      "type": "branch",
+                      "on": "{{vars.consensus_out.FinalVerdict | default: 'none'}}",
+                      "cases": {
+                        "approved": {
+                          "type": "sequence",
+                          "steps": [
+                            {
+                              "type": "set_variable",
+                              "vars": {
+                                "review_ref": "{{vars.consensus_out.AttestedRef | default: ''}}"
+                              }
+                            },
+                            {
+                              "type": "branch",
+                              "on": "{{vars.review_ref | default: 'none'}}",
+                              "cases": {
+                                "none": {
+                                  "type": "set_variable",
+                                  "vars": {
+                                    "review_scrub": ""
+                                  }
+                                }
+                              },
+                              "default": {
+                                "name": "pr_publish_scrub",
+                                "type": "branch",
+                                "on": "{{vars.consensus_out.ScrubAttested | default: 'false'}}",
+                                "cases": {
+                                  "True": {
+                                    "type": "set_variable",
+                                    "vars": {
+                                      "review_scrub": "pass"
+                                    }
+                                  },
+                                  "true": {
+                                    "type": "set_variable",
+                                    "vars": {
+                                      "review_scrub": "pass"
+                                    }
+                                  }
+                                },
+                                "default": {
+                                  "type": "set_variable",
+                                  "vars": {
+                                    "review_scrub": ""
+                                  }
+                                }
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      "default": {
+                        "type": "set_variable",
+                        "vars": {
+                          "review_ref": "",
+                          "review_scrub": ""
+                        }
+                      }
+                    },
+                    {
+                      "name": "pr_publish_review_attrs",
+                      "type": "set_attribute",
+                      "attributes": {
+                        "ReviewRef": "{{vars.review_ref}}",
+                        "ReviewScrub": "{{vars.review_scrub}}"
+                      }
                     }
                   ]
                 }
@@ -1635,76 +1721,6 @@
                   "REJECTED": {
                     "type": "break"
                   }
-                }
-              },
-              {
-                "name": "pr_publish_review_ref",
-                "type": "branch",
-                "on": "{{vars.consensus_out.FinalVerdict | default: 'none'}}",
-                "cases": {
-                  "approved": {
-                    "type": "sequence",
-                    "steps": [
-                      {
-                        "type": "set_variable",
-                        "vars": {
-                          "review_ref": "{{vars.consensus_out.AttestedRef | default: ''}}"
-                        }
-                      },
-                      {
-                        "type": "branch",
-                        "on": "{{vars.review_ref | default: 'none'}}",
-                        "cases": {
-                          "none": {
-                            "type": "set_variable",
-                            "vars": {
-                              "review_scrub": ""
-                            }
-                          }
-                        },
-                        "default": {
-                          "name": "pr_publish_scrub",
-                          "type": "branch",
-                          "on": "{{vars.consensus_out.ScrubAttested | default: 'false'}}",
-                          "cases": {
-                            "True": {
-                              "type": "set_variable",
-                              "vars": {
-                                "review_scrub": "pass"
-                              }
-                            },
-                            "true": {
-                              "type": "set_variable",
-                              "vars": {
-                                "review_scrub": "pass"
-                              }
-                            }
-                          },
-                          "default": {
-                            "type": "set_variable",
-                            "vars": {
-                              "review_scrub": ""
-                            }
-                          }
-                        }
-                      }
-                    ]
-                  }
-                },
-                "default": {
-                  "type": "set_variable",
-                  "vars": {
-                    "review_ref": "",
-                    "review_scrub": ""
-                  }
-                }
-              },
-              {
-                "name": "pr_publish_review_attrs",
-                "type": "set_attribute",
-                "attributes": {
-                  "ReviewRef": "{{vars.review_ref}}",
-                  "ReviewScrub": "{{vars.review_scrub}}"
                 }
               },
               {
@@ -1797,6 +1813,22 @@
                   "changes_requested": {
                     "type": "sequence",
                     "steps": [
+                      {
+                        "name": "pr_withdraw_review_ref",
+                        "type": "set_variable",
+                        "vars": {
+                          "review_ref": "",
+                          "review_scrub": ""
+                        }
+                      },
+                      {
+                        "name": "pr_withdraw_review_attrs",
+                        "type": "set_attribute",
+                        "attributes": {
+                          "ReviewRef": "",
+                          "ReviewScrub": ""
+                        }
+                      },
                       {
                         "name": "set_revision_phase",
                         "type": "set_attribute",

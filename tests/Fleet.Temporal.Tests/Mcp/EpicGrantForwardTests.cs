@@ -350,7 +350,7 @@ public sealed class EpicGrantForwardTests
         var result = await context.Tool.SignalWorkflowAsync(
             "workflow-1", "merge-approval", $"{{\"Decision\":\"{decision}\",\"GrantId\":\"{GrantId}\"}}");
 
-        Assert.Contains("Decision must be exactly 'changes_requested'", result);
+        Assert.Contains($"carries GrantId with Decision '{decision}'", result);
         Assert.Empty(forwarder.Calls);
         await AssertNothingSignalledAsync(context);
     }
@@ -384,8 +384,13 @@ public sealed class EpicGrantForwardTests
         await AssertNothingSignalledAsync(context);
     }
 
+    /// <summary>
+    /// Review round 1 finding 5: feedback carrying a stray GrantId used to be signalled and then
+    /// discarded by the gate's guard, while the tool reported success. It is now refused and
+    /// nothing is sent; the same feedback without GrantId still takes the feedback path.
+    /// </summary>
     [Fact]
-    public async Task ChangesRequestedWithGrantId_FollowsTodaysFeedbackPath()
+    public async Task ChangesRequestedWithGrantId_IsRefused_AndNothingIsSent()
     {
         var forwarder = new FakeForwarder();
         var context = BuildTool(forwarder);
@@ -393,10 +398,28 @@ public sealed class EpicGrantForwardTests
 
         var result = await context.Tool.SignalWorkflowAsync("workflow-1", "merge-approval", payload);
 
+        Assert.StartsWith("Error: 'merge-approval' was not sent because the payload carries GrantId with Decision 'changes_requested'", result);
+        Assert.Contains("send feedback without it", result);
+        Assert.Empty(forwarder.Calls);
+        await AssertNothingSignalledAsync(context);
+        var entry = Assert.Single(context.Logger.Entries);
+        Assert.Equal(LogLevel.Warning, entry.Level);
+        Assert.Contains("decision=changes_requested", entry.Message);
+        Assert.Contains("reason=grant_id_without_approved", entry.Message);
+        Assert.DoesNotContain("fix it", entry.Message);
+    }
+
+    [Fact]
+    public async Task ChangesRequestedWithoutGrantId_StillFollowsTodaysFeedbackPath()
+    {
+        var forwarder = new FakeForwarder();
+        var context = BuildTool(forwarder);
+        const string payload = "{\"Decision\":\"changes_requested\",\"Comment\":\"fix it\"}";
+
+        var result = await context.Tool.SignalWorkflowAsync("workflow-1", "merge-approval", payload);
+
         Assert.Empty(forwarder.Calls);
         Assert.Equal("merge-approval", context.SentSignal);
-        var arg = Assert.IsType<JsonElement>(Assert.Single(context.SentArgs!));
-        Assert.Equal("changes_requested", arg.GetProperty("Decision").GetString());
         Assert.Equal("signalled", JsonDocument.Parse(result).RootElement.GetProperty("status").GetString());
         Assert.Equal(
             "Allowed merge-approval signal for workflow workflow-1; signal=merge-approval; decision=changes_requested; caller=cto-agent",
@@ -404,7 +427,7 @@ public sealed class EpicGrantForwardTests
     }
 
     [Fact]
-    public async Task ChangesRequestedWithGrantId_OnDocReview_StaysCeoOnly()
+    public async Task ChangesRequestedWithGrantId_OnDocReview_IsRefused_AndNothingIsSent()
     {
         var forwarder = new FakeForwarder();
         var context = BuildTool(forwarder);
@@ -413,7 +436,7 @@ public sealed class EpicGrantForwardTests
             "workflow-1", "doc-review",
             "{\"Decision\":\"changes_requested\",\"Comment\":\"fix it\",\"GrantId\":\"" + GrantId + "\"}");
 
-        Assert.Contains("'doc-review' is a CEO-only gate", result);
+        Assert.StartsWith("Error: 'doc-review' was not sent because the payload carries GrantId", result);
         Assert.Empty(forwarder.Calls);
         await AssertNothingSignalledAsync(context);
     }

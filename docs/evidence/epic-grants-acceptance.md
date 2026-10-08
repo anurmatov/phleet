@@ -61,7 +61,7 @@ times, all unauthenticated (`auth=no`), each a 404 for the private target.
 
 ## Broker isolation
 
-**Recorded run (`3e6b71f`, same harness at `2b6f51b`).** `stack.sh` launches every process with `env -i` plus its env file
+**Recorded run (`3e6b71f`; the `2b6f51b` run showed the same).** `stack.sh` launches every process with `env -i` plus its env file
 (`RabbitMq__Host` and `RABBITMQ_HOST` = `127.0.0.1`) and, before declaring the stack ready, reads each
 .NET process's `/proc/<pid>/environ`:
 

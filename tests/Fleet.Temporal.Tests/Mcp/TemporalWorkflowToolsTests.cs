@@ -113,6 +113,7 @@ public sealed class TemporalWorkflowToolsTests
             registry,
             ctoConfig,
             context.GateReader,
+            Substitute.For<IEpicGrantDecisionForwarder>(),
             accessor,
             context.Logger);
         return context;

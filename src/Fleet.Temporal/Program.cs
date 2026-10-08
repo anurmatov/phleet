@@ -70,6 +70,8 @@ builder.Services.AddSingleton<TaskCompletionRegistry>();
 builder.Services.AddSingleton<WorkflowTypeRegistry>();
 builder.Services.AddSingleton<CtoAgentConfigService>();
 builder.Services.AddSingleton<IWorkflowGateStateReader, WorkflowGateStateReader>();
+// #436: forwards CTO delegated gate approvals to the orchestrator on the "orchestrator" client.
+builder.Services.AddSingleton<IEpicGrantDecisionForwarder, OrchestratorEpicGrantForwarder>();
 builder.Services.AddSingleton<IWorkflowDispatcher, TemporalWorkflowDispatcher>();
 
 // Peer config — fetches FLEET_CTO_AGENT and other keys from orchestrator on startup

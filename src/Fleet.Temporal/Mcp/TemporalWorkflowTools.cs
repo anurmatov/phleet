@@ -14,13 +14,27 @@ public sealed class TemporalWorkflowTools(
     WorkflowTypeRegistry registry,
     CtoAgentConfigService ctoAgentConfig,
     IWorkflowGateStateReader gateStateReader,
+    IEpicGrantDecisionForwarder grantForwarder,
     IHttpContextAccessor httpContextAccessor,
     ILogger<TemporalWorkflowTools> logger)
 {
     private const string DefaultNamespace = "fleet";
     private const string MergeApprovalSignal = "merge-approval";
     private const string DesignApprovalSignal = "design-approval";
+    private const string DocReviewSignal = "doc-review";
     private const string ChangesRequestedDecision = "changes_requested";
+    private const string ApprovedDecision = "approved";
+    private const string GrantIdField = "GrantId";
+
+    /// <summary>
+    /// Gates on which the configured CTO agent may send <c>approved</c> with a <c>GrantId</c> (#436).
+    /// This tool never signals such a payload: it forwards it to the orchestrator, which decides it
+    /// under an active epic grant and sends the signal itself, or sends nothing.
+    ///
+    /// Like <see cref="FeedbackEligibleGates"/>, deliberately private to this MCP tool and NOT a
+    /// change to <see cref="CeoGateSignals"/>. <c>advisory-review</c> is never delegable.
+    /// </summary>
+    private static readonly string[] DelegableGates = [MergeApprovalSignal, DesignApprovalSignal, DocReviewSignal];
 
     /// <summary>
     /// CEO-only gates that the configured CTO agent may return for revision through this tool, and
@@ -184,15 +198,28 @@ public sealed class TemporalWorkflowTools(
         "(2) 'escalation-decision' — {\"Decision\":\"retry|skip|continue\",\"UpdatedInstruction\":\"...\"}. " +
         "IMPORTANT — CEO-only signals are BLOCKED and cannot be sent via this tool: " +
         "'merge-approval', 'doc-review', 'design-approval', 'advisory-review'. " +
-        "The only exception is 'merge-approval' or 'design-approval' with Decision exactly 'changes_requested' and a nonblank Comment, sent by the currently configured CTO agent resolved from the MCP request. " +
+        "There are two exceptions, both only for the currently configured CTO agent resolved from the MCP request. " +
+        "(a) Feedback: 'merge-approval' or 'design-approval' with Decision exactly 'changes_requested' and a nonblank Comment. " +
         "'design-approval' feedback is accepted only while the workflow is Running and waiting at its design-approval gate (Phase 'design-approval'); otherwise it is refused and nothing is sent. " +
-        "Approval and rejection decisions remain CEO-only for both gates. 'doc-review' and 'advisory-review' have no exception. All other CEO-only gate decisions must be sent from the fleet dashboard by the CEO.")]
+        "(b) Delegated approval under an epic grant: 'merge-approval', 'design-approval' or 'doc-review' with {\"Decision\":\"approved\",\"GrantId\":\"<grant id>\",\"VisitId\":\"<GateVisit>\",\"ArtifactRef\":\"<ReviewRef>\",\"Evidence\":\"<https url>\"}. " +
+        "This tool does not signal it: it is forwarded to the orchestrator, which decides it under an active epic grant and sends nothing on refusal. The tool returns status 'delegated' with the orchestrator's result and reason. " +
+        "Approval without a GrantId, and every rejection, remain CEO-only; 'advisory-review' has no exception. All other CEO-only gate decisions must be sent from the fleet dashboard by the CEO.")]
     public async Task<string> SignalWorkflowAsync(
         [Description("Workflow ID to signal")] string workflow_id,
         [Description("Signal name (e.g. human-review, merge-approval)")] string signal_name,
-        [Description("Signal payload as a JSON object string. For 'human-review': {\"Decision\":\"approved\"} or {\"Decision\":\"changes_requested\",\"Comment\":\"your feedback\"}. For the CTO 'merge-approval' or 'design-approval' exception: {\"Decision\":\"changes_requested\",\"Comment\":\"required feedback\"}.")] string? args = null,
+        [Description("Signal payload as a JSON object string. For 'human-review': {\"Decision\":\"approved\"} or {\"Decision\":\"changes_requested\",\"Comment\":\"your feedback\"}. For the CTO 'merge-approval' or 'design-approval' exception: {\"Decision\":\"changes_requested\",\"Comment\":\"required feedback\"}. For a CTO delegated approval under an epic grant: {\"Decision\":\"approved\",\"GrantId\":\"<grant id>\",\"VisitId\":\"<GateVisit>\",\"ArtifactRef\":\"<ReviewRef>\",\"Evidence\":\"<https url>\"}.")] string? args = null,
         [Description("Temporal namespace. Default: fleet.")] string @namespace = DefaultNamespace)
     {
+        // #436 delegated approval. Only the exact delegated shape enters this branch; every other
+        // payload, including a CTO 'approved' without a GrantId, falls through to the code below
+        // unchanged. Gate matched like the feedback gates: case-insensitive, untrimmed.
+        var delegatedGate = Array.Find(
+            DelegableGates,
+            gate => string.Equals(signal_name, gate, StringComparison.OrdinalIgnoreCase));
+
+        if (delegatedGate is not null && TryReadDelegatedApproval(args, out var delegatedArgs))
+            return await ForwardDelegatedApprovalAsync(workflow_id, delegatedGate, delegatedArgs, @namespace);
+
         // Matched exactly as before: case-insensitive but untrimmed, so a padded name falls through
         // to the reserved-list refusal below instead of reaching the exception.
         var feedbackGate = Array.Find(
@@ -415,6 +442,157 @@ public sealed class TemporalWorkflowTools(
                 decision,
                 caller);
         }
+    }
+
+    // ── #436 delegated approval ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// True only for the delegated shape: <paramref name="args"/> parses to a JSON object whose
+    /// <c>Decision</c> is the string <c>approved</c> (ordinal) and which has a property named
+    /// <c>GrantId</c> in any casing, whatever its value. Pure: no logging, no side effects, so a
+    /// payload that is not delegated reaches the existing code exactly as before.
+    /// </summary>
+    private static bool TryReadDelegatedApproval(string? args, out JsonElement argsObject)
+    {
+        argsObject = default;
+        if (string.IsNullOrWhiteSpace(args)) return false;
+
+        JsonElement parsed;
+        try
+        {
+            parsed = JsonSerializer.Deserialize<JsonElement>(args);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+
+        if (parsed.ValueKind != JsonValueKind.Object) return false;
+        if (!string.Equals(GetStringProperty(parsed, "Decision"), ApprovedDecision, StringComparison.Ordinal)) return false;
+        if (!parsed.EnumerateObject().Any(p => string.Equals(p.Name, GrantIdField, StringComparison.OrdinalIgnoreCase)))
+            return false;
+
+        argsObject = parsed;
+        return true;
+    }
+
+    /// <summary>
+    /// Checks the caller exactly like the feedback exception (CTO configured, caller resolved,
+    /// equal ignoring case), then a nonblank string GrantId, then forwards once. The bridge never
+    /// signals the workflow on this path — only the orchestrator does, after its own checks.
+    /// </summary>
+    private async Task<string> ForwardDelegatedApprovalAsync(
+        string workflowId,
+        string gate,
+        JsonElement args,
+        string @namespace)
+    {
+        var caller = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+        var configuredCto = ctoAgentConfig.GetCtoAgent();
+        var grantId = GetStringPropertyIgnoreCase(args, GrantIdField);
+
+        string? blockReason = null;
+        if (string.IsNullOrWhiteSpace(configuredCto))
+            blockReason = "the configured CTO agent is not configured";
+        else if (string.IsNullOrWhiteSpace(caller))
+            blockReason = "the caller identity is unresolved";
+        else if (!string.Equals(caller, configuredCto, StringComparison.OrdinalIgnoreCase))
+            blockReason = "the caller is not the configured CTO agent";
+        else if (string.IsNullOrWhiteSpace(grantId))
+            blockReason = "GrantId must be a nonblank string";
+
+        if (blockReason is not null)
+        {
+            LogDelegatedApproval(LogLevel.Warning, gate, workflowId, caller, grantId, "blocked", blockReason);
+            return DelegatedBlockedError(gate, blockReason);
+        }
+
+        var request = new EpicGrantDecisionRequest(
+            Namespace: @namespace,
+            WorkflowId: workflowId,
+            Gate: gate,
+            Decision: ApprovedDecision,
+            VisitId: GetStringPropertyIgnoreCase(args, "VisitId") ?? "",
+            ArtifactRef: GetStringPropertyIgnoreCase(args, "ArtifactRef") ?? "",
+            Evidence: GetStringPropertyIgnoreCase(args, "Evidence") ?? "",
+            Caller: caller!);
+
+        EpicGrantDecisionResult outcome;
+        try
+        {
+            outcome = await grantForwarder.ForwardAsync(grantId!, request);
+        }
+        catch (Exception ex)
+        {
+            outcome = EpicGrantDecisionResult.Failed($"the forward failed ({ex.GetType().Name})");
+        }
+
+        if (outcome.Error is not null)
+        {
+            LogDelegatedApproval(LogLevel.Warning, gate, workflowId, caller, grantId, "forward_failed", outcome.Error);
+            return $"Error: the delegated '{gate}' approval could not be forwarded to the orchestrator because " +
+                   $"{outcome.Error}. Nothing was sent; the gate is unchanged.";
+        }
+
+        LogDelegatedApproval(LogLevel.Information, gate, workflowId, caller, grantId, outcome.Result, outcome.Reason);
+        return JsonSerializer.Serialize(new
+        {
+            workflowId,
+            signalName = gate,
+            status = "delegated",
+            result = outcome.Result,
+            reason = outcome.Reason
+        });
+    }
+
+    /// <summary>
+    /// The exact property first, otherwise the first property with that name in any casing.
+    /// Null unless the value is a JSON string.
+    /// </summary>
+    private static string? GetStringPropertyIgnoreCase(JsonElement element, string propertyName)
+    {
+        if (element.ValueKind != JsonValueKind.Object) return null;
+
+        if (element.TryGetProperty(propertyName, out var exact))
+            return exact.ValueKind == JsonValueKind.String ? exact.GetString() : null;
+
+        foreach (var property in element.EnumerateObject())
+        {
+            if (string.Equals(property.Name, propertyName, StringComparison.OrdinalIgnoreCase))
+                return property.Value.ValueKind == JsonValueKind.String ? property.Value.GetString() : null;
+        }
+
+        return null;
+    }
+
+    private static string DelegatedBlockedError(string gate, string blockReason) =>
+        $"Error: the delegated '{gate}' approval was refused because {blockReason}. " +
+        $"Only the configured CTO agent may send Decision '{ApprovedDecision}' with a nonblank {GrantIdField} via this tool; " +
+        "it is forwarded to the orchestrator, which decides it under an active epic grant. Nothing was sent.";
+
+    /// <summary>
+    /// One line per delegated attempt. Evidence, VisitId and ArtifactRef are never logged; the
+    /// orchestrator records the decision itself.
+    /// </summary>
+    private void LogDelegatedApproval(
+        LogLevel level,
+        string gate,
+        string workflowId,
+        string? caller,
+        string? grantId,
+        string? outcome,
+        string? reason)
+    {
+        logger.Log(
+            level,
+            "Delegated {Gate} approval for workflow {WorkflowId}; decision={Decision}; caller={Caller}; grant={GrantId}; outcome={Outcome}; reason={Reason}",
+            gate,
+            workflowId,
+            ApprovedDecision,
+            string.IsNullOrWhiteSpace(caller) ? "unresolved" : caller,
+            string.IsNullOrWhiteSpace(grantId) ? "missing" : grantId,
+            outcome ?? "unknown",
+            reason ?? "none");
     }
 
     [McpServerTool(Name = "temporal_cancel_workflow")]

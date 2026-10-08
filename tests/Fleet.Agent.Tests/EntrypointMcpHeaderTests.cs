@@ -69,28 +69,32 @@ public sealed class EntrypointMcpHeaderTests
         }
     }
 
-    [Fact]
-    public async Task FilesServerIsHeaderlessAndCodexToolIsEnabled()
+    [Theory]
+    [InlineData("fleet-journal-files", 8091, "journal-files", "fetch_attachment")]
+    [InlineData("fleet-telegram-copy", 8092, "telegram-copy", "copy_message")]
+    public async Task RuntimeServerIsHeaderlessStreamableHttpAndCodexToolIsEnabled(string name, int port, string path, string tool)
     {
         using var temp = new TempDirectory();
         var entrypoint = File.ReadAllText(RepoPaths.Resolve("entrypoint.sh"));
-        var mcp = temp.Write("mcp.json", "{\"mcpServers\":{\"fleet-journal-files\":{\"url\":\"http://127.0.0.1:8091/journal-files/v1/mcp\"}}}");
-        var settings = temp.Write("appsettings.json", "{\"Agent\":{\"McpHeaderSupport\":false,\"AllowedTools\":[\"mcp__fleet-journal-files__fetch_attachment\"]}}");
+        var url = $"http://127.0.0.1:{port}/{path}/v1/mcp";
+        var mcp = temp.Write("mcp.json", JsonSerializer.Serialize(new { mcpServers = new Dictionary<string, object> { [name] = new { url } } }));
+        var settings = temp.Write("appsettings.json", JsonSerializer.Serialize(new { Agent = new { McpHeaderSupport = false, AllowedTools = new[] { $"mcp__{name}__{tool}" } } }));
         var python = ExtractBetween(entrypoint, "python3 - \"${MCP_CONFIG}\" \"${GEMINI_SETTINGS}\" <<'PYEOF'\n", "\nPYEOF")
             .Replace("'/app/appsettings.json'", "sys.argv[3]", StringComparison.Ordinal);
         var gemini = Path.Combine(temp.Path, "gemini.json");
         Assert.Equal(0, (await RunAsync("python3", [temp.Write("translate.py", python), mcp, gemini, settings])).ExitCode);
         using var json = JsonDocument.Parse(await File.ReadAllTextAsync(gemini));
-        var server = json.RootElement.GetProperty("mcpServers").GetProperty("fleet-journal-files");
-        Assert.Equal("http://127.0.0.1:8091/journal-files/v1/mcp", server.GetProperty("httpUrl").GetString());
+        var server = json.RootElement.GetProperty("mcpServers").GetProperty(name);
+        Assert.Equal(url, server.GetProperty("httpUrl").GetString());
+        Assert.False(server.TryGetProperty("url", out _));
         Assert.False(server.TryGetProperty("headers", out _));
         var toml = Path.Combine(temp.Path, "config.toml");
         var node = ExtractBetween(entrypoint, "        node -e \"\n", "\n\" || true")
             .Replace("/app/appsettings.json", settings, StringComparison.Ordinal).Replace("$MCP_JSON", mcp, StringComparison.Ordinal)
             .Replace("/root/.codex/config.toml", toml, StringComparison.Ordinal);
         Assert.Equal(0, (await RunAsync("node", [temp.Write("translate.js", node)])).ExitCode);
-        var text = await File.ReadAllTextAsync(toml); Assert.Contains("enabled_tools = [\"fetch_attachment\"]", text);
-        Assert.Contains("url = \"http://127.0.0.1:8091/journal-files/v1/mcp\"", text);
+        var text = await File.ReadAllTextAsync(toml); Assert.Contains($"enabled_tools = [\"{tool}\"]", text);
+        Assert.Contains($"url = \"{url}\"", text);
         Assert.DoesNotContain("http_headers", text);
     }
 

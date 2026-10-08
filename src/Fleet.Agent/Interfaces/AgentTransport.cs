@@ -29,7 +29,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
     private ITelegramBotClient? _bot;
 
     /// <summary>Allows tests to inject a fake bot without a real token.</summary>
-    internal ITelegramBotClient? BotForTesting { set => _bot = value; }
+    internal ITelegramBotClient? BotForTesting { set => SetPollingBot(value); }
     private readonly AgentOptions _agentConfig;
     private readonly TelegramOptions _telegramConfig;
     private readonly AllowlistHolder _allowlist;
@@ -135,11 +135,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
         {
             try
             {
-                // Copy uses this SAME polling client. Disable SDK 429 retries for opt-in
-                // agents; mutating a shared policy around an in-flight request is unsafe.
-                _bot = _telegramConfig.MessageCopyEnabled
-                    ? new TelegramBotClient(new TelegramBotClientOptions(telegramConfig.Value.BotToken) { RetryCount = 0 })
-                    : new TelegramBotClient(telegramConfig.Value.BotToken);
+                SetPollingBot(new TelegramBotClient(telegramConfig.Value.BotToken));
                 // Attachment sends keep their separate no-retry client; copy always uses _bot.
                 if (journal?.SendEnabled == true)
                     _journalSendBot = new TelegramBotClient(new TelegramBotClientOptions(telegramConfig.Value.BotToken) { RetryCount = 0 });
@@ -191,6 +187,30 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
             _telegramConfig,
             (chatId, text) => SendTextAsync(chatId, text),
             logger);
+    }
+
+    private void SetPollingBot(ITelegramBotClient? bot)
+    {
+        if (_bot is not null && _telegramConfig.MessageCopyEnabled)
+            _bot.OnApiResponseReceived -= RejectCopyRetry;
+        _bot = bot;
+        if (bot is not null && _telegramConfig.MessageCopyEnabled)
+            bot.OnApiResponseReceived += RejectCopyRetry;
+    }
+
+    private static async ValueTask RejectCopyRetry(ITelegramBotClient bot, Telegram.Bot.Args.ApiResponseEventArgs args, CancellationToken ct)
+    {
+        // This SDK event runs before its 429 retry loop. Reject only copyMessage's
+        // rate limit here, without another client or changing any shared retry options.
+        // Ordinary replies, polling and prompt/cleanup calls retain the SDK policy.
+        if (args.ApiRequestEventArgs.Request.MethodName != "copyMessage" || args.ResponseMessage.IsSuccessStatusCode) return;
+        using var response = System.Text.Json.JsonDocument.Parse(await args.ResponseMessage.Content.ReadAsStringAsync(ct));
+        var error = response.RootElement;
+        if (error.GetProperty("error_code").GetInt32() != 429) return;
+        int? retryAfter = error.TryGetProperty("parameters", out var parameters)
+            && parameters.TryGetProperty("retry_after", out var retry) ? retry.GetInt32() : null;
+        throw new Telegram.Bot.Exceptions.ApiRequestException(error.GetProperty("description").GetString() ?? "Too Many Requests",
+            429, new ResponseParameters { RetryAfter = retryAfter });
     }
 
     private ITelegramBotClient CopyBot => _telegramConfig.MessageCopyEnabled && _bot is not null

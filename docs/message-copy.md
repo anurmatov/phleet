@@ -68,9 +68,12 @@ Grant/reprovision only after **both agent and orchestrator images from the merge
 are running; a stored `fleet-telegram-copy` endpoint row is reserved and refuses
 before deprovisioning, while grant-without-bot warns `message_copy_unavailable:no_telegram_bot`.
 
-For enabled agents only, the polling client's SDK retries are disabled to preserve
-one-shot copying; agents without the grant retain their original retry policy,
-configuration bytes and polling update list.
+For enabled agents only, the polling client's response hook refuses a `copyMessage`
+429 before the SDK can retry it; no shared retry option is changed and no second
+bot client is created. Ordinary replies, polling and prompt/cleanup calls retain
+the SDK retry policy. Agents without the grant retain their original client,
+configuration bytes and polling update list. Gemini uses `httpUrl` for this
+stateless streamable-HTTP listener.
 
 Remove the grant and reprovision to disable, or revert the code to roll back;
 no schema, persisted state, host port, network, production config or journal key changes.

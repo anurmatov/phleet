@@ -48,7 +48,7 @@ public sealed class MessageCopyTransportTests
             await using var services = Provider(root: root);
             var transport = services.GetServices<IHostedService>().OfType<AgentTransport>().Single();
             var handler = new BotApi(); using var http = new HttpClient(handler);
-            transport.BotForTesting = new TelegramBotClient(new TelegramBotClientOptions(SyntheticBotToken) { RetryCount = 0 }, http);
+            transport.BotForTesting = new TelegramBotClient(SyntheticBotToken, http);
             ITelegramCopyClient bot = transport;
             Assert.Equal("Synthetic recipient", await bot.GetChatAsync(2002, default));
             Assert.Equal(66, await bot.SendPromptAsync(1001, 77, "Synthetic recipient", "NONCE", default));
@@ -82,15 +82,15 @@ public sealed class MessageCopyTransportTests
         var transport = hosted.OfType<AgentTransport>().Single();
         Assert.Equal(enabled, transport.PollingUpdates.Contains(UpdateType.CallbackQuery));
         Assert.Equal(enabled, services.GetService<MessageCopyTools>() is not null);
+        // Real production construction preserves the SDK retry policy for ordinary operations.
+        var field = typeof(AgentTransport).GetField("_bot", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var bot = (TelegramBotClient)field.GetValue(transport)!;
+        var options = (TelegramBotClientOptions)typeof(TelegramBotClient).GetField("_options", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(bot)!;
+        Assert.Equal(new TelegramBotClientOptions(SyntheticBotToken).RetryCount, options.RetryCount);
         if (enabled)
         {
             Assert.Same(services.GetRequiredService<MessageCopyListener>(), hosted.OfType<MessageCopyListener>().Single());
             Assert.True(Array.FindIndex(hosted, s => s is MessageCopyListener) < Array.FindIndex(hosted, s => s is WarmupService));
-            // Real production construction (not an injected fake) carries zero retry policy.
-            var field = typeof(AgentTransport).GetField("_bot", BindingFlags.NonPublic | BindingFlags.Instance)!;
-            var bot = (TelegramBotClient)field.GetValue(transport)!;
-            var options = (TelegramBotClientOptions)typeof(TelegramBotClient).GetField("_options", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(bot)!;
-            Assert.Equal(0, options.RetryCount);
         }
         else Assert.Equal(new[] { UpdateType.Message, UpdateType.MessageReaction }, transport.PollingUpdates);
     }
@@ -110,20 +110,41 @@ public sealed class MessageCopyTransportTests
     {
         await using var services = Provider(); var transport = services.GetServices<IHostedService>().OfType<AgentTransport>().Single();
         var handler = new BotApi { ErrorStatus = status }; using var http = new HttpClient(handler);
-        transport.BotForTesting = new TelegramBotClient(new TelegramBotClientOptions(SyntheticBotToken) { RetryCount = 0 }, http);
-        await Assert.ThrowsAsync<TelegramCopyException>(() => ((ITelegramCopyClient)transport).CopyMessageAsync(2002, 1001, 77, default));
+        transport.BotForTesting = new TelegramBotClient(SyntheticBotToken, http);
+        var error = await Assert.ThrowsAsync<TelegramCopyException>(() => ((ITelegramCopyClient)transport).CopyMessageAsync(2002, 1001, 77, default));
+        Assert.Equal(status, error.Status);
+        Assert.Equal(1, error.RetryAfter);
         Assert.Single(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Transport_OrdinaryReply429_RetriesWithAndWithoutCopy(bool enabled)
+    {
+        await using var services = Provider(copy: enabled);
+        var transport = services.GetServices<IHostedService>().OfType<AgentTransport>().Single();
+        var handler = new BotApi { ErrorStatus = 429, ErrorOnce = true };
+        using var http = new HttpClient(handler);
+        // Carry the production-constructed retry options into the wire test, rather
+        // than silently replacing a broken production policy with SDK defaults.
+        var polling = (TelegramBotClient)typeof(AgentTransport).GetField("_bot", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(transport)!;
+        var options = (TelegramBotClientOptions)typeof(TelegramBotClient).GetField("_options", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(polling)!;
+        transport.BotForTesting = new TelegramBotClient(options, http);
+        await transport.SendHtmlTextAsync(1001, "Synthetic reply");
+        Assert.Equal(2, handler.Requests.Count(r => r.Method == "sendMessage"));
     }
 
     private sealed class BotApi : HttpMessageHandler
     {
         public List<(string Method, JsonNode Body)> Requests { get; } = [];
         public int? ErrorStatus { get; init; }
+        public bool ErrorOnce { get; init; }
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             var method = request.RequestUri!.Segments[^1];
             Requests.Add((method, JsonNode.Parse(await request.Content!.ReadAsStringAsync(ct))!));
-            if (ErrorStatus is { } status) return new((HttpStatusCode)status) { Content = new StringContent($"{{\"ok\":false,\"error_code\":{status},\"description\":\"Synthetic error\",\"parameters\":{{\"retry_after\":1}}}}", Encoding.UTF8, "application/json") };
+            if (ErrorStatus is { } status && (!ErrorOnce || Requests.Count(r => r.Method == method) == 1)) return new((HttpStatusCode)status) { Content = new StringContent($"{{\"ok\":false,\"error_code\":{status},\"description\":\"Synthetic error\",\"parameters\":{{\"retry_after\":1}}}}", Encoding.UTF8, "application/json") };
             var result = method switch
             {
                 "getChat" => "{\"id\":2002,\"type\":\"private\",\"first_name\":\"Synthetic\",\"last_name\":\"recipient\",\"accent_color_id\":0,\"max_reaction_count\":0}",

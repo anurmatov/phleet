@@ -308,7 +308,12 @@ public sealed class GeminiExecutor : IAgentExecutor
 
             await stderrTask;
             await process.WaitForExitAsync(ct);
-            processInterval?.Close();
+
+            // #439 D2: only a CLI that exited by itself with code 0 closes normally.
+            if (process.ExitCode == 0)
+                processInterval?.CloseNormally();
+            else
+                processInterval?.Close();
 
             if (process.ExitCode == 0)
             {
@@ -343,6 +348,19 @@ public sealed class GeminiExecutor : IAgentExecutor
             // #394: the ledger interval closes only on a confirmed exit. A kill that failed or has
             // not taken effect yet leaves the CLI able to send, so a watcher keeps the interval
             // open until the process really exits.
+            // #439 D4: a CLI still running after a cancellation or a failure is no longer the task's
+            // turn. Its interval is handed over to unknown before the kill, so a send it makes before
+            // the exit is excluded rather than attributed to the task's origin.
+            if (process is not null && processInterval is not null && _ledger is not null)
+            {
+                bool running;
+                try { running = !process.HasExited; }
+                catch { running = true; }
+
+                if (running)
+                    processInterval = _ledger.ContinueAsUnknown(processInterval);
+            }
+
             var exited = true;
             if (process is not null)
             {

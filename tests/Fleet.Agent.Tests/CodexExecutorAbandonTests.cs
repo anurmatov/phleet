@@ -332,7 +332,7 @@ public class CodexExecutorAbandonTests
         Assert.Contains(server.Logs, l => l.Contains("drain=" + expected));
         Assert.Contains(ledger.SnapshotForTests(), i => i.Origin == TurnOrigin.Unknown && !i.LockHeld && i.End is null);
         time.Advance(TimeSpan.FromSeconds(5));
-        Assert.Equal(ToolSendAttribution.NonHuman, ledger.Attribute(time.GetUtcNow() - TimeSpan.FromSeconds(2)));
+        Assert.Equal(ToolSendAttribution.ExcludedOrigin, ledger.Attribute(time.GetUtcNow() - TimeSpan.FromSeconds(2)).Attribution);
         await server.NotifyAsync(AbandonAppServer.Frame("item/completed", "turn-1",
             new JsonObject { ["type"] = "agentMessage", ["text"] = "late orphan text" }));
         var next = await CollectAsync(server.Executor.ExecuteAsync("next"));

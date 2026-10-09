@@ -34,9 +34,11 @@ public sealed partial class MidTurnIsolationTests
             rig.At(102.25);
             Assert.Equal(1, await rig.DecideAsync());
             Assert.Single(rig.Acked);
-            Assert.Equal(source == TaskSource.UserMessage ? 1 : 0, rig.Rows);
-            Assert.Equal(source == TaskSource.UserMessage ? 1 : 0, rig.Counters.Get("tool_send_captured"));
-            Assert.Equal(source == TaskSource.UserMessage ? 0 : 1, rig.Counters.Get("tool_send_non_human"));
+            // #439: a relay (workflow) turn's send is captured as relay; a bridge turn's stays excluded.
+            Assert.Equal(source == TaskSource.Bridge ? 0 : 1, rig.Rows);
+            Assert.Equal(source == TaskSource.Bridge ? 0 : 1, rig.Counters.Get("tool_send_captured"));
+            Assert.Equal(source == TaskSource.Relay ? 1 : 0, rig.Counters.Get("tool_send_captured_relay"));
+            Assert.Equal(source == TaskSource.Bridge ? 1 : 0, rig.Counters.Get("tool_send_excluded_origin"));
             executor.Release();
             if (source != TaskSource.UserMessage)
             {

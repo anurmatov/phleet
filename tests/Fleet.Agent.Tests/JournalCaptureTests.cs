@@ -8,6 +8,7 @@ using Fleet.Agent.Models;
 using Fleet.Agent.Services;
 using Fleet.Journal.Client;
 using Fleet.Shared;
+using Fleet.Shared.Journal;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -113,6 +114,99 @@ public sealed class JournalCaptureTests : IDisposable
         Assert.Empty(Directory.GetFiles(rig.Spool.PendingDir));
         Assert.Equal(0, rig.Counters.Get("journal_captured{direction=outbound}"));
         Assert.True(rig.Counters.Get("journal_excluded{reason=system_origin}") >= 1);
+    }
+
+    [Fact]
+    public async Task A_bridge_tasks_reply_to_the_group_writes_no_spool_file()
+    {
+        var rig = Rig.Build(_root);
+        var manager = rig.ManagerAnswering("the answer");
+
+        var done = new TaskCompletionSource();
+        manager.OnTaskCompleted += (_, _, _, _, _, _, _, _) => done.TrySetResult();
+        _ = manager.StartTask(chatId: Group, task: "status?", displayText: "status?", isSessionTask: false,
+            source: TaskSource.Bridge, taskId: "t-1");
+        await done.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Contains(rig.Bot.Texts, t => t.Contains("the answer", StringComparison.Ordinal));
+        Assert.Empty(Directory.GetFiles(rig.Spool.PendingDir));
+        Assert.Equal(0, rig.Counters.Get("journal_captured{direction=outbound}"));
+        Assert.True(rig.Counters.Get("journal_excluded{reason=system_origin}") >= 1);
+    }
+
+    /// <summary>
+    /// #439 D5: one relay turn replies through the runtime and sends through a Telegram MCP tool to
+    /// the same allowlisted DM. Classifier rule 2 still excludes the runtime reply; the tool send the
+    /// ledger admits is one <c>agent_tool</c> record.
+    /// </summary>
+    [Fact]
+    public async Task A_relay_turns_runtime_reply_is_excluded_and_its_tool_send_to_the_same_dm_is_journaled()
+    {
+        var rig = Rig.Build(_root);
+        var clock = new ManualClock(ReceiptRig.T(90));
+        var ledger = new TurnOriginLedger(NullLogger<TurnOriginLedger>.Instance, clock);
+
+        var executor = Substitute.For<IAgentExecutor>();
+        executor
+            .ExecuteAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<MessageImage>?>(),
+                Arg.Any<IReadOnlyList<MessageDocument>?>(), Arg.Any<CancellationToken>())
+            .Returns(_ => RelayTurn(ledger, clock, "the answer"));
+        var manager = new TaskManager(rig.AgentOptions, executor, new SessionManager(), NullLogger<TaskManager>.Instance,
+            sink: rig.Holder, ledger: ledger);
+
+        var done = new TaskCompletionSource();
+        manager.OnTaskCompleted += (_, _, _, _, _, _, _, _) => done.TrySetResult();
+        _ = manager.StartTask(chatId: User, task: "directive", displayText: "directive", isSessionTask: false,
+            source: TaskSource.Relay, relaySender: "agent2", taskId: "t-1");
+        await done.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Contains(rig.Bot.Texts, t => t.Contains("the answer", StringComparison.Ordinal));
+        Assert.Empty(Directory.GetFiles(rig.Spool.PendingDir));
+        Assert.True(rig.Counters.Get("journal_excluded{reason=system_origin}") >= 1);
+
+        // The same turn's send_message to that DM, stamped while it ran.
+        var consumer = new ToolSendReceiptConsumer(
+            rig.AgentOptions, new NoBroker(), ledger, rig.Capture, rig.Counters, () => rig.Bot.BotId,
+            NullLogger<ToolSendReceiptConsumer>.Instance, clock)
+        {
+            AckHook = _ => Task.CompletedTask,
+        };
+        clock.Set(ReceiptRig.T(100.1));
+        await consumer.ReceiveAsync(ToolSendReceipts.Serialize(ReceiptRig.Receipt(100) with
+        {
+            BotId = rig.Bot.BotId,
+            Chat = new ToolSendChat(User, "private", null),
+        }), deliveryTag: 1);
+        clock.Set(ReceiptRig.T(102.25));
+        Assert.Equal(1, await consumer.DecideDueAsync());
+
+        var record = Assert.Single(rig.Spool.Pending()).Record;
+        Assert.Equal("agent_tool", record["origin"]!.GetValue<string>());
+        Assert.Equal("outbound", record["direction"]!.GetValue<string>());
+        Assert.Equal(User, record["telegram"]!["chatId"]!.GetValue<long>());
+        Assert.Equal(1, rig.Counters.Get("tool_send_captured_relay"));
+    }
+
+    /// <summary>A relay turn as an executor runs it: its interval from start to its own successful result.</summary>
+    private static async IAsyncEnumerable<AgentProgress> RelayTurn(TurnOriginLedger ledger, ManualClock clock, string answer)
+    {
+        var interval = ledger.OpenTurn();
+        try
+        {
+            await Task.Yield();
+            clock.Set(ReceiptRig.T(100.5));
+            interval.CloseNormally();
+            yield return new AgentProgress { Summary = answer, EventType = "result", FinalResult = answer };
+        }
+        finally
+        {
+            interval.Close();
+        }
+    }
+
+    private sealed class NoBroker : IAgentBrokerConnection
+    {
+        public RabbitMQ.Client.IConnection? Connection => null;
     }
 
     [Fact]
@@ -427,6 +521,7 @@ public sealed class JournalCaptureTests : IDisposable
         public required MessageSinkHolder Holder { get; init; }
         public required JournalBot Bot { get; init; }
         public required JournalSpool Spool { get; init; }
+        public required JournalCapture Capture { get; init; }
         public required string SpoolRoot { get; init; }
         public required JournalCounters Counters { get; init; }
         public required string AttachmentDir { get; init; }
@@ -519,6 +614,7 @@ public sealed class JournalCaptureTests : IDisposable
                 Holder = holder,
                 Bot = bot,
                 Spool = spool ?? null!,
+                Capture = capture ?? null!,
                 SpoolRoot = spoolRoot,
                 Counters = counters,
                 AttachmentDir = attachments,

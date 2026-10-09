@@ -10,23 +10,54 @@ public enum TurnOrigin { Human, Relay, Bridge, Unknown }
 /// <summary>What the ledger can prove about a tool send's clock-uncertainty window.</summary>
 public enum ToolSendAttribution
 {
-    /// <summary>Human intervals cover every instant of the window and nothing else touches it.</summary>
+    /// <summary>Captured: only human turns touch the window (#439 D1).</summary>
     Human,
 
+    /// <summary>Captured: a relay turn touches the window, and nothing but human and relay turns does (#439 D1).</summary>
+    Relay,
+
     /// <summary>
-    /// Part of the window is not covered by a human interval, or the window starts before what the
-    /// ledger still remembers.
+    /// Not captured: no human or relay turn touches the window, part of it is uncovered next to a
+    /// turn that ended abnormally, or the window starts before what the ledger still remembers.
     /// </summary>
     Unattributed,
 
-    /// <summary>A relay, bridge or unknown interval touches the window.</summary>
-    NonHuman,
+    /// <summary>Not captured: a bridge or unknown interval touches the window.</summary>
+    ExcludedOrigin,
+}
+
+/// <summary>Which step of <see cref="TurnOriginLedger.Attribute"/> decided a tool send (#439).</summary>
+public enum ToolSendReason
+{
+    /// <summary>Human and relay intervals cover every instant of the window.</summary>
+    Covered,
+
+    /// <summary>Part of the window is interval-free, and every human or relay turn touching it is open or closed normally.</summary>
+    IdleEdge,
+
+    /// <summary>A bridge or unknown interval touches the window.</summary>
+    BridgeOrUnknown,
+
+    /// <summary>No interval of any origin touches the window.</summary>
+    NoInterval,
+
+    /// <summary>Part of the window is uncovered and a human or relay turn touching it closed abnormally.</summary>
+    AbnormalClose,
+
+    /// <summary>The window is not yet observed to its end, or starts before what the ledger still remembers.</summary>
+    Horizon,
 }
 
 /// <summary>
+/// One tool-send decision (#439). <see cref="RelayTouched"/> reports whether any relay interval
+/// touches the window, whatever the result; it is false on the <see cref="ToolSendReason.Horizon"/> path.
+/// </summary>
+public readonly record struct ToolSendDecision(ToolSendAttribution Attribution, ToolSendReason Reason, bool RelayTouched);
+
+/// <summary>
 /// Every period in which the provider may be acting, tagged with whose turn it is (#394). A tool
-/// send made through a Telegram MCP tool is journaled only when this ledger proves it answered a
-/// human.
+/// send made through a Telegram MCP tool is journaled only when this ledger proves it was made in a
+/// human or workflow (relay) turn (#439).
 /// </summary>
 /// <remarks>
 /// <para>
@@ -50,10 +81,47 @@ public enum ToolSendAttribution
 /// process exit, whoever holds the lock meanwhile.</item>
 /// </list>
 /// <para>
-/// The rule (<see cref="Attribute"/>) is fail closed: <b>every</b> instant of
-/// <c>[requestedAt − 2 s, requestedAt + 2 s]</c> must be covered by human intervals, and no relay,
-/// bridge or unknown interval may touch it. There is no precedence between intervals and no
+/// The rule (<see cref="Attribute"/>, #439) decides the window <c>W = [requestedAt − 2 s, requestedAt + 2 s]</c>.
+/// A send is captured when (a) no bridge or unknown interval touches <c>W</c>, (b) at least one human
+/// or relay interval does, and (c) either human and relay intervals cover every instant of <c>W</c>,
+/// or every human or relay interval touching <c>W</c> is still open or <b>closed normally</b>. The
+/// result is <see cref="ToolSendAttribution.Relay"/> if any relay interval touches <c>W</c>, else
+/// <see cref="ToolSendAttribution.Human"/>. There is no precedence between intervals and no
 /// exact-containment step. Closed intervals are kept for 10 minutes; open ones are never evicted.
+/// </para>
+/// <para>
+/// <b>Closed normally</b> (<see cref="LedgerInterval.CloseNormally"/>) means the executor read the
+/// provider's own successful terminal for that turn: Claude's current-turn <c>result</c> without
+/// error, Codex's <c>turn/completed</c> with <c>status: completed</c>, a Gemini CLI that exited by
+/// itself with code 0. Cancellation, timeout, kill, process death, abandon, an error terminal and every
+/// other path close abnormally. So a Claude turn that hits max-turns or ends on an error
+/// <c>result</c> closes abnormally, and a send whose window reaches past its edge is
+/// <see cref="ToolSendAttribution.Unattributed"/>. That is deliberate, not a bug to fix: the tail of
+/// a turn that did not finish cleanly is not proven idle.
+/// </para>
+/// <para>
+/// Still excluded: any bridge or unknown contact (<c>/run</c>, warmup, injected or background provider
+/// turns, a Codex interrupted turn that outlived its drain, a Gemini call cancelled without a
+/// confirmed exit, handed over by <see cref="ContinueAsUnknown"/>); a window before the horizon; a
+/// receipt redelivered after a restart; an uncovered part of <c>W</c> next to an abnormal close.
+/// </para>
+/// <para>
+/// Why an interval-free part of <c>W</c> can be accepted. Every provider action that can issue an
+/// MCP call leaves a record first: under the turn lock it is inside a lock-held interval; outside it
+/// the stdout reader opens an unknown interval on the first turn-content event, which the CLI emits
+/// before it dispatches the tool call; a Gemini call is covered from process start to confirmed exit.
+/// The decision waits until <c>requestedAt + 2.25 s</c>, so a reader-opened interval is visible and
+/// touches <c>W</c> as long as <b>clock skew plus reader lag stay within 2 s together</b>. Before
+/// #439 a late reader only failed closed; the idle-edge path makes that combined budget a capture
+/// condition. So an interval-free part of <c>W</c> means no tracked provider activity there, and the
+/// send belongs to a human or relay turn touching <c>W</c>. If one of those ended abnormally the
+/// uncovered part may be its cancelled tail, so it is refused. Residual, the same class as before: a
+/// process the provider detached from its own stdout (a background shell child calling the MCP
+/// endpoint) is never seen.
+/// </para>
+/// <para>
+/// A human-turn send whose window merely touches an adjacent relay interval is labelled relay.
+/// Capture is identical; <see cref="ToolSendDecision.RelayTouched"/> and the decision log make it visible.
 /// </para>
 /// <para>
 /// Never throws and never blocks beyond a short lock: an executor must not fail a turn because of
@@ -198,9 +266,10 @@ public sealed class TurnOriginLedger
     /// <summary>
     /// Decides a tool send stamped <paramref name="requestedAt"/> by the publisher's clock, as of now.
     /// An interval still open counts as covering up to now. The caller waits until the agent clock
-    /// has passed the end of the window; asked earlier, the answer is <see cref="ToolSendAttribution.Unattributed"/>.
+    /// has passed the end of the window; asked earlier, the answer is
+    /// <see cref="ToolSendAttribution.Unattributed"/> / <see cref="ToolSendReason.Horizon"/>.
     /// </summary>
-    public ToolSendAttribution Attribute(DateTimeOffset requestedAt)
+    public ToolSendDecision Attribute(DateTimeOffset requestedAt)
     {
         var from = requestedAt - ClockSkew;
         var to = requestedAt + ClockSkew;
@@ -210,38 +279,75 @@ public sealed class TurnOriginLedger
             var now = _time.GetUtcNow();
             SweepLocked(now);
 
-            // Not yet observed to its end, or older than what is still remembered: nothing about
-            // the window can be proven.
+            // 1. Not yet observed to its end, or older than what is still remembered: nothing about
+            //    the window can be proven.
             var horizon = Max(_startedAt, now - Retention);
             if (now < to || from < horizon)
-                return ToolSendAttribution.Unattributed;
+                return new(ToolSendAttribution.Unattributed, ToolSendReason.Horizon, RelayTouched: false);
 
-            // Any non-human interval that touches the window, at any point, excludes the send.
-            foreach (var interval in _intervals)
-            {
-                if (interval.Origin != TurnOrigin.Human
-                    && interval.Start <= to && (interval.End ?? now) >= from)
-                {
-                    return ToolSendAttribution.NonHuman;
-                }
-            }
+            var touching = _intervals.Where(i => i.Start <= to && (i.End ?? now) >= from).ToList();
+            var relayTouched = touching.Any(i => i.Origin == TurnOrigin.Relay);
 
-            // Every instant must be covered by the union of human intervals — a gap between two
-            // human turns, or the time before or after one, is not.
+            // 2. Any bridge or unknown interval that touches the window, at any point, excludes the send.
+            if (touching.Any(i => i.Origin is TurnOrigin.Bridge or TurnOrigin.Unknown))
+                return new(ToolSendAttribution.ExcludedOrigin, ToolSendReason.BridgeOrUnknown, relayTouched);
+
+            // 3. Nobody's turn touches the window.
+            var turns = touching.Where(i => i.Origin is TurnOrigin.Human or TurnOrigin.Relay).OrderBy(i => i.Start).ToList();
+            if (turns.Count == 0)
+                return new(ToolSendAttribution.Unattributed, ToolSendReason.NoInterval, relayTouched);
+
+            var captured = relayTouched ? ToolSendAttribution.Relay : ToolSendAttribution.Human;
+
+            // 4. Every instant covered by the union of human and relay intervals.
             var covered = from;
-            foreach (var interval in _intervals
-                         .Where(i => i.Origin == TurnOrigin.Human && i.Start <= to && (i.End ?? now) >= from)
-                         .OrderBy(i => i.Start))
+            var gap = false;
+            foreach (var interval in turns)
             {
                 if (interval.Start > covered)
-                    return ToolSendAttribution.Unattributed;
+                {
+                    gap = true;
+                    break;
+                }
 
                 covered = Max(covered, interval.End ?? now);
-                if (covered >= to)
-                    return ToolSendAttribution.Human;
+                if (covered >= to) break;
             }
 
-            return covered >= to ? ToolSendAttribution.Human : ToolSendAttribution.Unattributed;
+            if (!gap && covered >= to)
+                return new(captured, ToolSendReason.Covered, relayTouched);
+
+            // 5. An interval-free part is idle only when no turn touching the window ended abnormally:
+            //    the uncovered part could otherwise be a cancelled turn's tail.
+            if (turns.All(i => i.End is null || i.ClosedNormally))
+                return new(captured, ToolSendReason.IdleEdge, relayTouched);
+
+            // 6.
+            return new(ToolSendAttribution.Unattributed, ToolSendReason.AbnormalClose, relayTouched);
+        }
+    }
+
+    /// <summary>
+    /// Hands <paramref name="interval"/> over to an <see cref="TurnOrigin.Unknown"/> interval with no
+    /// gap (#439): under one lock acquisition it closes <paramref name="interval"/> abnormally at now
+    /// and opens an unknown interval starting at the same instant, with no lock and no owner, which
+    /// only <see cref="LedgerInterval.Close"/> ends. For work that may still be running after its
+    /// task gave up on it (a Gemini CLI whose kill is not confirmed yet), so its sends are not
+    /// attributed to the task. On an already-closed interval it opens nothing and returns
+    /// <paramref name="interval"/>. Never throws.
+    /// </summary>
+    public LedgerInterval ContinueAsUnknown(LedgerInterval interval)
+    {
+        lock (_gate)
+        {
+            if (interval.End is not null) return interval;
+
+            var now = _time.GetUtcNow();
+            CloseLocked(interval, now);
+            var unknown = new LedgerInterval(this, TurnOrigin.Unknown, now, lockHeld: false, owner: null);
+            _intervals.Add(unknown);
+            SweepLocked(now);
+            return unknown;
         }
     }
 
@@ -256,6 +362,13 @@ public sealed class TurnOriginLedger
     {
         lock (_gate)
             return _intervals.Select(i => (i.Origin, i.Start, i.End, i.LockHeld)).ToList();
+    }
+
+    /// <summary>Every retained interval with how it closed, for tests.</summary>
+    internal IReadOnlyList<(TurnOrigin Origin, DateTimeOffset? End, bool ClosedNormally)> ClosuresForTests()
+    {
+        lock (_gate)
+            return _intervals.Select(i => (i.Origin, i.End, i.ClosedNormally)).ToList();
     }
 
     internal TurnOrigin? PendingForTests => _pending.Value;
@@ -376,7 +489,11 @@ public sealed class TurnOriginLedger
         }
     }
 
-    /// <summary>One interval. <see cref="Close"/> is idempotent.</summary>
+    /// <summary>
+    /// One interval. <see cref="Close"/> and <see cref="Dispose"/> close it abnormally;
+    /// <see cref="CloseNormally"/> closes it normally (#439). All three are idempotent, and the first
+    /// close wins.
+    /// </summary>
     public sealed class LedgerInterval : IDisposable
     {
         private readonly TurnOriginLedger _ledger;
@@ -397,7 +514,26 @@ public sealed class TurnOriginLedger
         internal ProviderActivity? Owner { get; }
         internal bool StuckReported { get; set; }
 
+        /// <summary>Closed by <see cref="CloseNormally"/>: the provider's own successful terminal for this turn was read.</summary>
+        internal bool ClosedNormally { get; private set; }
+
         public void Close() => _ledger.Close(this);
+
+        /// <summary>
+        /// Call only on the provider's own successful terminal for this turn (#439 D2) — never on a
+        /// cancellation, timeout, kill, process death, abandon, error or <c>/run</c>. Marks and closes
+        /// the interval if it is still open; a no-op on a closed one.
+        /// </summary>
+        public void CloseNormally()
+        {
+            lock (_ledger._gate)
+            {
+                if (End is not null) return;
+
+                ClosedNormally = true;
+                _ledger.CloseLocked(this, _ledger._time.GetUtcNow());
+            }
+        }
 
         public void Dispose() => Close();
     }

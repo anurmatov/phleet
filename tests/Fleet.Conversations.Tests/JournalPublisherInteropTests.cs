@@ -100,6 +100,60 @@ public sealed class JournalPublisherInteropTests(MySqlFixture fixture) : IDispos
             + $"JOIN journal_conversations c ON c.id = m.conversation_id WHERE c.telegram_chat_id = {Dm} AND m.direction = 'outbound'"));
     }
 
+    /// <summary>
+    /// #439 AC10: a 2-part relay tool send the agent spooled twice — a broker redelivery decided
+    /// again — is created once per message and then a duplicate per message. The first send group
+    /// stands: no conflict, no second row, nothing a drainer would dead-letter.
+    /// </summary>
+    [Fact]
+    public async Task A_redelivered_two_part_relay_tool_send_is_created_once_then_duplicate()
+    {
+        await using var host = await JournalHttpHost.StartAsync(fixture.ConnectionString);
+
+        var spool = new JournalSpool(Path.Combine(_root, "relay-tool-send"));
+        var capture = NewCapture(spool);
+        var deliveries = new List<List<System.Text.Json.Nodes.JsonObject>>();
+        for (var delivery = 0; delivery < 2; delivery++)
+        {
+            // What ToolSendReceiptConsumer.Capture writes for a receipt the ledger attributed to a relay turn.
+            var seen = spool.PendingIds().ToHashSet();
+            var batch = capture.Outbound(OutboundOrigin.Human, JournalRecordOrigin.AgentTool);
+            for (var part = 1; part <= 2; part++)
+            {
+                batch.Add(new JournalMessage
+                {
+                    BotId = 7101, ChatId = Dm, ChatType = "private", MessageId = 440 + part, Date = Now,
+                    SenderKind = JournalSenderKind.Agent, SenderId = "7101", Text = $"workflow update, part {part}",
+                    TextFormat = JournalTextFormat.Plain,
+                });
+            }
+            batch.Flush();
+            deliveries.Add(spool.Pending().Where(e => !seen.Contains(e.Id)).Select(e => e.Record)
+                .OrderBy(r => r["sendGroup"]!["part"]!.GetValue<int>()).ToList());
+        }
+
+        Assert.All(deliveries, d => Assert.Equal(2, d.Count));
+        Assert.All(deliveries.SelectMany(d => d), r => Assert.Equal("agent_tool", r["origin"]!.GetValue<string>()));
+        var groups = deliveries.Select(d => Assert.Single(d.Select(r => r["sendGroup"]!["id"]!.GetValue<string>()).Distinct())).ToList();
+        Assert.NotEqual(groups[0], groups[1]);
+
+        // Delivered in order, as the drainer would: the first delivery's two parts, then the redelivery's.
+        var results = new List<string>();
+        foreach (var record in deliveries.SelectMany(d => d))
+        {
+            var response = await host.PostAsync(record.ToJsonString(JournalRecordJson.StoredOptions), "agent1");
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.NotEqual(HttpStatusCode.Conflict, response.StatusCode);
+            results.Add($"{(int)response.StatusCode}:{System.Text.Json.Nodes.JsonNode.Parse(body)!["result"]!.GetValue<string>()}");
+        }
+
+        Assert.Equal(["201:created", "201:created", "200:duplicate", "200:duplicate"], results);
+        Assert.Equal($"2|1|{groups[0]}", await fixture.ScalarRowAsync(
+            "SELECT COUNT(*), COUNT(DISTINCT m.send_group_id), MIN(m.send_group_id) FROM journal_messages m "
+            + $"JOIN journal_conversations c ON c.id = m.conversation_id WHERE c.telegram_chat_id = {Dm} "
+            + "AND m.direction = 'outbound' AND m.source_key IN ('tg:441', 'tg:442')"));
+    }
+
     private static readonly DateTime Now = new(2026, 9, 27, 10, 0, 0, DateTimeKind.Utc);
 
     private static JournalMessage Voice(long botId, string transcript) => new()

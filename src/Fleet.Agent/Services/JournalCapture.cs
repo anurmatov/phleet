@@ -142,6 +142,9 @@ public sealed class JournalCapture
         private readonly List<JournalMessage> _kept = [];
         public bool SpoolSucceeded { get; private set; }
 
+        /// <summary>How many added messages the classifier kept, flushed or not (#439).</summary>
+        public int Kept { get; private set; }
+
         internal OutboundBatch(JournalCapture owner, OutboundOrigin origin, JournalRecordOrigin recordOrigin)
         {
             _owner = owner;
@@ -154,7 +157,11 @@ public sealed class JournalCapture
         {
             try
             {
-                if ((_recordOrigin != JournalRecordOrigin.AgentCopy || _owner._sendEnabled) && _owner.Include(JournalDirection.Outbound, message, _origin)) _kept.Add(message);
+                if ((_recordOrigin != JournalRecordOrigin.AgentCopy || _owner._sendEnabled) && _owner.Include(JournalDirection.Outbound, message, _origin))
+                {
+                    _kept.Add(message);
+                    Kept++;
+                }
             }
             catch (Exception e)
             {

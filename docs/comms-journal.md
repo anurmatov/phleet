@@ -150,6 +150,10 @@ The task origin (`JournalTaskOrigin`) is why an outbound message exists, not the
 agent's `Relay` and `Bridge` task sources map one to one, everything else maps to `Human`. A null
 allowlist skips rule 4.
 
+Rule 2 governs **runtime** relay and bridge replies only. A Telegram MCP tool send the ledger
+attributes to a human or relay turn is classified with task origin `Human` (#439), so rules 1, 3 and
+4 apply to every tool send (see [Tool sends](#tool-sends-slice-5)).
+
 **Publishers classify first and write nothing for an excluded message** — no local file, no
 request. The server repeats the check with `Human` and no allowlist, so only rules 1 and 3 apply
 there, and it runs before any write.
@@ -228,6 +232,12 @@ Messages an agent sends through the Telegram MCP tools (`send_message`, `send_to
 exclusion list, so `fleet-telegram` reports what it sent and the agent classifies and spools it with
 its own ingest token. The records carry `origin: agent_tool`; the observer is the agent.
 
+Since #439 a send made in a workflow (relay) turn is journaled like a human one, and so is a send
+that is a turn's **final action**, when the turn ends at once. Nothing has to wait for a send to be
+captured. Bridge and unknown-origin sends are never journaled, and capturing a send adds only the
+agent's own outbound message to its own observed scope: read access does not widen, and workflow
+turns stay unbound.
+
 **Receipts.** Every Bot API send in `Fleet.Telegram` goes through `TelegramSender`, and a source-scan
 test fails if anything else calls a send method on a bot client. When a tool call ends with at least
 one message accepted, `fleet-telegram` publishes one receipt:
@@ -254,13 +264,46 @@ agent's own bot is `tool_send_foreign_bot`. Both are acked and dropped.
 ### Origin attribution (fail closed)
 
 `TurnOriginLedger` records every period in which the provider may be acting, tagged `human`,
-`relay`, `bridge` or `unknown`. With `W = [requestedAt − 2 s, requestedAt + 2 s]`:
+`relay`, `bridge` or `unknown`. With `W = [requestedAt − 2 s, requestedAt + 2 s]`, `Attribute`
+decides in this order and stops at the first match:
 
-- a tool send is journaled **only if** the union of `human` intervals covers every instant of `W`
-  **and** no `relay`, `bridge` or `unknown` interval touches `W`. There is no precedence between
-  intervals;
-- an uncovered part of `W` (before a turn, after it, between two turns) → `tool_send_unattributed`;
-  any non-human overlap → `tool_send_non_human`;
+1. the agent clock has not passed the end of `W`, or `W` starts before the horizon →
+   `unattributed`, reason `horizon`;
+2. any `bridge` or `unknown` interval touches `W` → `excluded_origin`, reason `bridge_or_unknown`;
+3. no `human` or `relay` interval touches `W` → `unattributed`, reason `no_interval`;
+4. `human` and `relay` intervals cover every instant of `W` → captured, reason `covered`;
+5. part of `W` is interval-free, and every `human` or `relay` interval touching `W` is still open or
+   **closed normally** → captured, reason `idle_edge`;
+6. otherwise → `unattributed`, reason `abnormal_close`.
+
+A captured send is `relay` when any relay interval touches `W`, else `human`; both are captured the
+same way. A human-turn send whose `W` merely touches an adjacent relay interval is labelled `relay`;
+the decision log's `relay_touched` shows it. There is no precedence between intervals.
+`tool_send_non_human` was renamed `tool_send_excluded_origin`.
+
+**Closed normally** means the executor read the provider's own successful terminal for that turn:
+Claude's current-turn `result` without error (after the max-turns check, so an exhausted turn is
+abnormal), Codex's `turn/completed` with `status: completed`, or a Gemini CLI that exited by itself
+with code 0. Cancellation, timeout, kill, process death, an abandoned turn, an error terminal and
+every other path close abnormally, and `/run` never closes normally.
+
+**Why an interval-free part of `W` can be accepted.** Every provider action that can issue an MCP
+call is in the ledger first. Under the turn lock it is inside a lock-held interval. Outside it, the
+stdout reader opens an `unknown` interval on the first turn-content event, which the CLI emits
+before it dispatches the tool call. A Gemini call is covered from process start to confirmed exit.
+The decision waits until `requestedAt + 2.25 s`, so a reader-opened interval touches `W` as long as
+**clock skew plus reader lag stay within 2 s together**. That combined budget used to only fail
+closed; the `idle_edge` path makes it a capture condition. So an interval-free part of `W` means no
+tracked provider activity there, and the send belongs to a `human` or `relay` turn touching `W`. If
+one of those ended abnormally, the uncovered part may be its cancelled tail, so it is refused.
+
+Residual, the same class as before: the ledger never sees a process the provider detached from its
+own stdout, such as a background shell child calling the MCP endpoint. Such a send was already
+captured inside an open human turn; it is now also captured within `W` next to a normally ended
+human or relay turn. It is still the agent's own bot, Bot API-accepted, allowlisted and not excluded.
+
+The other rules:
+
 - the decision waits until the agent clock passes `requestedAt + 2.25 s`. The receipt waits unacked
   in a list of at most 1,000 (overflow → `receipt_deferred_overflow`, acked, excluded) and is acked
   after the decision. An interval still open counts as covering up to decision time;
@@ -272,13 +315,13 @@ agent's own bot is `tool_send_foreign_bot`. Both are acked and dropped.
 
 Where intervals come from:
 
-| Source | Interval |
-|---|---|
-| An executor turn (`ExecuteAsync`, Claude `ReadInjectedTurnAnswersAsync`) | opens right **after** the executor takes its turn lock and closes before it releases it. Its origin is the one `TaskManager` set with `Pending(origin)` before enumerating, else `unknown` (warmup). A task waiting for the lock has none |
-| `/run` (`SendCommandAsync`) | lock-held, always `unknown`, **plus** an `unknown` interval opened before the command is submitted that outlives the lock. It ends on the command's own terminal event or a confirmed process exit, and the stdout reader retires it even after its caller stopped reading: Codex binds it to the turn of the first `userShell` command item and closes it on that turn's `turn/completed`; Claude closes the oldest waiting command on the next result for a stdin message (human or unstamped origin — claude answers stdin messages one at a time, in order). Another turn's terminal never closes it. A refused request closes it at once |
-| A Codex turn interrupted on cancellation whose end is not seen within the drain | `unknown`, opened while the lock is still held, until the reader reads that turn's own `turn/completed` or the process exit is confirmed |
-| Gemini | one CLI process per call, from start to confirmed exit. After a cancellation the CLI is killed and its exit awaited; a kill that fails or does not take effect keeps the interval open until the process really exits |
-| A turn the provider starts by itself (an injected message before the lock is taken, a background-task notification) | `unknown`, opened by the stdout reader on a turn-content event (Claude `assistant`, `user`, `stream_event`, `system/init`; Codex `turn/started`, `item/*`) while no other interval is open |
+| Source | Interval | Closed normally |
+|---|---|---|
+| An executor turn (`ExecuteAsync`, Claude `ReadInjectedTurnAnswersAsync`) | opens right **after** the executor takes its turn lock and closes before it releases it. Its origin is the one `TaskManager` set with `Pending(origin)` before enumerating, else `unknown` (warmup). A task waiting for the lock has none | Claude: the current-turn `result` without error, or the last injected answer's. Codex: that turn's own `turn/completed` with `status: completed`. Never on cancellation, process death, an app-server exit, an RPC error or the abandon path |
+| `/run` (`SendCommandAsync`) | lock-held, always `unknown`, **plus** an `unknown` interval opened before the command is submitted that outlives the lock. It ends on the command's own terminal event or a confirmed process exit, and the stdout reader retires it even after its caller stopped reading: Codex binds it to the turn of the first `userShell` command item and closes it on that turn's `turn/completed`; Claude closes the oldest waiting command on the next result for a stdin message (human or unstamped origin — claude answers stdin messages one at a time, in order). Another turn's terminal never closes it. A refused request closes it at once | never |
+| A Codex turn interrupted on cancellation whose end is not seen within the drain | `unknown`, opened while the lock is still held, until the reader reads that turn's own `turn/completed` or the process exit is confirmed | never |
+| Gemini | one CLI process per call, from start to confirmed exit. After a cancellation or a failure with the CLI still running, the interval is handed over to `unknown` before the kill (`ContinueAsUnknown`), so its sends are never attributed to the task. A kill that fails or does not take effect keeps that `unknown` interval open until the process really exits | the CLI exited by itself with code 0 |
+| A turn the provider starts by itself (an injected message before the lock is taken, a background-task notification) | `unknown`, opened by the stdout reader on a turn-content event (Claude `assistant`, `user`, `stream_event`, `system/init`; Codex `turn/started`, `item/*`) while no other interval is open | never |
 
 An `unknown` interval from the stdout reader closes **only** on the first terminal event after it
 opened (Claude `result`, Codex `turn/completed`) or on confirmed process end (stdout EOF, or a kill
@@ -286,9 +329,11 @@ after `WaitForExitAsync` returned). `RequestRestart()`, reader cancellation, a `
 that returned `false`, silence and another lock acquisition do not close it. After 10 minutes open it
 logs `journal_ledger_unknown_stuck` once and stays open.
 
-The trade-off is chosen: a genuine human tool send is not journaled when it falls within 2 s of the
-start or end of its own turn, within 2 s of any relay, bridge, `/run` or warmup activity, or while an
-untracked provider turn is still unterminated. Relay and bridge sends are never journaled.
+The trade-off is chosen: a tool send is not journaled when its window touches bridge, `/run`, warmup
+or untracked provider activity, when part of its window is uncovered next to a turn that was
+cancelled, timed out, killed or ended on an error, before the horizon, or after a restart. A send in
+the last or first 2 s of a normally ended or still-open human or relay turn — a workflow step's
+final update included — is journaled. Bridge and unknown-origin sends are never journaled.
 
 **Idempotency.** A duplicate receipt or a redelivery resolves on the natural key
 `(conversation, tg:<messageId>)`: same observer and fingerprint answer `200 duplicate`.
@@ -696,14 +741,39 @@ Under the `Fleet.Conversations` meter: `fleet.journal.ingest{result}` (`created`
 `fleet.journal.ingest.duration` and `fleet.journal.read.duration{tool}` (ms).
 
 Agent counters (in-process `JournalCounters`, like the capture counters): `journal_excluded{reason}`,
-`tool_send_captured`, `tool_send_unattributed`, `tool_send_non_human`, `tool_send_foreign_bot`,
-`receipt_clock_skew`, `receipt_deferred_overflow`, `receipt_invalid`, and the one-off
-`journal_ledger_unknown_stuck` warning. `fleet-telegram` counts `journal_receipts_published` and
-`journal_receipts_dropped` and logs both in its drop warning, at most once a minute.
+`tool_send_captured` (with its subset `tool_send_captured_relay`), `tool_send_idle_edge` (captured
+through step 5), `tool_send_unattributed`, `tool_send_excluded_origin` (formerly
+`tool_send_non_human`), `tool_send_foreign_bot`, `receipt_clock_skew`, `receipt_deferred_overflow`,
+`receipt_invalid`, and the one-off `journal_ledger_unknown_stuck` warning. `fleet-telegram` counts
+`journal_receipts_published` and `journal_receipts_dropped` and logs both in its drop warning, at
+most once a minute.
 
-Working: `agent_tool` rows appear, and new outbound rows hold no `<blockquote expandable>`. Broken:
-the unattributed or drop counters climb, or `dead/` grows with `invalid_record{origin}` (Comms older
-than the agents).
+Every decided receipt logs one Information line, the production signal for tool sends:
+
+```
+tool-send receipt decided (attribution=relay, reason=idle_edge, relay_touched=true, parts=1, kept=1)
+```
+
+`attribution` is `human|relay|excluded_origin|unattributed`, `reason` one of the six codes above,
+`parts` the receipt's message count and `kept` how many the classifier kept (0 when not captured).
+Fixed codes, a boolean and integers only: never text, a chat id, a message id, a title or a bot id.
+
+Working: `agent_tool` rows appear, and new outbound rows hold no `<blockquote expandable>`. A
+workflow or human send that is a turn's final action logs `attribution=relay|human` with
+`reason=idle_edge|covered` and `kept ≥ 1`; workflow posts to an excluded chat log `kept=0`. Broken:
+
+- `reason=abnormal_close` with no cancellation, timeout, kill or provider error for that agent
+  within 10 s before it — a normal end was not marked;
+- any `reason=no_interval` — clock skew over 2 s, or a sender the ledger cannot see;
+- `attribution=excluded_origin relay_touched=true` on a normally ended turn with no `/run`, bridge
+  or background-turn event for that agent within 10 s — for example a provider that emits a content
+  event after its own terminal;
+- the drop counters climb, `fleet.journal.ingest{result=conflict}` is above 0, or `dead/` grows
+  (with `invalid_record{origin}`: Comms older than the agents).
+
+Triage: for an unexpected `abnormal_close`, check which executor path closed the turn (the provider
+error, cancellation or kill logged before it); for `no_interval`, check the agent and
+`fleet-telegram` clocks.
 
 `/ready` gets no new reason: its existing schema check reports `503 {status:"unhealthy", schema:…}`
 until `conversations migrate` has applied 0004. Ingest reads the schema version itself and caches

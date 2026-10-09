@@ -298,6 +298,12 @@ public sealed class ClaudeExecutor : IAgentExecutor
                         _logger.LogError("Claude result reported error: {Result}", progress.FinalResult ?? "(no message)");
                     }
 
+                    // #439 D2: the turn's own successful result, after the max-turns override, so an
+                    // exhausted or error turn stays an abnormal close. Before the yield, which a
+                    // caller may never resume.
+                    if (isCurrentTurnResult && !progress.IsErrorResult)
+                        turnInterval?.CloseNormally();
+
                     yield return progress;
 
                     // "result" event means this response is complete — process stays alive
@@ -407,6 +413,11 @@ public sealed class ClaudeExecutor : IAgentExecutor
                         break; // e.g. a background task-notification turn: not an answer; wait for the next start
 
                     remaining--;
+
+                    // #439 D2: the last injected turn's own successful result.
+                    if (remaining == 0 && !progress.IsErrorResult)
+                        turnInterval?.CloseNormally();
+
                     yield return new AgentProgress
                     {
                         IsSignificant = true,

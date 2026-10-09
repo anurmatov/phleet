@@ -62,6 +62,9 @@ public sealed class CodexExecutor : IAgentExecutor
     private string? _threadId;
     private volatile string? _activeTurnId;
     private volatile string? _commandTurnId;
+    // #439: the last turn whose turn/completed reported status completed. A task turn closes its
+    // ledger interval normally only when this names it; anything else stays an abnormal close.
+    private volatile string? _completedTurnId;
     private ThreadTokenUsageSnapshot? _lastTurnUsage;
     private int _messageCount;
     // Accumulates assistant text from item/completed notifications of type "agentMessage".
@@ -292,6 +295,15 @@ public sealed class CodexExecutor : IAgentExecutor
                     break;
                 }
                 _lastActivity = DateTimeOffset.UtcNow;
+
+                // #439 D2: this turn's own turn/completed with status completed. Interrupted, failed,
+                // an app-server exit, RPC errors and the abandon path below stay abnormal closes.
+                if (stream.Current is { FinalResult: not null, IsErrorResult: false } && turnId is not null
+                    && string.Equals(_completedTurnId, turnId, StringComparison.Ordinal))
+                {
+                    turnInterval?.CloseNormally();
+                }
+
                 yield return stream.Current;
                 if (stream.Current.FinalResult is not null) yield break;
             }
@@ -1430,6 +1442,7 @@ public sealed class CodexExecutor : IAgentExecutor
 
         if (string.Equals(status, "completed", StringComparison.OrdinalIgnoreCase))
         {
+            _completedTurnId = turnId;
             _messageCount++;
             return new AgentProgress
             {

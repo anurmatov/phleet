@@ -25,6 +25,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
 {
     private const long HumanChat = ReceiptRig.HumanDm;
     private const long RelayChat = -1002000000077;
+    private const long BridgeChat = -1002000000078;
 
     private readonly ReceiptRig _rig = new();
     private readonly LedgerFakeExecutor _executor;
@@ -75,7 +76,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
     }
 
     [Fact]
-    public async Task Deferral_catches_a_relay_that_acquires_after_the_receipt_arrived()
+    public async Task Deferral_captures_a_hand_off_to_a_late_relay_as_relay()
     {
         var human = await HumanAcquires("human", at: 90);
         await DeliverAsync(requestedAt: 100, arrivesAt: 100.1);
@@ -84,13 +85,14 @@ public sealed class TurnOriginLedgerTests : IDisposable
 
         await DecideAsync(at: 102.25);
 
-        Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
-        Assert.Equal(0, _rig.Rows);
+        Assert.Equal(["relay/idle_edge"], _rig.Decisions);
+        Assert.Equal(1, _rig.Counters.Get("tool_send_captured_relay"));
+        Assert.Equal(1, _rig.Rows);
         await EndsAsync(relay, at: 110);
     }
 
     [Fact]
-    public async Task Reverse_a_relay_holds_the_lock_while_the_human_waits()
+    public async Task Reverse_a_relay_holding_the_lock_while_a_human_waits_is_captured_as_relay()
     {
         var relay = await RelayAcquires("relay", at: 90);
         var human = await HumanWaits("human", at: 95);
@@ -98,8 +100,9 @@ public sealed class TurnOriginLedgerTests : IDisposable
         await DeliverAsync(requestedAt: 100, arrivesAt: 100.1);
         await DecideAsync(at: 102.25);
 
-        Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
-        Assert.Equal(0, _rig.Rows);
+        Assert.Equal(["relay/covered"], _rig.Decisions);
+        Assert.Equal(1, _rig.Counters.Get("tool_send_captured_relay"));
+        Assert.Equal(1, _rig.Rows);
         Assert.DoesNotContain(_rig.Ledger.SnapshotForTests(), i => i.Origin == TurnOrigin.Human);
 
         await EndsAsync(relay, at: 110);
@@ -108,7 +111,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
     }
 
     [Fact]
-    public async Task Skewed_handoff_excludes_the_relay_send_and_a_human_send_with_the_same_stamp()
+    public async Task Skewed_handoff_captures_both_sends_as_relay()
     {
         var human = await HumanAcquires("human", at: 90);
         await EndsAsync(human, at: 100.0);
@@ -119,8 +122,9 @@ public sealed class TurnOriginLedgerTests : IDisposable
         await DeliverAsync(requestedAt: 99.5, arrivesAt: 100.6, messageId: 2);
         await DecideAsync(at: 101.75);
 
-        Assert.Equal(2, _rig.Counters.Get("tool_send_non_human"));
-        Assert.Equal(0, _rig.Rows);
+        Assert.Equal(["relay/idle_edge", "relay/idle_edge"], _rig.Decisions);
+        Assert.Equal(2, _rig.Counters.Get("tool_send_captured_relay"));
+        Assert.Equal(2, _rig.Rows);
         await EndsAsync(relay, at: 110);
     }
 
@@ -145,7 +149,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
         await command.WaitAsync(Timeout);
         await DecideAsync(at: 103.25);
 
-        Assert.Equal(2, _rig.Counters.Get("tool_send_non_human"));
+        Assert.Equal(2, _rig.Counters.Get("tool_send_excluded_origin"));
         Assert.Equal(0, _rig.Rows);
     }
 
@@ -186,7 +190,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
         await EndsAsync(ping, at: 102);
         await DecideAsync(at: 103.25);
 
-        Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
+        Assert.Equal(1, _rig.Counters.Get("tool_send_excluded_origin"));
         Assert.Equal(0, _rig.Rows);
         await warmup.StopAsync(CancellationToken.None);
     }
@@ -194,19 +198,20 @@ public sealed class TurnOriginLedgerTests : IDisposable
     // ── coverage ─────────────────────────────────────────────────────────────
 
     [Fact]
-    public async Task Boundary_gap_at_the_end_of_a_turn_is_unattributed()
+    public async Task A_final_action_at_the_end_of_a_human_turn_is_captured()
     {
         var human = await HumanAcquires("human", at: 90);
         await DeliverAsync(requestedAt: 99.5, arrivesAt: 99.6);
         await EndsAsync(human, at: 100.0);
         await DecideAsync(at: 101.75);
 
-        Assert.Equal(1, _rig.Counters.Get("tool_send_unattributed"));
-        Assert.Equal(0, _rig.Rows);
+        Assert.Equal(["human/idle_edge"], _rig.Decisions);
+        Assert.Equal(1, _rig.Counters.Get("tool_send_idle_edge"));
+        Assert.Equal(1, _rig.Rows);
     }
 
     [Fact]
-    public async Task A_gap_between_two_human_turns_is_unattributed_and_the_middle_of_a_turn_is_captured()
+    public async Task A_hand_off_between_two_human_turns_and_the_middle_of_a_turn_are_captured()
     {
         var first = await HumanAcquires("human-a", at: 90);
         await EndsAsync(first, at: 100.0);
@@ -214,12 +219,13 @@ public sealed class TurnOriginLedgerTests : IDisposable
         var second = await HumanAcquires("human-b", at: 100.5);
 
         await DecideAsync(at: 102.45);
-        Assert.Equal(1, _rig.Counters.Get("tool_send_unattributed"));
-        Assert.Equal(0, _rig.Rows);
+        Assert.Equal(["human/idle_edge"], _rig.Decisions);
+        Assert.Equal(1, _rig.Rows);
 
         await DeliverAsync(requestedAt: 105, arrivesAt: 105.1);
         await DecideAsync(at: 107.25);
-        Assert.Equal(1, _rig.Rows);
+        Assert.Equal(["human/idle_edge", "human/covered"], _rig.Decisions);
+        Assert.Equal(2, _rig.Rows);
 
         await EndsAsync(second, at: 110);
     }
@@ -230,6 +236,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
         await DeliverAsync(requestedAt: 100, arrivesAt: 100.1);
         await DecideAsync(at: 102.25);
 
+        Assert.Equal(["unattributed/no_interval"], _rig.Decisions);
         Assert.Equal(1, _rig.Counters.Get("tool_send_unattributed"));
         Assert.Equal(0, _rig.Rows);
     }
@@ -256,6 +263,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
         await DeliverAsync(requestedAt: 150, arrivesAt: 800);
         await DecideAsync(at: 800);
 
+        Assert.Equal(["unattributed/horizon"], _rig.Decisions);
         Assert.Equal(1, _rig.Counters.Get("tool_send_unattributed"));
         Assert.Equal(0, _rig.Rows);
         await EndsAsync(human, at: 900);
@@ -273,6 +281,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
         rig.At(1000.5);
         await rig.DecideAsync();
 
+        Assert.Equal(["unattributed/horizon"], rig.Decisions);
         Assert.Equal(1, rig.Counters.Get("tool_send_unattributed"));
         Assert.Equal(0, rig.Rows);
     }
@@ -314,7 +323,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
         await DeliverAsync(requestedAt: 100.4, arrivesAt: 100.5);
         await DecideAsync(at: 102.65);
 
-        Assert.Equal(2, _rig.Counters.Get("tool_send_non_human"));
+        Assert.Equal(2, _rig.Counters.Get("tool_send_excluded_origin"));
         Assert.Equal(0, _rig.Rows);
     }
 
@@ -336,7 +345,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
         await DecideAsync(at: 412.25);
         await EndsAsync(later, at: 420);
 
-        Assert.Equal(2, _rig.Counters.Get("tool_send_non_human"));
+        Assert.Equal(2, _rig.Counters.Get("tool_send_excluded_origin"));
         Assert.Equal(0, _rig.Rows);
         Assert.Contains(_rig.Ledger.SnapshotForTests(), i => i.Origin == TurnOrigin.Unknown && i.End is null);
     }
@@ -350,7 +359,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
 
         await DeliverAsync(requestedAt: 105, arrivesAt: 105.1);
         await DecideAsync(at: 107.25);
-        Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
+        Assert.Equal(1, _rig.Counters.Get("tool_send_excluded_origin"));
         Assert.Equal(0, _rig.Rows);
 
         _rig.At(108);
@@ -391,7 +400,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
         var human = await HumanAcquires("human-a", at: 110);
         await DeliverAsync(requestedAt: 120, arrivesAt: 120.1);
         await DecideAsync(at: 122.25);
-        Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
+        Assert.Equal(1, _rig.Counters.Get("tool_send_excluded_origin"));
         Assert.Equal(0, _rig.Rows);
 
         // The turn's result at 130; the deferred restart's kill completes at 131.
@@ -423,7 +432,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
 
         await DeliverAsync(requestedAt: 110, arrivesAt: 110.1);
         await DecideAsync(at: 112.25);
-        Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
+        Assert.Equal(1, _rig.Counters.Get("tool_send_excluded_origin"));
         Assert.Equal(0, _rig.Rows);
         Assert.Contains(_rig.Ledger.SnapshotForTests(), i => i.Origin == TurnOrigin.Unknown && i.End is null);
 
@@ -484,6 +493,248 @@ public sealed class TurnOriginLedgerTests : IDisposable
         Assert.Equal(TurnOrigin.Unknown, Assert.Single(ledger.SnapshotForTests()).Origin);
     }
 
+    // ── final actions and edges (#439) ────────────────────────────────────────
+
+    [Fact]
+    public async Task A_final_action_at_the_end_of_a_relay_turn_is_captured_as_relay()
+    {
+        var relay = await RelayAcquires("relay", at: 90);
+        await DeliverAsync(requestedAt: 100, arrivesAt: 100.1);
+        await EndsAsync(relay, at: 100.5);
+        await DecideAsync(at: 102.25);
+
+        Assert.Equal(["relay/idle_edge"], _rig.Decisions);
+        Assert.Equal(1, _rig.Counters.Get("tool_send_captured_relay"));
+        Assert.Equal(1, _rig.Counters.Get("tool_send_idle_edge"));
+        Assert.Equal(1, _rig.Rows);
+    }
+
+    [Fact]
+    public async Task A_first_and_only_action_in_a_short_relay_turn_is_captured()
+    {
+        var relay = await RelayAcquires("relay", at: 99.5);
+        await DeliverAsync(requestedAt: 100, arrivesAt: 100.1);
+        await EndsAsync(relay, at: 100.5);
+        await DecideAsync(at: 102.25);
+
+        Assert.Equal(["relay/idle_edge"], _rig.Decisions);
+        Assert.Equal(1, _rig.Rows);
+    }
+
+    [Fact]
+    public async Task A_send_at_the_start_of_an_open_relay_turn_is_captured()
+    {
+        var relay = await RelayAcquires("relay", at: 99.5);
+        await DeliverAsync(requestedAt: 100, arrivesAt: 100.1);
+        await DecideAsync(at: 102.25);
+
+        Assert.Equal(["relay/idle_edge"], _rig.Decisions);
+        Assert.Equal(1, _rig.Rows);
+        await EndsAsync(relay, at: 110);
+    }
+
+    [Fact]
+    public async Task A_final_action_followed_by_a_queued_human_turn_is_captured_as_relay()
+    {
+        var relay = await RelayAcquires("relay", at: 90);
+        await DeliverAsync(requestedAt: 100, arrivesAt: 100.1);
+        await EndsAsync(relay, at: 100.5);
+        var human = await HumanAcquires("human", at: 100.501);
+        await DecideAsync(at: 102.25);
+
+        Assert.Equal(["relay/idle_edge"], _rig.Decisions);
+        Assert.Equal(1, _rig.Rows);
+        await EndsAsync(human, at: 110);
+    }
+
+    [Fact]
+    public async Task A_tail_touched_by_an_unknown_turn_is_excluded()
+    {
+        var relay = await RelayAcquires("relay", at: 90);
+        await DeliverAsync(requestedAt: 100, arrivesAt: 100.1);
+        await EndsAsync(relay, at: 100.5);
+
+        // The provider starts a turn of its own: the reader opens an unknown interval.
+        _rig.At(101.5);
+        _executor.Stdout("assistant");
+        await DecideAsync(at: 102.25);
+
+        Assert.Equal(["excluded_origin/bridge_or_unknown"], _rig.Decisions);
+        Assert.Equal(1, _rig.Counters.Get("tool_send_excluded_origin"));
+        Assert.Equal(0, _rig.Rows);
+    }
+
+    [Fact]
+    public async Task A_tail_touched_by_a_bridge_turn_is_excluded()
+    {
+        var relay = await RelayAcquires("relay", at: 90);
+        await DeliverAsync(requestedAt: 100, arrivesAt: 100.1);
+        await EndsAsync(relay, at: 100.5);
+        var bridge = await StartAsync(_humans, BridgeChat, TaskSource.Bridge, "bridge", at: 101.5, acquire: true);
+        await DecideAsync(at: 102.25);
+
+        Assert.Equal(["excluded_origin/bridge_or_unknown"], _rig.Decisions);
+        Assert.Equal(0, _rig.Rows);
+        await EndsAsync(bridge, at: 110);
+    }
+
+    [Fact]
+    public async Task A_tail_touched_by_a_late_run_is_excluded()
+    {
+        var relay = await RelayAcquires("relay", at: 90);
+        await DeliverAsync(requestedAt: 100, arrivesAt: 100.1);
+        await EndsAsync(relay, at: 100.5);
+
+        _rig.At(101.5);
+        var run = _executor.Turn("/run status");
+        var command = Task.Run(async () =>
+        {
+            await foreach (var _ in _executor.SendCommandAsync("/run status")) { }
+        });
+        await run.Acquired.Task.WaitAsync(Timeout);
+        await DecideAsync(at: 102.25);
+
+        Assert.Equal(["excluded_origin/bridge_or_unknown"], _rig.Decisions);
+        Assert.Equal(0, _rig.Rows);
+        await EndsAsync(run, at: 103);
+        await command.WaitAsync(Timeout);
+    }
+
+    [Fact]
+    public async Task A_final_action_of_a_cancelled_relay_turn_is_unattributed()
+    {
+        var relay = await RelayAcquires("relay", at: 90);
+        await DeliverAsync(requestedAt: 100, arrivesAt: 100.1);
+        await CancelsAsync(relay, at: 100.5);
+        await DecideAsync(at: 102.25);
+
+        Assert.Equal(["unattributed/abnormal_close"], _rig.Decisions);
+        Assert.Equal(1, _rig.Counters.Get("tool_send_unattributed"));
+        Assert.Equal(0, _rig.Rows);
+    }
+
+    [Fact]
+    public async Task A_final_action_of_a_cancelled_human_turn_is_unattributed()
+    {
+        var human = await HumanAcquires("human", at: 90);
+        await DeliverAsync(requestedAt: 100, arrivesAt: 100.1);
+        await CancelsAsync(human, at: 100.5);
+        await DecideAsync(at: 102.25);
+
+        Assert.Equal(["unattributed/abnormal_close"], _rig.Decisions);
+        Assert.Equal(0, _rig.Rows);
+    }
+
+    [Fact]
+    public async Task A_hand_off_after_a_cancelled_turn_is_unattributed()
+    {
+        var first = await RelayAcquires("relay-a", at: 90);
+        await DeliverAsync(requestedAt: 100, arrivesAt: 100.1);
+        await CancelsAsync(first, at: 100.5);
+        var next = await RelayAcquires("relay-b", at: 101.0);
+        await DecideAsync(at: 102.25);
+
+        Assert.Equal(["unattributed/abnormal_close"], _rig.Decisions);
+        Assert.Equal(0, _rig.Rows);
+        await EndsAsync(next, at: 110);
+    }
+
+    [Fact]
+    public async Task A_timed_out_turn_closes_abnormally()
+    {
+        // A workflow step that runs out of time is cancelled by its task id (POST /cancel/{taskId}).
+        _rig.At(90);
+        var relay = _executor.Turn("step");
+        await _relays.StartTask(RelayChat, "step", "step", isSessionTask: false, source: TaskSource.Relay,
+            relaySender: "peer-agent", taskId: "wf-step-1");
+        await relay.Acquired.Task.WaitAsync(Timeout);
+        await DeliverAsync(requestedAt: 100, arrivesAt: 100.1);
+
+        _rig.At(100.5);
+        Assert.True(await _relays.CancelByBridgeTaskIdAsync("wf-step-1"));
+        await relay.Released.Task.WaitAsync(Timeout);
+        await DecideAsync(at: 102.25);
+
+        Assert.Equal(["unattributed/abnormal_close"], _rig.Decisions);
+        Assert.Equal(0, _rig.Rows);
+    }
+
+    [Theory]
+    [InlineData("bridge")]
+    [InlineData("run")]
+    [InlineData("warmup")]
+    public void Relay_with_bridge_or_unknown_overlap_is_excluded_origin(string other)
+    {
+        _rig.At(90);
+        var relay = _rig.OpenTurn(OutboundOrigin.Relay);
+        _rig.At(99);
+        var overlap = other switch
+        {
+            "bridge" => _rig.OpenTurn(OutboundOrigin.Bridge),
+            "run" => _rig.Ledger.OpenTurn(command: true),
+            _ => _rig.Ledger.OpenTurn(), // warmup: nothing pending
+        };
+
+        _rig.At(102.25);
+        Assert.Equal(
+            new ToolSendDecision(ToolSendAttribution.ExcludedOrigin, ToolSendReason.BridgeOrUnknown, RelayTouched: true),
+            _rig.Ledger.Attribute(ReceiptRig.T(100)));
+
+        overlap.Close();
+        relay.Close();
+    }
+
+    [Fact]
+    public void CloseNormally_is_idempotent_and_Close_after_it_is_a_no_op()
+    {
+        _rig.At(90);
+        var interval = _rig.OpenTurn(OutboundOrigin.Relay);
+        _rig.At(100);
+        interval.CloseNormally();
+        _rig.At(101);
+        interval.CloseNormally();
+        interval.Close();
+        interval.Dispose();
+        Assert.Equal([(TurnOrigin.Relay, (DateTimeOffset?)ReceiptRig.T(100), true)], _rig.Ledger.ClosuresForTests());
+
+        // An abnormal close first: a later normal close cannot re-mark it.
+        var other = _rig.OpenTurn(OutboundOrigin.Human);
+        _rig.At(102);
+        other.Close();
+        _rig.At(103);
+        other.CloseNormally();
+        Assert.Contains((TurnOrigin.Human, (DateTimeOffset?)ReceiptRig.T(102), false), _rig.Ledger.ClosuresForTests());
+
+        // Nothing is left counted as lock-held: a reader event now opens an unknown interval.
+        _rig.Ledger.TrackProvider().TurnContent();
+        Assert.Contains(_rig.Ledger.SnapshotForTests(), i => i is { Origin: TurnOrigin.Unknown, LockHeld: false, End: null });
+    }
+
+    [Fact]
+    public void ContinueAsUnknown_has_no_gap_and_ignores_a_closed_interval()
+    {
+        _rig.At(90);
+        var relay = _rig.OpenTurn(OutboundOrigin.Relay);
+        _rig.At(102);
+        var unknown = _rig.Ledger.ContinueAsUnknown(relay);
+
+        Assert.NotSame(relay, unknown);
+        Assert.Equal(
+            [(TurnOrigin.Relay, ReceiptRig.T(90), (DateTimeOffset?)ReceiptRig.T(102), true), (TurnOrigin.Unknown, ReceiptRig.T(102), null, false)],
+            _rig.Ledger.SnapshotForTests());
+        Assert.DoesNotContain(_rig.Ledger.ClosuresForTests(), c => c.ClosedNormally);
+
+        // Already closed: nothing opens, the same interval comes back.
+        Assert.Same(relay, _rig.Ledger.ContinueAsUnknown(relay));
+        Assert.Equal(2, _rig.Ledger.SnapshotForTests().Count);
+
+        // Only Close ends the unknown interval; until then a send near it is excluded.
+        _rig.At(110);
+        Assert.Equal(ToolSendAttribution.ExcludedOrigin, _rig.Ledger.Attribute(ReceiptRig.T(105)).Attribution);
+        unknown.Close();
+        Assert.Equal(ReceiptRig.T(110), _rig.Ledger.SnapshotForTests().Single(i => i.Origin == TurnOrigin.Unknown).End);
+    }
+
     // ── harness ──────────────────────────────────────────────────────────────
 
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
@@ -536,6 +787,14 @@ public sealed class TurnOriginLedgerTests : IDisposable
         _rig.At(at);
         turn.Finish();
         return Task.CompletedTask;
+    }
+
+    /// <summary>The running turn's token is cancelled at <paramref name="at"/>: it ends without its result.</summary>
+    private async Task CancelsAsync(FakeTurn turn, double at)
+    {
+        _rig.At(at);
+        turn.Cancel();
+        await turn.Released.Task.WaitAsync(Timeout);
     }
 
     private async Task DeliverAsync(double requestedAt, double arrivesAt, long messageId = 0)
@@ -824,7 +1083,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
                 await _rig.DecideAsync();
             }
 
-            Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
+            Assert.Equal(1, _rig.Counters.Get("tool_send_excluded_origin"));
             Assert.Equal(1, _rig.Rows);
             Assert.False(standIn.Process.HasExited, "capture resumed without a restart");
             feed.End();
@@ -922,7 +1181,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
             await _rig.DeliverAsync(ReceiptRig.Receipt(105, messageId: 1));
             _rig.At(107.25);
             await _rig.DecideAsync();
-            Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
+            Assert.Equal(1, _rig.Counters.Get("tool_send_excluded_origin"));
             Assert.Equal(0, _rig.Rows);
 
             // Only the command's own turn/completed ends the exclusion.
@@ -1002,7 +1261,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
                 await _rig.DecideAsync();
             }
 
-            Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
+            Assert.Equal(1, _rig.Counters.Get("tool_send_excluded_origin"));
             Assert.Equal(1, _rig.Rows);
             Assert.False(standIn.Process.HasExited, "capture resumed without a restart");
             feed.End();
@@ -1067,7 +1326,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
                 await _rig.DecideAsync();
             }
 
-            Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
+            Assert.Equal(1, _rig.Counters.Get("tool_send_excluded_origin"));
             Assert.Equal(1, _rig.Rows);
             Assert.False(standIn.Process.HasExited, "capture resumed without a restart");
             feed.End();
@@ -1202,7 +1461,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
         }
 
         [Fact]
-        public async Task Gemini_concurrent_human_and_relay_processes_exclude_the_window()
+        public async Task Gemini_concurrent_human_and_relay_processes_are_captured_as_relay()
         {
             using var standIn = new GeminiStandIn();
             var gemini = Gemini(standIn);
@@ -1227,8 +1486,9 @@ public sealed class TurnOriginLedgerTests : IDisposable
 
             _rig.At(103.25);
             await _rig.DecideAsync();
-            Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
-            Assert.Equal(0, _rig.Rows);
+            Assert.Equal(["relay/covered"], _rig.Decisions);
+            Assert.Equal(1, _rig.Counters.Get("tool_send_captured_relay"));
+            Assert.Equal(1, _rig.Rows);
         }
 
         [Fact]
@@ -1245,11 +1505,16 @@ public sealed class TurnOriginLedgerTests : IDisposable
             _rig.At(102);
             await cancel.CancelAsync();
             await relay.WaitAsync(Timeout);
-            Assert.Equal((TurnOrigin.Relay, (DateTimeOffset?)ReceiptRig.T(102)), (Intervals.Single().Origin, Intervals.Single().End));
+
+            // #439 D4: handed over to unknown before the kill, closed at the confirmed exit.
+            Assert.Equal(
+                [(TurnOrigin.Relay, (DateTimeOffset?)ReceiptRig.T(102), false), (TurnOrigin.Unknown, ReceiptRig.T(102), false)],
+                _rig.Ledger.ClosuresForTests());
+            Assert.Contains(Intervals, i => i.Origin == TurnOrigin.Unknown && i.Start == ReceiptRig.T(102));
         }
 
         [Fact]
-        public async Task Gemini_failed_kill_keeps_the_relay_interval_until_the_process_really_exits()
+        public async Task Gemini_failed_kill_keeps_an_unknown_interval_until_the_process_really_exits()
         {
             using var standIn = new GeminiStandIn();
             var gemini = Gemini(standIn, terminate: _ => Task.FromResult(false));
@@ -1257,7 +1522,7 @@ public sealed class TurnOriginLedgerTests : IDisposable
         }
 
         [Fact]
-        public async Task Gemini_delayed_kill_keeps_the_relay_interval_until_the_kill_takes_effect()
+        public async Task Gemini_delayed_kill_keeps_an_unknown_interval_until_the_kill_takes_effect()
         {
             using var standIn = new GeminiStandIn();
             var killNow = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1271,7 +1536,8 @@ public sealed class TurnOriginLedgerTests : IDisposable
         }
 
         /// <summary>
-        /// A relay CLI is cancelled and its kill does not confirm an exit. Until <paramref name="exit"/>
+        /// A relay CLI is cancelled and its kill does not confirm an exit: its relay interval ends at
+        /// the cancellation and an unknown one takes over (#439 D4). Until <paramref name="exit"/>
         /// makes it exit, a human send is excluded; afterwards one is captured.
         /// </summary>
         private async Task AssertExclusionHeldUntilExitAsync(GeminiExecutor gemini, Action exit)
@@ -1285,7 +1551,9 @@ public sealed class TurnOriginLedgerTests : IDisposable
             _rig.At(102);
             await cancel.CancelAsync();
             await relay.WaitAsync(Timeout);
-            Assert.Equal((TurnOrigin.Relay, (DateTimeOffset?)null), (Intervals.Single().Origin, Intervals.Single().End));
+            Assert.Equal(ReceiptRig.T(102), Intervals.Single(i => i.Origin == TurnOrigin.Relay).End);
+            Assert.Equal((ReceiptRig.T(102), (DateTimeOffset?)null),
+                (Intervals.Single(i => i.Origin == TurnOrigin.Unknown).Start, Intervals.Single(i => i.Origin == TurnOrigin.Unknown).End));
 
             _rig.At(105);
             using (_rig.OpenTurn(OutboundOrigin.Human))
@@ -1294,13 +1562,14 @@ public sealed class TurnOriginLedgerTests : IDisposable
                 await _rig.DeliverAsync(ReceiptRig.Receipt(110, messageId: 1));
                 _rig.At(112.25);
                 await _rig.DecideAsync();
-                Assert.Equal(1, _rig.Counters.Get("tool_send_non_human"));
+                Assert.Equal(["excluded_origin/bridge_or_unknown"], _rig.Decisions);
+                Assert.Equal(1, _rig.Counters.Get("tool_send_excluded_origin"));
                 Assert.Equal(0, _rig.Rows);
 
                 _rig.At(120);
                 exit();
-                await Eventually(() => Intervals.Single(i => i.Origin == TurnOrigin.Relay).End is not null);
-                Assert.Equal(ReceiptRig.T(120), Intervals.Single(i => i.Origin == TurnOrigin.Relay).End);
+                await Eventually(() => Intervals.Single(i => i.Origin == TurnOrigin.Unknown).End is not null);
+                Assert.Equal(ReceiptRig.T(120), Intervals.Single(i => i.Origin == TurnOrigin.Unknown).End);
 
                 _rig.At(125.1);
                 await _rig.DeliverAsync(ReceiptRig.Receipt(125, messageId: 2));
@@ -1309,6 +1578,250 @@ public sealed class TurnOriginLedgerTests : IDisposable
             }
 
             Assert.Equal(1, _rig.Rows);
+        }
+
+        // ── how each executor closes its turn (#439 D2) ──
+
+        private IReadOnlyList<(TurnOrigin Origin, DateTimeOffset? End, bool ClosedNormally)> Closures =>
+            _rig.Ledger.ClosuresForTests();
+
+        [Fact]
+        public async Task Claude_a_current_turn_success_result_closes_normally()
+        {
+            using var standIn = new StandInProcess();
+            var claude = Claude();
+            var stdin = new SignalingTextWriter();
+            var events = Channel.CreateUnbounded<ClaudeStreamEvent>();
+            claude.SetProcessForTests(standIn.Process);
+            claude.SetStdinForTests(stdin);
+            claude.SetEventChannelForTests(events);
+
+            _rig.At(90);
+            var relay = Enumerate(OutboundOrigin.Relay, () => claude.ExecuteAsync("directive"));
+            await stdin.WaitForWriteAsync();
+            _rig.At(100);
+            await events.Writer.WriteAsync(Result());
+            await relay.WaitAsync(Timeout);
+
+            Assert.Equal([(TurnOrigin.Relay, (DateTimeOffset?)ReceiptRig.T(100), true)], Closures);
+        }
+
+        [Theory]
+        [InlineData("error")]
+        [InlineData("max_turns")]
+        public async Task Claude_an_error_result_or_max_turns_closes_abnormally(string kind)
+        {
+            using var standIn = new StandInProcess();
+            var claude = Claude();
+            var stdin = new SignalingTextWriter();
+            var events = Channel.CreateUnbounded<ClaudeStreamEvent>();
+            claude.SetProcessForTests(standIn.Process);
+            claude.SetStdinForTests(stdin);
+            claude.SetEventChannelForTests(events);
+
+            _rig.At(90);
+            var relay = Enumerate(OutboundOrigin.Relay, () => claude.ExecuteAsync("directive"));
+            await stdin.WaitForWriteAsync();
+            _rig.At(100);
+            await events.Writer.WriteAsync(kind == "error"
+                ? new ClaudeStreamEvent { Type = "result", Subtype = "error_during_execution", IsError = true }
+                : new ClaudeStreamEvent { Type = "result", Subtype = "success", Result = "ok", NumTurns = 100 });
+            await relay.WaitAsync(Timeout);
+
+            Assert.Equal([(TurnOrigin.Relay, (DateTimeOffset?)ReceiptRig.T(100), false)], Closures);
+        }
+
+        [Fact]
+        public async Task Claude_a_cancelled_turn_closes_abnormally()
+        {
+            using var standIn = new StandInProcess();
+            var claude = Claude();
+            var stdin = new SignalingTextWriter();
+            var events = Channel.CreateUnbounded<ClaudeStreamEvent>();
+            claude.SetProcessForTests(standIn.Process);
+            claude.SetStdinForTests(stdin);
+            claude.SetEventChannelForTests(events);
+            using var cancel = new CancellationTokenSource();
+
+            _rig.At(90);
+            var relay = EnumerateUntilCancelled(OutboundOrigin.Relay, ct => claude.ExecuteAsync("directive", ct: ct), cancel.Token);
+            await stdin.WaitForWriteAsync();
+            _rig.At(100);
+            await cancel.CancelAsync();
+            await relay.WaitAsync(Timeout);
+
+            Assert.Equal([(TurnOrigin.Relay, (DateTimeOffset?)ReceiptRig.T(100), false)], Closures);
+        }
+
+        [Fact]
+        public async Task Claude_injected_turns_close_normally_only_on_the_last_answer_and_abnormally_on_channel_close()
+        {
+            var claude = Claude();
+            var events = Channel.CreateUnbounded<ClaudeStreamEvent>();
+            claude.SetEventChannelForTests(events);
+
+            _rig.At(90);
+            var read = Enumerate(OutboundOrigin.Human, () => claude.ReadInjectedTurnAnswersAsync(2));
+            await events.Writer.WriteAsync(new ClaudeStreamEvent { Type = "system", Subtype = "init" });
+            await Eventually(() => Intervals.Count == 1);
+            _rig.At(95);
+            await events.Writer.WriteAsync(Result());
+            await events.Writer.WriteAsync(new ClaudeStreamEvent { Type = "system", Subtype = "init" });
+            await Task.Delay(100);
+            Assert.Null(Assert.Single(Intervals).End);
+
+            _rig.At(100);
+            await events.Writer.WriteAsync(Result());
+            await read.WaitAsync(Timeout);
+            Assert.Equal([(TurnOrigin.Human, (DateTimeOffset?)ReceiptRig.T(100), true)], Closures);
+
+            // The process dies (the channel completes) before the injected turn's result.
+            var closed = Claude();
+            var dying = Channel.CreateUnbounded<ClaudeStreamEvent>();
+            closed.SetEventChannelForTests(dying);
+            _rig.At(110);
+            var cut = Enumerate(OutboundOrigin.Human, () => closed.ReadInjectedTurnAnswersAsync(1));
+            await dying.Writer.WriteAsync(new ClaudeStreamEvent { Type = "system", Subtype = "init" });
+            await Eventually(() => Intervals.Count == 2);
+            _rig.At(112);
+            dying.Writer.TryComplete();
+            await cut.WaitAsync(Timeout);
+            Assert.Contains((TurnOrigin.Human, (DateTimeOffset?)ReceiptRig.T(112), false), Closures);
+        }
+
+        [Theory]
+        [InlineData("completed", true)]
+        [InlineData("interrupted", false)]
+        [InlineData("failed", false)]
+        [InlineData("app_server_exit", false)]
+        public async Task Codex_closes_normally_only_on_its_own_completed_turn(string end, bool normal)
+        {
+            using var standIn = new StandInProcess();
+            var codex = Codex();
+            codex.SetProcessForTests(standIn.Process);
+            codex.SetStdinForTests(standIn.StandardInput);
+            codex.SetThreadStateForTests("thread-1", null);
+            var notes = Channel.CreateUnbounded<JsonObject>();
+            codex.SetNotificationChannelForTests(notes);
+            using var cts = new CancellationTokenSource(Timeout);
+
+            _rig.At(90);
+            var relay = Enumerate(OutboundOrigin.Relay, () => codex.ExecuteAsync("directive"));
+            await codex.WaitAndCompleteNextPendingRequestForTests(
+                new JsonObject { ["turn"] = new JsonObject { ["id"] = "turn-1" } }, cts.Token);
+
+            _rig.At(100);
+            if (end == "app_server_exit") notes.Writer.TryComplete();
+            else await notes.Writer.WriteAsync(TurnCompleted("turn-1", end));
+            await relay.WaitAsync(Timeout);
+
+            Assert.Equal([(TurnOrigin.Relay, (DateTimeOffset?)ReceiptRig.T(100), normal)], Closures);
+        }
+
+        [Fact]
+        public async Task Codex_an_abandoned_turn_closes_abnormally_and_the_next_completed_one_normally()
+        {
+            await using var server = new AbandonAppServer(_rig.Ledger);
+            using var pending = _rig.Ledger.Pending(OutboundOrigin.Relay);
+
+            _rig.At(90);
+            var first = server.Executor.ExecuteAsync("first").GetAsyncEnumerator();
+            Assert.True(await first.MoveNextAsync());
+            _rig.At(100);
+            await first.DisposeAsync();
+            Assert.Contains((TurnOrigin.Relay, (DateTimeOffset?)ReceiptRig.T(100), false), Closures);
+
+            _rig.At(110);
+            await foreach (var _ in server.Executor.ExecuteAsync("next")) { }
+            Assert.Contains((TurnOrigin.Relay, (DateTimeOffset?)ReceiptRig.T(110), true), Closures);
+            Assert.Equal(2, Closures.Count(c => c.Origin == TurnOrigin.Relay));
+        }
+
+        [Theory]
+        [InlineData(0, true)]
+        [InlineData(3, false)]
+        public async Task Gemini_closes_normally_only_on_its_own_exit_code_zero(int exitCode, bool normal)
+        {
+            using var standIn = new GeminiStandIn(exitCode);
+            var gemini = Gemini(standIn);
+
+            _rig.At(90);
+            var relay = Enumerate(OutboundOrigin.Relay, () => gemini.ExecuteAsync("directive"));
+            await Eventually(() => Intervals.Count == 1);
+            _rig.At(100);
+            standIn.Release();
+            await relay.WaitAsync(Timeout);
+
+            Assert.Equal([(TurnOrigin.Relay, (DateTimeOffset?)ReceiptRig.T(100), normal)], Closures);
+        }
+
+        [Theory]
+        [InlineData(OutboundOrigin.Relay)]
+        [InlineData(OutboundOrigin.Human)]
+        public async Task Gemini_call_cancelled_without_a_confirmed_exit_hands_over_to_unknown_and_its_send_is_excluded(OutboundOrigin origin)
+        {
+            using var standIn = new GeminiStandIn();
+            var gemini = Gemini(standIn, terminate: _ => Task.FromResult(false));
+            using var cancel = new CancellationTokenSource();
+
+            _rig.At(100);
+            var call = EnumerateUntilCancelled(origin, ct => gemini.ExecuteAsync("task", ct: ct), cancel.Token);
+            await Eventually(() => Intervals.Count == 1);
+            _rig.At(102);
+            await cancel.CancelAsync();
+            await call.WaitAsync(Timeout);
+
+            var task = origin == OutboundOrigin.Relay ? TurnOrigin.Relay : TurnOrigin.Human;
+            Assert.Equal([(task, (DateTimeOffset?)ReceiptRig.T(102), false), (TurnOrigin.Unknown, null, false)], Closures);
+
+            // Its own send, after the cancellation and before the exit: never attributed to the task.
+            _rig.At(106.1);
+            await _rig.DeliverAsync(ReceiptRig.Receipt(106));
+            _rig.At(108.25);
+            await _rig.DecideAsync();
+            Assert.Equal(["excluded_origin/bridge_or_unknown"], _rig.Decisions);
+            Assert.Equal(0, _rig.Rows);
+
+            standIn.Release();
+            await Eventually(() => Intervals.All(i => i.End is not null));
+        }
+
+        [Fact]
+        public async Task Reader_ordering_a_provider_turn_after_a_normal_end_is_never_an_idle_tail()
+        {
+            using var standIn = new StandInProcess();
+            var claude = Claude();
+            claude.SetProcessForTests(standIn.Process);
+            var stdin = new SignalingTextWriter();
+            claude.SetStdinForTests(stdin);
+            var events = Channel.CreateUnbounded<ClaudeStreamEvent>();
+            claude.SetEventChannelForTests(events);
+            var feed = new LineFeed();
+            var reader = claude.RunStdoutReaderForTests(new StreamReader(feed));
+
+            _rig.At(90);
+            var relay = Enumerate(OutboundOrigin.Relay, () => claude.ExecuteAsync("directive"));
+            await stdin.WaitForWriteAsync();
+            _rig.At(100.5);
+            await events.Writer.WriteAsync(Result());
+            await relay.WaitAsync(Timeout);
+            Assert.Equal([(TurnOrigin.Relay, (DateTimeOffset?)ReceiptRig.T(100.5), true)], Closures);
+
+            // Claude starts a turn of its own; the reader sees it before that turn can send.
+            _rig.At(101.5);
+            feed.WriteLine(Assistant);
+            await events.Reader.ReadAsync().AsTask().WaitAsync(Timeout);
+
+            _rig.At(101.7);
+            await _rig.DeliverAsync(ReceiptRig.Receipt(101.6));
+            _rig.At(103.85);
+            await _rig.DecideAsync();
+
+            Assert.Equal(["excluded_origin/bridge_or_unknown"], _rig.Decisions);
+            Assert.Equal("true", Assert.Single(_rig.DecisionEvents).Value("RelayTouched"));
+            Assert.Equal(0, _rig.Rows);
+            feed.End();
+            await reader.WaitAsync(Timeout);
         }
 
         // ── harness ──
@@ -1404,12 +1917,12 @@ public sealed class TurnOriginLedgerTests : IDisposable
             ["params"] = new JsonObject { ["turn"] = new JsonObject { ["id"] = turnId } },
         };
 
-        private static JsonObject TurnCompleted(string turnId) => new()
+        private static JsonObject TurnCompleted(string turnId, string status = "completed") => new()
         {
             ["method"] = "turn/completed",
             ["params"] = new JsonObject
             {
-                ["turn"] = new JsonObject { ["id"] = turnId, ["status"] = "completed" },
+                ["turn"] = new JsonObject { ["id"] = turnId, ["status"] = status },
             },
         };
     }
@@ -1425,7 +1938,10 @@ public sealed class TurnOriginLedgerTests : IDisposable
     }
 }
 
-/// <summary>One scripted executor call: the test sees it enter, acquire and release, and ends it.</summary>
+/// <summary>
+/// One scripted executor call: the test sees it enter, acquire and release, and ends it — with its
+/// result (<see cref="Finish"/>) or by cancelling its token (<see cref="Cancel"/>).
+/// </summary>
 internal sealed class FakeTurn
 {
     private readonly TaskCompletionSource _finish = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1433,9 +1949,12 @@ internal sealed class FakeTurn
     public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource Acquired { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource Released { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public CancellationTokenSource Cancellation { get; } = new();
     public Task Finished => _finish.Task;
 
     public void Finish() => _finish.TrySetResult();
+
+    public void Cancel() => Cancellation.Cancel();
 }
 
 /// <summary>A kill the test holds until it moves the clock.</summary>
@@ -1453,7 +1972,8 @@ internal sealed class HeldKill
 /// A provider executor reduced to its ledger contract, with the calls at the same points as the real
 /// ones (whose own sites <see cref="TurnOriginLedgerTests.ExecutorHooks"/> covers): a real
 /// <see cref="SemaphoreSlim"/> turn lock; the interval opened right after it is acquired and closed
-/// in the finally that releases it; <see cref="SendCommandAsync"/> always unknown; a deferred
+/// in the finally that releases it, normally (#439) only right before a non-command turn yields its
+/// result; <see cref="SendCommandAsync"/> always unknown; a deferred
 /// restart that kills after the turn's result, as Claude does; and a "stdout" whose events are
 /// classified as Claude's reader classifies them, one <see cref="TurnOriginLedger.ProviderActivity"/>
 /// per process.
@@ -1500,7 +2020,12 @@ internal sealed class LedgerFakeExecutor(TurnOriginLedger ledger) : IAgentExecut
         try
         {
             turn.Acquired.TrySetResult();
-            await turn.Finished.WaitAsync(ct);
+            using (var cancellable = CancellationTokenSource.CreateLinkedTokenSource(ct, turn.Cancellation.Token))
+                await turn.Finished.WaitAsync(cancellable.Token);
+
+            // The provider's own successful terminal, as the real executors mark it; a cancelled
+            // turn never gets here and keeps the abnormal close below.
+            if (!command) interval.CloseNormally();
             yield return new AgentProgress { EventType = "result", Summary = "done", FinalResult = "done", IsSignificant = true };
 
             if (_restartRequested)
@@ -1631,9 +2156,10 @@ internal sealed class SignalingTextWriter : TextWriter
 
 /// <summary>
 /// A stand-in gemini CLI: reads the task from stdin, waits until the test releases it, prints one
-/// assistant message and exits 0. POSIX-only, like <see cref="StandInProcess"/>.
+/// assistant message and exits with <paramref name="exitCode"/> (0 by default). POSIX-only, like
+/// <see cref="StandInProcess"/>.
 /// </summary>
-internal sealed class GeminiStandIn : IDisposable
+internal sealed class GeminiStandIn(int exitCode = 0) : IDisposable
 {
     private const string ShellPath = "/bin/sh"; // hygiene-ok: OS stand-in binary, not provider data
 
@@ -1650,8 +2176,9 @@ internal sealed class GeminiStandIn : IDisposable
             RedirectStandardError = true,
         };
         psi.ArgumentList.Add("-c");
-        psi.ArgumentList.Add("""cat >/dev/null; while [ ! -e "$0" ]; do sleep 0.05; done; echo '{"type":"message","role":"assistant","content":"ok"}'""");
+        psi.ArgumentList.Add("""cat >/dev/null; while [ ! -e "$0" ]; do sleep 0.05; done; echo '{"type":"message","role":"assistant","content":"ok"}'; exit "$1" """);
         psi.ArgumentList.Add(_release);
+        psi.ArgumentList.Add(exitCode.ToString(System.Globalization.CultureInfo.InvariantCulture));
         return Process.Start(psi);
     }
 

@@ -14,8 +14,8 @@ namespace Fleet.Agent.Services;
 
 /// <summary>
 /// Consumes what <c>fleet-telegram</c> reports it sent through a Telegram MCP tool for this agent,
-/// and journals the sends the <see cref="TurnOriginLedger"/> proves answered a human (#394).
-/// Registered only when <c>Journal__IngestToken</c> is set.
+/// and journals the sends the <see cref="TurnOriginLedger"/> proves were made in a human or relay
+/// (workflow) turn (#394, #439). Registered only when <c>Journal__IngestToken</c> is set.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -273,34 +273,67 @@ public sealed class ToolSendReceiptConsumer : BackgroundService
 
     private void Decide(ToolSendReceipt receipt)
     {
-        switch (_ledger.Attribute(receipt.RequestedAt))
+        var decision = _ledger.Attribute(receipt.RequestedAt);
+        var kept = 0;
+
+        switch (decision.Attribution)
         {
             case ToolSendAttribution.Human:
+            case ToolSendAttribution.Relay:
                 _counters.ToolSendCaptured();
-                Capture(receipt);
+                if (decision.Attribution == ToolSendAttribution.Relay) _counters.ToolSendCapturedRelay();
+                if (decision.Reason == ToolSendReason.IdleEdge) _counters.ToolSendIdleEdge();
+                kept = Capture(receipt);
                 break;
 
-            case ToolSendAttribution.NonHuman:
-                _counters.ToolSendNonHuman();
-                _logger.LogDebug("tool-send receipt excluded (tool_send_non_human)");
+            case ToolSendAttribution.ExcludedOrigin:
+                _counters.ToolSendExcludedOrigin();
                 break;
 
             default:
                 _counters.ToolSendUnattributed();
-                _logger.LogDebug("tool-send receipt excluded (tool_send_unattributed)");
                 break;
         }
+
+        // The production signal (#439): fixed codes, a boolean and two counts — never text, ids or a title.
+        _logger.LogInformation(
+            "tool-send receipt decided (attribution={Attribution}, reason={Reason}, relay_touched={RelayTouched}, parts={Parts}, kept={Kept})",
+            AttributionCode(decision.Attribution), ReasonCode(decision.Reason), decision.RelayTouched ? "true" : "false",
+            receipt.Messages.Count, kept);
     }
+
+    private static string AttributionCode(ToolSendAttribution attribution) => attribution switch
+    {
+        ToolSendAttribution.Human => "human",
+        ToolSendAttribution.Relay => "relay",
+        ToolSendAttribution.ExcludedOrigin => "excluded_origin",
+        _ => "unattributed",
+    };
+
+    private static string ReasonCode(ToolSendReason reason) => reason switch
+    {
+        ToolSendReason.Covered => "covered",
+        ToolSendReason.IdleEdge => "idle_edge",
+        ToolSendReason.BridgeOrUnknown => "bridge_or_unknown",
+        ToolSendReason.NoInterval => "no_interval",
+        ToolSendReason.AbnormalClose => "abnormal_close",
+        _ => "horizon",
+    };
 
     /// <summary>
     /// The existing capture path with <c>origin: agent_tool</c>: rules 1–4 and the allowlist apply
     /// unchanged, and a multi-message send shares one <c>sendGroup</c>. Never throws.
     /// </summary>
-    private void Capture(ToolSendReceipt receipt)
+    /// <returns>How many messages the classifier kept.</returns>
+    private int Capture(ToolSendReceipt receipt)
     {
+        JournalCapture.OutboundBatch? batch = null;
         try
         {
-            var batch = _capture.Outbound(OutboundOrigin.Human, JournalRecordOrigin.AgentTool);
+            // #439 D5: a relay send is captured exactly like a human one. The task origin here is
+            // what classifier rule 2 (system_origin) reads, and that rule governs runtime relay and
+            // bridge replies only; a tool send the ledger admitted goes through rules 1, 3 and 4.
+            batch = _capture.Outbound(OutboundOrigin.Human, JournalRecordOrigin.AgentTool);
             foreach (var message in receipt.Messages)
             {
                 batch.Add(new JournalMessage
@@ -331,6 +364,8 @@ public sealed class ToolSendReceiptConsumer : BackgroundService
             _counters.CaptureFailed();
             _logger.LogWarning("tool-send capture failed ({Error}); the record is lost", e.GetType().Name);
         }
+
+        return batch?.Kept ?? 0;
     }
 
     // ── broker acknowledgement ───────────────────────────────────────────────

@@ -246,6 +246,7 @@ public sealed class CodexExecutor : IAgentExecutor
                 var turn = response.RequireObject("turn");
                 turnId = turn.RequireString("id");
                 _activeTurnId = turnId;
+                _completedTurnId = null;
                 _turnHasFinalAnswerPhase = false;
                 _lastTurnUsage = null;
                 _currentTurnAssistantText = "";

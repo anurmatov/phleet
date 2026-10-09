@@ -21,6 +21,9 @@ public sealed class JournalPublisherInteropTests(MySqlFixture fixture) : IDispos
     private const long Supergroup = -1000000000377;
     private const long Dm = 377;
 
+    // The redelivery case's own conversation, so the other tests' per-chat counts hold in any order.
+    private const long RelayDm = 439;
+
     private readonly string _root = Path.Combine(Path.GetTempPath(), "journal-interop-" + Guid.NewGuid().ToString("N"));
 
     public void Dispose()
@@ -122,7 +125,7 @@ public sealed class JournalPublisherInteropTests(MySqlFixture fixture) : IDispos
             {
                 batch.Add(new JournalMessage
                 {
-                    BotId = 7101, ChatId = Dm, ChatType = "private", MessageId = 440 + part, Date = Now,
+                    BotId = 7101, ChatId = RelayDm, ChatType = "private", MessageId = 440 + part, Date = Now,
                     SenderKind = JournalSenderKind.Agent, SenderId = "7101", Text = $"workflow update, part {part}",
                     TextFormat = JournalTextFormat.Plain,
                 });
@@ -150,8 +153,8 @@ public sealed class JournalPublisherInteropTests(MySqlFixture fixture) : IDispos
         Assert.Equal(["201:created", "201:created", "200:duplicate", "200:duplicate"], results);
         Assert.Equal($"2|1|{groups[0]}", await fixture.ScalarRowAsync(
             "SELECT COUNT(*), COUNT(DISTINCT m.send_group_id), MIN(m.send_group_id) FROM journal_messages m "
-            + $"JOIN journal_conversations c ON c.id = m.conversation_id WHERE c.telegram_chat_id = {Dm} "
-            + "AND m.direction = 'outbound' AND m.source_key IN ('tg:441', 'tg:442')"));
+            + $"JOIN journal_conversations c ON c.id = m.conversation_id WHERE c.telegram_chat_id = {RelayDm} "
+            + "AND m.direction = 'outbound'"));
     }
 
     private static readonly DateTime Now = new(2026, 9, 27, 10, 0, 0, DateTimeKind.Utc);
@@ -182,7 +185,7 @@ public sealed class JournalPublisherInteropTests(MySqlFixture fixture) : IDispos
     private static JournalCapture NewCapture(JournalSpool spool) => new(
         spool,
         new JournalCounters(),
-        new AllowlistHolder(Options.Create(new TelegramOptions { AllowedUserIds = [Dm], AllowedGroupIds = [Supergroup] })),
+        new AllowlistHolder(Options.Create(new TelegramOptions { AllowedUserIds = [Dm, RelayDm], AllowedGroupIds = [Supergroup] })),
         Options.Create(new ClientOptions { IngestToken = "cj1.ingest.agent1.AAAA" }),
         NullLogger<JournalCapture>.Instance);
 }

@@ -642,7 +642,9 @@ public sealed class TurnOriginLedgerTests : IDisposable
     [Fact]
     public async Task A_timed_out_turn_closes_abnormally()
     {
-        // A workflow step that runs out of time is cancelled by its task id (POST /cancel/{taskId}).
+        // No timer runs here: a workflow step that runs out of time is cancelled by its task id
+        // (POST /cancel/{taskId} → CancelByBridgeTaskIdAsync), the same token cancellation a timeout
+        // reaches the turn through. That path is what this drives.
         _rig.At(90);
         var relay = _executor.Turn("step");
         await _relays.StartTask(RelayChat, "step", "step", isSessionTask: false, source: TaskSource.Relay,

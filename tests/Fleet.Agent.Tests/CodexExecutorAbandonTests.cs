@@ -236,8 +236,7 @@ public class CodexExecutorAbandonTests
     public async Task Cleanup_SendLockUnavailable_SkipsDrainAndDefersRestartWithinBudget(bool command)
     {
         var starts = 0;
-        var ledger = new TurnOriginLedger();
-        await using var server = new AbandonAppServer(ledger, _ => { starts++; return StartFreshPeer(); });
+        await using var server = new AbandonAppServer(_ => { starts++; return StartFreshPeer(); });
         server.OnTurn = id => server.NotifyAsync(AbandonAppServer.Started(id));
         using var caller = new CancellationTokenSource();
         var first = (command ? server.Executor.SendCommandAsync("first", caller.Token)
@@ -256,7 +255,6 @@ public class CodexExecutorAbandonTests
             Assert.Equal(1, server.Executor.TurnLockForTests.CurrentCount);
             Assert.DoesNotContain(server.Requests, r => (string?)r["method"] == "turn/interrupt");
             Assert.Contains(server.Logs, l => l.Contains("cleanupLock=send") && l.Contains("restartRequested=true"));
-            Assert.Contains(ledger.SnapshotForTests(), i => i.Origin == TurnOrigin.Unknown && !i.LockHeld && i.End is null);
         }
         finally { server.Executor.SendLockForTests.Release(); }
         var next = await CollectAsync(server.Executor.ExecuteAsync("next"));
@@ -299,11 +297,8 @@ public class CodexExecutorAbandonTests
     public async Task ExecuteAsync_DrainCannotFinish_RestartsOnceAndNeverMasksConsumerError(string fault)
     {
         var restarts = 0;
-        var time = new TestTime();
-        var ledger = new TurnOriginLedger(time: time);
-        await using var server = new AbandonAppServer(ledger, _ => { restarts++; return StartFreshPeer(); });
+        await using var server = new AbandonAppServer(_ => { restarts++; return StartFreshPeer(); });
         server.OnInterrupt = _ => Task.CompletedTask;
-        using var pending = ledger.Pending(OutboundOrigin.Human);
         var first = server.Executor.ExecuteAsync("first").GetAsyncEnumerator();
         Assert.True(await first.MoveNextAsync());
         var blockedWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -330,9 +325,6 @@ public class CodexExecutorAbandonTests
         var expected = fault is "missing_stdin" or "throwing_stdin" or "blocked_stdin" ? "write_failed"
             : fault is "missing_channel" or "closed_channel" ? "channel_closed" : "timeout";
         Assert.Contains(server.Logs, l => l.Contains("drain=" + expected));
-        Assert.Contains(ledger.SnapshotForTests(), i => i.Origin == TurnOrigin.Unknown && !i.LockHeld && i.End is null);
-        time.Advance(TimeSpan.FromSeconds(5));
-        Assert.Equal(ToolSendAttribution.NonHuman, ledger.Attribute(time.GetUtcNow() - TimeSpan.FromSeconds(2)));
         await server.NotifyAsync(AbandonAppServer.Frame("item/completed", "turn-1",
             new JsonObject { ["type"] = "agentMessage", ["text"] = "late orphan text" }));
         var next = await CollectAsync(server.Executor.ExecuteAsync("next"));
@@ -344,7 +336,6 @@ public class CodexExecutorAbandonTests
         Assert.Equal("answer-2", Assert.Single(following).FinalResult);
         Assert.Equal(1, restarts);
         Assert.DoesNotContain(next, p => p.Summary.Contains("orphan") || p.EventType == "recovered_answer");
-        Assert.DoesNotContain(ledger.SnapshotForTests(), i => i.Origin == TurnOrigin.Unknown && !i.LockHeld && i.End is null);
     }
 
     [Theory]
@@ -407,13 +398,6 @@ public class CodexExecutorAbandonTests
         Assert.Null(server.Executor.CommandTurnIdForTests);
         Assert.Null(server.Executor.ActiveTurnIdForTests);
         await AssertHealthyAsync(server);
-    }
-
-    private sealed class TestTime : TimeProvider
-    {
-        private DateTimeOffset _now = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
-        public override DateTimeOffset GetUtcNow() => _now;
-        public void Advance(TimeSpan duration) => _now += duration;
     }
 
     /// <summary>A fresh stdio peer exercises real startup, initialize and thread/start after recovery.</summary>

@@ -134,19 +134,12 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
     private readonly PromptBuilder _promptBuilder;
 
-    // The tool-send turn ledger (#394). Null without the journal, and then nothing below records.
-    // _activity belongs to the current process and its stdout reader.
-    private readonly TurnOriginLedger? _ledger;
-    private TurnOriginLedger.ProviderActivity? _activity;
-
     public ClaudeExecutor(
-        IOptions<AgentOptions> config, ILogger<ClaudeExecutor> logger, PromptBuilder promptBuilder,
-        TurnOriginLedger? ledger = null)
+        IOptions<AgentOptions> config, ILogger<ClaudeExecutor> logger, PromptBuilder promptBuilder)
     {
         _config = config.Value;
         _logger = logger;
         _promptBuilder = promptBuilder;
-        _ledger = ledger;
     }
 
     /// <summary>
@@ -161,9 +154,6 @@ public sealed class ClaudeExecutor : IAgentExecutor
     {
         _lastActivity = DateTimeOffset.UtcNow;
         await _sendLock.WaitAsync(ct);
-        // #394: held from here to the release below, never while waiting. The pending origin, or
-        // unknown (warmup, the CLI).
-        var turnInterval = _ledger?.OpenTurn();
 
         try
         {
@@ -333,7 +323,6 @@ public sealed class ClaudeExecutor : IAgentExecutor
         }
         finally
         {
-            turnInterval?.Close();
             _sendLock.Release();
         }
     }
@@ -369,7 +358,6 @@ public sealed class ClaudeExecutor : IAgentExecutor
             yield break;
 
         await _sendLock.WaitAsync(ct);
-        var turnInterval = _ledger?.OpenTurn();
         try
         {
             var reader = _eventChannel.Reader;
@@ -423,7 +411,6 @@ public sealed class ClaudeExecutor : IAgentExecutor
         }
         finally
         {
-            turnInterval?.Close();
             _sendLock.Release();
         }
     }
@@ -639,8 +626,6 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
     public void RequestRestart()
     {
-        // Only a flag: the process keeps running and can still send, so an untracked turn's ledger
-        // interval stays open until the restart actually kills it (#394).
         _restartRequested = true;
         _logger.LogInformation("Process restart requested (deferred until current task completes)");
     }
@@ -765,9 +750,8 @@ public sealed class ClaudeExecutor : IAgentExecutor
         _eventChannel ??= Channel.CreateUnbounded<ClaudeStreamEvent>(
             new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
         _readerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var activity = _activity = _ledger?.TrackProvider();
         var token = _readerCts.Token;
-        return Task.Run(() => ReadStdoutLoopAsync(activity, token), CancellationToken.None);
+        return Task.Run(() => ReadStdoutLoopAsync(token), CancellationToken.None);
     }
 
     // --- Stdout channel helpers ---
@@ -846,7 +830,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
     /// When the process exits or the token is cancelled, the channel writer is
     /// completed so any blocked ReadAsync in ExecuteAsync/SendCommandAsync returns.
     /// </summary>
-    private async Task ReadStdoutLoopAsync(TurnOriginLedger.ProviderActivity? activity, CancellationToken ct)
+    private async Task ReadStdoutLoopAsync(CancellationToken ct)
     {
         try
         {
@@ -859,15 +843,11 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 }
                 catch (OperationCanceledException)
                 {
-                    // Not a process end for the ledger: KillProcessAsync cancels first and reports
-                    // the end only once the kill has completed.
                     break;
                 }
 
                 if (line is null)
                 {
-                    // Process exited. Stdout EOF is a confirmed end (#394).
-                    activity?.ProcessEnded();
                     break;
                 }
                 if (string.IsNullOrWhiteSpace(line)) continue;
@@ -884,8 +864,6 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 }
 
                 if (evt is null) continue;
-
-                ObserveTurnActivity(activity, evt);
 
                 if (evt.SessionId is not null)
                     _lastSessionId = evt.SessionId;
@@ -910,27 +888,6 @@ public sealed class ClaudeExecutor : IAgentExecutor
             _eventChannel?.Writer.TryComplete();
             _logger.LogDebug("Background stdout reader stopped");
         }
-    }
-
-    /// <summary>
-    /// #394: the reader sees every event as it is read, whoever later consumes it, so it is where a
-    /// turn Claude started on its own becomes visible — an injected message that began before
-    /// <see cref="ReadInjectedTurnAnswersAsync"/> took the lock, or a background-task notification.
-    /// Background-task lifecycle <c>system</c> events are not turn content; any <c>result</c> is
-    /// the terminal event, since Claude runs one turn at a time.
-    /// </summary>
-    private static void ObserveTurnActivity(TurnOriginLedger.ProviderActivity? activity, ClaudeStreamEvent evt)
-    {
-        if (activity is null) return;
-
-        if (evt.Type == "result")
-        {
-            activity.TurnEnded();
-            // A result for a stdin message retires the oldest waiting /run, whoever still reads.
-            if (IsCurrentTurnResult(evt)) activity.CommandResult();
-        }
-        else if (evt.Type is "assistant" or "user" or "stream_event" || evt is { Type: "system", Subtype: "init" })
-            activity.TurnContent();
     }
 
     // --- Process lifecycle ---
@@ -1011,8 +968,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
         _readerCts = new CancellationTokenSource();
         _eventChannel = Channel.CreateUnbounded<ClaudeStreamEvent>(
             new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
-        var activity = _activity = _ledger?.TrackProvider();
-        _ = Task.Run(() => ReadStdoutLoopAsync(activity, _readerCts.Token));
+        _ = Task.Run(() => ReadStdoutLoopAsync(_readerCts.Token));
 
         if (resumeId is not null)
             _logger.LogInformation("Restarted claude process with --resume {SessionId} (PID {Pid})", resumeId, _process.Id);
@@ -1138,11 +1094,6 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 _process.Kill(entireProcessTree: true);
                 await _process.WaitForExitAsync();
             }
-
-            // #394: exited already, or the kill has completed — a confirmed end. A kill that threw
-            // proves nothing, so an untracked turn's interval stays open.
-            _activity?.ProcessEnded();
-            _activity = null;
         }
         catch (InvalidOperationException) { }
         catch (SystemException) { }
@@ -1215,11 +1166,6 @@ public sealed class ClaudeExecutor : IAgentExecutor
     {
         _lastActivity = DateTimeOffset.UtcNow;
         await _sendLock.WaitAsync(ct);
-        // #394: a raw command is never attributed to anyone. A cancelled command releases the lock
-        // while claude may still be running it, so commandInterval stays until its own result is
-        // read below or the process's end is confirmed.
-        var turnInterval = _ledger?.OpenTurn(command: true);
-        TurnOriginLedger.LedgerInterval? commandInterval = null;
 
         try
         {
@@ -1253,7 +1199,6 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 type = "user",
                 message = new { role = "user", content = command }
             });
-            commandInterval = _ledger?.OpenCommand(_activity);
             await WriteStdinLineAsync(message, ct);
 
             // Read response events until "result" — via the channel, not _stdout directly.
@@ -1269,10 +1214,6 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
                 var isCurrentTurnResult = IsCurrentTurnResult(evt);
                 var progress = ParseProgress(evt);
-
-                // The command's own result: closed before the yield, which a caller may never resume.
-                if (isCurrentTurnResult)
-                    commandInterval?.Close();
 
                 yield return progress;
 
@@ -1296,7 +1237,6 @@ public sealed class ClaudeExecutor : IAgentExecutor
         }
         finally
         {
-            turnInterval?.Close();
             _sendLock.Release();
         }
     }

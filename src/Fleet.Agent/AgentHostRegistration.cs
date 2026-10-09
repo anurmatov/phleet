@@ -436,17 +436,16 @@ public static class AgentHostRegistration
         services.AddSingleton<TurnBindingPublisher>();
         services.AddHostedService(sp => sp.GetRequiredService<TurnBindingPublisher>());
 
-        // Tool-send receipts (#394). The ledger exists only here, so without the journal every
-        // executor and TaskManager hold null and record nothing. AddSingleton + factory-AddHostedService,
-        // the same pair as the drainer; the bot id is read from the transport lazily, once it exists.
-        services.AddSingleton<TurnOriginLedger>();
+        // Tool-send receipts (#394, #439). AddSingleton + factory-AddHostedService, the same pair as
+        // the drainer. The bot id is read from the transport lazily; the transport derives it from
+        // Telegram:BotToken when it is constructed, before any hosted service starts, so receipts
+        // queued across a restart never meet an unknown own bot.
         services.AddSingleton(sp =>
         {
             long? botId = null;
             return new ToolSendReceiptConsumer(
                 sp.GetRequiredService<IOptions<AgentOptions>>(),
                 sp.GetRequiredService<GroupRelayService>(),
-                sp.GetRequiredService<TurnOriginLedger>(),
                 sp.GetRequiredService<JournalCapture>(),
                 sp.GetRequiredService<JournalCounters>(),
                 () => botId ??= sp.GetServices<IHostedService>().OfType<AgentTransport>().FirstOrDefault()?.BotId,

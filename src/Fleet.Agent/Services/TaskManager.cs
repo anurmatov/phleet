@@ -90,11 +90,6 @@ public sealed class TaskManager
     /// </summary>
     private readonly string? _telegramAttachmentDir;
 
-    /// <summary>
-    /// The tool-send turn ledger (#394): the origin each executor enumeration runs under. Optional,
-    /// and null without the journal.
-    /// </summary>
-    private readonly TurnOriginLedger? _ledger;
     private readonly TurnBindingPublisher? _turnBindings;
 
     public TaskManager(
@@ -107,13 +102,11 @@ public sealed class TaskManager
         IOptions<TelegramOptions>? telegramConfig = null,
         ConversationEventCounters? counters = null,
         IMessageSink? sink = null,
-        TurnOriginLedger? ledger = null,
         TurnBindingPublisher? turnBindings = null,
         QueueLaneCounter? queueCounter = null)
     {
         _queueCounter = queueCounter ?? new();
         _messageQueue = new DispatchQueue(_queueCounter);
-        _ledger = ledger;
         _turnBindings = turnBindings;
         _agentConfig = agentConfig.Value;
         _executor = executor;
@@ -850,7 +843,6 @@ public sealed class TaskManager
         async Task DeliverInjectedTurnAnswersAsync(int injectedCount)
         {
             if (injectedCount <= 0) return;
-            using var pendingOrigin = _ledger?.Pending(origin);
             await foreach (var extra in _executor.ReadInjectedTurnAnswersAsync(injectedCount, ct))
             {
                 if (extra.FinalResult is not { Length: > 0 } text || ProtocolSanitizer.IsIdleMarker(text))
@@ -885,7 +877,6 @@ public sealed class TaskManager
             var steerCount = state.Get(taskId)?.SteerCount ?? 0;
             if (steerCount <= 0 || processExitResult) return;
             var read = 0;
-            using (_ledger?.Pending(origin))
             {
                 await foreach (var _ in _executor.ReadInjectedTurnAnswersAsync(steerCount, ct))
                 {
@@ -911,8 +902,6 @@ public sealed class TaskManager
 
             while (true)
             {
-                // #394: the executor tags its lock-held interval with this, once it holds the lock.
-                using var pendingOrigin = _ledger?.Pending(origin);
                 // #406: this executor turn consumes the late-result guard whatever its first event is.
                 var steeringResidue = Interlocked.Exchange(ref _steeringResidue, 0) == 1;
                 var firstEvent = true;

@@ -142,6 +142,12 @@ public sealed class JournalCapture
         private readonly List<JournalMessage> _kept = [];
         public bool SpoolSucceeded { get; private set; }
 
+        /// <summary>Messages the classifier kept.</summary>
+        public int Kept { get; private set; }
+
+        /// <summary>Kept messages the spool wrote.</summary>
+        public int Spooled { get; private set; }
+
         internal OutboundBatch(JournalCapture owner, OutboundOrigin origin, JournalRecordOrigin recordOrigin)
         {
             _owner = owner;
@@ -154,7 +160,11 @@ public sealed class JournalCapture
         {
             try
             {
-                if ((_recordOrigin != JournalRecordOrigin.AgentCopy || _owner._sendEnabled) && _owner.Include(JournalDirection.Outbound, message, _origin)) _kept.Add(message);
+                if ((_recordOrigin != JournalRecordOrigin.AgentCopy || _owner._sendEnabled) && _owner.Include(JournalDirection.Outbound, message, _origin))
+                {
+                    _kept.Add(message);
+                    Kept++;
+                }
             }
             catch (Exception e)
             {
@@ -179,7 +189,11 @@ public sealed class JournalCapture
                 var group = groupId is null ? null : new JournalSendGroup { Id = groupId, Part = i + 1, Parts = messages.Length };
                 try
                 {
-                    SpoolSucceeded |= _owner.Write(JournalDirection.Outbound, messages[i], group, SpoolMediaMode.Copy, _recordOrigin);
+                    if (_owner.Write(JournalDirection.Outbound, messages[i], group, SpoolMediaMode.Copy, _recordOrigin))
+                    {
+                        SpoolSucceeded = true;
+                        Spooled++;
+                    }
                 }
                 catch (Exception e)
                 {

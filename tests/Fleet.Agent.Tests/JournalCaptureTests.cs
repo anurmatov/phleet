@@ -8,6 +8,7 @@ using Fleet.Agent.Models;
 using Fleet.Agent.Services;
 using Fleet.Journal.Client;
 using Fleet.Shared;
+using Fleet.Shared.Journal;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -113,6 +114,73 @@ public sealed class JournalCaptureTests : IDisposable
         Assert.Empty(Directory.GetFiles(rig.Spool.PendingDir));
         Assert.Equal(0, rig.Counters.Get("journal_captured{direction=outbound}"));
         Assert.True(rig.Counters.Get("journal_excluded{reason=system_origin}") >= 1);
+    }
+
+    [Fact]
+    public async Task A_bridge_tasks_reply_to_the_group_writes_no_spool_file()
+    {
+        var rig = Rig.Build(_root);
+        var manager = rig.ManagerAnswering("the answer");
+
+        var done = new TaskCompletionSource();
+        manager.OnTaskCompleted += (_, _, _, _, _, _, _, _) => done.TrySetResult();
+        _ = manager.StartTask(chatId: Group, task: "status?", displayText: "status?", isSessionTask: false,
+            source: TaskSource.Bridge, taskId: "t-1");
+        await done.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Contains(rig.Bot.Texts, t => t.Contains("the answer", StringComparison.Ordinal));
+        Assert.Empty(Directory.GetFiles(rig.Spool.PendingDir));
+        Assert.Equal(0, rig.Counters.Get("journal_captured{direction=outbound}"));
+        Assert.True(rig.Counters.Get("journal_excluded{reason=system_origin}") >= 1);
+    }
+
+    /// <summary>
+    /// #439 D1/D2: one relay turn replies through the runtime and sends through a Telegram MCP tool
+    /// to the same group. Classifier rule 2 still excludes the runtime reply; the tool send's receipt
+    /// is one <c>agent_tool</c> record.
+    /// </summary>
+    [Fact]
+    public async Task A_relay_turns_runtime_reply_is_excluded_while_its_tool_send_receipt_is_journaled()
+    {
+        var rig = Rig.Build(_root);
+        var manager = rig.ManagerAnswering("the answer");
+
+        var done = new TaskCompletionSource();
+        manager.OnTaskCompleted += (_, _, _, _, _, _, _, _) => done.TrySetResult();
+        _ = manager.StartTask(chatId: Group, task: "status?", displayText: "status?", isSessionTask: false,
+            source: TaskSource.Relay, relaySender: "agent2", taskId: "t-1");
+        await done.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Contains(rig.Bot.Texts, t => t.Contains("the answer", StringComparison.Ordinal));
+        Assert.Empty(Directory.GetFiles(rig.Spool.PendingDir));
+        Assert.True(rig.Counters.Get("journal_excluded{reason=system_origin}") >= 1);
+
+        var consumer = new ToolSendReceiptConsumer(
+            rig.AgentOptions, new NoBroker(), rig.Capture, rig.Counters, () => rig.Bot.BotId,
+            NullLogger<ToolSendReceiptConsumer>.Instance)
+        {
+            AckHook = _ => Task.CompletedTask,
+        };
+        await consumer.HandleAsync(ToolSendReceipts.Serialize(new ToolSendReceipt
+        {
+            Agent = "fleet-agent1",
+            Tool = "send_message",
+            RequestedAt = DateTimeOffset.UtcNow,
+            BotId = rig.Bot.BotId,
+            Chat = new ToolSendChat(Group, "supergroup", null),
+            Messages = [new ToolSendMessage(9001, DateTime.UtcNow, null, "sent by a tool", ToolSendTextFormats.Plain)],
+        }), deliveryTag: 1);
+
+        var record = Assert.Single(rig.Spool.Pending()).Record;
+        Assert.Equal("agent_tool", record["origin"]!.GetValue<string>());
+        Assert.Equal("outbound", record["direction"]!.GetValue<string>());
+        Assert.Equal(Group, record["telegram"]!["chatId"]!.GetValue<long>());
+        Assert.Equal(1, rig.Counters.Get("tool_send_captured"));
+    }
+
+    private sealed class NoBroker : IAgentBrokerConnection
+    {
+        public RabbitMQ.Client.IConnection? Connection => null;
     }
 
     [Fact]
@@ -427,6 +495,7 @@ public sealed class JournalCaptureTests : IDisposable
         public required MessageSinkHolder Holder { get; init; }
         public required JournalBot Bot { get; init; }
         public required JournalSpool Spool { get; init; }
+        public required JournalCapture Capture { get; init; }
         public required string SpoolRoot { get; init; }
         public required JournalCounters Counters { get; init; }
         public required string AttachmentDir { get; init; }
@@ -519,6 +588,7 @@ public sealed class JournalCaptureTests : IDisposable
                 Holder = holder,
                 Bot = bot,
                 Spool = spool ?? null!,
+                Capture = capture ?? null!,
                 SpoolRoot = spoolRoot,
                 Counters = counters,
                 AttachmentDir = attachments,

@@ -224,9 +224,9 @@ A split reply is one `sendGroup`, and `parts` counts journaled messages only.
 ## Tool sends (slice 5)
 
 Messages an agent sends through the Telegram MCP tools (`send_message`, `send_to_ceo`) are sent by
-`fleet-telegram`, not by the agent. Only the agent knows the turn's origin, its allowlist and its
-exclusion list, so `fleet-telegram` reports what it sent and the agent classifies and spools it with
-its own ingest token. The records carry `origin: agent_tool`; the observer is the agent.
+`fleet-telegram`, not by the agent. Only the agent holds its ingest identity, its allowlist and its
+exclusion list, so `fleet-telegram` reports what it delivered and the agent classifies and spools it
+with its own ingest token. The records carry `origin: agent_tool`; the observer is the agent.
 
 **Receipts.** Every Bot API send in `Fleet.Telegram` goes through `TelegramSender`, and a source-scan
 test fails if anything else calls a send method on a bot client. When a tool call ends with at least
@@ -246,55 +246,75 @@ conversation.
 
 **The agent's queue.** An agent with the journal on declares the durable queue
 `fleet.journal.tool-sends.<name>` (24 h TTL, 10,000 messages, `drop-head`), bound with its
-lower-cased name, and consumes it on its broker connection with manual ack. An agent with the
-journal off declares nothing and deletes that queue at startup if it exists. A receipt that fails
-to parse, has the wrong version or is over 1 MiB is `receipt_invalid`; one whose `botId` is not the
-agent's own bot is `tool_send_foreign_bot`. Both are acked and dropped.
+lower-cased name, and consumes it on its broker connection with prefetch 32 and manual ack. A
+receipt is at most 1 MiB, so at most 32 MiB is in flight. An agent with the journal off declares
+nothing and deletes that queue at startup if it exists.
 
-### Origin attribution (fail closed)
+### Delivery-based admission (#439)
 
-`TurnOriginLedger` records every period in which the provider may be acting, tagged `human`,
-`relay`, `bridge` or `unknown`. With `W = [requestedAt − 2 s, requestedAt + 2 s]`:
+Every message the agent's own bot delivered through these tools is journaled **once**, whatever
+turn made the call: human, workflow, bridge, unknown, cancelled, failed, a turn that ended at once,
+or no turn at all. That holds when the receipt arrives after the turn ended or after an agent
+restart. Turn origin, turn outcome, timing and provider lifecycle are **not** consulted.
 
-- a tool send is journaled **only if** the union of `human` intervals covers every instant of `W`
-  **and** no `relay`, `bridge` or `unknown` interval touches `W`. There is no precedence between
-  intervals;
-- an uncovered part of `W` (before a turn, after it, between two turns) → `tool_send_unattributed`;
-  any non-human overlap → `tool_send_non_human`;
-- the decision waits until the agent clock passes `requestedAt + 2.25 s`. The receipt waits unacked
-  in a list of at most 1,000 (overflow → `receipt_deferred_overflow`, acked, excluded) and is acked
-  after the decision. An interval still open counts as covering up to decision time;
-- `requestedAt` later than the receipt's arrival → `receipt_clock_skew`. The guarantee holds while
-  the `fleet-telegram` and agent clocks differ by at most 2 s: trivially on one host, with NTP on
-  several;
-- closed intervals are kept 10 minutes, open ones forever. A window that starts before that horizon
-  or before the agent started — including a receipt redelivered after an agent restart — is excluded.
+The agent decides each receipt on arrival:
 
-Where intervals come from:
+1. It fails to parse, has a version other than `1` or is over 1 MiB, names another agent, or has a
+   message id ≤ 0 → `receipt_invalid` (reason `malformed`, `version`, `too_large`, `agent` or
+   `message_id`), acked, nothing written.
+2. Its `botId` is not the agent's own bot, or the own bot id is unknown → `tool_send_foreign_bot`,
+   acked, nothing written. The own bot id is derived from `Telegram:BotToken` when the transport is
+   constructed, before any hosted service starts, so a receipt queued across a restart meets a
+   known id.
+3. Otherwise each message goes through the capture path as an outbound `agent_tool` record and the
+   receipt counts `tool_send_captured`. Classifier rules 1, 3 and 4 still apply to every message:
+   chat id 0 → `no_chat`; an excluded chat (including the coordination group) →
+   `operational_chat`; not in the allowlist → `unauthorized_chat`; a channel or unknown kind →
+   `unsupported_chat`. Rule 2 (`system_origin`) keeps governing runtime relay and bridge replies
+   only. A split send of 2 to 64 messages shares one `sendGroup`.
+4. The ack follows the spool write and never precedes it.
 
-| Source | Interval |
-|---|---|
-| An executor turn (`ExecuteAsync`, Claude `ReadInjectedTurnAnswersAsync`) | opens right **after** the executor takes its turn lock and closes before it releases it. Its origin is the one `TaskManager` set with `Pending(origin)` before enumerating, else `unknown` (warmup). A task waiting for the lock has none |
-| `/run` (`SendCommandAsync`) | lock-held, always `unknown`, **plus** an `unknown` interval opened before the command is submitted that outlives the lock. It ends on the command's own terminal event or a confirmed process exit, and the stdout reader retires it even after its caller stopped reading: Codex binds it to the turn of the first `userShell` command item and closes it on that turn's `turn/completed`; Claude closes the oldest waiting command on the next result for a stdin message (human or unstamped origin — claude answers stdin messages one at a time, in order). Another turn's terminal never closes it. A refused request closes it at once |
-| A Codex turn interrupted on cancellation whose end is not seen within the drain | `unknown`, opened while the lock is still held, until the reader reads that turn's own `turn/completed` or the process exit is confirmed |
-| Gemini | one CLI process per call, from start to confirmed exit. After a cancellation the CLI is killed and its exit awaited; a kill that fails or does not take effect keeps the interval open until the process really exits |
-| A turn the provider starts by itself (an injected message before the lock is taken, a background-task notification) | `unknown`, opened by the stdout reader on a turn-content event (Claude `assistant`, `user`, `stream_event`, `system/init`; Codex `turn/started`, `item/*`) while no other interval is open |
+There is no deferral, decision delay, clock-skew check or restart horizon.
 
-An `unknown` interval from the stdout reader closes **only** on the first terminal event after it
-opened (Claude `result`, Codex `turn/completed`) or on confirmed process end (stdout EOF, or a kill
-after `WaitForExitAsync` returned). `RequestRestart()`, reader cancellation, a `TryStopProcessAsync`
-that returned `false`, silence and another lock acquisition do not close it. After 10 minutes open it
-logs `journal_ledger_unknown_stuck` once and stays open.
+**Idempotency.** A receipt redelivered after a crash before its ack is captured again and resolves on
+Comms' natural key `(conversation, tg:<messageId>)` with the unchanged fingerprint (it excludes the
+event id, `sendGroup` and the text format): `200 duplicate`, nothing written, the first write's
+`sendGroup` stands.
 
-The trade-off is chosen: a genuine human tool send is not journaled when it falls within 2 s of the
-start or end of its own turn, within 2 s of any relay, bridge, `/run` or warmup activity, or while an
-untracked provider turn is still unterminated. Relay and bridge sends are never journaled.
+### Authenticity
 
-**Idempotency.** A duplicate receipt or a redelivery resolves on the natural key
-`(conversation, tg:<messageId>)`: same observer and fingerprint answer `200 duplicate`.
+A receipt is trusted because of where it can come from:
 
-**Known limit.** Any broker client can publish to an agent's receipt queue, as it can already publish
-relay directives. The `botId` check blocks cross-bot rows; broker authentication is out of scope.
+1. `fleet-telegram` builds receipts only in `TelegramSender`, from a `Message` the Bot API returned
+   to the agent's own bot client.
+2. The routing key is the trusted `?agent=` endpoint attribution, lower-cased.
+3. The agent consumes only its own queue `fleet.journal.tool-sends.<name>`.
+4. The agent drops a receipt whose `agent` is not its own name (`receipt_invalid`, reason `agent`)
+   and one whose `botId` is not its own bot (`tool_send_foreign_bot`). The notifier fallback bot
+   never produces a receipt.
+5. **Boundary:** the broker is a trusted internal service. Any client holding broker credentials can
+   publish a forged receipt, as it can already publish relay directives; broker authentication is
+   out of scope. A forged receipt with a fresh message id becomes a row **undetected**. Only one
+   that reuses a real message id surfaces: the later genuine record is a fingerprint conflict,
+   Comms answers `409`, the record goes to the agent's `dead/`, and
+   `fleet.journal.ingest{result=conflict}` rises.
+
+### Failure boundaries
+
+"Delivered" means a `Message` the Bot API returned. Nothing else is promised.
+
+| Stage | What is kept | Failure → outcome |
+|---|---|---|
+| Bot API (`fleet-telegram`) | each own-bot `Message` returned | error, timeout or ambiguous result → no `Message`, nothing recorded, tool result unchanged. Partial multi-chunk → accepted chunks only. Notifier fallback → never recorded |
+| receipt publish (`fleet-telegram`) | in-memory channel of 1,000; one publish attempt, 10 s timeout | overflow, broker error, timeout or shutdown → receipt dropped, `journal_receipts_dropped` counted and warned. A crash before publish → lost, uncounted. No retry |
+| broker queue | durable per-agent queue: 24 h TTL, 10,000 messages, `drop-head`, no dead-letter exchange | agent down → receipts wait. TTL, overflow, journal-off startup deleting the queue, or no queue (journal off) → lost |
+| agent consume | prefetch 32, manual ack after the spool write returns | invalid or foreign → acked and dropped, counted. Ack failure or crash before ack → redelivered → captured again → `duplicate`. Spool full or write error → counted (`journal_spool_dropped{reason=full}` / `journal_capture_failed`), acked, record lost |
+| spool (agent disk) | 10,000 records or 1 GiB, kept across restarts | full → the new record is dropped |
+| drainer → Comms | backoff 1 s → 5 min, 15 s timeout | 5xx or timeout → retry. 401 → stall. 404 → 5 min pause. `422 excluded_chat` or `unknown_conversation` → drop. Refused → `dead/`, kept 30 days, redrive by moving it back to `pending/` |
+| Comms store | natural key plus fingerprint | same message → `duplicate`. Same key with a different fingerprint → `409` → `dead/` (investigate) |
+
+Capture never widens reads: read scope and turn binding are unchanged, so a workflow turn's
+`get_message(telegram_message_id)` still answers `unavailable:no_bound_conversation`.
 
 ## Tokens and rotation
 
@@ -696,14 +716,33 @@ Under the `Fleet.Conversations` meter: `fleet.journal.ingest{result}` (`created`
 `fleet.journal.ingest.duration` and `fleet.journal.read.duration{tool}` (ms).
 
 Agent counters (in-process `JournalCounters`, like the capture counters): `journal_excluded{reason}`,
-`tool_send_captured`, `tool_send_unattributed`, `tool_send_non_human`, `tool_send_foreign_bot`,
-`receipt_clock_skew`, `receipt_deferred_overflow`, `receipt_invalid`, and the one-off
-`journal_ledger_unknown_stuck` warning. `fleet-telegram` counts `journal_receipts_published` and
-`journal_receipts_dropped` and logs both in its drop warning, at most once a minute.
+`tool_send_captured`, `tool_send_foreign_bot` and `receipt_invalid`. `fleet-telegram` counts
+`journal_receipts_published` and `journal_receipts_dropped` and logs both in its drop warning, at
+most once a minute.
 
-Working: `agent_tool` rows appear, and new outbound rows hold no `<blockquote expandable>`. Broken:
-the unattributed or drop counters climb, or `dead/` grows with `invalid_record{origin}` (Comms older
-than the agents).
+Each receipt logs one Information line on the agent, fixed codes and integers only — never text, a
+chat id, a message id, a title or a bot id:
+
+```
+tool-send receipt handled (result={captured|invalid|foreign_bot},
+  reason={-|too_large|malformed|version|agent|message_id},
+  parts={n}, kept={k}, spooled={s})
+```
+
+`parts` is the receipt's message count, `kept` the count the classifier kept, `spooled` the count
+written to the spool.
+
+Working: each tool send to an allowlisted chat logs `result=captured` with `kept = spooled ≥ 1` on the
+sending agent within seconds; the heartbeat spool drains to 0; `fleet.journal.ingest{result=created}`
+rises and the row is readable; posts to excluded chats log `kept=0`; new outbound rows hold no
+`<blockquote expandable>`. Broken: `fleet-telegram` logs `journal: tool-send receipt dropped`; any
+`result=invalid` or `result=foreign_bot` line; `spooled < kept`; `fleet.journal.ingest{result=conflict}`
+above 0 or `dead/` growing (with `invalid_record{origin}`, Comms is older than the agents); any log
+line carrying text or ids.
+
+Triage: `journal_receipts_dropped` → broker health; `invalid` or `foreign_bot` → a publisher or
+attribution mismatch; `spooled < kept` → spool health; `conflict` → a possible forged receipt or a
+fingerprint mismatch.
 
 `/ready` gets no new reason: its existing schema check reports `503 {status:"unhealthy", schema:…}`
 until `conversations migrate` has applied 0004. Ingest reads the schema version itself and caches

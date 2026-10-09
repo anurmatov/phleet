@@ -239,9 +239,9 @@ public sealed partial class MidTurnIsolationTests
     }
 
     internal static TaskManager Manager(string provider, ControlledExecutor executor, IMessageSink? sink = null,
-        InjectionOutcomeCounter? counter = null, TurnBindingPublisher? publisher = null, TurnOriginLedger? ledger = null) => new(
+        InjectionOutcomeCounter? counter = null, TurnBindingPublisher? publisher = null) => new(
         Options.Create(new AgentOptions { Name = "agent1", Role = "test", WorkDir = "/tmp", Provider = provider }),
-        executor, new SessionManager(), NullLogger<TaskManager>.Instance, counter, sink: sink, turnBindings: publisher, ledger: ledger);
+        executor, new SessionManager(), NullLogger<TaskManager>.Instance, counter, sink: sink, turnBindings: publisher);
 
     private static async Task Until(Func<bool> condition)
     {
@@ -249,7 +249,7 @@ public sealed partial class MidTurnIsolationTests
         while (!condition()) await Task.Delay(10, deadline.Token);
     }
 
-    internal sealed class ControlledExecutor(MidTurnInjectionStatus status, TurnOriginLedger? ledger = null) : IAgentExecutor
+    internal sealed class ControlledExecutor(MidTurnInjectionStatus status) : IAgentExecutor
     {
         private readonly SemaphoreSlim _release = new(0);
         private readonly ConcurrentQueue<string> _tasks = new();
@@ -263,7 +263,6 @@ public sealed partial class MidTurnIsolationTests
             IReadOnlyList<MessageImage>? images = null, IReadOnlyList<MessageDocument>? documents = null,
             [EnumeratorCancellation] CancellationToken ct = default)
         {
-            using var interval = ledger?.OpenTurn();
             _tasks.Enqueue(task);
             await _release.WaitAsync(ct);
             yield return new AgentProgress { EventType = "result", Summary = task, FinalResult = task };

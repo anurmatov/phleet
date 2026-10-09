@@ -13,9 +13,9 @@ using RabbitMQ.Client.Events;
 namespace Fleet.Agent.Services;
 
 /// <summary>
-/// Consumes what <c>fleet-telegram</c> reports it sent through a Telegram MCP tool for this agent,
-/// and journals the sends the <see cref="TurnOriginLedger"/> proves answered a human (#394).
-/// Registered only when <c>Journal__IngestToken</c> is set.
+/// Consumes what <c>fleet-telegram</c> reports it delivered through a Telegram MCP tool for this
+/// agent's own bot, and journals every delivered message (#394, #439). Registered only when
+/// <c>Journal__IngestToken</c> is set.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -24,50 +24,47 @@ namespace Fleet.Agent.Services;
 /// on the agent's one broker connection with manual ack.
 /// </para>
 /// <para>
-/// <b>A receipt is decided only after its window has been observed.</b> It waits, unacked, until
-/// the agent clock passes <c>requestedAt + 2 s + 0.25 s</c>, in a list bounded at
-/// <see cref="MaxDeferred"/>; the ack follows the decision. A receipt redelivered after a restart
-/// meets an empty ledger and is excluded.
+/// <b>Delivery is the admission rule.</b> A receipt is captured when it parses as <c>v: 1</c>, names
+/// this agent, carries this agent's own bot id and every message id is positive. Turn origin, turn
+/// outcome, timing and provider lifecycle are never consulted. The classifier still decides where
+/// capture is allowed (excluded chats, the allowlist, chat kind). Each receipt is decided on
+/// arrival and acked only after its spool write returns, so a receipt redelivered after a crash is
+/// captured again and Comms answers <c>duplicate</c>.
 /// </para>
 /// <para>
 /// ⚠️ Nothing here can fail or slow a Telegram send or a turn: the tool already returned when the
-/// receipt was published, and capture never throws. Logs carry reason codes only — never text,
-/// never a chat id.
+/// receipt was published, and capture never throws. Logs carry fixed codes and counts only — never
+/// text, never an id.
 /// </para>
 /// </remarks>
 public sealed class ToolSendReceiptConsumer : BackgroundService
 {
-    /// <summary>How long after <c>requestedAt</c> a receipt waits before it is decided.</summary>
-    public static readonly TimeSpan DecisionDelay = TurnOriginLedger.ClockSkew + TimeSpan.FromMilliseconds(250);
+    /// <summary>Unacked receipts on the channel. A receipt is at most 1 MiB, so at most 32 MiB in flight.</summary>
+    public const int Prefetch = 32;
 
-    /// <summary>Receipts waiting for their decision. Also the broker prefetch, so the list is the backpressure.</summary>
-    public const int MaxDeferred = 1_000;
-
-    private static readonly TimeSpan DecisionTick = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan InitialBackoff = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan MaxBackoff = TimeSpan.FromMinutes(1);
 
     private readonly string _agentName;
     private readonly IAgentBrokerConnection _broker;
-    private readonly TurnOriginLedger _ledger;
     private readonly JournalCapture _capture;
     private readonly JournalCounters _counters;
     private readonly Func<long?> _ownBotId;
     private readonly ILogger<ToolSendReceiptConsumer> _logger;
     private readonly TimeProvider _time;
-    private readonly List<Deferred> _deferred = [];
 
     private IChannel? _channel;
     private string? _consumerTag;
 
     /// <param name="ownBotId">
-    /// This agent's own bot id, or null while it is unknown. A receipt from any other bot — the
+    /// This agent's own bot id, or null while it is unknown. The transport derives it from
+    /// <c>Telegram:BotToken</c> when it is constructed, before any hosted service starts, so a
+    /// receipt queued across a restart meets a known id. A receipt from any other bot — the
     /// notifier fallback bot included — is dropped.
     /// </param>
     public ToolSendReceiptConsumer(
         IOptions<AgentOptions> agent,
         IAgentBrokerConnection broker,
-        TurnOriginLedger ledger,
         JournalCapture capture,
         JournalCounters counters,
         Func<long?> ownBotId,
@@ -76,7 +73,6 @@ public sealed class ToolSendReceiptConsumer : BackgroundService
     {
         _agentName = agent.Value.Name;
         _broker = broker;
-        _ledger = ledger;
         _capture = capture;
         _counters = counters;
         _ownBotId = ownBotId;
@@ -100,7 +96,7 @@ public sealed class ToolSendReceiptConsumer : BackgroundService
             try
             {
                 await AttachAsync(stoppingToken);
-                break;
+                return;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -118,23 +114,6 @@ public sealed class ToolSendReceiptConsumer : BackgroundService
                 catch (OperationCanceledException) { return; }
 
                 delay = delay * 2 > MaxBackoff ? MaxBackoff : delay * 2;
-            }
-        }
-
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            try { await Task.Delay(DecisionTick, _time, stoppingToken); }
-            catch (OperationCanceledException) { return; }
-
-            try
-            {
-                await DecideDueAsync();
-            }
-            catch (Exception e)
-            {
-                // A fault escaping a BackgroundService stops the host; the journal must never do
-                // that. What was not acked is redelivered and excluded.
-                _logger.LogWarning("tool-send receipt decision failed ({Error})", e.GetType().Name);
             }
         }
     }
@@ -165,20 +144,20 @@ public sealed class ToolSendReceiptConsumer : BackgroundService
             QueueName, ToolSendReceipts.Exchange, ToolSendReceipts.RoutingKey(_agentName),
             cancellationToken: ct);
 
-        // Unacked receipts are exactly the deferred ones, so the prefetch bounds the list.
-        await channel.BasicQosAsync(0, MaxDeferred, global: false, cancellationToken: ct);
+        await channel.BasicQosAsync(0, Prefetch, global: false, cancellationToken: ct);
 
         var consumer = new AsyncEventingBasicConsumer(channel);
         consumer.ReceivedAsync += async (_, ea) =>
         {
             try
             {
-                // The body buffer is only valid during this callback; Admit parses it synchronously.
-                await ReceiveAsync(ea.Body, ea.DeliveryTag, channel);
+                // The body buffer is only valid during this callback; HandleAsync parses it before
+                // its first await.
+                await HandleAsync(ea.Body, ea.DeliveryTag, channel);
             }
             catch (Exception e)
             {
-                // Unacked: redelivered when the channel closes, and then excluded by the ledger.
+                // Unacked: redelivered when the channel closes, then captured again as a duplicate.
                 _logger.LogWarning("tool-send receipt handler failed ({Error})", e.GetType().Name);
             }
         };
@@ -190,117 +169,64 @@ public sealed class ToolSendReceiptConsumer : BackgroundService
     // ── one receipt ──────────────────────────────────────────────────────────
 
     /// <summary>
-    /// A delivery arrived. Dropped at once when it cannot be journaled whatever the ledger says;
-    /// otherwise deferred until its window has been observed.
+    /// Decides one delivery, writes what it keeps to the spool, logs one line, then acks. The ack
+    /// never precedes the spool write.
     /// </summary>
-    internal Task ReceiveAsync(ReadOnlyMemory<byte> body, ulong deliveryTag, IChannel? channel = null) =>
-        Admit(body.Span, deliveryTag, channel) ? Task.CompletedTask : AckAsync(channel, deliveryTag);
-
-    /// <summary>True when deferred; false when dropped and counted, and the caller acks.</summary>
-    private bool Admit(ReadOnlySpan<byte> body, ulong deliveryTag, IChannel? channel)
+    internal Task HandleAsync(ReadOnlyMemory<byte> body, ulong deliveryTag, IChannel? channel = null)
     {
-        var arrivedAt = _time.GetUtcNow();
+        var outcome = Decide(body.Span);
 
+        // Fixed codes and counts only.
+        _logger.LogInformation(
+            "tool-send receipt handled (result={Result}, reason={Reason}, parts={Parts}, kept={Kept}, spooled={Spooled})",
+            outcome.Result, outcome.Reason, outcome.Parts, outcome.Kept, outcome.Spooled);
+
+        return AckAsync(channel, deliveryTag);
+    }
+
+    private Outcome Decide(ReadOnlySpan<byte> body)
+    {
         if (!ToolSendReceipts.TryParse(body, out var receipt, out var reason))
-        {
-            _counters.ReceiptInvalid();
-            _logger.LogDebug("tool-send receipt dropped (receipt_invalid, {Reason})", reason);
-            return false;
-        }
+            return Invalid(reason ?? "malformed", parts: 0);
+
+        var parts = receipt!.Messages.Count;
+
+        // fleet-telegram stamps the trusted endpoint attribution, lower-cased.
+        if (!string.Equals(receipt.Agent, ToolSendReceipts.RoutingKey(_agentName), StringComparison.Ordinal))
+            return Invalid("agent", parts);
+
+        if (receipt.Messages.Any(m => m.MessageId <= 0))
+            return Invalid("message_id", parts);
 
         // Only this agent's own bot writes to its conversations. A fallback-bot send, or anything
         // another broker client published here, never becomes a row.
-        if (_ownBotId() is not { } own || receipt!.BotId != own)
+        if (_ownBotId() is not { } own || receipt.BotId != own)
         {
             _counters.ToolSendForeignBot();
-            _logger.LogDebug("tool-send receipt dropped (tool_send_foreign_bot)");
-            return false;
+            return new Outcome("foreign_bot", "-", parts, 0, 0);
         }
 
-        // A stamp later than its own arrival: the publisher's clock is ahead, and the window
-        // cannot be placed on this agent's clock.
-        if (receipt.RequestedAt > arrivedAt)
-        {
-            _counters.ReceiptClockSkew();
-            _logger.LogDebug("tool-send receipt dropped (receipt_clock_skew)");
-            return false;
-        }
+        var (kept, spooled) = Capture(receipt);
+        _counters.ToolSendCaptured();
+        return new Outcome("captured", "-", parts, kept, spooled);
+    }
 
-        lock (_deferred)
-        {
-            if (_deferred.Count >= MaxDeferred)
-            {
-                _counters.ReceiptDeferredOverflow();
-                _logger.LogDebug("tool-send receipt dropped (receipt_deferred_overflow)");
-                return false;
-            }
-
-            _deferred.Add(new Deferred(receipt, deliveryTag, channel, receipt.RequestedAt + DecisionDelay));
-        }
-
-        return true;
+    private Outcome Invalid(string reason, int parts)
+    {
+        _counters.ReceiptInvalid();
+        return new Outcome("invalid", reason, parts, 0, 0);
     }
 
     /// <summary>
-    /// Decides and acks every receipt whose window has been observed. Runs on the consumer's tick;
-    /// tests call it after moving the clock.
+    /// The existing capture path with <c>origin: agent_tool</c>: rules 1, 3 and 4 and the allowlist
+    /// apply unchanged, and a multi-message send shares one <c>sendGroup</c>. Never throws.
     /// </summary>
-    internal async Task<int> DecideDueAsync()
+    private (int Kept, int Spooled) Capture(ToolSendReceipt receipt)
     {
-        var now = _time.GetUtcNow();
-        List<Deferred> due;
-        lock (_deferred)
-        {
-            due = _deferred.Where(d => now >= d.DueAt).OrderBy(d => d.DueAt).ToList();
-            _deferred.RemoveAll(d => now >= d.DueAt);
-        }
-
-        foreach (var entry in due)
-        {
-            Decide(entry.Receipt);
-            await AckAsync(entry.Channel, entry.DeliveryTag);
-        }
-
-        // Eviction and the stuck warning run even when no receipt arrives.
-        _ledger.Sweep();
-        return due.Count;
-    }
-
-    internal int DeferredCountForTests
-    {
-        get { lock (_deferred) return _deferred.Count; }
-    }
-
-    private void Decide(ToolSendReceipt receipt)
-    {
-        switch (_ledger.Attribute(receipt.RequestedAt))
-        {
-            case ToolSendAttribution.Human:
-                _counters.ToolSendCaptured();
-                Capture(receipt);
-                break;
-
-            case ToolSendAttribution.NonHuman:
-                _counters.ToolSendNonHuman();
-                _logger.LogDebug("tool-send receipt excluded (tool_send_non_human)");
-                break;
-
-            default:
-                _counters.ToolSendUnattributed();
-                _logger.LogDebug("tool-send receipt excluded (tool_send_unattributed)");
-                break;
-        }
-    }
-
-    /// <summary>
-    /// The existing capture path with <c>origin: agent_tool</c>: rules 1–4 and the allowlist apply
-    /// unchanged, and a multi-message send shares one <c>sendGroup</c>. Never throws.
-    /// </summary>
-    private void Capture(ToolSendReceipt receipt)
-    {
+        JournalCapture.OutboundBatch? batch = null;
         try
         {
-            var batch = _capture.Outbound(OutboundOrigin.Human, JournalRecordOrigin.AgentTool);
+            batch = _capture.Outbound(OutboundOrigin.Human, JournalRecordOrigin.AgentTool);
             foreach (var message in receipt.Messages)
             {
                 batch.Add(new JournalMessage
@@ -331,7 +257,11 @@ public sealed class ToolSendReceiptConsumer : BackgroundService
             _counters.CaptureFailed();
             _logger.LogWarning("tool-send capture failed ({Error}); the record is lost", e.GetType().Name);
         }
+
+        return (batch?.Kept ?? 0, batch?.Spooled ?? 0);
     }
+
+    private readonly record struct Outcome(string Result, string Reason, int Parts, int Kept, int Spooled);
 
     // ── broker acknowledgement ───────────────────────────────────────────────
 
@@ -354,15 +284,14 @@ public sealed class ToolSendReceiptConsumer : BackgroundService
         }
         catch (Exception e)
         {
-            // The channel went away: the receipt is redelivered and meets the ledger again.
+            // The channel went away: the receipt is redelivered and captured again as a duplicate.
             _logger.LogWarning("tool-send receipt ack failed ({Error})", e.GetType().Name);
         }
     }
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
-        // Deferred receipts stay unacked on purpose: the broker redelivers them to the next start,
-        // whose empty ledger excludes them.
+        // A receipt not yet acked is redelivered to the next start and captured then.
         var channel = _channel;
         if (channel is { IsOpen: true } && _consumerTag is not null)
         {
@@ -378,8 +307,6 @@ public sealed class ToolSendReceiptConsumer : BackgroundService
             try { await channel.DisposeAsync(); } catch { /* shutting down */ }
         }
     }
-
-    private sealed record Deferred(ToolSendReceipt Receipt, ulong DeliveryTag, IChannel? Channel, DateTimeOffset DueAt);
 }
 
 /// <summary>

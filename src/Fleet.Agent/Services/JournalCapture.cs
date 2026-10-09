@@ -142,8 +142,11 @@ public sealed class JournalCapture
         private readonly List<JournalMessage> _kept = [];
         public bool SpoolSucceeded { get; private set; }
 
-        /// <summary>How many added messages the classifier kept, flushed or not (#439).</summary>
+        /// <summary>Messages the classifier kept.</summary>
         public int Kept { get; private set; }
+
+        /// <summary>Kept messages the spool wrote.</summary>
+        public int Spooled { get; private set; }
 
         internal OutboundBatch(JournalCapture owner, OutboundOrigin origin, JournalRecordOrigin recordOrigin)
         {
@@ -186,7 +189,11 @@ public sealed class JournalCapture
                 var group = groupId is null ? null : new JournalSendGroup { Id = groupId, Part = i + 1, Parts = messages.Length };
                 try
                 {
-                    SpoolSucceeded |= _owner.Write(JournalDirection.Outbound, messages[i], group, SpoolMediaMode.Copy, _recordOrigin);
+                    if (_owner.Write(JournalDirection.Outbound, messages[i], group, SpoolMediaMode.Copy, _recordOrigin))
+                    {
+                        SpoolSucceeded = true;
+                        Spooled++;
+                    }
                 }
                 catch (Exception e)
                 {

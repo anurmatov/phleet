@@ -62,9 +62,6 @@ public sealed class CodexExecutor : IAgentExecutor
     private string? _threadId;
     private volatile string? _activeTurnId;
     private volatile string? _commandTurnId;
-    // #439: the last turn whose turn/completed reported status completed. A task turn closes its
-    // ledger interval normally only when this names it; anything else stays an abnormal close.
-    private volatile string? _completedTurnId;
     private ThreadTokenUsageSnapshot? _lastTurnUsage;
     private int _messageCount;
     // Accumulates assistant text from item/completed notifications of type "agentMessage".
@@ -76,11 +73,6 @@ public sealed class CodexExecutor : IAgentExecutor
     private volatile bool _restartRequested;
     private volatile bool _turnHasFinalAnswerPhase;
     private readonly Func<ProcessStartInfo, Process?> _processStarter;
-
-    // The tool-send turn ledger (#394). Null without the journal, and then nothing below records.
-    // _activity belongs to the current app-server process and its stdout reader.
-    private readonly TurnOriginLedger? _ledger;
-    private TurnOriginLedger.ProviderActivity? _activity;
 
     private const string CodexBin = "codex";
     internal const string OssBaseUrlEnvVar = "CODEX_OSS_BASE_URL";
@@ -113,9 +105,8 @@ public sealed class CodexExecutor : IAgentExecutor
         IOptions<TelegramOptions> telegramConfig,
         PromptBuilder promptBuilder,
         ILogger<CodexExecutor> logger,
-        HostedProviderAdapterHost? adapterHost = null,
-        TurnOriginLedger? ledger = null)
-        : this(config, telegramConfig, promptBuilder, logger, Process.Start, adapterHost: adapterHost, ledger: ledger)
+        HostedProviderAdapterHost? adapterHost = null)
+        : this(config, telegramConfig, promptBuilder, logger, Process.Start, adapterHost: adapterHost)
     {
     }
 
@@ -126,15 +117,13 @@ public sealed class CodexExecutor : IAgentExecutor
         ILogger<CodexExecutor> logger,
         Func<ProcessStartInfo, Process?> processStarter,
         Func<string, string?>? environmentReader = null,
-        HostedProviderAdapterHost? adapterHost = null,
-        TurnOriginLedger? ledger = null)
+        HostedProviderAdapterHost? adapterHost = null)
     {
         _config = config.Value;
         _promptBuilder = promptBuilder;
         _logger = logger;
         _normalizedAttachmentDir = Path.GetFullPath(telegramConfig.Value.AttachmentDir);
         _processStarter = processStarter;
-        _ledger = ledger;
 
         // Resolved here and validated in EnsureProcessReadyAsync rather than thrown from the
         // constructor, so a misconfigured model surfaces as a named startup failure instead of a
@@ -203,9 +192,6 @@ public sealed class CodexExecutor : IAgentExecutor
         // the first turn completes, mirroring ClaudeExecutor's _sendLock.WaitAsync pattern.
         // This replaces the previous single-flight throw (G2 deviation) with graceful queuing.
         await _turnLock.WaitAsync(ct);
-        // #394: held from here to the release below, never while waiting. The pending origin, or
-        // unknown (warmup, the CLI).
-        var turnInterval = _ledger?.OpenTurn();
 
         string? turnId = null;
         var abandonReason = "consumer_exit";
@@ -246,7 +232,6 @@ public sealed class CodexExecutor : IAgentExecutor
                 var turn = response.RequireObject("turn");
                 turnId = turn.RequireString("id");
                 _activeTurnId = turnId;
-                _completedTurnId = null;
                 _turnHasFinalAnswerPhase = false;
                 _lastTurnUsage = null;
                 _currentTurnAssistantText = "";
@@ -296,15 +281,6 @@ public sealed class CodexExecutor : IAgentExecutor
                     break;
                 }
                 _lastActivity = DateTimeOffset.UtcNow;
-
-                // #439 D2: this turn's own turn/completed with status completed. Interrupted, failed,
-                // an app-server exit, RPC errors and the abandon path below stay abnormal closes.
-                if (stream.Current is { FinalResult: not null, IsErrorResult: false } && turnId is not null
-                    && string.Equals(_completedTurnId, turnId, StringComparison.Ordinal))
-                {
-                    turnInterval?.CloseNormally();
-                }
-
                 yield return stream.Current;
                 if (stream.Current.FinalResult is not null) yield break;
             }
@@ -313,7 +289,6 @@ public sealed class CodexExecutor : IAgentExecutor
         {
             if (turnId is not null && _activeTurnId == turnId)
                 await AbandonOwnedTurnAsync(turnId, "task", abandonReason, acquireTurnLock: false);
-            turnInterval?.Close();
             _turnLock.Release();
         }
     }
@@ -377,12 +352,6 @@ public sealed class CodexExecutor : IAgentExecutor
     {
         _lastActivity = DateTimeOffset.UtcNow;
         await _sendLock.WaitAsync(ct);
-        // #394: a raw command is never attributed to anyone. The lock-held interval covers the
-        // request; the shell command itself runs after the request was accepted and the lock
-        // released, so commandInterval covers it until its own turn/completed is read below or the
-        // app-server's exit is confirmed — whoever takes a lock meanwhile.
-        var turnInterval = _ledger?.OpenTurn(command: true);
-        TurnOriginLedger.LedgerInterval? commandInterval = null;
 
         Exception? commandError = null;
 
@@ -414,11 +383,6 @@ public sealed class CodexExecutor : IAgentExecutor
                 ["command"] = command,
             };
 
-            // Opened before the request, so no notification of the command can precede it. A
-            // request that fails any other way than an RPC refusal may still have been accepted:
-            // the interval then stays open until the process ends.
-            commandInterval = _ledger?.OpenCommand(_activity);
-
             // Intentional: `thread/shellCommand` is the v2 thread-scoped shell entrypoint.
             // It preserves shell syntax (pipes, redirects, quoting) unlike `command/exec`.
             await SendRequestAsync(ThreadShellCommandMethod, shellParams, ct);
@@ -430,12 +394,9 @@ public sealed class CodexExecutor : IAgentExecutor
             LogRpcError(ex);
             if (ex.IsSessionError) RequestRestart();
             commandError = ex;
-            // Refused, so nothing runs.
-            commandInterval?.Close();
         }
         finally
         {
-            turnInterval?.Close();
             _sendLock.Release();
         }
 
@@ -470,9 +431,6 @@ public sealed class CodexExecutor : IAgentExecutor
                 var progress = stream.Current;
                 _lastActivity = DateTimeOffset.UtcNow;
 
-                // Close before yielding a terminal, even if the caller never resumes.
-                if (progress.FinalResult is not null && !progress.IsProcessExit)
-                    commandInterval?.Close();
                 yield return progress;
                 if (progress.FinalResult is not null) yield break;
             }
@@ -492,8 +450,6 @@ public sealed class CodexExecutor : IAgentExecutor
         }
     }
 
-    // Only a flag, applied at the next turn start: the app-server keeps running and can still send,
-    // so an untracked turn's ledger interval stays open until then (#394).
     public void RequestRestart() => _restartRequested = true;
 
     public async Task StopProcessAsync()
@@ -579,9 +535,8 @@ public sealed class CodexExecutor : IAgentExecutor
         var channel = _notificationChannel ??= Channel.CreateUnbounded<JsonObject>(
             new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
         _readerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var activity = _activity = _ledger?.TrackProvider();
         var token = _readerCts.Token;
-        return Task.Run(() => ReadStdoutAsync(stdout, channel.Writer, activity, token), CancellationToken.None);
+        return Task.Run(() => ReadStdoutAsync(stdout, channel.Writer, token), CancellationToken.None);
     }
 
     // Polls _pendingRequests until a TCS appears, resolves it with the given result, and returns.
@@ -847,8 +802,7 @@ public sealed class CodexExecutor : IAgentExecutor
             SingleWriter = true,
         });
         _readerCts = new CancellationTokenSource();
-        var activity = _activity = _ledger?.TrackProvider();
-        _ = Task.Run(() => ReadStdoutAsync(_process.StandardOutput, _notificationChannel.Writer, activity, _readerCts.Token));
+        _ = Task.Run(() => ReadStdoutAsync(_process.StandardOutput, _notificationChannel.Writer, _readerCts.Token));
         _ = Task.Run(() => ReadStderrAsync(_process.StandardError, _readerCts.Token));
 
         _threadId = null;
@@ -959,7 +913,7 @@ public sealed class CodexExecutor : IAgentExecutor
     }
 
     private async Task ReadStdoutAsync(
-        StreamReader reader, ChannelWriter<JsonObject> writer, TurnOriginLedger.ProviderActivity? activity, CancellationToken ct)
+        StreamReader reader, ChannelWriter<JsonObject> writer, CancellationToken ct)
     {
         try
         {
@@ -996,15 +950,9 @@ public sealed class CodexExecutor : IAgentExecutor
 
                 if (obj["method"] is JsonValue)
                 {
-                    ObserveTurnActivity(activity, obj);
                     await writer.WriteAsync(obj, ct);
                 }
             }
-
-            // The loop also ends on cancellation, which StopInternalAsync reports itself once its
-            // kill has completed. Only stdout EOF is a process end here (#394).
-            if (line is null)
-                activity?.ProcessEnded();
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -1017,42 +965,6 @@ public sealed class CodexExecutor : IAgentExecutor
             writer.TryComplete();
         }
     }
-
-    /// <summary>
-    /// #394: the reader sees every notification as it is read, whoever later consumes it, so a turn
-    /// the app-server runs outside a lock-held interval — a shell command streaming after its
-    /// request returned, an interrupted turn that outlived its drain — becomes visible here.
-    /// </summary>
-    private static void ObserveTurnActivity(TurnOriginLedger.ProviderActivity? activity, JsonObject notification)
-    {
-        if (activity is null || notification["method"] is not JsonValue value || !value.TryGetValue<string>(out var method))
-            return;
-
-        var @params = notification["params"] as JsonObject;
-
-        if (method == "turn/completed")
-        {
-            activity.TurnEnded(TryString((@params?["turn"] as JsonObject)?["id"]));
-            return;
-        }
-
-        if (method == "turn/started" || method.StartsWith("item/", StringComparison.Ordinal))
-            activity.TurnContent();
-
-        // Only /run starts a user shell command, so its turn is the command's: the command's
-        // interval retires with that turn's completion even if nobody reads the stream any more.
-        if (method == "item/started"
-            && @params?["item"] is JsonObject item
-            && TryString(item["type"]) == "commandExecution"
-            && TryString(item["source"]) == "userShell"
-            && TryString(@params["turnId"]) is { Length: > 0 } shellTurnId)
-        {
-            activity.ShellCommandTurn(shellTurnId);
-        }
-    }
-
-    private static string? TryString(JsonNode? node) =>
-        node is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
 
     private async Task ReadStderrAsync(StreamReader reader, CancellationToken ct)
     {
@@ -1443,7 +1355,6 @@ public sealed class CodexExecutor : IAgentExecutor
 
         if (string.Equals(status, "completed", StringComparison.OrdinalIgnoreCase))
         {
-            _completedTurnId = turnId;
             _messageCount++;
             return new AgentProgress
             {
@@ -1560,7 +1471,6 @@ public sealed class CodexExecutor : IAgentExecutor
         RequestRestart();
         try
         {
-            _ledger?.OpenUntilTurnEnds(_activity, turnId);
             _logger.LogWarning(
                 "codex_turn_abandoned: turnId={TurnId} path={Path} reason={Reason} drain=write_failed restartRequested=true cleanupLock={CleanupLock}",
                 turnId, path, reason, cleanupLock);
@@ -1595,7 +1505,6 @@ public sealed class CodexExecutor : IAgentExecutor
             // Even a failing diagnostic sink cannot mask the original consumer exception.
             try
             {
-                _ledger?.OpenUntilTurnEnds(_activity, turnId);
                 _logger.LogWarning(ex, "codex_turn_abandoned: turnId={TurnId} path={Path} reason={Reason} drain=write_failed restartRequested=true", turnId, path, reason);
             }
             catch { }
@@ -1615,7 +1524,6 @@ public sealed class CodexExecutor : IAgentExecutor
             written = await InterruptTurnAsync(turnId).WaitAsync(drainCts.Token);
             if (_notificationChannel is null)
             {
-                _ledger?.OpenUntilTurnEnds(_activity, turnId);
                 return written ? DrainOutcome.ChannelClosed : DrainOutcome.WriteFailed;
             }
             while (true)
@@ -1649,13 +1557,11 @@ public sealed class CodexExecutor : IAgentExecutor
         catch (OperationCanceledException)
         {
             _logger.LogWarning("CodexExecutor timed out draining interrupted turn {TurnId}", turnId);
-            _ledger?.OpenUntilTurnEnds(_activity, turnId);
             return written ? DrainOutcome.Timeout : DrainOutcome.WriteFailed;
         }
         catch (ChannelClosedException)
         {
             _logger.LogWarning("CodexExecutor notification channel closed while draining interrupted turn {TurnId}", turnId);
-            _ledger?.OpenUntilTurnEnds(_activity, turnId);
             return written ? DrainOutcome.ChannelClosed : DrainOutcome.WriteFailed;
         }
     }
@@ -1673,11 +1579,6 @@ public sealed class CodexExecutor : IAgentExecutor
                 if (!_process.HasExited)
                     _process.Kill(entireProcessTree: true);
                 await _process.WaitForExitAsync();
-
-                // #394: the kill has completed (or the process had already exited) — a confirmed
-                // end. Cancelling the reader above is not one, and a kill that threw proves nothing.
-                _activity?.ProcessEnded();
-                _activity = null;
             }
             catch { }
 

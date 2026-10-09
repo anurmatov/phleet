@@ -223,13 +223,14 @@ stay.
   messages their own bot observed.
 - **Rollback:** revert and redeploy; rows already written stay valid. Delete leftover
   `fleet.journal.tool-sends.*` queues (journal-off agents delete their own at startup).
-- **Relay and final-action sends (#439):** agent image only. No migration, no new key, no grant, and
-  no Comms or `fleet-telegram` recreation; journal-enabled agents capture workflow (relay) sends and
-  final-action sends once their image updates. Schedule the agent restart when no review or delegate
-  step is in flight. Per-agent mitigation: turn that agent's journaling off and reprovision. Global
-  rollback: revert and redeploy agents; relay and edge sends go back to excluded, rows already
-  written stay readable, and removal is only the existing two-step `journal purge` on an explicit
-  operator decision.
+- **Delivery-based capture (#439):** agent image only — no Comms, `fleet-telegram`, schema, config,
+  grant or wire change. Once its image updates, a journal-enabled agent journals every own-bot
+  `send_message`/`send_to_ceo` delivery whatever turn made the call, including receipts already
+  waiting in its queue; sends before the deploy are never backfilled. Schedule the normal agent
+  restart outside in-flight review or delegate steps. Per-agent mitigation: turn that agent's
+  journaling off and reprovision. Global rollback: revert and redeploy agents; the old consumer again
+  excludes non-human, edge and post-restart receipts, and rows already written stay. Removal of rows
+  is only through the existing two-step `journal purge`, on an operator decision.
 
 ### Retention is a garbage-collection horizon, not deletion
 

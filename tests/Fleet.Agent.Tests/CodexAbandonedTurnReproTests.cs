@@ -102,7 +102,7 @@ internal sealed class AbandonAppServer : IAsyncDisposable
     public ConcurrentQueue<string> Logs { get; } = new();
     public StreamWriter Stdin { get; }
 
-    public AbandonAppServer(TurnOriginLedger? ledger = null, Func<System.Diagnostics.ProcessStartInfo, System.Diagnostics.Process?>? starter = null)
+    public AbandonAppServer(Func<System.Diagnostics.ProcessStartInfo, System.Diagnostics.Process?>? starter = null)
     {
         Directory.CreateDirectory(_directory);
         Options = Microsoft.Extensions.Options.Options.Create(new AgentOptions
@@ -110,7 +110,7 @@ internal sealed class AbandonAppServer : IAsyncDisposable
         var telegram = Microsoft.Extensions.Options.Options.Create(new TelegramOptions());
         Executor = new CodexExecutor(Options, telegram,
             new PromptBuilder(Options, NullLogger<PromptBuilder>.Instance), new TestLogger(Logs),
-            starter ?? (_ => throw new InvalidOperationException("Unexpected process restart")), ledger: ledger);
+            starter ?? (_ => throw new InvalidOperationException("Unexpected process restart")));
         _output = new StreamWriter(_stdout.Writer.AsStream()) { AutoFlush = true };
         _input = new StreamReader(_stdout.Reader.AsStream());
         Stdin = new RpcWriter(HandleAsync);

@@ -17,7 +17,7 @@ namespace Fleet.Agent.Tests;
 /// <summary>
 /// #406 Part B on the live dispatch path: a verified human's message steers the running workflow
 /// turn with a text-only copy and still gets its own reply turn; the workflow's callback, terminal
-/// event, binding and ledger do not move; steering-only answers are drained and discarded and
+/// event and binding do not move; steering-only answers are drained and discarded and
 /// nothing else is. The workflow runs on chat key 900; humans write from 101 and 202.
 /// </summary>
 public sealed class HumanSteeringTests
@@ -350,12 +350,10 @@ public sealed class HumanSteeringTests
         Assert.Equal(0, handler.Calls);
         await Task.Delay(100);
         Assert.Equal(before, h.Binding.Current);
-        Assert.DoesNotContain(h.Ledger.SnapshotForTests(), i => i.Origin == TurnOrigin.Human);
 
         h.Executor.Release();
         await h.Executor.WaitStarted(2);
         Assert.Equal(("bound", (long?)U1Chat), (h.Binding.Current.State, h.Binding.Current.ChatId));
-        Assert.Contains(h.Ledger.SnapshotForTests(), i => i.Origin == TurnOrigin.Human && i.End is null);
         await h.FinishAsync();
     }
 
@@ -379,7 +377,6 @@ public sealed class HumanSteeringTests
         await h.FinishAsync();
 
         Assert.Equal([1], h.Executor.ReadCalls);
-        Assert.Equal([TurnOrigin.Relay], h.Executor.ReadOrigins);
         Assert.Equal(control.Completion, Assert.Single(h.Completions, c => c.ChatId == WorkflowChat));
         Assert.DoesNotContain(h.Sink.Sent, s => s.Text.Contains("STEER-ONLY"));
         Assert.DoesNotContain(h.Events.RecoveredTexts(), t => t.Contains("STEER-ONLY"));
@@ -800,7 +797,6 @@ public sealed class HumanSteeringTests
         public RecordingSink Sink { get; } = new();
         public RecordingEvents Events { get; } = new();
         public InjectionOutcomeCounter Counter { get; } = new();
-        public TurnOriginLedger Ledger { get; } = new();
         public TurnBindingPublisher Binding { get; }
         public ConcurrentQueue<Completion> Completions { get; } = new();
         public bool ThrowOnInject { set => Executor.ThrowOnInject = value; }
@@ -809,12 +805,12 @@ public sealed class HumanSteeringTests
         public Harness(string provider, MidTurnInjectionStatus status, ILogger<TaskManager>? logger = null, bool suppressToolMessages = false)
         {
             _provider = provider;
-            Executor = new SteeringExecutor(status, Ledger);
+            Executor = new SteeringExecutor(status);
             Binding = new TurnBindingPublisher(new JournalHttpClient(_http, "ingest", readToken: "read"), NullLogger<TurnBindingPublisher>.Instance);
             foreach (var chat in new[] { U1Chat, U2Chat }) Binding.ObserveChat(chat, 1, "private");
             Manager = new TaskManager(
                 Options.Create(new AgentOptions { Name = "agent1", Role = "test", WorkDir = "/tmp", Provider = provider, ShowStats = false, SuppressToolMessages = suppressToolMessages }),
-                Executor, new SessionManager(), logger ?? NullLogger<TaskManager>.Instance, Counter, Events, sink: Sink, ledger: Ledger, turnBindings: Binding);
+                Executor, new SessionManager(), logger ?? NullLogger<TaskManager>.Instance, Counter, Events, sink: Sink, turnBindings: Binding);
             Manager.OnTaskCompleted += (chat, result, sender, source, partial, correlation, taskId, kind) =>
                 Completions.Enqueue(new(chat, result, sender, source, partial, correlation, taskId, kind));
         }
@@ -912,7 +908,7 @@ public sealed class HumanSteeringTests
     /// The ControlledExecutor blocking shape, plus scripted own-turn answers (as InjectedTurnExecutor),
     /// a scripted leading recovered_answer per turn index, and scripted process exits.
     /// </summary>
-    internal sealed class SteeringExecutor(MidTurnInjectionStatus status, TurnOriginLedger ledger) : IAgentExecutor
+    internal sealed class SteeringExecutor(MidTurnInjectionStatus status) : IAgentExecutor
     {
         private readonly SemaphoreSlim _release = new(0);
         private readonly ConcurrentQueue<string> _tasks = new();
@@ -923,8 +919,6 @@ public sealed class HumanSteeringTests
         public ConcurrentQueue<string> OwnTurnAnswers { get; } = new();
         public ConcurrentQueue<int> ReadCallsQueue { get; } = new();
         public IReadOnlyList<int> ReadCalls => [.. ReadCallsQueue];
-        public ConcurrentQueue<TurnOrigin> ReadOriginsQueue { get; } = new();
-        public IReadOnlyList<TurnOrigin> ReadOrigins => [.. ReadOriginsQueue];
         public ConcurrentDictionary<int, AgentProgress> Leading { get; } = new();
         public HashSet<int> ProcessExitTurns { get; } = [];
         public bool ThrowOnInject { get; set; }
@@ -943,7 +937,6 @@ public sealed class HumanSteeringTests
             IReadOnlyList<MessageImage>? images = null, IReadOnlyList<MessageDocument>? documents = null,
             [EnumeratorCancellation] CancellationToken ct = default)
         {
-            using var interval = ledger.OpenTurn();
             var index = _tasks.Count;
             _tasks.Enqueue(task);
             if (Leading.TryGetValue(index, out var leading)) yield return leading;
@@ -974,9 +967,7 @@ public sealed class HumanSteeringTests
         public async IAsyncEnumerable<AgentProgress> ReadInjectedTurnAnswersAsync(int injectedMessages,
             [EnumeratorCancellation] CancellationToken ct = default)
         {
-            using var interval = ledger.OpenTurn();
             ReadCallsQueue.Enqueue(injectedMessages);
-            ReadOriginsQueue.Enqueue(ledger.SnapshotForTests()[^1].Origin);
             _drainStarted.TrySetResult();
             await _drainGate.Task.WaitAsync(ct);
             for (var i = 0; i < injectedMessages && OwnTurnAnswers.TryDequeue(out var answer); i++)

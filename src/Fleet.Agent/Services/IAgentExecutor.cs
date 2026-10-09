@@ -22,28 +22,6 @@ public sealed record MidTurnInjectionResult(MidTurnInjectionStatus Status, strin
     public static MidTurnInjectionResult Failed(string error) => new(MidTurnInjectionStatus.Failed, error);
 }
 
-/// <remarks>
-/// <para>
-/// <b>Turn-origin ledger contract (#394).</b> An executor given a <see cref="TurnOriginLedger"/>
-/// records every period in which its provider may be acting, so a Telegram MCP tool send can be
-/// journaled only when it provably answered a human:
-/// </para>
-/// <list type="bullet">
-/// <item>Every entry point that runs the provider (<see cref="ExecuteAsync"/>,
-/// <see cref="ReadInjectedTurnAnswersAsync"/>, <see cref="SendCommandAsync"/>) opens an interval
-/// <b>immediately after</b> it acquires its turn lock and closes it in the <c>finally</c> that
-/// releases the lock — never while waiting, never after release. It takes the origin the caller
-/// set with <see cref="TurnOriginLedger.Pending"/>, or unknown when there is none (warmup, the CLI);
-/// <see cref="SendCommandAsync"/> is always unknown. An executor without a lock (Gemini) spans each
-/// provider process from start to exit instead.</item>
-/// <item>A persistent process's stdout reader reports every turn-content event and every terminal
-/// event to its <see cref="TurnOriginLedger.ProviderActivity"/>, which opens an unknown interval for
-/// a turn the provider started on its own. Only that turn's terminal event, stdout EOF or a kill
-/// that has completed (after <c>WaitForExitAsync</c>) closes it — never <see cref="RequestRestart"/>,
-/// a cancelled reader, a <see cref="TryStopProcessAsync"/> that returned false, silence or a
-/// timeout.</item>
-/// </list>
-/// </remarks>
 public interface IAgentExecutor : IAsyncDisposable
 {
     /// <summary>Send a task to the LLM process, streaming progress events.</summary>

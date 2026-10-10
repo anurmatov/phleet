@@ -31,7 +31,7 @@ public sealed class CodexExecutor : IAgentExecutor
     private StreamWriter? _stdin;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private readonly SemaphoreSlim _turnLock = new(1, 1);
-    private readonly ConcurrentDictionary<long, TaskCompletionSource<RpcOutcome>> _pendingRequests = new();
+    private ConcurrentDictionary<long, TaskCompletionSource<RpcOutcome>> _pendingRequests = new();
     private Channel<JsonObject>? _notificationChannel;
     private CancellationTokenSource? _readerCts;
     private long _nextRequestId;
@@ -510,6 +510,9 @@ public sealed class CodexExecutor : IAgentExecutor
     internal string? CommandTurnIdForTests => _commandTurnId;
     internal bool RestartRequestedForTests => _restartRequested;
 
+    internal IReadOnlyList<Task> PendingRequestTasksForTests =>
+        Volatile.Read(ref _pendingRequests).Values.Select(tcs => (Task)tcs.Task).ToArray();
+
     internal SemaphoreSlim TurnLockForTests => _turnLock;
     internal SemaphoreSlim SendLockForTests => _sendLock;
 
@@ -536,7 +539,8 @@ public sealed class CodexExecutor : IAgentExecutor
             new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
         _readerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var token = _readerCts.Token;
-        return Task.Run(() => ReadStdoutAsync(stdout, channel.Writer, token), CancellationToken.None);
+        var pending = Volatile.Read(ref _pendingRequests);
+        return Task.Run(() => ReadStdoutAsync(stdout, channel.Writer, pending, token), CancellationToken.None);
     }
 
     // Polls _pendingRequests until a TCS appears, resolves it with the given result, and returns.
@@ -546,9 +550,10 @@ public sealed class CodexExecutor : IAgentExecutor
     {
         while (!ct.IsCancellationRequested)
         {
-            foreach (var (id, tcs) in _pendingRequests)
+            var pending = Volatile.Read(ref _pendingRequests);
+            foreach (var (id, tcs) in pending)
             {
-                if (_pendingRequests.TryRemove(id, out var found) && found.TrySetResult(new RpcOutcome(result, null)))
+                if (pending.TryRemove(id, out var found) && found.TrySetResult(new RpcOutcome(result, null)))
                     return true;
             }
             await Task.Delay(1, ct);
@@ -794,16 +799,22 @@ public sealed class CodexExecutor : IAgentExecutor
             }
         }
 
+        var pending = new ConcurrentDictionary<long, TaskCompletionSource<RpcOutcome>>();
+        Volatile.Write(ref _pendingRequests, pending);
         _process = _processStarter(psi) ?? throw new InvalidOperationException("Failed to start codex app-server");
-        _stdin = new StreamWriter(_process.StandardInput.BaseStream, new UTF8Encoding(false)) { AutoFlush = true };
+        Volatile.Write(ref _stdin, new StreamWriter(_process.StandardInput.BaseStream, new UTF8Encoding(false)) { AutoFlush = true });
         _notificationChannel = Channel.CreateUnbounded<JsonObject>(new UnboundedChannelOptions
         {
             SingleReader = true,
             SingleWriter = true,
         });
         _readerCts = new CancellationTokenSource();
-        _ = Task.Run(() => ReadStdoutAsync(_process.StandardOutput, _notificationChannel.Writer, _readerCts.Token));
-        _ = Task.Run(() => ReadStderrAsync(_process.StandardError, _readerCts.Token));
+        var stdout = _process.StandardOutput;
+        var stderr = _process.StandardError;
+        var writer = _notificationChannel.Writer;
+        var token = _readerCts.Token;
+        _ = Task.Run(() => ReadStdoutAsync(stdout, writer, pending, token));
+        _ = Task.Run(() => ReadStderrAsync(stderr, token));
 
         _threadId = null;
         _activeTurnId = null;
@@ -913,7 +924,8 @@ public sealed class CodexExecutor : IAgentExecutor
     }
 
     private async Task ReadStdoutAsync(
-        StreamReader reader, ChannelWriter<JsonObject> writer, CancellationToken ct)
+        StreamReader reader, ChannelWriter<JsonObject> writer,
+        ConcurrentDictionary<long, TaskCompletionSource<RpcOutcome>> pending, CancellationToken ct)
     {
         try
         {
@@ -939,11 +951,12 @@ public sealed class CodexExecutor : IAgentExecutor
 
                 if (TryGetRequestId(obj, out var requestId))
                 {
-                    // _pendingRequests is only written from this loop (single reader) and
-                    // from CancellationToken registrations via TryRemove. ConcurrentDictionary
-                    // makes both paths safe. Do not add a second stdout reader without
-                    // revisiting this assumption.
-                    if (_pendingRequests.TryRemove(requestId, out var tcs))
+                    // Each process generation has exactly one reader and its own pending map.
+                    // SendRequestAsync captures that map once: generation swaps happen under
+                    // _sendLock (EnsureProcessReadyAsync, StopProcessAsync, TryStopProcessAsync)
+                    // or DisposeAsync, and every request caller holds _sendLock while awaiting.
+                    // Review any future caller outside that lock against this assumption.
+                    if (pending.TryRemove(requestId, out var tcs))
                         tcs.TrySetResult(new RpcOutcome(obj["result"] as JsonObject, obj["error"] as JsonObject));
                     continue;
                 }
@@ -961,7 +974,7 @@ public sealed class CodexExecutor : IAgentExecutor
         }
         finally
         {
-            FailPendingRequests(new InvalidOperationException("Codex app-server stdout reader stopped before the request completed."));
+            FailPendingRequests(pending, new InvalidOperationException("Codex app-server stdout reader stopped before the request completed."));
             writer.TryComplete();
         }
     }
@@ -983,12 +996,14 @@ public sealed class CodexExecutor : IAgentExecutor
 
     private async Task<JsonObject> SendRequestAsync(string method, JsonObject? @params, CancellationToken ct)
     {
-        if (_stdin is null)
+        var stdin = Volatile.Read(ref _stdin);
+        if (stdin is null)
             throw new InvalidOperationException("CodexExecutor stdin is not available.");
+        var pending = Volatile.Read(ref _pendingRequests);
 
         var id = Interlocked.Increment(ref _nextRequestId);
         var tcs = new TaskCompletionSource<RpcOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _pendingRequests[id] = tcs;
+        pending[id] = tcs;
 
         var message = new JsonObject
         {
@@ -1000,12 +1015,12 @@ public sealed class CodexExecutor : IAgentExecutor
         if (@params is not null)
             message["params"] = @params;
 
-        await _stdin.WriteLineAsync(message.ToJsonString());
+        await stdin.WriteLineAsync(message.ToJsonString());
 
         using var registration = ct.Register(() =>
         {
-            if (_pendingRequests.TryRemove(id, out var pending))
-                pending.TrySetCanceled(ct);
+            if (pending.TryRemove(id, out var request))
+                request.TrySetCanceled(ct);
         });
 
         var outcome = await tcs.Task;
@@ -1568,6 +1583,7 @@ public sealed class CodexExecutor : IAgentExecutor
 
     private async Task StopInternalAsync()
     {
+        var pending = Volatile.Read(ref _pendingRequests);
         _readerCts?.Cancel();
         _readerCts?.Dispose();
         _readerCts = null;
@@ -1586,7 +1602,7 @@ public sealed class CodexExecutor : IAgentExecutor
             _process = null;
         }
 
-        FailPendingRequests(new InvalidOperationException("Codex app-server stopped before the request completed."));
+        FailPendingRequests(pending, new InvalidOperationException("Codex app-server stopped before the request completed."));
 
         _stdin?.Dispose();
         _stdin = null;
@@ -1600,12 +1616,13 @@ public sealed class CodexExecutor : IAgentExecutor
         _messageCount = 0;
     }
 
-    private void FailPendingRequests(Exception ex)
+    private void FailPendingRequests(
+        ConcurrentDictionary<long, TaskCompletionSource<RpcOutcome>> pending, Exception ex)
     {
-        foreach (var (id, tcs) in _pendingRequests)
+        foreach (var (id, tcs) in pending)
         {
-            if (_pendingRequests.TryRemove(id, out var pending))
-                pending.TrySetException(ex);
+            if (pending.TryRemove(id, out var request))
+                request.TrySetException(ex);
             else
                 tcs.TrySetException(ex);
         }

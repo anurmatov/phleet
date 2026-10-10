@@ -1437,7 +1437,7 @@
                           "args": {
                             "Subject": "PR for issue #{{input.IssueNumber | default: 'N/A'}} in {{input.Repo}}",
                             "Synthesizer": "{{config.EscalationTarget}}",
-                            "ReviewPrompt": "Review the PR in repo {{input.Repo}} that implements:\n  Issue number: {{input.IssueNumber | default: 'N/A'}}\n  Description: {{input.Description | default: 'none'}}\n\nIf an issue number is provided, run `gh issue view {{input.IssueNumber}} --repo {{input.Repo}} --comments` to read the full spec and verify the implementation matches.\n\nImplementation summary from {{input.TargetAgent}}:\n{{vars.impl_result}}\n\nPrior consensus feedback (if any):\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nCEO feedback incorporated (if any):\n{{vars.ceo_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nReview discipline:\n- Fetch the current spec/PR fresh — do NOT summarize prior rounds.\n- Verify each prior finding against the current text before reporting.\n- Give structured findings with severity (blocker, high, medium, low).\n- End your response with exactly one verdict line: VERDICT: approved | changes_requested | needs_human_review.\n\nEVIDENCE MIRROR (best-effort, optional).\nPost your full technical review as a comment on that GitHub issue/PR, then put the resulting comment URL on your EVIDENCE: line.\n- Before posting, remove private identities, internal IDs, hostnames, workflow-run identifiers, and private incident or configuration details. The repository may be public. Your unsanitized response is retained in durable workflow history regardless.\n- If the GitHub CLI, auth, API, or the comment post fails for any reason, write `EVIDENCE: none`, mention the mirror failure in one short clause in SUMMARY:, and still return every BLOCKER: line and your VERDICT:. A failed mirror never downgrades or fails the review — durable history is the source of truth, the comment is a convenience copy.\n- If you are continuing a response that was cut off and the earlier part already contains an `EVIDENCE: https://...` URL, reuse that URL and do NOT post a second comment.\n\nPR head under review (ReviewRef): {{vars.head_sha | default: 'unknown'}}. Run `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid` and request changes if the head differs from it.\n\nReviewed-ref attestation (#436):\n- End your review with `REVIEWED_REF: <ref>` for the ref you actually checked.\n- If `{{input.Repo}}` is public, check that no private names, internal URLs, hosts, credentials or private links are present, and add `PUBLIC_SCRUB: pass` or `PUBLIC_SCRUB: fail`.",
+                            "ReviewPrompt": "Review the PR in repo {{input.Repo}} that implements:\n  Issue number: {{input.IssueNumber | default: 'N/A'}}\n  Description: {{input.Description | default: 'none'}}\n\nIf an issue number is provided, run `gh issue view {{input.IssueNumber}} --repo {{input.Repo}} --comments` to read the full spec and verify the implementation matches.\n\nImplementation summary from {{input.TargetAgent}}:\n{{vars.impl_result}}\n\nPrior consensus feedback (if any):\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nMerge-gate feedback review (if any):\n{{vars.ceo_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nHuman review after merge-gate feedback (if any): {{vars.post_feedback_decision.Decision | default: 'none'}} — {{vars.post_feedback_decision.Comment | default: 'none'}}\n\nReview discipline:\n- Fetch the current spec/PR fresh — do NOT summarize prior rounds.\n- Verify each prior finding against the current text before reporting.\n- Give structured findings with severity (blocker, high, medium, low).\n- End your response with exactly one verdict line: VERDICT: approved | changes_requested | needs_human_review.\n\nEVIDENCE MIRROR (best-effort, optional).\nPost your full technical review as a comment on that GitHub issue/PR, then put the resulting comment URL on your EVIDENCE: line.\n- Before posting, remove private identities, internal IDs, hostnames, workflow-run identifiers, and private incident or configuration details. The repository may be public. Your unsanitized response is retained in durable workflow history regardless.\n- If the GitHub CLI, auth, API, or the comment post fails for any reason, write `EVIDENCE: none`, mention the mirror failure in one short clause in SUMMARY:, and still return every BLOCKER: line and your VERDICT:. A failed mirror never downgrades or fails the review — durable history is the source of truth, the comment is a convenience copy.\n- If you are continuing a response that was cut off and the earlier part already contains an `EVIDENCE: https://...` URL, reuse that URL and do NOT post a second comment.\n\nPR head under review (ReviewRef): {{vars.head_sha | default: 'unknown'}}. Run `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid` and request changes if the head differs from it.\n\nReviewed-ref attestation (#436):\n- End your review with `REVIEWED_REF: <ref>` for the ref you actually checked.\n- If `{{input.Repo}}` is public, check that no private names, internal URLs, hosts, credentials or private links are present, and add `PUBLIC_SCRUB: pass` or `PUBLIC_SCRUB: fail`.",
                             "ReviewerAgents": "{{input.ConsensusAgents}}",
                             "ReviewRef": "{{vars.head_sha}}",
                             "ExcludedAgents": "{{input.TargetAgent}},{{config.CtoAgent}}"
@@ -1557,7 +1557,7 @@
                             "type": "delegate",
                             "target": "{{input.TargetAgent}}",
                             "outputVar": "impl_result",
-                            "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nRevise the PR in repo {{input.Repo}} based on review feedback.\n\nFull feedback (apply all):\n{{vars.consensus_out.ConsolidatedReasoning}}\n\nPrior CEO feedback (if any):\n{{vars.ceo_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nAt the end of your response, output the PR head commit after your push, on its own line (from `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>",
+                            "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nRevise the PR in repo {{input.Repo}} based on review feedback.\n\nFull feedback (apply all):\n{{vars.consensus_out.ConsolidatedReasoning}}\n\nPrior merge-gate feedback review (if any):\n{{vars.ceo_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nAt the end of your response, output the PR head commit after your push, on its own line (from `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>",
                             "timeoutMinutes": 30
                           }
                         },
@@ -1839,10 +1839,11 @@
                       },
                       {
                         "args": {
-                          "Subject": "CEO merge-gate feedback on PR for issue #{{input.IssueNumber | default: 'N/A'}} in {{input.Repo}}",
+                          "Subject": "Merge-gate feedback on PR for issue #{{input.IssueNumber | default: 'N/A'}} in {{input.Repo}}",
                           "Synthesizer": "{{config.EscalationTarget}}",
-                          "ReviewPrompt": "Review the PR at {{vars.pr_url}} in repo {{input.Repo}}.\n\nThe CEO has reviewed the approved PR and requested changes before merging:\n{{vars.merge_decision.Comment | default: 'no specific comment'}}\n\nEvaluate whether the CEO's concerns are valid and warrant code changes.\nImplementation summary:\n{{vars.impl_result}}\n\nPrior review history:\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nReview discipline:\n- Fetch the current spec/PR fresh — do NOT summarize prior rounds.\n- Verify each prior finding against the current text before reporting.\n- Give structured findings with severity (blocker, high, medium, low).\n- End your response with exactly one verdict line: VERDICT: approved | changes_requested | needs_human_review.\n\nEVIDENCE MIRROR (best-effort, optional).\nPost your full technical review as a comment on that GitHub issue/PR, then put the resulting comment URL on your EVIDENCE: line.\n- Before posting, remove private identities, internal IDs, hostnames, workflow-run identifiers, and private incident or configuration details. The repository may be public. Your unsanitized response is retained in durable workflow history regardless.\n- If the GitHub CLI, auth, API, or the comment post fails for any reason, write `EVIDENCE: none`, mention the mirror failure in one short clause in SUMMARY:, and still return every BLOCKER: line and your VERDICT:. A failed mirror never downgrades or fails the review — durable history is the source of truth, the comment is a convenience copy.\n- If you are continuing a response that was cut off and the earlier part already contains an `EVIDENCE: https://...` URL, reuse that URL and do NOT post a second comment.",
-                          "ReviewerAgents": "{{input.ConsensusAgents}}"
+                          "ReviewPrompt": "Review the PR at {{vars.pr_url}} in repo {{input.Repo}}.\n\nMerge-gate feedback requested changes before merging. It came through the merge-approval signal, which the CEO sends from the dashboard and the configured CTO agent may send as feedback; the payload does not say which.\n\nFeedback comment:\n{{vars.merge_decision.Comment | default: 'no specific comment'}}\n\nEvaluate whether the feedback's concerns are valid and warrant code changes.\nImplementation summary:\n{{vars.impl_result}}\n\nPrior review history:\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nReview discipline:\n- Fetch the current spec/PR fresh — do NOT summarize prior rounds.\n- Verify each prior finding against the current text before reporting.\n- Give structured findings with severity (blocker, high, medium, low).\n- End your response with exactly one verdict line: VERDICT: approved | changes_requested | needs_human_review.\n\nEVIDENCE MIRROR (best-effort, optional).\nPost your full technical review as a comment on that GitHub issue/PR, then put the resulting comment URL on your EVIDENCE: line.\n- Before posting, remove private identities, internal IDs, hostnames, workflow-run identifiers, and private incident or configuration details. The repository may be public. Your unsanitized response is retained in durable workflow history regardless.\n- If the GitHub CLI, auth, API, or the comment post fails for any reason, write `EVIDENCE: none`, mention the mirror failure in one short clause in SUMMARY:, and still return every BLOCKER: line and your VERDICT:. A failed mirror never downgrades or fails the review — durable history is the source of truth, the comment is a convenience copy.\n- If you are continuing a response that was cut off and the earlier part already contains an `EVIDENCE: https://...` URL, reuse that URL and do NOT post a second comment.",
+                          "ReviewerAgents": "{{input.ConsensusAgents}}",
+                          "ExcludedAgents": "{{input.TargetAgent}},{{config.CtoAgent}}"
                         },
                         "name": "ceo_consensus_review",
                         "type": "child_workflow",
@@ -1860,25 +1861,109 @@
                             "type": "delegate",
                             "target": "{{input.TargetAgent}}",
                             "outputVar": "impl_result",
-                            "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nThe CEO requested changes before merging the PR in repo {{input.Repo}}.\n\nCEO feedback: {{vars.merge_decision.Comment | default: 'no specific comment'}}\n\nReviewers have confirmed the CEO's concerns are valid. Apply the necessary changes and push to the branch.\n\nReviewer consensus on CEO feedback:\n{{vars.ceo_consensus_out.ConsolidatedReasoning}}\n\nPrior feedback:\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nAt the end of your response, output the PR head commit after your push, on its own line (from `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>",
+                            "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nMerge-gate feedback requested changes before merging the PR in repo {{input.Repo}}.\n\nFeedback: {{vars.merge_decision.Comment | default: 'no specific comment'}}\n\nReviewers confirmed the feedback is valid. Apply the necessary changes and push to the branch.\n\nReviewer consensus on the feedback:\n{{vars.ceo_consensus_out.ConsolidatedReasoning}}\n\nPrior feedback:\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nAt the end of your response, output the PR head commit after your push, on its own line (from `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>",
                             "timeoutMinutes": 30
                           },
                           "needs_human_review": {
                             "type": "sequence",
                             "steps": [
                               {
-                                "name": "notify_ceo_consensus_needs_human",
-                                "type": "delegate",
-                                "target": "{{config.CtoAgent}}",
-                                "instruction": "Post to Telegram group: PrImplementationWorkflow for issue #{{input.IssueNumber | default: 'N/A'}} in {{input.Repo}} — CEO-triggered consensus review flagged needs_human_review. Manual intervention required.",
-                                "ignoreFailure": true,
-                                "timeoutMinutes": 5
+                                "name": "set_post_feedback_human_review_phase",
+                                "type": "set_attribute",
+                                "attributes": {
+                                  "Phase": "human-review"
+                                },
+                                "ignoreFailure": true
                               },
                               {
-                                "name": "emit_ceo_needs_human_error",
-                                "type": "set_variable",
-                                "vars": {
-                                  "outer_done": "FAILED"
+                                "name": "post_feedback_human_review_signal",
+                                "type": "wait_for_signal",
+                                "phase": "human-review",
+                                "outputVar": "post_feedback_decision",
+                                "notifyStep": {
+                                  "name": "notify_post_feedback_human_review",
+                                  "type": "delegate",
+                                  "target": "{{config.CtoAgent}}",
+                                  "instruction": "Post to Telegram group: PR for issue #{{input.IssueNumber | default: 'N/A'}} in {{input.Repo}} ({{vars.pr_url}}) is paused for a human-review decision. The review of merge-gate feedback returned needs_human_review:\n{{vars.ceo_consensus_out.ConsolidatedReasoning}}\nMerge-gate feedback: {{vars.merge_decision.Comment | default: 'none'}}. The signal payload does not record who sent it; do not call it a CEO decision.\nSend 'human-review': approved → fresh consensus review of the current head, then the separate merge-approval gate; changes_requested with a Comment → the implementer revises, then fresh review; rejected → the run ends and the PR stays open. No human-review decision merges the PR. This pause ends after 3 hours.",
+                                  "ignoreFailure": true,
+                                  "timeoutMinutes": 5
+                                },
+                                "signalName": "human-review",
+                                "maxReminders": 2,
+                                "timeoutMinutes": 180,
+                                "autoCompleteOnTimeout": true,
+                                "reminderIntervalMinutes": 60
+                              },
+                              {
+                                "on": "{{vars.post_feedback_decision.Decision | default: 'timeout'}}",
+                                "name": "post_feedback_human_decision_branch",
+                                "type": "branch",
+                                "cases": {
+                                  "timeout": {
+                                    "type": "sequence",
+                                    "steps": [
+                                      {
+                                        "name": "notify_post_feedback_human_review_timeout",
+                                        "type": "delegate",
+                                        "target": "{{config.CtoAgent}}",
+                                        "instruction": "Post to Telegram group: PrImplementationWorkflow for issue #{{input.IssueNumber | default: 'N/A'}} in {{input.Repo}} ({{vars.pr_url}}) auto-cancelled: no human-review response after 3 hours following the merge-gate feedback review. The PR stays open.",
+                                        "ignoreFailure": true,
+                                        "timeoutMinutes": 5
+                                      },
+                                      {
+                                        "name": "set_post_feedback_timeout_sentinel",
+                                        "type": "set_variable",
+                                        "vars": {
+                                          "outer_done": "TIMEOUT"
+                                        }
+                                      }
+                                    ]
+                                  },
+                                  "approved": {
+                                    "type": "sequence",
+                                    "steps": []
+                                  },
+                                  "rejected": {
+                                    "type": "sequence",
+                                    "steps": [
+                                      {
+                                        "name": "notify_post_feedback_human_rejected",
+                                        "type": "delegate",
+                                        "target": "{{config.CtoAgent}}",
+                                        "instruction": "Post to Telegram group: PR for issue #{{input.IssueNumber | default: 'N/A'}} in {{input.Repo}} ({{vars.pr_url}}) was rejected at the human-review pause after the merge-gate feedback review. The run ends and the PR stays open. Reason: {{vars.post_feedback_decision.Comment | default: 'no reason given'}}",
+                                        "ignoreFailure": true,
+                                        "timeoutMinutes": 5
+                                      },
+                                      {
+                                        "name": "emit_post_feedback_human_rejected",
+                                        "type": "set_variable",
+                                        "vars": {
+                                          "outer_done": "REJECTED"
+                                        }
+                                      }
+                                    ]
+                                  }
+                                },
+                                "default": {
+                                  "type": "sequence",
+                                  "steps": [
+                                    {
+                                      "name": "set_post_feedback_revision_phase",
+                                      "type": "set_attribute",
+                                      "attributes": {
+                                        "Phase": "revision"
+                                      },
+                                      "ignoreFailure": true
+                                    },
+                                    {
+                                      "name": "revise_post_feedback_human",
+                                      "type": "delegate",
+                                      "target": "{{input.TargetAgent}}",
+                                      "outputVar": "impl_result",
+                                      "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nA human-review decision requested changes on the PR at {{vars.pr_url}} in repo {{input.Repo}}, after the review of merge-gate feedback returned needs_human_review.\n\nHuman-review comment: {{vars.post_feedback_decision.Comment | default: 'changes requested'}}\n\nMerge-gate feedback: {{vars.merge_decision.Comment | default: 'no specific comment'}}\n\nFeedback review reasoning:\n{{vars.ceo_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nPrior consensus feedback:\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating this feedback:\n- Treat the human-review comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nA fresh consensus review of your new head runs next, then the separate merge-approval gate.\n\nAt the end of your response, output the PR head commit after your push, on its own line (from `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>",
+                                      "timeoutMinutes": 30
+                                    }
+                                  ]
                                 }
                               }
                             ]
@@ -1888,7 +1973,7 @@
                           "name": "renotify_ceo_reviewers_approve",
                           "type": "delegate",
                           "target": "{{config.CtoAgent}}",
-                          "instruction": "Post to Telegram group: Reviewers have evaluated the CEO's feedback on PR for issue #{{input.IssueNumber | default: 'N/A'}} in {{input.Repo}} and concluded the changes are not warranted.\n\nReviewer reasoning:\n{{vars.ceo_consensus_out.ConsolidatedReasoning}}\n\nPlease re-evaluate and send another 'merge-approval' signal.",
+                          "instruction": "Post to Telegram group: Reviewers evaluated the merge-gate feedback on PR for issue #{{input.IssueNumber | default: 'N/A'}} in {{input.Repo}} and concluded the changes are not warranted.\n\nReviewer reasoning:\n{{vars.ceo_consensus_out.ConsolidatedReasoning}}\n\nPlease re-evaluate and send another 'merge-approval' signal.",
                           "ignoreFailure": true,
                           "timeoutMinutes": 5
                         }

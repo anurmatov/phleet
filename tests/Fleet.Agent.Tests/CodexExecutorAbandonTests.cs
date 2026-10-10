@@ -452,12 +452,7 @@ public class CodexExecutorAbandonTests
         try
         {
             await server.Withheld.Task.WaitAsync(TimeSpan.FromSeconds(10));
-            // Baseline-only reflection keeps the production source unmodified for AC1.
-            var map = typeof(CodexExecutor).GetField("_pendingRequests",
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(server.Executor)!;
-            var values = (System.Collections.IEnumerable)map.GetType().GetProperty("Values")!.GetValue(map)!;
-            var captured = Assert.Single(values.Cast<object>().Select(tcs =>
-                (Task)tcs.GetType().GetProperty("Task")!.GetValue(tcs)!));
+            var captured = Assert.Single(server.Executor.PendingRequestTasksForTests);
             await server.Executor.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
             Assert.True(captured.IsFaulted);
             var error = Assert.IsType<InvalidOperationException>(Assert.Single(captured.Exception!.InnerExceptions));

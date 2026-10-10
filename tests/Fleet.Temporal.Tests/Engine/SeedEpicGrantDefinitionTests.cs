@@ -133,7 +133,7 @@ public sealed class SeedEpicGrantDefinitionTests
             "synthesis" => "the CEO's concern holds\nVERDICT: changes_requested",
             "verify_merge_status" => PrState(merged: true),
             "prepare" => "PREP: NO_DOC",
-            $"review-{Reviewer}" when call.Instruction.Contains("The CEO has reviewed") =>
+            $"review-{Reviewer}" when call.Instruction.Contains("Merge-gate feedback requested changes") =>
                 Review("changes_requested", blocker: "apply the CEO's fix"),
             $"review-{Reviewer}" => Review("approved", reviewedRef: head),
             _ => "ok",

@@ -453,6 +453,7 @@ public class CodexExecutorAbandonTests
         {
             await server.Withheld.Task.WaitAsync(TimeSpan.FromSeconds(10));
             var captured = Assert.Single(server.Executor.PendingRequestTasksForTests);
+            await oldStdout!.Reading.Task.WaitAsync(TimeSpan.FromSeconds(10));
             await server.Executor.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
             Assert.True(captured.IsFaulted);
             var error = Assert.IsType<InvalidOperationException>(Assert.Single(captured.Exception!.InnerExceptions));

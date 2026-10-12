@@ -362,3 +362,22 @@ cross-chat switch is a REST/dashboard-only, default-off agent DB field; no MCP
 write or automatic grant is allowed. See `docs/comms-journal.md` and
 `docs/comms-deployment.md` for the send trust boundary, dump-first rollout,
 rotation key alignment and operator-owned exact-image acceptance prerequisites.
+
+## Epic driver handoffs
+
+The default-off orchestrator watcher reads `FLEET_EPIC_WATCHER_ENABLED=false` and
+`FLEET_EPIC_WATCHER_INTERVAL_SECONDS=300` (60–3600) at startup. Fresh setup writes
+defaults; upgrade adds only missing values. `GET /api/epic-drivers/{workflowId}/state`
+is read-only and internal-only, with bounded Temporal reads, immutable outcome
+parsing and a 30-second reply cache that retains errors. Dry-run grant decisions
+fail closed at D6 (`visibility_unknown`) without GitHub or writes.
+`temporal_start_workflow` accepts optional `id_reuse_policy=allow_duplicate` or
+`reject_duplicate`; unknown values start nothing. Workflow config exposes
+`OrchestratorUrl` from `TemporalBridge:OrchestratorUrl`. See `docs/epic-driver.md`:
+seeds do not upgrade live definitions, wakes do not approve, and operator-owned
+isolated-stack verification and rollout remain separate from source/CI evidence.
+
+| watcher environment key | default | orchestrator option |
+|---|---|---|
+| `FLEET_EPIC_WATCHER_ENABLED` | `false` | `EpicDriverWatcher__Enabled` |
+| `FLEET_EPIC_WATCHER_INTERVAL_SECONDS` | `300` | `EpicDriverWatcher__IntervalSeconds` |

@@ -231,3 +231,11 @@ that are missing; neither prompts or changes a present value.
 above) refuse every decision with `disabled` at once. Re-save the previous definition content as a
 new version to return a definition to the human-only shape. Reverting the code uses the same
 no-running-consensus rule for the bridge; the migration's Down drops only the two tables.
+
+## Driver watcher wakes
+
+The default-off epic watcher sends only `blocker-resolved` wake hints to eligible
+exact driver runs. Wakes never approve a guarded gate or widen grant authority.
+A replacement driver run still requires its own human-created grant; seeds,
+source merges and watcher activation do not transfer an old scope. See
+[epic driver handoffs](epic-driver.md) for separate rollout and rollback gates.

@@ -101,8 +101,13 @@ internal sealed class AbandonAppServer : IAsyncDisposable
     public TaskCompletionSource InterruptWritten { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public ConcurrentQueue<string> Logs { get; } = new();
     public StreamWriter Stdin { get; }
+    public Task ReaderTask => _reader;
+    public string DirectoryPath => _directory;
+    public string? WithholdMethod { get; set; }
+    public TaskCompletionSource Withheld { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    public AbandonAppServer(Func<System.Diagnostics.ProcessStartInfo, System.Diagnostics.Process?>? starter = null)
+    public AbandonAppServer(Func<System.Diagnostics.ProcessStartInfo, System.Diagnostics.Process?>? starter = null,
+        Func<Stream, Stream>? wrapStdout = null)
     {
         Directory.CreateDirectory(_directory);
         Options = Microsoft.Extensions.Options.Options.Create(new AgentOptions
@@ -112,7 +117,8 @@ internal sealed class AbandonAppServer : IAsyncDisposable
             new PromptBuilder(Options, NullLogger<PromptBuilder>.Instance), new TestLogger(Logs),
             starter ?? (_ => throw new InvalidOperationException("Unexpected process restart")));
         _output = new StreamWriter(_stdout.Writer.AsStream()) { AutoFlush = true };
-        _input = new StreamReader(_stdout.Reader.AsStream());
+        var stdout = _stdout.Reader.AsStream();
+        _input = new StreamReader(wrapStdout?.Invoke(stdout) ?? stdout);
         Stdin = new RpcWriter(HandleAsync);
         Executor.SetProcessForTests(_process.Process);
         Executor.SetStdinForTests(Stdin);
@@ -125,6 +131,11 @@ internal sealed class AbandonAppServer : IAsyncDisposable
         var request = JsonNode.Parse(line)!.AsObject();
         Requests.Enqueue(request);
         var method = (string?)request["method"];
+        if (method == WithholdMethod)
+        {
+            Withheld.TrySetResult();
+            return;
+        }
         if (method == "turn/interrupt")
         {
             var id = (string)request["params"]!["turnId"]!;
@@ -177,6 +188,6 @@ internal sealed class AbandonAppServer : IAsyncDisposable
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
         public bool IsEnabled(LogLevel level) => true;
         public void Log<TState>(LogLevel level, EventId id, TState state, Exception? ex, Func<TState, Exception?, string> formatter)
-            => messages.Enqueue(formatter(state, ex));
+            => messages.Enqueue(formatter(state, ex) + (ex is null ? "" : " " + ex.Message));
     }
 }

@@ -1,4 +1,5 @@
 using Fleet.Orchestrator.Configuration;
+using Fleet.Orchestrator.Endpoints;
 using Microsoft.Extensions.Options;
 using Temporalio.Client;
 using Temporalio.Common;
@@ -10,7 +11,7 @@ namespace Fleet.Orchestrator.Services;
 /// </summary>
 public sealed class TemporalClientRegistry(
     IOptions<TemporalOptions> opts,
-    ILogger<TemporalClientRegistry> logger) : IEpicDriverTemporal
+    ILogger<TemporalClientRegistry> logger) : IEpicDriverTemporal, IWorkflowSignalClient
 {
     private readonly TemporalOptions _opts = opts.Value;
     private Dictionary<string, ITemporalClient>? _clients;
@@ -80,9 +81,10 @@ public sealed class TemporalClientRegistry(
                 attrs.TryGetValue(SearchAttributeKey.CreateLong("IssueNumber"), out var issue);
                 attrs.TryGetValue(SearchAttributeKey.CreateKeyword("Repo"), out var repo);
                 attrs.TryGetValue(SearchAttributeKey.CreateKeyword("Phase"), out var phase);
+                attrs.TryGetValue(SearchAttributeKey.CreateKeyword("GateRef"), out var gateRef);
                 runs.Add(new(wf.Id, wf.RunId ?? "", wf.WorkflowType ?? "", ns, wf.TaskQueue,
                     wf.Status.ToString(), wf.StartTime, wf.CloseTime, issue > 0 && issue <= int.MaxValue ? (int)issue : null,
-                    Repo: repo, Phase: phase));
+                    Repo: repo, Phase: phase, GateRef: gateRef));
             }
             return new(runs, true, null);
         }
@@ -205,6 +207,7 @@ public sealed class TemporalClientRegistry(
                     string? repo = null;
                     string? docPrs = null;
                     string? phase = null;
+                    string? gateRef = null;
                     try
                     {
                         var attrs = wf.TypedSearchAttributes;
@@ -218,6 +221,8 @@ public sealed class TemporalClientRegistry(
                             docPrs = dv;
                         if (attrs.TryGetValue(SearchAttributeKey.CreateKeyword("Phase"), out var phv))
                             phase = phv;
+                        if (attrs.TryGetValue(SearchAttributeKey.CreateKeyword("GateRef"), out var grv))
+                            gateRef = grv;
                     }
                     catch
                     {
@@ -237,7 +242,8 @@ public sealed class TemporalClientRegistry(
                         PrNumber:     prNum,
                         Repo:         repo,
                         DocPrs:       docPrs,
-                        Phase:        phase));
+                        Phase:        phase,
+                        GateRef:      gateRef));
                 }
             }
             catch (Exception ex)
@@ -684,6 +690,17 @@ public sealed class TemporalClientRegistry(
 
         logger.LogInformation("Started workflow {Type} as {Id} in namespace {Namespace}", workflowType, workflowId, @namespace);
         return handle.Id;
+    }
+
+    public async Task<WorkflowSignalGate> DescribeSignalGateAsync(string ns,string id,string runId,CancellationToken ct)
+    {
+        var client=await GetClientAsync(ns,ct) ?? throw new InvalidOperationException("Temporal unavailable");
+        var described=await client.GetWorkflowHandle(id,runId:runId).DescribeAsync(new WorkflowDescribeOptions
+        { Rpc=new RpcOptions {CancellationToken=ct,Timeout=TimeSpan.FromSeconds(10)} });
+        if(described.RunId!=runId) throw new InvalidOperationException("Run identity mismatch");
+        described.TypedSearchAttributes.TryGetValue(SearchAttributeKey.CreateKeyword("Phase"),out var phase);
+        described.TypedSearchAttributes.TryGetValue(SearchAttributeKey.CreateKeyword("GateRef"),out var gateRef);
+        return new(described.Status.ToString(),phase,gateRef);
     }
 
     public async Task<bool> SignalWorkflowAsync(

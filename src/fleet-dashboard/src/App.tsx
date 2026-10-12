@@ -34,6 +34,7 @@ import type {
   PromptSizeReport,
 } from './types'
 import { apiFetch, heartbeatAge } from './utils'
+import { buildSignalRequest, signalErrorMessage } from './signalRequest'
 import { projectPayload } from './projectAssignments'
 import { PROVIDER_DEFAULT_MODEL } from './constants'
 import { parseWarmupTimeoutSeconds, warmupTimeoutEditValue } from './warmupTimeout'
@@ -1548,17 +1549,16 @@ export default function App() {
   }
 
   function sendSignal(wf: WorkflowSummary, signalName: string, payload: string, comment?: string) {
-    const finalPayload = comment ? JSON.stringify({ ...JSON.parse(payload), Comment: comment }) : payload
     const key = signalKey(wf)
     setSignalStates(prev => ({ ...prev, [key]: 'pending' }))
     apiFetch(`/api/workflows/${encodeURIComponent(wf.namespace)}/signal/${encodeURIComponent(wf.workflowId)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signalName, workflowType: wf.workflowType, payload: finalPayload, runId: wf.runId }),
+      body: JSON.stringify(buildSignalRequest(wf, signalName, payload, comment)),
     })
       .then(async r => {
         if (r.ok) { setSignalStates(prev => ({ ...prev, [key]: 'success' })); setSignalMsg(prev => ({ ...prev, [key]: 'Signal sent' })); setSentSignals(prev => new Set(prev).add(`${wf.workflowId}::${wf.phase}`)) }
-        else { const b = await r.json().catch(() => ({})); setSignalStates(prev => ({ ...prev, [key]: 'error' })); setSignalMsg(prev => ({ ...prev, [key]: b?.error ?? `Error ${r.status}` })) }
+        else { const b = await r.json().catch(() => ({})); setSignalStates(prev => ({ ...prev, [key]: 'error' })); setSignalMsg(prev => ({ ...prev, [key]: signalErrorMessage(r.status, b) })) }
       })
       .catch(() => { setSignalStates(prev => ({ ...prev, [key]: 'error' })); setSignalMsg(prev => ({ ...prev, [key]: 'Request failed' })) })
       .finally(() => setTimeout(() => setSignalStates(prev => ({ ...prev, [key]: 'idle' })), 4000))

@@ -4,7 +4,7 @@ namespace Fleet.Temporal;
 /// The approval gates that only a human may resolve.
 ///
 /// <para>
-/// These four signal names carry an approval decision that the dashboard — which is auth-gated and
+/// These signal names carry an approval decision that the dashboard — which is auth-gated and
 /// identifies the human behind it — is the only sanctioned source of. Everything else about a
 /// workflow can be automated; these cannot, because the whole point of the gate is that something
 /// outside the automation said yes.
@@ -31,6 +31,7 @@ public static class CeoGateSignals
         "doc-review",
         "design-approval",
         "advisory-review",
+        "acceptance-decision",
     };
 
     /// <summary>The reserved names, for messages and documentation.</summary>

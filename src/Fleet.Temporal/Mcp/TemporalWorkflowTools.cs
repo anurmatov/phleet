@@ -201,7 +201,7 @@ public sealed class TemporalWorkflowTools(
         "(1) 'human-review' — structured payload required: {\"Decision\":\"approved\"} or {\"Decision\":\"changes_requested\",\"Comment\":\"feedback\"} or {\"Decision\":\"rejected\",\"Comment\":\"reason\"}. " +
         "(2) 'escalation-decision' — {\"Decision\":\"retry|skip|continue\",\"UpdatedInstruction\":\"...\"}. " +
         "IMPORTANT — CEO-only signals are BLOCKED and cannot be sent via this tool: " +
-        "'merge-approval', 'doc-review', 'design-approval', 'advisory-review'. " +
+        "'merge-approval', 'doc-review', 'design-approval', 'advisory-review', 'acceptance-decision'. " +
         "There are two exceptions, both only for the currently configured CTO agent resolved from the MCP request. " +
         "(a) Feedback: 'merge-approval' or 'design-approval' with Decision exactly 'changes_requested' and a nonblank Comment. " +
         "'design-approval' feedback is accepted only while the workflow is Running and waiting at its design-approval gate (Phase 'design-approval'); otherwise it is refused and nothing is sent. " +
@@ -694,14 +694,23 @@ public sealed class TemporalWorkflowTools(
     }
 
     [McpServerTool(Name = "temporal_get_workflow_result")]
-    [Description("Get the result/output of a completed workflow. Returns an error if still running or failed.")]
+    [Description("Get a completed workflow result. Optional run_id reads only that exact run, never follows continued runs, and returns a workflowId/runId/result wrapper. Without run_id, latest-run output is unchanged. A Running run waits for completion; failed or continued runs return error text.")]
     public async Task<string> GetWorkflowResultAsync(
         [Description("Workflow ID to get result from")] string workflow_id,
-        [Description("Temporal namespace. Default: fleet.")] string @namespace = DefaultNamespace)
+        [Description("Temporal namespace. Default: fleet.")] string @namespace = DefaultNamespace,
+        [Description("Optional exact run ID. Empty/absent keeps latest-run behavior.")] string? run_id = null)
     {
         try
         {
             var client = await clientFactory.GetClientAsync(@namespace);
+            if (!string.IsNullOrEmpty(run_id))
+            {
+                // SDK 1.11.1 GetWorkflowHandle sets RunId but omits ResultRunId; GetResultAsync
+                // uses ResultRunId (sdk-dotnet/1.11.1, TemporalClient.Workflow.cs:55-57).
+                var bound = client.GetWorkflowHandle(workflow_id, runId: run_id) with { ResultRunId = run_id };
+                var boundResult = await bound.GetResultAsync<JsonElement>(followRuns: false);
+                return JsonSerializer.Serialize(new { workflowId = workflow_id, runId = run_id, result = boundResult });
+            }
             var handle = client.GetWorkflowHandle(workflow_id);
             var result = await handle.GetResultAsync<JsonElement>();
             return JsonSerializer.Serialize(result);

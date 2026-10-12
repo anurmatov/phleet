@@ -39,6 +39,9 @@ jobs:
           --filter "FullyQualifiedName!~Fleet.Conversations.Tests&FullyQualifiedName!~Fleet.Orchestrator.Tests.Migrations"
           --logger "console;verbosity=normal"
 
+      - name: Acceptance plan validators and public placeholders
+        run: python3 -m unittest discover tests/scripts
+
       - name: GitHub API endpoint token routing
         run: |
           set -euo pipefail

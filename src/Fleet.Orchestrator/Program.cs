@@ -89,6 +89,7 @@ if (!string.IsNullOrEmpty(connectionString))
 // Temporal workflow poller (disabled if Temporal:Address is empty)
 builder.Services.AddSingleton<WorkflowStore>();
 builder.Services.AddSingleton<TemporalClientRegistry>();
+builder.Services.AddSingleton<IWorkflowSignalClient>(sp => sp.GetRequiredService<TemporalClientRegistry>());
 builder.Services.AddHostedService<TemporalPollerService>();
 
 // Epic grants (#436): opt-in, run-scoped delegated gate approvals. Off unless EpicGrants:Enabled.
@@ -1023,43 +1024,8 @@ app.MapPost("/api/workflows/start", async (HttpRequest request, TemporalClientRe
 // REST: signal registry — static mapping of workflow type → available signals
 app.MapGet("/api/signals", () => Results.Ok(SignalRegistry.All));
 
-// REST: send a signal to a running Temporal workflow
-app.MapPost("/api/workflows/{ns}/signal/{**id}", async (string ns, string id, HttpRequest request, TemporalClientRegistry temporal) =>
-{
-    if (!temporal.IsConfigured)
-        return Results.Json(new { error = "Temporal is not configured on this orchestrator" }, statusCode: 503);
-
-    // Body: { signalName, workflowType, payload, runId? }
-    using var body = await System.Text.Json.JsonDocument.ParseAsync(request.Body);
-    var root = body.RootElement;
-
-    if (!root.TryGetProperty("signalName", out var signalNameEl) || signalNameEl.GetString() is not string signalName || string.IsNullOrWhiteSpace(signalName))
-        return Results.BadRequest(new { error = "signalName is required" });
-
-    // Validate signal name against registry if workflowType is provided
-    if (root.TryGetProperty("workflowType", out var wfTypeEl) && wfTypeEl.GetString() is string wfType && !string.IsNullOrWhiteSpace(wfType))
-    {
-        var knownSignals = SignalRegistry.Get(wfType);
-        if (knownSignals is not null && !knownSignals.Any(s => s.Name.Equals(signalName, StringComparison.OrdinalIgnoreCase)))
-            return Results.BadRequest(new { error = $"Signal '{signalName}' is not registered for workflow type '{wfType}'" });
-    }
-
-    var payload    = root.TryGetProperty("payload", out var payloadEl) ? (payloadEl.GetString() ?? "{}") : "{}";
-    var runId      = root.TryGetProperty("runId",   out var runIdEl)   ? runIdEl.GetString() : null;
-    var workflowId = Uri.UnescapeDataString(id);
-
-    try
-    {
-        var ok = await temporal.SignalWorkflowAsync(ns, workflowId, runId, signalName, payload);
-        return ok
-            ? Results.Ok(new { message = $"Signal '{signalName}' sent to workflow '{workflowId}'" })
-            : Results.NotFound(new { error = $"No client for namespace '{ns}'" });
-    }
-    catch (Exception ex)
-    {
-        return Results.Json(new { error = $"Failed to send signal: {ex.Message}" }, statusCode: 500);
-    }
-});
+// REST: exact-run signal/gate identity checks share the tested production handler.
+app.MapWorkflowSignalEndpoints();
 
 // WebSocket: real-time agent state updates
 app.Map("/ws", async (HttpContext context, AgentRegistry registry) =>

@@ -1,5 +1,6 @@
 namespace Fleet.Temporal.Engine;
 
+using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -16,6 +17,7 @@ using System.Text.RegularExpressions;
 ///   | default: value          — return fallback if left side is null/empty string
 ///   | extract: 'PATTERN'      — regex match; returns first capture group if present, else full match
 ///   | json                    — parse string as JSON into JsonElement
+///   | add: integer            — checked signed integer addition, invalid input fails
 ///
 /// Full-expression optimization:
 ///   If the template is exactly {{expr}} (no surrounding text), the raw resolved object is returned
@@ -180,6 +182,15 @@ public sealed class TemplateEngine
             if (value is JsonElement el && (el.ValueKind == JsonValueKind.Null || el.ValueKind == JsonValueKind.Undefined))
                 return fallback;
             return value;
+        }
+
+        if (filter.StartsWith("add:", StringComparison.OrdinalIgnoreCase))
+        {
+            var amount = filter.Substring("add:".Length).Trim();
+            if (!long.TryParse(value?.ToString(), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var left)
+                || !long.TryParse(amount, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var right))
+                throw new FormatException("add requires integer input and argument.");
+            return checked(left + right).ToString(CultureInfo.InvariantCulture);
         }
 
         if (filter.StartsWith("extract:", StringComparison.OrdinalIgnoreCase))

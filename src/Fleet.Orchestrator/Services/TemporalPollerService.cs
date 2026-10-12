@@ -54,6 +54,7 @@ public sealed class TemporalPollerService(
                             string? repo = null;
                             string? docPrs = null;
                             string? phase = null;
+                            string? gateRef = null;
                             try
                             {
                                 var attrs = wf.TypedSearchAttributes;
@@ -67,6 +68,8 @@ public sealed class TemporalPollerService(
                                     docPrs = dv;
                                 if (attrs.TryGetValue(SearchAttributeKey.CreateKeyword("Phase"), out var phv))
                                     phase = phv;
+                                if (attrs.TryGetValue(SearchAttributeKey.CreateKeyword("GateRef"), out var grv))
+                                    gateRef = grv;
                             }
                             catch
                             {
@@ -85,7 +88,8 @@ public sealed class TemporalPollerService(
                                 PrNumber:     prNum,
                                 Repo:         repo,
                                 DocPrs:       docPrs,
-                                Phase:        phase));
+                                Phase:        phase,
+                                GateRef:      gateRef));
                         }
                     }
                     catch (Exception ex) when (!ct.IsCancellationRequested)

@@ -96,7 +96,7 @@ public sealed class SeedPostFeedbackHumanReviewTests
 
             await h.WaitForGateVisitAsync(handle, "merge-approval:2");
             Assert.Equal(HeadA, h.LastUpsert(await handle.FetchHistoryAsync(), "ReviewRef"));
-            await handle.SignalAsync("merge-approval", [Json("""{"Decision":"approved"}""")]);
+            await h.SignalHumanApprovalAsync(handle);
         });
 
         // PR review, feedback review (publishes nothing), then exactly one fresh PR review of A.
@@ -129,7 +129,7 @@ public sealed class SeedPostFeedbackHumanReviewTests
 
             await h.WaitForGateVisitAsync(handle, "merge-approval:2");
             Assert.Equal(HeadB, h.LastUpsert(await handle.FetchHistoryAsync(), "ReviewRef"));
-            await handle.SignalAsync("merge-approval", [Json("""{"Decision":"approved"}""")]);
+            await h.SignalHumanApprovalAsync(handle);
         });
 
         var revise = Assert.Single(run.Calls, c => c.Step == "revise_post_feedback_human");
@@ -217,7 +217,7 @@ public sealed class SeedPostFeedbackHumanReviewTests
             await handle.SignalAsync("human-review", [Json("""{"Decision":"approved"}""")]);
 
             await h.WaitForGateVisitAsync(handle, "merge-approval:2");
-            await handle.SignalAsync("merge-approval", [Json("""{"Decision":"approved"}""")]);
+            await h.SignalHumanApprovalAsync(handle);
         });
 
         Assert.Equal("", refAtPause);

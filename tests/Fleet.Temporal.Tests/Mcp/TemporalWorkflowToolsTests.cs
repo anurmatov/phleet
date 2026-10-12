@@ -255,6 +255,7 @@ public sealed class TemporalWorkflowToolsTests
     [Theory]
     [InlineData("doc-review")]
     [InlineData("advisory-review")]
+    [InlineData("acceptance-decision")]
     public async Task SignalWorkflowAsync_OtherCeoOnlySignalFromCto_Blocks(string signalName)
     {
         var context = BuildTool();
@@ -626,13 +627,13 @@ public sealed class TemporalWorkflowToolsTests
             error);
     }
 
-    /// <summary>AC7. The shared reserved list is untouched: still exactly four names.</summary>
+    /// <summary>AC7. The shared list preserves the existing gates and adds acceptance-decision.</summary>
     [Fact]
     public void CeoGateSignals_StillReservesDesignApproval()
     {
         Assert.True(CeoGateSignals.IsReserved("design-approval"));
         Assert.Equal(
-            new[] { "advisory-review", "design-approval", "doc-review", "merge-approval" },
+            new[] { "acceptance-decision", "advisory-review", "design-approval", "doc-review", "merge-approval" },
             CeoGateSignals.All.Order(StringComparer.Ordinal).ToArray());
     }
 

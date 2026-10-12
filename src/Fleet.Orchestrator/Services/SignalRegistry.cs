@@ -21,7 +21,7 @@ public static class SignalRegistry
     /// ValidPhases: if non-null, the signal button is only shown when the workflow's Phase
     /// search attribute matches one of the listed values. Null means always show.
     /// </summary>
-    public record SignalDef(string Name, string Label, SignalButton[] Buttons, string[]? ValidPhases = null);
+    public record SignalDef(string Name, string Label, SignalButton[] Buttons, string[]? ValidPhases = null, string? BindAttribute = null);
 
     private static readonly Dictionary<string, SignalDef[]> _registry =
         new(StringComparer.OrdinalIgnoreCase)
@@ -61,7 +61,11 @@ public static class SignalRegistry
                     new SignalButton("Approve Merge",    """{"Decision":"approved"}"""),
                     new SignalButton("Request Changes",  """{"Decision":"changes_requested"}""", RequiresComment: true),
                     new SignalButton("Reject",           """{"Decision":"rejected"}""",          RequiresComment: true),
-                ], ValidPhases: ["merge-approval"]),
+                ], ValidPhases: ["merge-approval"], BindAttribute: "GateRef"),
+                new SignalDef("acceptance-decision", "acceptance decision", [
+                    new SignalButton("Continue", """{"Decision":"continue"}"""),
+                    new SignalButton("Stop", """{"Decision":"stop"}"""),
+                ], ValidPhases: ["acceptance-continue", "acceptance-blocked"], BindAttribute: "GateRef"),
                 new SignalDef("escalation-decision", "escalation", [
                     new SignalButton("Approve",         """{"Decision":"approved"}"""),
                     new SignalButton("Request Changes", """{"Decision":"changes_requested"}""", RequiresComment: true),

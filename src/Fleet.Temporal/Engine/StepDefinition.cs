@@ -323,6 +323,10 @@ public record ChildWorkflowStep : StepDefinition
 
     public string? Namespace { get; init; }
     public string? TaskQueue { get; init; }
+
+    /// <summary>Optional literal hard deadline for an awaited child, in minutes.</summary>
+    [JsonNumberHandling(JsonNumberHandling.Strict)]
+    public int? ExecutionTimeoutMinutes { get; init; }
 }
 
 public sealed record FireAndForgetStep : ChildWorkflowStep
@@ -365,6 +369,9 @@ public sealed record SetAttributeStep : StepDefinition
     /// Type resolved from SearchAttributeTypeRegistry at runtime; unknown attributes are skipped.
     /// </summary>
     public required Dictionary<string, string> Attributes { get; init; }
+
+    /// <summary>Unknown names or invalid values fail the step instead of being skipped.</summary>
+    public bool Required { get; init; }
 }
 
 public sealed record HttpRequestStep : StepDefinition

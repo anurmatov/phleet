@@ -61,6 +61,8 @@ public class ConsensusReviewWorkflow
     /// this change — removing the legacy branch is a later maintenance step, once no retained
     /// or running history can still need it.
     /// </summary>
+    internal const string ClassifyPatchId = "consensus-review-classify-v1";
+
     internal const string CompactPatchId = "consensus-review-compact-v1";
 
     /// <summary>
@@ -154,6 +156,9 @@ public class ConsensusReviewWorkflow
 
     private static async Task<ConsensusReviewOutput> RunReviewRoundAsync(ConsensusReviewInput input)
     {
+        if (input.Mode is not (null or "review" or "classify"))
+            throw new Temporalio.Exceptions.ApplicationFailureException("Unknown consensus mode.", nonRetryable: true);
+        var classifying = input.Mode == "classify" && Workflow.Patched(ClassifyPatchId);
         var reviewers = input.ReviewerAgents!;
         var synthesizer = input.Synthesizer!;
         var workflowId = Workflow.Info.WorkflowId;
@@ -178,6 +183,10 @@ public class ConsensusReviewWorkflow
             budgeted, agentBudgetSeconds, ActivityCancellationType.TryCancel);
 
         var instructionSuffix = compact ? BuildReviewEnvelopeInstruction() : BuildLegacyVerdictInstruction();
+        if (classifying)
+            instructionSuffix += "\nClassification: the first line of SUMMARY must be exactly LABEL: product_defect, LABEL: harness, or LABEL: environment. " +
+                "product_defect requires changes_requested and at least one BLOCKER citing receipt, expected versus actual and code path. " +
+                "harness and environment require approved with no blockers. If not provable, use needs_human_review. Labels are decided by unanimous reviewers, never the synthesizer.";
 
         // ── Fan out: all agents review in parallel ────────────────────────────────
         var reviewTasks = reviewers
@@ -197,7 +206,17 @@ public class ConsensusReviewWorkflow
             })
             .ToArray();
 
-        await Workflow.WhenAllAsync(reviewTasks);
+        try
+        {
+            await Workflow.WhenAllAsync(reviewTasks);
+        }
+        catch (Temporalio.Exceptions.ActivityFailureException) when (classifying)
+        {
+            var partial = reviewers.Zip(reviewTasks, (agent, task) => task.IsCompletedSuccessfully
+                ? ParseReview(agent, task.Result.Text)
+                : new AgentReview(agent, "Classification review did not complete.", ReviewVerdict.NeedsHumanReview)).ToArray();
+            return ComposeOutput(partial, ReviewVerdict.NeedsHumanReview, "Classification evidence unavailable.");
+        }
 
         if (!compact)
             return await RunLegacyAsync(input, reviewers, reviewTasks, synthesizer, workflowId, synthesisOptions, agentBudgetSeconds);
@@ -219,6 +238,8 @@ public class ConsensusReviewWorkflow
                 ConsolidatedReasoning: BuildOverflowMessage(blockerCount, reviewerCount),
                 PerAgentVerdicts: agentReviews);
         }
+
+        if (classifying) return Classify(agentReviews);
 
         // ── Fail closed: any reviewer needing human review skips synthesis ────────
         if (agentReviews.Any(r => r.Verdict == ReviewVerdict.NeedsHumanReview))
@@ -248,6 +269,29 @@ public class ConsensusReviewWorkflow
             agentReviews,
             ParseSynthesizerVerdict(synthesisResult.Text),
             synthesisResult.Text);
+    }
+
+    internal static ConsensusReviewOutput Classify(AgentReview[] reviews)
+    {
+        string? label = null;
+        foreach (var review in reviews)
+        {
+            var first = review.Summary.Split('\n')[0].Trim();
+            var parsed = first switch
+            {
+                "LABEL: product_defect" => "product_defect",
+                "LABEL: harness" => "harness",
+                "LABEL: environment" => "environment",
+                _ => null,
+            };
+            var expected = parsed == "product_defect" ? ReviewVerdict.ChangesRequested : ReviewVerdict.Approved;
+            if (parsed is null || review.Verdict != expected || (label is not null && label != parsed))
+                return ComposeOutput(reviews, ReviewVerdict.NeedsHumanReview, RenderCompactReviews(reviews));
+            label = parsed;
+        }
+        if (label is null) return ComposeOutput(reviews, ReviewVerdict.NeedsHumanReview, "No classification evidence.");
+        var output = ComposeOutput(reviews, reviews[0].Verdict, RenderCompactReviews(reviews));
+        return output with { ClassificationLabel = output.FinalVerdict == ReviewVerdict.NeedsHumanReview ? null : label };
     }
 
     // ── Timer ordering ────────────────────────────────────────────────────────────

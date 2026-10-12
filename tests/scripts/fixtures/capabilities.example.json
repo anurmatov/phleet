@@ -1,0 +1,1 @@
+{"version":1,"items":{"ssh:host-a":{"anyEnvRef":["TEST_CREDENTIAL_A"],"sshTarget":"user-x@192.0.2.10"}}}

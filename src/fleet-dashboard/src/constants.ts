@@ -68,6 +68,10 @@ export const CODEX_SANDBOX_MODES: string[] = [
 // ── Phase label mapping ───────────────────────────────────────────────────────
 
 export const PHASE_LABELS: Record<string, { label: string; color: string }> = {
+  'acceptance-running': { label: 'Acceptance Running', color: 'blue' },
+  'acceptance-classifying': { label: 'Acceptance Classification', color: 'purple' },
+  'acceptance-continue': { label: 'Acceptance Continue', color: 'yellow' },
+  'acceptance-blocked': { label: 'Acceptance Blocked', color: 'red' },
   'human-review':    { label: 'Code Review',     color: 'yellow' },
   'merge-approval':  { label: 'Merge Approval',  color: 'blue'   },
   'design-approval': { label: 'Design Approval', color: 'purple' },

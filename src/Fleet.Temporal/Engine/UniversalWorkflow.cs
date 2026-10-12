@@ -43,6 +43,9 @@ public class UniversalWorkflow
     /// </summary>
     internal const string SignalBufferPatchId = "uwe-signal-buffer-v1";
 
+    // Histories without this marker retain the final-iteration continue leak on replay.
+    internal const string LoopFinalContinuePatchId = "uwe-loop-final-continue-v1";
+
     /// <summary>
     /// Error type stamped on the refusal to emit an approver-only gate signal.
     ///
@@ -406,7 +409,10 @@ public class UniversalWorkflow
 
             if (_skipRemaining) return null;
         }
-        return lastResult;
+        // New histories consume a final continue here, so the parent can notify and wake.
+        // Old histories must retain the leak: consuming it changes subsequent commands.
+        return lastResult is ControlFlow && Workflow.Patched(LoopFinalContinuePatchId)
+            ? null : lastResult;
     }
 
     private async Task<object?> ExecuteBranchAsync(BranchStep step)
@@ -1020,6 +1026,8 @@ public class UniversalWorkflow
             new ChildWorkflowOptions
             {
                 TaskQueue = tq,
+                ExecutionTimeout = step.ExecutionTimeoutMinutes is { } minutes
+                    ? TimeSpan.FromMinutes(minutes) : null,
             });
 
         if (step.OutputVar != null) SetVar(step.OutputVar, result);
@@ -1082,46 +1090,57 @@ public class UniversalWorkflow
 
     private Task<object?> ExecuteSetAttributeAsync(SetAttributeStep step)
     {
-        var updates = new List<SearchAttributeUpdate>();
-
-        foreach (var (name, valueExpr) in step.Attributes)
+        try
         {
-            var resolved = _template.ResolveString(valueExpr);
-            var attrType = SearchAttributeTypeRegistry.GetType(name);
+            var updates = new List<SearchAttributeUpdate>();
 
-            if (attrType == null)
+            foreach (var (name, valueExpr) in step.Attributes)
             {
-                Workflow.Logger.LogWarning("SetAttributeStep: unknown search attribute '{Name}' — skipped", name);
-                continue;
-            }
+                var resolved = _template.ResolveString(valueExpr);
+                var attrType = SearchAttributeTypeRegistry.GetType(name);
 
-            try
-            {
-                updates.Add(attrType switch
+                if (attrType == null)
                 {
-                    SearchAttributeTypeRegistry.AttributeType.Int
-                        => SearchAttributeKey.CreateLong(name).ValueSet(long.Parse(resolved)),
+                    if (step.Required)
+                        throw new InvalidOperationException("Unknown required search attribute.");
+                    Workflow.Logger.LogWarning("SetAttributeStep: unknown search attribute '{Name}' — skipped", name);
+                    continue;
+                }
 
-                    SearchAttributeTypeRegistry.AttributeType.Keyword
-                        => SearchAttributeKey.CreateKeyword(name).ValueSet(resolved),
+                try
+                {
+                    updates.Add(attrType switch
+                    {
+                        SearchAttributeTypeRegistry.AttributeType.Int
+                            => SearchAttributeKey.CreateLong(name).ValueSet(long.Parse(resolved)),
 
-                    SearchAttributeTypeRegistry.AttributeType.DateTime
-                        => SearchAttributeKey.CreateDateTimeOffset(name)
-                               .ValueSet(DateTimeOffset.Parse(resolved)),
+                        SearchAttributeTypeRegistry.AttributeType.Keyword
+                            => SearchAttributeKey.CreateKeyword(name).ValueSet(resolved),
 
-                    _ => throw new InvalidOperationException($"Unhandled attribute type: {attrType}")
-                });
+                        SearchAttributeTypeRegistry.AttributeType.DateTime
+                            => SearchAttributeKey.CreateDateTimeOffset(name)
+                                   .ValueSet(DateTimeOffset.Parse(resolved)),
+
+                        _ => throw new InvalidOperationException($"Unhandled attribute type: {attrType}")
+                    });
+                }
+                catch (Exception ex) when (!step.Required)
+                {
+                    Workflow.Logger.LogWarning(ex, "SetAttributeStep: failed to build update for '{Name}' — skipped", name);
+                }
             }
-            catch (Exception ex)
-            {
-                Workflow.Logger.LogWarning(ex, "SetAttributeStep: failed to build update for '{Name}' — skipped", name);
-            }
+
+            if (updates.Count > 0)
+                Workflow.UpsertTypedSearchAttributes([.. updates]);
+
+            return Task.FromResult<object?>(null);
         }
-
-        if (updates.Count > 0)
-            Workflow.UpsertTypedSearchAttributes([.. updates]);
-
-        return Task.FromResult<object?>(null);
+        catch (Exception) when (step.Required)
+        {
+            throw new ApplicationFailureException(
+                $"Required search attribute write failed at step '{step.Name ?? "(unnamed)"}'.",
+                errorType: "RequiredSearchAttribute", nonRetryable: true);
+        }
     }
 
     private async Task<object?> ExecuteHttpRequestAsync(HttpRequestStep step)

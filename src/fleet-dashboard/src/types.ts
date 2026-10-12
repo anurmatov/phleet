@@ -69,6 +69,7 @@ export interface WorkflowSummary {
   repo: string | null
   docPrs: string | null
   phase: string | null
+  gateRef: string | null
 }
 
 export interface WorkflowEvent {

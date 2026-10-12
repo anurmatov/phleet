@@ -17,7 +17,7 @@ ARG MC_VERSION=RELEASE.2025-08-13T08-35-41Z
 # diagrams agents render show their text, Latin and Cyrillic (#371); ffmpeg pulls both in today,
 # and naming them keeps them if ffmpeg changes. --no-install-recommends is scoped to this line
 # so ffmpeg's X11/GUI recommends stay out without changing what the other packages pull in.
-RUN apt-get update && apt-get install -y curl git jq rsync cron openssh-client && \
+RUN apt-get update && apt-get install -y curl git jq rsync cron openssh-client python3 && \
     apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core fontconfig && rm -rf /var/lib/apt/lists/*
 RUN ffmpeg -version >/dev/null && ffprobe -version >/dev/null || \
     (echo "ERROR: ffmpeg/ffprobe not runnable in the agent image" && exit 1)
@@ -91,6 +91,9 @@ RUN npm list -g @google/gemini-cli-core 2>&1 | grep -q "empty" || \
 RUN mkdir -p /workspace /root/.claude
 
 COPY skills/ /app/skills/
+
+COPY scripts/acceptance_plan.py /opt/fleet/acceptance_plan.py
+RUN test -f /opt/fleet/acceptance_plan.py && python3 /opt/fleet/acceptance_plan.py --help
 
 COPY gh-auth.sh /app/gh-auth.sh
 COPY entrypoint.sh /app/entrypoint.sh

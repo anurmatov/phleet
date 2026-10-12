@@ -212,13 +212,15 @@ public sealed class GetUweReferenceTool
           "taskQueue": "fleet",
           "args": { "Topic": "{{vars.pr_url}}", "Agents": ["cto", "developer", "reviewer"] },
           "outputVar": "consensus_result",
-          "timeoutMinutes": 60
+          "executionTimeoutMinutes": 60
         }
         ```
         - `workflowType` (required): workflow type name — supports `{{template}}`
         - `args`: object passed as workflow input; values support template expressions
         - `namespace`: optional namespace override (defaults to current workflow namespace)
         - `taskQueue`: optional task queue override
+        - `executionTimeoutMinutes`: optional positive integer literal hard deadline, absent = unchanged.
+          It is rejected at definition load on `fire_and_forget`; never use a template.
         - `ConsensusReviewWorkflow` (#436) also takes optional `ReviewRef` (the commit SHA or
           SHA-256 under review, named to every reviewer) and `ExcludedAgents` (CSV or array; a
           listed reviewer fails the child non-retryably with `ReviewerNotIndependent` before any
@@ -227,10 +229,16 @@ public sealed class GetUweReferenceTool
           `ScrubAttested` (an approving `PUBLIC_SCRUB: pass` and no `PUBLIC_SCRUB: fail`). Publish
           `AttestedRef` as `vars.review_ref` and the `ReviewRef` attribute only when
           `FinalVerdict == approved`; see `docs/epic-grants.md`.
+        - `Mode` defaults to `review`. `classify` requires the first SUMMARY line to be exactly
+          LABEL: product_defect, LABEL: harness, or LABEL: environment. Product defects require
+          changes_requested and a receipt/expected-versus-actual/code-path blocker; harness and
+          environment require approved. Code returns ClassificationLabel only when every label
+          and verdict is consistent and unanimous; otherwise needs_human_review, no label and
+          no synthesizer verdict call. The mode is patch-gated for existing-history replay.
 
         ### 12. fire_and_forget
         Starts a child workflow without waiting for the result (ParentClosePolicy = Abandon).
-        Same properties as `child_workflow`.
+        Same properties as `child_workflow`, except `executionTimeoutMinutes` is forbidden.
         ```json
         {
           "type": "fire_and_forget",
@@ -287,7 +295,11 @@ public sealed class GetUweReferenceTool
         - `attributes` (required): object with string keys and string values (not a single name/value pair)
         - Registered attributes: IssueNumber (Int), PrNumber (Int), Repo (Keyword),
           DocPrs (Keyword), Phase (Keyword), ReviewDate (Keyword)
-        - Unknown attribute names are silently skipped.
+        - `required` (default false): unknown names or invalid values fail non-retryably with
+          RequiredSearchAttribute. Without it they are skipped as before. Required gate writes
+          must not use ignoreFailure; namespace registration must precede activation.
+        - Also registered: PositionId (Int), GateVisit, ReviewRef, ReviewScrub, GateRef and
+          Acceptance (Keyword). Acceptance is a visibility record, never authority or routing.
 
         ### 16. http_request
         Makes a generic HTTP request to any URL. Used for calling REST endpoints or MCP servers directly.
@@ -352,8 +364,8 @@ public sealed class GetUweReferenceTool
         - An empty or unresolved `workflowId` is a logged SKIP, not an error — so a run started
           without a waiter id behaves exactly as it did before the step was added.
         - Implemented as a workflow command, not an activity: deterministic and replay-safe.
-        - **Approver-only gates are refused.** `merge-approval`, `doc-review`, `design-approval` and
-          `advisory-review` resolve a human approval and may only be sent from the dashboard. A
+        - **Approver-only gates are refused.** `merge-approval`, `doc-review`, `design-approval`,
+          `advisory-review` and `acceptance-decision` resolve a human approval and may only be sent from the dashboard. A
           definition naming one literally fails at definition LOAD; one that resolves to a reserved
           name through a template fails the workflow at execution. The refusal is NOT suppressed by
           `ignoreFailure` — an authorization check a definition can switch off with one flag is not
@@ -412,6 +424,7 @@ public sealed class GetUweReferenceTool
         |----------------------|--------------------------------------------------------------------------|
         | `\| default:"val"`  | Return fallback if expression is null or empty string                    |
         | `\| extract:'PATTERN'` | Regex match on string; returns first capture group if present, else full match |
+        | `\| add:<int>`      | Checked signed integer addition; invalid input/argument and overflow fail |
         | `\| json`           | Parse the string value as JSON into a JsonElement (deserialize, not serialize) |
 
         ### Filter examples

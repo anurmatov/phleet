@@ -16,4 +16,5 @@ public sealed record WorkflowSummary(
     int? PrNumber = null,
     string? Repo = null,
     string? DocPrs = null,
-    string? Phase = null);
+    string? Phase = null,
+    string? GateRef = null);

@@ -39,6 +39,11 @@ public static class WorkflowDefinitionValidator
                     "required whenever bindTo is present.");
             }
 
+            if (step is FireAndForgetStep { ExecutionTimeoutMinutes: not null })
+                throw new InvalidOperationException($"Workflow '{workflowTypeName}' step '{step.Name}' cannot set executionTimeoutMinutes on fire_and_forget.");
+            if (step is ChildWorkflowStep { ExecutionTimeoutMinutes: <= 0 })
+                throw new InvalidOperationException($"Workflow '{workflowTypeName}' step '{step.Name}' requires positive executionTimeoutMinutes.");
+
             if (step is WaitForSignalStep gateWait)
                 ValidateGateVisit(gateWait, workflowTypeName);
 

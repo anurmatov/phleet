@@ -119,6 +119,9 @@ public sealed class EpicDriverStateService(IServiceScopeFactory scopes, IEpicGra
             errors.Add("temporal_or_database_error");
             logger.LogWarning("EpicDriverState read failed error={Error}", ex.GetType().Name);
         }
+        // Linkage can return partial progress on the internal deadline. A disconnected
+        // caller is different: abort rather than publishing or caching that partial reply.
+        ct.ThrowIfCancellationRequested();
         var finalErrors = errors.Distinct().Order(StringComparer.Ordinal).ToArray();
         var tuples = children.Select(c => new object?[] { c.WorkflowId, c.RunId, c.Status, c.Phase, c.GateVisit,
             c.ReviewRef, c.NextAction, c.Outcome, c.OutcomeIssue });

@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Diagnostics;
+using Microsoft.Data.Sqlite;
 using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Models;
@@ -23,6 +25,7 @@ internal sealed class DriverTemporal : IEpicGrantTemporal, IEpicDriverTemporal
     public int Lists { get; private set; }
     public int CloseReads { get; private set; }
     public string? FailHistory { get; set; }
+    public string? FailDescribe { get; set; }
     public string? VisibilityError { get; set; }
     public string SendResult { get; set; } = "sent";
     public Func<string, CancellationToken, Task>? BeforeHistory { get; set; }
@@ -34,8 +37,11 @@ internal sealed class DriverTemporal : IEpicGrantTemporal, IEpicDriverTemporal
         Descriptions[id] = new(status, id + "-run", type, DateTimeOffset.UtcNow, parent, parentRun, gate, gate is null ? null : new string('a', 40), "pass", IssueNumber: 42, Phase: gate is null ? "working" : "merge-approval", Repo: "example/repo");
         Histories[id] = new("{\"WaiterWorkflowId\":\"driver\"}", type, 1);
     }
-    public Task<EpicRunDescription?> DescribeAsync(string ns, string id, string? run, CancellationToken ct) =>
-        Task.FromResult(Descriptions.GetValueOrDefault(id) is { } d && (run is null || d.RunId == run) ? d : null);
+    public Task<EpicRunDescription?> DescribeAsync(string ns, string id, string? run, CancellationToken ct)
+    {
+        if (id == FailDescribe) throw new InvalidOperationException("Temporal describe failed");
+        return Task.FromResult(Descriptions.GetValueOrDefault(id) is { } d && (run is null || d.RunId == run) ? d : null);
+    }
     public async Task<EpicRunHistory?> ReadRunAsync(string ns, string id, string run, CancellationToken ct)
     {
         if (BeforeHistory is not null) await BeforeHistory(id, ct);
@@ -115,6 +121,116 @@ public class EpicDriverStateServiceTests
         Assert.Equal(1, f.Temporal.CloseReads);
     }
 
+    [Theory]
+    [InlineData("visibility_unknown")]
+    [InlineData("definition_out_of_scope")]
+    [InlineData("not_linked")]
+    public async Task Read_ParkedChild_ReportsTheRealDryRunRefusalWithoutWriting(string expected)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<OrchestratorDbContext>().UseSqlite(connection).Options;
+        await using (var db = new OrchestratorDbContext(options)) await db.Database.EnsureCreatedAsync();
+        var world = new EpicGrantWorld(() => new OrchestratorDbContext(options));
+        await world.InitializeAsync();
+        if (expected == "definition_out_of_scope") world.PrRunRecord.DefinitionVersion = 999;
+        if (expected == "not_linked") world.PrRunRecord.StartTime = world.GrantCreatedAt.AddSeconds(-1);
+        var temporal = new DriverTemporal();
+        temporal.Descriptions[EpicGrantWorld.DriverId] = world.DriverRunRecord.Describe();
+        temporal.Runs.Add(new(EpicGrantWorld.PrId, EpicGrantWorld.PrRun, EpicGrantWorld.PrType,
+            "fleet", "fleet", "Running", world.PrRunRecord.StartTime, Repo: EpicGrantWorld.PrivateRepo, IssueNumber: 12));
+        temporal.Descriptions[EpicGrantWorld.PrId] = world.PrRunRecord.Describe() with { IssueNumber = 12, Repo = EpicGrantWorld.PrivateRepo };
+        temporal.Histories[EpicGrantWorld.PrId] = new(world.PrRunRecord.Input!.ToJsonString(),
+            world.PrRunRecord.DefinitionName, world.PrRunRecord.DefinitionVersion);
+        using var services = new ServiceCollection()
+            .AddDbContext<OrchestratorDbContext>(o => o.UseSqlite(connection))
+            .AddScoped(sp => world.Service(sp.GetRequiredService<OrchestratorDbContext>()))
+            .BuildServiceProvider();
+        var state = new EpicDriverStateService(services.GetRequiredService<IServiceScopeFactory>(), temporal,
+            new(temporal, temporal), world.Clock, world.Configuration, NullLogger<EpicDriverStateService>.Instance);
+        world.GitHub.Calls.Clear();
+        var reply = await state.ReadAsync("fleet", EpicGrantWorld.DriverId, default);
+        Assert.Empty(reply.Errors);
+        var child = Assert.Single(reply.Children);
+        Assert.Equal("human_decide", child.NextAction); Assert.Equal(expected, child.Eligibility);
+        Assert.Empty(world.GitHub.Calls); Assert.Empty(world.Temporal.Signals); Assert.Empty(temporal.Signals);
+        await using var checkedDb = new OrchestratorDbContext(options);
+        Assert.Empty(await checkedDb.EpicGrantDecisions.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Read_FailedChild_ReportsTerminalFailedRatherThanCompletion()
+    {
+        using var f = new DriverFixture(); f.Temporal.Add("failed", "UweDesignWorkflow", "Failed");
+        var reply = await f.State.ReadAsync("fleet", "driver", default);
+        Assert.Empty(reply.Errors); var child = Assert.Single(reply.Children);
+        Assert.Equal("terminal_failed", child.NextAction); Assert.Equal("failed", child.Outcome); Assert.Null(child.OutcomeIssue);
+    }
+
+    [Fact]
+    public async Task Read_Fingerprint_IsStableAcrossTimeOrderingAndNonTupleFieldsButChangesWithPhase()
+    {
+        using var f = new DriverFixture();
+        f.Temporal.Add("child-a", "UwePrImplementationWorkflow"); f.Temporal.Add("child-b", "UwePrImplementationWorkflow");
+        var first = await f.State.ReadAsync("fleet", "driver", default);
+        f.Temporal.Runs.Reverse();
+        f.Temporal.Descriptions["child-a"] = f.Temporal.Descriptions["child-a"] with { Repo = "example/other", IssueNumber = 99 };
+        f.Clock.Advance(TimeSpan.FromSeconds(31)); var unchanged = await f.State.ReadAsync("fleet", "driver", default);
+        Assert.False(unchanged.Cached); Assert.NotEqual(first.ComputedAt, unchanged.ComputedAt);
+        Assert.Equal(first.Fingerprint, unchanged.Fingerprint);
+        f.Temporal.Descriptions["child-a"] = f.Temporal.Descriptions["child-a"] with { Phase = "different-phase" };
+        f.Clock.Advance(TimeSpan.FromSeconds(31)); var changed = await f.State.ReadAsync("fleet", "driver", default);
+        Assert.NotEqual(unchanged.Fingerprint, changed.Fingerprint);
+    }
+
+    [Fact]
+    public async Task Read_Fingerprint_ChangesWhenOnlyTheImmutableOutcomeChanges()
+    {
+        using var f = new DriverFixture(); f.Temporal.Add("design", "UweDesignWorkflow", "Completed");
+        f.Temporal.Results["design"] = new("json/plain", "{\"IssueNumber\":42}");
+        var approved = await f.State.ReadAsync("fleet", "driver", default);
+        // Closed outcomes are immutable per run. Compare independently computed snapshots,
+        // not a rewrite of an outcome already cached by one service instance.
+        f.Temporal.Results["design"] = new("binary/null", null);
+        var fresh = new EpicDriverStateService(f.Services.GetRequiredService<IServiceScopeFactory>(), f.Temporal,
+            f.Linkage, f.Clock, new ConfigurationBuilder().Build(), NullLogger<EpicDriverStateService>.Instance);
+        var rejected = await fresh.ReadAsync("fleet", "driver", default);
+        var a = Assert.Single(approved.Children); var b = Assert.Single(rejected.Children);
+        Assert.Equal("approved", a.Outcome); Assert.Equal("not_approved", b.Outcome);
+        Assert.Equal(a, b with { Outcome = a.Outcome, OutcomeIssue = a.OutcomeIssue });
+        Assert.NotEqual(approved.Fingerprint, rejected.Fingerprint);
+    }
+
+    [Fact]
+    public async Task Read_GenericTemporalError_ReturnsErrorAndNoFingerprint()
+    {
+        using var f = new DriverFixture(); f.Temporal.FailDescribe = "driver";
+        var reply = await f.State.ReadAsync("fleet", "driver", default);
+        Assert.Contains("temporal_or_database_error", reply.Errors); Assert.Equal("none", reply.Fingerprint);
+        Assert.Empty(f.Temporal.Signals);
+    }
+
+    [Fact]
+    public async Task Read_FiftyChildrenAtTwoSecondsPerRead_CompletesInsideTheDeadline()
+    {
+        using var f = new DriverFixture();
+        for (var i = 0; i < 50; i++) f.Temporal.Add("child-" + i, "UwePrImplementationWorkflow");
+        var active = 0; var maximum = 0;
+        f.Temporal.BeforeHistory = async (_, ct) =>
+        {
+            var current = Interlocked.Increment(ref active);
+            int previous;
+            do { previous = Volatile.Read(ref maximum); if (current <= previous) break; }
+            while (Interlocked.CompareExchange(ref maximum, current, previous) != previous);
+            try { await Task.Delay(TimeSpan.FromSeconds(2), ct); }
+            finally { Interlocked.Decrement(ref active); }
+        };
+        var timer = Stopwatch.StartNew();
+        var reply = await f.State.ReadAsync("fleet", "driver", default).WaitAsync(TimeSpan.FromSeconds(45));
+        Assert.Empty(reply.Errors); Assert.False(reply.Truncated); Assert.Equal(50, reply.Children.Count);
+        Assert.InRange(maximum, 2, 8); Assert.True(timer.Elapsed < TimeSpan.FromSeconds(45));
+    }
+
     [Fact]
     public async Task Read_MissingExactRunAttribute_CannotApproveUsingStaleVisibility()
     {
@@ -124,6 +240,18 @@ public class EpicDriverStateServiceTests
         var state = await f.State.ReadAsync("fleet", "driver", default);
         Assert.Equal("invalid_result", Assert.Single(state.Children).Outcome);
         Assert.Null(Assert.Single(state.Children).OutcomeIssue);
+    }
+
+    [Fact]
+    public async Task Read_CallerCancellation_DoesNotCacheAnAbortedRequestAsADeadline()
+    {
+        using var f = new DriverFixture(); f.Temporal.Add("child", "UwePrImplementationWorkflow");
+        using var caller = new CancellationTokenSource();
+        f.Temporal.BeforeHistory = (_, ct) => { caller.Cancel(); return Task.FromCanceled(ct); };
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => f.State.ReadAsync("fleet", "driver", caller.Token));
+        f.Temporal.BeforeHistory = null;
+        var fresh = await f.State.ReadAsync("fleet", "driver", default);
+        Assert.False(fresh.Cached); Assert.Empty(fresh.Errors); Assert.Single(fresh.Children);
     }
 
     [Fact]

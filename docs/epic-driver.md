@@ -49,7 +49,8 @@ requires a complete independent Running-workflow/open-PR duplicate check.
 
 Replies, including errors, expire 30 seconds after their original `computedAt`.
 A cache hit changes only `cached`; it cannot renew expiry, clear errors or change
-the fingerprint. First reads after restart can hit the deadline while populating
+the fingerprint. Caller cancellation aborts without caching a partial deadline
+reply. First reads after restart can hit the deadline while populating
 immutable per-run linkage/outcome caches.
 
 Early exit additionally requires unchanged issue `updatedAt` and fingerprint,
@@ -86,6 +87,10 @@ per scan, targeting the exact run with only `decision: wake` and `blockerRef`.
 It never calls an agent, GitHub or chat. Lookback overlaps 60 seconds and caps at
 one hour; failed scans keep the watermark and failed sends keep triggers retryable.
 In-memory eligibility and trigger LRUs are each bounded at 4096 entries.
+After restart the trigger LRU is empty, so an already parked child can cause one
+initial gate-entered wake per driver; the one-wake-per-scan bound still applies.
+Expiry can also wake a driver for an already revoked grant: it is a harmless
+extra reconciliation hint, never renewed authority.
 
 A manual wake uses the existing signal tool, for example these arguments:
 

@@ -43,6 +43,9 @@ public class UniversalWorkflow
     /// </summary>
     internal const string SignalBufferPatchId = "uwe-signal-buffer-v1";
 
+    // Histories without this marker retain the final-iteration continue leak on replay.
+    internal const string LoopFinalContinuePatchId = "uwe-loop-final-continue-v1";
+
     /// <summary>
     /// Error type stamped on the refusal to emit an approver-only gate signal.
     ///
@@ -406,9 +409,10 @@ public class UniversalWorkflow
 
             if (_skipRemaining) return null;
         }
-        // A continue on the final iteration is consumed by this loop, just like break.
-        // Leaking it would skip the parent's exhaustion notice and waiter wake.
-        return lastResult is ControlFlow ? null : lastResult;
+        // New histories consume a final continue here, so the parent can notify and wake.
+        // Old histories must retain the leak: consuming it changes subsequent commands.
+        return lastResult is ControlFlow && Workflow.Patched(LoopFinalContinuePatchId)
+            ? null : lastResult;
     }
 
     private async Task<object?> ExecuteBranchAsync(BranchStep step)

@@ -24,6 +24,8 @@ public static class SearchAttributeTypeRegistry
         ["GateVisit"]   = AttributeType.Keyword,
         ["ReviewRef"]   = AttributeType.Keyword,
         ["ReviewScrub"] = AttributeType.Keyword,
+        ["GateRef"]     = AttributeType.Keyword,
+        ["Acceptance"]  = AttributeType.Keyword,
     };
 
     /// <summary>Returns the registered type for the attribute name, or null if unknown.</summary>

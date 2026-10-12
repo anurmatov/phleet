@@ -25,7 +25,7 @@ public sealed class SearchAttributeInitializer(
     /// Search attributes required by Fleet workflows.
     /// Add new attributes here — they will be registered across all configured namespaces.
     /// </summary>
-    private static readonly IReadOnlyDictionary<string, IndexedValueType> RequiredAttributes =
+    internal static readonly IReadOnlyDictionary<string, IndexedValueType> RequiredAttributes =
         new Dictionary<string, IndexedValueType>
         {
             ["IssueNumber"] = IndexedValueType.Int,
@@ -38,6 +38,8 @@ public sealed class SearchAttributeInitializer(
             ["GateVisit"]   = IndexedValueType.Keyword,   // #436
             ["ReviewRef"]   = IndexedValueType.Keyword,   // #436
             ["ReviewScrub"] = IndexedValueType.Keyword,   // #436
+            ["GateRef"]     = IndexedValueType.Keyword,
+            ["Acceptance"]  = IndexedValueType.Keyword,
         };
 
     public async Task StartAsync(CancellationToken cancellationToken)

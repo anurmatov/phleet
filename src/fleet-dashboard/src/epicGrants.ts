@@ -48,6 +48,8 @@ export function createBlockedReason(
   if (!parsed.ok) return parsed.error
   if (report === null || textAtValidation === null) return 'Validate the scope first.'
   if (textAtValidation !== currentText) return 'The scope changed since it was validated. Validate again.'
+  if (parsed.scope.mode === 'autonomous' && (!report.preflight || report.preflight.unresolved !== 0))
+    return 'The charter needs a resolved server preflight.'
   if (report.valid !== true) return 'The scope is not valid. Fix the errors in the report.'
   return null
 }
@@ -76,6 +78,7 @@ export function asValidationReport(body: unknown): ScopeValidationReport | null 
     workflows: Array.isArray(b.workflows) ? b.workflows as ScopeValidationReport['workflows'] : [],
     targets: Array.isArray(b.targets) ? b.targets as ScopeValidationReport['targets'] : [],
     expiresAt: typeof b.expiresAt === 'string' ? b.expiresAt : null,
+    ...(b.preflight && typeof b.preflight === 'object' ? { preflight: b.preflight as ScopeValidationReport['preflight'] } : {}),
   }
 }
 
@@ -146,4 +149,25 @@ export function applyRevoke(list: EpicGrantView[], updated: EpicGrantView): Epic
 export function applyRevokeToDetail<T extends EpicGrantView>(detail: T | null, updated: EpicGrantView): T | null {
   if (detail === null || detail.id !== updated.id) return detail
   return { ...detail, ...updated }
+}
+
+/** A draft only: this cannot activate a grant or replace server validation. */
+export function autonomyCharterDraft(scope: Record<string, unknown>): Record<string, unknown> {
+  return { ...scope, mode: 'autonomous', outcome: '', children: { repos: [], maxIssues: 0 },
+    adopt: [], limits: { maxDecisions: 20, maxDelegatedRuns: 12, maxBlockedRechecks: 3, maxTotalAcceptanceRounds: 10 },
+    acceptanceIsolation: 'isolated', plan: [], exclusions: [] }
+}
+
+/** Only exact server preflight identities can populate adoption; prose is never scope. */
+export function adoptPreflightRun(scope: Record<string, unknown>, item: Record<string, unknown>, selected: boolean): Record<string, unknown> {
+  const namespace = (scope.driver as Record<string, unknown> | undefined)?.namespace
+  if (item.source !== 'linked_run' || typeof namespace !== 'string' || typeof item.workflowId !== 'string'
+    || typeof item.runId !== 'string' || typeof item.repo !== 'string' || !Number.isSafeInteger(item.issue) || Number(item.issue) <= 0) return scope
+  const adopt = Array.isArray(scope.adopt) ? scope.adopt : []
+  const remaining = adopt.filter(a => !(a && a.namespace === namespace && a.workflowId === item.workflowId && a.runId === item.runId))
+  return { ...scope, adopt: selected ? [...remaining, { namespace, workflowId: item.workflowId, runId: item.runId, repo: item.repo, issue: item.issue }] : remaining }
+}
+export function preflightRunIsAdopted(scope: Record<string, unknown>, item: Record<string, unknown>): boolean {
+  const namespace = (scope.driver as Record<string, unknown> | undefined)?.namespace
+  return Array.isArray(scope.adopt) && scope.adopt.some(a => a && a.namespace === namespace && a.workflowId === item.workflowId && a.runId === item.runId)
 }

@@ -35,6 +35,10 @@ public static class EpicGrantGates
 public static class EpicGrantRefusal
 {
     public const string Disabled = "disabled";
+    public const string AutonomyDisabled = "autonomy_disabled";
+    public const string AcceptanceMissing = "acceptance_missing";
+    public const string Excluded = "excluded";
+    public const string BudgetExhausted = "budget_exhausted";
     public const string Caller = "caller";
     public const string BadRequest = "bad_request";
     public const string GrantInactive = "grant_inactive";
@@ -291,6 +295,7 @@ public class EpicGrantView
     public required string Id { get; init; }
     public required string Status { get; init; }
     public required string EffectiveStatus { get; init; }
+    public string Mode { get; init; } = "delegated";
     public required string ScopeSha256 { get; init; }
     public required string DriverNamespace { get; init; }
     public required string DriverWorkflowId { get; init; }
@@ -305,6 +310,10 @@ public class EpicGrantView
 public sealed class EpicGrantDetail : EpicGrantView
 {
     public required JsonElement Scope { get; init; }
+    public JsonElement? Preflight { get; set; }
+    public EpicGrantBudgets? Budgets { get; set; }
+    public IReadOnlyList<EpicGrantBindingView> Bindings { get; set; } = [];
+    public IReadOnlyList<EpicGrantRunView> Runs { get; set; } = [];
     public required IReadOnlyList<EpicGrantDecisionView> Decisions { get; init; }
 }
 
@@ -333,7 +342,9 @@ public sealed class ScopeValidationReport
     public DriverReport? Driver { get; set; }
     public List<WorkflowReport> Workflows { get; } = [];
     public List<TargetReport> Targets { get; } = [];
+    public List<TargetReport> Children { get; } = [];
     public DateTime? ExpiresAt { get; set; }
+    public EpicPreflightReport? Preflight { get; set; }
 
     /// <param name="Status">Temporal status name (<c>Running</c>, <c>Completed</c>, …), <c>not_found</c> or <c>unknown</c>.</param>
     public sealed record DriverReport(string Namespace, string WorkflowId, string RunId, string Status);
@@ -781,14 +792,15 @@ internal static class EpicJson
 /// Scoped: one instance per request, over that request's <see cref="OrchestratorDbContext"/>.
 /// </para>
 /// </remarks>
-public sealed class EpicGrantService(
+public sealed partial class EpicGrantService(
     OrchestratorDbContext db,
     IEpicGrantTemporal temporal,
     RepoVisibilityReader visibility,
     IOptions<EpicGrantOptions> options,
     IConfiguration configuration,
     TimeProvider clock,
-    ILogger<EpicGrantService> logger)
+    ILogger<EpicGrantService> logger,
+    EpicRunLinkage? linkage = null)
 {
     public const int MaxScopeBytes = 64 * 1024;
     private const string ApprovedDecision = "approved";
@@ -838,7 +850,16 @@ public sealed class EpicGrantService(
             .Where(d => d.GrantId == grantId)
             .OrderByDescending(d => d.Id)
             .ToListAsync(ct);
-        return ToDetail(grant, decisions, UtcNow);
+        var detail = ToDetail(grant, decisions, UtcNow);
+        if (grant.Mode == "autonomous" && EpicScopeParser.Parse(grant.ScopeJson, autonomyEnabled:true).Scope?.Autonomy is { } charter)
+        {
+            detail.Budgets = await ReadBudgetsAsync(grantId,charter,ct);
+            detail.Bindings = await db.EpicGrantBindings.AsNoTracking().Where(b => b.GrantId == grantId).OrderBy(b => b.Id)
+                .Select(b => new EpicGrantBindingView(b.Namespace,b.Repo,b.Issue,b.WorkflowId,b.RunId,b.ReviewRef,b.CreatedAt)).ToListAsync(ct);
+            detail.Runs = await db.EpicGrantRuns.AsNoTracking().Where(r => r.GrantId == grantId).OrderBy(r => r.Id)
+                .Select(r => new EpicGrantRunView(r.Namespace,r.WorkflowId,r.RunId,r.WorkflowType,r.Repo,r.Issue,r.MaxFixRound,r.FirstReservedAt)).ToListAsync(ct);
+        }
+        return detail;
     }
 
     // ── Create ───────────────────────────────────────────────────────────────
@@ -861,6 +882,8 @@ public sealed class EpicGrantService(
         {
             Id = Guid.NewGuid(),
             Status = EpicGrantStatus.Active,
+            Mode = scope.Mode,
+            PreflightJson = report.Preflight is null ? null : EpicGrantPreflight.CanonicalJson(report.Preflight),
             ScopeJson = body,
             ScopeSha256 = Sha256Hex(body),
             DriverNamespace = scope.Driver.Namespace,
@@ -870,6 +893,7 @@ public sealed class EpicGrantService(
             CreatedAt = UtcNow,
             ExpiresAt = scope.ExpiresAt.UtcDateTime,
         };
+        if (grant.PreflightJson is not null) grant.PreflightSha256 = Sha256Hex(grant.PreflightJson);
         db.EpicGrants.Add(grant);
         await db.SaveChangesAsync(ct);
         logger.LogInformation("EpicGrant created grant={GrantId} driver={DriverWorkflowId} expires={ExpiresAt:O}",
@@ -889,7 +913,7 @@ public sealed class EpicGrantService(
             return (report, null, null);
         }
 
-        var parse = EpicScopeParser.Parse(body);
+        var parse = EpicScopeParser.Parse(body, _options.AutonomyEnabled, _options.DeniedRepoSet());
         errors.AddRange(parse.Errors);
 
         if (!IsEnabled)
@@ -955,6 +979,17 @@ public sealed class EpicGrantService(
                 target.Repo, target.Issues, target.AllowPublic, seen, isDenied));
         }
 
+        if (parse.Autonomy is { } charter)
+            foreach (var child in charter.Children.Repos)
+            {
+                if (denied.Contains(child.Repo)) { errors.Add($"child repo {child.Repo} is denied"); continue; }
+                var read = await visibility.ReadAsync(child.Repo, ct);
+                if (read == RepoVisibility.Unknown) errors.Add($"child repo {child.Repo} visibility is unknown");
+                else if (read == RepoVisibility.Public && !child.AllowPublic) errors.Add($"child repo {child.Repo} needs allowPublic: true");
+                else if (read == RepoVisibility.Private && child.AllowPublic) errors.Add($"child repo {child.Repo} is not public; allowPublic is not allowed");
+                report.Children.Add(new(child.Repo, [], child.AllowPublic, VisibilityName(read), false));
+            }
+
         var served = new HashSet<string>(StringComparer.Ordinal);
         foreach (var workflow in parse.Workflows)
         {
@@ -992,6 +1027,16 @@ public sealed class EpicGrantService(
                 errors.Add($"gate {gate} is not served by any listed workflow");
 
         var scope = parse.Scope;
+        if (scope?.Autonomy is not null && errors.Count == 0)
+        {
+            try
+            {
+                report.Preflight = await ComputePreflightAsync(scope, report, cto!, ct);
+                if (report.Preflight.Unresolved != 0) errors.Add("preflight has unresolved items");
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch { errors.Add("preflight could not be computed"); }
+        }
         report.Valid = errors.Count == 0 && scope is not null;
         return (report, scope, cto);
     }
@@ -1082,6 +1127,21 @@ public sealed class EpicGrantService(
         }
         if (grant is null) return Refuse(EpicGrantRefusal.GrantInactive);
 
+        // D1a is independent of structural parsing of the immutable stored scope.
+        if (grant.Mode == "autonomous" && !_options.AutonomyEnabled)
+            return Refuse(EpicGrantRefusal.AutonomyDisabled);
+        EpicPreflightVisibility? recorded = null;
+        if (dryRun && grant.Mode == "autonomous")
+        {
+            recorded = EpicGrantPreflight.ReadStoredVisibility(grant.PreflightJson, grant.PreflightSha256);
+            if (!recorded.Valid)
+            {
+                logger.LogWarning("EpicGrant preflight_integrity grant={GrantId} reader=dry_run result={Result}",
+                    grantId, recorded.Failure);
+                return Refuse(EpicGrantRefusal.Unknown);
+            }
+        }
+
         // D1 — caller, request shape.
         var cto = ConfiguredCto;
         if (cto is null
@@ -1100,8 +1160,9 @@ public sealed class EpicGrantService(
         if (!(UtcNow < AsUtc(grant.ExpiresAt))) return Refuse(EpicGrantRefusal.Expired);
         if (!string.Equals(Sha256Hex(grant.ScopeJson), grant.ScopeSha256, StringComparison.OrdinalIgnoreCase))
             return Refuse(EpicGrantRefusal.ScopeTampered);
-        if (EpicScopeParser.Parse(grant.ScopeJson).Scope is not { } scope)
+        if (EpicScopeParser.Parse(grant.ScopeJson, autonomyEnabled: true).Scope is not { } scope)
             return Refuse(EpicGrantRefusal.ScopeTampered);
+        if (grant.Mode != scope.Mode) return Refuse(EpicGrantRefusal.ScopeTampered);
         var driver = scope.Driver;
 
         // D3 — the driver run, at its exact run id, is Running.
@@ -1121,18 +1182,21 @@ public sealed class EpicGrantService(
         EpicRunDescription target;
         EpicRunHistory history;
         JsonElement input;
+        EpicScopeAdoption? adopted = null;
         try
         {
             var described = await temporal.DescribeAsync(ns, workflowId, null, ct);
             if (described is null || !described.IsRunning || string.IsNullOrEmpty(described.RunId)
-                || described.StartTime is not { } started || started < AsUtcOffset(grant.CreatedAt))
+                || described.StartTime is not { } started)
                 return Refuse(EpicGrantRefusal.NotLinked);
             target = described;
+            adopted = scope.Autonomy?.Adopt.FirstOrDefault(a => a.Namespace == ns && a.WorkflowId == workflowId && a.RunId == target.RunId);
+            if (started < AsUtcOffset(grant.CreatedAt) && adopted is null) return Refuse(EpicGrantRefusal.NotLinked);
 
             history = await temporal.ReadRunAsync(ns, workflowId, target.RunId, ct)
                 ?? throw new InvalidOperationException("target run has no history page");
             input = ParseInput(history.InputJson);
-            if (!await EpicRunLinkage.IsLinkedAsync(temporal, ns, target, input, driver, ct))
+            if (adopted is null && !await EpicRunLinkage.IsLinkedAsync(temporal, ns, target, input, driver, ct))
                 return Refuse(EpicGrantRefusal.NotLinked);
         }
         catch (Exception ex)
@@ -1162,20 +1226,38 @@ public sealed class EpicGrantService(
         if (!scope.Gates.Contains(gate, StringComparer.Ordinal) || !EpicJson.GuardedGates(stored).Contains(gate))
             return Refuse(EpicGrantRefusal.GateOutOfScope);
 
-        // D6 — repo and issue are targets; not denied; visibility known and allowed.
+        // D6′ — listed, previously bound, or eligible CREATE issue; deny list always wins.
         var repo = EpicJson.String(input, "Repo");
         var issue = EpicJson.PositiveInteger(input, gate == EpicGrantGates.DesignApproval ? "ExistingIssueNumber" : "IssueNumber");
-        var targetEntry = repo is null || issue is null
-            ? null
-            : scope.Targets.FirstOrDefault(t => string.Equals(t.Repo, repo, StringComparison.OrdinalIgnoreCase)
-                                                && t.Issues.Contains(issue.Value));
-        if (targetEntry is null) return Refuse(EpicGrantRefusal.TargetOutOfScope);
-        if (_options.DeniedRepoSet().Contains(targetEntry.Repo)) return Refuse(EpicGrantRefusal.TargetOutOfScope);
-        if (dryRun) return Refuse(EpicGrantRefusal.VisibilityUnknown);
-        var seen = await visibility.ReadAsync(targetEntry.Repo, ct);
+        if (scope.Autonomy is not null && gate == EpicGrantGates.DesignApproval) issue ??= target.IssueNumber;
+        if (repo is null || issue is null) return Refuse(EpicGrantRefusal.TargetOutOfScope);
+        if (adopted is not null && (!SameRepo(repo,adopted.Repo) || issue != adopted.Issue))
+            return Refuse(EpicGrantRefusal.TargetOutOfScope);
+        var targetEntry = scope.Targets.FirstOrDefault(t => SameRepo(t.Repo, repo) && t.Issues.Contains(issue.Value));
+        var bound = scope.Autonomy is not null && await db.EpicGrantBindings.AsNoTracking()
+            .AnyAsync(b => b.GrantId == id && b.Repo == repo.ToLower() && b.Issue == issue, ct);
+        var childRepo = scope.Autonomy?.Children.Repos.FirstOrDefault(r => SameRepo(r.Repo, repo));
+        var needsBinding = targetEntry is null && !bound && childRepo is not null
+            && gate == EpicGrantGates.DesignApproval && target.WorkflowType == "UweDesignWorkflow"
+            && adopted is null && target.StartTime >= AsUtcOffset(grant.CreatedAt)
+            && EpicJson.Property(input,"ExistingIssueNumber") is null
+            && target.IssueNumber == issue && EpicJson.String(input,"AutonomyGrantId") == FormatId(id)
+            && HasScrubToken(target.ReviewScrub,"scope-fit");
+        if (targetEntry is null && !bound && !needsBinding) return Refuse(EpicGrantRefusal.TargetOutOfScope);
+        if (_options.DeniedRepoSet().Contains(repo)) return Refuse(EpicGrantRefusal.TargetOutOfScope);
+        if (dryRun && scope.Autonomy is null) return Refuse(EpicGrantRefusal.VisibilityUnknown);
+        var seen = dryRun
+            ? recorded!.Visibility.GetValueOrDefault(repo) switch
+                { "public" => RepoVisibility.Public, "private" => RepoVisibility.Private, _ => RepoVisibility.Unknown }
+            : await visibility.ReadAsync(repo, ct);
         if (seen == RepoVisibility.Unknown) return Refuse(EpicGrantRefusal.VisibilityUnknown);
-        if (seen == RepoVisibility.Public && !targetEntry.AllowPublic) return Refuse(EpicGrantRefusal.TargetOutOfScope);
+        if (seen == RepoVisibility.Public && !(targetEntry?.AllowPublic ?? childRepo?.AllowPublic ?? false))
+            return Refuse(EpicGrantRefusal.TargetOutOfScope);
         var isPublic = seen == RepoVisibility.Public;
+        if (scope.Autonomy is { } charter && (charter.Exclusions.Contains(workflowId,StringComparer.Ordinal)
+            || charter.Plan.Any(p => p.Issue is not null && p.Issue == issue && SameRepo(p.Repo,repo)
+                && p.Workflow == target.WorkflowType && charter.Exclusions.Contains(p.Id,StringComparer.Ordinal))))
+            return Refuse(EpicGrantRefusal.Excluded);
 
         // D7 — the author is not the decider.
         var author = gate == EpicGrantGates.DocReview
@@ -1189,12 +1271,29 @@ public sealed class EpicGrantService(
             return Refuse(EpicGrantRefusal.StaleVisit);
         if (string.IsNullOrEmpty(target.ReviewRef) || target.ReviewRef != artifactRef)
             return Refuse(EpicGrantRefusal.StaleArtifact);
-        if (isPublic && target.ReviewScrub != "pass")
+        if (adopted?.ArtifactRef is { } adoptedRef && adoptedRef != artifactRef)
+            return Refuse(EpicGrantRefusal.StaleArtifact);
+        if (scope.Autonomy is not null && gate == EpicGrantGates.MergeApproval)
+            return Refuse(EpicGrantRefusal.AcceptanceMissing);
+        if (isPublic && (scope.Autonomy is null ? target.ReviewScrub != "pass" : !HasScrubToken(target.ReviewScrub, "pass")))
             return Refuse(EpicGrantRefusal.ScrubMissing);
+
+        if (dryRun)
+        {
+            var budgets = await ReadBudgetsAsync(id,scope.Autonomy!,ct);
+            var recordedRun = await db.EpicGrantRuns.AsNoTracking().AnyAsync(r => r.GrantId==id && r.Namespace==ns
+                && r.WorkflowId==workflowId && r.RunId==runId,ct);
+            if (budgets.Decisions.Used >= budgets.Decisions.Max
+                || !recordedRun && budgets.DelegatedRuns.Used >= budgets.DelegatedRuns.Max
+                || needsBinding && budgets.ChildIssues.Used >= budgets.ChildIssues.Max)
+                return Refuse(EpicGrantRefusal.BudgetExhausted);
+            return (new EpicGrantDecisionResult("eligible", null, null), null);
+        }
 
         // D11 — reserve the visit.
         var reservation = await ReserveAsync(id, ns, workflowId, runId, gate, visitId, artifactRef,
-            request.Evidence!, request.Caller!.Trim(), ct);
+            request.Evidence!, request.Caller!.Trim(), ct,
+            scope.Autonomy is null ? null : new(target.WorkflowType, repo, issue, needsBinding));
         if (reservation.DecisionId is not { } decisionId)
             return Refuse(reservation.Refusal ?? EpicGrantRefusal.Unknown, reservation.Error);
 
@@ -1233,6 +1332,7 @@ public sealed class EpicGrantService(
             : (new EpicGrantDecisionResult(EpicGrantDecisionResults.SendFailed, EpicGrantDecisionResults.SendFailed, decisionId), sendError);
     }
 
+    internal sealed record AutonomyReservation(string WorkflowType, string Repo, long? Issue, bool NeedsBinding);
     internal sealed record Reservation(long? DecisionId, string? Refusal, Exception? Error);
 
     /// <summary>
@@ -1247,7 +1347,7 @@ public sealed class EpicGrantService(
     /// </remarks>
     internal async Task<Reservation> ReserveAsync(
         Guid grantId, string ns, string workflowId, string runId, string gate,
-        string visitId, string artifactRef, string evidence, string caller, CancellationToken ct)
+        string visitId, string artifactRef, string evidence, string caller, CancellationToken ct, AutonomyReservation? autonomy = null)
     {
         var strategy = db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
@@ -1261,6 +1361,38 @@ public sealed class EpicGrantService(
                 var now = UtcNow;
                 if (!(now < AsUtc(grant.ExpiresAt)))
                     return new Reservation(null, EpicGrantRefusal.Expired, null);
+
+                if (grant.Mode == "autonomous")
+                {
+                    if (!_options.AutonomyEnabled) return new(null, EpicGrantRefusal.AutonomyDisabled, null);
+                    var charter = EpicScopeParser.Parse(grant.ScopeJson, autonomyEnabled: true).Scope?.Autonomy;
+                    if (charter is null || autonomy is null || Sha256Hex(grant.ScopeJson) != grant.ScopeSha256)
+                        return new(null, EpicGrantRefusal.ScopeTampered, null);
+                    if (await db.EpicGrantDecisions.CountAsync(d => d.GrantId == grantId, ct) >= charter.Limits.MaxDecisions)
+                    {
+                        logger.LogWarning("EpicGrant budget_exhausted grant={GrantId} budget=maxDecisions",grantId);
+                        return new(null, EpicGrantRefusal.BudgetExhausted, null);
+                    }
+                    if (!await db.EpicGrantRuns.AnyAsync(r => r.GrantId == grantId && r.Namespace == ns
+                        && r.WorkflowId == workflowId && r.RunId == runId, ct))
+                    {
+                        if (await db.EpicGrantRuns.CountAsync(r => r.GrantId == grantId, ct) >= charter.Limits.MaxDelegatedRuns)
+                        {
+                            logger.LogWarning("EpicGrant budget_exhausted grant={GrantId} budget=maxDelegatedRuns",grantId);
+                            return new(null, EpicGrantRefusal.BudgetExhausted, null);
+                        }
+                        db.EpicGrantRuns.Add(new() { GrantId=grantId, Namespace=ns, WorkflowId=workflowId, RunId=runId,
+                            WorkflowType=autonomy.WorkflowType, Repo=autonomy.Repo.ToLowerInvariant(), Issue=autonomy.Issue, FirstReservedAt=now });
+                    }
+                    if (autonomy.NeedsBinding && !await db.EpicGrantBindings.AnyAsync(b => b.GrantId == grantId
+                        && b.Repo == autonomy.Repo.ToLower() && b.Issue == autonomy.Issue, ct))
+                    {
+                        if (await db.EpicGrantBindings.CountAsync(b => b.GrantId == grantId, ct) >= charter.Children.MaxIssues)
+                        { logger.LogWarning("EpicGrant budget_exhausted grant={GrantId} budget=maxIssues",grantId); db.ChangeTracker.Clear(); return new(null, EpicGrantRefusal.BudgetExhausted, null); }
+                        db.EpicGrantBindings.Add(new() { GrantId=grantId, Namespace=ns, Repo=autonomy.Repo.ToLowerInvariant(),
+                            Issue=autonomy.Issue!.Value, WorkflowId=workflowId, RunId=runId, ReviewRef=artifactRef, CreatedAt=now });
+                    }
+                }
 
                 // From the insert onward the caller's token is not honoured: a cancellation
                 // between a committed insert and the send would leave a `reserved` row with nothing
@@ -1316,6 +1448,9 @@ public sealed class EpicGrantService(
     /// <summary>A grant id in its canonical 36-character <c>D</c> form, or null.</summary>
     private static Guid? ParseId(string? id) =>
         Guid.TryParseExact(id, "D", out var parsed) ? parsed : null;
+
+    private static bool HasScrubToken(string? scrub, string token) =>
+        (scrub ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries).Contains(token, StringComparer.Ordinal);
 
     private static string FormatId(Guid id) => id.ToString("D");
 
@@ -1397,11 +1532,18 @@ public sealed class EpicGrantService(
             grantId, workflowId, gate, result.Result, result.Reason ?? "none");
     }
 
+    private static JsonElement? ParseEvidence(string? json)
+    {
+        try { return json is null ? null : JsonSerializer.Deserialize<JsonElement>(json); }
+        catch (JsonException) { return null; }
+    }
+
     private static EpicGrantView ToView(EpicGrant g, DateTime now) => new()
     {
         Id = FormatId(g.Id),
         Status = g.Status,
         EffectiveStatus = EffectiveStatus(g, now),
+        Mode = g.Mode,
         ScopeSha256 = g.ScopeSha256,
         DriverNamespace = g.DriverNamespace,
         DriverWorkflowId = g.DriverWorkflowId,
@@ -1431,6 +1573,7 @@ public sealed class EpicGrantService(
             Id = FormatId(g.Id),
             Status = g.Status,
             EffectiveStatus = EffectiveStatus(g, now),
+            Mode = g.Mode,
             ScopeSha256 = g.ScopeSha256,
             DriverNamespace = g.DriverNamespace,
             DriverWorkflowId = g.DriverWorkflowId,
@@ -1441,6 +1584,7 @@ public sealed class EpicGrantService(
             RevokedAt = g.RevokedAt is { } revoked ? AsUtc(revoked) : null,
             RevokeReason = g.RevokeReason,
             Scope = scope,
+            Preflight = ParseEvidence(g.PreflightJson),
             Decisions = decisions.Select(d => new EpicGrantDecisionView
             {
                 Id = d.Id,

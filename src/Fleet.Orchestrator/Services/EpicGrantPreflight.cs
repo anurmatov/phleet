@@ -11,6 +11,28 @@ internal sealed record EpicPreflightVisibility(
 /// <summary>Stored-evidence checks shared by the autonomous preflight readers.</summary>
 internal static class EpicGrantPreflight
 {
+    public static string CanonicalJson<T>(T value)
+    {
+        var element = JsonSerializer.SerializeToElement(value, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream)) Write(element, writer);
+        return Encoding.UTF8.GetString(stream.ToArray());
+
+        static void Write(JsonElement element, Utf8JsonWriter writer)
+        {
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                writer.WriteStartObject();
+                foreach (var p in element.EnumerateObject().OrderBy(p => p.Name, StringComparer.Ordinal))
+                { writer.WritePropertyName(p.Name); Write(p.Value, writer); }
+                writer.WriteEndObject();
+            }
+            else if (element.ValueKind == JsonValueKind.Array)
+            { writer.WriteStartArray(); foreach (var item in element.EnumerateArray()) Write(item, writer); writer.WriteEndArray(); }
+            else element.WriteTo(writer);
+        }
+    }
+
     // Callers must audit the returned failure and refuse before using any cached evidence.
     // Never normalize the stored JSON before hashing: whitespace is part of its evidence.
     public static EpicPreflightVisibility ReadStoredVisibility(string? json, string? sha256)

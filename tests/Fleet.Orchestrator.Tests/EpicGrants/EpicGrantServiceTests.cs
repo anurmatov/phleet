@@ -54,13 +54,14 @@ internal sealed class FakeRun
     public string? GateVisit { get; set; }
     public string? ReviewRef { get; set; }
     public string? ReviewScrub { get; set; }
+    public long? IssueNumber { get; set; }
     public JsonObject? Input { get; set; } = new();
     public string? DefinitionName { get; set; }
     public int? DefinitionVersion { get; set; }
     public bool HistoryMissing { get; set; }
 
     public EpicRunDescription Describe() =>
-        new(Status, RunId, Type, StartTime, ParentId, ParentRunId, GateVisit, ReviewRef, ReviewScrub);
+        new(Status, RunId, Type, StartTime, ParentId, ParentRunId, GateVisit, ReviewRef, ReviewScrub, IssueNumber);
 }
 
 internal sealed record SentSignal(string Namespace, string WorkflowId, string RunId, string SignalName, string PayloadJson);
@@ -210,11 +211,11 @@ internal sealed class EpicGrantWorld(Func<OrchestratorDbContext> newDb)
 
     public OrchestratorDbContext NewDb() => newDb();
 
-    public EpicGrantService Service(OrchestratorDbContext db) => new(
+    public EpicGrantService Service(OrchestratorDbContext db, EpicRunLinkage? linkage = null) => new(
         db, Temporal,
         new RepoVisibilityReader(new HttpClient(GitHub), Microsoft.Extensions.Options.Options.Create(Options),
             NullLogger<RepoVisibilityReader>.Instance),
-        Microsoft.Extensions.Options.Options.Create(Options), Configuration, Clock, Log);
+        Microsoft.Extensions.Options.Options.Create(Options), Configuration, Clock, Log, linkage);
 
     /// <summary>Seeds definitions, the driver, the grant and the default PR run.</summary>
     public async Task InitializeAsync()
@@ -1302,6 +1303,7 @@ public sealed class EpicGrantEndpointTests : IAsyncLifetime
             new[]
             {
                 "GET /api/epic-grants", "GET /api/epic-grants/{id}",
+            "GET /api/epic-grants/{id}/admission",
                 "POST /api/epic-grants", "POST /api/epic-grants/validate",
                 "POST /api/epic-grants/{id}/decisions", "POST /api/epic-grants/{id}/revoke",
             }.OrderBy(r => r, StringComparer.Ordinal),

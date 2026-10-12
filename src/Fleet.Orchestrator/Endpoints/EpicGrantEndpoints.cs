@@ -45,6 +45,21 @@ public static class EpicGrantEndpoints
                 : Results.Ok(grant);
         });
 
+        // Advisory only. This route never creates a run, reservation, or binding.
+        app.MapGet("/api/epic-grants/{id}/admission", async (string id, HttpRequest request, IServiceScopeFactory scopes, CancellationToken ct) =>
+        {
+            using var scope = scopes.CreateScope();
+            if (Service(scope) is not { } service) return Results.Ok(new { result = "deny", reason = "unknown", needsBinding = false });
+            var rawIssue = request.Query["issue"].ToString();
+            long? issue = null;
+            if (rawIssue.Length != 0)
+            {
+                if (!long.TryParse(rawIssue, out var parsed) || parsed <= 0) return Results.Ok(new { result = "deny", reason = "target_out_of_scope", needsBinding = false });
+                issue = parsed;
+            }
+            return Results.Ok(await service.AdmissionAsync(id,request.Query["workflowType"],request.Query["repo"],issue,request.Query["planItem"],ct));
+        });
+
         // Dry run of creation: every check, nothing stored. 200 whenever the body is JSON.
         app.MapPost("/api/epic-grants/validate", async (HttpRequest request, IServiceScopeFactory scopes, CancellationToken ct) =>
         {

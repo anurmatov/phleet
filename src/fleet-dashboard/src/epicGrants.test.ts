@@ -4,7 +4,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { EpicGrantDecisionView, EpicGrantDetail, EpicGrantView, ScopeValidationReport } from './types'
 import {
-  DELIVERY_UNKNOWN_AFTER_MS, applyRevoke, applyRevokeToDetail, asValidationReport, canCreate,
+  adoptPreflightRun, preflightRunIsAdopted, autonomyCharterDraft, DELIVERY_UNKNOWN_AFTER_MS, applyRevoke, applyRevokeToDetail, asValidationReport, canCreate,
   canRevoke, createBlockedReason, isDeliveryUnknown, isPublicTarget, parseScopeText,
   responseErrorMessage, revokeRequestBody, scopeRequestBody, shortHash, statusLabel,
 } from './epicGrants.ts'
@@ -204,4 +204,36 @@ test('shortHash: 12 characters plus an ellipsis; short or missing values are unc
   assert.equal(shortHash(''), '')
   assert.equal(shortHash(null), '')
   assert.equal(shortHash(undefined), '')
+})
+
+
+test('charter draft preserves immutable driver pins but grants no new issue scope', () => {
+  const original = JSON.parse(SCOPE_TEXT)
+  const draft = autonomyCharterDraft(original)
+  assert.deepEqual(draft.driver, original.driver)
+  assert.deepEqual(draft.workflows, original.workflows)
+  assert.deepEqual(draft.children, { repos: [], maxIssues: 0 })
+  assert.deepEqual(draft.plan, [])
+  assert.equal(draft.acceptanceIsolation, 'isolated')
+  assert.equal(original.mode, undefined)
+})
+test('autonomous create requires fresh resolved preflight, legacy remains unchanged', () => {
+  const text = JSON.stringify(autonomyCharterDraft(JSON.parse(SCOPE_TEXT)))
+  assert.match(createBlockedReason(report(), text, text)!, /preflight/)
+  const preflight = { items: [], unresolved: 1, sha256: 'a'.repeat(64), visibility: {} }
+  assert.match(createBlockedReason(report({ preflight }), text, text)!, /preflight/)
+  assert.equal(createBlockedReason(report({ preflight: { ...preflight, unresolved: 0 } }), text, text), null)
+  assert.equal(createBlockedReason(report(), SCOPE_TEXT, SCOPE_TEXT), null)
+})
+
+
+test('adoption checkbox records only exact server run ids and removing it preserves other entries', () => {
+  const scope = autonomyCharterDraft(JSON.parse(SCOPE_TEXT))
+  const item = { source: 'linked_run', workflowId: 'child-example', runId: 'run-example', repo: 'example-org/example-repo', issue: 12 }
+  const adopted = adoptPreflightRun(scope, item, true)
+  assert.deepEqual(adopted.adopt, [{ namespace: 'fleet', workflowId: item.workflowId, runId: item.runId, repo: item.repo, issue: 12 }])
+  assert.equal(preflightRunIsAdopted(adopted, item), true)
+  assert.equal(preflightRunIsAdopted(adopted, { ...item, runId: 'new-run' }), false)
+  assert.deepEqual(adoptPreflightRun(adopted, item, false).adopt, [])
+  assert.equal(adoptPreflightRun(scope, { ...item, issue: null }, true), scope)
 })

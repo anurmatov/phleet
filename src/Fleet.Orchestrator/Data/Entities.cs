@@ -441,6 +441,10 @@ public class EpicGrant
     /// <summary><see cref="EpicGrantStatus.Active"/> or <see cref="EpicGrantStatus.Revoked"/>.</summary>
     public required string Status { get; set; }
 
+    public string Mode { get; set; } = "delegated";
+    public string? PreflightJson { get; set; }
+    public string? PreflightSha256 { get; set; }
+
     public required string ScopeJson { get; set; }
     public required string ScopeSha256 { get; set; }
     public required string DriverNamespace { get; set; }
@@ -454,6 +458,37 @@ public class EpicGrant
     public DateTime ExpiresAt { get; set; }
     public DateTime? RevokedAt { get; set; }
     public string? RevokeReason { get; set; }
+}
+
+/// <summary>Permanent server-owned issue binding; inserted only with a decision reservation.</summary>
+public class EpicGrantBinding
+{
+    public long Id { get; set; }
+    public Guid GrantId { get; set; }
+    public required string Namespace { get; set; }
+    public required string Repo { get; set; }
+    public long Issue { get; set; }
+    public required string WorkflowId { get; set; }
+    public required string RunId { get; set; }
+    public required string ReviewRef { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public EpicGrant Grant { get; set; } = null!;
+}
+
+/// <summary>Permanent budget record for an exact run, including unsuccessful sends.</summary>
+public class EpicGrantRun
+{
+    public long Id { get; set; }
+    public Guid GrantId { get; set; }
+    public required string Namespace { get; set; }
+    public required string WorkflowId { get; set; }
+    public required string RunId { get; set; }
+    public required string WorkflowType { get; set; }
+    public required string Repo { get; set; }
+    public long? Issue { get; set; }
+    public int MaxFixRound { get; set; }
+    public DateTime FirstReservedAt { get; set; }
+    public EpicGrant Grant { get; set; } = null!;
 }
 
 /// <summary>Valid values for <see cref="EpicGrant.Status"/>.</summary>

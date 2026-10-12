@@ -132,3 +132,36 @@ restores the prior definition as a new version, or reverts code (no schema chang
 Never restart Telegram for this feature, restore a DB, change grant authority or
 migrate running workflows as an implicit consequence. A new driver run needs a
 new grant. Charter admission/budgets and plan scheduling belong to later stages.
+
+## Autonomous charter dispatch (stage 2)
+
+With no active autonomous grant, retain the legacy dispatch rule. With one, read
+its immutable scope and plan, call admission before every start, then complete
+the existing independent duplicate-owner check. Error, partial visibility or
+deny means start nothing and record the reason. Admission is not approval.
+
+Process ready items in plan order only after all `after` dependencies are done.
+Start at most two per tick; more ready work requests one existing self wake.
+Use `<Type>-<repo-name>-<plan-id>-d<first8-driver-run-id>-a<n>` with reject_duplicate,
+three attempts maximum. Retry only Failed or TimedOut. Canceled, Terminated,
+Completed without verified done, unknown state and a third failure stop automatic
+redispatch with attempt_canceled, attempt_terminated, attempt_completed_not_done,
+attempt_status_unknown or attempts_exhausted. Write the exact reason and attempt
+ids to the checklist, `human:charter:<reason>:<plan-id>` as next action, and one
+human ask. Never reset a run or reuse an attempt id to evade adoption or budgets.
+
+Pass WaiterWorkflowId to every child, AutonomyGrantId to Design/DesignToPr and
+RequireAcceptance=true to PR/DesignToPr. A design is done only with the exact
+approved result and matching issue; PR requires MERGED and non-null mergedAt;
+DesignToPr needs both linked outcomes. A CREATE row records its returned issue,
+not an issue inferred from prose. An in-flight/start is working; all remaining
+human gates is blocked except doc-review; missing charter authority is
+needs-authority. Parked eligible autonomous gates can emit cto_decide only after
+the read-only grant checks succeed; the independent one-send procedure is unchanged.
+
+State adds grant mode and permanent budgets to the fingerprint. Autonomous state
+requests recheck stored preflight rather than reuse an unchecked snapshot;
+malformed/missing evidence stays human_decide with eligibility unknown.
+No new workflow steps, sleeps, search attributes or live definition changes are
+introduced by these source seeds. [Charter rollout and rollback](epic-grants.md#autonomy-charters-stage-2-default-off)
+remain separate human-approved operations; source tests do not establish deployment.

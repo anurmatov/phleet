@@ -13,7 +13,7 @@ using Temporalio.Worker;
 namespace Fleet.Temporal.Tests.Engine;
 
 // The production dynamic engine interprets the shipped seed; only owner/status IO is stubbed.
-public sealed class AcceptanceScenarioTests
+public sealed partial class AcceptanceScenarioTests
 {
     private static readonly string Head = new('a', 40);
 

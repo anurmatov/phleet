@@ -3,9 +3,10 @@
 Contract: [#434](https://github.com/anurmatov/phleet/issues/434), overridden by
 [#441 revision 3](https://github.com/anurmatov/phleet/issues/441).
 This is the required contract, not a record of deployment or acceptance.
-The draft PR still requires the revised parent definition and parent scenario
-evidence before readiness. Nothing here authorizes activation of the
-acceptance/cleanup children.
+The parent, acceptance and cleanup seeds are source definitions with local
+definition/scenario tests. CI, independent review and exact-head isolated
+operator acceptance remain separate gates. Nothing here activates a live
+definition or claims a deployment.
 
 ## Validator interface
 

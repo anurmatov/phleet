@@ -180,7 +180,7 @@ public sealed class SeedEpicGrantDefinitionTests
         var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", PrInput(), Respond, async (handle, h) =>
         {
             await h.WaitForGateVisitAsync(handle, "merge-approval:1");
-            await handle.SignalAsync("merge-approval", [Json("""{"Decision":"approved"}""")]);
+            await h.SignalHumanApprovalAsync(handle);
         });
 
         var merge = Assert.Single(run.Calls, c => c.Step == "phase4_merge");
@@ -198,62 +198,37 @@ public sealed class SeedEpicGrantDefinitionTests
         };
     }
 
-    /// <summary>
-    /// A review that does not attest the head (here: no REVIEWED_REF line) publishes an empty ref,
-    /// so a delegated approval can never match; the human path still works.
-    /// </summary>
     [Fact]
-    public async Task Pr_UnattestedReview_PublishesNoRef_AndOnlyAHumanCanApprove()
+    public async Task Pr_UnattestedReview_NeverPublishesOrReachesTheMergeGate()
     {
-        var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", PrInput(), Respond, async (handle, h) =>
-        {
-            await h.WaitForGateVisitAsync(handle, "merge-approval:1");
-            await handle.SignalAsync("merge-approval", [Delegated("merge-approval:1", HeadA)]);
-            await handle.SignalAsync("merge-approval", [Json("""{"Decision":"approved"}""")]);
-        });
-
-        Assert.Equal(["", ""], run.Upserts("ReviewRef"));
-        Assert.Equal(1, run.Discards);
-        Assert.Single(run.Calls, c => c.Step == "phase4_merge");
-        Assert.Equal(["", ""], run.Upserts("ReviewScrub"));
-
+        var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", PrInput(), Respond, (_, _) => Task.CompletedTask);
+        Assert.All(run.Upserts("ReviewRef"), value => Assert.Equal("", value));
+        Assert.Empty(run.Upserts("GateRef"));
+        Assert.DoesNotContain(run.Calls, c => c.Step is "phase4_merge" or "phase4_merge_pinned");
+        Assert.Equal(5, run.ConsensusInputs.Count);
         static string Respond(Call call) => call.Step switch
         {
             "phase1_implement" => $"done\nPR_URL: {PrUrl}\nHEAD_SHA: {HeadA}",
-            "verify_merge_status" => PrState(merged: true),
-            "prepare" => "PREP: NO_DOC",
             $"review-{Reviewer}" => Review("approved", reviewedRef: null, scrub: "pass"),
             _ => "ok",
         };
     }
 
-    /// <summary>
-    /// Review round 1, finding 2: a human <c>changes_requested</c> withdraws the published ref. When
-    /// the follow-up review finds the concern unwarranted, the gate is re-entered WITHOUT a new
-    /// review, so it must be human-only: a delegated approval naming the old ref (even for the new
-    /// visit) is discarded, and only a human can approve.
-    /// </summary>
     [Fact]
-    public async Task Pr_HumanChangesRequested_ThenTheReviewDisagrees_ReparksHumanOnly()
+    public async Task Pr_FeedbackReviewApproval_ReturnsToFreshAttestedConsensus()
     {
         var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", PrInput(), Respond, async (handle, h) =>
         {
             await h.WaitForGateVisitAsync(handle, "merge-approval:1");
             await handle.SignalAsync("merge-approval", [Json("""{"Decision":"changes_requested","Comment":"is this safe?"}""")]);
-
             await h.WaitForGateVisitAsync(handle, "merge-approval:2");
-            Assert.Equal("", h.LastUpsert(await handle.FetchHistoryAsync(), "ReviewRef"));
-            await handle.SignalAsync("merge-approval", [Delegated("merge-approval:2", HeadA)]);
-            await handle.SignalAsync("merge-approval", [Json("""{"Decision":"approved"}""")]);
+            Assert.Equal(HeadA, h.LastUpsert(await handle.FetchHistoryAsync(), "ReviewRef"));
+            await handle.SignalAsync("merge-approval", [Delegated("merge-approval:1", HeadA)]);
+            await h.SignalHumanApprovalAsync(handle);
         });
-
-        Assert.Equal(["", HeadA, ""], run.Upserts("ReviewRef"));
+        Assert.Equal(2, run.ConsensusInputs.Count(i => i.ReviewRef is not null));
         Assert.Equal(1, run.Discards);
-        Assert.Single(run.Calls, c => c.Step == "phase4_merge");
-        Assert.DoesNotContain(run.Calls, c => c.Step == "phase4_merge_pinned");
-        // No second PR review ran: the gate was re-entered on the CEO-feedback review's approval.
-        Assert.Single(run.ConsensusInputs, i => i.ReviewRef is not null);
-
+        Assert.Contains($"--match-head-commit {HeadA}", Assert.Single(run.Calls, c => c.Step == "phase4_merge").Instruction);
         static string Respond(Call call) => call.Step switch
         {
             "phase1_implement" => $"done\nPR_URL: {PrUrl}\nHEAD_SHA: {HeadA}",
@@ -618,6 +593,7 @@ internal sealed class SeedHarness
     private static readonly JsonSerializerOptions WebOptions = new(JsonSerializerDefaults.Web);
 
     private readonly List<Call> _calls = [];
+    private WorkflowEnvironment? _environment;
     private readonly List<ConsensusCall> _consensus = [];
 
     public IReadOnlyList<Call> Calls
@@ -651,7 +627,30 @@ internal sealed class SeedHarness
         }
         await env.Client.Connection.OperatorService.AddSearchAttributesAsync(register);
 
-        var harness = new SeedHarness();
+        var harness = new SeedHarness { _environment = env };
+        if (workflowType == "UwePrImplementationWorkflow")
+        {
+            var originalRespond = respond;
+            var latestHead = new string('a', 40);
+            respond = call =>
+            {
+                var reply = originalRespond(call);
+                if (reply == "ok" && (call.Step is "pin" or "pin_after_approval")) return DocOnlyPin(latestHead);
+                if (reply == "ok" && call.Step == "phase2_5_unresolved_check") return "UNRESOLVED: none";
+                if (reply == "ok" && call.Step == "notify_invalidation") return $"HEAD_OID: {latestHead}";
+                if (call.Step == "phase1_implement" || call.Step.StartsWith("revise_", StringComparison.Ordinal))
+                {
+                    var match = System.Text.RegularExpressions.Regex.Match(reply, @"HEAD_SHA:\s*([0-9a-f]{40})");
+                    if (match.Success)
+                    {
+                        latestHead = match.Groups[1].Value;
+                        if (!reply.Contains("IMPLEMENTATION:", StringComparison.Ordinal))
+                            reply += $"\nIMPLEMENTATION: complete\nHEAD_RANGE: {latestHead}..{latestHead}";
+                    }
+                }
+                return reply;
+            };
+        }
         var logs = new DiscardCounter();
         using var loggerFactory = LoggerFactory.Create(b => b.AddProvider(logs));
         // The seed starts its children on task queue "fleet"; each test has its own environment.
@@ -717,6 +716,17 @@ internal sealed class SeedHarness
                 started.WorkflowExecutionStartedEventAttributes.Input.Payloads_[0]);
             _consensus.Add(new ConsensusCall(input.ReviewRef, input.ExcludedAgents ?? []));
         }
+    }
+
+    internal static string DocOnlyPin(string head) =>
+        $"HEAD_OID: {head}\nCI: success\nCHANGE_CLASS: doc_only\nPLAN: ok\nPLAN_SHA256: {new string('b',64)}\nMAX_DURATION: 14400\nWAIT_SECONDS: 0\nPOST_STAGES: 0\nOWNER: agent3\nPRIOR_RECEIPTS: no\nPRIOR_ATTEMPTS_CLEAN: yes\nPRIOR_ROUNDS: ok\nPRIOR_LAST_HEAD: none\nPLAN_APPROVAL: design\nACCEPTANCE_ISO: isolated\nHARNESS_RETRY_SPENT: no\nPINNED_AT: 2026-01-01T00:00:00Z\nPRE_STAGES: 1\nMAP_COMMIT: none\nMAP_SHA256: none\nSSH_TARGETS: none\nBODY_SHA256: {new string('c',64)}";
+
+    internal Task AdvanceAsync(TimeSpan duration) => _environment!.DelayAsync(duration);
+
+    public async Task SignalHumanApprovalAsync(WorkflowHandle handle)
+    {
+        var gateRef = LastUpsert(await handle.FetchHistoryAsync(), "GateRef");
+        await handle.SignalAsync("merge-approval", [JsonSerializer.SerializeToElement(new { Decision = "approved", Ref = gateRef })]);
     }
 
     public async Task WaitForGateVisitAsync(WorkflowHandle handle, string visit)

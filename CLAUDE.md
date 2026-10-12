@@ -294,6 +294,11 @@ events — locations, contacts, polls, venue shares — are not attachments.
 
 ## Epic grants
 
+Autonomous charters use the separate startup-only `FLEET_AUTONOMY_ENABLED` switch
+(default false), mapped only to orchestrator `EpicGrants__AutonomyEnabled`.
+Autonomy with grants disabled or a nonpositive maximum lifetime logs
+`epic_autonomy_misconfigured` once at startup and is treated as off.
+
 Opt-in (`FLEET_EPIC_GRANTS_ENABLED`, default false) run-scoped delegation of `design-approval`,
 `merge-approval` and `doc-review` to the configured CTO agent (#436). A `wait_for_signal` with
 `visitVar` publishes the `GateVisit` attribute; its `delegatedGuard` discards any payload carrying

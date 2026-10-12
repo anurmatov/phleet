@@ -111,6 +111,10 @@ builder.Services
 
 var app = builder.Build();
 
+var epicGrantOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<EpicGrantOptions>>().Value;
+if (epicGrantOptions.DisableMisconfiguredAutonomy())
+    app.Logger.LogWarning("epic_autonomy_misconfigured");
+
 // Resolve the size policy now so an invalid value warns at startup, then log the active limits.
 var promptSizePolicy = app.Services.GetRequiredService<PromptSizePolicy>();
 promptSizePolicy.LogStartup();

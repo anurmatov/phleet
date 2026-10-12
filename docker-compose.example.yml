@@ -433,6 +433,7 @@ services:
       - EpicGrants__Enabled=${FLEET_EPIC_GRANTS_ENABLED:-false}
       - EpicGrants__MaxDays=${FLEET_EPIC_GRANTS_MAX_DAYS:-14}
       - EpicGrants__DeniedRepos=${FLEET_EPIC_GRANTS_DENIED_REPOS:-}
+      - EpicGrants__AutonomyEnabled=${FLEET_AUTONOMY_ENABLED:-false}
       - EpicDriverWatcher__Enabled=${FLEET_EPIC_WATCHER_ENABLED:-false}
       - EpicDriverWatcher__IntervalSeconds=${FLEET_EPIC_WATCHER_INTERVAL_SECONDS:-300}
     mem_limit: 512m

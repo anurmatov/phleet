@@ -1240,7 +1240,7 @@ public sealed partial class EpicGrantService(
         var needsBinding = targetEntry is null && !bound && childRepo is not null
             && gate == EpicGrantGates.DesignApproval && target.WorkflowType == "UweDesignWorkflow"
             && adopted is null && target.StartTime >= AsUtcOffset(grant.CreatedAt)
-            && EpicJson.Property(input,"ExistingIssueNumber") is null
+            && EpicJson.PositiveInteger(input,"ExistingIssueNumber") is null
             && target.IssueNumber == issue && EpicJson.String(input,"AutonomyGrantId") == FormatId(id)
             && HasScrubToken(target.ReviewScrub,"scope-fit");
         if (targetEntry is null && !bound && !needsBinding) return Refuse(EpicGrantRefusal.TargetOutOfScope);

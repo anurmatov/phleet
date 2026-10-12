@@ -6,7 +6,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Fleet.Orchestrator.Tests.EpicGrants;
 
-public sealed class AutonomyDecisionTests : IAsyncLifetime
+public sealed partial class AutonomyDecisionTests : IAsyncLifetime
 {
     private SqliteConnection _connection = null!;
     private EpicGrantWorld _world = null!;

@@ -39,7 +39,12 @@ public sealed class AddAutonomyChartersMigrationTests : IAsyncLifetime
             INSERT INTO epic_grants (Id,Status,ScopeJson,ScopeSha256,DriverNamespace,DriverWorkflowId,DriverRunId,CtoAgent,CreatedAt,ExpiresAt)
             VALUES ('00000000-0000-4000-8000-000000000001','active','{}',REPEAT('a',64),'default','driver','run','agent1',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))
             """);
+        await SqlAsync(_connection,"""
+            INSERT INTO epic_grant_decisions (GrantId,Namespace,WorkflowId,RunId,Gate,VisitId,ArtifactRef,Evidence,Caller,Status,CreatedAt,UpdatedAt)
+            VALUES ('00000000-0000-4000-8000-000000000001','default','child','run','design-approval','design-approval:1','ref','https://example.com/review','agent1','sent',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))
+            """);
         await db.Database.MigrateAsync();
+        Assert.Equal(1L,Convert.ToInt64(await SqlAsync(_connection,"SELECT COUNT(*) FROM epic_grant_decisions WHERE Status='sent' AND VisitId='design-approval:1' AND ArtifactRef='ref'")));
         Assert.Equal("delegated",await SqlAsync(_connection,"SELECT Mode FROM epic_grants"));
         const string evidence=" {\"visibility\":{\"example-org/example-repo\":\"private\"}} ";
         var grant=await db.EpicGrants.SingleAsync(); grant.PreflightJson=evidence;
@@ -54,6 +59,7 @@ public sealed class AddAutonomyChartersMigrationTests : IAsyncLifetime
         await migrator.MigrateAsync("20261008135432_AddEpicGrants");
         Assert.Equal(0L,Convert.ToInt64(await SqlAsync(_connection,"SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('epic_grant_bindings','epic_grant_runs')")));
         Assert.Equal(1L,Convert.ToInt64(await SqlAsync(_connection,"SELECT COUNT(*) FROM epic_grants")));
+        Assert.Equal(1L,Convert.ToInt64(await SqlAsync(_connection,"SELECT COUNT(*) FROM epic_grant_decisions")));
     }
     [Fact]
     public async Task ConcurrentAutonomousDecisions_ReserveOnlyOneAtDecisionBudgetOne()

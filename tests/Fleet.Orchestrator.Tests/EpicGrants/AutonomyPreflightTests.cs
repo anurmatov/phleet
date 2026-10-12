@@ -9,7 +9,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Fleet.Orchestrator.Tests.EpicGrants;
 
-public sealed class AutonomyPreflightTests : IAsyncLifetime
+public sealed partial class AutonomyPreflightTests : IAsyncLifetime
 {
     private SqliteConnection _connection = null!;
     private EpicGrantWorld _world = null!;

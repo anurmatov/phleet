@@ -41,7 +41,7 @@ function isRunning(status: string): boolean {
   return status.toLowerCase().includes('running')
 }
 
-function ScopeReport({ report, stale, text, onAdopt }: { report: ScopeValidationReport; stale: boolean; text: string; onAdopt: (item: Record<string, unknown>, checked: boolean) => void }) {
+export function ScopeReport({ report, stale, text, onAdopt }: { report: ScopeValidationReport; stale: boolean; text: string; onAdopt: (item: Record<string, unknown>, checked: boolean) => void }) {
   const parsed = parseScopeText(text)
   return (
     <div className={`eg-report${stale ? ' eg-report-stale' : ''}`}>
@@ -133,6 +133,15 @@ function ScopeReport({ report, stale, text, onAdopt }: { report: ScopeValidation
       )}
     </div>
   )
+}
+
+export function AutonomyNotice() {
+  return <div className="wfd-validation-item warning">
+    Charter JSON: fill outcome, children repos/maxIssues, all four limits, plan/after, optional adopt and exclusions below.
+    Creation requires zero unresolved server preflight items. Stage 2 never delegates merges.
+    Excluded action classes: deployments, credentials, money, production tests, instructions and live configuration.
+    An exclusion stays a human decision and cannot widen this charter.
+  </div>
 }
 
 function GrantStatusBadge({ status }: { status: EpicGrantView['effectiveStatus'] }) {
@@ -366,12 +375,7 @@ export default function EpicGrantsView() {
               const parsed = parseScopeText(text || SCOPE_PLACEHOLDER)
               if (parsed.ok) { setText(JSON.stringify(autonomyCharterDraft(parsed.scope), null, 2)); setReport(null); setValidatedText(null) }
             }}>Draft autonomy charter</button>
-            {parseScopeText(text).ok && text.includes('"autonomous"') && <div className="wfd-validation-item warning">
-              Charter JSON: fill outcome, children repos/maxIssues, all four limits, plan/after, optional adopt and exclusions below.
-              Creation requires zero unresolved server preflight items. Stage 2 never delegates merges.
-              Excluded action classes: deployments, credentials, money, production tests, instructions and live configuration.
-              An exclusion stays a human decision and cannot widen this charter.
-            </div>}
+            {parseScopeText(text).ok && text.includes('"autonomous"') && <AutonomyNotice />}
             <label className="config-label">Scope JSON <span className="wfd-required">*</span></label>
             <FieldHint>
               One driver run, exact target issues, pinned workflow definitions, gates and an expiry.

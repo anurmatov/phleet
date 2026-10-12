@@ -1,3 +1,10 @@
+using Fleet.Temporal.Engine;
+using Temporalio.Api.Enums.V1;
+using Temporalio.Api.OperatorService.V1;
+using Temporalio.Converters;
+using Temporalio.Exceptions;
+using Temporalio.Testing;
+using Temporalio.Worker;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Fleet.Shared;
@@ -46,7 +53,8 @@ public sealed partial class AcceptanceScenarioTests
             Assert.Equal($"cont:1:6:{Plan[..8]}", h.LastUpsert(history, "GateRef"));
             Assert.Contains("fix=5;batch=5", h.LastUpsert(history, "Acceptance"));
             await Decision(handle, h, "stop");
-        });
+        }, captureWaiter: true);
+        Assert.Equal("cancelled", run.WaiterDecision);
         Assert.Equal(5, run.Calls.Count(c => c.Step.StartsWith("revise_", StringComparison.Ordinal)));
         Assert.Equal(6, run.ChildStarts("UwePrAcceptanceWorkflow").Count);
         Assert.DoesNotContain(run.Calls, c => c.Step is "phase4_merge" or "phase4_merge_pinned");
@@ -266,7 +274,7 @@ public sealed partial class AcceptanceScenarioTests
             await WaitPhase(handle, h, "acceptance-blocked"); Assert.Contains("block=ci_timeout;", h.LastUpsert(await handle.FetchHistoryAsync(), "Acceptance")); await Decision(handle, h, "stop");
         });
         Assert.Empty(run.ChildStarts("UwePrAcceptanceWorkflow"));
-        Assert.Equal(12, run.History.Events.Count(e => e.EventType == Temporalio.Api.Enums.V1.EventType.TimerStarted && e.TimerStartedEventAttributes.StartToFireTimeout.Seconds == 300)); ValidWrites(run);
+        Assert.Equal(12, run.History.Events.Count(e => e.EventType == EventType.TimerStarted && e.TimerStartedEventAttributes.StartToFireTimeout.Seconds == 300)); ValidWrites(run);
     }
 
     [Fact]
@@ -279,7 +287,7 @@ public sealed partial class AcceptanceScenarioTests
             actor.ThrowOwner = false; actor.PriorClean = "no"; await Decision(handle, h, "continue");
             await WaitTimers(handle, 2);
             var history = await handle.FetchHistoryAsync();
-            Assert.Single(history.Events.Where(e => e.EventType == Temporalio.Api.Enums.V1.EventType.StartChildWorkflowExecutionInitiated && e.StartChildWorkflowExecutionInitiatedEventAttributes.WorkflowType.Name == "UwePrAcceptanceWorkflow"));
+            Assert.Single(history.Events.Where(e => e.EventType == EventType.StartChildWorkflowExecutionInitiated && e.StartChildWorkflowExecutionInitiatedEventAttributes.WorkflowType.Name == "UwePrAcceptanceWorkflow"));
             actor.PriorClean = "yes"; await h.AdvanceAsync(TimeSpan.FromSeconds(1801));
             await h.WaitForGateVisitAsync(handle, "merge-approval:1"); await h.SignalHumanApprovalAsync(handle);
         });
@@ -299,10 +307,174 @@ public sealed partial class AcceptanceScenarioTests
         Assert.Contains($"--match-head-commit {actor.Head}", Assert.Single(run.Calls, c => c.Step == "phase4_merge").Instruction); ValidWrites(run);
     }
 
+    [Fact]
+    public async Task Parent_PlanlessCiTimeoutParksWithoutDraftingOrInventingAPlan()
+    {
+        var actor = new Actor { Ci = "pending", PlanHash = "none", PlanStatus = "missing" };
+        var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", ParentInput(), actor.Respond, async (handle, h) =>
+        {
+            await WaitTimers(handle, 1); await h.AdvanceAsync(TimeSpan.FromSeconds(3601));
+            await WaitPhase(handle, h, "acceptance-blocked");
+            Assert.Equal("block:1:0:00000000", h.LastUpsert(await handle.FetchHistoryAsync(), "GateRef"));
+            Assert.Contains("block=ci_timeout;", h.LastUpsert(await handle.FetchHistoryAsync(), "Acceptance"));
+            await Decision(handle, h, "stop");
+        });
+        Assert.DoesNotContain(run.Calls, c => c.Step == "prepare_plan_gate");
+        Assert.Empty(run.ChildStarts("UwePrAcceptanceWorkflow")); ValidWrites(run);
+    }
+
+    [Fact]
+    public async Task Parent_MissingPlanAloneDraftsAndBindsTheCanonicalHash()
+    {
+        var actor = new Actor { PlanHash = "none", PlanStatus = "missing" };
+        var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", ParentInput(),
+            call => call.Step == "prepare_plan_gate" ? "PLAN_SHA256: " + Plan : actor.Respond(call), async (handle, h) =>
+        {
+            await WaitPhase(handle, h, "acceptance-blocked");
+            Assert.Equal($"plan:1:{Plan}", h.LastUpsert(await handle.FetchHistoryAsync(), "GateRef"));
+            await Decision(handle, h, "stop");
+        });
+        Assert.Single(run.Calls, c => c.Step == "prepare_plan_gate");
+        Assert.Empty(run.ChildStarts("UwePrAcceptanceWorkflow")); ValidWrites(run);
+    }
+
+    [Theory]
+    [InlineData("exceeds", "ok", "plan_amendment")]
+    [InlineData("ok", "invalid", "prior_rounds_unknown")]
+    public async Task Parent_PlanlessNonMissingReasonUsesNoPlanIdentityWithoutDrafting(string planStatus, string priorRounds, string reason)
+    {
+        var actor = new Actor { PlanHash = "none", PlanStatus = planStatus, PriorRounds = priorRounds };
+        var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", ParentInput(), actor.Respond, async (handle, h) =>
+        {
+            await WaitPhase(handle, h, "acceptance-blocked");
+            var history = await handle.FetchHistoryAsync();
+            Assert.Equal("block:1:0:00000000", h.LastUpsert(history, "GateRef"));
+            Assert.Contains($"block={reason};", h.LastUpsert(history, "Acceptance"));
+            await Decision(handle, h, "stop");
+        });
+        Assert.DoesNotContain(run.Calls, c => c.Step == "prepare_plan_gate");
+        Assert.Empty(run.ChildStarts("UwePrAcceptanceWorkflow")); ValidWrites(run);
+    }
+
+    [Theory]
+    [InlineData("approved")]
+    [InlineData("changes_requested")]
+    public async Task Parent_HumanReviewAlwaysReturnsThroughReviewOrRevision(string decision)
+    {
+        var actor = new Actor { HumanReviewOnce = true, DocOnly = true };
+        var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", ParentInput(), actor.Respond, async (handle, h) =>
+        {
+            await WaitPhase(handle, h, "human-review");
+            Assert.DoesNotContain(h.Calls, c => c.Step == "pin");
+            await handle.SignalAsync("human-review", [JsonSerializer.SerializeToElement(new { Decision = decision, Comment = "revise" })]);
+            await h.WaitForGateVisitAsync(handle, "merge-approval:1"); await h.SignalHumanApprovalAsync(handle);
+        });
+        Assert.Equal(2, run.ConsensusInputs.Count(i => i.ReviewRef is not null));
+        Assert.Single(run.Calls, c => c.Step == "pin");
+        if (decision == "approved")
+        {
+            Assert.DoesNotContain(run.Calls, c => c.Step.StartsWith("revise_", StringComparison.Ordinal));
+            Assert.All(run.ConsensusInputs, i => Assert.Equal(actor.Head, i.ReviewRef));
+        }
+        else
+        {
+            Assert.Single(run.Calls, c => c.Step == "revise_human_feedback");
+            var scheduled = Assert.Single(run.History.Events, e => e.EventType == EventType.ActivityTaskScheduled
+                && e.ActivityTaskScheduledEventAttributes.ActivityType.Name == "DelegateToAgent"
+                && DataConverter.Default.PayloadConverter.ToValue<string>(e.ActivityTaskScheduledEventAttributes.Input.Payloads_[2]).EndsWith("/revise_human_feedback", StringComparison.Ordinal));
+            var before = run.History.Events.Where(e => e.EventId < scheduled.EventId && e.EventType == EventType.UpsertWorkflowSearchAttributes
+                && e.UpsertWorkflowSearchAttributesEventAttributes.SearchAttributes.IndexedFields.ContainsKey("Phase")).Last();
+            Assert.Equal("revision", DataConverter.Default.PayloadConverter.ToValue<string>(before.UpsertWorkflowSearchAttributesEventAttributes.SearchAttributes.IndexedFields["Phase"]));
+        }
+        ValidWrites(run);
+    }
+
+    [Fact]
+    public async Task Parent_UnattestedApprovalReviewsAgainWithoutCallingImplementer()
+    {
+        var actor = new Actor { UnattestedOnce = true, DocOnly = true };
+        var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", ParentInput(), actor.Respond, async (handle, h) =>
+        {
+            await h.WaitForGateVisitAsync(handle, "merge-approval:1"); await h.SignalHumanApprovalAsync(handle);
+        });
+        Assert.Equal(2, run.ConsensusInputs.Count);
+        Assert.DoesNotContain(run.Calls, c => c.Step.StartsWith("revise_", StringComparison.Ordinal));
+        Assert.Single(run.Calls, c => c.Step == "phase1_implement");
+        Assert.Single(run.Calls, c => c.Step == "pin"); ValidWrites(run);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Parent_MergeFeedbackExhaustsSixtyPassesButApprovalInPassFiftyNineMerges(bool approveIn59)
+    {
+        var actor = new Actor { DocOnly = true, FeedbackNeedsFix = true };
+        var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", ParentInput(), actor.Respond, async (handle, h) =>
+        {
+            // Feedback dispatch and revision consume alternating delivery passes: gate 30 is pass 59.
+            for (var gate = 1; gate <= 30; gate++)
+            {
+                await WaitGateRef(handle, h, $"merge:{gate:x40}:{gate}");
+                if (approveIn59 && gate == 30) await h.SignalHumanApprovalAsync(handle);
+                else await handle.SignalAsync("merge-approval", [JsonSerializer.SerializeToElement(new { Decision = "changes_requested", Comment = "revise" })]);
+            }
+            // Exercise the test server's virtual clock, not a wall-clock sleep or a production timer.
+            await h.AdvanceAsync(TimeSpan.FromSeconds(1));
+        }, captureWaiter: true);
+        Assert.Equal(30, run.Calls.Count(c => c.Step == "pin"));
+        Assert.Equal(approveIn59 ? 29 : 30, run.Calls.Count(c => c.Step == "revise_ceo_feedback"));
+        if (approveIn59)
+        {
+            Assert.Single(run.Calls, c => c.Step == "phase4_merge");
+            Assert.Equal("approved", run.WaiterDecision);
+            Assert.DoesNotContain(run.Calls, c => c.Step == "notify_outer_loop_exhausted");
+        }
+        else
+        {
+            Assert.Empty(run.ChildStarts("UweDocMaintenanceWorkflow"));
+            Assert.DoesNotContain(run.Calls, c => c.Step is "phase4_merge" or "phase4_merge_pinned");
+            Assert.Contains("60", Assert.Single(run.Calls, c => c.Step == "notify_outer_loop_exhausted").Instruction);
+            Assert.Equal("cancelled", run.WaiterDecision);
+        }
+        ValidWrites(run);
+    }
+
+    [Fact]
+    public async Task Parent_RequiredAcceptanceWriteFailureEndsRunBeforeAnyGatePark()
+    {
+        var root = SeedHarness.Parse("UwePrImplementationWorkflow");
+        var write = Assert.Single(WorkflowDefinitionValidator.Walk(root).OfType<SetAttributeStep>(), s => s.Name == "w4_initial_implement_clear");
+        Assert.True(write.Required); Assert.Contains("Acceptance", write.Attributes.Keys);
+        // Inject failure building this atomic write, without changing the shipped seed or namespace.
+        write.Attributes["IssueNumber"] = "invalid-integer";
+        await using var env = await WorkflowEnvironment.StartTimeSkippingAsync();
+        var register = new AddSearchAttributesRequest { Namespace = env.Client.Options.Namespace };
+        foreach (var name in SearchAttributeTypeRegistry.GetNames()) register.SearchAttributes[name] = SearchAttributeTypeRegistry.GetType(name) switch
+        {
+            SearchAttributeTypeRegistry.AttributeType.Int => IndexedValueType.Int,
+            SearchAttributeTypeRegistry.AttributeType.DateTime => IndexedValueType.Datetime,
+            _ => IndexedValueType.Keyword
+        };
+        await env.Client.Connection.OperatorService.AddSearchAttributesAsync(register);
+        var queue = "acceptance-write-" + Guid.NewGuid().ToString("N");
+        using var worker = new TemporalWorker(env.Client, new TemporalWorkerOptions(queue)
+            .AddWorkflow<UniversalWorkflow>().AddAllActivities(new AcceptanceEngineActivities(root)));
+        await worker.ExecuteAsync(async () =>
+        {
+            var handle = await env.Client.StartWorkflowAsync("UwePrImplementationWorkflow", [ParentInput()], new WorkflowOptions(queue, queue));
+            var error = await Assert.ThrowsAsync<WorkflowFailedException>(() => handle.GetResultAsync<string>());
+            Assert.Equal("RequiredSearchAttribute", Assert.IsType<ApplicationFailureException>(error.InnerException).ErrorType);
+            var history = await handle.FetchHistoryAsync();
+            Assert.Empty(SeedHarness.Upserts(history, "GateVisit"));
+            Assert.Empty(SeedHarness.Upserts(history, "GateRef"));
+            Assert.DoesNotContain(history.Events, e => e.EventType == EventType.TimerStarted);
+        });
+    }
+
     private static async Task WaitTimers(WorkflowHandle handle, int count)
     {
         var end = DateTime.UtcNow + TimeSpan.FromSeconds(20);
-        while ((await handle.FetchHistoryAsync()).Events.Count(e => e.EventType == Temporalio.Api.Enums.V1.EventType.TimerStarted) < count)
+        while ((await handle.FetchHistoryAsync()).Events.Count(e => e.EventType == EventType.TimerStarted) < count)
         { if (DateTime.UtcNow > end) throw new TimeoutException("timer"); await Task.Delay(20); }
     }
 
@@ -334,7 +506,7 @@ public sealed partial class AcceptanceScenarioTests
         public string PlanHash = Plan;
         public string PriorHead = "none";
         public int PassOnAttempt;
-        public bool FeedbackNeedsFix, MoveDuringReview;
+        public bool FeedbackNeedsFix, MoveDuringReview, HumanReviewOnce, UnattestedOnce;
         public bool ThrowOwner, Incomplete;
         public string Ci = "success", PriorClean = "yes";
         public string StageResult = "done", Label = "product_defect", PlanStatus = "ok", PriorRounds = "ok", DesignApproval = "design", HarnessEvidence = "no";
@@ -355,7 +527,7 @@ public sealed partial class AcceptanceScenarioTests
             if (call.Step == "reserve_harness_retry") return "RESERVATION: reserved 123";
             if (call.Step == "pre_stage")
             {
-                if (ThrowOwner) throw new Temporalio.Exceptions.ApplicationFailureException("synthetic owner failure", errorType: "Synthetic", nonRetryable: true);
+                if (ThrowOwner) throw new ApplicationFailureException("synthetic owner failure", errorType: "Synthetic", nonRetryable: true);
                 var attempt = Regex.Match(call.Instruction, @"ATTEMPT: ([^,]+)").Groups[1].Value;
                 var number = int.Parse(Regex.Match(attempt, @"-a([0-9]+)$").Groups[1].Value);
                 var result = PassOnAttempt > 0 && number >= PassOnAttempt ? "done" : StageResult;
@@ -363,6 +535,10 @@ public sealed partial class AcceptanceScenarioTests
             }
             if (call.Step is "cleanup" or "backstop_cleanup") return "CLEANUP: verified\nRECEIPT: https://example.com/cleanup";
             if (call.Step == "child_status") return "CHILD: running";
+            if (call.Step.StartsWith("review-", StringComparison.Ordinal) && HumanReviewOnce)
+            { HumanReviewOnce = false; return "SUMMARY: human decision required\nBLOCKER: operational decision\nVERDICT: needs_human_review"; }
+            if (call.Step.StartsWith("review-", StringComparison.Ordinal) && UnattestedOnce)
+            { UnattestedOnce = false; return "SUMMARY: checked\nVERDICT: approved"; }
             if (MoveDuringReview && call.Step.StartsWith("review-", StringComparison.Ordinal)) { MoveDuringReview = false; MoveHead(); return "SUMMARY: head changed\nBLOCKER: head_changed\nVERDICT: needs_human_review"; }
             if (call.Step == "synthesis") return "SUMMARY: applies\nVERDICT: changes_requested";
             if (FeedbackNeedsFix && call.Step.StartsWith("review-", StringComparison.Ordinal) && call.Instruction.Contains("Merge-gate feedback requested changes", StringComparison.Ordinal))

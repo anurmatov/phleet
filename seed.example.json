@@ -3967,44 +3967,51 @@
                     "type": "sequence",
                     "steps": [
                       {
-                        "name": "blocked_hash_present",
+                        "name": "draft_only_missing_plan",
                         "type": "branch",
-                        "on": "{{vars.plan_sha}}",
+                        "on": "{{vars.block_reason}}",
                         "cases": {
-                          "none": {
-                            "name": "draft_missing_plan",
-                            "type": "sequence",
-                            "steps": [
-                              {
-                                "name": "prepare_plan_gate",
-                                "type": "delegate",
-                                "target": "{{config.CtoAgent}}",
-                                "instruction": "Draft the missing/amended Acceptance plan comment for {{vars.pr_url}} without granting or executing anything. Hash its canonical JSON and return PLAN_SHA256: <64 lowercase hex>. This is not approval; only the subsequent bound CEO plan gate can approve that exact hash.",
-                                "timeoutMinutes": 15,
-                                "outputVar": "draft_plan",
-                                "ignoreFailure": true,
-                                "retryOnIncomplete": false,
-                                "maxIncompleteRetries": 0
-                              },
-                              {
-                                "name": "capture_draft_plan_sha",
-                                "type": "set_variable",
-                                "vars": {
-                                  "plan_sha": "{{vars.draft_plan | extract: '(?m)^PLAN_SHA256: ([0-9a-f]{64})\\r?$' | default: 'none'}}"
-                                }
-                              },
-                              {
-                                "name": "draft_plan_required",
-                                "type": "branch",
-                                "on": "{{vars.plan_sha}}",
-                                "cases": {
-                                  "none": {
-                                    "type": "fail",
-                                    "message": "Cannot publish a plan gate without a valid canonical plan hash"
+                          "plan_missing": {
+                            "name": "missing_plan_hash_present",
+                            "type": "branch",
+                            "on": "{{vars.plan_sha}}",
+                            "cases": {
+                              "none": {
+                                "name": "draft_missing_plan",
+                                "type": "sequence",
+                                "steps": [
+                                  {
+                                    "name": "prepare_plan_gate",
+                                    "type": "delegate",
+                                    "target": "{{config.CtoAgent}}",
+                                    "instruction": "Draft the missing Acceptance plan comment for {{vars.pr_url}} without granting or executing anything. Hash its canonical JSON and return PLAN_SHA256: <64 lowercase hex>. This is not approval; only the subsequent bound CEO plan gate can approve that exact hash.",
+                                    "timeoutMinutes": 15,
+                                    "outputVar": "draft_plan",
+                                    "ignoreFailure": true,
+                                    "retryOnIncomplete": false,
+                                    "maxIncompleteRetries": 0
+                                  },
+                                  {
+                                    "name": "capture_draft_plan_sha",
+                                    "type": "set_variable",
+                                    "vars": {
+                                      "plan_sha": "{{vars.draft_plan | extract: '(?m)^PLAN_SHA256: ([0-9a-f]{64})\\r?$' | default: 'none'}}"
+                                    }
+                                  },
+                                  {
+                                    "name": "draft_plan_required",
+                                    "type": "branch",
+                                    "on": "{{vars.plan_sha}}",
+                                    "cases": {
+                                      "none": {
+                                        "type": "fail",
+                                        "message": "Cannot publish a plan gate without a valid canonical plan hash"
+                                      }
+                                    }
                                   }
-                                }
+                                ]
                               }
-                            ]
+                            }
                           }
                         }
                       },
@@ -4018,42 +4025,56 @@
                       {
                         "name": "blocked_gate_identity",
                         "type": "branch",
-                        "on": "{{vars.block_reason}}",
+                        "on": "{{vars.plan_sha}}",
                         "cases": {
-                          "plan_unapproved": {
-                            "name": "plan_gate_ref_plan_unapproved",
+                          "none": {
+                            "name": "no_plan_gate_identity",
                             "type": "set_variable",
                             "vars": {
-                              "gate_ref": "plan:{{vars.acc_gate_seq}}:{{vars.plan_sha}}"
-                            }
-                          },
-                          "plan_missing": {
-                            "name": "plan_gate_ref_plan_missing",
-                            "type": "set_variable",
-                            "vars": {
-                              "gate_ref": "plan:{{vars.acc_gate_seq}}:{{vars.plan_sha}}"
-                            }
-                          },
-                          "plan_amendment": {
-                            "name": "plan_gate_ref_plan_amendment",
-                            "type": "set_variable",
-                            "vars": {
-                              "gate_ref": "plan:{{vars.acc_gate_seq}}:{{vars.plan_sha}}"
-                            }
-                          },
-                          "plan_changed": {
-                            "name": "plan_gate_ref_plan_changed",
-                            "type": "set_variable",
-                            "vars": {
-                              "gate_ref": "plan:{{vars.acc_gate_seq}}:{{vars.plan_sha}}"
+                              "gate_ref": "block:{{vars.acc_gate_seq}}:{{vars.attempt_seq}}:00000000"
                             }
                           }
                         },
                         "default": {
-                          "name": "nonplan_gate_ref",
-                          "type": "set_variable",
-                          "vars": {
-                            "gate_ref": "block:{{vars.acc_gate_seq}}:{{vars.attempt_seq}}:{{vars.plan_sha | extract: \"^([0-9a-f]{8})\"}}"
+                          "name": "blocked_reason_gate_identity",
+                          "type": "branch",
+                          "on": "{{vars.block_reason}}",
+                          "cases": {
+                            "plan_unapproved": {
+                              "name": "plan_gate_ref_plan_unapproved",
+                              "type": "set_variable",
+                              "vars": {
+                                "gate_ref": "plan:{{vars.acc_gate_seq}}:{{vars.plan_sha}}"
+                              }
+                            },
+                            "plan_missing": {
+                              "name": "plan_gate_ref_plan_missing",
+                              "type": "set_variable",
+                              "vars": {
+                                "gate_ref": "plan:{{vars.acc_gate_seq}}:{{vars.plan_sha}}"
+                              }
+                            },
+                            "plan_amendment": {
+                              "name": "plan_gate_ref_plan_amendment",
+                              "type": "set_variable",
+                              "vars": {
+                                "gate_ref": "plan:{{vars.acc_gate_seq}}:{{vars.plan_sha}}"
+                              }
+                            },
+                            "plan_changed": {
+                              "name": "plan_gate_ref_plan_changed",
+                              "type": "set_variable",
+                              "vars": {
+                                "gate_ref": "plan:{{vars.acc_gate_seq}}:{{vars.plan_sha}}"
+                              }
+                            }
+                          },
+                          "default": {
+                            "name": "nonplan_gate_ref",
+                            "type": "set_variable",
+                            "vars": {
+                              "gate_ref": "block:{{vars.acc_gate_seq}}:{{vars.attempt_seq}}:{{vars.plan_sha | extract: \"^([0-9a-f]{8})\" | default: '00000000'}}"
+                            }
                           }
                         }
                       },

@@ -576,6 +576,8 @@ internal sealed record SeedRun(
     IReadOnlyList<ConsensusCall> ConsensusInputs,
     int Discards)
 {
+    public string? WaiterDecision { get; init; }
+
     public List<string> Upserts(string attribute) => SeedHarness.Upserts(History, attribute);
 
     /// <summary>The input of every child of this type the run started.</summary>
@@ -612,7 +614,8 @@ internal sealed class SeedHarness
         string workflowType,
         Dictionary<string, object?> input,
         Func<Call, string> respond,
-        Func<WorkflowHandle, SeedHarness, Task> drive)
+        Func<WorkflowHandle, SeedHarness, Task> drive,
+        bool captureWaiter = false)
     {
         await using var env = await WorkflowEnvironment.StartTimeSkippingAsync();
         var register = new AddSearchAttributesRequest { Namespace = env.Client.Options.Namespace };
@@ -663,6 +666,7 @@ internal sealed class SeedHarness
             new TemporalWorkerOptions(taskQueue) { LoggerFactory = loggerFactory }
                 .AddWorkflow<UniversalWorkflow>()
                 .AddWorkflow<ConsensusReviewWorkflow>()
+                .AddWorkflow<SeedWaiterWorkflow>()
                 .AddAllActivities(typeof(LoadWorkflowDefinitionActivity), loader)
                 .AddActivity(ActivityDefinition.Create(
                     "LoadWorkflowConfig", typeof(JsonElement), [], 0,
@@ -671,19 +675,24 @@ internal sealed class SeedHarness
                 .AddActivity(harness.DelegateStub(respond)));
 
         object? result = null;
+        string? waiterDecision = null;
         await worker.ExecuteAsync(async () =>
         {
+            WorkflowHandle? waiter = null;
+            if (captureWaiter) waiter = await env.Client.StartWorkflowAsync(
+                "SeedWaiterWorkflow", [], new WorkflowOptions((string)input["WaiterWorkflowId"]!, taskQueue));
             var handle = await env.Client.StartWorkflowAsync(
                 workflowType, [input], new WorkflowOptions(id: workflowId, taskQueue: taskQueue));
             await drive(handle, harness);
             result = await handle.GetResultAsync<JsonElement?>().WaitAsync(TimeSpan.FromSeconds(120));
+            if (waiter is not null) waiterDecision = await waiter.GetResultAsync<string>().WaitAsync(TimeSpan.FromSeconds(10));
         });
 
         var history = await env.Client.GetWorkflowHandle(workflowId).FetchHistoryAsync();
         await harness.CollectConsensusInputsAsync(env, history);
         return new SeedRun(
             result is JsonElement { ValueKind: JsonValueKind.Null } ? null : result,
-            history, harness.Calls, harness._consensus, logs.Count);
+            history, harness.Calls, harness._consensus, logs.Count) { WaiterDecision = waiterDecision };
     }
 
     private ActivityDefinition DelegateStub(Func<Call, string> respond) =>
@@ -808,5 +817,24 @@ internal sealed class SeedHarness
                     Interlocked.Increment(ref owner._count);
             }
         }
+    }
+}
+
+// Records the actual external blocker-resolved signal in the owned test environment.
+[Temporalio.Workflows.Workflow]
+public sealed class SeedWaiterWorkflow
+{
+    private string? _decision;
+    [Temporalio.Workflows.WorkflowRun]
+    public async Task<string> RunAsync()
+    {
+        await Temporalio.Workflows.Workflow.WaitConditionAsync(() => _decision is not null);
+        return _decision!;
+    }
+    [Temporalio.Workflows.WorkflowSignal("blocker-resolved")]
+    public Task WakeAsync(JsonElement payload)
+    {
+        _decision = payload.GetProperty("decision").GetString();
+        return Task.CompletedTask;
     }
 }

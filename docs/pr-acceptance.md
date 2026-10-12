@@ -264,7 +264,10 @@ Every PIN compares PLAN_SHA256 with approved_plan_sha256. First-attempt changes
 are detected too. In-run plan-gate continue binds to the full hash already in
 GateRef, never a later issue read. A restart repeats immutable evidence lookup.
 Missing plan → plan_missing; malformed → plan_invalid; exceeds → plan_amendment;
-changed → plan_changed. Capability-map/config failures fail owner access closed.
+changed → plan_changed. Only `plan_missing` drafts a plan comment before the
+bound plan gate. Non-plan BLOCKED reasons without a plan use `00000000` as the
+no-plan sha8 in `block:<gate>:<attempt>:00000000`; this is a gate identity, never
+an approved plan hash, and continue always repeats PIN. Capability-map/config failures fail owner access closed.
 GitHub CI lookup errors are pending, not empty-success. A missing PR is blocked
 owner_unavailable (pin_failed), never blind progress.
 

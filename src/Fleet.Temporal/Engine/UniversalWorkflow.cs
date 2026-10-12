@@ -406,7 +406,9 @@ public class UniversalWorkflow
 
             if (_skipRemaining) return null;
         }
-        return lastResult;
+        // A continue on the final iteration is consumed by this loop, just like break.
+        // Leaking it would skip the parent's exhaustion notice and waiter wake.
+        return lastResult is ControlFlow ? null : lastResult;
     }
 
     private async Task<object?> ExecuteBranchAsync(BranchStep step)

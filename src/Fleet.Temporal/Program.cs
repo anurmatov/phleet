@@ -17,6 +17,7 @@ builder.Services.Configure<RabbitMqOptions>(builder.Configuration.GetSection(Rab
 builder.Services.Configure<TemporalBridgeOptions>(builder.Configuration.GetSection(TemporalBridgeOptions.Section));
 builder.Services.Configure<FleetMemoryOptions>(builder.Configuration.GetSection(FleetMemoryOptions.Section));
 builder.Services.Configure<FleetWorkflowOptions>(builder.Configuration.GetSection(FleetWorkflowOptions.Section));
+builder.Services.PostConfigure<FleetWorkflowOptions>(o => o.OrchestratorUrl = builder.Configuration["TemporalBridge:OrchestratorUrl"] ?? "");
 builder.Services.Configure<AuthTokenRefreshOptions>(builder.Configuration.GetSection(AuthTokenRefreshOptions.Section));
 
 // RabbitMQ connection factory used by DelegateToAgentActivity for outbound publishes

@@ -79,12 +79,14 @@ rc=0; bash "$DIR/upgrade.sh" > "$DIR/output" 2>&1 || rc=$?
 ! grep -q '^compose ' "$CALLS"
 echo 'PASS invalid store fails before compose'
 # Comms disabled, even with an endpoint: remove every optional service but keep keys/volumes.
-# The epic grant keys (#436) are present, so upgrade has nothing to add and must not touch .env.
+# The epic watcher/grant keys are present, so upgrade has nothing to add and must not touch .env.
 cat > "$ENV" <<'ENV'
 FLEET_COMMS_ENABLED=false
 FLEET_COMMS_MEDIA_ENDPOINT=http://comms-minio:9000
 FLEET_COMMS_MEDIA_STORE=minio
 FLEET_COMMS_MEDIA_SECRET_KEY=preserve-secret
+FLEET_EPIC_WATCHER_ENABLED=false
+FLEET_EPIC_WATCHER_INTERVAL_SECONDS=300
 FLEET_EPIC_GRANTS_ENABLED=false
 FLEET_EPIC_GRANTS_MAX_DAYS=14
 FLEET_EPIC_GRANTS_DENIED_REPOS=
@@ -99,12 +101,12 @@ for service in fleet-comms fleet-comms-ops comms-mysql comms-minio comms-minio-i
 done
 ! grep -Eq ' down .* -v| rm .* -v|image inspect| pull |fleet:comms' "$CALLS"
 echo 'PASS disabled Comms removes containers but preserves keys and volumes'
-# #436: upgrade adds a missing epic grant key with its default, keeps a present value, and never
+# Epic watcher/grant upgrades append missing defaults, keep a present value, and never
 # glues a key onto a last line that has no newline.
 printf 'FLEET_COMMS_ENABLED=false\nFLEET_EPIC_GRANTS_MAX_DAYS=7' > "$ENV"
 bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1
-[[ "$(cat "$ENV")" == "$(printf 'FLEET_COMMS_ENABLED=false\nFLEET_EPIC_GRANTS_MAX_DAYS=7\nFLEET_EPIC_GRANTS_ENABLED=false\nFLEET_EPIC_GRANTS_DENIED_REPOS=')" ]]
-echo 'PASS upgrade adds missing epic grant keys with defaults and keeps present values'
+[[ "$(cat "$ENV")" == "$(printf 'FLEET_COMMS_ENABLED=false\nFLEET_EPIC_GRANTS_MAX_DAYS=7\nFLEET_EPIC_WATCHER_ENABLED=false\nFLEET_EPIC_WATCHER_INTERVAL_SECONDS=300\nFLEET_EPIC_GRANTS_ENABLED=false\nFLEET_EPIC_GRANTS_DENIED_REPOS=')" ]]
+echo 'PASS upgrade adds missing epic watcher/grant keys with defaults and keeps present values'
 # Pull failure must also precede every lifecycle operation.
 cat > "$ENV" <<'ENV'
 FLEET_COMMS_ENABLED=true

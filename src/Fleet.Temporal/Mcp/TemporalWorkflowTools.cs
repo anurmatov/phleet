@@ -58,14 +58,17 @@ public sealed class TemporalWorkflowTools(
     private static bool IsCeoOnlySignal(string signalName) => CeoGateSignals.IsReserved(signalName);
 
     [McpServerTool(Name = "temporal_start_workflow")]
-    [Description("Start a new Temporal workflow execution. Returns workflowId and runId. IMPORTANT: use 'input' (not 'args') to pass workflow arguments — 'args' is for temporal_signal_workflow only.")]
+    [Description("Start a new Temporal workflow execution. Returns workflowId and runId. IMPORTANT: use 'input' (not 'args') to pass workflow arguments — 'args' is for temporal_signal_workflow only. Optional id_reuse_policy: allow_duplicate (default) or reject_duplicate.")]
     public async Task<string> StartWorkflowAsync(
         [Description("Registered workflow type name (e.g. ConsensusReviewWorkflow, AuthTokenRefreshWorkflow)")] string workflow_type,
         [Description("Optional custom workflow ID. Auto-generated as '{type}-{timestamp}' if omitted.")] string? workflow_id = null,
         [Description("Workflow-specific input as a JSON object string. Schema depends on workflow type — use temporal_list_workflow_types to check. NOTE: this parameter is called 'input', not 'args'.")] string? input = null,
         [Description("Task queue name. Defaults to namespace name if omitted.")] string? task_queue = null,
-        [Description("Temporal namespace. Default: fleet.")] string @namespace = DefaultNamespace)
+        [Description("Temporal namespace. Default: fleet.")] string @namespace = DefaultNamespace,
+        [Description("Workflow ID reuse: allow_duplicate (default) or reject_duplicate.")] string id_reuse_policy = "allow_duplicate")
     {
+        if (id_reuse_policy is not ("allow_duplicate" or "reject_duplicate"))
+            return "Error: unknown id_reuse_policy. Use allow_duplicate or reject_duplicate.";
         task_queue ??= @namespace;
         var id = workflow_id ?? $"{workflow_type}-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
 
@@ -107,7 +110,8 @@ public sealed class TemporalWorkflowTools(
             var handle = await client.StartWorkflowAsync(
                 workflow_type,
                 inputObj is null ? [] : [inputObj],
-                new WorkflowOptions(id: id, taskQueue: task_queue));
+                new WorkflowOptions(id: id, taskQueue: task_queue)
+                { IdReusePolicy = id_reuse_policy == "reject_duplicate" ? WorkflowIdReusePolicy.RejectDuplicate : WorkflowIdReusePolicy.AllowDuplicate });
 
             return JsonSerializer.Serialize(new
             {

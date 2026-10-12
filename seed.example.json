@@ -2198,6 +2198,707 @@
           }
         ]
       }
+    },
+    {
+      "name": "UweCarteBlancheWorkflow",
+      "namespace": "fleet",
+      "taskQueue": "fleet",
+      "description": "Bounded epic reconciliation with wake-only signals, explicit failed-tick repair and independent completion review; existing running definitions are unchanged.",
+      "definition": {
+        "type": "sequence",
+        "steps": [
+          {
+            "type": "set_attribute",
+            "name": "epic_attrs",
+            "attributes": {
+              "Repo": "{{input.EpicRepo}}",
+              "IssueNumber": "{{input.EpicIssue}}",
+              "Phase": "driving-epic"
+            },
+            "ignoreFailure": true
+          },
+          {
+            "type": "set_variable",
+            "name": "init",
+            "vars": {
+              "wake_kind": "first",
+              "wake_ref": "none",
+              "wake_streak": "",
+              "floor_class": "none",
+              "fail_streak": "",
+              "repair_notified": "no",
+              "blocked_notified": "no",
+              "epic_fingerprint": "none",
+              "epic_next": "none",
+              "tick_ask": "",
+              "findings_write_status": "none",
+              "completion_findings": ""
+            }
+          },
+          {
+            "type": "loop",
+            "name": "epic_rounds",
+            "maxIterations": 336,
+            "steps": [
+              {
+                "type": "delegate",
+                "name": "epic_tick",
+                "target": "{{input.TargetAgent}}",
+                "instruction": "Epic {{input.EpicRepo}}#{{input.EpicIssue}}. Read the issue body, not its whole comment trail.\n\nThe tick stays short (one or two minutes), never waits in the background, and never reads the whole comment trail. It must contain, in substance:\n\n1. **Header:** `Woken by: {{vars.wake_kind}} from {{vars.wake_ref}}.` `timeout` means a scheduled check. Anything else is a hint: check that run's real status first. A wake never approves, rejects or ends anything. The header also carries the previous tick's values:\n   - `Previous updatedAt: {{vars.epic_seen | default:'none'}}`\n   - `Previous fingerprint: {{vars.epic_fingerprint}}`\n   - `Previous status: {{vars.tick_status | default:'none'}}`\n   - `Previous next action: {{vars.epic_next}}`\n   - `Previous ask: {{vars.tick_ask | default:'none'}}`\n   - `Last completion review: {{vars.epic_consensus.FinalVerdict | default:'none'}}`\n   - `Last completion findings: {{vars.completion_findings | default:'none'}}` (authoritative, full, never truncated; set only on the `changes_requested` path, see §3.6)\n   - `Findings write: {{vars.findings_write_status}}` (`completed`, or `unknown`/`failed`/`incomplete` when the checklist write did not finish; `none` before any review)\n2. **Step 0:** `curl -s -m 60 {{config.OrchestratorUrl}}/api/epic-drivers/{{workflow.id}}/state`. End the tick early **only** when all of these hold:\n   - the issue `updatedAt` is unchanged;\n   - `fingerprint` equals `{{vars.epic_fingerprint}}`;\n   - `errors` is empty and `truncated` is false;\n   - **no child has a non-empty `gateVisit`** (parked at any gate, whether `cto_decide` or `human_decide`) and no child is `terminal_failed`;\n   - the previous status is not `none` (the first tick and the tick after a failed tick never end early);\n   - the previous status is not `proposed`. A tick after a completion review never ends early. It fully reconciles against `Last completion findings`, which are authoritative. When `Findings write` is not `completed`, or the checklist lacks a finding, the tick writes the missing findings to the checklist itself. It reports `proposed` again only with fresh per-criterion evidence that every finding is resolved.\n\n   **An early exit re-emits the previous tick's `EPIC_STATUS`, `EPIC_NEXT_ACTION` and `EPIC_ASK` unchanged**, with `EPIC_STATE_CHANGED: no`, the observed `EPIC_SEEN` and `EPIC_FINGERPRINT`, and a fresh `EPIC_NEXT_TICK_AT`. It never reports `working` unless the previous tick did. A parked or failed child is never progress: every tick with one does the full reconcile, and reports `blocked` when the gate is the only remaining work. If the state cannot be read, do a full read and do not end early.\n3. **Reconcile** as today: read only what changed, establish real state (merged, CI, alive, deployed), act, and update the checklist only with evidence. Keep each child workflow id in the checklist row it belongs to.\n   - **Partial state.** When the state reply has non-empty `errors` (`deadline`, `candidates_incomplete`, `candidates_page_failed`, `linkage_unknown:…`, `children_truncated`, a Temporal error), or cannot be read at all, the children list is **partial**.\n     - A child missing from a partial list is **unknown, not absent**. Do not mark its row done or failed from the state reply.\n     - Never report `proposed` from a partial list. Report `working`, with `EPIC_NEXT_ACTION: system:state-partial:<first error>`.\n     - Start nothing for an affected row unless the complete §8 duplicate check proves no Running owner. If that check errors or is incomplete, start nothing.\n4. **Child outcomes** come from the state endpoint, never from a status alone:\n   - a design child counts as approved **only** when its `outcome` is `approved` and its `outcomeIssue` is the issue the tick expects for that row;\n   - `not_approved`, `invalid_result`, `failed`, `unknown` and `no_result` never count as approved;\n   - a Completed `UweDesignToPrWorkflow` is never evidence by itself, because it returns no result: use its linked design child's `outcome` and its PR child's real merge state;\n   - a PR child counts as merged only when `gh pr view --json state,mergedAt` shows `MERGED` with a non-null `mergedAt`.\n5. **`cto_decide`:** if `TargetAgent` is the configured CTO agent, run the existing epic-grant decision procedure once (`docs/epic-grants.md`: an independent check of the exact artifact, one send, no retry; read the grant's decisions first). Otherwise call `notify_cto` with the gate, run and visit. (This stage never emits `cto_decide`; see §4.)\n6. **Dispatch (unchanged legacy rule):** do or dispatch the next actionable step the epic already authorizes. If some steps are blocked but others are actionable, do the actionable ones and report `working`. Before any start, run the owner selection and duplicate check in §8, and pass input `WaiterWorkflowId={{workflow.id}}`. Scheduling rules keyed on a charter plan (deterministic attempt ids, dependency order, starts per tick) belong to the later charter stage, not here.\n7. **Status choice:**\n   - `working`: something is in flight or was started.\n   - `blocked`: every remaining item waits on a human gate.\n   - `needs-authority`: every remaining item needs new authority (out of scope, or a design child that is not approved).\n   - `proposed`: every item is done, the state reply is complete (empty `errors`), and evidence is cited per acceptance criterion.\n8. **Report lines**, last and in this order:\n   - `EPIC_SEEN: <updatedAt>`\n   - `EPIC_CHILD: <one running child id|none>`\n   - `EPIC_STATUS: working|blocked|needs-authority|proposed`\n   - `EPIC_STATE_CHANGED: yes|no`\n   - `EPIC_NEXT_TICK_AT: <UTC>`: working = now + 31 min, blocked or needs-authority = now + 61 min, proposed = `review-now`. Notify time and storm cooldowns are excluded; a wake may come sooner.\n   - `EPIC_FINGERPRINT: <fingerprint|none>`\n   - `EPIC_NEXT_ACTION: <owner>:<action>:<ref>`, e.g. `cto:decide:merge-approval:2@<workflow-id>` or `human:approve:<what>`\n   - `EPIC_ASK: <one sentence, the exact human action>`, for `blocked` or `needs-authority`\n   - `EPIC_BLOCKER: <workflow id|none>`, informational\n\n   `EPIC_STATE_CHANGED: yes` only when a checklist item completed or failed, a child started or ended, the status changed, human action became necessary, or completion is proposed. The first tick is `yes`; byte counts, percentages and ETAs alone are `no`.\n\n\nOwner selection and duplicate check:\n\nFields come from unauthenticated orchestrator GETs:\n\n| field | endpoint |\n|---|---|\n| `agentName`, `role`, `effectiveStatus`, `isDbOnly` | `GET /api/agents` |\n| `provider`, `tools[].toolName` + `tools[].isEnabled`, `projects`, `envRefs` | `GET /api/agents/{name}/config` |\n\nEvery comparison is an exact, case-sensitive ordinal match. \"Enabled tools\" means the `toolName` values with `isEnabled == true`.\n\n1. The named owner N is usable when `effectiveStatus == \"idle\"` and `isDbOnly == false`.\n2. Otherwise pick an agent C that meets **every** rule. N's `/config` is read even when N is DB-only or not provisioned.\n   - `C.role == N.role`;\n   - `C.effectiveStatus == \"idle\"` and `C.isDbOnly == false`;\n   - `C.projects` ⊇ `N.projects`;\n   - C's enabled tools ⊇ N's enabled tools;\n   - `C.envRefs` ⊇ `N.envRefs` (every env ref);\n   - C is not the configured CTO, not the driver's `TargetAgent`, and not in that workflow's `ConsensusAgents`;\n   - no Running workflow already owns the same target issue.\n\n   Tie-break: `C.provider == N.provider` first, then `agentName` ascending (ordinal).\n3. If N's `/config` cannot be read, report `blocked` and ask the human to provision N or name an owner.\n4. Record `owner=C (replaces N: <effectiveStatus>) verified <UTC>` in the checklist row.\n5. If no agent qualifies, report `blocked` with that exact human action.\n6. Never create, update or reprovision agents, and never write tools, projects, instructions or grants.\n\n**Duplicate check before any start:** list Running workflows and open linked PRs for the target repo and issue. If one exists, record it and start nothing. The check is **complete** only when both lists return without error and the workflow list is not truncated: `temporal_list_workflows` with `query` `ExecutionStatus=\"Running\" AND Repo=\"<repo>\" AND IssueNumber=<n>` and `limit` 100 returns fewer than 100 rows, and `gh pr list --repo <repo> --state open --search \"<n>\"` succeeds. Any error or a full page means incomplete: start nothing (fail-closed).\n\n",
+                "timeoutMinutes": 10,
+                "ignoreFailure": true,
+                "retryOnIncomplete": false,
+                "repo": "{{input.EpicRepo}}",
+                "outputVar": "tick_result",
+                "statusVar": "tick_delivery"
+              },
+              {
+                "type": "set_variable",
+                "name": "read_tick_status",
+                "vars": {
+                  "epic_seen": "{{vars.tick_result | extract:'EPIC_SEEN:\\s*(\\S+)' | default:''}}",
+                  "epic_child": "{{vars.tick_result | extract:'EPIC_CHILD:\\s*(\\S+)' | default:'none'}}",
+                  "tick_status": "{{vars.tick_result | extract:'EPIC_STATUS:[ \\t]*(working|blocked|needs-authority|proposed)(?=[ \\t]*(\\r?\\n|$))'}}",
+                  "tick_blocker": "{{vars.tick_result | extract:'EPIC_BLOCKER:\\s*(\\S+)' | default:'none'}}",
+                  "tick_state_changed": "{{vars.tick_result | extract:'EPIC_STATE_CHANGED:\\s*(yes|no)' | default:'no'}}",
+                  "epic_fingerprint": "{{vars.tick_result | extract:'EPIC_FINGERPRINT:\\s*([0-9a-f]{64}|none)' | default:'none'}}",
+                  "epic_next": "{{vars.tick_result | extract:'EPIC_NEXT_ACTION:\\s*(\\S+)' | default:'none'}}",
+                  "tick_ask": "{{vars.tick_result | extract:'EPIC_ASK:[ \\t]*([^\\r\\n]+)' | default:''}}"
+                }
+              },
+              {
+                "type": "set_variable",
+                "name": "tick_gate_key",
+                "vars": {
+                  "tick_gate_key": "{{vars.tick_delivery}}:{{vars.tick_status}}"
+                }
+              },
+              {
+                "type": "branch",
+                "name": "tick_parse_gate",
+                "on": "{{vars.tick_gate_key}}",
+                "cases": {
+                  "completed:working": {
+                    "type": "set_variable",
+                    "name": "clear_failures",
+                    "vars": {
+                      "fail_streak": "",
+                      "repair_notified": "no"
+                    }
+                  },
+                  "completed:blocked": {
+                    "type": "set_variable",
+                    "name": "clear_failures",
+                    "vars": {
+                      "fail_streak": "",
+                      "repair_notified": "no"
+                    }
+                  },
+                  "completed:needs-authority": {
+                    "type": "set_variable",
+                    "name": "clear_failures",
+                    "vars": {
+                      "fail_streak": "",
+                      "repair_notified": "no"
+                    }
+                  },
+                  "completed:proposed": {
+                    "type": "set_variable",
+                    "name": "clear_failures",
+                    "vars": {
+                      "fail_streak": "",
+                      "repair_notified": "no"
+                    }
+                  }
+                },
+                "default": {
+                  "type": "sequence",
+                  "steps": [
+                    {
+                      "type": "set_variable",
+                      "name": "increment_fail_streak",
+                      "vars": {
+                        "fail_streak": "{{vars.fail_streak}}x"
+                      }
+                    },
+                    {
+                      "type": "set_variable",
+                      "name": "cap_fail_streak",
+                      "vars": {
+                        "fail_streak": "{{vars.fail_streak | extract:'^(xxx|xx|x)'}}"
+                      }
+                    },
+                    {
+                      "type": "set_attribute",
+                      "attributes": {
+                        "Phase": "tick-failed"
+                      },
+                      "ignoreFailure": true
+                    },
+                    {
+                      "type": "branch",
+                      "name": "repair_or_retry",
+                      "on": "{{vars.fail_streak}}",
+                      "cases": {
+                        "xxx": {
+                          "type": "sequence",
+                          "steps": [
+                            {
+                              "type": "set_attribute",
+                              "attributes": {
+                                "Phase": "needs-repair"
+                              },
+                              "ignoreFailure": true
+                            },
+                            {
+                              "type": "branch",
+                              "name": "notify_repair_once",
+                              "on": "{{vars.repair_notified}}",
+                              "cases": {
+                                "no": {
+                                  "type": "sequence",
+                                  "steps": [
+                                    {
+                                      "type": "delegate",
+                                      "name": "notify_tick_repair",
+                                      "target": "{{config.CtoAgent}}",
+                                      "instruction": "Tell the human approver: driver {{workflow.id}} tick delivery {{vars.tick_delivery}} is not progress; the driver retries about every 60 minutes.",
+                                      "timeoutMinutes": 10,
+                                      "ignoreFailure": true,
+                                      "retryOnIncomplete": false
+                                    },
+                                    {
+                                      "type": "set_variable",
+                                      "name": "repair_notified",
+                                      "vars": {
+                                        "repair_notified": "yes"
+                                      }
+                                    }
+                                  ]
+                                }
+                              },
+                              "default": {
+                                "type": "noop"
+                              }
+                            },
+                            {
+                              "type": "sleep",
+                              "name": "epic_repair_floor",
+                              "seconds": 1800
+                            },
+                            {
+                              "type": "wait_for_signal",
+                              "name": "epic_wake_wait_repair",
+                              "signalName": "blocker-resolved",
+                              "timeoutMinutes": 30,
+                              "maxReminders": 0,
+                              "autoCompleteOnTimeout": true,
+                              "outputVar": "wake"
+                            },
+                            {
+                              "type": "set_variable",
+                              "name": "reset_failed_tick",
+                              "vars": {
+                                "wake_kind": "timeout",
+                                "wake_ref": "none",
+                                "tick_status": "",
+                                "epic_fingerprint": "none",
+                                "epic_next": "none",
+                                "tick_ask": ""
+                              }
+                            },
+                            {
+                              "type": "continue"
+                            }
+                          ]
+                        }
+                      },
+                      "default": {
+                        "type": "sequence",
+                        "steps": [
+                          {
+                            "type": "sleep",
+                            "name": "epic_tick_retry_floor",
+                            "seconds": 60
+                          },
+                          {
+                            "type": "set_variable",
+                            "name": "reset_failed_tick",
+                            "vars": {
+                              "wake_kind": "timeout",
+                              "wake_ref": "none",
+                              "tick_status": "",
+                              "epic_fingerprint": "none",
+                              "epic_next": "none",
+                              "tick_ask": ""
+                            }
+                          },
+                          {
+                            "type": "continue"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "type": "set_variable",
+                "name": "classify_wake",
+                "vars": {
+                  "wake_class": "{{vars.wake_kind | extract:'^(timeout|first)$' | default:'wake'}}"
+                }
+              },
+              {
+                "type": "branch",
+                "name": "update_wake_streak",
+                "on": "{{vars.wake_class}}:{{vars.tick_state_changed}}",
+                "cases": {
+                  "wake:no": {
+                    "type": "sequence",
+                    "steps": [
+                      {
+                        "type": "set_variable",
+                        "name": "increment_wake_streak",
+                        "vars": {
+                          "wake_streak": "{{vars.wake_streak}}x"
+                        }
+                      },
+                      {
+                        "type": "set_variable",
+                        "name": "cap_wake_streak",
+                        "vars": {
+                          "wake_streak": "{{vars.wake_streak | extract:'^(xxxxxx|xxxxx|xxxx|xxx|xx|x)'}}"
+                        }
+                      }
+                    ]
+                  }
+                },
+                "default": {
+                  "type": "set_variable",
+                  "name": "clear_wake_streak",
+                  "vars": {
+                    "wake_streak": ""
+                  }
+                }
+              },
+              {
+                "type": "set_variable",
+                "name": "read_floor_class",
+                "vars": {
+                  "floor_class": "{{vars.wake_streak | extract:'^(xxxxxx|xxx)' | default:'none'}}"
+                }
+              },
+              {
+                "type": "set_variable",
+                "name": "build_notify_key",
+                "vars": {
+                  "notify_key": "{{vars.tick_status}}:{{vars.tick_state_changed}}"
+                }
+              },
+              {
+                "type": "branch",
+                "name": "notify_on_material_change",
+                "on": "{{vars.notify_key}}",
+                "cases": {
+                  "working:yes": {
+                    "type": "delegate",
+                    "name": "notify_working_change",
+                    "target": "{{config.CtoAgent}}",
+                    "instruction": "Tell the human approver the material epic change: {{vars.tick_result}}; do not repeat unchanged metrics.",
+                    "timeoutMinutes": 10,
+                    "ignoreFailure": true,
+                    "retryOnIncomplete": false
+                  },
+                  "proposed:yes": {
+                    "type": "delegate",
+                    "name": "notify_proposed_change",
+                    "target": "{{config.CtoAgent}}",
+                    "instruction": "Tell the human approver epic {{input.EpicRepo}}#{{input.EpicIssue}} proposes completion; independent verification follows, not approval.",
+                    "timeoutMinutes": 10,
+                    "ignoreFailure": true,
+                    "retryOnIncomplete": false
+                  }
+                },
+                "default": {
+                  "type": "noop"
+                }
+              },
+              {
+                "type": "set_variable",
+                "name": "read_route_key",
+                "vars": {
+                  "route_key": "{{vars.tick_status | extract:'^(working|proposed)$' | default:'held'}}"
+                }
+              },
+              {
+                "type": "branch",
+                "name": "route_status",
+                "on": "{{vars.route_key}}",
+                "cases": {
+                  "held": {
+                    "type": "sequence",
+                    "steps": [
+                      {
+                        "type": "branch",
+                        "name": "reset_held_notice",
+                        "on": "{{vars.tick_state_changed}}",
+                        "cases": {
+                          "yes": {
+                            "type": "set_variable",
+                            "name": "clear_held_notice",
+                            "vars": {
+                              "blocked_notified": "no"
+                            }
+                          }
+                        },
+                        "default": {
+                          "type": "noop"
+                        }
+                      },
+                      {
+                        "type": "branch",
+                        "name": "held_phase",
+                        "on": "{{vars.tick_status}}",
+                        "cases": {
+                          "needs-authority": {
+                            "type": "set_attribute",
+                            "attributes": {
+                              "Phase": "needs-authority"
+                            },
+                            "ignoreFailure": true
+                          }
+                        },
+                        "default": {
+                          "type": "set_attribute",
+                          "attributes": {
+                            "Phase": "blocked-on-human"
+                          },
+                          "ignoreFailure": true
+                        }
+                      },
+                      {
+                        "type": "branch",
+                        "name": "notify_once_per_held_stretch",
+                        "on": "{{vars.blocked_notified}}",
+                        "cases": {
+                          "no": {
+                            "type": "sequence",
+                            "steps": [
+                              {
+                                "type": "delegate",
+                                "name": "notify_held",
+                                "target": "{{config.CtoAgent}}",
+                                "instruction": "Tell the human approver: epic {{input.EpicRepo}}#{{input.EpicIssue}} status {{vars.tick_status}}, blocker {{vars.tick_blocker}}. Required action: {{vars.tick_ask}}. This is not approval.",
+                                "timeoutMinutes": 10,
+                                "ignoreFailure": true,
+                                "retryOnIncomplete": false
+                              },
+                              {
+                                "type": "set_variable",
+                                "name": "mark_held_notice",
+                                "vars": {
+                                  "blocked_notified": "yes"
+                                }
+                              }
+                            ]
+                          }
+                        },
+                        "default": {
+                          "type": "noop"
+                        }
+                      },
+                      {
+                        "type": "branch",
+                        "name": "pick_floor",
+                        "on": "{{vars.floor_class}}",
+                        "cases": {
+                          "xxxxxx": {
+                            "type": "sleep",
+                            "name": "epic_wake_cooldown_30m",
+                            "seconds": 1800
+                          },
+                          "xxx": {
+                            "type": "sleep",
+                            "name": "epic_wake_cooldown_10m",
+                            "seconds": 600
+                          }
+                        },
+                        "default": {
+                          "type": "sleep",
+                          "name": "epic_wake_floor",
+                          "seconds": 60
+                        }
+                      },
+                      {
+                        "type": "wait_for_signal",
+                        "name": "epic_wake_wait_blocked",
+                        "signalName": "blocker-resolved",
+                        "timeoutMinutes": 60,
+                        "maxReminders": 0,
+                        "autoCompleteOnTimeout": true,
+                        "outputVar": "wake"
+                      },
+                      {
+                        "type": "set_variable",
+                        "name": "read_wake",
+                        "vars": {
+                          "wake_kind": "{{vars.wake.decision | extract:'^(approved|rejected|cancelled|wake|timeout)$' | default:'unknown'}}",
+                          "wake_ref": "{{vars.wake.blockerRef | extract:'^([A-Za-z0-9][A-Za-z0-9:._/-]{0,199})$' | default:'none'}}"
+                        }
+                      },
+                      {
+                        "type": "continue"
+                      }
+                    ]
+                  },
+                  "proposed": {
+                    "type": "noop"
+                  }
+                },
+                "default": {
+                  "type": "sequence",
+                  "steps": [
+                    {
+                      "type": "set_variable",
+                      "name": "clear_held_notice",
+                      "vars": {
+                        "blocked_notified": "no"
+                      }
+                    },
+                    {
+                      "type": "set_attribute",
+                      "attributes": {
+                        "Phase": "driving-epic"
+                      },
+                      "ignoreFailure": true
+                    },
+                    {
+                      "type": "branch",
+                      "name": "pick_floor",
+                      "on": "{{vars.floor_class}}",
+                      "cases": {
+                        "xxxxxx": {
+                          "type": "sleep",
+                          "name": "epic_wake_cooldown_30m",
+                          "seconds": 1800
+                        },
+                        "xxx": {
+                          "type": "sleep",
+                          "name": "epic_wake_cooldown_10m",
+                          "seconds": 600
+                        }
+                      },
+                      "default": {
+                        "type": "sleep",
+                        "name": "epic_wake_floor",
+                        "seconds": 60
+                      }
+                    },
+                    {
+                      "type": "wait_for_signal",
+                      "name": "epic_wake_wait",
+                      "signalName": "blocker-resolved",
+                      "timeoutMinutes": 30,
+                      "maxReminders": 0,
+                      "autoCompleteOnTimeout": true,
+                      "outputVar": "wake"
+                    },
+                    {
+                      "type": "set_variable",
+                      "name": "read_wake",
+                      "vars": {
+                        "wake_kind": "{{vars.wake.decision | extract:'^(approved|rejected|cancelled|wake|timeout)$' | default:'unknown'}}",
+                        "wake_ref": "{{vars.wake.blockerRef | extract:'^([A-Za-z0-9][A-Za-z0-9:._/-]{0,199})$' | default:'none'}}"
+                      }
+                    },
+                    {
+                      "type": "continue"
+                    }
+                  ]
+                }
+              },
+              {
+                "type": "set_attribute",
+                "attributes": {
+                  "Phase": "verifying-completion"
+                },
+                "ignoreFailure": true
+              },
+              {
+                "type": "child_workflow",
+                "name": "epic_completion_review",
+                "workflowType": "ConsensusReviewWorkflow",
+                "taskQueue": "fleet",
+                "outputVar": "epic_consensus",
+                "args": {
+                  "ReviewerAgents": "{{input.ConsensusAgents}}",
+                  "Synthesizer": "{{config.EscalationTarget}}",
+                  "ReviewPrompt": "Disprove the completion claim for {{input.EpicRepo}}#{{input.EpicIssue}}: read its checklist and acceptance criteria, verify each against real merged PRs, named passing rather than skipped tests, and applied deployments. Report every unresolved criterion. Author and configured CTO do not review their own work.",
+                  "ExcludedAgents": "{{input.TargetAgent}},{{config.CtoAgent}}"
+                }
+              },
+              {
+                "type": "branch",
+                "name": "route_verdict",
+                "on": "{{vars.epic_consensus.FinalVerdict | default:'changes_requested'}}",
+                "cases": {
+                  "approved": {
+                    "type": "sequence",
+                    "steps": [
+                      {
+                        "type": "set_variable",
+                        "name": "approved_exit",
+                        "vars": {
+                          "exit_reason": "approved"
+                        }
+                      },
+                      {
+                        "type": "set_attribute",
+                        "attributes": {
+                          "Phase": "complete"
+                        },
+                        "ignoreFailure": true
+                      },
+                      {
+                        "type": "delegate",
+                        "name": "close_out",
+                        "target": "{{input.TargetAgent}}",
+                        "instruction": "Post the verified result and close epic {{input.EpicRepo}}#{{input.EpicIssue}}.",
+                        "timeoutMinutes": 15,
+                        "ignoreFailure": true,
+                        "retryOnIncomplete": false
+                      },
+                      {
+                        "type": "break"
+                      }
+                    ]
+                  },
+                  "rejected": {
+                    "type": "sequence",
+                    "steps": [
+                      {
+                        "type": "set_variable",
+                        "name": "rejected_exit",
+                        "vars": {
+                          "exit_reason": "rejected"
+                        }
+                      },
+                      {
+                        "type": "set_attribute",
+                        "attributes": {
+                          "Phase": "rejected"
+                        },
+                        "ignoreFailure": true
+                      },
+                      {
+                        "type": "delegate",
+                        "name": "notify_rejected",
+                        "target": "{{config.CtoAgent}}",
+                        "instruction": "Tell the human approver epic {{input.EpicRepo}}#{{input.EpicIssue}} completion was rejected; no approval or merge implied.",
+                        "timeoutMinutes": 10,
+                        "ignoreFailure": true,
+                        "retryOnIncomplete": false
+                      },
+                      {
+                        "type": "break"
+                      }
+                    ]
+                  }
+                },
+                "default": {
+                  "type": "sequence",
+                  "steps": [
+                    {
+                      "type": "set_attribute",
+                      "attributes": {
+                        "Phase": "driving-epic"
+                      },
+                      "ignoreFailure": true
+                    },
+                    {
+                      "type": "branch",
+                      "name": "findings_source",
+                      "on": "{{vars.epic_consensus.FinalVerdict | default:'changes_requested'}}",
+                      "cases": {
+                        "needs_human_review": {
+                          "type": "set_variable",
+                          "name": "overflow_findings",
+                          "vars": {
+                            "completion_findings": "{{vars.epic_consensus.ConsolidatedReasoning}}\nPer-reviewer verdicts: {{vars.epic_consensus.PerAgentVerdicts | json}}"
+                          }
+                        }
+                      },
+                      "default": {
+                        "type": "set_variable",
+                        "name": "review_findings",
+                        "vars": {
+                          "completion_findings": "{{vars.epic_consensus.ConsolidatedReasoning | default:'none returned'}}"
+                        }
+                      }
+                    },
+                    {
+                      "type": "set_variable",
+                      "name": "init_findings_write",
+                      "vars": {
+                        "findings_write_status": "unknown",
+                        "findings_write_result": ""
+                      }
+                    },
+                    {
+                      "type": "delegate",
+                      "name": "record_findings",
+                      "target": "{{input.TargetAgent}}",
+                      "instruction": "Add each authoritative finding to the epic checklist: {{vars.completion_findings}}. Never truncate or drop a blocker. Epic {{input.EpicRepo}}#{{input.EpicIssue}}.",
+                      "timeoutMinutes": 15,
+                      "ignoreFailure": true,
+                      "retryOnIncomplete": false,
+                      "outputVar": "findings_write_result",
+                      "statusVar": "findings_write_status"
+                    },
+                    {
+                      "type": "sleep",
+                      "name": "completion_retry_floor",
+                      "seconds": 60
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "type": "branch",
+            "name": "route_exit",
+            "on": "{{vars.exit_reason | default:'exhausted'}}",
+            "cases": {
+              "exhausted": {
+                "type": "sequence",
+                "steps": [
+                  {
+                    "type": "set_attribute",
+                    "attributes": {
+                      "Phase": "exhausted"
+                    },
+                    "ignoreFailure": true
+                  },
+                  {
+                    "type": "delegate",
+                    "name": "notify_exhausted",
+                    "target": "{{config.CtoAgent}}",
+                    "instruction": "Tell the human approver driver {{workflow.id}} exhausted without completion or block; this is itself a finding.",
+                    "timeoutMinutes": 10,
+                    "ignoreFailure": true,
+                    "retryOnIncomplete": false
+                  }
+                ]
+              }
+            },
+            "default": {
+              "type": "noop"
+            }
+          }
+        ]
+      }
     }
   ],
   "schedules": [],

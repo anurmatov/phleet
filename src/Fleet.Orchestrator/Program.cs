@@ -96,6 +96,11 @@ builder.Services.TryAddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IEpicGrantTemporal, TemporalEpicGrantClient>();
 builder.Services.AddHttpClient<RepoVisibilityReader>(c => c.Timeout = RepoVisibilityReader.Timeout);
 builder.Services.AddScoped<EpicGrantService>();
+builder.Services.Configure<EpicDriverWatcherOptions>(builder.Configuration.GetSection(EpicDriverWatcherOptions.Section));
+builder.Services.AddSingleton<IEpicDriverTemporal>(sp => sp.GetRequiredService<TemporalClientRegistry>());
+builder.Services.AddSingleton<EpicRunLinkage>();
+builder.Services.AddSingleton<EpicDriverStateService>();
+builder.Services.AddHostedService<EpicDriverWatcherService>();
 
 // MCP server (HTTP transport — same port as REST, path /mcp)
 builder.Services
@@ -346,6 +351,7 @@ app.MapProjectContextEndpoints();
 // REST: the /api/epic-grants surface (#436) — list, detail, validate, create, revoke, and the
 // bridge-only decisions route. Mapped from Endpoints/EpicGrantEndpoints.cs.
 app.MapEpicGrantEndpoints();
+app.MapEpicDriverEndpoints();
 
 // REST: active workflows across all Temporal namespaces
 app.MapGet("/api/workflows", (WorkflowStore workflows) =>

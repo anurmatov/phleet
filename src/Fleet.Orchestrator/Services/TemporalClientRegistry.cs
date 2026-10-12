@@ -10,7 +10,7 @@ namespace Fleet.Orchestrator.Services;
 /// </summary>
 public sealed class TemporalClientRegistry(
     IOptions<TemporalOptions> opts,
-    ILogger<TemporalClientRegistry> logger)
+    ILogger<TemporalClientRegistry> logger) : IEpicDriverTemporal
 {
     private readonly TemporalOptions _opts = opts.Value;
     private Dictionary<string, ITemporalClient>? _clients;
@@ -62,6 +62,57 @@ public sealed class TemporalClientRegistry(
     /// <summary>Returns the list of known namespaces (connected clients if initialized, configured list otherwise).</summary>
     public string[] GetNamespaces() =>
         _clients is not null ? [.. _clients.Keys] : [.. _opts.Namespaces];
+
+    public async Task<EpicVisibilityResult> ListAsync(string ns, string query, int? limit, CancellationToken ct)
+    {
+        var runs = new List<Models.WorkflowSummary>();
+        try
+        {
+            var client = await GetClientAsync(ns, ct).WaitAsync(TemporalEpicGrantClient.Bound, ct)
+                ?? throw new InvalidOperationException("Temporal unavailable");
+            await using var iterator = client.ListWorkflowsAsync(query).GetAsyncEnumerator(ct);
+            while (await iterator.MoveNextAsync().AsTask().WaitAsync(TemporalEpicGrantClient.Bound, ct))
+            {
+                var wf = iterator.Current;
+                if (limit is { } max && runs.Count == max)
+                    return new(runs, false, "candidates_incomplete");
+                var attrs = wf.TypedSearchAttributes;
+                attrs.TryGetValue(SearchAttributeKey.CreateLong("IssueNumber"), out var issue);
+                attrs.TryGetValue(SearchAttributeKey.CreateKeyword("Repo"), out var repo);
+                attrs.TryGetValue(SearchAttributeKey.CreateKeyword("Phase"), out var phase);
+                runs.Add(new(wf.Id, wf.RunId ?? "", wf.WorkflowType ?? "", ns, wf.TaskQueue,
+                    wf.Status.ToString(), wf.StartTime, wf.CloseTime, issue > 0 && issue <= int.MaxValue ? (int)issue : null,
+                    Repo: repo, Phase: phase));
+            }
+            return new(runs, true, null);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            logger.LogWarning("Epic visibility read failed namespace={Namespace} error={Error}", ns, ex.GetType().Name);
+            return new(runs, false, "candidates_page_failed");
+        }
+    }
+
+    public async Task<string> SignalWorkflowAsync(string ns, string workflowId, string runId,
+        string signalName, object payload, CancellationToken ct)
+    {
+        try
+        {
+            var client = await GetClientAsync(ns, ct).WaitAsync(TemporalEpicGrantClient.Bound, ct)
+                ?? throw new InvalidOperationException("Temporal unavailable");
+            await client.GetWorkflowHandle(workflowId, runId: runId).SignalAsync(signalName, [payload],
+                new WorkflowSignalOptions { Rpc = new RpcOptions { CancellationToken = ct, Timeout = TemporalEpicGrantClient.Bound } });
+            return "sent";
+        }
+        catch (Temporalio.Exceptions.RpcException ex) when (ex.Code == Temporalio.Exceptions.RpcException.StatusCode.NotFound)
+        { return "not_found"; }
+        catch (Exception ex)
+        {
+            logger.LogWarning("Epic wake send failed workflow={WorkflowId} run={RunId} error={Error}", workflowId, runId, ex.GetType().Name);
+            return "failed";
+        }
+    }
 
     public async Task<bool> CancelWorkflowAsync(string @namespace, string workflowId, string? runId, CancellationToken ct = default)
     {

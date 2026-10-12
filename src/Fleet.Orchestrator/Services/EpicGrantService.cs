@@ -75,7 +75,10 @@ public sealed record EpicRunDescription(
     string? ParentRunId,
     string? GateVisit,
     string? ReviewRef,
-    string? ReviewScrub)
+    string? ReviewScrub,
+    long? IssueNumber = null,
+    string? Phase = null,
+    string? Repo = null)
 {
     public bool IsRunning => Status == nameof(WorkflowExecutionStatus.Running);
 }
@@ -104,6 +107,9 @@ public interface IEpicGrantTemporal
     /// </summary>
     Task<EpicRunHistory?> ReadRunAsync(string @namespace, string workflowId, string runId, CancellationToken ct);
 
+    Task<EpicCloseResult?> ReadCloseResultAsync(string ns, string workflowId, string runId, CancellationToken ct) =>
+        throw new NotSupportedException("Close-event reading is not implemented by this Temporal port");
+
     /// <summary>Signals the exact run with one JSON payload.</summary>
     Task SignalAsync(string @namespace, string workflowId, string runId, string signalName, string payloadJson, CancellationToken ct);
 }
@@ -131,7 +137,10 @@ public sealed class TemporalEpicGrantClient(TemporalClientRegistry registry) : I
                     ParentRunId: d.ParentRunId,
                     GateVisit: Keyword(d.TypedSearchAttributes, "GateVisit"),
                     ReviewRef: Keyword(d.TypedSearchAttributes, "ReviewRef"),
-                    ReviewScrub: Keyword(d.TypedSearchAttributes, "ReviewScrub"));
+                    ReviewScrub: Keyword(d.TypedSearchAttributes, "ReviewScrub"),
+                    IssueNumber: Integer(d.TypedSearchAttributes, "IssueNumber"),
+                    Phase: Keyword(d.TypedSearchAttributes, "Phase"),
+                    Repo: Keyword(d.TypedSearchAttributes, "Repo"));
             }
             catch (RpcException ex) when (ex.Code == RpcException.StatusCode.NotFound)
             {
@@ -187,6 +196,25 @@ public sealed class TemporalEpicGrantClient(TemporalClientRegistry registry) : I
             return new EpicRunHistory(inputJson, name, version);
         });
 
+    public Task<EpicCloseResult?> ReadCloseResultAsync(string ns, string workflowId, string runId, CancellationToken ct) =>
+        BoundedAsync<EpicCloseResult?>(ct, async token =>
+        {
+            var client = await ClientAsync(ns, token);
+            var response = await client.WorkflowService.GetWorkflowExecutionHistoryAsync(
+                new Temporalio.Api.WorkflowService.V1.GetWorkflowExecutionHistoryRequest
+                {
+                    Namespace = ns,
+                    Execution = new() { WorkflowId = workflowId, RunId = runId },
+                    HistoryEventFilterType = HistoryEventFilterType.CloseEvent,
+                }, new RpcOptions { CancellationToken = token, Timeout = Bound });
+            var completed = response.History?.Events.FirstOrDefault(e => e.EventType == EventType.WorkflowExecutionCompleted);
+            if (completed is null) throw new InvalidOperationException("Completed close event unavailable");
+            var payload = completed.WorkflowExecutionCompletedEventAttributes?.Result?.Payloads_.FirstOrDefault();
+            if (payload is null) return new EpicCloseResult("binary/null", null);
+            var encoding = payload.Metadata.TryGetValue("encoding", out var bytes) ? bytes.ToStringUtf8() : "";
+            return new EpicCloseResult(encoding, payload.Data.ToStringUtf8());
+        });
+
     public Task SignalAsync(string @namespace, string workflowId, string runId, string signalName, string payloadJson, CancellationToken ct) =>
         BoundedAsync<object?>(ct, async token =>
         {
@@ -220,6 +248,12 @@ public sealed class TemporalEpicGrantClient(TemporalClientRegistry registry) : I
         {
             return null;
         }
+    }
+
+    private static long? Integer(SearchAttributeCollection attributes, string name)
+    {
+        try { return attributes.TryGetValue(SearchAttributeKey.CreateLong(name), out var value) && value > 0 ? value : null; }
+        catch { return null; }
     }
 
     /// <summary>The payload's JSON text; null for a <c>binary/null</c> payload; throws for anything else.</summary>
@@ -915,7 +949,7 @@ public sealed class EpicGrantService(
             string? stored;
             try
             {
-                stored = await LoadStoredDefinitionAsync(workflow.Type, workflow.Version, ct);
+                stored = await EpicRunLinkage.LoadStoredDefinitionAsync(db, workflow.Type, workflow.Version, ct);
             }
             catch (Exception ex)
             {
@@ -1007,8 +1041,15 @@ public sealed class EpicGrantService(
         return result;
     }
 
+    /// <summary>Read-only D1–D10 preflight; S1 always refuses at D6 without reading GitHub.</summary>
+    public async Task<EpicGrantDecisionResult> DryRunDecideAsync(string grantId, EpicGrantDecisionRequest request, CancellationToken ct)
+    {
+        try { return (await DecideCoreAsync(grantId, request, ct, dryRun: true)).Item1; }
+        catch { return EpicGrantDecisionResult.Refused(EpicGrantRefusal.Unknown); }
+    }
+
     private async Task<(EpicGrantDecisionResult, Exception?)> DecideCoreAsync(
-        string grantId, EpicGrantDecisionRequest request, CancellationToken ct)
+        string grantId, EpicGrantDecisionRequest request, CancellationToken ct, bool dryRun = false)
     {
         static (EpicGrantDecisionResult, Exception?) Refuse(string reason, Exception? ex = null) =>
             (EpicGrantDecisionResult.Refused(reason), ex);
@@ -1079,7 +1120,7 @@ public sealed class EpicGrantService(
             history = await temporal.ReadRunAsync(ns, workflowId, target.RunId, ct)
                 ?? throw new InvalidOperationException("target run has no history page");
             input = ParseInput(history.InputJson);
-            if (!await IsLinkedAsync(ns, target, input, driver, ct))
+            if (!await EpicRunLinkage.IsLinkedAsync(temporal, ns, target, input, driver, ct))
                 return Refuse(EpicGrantRefusal.NotLinked);
         }
         catch (Exception ex)
@@ -1098,7 +1139,7 @@ public sealed class EpicGrantService(
         string? stored;
         try
         {
-            stored = await LoadStoredDefinitionAsync(definitionName, definitionVersion, ct);
+            stored = await EpicRunLinkage.LoadStoredDefinitionAsync(db, definitionName, definitionVersion, ct);
         }
         catch (Exception ex)
         {
@@ -1118,6 +1159,7 @@ public sealed class EpicGrantService(
                                                 && t.Issues.Contains(issue.Value));
         if (targetEntry is null) return Refuse(EpicGrantRefusal.TargetOutOfScope);
         if (_options.DeniedRepoSet().Contains(targetEntry.Repo)) return Refuse(EpicGrantRefusal.TargetOutOfScope);
+        if (dryRun) return Refuse(EpicGrantRefusal.VisibilityUnknown);
         var seen = await visibility.ReadAsync(targetEntry.Repo, ct);
         if (seen == RepoVisibility.Unknown) return Refuse(EpicGrantRefusal.VisibilityUnknown);
         if (seen == RepoVisibility.Public && !targetEntry.AllowPublic) return Refuse(EpicGrantRefusal.TargetOutOfScope);
@@ -1257,39 +1299,6 @@ public sealed class EpicGrantService(
         return await db.EpicGrants.AsNoTracking().FirstOrDefaultAsync(g => g.Id == grantId, ct);
     }
 
-    /// <summary>
-    /// Linked when the run's input <c>WaiterWorkflowId</c> is the driver workflow id, or when a
-    /// parent at most two levels up is the driver run itself or has that input.
-    /// </summary>
-    private async Task<bool> IsLinkedAsync(
-        string ns, EpicRunDescription target, JsonElement input, EpicScopeDriver driver, CancellationToken ct)
-    {
-        if (WaitsOn(input, driver)) return true;
-
-        var (parentId, parentRunId) = (target.ParentWorkflowId, target.ParentRunId);
-        for (var level = 1; level <= 2; level++)
-        {
-            if (string.IsNullOrEmpty(parentId) || string.IsNullOrEmpty(parentRunId)) return false;
-            if (string.Equals(ns, driver.Namespace, StringComparison.Ordinal)
-                && parentId == driver.WorkflowId && parentRunId == driver.RunId)
-                return true;
-
-            var parentHistory = await temporal.ReadRunAsync(ns, parentId, parentRunId, ct)
-                ?? throw new InvalidOperationException("parent run has no history page");
-            if (WaitsOn(ParseInput(parentHistory.InputJson), driver)) return true;
-            if (level == 2) break;
-
-            var parent = await temporal.DescribeAsync(ns, parentId, parentRunId, ct);
-            if (parent is null) return false;
-            (parentId, parentRunId) = (parent.ParentWorkflowId, parent.ParentRunId);
-        }
-
-        return false;
-
-        static bool WaitsOn(JsonElement input, EpicScopeDriver driver) =>
-            EpicJson.String(input, "WaiterWorkflowId") is { Length: > 0 } waiter && waiter == driver.WorkflowId;
-    }
-
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     /// <summary>A grant id in its canonical 36-character <c>D</c> form, or null.</summary>
@@ -1323,24 +1332,6 @@ public sealed class EpicGrantService(
         if (string.IsNullOrWhiteSpace(inputJson)) return default;
         using var doc = JsonDocument.Parse(inputJson);
         return doc.RootElement.Clone();
-    }
-
-    /// <summary>
-    /// The stored definition for exactly (type, version): the main row when its version matches,
-    /// otherwise the archived version row. Null when neither exists.
-    /// </summary>
-    private async Task<string?> LoadStoredDefinitionAsync(string type, int version, CancellationToken ct)
-    {
-        var main = await db.WorkflowDefinitions.AsNoTracking()
-            .Where(d => d.Name == type)
-            .Select(d => new { d.Id, d.Name, d.Version, d.Definition })
-            .FirstOrDefaultAsync(ct);
-        if (main is null || main.Name != type) return null;
-        if (main.Version == version) return main.Definition;
-        return await db.WorkflowDefinitionVersions.AsNoTracking()
-            .Where(v => v.WorkflowDefinitionId == main.Id && v.Version == version)
-            .Select(v => v.Definition)
-            .FirstOrDefaultAsync(ct);
     }
 
     /// <summary>Exactly the five contract fields, in contract order.</summary>

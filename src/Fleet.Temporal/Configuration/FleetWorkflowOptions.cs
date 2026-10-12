@@ -9,6 +9,8 @@ public sealed class FleetWorkflowOptions
 {
     public const string Section = "FleetWorkflows";
 
+    public string OrchestratorUrl { get; set; } = "";
+
     /// <summary>
     /// Agent name for escalation notifications (e.g. workflow failures, timeout alerts).
     /// Alias for <see cref="CtoAgent"/> — both resolve to the same volatile backing field

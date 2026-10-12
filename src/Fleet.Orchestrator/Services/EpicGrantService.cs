@@ -364,7 +364,11 @@ internal sealed record EpicScope(
     IReadOnlyList<EpicScopeTarget> Targets,
     IReadOnlyList<string> Gates,
     IReadOnlyList<EpicScopeWorkflow> Workflows,
-    DateTimeOffset ExpiresAt);
+    DateTimeOffset ExpiresAt,
+    EpicAutonomyScope? Autonomy = null)
+{
+    public string Mode => Autonomy is null ? "delegated" : "autonomous";
+}
 
 /// <summary>Everything the parser could read, plus every structural error it found.</summary>
 internal sealed class EpicScopeParse
@@ -375,11 +379,12 @@ internal sealed class EpicScopeParse
     public List<string> Gates { get; } = [];
     public List<EpicScopeWorkflow> Workflows { get; } = [];
     public DateTimeOffset? ExpiresAt { get; set; }
+    public EpicAutonomyScope? Autonomy { get; set; }
 
     /// <summary>The complete scope, only when there is no structural error.</summary>
     public EpicScope? Scope =>
         Errors.Count == 0 && Driver is not null && ExpiresAt is { } expires
-            ? new EpicScope(Driver, Targets, Gates, Workflows, expires)
+            ? new EpicScope(Driver, Targets, Gates, Workflows, expires, Autonomy)
             : null;
 }
 
@@ -387,7 +392,7 @@ internal sealed class EpicScopeParse
 /// The strict structural reader of a grant scope (#436 §5). Only the documented fields are
 /// allowed at every level, each at most once; arrays must be non-empty.
 /// </summary>
-internal static class EpicScopeParser
+internal static partial class EpicScopeParser
 {
     private static readonly string[] RootKeys = ["driver", "targets", "gates", "workflows", "expiresAt"];
     private static readonly string[] DriverKeys = ["namespace", "workflowId", "runId"];
@@ -409,7 +414,7 @@ internal static class EpicScopeParser
         }
     }
 
-    public static EpicScopeParse Parse(string text)
+    public static EpicScopeParse Parse(string text, bool autonomyEnabled = false, IReadOnlySet<string>? deniedRepos = null)
     {
         var result = new EpicScopeParse();
         var errors = result.Errors;
@@ -433,7 +438,13 @@ internal static class EpicScopeParser
                 return result;
             }
 
-            CheckKeys(root, "scope", RootKeys, errors);
+            var mode = root.TryGetProperty("mode", out var modeJson)
+                ? modeJson.ValueKind == JsonValueKind.String ? modeJson.GetString() : null
+                : "delegated";
+            if (mode is not ("delegated" or "autonomous")) errors.Add("mode must be delegated or autonomous");
+            var autonomous = mode == "autonomous";
+            CheckKeys(root, "scope", autonomous ? [.. RootKeys, .. AutonomyKeys] : [.. RootKeys, "mode"], errors);
+            if (autonomous && !autonomyEnabled) errors.Add("autonomy is disabled");
             foreach (var key in RootKeys)
                 if (!root.TryGetProperty(key, out _))
                     errors.Add($"scope: missing field '{key}'");
@@ -442,6 +453,7 @@ internal static class EpicScopeParser
             if (root.TryGetProperty("targets", out var targets)) ParseTargets(targets, result);
             if (root.TryGetProperty("gates", out var gates)) ParseGates(gates, result);
             if (root.TryGetProperty("workflows", out var workflows)) ParseWorkflows(workflows, result);
+            if (autonomous) ParseAutonomy(root, result, deniedRepos);
             if (root.TryGetProperty("expiresAt", out var expires))
             {
                 if (expires.ValueKind == JsonValueKind.String

@@ -400,6 +400,160 @@ public class CodexExecutorAbandonTests
         await AssertHealthyAsync(server);
     }
 
+    [Fact]
+    public async Task Restart_StaleReaderFinallyAfterNewInitialize_DoesNotFailTheNewGeneration()
+    {
+        var restarts = 0;
+        GatedEofStream? oldStdout = null;
+        AbandonAppServer? harness = null;
+        await using var server = new AbandonAppServer(_ =>
+        {
+            restarts++;
+            return StartGatedPeer(harness!.DirectoryPath);
+        }, stream => oldStdout = new GatedEofStream(stream));
+        harness = server;
+        var marker = Path.Combine(server.DirectoryPath, "initialize-seen");
+        var go = Path.Combine(server.DirectoryPath, "initialize-go");
+        var marked = WaitForFileAsync(marker);
+        await oldStdout!.Reading.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        server.Executor.RequestRestart();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var next = CollectAsync(server.Executor.ExecuteAsync("next", ct: deadline.Token));
+        try
+        {
+            await marked;
+            oldStdout!.Release();
+            await server.ReaderTask.WaitAsync(TimeSpan.FromSeconds(10));
+            File.WriteAllText(go, "go");
+            var result = await next.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal("answer-2", Assert.Single(result).FinalResult);
+            Assert.Equal(1, restarts);
+            Assert.DoesNotContain(server.Logs, l => l.Contains("startup attempt 1/3 failed"));
+        }
+        finally
+        {
+            oldStdout!.Release();
+            File.WriteAllText(go, "go");
+            deadline.Cancel();
+            // Include the real failure signature in fail-before and mutation receipts.
+            Console.WriteLine(string.Join(Environment.NewLine, server.Logs));
+            try { await next.WaitAsync(TimeSpan.FromSeconds(10)); }
+            catch (Exception) { } // The assertions above carry the test result.
+        }
+    }
+
+    [Fact]
+    public async Task Dispose_FailsTheOutgoingGenerationsPendingRequest()
+    {
+        GatedEofStream? oldStdout = null;
+        await using var server = new AbandonAppServer(wrapStdout: stream => oldStdout = new GatedEofStream(stream));
+        server.WithholdMethod = "turn/start";
+        var enumeration = CollectAsync(server.Executor.ExecuteAsync("x"));
+        try
+        {
+            await server.Withheld.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            var captured = Assert.Single(server.Executor.PendingRequestTasksForTests);
+            await oldStdout!.Reading.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await server.Executor.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.True(captured.IsFaulted);
+            var error = Assert.IsType<InvalidOperationException>(Assert.Single(captured.Exception!.InnerExceptions));
+            Assert.Equal("Codex app-server stopped before the request completed.", error.Message);
+            // Dispose can also dispose the caller's semaphore before its finally releases it.
+            await ObserveEnumerationAsync(enumeration).WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            oldStdout!.Release();
+        }
+        // The harness deliberately disposes the executor again; double dispose must not throw.
+    }
+
+    private static async Task ObserveEnumerationAsync(Task<List<AgentProgress>> enumeration)
+    {
+        try { await enumeration; }
+        catch (Exception) { } // Only completion is asserted, not the caller's exception type.
+    }
+
+    private static async Task WaitForFileAsync(string path)
+    {
+        var seen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var watcher = new FileSystemWatcher(Path.GetDirectoryName(path)!, Path.GetFileName(path));
+        watcher.Created += (_, _) => seen.TrySetResult();
+        watcher.EnableRaisingEvents = true;
+        if (File.Exists(path)) seen.TrySetResult();
+        await seen.Task.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    private static Process StartGatedPeer(string directory)
+    {
+        var psi = new ProcessStartInfo("python3")
+        {
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        psi.ArgumentList.Add("-u");
+        psi.ArgumentList.Add("-c");
+        psi.ArgumentList.Add("""
+            import sys, json, os
+            marker, go = sys.argv[1:]
+            for line in sys.stdin:
+                q = json.loads(line)
+                method = q.get('method')
+                if 'id' not in q:
+                    continue
+                if method == 'initialize':
+                    open(marker, 'w').close()
+                    while not os.path.exists(go):
+                        os.sched_yield()
+                result = {}
+                if method == 'thread/start':
+                    result = {'thread': {'id': 'fresh-thread', 'ephemeral': True}}
+                if method == 'turn/start':
+                    result = {'turn': {'id': 'fresh-turn'}}
+                print(json.dumps({'id': q['id'], 'result': result}), flush=True)
+                if method == 'turn/start':
+                    print(json.dumps({'method':'turn/completed', 'params':{'turn':{
+                        'id':'fresh-turn', 'status':'completed', 'items':[
+                        {'type':'agentMessage','text':'answer-2'}]}}}), flush=True)
+            """);
+        psi.ArgumentList.Add(Path.Combine(directory, "initialize-seen"));
+        psi.ArgumentList.Add(Path.Combine(directory, "initialize-go"));
+        return Process.Start(psi)!;
+    }
+
+    private sealed class GatedEofStream(Stream inner) : Stream
+    {
+        private readonly CancellationTokenSource _release = new();
+        public TaskCompletionSource Reading { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public void Release() => _release.Cancel();
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            Reading.TrySetResult();
+            // Ignore the generation's cancellation until Release makes this read return EOF.
+            try { return await inner.ReadAsync(buffer, _release.Token); }
+            catch (OperationCanceledException) when (_release.IsCancellationRequested) { return 0; }
+        }
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+        public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { inner.Dispose(); _release.Dispose(); }
+            base.Dispose(disposing);
+        }
+    }
+
     /// <summary>A fresh stdio peer exercises real startup, initialize and thread/start after recovery.</summary>
     private static Process StartFreshPeer()
     {

@@ -770,12 +770,30 @@ public class ConsensusReviewWorkflow
     /// <see cref="ConsensusReviewOutput.ScrubAttested"/> from the round's own output. Pure and
     /// deterministic: it reads only the verdicts and the durable review texts.
     /// </summary>
-    internal static ConsensusReviewOutput ApplyAttestation(ConsensusReviewOutput output, string? reviewRef) =>
-        output with
+    internal static ConsensusReviewOutput ApplyAttestation(ConsensusReviewOutput output, string? reviewRef)
+    {
+        var attestedRef = ComputeAttestedRef(output, reviewRef);
+        return output with
         {
-            AttestedRef = ComputeAttestedRef(output, reviewRef),
+            AttestedRef = attestedRef,
             ScrubAttested = ComputeScrubAttested(output.PerAgentVerdicts),
+            ScopeFitAttested = ComputeScopeFitAttested(output.PerAgentVerdicts, attestedRef),
         };
+    }
+
+    // Pure output derivation: no workflow commands, and old reviews without the line stay false.
+    internal static bool ComputeScopeFitAttested(AgentReview[]? reviews, string? attestedRef)
+    {
+        if (string.IsNullOrWhiteSpace(attestedRef) || reviews is not { Length: > 0 }) return false;
+        foreach (var review in reviews)
+        {
+            if (review is null) return false;
+            var lines = TrimmedLines(review.ReviewText).ToArray();
+            if (!lines.Contains("SCOPE_FIT: pass", StringComparer.Ordinal)
+                || lines.Contains("SCOPE_FIT: fail", StringComparer.Ordinal)) return false;
+        }
+        return true;
+    }
 
     /// <summary>
     /// <paramref name="reviewRef"/> only when it is non-blank, the final verdict is approved,

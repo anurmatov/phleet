@@ -88,4 +88,7 @@ public sealed record ConsensusReviewOutput(
     bool ScrubAttested = false,
 
     /// <summary>Only a unanimous valid classify-mode round may set this.</summary>
-    string? ClassificationLabel = null);
+    string? ClassificationLabel = null,
+
+    /// <summary>Every independently attested reviewer explicitly approved charter scope fit.</summary>
+    bool ScopeFitAttested = false);

@@ -173,9 +173,9 @@ public sealed class SeedEpicGrantDefinitionTests
         };
     }
 
-    /// <summary>AC-D3: a human approval merges exactly as before — no pin, no pinned step.</summary>
+    /// <summary>#441 C-D4: human approvals pin the attested ref as grant approvals do.</summary>
     [Fact]
-    public async Task Pr_HumanApproval_MergesUnpinned()
+    public async Task Pr_HumanApproval_MergesPinned()
     {
         var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", PrInput(), Respond, async (handle, h) =>
         {
@@ -184,7 +184,7 @@ public sealed class SeedEpicGrantDefinitionTests
         });
 
         var merge = Assert.Single(run.Calls, c => c.Step == "phase4_merge");
-        Assert.DoesNotContain("--match-head-commit", merge.Instruction);
+        Assert.Contains($"--match-head-commit {HeadA}", merge.Instruction);
         Assert.DoesNotContain(run.Calls, c => c.Step == "phase4_merge_pinned");
         Assert.Equal(0, run.Discards);
 

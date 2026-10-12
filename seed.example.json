@@ -2050,7 +2050,7 @@
                         "type": "delegate_with_escalation",
                         "target": "{{config.CtoAgent}}",
                         "outputVar": "merge_result",
-                        "instruction": "Merge the PR at {{vars.pr_url}} in repo {{input.Repo}}. Do not force-push. Confirm once merged.",
+                        "instruction": "Merge the PR at {{vars.pr_url}} in repo {{input.Repo}}, pinned to the unanimously attested head {{vars.review_ref}}. If draft, run gh pr ready first. Run exactly:\ngh pr merge {{vars.pr_url}} --repo {{input.Repo}} --squash --match-head-commit {{vars.review_ref}}\n\nIf it fails, do not retry or merge another way, bypass branch protection or rewrite branch history. Report the exact failure. Confirm only the actual merged state.",
                         "timeoutMinutes": 10
                       }
                     },
@@ -2895,6 +2895,904 @@
             },
             "default": {
               "type": "noop"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "UwePrAcceptanceWorkflow",
+      "namespace": "fleet",
+      "taskQueue": "fleet",
+      "description": "One exact-head preapproved acceptance attempt with bounded owner stages, durable literal wait and abandoned cleanup backstop.",
+      "definition": {
+        "name": "root",
+        "type": "sequence",
+        "steps": [
+          {
+            "name": "acceptance_init",
+            "type": "set_variable",
+            "vars": {
+              "acceptance": "passed",
+              "reason": "none",
+              "cleanup": "deferred",
+              "receipts": "",
+              "owner_report": "none",
+              "owner_timeout": "no",
+              "backstop": ""
+            }
+          },
+          {
+            "name": "start_cleanup_backstop",
+            "type": "fire_and_forget",
+            "workflowType": "UweAcceptanceCleanupWorkflow",
+            "taskQueue": "fleet",
+            "outputVar": "backstop",
+            "ignoreFailure": true,
+            "args": {
+              "Repo": "{{input.Repo}}",
+              "PrNumber": "{{input.PrNumber}}",
+              "AttemptId": "{{input.AttemptId}}",
+              "Owner": "{{input.Owner}}",
+              "MaxDurationSeconds": "{{input.MaxDurationSeconds}}",
+              "ChildWorkflowId": "{{workflow.id}}"
+            }
+          },
+          {
+            "name": "backstop_started",
+            "type": "branch",
+            "on": "{{vars.backstop | default: 'none'}}",
+            "cases": {
+              "none": {
+                "name": "backstop_failed",
+                "type": "set_variable",
+                "vars": {
+                  "acceptance": "blocked",
+                  "reason": "owner_unavailable",
+                  "owner_timeout": "yes"
+                }
+              }
+            },
+            "default": {
+              "name": "pre_stages",
+              "type": "sequence",
+              "steps": [
+                {
+                  "name": "pre_init",
+                  "type": "set_variable",
+                  "vars": {
+                    "stage_kind": "pre",
+                    "stage_index": "0"
+                  }
+                },
+                {
+                  "name": "pre_loop",
+                  "type": "loop",
+                  "maxIterations": 4,
+                  "steps": [
+                    {
+                      "name": "pre_increment",
+                      "type": "set_variable",
+                      "vars": {
+                        "stage_index": "{{vars.stage_index | add: 1}}",
+                        "stage_report": ""
+                      }
+                    },
+                    {
+                      "name": "pre_stage",
+                      "type": "delegate",
+                      "target": "{{input.Owner}}",
+                      "instruction": "Before any action, enforce the lease: if now is later than {{input.PinnedAt}} + {{input.MaxDurationSeconds}} seconds or a verified cleanup receipt already exists for {{input.AttemptId}}, create nothing and return STAGE_RESULT: env_blocked / REASON: attempt_expired. Read the actual PR head and require {{input.HeadOid}}, otherwise create nothing and return head_changed. Use only the approved plan at sha256 {{input.PlanSha256}} for {{input.Repo}} PR {{input.PrNumber}}. No new privileges, configuration, instructions, definitions, deployment, providers or production effects beyond the explicit plan. Owner-stage work is one attempt with no retries. Run exactly stage {{vars.stage_kind}}:{{vars.stage_index}}, then end the turn. Pre stage one confirms every capability and prerequisite before resources: use the validated SshTargets {{input.SshTargets}} and capability map {{input.CapabilityMapCommit}} / {{input.CapabilityMapSha256}}, report names only, never credential values. The plan's pre/post stage lists decide done, never choose a wait or create a schedule. Preserve isolation/resources/checks on HarnessRetry={{input.HarnessRetry}}; save any harness diff. Write a new immutable protected receipt with attempt, PR, head, source archive/image/map/plan hashes, commands, exit codes, actual HTTP counts, timestamps, lease/deadline, baseline, isolation, owned resources, cleanup, and harness_retry. Post only acceptance_plan.py render-comment output after its fail-closed scrub, best effort. Return exactly ATTEMPT: {{input.AttemptId}}, HEAD: {{input.HeadOid}}, STAGE: {{vars.stage_kind}}:{{vars.stage_index}}, STAGE_RESULT: pass|done|product_fail|harness_fail|env_blocked|head_changed, REASON: <code>, RECEIPT: <protected URL>, one token line each. pass advances; done ends the stage list. Never return a pass for an unrun check.",
+                      "outputVar": "stage_report",
+                      "statusVar": "stage_report_status",
+                      "timeoutMinutes": 60,
+                      "retryOnIncomplete": false,
+                      "maxIncompleteRetries": 0,
+                      "ignoreFailure": true
+                    },
+                    {
+                      "name": "pre_status",
+                      "type": "branch",
+                      "on": "{{vars.stage_report_status}}",
+                      "cases": {
+                        "completed": {
+                          "name": "pre_parse",
+                          "type": "sequence",
+                          "steps": [
+                            {
+                              "name": "pre_tokens",
+                              "type": "set_variable",
+                              "vars": {
+                                "stage_result": "{{vars.stage_report | extract: '(?m)^STAGE_RESULT: (pass|done|product_fail|harness_fail|env_blocked|head_changed)\\r?$' | default: 'none'}}",
+                                "stage_head": "{{vars.stage_report | extract: '(?m)^HEAD: ([0-9a-f]{40})\\r?$' | default: 'none'}}",
+                                "stage_attempt": "{{vars.stage_report | extract: '(?m)^ATTEMPT: ([^\\r\\n]+)\\r?$' | default: 'none'}}",
+                                "receipts": "{{vars.receipts}} {{vars.stage_report | extract: \"(?m)^RECEIPT: ([^\\r\\n]+)\\r?$\"}}"
+                              }
+                            },
+                            {
+                              "name": "pre_identity",
+                              "type": "sequence",
+                              "steps": [
+                                {
+                                  "name": "pre_identity_pair",
+                                  "type": "set_variable",
+                                  "vars": {
+                                    "pair": "{{vars.stage_attempt}}={{input.AttemptId}}"
+                                  }
+                                },
+                                {
+                                  "name": "pre_identity_match",
+                                  "type": "branch",
+                                  "on": "{{vars.pair | extract: '^([^\\r\\n]+)=\\1$'}}",
+                                  "cases": {
+                                    "": {
+                                      "name": "pre_bad_identity",
+                                      "type": "sequence",
+                                      "steps": [
+                                        {
+                                          "name": "owner_timeout",
+                                          "type": "set_variable",
+                                          "vars": {
+                                            "acceptance": "blocked",
+                                            "reason": "owner_timeout",
+                                            "cleanup": "deferred",
+                                            "owner_timeout": "yes"
+                                          }
+                                        },
+                                        {
+                                          "type": "break"
+                                        }
+                                      ]
+                                    }
+                                  },
+                                  "default": {
+                                    "name": "pre_head",
+                                    "type": "sequence",
+                                    "steps": [
+                                      {
+                                        "name": "pre_head_pair",
+                                        "type": "set_variable",
+                                        "vars": {
+                                          "pair": "{{vars.stage_head}}={{input.HeadOid}}"
+                                        }
+                                      },
+                                      {
+                                        "name": "pre_head_match",
+                                        "type": "branch",
+                                        "on": "{{vars.pair | extract: '^([^\\r\\n]+)=\\1$'}}",
+                                        "cases": {
+                                          "": {
+                                            "name": "pre_wrong_head",
+                                            "type": "sequence",
+                                            "steps": [
+                                              {
+                                                "name": "pre_head_mismatch",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "acceptance": "head_changed",
+                                                  "reason": "head_changed"
+                                                }
+                                              },
+                                              {
+                                                "type": "break"
+                                              }
+                                            ]
+                                          }
+                                        },
+                                        "default": {
+                                          "name": "pre_result",
+                                          "type": "branch",
+                                          "on": "{{vars.stage_result}}",
+                                          "cases": {
+                                            "pass": {
+                                              "type": "noop"
+                                            },
+                                            "done": {
+                                              "type": "break"
+                                            },
+                                            "head_changed": {
+                                              "name": "pre_head_changed",
+                                              "type": "sequence",
+                                              "steps": [
+                                                {
+                                                  "name": "pre_invalidate",
+                                                  "type": "set_variable",
+                                                  "vars": {
+                                                    "acceptance": "head_changed",
+                                                    "reason": "head_changed"
+                                                  }
+                                                },
+                                                {
+                                                  "type": "break"
+                                                }
+                                              ]
+                                            }
+                                          },
+                                          "default": {
+                                            "name": "pre_failed",
+                                            "type": "sequence",
+                                            "steps": [
+                                              {
+                                                "name": "pre_failure_result",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "acceptance": "failed",
+                                                  "reason": "{{vars.stage_report | extract: '(?m)^REASON: ([^\\r\\n]+)\\r?$' | default: 'none'}}",
+                                                  "owner_report": "{{vars.stage_result}}"
+                                                }
+                                              },
+                                              {
+                                                "type": "break"
+                                              }
+                                            ]
+                                          }
+                                        }
+                                      }
+                                    ]
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      "default": {
+                        "name": "pre_owner_unavailable",
+                        "type": "sequence",
+                        "steps": [
+                          {
+                            "name": "owner_timeout",
+                            "type": "set_variable",
+                            "vars": {
+                              "acceptance": "blocked",
+                              "reason": "owner_timeout",
+                              "cleanup": "deferred",
+                              "owner_timeout": "yes"
+                            }
+                          },
+                          {
+                            "type": "break"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "name": "wait_if_pre_passed",
+            "type": "branch",
+            "on": "{{vars.acceptance}}",
+            "cases": {
+              "passed": {
+                "name": "acceptance_wait",
+                "type": "branch",
+                "on": "{{input.WaitSeconds}}",
+                "cases": {
+                  "0": {
+                    "type": "noop"
+                  },
+                  "60": {
+                    "type": "sleep",
+                    "seconds": 60
+                  },
+                  "300": {
+                    "type": "sleep",
+                    "seconds": 300
+                  },
+                  "900": {
+                    "type": "sleep",
+                    "seconds": 900
+                  },
+                  "1800": {
+                    "type": "sleep",
+                    "seconds": 1800
+                  },
+                  "3660": {
+                    "type": "sleep",
+                    "seconds": 3660
+                  },
+                  "7260": {
+                    "type": "sleep",
+                    "seconds": 7260
+                  },
+                  "14460": {
+                    "type": "sleep",
+                    "seconds": 14460
+                  }
+                },
+                "default": {
+                  "type": "fail",
+                  "message": "Invalid preapproved WaitSeconds"
+                }
+              }
+            }
+          },
+          {
+            "name": "post_if_pre_passed",
+            "type": "branch",
+            "on": "{{vars.acceptance}}",
+            "cases": {
+              "passed": {
+                "name": "post_stage_count",
+                "type": "branch",
+                "on": "{{input.PostStages}}",
+                "cases": {
+                  "0": {
+                    "type": "noop"
+                  }
+                },
+                "default": {
+                  "name": "post_stages",
+                  "type": "sequence",
+                  "steps": [
+                    {
+                      "name": "post_init",
+                      "type": "set_variable",
+                      "vars": {
+                        "stage_kind": "post",
+                        "stage_index": "0"
+                      }
+                    },
+                    {
+                      "name": "post_loop",
+                      "type": "loop",
+                      "maxIterations": 4,
+                      "steps": [
+                        {
+                          "name": "post_increment",
+                          "type": "set_variable",
+                          "vars": {
+                            "stage_index": "{{vars.stage_index | add: 1}}",
+                            "stage_report": ""
+                          }
+                        },
+                        {
+                          "name": "post_stage",
+                          "type": "delegate",
+                          "target": "{{input.Owner}}",
+                          "instruction": "Before any action, enforce the lease: if now is later than {{input.PinnedAt}} + {{input.MaxDurationSeconds}} seconds or a verified cleanup receipt already exists for {{input.AttemptId}}, create nothing and return STAGE_RESULT: env_blocked / REASON: attempt_expired. Read the actual PR head and require {{input.HeadOid}}, otherwise create nothing and return head_changed. Use only the approved plan at sha256 {{input.PlanSha256}} for {{input.Repo}} PR {{input.PrNumber}}. No new privileges, configuration, instructions, definitions, deployment, providers or production effects beyond the explicit plan. Owner-stage work is one attempt with no retries. Run exactly stage {{vars.stage_kind}}:{{vars.stage_index}}, then end the turn. Pre stage one confirms every capability and prerequisite before resources: use the validated SshTargets {{input.SshTargets}} and capability map {{input.CapabilityMapCommit}} / {{input.CapabilityMapSha256}}, report names only, never credential values. The plan's pre/post stage lists decide done, never choose a wait or create a schedule. Preserve isolation/resources/checks on HarnessRetry={{input.HarnessRetry}}; save any harness diff. Write a new immutable protected receipt with attempt, PR, head, source archive/image/map/plan hashes, commands, exit codes, actual HTTP counts, timestamps, lease/deadline, baseline, isolation, owned resources, cleanup, and harness_retry. Post only acceptance_plan.py render-comment output after its fail-closed scrub, best effort. Return exactly ATTEMPT: {{input.AttemptId}}, HEAD: {{input.HeadOid}}, STAGE: {{vars.stage_kind}}:{{vars.stage_index}}, STAGE_RESULT: pass|done|product_fail|harness_fail|env_blocked|head_changed, REASON: <code>, RECEIPT: <protected URL>, one token line each. pass advances; done ends the stage list. Never return a pass for an unrun check.",
+                          "outputVar": "stage_report",
+                          "statusVar": "stage_report_status",
+                          "timeoutMinutes": 60,
+                          "retryOnIncomplete": false,
+                          "maxIncompleteRetries": 0,
+                          "ignoreFailure": true
+                        },
+                        {
+                          "name": "post_status",
+                          "type": "branch",
+                          "on": "{{vars.stage_report_status}}",
+                          "cases": {
+                            "completed": {
+                              "name": "post_parse",
+                              "type": "sequence",
+                              "steps": [
+                                {
+                                  "name": "post_tokens",
+                                  "type": "set_variable",
+                                  "vars": {
+                                    "stage_result": "{{vars.stage_report | extract: '(?m)^STAGE_RESULT: (pass|done|product_fail|harness_fail|env_blocked|head_changed)\\r?$' | default: 'none'}}",
+                                    "stage_head": "{{vars.stage_report | extract: '(?m)^HEAD: ([0-9a-f]{40})\\r?$' | default: 'none'}}",
+                                    "stage_attempt": "{{vars.stage_report | extract: '(?m)^ATTEMPT: ([^\\r\\n]+)\\r?$' | default: 'none'}}",
+                                    "receipts": "{{vars.receipts}} {{vars.stage_report | extract: \"(?m)^RECEIPT: ([^\\r\\n]+)\\r?$\"}}"
+                                  }
+                                },
+                                {
+                                  "name": "post_identity",
+                                  "type": "sequence",
+                                  "steps": [
+                                    {
+                                      "name": "post_identity_pair",
+                                      "type": "set_variable",
+                                      "vars": {
+                                        "pair": "{{vars.stage_attempt}}={{input.AttemptId}}"
+                                      }
+                                    },
+                                    {
+                                      "name": "post_identity_match",
+                                      "type": "branch",
+                                      "on": "{{vars.pair | extract: '^([^\\r\\n]+)=\\1$'}}",
+                                      "cases": {
+                                        "": {
+                                          "name": "post_bad_identity",
+                                          "type": "sequence",
+                                          "steps": [
+                                            {
+                                              "name": "owner_timeout",
+                                              "type": "set_variable",
+                                              "vars": {
+                                                "acceptance": "blocked",
+                                                "reason": "owner_timeout",
+                                                "cleanup": "deferred",
+                                                "owner_timeout": "yes"
+                                              }
+                                            },
+                                            {
+                                              "type": "break"
+                                            }
+                                          ]
+                                        }
+                                      },
+                                      "default": {
+                                        "name": "post_head",
+                                        "type": "sequence",
+                                        "steps": [
+                                          {
+                                            "name": "post_head_pair",
+                                            "type": "set_variable",
+                                            "vars": {
+                                              "pair": "{{vars.stage_head}}={{input.HeadOid}}"
+                                            }
+                                          },
+                                          {
+                                            "name": "post_head_match",
+                                            "type": "branch",
+                                            "on": "{{vars.pair | extract: '^([^\\r\\n]+)=\\1$'}}",
+                                            "cases": {
+                                              "": {
+                                                "name": "post_wrong_head",
+                                                "type": "sequence",
+                                                "steps": [
+                                                  {
+                                                    "name": "post_head_mismatch",
+                                                    "type": "set_variable",
+                                                    "vars": {
+                                                      "acceptance": "head_changed",
+                                                      "reason": "head_changed"
+                                                    }
+                                                  },
+                                                  {
+                                                    "type": "break"
+                                                  }
+                                                ]
+                                              }
+                                            },
+                                            "default": {
+                                              "name": "post_result",
+                                              "type": "branch",
+                                              "on": "{{vars.stage_result}}",
+                                              "cases": {
+                                                "pass": {
+                                                  "type": "noop"
+                                                },
+                                                "done": {
+                                                  "type": "break"
+                                                },
+                                                "head_changed": {
+                                                  "name": "post_head_changed",
+                                                  "type": "sequence",
+                                                  "steps": [
+                                                    {
+                                                      "name": "post_invalidate",
+                                                      "type": "set_variable",
+                                                      "vars": {
+                                                        "acceptance": "head_changed",
+                                                        "reason": "head_changed"
+                                                      }
+                                                    },
+                                                    {
+                                                      "type": "break"
+                                                    }
+                                                  ]
+                                                }
+                                              },
+                                              "default": {
+                                                "name": "post_failed",
+                                                "type": "sequence",
+                                                "steps": [
+                                                  {
+                                                    "name": "post_failure_result",
+                                                    "type": "set_variable",
+                                                    "vars": {
+                                                      "acceptance": "failed",
+                                                      "reason": "{{vars.stage_report | extract: '(?m)^REASON: ([^\\r\\n]+)\\r?$' | default: 'none'}}",
+                                                      "owner_report": "{{vars.stage_result}}"
+                                                    }
+                                                  },
+                                                  {
+                                                    "type": "break"
+                                                  }
+                                                ]
+                                              }
+                                            }
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          "default": {
+                            "name": "post_owner_unavailable",
+                            "type": "sequence",
+                            "steps": [
+                              {
+                                "name": "owner_timeout",
+                                "type": "set_variable",
+                                "vars": {
+                                  "acceptance": "blocked",
+                                  "reason": "owner_timeout",
+                                  "cleanup": "deferred",
+                                  "owner_timeout": "yes"
+                                }
+                              },
+                              {
+                                "type": "break"
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "name": "cleanup_if_owner_available",
+            "type": "branch",
+            "on": "{{vars.owner_timeout}}",
+            "cases": {
+              "no": {
+                "name": "cleanup_available",
+                "type": "sequence",
+                "steps": [
+                  {
+                    "name": "clear_cleanup_report",
+                    "type": "set_variable",
+                    "vars": {
+                      "cleanup_report": ""
+                    }
+                  },
+                  {
+                    "name": "cleanup",
+                    "type": "delegate",
+                    "target": "{{input.Owner}}",
+                    "instruction": "Check the lease and cleanup receipt first, but expired attempts still permit idempotent cleanup only, never stage work. For {{input.AttemptId}} in {{input.Repo}} PR {{input.PrNumber}}, return ALREADY_CLEAN if its cleanup receipt is already verified. Otherwise remove only resources labelled fleet.acceptance.attempt={{input.AttemptId}}, compare the immutable baseline, and save a new protected cleanup receipt. Do not touch unrelated resources or run new tests. Record head/source/image/plan/map hashes, commands, exit codes, timestamps, lease, baseline before/after, cleanup and harness_retry. Post only scrubbed acceptance_plan.py render-comment output, best effort. Return CLEANUP: verified|residue, RECEIPT: <protected URL>; never claim verified without comparison.",
+                    "outputVar": "cleanup_report",
+                    "statusVar": "cleanup_report_status",
+                    "timeoutMinutes": 60,
+                    "retryOnIncomplete": false,
+                    "maxIncompleteRetries": 0,
+                    "ignoreFailure": true
+                  },
+                  {
+                    "name": "cleanup_owner_status",
+                    "type": "branch",
+                    "on": "{{vars.cleanup_report_status}}",
+                    "cases": {
+                      "completed": {
+                        "name": "cleanup_reported",
+                        "type": "sequence",
+                        "steps": [
+                          {
+                            "type": "branch",
+                            "name": "cleanup_tokens_already_clean",
+                            "on": "{{vars.cleanup_report | extract: '(?m)^(ALREADY_CLEAN)\\r?$'}}",
+                            "cases": {
+                              "ALREADY_CLEAN": {
+                                "type": "set_variable",
+                                "vars": {
+                                  "cleanup": "verified"
+                                }
+                              }
+                            },
+                            "default": {
+                              "name": "cleanup_tokens",
+                              "type": "set_variable",
+                              "vars": {
+                                "cleanup": "{{vars.cleanup_report | extract: '(?m)^CLEANUP: (verified|residue)\\r?$' | default: 'residue'}}",
+                                "receipts": "{{vars.receipts}} {{vars.cleanup_report | extract: \"(?m)^RECEIPT: ([^\\r\\n]+)\\r?$\"}}"
+                              }
+                            }
+                          },
+                          {
+                            "name": "cleanup_verified",
+                            "type": "branch",
+                            "on": "{{vars.cleanup}}",
+                            "cases": {
+                              "verified": {
+                                "type": "noop"
+                              }
+                            },
+                            "default": {
+                              "name": "cleanup_residue",
+                              "type": "set_variable",
+                              "vars": {
+                                "acceptance": "blocked",
+                                "reason": "cleanup_residue"
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    },
+                    "default": {
+                      "name": "owner_timeout",
+                      "type": "set_variable",
+                      "vars": {
+                        "acceptance": "blocked",
+                        "reason": "owner_timeout",
+                        "cleanup": "deferred",
+                        "owner_timeout": "yes"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "name": "emit_acceptance_result",
+            "type": "set_variable",
+            "vars": {
+              "_result": "ACCEPTANCE: {{vars.acceptance}}\nREASON: {{vars.reason}}\nRECEIPTS: {{vars.receipts}}\nCLEANUP: {{vars.cleanup}}\nOWNER_REPORT: {{vars.owner_report}}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "UweAcceptanceCleanupWorkflow",
+      "namespace": "fleet",
+      "taskQueue": "fleet",
+      "description": "Idempotent acceptance cleanup after a confirmed closed child; never tears down a running or unknown child.",
+      "definition": {
+        "name": "root",
+        "type": "sequence",
+        "steps": [
+          {
+            "name": "backstop_delay",
+            "type": "branch",
+            "on": "{{input.MaxDurationSeconds}}",
+            "cases": {
+              "3600": {
+                "type": "sleep",
+                "seconds": 5400
+              },
+              "7200": {
+                "type": "sleep",
+                "seconds": 9000
+              },
+              "14400": {
+                "type": "sleep",
+                "seconds": 16200
+              },
+              "21600": {
+                "type": "sleep",
+                "seconds": 23400
+              }
+            },
+            "default": {
+              "type": "fail",
+              "message": "Invalid preapproved MaxDurationSeconds"
+            }
+          },
+          {
+            "name": "check_child",
+            "type": "sequence",
+            "steps": [
+              {
+                "name": "clear_status",
+                "type": "set_variable",
+                "vars": {
+                  "child_report": ""
+                }
+              },
+              {
+                "name": "child_status",
+                "type": "delegate",
+                "target": "{{config.CtoAgent}}",
+                "instruction": "Read temporal_get_workflow_status for exact child workflow {{input.ChildWorkflowId}}. Return CHILD: running only for confirmed Running; CHILD: closed only for a confirmed terminal state. Error, unknown, missing result or access failure returns CHILD: unknown, never closed. Do not clean up or change runtime.",
+                "outputVar": "child_report",
+                "statusVar": "child_report_status",
+                "timeoutMinutes": 5,
+                "retryOnIncomplete": false,
+                "maxIncompleteRetries": 0,
+                "ignoreFailure": true
+              },
+              {
+                "name": "status_available",
+                "type": "branch",
+                "on": "{{vars.child_report_status}}",
+                "cases": {
+                  "completed": {
+                    "name": "child_token",
+                    "type": "set_variable",
+                    "vars": {
+                      "child": "{{vars.child_report | extract: '(?m)^CHILD: (running|closed|unknown)\\r?$' | default: 'unknown'}}"
+                    }
+                  }
+                },
+                "default": {
+                  "type": "set_variable",
+                  "vars": {
+                    "child": "unknown"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "name": "check_running_child",
+            "type": "branch",
+            "on": "{{vars.child}}",
+            "cases": {
+              "running": {
+                "name": "running_rechecks",
+                "type": "loop",
+                "maxIterations": 2,
+                "steps": [
+                  {
+                    "type": "sleep",
+                    "seconds": 1800
+                  },
+                  {
+                    "name": "check_child",
+                    "type": "sequence",
+                    "steps": [
+                      {
+                        "name": "clear_status",
+                        "type": "set_variable",
+                        "vars": {
+                          "child_report": ""
+                        }
+                      },
+                      {
+                        "name": "child_status",
+                        "type": "delegate",
+                        "target": "{{config.CtoAgent}}",
+                        "instruction": "Read temporal_get_workflow_status for exact child workflow {{input.ChildWorkflowId}}. Return CHILD: running only for confirmed Running; CHILD: closed only for a confirmed terminal state. Error, unknown, missing result or access failure returns CHILD: unknown, never closed. Do not clean up or change runtime.",
+                        "outputVar": "child_report",
+                        "statusVar": "child_report_status",
+                        "timeoutMinutes": 5,
+                        "retryOnIncomplete": false,
+                        "maxIncompleteRetries": 0,
+                        "ignoreFailure": true
+                      },
+                      {
+                        "name": "status_available",
+                        "type": "branch",
+                        "on": "{{vars.child_report_status}}",
+                        "cases": {
+                          "completed": {
+                            "name": "child_token",
+                            "type": "set_variable",
+                            "vars": {
+                              "child": "{{vars.child_report | extract: '(?m)^CHILD: (running|closed|unknown)\\r?$' | default: 'unknown'}}"
+                            }
+                          }
+                        },
+                        "default": {
+                          "type": "set_variable",
+                          "vars": {
+                            "child": "unknown"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "name": "stop_rechecking",
+                    "type": "branch",
+                    "on": "{{vars.child}}",
+                    "cases": {
+                      "running": {
+                        "type": "noop"
+                      }
+                    },
+                    "default": {
+                      "type": "break"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "name": "cleanup_only_closed_child",
+            "type": "branch",
+            "on": "{{vars.child}}",
+            "cases": {
+              "closed": {
+                "name": "closed_child_cleanup",
+                "type": "sequence",
+                "steps": [
+                  {
+                    "name": "backstop_cleanup",
+                    "type": "delegate",
+                    "target": "{{input.Owner}}",
+                    "instruction": "Check the lease and cleanup receipt first, but expired attempts still permit idempotent cleanup only, never stage work. For {{input.AttemptId}} in {{input.Repo}} PR {{input.PrNumber}}, return ALREADY_CLEAN if its cleanup receipt is already verified. Otherwise remove only resources labelled fleet.acceptance.attempt={{input.AttemptId}}, compare the immutable baseline, and save a new protected cleanup receipt. Do not touch unrelated resources or run new tests. Record head/source/image/plan/map hashes, commands, exit codes, timestamps, lease, baseline before/after, cleanup and harness_retry. Post only scrubbed acceptance_plan.py render-comment output, best effort. Return CLEANUP: verified|residue, RECEIPT: <protected URL>; never claim verified without comparison.",
+                    "outputVar": "cleanup_report",
+                    "statusVar": "cleanup_report_status",
+                    "timeoutMinutes": 60,
+                    "retryOnIncomplete": false,
+                    "maxIncompleteRetries": 0,
+                    "ignoreFailure": true
+                  },
+                  {
+                    "type": "branch",
+                    "on": "{{vars.cleanup_report_status}}",
+                    "cases": {
+                      "completed": {
+                        "type": "sequence",
+                        "steps": [
+                          {
+                            "type": "branch",
+                            "name": "cleanup_outcome_already_clean",
+                            "on": "{{vars.cleanup_report | extract: '(?m)^(ALREADY_CLEAN)\\r?$'}}",
+                            "cases": {
+                              "ALREADY_CLEAN": {
+                                "type": "set_variable",
+                                "vars": {
+                                  "cleanup": "verified"
+                                }
+                              }
+                            },
+                            "default": {
+                              "name": "cleanup_outcome",
+                              "type": "set_variable",
+                              "vars": {
+                                "cleanup": "{{vars.cleanup_report | extract: '(?m)^CLEANUP: (verified|residue|ALREADY_CLEAN)\\r?$' | default: 'unknown'}}"
+                              }
+                            }
+                          },
+                          {
+                            "name": "backstop_cleanup_verified",
+                            "type": "branch",
+                            "on": "{{vars.cleanup}}",
+                            "cases": {
+                              "verified": {
+                                "type": "noop"
+                              },
+                              "ALREADY_CLEAN": {
+                                "type": "noop"
+                              }
+                            },
+                            "default": {
+                              "name": "notify_cleanup_residue",
+                              "type": "delegate",
+                              "target": "{{config.CtoAgent}}",
+                              "instruction": "Cleanup is not verified for an acceptance attempt. Inspect protected receipt evidence and coordinate its owner; do not clean unrelated resources. Use 1–3 plain sentences, verified facts, next action and owner, and at most one human ask. Do not send approval signals.",
+                              "outputVar": "report",
+                              "statusVar": "report_status",
+                              "timeoutMinutes": 5,
+                              "retryOnIncomplete": false,
+                              "maxIncompleteRetries": 0,
+                              "ignoreFailure": true
+                            }
+                          }
+                        ]
+                      }
+                    },
+                    "default": {
+                      "type": "delegate",
+                      "target": "{{config.CtoAgent}}",
+                      "instruction": "Acceptance cleanup delegate failed. Cleanup remains unverified; coordinate the owner from protected evidence, without touching unrelated resources. Use 1–3 plain sentences, verified facts and the concrete next owner/action.",
+                      "timeoutMinutes": 5,
+                      "ignoreFailure": true
+                    }
+                  }
+                ]
+              }
+            },
+            "default": {
+              "name": "notify_live_or_unknown_child",
+              "type": "delegate",
+              "target": "{{config.CtoAgent}}",
+              "instruction": "Acceptance child remains running or its status is unknown. No cleanup was dispatched; verify the child before coordinating its owner. Use 1–3 plain sentences, verified facts, next action and owner, and at most one human ask. Do not send approval signals.",
+              "outputVar": "report",
+              "statusVar": "report_status",
+              "timeoutMinutes": 5,
+              "retryOnIncomplete": false,
+              "maxIncompleteRetries": 0,
+              "ignoreFailure": true
             }
           }
         ]

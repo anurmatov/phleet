@@ -3,8 +3,9 @@
 Contract: [#434](https://github.com/anurmatov/phleet/issues/434), overridden by
 [#441 revision 3](https://github.com/anurmatov/phleet/issues/441).
 This is the required contract, not a record of deployment or acceptance.
-The draft PR still requires the three seed definitions and scenario evidence
-before readiness; nothing here authorizes their activation.
+The draft PR still requires the revised parent definition and parent scenario
+evidence before readiness. Nothing here authorizes activation of the
+acceptance/cleanup children.
 
 ## Validator interface
 

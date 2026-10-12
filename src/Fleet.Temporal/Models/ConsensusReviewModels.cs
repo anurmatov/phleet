@@ -56,7 +56,10 @@ public sealed record ConsensusReviewInput(
     /// <see cref="ConsensusReviewOutput.AttestedRef"/> can ever carry. When blank, reviewer
     /// instructions are byte-identical to the pre-#436 text.
     /// </summary>
-    string? ReviewRef = null);
+    string? ReviewRef = null,
+
+    /// <summary>review (default) or unanimous, code-decided acceptance classification.</summary>
+    string? Mode = "review");
 
 /// <summary>Output produced by the ConsensusReviewWorkflow.</summary>
 public sealed record ConsensusReviewOutput(
@@ -82,4 +85,7 @@ public sealed record ConsensusReviewOutput(
     /// reviewer, whatever its verdict, wrote <c>PUBLIC_SCRUB: fail</c> (#436). Defaulted so outputs
     /// recorded before #436 deserialize unchanged.
     /// </summary>
-    bool ScrubAttested = false);
+    bool ScrubAttested = false,
+
+    /// <summary>Only a unanimous valid classify-mode round may set this.</summary>
+    string? ClassificationLabel = null);

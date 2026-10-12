@@ -184,6 +184,7 @@ public sealed class SignalWorkflowStepTests
     [InlineData("doc-review")]
     [InlineData("design-approval")]
     [InlineData("advisory-review")]
+    [InlineData("acceptance-decision")]
     [InlineData("MERGE-APPROVAL")]   // case is not a bypass
     [InlineData("  doc-review  ")]   // nor is whitespace
     public void Validate_SignalWorkflowSendingAnApproverGate_FailsToLoad(string signalName)
@@ -235,10 +236,10 @@ public sealed class SignalWorkflowStepTests
     /// was not updated — so the engine and the MCP tool read the same names.
     /// </summary>
     [Fact]
-    public void TheReservedList_IsTheFourApproverGates()
+    public void TheReservedList_IncludesAcceptanceDecision()
     {
         Assert.Equal(
-            ["advisory-review", "design-approval", "doc-review", "merge-approval"],
+            ["acceptance-decision", "advisory-review", "design-approval", "doc-review", "merge-approval"],
             CeoGateSignals.All.OrderBy(n => n, StringComparer.Ordinal).ToArray());
 
         Assert.False(CeoGateSignals.IsReserved("human-review"));

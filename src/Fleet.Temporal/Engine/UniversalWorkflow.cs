@@ -1020,6 +1020,8 @@ public class UniversalWorkflow
             new ChildWorkflowOptions
             {
                 TaskQueue = tq,
+                ExecutionTimeout = step.ExecutionTimeoutMinutes is { } minutes
+                    ? TimeSpan.FromMinutes(minutes) : null,
             });
 
         if (step.OutputVar != null) SetVar(step.OutputVar, result);
@@ -1082,46 +1084,57 @@ public class UniversalWorkflow
 
     private Task<object?> ExecuteSetAttributeAsync(SetAttributeStep step)
     {
-        var updates = new List<SearchAttributeUpdate>();
-
-        foreach (var (name, valueExpr) in step.Attributes)
+        try
         {
-            var resolved = _template.ResolveString(valueExpr);
-            var attrType = SearchAttributeTypeRegistry.GetType(name);
+            var updates = new List<SearchAttributeUpdate>();
 
-            if (attrType == null)
+            foreach (var (name, valueExpr) in step.Attributes)
             {
-                Workflow.Logger.LogWarning("SetAttributeStep: unknown search attribute '{Name}' — skipped", name);
-                continue;
-            }
+                var resolved = _template.ResolveString(valueExpr);
+                var attrType = SearchAttributeTypeRegistry.GetType(name);
 
-            try
-            {
-                updates.Add(attrType switch
+                if (attrType == null)
                 {
-                    SearchAttributeTypeRegistry.AttributeType.Int
-                        => SearchAttributeKey.CreateLong(name).ValueSet(long.Parse(resolved)),
+                    if (step.Required)
+                        throw new InvalidOperationException("Unknown required search attribute.");
+                    Workflow.Logger.LogWarning("SetAttributeStep: unknown search attribute '{Name}' — skipped", name);
+                    continue;
+                }
 
-                    SearchAttributeTypeRegistry.AttributeType.Keyword
-                        => SearchAttributeKey.CreateKeyword(name).ValueSet(resolved),
+                try
+                {
+                    updates.Add(attrType switch
+                    {
+                        SearchAttributeTypeRegistry.AttributeType.Int
+                            => SearchAttributeKey.CreateLong(name).ValueSet(long.Parse(resolved)),
 
-                    SearchAttributeTypeRegistry.AttributeType.DateTime
-                        => SearchAttributeKey.CreateDateTimeOffset(name)
-                               .ValueSet(DateTimeOffset.Parse(resolved)),
+                        SearchAttributeTypeRegistry.AttributeType.Keyword
+                            => SearchAttributeKey.CreateKeyword(name).ValueSet(resolved),
 
-                    _ => throw new InvalidOperationException($"Unhandled attribute type: {attrType}")
-                });
+                        SearchAttributeTypeRegistry.AttributeType.DateTime
+                            => SearchAttributeKey.CreateDateTimeOffset(name)
+                                   .ValueSet(DateTimeOffset.Parse(resolved)),
+
+                        _ => throw new InvalidOperationException($"Unhandled attribute type: {attrType}")
+                    });
+                }
+                catch (Exception ex) when (!step.Required)
+                {
+                    Workflow.Logger.LogWarning(ex, "SetAttributeStep: failed to build update for '{Name}' — skipped", name);
+                }
             }
-            catch (Exception ex)
-            {
-                Workflow.Logger.LogWarning(ex, "SetAttributeStep: failed to build update for '{Name}' — skipped", name);
-            }
+
+            if (updates.Count > 0)
+                Workflow.UpsertTypedSearchAttributes([.. updates]);
+
+            return Task.FromResult<object?>(null);
         }
-
-        if (updates.Count > 0)
-            Workflow.UpsertTypedSearchAttributes([.. updates]);
-
-        return Task.FromResult<object?>(null);
+        catch (Exception) when (step.Required)
+        {
+            throw new ApplicationFailureException(
+                $"Required search attribute write failed at step '{step.Name ?? "(unnamed)"}'.",
+                errorType: "RequiredSearchAttribute", nonRetryable: true);
+        }
     }
 
     private async Task<object?> ExecuteHttpRequestAsync(HttpRequestStep step)

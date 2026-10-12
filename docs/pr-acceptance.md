@@ -1,9 +1,10 @@
 # PR acceptance implementation status
 
 **Draft implementation for #434 under #441 revision 3. Not ready for activation or merge.**
-This page currently documents the validator and visibility-record foundation only.
-The parent/child/cleanup definitions, engine extensions, dashboard stale-click guard,
-classification/replay coverage and end-to-end scenario tests are still pending in this PR.
+This page documents the currently implemented validator, visibility record, engine
+required writes/child deadlines, run-bound results and unanimous classification.
+The parent/child/cleanup definitions, dashboard stale-click guard,
+full state-machine scenario coverage and complete operational runbook remain pending.
 Existing seeded definitions and every running snapshot are unchanged.
 
 ## Validator interface
@@ -115,7 +116,9 @@ match; `envref:<NAME>` must exist in `envRefs`; `mcp:<server>` matches
 The required future PIN lookup selects Completed design runs whose Repo,
 IssueNumber and ReviewRef match the exact current issue body. It must fetch
 **that row's run ID**, with `followRuns: false`, not the latest run under the ID.
-The current result-tool extension and PIN seed wiring are not implemented yet.
+The result-tool extension binds both `RunId` and `ResultRunId` with
+`followRuns: false`: SDK 1.11.1's `GetWorkflowHandle` omits `ResultRunId`, while
+`GetResultAsync` uses it. The PIN seed wiring is not implemented yet.
 
 The validator accepts only a JSON wrapper with exactly `workflowId`, `runId`
 and `result`, matching the requested IDs. Result may be an object or one JSON
@@ -159,11 +162,31 @@ runtime acceptance or proof that every earlier attempt was discovered.
 
 ## Remaining acceptance and rollout
 
-The complete state-machine/caps/gates/restart/runbook, seed parity command,
-classification and scenario coverage are still required before this draft is
+The complete state-machine/caps/gates/restart/runbook, seed parity command
+and scenario coverage are still required before this draft is
 ready. Existing #443 pause, #445 generation ownership and #447 wake/state source
 remain untouched. A green local test or CI result is not production-path proof.
 Runtime deployment, namespace registration, definition activation and exact-head
 isolated premerge verification require separate authorization; this PR performs
 none of them. Registration may fail at startup or stall an upsert workflow task.
 Activation must check it first. Keep registered attributes and rollback data.
+
+## Agent image size evidence
+
+The copied validator is 21,584 bytes. The baseline agent build already installs
+Python transitively; explicitly naming `python3` makes that prerequisite durable.
+This is not a claim that the bare SDK base contains Python.
+
+Historical CI image sizes, measured by `docker image inspect`:
+
+| head | image bytes | evidence |
+|---|---|---|
+| baseline `7b6b858` | 2,955,284,080 | [job](https://github.com/anurmatov/phleet/actions/runs/38261280020/job/114852116845) |
+| foundation `309a82e` | 2,955,306,698 | [job](https://github.com/anurmatov/phleet/actions/runs/38272255309/job/114889112981) |
+
+Observed foundation growth: **22,618 bytes**, below 100 KB. Both builds resolved
+SDK base digest `e70cdb7f80b0348f5cb85f19a8f670fca061f033d57eed12fa003d58b0e06317`
+and installed Python 3.12.3. This is historical CI evidence, not a controlled
+attribution of every filesystem byte or proof for a later revised head. Fresh
+exact-head image evidence remains required before readiness; no local Docker
+or host operation was performed.

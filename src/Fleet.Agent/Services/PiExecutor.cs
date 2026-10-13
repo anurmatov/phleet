@@ -1697,7 +1697,7 @@ public sealed class PiExecutor : IAgentExecutor
         text is null ? "(no detail)" : text.Length > MaxServerTextChars ? text[..MaxServerTextChars] : text;
 
     private static string ContentText(JsonNode? result) =>
-        result?["content"] is JsonArray content
+        result is JsonObject obj && obj["content"] is JsonArray content
             ? string.Concat(content.Where(b => Str(b, "type") == "text").Select(b => Str(b, "text")))
             : "";
 

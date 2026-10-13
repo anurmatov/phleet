@@ -385,6 +385,27 @@ public sealed class PiExecutorTests
     }
 
     [Fact]
+    public async Task AToolResultThatIsNotAnObject_IsIgnored_AndTheRunCompletes()
+    {
+        await using var rig = Rig.Create();
+        rig.Pi.OnPrompt = async (p, f) =>
+        {
+            await p.AckAsync(f);
+            var end = ToolEnd("c1", "bash", "");
+            end["result"] = "a bare string, not an object";
+            await p.EmitAsync(AgentStart(), TurnStart(),
+                ToolCallMessage("c1", "bash", new JsonObject { ["command"] = "ls" }),
+                ToolStart("c1", "bash", new JsonObject { ["command"] = "ls" }), end,
+                TurnEnd(), TurnStart(), FinalText("listed"), TurnEnd(), AgentEnd(), AgentSettled());
+        };
+
+        var progress = await rig.RunTurnAsync();
+
+        Assert.Equal("", Assert.Single(progress, p => p.EventType == "tool_result").Summary);
+        Assert.Equal("listed", Terminal(progress).FinalResult);
+    }
+
+    [Fact]
     public async Task IsProcessWarm_IsFalseBeforeTheFirstTurnAndAfterReset()
     {
         await using var rig = Rig.Create();

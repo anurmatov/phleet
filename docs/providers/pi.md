@@ -92,6 +92,10 @@ Context window (tokens)
 Effort      [ Default (on) v ]           Default (on) · Off · On
 ```
 
+Screenshots (rendered from the dashboard components at the PR head, placeholder values):
+[Pi config](images/pi/config-pi.jpg) · [Codex local before](images/pi/switch-codex-before.jpg) and
+[after the switch to Pi](images/pi/switch-codex-to-pi-after.jpg) · [New Agent, Create blocked](images/pi/create-pi-blocked.jpg).
+
 A new agent: in **New Agent**, pick **Provider → Pi (local model)** and fill **Server URL**,
 **Context window** and **Model tag**. Create stays disabled, with the PI1 or PI3 text, until all
 three are valid, so the agent is created complete and can provision at once.

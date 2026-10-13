@@ -114,6 +114,41 @@ public sealed class ProgramRegistrationGraphTests : IDisposable
         Assert.Contains(host.Services.GetServices<IHostedService>(), s => s is AgentTransport);
     }
 
+    // ── #386: provider pi ─────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The graph <c>Program.cs</c> builds registers <see cref="PiExecutor"/> as one singleton and
+    /// serves it as <see cref="IAgentExecutor"/> for provider <c>pi</c>. Resolving it starts nothing:
+    /// the process is lazy.
+    /// </summary>
+    [Fact]
+    public void Pi_TheRealGraphServesPiExecutorAsTheExecutor()
+    {
+        var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings { DisableDefaults = true });
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Agent:Name"] = "fleet-agent1",
+            ["Agent:Role"] = "generic-role",
+            ["Agent:WorkDir"] = _workDir,
+            ["Agent:Provider"] = "pi",
+            ["Agent:Model"] = "qwen3.8-flash-next",
+            ["Agent:PiBaseUrl"] = "http://inference-host:8000",
+            ["Agent:ContextWindow"] = "131072",
+            ["Telegram:BotToken"] = "",
+        });
+        builder.Services.AddLogging();
+        builder.Services.AddAgentCoreServices(builder.Configuration);
+        builder.Services.AddAgentDaemonServices(builder.Configuration);
+
+        Assert.Single(builder.Services, d => d.ServiceType == typeof(PiExecutor) && d.Lifetime == ServiceLifetime.Singleton);
+        using var host = builder.Build();
+
+        var executor = Assert.IsType<PiExecutor>(host.Services.GetRequiredService<IAgentExecutor>());
+        Assert.Same(host.Services.GetRequiredService<PiExecutor>(), executor);
+        Assert.False(executor.IsProcessWarm);
+        Assert.Null(executor.LastSessionId);
+    }
+
     // ── T10 / T13b: relay completion, once, from one instance ─────────────────────────────
 
     /// <summary>

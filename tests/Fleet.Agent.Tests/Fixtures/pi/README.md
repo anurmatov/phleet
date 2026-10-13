@@ -1,0 +1,1 @@
+These Pi fixtures were constructed in Pi 1.0.4 event shapes (docs/json.md and rpc-mode.ts at tag v1.0.4, commit 7c10bd4); they were not recorded from a Pi run, and every value in them is synthetic. Each file holds the stdout lines that follow the prompt ack, which the replay harness writes itself.

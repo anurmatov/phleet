@@ -160,7 +160,9 @@ export function switchProvider(edits: LocalModelEdits, next: string): LocalModel
     }
   }
   const patch: LocalModelPatch = { provider: next, localMode: false, model: PROVIDER_DEFAULT_MODEL[next] ?? '' }
-  return next === 'gemini' ? { ...patch, localBaseUrl: '', contextWindow: '' } : patch
+  // Leaving Pi for a cloud model drops its off/on effort: no cloud provider takes either.
+  const cloud = isPi(edits.provider) ? { ...patch, effort: '' } : patch
+  return next === 'gemini' ? { ...cloud, localBaseUrl: '', contextWindow: '' } : cloud
 }
 
 /**

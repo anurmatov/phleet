@@ -455,9 +455,11 @@ test('Cloud → Pi starts like Cloud → Local; Pi → Gemini clears the URL and
   assert.deepEqual(switchProvider(gemini, 'pi'),
     { provider: 'pi', localMode: true, model: '', localBaseUrl: '', localServer: 'ollama', effort: '' })
 
-  const fromPi = apply(piEdits(), switchProvider(piEdits(), 'gemini'))
-  assert.deepEqual([fromPi.provider, fromPi.localMode, fromPi.model, fromPi.localBaseUrl, fromPi.contextWindow],
-    ['gemini', false, PROVIDER_DEFAULT_MODEL.gemini, '', ''])
+  const fromPi = apply(piEdits({ effort: 'on' }), switchProvider(piEdits({ effort: 'on' }), 'gemini'))
+  assert.deepEqual([fromPi.provider, fromPi.localMode, fromPi.model, fromPi.localBaseUrl, fromPi.contextWindow, fromPi.effort],
+    ['gemini', false, PROVIDER_DEFAULT_MODEL.gemini, '', '', ''])
+  // The stale on does not resurface on a later gemini → claude switch.
+  assert.equal(apply(fromPi, switchProvider(fromPi, 'claude')).effort, '')
   assert.deepEqual(switchProvider(piEdits(), 'pi'), {})
 })
 

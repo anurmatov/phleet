@@ -4383,9 +4383,14 @@ body {
   transition: border-color 0.15s, color 0.15s, background 0.15s;
 }
 
-.model-pill:hover {
+.model-pill:hover:not(:disabled) {
   border-color: var(--grey);
   color: var(--text);
+}
+
+.model-pill:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
 }
 
 .model-pill.active {

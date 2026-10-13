@@ -1,6 +1,9 @@
 import { useState } from 'react'
 import type { CreateForm, InstructionSummary } from '../types'
-import { PROVIDER_DEFAULT_MODEL } from '../constants'
+import { PROVIDER_OPTIONS } from '../constants'
+import {
+  PI_MIN_CONTEXT_WINDOW, PI_RUNS_ON_NOTE, createFormProviderPatch, isPi, localModelSuggestions,
+} from '../localModel'
 import ModelSelector from './ModelSelector'
 import FieldHint from './FieldHint'
 import InstructionPicker from './InstructionPicker'
@@ -35,6 +38,7 @@ export default function CreateAgentModal({
   onClose,
 }: CreateAgentModalProps) {
   const [shortNameTouched, setShortNameTouched] = useState(false)
+  const provider = createForm.provider || 'claude'
 
   return (
     <div className="config-modal-overlay" onClick={onClose}>
@@ -102,24 +106,52 @@ export default function CreateAgentModal({
             <label className="config-label">Provider</label>
             <select
               className="config-input"
-              value={createForm.provider || 'claude'}
-              onChange={e => onFormChange({ provider: e.target.value, model: PROVIDER_DEFAULT_MODEL[e.target.value] ?? '' })}
+              value={provider}
+              onChange={e => onFormChange(createFormProviderPatch({ ...createForm, provider }, e.target.value))}
             >
-              <option value="claude">Claude (Anthropic)</option>
-              <option value="codex">Codex (OpenAI)</option>
-              <option value="gemini">Gemini (Google)</option>
+              {PROVIDER_OPTIONS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
             </select>
           </div>
-          <div className="config-row">
-            <label className="config-label">
-              Model{(createForm.provider || 'claude') !== 'codex' && <span style={{ color: 'var(--red)' }}> *</span>}
-            </label>
-            <ModelSelector
-              provider={createForm.provider || 'claude'}
-              value={createForm.model}
-              onChange={model => onFormChange({ model })}
-            />
-          </div>
+          {isPi(provider) ? (
+            // Pi has no cloud model list: the bare tag the local server serves. The server URL and
+            // context window are set in ✎ config, which is where Pi's Runs on (Local server) lives.
+            <div className="config-row">
+              <label className="config-label">Model tag <span style={{ color: 'var(--red)' }}>*</span></label>
+              <FieldHint>{PI_RUNS_ON_NOTE}. After creating, set its Server URL and Context window (at least {PI_MIN_CONTEXT_WINDOW}) in <strong>✎ config</strong> before provisioning.</FieldHint>
+              <div className="model-selector">
+                <input
+                  className="config-input"
+                  value={createForm.model}
+                  onChange={e => onFormChange({ model: e.target.value })}
+                  placeholder="the server's model tag"
+                />
+                <div className="model-pills">
+                  {localModelSuggestions(provider).map(s => (
+                    <button
+                      key={s.tag}
+                      type="button"
+                      className={`model-pill${createForm.model.trim() === s.tag ? ' active' : ''}`}
+                      title={s.tag}
+                      onClick={() => onFormChange({ model: s.tag })}
+                    >
+                      {s.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="config-row">
+              <label className="config-label">
+                Model{provider !== 'codex' && <span style={{ color: 'var(--red)' }}> *</span>}
+              </label>
+              <ModelSelector
+                provider={provider}
+                value={createForm.model}
+                onChange={model => onFormChange({ model })}
+              />
+            </div>
+          )}
           <div className="config-row">
             <label className="config-label">Memory (MB)</label>
             <input className="config-input config-input-short" type="number" value={createForm.memoryLimitMb} onChange={e => onFormChange({ memoryLimitMb: e.target.value })} />

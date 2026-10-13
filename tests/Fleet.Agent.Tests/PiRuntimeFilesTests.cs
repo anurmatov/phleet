@@ -271,4 +271,66 @@ public sealed class PiRuntimeFilesTests
     [Fact]
     public void A32_ThePlaceholderIsAccepted() =>
         Assert.Null(PiRuntimeFiles.DescribeApiKeyFault(ClaudeLocalModel.PlaceholderAuthToken));
+
+    // ── A32 (amended): Pi's own empty auth.json is the only credential-named file ──
+
+    [Fact]
+    public void A32_WriteAll_RemovesAuthAndMcpAuthBeforeEveryStart()
+    {
+        var dir = Directory.CreateTempSubdirectory("pi-auth-").FullName;
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, PiRuntimeFiles.AuthFileName), "{\"anthropic\":{\"key\":\"marker-value\"}}");
+            File.WriteAllText(Path.Combine(dir, PiRuntimeFiles.McpAuthFileName), "{}");
+
+            PiRuntimeFiles.WriteAll(dir, "http://inference-host:8000", "qwen3.8-flash-next", 131072, []);
+
+            Assert.False(File.Exists(Path.Combine(dir, PiRuntimeFiles.AuthFileName)));
+            Assert.False(File.Exists(Path.Combine(dir, PiRuntimeFiles.McpAuthFileName)));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(null, null, null)]
+    [InlineData("{}", null, null)]
+    [InlineData("{}\n", null, "auth.json")]
+    [InlineData("{\"anthropic\":{\"type\":\"api_key\",\"key\":\"marker-value\"}}", null, "auth.json")]
+    [InlineData("{}", "{}", "mcp-auth.json")]
+    [InlineData(null, "{}", "mcp-auth.json")]
+    public void A32_OnlyPisOwnEmptyAuthFileIsAllowed(string? auth, string? mcpAuth, string? fault)
+    {
+        var dir = Directory.CreateTempSubdirectory("pi-auth-").FullName;
+        try
+        {
+            if (auth is not null)
+                File.WriteAllText(Path.Combine(dir, PiRuntimeFiles.AuthFileName), auth);
+            if (mcpAuth is not null)
+                File.WriteAllText(Path.Combine(dir, PiRuntimeFiles.McpAuthFileName), mcpAuth);
+
+            Assert.Equal(fault, PiRuntimeFiles.DescribeCredentialFileFault(dir));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void A32_AnAuthDirectoryIsAFault()
+    {
+        var dir = Directory.CreateTempSubdirectory("pi-auth-").FullName;
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(dir, PiRuntimeFiles.AuthFileName));
+            Assert.Equal("auth.json", PiRuntimeFiles.DescribeCredentialFileFault(dir));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
 }

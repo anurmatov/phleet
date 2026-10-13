@@ -27,6 +27,19 @@ public static class PiRuntimeFiles
     public const string SettingsFileName = "settings.json";
     public const string ExtensionConfigFileName = "fleet-pi.json";
 
+    /// <summary>
+    /// Pi 1.0.4 writes <c>{}</c> to this file on every start (<c>AuthStorage.ensureFileExists</c>,
+    /// <c>coding-agent/src/core/auth-storage.ts:63-65</c>) and offers no flag to skip it. Fleet removes
+    /// it before every start and refuses a running Pi whose copy holds anything but that <c>{}</c>.
+    /// </summary>
+    public const string AuthFileName = "auth.json";
+
+    /// <summary>Pi's MCP OAuth store; never written with <c>--no-mcp</c>, so it must not exist.</summary>
+    public const string McpAuthFileName = "mcp-auth.json";
+
+    /// <summary>The exact content Pi writes to an empty <see cref="AuthFileName"/>: no credential.</summary>
+    public const string EmptyAuthContent = "{}";
+
     /// <summary>The Pi binary, resolved on PATH.</summary>
     public const string PiBin = "pi";
 
@@ -220,6 +233,20 @@ public static class PiRuntimeFiles
         string agentDir, string baseUrl, string tag, int contextWindow, IEnumerable<string> allowedTools,
         string mcpConfigPath = PiLocalModel.McpConfigPath)
     {
+        // Whatever the model's shell wrote into Pi's credential files does not survive a restart.
+        foreach (var name in new[] { AuthFileName, McpAuthFileName })
+        {
+            try
+            {
+                if (Directory.Exists(agentDir))
+                    File.Delete(Path.Combine(agentDir, name));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new PiRuntimeFileWriteException(name, ex);
+            }
+        }
+
         var files = new (string Name, string Content)[]
         {
             (ModelsFileName, BuildModelsJson(baseUrl, tag, contextWindow)),
@@ -242,6 +269,31 @@ public static class PiRuntimeFiles
                 throw new PiRuntimeFileWriteException(name, ex);
             }
         }
+    }
+
+    /// <summary>
+    /// The credential file a started Pi must not hold, or null: <see cref="AuthFileName"/> with any
+    /// content but Pi's own <see cref="EmptyAuthContent"/>, or any <see cref="McpAuthFileName"/>.
+    /// Names the file, never its content.
+    /// </summary>
+    public static string? DescribeCredentialFileFault(string agentDir)
+    {
+        var auth = Path.Combine(agentDir, AuthFileName);
+        if (File.Exists(auth) || Directory.Exists(auth))
+        {
+            try
+            {
+                if (!File.Exists(auth) || File.ReadAllText(auth) != EmptyAuthContent)
+                    return AuthFileName;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return AuthFileName;
+            }
+        }
+
+        var mcpAuth = Path.Combine(agentDir, McpAuthFileName);
+        return File.Exists(mcpAuth) || Directory.Exists(mcpAuth) ? McpAuthFileName : null;
     }
 
     private static string Serialize(JsonNode node) => node.ToJsonString(Format) + "\n";

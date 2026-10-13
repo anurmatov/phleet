@@ -509,6 +509,11 @@ public sealed class PiExecutor : IAgentExecutor
             if (DescribeStateMismatch(state, _config.Model, PiLocalModel.ThinkingArgument(_config.Effort)) is { } field)
                 throw new PiStartFault(field, gen.Stderr.Text);
 
+            // §18: no provider credential where the shell can read it. Pi has written its own empty
+            // auth.json by now; anything else in it, or any mcp-auth.json, refuses the start.
+            if (PiRuntimeFiles.DescribeCredentialFileFault(_settings.AgentDir) is { } credentialFile)
+                throw new PiStartFault(credentialFile, gen.Stderr.Text);
+
             gen.InitialMessageCount = (int)(Num(state, "messageCount") ?? 0);
             ApplySessionState(gen, state, force: true);
 

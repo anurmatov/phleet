@@ -299,8 +299,15 @@ public sealed class PiExecutorRealPiTests
 
         var progress = await rig.RunTurnAsync("look for credentials");
 
+        // A32 as amended in PR #452 (pending human design approval): Pi 1.0.4 writes "{}" to
+        // $PI_CODING_AGENT_DIR/auth.json on every start (auth-storage.ts:63-65) and has no flag to skip
+        // it, so exactly that one file, holding exactly "{}", is the only match allowed. Anything
+        // else, a second match or any other content, fails.
         var output = Assert.Single(progress, p => p.EventType == "tool_result").Summary;
-        Assert.Equal("find-done", output.Trim());
+        var authPath = Path.Combine(rig.AgentDir, PiRuntimeFiles.AuthFileName);
+        Assert.Equal(new[] { authPath, "find-done" }, output.Trim().Split('\n', StringSplitOptions.TrimEntries));
+        Assert.Equal(PiRuntimeFiles.EmptyAuthContent, File.ReadAllText(authPath));
+        Assert.Null(PiRuntimeFiles.DescribeCredentialFileFault(rig.AgentDir));
         var models = JsonNode.Parse(File.ReadAllText(Path.Combine(rig.AgentDir, "models.json")))!;
         Assert.Equal(ClaudeLocalModel.PlaceholderAuthToken, (string?)models["providers"]!["fleet-local"]!["apiKey"]);
     }

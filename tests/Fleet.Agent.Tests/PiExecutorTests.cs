@@ -265,6 +265,44 @@ public sealed class PiExecutorTests
     }
 
     [Fact]
+    public async Task A32_AStartedPiWhoseAuthFileHoldsACredential_IsKilledRetriedAndNamesTheFile()
+    {
+        string? agentDir = null;
+        await using var rig = Rig.Create(arrange: pi => pi.StateFor = _ =>
+        {
+            // What a started Pi would leave behind if something had put a credential in its store.
+            File.WriteAllText(Path.Combine(agentDir!, "auth.json"), "{\"anthropic\":{\"key\":\"marker-value\"}}");
+            return pi.DefaultState();
+        });
+        agentDir = rig.AgentDir;
+
+        var result = Terminal(await rig.RunTurnAsync());
+
+        Assert.True(result.IsErrorResult);
+        Assert.Equal("Pi failed to start: auth.json", result.FinalResult);
+        Assert.Equal(PiExecutor.StartAttempts, rig.Pi.Processes.Count);
+        Assert.All(rig.Pi.Processes, p => Assert.Empty(p.FramesOfType("prompt")));
+        Assert.DoesNotContain(rig.Logger.Entries, e => e.Message.Contains("marker-value", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A32_PisOwnEmptyAuthFile_Starts()
+    {
+        string? agentDir = null;
+        await using var rig = Rig.Create(arrange: pi => pi.StateFor = _ =>
+        {
+            File.WriteAllText(Path.Combine(agentDir!, "auth.json"), "{}");
+            return pi.DefaultState();
+        });
+        agentDir = rig.AgentDir;
+
+        var result = Terminal(await rig.RunTurnAsync());
+
+        Assert.False(result.IsErrorResult);
+        Assert.Single(rig.Pi.Processes);
+    }
+
+    [Fact]
     public async Task A7b_NoGetStateAnswer_FailsAfterThreeAttemptsNamingGetState()
     {
         await using var rig = Rig.Create(

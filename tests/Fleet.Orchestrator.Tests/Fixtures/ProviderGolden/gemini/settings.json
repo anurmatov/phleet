@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "mcp__fleet-memory__memory_get",
+      "mcp__fleet-memory__memory_search",
+      "mcp__fleet-temporal__notify_cto",
+      "Read"
+    ]
+  }
+}

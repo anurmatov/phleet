@@ -1,0 +1,10 @@
+./workspaces/fleet-agent-golden:/workspace
+./workspaces/fleet-agent-golden/.generated/projects:/app/projects:ro
+./workspaces/fleet-agent-golden/.generated/appsettings.json:/app/appsettings.json:ro
+./workspaces/fleet-agent-golden/claude:/root/.claude
+./workspaces/fleet-agent-golden/.generated/settings.json:/root/.claude/settings.json:ro
+./workspaces/fleet-agent-golden/codex:/root/.codex
+./workspaces/fleet-agent-golden/.generated/.mcp.json:/workspace/.mcp.json:ro
+./workspaces/fleet-agent-golden/.generated/roles:/app/roles:ro
+./.claude-credentials.json:/root/.claude-host/.credentials.json:ro
+<base>/credentials/creds.json:/workspace/creds.json:ro

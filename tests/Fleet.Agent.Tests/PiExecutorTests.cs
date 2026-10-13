@@ -1172,4 +1172,23 @@ public sealed class PiExecutorTests
         Assert.True(result.IsErrorResult);
         Assert.Equal("context overflowed and automatic recovery failed — send /reset", result.FinalResult);
     }
+
+    [Fact]
+    public async Task A10_FailedOverflowRecoveryWithoutItsEvent_StillReplaysToTheResetText()
+    {
+        var result = Terminal(await ProviderFrameReplay.ReplayPiAsync("overflow-recovery-silent.ndjson"));
+
+        Assert.True(result.IsErrorResult);
+        Assert.Equal("context overflowed and automatic recovery failed — send /reset", result.FinalResult);
+    }
+
+    [Fact]
+    public async Task A10_APreviousRunsLateFailedRecovery_DoesNotFailTheNextRun()
+    {
+        var result = Terminal(await ProviderFrameReplay.ReplayPiAsync("stray-recovery-before-run.ndjson"));
+        var ordinary = Terminal(await ProviderFrameReplay.ReplayPiAsync("ordinary-turn.ndjson"));
+
+        Assert.False(result.IsErrorResult);
+        Assert.Equal(ordinary.FinalResult, result.FinalResult);
+    }
 }

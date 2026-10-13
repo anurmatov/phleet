@@ -1083,10 +1083,18 @@ public sealed class PiExecutor : IAgentExecutor
                     tail, PiLocalModel.TailBudgetTokens);
 
             gen.PostCompaction = true;
+            if (reason == "overflow")
+                run.OverflowCompacted = true;
         }
         else if (Bool(json, "aborted") == true)
         {
             _logger.LogInformation("pi compaction {Reason} aborted", reason);
+        }
+        else if (reason == "overflow" && !run.AgentStarted)
+        {
+            // Pi 1.0.4 can deliver the previous run's failed-recovery compaction_end before this
+            // run's agent_start; this run has not failed.
+            _logger.LogWarning("pi: a failed overflow recovery from the previous run was reported late; ignored");
         }
         else if (reason == "overflow")
         {
@@ -1113,13 +1121,23 @@ public sealed class PiExecutor : IAgentExecutor
         return Result(run.Final!, run, isError: false);
     }
 
+    private static bool LooksLikeContextOverflow(string? error) =>
+        error is not null
+        && (error.Contains("context", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("prompt has", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("too long", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("overflow", StringComparison.OrdinalIgnoreCase));
+
     /// <summary>The run ended with no answer: the §13 text for what went wrong.</summary>
     private AgentProgress Failed(RunState run)
     {
         run.Terminal = true;
         string text;
+        // Pi 1.0.4 does not always emit the failed-recovery compaction_end, so a run that already
+        // compacted for an overflow and then ends on a context error counts as a failed recovery.
         if (run.OverflowRecoveryFailed
-            || run.LastError?.Contains("overflow recovery failed", StringComparison.OrdinalIgnoreCase) == true)
+            || run.LastError?.Contains("overflow recovery failed", StringComparison.OrdinalIgnoreCase) == true
+            || (run.OverflowCompacted && run.LastStopReason == "error" && LooksLikeContextOverflow(run.LastError)))
         {
             text = OverflowRecoveryFailedText;
         }
@@ -1782,6 +1800,7 @@ public sealed class PiExecutor : IAgentExecutor
         public string? LastStopReason;
         public string? LastError;
         public bool OverflowRecoveryFailed;
+        public bool OverflowCompacted;
 
         public List<AgentProgress> TakeOutput()
         {

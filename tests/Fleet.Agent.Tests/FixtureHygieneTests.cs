@@ -348,7 +348,7 @@ public partial class FixtureHygieneTests
     [InlineData(ProviderFrameReplay.ClaudeDirectory, 5)]
     [InlineData(ProviderFrameReplay.CodexDirectory, 5)]
     [InlineData(ProviderFrameReplay.GeminiDirectory, 4)]
-    [InlineData(ProviderFrameReplay.PiDirectory, 6)]
+    [InlineData(ProviderFrameReplay.PiDirectory, 8)]
     public void EveryProviderCorpusIsCopiedToTheTestOutput(string provider, int expectedFiles)
     {
         var directory = Path.Combine(AppContext.BaseDirectory, "Fixtures", provider);

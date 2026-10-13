@@ -473,7 +473,7 @@ public class ContainerProvisioningServiceTests
     [Theory]
     // V1 — a hand-edited row: the field left behind on a provider change.
     [InlineData("codex", "qwen3.8:27b-agent", LocalUrl, null, "must be ollama/<tag> or lmstudio/<tag>")]
-    [InlineData("gemini", "qwen3.8:27b-agent", LocalUrl, null, "Local model runs on claude or codex")]
+    [InlineData("gemini", "qwen3.8:27b-agent", LocalUrl, null, "Local model runs on claude, codex or pi")]
     // V2, V3
     [InlineData("claude", "qwen3.8:27b-agent", "http://inference-host:11434/v1", null, "has a path")]
     [InlineData("claude", "qwen3.8:27b-agent", "  ", null, "has surrounding whitespace")]
@@ -560,5 +560,216 @@ public class ContainerProvisioningServiceTests
         });
 
         ContainerProvisioningService.GenerateAppsettingsJson(agent, "acto");
+    }
+
+    // ── #386: provider pi and PV1 ────────────────────────────────────────────────────────────────
+
+    private const string PiUrl = "http://inference-host:8000";
+
+    private static Agent PiAgent(string name = "api")
+    {
+        var agent = MinimalAgent(name, "pi");
+        agent.Model = "qwen3.8-flash-next";
+        agent.LocalBaseUrl = PiUrl;
+        agent.ContextWindow = 131_072;
+        return agent;
+    }
+
+    private static AgentCredentialMount Mount(string mountPath) => new()
+    {
+        MountPath = mountPath,
+        CredentialFile = new CredentialFile { Name = "c", FileName = "c", FilePath = "/tmp/c" },
+    };
+
+    [Fact]
+    public void McpHeaderSupport_Pi_IsTrue_AndTheOthersAreUnchanged()
+    {
+        Assert.True(ContainerProvisioningService.SupportsMcpHeaders("pi"));
+        Assert.Equal(
+            [("claude", true), ("codex", true), ("gemini", false), ("pi", true)],
+            ContainerProvisioningService.McpHeaderSupport.Select(kv => (kv.Key, kv.Value)).OrderBy(kv => kv.Key));
+    }
+
+    [Fact]
+    public void BuildBinds_Pi_GetsNoCredentialBind_EvenWithEveryHostCredentialFile()
+    {
+        var agent = PiAgent("agolden");
+
+        var binds = BindsWithAllHostCredentialFiles(agent);
+
+        Assert.Equal(MainBinds("unused")[..^1], binds);
+    }
+
+    [Theory]
+    [InlineData("foo")]
+    [InlineData("Claude")]
+    [InlineData("GEMINI")]
+    [InlineData(" pi")]
+    public void BuildBinds_AnUnknownProvider_RaisesPV1_InsteadOfMountingClaudeCredentials(string provider)
+    {
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => BindsWithAllHostCredentialFiles(MinimalAgent("afoo", provider)));
+
+        Assert.Equal($"Unknown provider '{provider}'; use claude, codex, gemini or pi.", ex.Message);
+    }
+
+    [Fact]
+    public void BuildBinds_AnEmptyProvider_IsStillClaude()
+    {
+        var binds = BindsWithAllHostCredentialFiles(MinimalAgent("agolden", ""));
+
+        Assert.Equal(MainBinds("./.claude-credentials.json:/root/.claude-host/.credentials.json:ro"), binds);
+    }
+
+    [Fact]
+    public void GenerateAppsettingsJson_Pi_AutoGrantsBothBaselineTools()
+    {
+        var tools = GetAllowedTools(PiAgent(), "acto");
+
+        Assert.Equal(["mcp__fleet-memory__memory_get", "mcp__fleet-temporal__notify_cto"], tools);
+    }
+
+    [Theory]
+    [InlineData("api")]   // the configured CTO agent itself
+    [InlineData("API")]   // matched case-insensitively, as for codex
+    [InlineData("")]      // FLEET_CTO_AGENT unset: fail-safe, no grant
+    public void GenerateAppsettingsJson_Pi_NoNotifyCto_ForTheCtoAgentOrWithoutOne(string ctoAgentName)
+    {
+        var tools = GetAllowedTools(PiAgent("api"), ctoAgentName);
+
+        Assert.Equal(["mcp__fleet-memory__memory_get"], tools);
+    }
+
+    [Fact]
+    public void GenerateAppsettingsJson_Pi_AddsPiBaseUrlAndContextWindow_AndNoClaudeOrCodexKey()
+    {
+        var agent = PiAgent();
+        agent.LocalBaseUrl = "HTTP://Inference-Host:8000/";
+
+        var node = JsonDocument.Parse(ContainerProvisioningService.GenerateAppsettingsJson(agent, "acto"))
+            .RootElement.GetProperty("Agent");
+
+        Assert.Equal(PiUrl, node.GetProperty("PiBaseUrl").GetString());
+        Assert.Equal(131_072, node.GetProperty("ContextWindow").GetInt32());
+        Assert.Equal(JsonValueKind.Null, node.GetProperty("AnthropicBaseUrl").ValueKind);
+        Assert.False(node.TryGetProperty("CodexOssBaseUrl", out _));
+        Assert.False(node.GetProperty("HostedProvider").GetBoolean());
+    }
+
+    [Theory]
+    [InlineData("claude", "claude-opus-5-5", null)]
+    [InlineData("codex", "gpt-5.5", null)]
+    [InlineData("codex", "zai/glm-5.3", null)]
+    [InlineData("gemini", "gemini-2.5-pro", null)]
+    [InlineData("claude", "qwen3.8-flash-next", PiUrl)]
+    [InlineData("codex", "ollama/qwen3.8-flash-next", PiUrl)]
+    public void GenerateAppsettingsJson_NonPiAgents_NeverGetPiBaseUrl(string provider, string model, string? url)
+    {
+        var agent = MinimalAgent("aother", provider);
+        agent.Model = model;
+        agent.LocalBaseUrl = url;
+        agent.ContextWindow = 131_072;
+
+        var json = ContainerProvisioningService.GenerateAppsettingsJson(agent, "acto");
+
+        Assert.DoesNotContain("PiBaseUrl", json);
+    }
+
+    [Theory]
+    // PV1
+    [InlineData("foo", "qwen3.8-flash-next", PiUrl, 131_072, null, "Unknown provider 'foo'; use claude, codex, gemini or pi.")]
+    // PI1
+    [InlineData("pi", "qwen3.8-flash-next", null, 131_072, null, "Pi runs only on a local server; set the local server URL.")]
+    // L2 still applies
+    [InlineData("pi", "qwen3.8-flash-next", PiUrl + "/v1", 131_072, null, "has a path")]
+    // PI2: the charset, then each refused first segment
+    [InlineData("pi", "qwen 3.8", PiUrl, 131_072, null, "Pi takes the bare model tag the server serves (no ollama/ or lmstudio/ prefix).")]
+    [InlineData("pi", "ollama/qwen3.8-flash-next", PiUrl, 131_072, null, "Pi takes the bare model tag the server serves (no ollama/ or lmstudio/ prefix).")]
+    [InlineData("pi", "lmstudio/qwen3.8-flash-next", PiUrl, 131_072, null, "Pi takes the bare model tag the server serves (no ollama/ or lmstudio/ prefix).")]
+    [InlineData("pi", "zai/glm-5.3", PiUrl, 131_072, null, "Pi takes the bare model tag the server serves (no ollama/ or lmstudio/ prefix).")]
+    // PI3
+    [InlineData("pi", "qwen3.8-flash-next", PiUrl, null, null, "Pi needs the server's context size, at least 65536; set the context window to the server's --ctx.")]
+    [InlineData("pi", "qwen3.8-flash-next", PiUrl, 65_535, null, "Pi needs the server's context size, at least 65536; set the context window to the server's --ctx.")]
+    // PI4
+    [InlineData("pi", "qwen3.8-flash-next", PiUrl, 131_072, "xhigh", "Pi effort is off or on.")]
+    public void GenerateAppsettingsJson_RefusesAnInvalidPiConfig(
+        string provider, string model, string? baseUrl, int? window, string? effort, string expected)
+    {
+        var agent = MinimalAgent("api", provider);
+        agent.Model = model;
+        agent.LocalBaseUrl = baseUrl;
+        agent.ContextWindow = window;
+        agent.Effort = effort;
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => ContainerProvisioningService.GenerateAppsettingsJson(agent, "acto"));
+
+        Assert.Contains(expected, ex.Message);
+        Assert.Equal(ex.Message.Replace("Agent 'api' cannot be provisioned: ", ""),
+            ContainerProvisioningService.DescribeProviderPreflightFault(agent));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("off")]
+    [InlineData("on")]
+    public void DescribeLocalModelFault_Pi_AcceptsEveryPiEffort(string? effort)
+    {
+        var agent = PiAgent();
+        agent.Effort = effort;
+
+        Assert.Null(ContainerProvisioningService.DescribeLocalModelFault(agent));
+        Assert.Null(ContainerProvisioningService.DescribeProviderPreflightFault(agent));
+    }
+
+    [Theory]
+    [InlineData("/root/.claude-host/.credentials.json")]
+    [InlineData("/root/.codex-host/auth.json")]
+    [InlineData("/root/.gemini/oauth_creds.json")]
+    [InlineData("/root/.pi/agent/auth.json")]
+    [InlineData("/root/.claude.json")]
+    [InlineData("/root/.codex/auth.json")]
+    public void DescribeLocalModelFault_Pi5_NamesTheMountPath(string mountPath)
+    {
+        var agent = PiAgent();
+        agent.CredentialMounts.Add(Mount("/workspace/creds.json"));
+        agent.CredentialMounts.Add(Mount(mountPath));
+
+        Assert.Equal(
+            $"Pi agents must hold no provider credential, but a credential mount targets {mountPath}. Remove it, then reprovision.",
+            ContainerProvisioningService.DescribeLocalModelFault(agent));
+    }
+
+    [Theory]
+    [InlineData("/workspace/creds.json")]
+    [InlineData("/root/.ssh/id_ed25519")]
+    public void DescribeLocalModelFault_Pi5_AcceptsAMountOutsideTheProviderDirectories(string mountPath)
+    {
+        var agent = PiAgent();
+        agent.CredentialMounts.Add(Mount(mountPath));
+
+        Assert.Null(ContainerProvisioningService.DescribeLocalModelFault(agent));
+    }
+
+    [Theory]
+    [InlineData("claude", "claude-opus-5-5", null, null)]
+    [InlineData("claude", "qwen3.8-flash-next", PiUrl, "xhigh")]
+    [InlineData("codex", "ollama/qwen3.8-flash-next", PiUrl, "none")]
+    [InlineData("codex", "zai/glm-5.3", null, "high")]
+    [InlineData("gemini", "gemini-2.5-pro", null, null)]
+    [InlineData("", "claude-opus-5-5", null, null)]
+    public void DescribeProviderPreflightFault_IgnoresEveryOtherProvider_EvenWithACredentialMount(
+        string provider, string model, string? url, string? effort)
+    {
+        // Claude and codex keep their own provisioning path; PI5 applies to pi only.
+        var agent = MinimalAgent("aother", provider);
+        agent.Model = model;
+        agent.LocalBaseUrl = url;
+        agent.Effort = effort;
+        agent.ContextWindow = 4_096;
+        agent.CredentialMounts.Add(Mount("/root/.codex-host/auth.json"));
+
+        Assert.Null(ContainerProvisioningService.DescribeProviderPreflightFault(agent));
     }
 }

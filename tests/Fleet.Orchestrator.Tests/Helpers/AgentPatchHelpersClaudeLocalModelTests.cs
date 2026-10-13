@@ -78,7 +78,7 @@ public class AgentPatchHelpersClaudeLocalModelTests
     [InlineData("http://host.docker.internal:11434", "zai/glm-5.3", "", null, "selects the codex path")]
     [InlineData("http://host.docker.internal:11434", LocalTag, "high", null, "must be empty (model default, sent as xhigh), off, low, medium or xhigh")]
     [InlineData("http://host.docker.internal:11434", LocalTag, "max", null, "must be empty (model default, sent as xhigh), off, low, medium or xhigh")]
-    [InlineData("http://host.docker.internal:11434", LocalTag, "", "gemini", "Local model runs on claude or codex")]
+    [InlineData("http://host.docker.internal:11434", LocalTag, "", "gemini", "Local model runs on claude, codex or pi")]
     public void Rejected_RowUnchanged(string baseUrl, string model, string effort, string? provider, string expected)
     {
         Seed();

@@ -16,7 +16,9 @@ namespace Fleet.Orchestrator.Endpoints;
 /// <remarks>
 /// Lifted verbatim from <c>Program.cs</c> (#386) so the endpoint tests can run the production
 /// handler over real HTTP and prove PV1 refuses an unknown provider before a row is written — the
-/// same pattern as <see cref="AgentConfigEndpoints"/> (#357).
+/// same pattern as <see cref="AgentConfigEndpoints"/> (#357). Creation takes no local server URL or
+/// context window, so a <c>pi</c> agent is created here and configured through the PUT before it
+/// can be provisioned; provisioning refuses it until then (PI1, PI3).
 /// </remarks>
 public static class AgentCreateEndpoints
 {
@@ -37,6 +39,9 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         return Results.BadRequest(new { error = "model is required" });
     if (string.IsNullOrWhiteSpace(body.Role))
         return Results.BadRequest(new { error = "role is required" });
+    // PV1 (#386): refused before anything is written. Omitted or "" stays claude.
+    if (AgentProviders.DescribeFault(body.Provider) is { } providerFault)
+        return Results.BadRequest(new { error = providerFault });
 
     // Telegram is a hard prerequisite — agents without a valid bot token are headless.
     var setupStatus = setupService.GetStatus();

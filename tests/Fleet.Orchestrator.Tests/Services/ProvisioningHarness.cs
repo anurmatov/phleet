@@ -29,6 +29,12 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
     public ProvisioningLogSink Logs { get; } = new();
     public int DockerRequestCount => _dockerApi.RequestCount;
 
+    /// <summary>Every Docker API call, as <c>METHOD /path</c>, in order.</summary>
+    public IReadOnlyList<string> DockerRequests => _dockerApi.Requests;
+
+    /// <summary>The JSON body of every <c>/containers/create</c> call; its <c>HostConfig.Binds</c> are the binds.</summary>
+    public IReadOnlyList<string> CreateBodies => _dockerApi.CreateBodies;
+
     private ProvisioningHarness(IReadOnlyDictionary<string, string?>? extraConfig)
     {
         BaseDir = Path.Combine(Path.GetTempPath(), $"prov-harness-{Guid.NewGuid():N}");
@@ -97,19 +103,25 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
     private sealed class FakeDockerApi : HttpMessageHandler
     {
         public int RequestCount { get; private set; }
+        public List<string> Requests { get; } = [];
+        public List<string> CreateBodies { get; } = [];
 
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             RequestCount++;
             var path = request.RequestUri!.AbsolutePath;
+            Requests.Add($"{request.Method} {path}");
             if (request.Method == HttpMethod.Post && path.EndsWith("/containers/create", StringComparison.Ordinal))
-                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Created)
+            {
+                CreateBodies.Add(request.Content is null ? "" : await request.Content.ReadAsStringAsync(ct));
+                return new HttpResponseMessage(HttpStatusCode.Created)
                 {
                     Content = new StringContent("""{"Id":"0123456789abcdef0123"}""", System.Text.Encoding.UTF8, "application/json"),
-                });
+                };
+            }
             if (request.Method == HttpMethod.Post && path.EndsWith("/start", StringComparison.Ordinal))
-                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NoContent));
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+                return new HttpResponseMessage(HttpStatusCode.NoContent);
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
         }
     }
 }

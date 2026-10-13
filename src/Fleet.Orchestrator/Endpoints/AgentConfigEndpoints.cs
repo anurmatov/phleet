@@ -168,7 +168,13 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     if (body.AutoMemoryEnabled is not null) agent.AutoMemoryEnabled = body.AutoMemoryEnabled.Value;
     if (body.JournalEnabled is not null) agent.JournalEnabled = body.JournalEnabled.Value;
     if (body.JournalCrossChatEnabled is not null) agent.JournalCrossChatEnabled = body.JournalCrossChatEnabled.Value;
-    if (body.Provider is not null) agent.Provider = body.Provider;
+    if (body.Provider is not null)
+    {
+        // PV1 (#386): an unknown provider is refused, never served as claude. "" stays claude.
+        if (AgentProviders.DescribeFault(body.Provider) is { } providerFault)
+            return Results.BadRequest(new { error = providerFault });
+        agent.Provider = body.Provider;
+    }
     if (body.CodexSandboxMode is not null)
     {
         var (sandboxError, sandboxValue) = AgentPatchHelpers.MapCodexSandboxMode(body.CodexSandboxMode);
@@ -315,8 +321,9 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
             .ToList();
     }
 
-    // #340, #382: the agent's resulting state, after every field in the request is applied. A 400
-    // here returns before SaveChanges, so nothing from this request is persisted.
+    // #340, #382, #386: the agent's resulting state (PV1, then the local-model and pi rules), after
+    // every field in the request is applied. A 400 here returns before SaveChanges, so nothing from
+    // this request is persisted.
     if (AgentPatchHelpers.FinalizeLocalModel(agent) is { } localModelFault)
         return Results.BadRequest(new { error = localModelFault });
 

@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using Fleet.Orchestrator.Data;
+using Fleet.Shared;
 using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol.Server;
 
@@ -17,7 +18,7 @@ public sealed class CreateAgentTool(IServiceScopeFactory scopeFactory, IConfigur
         [Description("Display name shown in the dashboard (e.g. 'Fleet Dev'). Defaults to agent_name if omitted.")] string? display_name = null,
         [Description("Memory limit in MB. Defaults to 4096.")] int? memory_limit_mb = null,
         [Description("Docker container name override (e.g. fleet-my-agent). Defaults to 'fleet-{agent_name}'.")] string? container_name = null,
-        [Description("LLM provider: claude (default) or codex (OpenAI via Codex SDK).")] string? provider = null,
+        [Description("LLM provider: claude (default), codex (OpenAI via Codex SDK), gemini, or pi (Pi on a local model server only). Any other value is refused. A pi agent cannot be provisioned until update_agent_config sets local_base_url, the server's bare model tag and context_window (at least 65536).")] string? provider = null,
         [Description("When true, /var/run/docker.sock is bind-mounted into the container. Grants host Docker access — only set for agents that manage containers (e.g. devops, developer, co-cto). Defaults to false.")] bool? mount_docker_sock = null)
     {
         using var scope = scopeFactory.CreateScope();
@@ -31,6 +32,10 @@ public sealed class CreateAgentTool(IServiceScopeFactory scopeFactory, IConfigur
             return "role is required.";
         if (string.IsNullOrWhiteSpace(model))
             return "model is required.";
+
+        // PV1 (#386): refused before anything is written. Omitted or "" stays claude.
+        if (AgentProviders.DescribeFault(provider) is { } providerFault)
+            return providerFault;
 
         if (await db.Agents.AnyAsync(a => a.Name == name))
             return $"Agent '{name}' already exists in DB.";

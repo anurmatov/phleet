@@ -6,20 +6,26 @@ namespace Fleet.Orchestrator.Helpers;
 internal static class AgentPatchHelpers
 {
     /// <summary>
-    /// Validates an agent's local-model state after every field in the request is applied (#340,
-    /// #382), then stores <c>LocalBaseUrl</c> in canonical form. Returns the fault, or null. On a
-    /// fault the caller returns an error without saving, so nothing is persisted.
+    /// Validates an agent's provider and local-model state after every field in the request is
+    /// applied (#340, #382, #386), then stores <c>LocalBaseUrl</c> in canonical form. Returns the
+    /// fault, or null. On a fault the caller returns an error without saving, so nothing is persisted.
     /// </summary>
     /// <remarks>
     /// Shared by <c>update_agent_config</c> and <c>PUT /api/agents/{name}/config</c> so the two write
     /// paths cannot disagree. Runs on every write: a request that only sets <c>effort</c> on a local
-    /// agent is still refused (V7). Agents without the field are never affected. <c>Model</c> is
-    /// never rewritten here: on a provider switch the caller sends the matching model, and V6 or
-    /// C1 rejects a mismatch.
+    /// agent is still refused (V7). Agents without the field are never affected, except provider
+    /// <c>pi</c>, which is always local and is checked in full (PI1–PI4, with the context window).
+    /// <c>Model</c> and <c>Effort</c> are never rewritten here: on a provider switch the caller sends
+    /// the matching values, and V6, C1, PI2 or PI4 rejects a mismatch.
     /// </remarks>
     internal static string? FinalizeLocalModel(Agent agent)
     {
-        if (LocalModel.DescribeConfigFault(agent.Provider, agent.LocalBaseUrl, agent.Model, agent.Effort)
+        // PV1 (#386): the resulting provider, whichever field or earlier write put it there.
+        if (AgentProviders.DescribeFault(agent.Provider) is { } providerFault)
+            return providerFault;
+
+        if (LocalModel.DescribeConfigFault(
+                agent.Provider, agent.LocalBaseUrl, agent.Model, agent.Effort, agent.ContextWindow)
             is { } fault)
         {
             return fault;

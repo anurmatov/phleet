@@ -36,12 +36,17 @@ public sealed class ContainerProvisioningService(
     /// Header support is a property of the pinned provider CLI, not something provisioning probes
     /// at runtime. Flip a false value only with a pinned-CLI tools/list transcript in the PR.
     /// </summary>
+    /// <remarks>
+    /// <c>pi</c> (#386): the Fleet Pi extension, not Pi itself, reads <c>.mcp.json</c> and sends
+    /// each server's <c>headers</c> (A17).
+    /// </remarks>
     internal static readonly IReadOnlyDictionary<string, bool> McpHeaderSupport =
         new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
         {
             ["claude"] = true,
             ["codex"] = true,
             ["gemini"] = false,
+            ["pi"] = true,
         };
 
     private static readonly JsonSerializerOptions IndentedJson = new() { WriteIndented = true };
@@ -197,39 +202,54 @@ public sealed class ContainerProvisioningService(
         if (HasStyleFile(agent))
             binds.Add($"./workspaces/{containerName}/.generated/output-styles:/workspace/.claude/output-styles:ro");
 
-        if (agent.Provider == "gemini")
+        // PV1 (#386): one explicit case per provider. Only an empty provider means claude; any
+        // other string is refused rather than handed the Claude credential.
+        switch (AgentProviders.Normalize(agent.Provider))
         {
-            // Mount gemini OAuth credentials writable — the CLI's google-auth-library refreshes
-            // the file in-place on token expiry, so the mount must be read-write. The refreshed
-            // token propagates back to the host, preventing stale-token failures on container restart.
-            var geminiTokenStorePath = Path.Combine(baseDir, ".gemini-credentials.json");
-            if (File.Exists(geminiTokenStorePath))
-                binds.Add("./.gemini-credentials.json:/root/.gemini/oauth_creds.json:rw");
-        }
-        else if (agent.Provider == "codex")
-        {
-            // A hosted-provider agent must hold no OpenAI credential (#335 D6): its model is served
-            // by the vendor through the loopback adapter, and the credential would be one more
-            // secret in a container whose model runs a root shell.
-            if (IsHostedProvider(agent))
-                return AppendCredentialMounts(agent, binds);
+            case AgentProviders.Gemini:
+            {
+                // Mount gemini OAuth credentials writable — the CLI's google-auth-library refreshes
+                // the file in-place on token expiry, so the mount must be read-write. The refreshed
+                // token propagates back to the host, preventing stale-token failures on container restart.
+                var geminiTokenStorePath = Path.Combine(baseDir, ".gemini-credentials.json");
+                if (File.Exists(geminiTokenStorePath))
+                    binds.Add("./.gemini-credentials.json:/root/.gemini/oauth_creds.json:rw");
+                break;
+            }
+            case AgentProviders.Codex:
+            {
+                // A hosted-provider agent must hold no OpenAI credential (#335 D6): its model is served
+                // by the vendor through the loopback adapter, and the credential would be one more
+                // secret in a container whose model runs a root shell.
+                if (IsHostedProvider(agent))
+                    return AppendCredentialMounts(agent, binds);
 
-            // Mount codex credentials for seeding new codex containers (entrypoint.sh reads this)
-            var codexTokenStorePath = Path.Combine(baseDir, ".codex-credentials.json");
-            if (File.Exists(codexTokenStorePath))
-                binds.Add("./.codex-credentials.json:/root/.codex-host/auth.json:ro");
-        }
-        else
-        {
-            // A local-model agent must hold no Claude credential (#340 D3): its model is served by a
-            // local Anthropic-compatible server, which must never receive a real OAuth token.
-            if (ClaudeLocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl))
-                return AppendCredentialMounts(agent, binds);
+                // Mount codex credentials for seeding new codex containers (entrypoint.sh reads this)
+                var codexTokenStorePath = Path.Combine(baseDir, ".codex-credentials.json");
+                if (File.Exists(codexTokenStorePath))
+                    binds.Add("./.codex-credentials.json:/root/.codex-host/auth.json:ro");
+                break;
+            }
+            case AgentProviders.Pi:
+                // A pi agent holds no provider credential at all (#386): its model runs a root shell
+                // with no approval step or sandbox, and its server needs none. PI5 refuses an
+                // operator credential mount into a provider directory.
+                break;
+            case AgentProviders.Claude:
+            {
+                // A local-model agent must hold no Claude credential (#340 D3): its model is served by a
+                // local Anthropic-compatible server, which must never receive a real OAuth token.
+                if (ClaudeLocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl))
+                    return AppendCredentialMounts(agent, binds);
 
-            // Mount orchestrator-stored Claude credentials for seeding new containers (entrypoint.sh reads this)
-            var tokenStorePath = Path.Combine(baseDir, ".claude-credentials.json");
-            if (File.Exists(tokenStorePath))
-                binds.Add("./.claude-credentials.json:/root/.claude-host/.credentials.json:ro");
+                // Mount orchestrator-stored Claude credentials for seeding new containers (entrypoint.sh reads this)
+                var tokenStorePath = Path.Combine(baseDir, ".claude-credentials.json");
+                if (File.Exists(tokenStorePath))
+                    binds.Add("./.claude-credentials.json:/root/.claude-host/.credentials.json:ro");
+                break;
+            }
+            default:
+                throw new InvalidOperationException(AgentProviders.UnknownProviderText(agent.Provider));
         }
 
         return AppendCredentialMounts(agent, binds);
@@ -248,13 +268,19 @@ public sealed class ContainerProvisioningService(
     }
 
     /// <summary>
-    /// The local-model fault that must stop provisioning (#340 D1 point 2, #382), or null: L1, L2,
-    /// V4–V8, C1, C2, or a claude local agent carrying a credential mount into
-    /// <c>/root/.claude*</c>, which would hand it the Claude credential the bind skip above withholds.
+    /// The local-model fault that must stop provisioning (#340 D1 point 2, #382, #386), or null:
+    /// PV1, L1, L2, V4–V8, C1, C2, PI1–PI4, or a credential mount that would hand a local agent the
+    /// credential the bind skip above withholds — into <c>/root/.claude*</c> for claude local mode,
+    /// into any provider directory for pi (PI5).
     /// </summary>
     internal static string? DescribeLocalModelFault(Agent agent)
     {
-        if (LocalModel.DescribeConfigFault(agent.Provider, agent.LocalBaseUrl, agent.Model, agent.Effort)
+        // PV1 (#386): an unknown provider is refused before anything else reads it.
+        if (AgentProviders.DescribeFault(agent.Provider) is { } providerFault)
+            return providerFault;
+
+        if (LocalModel.DescribeConfigFault(
+                agent.Provider, agent.LocalBaseUrl, agent.Model, agent.Effort, agent.ContextWindow)
             is { } fault)
         {
             return fault;
@@ -265,6 +291,14 @@ public sealed class ContainerProvisioningService(
             is { } effortFault)
         {
             return effortFault;
+        }
+
+        // PI5 (#386), next to the claude check below; the entrypoint's deletion is the backstop.
+        if (PiLocalModel.IsPi(agent.Provider))
+        {
+            return agent.CredentialMounts
+                .Select(m => PiLocalModel.DescribeCredentialMountFault(m.MountPath))
+                .FirstOrDefault(f => f is not null);
         }
 
         if (!ClaudeLocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl))
@@ -278,6 +312,19 @@ public sealed class ContainerProvisioningService(
             : $"Claude local model mode forbids a credential mount into /root/.claude*, but one targets "
             + $"{claudeMount.MountPath}. Remove it, then reprovision.";
     }
+
+    /// <summary>
+    /// The faults that stop provisioning before Docker is called, and a reprovision before the old
+    /// container is removed (#386): PV1 for every agent, and every pi fault (PI1–PI5, L2). Null
+    /// when there is none.
+    /// </summary>
+    /// <remarks>
+    /// Claude and codex local faults keep their #340/#382 path: <see cref="GenerateAppsettingsJson"/>
+    /// refuses them during provisioning, which a reprovision reaches after removing the container.
+    /// </remarks>
+    internal static string? DescribeProviderPreflightFault(Agent agent) =>
+        AgentProviders.DescribeFault(agent.Provider)
+        ?? (PiLocalModel.IsPi(agent.Provider) ? DescribeLocalModelFault(agent) : null);
 
     /// <summary>
     /// P1 (#382): a codex agent whose model is <c>ollama/…</c> or <c>lmstudio/…</c> and has no local
@@ -358,6 +405,9 @@ public sealed class ContainerProvisioningService(
 
         if (DescribePrimaryHumanFault() is { } priorityFault)
             return ProvisionResult.Fail(agentName, priorityFault);
+        // #386: PV1 and the pi rules, before Docker is called or any file is generated.
+        if (DescribeProviderPreflightFault(agent) is { } providerFault)
+            return ProvisionResult.Fail(agentName, providerFault);
         if (DescribeJournalProvisioningFault(agent) is { } journalFault)
             return ProvisionResult.Fail(agentName, journalFault);
 
@@ -390,7 +440,14 @@ public sealed class ContainerProvisioningService(
         await GenerateInstructionFilesAsync(agent, baseDir, instructionVersionOverrides);
         await GenerateProjectContextFilesAsync(agent, baseDir, projectContexts);
 
-        if (LocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl))
+        if (PiLocalModel.IsPi(agent.Provider))
+        {
+            // The pre-flight above guarantees an origin and a window; the origin carries no credentials (L2).
+            logger.LogInformation(
+                "Pi agent '{Agent}': server {Origin}, model {Tag}, context {W}",
+                agentName, LocalModel.CanonicalizeBaseUrl(agent.LocalBaseUrl!), agent.Model, agent.ContextWindow);
+        }
+        else if (LocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl))
         {
             logger.LogInformation(
                 "Local model for '{Agent}': harness {Provider}, server {Origin}, context window {ContextWindow}",
@@ -406,7 +463,7 @@ public sealed class ContainerProvisioningService(
         else if (agent.ContextWindow is not null)
         {
             logger.LogInformation(
-                "ContextWindow {ContextWindow} ignored for '{Agent}': it applies only to a claude or codex agent with a local server URL",
+                "ContextWindow {ContextWindow} ignored for '{Agent}': it applies only to a claude, codex or pi agent with a local server URL",
                 agent.ContextWindow, agentName);
         }
 
@@ -516,6 +573,10 @@ public sealed class ContainerProvisioningService(
     {
         if (DescribePrimaryHumanFault() is { } priorityFault)
             return ProvisionResult.Fail(agentName, priorityFault);
+
+        // #386: PV1 and the pi rules (PI5 included) likewise keep the old container.
+        if (await DescribeProviderPreflightFaultAsync(agentName, ct) is { } providerFault)
+            return ProvisionResult.Fail(agentName, providerFault);
 
         // Journal faults must be found before DeprovisionAsync. A missing signing key or an
         // unsupported provider therefore leaves the old, working container untouched.
@@ -1169,10 +1230,12 @@ public sealed class ContainerProvisioningService(
         var tools = agent.Tools.Where(t => t.IsEnabled).OrderBy(t => t.ToolName)
             .Select(t => JournalGrants.IsSendGrant(t.ToolName) ? JournalGrants.SendGrant : string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase) ? JournalFilesGrant : t.ToolName).ToList();
 
-        // Codex derives config.toml enabled_tools from AllowedTools (entrypoint.sh).
-        // Auto-grant the same baseline tools that GenerateSettingsJson grants for claude/gemini,
-        // but gate strictly to codex — other providers don't read AllowedTools this way.
-        if (string.Equals(agent.Provider, "codex", StringComparison.OrdinalIgnoreCase))
+        // Codex derives config.toml enabled_tools from AllowedTools (entrypoint.sh), and the Pi
+        // extension registers exactly the AllowedTools names (#386). Auto-grant the same baseline
+        // tools that GenerateSettingsJson grants for claude/gemini, but gate strictly to codex and
+        // pi — other providers don't read AllowedTools this way.
+        if (string.Equals(agent.Provider, "codex", StringComparison.OrdinalIgnoreCase)
+            || PiLocalModel.IsPi(agent.Provider))
         {
             if (!tools.Contains("mcp__fleet-memory__memory_get", StringComparer.OrdinalIgnoreCase))
                 tools.Add("mcp__fleet-memory__memory_get");
@@ -1252,17 +1315,19 @@ public sealed class ContainerProvisioningService(
 
         var json = JsonSerializer.Serialize(obj, IndentedJson);
 
-        // Inlined for codex, gemini and local-model claude (#365). Cloud claude reads the style file
+        // Inlined for codex, gemini, pi and local-model claude (#365). Cloud claude reads the style file
         // instead, and putting the text in both places would assert the same rules twice.
         //
         // Added by editing the serialized document rather than by a nullable property on the
         // anonymous type above, because a null property still SERIALIZES — and an agent with no
         // style must produce the same bytes it produced before this existed.
         var codexLocal = LocalModel.IsCodexEnabled(agent.Provider, agent.LocalBaseUrl);
+        var piLocal = LocalModel.IsPiEnabled(agent.Provider, agent.LocalBaseUrl);
         if ((style is null || HasStyleFile(agent))
             && journal?.IngestToken is null
             && journal?.ReadToken is null
             && !codexLocal
+            && !piLocal
             && !HasTelegramBot(agent))
             return json;
 
@@ -1284,6 +1349,16 @@ public sealed class ContainerProvisioningService(
         {
             var agentNode = node["Agent"]!.AsObject();
             agentNode["CodexOssBaseUrl"] = LocalModel.CodexOssBaseUrl(LocalModel.CanonicalizeBaseUrl(agent.LocalBaseUrl!));
+            if (agent.ContextWindow is int window)
+                agentNode["ContextWindow"] = window;
+        }
+
+        // #386: pi agents only, the same way. Pi appends /v1/messages to the origin; the window is
+        // the server's --ctx, which PI3 has already required.
+        if (piLocal)
+        {
+            var agentNode = node["Agent"]!.AsObject();
+            agentNode["PiBaseUrl"] = LocalModel.CanonicalizeBaseUrl(agent.LocalBaseUrl!);
             if (agent.ContextWindow is int window)
                 agentNode["ContextWindow"] = window;
         }
@@ -1473,6 +1548,17 @@ public sealed class ContainerProvisioningService(
             .AsNoTracking()
             .FirstOrDefaultAsync(a => a.Name == agentName, ct);
         return agent is null ? null : DescribeJournalProvisioningFault(agent);
+    }
+
+    private async Task<string?> DescribeProviderPreflightFaultAsync(string agentName, CancellationToken ct)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        var agent = await db.Agents
+            .Include(a => a.CredentialMounts)
+            .AsNoTracking()
+            .FirstOrDefaultAsync(a => a.Name == agentName, ct);
+        return agent is null ? null : DescribeProviderPreflightFault(agent);
     }
 
     private async Task<string?> DescribeCodexServerUrlFaultAsync(string agentName, CancellationToken ct)

@@ -78,13 +78,58 @@ public class AgentProviderToolTests
     [InlineData("claude", "claude")]
     [InlineData("codex", "codex")]
     [InlineData("gemini", "gemini")]
-    [InlineData("pi", "pi")]
     public async Task Create_AKnownOrEmptyProvider_IsAccepted(string? provider, string stored)
     {
         var result = await Create().CreateAgentAsync("agent1", "developer", "model-x", provider: provider);
 
         Assert.StartsWith("Agent 'agent1' created in DB", result);
-        Assert.Equal(stored, Assert.Single(Agents()).Provider);
+        var agent = Assert.Single(Agents());
+        Assert.Equal(stored, agent.Provider);
+        Assert.Null(agent.LocalBaseUrl);
+        Assert.Null(agent.ContextWindow);
+    }
+
+    // ── #386 H1: create_agent checks the local server URL and context like update_agent_config ──
+
+    [Fact]
+    public async Task Create_ACompletePiAgent_IsStoredWithTheCanonicalUrlAndTheContext()
+    {
+        var result = await Create().CreateAgentAsync("agent1", "developer", "qwen3.8-flash-next", provider: "pi",
+            local_base_url: "HTTP://Inference-Host:8000/", context_window: 131072);
+
+        Assert.StartsWith("Agent 'agent1' created in DB", result);
+        var agent = Assert.Single(Agents());
+        Assert.Equal("pi", agent.Provider);
+        Assert.Equal("http://inference-host:8000", agent.LocalBaseUrl);
+        Assert.Equal(131072, agent.ContextWindow);
+    }
+
+    [Theory]
+    [InlineData("qwen3.8-flash-next", null, 131072, "Pi runs only on a local server; set the local server URL.")]
+    [InlineData("qwen3.8-flash-next", "http://inference-host:8000", null, "Pi needs the server's context size, at least 65536; set the context window to the server's --ctx.")]
+    [InlineData("qwen3.8-flash-next", "http://inference-host:8000", 65535, "Pi needs the server's context size, at least 65536; set the context window to the server's --ctx.")]
+    [InlineData("lmstudio/qwen3.8-flash-next", "http://inference-host:8000", 131072, "Pi takes the bare model tag the server serves (no ollama/ or lmstudio/ prefix).")]
+    public async Task Create_AnIncompletePiAgent_IsRefusedWithTheRuleText_AndNoRowIsWritten(
+        string model, string? url, int? context, string expected)
+    {
+        var result = await Create().CreateAgentAsync("agent1", "developer", model, provider: "pi",
+            local_base_url: url, context_window: context);
+
+        Assert.Equal(expected, result);
+        Assert.Empty(Agents());
+        await using var db = new OrchestratorDbContext(_options);
+        Assert.Empty(db.AgentNetworks);
+        Assert.Empty(db.AgentEnvRefs);
+    }
+
+    [Fact]
+    public async Task Create_GeminiWithAUrl_IsRefusedByL1()
+    {
+        var result = await Create().CreateAgentAsync("agent1", "developer", "gemini-2.5-pro", provider: "gemini",
+            local_base_url: "http://inference-host:8000");
+
+        Assert.Equal("Local model runs on claude, codex or pi; clear the local server URL first.", result);
+        Assert.Empty(Agents());
     }
 
     // ── update_agent_config ──────────────────────────────────────────────────────────────────────

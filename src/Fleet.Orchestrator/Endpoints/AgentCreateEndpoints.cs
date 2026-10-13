@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Helpers;
 using Fleet.Orchestrator.Services;
 using Fleet.Shared;
 using Microsoft.AspNetCore.Builder;
@@ -16,9 +17,9 @@ namespace Fleet.Orchestrator.Endpoints;
 /// <remarks>
 /// Lifted verbatim from <c>Program.cs</c> (#386) so the endpoint tests can run the production
 /// handler over real HTTP and prove PV1 refuses an unknown provider before a row is written — the
-/// same pattern as <see cref="AgentConfigEndpoints"/> (#357). Creation takes no local server URL or
-/// context window, so a <c>pi</c> agent is created here and configured through the PUT before it
-/// can be provisioned; provisioning refuses it until then (PI1, PI3).
+/// same pattern as <see cref="AgentConfigEndpoints"/> (#357). It also takes the local server URL and
+/// context window, checked like the PUT before anything is written, so a <c>pi</c> agent is created
+/// complete and provisions at once (PI1, PI3).
 /// </remarks>
 public static class AgentCreateEndpoints
 {
@@ -42,6 +43,17 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
     // PV1 (#386): refused before anything is written. Omitted or "" stays claude.
     if (AgentProviders.DescribeFault(body.Provider) is { } providerFault)
         return Results.BadRequest(new { error = providerFault });
+    // #386: the local server URL and context window are checked like the PUT (a pi agent needs
+    // both: PI1, PI3), before anything is written.
+    var localModel = new Agent
+    {
+        Name = "", DisplayName = "", Role = "", ContainerName = "", // a validation probe, never saved
+        Provider = body.Provider ?? "claude",
+        Model = body.Model.Trim(),
+        Effort = string.IsNullOrEmpty(body.Effort) ? null : body.Effort,
+    };
+    if (AgentPatchHelpers.ApplyLocalModelOnCreate(localModel, body.LocalBaseUrl, body.ContextWindow) is { } localModelFault)
+        return Results.BadRequest(new { error = localModelFault });
 
     // Telegram is a hard prerequisite — agents without a valid bot token are headless.
     var setupStatus = setupService.GetStatus();
@@ -103,6 +115,8 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         CodexSandboxMode          = string.IsNullOrEmpty(body.CodexSandboxMode) ? null : body.CodexSandboxMode,
         MountDockerSock           = body.MountDockerSock   ?? false,
     };
+    agent.LocalBaseUrl = localModel.LocalBaseUrl;
+    agent.ContextWindow = localModel.ContextWindow;
 
     db.Agents.Add(agent);
     await db.SaveChangesAsync();

@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Helpers;
 using Fleet.Shared;
 using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol.Server;
@@ -18,8 +19,10 @@ public sealed class CreateAgentTool(IServiceScopeFactory scopeFactory, IConfigur
         [Description("Display name shown in the dashboard (e.g. 'Fleet Dev'). Defaults to agent_name if omitted.")] string? display_name = null,
         [Description("Memory limit in MB. Defaults to 4096.")] int? memory_limit_mb = null,
         [Description("Docker container name override (e.g. fleet-my-agent). Defaults to 'fleet-{agent_name}'.")] string? container_name = null,
-        [Description("LLM provider: claude (default), codex (OpenAI via Codex SDK), gemini, or pi (Pi on a local model server only). Any other value is refused. A pi agent cannot be provisioned until update_agent_config sets local_base_url, the server's bare model tag and context_window (at least 65536).")] string? provider = null,
-        [Description("When true, /var/run/docker.sock is bind-mounted into the container. Grants host Docker access — only set for agents that manage containers (e.g. devops, developer, co-cto). Defaults to false.")] bool? mount_docker_sock = null)
+        [Description("LLM provider: claude (default), codex (OpenAI via Codex SDK), gemini, or pi (Pi on a local model server only). Any other value is refused. A pi agent needs model = the server's bare model tag, local_base_url and context_window (at least 65536) here.")] string? provider = null,
+        [Description("When true, /var/run/docker.sock is bind-mounted into the container. Grants host Docker access — only set for agents that manage containers (e.g. devops, developer, co-cto). Defaults to false.")] bool? mount_docker_sock = null,
+        [Description("Local model server origin (scheme://host[:port], no path), e.g. http://inference-host:8000. Required for provider pi; optional local mode for claude or codex. Checked like update_agent_config before anything is written.")] string? local_base_url = null,
+        [Description("The local server's context size in tokens (its --ctx). Required for provider pi, at least 65536.")] int? context_window = null)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
@@ -66,6 +69,11 @@ public sealed class CreateAgentTool(IServiceScopeFactory scopeFactory, IConfigur
             Provider        = provider ?? "claude",
             MountDockerSock = mount_docker_sock ?? false,
         };
+
+        // #386: the local server URL and context are checked like update_agent_config, before the
+        // row is written.
+        if (AgentPatchHelpers.ApplyLocalModelOnCreate(agent, local_base_url, context_window) is { } localModelFault)
+            return localModelFault;
 
         db.Agents.Add(agent);
         await db.SaveChangesAsync();

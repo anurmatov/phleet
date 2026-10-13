@@ -45,6 +45,31 @@ internal static class AgentPatchHelpers
     }
 
     /// <summary>
+    /// The local server URL and context window a create request carries (#386): validated by the same
+    /// rules as the PUT, before the row is written, and stored in canonical form. Returns the fault,
+    /// or null.
+    /// </summary>
+    /// <remarks>
+    /// A <c>pi</c> agent is always local, so it must arrive with both (PI1, PI3). For every other
+    /// provider a create without either field is unchanged; with one, it is checked exactly as an
+    /// update would check it. <c>null</c>, <c>""</c> and a context of 0 mean not set.
+    /// </remarks>
+    internal static string? ApplyLocalModelOnCreate(Agent agent, string? localBaseUrl, int? contextWindow)
+    {
+        var url = string.IsNullOrEmpty(localBaseUrl) ? null : localBaseUrl;
+        var window = contextWindow is null or 0 ? null : contextWindow;
+        if (!PiLocalModel.IsPi(agent.Provider) && url is null && window is null)
+            return null;
+
+        if (window is int tokens && ContextWindow.DescribeFault(tokens) is { } windowFault)
+            return windowFault;
+
+        agent.LocalBaseUrl = url;
+        agent.ContextWindow = window;
+        return FinalizeLocalModel(agent);
+    }
+
+    /// <summary>
     /// A1 (#382): resolves the local server URL field and its deprecated alias into one value.
     /// </summary>
     /// <remarks>

@@ -1958,4 +1958,6 @@ record CreateAgentRequest(
     long[]? TelegramUsers,
     long[]? TelegramGroups,
     bool? Provision,
-    bool? MountDockerSock);
+    bool? MountDockerSock,
+    string? LocalBaseUrl = null,
+    int? ContextWindow = null);

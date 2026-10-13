@@ -88,7 +88,59 @@ public sealed class AgentCreateEndpointsTests : IAsyncLifetime
     }
 
     private Task<HttpResponseMessage> PostAsync(string? provider) =>
-        _client.PostAsJsonAsync("/api/agents", new { name = "agent1", role = "co-cto", model = "model-x", provider });
+        provider == "pi"
+            ? PostLocalAsync("pi", "qwen3.8-flash-next", "http://inference-host:8000", 131072)
+            : _client.PostAsJsonAsync("/api/agents", new { name = "agent1", role = "co-cto", model = "model-x", provider });
+
+    private Task<HttpResponseMessage> PostLocalAsync(
+        string provider, string model, string? localBaseUrl, int? contextWindow, string? effort = null) =>
+        _client.PostAsJsonAsync("/api/agents",
+            new { name = "agent1", role = "co-cto", model, provider, localBaseUrl, contextWindow, effort });
+
+    private static async Task<string?> ErrorAsync(HttpResponseMessage response) =>
+        (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString();
+
+    // ── #386 H1: create checks the local server URL and context like the PUT, before any write ──
+
+    [Theory]
+    [InlineData("pi", "qwen3.8-flash-next", null, 131072, null, "Pi runs only on a local server; set the local server URL.")]
+    [InlineData("pi", "qwen3.8-flash-next", "http://inference-host:8000", null, null, "Pi needs the server's context size, at least 65536; set the context window to the server's --ctx.")]
+    [InlineData("pi", "qwen3.8-flash-next", "http://inference-host:8000", 65535, null, "Pi needs the server's context size, at least 65536; set the context window to the server's --ctx.")]
+    [InlineData("pi", "ollama/qwen3.8-flash-next", "http://inference-host:8000", 131072, null, "Pi takes the bare model tag the server serves (no ollama/ or lmstudio/ prefix).")]
+    [InlineData("pi", "qwen3.8-flash-next", "http://inference-host:8000", 131072, "xhigh", "Pi effort is off or on.")]
+    [InlineData("gemini", "gemini-2.5-pro", "http://inference-host:8000", null, null, "Local model runs on claude, codex or pi; clear the local server URL first.")]
+    public async Task H1_ALocalModelFault_Is400WithTheRuleText_AndNoRowIsWritten(
+        string provider, string model, string? url, int? context, string? effort, string expected)
+    {
+        var response = await PostLocalAsync(provider, model, url, context, effort);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(expected, await ErrorAsync(response));
+        Assert.Equal(0, await AgentCountAsync());
+    }
+
+    [Fact]
+    public async Task H1_AUrlWithAPath_IsRefusedByL2_AndNoRowIsWritten()
+    {
+        var response = await PostLocalAsync("pi", "qwen3.8-flash-next", "http://inference-host:8000/v1", 131072);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("has a path", await ErrorAsync(response));
+        Assert.Equal(0, await AgentCountAsync());
+    }
+
+    [Theory]
+    [InlineData("off")]
+    [InlineData("on")]
+    [InlineData(null)]
+    public async Task H1_ACompletePiCreate_PassesTheLocalModelChecks(string? effort)
+    {
+        // Past every request check: the next refusal is the environment's (Telegram not configured).
+        var response = await PostLocalAsync("pi", "qwen3.8-flash-next", "http://inference-host:8000", 131072, effort);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("telegram_not_configured", await ErrorAsync(response));
+    }
 
     [Theory]
     [InlineData("foo")]

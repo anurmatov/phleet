@@ -1,35 +1,41 @@
-# Local models for Claude and Codex agents
+# Local models for Claude, Codex and Pi agents
 
 A `claude` or `codex` agent can run its turns on an inference server you run, instead of the
 cloud. You turn this on per agent with one setting: **Runs on → Local server**. You enter the
 server URL, the model tag and the context window. Fleet derives each harness's runtime settings
-from those values.
+from those values. A `pi` agent always runs on a local server and uses the same fields.
 
 Local is a *where it runs* choice inside the harness you picked. There is no "Local" provider.
 The harness still decides the tools, the prompt and the protocol. Gemini has no local mode.
 
-Harness detail lives on two more pages:
+Harness detail lives on three more pages:
 
 - `claude-local-models.md`: the Claude Code child environment, thinking control, credential
   isolation, server setup and measured latency.
 - `codex-local-models.md`: the `ollama/` and `lmstudio/` model prefix, the startup gate and
   operational cautions.
+- `pi.md`: Pi 1.0.4, its generated files and flags, compaction, credentials, rollout, rollback
+  and troubleshooting. Its integration with Fleet has not been measured yet (`pi.md`, "Status").
 
 ## 1. When to use it
 
 Use it when an agent's turns should run on a model you host, for example Qwen3.8 on Ollama.
 
-| | Claude local | Codex local |
-|---|---|---|
-| provider | `claude` | `codex` |
-| harness | Claude Code | codex app-server |
-| server API | Anthropic Messages (`/v1/messages`) | OpenAI-compatible (`/v1`) |
-| server software | Anthropic-compatible (validated: Ollama) | Ollama or LM Studio |
-| stored model | bare tag: `qwen3.8:27b` | prefixed tag: `ollama/qwen3.8:27b` or `lmstudio/qwen3.8:27b` |
-| cloud credential in the container | none | **still present until #383** (§7) |
+| | Claude local | Codex local | Pi |
+|---|---|---|---|
+| provider | `claude` | `codex` | `pi` (always local) |
+| harness | Claude Code | codex app-server | Pi 1.0.4 RPC + the Fleet extension |
+| server API | Anthropic Messages (`/v1/messages`) | OpenAI-compatible (`/v1`) | Anthropic Messages (`/v1/messages`) |
+| server software | Anthropic-compatible (validated: Ollama) | Ollama or LM Studio | Anthropic-compatible; not yet validated in Fleet |
+| stored model | bare tag: `qwen3.8:27b` | prefixed tag: `ollama/qwen3.8:27b` or `lmstudio/qwen3.8:27b` | bare tag: `qwen3.8:27b` |
+| context window | recommended | recommended | required, at least 65536 |
+| cloud credential in the container | none | **still present until #383** (§7) | none |
 
 Pick the harness first. If the agent's instructions and workflows are written for Claude Code,
-use Claude local. If you need a container with no cloud credential in it, use Claude local.
+use Claude local. If you need a container with no cloud credential in it, use Claude local or
+Pi. Pi replaces its harness's compaction summary with one designed to reuse the server's prefix
+cache (`pi.md` §5); that design passed its reopen gate once on one server and is not yet measured
+inside Fleet.
 
 Everything the agent sees goes to that server: the system prompt, the conversation, tool
 results and MCP output. `http` is accepted to any host, so this traffic can travel in
@@ -195,7 +201,7 @@ The same rules run in three places:
 
 | id | when | message or result |
 |---|---|---|
-| L1 | provider `gemini` with a URL | "Local model runs on claude or codex; clear the local server URL first." |
+| L1 | a URL on a provider other than `claude`, `codex` or `pi` (today: `gemini`) | "Local model runs on claude, codex or pi; clear the local server URL first." |
 | L2 | URL is malformed or has a path, credentials, query or fragment | for example "Local server URL has a path. It must be an http(s) origin such as http://<server-address>:11434 — no path, credentials, query or fragment. Fleet adds /v1/messages for Claude and /v1 for Codex." |
 | L2 | URL points at `localhost`, `127.0.0.0/8`, `::1` or `0.0.0.0` | "Local server URL points at localhost, which inside an agent container is the container itself; use the inference server's LAN address or host name." |
 | V4 / C2 | the tag is not 1–100 characters matching `^[A-Za-z0-9][A-Za-z0-9._:/-]*$` | "The local model tag must be 1–100 characters matching …" |
@@ -207,6 +213,12 @@ The same rules run in three places:
 | — | context window outside 4096–1048576 | "Context window … is outside the valid range 4096..1048576 tokens (0 clears it)." `0` clears it. |
 | P1 | provision: Codex `ollama/`/`lmstudio/` model, no URL, and no usable `CODEX_OSS_BASE_URL` Env Ref | provisioning fails before the container is created, with "Codex local model '<model>' has no server URL: …" (§12). A reprovision fails before the old container is removed. |
 | S1 | startup: `Agent.CodexOssBaseUrl` is present but wrong | exit 1 with "CodexOssBaseUrl is not <canonical origin>/v1; redeploy both images and reprovision" (§12) |
+
+Pi has its own rules on top of L2: PI1 (a URL is required), PI2 (a bare tag), PI3 (a context
+window of at least 65536), PI4 (effort `off`, `on` or empty) and PI5 (no credential mount). See
+`pi.md` §3. Every provider is also checked against PV1: anything other than empty, `claude`,
+`codex`, `gemini` or `pi` is refused with "Unknown provider '{p}'; use claude, codex, gemini or
+pi."
 
 "Usable" in P1 means the agent has the Env Ref and `.env` holds a non-blank value for it. A
 missing key, a blank value, a missing `.env` and an unreadable `.env` all fail P1.
@@ -260,6 +272,21 @@ Codex there is one exception: the agent's Env Refs contain exactly `CODEX_OSS_BA
   not one turn. Recover with `/cancel`. Details: `codex-local-models.md`, "Operational cautions".
 - **LM Studio.** Pick **Server → LM Studio** and enter its origin, for example
   `http://<server-address>:1234`.
+
+### Pi
+
+- **Effort.** Empty (the default) and `on` run `--thinking medium`; `off` runs `--thinking off`.
+  Anything else is rejected (PI4).
+- **Context window.** Required, at least 65536, and exactly the server's `--ctx`. Pi compacts at
+  `ContextWindow − 16384` and keeps a raw tail of about 8192 tokens.
+- **Compaction.** The Fleet extension sends a summary request built to extend the last request,
+  so a server with prefix reuse can serve it from cache. It falls back to Pi's default summary
+  with a named Warning (`pi.md` §5.4). Fleet never resets a session on its own.
+- **Credentials.** The container holds no provider credential: no mount, leftover files deleted
+  at start, the credential environment dropped from PID 1 and from Pi. The agent's queue is not
+  bound to `fleet.relay`.
+- **Not a sandbox.** Pi has no approval step and no path limit; the model's shell runs as root.
+- **Images** are dropped with a note; the model is declared text-only.
 
 ## 7. ⚠️ Known security gap: Codex local keeps the OpenAI credential (#383)
 
@@ -342,6 +369,9 @@ Use this order when you upgrade a Fleet install to this release.
 5. Keep each agent's context window in lockstep with its server. Raise the server first, then
    the agent. Lower the agent first, then the server. The agent's value must never be higher
    than the server's.
+6. Pi: before the release that adds it, `get_agent_config` for every agent must show a provider
+   in PV1's set (empty, `claude`, `codex`, `gemini`, `pi`). After it, move local agents to Pi one
+   at a time and smoke-test each (`pi.md` §10).
 
 ## 11. Rollback
 
@@ -389,6 +419,15 @@ Unload the local model on the server with `keep_alive: 0` if nothing else uses i
 
 Claude local agents are unaffected. After the revert, Codex agents stored with effort `none` or
 `minimal` again send no effort.
+
+### Pi
+
+One agent: switch it to Claude local or Codex local (`pi.md` §9) and reprovision.
+
+The release: **first** move every pi agent off `pi`. `get_agent_config` must show no agent with
+`Provider: pi` before you revert the pin: an older orchestrator mounts Claude credentials for a
+provider it does not know, and an older agent image falls back to the Claude executor
+(`pi.md` §11).
 
 ## 12. Troubleshooting by log line
 
@@ -442,6 +481,18 @@ The `CodexExecutor: local inference — provider …, model …` line now ends w
 | `Claude local model mode: base URL …, model …` | the claude child started in local mode |
 | `Claude local thinking: effort=… wire=…` | the thinking level sent to the server |
 | `[claude-code:unrecognized_model]` at `Warning` | expected for a local tag; turns still succeed |
+
+### Pi
+
+The full table is in `pi.md` §12. The lines to know first:
+
+| log line | meaning |
+|---|---|
+| `pi compaction … path=prefix` | the fast-path summary was used |
+| `Warning` `fast-path fallback reason=…` | Pi's default summary ran instead; the reason names why |
+| `Warning` `post-compaction TTFT over 65 s` | the first sign of a latency regression; the tested margin was 3 s |
+| exit 1, "pi agent must hold no provider credential" | a credential file is mounted into the container |
+| exit 1, "Unknown provider '…'" | PV1: the stored provider is not one Fleet knows |
 
 For any harness: a turn that fails with the server's own error usually means the server is
 down, the URL is wrong, or the tag is not pulled. Check the server directly. Fleet does not probe

@@ -35,6 +35,8 @@ public sealed class GetAgentConfigTool(IServiceScopeFactory scopeFactory)
         var sb = new StringBuilder();
         sb.AppendLine($"## {agent.Name} ({agent.DisplayName})");
         sb.AppendLine($"- Role: {agent.Role}");
+        // #386: the stored value verbatim, so a row PV1 would refuse is visible before a deploy.
+        sb.AppendLine($"- Provider: {(agent.Provider == "" ? "(empty: claude)" : agent.Provider)}");
         sb.AppendLine($"- Model: {agent.Model}");
         sb.AppendLine($"- Memory limit: {agent.MemoryLimitMb}MB");
         sb.AppendLine($"- Container: {agent.ContainerName}");
@@ -47,7 +49,9 @@ public sealed class GetAgentConfigTool(IServiceScopeFactory scopeFactory)
             && string.Equals(agent.Provider, "codex", StringComparison.Ordinal)
             && CodexLocalModelProviders.Split(agent.Model).Provider is not null
             && agent.EnvRefs.Any(e => e.EnvKeyName == "CODEX_OSS_BASE_URL");
-        sb.AppendLine("- Local model: " + (localOn ? $"on — server {agent.LocalBaseUrl}"
+        // #386: a pi agent is always local; the harness is named so it is not mistaken for claude local.
+        var piSuffix = PiLocalModel.IsPi(agent.Provider) ? " (Pi)" : "";
+        sb.AppendLine("- Local model: " + (localOn ? $"on — server {agent.LocalBaseUrl}{piSuffix}"
             : legacyCodexLocal ? "on — server from CODEX_OSS_BASE_URL Env Ref (legacy)"
             : "off"));
         sb.AppendLine($"- Context window: {(agent.ContextWindow is int window ? $"{window} tokens" : "(none)")}"

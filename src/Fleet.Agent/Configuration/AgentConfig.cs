@@ -73,11 +73,21 @@ public sealed class AgentOptions
     public string? CodexOssBaseUrl { get; set; }
 
     /// <summary>
-    /// Codex local model mode only (#382): the server's context size in tokens, sent as
+    /// Codex local model mode (#382): the server's context size in tokens, sent as
     /// <c>thread/start</c> <c>config.model_context_window</c> so codex compacts before the server
     /// rejects the prompt. Null leaves codex's own default. Never applied to cloud or hosted models.
+    /// For provider <c>pi</c> (#386) it is required, at least 65536, and written into Pi's
+    /// <c>models.json</c> as the model's <c>contextWindow</c> (PI3).
     /// </summary>
     public int? ContextWindow { get; set; }
+
+    /// <summary>
+    /// Provider <c>pi</c> only (#386): the canonical origin of the local Anthropic Messages server
+    /// (<c>scheme://host[:port]</c>), or null. Pi appends <c>/v1/messages</c> itself.
+    /// <see cref="Services.PiRuntimeFiles"/> writes it into <c>models.json</c>; the startup gate
+    /// refuses a pi agent without it, or with a non-canonical value.
+    /// </summary>
+    public string? PiBaseUrl { get; set; }
 
     /// <summary>
     /// Every instruction assigned to this agent, as <c>roles/</c> directory names, already in the

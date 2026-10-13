@@ -10,7 +10,8 @@ namespace Fleet.Orchestrator.Tests.Tools;
 /// #382 through <c>update_agent_config</c> and <c>get_agent_config</c>: <c>local_base_url</c> and
 /// its alias <c>anthropic_base_url</c> (A1), codex local mode, the gemini refusal, and a provider
 /// switch while local, one case per direction — the MCP mirror of
-/// <c>AgentConfigEndpointsLocalModelTests</c>.
+/// <c>AgentConfigEndpointsLocalModelTests</c>. #386: pi's rules (A5), switches into pi (A6) and the
+/// <c>get_agent_config</c> lines (A25).
 /// </summary>
 public class UpdateAgentConfigLocalModelTests
 {
@@ -35,13 +36,15 @@ public class UpdateAgentConfigLocalModelTests
 
     private UpdateAgentConfigTool Tool() => new(Scopes(), new NoOpAclChangeNotifier());
 
-    private void Seed(string provider, string model, string? url = null, int? window = null, string? envRef = null)
+    private void Seed(string provider, string model, string? url = null, int? window = null, string? envRef = null,
+        string? effort = null)
     {
         using var db = new OrchestratorDbContext(_options);
         db.Agents.Add(new Agent
         {
             Name = "agent1", DisplayName = "agent1", Role = "test", Model = model, Provider = provider,
             MemoryLimitMb = 1024, ContainerName = "agent1", LocalBaseUrl = url, ContextWindow = window,
+            Effort = effort,
             EnvRefs = envRef is null ? [] : [new AgentEnvRef { EnvKeyName = envRef }],
         });
         db.SaveChanges();
@@ -78,7 +81,7 @@ public class UpdateAgentConfigLocalModelTests
 
         var result = await Tool().UpdateAgentConfigAsync("agent1", local_base_url: Url);
 
-        Assert.Contains("Local model runs on claude or codex", result);
+        Assert.Contains("Local model runs on claude, codex or pi", result);
         Assert.Null(Stored().LocalBaseUrl);
     }
 
@@ -182,6 +185,7 @@ public class UpdateAgentConfigLocalModelTests
     [InlineData("codex", "ollama/qwen3.8:27b", null, "CODEX_OSS_BASE_URL", "- Local model: on — server from CODEX_OSS_BASE_URL Env Ref (legacy)", "(ignored: legacy Env Ref; set the local server URL)")]
     [InlineData("codex", "gpt-5", null, null, "- Local model: off", "(ignored: local model off)")]
     [InlineData("claude", "qwen3.8:27b", Url, null, "- Local model: on — server " + Url, "- Context window: 131072 tokens\n")]
+    [InlineData("pi", PiTag, PiUrl, null, "- Local model: on — server " + PiUrl + " (Pi)", "- Context window: 131072 tokens\n")]
     public async Task GetAgentConfig_ReportsTheLocalModel(
         string provider, string model, string? url, string? envRef, string localLine, string windowText)
     {
@@ -191,5 +195,152 @@ public class UpdateAgentConfigLocalModelTests
 
         Assert.Contains(localLine + "\n", result);
         Assert.Contains(windowText, result);
+    }
+
+    // ── #386 provider pi ─────────────────────────────────────────────────────────────────────────
+
+    private const string PiUrl = "http://inference-host:8000";
+    private const string PiTag = "qwen3.8-flash-next";
+
+    private (string Provider, string Model, string? Url, int? Window, string? Effort) Row()
+    {
+        var stored = Stored();
+        return (stored.Provider, stored.Model, stored.LocalBaseUrl, stored.ContextWindow, stored.Effort);
+    }
+
+    [Theory]
+    [InlineData("pi", "- Provider: pi\n")]
+    [InlineData("codex", "- Provider: codex\n")]
+    [InlineData("", "- Provider: (empty: claude)\n")]
+    public async Task A25_GetAgentConfig_PrintsTheProvider(string provider, string line)
+    {
+        Seed(provider, PiTag, PiUrl, 131_072);
+
+        var result = (await new GetAgentConfigTool(Scopes()).GetAgentConfigAsync("agent1")).ReplaceLineEndings("\n");
+
+        Assert.Contains(line, result);
+    }
+
+    [Fact]
+    public async Task Pi_SetUpByASwitchFromClaudeCloud_IsStoredCanonical()
+    {
+        Seed("claude", "claude-opus-5-5");
+
+        var result = await Tool().UpdateAgentConfigAsync("agent1",
+            provider: "pi", model: PiTag, local_base_url: "HTTP://Inference-Host:8000/", context_window: 131_072, effort: "off");
+
+        Assert.DoesNotContain("Invalid", result);
+        Assert.Equal(("pi", PiTag, (string?)PiUrl, (int?)131_072, (string?)"off"), Row());
+    }
+
+    // ── A5 over MCP: each rule's text, and nothing saved ─────────────────────────────────────────
+
+    public static TheoryData<string, string> A5Cases => new()
+    {
+        { "PI1 no url", Fleet.Shared.PiLocalModel.Pi1Text },
+        { "PI1 url cleared", Fleet.Shared.PiLocalModel.Pi1Text },
+        { "PI2 charset", Fleet.Shared.PiLocalModel.Pi2Text },
+        { "PI2 ollama/", Fleet.Shared.PiLocalModel.Pi2Text },
+        { "PI2 lmstudio/", Fleet.Shared.PiLocalModel.Pi2Text },
+        { "PI2 zai/", Fleet.Shared.PiLocalModel.Pi2Text },
+        { "PI3 unset", Fleet.Shared.PiLocalModel.Pi3Text },
+        { "PI3 65535", Fleet.Shared.PiLocalModel.Pi3Text },
+        { "PI4 xhigh", Fleet.Shared.PiLocalModel.Pi4Text },
+        { "L1 gemini url", Fleet.Shared.LocalModel.L1Text },
+    };
+
+    [Theory]
+    [MemberData(nameof(A5Cases))]
+    public async Task A5_PiRules_ReturnTheRuleText_AndLeaveTheRowUnchanged(string @case, string expected)
+    {
+        if (@case == "PI1 no url") Seed("claude", "claude-opus-5-5");
+        else if (@case == "L1 gemini url") Seed("gemini", "gemini-2.5-pro");
+        else Seed("pi", PiTag, PiUrl, 131_072, effort: "on");
+        var before = Row();
+
+        var tool = Tool();
+        var result = @case switch
+        {
+            "PI1 no url" => await tool.UpdateAgentConfigAsync("agent1", provider: "pi", model: PiTag, context_window: 131_072),
+            "PI1 url cleared" => await tool.UpdateAgentConfigAsync("agent1", local_base_url: ""),
+            "PI2 charset" => await tool.UpdateAgentConfigAsync("agent1", model: "qwen 3.8"),
+            "PI2 ollama/" => await tool.UpdateAgentConfigAsync("agent1", model: "ollama/" + PiTag),
+            "PI2 lmstudio/" => await tool.UpdateAgentConfigAsync("agent1", model: "lmstudio/" + PiTag),
+            "PI2 zai/" => await tool.UpdateAgentConfigAsync("agent1", model: "zai/glm-5.3"),
+            "PI3 unset" => await tool.UpdateAgentConfigAsync("agent1", context_window: 0),
+            "PI3 65535" => await tool.UpdateAgentConfigAsync("agent1", context_window: 65_535),
+            "PI4 xhigh" => await tool.UpdateAgentConfigAsync("agent1", effort: "xhigh"),
+            "L1 gemini url" => await tool.UpdateAgentConfigAsync("agent1", local_base_url: PiUrl),
+            _ => throw new ArgumentOutOfRangeException(nameof(@case)),
+        };
+
+        Assert.Contains(expected, result);
+        Assert.Equal(before, Row());
+    }
+
+    // ── A6 over MCP: a switch sends the matching values; nothing is rewritten ────────────────────
+
+    [Fact]
+    public async Task A6_CodexLocalToPi_WithTagAndEffort_KeepsUrlAndWindow()
+    {
+        Seed("codex", "ollama/qwen3.8:27b", Url, 131_072, effort: "none");
+
+        var result = await Tool().UpdateAgentConfigAsync("agent1", provider: "pi", model: "qwen3.8:27b", effort: "off");
+
+        Assert.DoesNotContain("Invalid", result);
+        Assert.Equal(("pi", "qwen3.8:27b", (string?)Url, (int?)131_072, (string?)"off"), Row());
+    }
+
+    [Fact]
+    public async Task A6_CodexLocalToPi_ProviderAlone_IsRefusedByPI2()
+    {
+        Seed("codex", "ollama/qwen3.8:27b", Url, 131_072, effort: "none");
+        var before = Row();
+
+        var result = await Tool().UpdateAgentConfigAsync("agent1", provider: "pi");
+
+        Assert.Contains(Fleet.Shared.PiLocalModel.Pi2Text, result);
+        Assert.Equal(before, Row());
+    }
+
+    [Fact]
+    public async Task A6_ClaudeLocalWithXhighToPi_ProviderAlone_IsRefusedByPI4()
+    {
+        Seed("claude", "qwen3.8:27b", Url, 131_072, effort: "xhigh");
+        var before = Row();
+
+        var result = await Tool().UpdateAgentConfigAsync("agent1", provider: "pi");
+
+        Assert.Contains(Fleet.Shared.PiLocalModel.Pi4Text, result);
+        Assert.Equal(before, Row());
+    }
+
+    // ── Leaving pi over MCP: its on/off effort never reaches a provider that cannot take it ───────
+
+    [Theory]
+    [InlineData("on", "claude", "claude-opus-5-5", "", "Effort 'on' applies only to provider pi; clear it or choose an effort for claude.")]
+    [InlineData("on", "codex", "ollama/qwen3.8:27b", null, "Effort 'on' applies only to provider pi; clear it or choose an effort for codex.")]
+    [InlineData("off", "codex", "ollama/qwen3.8:27b", null, "Effort 'off' applies only to pi and local claude models; clear it or choose an effort for codex.")]
+    public async Task LeavingPi_WithItsStoredEffort_IsRefused_AndTheRowIsUnchanged(
+        string effort, string provider, string model, string? url, string expected)
+    {
+        Seed("pi", PiTag, PiUrl, 131_072, effort: effort);
+        var before = Row();
+
+        var result = await Tool().UpdateAgentConfigAsync("agent1", provider: provider, model: model, local_base_url: url);
+
+        Assert.Contains(expected, result);
+        Assert.Equal(before, Row());
+    }
+
+    [Fact]
+    public async Task LeavingPi_ForClaudeLocalWithOff_IsAccepted()
+    {
+        Seed("pi", PiTag, PiUrl, 131_072, effort: "off");
+
+        var result = await Tool().UpdateAgentConfigAsync("agent1", provider: "claude");
+
+        Assert.DoesNotContain("Effort", result);
+        Assert.Equal(("claude", PiTag, (string?)PiUrl, (int?)131_072, (string?)"off"), Row());
     }
 }

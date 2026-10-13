@@ -158,6 +158,9 @@ export interface CreateForm {
   telegramUsers: string
   telegramGroups: string
   instructions: { name: string; loadOrder: number }[]
+  /** Pi only (#386): the local server origin and its context size, sent on create. */
+  localBaseUrl: string
+  contextWindow: string
 }
 
 export interface AgentConfig {
@@ -190,7 +193,7 @@ export interface AgentConfig {
   provider: string
   codexSandboxMode: string | null
   outputStyle: string | null
-  /** Origin of the local inference server, or null (cloud). Claude and Codex agents (#382). */
+  /** Origin of the local inference server, or null (cloud). Claude and Codex agents (#382); always set for Pi (#386). */
   localBaseUrl?: string | null
   /** Older name of `localBaseUrl`; an older orchestrator returns only this. Read, never sent. */
   anthropicBaseUrl?: string | null
@@ -250,7 +253,7 @@ export interface ConfigEdits {
   mountDockerSock: boolean
   /** Name of an output_styles row, or '' for none — the sentinel the API clears on. */
   outputStyle: string
-  /** "Runs on": true = Local server. Kept in the edit state because a fresh Local has no URL or tag yet. */
+  /** "Runs on": true = Local server. Kept in the edit state because a fresh Local has no URL or tag yet. Always true for Pi. */
   localMode: boolean
   /** Local server origin, or '' — the sentinel the API clears on. */
   localBaseUrl: string
@@ -264,11 +267,14 @@ export interface ConfigEdits {
 /** The two local servers codex routes on (`ollama/<tag>`, `lmstudio/<tag>`). */
 export type CodexLocalServer = 'ollama' | 'lmstudio'
 
+/** The harnesses with a local server mode. Pi (#386) has nothing else. */
+export type LocalHarness = 'claude' | 'codex' | 'pi'
+
 /** A suggestion chip in local mode: a public registry tag, never a URL or context size. */
 export interface LocalModelSuggestion {
   label: string
   tag: string
-  harnesses: ('claude' | 'codex')[]
+  harnesses: LocalHarness[]
   /** Effort the chip also sets on Codex, with the note shown while it is in effect. */
   codexEffort?: { value: string; note: string }
   contextHint?: string

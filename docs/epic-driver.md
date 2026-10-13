@@ -165,3 +165,146 @@ malformed/missing evidence stays human_decide with eligibility unknown.
 No new workflow steps, sleeps, search attributes or live definition changes are
 introduced by these source seeds. [Charter rollout and rollback](epic-grants.md#autonomy-charters-stage-2-default-off)
 remain separate human-approved operations; source tests do not establish deployment.
+
+## E1–E5 isolated-stack plan (not executed; needs human authorization)
+
+Every row below is **not run**. This is a source-only plan, not a runnable
+fixture, a grant, or permission to start services. A human must separately name
+an operator, exact source/image commits, disposable repo and test resources
+before fixture implementation or execution. No model/provider calls are needed:
+scripted stub agents must record their tool requests and return prepared results.
+
+### Bounds and no-touch boundary
+
+Use a disposable runner with its own Docker daemon/network, Temporal server and
+namespace `s2-fixture-<nonce>` (task queue equals namespace), orchestrator, bridge,
+MySQL and any bridge dependencies, disposable repo and stub agents. No Telegram
+service, real agent container, shared Docker socket, production credential mount
+or production service connection belongs in the fixture. Test-only credentials,
+auth attribution and feature flags must be approved for this stack only.
+
+Never touch any production namespace, Telegram, existing agents, grants, live
+workflow definitions, running snapshots, models, infrastructure or private pins.
+Any fixture charter is human-created in the fixture DB for its exact driver run;
+no production grant may be copied, widened, revoked or used. Loading/versioning
+fixture definitions is allowed only under the future authorization, never by
+writing to the live definition API. No test delegates a merge or deploys anything.
+
+Budget: setup 20 minutes; E1 5; E2 10; E3 six variants at 4 each; E4 10; E5 5;
+cleanup 10. Stop the entire campaign at 90 minutes, including cleanup. Stop a
+row at its bound, its first failed assertion, unknown/partial visibility,
+identity/head drift, unexpected network destination, missing prerequisite,
+non-fixture credential or cleanup failure. No blind retry, counter reset,
+assertion waiver or switch to a shared service makes a failed row pass.
+
+### Prepared inputs and command recipes (do not execute now)
+
+The operator must first supply reviewed fixture Compose/config files and stub
+scripts; they do not exist merely because this plan names them. Record their
+hashes and an ownership manifest. `$P`/`$F` name only that disposable project and
+Compose file; `$O` only its orchestrator; `$NS` its namespace; `$AUTH` a file
+containing only the fixture authorization header; `$OUT` protected receipts.
+Reject unset values, reserved namespaces or any manifest resource not owned by
+this campaign before a command. Do not substitute a production endpoint.
+
+After human authorization, bounded setup/cleanup commands are:
+
+```sh
+docker compose -p "$P" -f "$F" \
+  up -d --wait --wait-timeout 120
+
+docker compose -p "$P" -f "$F" \
+  down --volumes --remove-orphans
+```
+
+Verify the exact build head, namespace/queue routing, network destinations and
+fresh fixture-only DB before testing. Load the three reviewed seed definitions
+into the fixture only and record their versions/hashes; preserve the previous
+versions needed for E5. Independently attest each artifact with stub reviewers
+excluding the author/fixture decider. The human creates each bounded fixture
+charter only after validating its preflight and exact Running driver run.
+
+For each row start a unique driver through the fixture-bound MCP client:
+
+```text
+temporal_start_workflow
+  workflow_type:
+    UweCarteBlancheWorkflow
+  namespace: <fixture namespace>
+  task_queue: <same namespace>
+  workflow_id: <unique row driver>
+  input: <prepared JSON string>
+  id_reuse_policy: reject_duplicate
+```
+
+Prepared input supplies EpicRepo/EpicIssue, fixture TargetAgent and independent
+ConsensusAgents. Child inputs must record WaiterWorkflowId; Design/DesignToPr
+also receive AutonomyGrantId and PR/DesignToPr RequireAcceptance=true. Preserve
+returned workflow/run ids. Do not infer an id from a name or a Completed status.
+
+Capture a state reply and advisory admission for each planned item:
+
+```sh
+curl -fsS --max-time 10 \
+  "$O/api/epic-drivers/$DRIVER/state?namespace=$NS"
+
+curl -fsS --max-time 10 --get \
+  "$O/api/epic-grants/$G/admission" \
+  --data-urlencode "workflowType=$TYPE" \
+  --data-urlencode "repo=$REPO" \
+  --data-urlencode "issue=$ISSUE" \
+  --data-urlencode "planItem=$ITEM"
+```
+
+Save replies under `$OUT`, not a public share bucket. Use fixture-bound
+`temporal_list_workflows` with namespace, full row query and limit 201; a full
+page/error is incomplete, not absence. Export exact-run histories using the
+fixture Temporal SDK's GetWorkflowExecutionHistory request with both WorkflowId
+and RunId, paging to the end. The orchestrator's REST history route is latest-run
+only and is **not** an exact-run receipt. Read completed design results with
+`temporal_get_workflow_result(workflow_id, namespace, run_id)`; retain its exact
+wrapper and verify the positive issue against the run attribute.
+
+### Per-row procedure and expected evidence
+
+| row | prepared driver steps / commands | required evidence | status |
+|---|---|---|---|
+| E1 | Use a valid charter whose CREATE plan item names an allowed child repo; the stub proposes that item id with a different repo outside children; capture that mismatched admission, then start one unique driver using the recipes above | admission deny, no child start request or new visibility row, tick `needs-authority` and explicit `EPIC_ASK`; preserve the denial/checklist | not run |
+| E2 | Prepare p1, p2 after p1, p3–p5; start driver; capture each tick and tool trace; deliver only the requested fixture `blocker-resolved` wake via `temporal_signal_workflow`, args `{"decision":"wake","blockerRef":"self:more-ready"}` | tick 1 starts only p1/p3 and emits one self wake; tick 2 starts only p4/p5; p2 starts only after p1's exact approved/merged outcome; reject_duplicate, deterministic ids, at most two starts per tick | not run |
+| E3 | Fresh row/driver per Failed, TimedOut, Canceled, Terminated, Completed-not-done and third-Failed case; stub child produces the declared close event; capture state/list/history after one reconcile | only Failed/TimedOut permit a2; other cases emit attempt_canceled, attempt_terminated, attempt_completed_not_done or attempts_exhausted; no forbidden a2/a4; retain zero-start tool/visibility evidence and checklist/ask | not run |
+| E4 | Start a CREATE DesignToPr with empty ExistingIssueNumber; capture review refs and scope-fit; request the fixture decider's one delegated design approval through the guarded bridge path; read charter detail; capture PR child input; attempt delegated merge once | scope-fit attestation, one binding and exact-run row, RequireAcceptance=true, no unmarked gate approval, merge refusal acceptance_missing with no reservation/signal; all independent artifact refs and receipts | not run |
+| E5 | Start an old-definition fixture design and record version/hash/history; load the new seed versions into the fixture only; compare the old run without waking it; try its otherwise-current CREATE approval without scope-fit | unchanged old run id/loaded definition/events; no snapshot migration or new command from the definition save; target_out_of_scope, zero binding/signal for the old design | not run |
+
+E3 faults come only from the owned stub child, not production injection. A
+TimedOut case needs a prepared bounded test child timeout; failure to produce the
+exact terminal event stops the case. Canceled/Terminated cases may use only the
+fixture REST cancel/terminate route with `?runId=<owned exact run>` and `$AUTH`;
+never reset a run. Completed-not-done supplies a real completion with an invalid
+or nonapproved result, not a renamed status. Observe every attempted id, including
+absent forbidden retries. No caller may use the admin signal route to bypass a
+refused delegated gate.
+
+E4 decision metadata must name the fixture GrantId, current VisitId, ArtifactRef
+and a fixture evidence URL. The approved fixture decider still checks the exact
+artifact independently and sends once; an ambiguous result ends the row for
+history/decision-row inspection, never a resend. The merge gate remains human.
+E5 compares an idle old run only during the definition save; ordinary old-run
+activity is not falsely counted as a snapshot-migration event.
+
+### Evidence and cleanup
+
+For every row retain source/image/config/definition hashes, start inputs and
+returned exact ids, before/after state and complete visibility, paged histories,
+stub tool/notification traces, checklist updates and assertion outcomes. For E4
+also retain fixture-only grant detail and decision/binding/run row counts. Hash
+a value-free manifest linking these protected receipts. A source test, CI job,
+scripted response or this plan is not E1–E5 execution evidence.
+
+After saving receipts, stop/cancel only manifest-owned test runs and use the
+owned Compose down command above. Remove only owned fixture containers,
+networks/volumes and disposable repo artifacts under the human-approved cleanup
+scope; never prune a shared daemon or bulk-delete workflows/grants. Verify no
+owned listener, peer process, run or resource remains and verify the no-touch
+baseline unchanged. Cleanup uncertainty blocks any pass claim. An operator
+reports actual per-row pass/fail/not-run with exact artifact hashes for independent
+review; no merge, rollout, live enablement or grant authority follows that report.

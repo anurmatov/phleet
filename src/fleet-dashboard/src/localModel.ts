@@ -170,11 +170,33 @@ export function switchProvider(edits: LocalModelEdits, next: string): LocalModel
  */
 export function createFormProviderPatch(
   form: { provider: string; effort: string }, next: string,
-): { provider: string; model: string; effort?: string } {
+): { provider: string; model: string; effort?: string; localBaseUrl?: string; contextWindow?: string } {
   const patch = { provider: next, model: PROVIDER_DEFAULT_MODEL[next] ?? '' }
   if (next === form.provider) return patch
   if (isPi(next)) return { ...patch, effort: effortToPi(form.provider, form.effort) }
-  return isPi(form.provider) ? { ...patch, effort: '' } : patch
+  return isPi(form.provider) ? { ...patch, effort: '', localBaseUrl: '', contextWindow: '' } : patch
+}
+
+export type CreateLocalModel =
+  | { ok: true; body: { localBaseUrl?: string; contextWindow?: number } }
+  | { ok: false; error: string }
+
+/**
+ * The local-model part of the create request (#386 H1). A Pi agent is created complete: URL
+ * (PI1), tag, then context (PI3), checked as the config modal's Save checks them, so it can
+ * provision at once. Every other provider sends nothing here, as before.
+ */
+export function createFormLocalModel(
+  form: { provider: string; model: string; localBaseUrl: string; contextWindow: string },
+): CreateLocalModel {
+  if (!isPi(form.provider)) return { ok: true, body: {} }
+  const save = piSaveBody({
+    provider: form.provider, localMode: true, model: form.model, localBaseUrl: form.localBaseUrl,
+    contextWindow: form.contextWindow, localServer: 'ollama', effort: '', envRefs: '',
+  })
+  return save.ok
+    ? { ok: true, body: { localBaseUrl: save.body.localBaseUrl, contextWindow: save.body.contextWindow } }
+    : save
 }
 
 export function localModelSuggestions(provider: string): LocalModelSuggestion[] {

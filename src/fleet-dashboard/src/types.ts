@@ -158,6 +158,9 @@ export interface CreateForm {
   telegramUsers: string
   telegramGroups: string
   instructions: { name: string; loadOrder: number }[]
+  /** Pi only (#386): the local server origin and its context size, sent on create. */
+  localBaseUrl: string
+  contextWindow: string
 }
 
 export interface AgentConfig {

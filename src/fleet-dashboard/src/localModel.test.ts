@@ -461,11 +461,11 @@ test('Cloud → Pi starts like Cloud → Local; Pi → Gemini clears the URL and
   assert.deepEqual(switchProvider(piEdits(), 'pi'), {})
 })
 
-test('create form: Pi starts with an empty tag and a §4.7 effort; leaving Pi drops off/on', () => {
+test('create form: Pi starts with an empty tag and a §4.7 effort; leaving Pi drops off/on, URL and context', () => {
   assert.deepEqual(createFormProviderPatch({ provider: 'codex', effort: 'none' }, 'pi'), { provider: 'pi', model: '', effort: 'off' })
   assert.deepEqual(createFormProviderPatch({ provider: 'claude', effort: 'high' }, 'pi'), { provider: 'pi', model: '', effort: '' })
   assert.deepEqual(createFormProviderPatch({ provider: 'pi', effort: 'off' }, 'claude'),
-    { provider: 'claude', model: PROVIDER_DEFAULT_MODEL.claude, effort: '' })
+    { provider: 'claude', model: PROVIDER_DEFAULT_MODEL.claude, effort: '', localBaseUrl: '', contextWindow: '' })
   assert.deepEqual(createFormProviderPatch({ provider: 'claude', effort: 'high' }, 'codex'), { provider: 'codex', model: PROVIDER_DEFAULT_MODEL.codex })
 })
 
@@ -580,7 +580,7 @@ function createForm(overrides: Partial<CreateForm>): CreateForm {
     shortName: 'pi-dev', effort: '', jsonSchema: '', agentsJson: '', autoMemoryEnabled: true, showStats: true,
     prefixMessages: false, formattingMode: 0, suppressToolMessages: false, telegramSendOnly: false, provider: 'pi',
     codexSandboxMode: '', tools: '', projects: '', networks: '', envRefs: '', mcpEndpoints: [], telegramUsers: '',
-    telegramGroups: '', instructions: [], ...overrides,
+    telegramGroups: '', instructions: [], localBaseUrl: '', contextWindow: '', ...overrides,
   }
 }
 
@@ -606,4 +606,41 @@ test('create modal: pi option listed; pi takes a bare tag with the Qwen3.8 chips
   assert.ok(html.includes('>Qwen3.8 27B</button>'))
   assert.ok(html.includes('>Qwen3.8 Flash Next</button>'))
   assert.equal(html.includes('gpt-oss'), false)
+})
+
+// ── #386 H1: a Pi agent is created complete — URL, tag and context, checked before the request ──
+
+test('create body: Pi needs the URL (PI1), the tag, then a context of at least 65536 (PI3)', () => {
+  const create = localModel.createFormLocalModel
+  const pi = { provider: 'pi', model: PI_TAG, localBaseUrl: PI_ORIGIN, contextWindow: '131072' }
+  assert.deepEqual(create({ ...pi, localBaseUrl: '' }), { ok: false, error: PI1_TEXT })
+  assert.deepEqual(create({ ...pi, model: '' }), { ok: false, error: localModel.LOCAL_TAG_REQUIRED })
+  assert.deepEqual(create({ ...pi, contextWindow: '' }), { ok: false, error: localModel.PI3_TEXT })
+  assert.deepEqual(create({ ...pi, contextWindow: '65535' }), { ok: false, error: localModel.PI3_TEXT })
+  assert.deepEqual(create(pi), { ok: true, body: { localBaseUrl: PI_ORIGIN, contextWindow: 131072 } })
+  // Every other provider's create request is unchanged.
+  assert.deepEqual(create({ ...pi, provider: 'claude', localBaseUrl: '', contextWindow: '' }), { ok: true, body: {} })
+})
+
+test('create modal: Pi asks for the server URL and context; Create is blocked with the rule text until complete', () => {
+  const incomplete = renderCreate(createForm({ model: PI_TAG }))
+  assert.ok(incomplete.includes('Server URL'))
+  assert.ok(incomplete.includes('Context window'))
+  assert.ok(incomplete.includes(PI1_TEXT))
+  assert.match(incomplete, /<button class="config-save-btn" disabled="">Create<\/button>/)
+
+  const noContext = renderCreate(createForm({ model: PI_TAG, localBaseUrl: PI_ORIGIN, contextWindow: '65535' }))
+  const pi3Html = localModel.PI3_TEXT.split("'").join('&#x27;') // renderToStaticMarkup escapes the apostrophe
+  assert.ok(noContext.includes(pi3Html))
+  assert.match(noContext, /<button class="config-save-btn" disabled="">Create<\/button>/)
+
+  const complete = renderCreate(createForm({ model: PI_TAG, localBaseUrl: PI_ORIGIN, contextWindow: '131072' }))
+  assert.equal(complete.includes(PI1_TEXT), false)
+  assert.equal(complete.includes(pi3Html), false)
+  assert.match(complete, /<button class="config-save-btn">Create<\/button>/)
+
+  // Other providers never show the Pi fields or the block.
+  const claude = renderCreate(createForm({ provider: 'claude', model: PROVIDER_DEFAULT_MODEL.claude }))
+  assert.equal(claude.includes('Server URL'), false)
+  assert.match(claude, /<button class="config-save-btn">Create<\/button>/)
 })

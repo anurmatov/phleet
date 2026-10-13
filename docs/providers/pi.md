@@ -92,6 +92,12 @@ Context window (tokens)
 Effort      [ Default (on) v ]           Default (on) · Off · On
 ```
 
+A new agent: in **New Agent**, pick **Provider → Pi (local model)** and fill **Server URL**,
+**Context window** and **Model tag**. Create stays disabled, with the PI1 or PI3 text, until all
+three are valid, so the agent is created complete and can provision at once.
+
+An existing agent:
+
 1. Open the agent's config and pick **Provider → Pi (local model)**. **Runs on** is locked to
    Local server.
 2. Enter the **Server URL** as an origin only. Fleet adds `/v1/messages`.
@@ -100,6 +106,12 @@ Effort      [ Default (on) v ]           Default (on) · Off · On
 5. Pick **Effort** (§7) and click **Save & Reprovision**. A restart is not enough.
 
 ### MCP
+
+```
+create_agent agent_name=<agent> role=<role> provider=pi model=qwen3.8-flash-next local_base_url=http://inference-host:8000 context_window=131072
+```
+
+or, for an existing agent:
 
 ```
 update_agent_config agent_name=<agent> provider=pi local_base_url=http://inference-host:8000 model=qwen3.8-flash-next context_window=131072 effort=off
@@ -113,6 +125,9 @@ get_agent_config <agent>
 ### REST
 
 ```
+POST /api/agents
+{"name":"<agent>","role":"<role>","provider":"pi","model":"qwen3.8-flash-next","localBaseUrl":"http://inference-host:8000","contextWindow":131072}
+
 PUT /api/agents/<agent>/config
 {"provider":"pi","model":"qwen3.8-flash-next","localBaseUrl":"http://inference-host:8000","contextWindow":131072,"effort":"off"}
 
@@ -121,7 +136,7 @@ POST /api/agents/<agent>/reprovision
 
 ### Validation
 
-The rules run on write (HTTP 400 or a tool error; nothing is saved), at provisioning (a named
+The rules run on write, create included (HTTP 400 or a tool error; nothing is saved), at provisioning (a named
 fault before any container is created or removed) and at agent startup (exit 1).
 
 | id | when | message |
@@ -471,6 +486,12 @@ Log lines carry counts and names only, never prompt text or credentials.
   start beside a mounted one, PID 1 drops the credential denylist, and the Pi child drops it
   again. Pi's hosted and login auth (`auth.json`, `/login`, environment API keys, `sk-ant-oat`
   tokens) is never used.
+- **Pi's own empty `auth.json`.** Pi 1.0.4 writes `{}` to `/root/.pi/agent/auth.json` on every
+  start and has no flag to skip it. Fleet deletes `auth.json` and `mcp-auth.json` before every
+  start, and refuses a started Pi ("Pi failed to start: auth.json") whose `auth.json` holds
+  anything but `{}`, or that has an `mcp-auth.json`. That one empty file is the only
+  credential-named file a pi agent's shell can find. This is a declared amendment of A32 in
+  PR #452, pending human design approval.
 - **What stays readable:** MCP header tokens in `/workspace/.mcp.json`, as for every provider
   (they are MCP grants, not model credentials), and `GH_*`/`GITHUB_*` for repository work.
 - **Network:** `--offline`, `PI_OFFLINE=1` and `--no-mcp`. Pi is meant to connect only to your

@@ -4,8 +4,9 @@ using Fleet.Shared;
 namespace Fleet.Agent.Tests;
 
 /// <summary>
-/// <see cref="LocalModel"/> (#382): the URL rules both harnesses share (L1, L2), the codex local
-/// model rules (C1, C2), the canonical origin, and the codex base URL derived from it.
+/// <see cref="LocalModel"/> (#382, #386): the URL rules the local harnesses share (L1, L2), the
+/// codex local model rules (C1, C2), the pi rules (PI1–PI4), the canonical origin, and the codex
+/// base URL derived from it.
 /// </summary>
 public class LocalModelTests
 {
@@ -45,11 +46,86 @@ public class LocalModelTests
     [Theory]
     [InlineData("gemini")]
     [InlineData("Codex")]
+    [InlineData("Pi")]
     [InlineData(null)]
     public void L1_BaseUrlOnAnotherProvider_Rejected(string? provider) =>
         Assert.Equal(
-            "Local model runs on claude or codex; clear the local server URL first.",
+            "Local model runs on claude, codex or pi; clear the local server URL first.",
             Fault(provider, Url, "gemini-2.5-pro"));
+
+    [Fact]
+    public void L1_TheTextIsTheSharedConstant() =>
+        Assert.Equal("Local model runs on claude, codex or pi; clear the local server URL first.", LocalModel.L1Text);
+
+    // ── PI1–PI4 (#386): a pi agent is always local and checked in full ───────
+
+    private const string PiUrl = "http://inference-host:8000";
+    private const string PiTag = "qwen3.8-flash-next";
+
+    private static string? PiFault(string? baseUrl, string? model = PiTag, string? effort = null, int? contextWindow = 131072) =>
+        LocalModel.DescribeConfigFault("pi", baseUrl, model, effort, contextWindow);
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("on")]
+    [InlineData("off")]
+    [InlineData("")]
+    public void Pi_ValidConfig_NoFault(string? effort)
+    {
+        Assert.Null(PiFault(PiUrl, effort: effort));
+        Assert.True(LocalModel.IsEnabled("pi", PiUrl));
+        Assert.True(LocalModel.IsPiEnabled("pi", PiUrl));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public void PI1_NoUrl_Rejected(string? baseUrl) =>
+        Assert.Equal("Pi runs only on a local server; set the local server URL.", PiFault(baseUrl));
+
+    [Theory]
+    [InlineData("http://inference-host:8000/v1", "has a path")]
+    [InlineData("http://localhost:8000", "is the container")]
+    public void PI_L2_StillAppliesToTheUrl(string baseUrl, string reason) =>
+        Assert.Contains(reason, PiFault(baseUrl));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(null)]
+    [InlineData("qwen 3.8")]
+    [InlineData("ollama/qwen3.8")]
+    [InlineData("lmstudio/qwen3.8")]
+    [InlineData("LMSTUDIO/qwen3.8")]
+    [InlineData("zai/glm-5.3")]
+    public void PI2_NotABareTag_Rejected(string? model) =>
+        Assert.Equal(
+            "Pi takes the bare model tag the server serves (no ollama/ or lmstudio/ prefix).",
+            PiFault(PiUrl, model));
+
+    [Theory]
+    [InlineData("hf.co/org/model:q4")]
+    [InlineData("qwen3.8:27b")]
+    public void PI2_ABareTagWithAnUnreservedSlashOrColon_Accepted(string model) =>
+        Assert.Null(PiFault(PiUrl, model));
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(65535)]
+    [InlineData(4096)]
+    public void PI3_ContextUnsetOrBelow65536_Rejected(int? contextWindow) =>
+        Assert.Equal(
+            "Pi needs the server's context size, at least 65536; set the context window to the server's --ctx.",
+            PiFault(PiUrl, contextWindow: contextWindow));
+
+    [Fact]
+    public void PI3_Exactly65536_Accepted() => Assert.Null(PiFault(PiUrl, contextWindow: 65536));
+
+    [Theory]
+    [InlineData("xhigh")]
+    [InlineData("medium")]
+    [InlineData("ON")]
+    public void PI4_EffortNotOffOrOn_Rejected(string effort) =>
+        Assert.Equal("Pi effort is off or on.", PiFault(PiUrl, effort: effort));
 
     // ── L2 ───────────────────────────────────────────────────────────────────
 

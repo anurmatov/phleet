@@ -22,7 +22,7 @@ public class StartupConfigurationGateTests
     private static ServiceProvider BuildServices(
         string provider, string model, bool? hostedProvider = null, string? hostedKeyEnv = null,
         string? keyFilePath = null, string? anthropicBaseUrl = null, string? effort = null,
-        string? codexOssBaseUrl = null)
+        string? codexOssBaseUrl = null, string? piBaseUrl = null, int? contextWindow = null)
     {
         // DisableDefaults-equivalent: nothing ambient, only the values the gate reads.
         var values = new Dictionary<string, string?>
@@ -43,6 +43,10 @@ public class StartupConfigurationGateTests
             values["Agent:Effort"] = effort;
         if (codexOssBaseUrl is not null)
             values["Agent:CodexOssBaseUrl"] = codexOssBaseUrl;
+        if (piBaseUrl is not null)
+            values["Agent:PiBaseUrl"] = piBaseUrl;
+        if (contextWindow is not null)
+            values["Agent:ContextWindow"] = contextWindow.Value.ToString();
 
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(values).Build();
 
@@ -342,5 +346,149 @@ public class StartupConfigurationGateTests
         // A present credential file is the normal case for an off claude agent.
         AgentHostRegistration.ValidateStartupConfiguration(
             services, _ => null, _ => throw new InvalidOperationException("file probe must not run when off"));
+    }
+
+    // ── #386: provider pi (A7) and PV1 (A30) ────────────────────────────────
+
+    private const string PiUrl = "http://inference-host:8000";
+    private const string PiTag = "qwen3.8-flash-next";
+    private const string PiOnPath = "/usr/local/bin/pi";
+    private static readonly Func<string, string?> PiPath = name => name == "PATH" ? "/usr/bin:/usr/local/bin" : null;
+    private static readonly Func<string, bool> PiBinaryPresent = path => path == PiOnPath;
+    private static readonly Func<string, bool> ExtensionPresent = path => path == "/opt/fleet-pi-extension";
+
+    private static void PiGate(ServiceProvider services, Func<string, bool>? extension = null, Func<string, bool>? files = null) =>
+        AgentHostRegistration.ValidateStartupConfiguration(
+            services, PiPath, files ?? PiBinaryPresent, extension ?? ExtensionPresent);
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("on")]
+    [InlineData("off")]
+    public void A7_Pi_AValidConfigurationStarts(string? effort)
+    {
+        using var services = BuildServices("pi", PiTag, piBaseUrl: PiUrl, contextWindow: 131072, effort: effort);
+
+        PiGate(services);
+    }
+
+    [Fact]
+    public void A7_Pi_MissingPiBaseUrl_Throws()
+    {
+        using var services = BuildServices("pi", PiTag, contextWindow: 131072);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => PiGate(services));
+
+        Assert.Equal("Pi runs only on a local server; set the local server URL.", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("http://inference-host:8000/")]
+    [InlineData("HTTP://Inference-Host:8000")]
+    [InlineData("http://inference-host:80")]
+    public void A7_Pi_NonCanonicalPiBaseUrl_Throws(string baseUrl)
+    {
+        using var services = BuildServices("pi", PiTag, piBaseUrl: baseUrl, contextWindow: 131072);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => PiGate(services));
+
+        Assert.StartsWith("Agent:PiBaseUrl is not in canonical form", ex.Message);
+        Assert.DoesNotContain(baseUrl, ex.Message);
+    }
+
+    [Theory]
+    [InlineData("http://inference-host:8000/v1", "has a path")]
+    [InlineData("http://inference-host:8000/v1/messages", "has a path")]
+    [InlineData("http://localhost:8000", "is the container")]
+    public void A7_Pi_APathOrAContainerLocalHost_Throws(string baseUrl, string reason)
+    {
+        using var services = BuildServices("pi", PiTag, piBaseUrl: baseUrl, contextWindow: 131072);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => PiGate(services));
+
+        Assert.Contains(reason, ex.Message);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(65535)]
+    public void A7_Pi_ContextBelow65536_Throws(int? contextWindow)
+    {
+        using var services = BuildServices("pi", PiTag, piBaseUrl: PiUrl, contextWindow: contextWindow);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => PiGate(services));
+
+        Assert.StartsWith("Pi needs the server's context size, at least 65536", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("ollama/x")]
+    [InlineData("lmstudio/qwen3.8")]
+    public void A7_Pi_APrefixedModel_Throws(string model)
+    {
+        using var services = BuildServices("pi", model, piBaseUrl: PiUrl, contextWindow: 131072);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => PiGate(services));
+
+        Assert.Equal("Pi takes the bare model tag the server serves (no ollama/ or lmstudio/ prefix).", ex.Message);
+    }
+
+    [Fact]
+    public void A7_Pi_EffortOutsideOffOn_Throws()
+    {
+        using var services = BuildServices("pi", PiTag, piBaseUrl: PiUrl, contextWindow: 131072, effort: "xhigh");
+
+        var ex = Assert.Throws<InvalidOperationException>(() => PiGate(services));
+
+        Assert.Equal("Pi effort is off or on.", ex.Message);
+    }
+
+    [Fact]
+    public void A7_Pi_MissingExtensionDirectory_Throws()
+    {
+        using var services = BuildServices("pi", PiTag, piBaseUrl: PiUrl, contextWindow: 131072);
+        var probed = new List<string>();
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => PiGate(services, extension: path => { probed.Add(path); return false; }));
+
+        Assert.Equal(["/opt/fleet-pi-extension"], probed);
+        Assert.Contains("/opt/fleet-pi-extension", ex.Message);
+    }
+
+    [Fact]
+    public void A7_Pi_NoPiBinaryOnPath_Throws()
+    {
+        using var services = BuildServices("pi", PiTag, piBaseUrl: PiUrl, contextWindow: 131072);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => PiGate(services, files: _ => false));
+
+        Assert.Contains("pi binary is not on PATH", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("claude", "claude-sonnet-5")]
+    [InlineData("codex", "gpt-5")]
+    [InlineData("gemini", "gemini-2.5-pro")]
+    public void A7_ThePiChecksNeverRunForAnotherProvider(string provider, string model)
+    {
+        using var services = BuildServices(provider, model);
+
+        AgentHostRegistration.ValidateStartupConfiguration(
+            services, _ => null, _ => false, _ => throw new InvalidOperationException("the extension probe must not run"));
+    }
+
+    [Theory]
+    [InlineData("foo")]
+    [InlineData("Claude")]
+    [InlineData("PI")]
+    public void A30_PV1_AnUnknownProvider_Throws(string provider)
+    {
+        using var services = BuildServices(provider, "anything");
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => AgentHostRegistration.ValidateStartupConfiguration(services, _ => null, _ => false, _ => true));
+
+        Assert.Equal($"Unknown provider '{provider}'; use claude, codex, gemini or pi.", ex.Message);
     }
 }

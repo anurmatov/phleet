@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using Fleet.Agent.Tests.Harness;
 
@@ -114,6 +115,14 @@ public partial class FixtureHygieneTests
         "tests/Fleet.Agent.Tests/Harness/ScriptedExecutor.cs",
         "tests/Fleet.Agent.Tests/Harness/StandInProcess.cs",
         "tests/Fleet.Agent.Tests/Harness/UtteranceEpochFence.cs",
+        "tests/Fleet.Agent.Tests/Harness/PiStandIn.cs",
+        "tests/Fleet.Agent.Tests/PiExecutorTests.cs",
+        "tests/Fleet.Agent.Tests/PiExecutorRealPiTests.cs",
+        "tests/Fleet.Agent.Tests/PiRuntimeFilesTests.cs",
+        "tests/Fleet.Agent.Tests/PiCredentialEnvListTests.cs",
+        "tests/Fleet.Agent.Tests/PiTokenBroadcastIsolationTests.cs",
+        "tests/Fleet.Agent.Tests/EntrypointPiCredentialEnvTests.cs",
+        "tests/Fleet.Agent.Tests/AgentProvidersTests.cs",
         "docs/conversation-protocol.md",
         "docs/spikes/real-adapter-capability-matrix.md",
         "docs/spikes/session-continuity-scenarios.md",
@@ -122,7 +131,39 @@ public partial class FixtureHygieneTests
     ];
 
     private static IEnumerable<string> FixtureFiles() =>
-        Directory.EnumerateFiles(RepoPaths.Resolve(FixtureRoot), "*", SearchOption.AllDirectories);
+        Directory.EnumerateFiles(RepoPaths.Resolve(FixtureRoot), "*", SearchOption.AllDirectories)
+            .Where(path => !IsPinnedVendoredSource(path));
+
+    /// <summary>The directory of third-party Pi source vendored for #386 §15, and its pin file.</summary>
+    private const string VendoredSourceDirectory = "pi-source";
+    private const string VendoredSourcePins = "SOURCE.txt";
+
+    /// <summary>
+    /// Third-party source vendored byte for byte (#386 §15: Pi's <c>args.ts</c> and
+    /// <c>env-api-keys.ts</c>). Its content is upstream's, not fixture data Fleet wrote, and it cannot
+    /// be edited to satisfy a pattern without breaking the SHA-256 pin that is the reason it exists.
+    /// </summary>
+    /// <remarks>
+    /// Exempt only while its bytes match the hash recorded for it in <c>SOURCE.txt</c>: a file edited
+    /// here, or added without a pin, is swept like any other, and <c>SOURCE.txt</c> itself always is.
+    /// This is a scope rule, not an allowlist entry — no matched value is ever exempted.
+    /// </remarks>
+    private static bool IsPinnedVendoredSource(string path)
+    {
+        var directory = Path.GetDirectoryName(path)!;
+        if (Path.GetFileName(directory) != VendoredSourceDirectory || Path.GetFileName(path) == VendoredSourcePins)
+            return false;
+
+        var pins = Path.Combine(directory, VendoredSourcePins);
+        if (!File.Exists(pins))
+            return false;
+
+        var hash = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(path)));
+        return File.ReadAllLines(pins).Any(line =>
+            line.Split(' ') is ["file", var name, _, "sha256", var pinned]
+            && name == Path.GetFileName(path)
+            && pinned == hash);
+    }
 
     // ── The sweep ────────────────────────────────────────────────────────────
 
@@ -257,6 +298,32 @@ public partial class FixtureHygieneTests
         Assert.NotEmpty(Sweep("fixture.jsonl", $"{{\"path\":\"{path}\"}}", fixtureScope: true));
 
     [Fact]
+    public void OnlyPinnedVendoredBytesLeaveTheSweep()
+    {
+        var root = RepoPaths.Resolve(FixtureRoot);
+        var vendored = Path.Combine(root, VendoredSourceDirectory);
+
+        Assert.True(IsPinnedVendoredSource(Path.Combine(vendored, "args.ts")));
+        Assert.True(IsPinnedVendoredSource(Path.Combine(vendored, "env-api-keys.ts")));
+        Assert.False(IsPinnedVendoredSource(Path.Combine(vendored, VendoredSourcePins)));
+        Assert.Contains(FixtureFiles(), f => f.EndsWith(Path.Combine(VendoredSourceDirectory, VendoredSourcePins), StringComparison.Ordinal));
+
+        // Bytes that no longer match their pin are swept again.
+        var copy = Path.Combine(Path.GetTempPath(), $"hygiene-{Guid.NewGuid():N}", VendoredSourceDirectory);
+        Directory.CreateDirectory(copy);
+        try
+        {
+            File.Copy(Path.Combine(vendored, VendoredSourcePins), Path.Combine(copy, VendoredSourcePins));
+            File.WriteAllText(Path.Combine(copy, "args.ts"), File.ReadAllText(Path.Combine(vendored, "args.ts")) + "// edited\n");
+            Assert.False(IsPinnedVendoredSource(Path.Combine(copy, "args.ts")));
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(copy)!, recursive: true);
+        }
+    }
+
+    [Fact]
     public void TheAllowlistIsShort() => Assert.True(
         Allowlist.Count <= 8,
         "An allowlist that grows is a denylist that stopped working. Fix the pattern instead.");
@@ -281,6 +348,7 @@ public partial class FixtureHygieneTests
     [InlineData(ProviderFrameReplay.ClaudeDirectory, 5)]
     [InlineData(ProviderFrameReplay.CodexDirectory, 5)]
     [InlineData(ProviderFrameReplay.GeminiDirectory, 4)]
+    [InlineData(ProviderFrameReplay.PiDirectory, 6)]
     public void EveryProviderCorpusIsCopiedToTheTestOutput(string provider, int expectedFiles)
     {
         var directory = Path.Combine(AppContext.BaseDirectory, "Fixtures", provider);

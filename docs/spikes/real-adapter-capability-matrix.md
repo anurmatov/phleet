@@ -160,6 +160,32 @@ rendering turn state renders late, and one that treats it as a stream position i
 | S16 | — | — | submission.accepted(ran) → submission.accepted(ran) ‖ turn.started → turn.final(completed) → turn.started → turn.final(completed) | inferred | fixture-only | restart is a local process action; no provider frame acknowledges it; terminal constructed in ExecuteAsync; no seam below ExecuteAsync at `ca90b205` |
 | G1 | `tool completion` | `tool_result` | turn.progress(tool) | unsupported | fixture-only | the provider DOES emit a completion frame; the runtime maps it with `IsSignificant = false`, and `TaskManager` publishes `turn.progress` only when `IsSignificant && ToolName is not null`. A client sees a tool START and never a tool FINISH, so a per-tool spinner has no event that clears it. |
 | G2 | `init` + `message/assistant` + `message/assistant` + `message/assistant` + `result/success` | `assistant` + `assistant` + `assistant` | turn.final(completed) | unsupported | fixture-only | `ConversationEventKind` has no delta kind. Three assistant chunks in, exactly one `turn.final` out — a client cannot begin rendering, or speaking, before the whole answer exists. |
+
+## pi
+
+Provider `pi` (#386) has no rows in the scenario grammar above: no harness scenario replays Pi
+frames yet, and the parser reads only the `claude`, `codex` and `gemini` headings. This section
+holds only what the issue's production-path canary measures, one row per gate (B1–B12), and
+nothing from the 2026-10-13 reopen-gate spike. **The canary has not run**, so every result reads
+`not measured (B canary pending)`. A result may change only together with an evidence cell
+`canary@<YYYY-MM-DD>/pi-<version>` naming the dated canary run; `ProviderCapabilityMatrixTests`
+enforces that, and for now it requires every row to be pending.
+
+| gate | measures | result | evidence |
+|---|---|---|---|
+| B1 | base prompt B and the cold prefill rate r of the first request | not measured (B canary pending) | — |
+| B2 | HTTP 400s and overflow compactions before the overflow probe | not measured (B canary pending) | — |
+| B3 | prompt growth per growth turn | not measured (B canary pending) | — |
+| B4 | threshold compactions that take the prefix path | not measured (B canary pending) | — |
+| B5 | anchor recall after every compaction | not measured (B canary pending) | — |
+| B6 | nonce recall after both compactions | not measured (B canary pending) | — |
+| B7 | `cached/prompt` on ordinary turns | not measured (B canary pending) | — |
+| B8 | `cached/prompt` on fast-path summary calls | not measured (B canary pending) | — |
+| B9 | first post-compaction prompt size, and reuse on the call after it | not measured (B canary pending) | — |
+| B10 | latency budgets L0, L1, L2, L2c and L3 | not measured (B canary pending) | — |
+| B11 | overflow recovery without `/reset` | not measured (B canary pending) | — |
+| B12 | errors or timeouts on the server's other clients | not measured (B canary pending) | — |
+
 ## Reading the `G` rows
 
 `G1`, `G2` and `G3` are not turn scenarios. They record the three per-provider facts the design
@@ -186,4 +212,5 @@ progress. Running them per provider would produce three identical rows and a fal
 per-provider coverage. They are recorded **once**, in the scenario table of
 `session-continuity-scenarios.md`, and asserted once in `RuntimeScenarioTests`. The bidirectional
 doc ↔ harness check in `ProviderCapabilityMatrixTests` therefore scopes to the per-provider rows in
-this file.
+this file. The `## pi` section is outside that check: it uses its own four-column grammar and is
+checked separately.

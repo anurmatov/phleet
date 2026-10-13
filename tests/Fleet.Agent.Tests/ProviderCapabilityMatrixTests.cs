@@ -250,4 +250,175 @@ public class ProviderCapabilityMatrixTests
     {
         Assert.Throws<FormatException>(() => CapabilityMatrix.Parse(Document(GoodRow, GoodRow)));
     }
+
+    // ── The `## pi` section (#386 B13) ───────────────────────────────────────
+    //
+    // Pi has no harness scenarios, so its section is not in the scenario grammar above and the
+    // scenario parser never reads it. It carries only production-path canary (B1–B12) results, one
+    // row per gate. The canary has not run, so every row must still say so: a number here before
+    // the canary would be a claim, not evidence (#386 MUST NOT 4).
+
+    private const string PiHeading = "## pi";
+    private const string PiPending = "not measured (B canary pending)";
+    private const string PiNoEvidence = "—";
+    private static readonly string[] PiHeader = ["gate", "measures", "result", "evidence"];
+    private static readonly string[] PiGates =
+        ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10", "B11", "B12"];
+
+    /// <summary>The evidence a measured pi result must cite: the dated canary run and the Pi pin.</summary>
+    private static readonly System.Text.RegularExpressions.Regex PiCanaryEvidence =
+        new(@"^canary@\d{4}-\d{2}-\d{2}/pi-\d+\.\d+\.\d+$");
+
+    private sealed record PiRow(string Gate, string Measures, string Result, string Evidence);
+
+    private static string PiDocument(params string[] rows) =>
+        "# probe\n\n" + PiHeading + "\n\nprose\n\n| gate | measures | result | evidence |\n|---|---|---|---|\n"
+        + string.Join("\n", rows) + "\n\n## next\n";
+
+    private static string PendingRow(string gate) => $"| {gate} | something | {PiPending} | {PiNoEvidence} |";
+
+    private static string[] AllPendingRows() => PiGates.Select(PendingRow).ToArray();
+
+    /// <summary>Rows of the one <c>## pi</c> section, in document order; a malformed section throws.</summary>
+    private static IReadOnlyList<PiRow> ParsePiSection(string markdown)
+    {
+        var lines = markdown.Split('\n').Select(l => l.TrimEnd('\r').Trim()).ToList();
+        var headings = lines.Select((line, index) => (line, index)).Where(l => l.line == PiHeading).ToList();
+        if (headings.Count != 1)
+            throw new FormatException($"expected exactly one '{PiHeading}' heading, found {headings.Count}");
+
+        var rows = new List<PiRow>();
+        var sawHeader = false;
+        foreach (var line in lines.Skip(headings[0].index + 1).TakeWhile(l => !l.StartsWith("## ", StringComparison.Ordinal)))
+        {
+            if (!line.StartsWith('|'))
+                continue;
+
+            var cells = line.Trim('|').Split('|').Select(c => c.Trim()).ToArray();
+            if (cells.Length != PiHeader.Length)
+                throw new FormatException($"pi row has {cells.Length} cells, expected {PiHeader.Length}: {line}");
+            if (!sawHeader)
+            {
+                if (!cells.SequenceEqual(PiHeader, StringComparer.Ordinal))
+                    throw new FormatException($"the pi table header must be '{string.Join(" | ", PiHeader)}': {line}");
+                sawHeader = true;
+                continue;
+            }
+            if (cells.All(c => c.Length > 0 && c.All(ch => ch is '-' or ':')))
+                continue;
+
+            rows.Add(new PiRow(cells[0], cells[1], cells[2], cells[3]));
+        }
+
+        if (rows.Count == 0)
+            throw new FormatException("the pi section has no rows");
+        return rows;
+    }
+
+    /// <summary>
+    /// The section's standing rules, whatever the canary state: exactly B1–B12 in order, and a
+    /// result is either the pending literal with no evidence or a measurement citing a dated
+    /// canary run. Returns the first fault, or null.
+    /// </summary>
+    private static string? PiSectionFault(IReadOnlyList<PiRow> rows)
+    {
+        if (!rows.Select(r => r.Gate).SequenceEqual(PiGates, StringComparer.Ordinal))
+            return $"the pi rows must be exactly {string.Join(", ", PiGates)} in order, found {string.Join(", ", rows.Select(r => r.Gate))}";
+
+        foreach (var row in rows)
+        {
+            if (string.IsNullOrWhiteSpace(row.Measures))
+                return $"{row.Gate} does not say what it measures";
+
+            if (row.Result == PiPending)
+            {
+                if (row.Evidence != PiNoEvidence)
+                    return $"{row.Gate} is pending but cites evidence '{row.Evidence}'";
+            }
+            else if (!PiCanaryEvidence.IsMatch(row.Evidence))
+            {
+                return $"{row.Gate} states a result without canary evidence: '{row.Evidence}'";
+            }
+        }
+
+        return null;
+    }
+
+    private static IReadOnlyList<PiRow> CommittedPiRows() =>
+        ParsePiSection(File.ReadAllText(RepoPaths.Resolve(CapabilityMatrix.DocumentPath)));
+
+    [Fact]
+    public void PiSection_IsNotReadAsScenarioRows()
+    {
+        Assert.DoesNotContain("pi", CapabilityMatrix.Providers);
+        Assert.DoesNotContain(CapabilityMatrix.Parse(), r => r.Provider == "pi");
+    }
+
+    [Fact]
+    public void PiSection_HasOneRowPerCanaryGateAndOnlyCanaryEvidence()
+    {
+        Assert.Null(PiSectionFault(CommittedPiRows()));
+    }
+
+    /// <summary>
+    /// The B canary has not run. Every pi result stays pending until it does; this test changes in
+    /// the same commit as the canary evidence, never before.
+    /// </summary>
+    [Fact]
+    public void PiSection_ClaimsNoMeasurementUntilTheCanaryRuns()
+    {
+        foreach (var row in CommittedPiRows())
+        {
+            Assert.Equal(PiPending, row.Result);
+            Assert.Equal(PiNoEvidence, row.Evidence);
+            Assert.DoesNotMatch(@"\d", row.Result);
+        }
+    }
+
+    [Fact]
+    public void PiSectionRules_AcceptAPendingSection()
+    {
+        Assert.Null(PiSectionFault(ParsePiSection(PiDocument(AllPendingRows()))));
+    }
+
+    /// <summary>The shape a measured row takes once the canary has run.</summary>
+    [Fact]
+    public void PiSectionRules_AcceptAMeasurementCitingACanaryRun()
+    {
+        var rows = AllPendingRows();
+        rows[6] = "| B7 | something | lowest cached/prompt 0.93 | canary@2026-11-02/pi-1.0.4 |";
+
+        Assert.Null(PiSectionFault(ParsePiSection(PiDocument(rows))));
+    }
+
+    [Theory]
+    [InlineData("a number without evidence", 6, "| B7 | something | cached/prompt 0.99 | — |")]
+    [InlineData("spike evidence", 6, "| B7 | something | cached/prompt 0.99 | spike@2026-10-13 |")]
+    [InlineData("pending with evidence", 6, "| B7 | something | not measured (B canary pending) | canary@2026-11-02/pi-1.0.4 |")]
+    [InlineData("a reopen-gate row", 0, "| G1 | summary-call cache ratio | not measured (B canary pending) | — |")]
+    [InlineData("a B13 row", 11, "| B13 | the matrix itself | not measured (B canary pending) | — |")]
+    [InlineData("no measures", 2, "| B3 |  | not measured (B canary pending) | — |")]
+    public void PiSectionRules_RejectABrokenRow(string _, int index, string replacement)
+    {
+        var rows = AllPendingRows();
+        rows[index] = replacement;
+
+        Assert.NotNull(PiSectionFault(ParsePiSection(PiDocument(rows))));
+    }
+
+    [Fact]
+    public void PiSectionRules_RejectAMissingGate()
+    {
+        Assert.NotNull(PiSectionFault(ParsePiSection(PiDocument(AllPendingRows()[..^1]))));
+    }
+
+    [Fact]
+    public void PiSectionParser_RejectsAMissingOrRepeatedSectionAndAWrongTable()
+    {
+        Assert.Throws<FormatException>(() => ParsePiSection("# probe\n\n## claude\n"));
+        Assert.Throws<FormatException>(() => ParsePiSection(PiDocument(AllPendingRows()) + PiDocument(AllPendingRows())));
+        Assert.Throws<FormatException>(() => ParsePiSection(
+            PiDocument(AllPendingRows()).Replace("| gate | measures | result | evidence |", "| gate | result | evidence | note |")));
+        Assert.Throws<FormatException>(() => ParsePiSection(PiDocument("| B1 | something | pending |")));
+    }
 }

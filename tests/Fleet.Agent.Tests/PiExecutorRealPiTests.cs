@@ -119,11 +119,17 @@ public sealed class PiExecutorRealPiTests
     [Fact]
     public async Task A28_A14_AFastPathThresholdCompaction_IsSurvived_AndTheNextPromptWaitsForItsSettle()
     {
-        // W = 65536 compacts at 49152 tokens; long messages cross it in a few turns. The summary
+        // W = 65536 compacts at 49152 tokens. The stub reports server usage, so the second answer's
+        // usage (50000 input) crosses the threshold the way a real server's would. The summary
         // answer is delayed 3 s, so the turn after the crossing one meets a compaction in progress.
         await using var rig = await RealRig.StartAsync(
             new JsonObject
             {
+                ["main"] = new JsonArray
+                {
+                    new JsonObject { ["text"] = "Turn one done.", ["usage"] = new JsonObject { ["input"] = 30000 } },
+                    new JsonObject { ["text"] = "Turn two done.", ["usage"] = new JsonObject { ["input"] = 50000 } },
+                },
                 ["summary"] = new JsonArray
                 {
                     new JsonObject

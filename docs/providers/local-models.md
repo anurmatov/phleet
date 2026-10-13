@@ -369,8 +369,10 @@ Use this order when you upgrade a Fleet install to this release.
 5. Keep each agent's context window in lockstep with its server. Raise the server first, then
    the agent. Lower the agent first, then the server. The agent's value must never be higher
    than the server's.
-6. Pi: before the release that adds it, `get_agent_config` for every agent must show a provider
-   in PV1's set (empty, `claude`, `codex`, `gemini`, `pi`). After it, move local agents to Pi one
+6. Pi: before the release that adds it, every agent's provider must be in PV1's set (empty,
+   `claude`, `codex`, `gemini`, `pi`). Check it on the current release through the `provider`
+   field of `GET /api/agents/<agent>/config` or the `Provider` column of the `agents` table;
+   `get_agent_config` prints a `Provider:` line only from that release on. After it, move local agents to Pi one
    at a time and smoke-test each (`pi.md` §10).
 
 ## 11. Rollback

@@ -419,7 +419,9 @@ Anything else is refused (PI4). The compaction summary always runs with thinking
 | Pi → Codex local | `<tag>` → `ollama/<tag>` | `off` → `none`; `on`/`""` → `""` | kept |
 
 - The dashboard normalizes these values. REST and MCP never rewrite `Model` or `Effort`: send the
-  matching values in the same call, or the write fails with PI2 or PI4.
+  matching values in the same call. Into pi, a mismatch fails with PI2 or PI4. Out of pi, a
+  stored `on` (any provider) or `off` (codex, gemini, or claude cloud) is refused, as is an
+  `on` on a create; send the mapped effort, or `""`, with the switch.
 - A legacy Codex agent that reaches its server through the `CODEX_OSS_BASE_URL` Env Ref needs
   its Server URL entered first (`local-models.md` §9).
 - The server must serve Anthropic Messages. The Codex thread is dropped. Reprovision.
@@ -428,9 +430,12 @@ Anything else is refused (PI4). The compaction summary always runs with thinking
 
 Roll out only after the reopen gate has passed on the server the first Pi agents will use.
 
-0. Before deploying, run `get_agent_config` for every agent. Each must show a provider in PV1's
-   set (empty, `claude`, `codex`, `gemini`, `pi`); fix any other row first, because the new
-   release refuses to provision it.
+0. Before deploying, check every agent's provider on the **current** release: the `provider` field
+   of `GET /api/agents/<agent>/config` (what the dashboard's config modal loads), or the
+   `Provider` column of the `agents` table (`SELECT Name, Provider FROM agents;`). Each must be
+   in PV1's set (empty, `claude`, `codex`, `gemini`, `pi`); fix any other row first, because the
+   new release refuses to provision it. `get_agent_config` prints a `Provider:` line only from
+   this release on.
 1. Deploy the orchestrator, dashboard and agent image of the same release together. There is no
    migration and no `.env` change; `upgrade.sh` picks up the new image with no new prompt.
 2. Check that every non-pi agent's generated `appsettings.json` is unchanged and that every agent

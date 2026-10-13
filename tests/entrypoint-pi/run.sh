@@ -114,8 +114,8 @@ run_branch_mode() {
         grep -qF "$path" "$branch" || fail_assert "the pi branch does not name $path"
     done
     grep -qF "rm -rf $SESSIONS" "$branch" || fail_assert "the pi branch does not remove $SESSIONS"
-    grep -qx '    # phleet:pi-credential-env-names' "$branch" || fail_assert "names marker missing from the pi branch"
-    grep -qx '    # phleet:pi-credential-env-prefixes' "$branch" || fail_assert "prefixes marker missing from the pi branch"
+    grep -qx '# phleet:pi-credential-env-names' "$branch" || fail_assert "names marker missing from the pi branch"
+    grep -qx '# phleet:pi-credential-env-prefixes' "$branch" || fail_assert "prefixes marker missing from the pi branch"
 
     # Nothing runs until every /root/ literal points into the scratch root.
     literals=$(grep -oF '/root/' "$branch" | wc -l)

@@ -49,6 +49,7 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
         _agentConfig = agentConfig.Value;
         _rabbitConfig = rabbitConfig.Value;
         _logger = logger;
+        Connect = (factory, ct) => RabbitMqConnectionHelper.ConnectWithRetryAsync(factory, _logger, ct);
     }
 
     public bool IsEnabled => _rabbitConfig.Host.Length > 0;
@@ -67,6 +68,24 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
     /// <summary>True once a consumer has been started. Used by the wiring-order tests.</summary>
     internal bool IsInitializedForTesting => _initialized;
 
+    /// <summary>
+    /// Opens the broker connection. A seam so a test can hand <see cref="InitializeAsync"/> a
+    /// recording connection and assert the bindings it makes; production retries with backoff.
+    /// </summary>
+    internal Func<ConnectionFactory, CancellationToken, Task<IConnection>> Connect { get; init; }
+
+    /// <summary>
+    /// Whether this agent's queue is bound to the <c>fleet.relay</c> token-broadcast fanout. False
+    /// for a Claude local-model agent (#340) and for every pi agent (#386 §4.6): neither holds an
+    /// OAuth credential, so a broadcast has nothing to update and must never be applied.
+    /// </summary>
+    internal static bool BindsTokenBroadcasts(AgentOptions agent) =>
+        !ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl)
+        && !PiLocalModel.IsPi(agent.Provider);
+
+    private string NoBroadcastMode =>
+        PiLocalModel.IsPi(_agentConfig.Provider) ? "Pi agent" : "Claude local model mode";
+
     public async Task InitializeAsync(CancellationToken ct)
     {
         if (!IsEnabled || _initialized)
@@ -84,7 +103,7 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
                 NetworkRecoveryInterval = TimeSpan.FromSeconds(5),
             };
 
-            _connection = await RabbitMqConnectionHelper.ConnectWithRetryAsync(factory, _logger, ct);
+            _connection = await Connect(factory, ct);
             _connection.ConnectionShutdownAsync += (_, args) =>
             {
                 _logger.LogWarning("RabbitMQ connection lost (reason: {Reason}) — auto-recovery in progress", args.ReplyText);
@@ -116,11 +135,12 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             await _consumeChannel.QueueBindAsync(queueName, _rabbitConfig.Exchange, routingKey: shortName,
                 cancellationToken: ct);
 
-            if (ClaudeLocalModel.IsEnabled(_agentConfig.Provider, _agentConfig.AnthropicBaseUrl))
+            if (!BindsTokenBroadcasts(_agentConfig))
             {
-                // #340 D3: fleet.relay carries only OAuth token broadcasts, and a local-model agent
-                // holds none. Never bound, not even transiently; a binding from an earlier life is
-                // removed. Runs after the QueueDeclare above: unbinding an undeclared queue is a 404.
+                // #340 D3, #386 §4.6: fleet.relay carries only OAuth token broadcasts, and a Claude
+                // local-model agent or a pi agent holds none. Never bound, not even transiently; a
+                // binding from an earlier life is removed. Runs after the QueueDeclare above:
+                // unbinding an undeclared queue is a 404.
                 await UnbindTokenBroadcastsAsync(queueName, ct);
             }
             else
@@ -156,7 +176,8 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
     /// <remarks>
     /// On its own short-lived channel: a broker error closes the channel it happens on, and on the
     /// consume channel that would stop all relay delivery to this agent. A failure is a warning,
-    /// not a startup failure — the token-update handler ignores claude broadcasts in local mode.
+    /// not a startup failure — the token-update handler ignores claude broadcasts in local mode, and
+    /// every broadcast on a pi agent.
     /// </remarks>
     private async Task UnbindTokenBroadcastsAsync(string queueName, CancellationToken ct)
     {
@@ -172,13 +193,13 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             await channel.CloseAsync(ct);
 
             _logger.LogInformation(
-                "Claude local model mode: {Queue} is not bound to fleet.relay (token broadcasts)", queueName);
+                "{Mode}: {Queue} is not bound to fleet.relay (token broadcasts)", NoBroadcastMode, queueName);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex,
-                "Claude local model mode: could not remove a fleet.relay binding from {Queue}; "
-                + "claude token broadcasts are still ignored by the handler", queueName);
+                "{Mode}: could not remove a fleet.relay binding from {Queue}; "
+                + "token broadcasts are still ignored by the handler", NoBroadcastMode, queueName);
         }
     }
 

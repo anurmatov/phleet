@@ -7,7 +7,7 @@ using Microsoft.EntityFrameworkCore;
 namespace Fleet.Orchestrator.Services;
 
 public sealed record EpicDriverIdentity(string WorkflowId, string RunId, string Status);
-public sealed record EpicDriverGrant(string Id, string Status, DateTime ExpiresAt);
+public sealed record EpicDriverGrant(string Id, string Status, DateTime ExpiresAt, string Mode = "delegated", EpicGrantBudgets? Budgets = null);
 public sealed record EpicDriverChild(string WorkflowId, string RunId, string Type, string Status, string? Phase,
     string? GateVisit, string? ReviewRef, string? Repo, long? Issue, string NextAction, string? Eligibility,
     string Outcome, long? OutcomeIssue);
@@ -40,11 +40,6 @@ public sealed class EpicDriverStateService(IServiceScopeFactory scopes, IEpicGra
             else
             {
                 var key = ns + ":" + driver.RunId;
-                if (_replies.TryGet(key, out var cached) && clock.GetUtcNow() - cached.ComputedAt < TimeSpan.FromSeconds(30))
-                {
-                    Log(workflowId, 0, cached, true);
-                    return cached with { Cached = true };
-                }
                 using var scope = scopes.CreateScope();
                 var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
                 if (db is null) errors.Add("database_unavailable");
@@ -52,12 +47,33 @@ public sealed class EpicDriverStateService(IServiceScopeFactory scopes, IEpicGra
                 {
                     var rows = await db.EpicGrants.AsNoTracking().Where(g => g.DriverRunId == driver.RunId
                         && g.DriverNamespace == ns && g.DriverWorkflowId == workflowId).ToListAsync(token);
+                    // Autonomous snapshots must rerun stored-preflight integrity on every request.
+                    if (rows.All(g => g.Mode != "autonomous") && _replies.TryGet(key, out var cached)
+                        && clock.GetUtcNow() - cached.ComputedAt < TimeSpan.FromSeconds(30))
+                    { Log(workflowId,0,cached,true); return cached with { Cached=true }; }
                     foreach (var g in rows.OrderBy(g => g.Id.ToString("D"), StringComparer.Ordinal))
+                    {
+                        EpicGrantBudgets? budgets = null;
+                        var service = scope.ServiceProvider.GetService<EpicGrantService>();
+                        if (g.Mode == "autonomous" && service is not null
+                            && EpicScopeParser.Parse(g.ScopeJson,autonomyEnabled:true).Scope?.Autonomy is { } charter)
+                            budgets = await service.ReadBudgetsAsync(g.Id,charter,token);
                         grants.Add(new(g.Id.ToString("D"), g.Status == "revoked" ? "revoked"
-                            : g.ExpiresAt <= clock.GetUtcNow().UtcDateTime ? "expired" : "active", g.ExpiresAt));
+                            : g.ExpiresAt <= clock.GetUtcNow().UtcDateTime ? "expired" : "active",g.ExpiresAt,g.Mode,budgets));
+                    }
                 }
                 var linked = await linkage.ListLinkedRunsAsync(ns, new(ns, workflowId, driver.RunId),
                     clock.GetUtcNow().AddHours(-24), 50, token);
+                if (db is not null)
+                    for (var i=0;i<grants.Count;i++)
+                        if (grants[i].Budgets is { } budgets)
+                        {
+                            var grantId=Guid.Parse(grants[i].Id);
+                            var recorded=await db.EpicGrantRuns.AsNoTracking().Where(r=>r.GrantId==grantId).ToListAsync(token);
+                            var pending=linked.Children.Count(r=>r.Description.IsRunning && !recorded.Any(row=>row.Namespace==r.Summary.Namespace
+                                && row.WorkflowId==r.Summary.WorkflowId && row.RunId==r.Summary.RunId));
+                            grants[i]=grants[i] with { Budgets=budgets with { DelegatedRuns=budgets.DelegatedRuns with { PendingRunning=pending } } };
+                        }
                 candidates = linked.Candidates; truncated = linked.Truncated; errors.AddRange(linked.Errors);
                 var collected = new System.Collections.Concurrent.ConcurrentBag<EpicDriverChild>();
                 var childErrors = new System.Collections.Concurrent.ConcurrentBag<string>();
@@ -82,12 +98,12 @@ public sealed class EpicDriverStateService(IServiceScopeFactory scopes, IEpicGra
                                     var result = await service.DryRunDecideAsync(grant.Id,
                                         new(ns, s.WorkflowId, gate, "approved", d.GateVisit, d.ReviewRef,
                                             "https://example.com/review", config["FLEET_CTO_AGENT"]), childCt);
-                                    eligibility = result.Reason ?? "unknown";
-                                    if (eligibility == "visibility_unknown") break;
+                                    eligibility = result.Result == "eligible" ? "eligible" : result.Reason ?? "unknown";
+                                    if (eligibility is "eligible" or "visibility_unknown") break;
                                 }
                             }
                             collected.Add(new(s.WorkflowId, s.RunId, s.WorkflowType, d.Status, d.Phase, d.GateVisit,
-                                d.ReviewRef, d.Repo, d.IssueNumber, !string.IsNullOrEmpty(d.GateVisit) ? "human_decide"
+                                d.ReviewRef, d.Repo, d.IssueNumber, !string.IsNullOrEmpty(d.GateVisit) ? eligibility == "eligible" ? "cto_decide" : "human_decide"
                                     : d.IsRunning ? "running" : d.Status == "Completed" ? "terminal_ok" : "terminal_failed",
                                 eligibility, outcome.Outcome, outcome.Issue));
                         });
@@ -125,7 +141,7 @@ public sealed class EpicDriverStateService(IServiceScopeFactory scopes, IEpicGra
         var finalErrors = errors.Distinct().Order(StringComparer.Ordinal).ToArray();
         var tuples = children.Select(c => new object?[] { c.WorkflowId, c.RunId, c.Status, c.Phase, c.GateVisit,
             c.ReviewRef, c.NextAction, c.Outcome, c.OutcomeIssue });
-        var canonical = JsonSerializer.Serialize(new { children = tuples, grants = grants.Select(g => new[] { g.Id, g.Status }) });
+        var canonical = JsonSerializer.Serialize(new { children = tuples, grants = grants.Select(g => new object?[] { g.Id,g.Status,g.Mode,g.Budgets }) });
         var fingerprint = finalErrors.Length > 0 ? "none" : Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
         var reply = new EpicDriverState(new(workflowId, driver?.RunId ?? "", driver?.Status ?? "unknown"),
             grants, children, fingerprint, truncated, finalErrors, clock.GetUtcNow(), false);

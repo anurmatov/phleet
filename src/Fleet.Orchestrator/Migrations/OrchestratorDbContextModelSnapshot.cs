@@ -576,6 +576,21 @@ namespace Fleet.Orchestrator.Migrations
                     b.Property<DateTime>("ExpiresAt")
                         .HasColumnType("datetime(6)");
 
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)")
+                        .HasDefaultValue("delegated");
+
+                    b.Property<string>("PreflightJson")
+                        .HasColumnType("longtext");
+
+                    b.Property<string>("PreflightSha256")
+                        .HasMaxLength(64)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
                     b.Property<string>("RevokeReason")
                         .HasMaxLength(500)
                         .HasColumnType("varchar(500)");
@@ -601,6 +616,57 @@ namespace Fleet.Orchestrator.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("epic_grants", (string)null);
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.EpicGrantBinding", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<Guid>("GrantId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<long>("Issue")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Namespace")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("Repo")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
+                    b.Property<string>("ReviewRef")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<string>("RunId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("WorkflowId")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("varchar(255)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("GrantId", "Repo", "Issue")
+                        .IsUnique();
+
+                    b.ToTable("epic_grant_bindings", (string)null);
                 });
 
             modelBuilder.Entity("Fleet.Orchestrator.Data.EpicGrantDecision", b =>
@@ -673,6 +739,61 @@ namespace Fleet.Orchestrator.Migrations
                         .IsUnique();
 
                     b.ToTable("epic_grant_decisions", (string)null);
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.EpicGrantRun", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime>("FirstReservedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<Guid>("GrantId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<long?>("Issue")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("MaxFixRound")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(0);
+
+                    b.Property<string>("Namespace")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("Repo")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
+                    b.Property<string>("RunId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("WorkflowId")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("varchar(255)");
+
+                    b.Property<string>("WorkflowType")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("varchar(100)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("GrantId", "Namespace", "WorkflowId", "RunId")
+                        .IsUnique();
+
+                    b.ToTable("epic_grant_runs", (string)null);
                 });
 
             modelBuilder.Entity("Fleet.Orchestrator.Data.Instruction", b =>
@@ -1083,7 +1204,29 @@ namespace Fleet.Orchestrator.Migrations
                     b.Navigation("Agent");
                 });
 
+            modelBuilder.Entity("Fleet.Orchestrator.Data.EpicGrantBinding", b =>
+                {
+                    b.HasOne("Fleet.Orchestrator.Data.EpicGrant", "Grant")
+                        .WithMany()
+                        .HasForeignKey("GrantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Grant");
+                });
+
             modelBuilder.Entity("Fleet.Orchestrator.Data.EpicGrantDecision", b =>
+                {
+                    b.HasOne("Fleet.Orchestrator.Data.EpicGrant", "Grant")
+                        .WithMany()
+                        .HasForeignKey("GrantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Grant");
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.EpicGrantRun", b =>
                 {
                     b.HasOne("Fleet.Orchestrator.Data.EpicGrant", "Grant")
                         .WithMany()

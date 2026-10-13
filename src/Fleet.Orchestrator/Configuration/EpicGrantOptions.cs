@@ -17,6 +17,17 @@ public sealed class EpicGrantOptions
     /// </summary>
     public bool Enabled { get; set; }
 
+    /// <summary>Separate startup-only autonomy switch, off by default.</summary>
+    public bool AutonomyEnabled { get; set; }
+
+    /// <summary>Returns true once when startup must log and disable invalid autonomy.</summary>
+    public bool DisableMisconfiguredAutonomy()
+    {
+        if (!AutonomyEnabled || (Enabled && MaxDays > 0)) return false;
+        AutonomyEnabled = false;
+        return true;
+    }
+
     /// <summary>Longest allowed grant lifetime, in days from creation.</summary>
     public int MaxDays { get; set; } = 14;
 

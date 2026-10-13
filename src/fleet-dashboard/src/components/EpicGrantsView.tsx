@@ -3,7 +3,7 @@ import { apiFetch } from '../utils'
 import FieldHint from './FieldHint'
 import type { EpicGrantDetail, EpicGrantView, ScopeValidationReport } from '../types'
 import {
-  applyRevoke, applyRevokeToDetail, asValidationReport, canRevoke, createBlockedReason,
+  adoptPreflightRun, preflightRunIsAdopted, autonomyCharterDraft, applyRevoke, applyRevokeToDetail, asValidationReport, canRevoke, createBlockedReason,
   isDeliveryUnknown, isPublicTarget, parseScopeText, responseErrorMessage, revokeRequestBody,
   scopeRequestBody, shortHash, statusLabel,
 } from '../epicGrants'
@@ -41,7 +41,8 @@ function isRunning(status: string): boolean {
   return status.toLowerCase().includes('running')
 }
 
-function ScopeReport({ report, stale }: { report: ScopeValidationReport; stale: boolean }) {
+export function ScopeReport({ report, stale, text, onAdopt }: { report: ScopeValidationReport; stale: boolean; text: string; onAdopt: (item: Record<string, unknown>, checked: boolean) => void }) {
+  const parsed = parseScopeText(text)
   return (
     <div className={`eg-report${stale ? ' eg-report-stale' : ''}`}>
       {stale && (
@@ -73,6 +74,17 @@ function ScopeReport({ report, stale }: { report: ScopeValidationReport; stale: 
         </div>
       </div>
 
+      {report.preflight && <>
+        <div className="eg-subtitle">Charter preflight: {report.preflight.unresolved} unresolved</div>
+        <pre>{JSON.stringify(report.preflight.items, null, 2)}</pre>
+        {report.preflight.items.filter(item => item.source === 'linked_run' && typeof item.issue === 'number').map(item => (
+          <label key={String(item.runId)}><input type="checkbox" checked={parsed.ok && preflightRunIsAdopted(parsed.scope, item)}
+            onChange={event => onAdopt(item, event.target.checked)} />
+            Adopt exact run {String(item.workflowId)} / {String(item.runId)} for {String(item.repo)}#{String(item.issue)}
+          </label>
+        ))}
+        <div className="eg-mono">Items SHA-256: {report.preflight.sha256}</div>
+      </>}
       <div className="eg-subtitle">Pinned workflows</div>
       {report.workflows.length === 0 ? <div className="eg-muted">none</div> : (
         <table className="eg-table">
@@ -121,6 +133,15 @@ function ScopeReport({ report, stale }: { report: ScopeValidationReport; stale: 
       )}
     </div>
   )
+}
+
+export function AutonomyNotice() {
+  return <div className="wfd-validation-item warning">
+    Charter JSON: fill outcome, children repos/maxIssues, all four limits, plan/after, optional adopt and exclusions below.
+    Creation requires zero unresolved server preflight items. Stage 2 never delegates merges.
+    Excluded action classes: deployments, credentials, money, production tests, instructions and live configuration.
+    An exclusion stays a human decision and cannot widen this charter.
+  </div>
 }
 
 function GrantStatusBadge({ status }: { status: EpicGrantView['effectiveStatus'] }) {
@@ -350,6 +371,11 @@ export default function EpicGrantsView() {
         <div className="wfd-new-form-title">New grant</div>
         <div className="wfd-new-form-fields">
           <div className="wfd-form-row">
+            <button className="wfd-toggle-btn" type="button" disabled={validating || createState === 'pending'} onClick={() => {
+              const parsed = parseScopeText(text || SCOPE_PLACEHOLDER)
+              if (parsed.ok) { setText(JSON.stringify(autonomyCharterDraft(parsed.scope), null, 2)); setReport(null); setValidatedText(null) }
+            }}>Draft autonomy charter</button>
+            {parseScopeText(text).ok && text.includes('"autonomous"') && <AutonomyNotice />}
             <label className="config-label">Scope JSON <span className="wfd-required">*</span></label>
             <FieldHint>
               One driver run, exact target issues, pinned workflow definitions, gates and an expiry.
@@ -366,7 +392,10 @@ export default function EpicGrantsView() {
             {formError && <div className="wfd-field-error">{formError}</div>}
           </div>
         </div>
-        {report && <ScopeReport report={report} stale={reportStale} />}
+        {report && <ScopeReport report={report} stale={reportStale} text={text} onAdopt={(item, checked) => {
+              const parsed = parseScopeText(text)
+              if (parsed.ok) setText(JSON.stringify(adoptPreflightRun(parsed.scope, item, checked), null, 2))
+            }} />}
         <div className="wfd-new-form-actions">
           <button className="wfd-cancel-btn" disabled={validating} onClick={handleValidate}>
             {validating ? 'Validating…' : 'Validate'}
@@ -455,6 +484,13 @@ export default function EpicGrantsView() {
                           </>
                         )}
                       </div>
+                      <div className="eg-subtitle">Mode: {detail.mode ?? 'delegated'}</div>
+                      {detail.mode === 'autonomous' && <>
+                        <div className="eg-subtitle">Permanent budgets</div>
+                        <pre>{JSON.stringify(detail.budgets, null, 2)}</pre>
+                        <div className="eg-subtitle">Stored preflight and issue bindings</div>
+                        <pre>{JSON.stringify({ preflight: detail.preflight, bindings: detail.bindings, runs: detail.runs }, null, 2)}</pre>
+                      </>}
                       <div className="eg-subtitle">
                         Decisions
                         <button className="wfd-toggle-btn eg-inline-btn" onClick={() => loadDetail(g.id)}>reload</button>

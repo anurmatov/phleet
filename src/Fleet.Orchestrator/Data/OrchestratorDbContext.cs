@@ -44,6 +44,8 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
 
     // Epic grants (#436): human-approved grant scopes and the permanent per-visit decision record.
     public DbSet<EpicGrant> EpicGrants => Set<EpicGrant>();
+    public DbSet<EpicGrantBinding> EpicGrantBindings => Set<EpicGrantBinding>();
+    public DbSet<EpicGrantRun> EpicGrantRuns => Set<EpicGrantRun>();
     public DbSet<EpicGrantDecision> EpicGrantDecisions => Set<EpicGrantDecision>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -335,6 +337,9 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             // Guid → char(36), Pomelo's native GUID column.
             e.Property(x => x.Id).ValueGeneratedNever();
             e.Property(x => x.Status).HasMaxLength(16).IsRequired();
+            e.Property(x => x.Mode).HasMaxLength(16).HasDefaultValue("delegated").IsRequired();
+            e.Property(x => x.PreflightJson).HasColumnType("longtext");
+            e.Property(x => x.PreflightSha256).HasMaxLength(64).IsFixedLength();
             e.Property(x => x.ScopeJson).HasColumnType("longtext").IsRequired();
             e.Property(x => x.ScopeSha256).HasMaxLength(64).IsFixedLength().IsRequired();
             e.Property(x => x.DriverNamespace).HasMaxLength(64).IsRequired();
@@ -342,6 +347,37 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.Property(x => x.DriverRunId).HasMaxLength(36).IsRequired();
             e.Property(x => x.CtoAgent).HasMaxLength(128).IsRequired();
             e.Property(x => x.RevokeReason).HasMaxLength(500);
+        });
+
+        modelBuilder.Entity<EpicGrantBinding>(e =>
+        {
+            e.ToTable("epic_grant_bindings");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).ValueGeneratedOnAdd();
+            e.Property(x => x.Namespace).HasMaxLength(64).IsRequired();
+            e.Property(x => x.Repo).HasMaxLength(200).IsRequired();
+            e.Property(x => x.WorkflowId).HasMaxLength(255).IsRequired();
+            e.Property(x => x.RunId).HasMaxLength(64).IsRequired();
+            e.Property(x => x.ReviewRef).HasMaxLength(64).IsFixedLength().IsRequired();
+            e.Property(x => x.CreatedAt).HasColumnType("datetime(6)");
+            e.HasIndex(x => new { x.GrantId, x.Repo, x.Issue }).IsUnique();
+            e.HasOne(x => x.Grant).WithMany().HasForeignKey(x => x.GrantId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<EpicGrantRun>(e =>
+        {
+            e.ToTable("epic_grant_runs");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).ValueGeneratedOnAdd();
+            e.Property(x => x.Namespace).HasMaxLength(64).IsRequired();
+            e.Property(x => x.WorkflowId).HasMaxLength(255).IsRequired();
+            e.Property(x => x.RunId).HasMaxLength(64).IsRequired();
+            e.Property(x => x.WorkflowType).HasMaxLength(100).IsRequired();
+            e.Property(x => x.Repo).HasMaxLength(200).IsRequired();
+            e.Property(x => x.MaxFixRound).HasDefaultValue(0);
+            e.Property(x => x.FirstReservedAt).HasColumnType("datetime(6)");
+            e.HasIndex(x => new { x.GrantId, x.Namespace, x.WorkflowId, x.RunId }).IsUnique();
+            e.HasOne(x => x.Grant).WithMany().HasForeignKey(x => x.GrantId).OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<EpicGrantDecision>(e =>

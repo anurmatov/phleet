@@ -501,6 +501,7 @@ export type EpicGrantEffectiveStatus = 'active' | 'expired' | 'revoked'
 export interface EpicGrantView {
   id: string
   status: EpicGrantStatus
+  mode?: 'delegated' | 'autonomous'
   effectiveStatus: EpicGrantEffectiveStatus
   scopeSha256: string
   driverNamespace: string
@@ -531,7 +532,23 @@ export interface EpicGrantDecisionView {
   updatedAt: string
 }
 
+export interface EpicGrantBudgets {
+  decisions: { used: number; max: number }
+  childIssues: { used: number; max: number }
+  delegatedRuns: { used: number; pendingRunning: number; max: number }
+  acceptanceRounds: { used: number; max: number }
+}
+export interface EpicPreflight {
+  items: Record<string, unknown>[]
+  unresolved: number
+  sha256: string
+  visibility: Record<string, 'public' | 'private'>
+}
 export interface EpicGrantDetail extends EpicGrantView {
+  budgets?: EpicGrantBudgets | null
+  preflight?: EpicPreflight | null
+  bindings?: { repo: string; issue: number; workflowId: string; runId: string; reviewRef: string }[]
+  runs?: { workflowId: string; runId: string; maxFixRound: number }[]
   scope: object
   decisions: EpicGrantDecisionView[]
 }
@@ -562,6 +579,7 @@ export interface ScopeValidationTarget {
 
 /** `POST /api/epic-grants/validate` (200), and the 400 body of `POST /api/epic-grants`. */
 export interface ScopeValidationReport {
+  preflight?: EpicPreflight | null
   valid: boolean
   errors: string[]
   scopeSha256: string | null

@@ -239,3 +239,57 @@ exact driver runs. Wakes never approve a guarded gate or widen grant authority.
 A replacement driver run still requires its own human-created grant; seeds,
 source merges and watcher activation do not transfer an old scope. See
 [epic driver handoffs](epic-driver.md) for separate rollout and rollback gates.
+
+## Autonomy charters (stage 2, default off)
+
+`FLEET_AUTONOMY_ENABLED=false` is an orchestrator startup-only switch. It requires
+base epic grants enabled with a positive lifetime; otherwise startup logs
+`epic_autonomy_misconfigured` and disables autonomy. It is not a peer or live
+configuration key. A source merge, seed save or design approval enables nothing.
+
+Legacy scopes omit `mode` or use `delegated`; new keys are then refused.
+An autonomous scope adds `mode: autonomous`, `outcome`, `children` (repo/public
+opt-ins and maxIssues), four `limits`, `acceptanceIsolation: isolated` and `plan`.
+Optional `adopt` and `exclusions` default to empty lists. The [stage-2 contract](https://github.com/anurmatov/phleet/issues/450)
+contains the exact ranges, graph and exclusion rules. No action list grants
+permission for deployments, credentials, money, production tests or instructions.
+
+The dashboard's charter draft fills no issue scope automatically: edit its JSON,
+validate, inspect every preflight item, then create only with zero unresolved
+items. Creation recomputes server-side preflight, captures live visibility for
+all target and child repos, and stores canonical JSON and its exact-byte SHA256.
+Plan definitions use the current saved version; loaded runs use their own pinned
+version. Running linked runs must be adopted by exact run id or excluded; a
+pre-grant CREATE design cannot bind a new issue. Exclusions remain human decisions.
+
+An adoption must name a listed repo/issue, a Running exact run and a guarded,
+pinned loaded definition with an independent author. Restarts/resets lose it;
+optional artifactRef additionally pins the decision. Adoption never widens targets.
+
+A post-grant linked CREATE design can bind its IssueNumber attribute only with
+matching AutonomyGrantId and an independently attested whole `scope-fit` token.
+Public decisions also need the whole `pass` token. Only a locked reservation
+transaction writes a binding or exact-run record. Decision, run and child counts
+are cumulative, including reserved/send_failed rows; revocation never deletes them.
+Acceptance rounds are reported as zero in stage 2. Every autonomous merge approval
+stops at `acceptance_missing` after the artifact check; merges remain human-only.
+
+Admission is a read-only internal GET at `/api/epic-grants/<id>/admission`, with
+workflowType, repo, issue (empty for CREATE) and planItem query fields. It returns
+result=admit/deny, reason, needsBinding, budgets and cachedAt. Replies last ten
+seconds; admission is advisory, never a reservation. The dashboard proxy returns
+404 for this route case-insensitively. Stored-preflight integrity is checked anew
+before any cached reply. Dry runs use only recorded visibility, never GitHub;
+real decisions read visibility live. Missing, mismatched or malformed preflight
+refuses unknown and logs `EpicGrant preflight_integrity` with reader and result.
+Neither reader writes rows or sends signals.
+
+Migration `AddAutonomyCharters` adds Mode with default delegated, nullable exact
+preflight evidence and two FK-restricted permanent tables. Verify Up/Down and
+concurrent budgets on real MySQL; SQLite/model tests are not schema proof.
+Before enabling, independently verify exact-head CI and isolated-stack acceptance,
+deploy flag-off, and separately approve child-first definition saves and the
+orchestrator flag. Preserve prior artifacts and do not change running snapshots.
+Rollback disables the startup flag and recreates only approved services; do not
+release rows, replay failed sends or rewrite stored charters. Reverting definitions
+requires a new approved version, not an edit to a running execution.

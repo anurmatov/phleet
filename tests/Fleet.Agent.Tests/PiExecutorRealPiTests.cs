@@ -243,11 +243,11 @@ public sealed class PiExecutorRealPiTests
             return; // Unmeasured on this machine; CI runs it strict.
         }
 
+        // One trace file per invocation: the executor also runs `pi --version` through the wrapper.
         using var traceDir = new PiTempDirectory("pi-strace");
-        var trace = Path.Combine(traceDir.Path, "connect.trace");
         var wrapper = Path.Combine(traceDir.Path, "pi-traced");
         File.WriteAllText(wrapper,
-            $"#!/bin/sh\nexec {strace} -f -qq -e trace=connect -o '{trace}' '{ResolvePi()}' \"$@\"\n");
+            $"#!/bin/sh\nexec {strace} -f -qq -e trace=connect -o '{traceDir.Path}/connect.'$$ '{ResolvePi()}' \"$@\"\n");
         File.SetUnixFileMode(wrapper, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 
         await using (var rig = await RealRig.StartAsync(new JsonObject
@@ -265,7 +265,10 @@ public sealed class PiExecutorRealPiTests
             Assert.Equal("three", Final(await rig.RunTurnAsync("3")));
 
             var allowed = new[] { new Uri(rig.Origin).Port, new Uri(rig.McpUrl).Port };
-            var connects = File.ReadAllLines(trace).Where(l => l.Contains("connect(", StringComparison.Ordinal)).ToList();
+            var connects = Directory.GetFiles(traceDir.Path, "connect.*")
+                .SelectMany(File.ReadAllLines)
+                .Where(l => l.Contains("connect(", StringComparison.Ordinal))
+                .ToList();
             var inet = connects.Where(l => l.Contains("AF_INET", StringComparison.Ordinal)).ToList();
             Assert.NotEmpty(inet);
             foreach (var line in inet)

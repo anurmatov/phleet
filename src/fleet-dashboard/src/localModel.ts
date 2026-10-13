@@ -2,12 +2,26 @@ import type { AgentConfig, CodexLocalServer, ConfigEdits, LocalModelSuggestion }
 import { LOCAL_MODEL_SUGGESTIONS, PROVIDER_DEFAULT_MODEL } from './constants.ts'
 import { parseContextWindow } from './contextWindow.ts'
 
-// Local model mode for the Claude and Codex harnesses (#382). "Runs on: Local server" is a
-// where-it-runs choice inside the chosen harness: one server URL, a model tag and a context window.
-// A Codex local model is stored as `<server>/<tag>`; a Claude local model is the bare tag.
+// Local model mode for the Claude and Codex harnesses (#382) and the Pi harness (#386). "Runs on:
+// Local server" is a where-it-runs choice inside the chosen harness: one server URL, a model tag and
+// a context window. A Codex local model is stored as `<server>/<tag>`; a Claude or Pi local model is
+// the bare tag. Pi has no cloud: it is always local.
 // Kept free of JSX and `import.meta.env` so `node --test` can run it.
 
 export const CODEX_LOCAL_SERVERS: CodexLocalServer[] = ['ollama', 'lmstudio']
+
+/** PI3's minimum context window; mirrors `PiLocalModel.MinContextWindow`. */
+export const PI_MIN_CONTEXT_WINDOW = 65536
+
+/** The "Runs on" note for a Pi agent, whose Runs on is locked to Local server. */
+export const PI_RUNS_ON_NOTE = 'Pi runs only on a local server'
+
+// The server's fault texts (`PiLocalModel.Pi1Text`, `Pi3Text`), shown before Save sends anything.
+export const PI1_TEXT = 'Pi runs only on a local server; set the local server URL.'
+export const PI3_TEXT = "Pi needs the server's context size, at least 65536; set the context window to the server's --ctx."
+
+/** PI4: '' (the default) and `on` run thinking on; `off` runs it off. */
+export const PI_EFFORT_CHOICES = ['', 'off', 'on']
 
 /** The Env Ref a legacy Codex local agent reaches its server through. */
 export const CODEX_OSS_ENV_REF = 'CODEX_OSS_BASE_URL'
@@ -26,7 +40,16 @@ export type LocalModelEdits =
 export type LocalModelPatch = Partial<LocalModelEdits>
 
 export function isLocalHarness(provider: string): boolean {
-  return provider === 'claude' || provider === 'codex'
+  return provider === 'claude' || provider === 'codex' || provider === 'pi'
+}
+
+export function isPi(provider: string): boolean {
+  return provider === 'pi'
+}
+
+/** Pi has no cloud mode, so its "Runs on" is locked to Local server. */
+export function runsOnLocked(provider: string): boolean {
+  return isPi(provider)
 }
 
 /**
@@ -46,8 +69,12 @@ export function composeCodexLocalModel(server: CodexLocalServer, tag: string): s
   return `${server}/${tag}`
 }
 
-/** Local when claude or codex has a URL, or codex has a local model (the legacy Env Ref row). Gemini never. */
+/**
+ * Local when claude or codex has a URL, or codex has a local model (the legacy Env Ref row). Pi
+ * always, URL or not (an empty URL is PI1 at Save). Gemini never.
+ */
 export function isLocalMode(provider: string, localBaseUrl: string, model: string): boolean {
+  if (runsOnLocked(provider)) return true
   if (!isLocalHarness(provider)) return false
   return localBaseUrl.trim() !== '' || (provider === 'codex' && splitCodexLocalModel(model) !== null)
 }
@@ -64,7 +91,7 @@ export function localModelEditValues(
   }
 }
 
-/** The model tag the form shows: the stored model for Claude, the part after `<server>/` for Codex. */
+/** The model tag the form shows: the stored model for Claude and Pi, the part after `<server>/` for Codex. */
 export function localModelTag(provider: string, model: string): string {
   return provider === 'codex' ? splitCodexLocalModel(model)?.tag ?? '' : model
 }
@@ -84,28 +111,70 @@ export function setLocalServer(edits: LocalModelEdits, server: CodexLocalServer)
 
 /**
  * The "Runs on" toggle. Cloud → Local starts with an empty tag and URL. Local → Cloud clears the
- * URL and the context window and resets the model; effort is left alone (#349 marker rule).
+ * URL and the context window and resets the model; effort is left alone (#349 marker rule). Pi is
+ * locked to Local server: nothing changes.
  */
 export function switchRunsOn(edits: LocalModelEdits, local: boolean): LocalModelPatch {
-  if (local === edits.localMode) return {}
+  if (runsOnLocked(edits.provider) || local === edits.localMode) return {}
   return local
     ? { localMode: true, model: '', localBaseUrl: '', localServer: 'ollama' }
     : { localMode: false, model: PROVIDER_DEFAULT_MODEL[edits.provider] ?? '', localBaseUrl: '', contextWindow: '' }
 }
 
 /**
- * Provider change. Claude ↔ Codex while Local keeps the URL and context and normalizes the stored
- * model (Codex → Claude strips `<server>/`; Claude → Codex composes `ollama/<tag>`). Gemini has no
- * local mode, so switching to it clears the URL and context. Otherwise the model resets as before.
+ * §4.7: the Pi effort for a move to Pi. From Codex, `none`/`minimal` → `off`; from Claude (or any
+ * other harness), `off` → `off`. Anything else → '' (the default, thinking on).
+ */
+export function effortToPi(from: string, effort: string): string {
+  if (from === 'codex') return effort === 'none' || effort === 'minimal' ? 'off' : ''
+  return effort === 'off' ? 'off' : ''
+}
+
+/** §4.7: the effort for a move from Pi. `off` → `off` on Claude, `none` on Codex; `on`/'' → ''. */
+export function effortFromPi(next: string, effort: string): string {
+  if (effort !== 'off') return ''
+  return next === 'codex' ? 'none' : 'off'
+}
+
+/**
+ * Provider change. Between local harnesses (Claude, Codex, Pi) the URL and context are kept and the
+ * stored model is normalized: `<server>/` is stripped leaving Codex, `ollama/<tag>` is composed
+ * entering it, and Claude and Pi keep the bare tag. A move to or from Pi also maps effort (§4.7);
+ * Claude ↔ Codex leaves it to the select's marker (#349). Cloud → Pi starts like Cloud → Local.
+ * Gemini has no local mode, so switching to it clears the URL and context. Otherwise the model
+ * resets as before.
  */
 export function switchProvider(edits: LocalModelEdits, next: string): LocalModelPatch {
   if (next === edits.provider) return {}
-  if (edits.localMode && isLocalHarness(next)) {
+  if ((edits.localMode || runsOnLocked(edits.provider)) && isLocalHarness(next)) {
     const tag = localModelTag(edits.provider, edits.model)
-    return { provider: next, localServer: 'ollama', model: modelForTag(next, 'ollama', tag) }
+    const patch: LocalModelPatch = { provider: next, localMode: true, localServer: 'ollama', model: modelForTag(next, 'ollama', tag) }
+    if (isPi(next)) return { ...patch, effort: effortToPi(edits.provider, edits.effort) }
+    if (isPi(edits.provider)) return { ...patch, effort: effortFromPi(next, edits.effort) }
+    return patch
+  }
+  if (isPi(next)) {
+    return {
+      provider: next, localMode: true, model: '', localBaseUrl: '', localServer: 'ollama',
+      effort: effortToPi(edits.provider, edits.effort),
+    }
   }
   const patch: LocalModelPatch = { provider: next, localMode: false, model: PROVIDER_DEFAULT_MODEL[next] ?? '' }
   return next === 'gemini' ? { ...patch, localBaseUrl: '', contextWindow: '' } : patch
+}
+
+/**
+ * The create form's provider change: the provider's default model. Pi has none, so it starts with
+ * an empty tag, and an effort copied from another agent is mapped as in §4.7. The create form has
+ * no local mode, so leaving Pi (for a cloud model) drops its off/on effort.
+ */
+export function createFormProviderPatch(
+  form: { provider: string; effort: string }, next: string,
+): { provider: string; model: string; effort?: string } {
+  const patch = { provider: next, model: PROVIDER_DEFAULT_MODEL[next] ?? '' }
+  if (next === form.provider) return patch
+  if (isPi(next)) return { ...patch, effort: effortToPi(form.provider, form.effort) }
+  return isPi(form.provider) ? { ...patch, effort: '' } : patch
 }
 
 export function localModelSuggestions(provider: string): LocalModelSuggestion[] {
@@ -154,21 +223,55 @@ export function v1PathHint(url: string): string | null {
 
 /** Effort values for the select; '' is the harness default. Codex uses one list, local or cloud. */
 export function effortChoices(provider: string, localMode: boolean): string[] {
+  if (isPi(provider)) return [...PI_EFFORT_CHOICES]
   if (provider === 'codex') return ['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
   if (provider === 'claude' && localMode) return ['', 'off', 'low', 'medium', 'xhigh']
   return ['', 'low', 'medium', 'high', 'xhigh', 'max']
+}
+
+/** The effort select's options: `effortChoices` with labels; the default names what it runs as. */
+export function effortOptions(provider: string, localMode: boolean): { value: string; label: string }[] {
+  if (isPi(provider)) return [{ value: '', label: 'Default (on)' }, { value: 'off', label: 'Off' }, { value: 'on', label: 'On' }]
+  const defaultLabel = provider === 'claude' && localMode ? 'default (xhigh)' : 'default'
+  return effortChoices(provider, localMode).map(value => ({ value, label: value === '' ? defaultLabel : value }))
+}
+
+/**
+ * PI3 as the form sees it: the text for an empty context window or a whole number below 65536, else
+ * null. A value that is not a whole number, or is over the maximum, is `parseContextWindow`'s.
+ */
+export function piContextFault(contextWindow: string): string | null {
+  const raw = contextWindow.trim()
+  if (raw === '') return PI3_TEXT
+  const value = Number(raw)
+  return Number.isInteger(value) && value < PI_MIN_CONTEXT_WINDOW ? PI3_TEXT : null
 }
 
 export type LocalModelSave =
   | { ok: true; body: { model: string; localBaseUrl: string; contextWindow: number } }
   | { ok: false; error: string }
 
+/** Pi is always local: URL (PI1), tag, then context (PI3) — the server's order. */
+function piSaveBody(edits: LocalModelEdits): LocalModelSave {
+  const localBaseUrl = edits.localBaseUrl.trim()
+  if (localBaseUrl === '') return { ok: false, error: PI1_TEXT }
+  const model = edits.model.trim()
+  if (model === '') return { ok: false, error: LOCAL_TAG_REQUIRED }
+  const contextFault = piContextFault(edits.contextWindow)
+  if (contextFault) return { ok: false, error: contextFault }
+  const contextWindow = parseContextWindow(edits.contextWindow)
+  if (!contextWindow.ok) return contextWindow
+  return { ok: true, body: { model, localBaseUrl, contextWindow: contextWindow.value } }
+}
+
 /**
  * The model, URL and context-window part of the config PUT. Sends `localBaseUrl` only — never the
  * `anthropicBaseUrl` alias. Claude local always needs a URL (empty means cloud); Codex local may
- * leave it empty only while the legacy Env Ref is present.
+ * leave it empty only while the legacy Env Ref is present. Pi always needs a URL and a context
+ * window of at least 65536.
  */
 export function localModelSaveBody(edits: LocalModelEdits): LocalModelSave {
+  if (isPi(edits.provider)) return piSaveBody(edits)
   const contextWindow = parseContextWindow(edits.contextWindow)
   if (!contextWindow.ok) return contextWindow
   if (!edits.localMode || !isLocalHarness(edits.provider)) {

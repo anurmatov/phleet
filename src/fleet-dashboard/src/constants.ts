@@ -1,5 +1,16 @@
 import type { LocalModelSuggestion } from './types'
 
+// ── Providers ─────────────────────────────────────────────────────────────────
+
+/** The provider select of both the config and the create modal, in display order. */
+export const PROVIDER_OPTIONS: { value: string; label: string }[] = [
+  { value: 'claude', label: 'Claude (Anthropic)' },
+  { value: 'codex', label: 'Codex (OpenAI)' },
+  { value: 'gemini', label: 'Gemini (Google)' },
+  // Pi (#386) runs only on a local server, so it has no cloud model list and no default model.
+  { value: 'pi', label: 'Pi (local model)' },
+]
+
 // ── Provider model lists ──────────────────────────────────────────────────────
 
 export const PROVIDER_MODELS: Record<string, string[]> = {
@@ -39,14 +50,14 @@ export const PROVIDER_DEFAULT_MODEL: Record<string, string> = {
   gemini: 'gemini-2.5-flash',
 }
 
-// Local-mode suggestion chips (#382). Public registry tags only: a chip never fills the server
+// Local-mode suggestion chips (#382; Pi #386). Public registry tags only: a chip never fills the server
 // URL or the context window, which are deployment-specific operator input.
 const QWEN_CODEX_EFFORT = { value: 'none', note: 'Effort set to none — recommended for Qwen3.8 on Codex' }
 const QWEN_CONTEXT_HINT = 'Qwen3.8 supports up to 262144; enter the context your server is configured with.'
 
 export const LOCAL_MODEL_SUGGESTIONS: LocalModelSuggestion[] = [
-  { label: 'Qwen3.8 27B', tag: 'qwen3.8:27b', harnesses: ['claude', 'codex'], codexEffort: QWEN_CODEX_EFFORT, contextHint: QWEN_CONTEXT_HINT },
-  { label: 'Qwen3.8 Flash Next', tag: 'qwen3.8-flash-next:125b-a6b-q4_K_M', harnesses: ['claude', 'codex'], codexEffort: QWEN_CODEX_EFFORT, contextHint: QWEN_CONTEXT_HINT },
+  { label: 'Qwen3.8 27B', tag: 'qwen3.8:27b', harnesses: ['claude', 'codex', 'pi'], codexEffort: QWEN_CODEX_EFFORT, contextHint: QWEN_CONTEXT_HINT },
+  { label: 'Qwen3.8 Flash Next', tag: 'qwen3.8-flash-next:125b-a6b-q4_K_M', harnesses: ['claude', 'codex', 'pi'], codexEffort: QWEN_CODEX_EFFORT, contextHint: QWEN_CONTEXT_HINT },
   { label: 'gpt-oss 20B', tag: 'gpt-oss:20b', harnesses: ['codex'] },
 ]
 

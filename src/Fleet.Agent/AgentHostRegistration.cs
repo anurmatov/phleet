@@ -59,6 +59,7 @@ public static class AgentHostRegistration
         services.AddSingleton<ClaudeExecutor>();
         services.AddSingleton<CodexExecutor>();
         services.AddSingleton<GeminiExecutor>();
+        services.AddSingleton<PiExecutor>();
 
         // Hosted provider (#335 D4/D5). Keyed off the orchestrator-emitted flag, the same value
         // entrypoint.sh read to decide whether to hand a key over. Absent, nothing is constructed
@@ -70,14 +71,19 @@ public static class AgentHostRegistration
             services.AddHostedService(sp => sp.GetRequiredService<HostedProviderAdapterHost>());
         }
 
+        // PV1 (#386): every provider has an explicit case. Null or empty is claude, as it always was;
+        // any other string fails here instead of falling through to Claude credentials and
+        // ClaudeExecutor. The startup gate refuses the same string first, with the same text.
         services.AddSingleton<IAgentExecutor>(sp =>
         {
             var provider = sp.GetRequiredService<IOptions<AgentOptions>>().Value.Provider;
             return provider switch
             {
-                "codex" => sp.GetRequiredService<CodexExecutor>(),
-                "gemini" => sp.GetRequiredService<GeminiExecutor>(),
-                _ => sp.GetRequiredService<ClaudeExecutor>(),
+                null or "" or AgentProviders.Claude => sp.GetRequiredService<ClaudeExecutor>(),
+                AgentProviders.Codex => sp.GetRequiredService<CodexExecutor>(),
+                AgentProviders.Gemini => sp.GetRequiredService<GeminiExecutor>(),
+                AgentProviders.Pi => sp.GetRequiredService<PiExecutor>(),
+                _ => throw new InvalidOperationException(AgentProviders.UnknownProviderText(provider)),
             };
         });
 
@@ -129,12 +135,27 @@ public static class AgentHostRegistration
     /// <see cref="Services.WarmupService"/> swallows executor startup failures as a warning, so a
     /// lazy check leaves the container up, reported healthy, and unable to answer a single turn.
     /// </para>
+    /// <para>
+    /// Before all of that it refuses an unknown provider (PV1, #386), and for provider <c>pi</c> it
+    /// checks PI1–PI4, the canonical <c>PiBaseUrl</c> and the Fleet extension directory
+    /// (<paramref name="directoryExists"/>, injectable for tests).
+    /// </para>
     /// </remarks>
     public static void ValidateStartupConfiguration(
         IServiceProvider services, Func<string, string?>? environmentReader = null,
-        Func<string, bool>? fileExists = null)
+        Func<string, bool>? fileExists = null, Func<string, bool>? directoryExists = null)
     {
         var agent = services.GetRequiredService<IOptions<AgentOptions>>().Value;
+
+        // PV1 first: an unknown provider must not reach any check written for a known one.
+        if (AgentProviders.DescribeFault(agent.Provider) is { } providerFault)
+            Fail(providerFault);
+
+        if (DescribePiFault(agent, directoryExists ?? Directory.Exists,
+                environmentReader ?? Environment.GetEnvironmentVariable, fileExists ?? File.Exists) is { } piFault)
+        {
+            Fail(piFault);
+        }
 
         if (DescribeHostedProviderFault(services, agent) is { } hostedFault)
             Fail(hostedFault);
@@ -169,6 +190,51 @@ public static class AgentHostRegistration
             throw new InvalidOperationException(fault);
         }
     }
+
+    /// <summary>
+    /// Provider <c>pi</c> (#386): PI1–PI4 through <see cref="PiLocalModel.DescribeConfigFault"/>
+    /// (which includes L2, so a path, query, credentials or a container-local host fail), then the
+    /// canonical form, then the extension directory baked into the image. Null for every other
+    /// provider, and when sound.
+    /// </summary>
+    /// <remarks>
+    /// The orchestrator always emits the canonical origin, so a non-canonical value means version
+    /// skew or a hand-edited <c>appsettings.json</c>. No reachability probe: an inference-host
+    /// reboot must not restart-loop agents (#340). The fault text never includes the URL.
+    /// </remarks>
+    internal static string? DescribePiFault(
+        AgentOptions agent, Func<string, bool> directoryExists, Func<string, string?> readEnv,
+        Func<string, bool> fileExists)
+    {
+        if (!PiLocalModel.IsPi(agent.Provider))
+            return null;
+
+        if (PiLocalModel.DescribeConfigFault(agent.PiBaseUrl, agent.Model, agent.Effort, agent.ContextWindow)
+            is { } fault)
+        {
+            return fault;
+        }
+
+        if (LocalModel.CanonicalizeBaseUrl(agent.PiBaseUrl!) != agent.PiBaseUrl)
+            return "Agent:PiBaseUrl is not in canonical form (scheme://host[:port], lowercase, no trailing "
+                 + "slash). The orchestrator always emits it canonical; redeploy both images and reprovision.";
+
+        if (!directoryExists(PiLocalModel.ExtensionDir))
+            return $"The Fleet Pi extension directory {PiLocalModel.ExtensionDir} is missing from this "
+                 + "agent image; rebuild the image.";
+
+        // §13: a missing binary is an image fault, so it stops the host here rather than surfacing
+        // as "Pi failed to start" on the first turn. The version itself is the image build's guard.
+        var onPath = (readEnv(EnvPath) ?? "")
+            .Split(':', StringSplitOptions.RemoveEmptyEntries)
+            .Any(dir => fileExists(Path.Combine(dir, PiExecutor.PiBin)));
+        if (!onPath)
+            return $"The {PiExecutor.PiBin} binary is not on PATH in this agent image; rebuild the image.";
+
+        return null;
+    }
+
+    private const string EnvPath = "PATH";
 
     /// <summary>Claude credential files that must not exist in local model mode (#340 D3).</summary>
     internal static readonly string[] ClaudeCredentialFiles =

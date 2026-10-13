@@ -60,7 +60,7 @@ export const SUMMARY_PREFIX = "Do not call tools.";
 export const DEFAULT_SUMMARY_MARKER = "You are a context summarization assistant";
 export const DEFAULT_USAGE_INPUT = 100;
 
-/** The exact DwarfStar context-overflow body (phleet #386 §2.2, A20). */
+/** The local server's exact context-overflow body (phleet #386 §2.2, A20). */
 export function overflowBody(nPrompt: number, nCtx: number): string {
 	return JSON.stringify({
 		type: "error",

@@ -493,6 +493,7 @@ echo "    2) codex"
 echo "    3) gemini"
 echo "    4) claude + codex"
 echo "    5) claude + gemini"
+echo "  Local models (Pi, Claude local, Codex local) are set per agent in the dashboard — see docs/providers/pi.md."
 read -rp "  Choice [1]: " provider_choice
 provider_choice="${provider_choice:-1}"
 

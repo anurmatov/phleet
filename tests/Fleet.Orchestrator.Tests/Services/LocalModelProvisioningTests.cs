@@ -320,6 +320,10 @@ public class LocalModelProvisioningTests
         "/root/.codex-host/auth.json",
         "/root/.gemini/oauth_creds.json",
         "/root/.pi/agent/auth.json",
+        // Normalised the way Docker mounts them (#386 review): none of these slips past PI5.
+        "/root//.claude-host/.credentials.json",
+        "/root/./.codex-host/auth.json",
+        "/workspace/../root/.pi/agent/auth.json",
     ];
 
     [Theory]

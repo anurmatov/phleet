@@ -119,6 +119,19 @@ public sealed class AgentCreateEndpointsTests : IAsyncLifetime
         Assert.Equal(0, await AgentCountAsync());
     }
 
+    [Theory]
+    [InlineData("claude", "claude-opus-5-5", "off", "Effort 'off' applies only to local Claude models; clear it or choose low, medium, high, xhigh or max.")]
+    [InlineData("claude", "claude-opus-5-5", "on", "Effort 'on' applies only to provider pi; clear it or choose an effort for claude.")]
+    [InlineData("codex", "gpt-5", "off", "Effort 'off' applies only to pi and local claude models; clear it or choose an effort for codex.")]
+    public async Task ACloudCreate_WithALocalOrPiOnlyEffort_Is400_LikeThePut(string provider, string model, string effort, string expected)
+    {
+        var response = await PostLocalAsync(provider, model, null, null, effort);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(expected, await ErrorAsync(response));
+        Assert.Equal(0, await AgentCountAsync());
+    }
+
     [Fact]
     public async Task H1_AUrlWithAPath_IsRefusedByL2_AndNoRowIsWritten()
     {

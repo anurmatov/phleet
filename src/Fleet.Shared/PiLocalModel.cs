@@ -135,15 +135,59 @@ public static class PiLocalModel
         return null;
     }
 
-    /// <summary>PI5 (provisioning only): the fault for a credential mount path, or null.</summary>
+    /// <summary>
+    /// PI5 (provisioning only): the fault for a credential mount path, or null. The path is checked
+    /// in the form Docker mounts it (repeated <c>/</c>, <c>.</c> and <c>..</c> resolved), so
+    /// <c>/root//.claude-host</c> or <c>/root/./.codex</c> cannot slip past.
+    /// </summary>
     public static string? DescribeCredentialMountFault(string? mountPath)
     {
         if (string.IsNullOrEmpty(mountPath))
             return null;
 
-        return CredentialMountRoots.Any(root => mountPath.StartsWith(root, StringComparison.Ordinal))
+        var normalized = NormalizeContainerPath(mountPath);
+        return CredentialMountRoots.Any(root => normalized.StartsWith(root, StringComparison.Ordinal))
             ? Pi5Text(mountPath)
             : null;
+    }
+
+    /// <summary>A container path with repeated separators, <c>.</c> and <c>..</c> resolved (POSIX rules).</summary>
+    internal static string NormalizeContainerPath(string path)
+    {
+        var segments = new List<string>();
+        foreach (var segment in path.Split('/'))
+        {
+            if (segment is "" or ".")
+                continue;
+            if (segment == "..")
+            {
+                if (segments.Count > 0)
+                    segments.RemoveAt(segments.Count - 1);
+                continue;
+            }
+            segments.Add(segment);
+        }
+        return "/" + string.Join('/', segments);
+    }
+
+    /// <summary>
+    /// The pi-only effort values must not survive a switch away from pi (#386): <c>on</c> exists only
+    /// for pi, and <c>off</c> only for pi and a local claude model (a cloud claude agent's
+    /// <c>off</c> is V8). REST and MCP never rewrite <c>Effort</c>, so a write that leaves pi with
+    /// one of them stored is refused rather than shipped to a provider that cannot take it. Null for
+    /// pi, and for every other value.
+    /// </summary>
+    public static string? DescribePiOnlyEffortFault(string? provider, string? effort)
+    {
+        if (IsPi(provider))
+            return null;
+
+        var resulting = AgentProviders.Normalize(provider);
+        if (effort == "on")
+            return $"Effort 'on' applies only to provider pi; clear it or choose an effort for {resulting}.";
+        if (effort == "off" && resulting is AgentProviders.Codex or AgentProviders.Gemini)
+            return $"Effort 'off' applies only to pi and local claude models; clear it or choose an effort for {resulting}.";
+        return null;
     }
 
     /// <summary>

@@ -368,6 +368,53 @@ public sealed class AgentConfigEndpointsLocalModelTests : IAsyncLifetime
         Assert.Equal(before, await RowAsync());
     }
 
+    // ── Leaving pi over REST: its on/off effort never reaches a provider that cannot take it ──────
+
+    public static TheoryData<string, object, string> LeavingPiWithItsEffort => new()
+    {
+        { "on", new { provider = "claude", model = "claude-opus-5-5", localBaseUrl = "" },
+            "Effort 'on' applies only to provider pi; clear it or choose an effort for claude." },
+        { "on", new { provider = "codex", model = "ollama/qwen3.8:27b" },
+            "Effort 'on' applies only to provider pi; clear it or choose an effort for codex." },
+        { "off", new { provider = "codex", model = "ollama/qwen3.8:27b" },
+            "Effort 'off' applies only to pi and local claude models; clear it or choose an effort for codex." },
+        { "on", new { provider = "claude", model = PiTag },
+            "Effort on a local Claude model must be empty (model default, sent as xhigh), off, low, medium or xhigh." },
+    };
+
+    [Theory]
+    [MemberData(nameof(LeavingPiWithItsEffort))]
+    public async Task LeavingPi_WithItsStoredEffort_Is400_AndTheRowIsUnchanged(string effort, object body, string expected)
+    {
+        await SeedAsync("pi", PiTag, PiUrl, 131_072, effort: effort);
+        var before = await RowAsync();
+
+        Assert.Equal(expected, await BadRequestErrorAsync(body));
+        Assert.Equal(before, await RowAsync());
+    }
+
+    [Fact]
+    public async Task LeavingPi_ForClaudeLocalWithOff_Returns200()
+    {
+        await SeedAsync("pi", PiTag, PiUrl, 131_072, effort: "off");
+
+        var response = await _client.PutAsJsonAsync(Put, new { provider = "claude" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(("claude", PiTag, (string?)PiUrl, (int?)131_072, (string?)"off", 1024), await RowAsync());
+    }
+
+    [Fact]
+    public async Task LeavingPi_WithTheEffortCleared_Returns200()
+    {
+        await SeedAsync("pi", PiTag, PiUrl, 131_072, effort: "on");
+
+        var response = await _client.PutAsJsonAsync(Put, new { provider = "codex", model = $"ollama/{PiTag}", effort = "" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(("codex", $"ollama/{PiTag}", (string?)PiUrl, (int?)131_072, (string?)null, 1024), await RowAsync());
+    }
+
     // ── A30: PV1 over REST PUT ───────────────────────────────────────────────────────────────────
 
     [Theory]

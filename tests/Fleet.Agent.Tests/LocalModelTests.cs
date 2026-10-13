@@ -255,4 +255,42 @@ public class LocalModelTests
         Assert.Equal((expectedProvider, expectedModel), CodexLocalModelProviders.Split(configured));
         Assert.Equal((expectedProvider, expectedModel), CodexExecutor.SplitLocalModel(configured));
     }
+
+    // ── #386: PI5 path normalisation and the pi-only effort values ─────────────────────────────
+
+    [Theory]
+    [InlineData("/root/.claude-host/.credentials.json")]
+    [InlineData("/root//.claude-host/.credentials.json")]
+    [InlineData("/root/./.codex-host/auth.json")]
+    [InlineData("/workspace/../root/.pi/agent/auth.json")]
+    [InlineData("//root/.gemini//oauth_creds.json")]
+    public void Pi5_ANormalisedCredentialMountPath_IsRefused_NamingThePathAsGiven(string mountPath) =>
+        Assert.Equal(PiLocalModel.Pi5Text(mountPath), PiLocalModel.DescribeCredentialMountFault(mountPath));
+
+    [Theory]
+    [InlineData("/workspace/creds.json")]
+    [InlineData("/root/claude/.credentials.json")]
+    [InlineData("/root/.claude/../../workspace/creds.json")]
+    public void Pi5_AnUnrelatedMountPath_IsAccepted(string mountPath) =>
+        Assert.Null(PiLocalModel.DescribeCredentialMountFault(mountPath));
+
+    [Theory]
+    [InlineData("claude", "on", "Effort 'on' applies only to provider pi; clear it or choose an effort for claude.")]
+    [InlineData("", "on", "Effort 'on' applies only to provider pi; clear it or choose an effort for claude.")]
+    [InlineData("codex", "on", "Effort 'on' applies only to provider pi; clear it or choose an effort for codex.")]
+    [InlineData("gemini", "on", "Effort 'on' applies only to provider pi; clear it or choose an effort for gemini.")]
+    [InlineData("codex", "off", "Effort 'off' applies only to pi and local claude models; clear it or choose an effort for codex.")]
+    [InlineData("gemini", "off", "Effort 'off' applies only to pi and local claude models; clear it or choose an effort for gemini.")]
+    public void PiOnlyEffort_IsRefusedOnEveryOtherProvider(string provider, string effort, string expected) =>
+        Assert.Equal(expected, PiLocalModel.DescribePiOnlyEffortFault(provider, effort));
+
+    [Theory]
+    [InlineData("pi", "on")]
+    [InlineData("pi", "off")]
+    [InlineData("claude", "off")] // claude local's off; claude cloud's off is V8
+    [InlineData("claude", "xhigh")]
+    [InlineData("codex", "none")]
+    [InlineData("gemini", null)]
+    public void PiOnlyEffort_LeavesEveryValidValueAlone(string provider, string? effort) =>
+        Assert.Null(PiLocalModel.DescribePiOnlyEffortFault(provider, effort));
 }

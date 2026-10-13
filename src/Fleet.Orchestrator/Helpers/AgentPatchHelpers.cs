@@ -38,6 +38,10 @@ internal static class AgentPatchHelpers
             return effortFault;
         }
 
+        // #386: leaving pi must not keep its on/off effort for a provider that cannot take it.
+        if (PiLocalModel.DescribePiOnlyEffortFault(agent.Provider, agent.Effort) is { } piEffortFault)
+            return piEffortFault;
+
         if (LocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl))
             agent.LocalBaseUrl = LocalModel.CanonicalizeBaseUrl(agent.LocalBaseUrl!);
 
@@ -59,7 +63,11 @@ internal static class AgentPatchHelpers
         var url = string.IsNullOrEmpty(localBaseUrl) ? null : localBaseUrl;
         var window = contextWindow is null or 0 ? null : contextWindow;
         if (!PiLocalModel.IsPi(agent.Provider) && url is null && window is null)
-            return null;
+        {
+            // No local fields: only the effort rules the PUT applies to a cloud agent (V8, pi-only).
+            return ClaudeLocalModel.DescribeLocalOnlyEffortFault(agent.Provider, null, agent.Effort)
+                ?? PiLocalModel.DescribePiOnlyEffortFault(agent.Provider, agent.Effort);
+        }
 
         if (window is int tokens && ContextWindow.DescribeFault(tokens) is { } windowFault)
             return windowFault;

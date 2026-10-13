@@ -314,4 +314,33 @@ public class UpdateAgentConfigLocalModelTests
         Assert.Contains(Fleet.Shared.PiLocalModel.Pi4Text, result);
         Assert.Equal(before, Row());
     }
+
+    // ── Leaving pi over MCP: its on/off effort never reaches a provider that cannot take it ───────
+
+    [Theory]
+    [InlineData("on", "claude", "claude-opus-5-5", "", "Effort 'on' applies only to provider pi; clear it or choose an effort for claude.")]
+    [InlineData("on", "codex", "ollama/qwen3.8:27b", null, "Effort 'on' applies only to provider pi; clear it or choose an effort for codex.")]
+    [InlineData("off", "codex", "ollama/qwen3.8:27b", null, "Effort 'off' applies only to pi and local claude models; clear it or choose an effort for codex.")]
+    public async Task LeavingPi_WithItsStoredEffort_IsRefused_AndTheRowIsUnchanged(
+        string effort, string provider, string model, string? url, string expected)
+    {
+        Seed("pi", PiTag, PiUrl, 131_072, effort: effort);
+        var before = Row();
+
+        var result = await Tool().UpdateAgentConfigAsync("agent1", provider: provider, model: model, local_base_url: url);
+
+        Assert.Contains(expected, result);
+        Assert.Equal(before, Row());
+    }
+
+    [Fact]
+    public async Task LeavingPi_ForClaudeLocalWithOff_IsAccepted()
+    {
+        Seed("pi", PiTag, PiUrl, 131_072, effort: "off");
+
+        var result = await Tool().UpdateAgentConfigAsync("agent1", provider: "claude");
+
+        Assert.DoesNotContain("Effort", result);
+        Assert.Equal(("claude", PiTag, (string?)PiUrl, (int?)131_072, (string?)"off"), Row());
+    }
 }

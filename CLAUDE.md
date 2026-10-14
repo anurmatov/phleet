@@ -259,6 +259,22 @@ agent startup, instead of falling through to Claude credentials. An empty provid
 
 See `docs/providers/pi.md`.
 
+### Harness defaults and `harnessExtra` (#460)
+
+`HarnessDefaults.Build` (`src/Fleet.Shared/`) is the only code that computes per-mode Codex and Claude
+Code settings (MUST NOT compute them anywhere else). The one per-agent override is `harnessExtra`
+(REST `harnessExtra` on `GET`/`PUT /api/agents/{name}/config` and `POST /api/agents`; MCP
+`harness_extra` on `update_agent_config` and `create_agent`; nullable `agents.harness_extra`, migration
+`AddAgentHarnessExtra`): claude and codex only, an **allowlist** with typed ranges in
+`HarnessExtra.cs`, checked on every write against the resulting provider and mode, `""` clears,
+applies on reprovision. `--tools` extras only add names, never narrow. `GET
+/api/agents/{name}/effective-harness` serves the computed plan (credentials masked) with
+`computedPlanSha256`, `startedPlanSha256` (from registration/heartbeat `PlanSha256`) and
+`pendingReprovision`. Provisioning writes `.generated/codex-root.toml` for codex agents before
+container create and mounts it read-only at `/app/codex-root.toml` (`HarnessDefaults.CodexRootTomlContainerPath`).
+Executors, `entrypoint.sh` and the sha report ship in the agent-image PR; until then agents ignore the
+field and the file. See `docs/providers/harness-defaults.md`.
+
 ## Project contexts
 
 Every assignment renders the project's canonical context (the version row `CurrentVersion` points

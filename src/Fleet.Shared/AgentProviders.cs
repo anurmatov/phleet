@@ -1,7 +1,7 @@
 namespace Fleet.Shared;
 
 /// <summary>
-/// The four agent harness names and PV1 (#386): an unknown provider string is refused everywhere
+/// The three agent harness names and PV1 (#386): an unknown provider string is refused everywhere
 /// instead of falling through to Claude credentials and <c>ClaudeExecutor</c>.
 /// </summary>
 /// <remarks>
@@ -14,9 +14,8 @@ public static class AgentProviders
     public const string Claude = "claude";
     public const string Codex = "codex";
     public const string Gemini = "gemini";
-    public const string Pi = "pi";
 
-    public static IReadOnlyList<string> All { get; } = [Claude, Codex, Gemini, Pi];
+    public static IReadOnlyList<string> All { get; } = [Claude, Codex, Gemini];
 
     /// <summary>True for a known provider, and for null/empty (which means claude).</summary>
     public static bool IsKnown(string? provider) =>
@@ -31,5 +30,5 @@ public static class AgentProviders
         IsKnown(provider) ? null : UnknownProviderText(provider!);
 
     public static string UnknownProviderText(string provider) =>
-        $"Unknown provider '{provider}'; use claude, codex, gemini or pi.";
+        $"Unknown provider '{provider}'; use claude, codex or gemini.";
 }

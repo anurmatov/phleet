@@ -23,7 +23,13 @@ public static class DbSeeder
         string? outputStylesDir = null,
         int projectContextLimitBytes = PromptSizePolicy.DefaultLimitBytes)
     {
-        // The #346 preflight runs first when RemoveProjectContextCards is pending; it throws
+        // Existing schemas have agents from the first migration. Check before any migration
+        // removes the legacy column, so refusal leaves the previous image's schema intact.
+        // A fresh database has no agents table yet, so there is nothing to check.
+        if ((await db.Database.GetAppliedMigrationsAsync()).Any())
+            await RemovedProviderGuard.EnsureAsync(db);
+
+        // The #346 preflight runs before RemoveProjectContextCards when it is pending; it throws
         // ContextRemovalBlockedException, having migrated nothing, when a project would lose its only text.
         logger?.LogInformation("Running database migrations...");
         await ContextRemovalPreflight.MigrateAsync(db, logger, projectContextLimitBytes);

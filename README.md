@@ -6,7 +6,7 @@
 
 Phleet is an open-source, self-hosted multi-agent AI platform built on .NET 10, coordinated by a central orchestrator backed by Temporal workflows.
 
-**Your credentials, your repos, your infrastructure.** Agents run as Docker containers on your host, use your Claude or Codex credentials, and hit your repos through your own GitHub App. Control plane, runtime state, workflow history, and memory stay on infrastructure you control; external traffic goes only to the providers you configure — Claude/Codex, GitHub, and Telegram, plus Z.ai if you give a codex agent a `zai/` GLM model on your GLM Coding Plan (see `docs/providers/codex-hosted-models.md`). A claude agent pointed at a local Anthropic-compatible server sends its conversation there instead of to Anthropic (see `docs/providers/claude-local-models.md`), and a `pi` agent only ever talks to the local server you give it (see `docs/providers/pi.md`).
+**Your credentials, your repos, your infrastructure.** Agents run as Docker containers on your host, use your Claude or Codex credentials, and hit your repos through your own GitHub App. Control plane, runtime state, workflow history, and memory stay on infrastructure you control; external traffic goes only to the providers you configure — Claude/Codex, GitHub, and Telegram, plus Z.ai if you give a codex agent a `zai/` GLM model on your GLM Coding Plan (see `docs/providers/codex-hosted-models.md`). A claude agent pointed at a local Anthropic-compatible server sends its conversation there instead of to Anthropic (see `docs/providers/claude-local-models.md`).
 
 <p align="center">
   <img src=".github/assets/phleet-dashboard.jpg" alt="Phleet dashboard — agents and active workflows" width="900">
@@ -146,10 +146,11 @@ The rest of this README is the plumbing — configuration, deployment, troublesh
 | Any | Codex | ⚠️ Code paths ship in `seed.example.json`, but Claude has seen far more wall-clock time in real workflows |
 | Any | Codex + GLM (Z.ai GLM Coding Plan) | ⚠️ A `zai/` model prefix runs GLM on your Coding Plan subscription through a loopback forwarder inside the agent. Subscriber-only use. The merged implementation passed exact-head canary acceptance. See `docs/providers/codex-hosted-models.md` |
 | Any | Claude or Codex + local model (e.g. Ollama) | ⚠️ Set **Runs on → Local server** per agent, with the server URL, model tag and context window. Claude local runs with no Claude credential in the container and passed exact-head canary acceptance. Codex local still holds the OpenAI credential until #383. See `docs/providers/local-models.md` |
-| Any | Pi + local model | ⚠️ Provider `pi` runs Pi 1.0.4 against a local Anthropic Messages server, with no provider credential in the container and Fleet's own MCP bridge and compaction summary. Its compaction design passed its reopen gate once, on one synthetic run on one server; Fleet integration and the production-path canary have not run yet. Pi is not a sandbox. See `docs/providers/pi.md` |
 | Any | Gemini | ⚠️ Supported via `gemini` CLI headless mode. Known trade-offs vs claude/codex: (1) no session persistence in headless mode — system prompt is re-sent on every task, so per-task token cost is higher; (2) PDFs are not passed as native content blocks — agent reads from disk via `@`-reference hints; (3) HTTP/SSE MCP transport only — stdio MCP servers are filtered out; (4) OAuth-only, no API key fallback — personal Google account required. See `docs/providers/gemini.md` for full details. |
 
 If you run Phleet on Windows, on a Linux host, or with Codex or Gemini as the primary provider and hit something broken — PRs and issue reports are very welcome. Small fixes and "it works on my box" confirmations are just as valuable as new features here.
+
+Before upgrading from a release with Pi, [move every Pi agent to Claude or Codex and reprovision](docs/upgrading/remove-pi.md).
 
 ## Architecture
 
@@ -160,7 +161,7 @@ If you run Phleet on Windows, on a Linux host, or with Codex or Gemini as the pr
 ### How It Works
 
 1. The orchestrator bootstraps agents from `seed.json` into MySQL on first start.
-2. Each agent container starts, authenticates via a GitHub App JWT, and launches a persistent AI process (`claude -p`, `codex app-server`, or `pi --mode rpc`; gemini runs a fresh CLI per task).
+2. Each agent container starts, authenticates via a GitHub App JWT, and launches a persistent AI process (`claude -p`, `codex app-server`; gemini runs a fresh CLI per task).
 3. Agents receive tasks via Telegram DM or RabbitMQ and stream responses back.
 4. Temporal workflows orchestrate multi-step, multi-agent tasks.
 5. Fleet Memory provides shared semantic memory across all agents (search, store, retrieve).

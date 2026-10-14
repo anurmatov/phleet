@@ -6,7 +6,7 @@ import type {
 import { CLAUDE_PERMISSION_MODES, CODEX_SANDBOX_MODES, PROVIDER_OPTIONS } from '../constants'
 import { harnessExtraPlaceholder } from '../effectiveHarness'
 import { crossChatDisabledReason, editedTools } from '../journalCrossChat'
-import { effortChoices, effortOptions, isLocalHarness, runsOnLocked, switchProvider } from '../localModel'
+import { effortChoices, effortOptions, isLocalHarness, switchProvider } from '../localModel'
 import { apiFetch } from '../utils'
 import ModelSelector from './ModelSelector'
 import FieldHint from './FieldHint'
@@ -128,9 +128,8 @@ export default function AgentConfigModal({
   const provider = configEdits?.provider ?? configData?.provider ?? 'claude'
   const isClaude = provider === 'claude'
   const isCodex = provider === 'codex'
-  // Pi is neither, so every Claude-only and Codex-only field below is hidden for it.
   const hasLocalMode = isLocalHarness(provider)
-  const isLocal = runsOnLocked(provider) || (hasLocalMode && (configEdits?.localMode ?? false))
+  const isLocal = hasLocalMode && (configEdits?.localMode ?? false)
 
   // One section shows at a time; the others stay mounted and hidden, so switching never touches the
   // shared configEdits and the save sends exactly what the unsectioned dialog sent (#460 Part 2).
@@ -180,9 +179,6 @@ export default function AgentConfigModal({
                     <select
                       className="config-input"
                       value={provider}
-                      // Switching keeps local mode between Claude, Codex and Pi (the model and, to or
-                      // from Pi, the effort follow the harness's form) and clears it for Gemini. Pi's
-                      // image input is kept, hidden and unsent off Pi — see switchProvider.
                       onChange={e => onEditsChange(switchProvider({ ...configEdits, provider }, e.target.value))}
                     >
                       {PROVIDER_OPTIONS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
@@ -204,8 +200,8 @@ export default function AgentConfigModal({
                   )}
                   {hasLocalMode && (
                   <div className="config-field">
-                    <label className="config-label">Effort <span className="config-provider-badge">Claude + Codex + Pi</span></label>
-                    <FieldHint>Reasoning effort level. <code>low</code> = faster/cheaper; <code>max</code> = deepest reasoning (Codex maps max → xhigh). Affects latency and cost. Codex also takes none/minimal; local Claude models use off/low/medium/xhigh; Pi turns thinking off or on.</FieldHint>
+                    <label className="config-label">Effort <span className="config-provider-badge">Claude + Codex</span></label>
+                    <FieldHint>Reasoning effort level. <code>low</code> = faster/cheaper; <code>max</code> = deepest reasoning (Codex maps max → xhigh). Affects latency and cost. Codex also takes none/minimal; local Claude models use off/low/medium/xhigh.</FieldHint>
                     {(() => {
                       // #349: each harness and mode owns its vocabulary. A stored value invalid for the
                       // current mode still renders (with a marker) — nothing is auto-cleared, and

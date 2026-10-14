@@ -49,18 +49,13 @@ public sealed class GetAgentConfigTool(IServiceScopeFactory scopeFactory)
             && string.Equals(agent.Provider, "codex", StringComparison.Ordinal)
             && CodexLocalModelProviders.Split(agent.Model).Provider is not null
             && agent.EnvRefs.Any(e => e.EnvKeyName == "CODEX_OSS_BASE_URL");
-        // #386: a pi agent is always local; the harness is named so it is not mistaken for claude local.
-        var piSuffix = PiLocalModel.IsPi(agent.Provider) ? " (Pi)" : "";
-        sb.AppendLine("- Local model: " + (localOn ? $"on — server {agent.LocalBaseUrl}{piSuffix}"
+        sb.AppendLine("- Local model: " + (localOn ? $"on — server {agent.LocalBaseUrl}"
             : legacyCodexLocal ? "on — server from CODEX_OSS_BASE_URL Env Ref (legacy)"
             : "off"));
         sb.AppendLine($"- Context window: {(agent.ContextWindow is int window ? $"{window} tokens" : "(none)")}"
             + (agent.ContextWindow is null || localOn ? ""
                 : legacyCodexLocal ? " (ignored: legacy Env Ref; set the local server URL)"
                 : " (ignored: local model off)"));
-        // #455: stored for every provider, so a value kept across a provider switch is visible.
-        sb.AppendLine($"- Pi image input: {agent.PiImageInput}"
-            + (agent.PiImageInput && !PiLocalModel.IsPi(agent.Provider) ? " (ignored: pi only)" : ""));
         sb.AppendLine($"- Auto memory: {agent.AutoMemoryEnabled}");
         sb.AppendLine($"- Journal enabled: {agent.JournalEnabled}");
         sb.AppendLine($"- Journal cross-chat attachments: {agent.JournalCrossChatEnabled}");

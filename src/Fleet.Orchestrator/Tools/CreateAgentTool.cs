@@ -19,11 +19,10 @@ public sealed class CreateAgentTool(IServiceScopeFactory scopeFactory, IConfigur
         [Description("Display name shown in the dashboard (e.g. 'Fleet Dev'). Defaults to agent_name if omitted.")] string? display_name = null,
         [Description("Memory limit in MB. Defaults to 4096.")] int? memory_limit_mb = null,
         [Description("Docker container name override (e.g. fleet-my-agent). Defaults to 'fleet-{agent_name}'.")] string? container_name = null,
-        [Description("LLM provider: claude (default), codex (OpenAI via Codex SDK), gemini, or pi (Pi on a local model server only). Any other value is refused. A pi agent needs model = the server's bare model tag, local_base_url and context_window (at least 65536) here.")] string? provider = null,
+        [Description("LLM provider: claude (default), codex or gemini. Any other value is refused.")] string? provider = null,
         [Description("When true, /var/run/docker.sock is bind-mounted into the container. Grants host Docker access — only set for agents that manage containers (e.g. devops, developer, co-cto). Defaults to false.")] bool? mount_docker_sock = null,
-        [Description("Local model server origin (scheme://host[:port], no path), e.g. http://inference-host:8000. Required for provider pi; optional local mode for claude or codex. Checked like update_agent_config before anything is written.")] string? local_base_url = null,
-        [Description("The local server's context size in tokens (its --ctx). Required for provider pi, at least 65536.")] int? context_window = null,
-        [Description("Provider pi only: the model accepts images (sends images and scanned PDF pages). Turn on only after the model's vision is verified. Stored for other providers but ignored. Takes effect on provisioning. Omit for false.")] bool? pi_image_input = null,
+        [Description("Local model server origin (scheme://host[:port], no path), e.g. http://inference-host:8000. Optional local mode for claude or codex. Checked like update_agent_config before anything is written.")] string? local_base_url = null,
+        [Description("The local server's context size in tokens (its --ctx). Used only for local models.")] int? context_window = null,
         [Description("Claude and codex only: extra harness settings merged over the mode defaults, one per line; checked against the same allowlist as update_agent_config before anything is written. Omit for none.")] string? harness_extra = null)
     {
         using var scope = scopeFactory.CreateScope();
@@ -70,7 +69,6 @@ public sealed class CreateAgentTool(IServiceScopeFactory scopeFactory, IConfigur
             HostPort        = allocatedPort,
             Provider        = provider ?? "claude",
             MountDockerSock = mount_docker_sock ?? false,
-            PiImageInput    = pi_image_input ?? false,
             HarnessExtra    = string.IsNullOrEmpty(harness_extra) ? null : harness_extra,
         };
 

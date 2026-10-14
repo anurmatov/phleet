@@ -235,56 +235,10 @@ try {
     console.error('WARN: codex config.toml not written: ' + e.message);
 }
 " || echo "WARN: codex config.toml not written: node exited non-zero" >&2
-elif [ "$PROVIDER" = "pi" ]; then
-    # Pi local-model agent (#386). Pi has no approval step, sandbox or path limit, and the model
-    # drives a root shell that can read /proc/1/environ and every file in this container. The
-    # control is absence: no provider credential may exist anywhere that shell can read.
-    # Provisioning refuses credential mounts (PI5); this branch is the backstop. The reserved
-    # hosted-key names are already unset above. No MCP config is generated here: the Fleet
-    # extension reads /workspace/.mcp.json itself.
-    #
-    # Scrub PID 1 before `exec dotnet`. The two lists must equal PiLocalModel.CredentialEnvNames
-    # and PiLocalModel.CredentialEnvPrefixes, in order; EntrypointPiCredentialEnvTests reads the
-    # line directly below each marker, so keep each one line and in this exact form. Only names
-    # are printed, never values: one NOTE for each variable that was set.
-    _PI_ENV_BEFORE=" $(compgen -e | tr '\n' ' ')"
-# phleet:pi-credential-env-names
-for _V in ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN ANT_LING_API_KEY OPENAI_API_KEY AZURE_OPENAI_API_KEY AZURE_OPENAI_BASE_URL AZURE_OPENAI_RESOURCE_NAME AZURE_OPENAI_API_VERSION AZURE_OPENAI_DEPLOYMENT_NAME_MAP DEEPSEEK_API_KEY NVIDIA_API_KEY GEMINI_API_KEY GROQ_API_KEY CEREBRAS_API_KEY XAI_API_KEY FIREWORKS_API_KEY TOGETHER_API_KEY BASETEN_API_KEY OPENROUTER_API_KEY AI_GATEWAY_API_KEY ZAI_API_KEY ZAI_CODING_CN_API_KEY MISTRAL_API_KEY MINIMAX_API_KEY MOONSHOT_API_KEY OPENCODE_API_KEY KIMI_API_KEY META_API_KEY CLOUDFLARE_API_KEY CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_GATEWAY_ID QWEN_TOKEN_PLAN_API_KEY QWEN_TOKEN_PLAN_CN_API_KEY XIAOMI_API_KEY XIAOMI_TOKEN_PLAN_CN_API_KEY XIAOMI_TOKEN_PLAN_AMS_API_KEY XIAOMI_TOKEN_PLAN_SGP_API_KEY AWS_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_BEARER_TOKEN_BEDROCK AWS_REGION PI_CODING_AGENT_SESSION_DIR PI_PACKAGE_DIR PI_SHARE_VIEWER_URL COPILOT_GITHUB_TOKEN GOOGLE_CLOUD_API_KEY GOOGLE_APPLICATION_CREDENTIALS TYPESAFE_API_KEY RADIUS_API_KEY MINIMAX_CN_API_KEY HF_TOKEN GCLOUD_PROJECT ZAI_CODING_PLAN_API_KEY GOOGLE_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_BASE_URL CODEX_OSS_BASE_URL OPENAI_BASE_URL CLAUDE_CODE_MAX_CONTEXT_TOKENS; do unset "$_V"; done
-# phleet:pi-credential-env-prefixes
-for _P in ANTHROPIC_ CLAUDE_CODE_ OPENAI_ CODEX_ GEMINI_ AWS_ GOOGLE_; do for _V in $(compgen -e); do case "$_V" in "$_P"*) unset "$_V";; esac; done; done
-    _PI_ENV_AFTER=" $(compgen -e | tr '\n' ' ')"
-    for _V in $_PI_ENV_BEFORE; do
-        case "$_PI_ENV_AFTER" in
-            *" $_V "*) ;;
-            *) echo "NOTE: unsetting ${_V} for a pi agent" >&2 ;;
-        esac
-    done
-    unset _V _PI_ENV_BEFORE _PI_ENV_AFTER
-
-    # Remove every provider credential file a harness could read. /root persists in the workspace
-    # volume, so a file from an earlier life must be removed, not just skipped. Pi sessions hold
-    # conversation text and live only as long as the container. A file that survives `rm` is a
-    # mount: refuse to start rather than run the model beside it.
-    _PI_CREDENTIAL_FILES="/root/.claude/.credentials.json /root/.codex/auth.json /root/.gemini/oauth_creds.json /root/.pi/agent/auth.json /root/.pi/agent/mcp-auth.json"
-    for _F in $_PI_CREDENTIAL_FILES; do
-        rm -f "$_F" 2>/dev/null
-    done
-    rm -rf /root/.pi/agent/sessions 2>/dev/null
-    _PI_CREDENTIAL_LEFT=false
-    for _F in $_PI_CREDENTIAL_FILES; do
-        if [ -e "$_F" ] || [ -L "$_F" ]; then
-            echo "ERROR: pi agent must hold no provider credential, but ${_F} could not be removed (bind-mounted?). Remove the mount, then reprovision." >&2
-            _PI_CREDENTIAL_LEFT=true
-        fi
-    done
-    if [ "$_PI_CREDENTIAL_LEFT" = "true" ]; then
-        exit 1
-    fi
-    unset _F _PI_CREDENTIAL_FILES _PI_CREDENTIAL_LEFT
 elif [ "$PROVIDER" != "claude" ]; then
     # PV1 (#386): an unknown provider fails closed. It used to fall through to the Claude branch
     # below and receive Claude credentials in a container where the model drives a shell.
-    echo "ERROR: Unknown provider '${PROVIDER}'; use claude, codex, gemini or pi." >&2
+    echo "ERROR: Unknown provider '${PROVIDER}'; use claude, codex or gemini." >&2
     exit 1
 elif [ "$CLAUDE_LOCAL_MODEL" = "true" ]; then
     # A local-model agent holds no Claude OAuth credential (#340 D3). /root/.claude persists in the

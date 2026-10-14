@@ -51,7 +51,6 @@
       "localBaseUrl": "",
       "localServer": "ollama",
       "contextWindow": "",
-      "piImageInput": false,
       "instructions": [
         {
           "name": "role-a",
@@ -174,7 +173,6 @@
       "localBaseUrl": "http://inference-host:11434",
       "localServer": "ollama",
       "contextWindow": "131072",
-      "piImageInput": false,
       "instructions": [
         {
           "name": "role-a",
@@ -242,7 +240,7 @@
       ]
     }
   },
-  "pi": {
+  "claude-local": {
     "edits": {
       "model": "qwen3.8:27b",
       "memoryLimitMb": "2048",
@@ -269,7 +267,7 @@
       "journalCrossChatEnabled": false,
       "hostPort": "",
       "telegramSendOnly": false,
-      "provider": "pi",
+      "provider": "claude",
       "codexSandboxMode": "",
       "tools": "Read, Bash(git *), mcp__fleet-memory__memory_search",
       "projects": [
@@ -293,8 +291,7 @@
       "localMode": true,
       "localBaseUrl": "http://inference-host:11434",
       "localServer": "ollama",
-      "contextWindow": "131072",
-      "piImageInput": true,
+      "contextWindow": "65536",
       "instructions": [
         {
           "name": "role-a",
@@ -305,8 +302,7 @@
     "body": {
       "model": "qwen3.8:27b",
       "localBaseUrl": "http://inference-host:11434",
-      "contextWindow": 131072,
-      "piImageInput": true,
+      "contextWindow": 65536,
       "memoryLimitMb": 2048,
       "isEnabled": true,
       "image": "",
@@ -324,7 +320,7 @@
       "formattingMode": 2,
       "suppressToolMessages": false,
       "telegramSendOnly": false,
-      "provider": "pi",
+      "provider": "claude",
       "effort": "off",
       "jsonSchema": "",
       "agentsJson": "",
@@ -335,6 +331,128 @@
       "hostPort": null,
       "canReceiveChatRequests": false,
       "mountDockerSock": true,
+      "outputStyle": "",
+      "tools": [
+        "Read",
+        "Bash(git *)",
+        "mcp__fleet-memory__memory_search"
+      ],
+      "projects": [
+        "project-a"
+      ],
+      "mcpEndpoints": [
+        {
+          "mcpName": "fleet-memory",
+          "url": "http://memory-host:3100",
+          "transportType": "http"
+        }
+      ],
+      "networks": [
+        "net-a"
+      ],
+      "envRefs": [
+        "EXAMPLE_KEY"
+      ],
+      "instructions": [
+        {
+          "instructionName": "role-a",
+          "loadOrder": 1
+        }
+      ]
+    }
+  },
+  "gemini": {
+    "edits": {
+      "model": "gemini-2.5-pro",
+      "memoryLimitMb": "2048",
+      "isEnabled": true,
+      "image": "",
+      "permissionMode": "acceptEdits",
+      "maxTurns": "50",
+      "workDir": "/workspace",
+      "proactiveIntervalMinutes": "0",
+      "groupListenMode": "mention",
+      "groupDebounceSeconds": "15",
+      "warmupTimeoutSeconds": "60",
+      "shortName": "agent1",
+      "displayName": "agent1",
+      "showStats": true,
+      "prefixMessages": false,
+      "formattingMode": 2,
+      "suppressToolMessages": false,
+      "effort": "",
+      "jsonSchema": "",
+      "agentsJson": "",
+      "autoMemoryEnabled": true,
+      "journalEnabled": false,
+      "journalCrossChatEnabled": false,
+      "hostPort": "",
+      "telegramSendOnly": false,
+      "provider": "gemini",
+      "codexSandboxMode": "",
+      "tools": "Read, Bash(git *), mcp__fleet-memory__memory_search",
+      "projects": [
+        "project-a"
+      ],
+      "networks": "net-a",
+      "envRefs": "EXAMPLE_KEY",
+      "mcpEndpoints": [
+        {
+          "mcpName": "fleet-memory",
+          "url": "http://memory-host:3100",
+          "transportType": "http"
+        }
+      ],
+      "telegramUsers": "123456789",
+      "telegramGroups": "-1001234567890",
+      "canReceiveChatRequests": true,
+      "requestReceivedMessage": "Forwarded.",
+      "mountDockerSock": false,
+      "outputStyle": "",
+      "localMode": false,
+      "localBaseUrl": "",
+      "localServer": "ollama",
+      "contextWindow": "",
+      "instructions": [
+        {
+          "name": "role-a",
+          "loadOrder": 1
+        }
+      ]
+    },
+    "body": {
+      "model": "gemini-2.5-pro",
+      "localBaseUrl": "",
+      "contextWindow": 0,
+      "memoryLimitMb": 2048,
+      "isEnabled": true,
+      "image": "",
+      "permissionMode": "acceptEdits",
+      "maxTurns": 50,
+      "workDir": "/workspace",
+      "proactiveIntervalMinutes": 0,
+      "groupListenMode": "mention",
+      "groupDebounceSeconds": 15,
+      "warmupTimeoutSeconds": 60,
+      "shortName": "agent1",
+      "displayName": "agent1",
+      "showStats": true,
+      "prefixMessages": false,
+      "formattingMode": 2,
+      "suppressToolMessages": false,
+      "telegramSendOnly": false,
+      "provider": "gemini",
+      "effort": "",
+      "jsonSchema": "",
+      "agentsJson": "",
+      "autoMemoryEnabled": true,
+      "journalEnabled": false,
+      "journalCrossChatEnabled": false,
+      "codexSandboxMode": "",
+      "hostPort": null,
+      "canReceiveChatRequests": true,
+      "requestReceivedMessage": "Forwarded.",
+      "mountDockerSock": false,
       "outputStyle": "",
       "tools": [
         "Read",

@@ -158,11 +158,6 @@ export interface CreateForm {
   telegramUsers: string
   telegramGroups: string
   instructions: { name: string; loadOrder: number }[]
-  /** Pi only (#386): the local server origin and its context size, sent on create. */
-  localBaseUrl: string
-  contextWindow: string
-  /** Pi only (#455): send images to the model. Default false. */
-  piImageInput: boolean
 }
 
 export interface AgentConfig {
@@ -195,14 +190,12 @@ export interface AgentConfig {
   provider: string
   codexSandboxMode: string | null
   outputStyle: string | null
-  /** Origin of the local inference server, or null (cloud). Claude and Codex agents (#382); always set for Pi (#386). */
+  /** Origin of the local inference server for Claude or Codex, or null for cloud. */
   localBaseUrl?: string | null
   /** Older name of `localBaseUrl`; an older orchestrator returns only this. Read, never sent. */
   anthropicBaseUrl?: string | null
   /** The local server's context size in tokens, or null. Used only in local mode (#367, #382). */
   contextWindow?: number | null
-  /** Pi's image input (#455). Stored for every provider, applied only to Pi; an older orchestrator omits it. */
-  piImageInput?: boolean
   /** The one per-agent harness override (#460), verbatim, or null. Claude and Codex only. */
   harnessExtra?: string | null
   tools: { toolName: string; isEnabled: boolean }[]
@@ -259,7 +252,7 @@ export interface ConfigEdits {
   mountDockerSock: boolean
   /** Name of an output_styles row, or '' for none — the sentinel the API clears on. */
   outputStyle: string
-  /** "Runs on": true = Local server. Kept in the edit state because a fresh Local has no URL or tag yet. Always true for Pi. */
+  /** True while editing local-server mode, even before a URL is entered. */
   localMode: boolean
   /** Local server origin, or '' — the sentinel the API clears on. */
   localBaseUrl: string
@@ -267,8 +260,6 @@ export interface ConfigEdits {
   localServer: CodexLocalServer
   /** Context window in tokens, or '' for not set (sent as 0, which the API clears on). */
   contextWindow: string
-  /** Pi's image input (#455). Kept across provider switches; sent only while the provider is Pi. */
-  piImageInput: boolean
   /** Extra harness settings (#460), '' for none. Sent only when it differs from the loaded value. */
   harnessExtra: string
   instructions: { name: string; loadOrder: number }[]
@@ -291,8 +282,7 @@ export interface EffectiveHarness {
 /** The two local servers codex routes on (`ollama/<tag>`, `lmstudio/<tag>`). */
 export type CodexLocalServer = 'ollama' | 'lmstudio'
 
-/** The harnesses with a local server mode. Pi (#386) has nothing else. */
-export type LocalHarness = 'claude' | 'codex' | 'pi'
+export type LocalHarness = 'claude' | 'codex'
 
 /** A suggestion chip in local mode: a public registry tag, never a URL or context size. */
 export interface LocalModelSuggestion {

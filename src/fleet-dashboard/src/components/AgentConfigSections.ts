@@ -20,7 +20,7 @@ export interface ConfigSection {
 
 const CLAUDE = ['claude'] as const
 const CODEX = ['codex'] as const
-const LOCAL_HARNESSES = ['claude', 'codex', 'pi'] as const
+const LOCAL_HARNESSES = ['claude', 'codex'] as const
 const HARNESS_EXTRA = ['claude', 'codex'] as const
 
 export const CONFIG_SECTIONS: readonly ConfigSection[] = [
@@ -28,13 +28,12 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
   {
     id: 'model', label: 'Model & runtime', fields: [
       { key: 'provider' },
-      { key: 'model', only: ['claude', 'codex', 'gemini'] },
-      // LocalModelFields: runs on, server URL or server, model tag, context window, image input.
+      { key: 'model' },
+      // LocalModelFields: runs on, server URL or server, model tag, context window.
       { key: 'localMode', only: LOCAL_HARNESSES },
       { key: 'localBaseUrl', only: LOCAL_HARNESSES },
       { key: 'localServer', only: CODEX },
       { key: 'contextWindow', only: LOCAL_HARNESSES },
-      { key: 'piImageInput', only: ['pi'] },
       { key: 'effort', only: LOCAL_HARNESSES },
       { key: 'codexSandboxMode', only: CODEX },
       { key: 'autoMemoryEnabled', only: CLAUDE },

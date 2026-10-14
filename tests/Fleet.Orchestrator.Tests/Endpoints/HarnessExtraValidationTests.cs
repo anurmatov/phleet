@@ -216,7 +216,6 @@ public sealed class HarnessExtraValidationTests : IAsyncLifetime
     }
 
     [Theory]
-    [InlineData("pi")]
     [InlineData("gemini")]
     public void Parse_OtherProviders_RefuseAnyNonEmptyValue(string provider)
     {
@@ -263,9 +262,8 @@ public sealed class HarnessExtraValidationTests : IAsyncLifetime
     }
 
     [Theory]
-    [InlineData("pi", "qwen3.8-flash-next", Url)]
     [InlineData("gemini", "gemini-2.5-pro", null)]
-    public async Task Put_AnyValueOnPiOrGemini_Is400UnsupportedProvider(string provider, string model, string? url)
+    public async Task Put_AnyValueOnGemini_Is400UnsupportedProvider(string provider, string model, string? url)
     {
         await SeedAsync(provider, model, url);
 

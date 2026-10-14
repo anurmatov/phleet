@@ -38,7 +38,7 @@ import { buildSignalRequest, signalErrorMessage } from './signalRequest'
 import { PROVIDER_DEFAULT_MODEL } from './constants'
 import { parseWarmupTimeoutSeconds, warmupTimeoutEditValue } from './warmupTimeout'
 import { contextWindowEditValue } from './contextWindow'
-import { createFormLocalModel, localModelEditValues } from './localModel'
+import { localModelEditValues } from './localModel'
 import { configSaveBody } from './agentConfigSave'
 import AppHeader from './components/AppHeader'
 import AppFooter from './components/AppFooter'
@@ -81,8 +81,7 @@ const DEFAULT_CREATE_FORM: CreateForm = {
   showStats: true, prefixMessages: false, formattingMode: 0, suppressToolMessages: false, telegramSendOnly: false, provider: 'claude',
   codexSandboxMode: '',
   tools: '', projects: '', networks: '', envRefs: '',
-  mcpEndpoints: [], telegramUsers: '', telegramGroups: '', instructions: [], localBaseUrl: '', contextWindow: '',
-  piImageInput: false,
+  mcpEndpoints: [], telegramUsers: '', telegramGroups: '', instructions: [],
 }
 
 export default function App() {
@@ -1604,8 +1603,6 @@ export default function App() {
     if (!createForm.role.trim()) { setCreateMsg('Role is required'); return }
     const createWarmupTimeout = parseWarmupTimeoutSeconds(createForm.warmupTimeoutSeconds)
     if (!createWarmupTimeout.ok) { setCreateMsg(createWarmupTimeout.error); return }
-    const createLocalModel = createFormLocalModel({ ...createForm, provider: createProvider, model: createModel })
-    if (!createLocalModel.ok) { setCreateMsg(createLocalModel.error); return }
     setCreateState('creating'); setCreateMsg('')
     try {
       const body = {
@@ -1644,7 +1641,6 @@ export default function App() {
         telegramUsers: createForm.telegramUsers.split('\n').map(s => parseInt(s.trim())).filter(n => !isNaN(n)),
         telegramGroups: createForm.telegramGroups.split('\n').map(s => parseInt(s.trim())).filter(n => !isNaN(n)),
         provision: !!createTemplateName,
-        ...createLocalModel.body,
       }
       const r = await apiFetch('/api/agents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       const data = await r.json().catch(() => ({}))

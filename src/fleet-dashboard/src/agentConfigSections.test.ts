@@ -12,7 +12,7 @@ import { CONFIG_SECTIONS, DEFAULT_SECTION, sectionCustomizedCount, visibleFields
 import { configSaveBody } from './agentConfigSave.ts'
 import type { AgentConfig, ConfigEdits } from './types'
 
-// Bodies recorded by evaluating the pre-#460 inline save code of App.tsx (main at 09eb3f1) on these
+// Bodies recorded by evaluating the pre-#460 inline save code of App.tsx (main at be931e7) on these
 // edits, before the dialog was sectioned.
 const recorded = JSON.parse(readFileSync(new URL('./fixtures/agentConfigSaveBodies.json', import.meta.url), 'utf8')) as
   Record<string, { edits: Omit<ConfigEdits, 'harnessExtra'>; body: Record<string, unknown> }>
@@ -29,7 +29,6 @@ const TODAY: Record<string, { section: string; key: string }> = {
   'Server URL': { section: 'model', key: 'localBaseUrl' },
   'Server': { section: 'model', key: 'localServer' },
   'Context window (tokens)': { section: 'model', key: 'contextWindow' },
-  'Image input': { section: 'model', key: 'piImageInput' },
   'Effort': { section: 'model', key: 'effort' },
   'Sandbox Mode': { section: 'model', key: 'codexSandboxMode' },
   'Auto Memory': { section: 'model', key: 'autoMemoryEnabled' },
@@ -113,11 +112,9 @@ test('sections: a provider sees only its fields; no section is ever empty for a 
   const advanced = CONFIG_SECTIONS.find(s => s.id === 'advanced')!
   assert.ok(visibleFields(advanced, 'claude').some(f => f.key === 'harnessExtra'))
   assert.ok(visibleFields(advanced, 'codex').some(f => f.key === 'harnessExtra'))
-  for (const provider of ['pi', 'gemini']) {
-    assert.equal(visibleFields(advanced, provider).some(f => f.key === 'harnessExtra'), false, provider)
-    assert.equal(visibleFields(CONFIG_SECTIONS[1], provider).some(f => f.key === 'effectiveHarness'), false, provider)
-  }
-  for (const provider of ['claude', 'codex', 'gemini', 'pi'])
+  assert.equal(visibleFields(advanced, 'gemini').some(f => f.key === 'harnessExtra'), false)
+  assert.equal(visibleFields(CONFIG_SECTIONS[1], 'gemini').some(f => f.key === 'effectiveHarness'), false)
+  for (const provider of ['claude', 'codex', 'gemini'])
     for (const s of CONFIG_SECTIONS) assert.ok(visibleFields(s, provider).length > 0, `${provider}/${s.id}`)
 })
 
@@ -158,8 +155,8 @@ test('rendered dialog: six tabs with counts, one visible panel, every label in i
 
     // Fields each render must show; the rest are provider- or mode-specific.
     const absent: Record<string, string[]> = {
-      claude: ['Server URL', 'Server', 'Context window (tokens)', 'Image input', 'Sandbox Mode'],
-      codex: ['Model', 'Image input', 'Auto Memory', 'Permission Mode', 'Max Turns', 'JSON Schema', 'Agents JSON'],
+      claude: ['Server URL', 'Server', 'Context window (tokens)', 'Sandbox Mode'],
+      codex: ['Model', 'Auto Memory', 'Permission Mode', 'Max Turns', 'JSON Schema', 'Agents JSON'],
     }
     for (const [html, provider] of [[claude, 'claude'], [codex, 'codex']] as const) {
       const byPanel = panels(html)
@@ -174,9 +171,9 @@ test('rendered dialog: six tabs with counts, one visible panel, every label in i
     assert.ok(codex.includes('tool_output_token_limit = 12000'), 'Codex placeholder')
     assert.ok(claude.includes('MAX_MCP_OUTPUT_TOKENS=12000'), 'Claude placeholder')
 
-    const pi = render(edits('pi'))
-    assert.equal(pi.includes('Extra harness settings'), false)
-    assert.equal(pi.includes('Effective settings'), false)
+    const gemini = render(edits('gemini'))
+    assert.equal(gemini.includes('Extra harness settings'), false)
+    assert.equal(gemini.includes('Effective settings'), false)
 
     // A refused harnessExtra shows its line and reason at the field too.
     const refused = 'harnessExtra line 2: \'notify\' is not an allowed setting for codex.'

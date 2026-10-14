@@ -476,15 +476,6 @@ public sealed class GroupBehavior
             return;
         }
 
-        // #386 §4.6: a pi agent holds no provider credential and is never bound to fleet.relay. A
-        // broadcast that reaches it anyway (a stale binding, or one naming "pi") must not write a
-        // credential file or restart Pi — whatever provider it names.
-        if (PiLocalModel.IsPi(_agentConfig.Provider))
-        {
-            _logger.LogInformation("Token update ignored — a pi agent holds no provider credential");
-            return;
-        }
-
         // Route by provider — default to "claude" for backward compat with old broadcasts
         var provider = shared?["provider"]?.GetValue<string>() ?? "claude";
         var agentProvider = _agentConfig.Provider.ToLowerInvariant();

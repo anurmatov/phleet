@@ -19,7 +19,6 @@ export type ConfigSaveBody =
 export function configSaveBody(edits: ConfigEdits, savedHarnessExtra: string | null | undefined): ConfigSaveBody {
   const provider = (edits.provider ?? 'claude').trim()
   // Model, local server URL (sent as `localBaseUrl` only) and context window, with the empty-URL rule;
-  // Pi also sends its image input, which every other provider omits (kept).
   const localModel = localModelSaveBody({ ...edits, provider })
   if (!localModel.ok) return { ok: false, error: localModel.error }
   const memoryLimitMb = parseInt(edits.memoryLimitMb, 10)

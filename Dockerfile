@@ -11,22 +11,16 @@ WORKDIR /app
 ARG CLAUDE_CODE_VERSION=2.1.280
 ARG CODEX_CLI_VERSION=0.159.2
 ARG GEMINI_CLI_VERSION=0.40.1
-ARG PI_CODING_AGENT_VERSION=1.0.4
 ARG MC_VERSION=RELEASE.2025-08-13T08-35-41Z
 
 # ffmpeg/ffprobe let agents look inside video attachments (#361). DejaVu and fontconfig let
 # diagrams agents render show their text, Latin and Cyrillic (#371); ffmpeg pulls both in today,
 # and naming them keeps them if ffmpeg changes. --no-install-recommends is scoped to this line
 # so ffmpeg's X11/GUI recommends stay out without changing what the other packages pull in.
-# poppler-utils (#455) lets Pi agents extract PDF text and render image-only pages; Fleet runs it
-# itself under prlimit. It is the distro's current package, deliberately unpinned: it parses
-# untrusted files, so every image rebuild picks up its security fixes (docs/providers/pi.md §8b).
 RUN apt-get update && apt-get install -y curl git jq rsync cron openssh-client python3 && \
-    apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core fontconfig poppler-utils && rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core fontconfig && rm -rf /var/lib/apt/lists/*
 RUN ffmpeg -version >/dev/null && ffprobe -version >/dev/null || \
     (echo "ERROR: ffmpeg/ffprobe not runnable in the agent image" && exit 1)
-COPY scripts/check-attachment-tools.sh /opt/fleet/
-RUN /opt/fleet/check-attachment-tools.sh
 RUN fc-list | grep -qi dejavu || (echo "ERROR: no DejaVu font in the agent image" && exit 1)
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y nodejs && \
@@ -48,15 +42,6 @@ RUN ACTUAL_CODEX_VERSION="$(codex --version | awk '{print $2}')" && \
     (echo "ERROR: expected codex ${CODEX_CLI_VERSION}, got ${ACTUAL_CODEX_VERSION}" && exit 1)
 RUN codex app-server --help > /dev/null 2>&1 || \
     (echo "ERROR: installed codex version does not support app-server" && exit 1)
-# Pi (#386), the local-model harness for provider `pi`. install-pi.sh installs it as a project in
-# /opt/pi, not with `npm install -g`: Pi declares its own @earendil-works/* packages as ^<pin>, and a
-# global install of 1.0.4 resolved them to 1.2.0. The guard fails the build unless `pi --version`,
-# node (>= 22.19), the flags Fleet passes and every installed @earendil-works/* package match the pin.
-# CI's `pi` job installs with the same script.
-COPY scripts/install-pi.sh scripts/check-pi-pin.sh /opt/fleet/
-RUN /opt/fleet/install-pi.sh "${PI_CODING_AGENT_VERSION}" /opt/pi && \
-    ln -s /opt/pi/node_modules/.bin/pi /usr/local/bin/pi
-RUN /opt/fleet/check-pi-pin.sh install "${PI_CODING_AGENT_VERSION}" /usr/local/bin/pi /opt/pi/node_modules
 RUN (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg) && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
     apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/*
@@ -102,15 +87,6 @@ RUN ACTUAL_GEMINI_VERSION="$(gemini --version | awk '{print $1}')" && \
 # bridge approach (issue #128, PR #129) and must not be re-introduced accidentally.
 RUN npm list -g @google/gemini-cli-core 2>&1 | grep -q "empty" || \
     (echo 'ERROR: @google/gemini-cli-core SDK is installed — remove it; GeminiExecutor uses the CLI binary only' && exit 1)
-
-# The Fleet Pi extension (#386), loaded with `-e /opt/fleet-pi-extension`: runtime dependencies only,
-# from its lockfile. The MCP SDK must be exactly 1.30.1, the pin the extension is built on; nothing
-# may bring in another @earendil-works/* version, and no Pi call may have left /root/.pi in the image.
-COPY src/fleet-pi-extension /opt/fleet-pi-extension
-RUN cd /opt/fleet-pi-extension && npm ci --omit=dev --no-audit --no-fund --loglevel=error && \
-    /opt/fleet/check-pi-pin.sh mcp-sdk 1.30.1 /opt/fleet-pi-extension/node_modules && \
-    /opt/fleet/check-pi-pin.sh tree "${PI_CODING_AGENT_VERSION}" /opt/fleet-pi-extension/node_modules && \
-    { [ ! -e /root/.pi ] || (echo "ERROR: the image must not ship /root/.pi" && exit 1); }
 
 RUN mkdir -p /workspace /root/.claude
 

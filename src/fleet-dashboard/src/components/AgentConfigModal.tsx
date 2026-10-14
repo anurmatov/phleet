@@ -145,8 +145,8 @@ export default function AgentConfigModal({
                   className="config-input"
                   value={provider}
                   // Switching keeps local mode between Claude, Codex and Pi (the model and, to or
-                  // from Pi, the effort follow the harness's form) and clears it for Gemini. Pi's
-                  // image input is kept, hidden and unsent off Pi — see switchProvider.
+                  // from Pi, the effort follow the harness's form) and clears it for Gemini — see
+                  // switchProvider.
                   onChange={e => onEditsChange(switchProvider({ ...configEdits, provider }, e.target.value))}
                 >
                   {PROVIDER_OPTIONS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}

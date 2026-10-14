@@ -161,8 +161,6 @@ export interface CreateForm {
   /** Pi only (#386): the local server origin and its context size, sent on create. */
   localBaseUrl: string
   contextWindow: string
-  /** Pi only (#455): send images to the model. Default false. */
-  piImageInput: boolean
 }
 
 export interface AgentConfig {
@@ -201,8 +199,6 @@ export interface AgentConfig {
   anthropicBaseUrl?: string | null
   /** The local server's context size in tokens, or null. Used only in local mode (#367, #382). */
   contextWindow?: number | null
-  /** Pi's image input (#455). Stored for every provider, applied only to Pi; an older orchestrator omits it. */
-  piImageInput?: boolean
   tools: { toolName: string; isEnabled: boolean }[]
   projects: string[]
   mcpEndpoints: McpEndpointEntry[]
@@ -265,8 +261,6 @@ export interface ConfigEdits {
   localServer: CodexLocalServer
   /** Context window in tokens, or '' for not set (sent as 0, which the API clears on). */
   contextWindow: string
-  /** Pi's image input (#455). Kept across provider switches; sent only while the provider is Pi. */
-  piImageInput: boolean
   instructions: { name: string; loadOrder: number }[]
 }
 

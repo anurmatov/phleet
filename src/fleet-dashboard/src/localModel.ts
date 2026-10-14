@@ -23,6 +23,10 @@ export const PI3_TEXT = "Pi needs the server's context size, at least 65536; set
 /** PI4: '' (the default) and `on` run thinking on; `off` runs it off. */
 export const PI_EFFORT_CHOICES = ['', 'off', 'on']
 
+/** The "Image input" checkbox's hint (#455), shown only for Pi. */
+export const PI_IMAGE_INPUT_HINT =
+  'Sends images (and scanned PDF pages) to this model. Turn on only after its vision is verified (docs/providers/pi.md §8a). Applies at the next reprovision.'
+
 /** The Env Ref a legacy Codex local agent reaches its server through. */
 export const CODEX_OSS_ENV_REF = 'CODEX_OSS_BASE_URL'
 
@@ -34,7 +38,7 @@ export const V1_PATH_HINT = 'Remove /v1 — Fleet adds the right path for each h
 
 /** The edit fields local mode reads and writes, with the provider already resolved. */
 export type LocalModelEdits =
-  Pick<ConfigEdits, 'model' | 'effort' | 'localMode' | 'localServer' | 'localBaseUrl' | 'contextWindow' | 'envRefs'>
+  Pick<ConfigEdits, 'model' | 'effort' | 'localMode' | 'localServer' | 'localBaseUrl' | 'contextWindow' | 'piImageInput' | 'envRefs'>
   & { provider: string }
 
 export type LocalModelPatch = Partial<LocalModelEdits>
@@ -79,15 +83,19 @@ export function isLocalMode(provider: string, localBaseUrl: string, model: strin
   return localBaseUrl.trim() !== '' || (provider === 'codex' && splitCodexLocalModel(model) !== null)
 }
 
-/** Edit-form values from an API row. An older orchestrator returns only `anthropicBaseUrl`. */
+/**
+ * Edit-form values from an API row. An older orchestrator returns only `anthropicBaseUrl`, and no
+ * `piImageInput` (off). The image input is loaded for every provider, so a switch to Pi shows it.
+ */
 export function localModelEditValues(
-  cfg: Pick<AgentConfig, 'provider' | 'model' | 'localBaseUrl' | 'anthropicBaseUrl'>,
-): Pick<ConfigEdits, 'localMode' | 'localBaseUrl' | 'localServer'> {
+  cfg: Pick<AgentConfig, 'provider' | 'model' | 'localBaseUrl' | 'anthropicBaseUrl' | 'piImageInput'>,
+): Pick<ConfigEdits, 'localMode' | 'localBaseUrl' | 'localServer' | 'piImageInput'> {
   const localBaseUrl = cfg.localBaseUrl ?? cfg.anthropicBaseUrl ?? ''
   return {
     localMode: isLocalMode(cfg.provider ?? 'claude', localBaseUrl, cfg.model),
     localBaseUrl,
     localServer: splitCodexLocalModel(cfg.model)?.server ?? 'ollama',
+    piImageInput: cfg.piImageInput ?? false,
   }
 }
 
@@ -142,7 +150,8 @@ export function effortFromPi(next: string, effort: string): string {
  * entering it, and Claude and Pi keep the bare tag. A move to or from Pi also maps effort (§4.7);
  * Claude ↔ Codex leaves it to the select's marker (#349). Cloud → Pi starts like Cloud → Local.
  * Gemini has no local mode, so switching to it clears the URL and context. Otherwise the model
- * resets as before.
+ * resets as before. Pi's image input is never in the patch: Save sends it only for Pi, so the
+ * stored value survives a switch away and shows again on a switch back (#455).
  */
 export function switchProvider(edits: LocalModelEdits, next: string): LocalModelPatch {
   if (next === edits.provider) return {}
@@ -180,25 +189,25 @@ export function createFormProviderPatch(
 }
 
 export type CreateLocalModel =
-  | { ok: true; body: { localBaseUrl?: string; contextWindow?: number } }
+  | { ok: true; body: { localBaseUrl?: string; contextWindow?: number; piImageInput?: boolean } }
   | { ok: false; error: string }
 
 /**
  * The local-model part of the create request (#386 H1). A Pi agent is created complete: URL
  * (PI1), tag, then context (PI3), checked as the config modal's Save checks them, so it can
- * provision at once. Every other provider sends nothing here, as before.
+ * provision at once, with its image input (#455). Every other provider sends nothing here, as before.
  */
 export function createFormLocalModel(
-  form: { provider: string; model: string; localBaseUrl: string; contextWindow: string },
+  form: { provider: string; model: string; localBaseUrl: string; contextWindow: string; piImageInput: boolean },
 ): CreateLocalModel {
   if (!isPi(form.provider)) return { ok: true, body: {} }
   const save = piSaveBody({
     provider: form.provider, localMode: true, model: form.model, localBaseUrl: form.localBaseUrl,
-    contextWindow: form.contextWindow, localServer: 'ollama', effort: '', envRefs: '',
+    contextWindow: form.contextWindow, piImageInput: form.piImageInput, localServer: 'ollama', effort: '', envRefs: '',
   })
-  return save.ok
-    ? { ok: true, body: { localBaseUrl: save.body.localBaseUrl, contextWindow: save.body.contextWindow } }
-    : save
+  if (!save.ok) return save
+  const { localBaseUrl, contextWindow, piImageInput } = save.body
+  return { ok: true, body: { localBaseUrl, contextWindow, piImageInput } }
 }
 
 export function localModelSuggestions(provider: string): LocalModelSuggestion[] {
@@ -272,7 +281,7 @@ export function piContextFault(contextWindow: string): string | null {
 }
 
 export type LocalModelSave =
-  | { ok: true; body: { model: string; localBaseUrl: string; contextWindow: number } }
+  | { ok: true; body: { model: string; localBaseUrl: string; contextWindow: number; piImageInput?: boolean } }
   | { ok: false; error: string }
 
 /** Pi is always local: URL (PI1), tag, then context (PI3) — the server's order. */
@@ -285,14 +294,15 @@ function piSaveBody(edits: LocalModelEdits): LocalModelSave {
   if (contextFault) return { ok: false, error: contextFault }
   const contextWindow = parseContextWindow(edits.contextWindow)
   if (!contextWindow.ok) return contextWindow
-  return { ok: true, body: { model, localBaseUrl, contextWindow: contextWindow.value } }
+  return { ok: true, body: { model, localBaseUrl, contextWindow: contextWindow.value, piImageInput: edits.piImageInput } }
 }
 
 /**
  * The model, URL and context-window part of the config PUT. Sends `localBaseUrl` only — never the
  * `anthropicBaseUrl` alias. Claude local always needs a URL (empty means cloud); Codex local may
  * leave it empty only while the legacy Env Ref is present. Pi always needs a URL and a context
- * window of at least 65536.
+ * window of at least 65536, and also sends its image input. Every other provider omits
+ * `piImageInput`, which the API reads as keep (#455).
  */
 export function localModelSaveBody(edits: LocalModelEdits): LocalModelSave {
   if (isPi(edits.provider)) return piSaveBody(edits)

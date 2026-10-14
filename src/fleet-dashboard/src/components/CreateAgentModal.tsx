@@ -2,7 +2,8 @@ import { useState } from 'react'
 import type { CreateForm, InstructionSummary } from '../types'
 import { PROVIDER_OPTIONS } from '../constants'
 import {
-  PI_MIN_CONTEXT_WINDOW, PI_RUNS_ON_NOTE, createFormLocalModel, createFormProviderPatch, isPi, localModelSuggestions,
+  PI_IMAGE_INPUT_HINT, PI_MIN_CONTEXT_WINDOW, PI_RUNS_ON_NOTE, createFormLocalModel, createFormProviderPatch, isPi,
+  localModelSuggestions,
 } from '../localModel'
 import ModelSelector from './ModelSelector'
 import FieldHint from './FieldHint'
@@ -164,6 +165,17 @@ export default function CreateAgentModal({
                   ))}
                 </div>
               </div>
+            </div>
+            <div className="config-row">
+              <label className="config-field config-field-checkbox">
+                <input
+                  type="checkbox"
+                  checked={createForm.piImageInput}
+                  onChange={e => onFormChange({ piImageInput: e.target.checked })}
+                />
+                <span className="config-label">Image input</span>
+              </label>
+              <FieldHint>{PI_IMAGE_INPUT_HINT}</FieldHint>
             </div>
             {piFault && <p className="config-feedback config-feedback-error">{piFault}</p>}
             </>

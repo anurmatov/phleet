@@ -26,7 +26,7 @@ const ORIGIN = 'http://inference-host:11434'
 function edits(overrides: Partial<LocalModelEdits> = {}): LocalModelEdits {
   return {
     provider: 'codex', localMode: true, model: 'ollama/qwen3.8:27b', localServer: 'ollama',
-    localBaseUrl: ORIGIN, contextWindow: '131072', effort: 'none', envRefs: '', ...overrides,
+    localBaseUrl: ORIGIN, contextWindow: '131072', piImageInput: false, effort: 'none', envRefs: '', ...overrides,
   }
 }
 
@@ -77,16 +77,16 @@ test('mode: local when claude or codex has a URL, or codex has a local model (le
 test('load: localBaseUrl wins, anthropicBaseUrl is the fallback for an older orchestrator', () => {
   assert.deepEqual(
     localModelEditValues({ provider: 'codex', model: 'lmstudio/x', localBaseUrl: ORIGIN, anthropicBaseUrl: ORIGIN }),
-    { localMode: true, localBaseUrl: ORIGIN, localServer: 'lmstudio' })
+    { localMode: true, localBaseUrl: ORIGIN, localServer: 'lmstudio', piImageInput: false })
   assert.deepEqual(
     localModelEditValues({ provider: 'claude', model: 'qwen3.8:27b', anthropicBaseUrl: ORIGIN }),
-    { localMode: true, localBaseUrl: ORIGIN, localServer: 'ollama' })
+    { localMode: true, localBaseUrl: ORIGIN, localServer: 'ollama', piImageInput: false })
   assert.deepEqual(
     localModelEditValues({ provider: 'codex', model: 'ollama/x', localBaseUrl: null, anthropicBaseUrl: null }),
-    { localMode: true, localBaseUrl: '', localServer: 'ollama' })
+    { localMode: true, localBaseUrl: '', localServer: 'ollama', piImageInput: false })
   assert.deepEqual(
     localModelEditValues({ provider: 'claude', model: 'claude-sonnet-4-6' }),
-    { localMode: false, localBaseUrl: '', localServer: 'ollama' })
+    { localMode: false, localBaseUrl: '', localServer: 'ollama', piImageInput: false })
 })
 
 test('Cloud → Local: tag and URL start empty', () => {
@@ -299,7 +299,7 @@ test('pi is a local harness whose Runs on is locked to Local server', () => {
   assert.equal(isLocalMode('pi', PI_ORIGIN, PI_TAG), true)
   assert.equal(isLocalMode('pi', '', PI_TAG), true)
   assert.deepEqual(localModelEditValues({ provider: 'pi', model: PI_TAG, localBaseUrl: null }),
-    { localMode: true, localBaseUrl: '', localServer: 'ollama' })
+    { localMode: true, localBaseUrl: '', localServer: 'ollama', piImageInput: false })
   // The Cloud pill does nothing; neither does Local.
   assert.deepEqual(switchRunsOn(piEdits(), false), {})
   assert.deepEqual(switchRunsOn(piEdits(), true), {})
@@ -333,11 +333,11 @@ test('pi Save: URL (PI1), then tag, then context — the server order; no Env Re
   assert.deepEqual(localModelSaveBody(piEdits({ localMode: false, localBaseUrl: '' })), { ok: false, error: PI1_TEXT })
 })
 
-test('pi Save body: model, localBaseUrl and contextWindow only — never anthropicBaseUrl', () => {
+test('pi Save body: model, localBaseUrl, contextWindow and piImageInput only — never anthropicBaseUrl', () => {
   const saved = localModelSaveBody(piEdits({ localBaseUrl: ` ${PI_ORIGIN} `, model: ` ${PI_TAG} ` }))
-  assert.deepEqual(saved, { ok: true, body: { model: PI_TAG, localBaseUrl: PI_ORIGIN, contextWindow: 131072 } })
+  assert.deepEqual(saved, { ok: true, body: { model: PI_TAG, localBaseUrl: PI_ORIGIN, contextWindow: 131072, piImageInput: false } })
   if (saved.ok) {
-    assert.deepEqual(Object.keys(saved.body).sort(), ['contextWindow', 'localBaseUrl', 'model'])
+    assert.deepEqual(Object.keys(saved.body).sort(), ['contextWindow', 'localBaseUrl', 'model', 'piImageInput'])
     assert.equal(JSON.stringify(saved.body).includes('anthropicBaseUrl'), false)
   }
 })
@@ -384,7 +384,8 @@ test('§4.7 Codex local → Pi: <server>/<tag> → <tag>; none/minimal → off, 
   const codex = edits({ model: 'ollama/qwen3.8:27b', effort: 'none' })
   const pi = apply(codex, switchProvider(codex, 'pi'))
   assert.deepEqual({ provider: pi.provider, model: pi.model, effort: pi.effort }, { provider: 'pi', model: 'qwen3.8:27b', effort: 'off' })
-  assert.deepEqual(localModelSaveBody(pi), { ok: true, body: { model: 'qwen3.8:27b', localBaseUrl: ORIGIN, contextWindow: 131072 } })
+  assert.deepEqual(localModelSaveBody(pi),
+    { ok: true, body: { model: 'qwen3.8:27b', localBaseUrl: ORIGIN, contextWindow: 131072, piImageInput: false } })
   // A legacy Env Ref row has no URL: Pi needs one entered first.
   const legacy = edits({ localBaseUrl: '', envRefs: 'CODEX_OSS_BASE_URL' })
   assert.deepEqual(localModelSaveBody(apply(legacy, switchProvider(legacy, 'pi'))), { ok: false, error: PI1_TEXT })
@@ -513,7 +514,7 @@ function configEdits(overrides: Partial<ConfigEdits>): ConfigEdits {
     codexSandboxMode: '', tools: '', projects: [], networks: '', envRefs: '', mcpEndpoints: [], telegramUsers: '',
     telegramGroups: '', canReceiveChatRequests: false, requestReceivedMessage: '', mountDockerSock: false,
     outputStyle: '', localMode: true, localBaseUrl: PI_ORIGIN, localServer: 'ollama', contextWindow: '131072',
-    instructions: [], ...overrides,
+    piImageInput: false, instructions: [], ...overrides,
   }
 }
 
@@ -582,7 +583,7 @@ function createForm(overrides: Partial<CreateForm>): CreateForm {
     shortName: 'pi-dev', effort: '', jsonSchema: '', agentsJson: '', autoMemoryEnabled: true, showStats: true,
     prefixMessages: false, formattingMode: 0, suppressToolMessages: false, telegramSendOnly: false, provider: 'pi',
     codexSandboxMode: '', tools: '', projects: '', networks: '', envRefs: '', mcpEndpoints: [], telegramUsers: '',
-    telegramGroups: '', instructions: [], localBaseUrl: '', contextWindow: '', ...overrides,
+    telegramGroups: '', instructions: [], localBaseUrl: '', contextWindow: '', piImageInput: false, ...overrides,
   }
 }
 
@@ -614,12 +615,12 @@ test('create modal: pi option listed; pi takes a bare tag with the Qwen3.8 chips
 
 test('create body: Pi needs the URL (PI1), the tag, then a context of at least 65536 (PI3)', () => {
   const create = localModel.createFormLocalModel
-  const pi = { provider: 'pi', model: PI_TAG, localBaseUrl: PI_ORIGIN, contextWindow: '131072' }
+  const pi = { provider: 'pi', model: PI_TAG, localBaseUrl: PI_ORIGIN, contextWindow: '131072', piImageInput: false }
   assert.deepEqual(create({ ...pi, localBaseUrl: '' }), { ok: false, error: PI1_TEXT })
   assert.deepEqual(create({ ...pi, model: '' }), { ok: false, error: localModel.LOCAL_TAG_REQUIRED })
   assert.deepEqual(create({ ...pi, contextWindow: '' }), { ok: false, error: localModel.PI3_TEXT })
   assert.deepEqual(create({ ...pi, contextWindow: '65535' }), { ok: false, error: localModel.PI3_TEXT })
-  assert.deepEqual(create(pi), { ok: true, body: { localBaseUrl: PI_ORIGIN, contextWindow: 131072 } })
+  assert.deepEqual(create(pi), { ok: true, body: { localBaseUrl: PI_ORIGIN, contextWindow: 131072, piImageInput: false } })
   // Every other provider's create request is unchanged.
   assert.deepEqual(create({ ...pi, provider: 'claude', localBaseUrl: '', contextWindow: '' }), { ok: true, body: {} })
 })
@@ -645,4 +646,119 @@ test('create modal: Pi asks for the server URL and context; Create is blocked wi
   const claude = renderCreate(createForm({ provider: 'claude', model: PROVIDER_DEFAULT_MODEL.claude }))
   assert.equal(claude.includes('Server URL'), false)
   assert.match(claude, /<button class="config-save-btn">Create<\/button>/)
+})
+
+// ── #455 A16: Pi's Image input — Pi only, off by default, round-trips, survives a provider switch ──
+
+const IMAGE_INPUT = 'Image input'
+
+/** The Image input checkbox in rendered markup: true checked, false unchecked, null absent. */
+function imageInputBox(html: string): boolean | null {
+  const match = /<input type="checkbox"( checked="")?\/><span class="config-label">Image input<\/span>/.exec(html)
+  return match ? match[1] !== undefined : null
+}
+
+type Element = { props: { type?: string; onChange?: (e: { target: { checked: boolean } }) => void; children?: unknown } }
+
+/** The checkbox inputs in an unrendered element tree (LocalModelFields has no hooks, so it can be called). */
+function checkboxes(node: unknown): Element[] {
+  if (Array.isArray(node)) return node.flatMap(checkboxes)
+  if (!node || typeof node !== 'object' || !('props' in node)) return []
+  const element = node as Element
+  return [...(element.props.type === 'checkbox' ? [element] : []), ...checkboxes(element.props.children)]
+}
+
+test('A16 image input: the hint text is exact', () => {
+  assert.equal(localModel.PI_IMAGE_INPUT_HINT,
+    'Sends images (and scanned PDF pages) to this model. Turn on only after its vision is verified (docs/providers/pi.md §8a). Applies at the next reprovision.')
+})
+
+test('A16 image input: shown only for Pi, unchecked by default, with the hint', () => {
+  const pi = renderConfig(configEdits({}))
+  assert.equal(imageInputBox(pi), false)
+  assert.ok(pi.includes(`<p class="field-hint">${localModel.PI_IMAGE_INPUT_HINT}</p>`))
+  // An API row without the field (an older orchestrator) loads as off.
+  assert.equal(localModelEditValues({ provider: 'pi', model: PI_TAG, localBaseUrl: PI_ORIGIN }).piImageInput, false)
+
+  const cloud = { localMode: false, localBaseUrl: '', contextWindow: '' }
+  const others = [
+    configEdits({ provider: 'claude' }),
+    configEdits({ provider: 'codex', model: `ollama/${PI_TAG}` }),
+    configEdits({ provider: 'claude', model: PROVIDER_DEFAULT_MODEL.claude, ...cloud }),
+    configEdits({ provider: 'codex', model: PROVIDER_DEFAULT_MODEL.codex, ...cloud }),
+    configEdits({ provider: 'gemini', model: PROVIDER_DEFAULT_MODEL.gemini, ...cloud }),
+  ]
+  // Hidden even when the stored value is on.
+  for (const e of others) assert.equal(renderConfig({ ...e, piImageInput: true }).includes(IMAGE_INPUT), false, `${e.provider} ${e.model}`)
+
+  assert.equal(imageInputBox(renderCreate(createForm({ model: PI_TAG }))), false)
+  assert.ok(renderCreate(createForm({ model: PI_TAG })).includes(localModel.PI_IMAGE_INPUT_HINT))
+  for (const provider of ['claude', 'codex', 'gemini']) {
+    const html = renderCreate(createForm({ provider, model: PROVIDER_DEFAULT_MODEL[provider], piImageInput: true }))
+    assert.equal(html.includes(IMAGE_INPUT), false, provider)
+  }
+})
+
+test('A16 image input: round-trips — load true → shown checked → Save sends it; unchecking sends false', () => {
+  const loaded = localModelEditValues({ provider: 'pi', model: PI_TAG, localBaseUrl: PI_ORIGIN, piImageInput: true })
+  assert.equal(loaded.piImageInput, true)
+  const e = configEdits(loaded)
+  assert.equal(imageInputBox(renderConfig(e)), true)
+  assert.deepEqual(localModelSaveBody({ ...e, provider: 'pi' }),
+    { ok: true, body: { model: PI_TAG, localBaseUrl: PI_ORIGIN, contextWindow: 131072, piImageInput: true } })
+
+  // The checkbox patches the edit state, and Save sends what it shows.
+  const patches: LocalModelPatch[] = []
+  const tree = (LocalModelFieldsModule.default as (p: unknown) => unknown)({ edits: { ...e, provider: 'pi' }, onEditsChange: (p: LocalModelPatch) => patches.push(p) })
+  const [box] = checkboxes(tree)
+  assert.equal(checkboxes(tree).length, 1)
+  box.props.onChange!({ target: { checked: false } })
+  assert.deepEqual(patches, [{ piImageInput: false }])
+  const off = { ...e, ...patches[0] }
+  assert.equal(imageInputBox(renderConfig(off)), false)
+  const saved = localModelSaveBody({ ...off, provider: 'pi' })
+  assert.ok(saved.ok)
+  if (saved.ok) assert.equal(saved.body.piImageInput, false)
+
+  // Create sends the box's value for Pi, and nothing for any other provider.
+  const create = localModel.createFormLocalModel
+  const form = { provider: 'pi', model: PI_TAG, localBaseUrl: PI_ORIGIN, contextWindow: '131072', piImageInput: true }
+  assert.equal(imageInputBox(renderCreate(createForm(form))), true)
+  assert.deepEqual(create(form), { ok: true, body: { localBaseUrl: PI_ORIGIN, contextWindow: 131072, piImageInput: true } })
+  for (const provider of ['claude', 'codex', 'gemini']) assert.deepEqual(create({ ...form, provider }), { ok: true, body: {} }, provider)
+})
+
+test('A16 image input: a stored value survives a provider switch — hidden and unsent off Pi, shown again on return', () => {
+  for (const stored of [true, false]) {
+    for (const next of ['claude', 'codex', 'gemini']) {
+      const label = `${stored} pi → ${next} → pi`
+      const pi = configEdits({ piImageInput: stored })
+      const away = { ...pi, ...switchProvider({ ...pi, provider: 'pi' }, next) }
+      assert.equal(away.piImageInput, stored, label)
+      assert.equal(renderConfig(away).includes(IMAGE_INPUT), false, label)
+      // Omitted, never false: the API keeps the stored value.
+      const saved = localModelSaveBody({ ...away, provider: next })
+      assert.ok(saved.ok, label)
+      if (saved.ok) assert.equal('piImageInput' in saved.body, false, label)
+
+      const back = { ...away, ...switchProvider({ ...away, provider: next }, 'pi') }
+      assert.equal(imageInputBox(renderConfig(back)), stored, label)
+    }
+  }
+  // Loaded on a non-Pi agent, it shows on a switch to Pi.
+  const claude = configEdits({ provider: 'claude', ...localModelEditValues({ provider: 'claude', model: PI_TAG, localBaseUrl: PI_ORIGIN, piImageInput: true }) })
+  assert.equal(imageInputBox(renderConfig({ ...claude, ...switchProvider({ ...claude, provider: 'claude' }, 'pi') })), true)
+
+  // No provider switch, Runs on toggle or create-form provider change ever touches it.
+  const providers = ['claude', 'codex', 'gemini', 'pi']
+  for (const from of providers) {
+    for (const local of [true, false]) {
+      const e = edits({ provider: from, localMode: local, piImageInput: true })
+      for (const to of providers) {
+        assert.equal('piImageInput' in switchProvider(e, to), false, `${from} ${local} → ${to}`)
+        assert.equal('piImageInput' in createFormProviderPatch({ provider: from, effort: '' }, to), false, `create ${from} → ${to}`)
+      }
+      assert.equal('piImageInput' in switchRunsOn(e, !local), false, `${from} runs on`)
+    }
+  }
 })

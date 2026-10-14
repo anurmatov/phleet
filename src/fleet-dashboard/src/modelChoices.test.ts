@@ -1,54 +1,93 @@
 // Run with `npm test` (node --test, Node ≥ 22.18 strips the types). Type-checked by `tsc -b`.
-// #460 owner direction: the cloud model picker offers family aliases only.
+// #460 owner direction: the cloud model picker lists family aliases; #465: plus a custom model name.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
-import { createElement } from 'react'
+import { createElement, type ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createServer } from 'vite'
 import { PROVIDER_DEFAULT_MODEL, PROVIDER_MODELS } from './constants.ts'
-import { modelChoices } from './modelChoices.ts'
+import { customModeFor, modelChoices } from './modelChoices.ts'
 
-test('Claude and Codex offer the family aliases only, with no free text', () => {
+test('Claude and Codex list the family aliases and take free text, like Gemini', () => {
   assert.deepEqual(PROVIDER_MODELS.claude, ['opus', 'sonnet', 'haiku'])
   assert.deepEqual(PROVIDER_MODELS.codex, ['sol', 'terra', 'luna'])
   assert.equal(PROVIDER_DEFAULT_MODEL.claude, 'sonnet')
   assert.equal(PROVIDER_DEFAULT_MODEL.codex, 'sol')
-  for (const provider of ['claude', 'codex']) {
+  for (const provider of ['claude', 'codex', 'gemini']) {
     const choices = modelChoices(provider, PROVIDER_MODELS[provider][0])
-    assert.equal(choices.freeText, false, provider)
+    assert.equal(choices.freeText, true, provider)
     assert.equal(choices.current, null, provider)
   }
 })
 
-test('a stored dated or hosted id is kept as the current choice, never rewritten', () => {
-  assert.deepEqual(modelChoices('claude', 'claude-opus-4-7'), { options: ['opus', 'sonnet', 'haiku'], current: 'claude-opus-4-7', freeText: false })
+test('a stored dated or hosted id is kept as the current value, never rewritten', () => {
+  assert.deepEqual(modelChoices('claude', 'claude-opus-4-7'), { options: ['opus', 'sonnet', 'haiku'], current: 'claude-opus-4-7', freeText: true })
   assert.equal(modelChoices('codex', 'gpt-5.6-sol').current, 'gpt-5.6-sol')
   assert.equal(modelChoices('codex', 'zai/glm-5.3').current, 'zai/glm-5.3')
   assert.equal(modelChoices('codex', '').current, null)
+  assert.equal(modelChoices('gemini', 'gemini-custom').current, 'gemini-custom')
 })
 
-test('Gemini keeps its list and free text', () => {
-  assert.equal(modelChoices('gemini', 'gemini-custom').freeText, true)
+test('custom mode follows the value: listed → select, other id → custom input, empty → unchanged', () => {
+  const claude = PROVIDER_MODELS.claude
+  assert.equal(customModeFor('opus', claude), false)
+  assert.equal(customModeFor('claude-opus-4-7', claude), true)
+  assert.equal(customModeFor('zai/glm-5.3', PROVIDER_MODELS.codex), true)
+  assert.equal(customModeFor('', claude), null)
+
+  // The picker's mount state and its value-change effect, applied to a sequence of values.
+  const modes = (options: string[], values: string[]) => {
+    let mode = customModeFor(values[0], options) ?? true
+    const out = [mode]
+    for (const v of values.slice(1)) { mode = customModeFor(v, options) ?? mode; out.push(mode) }
+    return out
+  }
+  // Create modal: mounted with the default alias, then "copy from" an agent on a dated or zai/ model.
+  assert.deepEqual(modes(claude, ['sonnet', 'claude-opus-4-7']), [false, true])
+  assert.deepEqual(modes(PROVIDER_MODELS.codex, ['sol', 'zai/glm-5.3']), [false, true])
+  // Typing in the custom input: clearing it stays custom; typing an alias goes back to the select.
+  assert.deepEqual(modes(claude, ['claude-opus-4-7', '', 'son', 'sonnet']), [true, true, true, false])
 })
 
-test('rendered picker: aliases, the stored dated id selected as current, no custom entry', async () => {
+test('rendered picker: aliases plus a custom entry; a stored non-alias id opens in the custom input', async () => {
   const server = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), configFile: false,
     server: { middlewareMode: true, hmr: false, watch: null }, appType: 'custom' })
   try {
     const { default: ModelSelector } = await server.ssrLoadModule('/src/components/ModelSelector.tsx')
     const render = (provider: string, value: string) =>
       renderToStaticMarkup(createElement(ModelSelector, { provider, value, onChange: () => {} }))
+    // The element tree ModelSelector returns, with its handlers; its hooks run inside the probe's render.
+    const tree = (provider: string, value: string, onChange: (model: string) => void) => {
+      let out: ReactElement | null = null
+      const Probe = () => { out = ModelSelector({ provider, value, onChange }); return null }
+      renderToStaticMarkup(createElement(Probe))
+      return out as unknown as ReactElement<{ children: ReactElement<Record<string, unknown>>[] }>
+    }
 
-    const dated = render('codex', 'gpt-5.6-sol')
-    assert.match(dated, /<option value="sol">sol<\/option><option value="terra">terra<\/option><option value="luna">luna<\/option><option value="gpt-5.6-sol" selected="">gpt-5.6-sol \(current\)<\/option>/)
-    assert.equal(dated.includes('custom'), false)
+    for (const [provider, value] of [['claude', 'opus'], ['codex', 'sol']]) {
+      const html = render(provider, value)
+      const [a, b, c] = PROVIDER_MODELS[provider]
+      assert.match(html, new RegExp(`<option value="${a}" selected="">${a}</option><option value="${b}">${b}</option><option value="${c}">${c}</option><option value="">custom…</option>`), provider)
+      assert.match(html, new RegExp(`class="model-pill active"[^>]*>${a}<`), provider)
+      assert.equal(html.includes('<input'), false, provider)
+    }
 
-    const alias = render('claude', 'opus')
-    assert.match(alias, /<option value="opus" selected="">opus<\/option>/)
-    assert.equal(alias.includes('(current)'), false)
-    assert.match(alias, /class="model-pill active"[^>]*>opus</)
+    for (const [provider, value] of [['claude', 'claude-opus-4-7'], ['codex', 'zai/glm-5.3'], ['codex', 'gpt-5.6-sol']]) {
+      const html = render(provider, value)
+      assert.ok(html.includes(`<input class="config-input " placeholder="custom model name" value="${value}"/>`), value)
+      assert.equal(html.includes('<select'), false, value)
+      for (const alias of PROVIDER_MODELS[provider]) assert.match(html, new RegExp(`class="model-pill"[^>]*>${alias}<`), value)
+    }
 
-    assert.ok(render('gemini', 'gemini-2.5-pro').includes('— custom —'))
+    assert.ok(render('gemini', 'gemini-2.5-pro').includes('custom…'))
+
+    // Typed text reaches onChange exactly; an alias pill hands over the alias.
+    const seen: string[] = []
+    const [input, pills] = tree('claude', 'claude-opus-4-7', m => seen.push(m)).props.children
+    ;(input.props.onChange as (e: { target: { value: string } }) => void)({ target: { value: ' Claude-Opus-4-7 ' } })
+    ;(input.props.onChange as (e: { target: { value: string } }) => void)({ target: { value: 'zai/GLM-5.3' } })
+    ;((pills.props.children as ReactElement<{ onClick: () => void }>[])[0].props.onClick)()
+    assert.deepEqual(seen, [' Claude-Opus-4-7 ', 'zai/GLM-5.3', 'opus'])
   } finally { await server.close() }
 })

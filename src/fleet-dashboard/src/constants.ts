@@ -11,12 +11,11 @@ export const PROVIDER_OPTIONS: { value: string; label: string }[] = [
 
 // ── Provider model lists ──────────────────────────────────────────────────────
 
-// Cloud Claude and Codex offer family aliases only (#460, owner direction): a dated version goes stale.
+// Cloud Claude and Codex list family aliases (#460, owner direction): a dated version goes stale.
 // Claude Code resolves opus/sonnet/haiku itself; Codex aliases are mapped to the current model id in
-// HarnessDefaults.CodexModelAliases, and the effective settings show the resolved id. A stored dated,
-// hosted (zai/) or other id keeps working and is shown as the current value, never rewritten.
-export const ALIAS_ONLY_PROVIDERS = ['claude', 'codex']
-
+// HarnessDefaults.CodexModelAliases, and the effective settings show the resolved id. A dated, hosted
+// (zai/) or other id is entered through the picker's custom entry (#465); a stored one keeps working,
+// opens in the custom input and is never rewritten.
 export const PROVIDER_MODELS: Record<string, string[]> = {
   claude: ['opus', 'sonnet', 'haiku'],
   codex: ['sol', 'terra', 'luna'],

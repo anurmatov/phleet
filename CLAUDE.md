@@ -224,9 +224,9 @@ overwriting existing keys, `entrypoint.sh` writes `codex-root.toml` before the `
 list to the `AgentOptions` default — so the orchestrator prepends them too
 (`HarnessDefaults.AgentDefaultAllowedTools`) and the six never cause `--tools`; `--tools` silently ignores
 unknown names, and `KeptTools` includes `TaskStop`/`SendMessage` because an explicit list drops them. An older image ignores the field
-and the file (view: "not reported"). Cloud model picker: families only — Claude `opus`/`sonnet`/`haiku`
+and the file (view: "not reported"). Cloud model picker: families — Claude `opus`/`sonnet`/`haiku`
 passed through, Codex `sol`/`terra`/`luna` mapped in `HarnessDefaults.CodexModelAliases` (the pinned
-Codex does not resolve them); dated ids keep working, never rewritten. The dashboard dialog is sectioned and shows the effective settings
+Codex does not resolve them) — plus a **custom…** free-text entry (#465); dated ids keep working, never rewritten. The dashboard dialog is sectioned and shows the effective settings
 and the `harnessExtra` textarea. See `docs/providers/harness-defaults.md`.
 
 ## Project contexts

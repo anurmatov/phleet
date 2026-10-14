@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react'
-import { PROVIDER_MODELS } from '../constants'
-import { modelChoices } from '../modelChoices'
+import { customModeFor, modelChoices } from '../modelChoices'
 
 const PILL_LABELS: Record<string, string> = {
   'gemini-3-pro-preview': '3 pro preview',
@@ -19,36 +18,19 @@ interface ModelSelectorProps {
 }
 
 export default function ModelSelector({ provider, value, onChange, className }: ModelSelectorProps) {
-  const models = PROVIDER_MODELS[provider] ?? []
-  const isKnown = models.includes(value)
   const choices = modelChoices(provider, value)
+  const models = choices.options
+  const isKnown = models.includes(value)
 
-  const [customMode, setCustomMode] = useState(!isKnown && models.length > 0)
+  // #465: a stored value outside the list (a dated or zai/ id), or none, opens in the custom input, as is.
+  const [customMode, setCustomMode] = useState(customModeFor(value, models) ?? true)
 
-  // When the model value changes to a known model (e.g. provider reset), exit custom mode
+  // Follow value changes: a listed model (e.g. provider reset) shows the select; any other id (e.g. a
+  // create-modal copy-from of a dated or zai/ model) shows the custom input.
   useEffect(() => {
-    if (models.includes(value)) setCustomMode(false)
+    const next = customModeFor(value, models)
+    if (next !== null) setCustomMode(next)
   }, [value, models])
-
-  // #460: Claude and Codex offer family aliases only. A stored dated or hosted id stays selected, as is,
-  // until an alias is picked.
-  if (!choices.freeText) {
-    return (
-      <div className="model-selector">
-        <select className={`config-input ${className ?? ''}`} value={value} onChange={e => onChange(e.target.value)}>
-          {choices.options.map(m => <option key={m} value={m}>{m}</option>)}
-          {choices.current !== null && <option value={choices.current}>{choices.current} (current)</option>}
-        </select>
-        <div className="model-pills">
-          {choices.options.map(m => (
-            <button key={m} type="button" className={`model-pill${value === m ? ' active' : ''}`} onClick={() => onChange(m)}>
-              {m}
-            </button>
-          ))}
-        </div>
-      </div>
-    )
-  }
 
   if (customMode) {
     return (
@@ -91,7 +73,7 @@ export default function ModelSelector({ provider, value, onChange, className }: 
         {models.map(m => (
           <option key={m} value={m}>{m}</option>
         ))}
-        <option value="">— custom —</option>
+        <option value="">custom…</option>
       </select>
       <div className="model-pills">
         {models.map(m => (

@@ -110,8 +110,8 @@ The effective-settings view shows the resolved id (`codex.model`), and it is par
 codex CI job checks that every target is in the pinned CLI's `model/list` catalog
 (`tests/codex-harness-keys/run.py`). Move the map together with any Codex CLI bump. Local mode keeps
 free-text tags. A stored dated id (`gpt-5.6-sol`, `claude-opus-4-7`), a hosted `zai/` model or any other
-value keeps working and is never rewritten. The picker shows it as the current value until someone picks
-a family. Hosted `zai/` models are set through `update_agent_config`.
+value keeps working and is never rewritten. The picker's **custom…** entry takes any such id, hosted `zai/`
+models included (#465); a stored one opens in that custom input until someone picks a family.
 
 ## `harnessExtra`
 

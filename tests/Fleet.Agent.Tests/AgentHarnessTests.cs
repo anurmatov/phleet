@@ -71,12 +71,10 @@ public sealed class AgentHarnessTests
         Assert.Equal(local ? 131_072 : null, input.ContextWindow);
     }
 
-    [Theory]
-    [InlineData("gemini")]
-    [InlineData("pi")]
-    public void GeminiAndPi_HaveNoPlan(string provider)
+    [Fact]
+    public void Gemini_HasNoPlan()
     {
-        var (harness, log) = Create(Options(provider, o => o.HarnessExtra = "web_search = \"live\""));
+        var (harness, log) = Create(Options("gemini", o => o.HarnessExtra = "web_search = \"live\""));
 
         Assert.Null(harness.Plan);
         Assert.Empty(log.Entries);

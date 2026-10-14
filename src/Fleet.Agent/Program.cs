@@ -66,7 +66,7 @@ catch (Exception ex)
 }
 
 // #460: compute the harness plan now, so its one startup line (`harness: mode=… plan=… extra=…`)
-// is logged at startup rather than at the first turn. Gemini and pi log nothing.
+// is logged at startup rather than at the first turn. Gemini logs nothing.
 app.Services.GetRequiredService<AgentHarness>();
 
 if (!isCliMode)

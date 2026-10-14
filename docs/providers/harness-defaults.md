@@ -174,7 +174,7 @@ container env (Claude local) or `Agent.ContextWindow` (Codex local), and the bou
 | `ClaudeExecutor` | appends `ClaudeArgs` last in `BuildArgs`; sets `ClaudeEnv` on the claude child only (local mode first removes the OAuth token and thinking overrides, then today's local entries, then the defaults) |
 | `CodexExecutor` | merges `CodexThreadConfig` into `thread/start` `config` after the hosted-provider keys and `model_context_window`, never overwriting a key already there |
 | `entrypoint.sh` | writes `/app/codex-root.toml` first into `~/.codex/config.toml`, then today's `[mcp_servers.*]` tables byte for byte; written even without `.mcp.json` |
-| heartbeat and registration | `PlanSha256` on every message; absent for gemini and pi |
+| heartbeat and registration | `PlanSha256` on every message; absent for gemini |
 
 `entrypoint.sh` failure paths: a missing, unreadable or directory `/app/codex-root.toml` prints
 `WARN: codex-root.toml unavailable: <reason>` and the MCP tables are still written (the CLI uses its

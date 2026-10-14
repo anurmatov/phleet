@@ -14,7 +14,7 @@ namespace Fleet.Agent.Services;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Null <see cref="Plan"/> for gemini and pi: the defaults apply to claude and codex only, and their
+/// Null <see cref="Plan"/> for gemini: the defaults apply to claude and codex only, and its
 /// heartbeats carry no sha.
 /// </para>
 /// <para>
@@ -75,7 +75,7 @@ public sealed class AgentHarness
     }
 
     /// <summary>
-    /// The <see cref="HarnessDefaults.Build"/> input for this agent's config, or null for gemini and pi.
+    /// The <see cref="HarnessDefaults.Build"/> input for this agent's config, or null for gemini.
     /// </summary>
     public static HarnessInput? InputFor(AgentOptions options, Func<string, string?> readEnv)
     {

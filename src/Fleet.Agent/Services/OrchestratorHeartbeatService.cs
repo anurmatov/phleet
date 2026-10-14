@@ -241,7 +241,7 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
         JournalHeartbeat? Journal = null,
         int PriorityQueuedCount = 0,
         // #460: the harness plan this agent started with, on registration and every heartbeat.
-        // Absent for gemini and pi, which have no plan, so their heartbeat is unchanged.
+        // Absent for gemini, which has no plan, so its heartbeat is unchanged.
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         string? PlanSha256 = null
     );

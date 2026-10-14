@@ -10,7 +10,12 @@ public sealed class AgentOptions
     public required string Role { get; set; }
     public List<string> Projects { get; set; } = [];
     public string Model { get; set; } = "claude-sonnet-4-6";
-    public List<string> AllowedTools { get; set; } = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"];
+    /// <remarks>
+    /// The configuration binder appends the generated list to this default instead of replacing it,
+    /// so the six names always come first. The orchestrator mirrors that when it computes the harness
+    /// plan (<see cref="HarnessDefaults.AgentDefaultAllowedTools"/>).
+    /// </remarks>
+    public List<string> AllowedTools { get; set; } = [.. HarnessDefaults.AgentDefaultAllowedTools];
     public string PermissionMode { get; set; } = "acceptEdits";
     public int MaxTurns { get; set; } = 50;
     public required string WorkDir { get; set; }
@@ -96,6 +101,13 @@ public sealed class AgentOptions
     /// omission note. The orchestrator writes the key only when true; reprovision-only.
     /// </summary>
     public bool PiImageInput { get; set; }
+
+    /// <summary>
+    /// The one per-agent harness override (#460 Part 3b), verbatim, or null. Written by the
+    /// orchestrator only when set; <see cref="Services.AgentHarness"/> re-validates it against this
+    /// image's allowlist and skips it as a whole, with one warning, when it no longer passes.
+    /// </summary>
+    public string? HarnessExtra { get; set; }
 
     /// <summary>
     /// Every instruction assigned to this agent, as <c>roles/</c> directory names, already in the

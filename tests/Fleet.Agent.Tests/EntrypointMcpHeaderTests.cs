@@ -44,16 +44,15 @@ public sealed class EntrypointMcpHeaderTests
     {
         using var temp = new TempDirectory();
         var script = ExtractBetween(
-            File.ReadAllText(RepoPaths.Resolve("entrypoint.sh")),
-            "        node -e \"\n",
-            "\n\" || true");
+            File.ReadAllText(RepoPaths.Resolve("entrypoint.sh")), CodexNodeStart, CodexNodeEnd);
         var appsettings = temp.Write("appsettings.json", Appsettings(supported));
         var mcp = temp.Write("mcp.json", McpJson());
         var output = Path.Combine(temp.Path, "config.toml");
         script = script
             .Replace("/app/appsettings.json", appsettings, StringComparison.Ordinal)
             .Replace("$MCP_JSON", mcp, StringComparison.Ordinal)
-            .Replace("/root/.codex/config.toml", output, StringComparison.Ordinal);
+            .Replace("/root/.codex/config.toml", output, StringComparison.Ordinal)
+            .Replace(CodexRootToml, Path.Combine(temp.Path, "absent-codex-root.toml"), StringComparison.Ordinal);
         var scriptPath = temp.Write("translate.js", script);
 
         var result = await RunAsync("node", [scriptPath]);
@@ -85,14 +84,21 @@ public sealed class EntrypointMcpHeaderTests
         Assert.Equal("http://127.0.0.1:8091/journal-files/v1/mcp", server.GetProperty("httpUrl").GetString());
         Assert.False(server.TryGetProperty("headers", out _));
         var toml = Path.Combine(temp.Path, "config.toml");
-        var node = ExtractBetween(entrypoint, "        node -e \"\n", "\n\" || true")
+        var node = ExtractBetween(entrypoint, CodexNodeStart, CodexNodeEnd)
             .Replace("/app/appsettings.json", settings, StringComparison.Ordinal).Replace("$MCP_JSON", mcp, StringComparison.Ordinal)
-            .Replace("/root/.codex/config.toml", toml, StringComparison.Ordinal);
+            .Replace("/root/.codex/config.toml", toml, StringComparison.Ordinal)
+            .Replace(CodexRootToml, Path.Combine(temp.Path, "absent-codex-root.toml"), StringComparison.Ordinal);
         Assert.Equal(0, (await RunAsync("node", [temp.Write("translate.js", node)])).ExitCode);
         var text = await File.ReadAllTextAsync(toml); Assert.Contains("enabled_tools = [\"fetch_attachment\"]", text);
         Assert.Contains("url = \"http://127.0.0.1:8091/journal-files/v1/mcp\"", text);
         Assert.DoesNotContain("http_headers", text);
     }
+
+    // The codex branch's config.toml program (#460: it also reads the generated root file, pointed
+    // at a missing path here so only the MCP tables are written; tests/entrypoint-codex covers both).
+    private const string CodexNodeStart = "    node -e \"\n";
+    private const string CodexNodeEnd = "\n\" || echo \"WARN: codex config.toml not written";
+    private const string CodexRootToml = "/app/codex-root.toml";
 
     private static string Appsettings(bool supported) => JsonSerializer.Serialize(new
     {

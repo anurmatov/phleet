@@ -4,8 +4,9 @@ using Fleet.Agent.Services;
 namespace Fleet.Agent.Tests;
 
 /// <summary>
-/// #340 D2/D4: the claude child's environment. Local mode sets the D2 pairs and removes the OAuth
-/// token; off, the start info's environment is never materialised, so the child inherits as before.
+/// #340 D2 and #460 AC-U5: the claude child's environment, applied from the harness plan. Local mode
+/// removes the OAuth token and the thinking overrides, sets the D2 pairs, then the mode defaults; cloud
+/// adds only <c>CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1</c> and keeps everything it inherits.
 /// </summary>
 public class ClaudeExecutorLocalModelEnvTests
 {
@@ -20,6 +21,11 @@ public class ClaudeExecutorLocalModelEnvTests
         return dir;
     }
 
+    private static bool Apply(IDictionary<string, string?> env, AgentOptions options, string? contextWindow = null) =>
+        ClaudeExecutor.ApplyHarnessEnvironment(env, options,
+            new AgentHarness(options, name => name == Fleet.Shared.ContextWindow.EnvVar ? contextWindow : null,
+                Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance).Plan!);
+
     private static AgentOptions Options(string provider, string? baseUrl) => new()
     {
         Name = "fleet-agent1",
@@ -31,7 +37,7 @@ public class ClaudeExecutorLocalModelEnvTests
     };
 
     [Fact]
-    public void LocalMode_SetsTheThirteenPairs_AndRemovesTheOAuthToken()
+    public void LocalMode_SetsTheThirteenPairsAndTheDefault_AndRemovesTheOAuthToken()
     {
         var env = new Dictionary<string, string?>
         {
@@ -40,8 +46,7 @@ public class ClaudeExecutorLocalModelEnvTests
             ["PATH"] = "/usr/bin",
         };
 
-        var applied = ClaudeExecutor.ConfigureLocalModelEnvironment(
-            () => env, Options("claude", "http://inference-host:11434"));
+        var applied = Apply(env, Options("claude", "http://inference-host:11434"));
 
         Assert.True(applied);
         Assert.False(env.ContainsKey("CLAUDE_CODE_OAUTH_TOKEN"));
@@ -59,25 +64,33 @@ public class ClaudeExecutorLocalModelEnvTests
         Assert.Equal("qwen3.8:27b-agent", env["ANTHROPIC_DEFAULT_SONNET_MODEL"]);
         Assert.Equal("qwen3.8:27b-agent", env["ANTHROPIC_DEFAULT_HAIKU_MODEL"]);
         Assert.Equal("qwen3.8:27b-agent", env["CLAUDE_CODE_SUBAGENT_MODEL"]);
-        Assert.Equal(14, env.Count);   // the 13 pairs plus PATH
+        Assert.Equal("1", env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]);
+        // The 13 pairs, the #460 default and PATH; no MAX_MCP_OUTPUT_TOKENS without a window.
+        Assert.Equal(15, env.Count);
+    }
+
+    [Fact]
+    public void LocalMode_WithAContextWindow_AddsMaxMcpOutputTokens()
+    {
+        var env = new Dictionary<string, string?>();
+
+        Assert.True(Apply(env, Options("claude", "http://inference-host:11434"), contextWindow: "131072"));
+        Assert.Equal("8192", env["MAX_MCP_OUTPUT_TOKENS"]);
     }
 
     [Theory]
-    [InlineData("claude", null)]
-    [InlineData("claude", "")]
-    [InlineData("codex", "http://inference-host:11434")]
-    [InlineData("gemini", "http://inference-host:11434")]
-    public void Off_NeverTouchesTheEnvironment(string provider, string? baseUrl)
+    [InlineData(null)]
+    [InlineData("")]
+    public void Cloud_AddsOnlyTheNonessentialTrafficDefault(string? baseUrl)
     {
-        var sentinel = new Dictionary<string, string?> { ["CLAUDE_CODE_OAUTH_TOKEN"] = "kept" };
-        var accessed = false;
+        var env = new Dictionary<string, string?> { ["CLAUDE_CODE_OAUTH_TOKEN"] = "kept" };
 
-        var applied = ClaudeExecutor.ConfigureLocalModelEnvironment(
-            () => { accessed = true; return sentinel; }, Options(provider, baseUrl));
+        var applied = Apply(env, Options("claude", baseUrl), contextWindow: "131072");
 
         Assert.False(applied);
-        Assert.False(accessed);
-        Assert.Equal("kept", Assert.Single(sentinel).Value);
+        Assert.Equal(
+            new Dictionary<string, string?> { ["CLAUDE_CODE_OAUTH_TOKEN"] = "kept", ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1" },
+            env);
     }
 
     // ── #349: thinking env control ───────────────────────────────────────────
@@ -96,8 +109,7 @@ public class ClaudeExecutorLocalModelEnvTests
             ["PATH"] = "/usr/bin",
         };
 
-        var applied = ClaudeExecutor.ConfigureLocalModelEnvironment(
-            () => env, Options("claude", "http://inference-host:11434"));
+        var applied = Apply(env, Options("claude", "http://inference-host:11434"));
 
         Assert.True(applied);
         Assert.False(env.ContainsKey("CLAUDE_CODE_OAUTH_TOKEN"));
@@ -117,7 +129,7 @@ public class ClaudeExecutorLocalModelEnvTests
         var options = Options("claude", "http://inference-host:11434");
         options.Effort = "off";
 
-        Assert.True(ClaudeExecutor.ConfigureLocalModelEnvironment(() => env, options));
+        Assert.True(Apply(env, options));
         Assert.Equal("""{"thinking":{"type":"disabled"}}""", env["CLAUDE_CODE_EXTRA_BODY"]);
     }
 
@@ -128,7 +140,7 @@ public class ClaudeExecutorLocalModelEnvTests
         var options = Options("claude", "http://inference-host:11434");
         options.Effort = "off";
 
-        var applied = ClaudeExecutor.ConfigureLocalModelEnvironment(() => env, options);
+        var applied = Apply(env, options);
 
         Assert.True(applied);
         Assert.Equal("""{"thinking":{"type":"disabled"}}""", env["CLAUDE_CODE_EXTRA_BODY"]);
@@ -145,7 +157,7 @@ public class ClaudeExecutorLocalModelEnvTests
         var options = Options("claude", "http://inference-host:11434");
         options.Effort = effort;
 
-        Assert.True(ClaudeExecutor.ConfigureLocalModelEnvironment(() => env, options));
+        Assert.True(Apply(env, options));
         Assert.False(env.ContainsKey("CLAUDE_CODE_EXTRA_BODY"));
     }
 
@@ -172,13 +184,18 @@ public class ClaudeExecutorLocalModelEnvTests
 
     /// <summary>
     /// AC 5: cloud args, byte for byte, as <c>main</c> produced them before #349 — captured by
-    /// running main's <c>BuildArgs</c> with these options; <c>{WORKDIR}</c> stands for the work dir.
+    /// running main's <c>BuildArgs</c> with these options; <c>{WORKDIR}</c> stands for the work dir —
+    /// followed by the #460 harness arguments.
     /// </summary>
     private const string CloudPrefix =
         "-p --input-format stream-json --output-format stream-json --verbose --allowedTools \"Read,Write,Edit,Bash,Glob,Grep\" "
       + "--model claude-model-x --max-turns 50 --permission-mode acceptEdits ";
 
-    private const string CloudSuffix = "--append-system-prompt-file \"{WORKDIR}/system-prompt.md\"";
+    // #460: the harness plan's arguments follow, last: the kept set, cloud web tools and the agent's
+    // six default file tools, then the two flags applied in every mode.
+    private const string CloudSuffix = "--append-system-prompt-file \"{WORKDIR}/system-prompt.md\" "
+      + "--tools \"Agent,Task,ToolSearch,Skill,TodoWrite,TaskStop,SendMessage,WebFetch,WebSearch,Bash,Edit,Glob,Grep,Read,Write\" "
+      + "--exclude-dynamic-system-prompt-sections --strict-mcp-config";
 
     [Theory]
     [InlineData(null, CloudPrefix + CloudSuffix)]
@@ -187,7 +204,7 @@ public class ClaudeExecutorLocalModelEnvTests
     [InlineData("high", CloudPrefix + "--effort high " + CloudSuffix)]
     [InlineData("xhigh", CloudPrefix + "--effort xhigh " + CloudSuffix)]
     [InlineData("max", CloudPrefix + "--effort max " + CloudSuffix)]
-    public void BuildArgs_CloudMode_IsByteIdenticalToMain(string? effort, string expectedFromMain)
+    public void BuildArgs_CloudMode_IsMainThenTheHarnessArgs(string? effort, string expectedFromMain)
     {
         var options = Options("claude", null);
         options.Model = "claude-model-x";

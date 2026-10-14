@@ -44,6 +44,11 @@ jobs:
       - name: Entrypoint pi branch
         run: bash tests/entrypoint-pi/run.sh
 
+      # #460 AC-U6: the codex branch writes codex-root.toml first, then byte-identical MCP tables,
+      # parsed with tomllib; a missing, unreadable or directory root file still keeps the MCP tables.
+      - name: Entrypoint codex config.toml
+        run: bash tests/entrypoint-codex/run.sh
+
       - name: Acceptance plan validators and public placeholders
         run: python3 -m unittest discover tests/scripts
 

@@ -21,6 +21,11 @@ public sealed class ClaudeExecutor : IAgentExecutor
 {
     private readonly AgentOptions _config;
     private readonly ILogger<ClaudeExecutor> _logger;
+    private readonly AgentHarness _harness;
+    // #460 failure at start: set by the stdout reader when the process's stdout ends before its
+    // system/init, read once by the next EnsureProcess.
+    private volatile bool _initSeen;
+    private volatile bool _exitedBeforeInit;
 
     private Process? _process;
     private TextWriter? _stdin;
@@ -135,11 +140,13 @@ public sealed class ClaudeExecutor : IAgentExecutor
     private readonly PromptBuilder _promptBuilder;
 
     public ClaudeExecutor(
-        IOptions<AgentOptions> config, ILogger<ClaudeExecutor> logger, PromptBuilder promptBuilder)
+        IOptions<AgentOptions> config, ILogger<ClaudeExecutor> logger, PromptBuilder promptBuilder,
+        AgentHarness? harness = null)
     {
         _config = config.Value;
         _logger = logger;
         _promptBuilder = promptBuilder;
+        _harness = harness ?? new AgentHarness(_config, Environment.GetEnvironmentVariable, logger);
     }
 
     /// <summary>
@@ -716,6 +723,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
     internal AgentProgress ParseProgressForTests(ClaudeStreamEvent evt) => ParseProgress(evt);
     internal string BuildArgsForTests(string? resumeSessionId = null) => BuildArgs(resumeSessionId);
+    internal AgentHarness HarnessForTests => _harness;
+    internal bool ExitedBeforeInitForTests => _exitedBeforeInit;
+    internal void FallBackIfExitedBeforeInitForTests() => FallBackIfExitedBeforeInit();
     internal bool TurnCommittedToFinalAnswerForTests => _turnCommittedToFinalAnswer;
     internal bool CurrentTurnResultSeenForTests => _currentTurnResultSeen;
     internal int GateReopenCountForTests => _gateReopenCount;
@@ -848,6 +858,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
                 if (line is null)
                 {
+                    // The process ended on its own; before its first system/init that is the
+                    // harnessExtra start failure (#460), read by the next EnsureProcess.
+                    if (!_initSeen) _exitedBeforeInit = true;
                     break;
                 }
                 if (string.IsNullOrWhiteSpace(line)) continue;
@@ -871,7 +884,10 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 // Process system events (background task lifecycle) immediately so
                 // _backgroundTasks is current even when no turn is active.
                 if (evt.Type == "system")
+                {
+                    if (evt.Subtype == "init") _initSeen = true;
                     ParseProgress(evt);
+                }
 
                 // Buffer for the active turn's read loop. Stale events that land
                 // between turns will be drained by DrainStaleTurnEvents().
@@ -909,6 +925,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
         _messageCount = 0;
         _previousCumulativeStats = null;
 
+        FallBackIfExitedBeforeInit();
+        _initSeen = false;
+
         var args = BuildArgs(resumeId);
         _logger.LogInformation("Starting persistent claude process: {Args}", args);
 
@@ -924,8 +943,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
             CreateNoWindow = true,
         };
 
-        // #340 D2. Off, psi.Environment is never touched, so the child inherits exactly as before.
-        if (ConfigureLocalModelEnvironment(() => psi.Environment, _config))
+        // #460: the plan's env on the child only — the local-model entries (#340 D2) and the mode
+        // defaults. Cloud adds only CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC.
+        if (_harness.Plan is { } plan && ApplyHarnessEnvironment(psi.Environment, _config, plan))
         {
             // #349 observability: what the child will send for thinking. No URL, model content
             // or token — the base URL is logged by the #340 line only as configured.
@@ -977,31 +997,39 @@ public sealed class ClaudeExecutor : IAgentExecutor
     }
 
     /// <summary>
-    /// Applies the local-model environment when local mode is on, and returns whether it did.
-    /// Off, <paramref name="environment"/> is never called, so the start info's environment is
-    /// never materialised (#340 D4).
+    /// #460 Part 3b, failure at start: the previous process exited before its <c>system/init</c>. With
+    /// an extra applied, the next start uses the mode defaults alone — once; <see cref="AgentHarness"/>
+    /// logs the one ERROR naming <c>harnessExtra</c>. Without an extra it changes nothing.
     /// </summary>
-    internal static bool ConfigureLocalModelEnvironment(
-        Func<IDictionary<string, string?>> environment, AgentOptions cfg)
+    private void FallBackIfExitedBeforeInit()
     {
-        if (!ClaudeLocalModel.IsEnabled(cfg.Provider, cfg.AnthropicBaseUrl))
-            return false;
-
-        ApplyLocalModelEnvironment(environment(), cfg);
-        return true;
+        if (!_exitedBeforeInit) return;
+        _exitedBeforeInit = false;
+        _harness.FallBackWithoutExtras();
     }
 
     /// <summary>
-    /// The only place <c>ANTHROPIC_*</c> is set: the claude child's own environment, never this
-    /// process or the container (#340 D2).
+    /// Applies the harness plan's environment to the claude child (#460): in local mode it first
+    /// removes <see cref="ClaudeLocalModel.RemovedEnvVars"/>, then sets every plan entry — today's
+    /// local-model pairs first, then the mode defaults. Returns whether local mode is on.
     /// </summary>
-    internal static void ApplyLocalModelEnvironment(IDictionary<string, string?> env, AgentOptions cfg)
+    /// <remarks>
+    /// The only place <c>ANTHROPIC_*</c> is set: the claude child's own environment, never this
+    /// process or the container (#340 D2). The values come from <see cref="HarnessDefaults.Build"/>
+    /// only (MUST NOT 9).
+    /// </remarks>
+    internal static bool ApplyHarnessEnvironment(IDictionary<string, string?> env, AgentOptions cfg, HarnessPlan plan)
     {
-        foreach (var name in ClaudeLocalModel.RemovedEnvVars)
-            env.Remove(name);
+        var local = ClaudeLocalModel.IsEnabled(cfg.Provider, cfg.AnthropicBaseUrl);
+        if (local)
+        {
+            foreach (var name in ClaudeLocalModel.RemovedEnvVars)
+                env.Remove(name);
+        }
 
-        foreach (var (name, value) in ClaudeLocalModel.BuildEnvironment(cfg.AnthropicBaseUrl!, cfg.Model, cfg.Effort))
+        foreach (var (name, value) in plan.ClaudeEnv!)
             env[name] = value;
+        return local;
     }
 
     /// <summary>
@@ -1151,6 +1179,11 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
         var systemPromptFile = _promptBuilder.WriteSystemPromptFile();
         sb.Append($"--append-system-prompt-file \"{EscapeArg(systemPromptFile)}\" ");
+
+        // #460: the harness plan's arguments, last. A flag's value is always its own quoted token,
+        // so a variadic flag (--tools, --disallowedTools) ends at the next flag.
+        foreach (var arg in _harness.Plan?.ClaudeArgs ?? [])
+            sb.Append(arg.StartsWith('-') ? $"{arg} " : $"\"{EscapeArg(arg)}\" ");
 
         return sb.ToString().TrimEnd();
     }

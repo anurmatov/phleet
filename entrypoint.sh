@@ -179,45 +179,62 @@ elif [ "$PROVIDER" = "codex" ]; then
     # Codex app-server threads are process-lifetime state only in phleet. Clear any stale
     # persisted sessions on cold start so a reprovision cannot accidentally inherit old rollout state.
     rm -rf /root/.codex/sessions/* 2>/dev/null || true
-    # Generate ~/.codex/config.toml with MCP servers + per-server enabled_tools whitelist
+    # Generate ~/.codex/config.toml (#460): the orchestrator-generated root settings first, then one
+    # [mcp_servers.<name>] table per URL server with its enabled_tools whitelist. Root keys and their
+    # [analytics]/[history] tables must come before any [mcp_servers.*] table — a key written after a
+    # table header belongs to that table. A missing, unreadable or directory /app/codex-root.toml
+    # (provisioning mounts it read-only for Codex agents) prints one WARN and the MCP tables are still
+    # written, so the agent never loses its MCP tools; the CLI then uses its built-in root defaults.
+    # Written even without .mcp.json, so a stale file from an earlier start never survives.
     MCP_JSON="/workspace/.mcp.json"
-    if [ -f "$MCP_JSON" ]; then
-        mkdir -p /root/.codex
-        node -e "
+    mkdir -p /root/.codex
+    node -e "
 const fs = require('fs');
-const appsettings = JSON.parse(fs.readFileSync('/app/appsettings.json', 'utf8'));
-const allowedTools = (appsettings.Agent && appsettings.Agent.AllowedTools) || [];
-const mcpHeaderSupport = appsettings.Agent && appsettings.Agent.McpHeaderSupport === true;
-const mcpCfg = JSON.parse(fs.readFileSync('$MCP_JSON', 'utf8'));
-const servers = mcpCfg.mcpServers || {};
-let toml = '';
-for (const [name, s] of Object.entries(servers)) {
-    if (!s.url) continue;
-    // False until a pinned-CLI tools/list proof flips ContainerProvisioningService.McpHeaderSupport.
-    // Fail closed: do not turn an authenticated server into a header-less one.
-    if (s.headers && Object.keys(s.headers).length > 0 && !mcpHeaderSupport) {
-        console.error('WARN: skipping MCP server \'' + name + '\' (headers unsupported by pinned codex CLI)');
-        continue;
+try {
+    let root = '';
+    try {
+        if (fs.statSync('/app/codex-root.toml').isDirectory()) throw new Error('is a directory');
+        root = fs.readFileSync('/app/codex-root.toml', 'utf8');
+    } catch (e) {
+        console.error('WARN: codex-root.toml unavailable: ' + (e.code || e.message));
     }
-    const prefix = 'mcp__' + name + '__';
-    const enabled = allowedTools
-        .filter(t => t.startsWith(prefix))
-        .map(t => t.slice(prefix.length));
-    toml += '[mcp_servers.' + name + ']\n';
-    toml += 'url = \"' + s.url + '\"\n';
-    if (s.headers && Object.keys(s.headers).length > 0) {
-        const pairs = Object.entries(s.headers)
-            .map(([k, v]) => JSON.stringify(k) + ' = ' + JSON.stringify(String(v)));
-        toml += 'http_headers = { ' + pairs.join(', ') + ' }\n';
+    let toml = '';
+    if (fs.existsSync('$MCP_JSON')) {
+        const appsettings = JSON.parse(fs.readFileSync('/app/appsettings.json', 'utf8'));
+        const allowedTools = (appsettings.Agent && appsettings.Agent.AllowedTools) || [];
+        const mcpHeaderSupport = appsettings.Agent && appsettings.Agent.McpHeaderSupport === true;
+        const mcpCfg = JSON.parse(fs.readFileSync('$MCP_JSON', 'utf8'));
+        const servers = mcpCfg.mcpServers || {};
+        for (const [name, s] of Object.entries(servers)) {
+            if (!s.url) continue;
+            // False until a pinned-CLI tools/list proof flips ContainerProvisioningService.McpHeaderSupport.
+            // Fail closed: do not turn an authenticated server into a header-less one.
+            if (s.headers && Object.keys(s.headers).length > 0 && !mcpHeaderSupport) {
+                console.error('WARN: skipping MCP server \'' + name + '\' (headers unsupported by pinned codex CLI)');
+                continue;
+            }
+            const prefix = 'mcp__' + name + '__';
+            const enabled = allowedTools
+                .filter(t => t.startsWith(prefix))
+                .map(t => t.slice(prefix.length));
+            toml += '[mcp_servers.' + name + ']\n';
+            toml += 'url = \"' + s.url + '\"\n';
+            if (s.headers && Object.keys(s.headers).length > 0) {
+                const pairs = Object.entries(s.headers)
+                    .map(([k, v]) => JSON.stringify(k) + ' = ' + JSON.stringify(String(v)));
+                toml += 'http_headers = { ' + pairs.join(', ') + ' }\n';
+            }
+            if (enabled.length > 0) {
+                toml += 'enabled_tools = [' + enabled.map(t => '\"' + t + '\"').join(', ') + ']\n';
+            }
+            toml += '\n';
+        }
     }
-    if (enabled.length > 0) {
-        toml += 'enabled_tools = [' + enabled.map(t => '\"' + t + '\"').join(', ') + ']\n';
-    }
-    toml += '\n';
+    fs.writeFileSync('/root/.codex/config.toml', root && toml ? root + '\n' + toml : root + toml);
+} catch (e) {
+    console.error('WARN: codex config.toml not written: ' + e.message);
 }
-if (toml) fs.writeFileSync('/root/.codex/config.toml', toml);
-" || true
-    fi
+" || echo "WARN: codex config.toml not written: node exited non-zero" >&2
 elif [ "$PROVIDER" = "pi" ]; then
     # Pi local-model agent (#386). Pi has no approval step, sandbox or path limit, and the model
     # drives a root shell that can read /proc/1/environ and every file in this container. The

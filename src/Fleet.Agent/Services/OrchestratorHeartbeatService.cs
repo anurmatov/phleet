@@ -33,6 +33,7 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
     private readonly ILogger<OrchestratorHeartbeatService> _logger;
     private readonly JournalDrainer? _journal;
     private readonly TurnBindingPublisher? _turnBindings;
+    private readonly AgentHarness? _harness;
 
     private IConnection? _connection;
     private IChannel? _channel;
@@ -45,8 +46,10 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
         TaskManager taskManager,
         IFleetConnectionState connectionState,
         ILogger<OrchestratorHeartbeatService> logger,
-        JournalDrainer? journal = null, TurnBindingPublisher? turnBindings = null)
+        JournalDrainer? journal = null, TurnBindingPublisher? turnBindings = null,
+        AgentHarness? harness = null)
     {
+        _harness = harness;
         _journal = journal;
         _turnBindings = turnBindings;
         _agentConfig = agentConfig.Value;
@@ -181,7 +184,8 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
             BackgroundTasks: backgroundTasks.Length > 0 ? backgroundTasks : null,
             TelegramConnected: _connectionState.TelegramConnected,
             Journal: JournalHeartbeat.From(_journal?.Snapshot(), _turnBindings?.BindingFailed == true),
-            PriorityQueuedCount: queueSnapshot.Count(q => q.Priority == Models.TaskPriority.PrimaryHuman));
+            PriorityQueuedCount: queueSnapshot.Count(q => q.Priority == Models.TaskPriority.PrimaryHuman),
+            PlanSha256: _harness?.Plan?.PlanSha256);
 
         var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
         var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent, Expiration = "60000" };
@@ -235,7 +239,11 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
         // exactly the heartbeat it published before #377.
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         JournalHeartbeat? Journal = null,
-        int PriorityQueuedCount = 0
+        int PriorityQueuedCount = 0,
+        // #460: the harness plan this agent started with, on registration and every heartbeat.
+        // Absent for gemini and pi, which have no plan, so their heartbeat is unchanged.
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        string? PlanSha256 = null
     );
 
     /// <summary>The conversation journal on this agent (#377). Counts and ages only.</summary>

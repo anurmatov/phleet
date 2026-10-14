@@ -44,7 +44,9 @@ export default async function fleetPiExtension(pi: ExtensionAPI): Promise<void> 
 	});
 	// Registered once, before the session starts; never added later (§18).
 	for (const tool of bridge.tools) pi.registerTool(tool);
-	pi.on("session_shutdown", async (event) => {
-		if (event.reason === "quit") await bridge.close();
+	// Every shutdown ends this instance: on quit, and on a fork (phleet #458), after which Pi loads
+	// the extension again with its own connections.
+	pi.on("session_shutdown", async () => {
+		await bridge.close();
 	});
 }

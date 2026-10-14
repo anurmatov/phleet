@@ -1,4 +1,5 @@
 using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Services;
 using Microsoft.Extensions.Logging;
 
 namespace Fleet.Orchestrator.Tests.Services;
@@ -168,8 +169,22 @@ public class ProviderGoldenTests
         foreach (var file in Files)
         {
             var expected = await File.ReadAllTextAsync(Path.Combine(FixtureDir(config), file));
-            Assert.True(expected == generated[file], $"{config}/{file} differs from the merge base:\n{generated[file]}");
+            var actual = file == "binds.txt" ? WithoutCodexRootBind(config, generated[file]) : generated[file];
+            Assert.True(expected == actual, $"{config}/{file} differs from the merge base:\n{generated[file]}");
         }
+    }
+
+    /// <summary>
+    /// #460: every codex agent gains exactly one bind, <c>.generated/codex-root.toml</c> read-only at
+    /// <c>/app/codex-root.toml</c>; no other agent gains it. The fixtures stay the merge base, so the
+    /// one expected line is removed here instead of regenerating them from the new code.
+    /// </summary>
+    private static string WithoutCodexRootBind(string config, string binds)
+    {
+        var line = ContainerProvisioningService.CodexRootTomlBind(ContainerName) + "\n";
+        var count = (binds.Length - binds.Replace(line, "").Length) / line.Length;
+        Assert.Equal(config.StartsWith("codex", StringComparison.Ordinal) ? 1 : 0, count);
+        return binds.Replace(line, "");
     }
 
     // ── #455 A2: PiImageInput ────────────────────────────────────────────────────────────────────
@@ -185,7 +200,8 @@ public class ProviderGoldenTests
         foreach (var file in Files)
         {
             var expected = await File.ReadAllTextAsync(Path.Combine(FixtureDir(config), file));
-            Assert.True(expected == generated[file], $"{config}/{file} differs from the merge base with PiImageInput on:\n{generated[file]}");
+            var actual = file == "binds.txt" ? WithoutCodexRootBind(config, generated[file]) : generated[file];
+            Assert.True(expected == actual, $"{config}/{file} differs from the merge base with PiImageInput on:\n{generated[file]}");
         }
         Assert.Single(logs, e => e.Message == IgnoredLog);
         Assert.Equal(LogLevel.Information, logs.Single(e => e.Message == IgnoredLog).Level);

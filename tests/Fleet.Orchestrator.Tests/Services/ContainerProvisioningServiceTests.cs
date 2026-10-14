@@ -389,7 +389,22 @@ public class ContainerProvisioningServiceTests
     {
         var binds = BindsWithAllHostCredentialFiles(MinimalAgent("agolden", provider));
 
-        Assert.Equal(MainBinds(credentialBind), binds);
+        // #460: codex agents gain exactly the read-only codex-root.toml bind; nothing else changes.
+        var codexRoot = ContainerProvisioningService.CodexRootTomlBind("fleet-agolden");
+        Assert.Equal(provider == "codex" ? 1 : 0, binds.Count(b => b == codexRoot));
+        Assert.Equal(MainBinds(credentialBind), binds.Where(b => b != codexRoot));
+    }
+
+    [Theory]
+    [InlineData("gpt-5.5")]
+    [InlineData("zai/glm-5.3")]
+    public void BuildBinds_CodexRootToml_IsMountedReadOnlyAtThePinnedPath_ForHostedCodexToo(string model)
+    {
+        var agent = MinimalAgent("agolden", "codex");
+        agent.Model = model;
+
+        Assert.Contains("./workspaces/fleet-agolden/.generated/codex-root.toml:/app/codex-root.toml:ro",
+            BindsWithAllHostCredentialFiles(agent));
     }
 
     // GenerateAppsettingsJson for MinimalAgent("agolden", "claude") on main at 9a2b6cc, verbatim.

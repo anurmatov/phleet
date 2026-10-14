@@ -77,6 +77,10 @@ namespace Fleet.Orchestrator.Migrations
                         .HasColumnType("varchar(50)")
                         .HasDefaultValue("mention");
 
+                    b.Property<string>("HarnessExtra")
+                        .HasColumnType("text")
+                        .HasColumnName("harness_extra");
+
                     b.Property<int?>("HostPort")
                         .HasColumnType("int");
 

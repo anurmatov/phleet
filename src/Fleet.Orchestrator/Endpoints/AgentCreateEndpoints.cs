@@ -54,9 +54,13 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         Provider = body.Provider ?? "claude",
         Model = body.Model.Trim(),
         Effort = string.IsNullOrEmpty(body.Effort) ? null : body.Effort,
+        HarnessExtra = string.IsNullOrEmpty(body.HarnessExtra) ? null : body.HarnessExtra,
     };
     if (AgentPatchHelpers.ApplyLocalModelOnCreate(localModel, body.LocalBaseUrl, body.ContextWindow) is { } localModelFault)
         return Results.BadRequest(new { error = localModelFault });
+    // #460: the same allowlist as the PUT, against the new agent's provider and mode.
+    if (AgentPatchHelpers.DescribeHarnessExtraFault(localModel) is { } harnessExtraFault)
+        return Results.BadRequest(AgentPatchHelpers.HarnessExtraBadRequest(harnessExtraFault));
 
     // Telegram is a hard prerequisite — agents without a valid bot token are headless.
     var setupStatus = setupService.GetStatus();
@@ -119,6 +123,7 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         MountDockerSock           = body.MountDockerSock   ?? false,
         // #455: stored for every provider; only pi applies it, on provisioning.
         PiImageInput              = body.PiImageInput      ?? false,
+        HarnessExtra              = localModel.HarnessExtra,
     };
     agent.LocalBaseUrl = localModel.LocalBaseUrl;
     agent.ContextWindow = localModel.ContextWindow;

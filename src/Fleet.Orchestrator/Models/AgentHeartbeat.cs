@@ -4,6 +4,10 @@ namespace Fleet.Orchestrator.Models;
 /// Message published by fleet agents on the fleet.orchestrator topic exchange.
 /// Routing key: "heartbeat" or "registration".
 /// </summary>
+/// <remarks>
+/// <c>PlanSha256</c> (#460): the harness plan the agent started with, sent on registration and every
+/// heartbeat. Null from an image that predates it.
+/// </remarks>
 public sealed record AgentHeartbeat(
     string AgentName,
     string Status,
@@ -20,7 +24,8 @@ public sealed record AgentHeartbeat(
     QueuedMessageInfo[]? QueuedMessages = null,
     BackgroundTaskSummary[]? BackgroundTasks = null,
     JournalHeartbeat? Journal = null,
-    int PriorityQueuedCount = 0);
+    int PriorityQueuedCount = 0,
+    string? PlanSha256 = null);
 
 /// <summary>
 /// Optional journal health emitted by S2 agents. Null means an older agent and is displayed as n/a.
@@ -79,6 +84,11 @@ public sealed class AgentState
     public BackgroundTaskSummary[]? BackgroundTasks { get; set; }
     /// <summary>Latest durable-spool health, or null for an old agent heartbeat.</summary>
     public JournalHeartbeat? Journal { get; set; }
+    /// <summary>
+    /// The harness plan sha the running agent reported it started with (#460), or null until a report
+    /// arrives. Runtime state, not config: compared with the computed plan to flag a pending reprovision.
+    /// </summary>
+    public string? StartedPlanSha256 { get; set; }
 
     /// <summary>True when this entry was synthesized from DB config and has never sent a heartbeat.</summary>
     public bool IsDbOnly { get; set; }

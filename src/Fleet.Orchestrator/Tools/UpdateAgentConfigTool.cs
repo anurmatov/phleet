@@ -50,7 +50,8 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         [Description("Local model (#382, #386), claude, codex or pi agents: origin of the local inference server (e.g. Ollama), e.g. http://<server-address>:11434 — origin only, never …/v1; Fleet adds /v1/messages for claude and pi and /v1 for codex. Set, the agent runs against that server; claude needs the server's bare model tag and effort off/low/medium/xhigh (empty = model default, sent as xhigh), codex needs model ollama/<tag> or lmstudio/<tag>, pi needs the bare tag and effort off/on (it is required for pi, which runs only locally). Stored canonical. Pass empty string to clear (back to the cloud). Omit to keep current. Takes effect on the next reprovision.")] string? local_base_url = null,
         [Description("Deprecated alias of local_base_url. If both are sent they must agree.")] string? anthropic_base_url = null,
         [Description("Local-model agents only (local_base_url set, claude, codex or pi): the server's context size in tokens (4096-1048576), e.g. its num_ctx or --ctx. Claude gets it as CLAUDE_CODE_MAX_CONTEXT_TOKENS, codex as model_context_window and pi as its model's contextWindow; pi requires it, at least 65536 and equal to the server's --ctx. Ignored for cloud agents. Codex compaction is best-effort: it compacts at 90% of the window, a single message or tool output larger than the space left reaches the server unchecked, and the server's HTTP 400 overflow leaves the thread failing every turn until it is reset (/cancel all, then /reset, or restart the agent). Pass 0 to clear. Omit to keep current. Takes effect on the next reprovision.")] int? context_window = null,
-        [Description("Provider pi only: the model accepts images (sends images and scanned PDF pages). Turn on only after the model's vision is verified. Stored for other providers but ignored, and kept across a provider switch. Takes effect on the next reprovision. Omit to keep current.")] bool? pi_image_input = null)
+        [Description("Provider pi only: the model accepts images (sends images and scanned PDF pages). Turn on only after the model's vision is verified. Stored for other providers but ignored, and kept across a provider switch. Takes effect on the next reprovision. Omit to keep current.")] bool? pi_image_input = null,
+        [Description("Claude and codex only: extra harness settings merged over the mode defaults, one per line (max 4096 chars, 50 lines; blank and # lines ignored). Allowlist only — anything else is refused, naming the line. Codex: key = value for web_search (\"disabled\"/\"cached\"/\"live\", local: \"disabled\" only), tools.view_image (bool, local: false only), model_reasoning_summary (\"none\"/\"auto\"/\"concise\"/\"detailed\"), tool_output_token_limit (1000-100000), features.apps, features.remote_plugin, features.skill_mcp_dependency_install, check_for_update_on_startup, analytics.enabled (bool), history.persistence (\"none\"/\"save-all\"). Claude: --tools <names> (adds known built-in tools to a computed list, never removes; a no-op when the agent keeps all built-ins), --disallowedTools WebSearch, !--exclude-dynamic-system-prompt-sections, MAX_MCP_OUTPUT_TOKENS=<1000-100000>, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=0|1. Pass empty string to clear. Omit to keep current. Takes effect on the next reprovision.")] string? harness_extra = null)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
@@ -346,6 +347,13 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
             agent.PiImageInput = pi_image_input.Value;
         }
 
+        // #460: "" clears; checked below against the resulting provider and mode.
+        if (harness_extra is not null && harness_extra != (agent.HarnessExtra ?? ""))
+        {
+            changes.AppendLine($"- harness_extra: {(agent.HarnessExtra is null ? "(none)" : "(set)")} → {(harness_extra == "" ? "(none)" : "(set)")}");
+            agent.HarnessExtra = harness_extra == "" ? null : harness_extra;
+        }
+
         var previousBaseUrl = agent.LocalBaseUrl;
         if (baseUrlSent)
             agent.LocalBaseUrl = baseUrl;
@@ -354,6 +362,10 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         // here skips SaveChanges, so nothing from this request is persisted.
         if (AgentPatchHelpers.FinalizeLocalModel(agent) is { } localFault)
             return $"Invalid local model configuration: {localFault}";
+
+        // #460 Part 3b: the allowlist, against the final provider and mode; nothing is saved on a fault.
+        if (AgentPatchHelpers.DescribeHarnessExtraFault(agent) is { } harnessExtraFault)
+            return $"Invalid harness_extra: {harnessExtraFault.Message}";
 
         if (agent.LocalBaseUrl != previousBaseUrl)
             changes.AppendLine($"- local_base_url: {previousBaseUrl ?? "(none)"} → {agent.LocalBaseUrl ?? "(none)"}");

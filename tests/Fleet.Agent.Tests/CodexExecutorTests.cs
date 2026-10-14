@@ -866,7 +866,7 @@ public class CodexExecutorTests
             Assert.Equal("ollama", (string?)startParams["modelProvider"]);
             // The window first, then the #460 local defaults (tool_output_token_limit = 131072 / 16).
             Assert.Equal(
-                """{"model_context_window":131072,"web_search":"disabled","tools.view_image":false,"model_reasoning_summary":"none","tool_output_token_limit":8192,"features.apps":false,"features.remote_plugin":false,"features.skill_mcp_dependency_install":false}""",
+                """{"model_context_window":131072,"web_search":"disabled","features.view_image":false,"model_reasoning_summary":"none","tool_output_token_limit":8192,"features.apps":false,"features.remote_plugin":false,"features.skill_mcp_dependency_install":false}""",
                 startParams["config"]!.ToJsonString());
             Assert.DoesNotContain("model_auto_compact_token_limit", startParams.ToJsonString());
 
@@ -948,7 +948,7 @@ public class CodexExecutorTests
             startParams.Select(kv => kv.Key));
         // #460: the local defaults, without the two window-derived values.
         Assert.Equal(
-            """{"web_search":"disabled","tools.view_image":false,"model_reasoning_summary":"none","features.apps":false,"features.remote_plugin":false,"features.skill_mcp_dependency_install":false}""",
+            """{"web_search":"disabled","features.view_image":false,"model_reasoning_summary":"none","features.apps":false,"features.remote_plugin":false,"features.skill_mcp_dependency_install":false}""",
             startParams["config"]!.ToJsonString());
     }
 
@@ -1084,12 +1084,12 @@ public class CodexExecutorTests
 
         CodexExecutor.MergeHarnessThreadConfig(startParams,
         [
-            new("model_context_window", 1), new("web_search", "disabled"), new("tools.view_image", false),
+            new("model_context_window", 1), new("web_search", "disabled"), new("features.view_image", false),
             new("tool_output_token_limit", 8192),
         ]);
 
         Assert.Equal(
-            """{"model":"m","config":{"model_providers.p.name":"P","model_context_window":131072,"web_search":"cached","tools.view_image":false,"tool_output_token_limit":8192}}""",
+            """{"model":"m","config":{"model_providers.p.name":"P","model_context_window":131072,"web_search":"cached","features.view_image":false,"tool_output_token_limit":8192}}""",
             startParams.ToJsonString());
     }
 
@@ -1125,7 +1125,7 @@ public class CodexExecutorTests
         var startParams = await DriveThreadStartAsync(executor, capture);
 
         Assert.Equal(
-            """{"model_context_window":131072,"web_search":"disabled","tools.view_image":false,"model_reasoning_summary":"concise","tool_output_token_limit":12000,"features.apps":false,"features.remote_plugin":false,"features.skill_mcp_dependency_install":false}""",
+            """{"model_context_window":131072,"web_search":"disabled","features.view_image":false,"model_reasoning_summary":"concise","tool_output_token_limit":12000,"features.apps":false,"features.remote_plugin":false,"features.skill_mcp_dependency_install":false}""",
             startParams["config"]!.ToJsonString());
         Assert.DoesNotContain("multi_agent", startParams.ToJsonString());
     }

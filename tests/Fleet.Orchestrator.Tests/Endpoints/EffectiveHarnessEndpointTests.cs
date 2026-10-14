@@ -220,7 +220,7 @@ public sealed class EffectiveHarnessEndpointTests : IAsyncLifetime
         var thread = (await GetAsync()).GetProperty("codex").GetProperty("threadConfig");
 
         Assert.Equal("disabled", thread.GetProperty("web_search").GetString());
-        Assert.False(thread.GetProperty("tools.view_image").GetBoolean());
+        Assert.False(thread.GetProperty("features.view_image").GetBoolean());
         Assert.Equal(8192, thread.GetProperty("tool_output_token_limit").GetInt32());
     }
 

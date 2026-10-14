@@ -182,7 +182,8 @@ public static class HarnessDefaults
             if (local)
             {
                 thread.Add(new("web_search", "disabled"));
-                thread.Add(new("tools.view_image", false));
+                // Not tools.view_image: codex 0.159.2 ignores that key; the feature flag removes the tool.
+                thread.Add(new("features.view_image", false));
                 thread.Add(new("model_reasoning_summary", "none"));
                 if (limit is int tokens) thread.Add(new("tool_output_token_limit", tokens));
             }

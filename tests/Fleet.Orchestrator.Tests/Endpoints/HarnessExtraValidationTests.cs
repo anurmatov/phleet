@@ -108,8 +108,8 @@ public sealed class HarnessExtraValidationTests : IAsyncLifetime
     [InlineData("codex", false, "web_search = \"live\"")]
     [InlineData("codex", false, "web_search = \"cached\"")]
     [InlineData("codex", true, "web_search = \"disabled\"")]
-    [InlineData("codex", false, "tools.view_image = false")]
-    [InlineData("codex", true, "tools.view_image = false")]
+    [InlineData("codex", false, "features.view_image = false")]
+    [InlineData("codex", true, "features.view_image = false")]
     [InlineData("codex", false, "model_reasoning_summary = \"detailed\"")]
     [InlineData("codex", true, "tool_output_token_limit = 1000")]
     [InlineData("codex", true, "tool_output_token_limit = 100000")]
@@ -142,12 +142,12 @@ public sealed class HarnessExtraValidationTests : IAsyncLifetime
     [InlineData("codex", false, "tool_output_token_limit = 999", "outside 1000-100000")]
     [InlineData("codex", false, "tool_output_token_limit = 100001", "outside 1000-100000")]
     [InlineData("codex", false, "tool_output_token_limit = \"12000\"", "must be an integer")]
-    [InlineData("codex", false, "tools.view_image = yes", "must be true or false")]
+    [InlineData("codex", false, "features.view_image = yes", "must be true or false")]
     [InlineData("codex", false, "web_search = live", "must be a quoted string")]
     [InlineData("codex", false, "web_search = \"on\"", "cannot be \"on\"")]
     [InlineData("codex", true, "web_search = \"live\"", "cannot enable web search in local mode")]
     [InlineData("codex", true, "web_search = \"cached\"", "cannot enable web search in local mode")]
-    [InlineData("codex", true, "tools.view_image = true", "cannot enable the image tool in local mode")]
+    [InlineData("codex", true, "features.view_image = true", "cannot enable the image tool in local mode")]
     [InlineData("codex", false, "features.multi_agent = false", "'features.multi_agent' is not an allowed setting")]
     [InlineData("codex", false, "model_auto_compact_token_limit = 5000", "is not an allowed setting")]
     [InlineData("codex", false, "project_doc_max_bytes = 1", "is not an allowed setting")]
@@ -175,7 +175,7 @@ public sealed class HarnessExtraValidationTests : IAsyncLifetime
     [InlineData("claude", false, "CLAUDE_CODE_OAUTH_TOKEN=x", "is not an allowed setting")]
     [InlineData("claude", false, "LD_PRELOAD=/x.so", "is not an allowed setting")]
     [InlineData("claude", false, "web_search = \"live\"", "'web_search' is not an allowed setting for claude")]
-    [InlineData("claude", false, "tools.view_image=false", "is not a valid environment variable name")]
+    [InlineData("claude", false, "features.view_image=false", "is not a valid environment variable name")]
     [InlineData("claude", false, "just text", "expected '--flag [value]'")]
     public void Parse_RefusesAnythingElse(string provider, bool local, string text, string reason)
     {
@@ -190,7 +190,7 @@ public sealed class HarnessExtraValidationTests : IAsyncLifetime
     [Fact]
     public void Parse_AnUnknownName_ListsTheAllowedNames()
     {
-        Assert.Contains("Allowed keys: web_search, tools.view_image,", HarnessExtra.Parse("notify = 1", "codex", false).Fault!.Message);
+        Assert.Contains("Allowed keys: web_search, features.view_image,", HarnessExtra.Parse("notify = 1", "codex", false).Fault!.Message);
         Assert.Contains("Allowed: --tools <names>, --disallowedTools WebSearch", HarnessExtra.Parse("--x", "claude", false).Fault!.Message);
     }
 

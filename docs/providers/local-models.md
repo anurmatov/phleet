@@ -132,7 +132,7 @@ trailing `/` dropped. The DB column is still `AnthropicBaseUrl`. There is no mig
 | Model | bare tag → `ANTHROPIC_DEFAULT_*_MODEL` | `modelProvider` + bare tag at `thread/start` |
 | Context window | `CLAUDE_CODE_MAX_CONTEXT_TOKENS` in the container env | `Agent.ContextWindow` in the generated `appsettings.json` → `thread/start` `config.model_context_window` |
 | Effort | `--effort`, or the disabled-thinking body for `off` | turn `effort`; `none` and `minimal` are sent as-is |
-| Harness defaults (#460) | `--tools`, `--disallowedTools WebSearch` and `MAX_MCP_OUTPUT_TOKENS` on the claude child | `web_search`, `tools.view_image`, `model_reasoning_summary`, `tool_output_token_limit` in `thread/start` `config` |
+| Harness defaults (#460) | `--tools`, `--disallowedTools WebSearch` and `MAX_MCP_OUTPUT_TOKENS` on the claude child | `web_search`, `features.view_image`, `model_reasoning_summary`, `tool_output_token_limit` in `thread/start` `config` |
 
 - Fleet adds the two Codex keys only when Codex local mode is on. Every other agent's generated
   files are unchanged.

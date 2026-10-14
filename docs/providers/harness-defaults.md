@@ -19,13 +19,20 @@ provider, or `ClaudeLocalModel.IsEnabled`), **cloud** otherwise. Hosted Codex pr
 | setting | where | cloud | local |
 |---|---|---|---|
 | `web_search` | thread `config` | unchanged (`cached`) | `"disabled"` |
-| `tools.view_image` | thread `config` | unchanged | `false` |
+| `features.view_image` | thread `config` | unchanged | `false` |
 | `model_reasoning_summary` | thread `config` | unchanged | `"none"` |
 | `tool_output_token_limit` | thread `config` | unchanged | `clamp(ContextWindow / 16, 4000, 25000)`, omitted when unset |
 | `features.apps`, `features.remote_plugin`, `features.skill_mcp_dependency_install` | thread `config` | `false` | `false` |
 | `check_for_update_on_startup` | `config.toml` root | `false` | `false` |
 | `analytics.enabled` | `[analytics]` | `false` | `false` |
 | `history.persistence` | `[history]` | `"none"` | `"none"` |
+
+**Checked on the pinned codex 0.159.2 (AC-C1, `tests/codex-harness-keys/run.py` in CI).** Codex's
+config parser ignores unknown keys, so each key is sent with a wrong-typed value: every key above makes
+`thread/start` fail naming it, so the CLI reads it. The design's `tools.view_image` is **not** read by
+this pin (any value is accepted and the tool stays); `features.view_image` is, and is what Fleet sets.
+On a captured local request the defaults remove exactly the `web_search` and `view_image` tools; the
+multi-agent tool stays.
 
 Unchanged: `features.multi_agent` (the Codex runtime instruction relies on its tools),
 `model_auto_compact_token_limit`, `project_doc_max_bytes` and AGENTS.md handling. Thread entries never
@@ -105,7 +112,7 @@ error naming the line, the reason and the allowed names; nothing is written:
 | provider | setting | value |
 |---|---|---|
 | codex | `web_search` | `"disabled"`, `"cached"` or `"live"`; local: `"disabled"` only |
-| codex | `tools.view_image` | `true`/`false`; local: `false` only |
+| codex | `features.view_image` | `true`/`false`; local: `false` only |
 | codex | `model_reasoning_summary` | `"none"`, `"auto"`, `"concise"` or `"detailed"` |
 | codex | `tool_output_token_limit` | integer 1000–100000 |
 | codex | `features.apps`, `features.remote_plugin`, `features.skill_mcp_dependency_install` | `true`/`false` |

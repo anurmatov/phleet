@@ -61,7 +61,7 @@ public sealed class HarnessDefaultsTests
         Assert.Equal(RootToml, plan.CodexRootToml);
         Assert.Equal(
         [
-            ("web_search", "disabled"), ("tools.view_image", false), ("model_reasoning_summary", "none"),
+            ("web_search", "disabled"), ("features.view_image", false), ("model_reasoning_summary", "none"),
             ("tool_output_token_limit", 8192), ("features.apps", false), ("features.remote_plugin", false),
             ("features.skill_mcp_dependency_install", false),
         ], Thread(plan));

@@ -688,6 +688,11 @@ jobs:
       - name: Install pinned codex CLI
         run: npm install -g @openai/codex@0.159.2 --silent
 
+      # #460 AC-C1: every harness key is one this codex reads (codex ignores unknown keys, so a renamed
+      # key would otherwise go silently inert), and the local defaults drop the two tools they target.
+      - name: Harness config keys read by the pinned codex
+        run: python3 tests/codex-harness-keys/run.py
+
       - name: Install jq
         run: sudo apt-get install -y jq
 

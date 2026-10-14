@@ -103,7 +103,7 @@ start, with `source=agent config` or `source=legacy env` and `contextWindow=`.
 
 ## Harness defaults (#460)
 
-In local mode `thread/start` `config` also carries `web_search = "disabled"`, `tools.view_image = false`,
+In local mode `thread/start` `config` also carries `web_search = "disabled"`, `features.view_image = false`,
 `model_reasoning_summary = "none"` and `tool_output_token_limit = clamp(ContextWindow / 16, 4000, 25000)`
 (omitted when the window is unset), after `model_context_window`; every Codex agent gets the
 `features.*` and `config.toml` root defaults. A legacy Env Ref agent has no `Agent:CodexOssBaseUrl` and

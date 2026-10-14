@@ -103,7 +103,7 @@ public static partial class HarnessExtra
             (raw, local) => ReadEnum(raw, ["disabled", "cached", "live"]) is (string mode, null) && local && mode != "disabled"
                 ? (null, "cannot enable web search in local mode")
                 : ReadEnum(raw, ["disabled", "cached", "live"])),
-        new("tools.view_image", HarnessExtraTarget.CodexThread, "true or false (local: false only)",
+        new("features.view_image", HarnessExtraTarget.CodexThread, "true or false (local: false only)",
             (raw, local) => ReadBool(raw) is (true, null) && local
                 ? (null, "cannot enable the image tool in local mode")
                 : ReadBool(raw)),

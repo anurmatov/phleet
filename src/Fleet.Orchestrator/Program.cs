@@ -141,7 +141,6 @@ if (!string.IsNullOrEmpty(connectionString))
     {
         await DbSeeder.SeedAsync(db, rolesDir, seedFilePath, startupLogger, temporalReg, projectsDir,
             projectContextLimitBytes: promptSizePolicy.ProjectContextLimitBytes);
-        await RemovedProviderGuard.EnsureAsync(db);
     }
     catch (Exception ex)
     {

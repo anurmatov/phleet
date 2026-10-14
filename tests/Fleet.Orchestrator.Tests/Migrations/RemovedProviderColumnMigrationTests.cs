@@ -83,6 +83,54 @@ public sealed class RemovedProviderColumnMigrationTests : IAsyncLifetime
         await RemovedProviderGuard.EnsureAsync(db);
     }
 
+    [Fact]
+    public async Task Startup_PiRow_RefusesBeforeMigration_PreservesRollbackSchema()
+    {
+        await MigrateAsync(Before);
+        await InsertAgentAsync("agent-a");
+        var migration = new RemoveAgentPiImageInput { ActiveProvider = "Pomelo.EntityFrameworkCore.MySql" };
+        var column = Assert.IsType<DropColumnOperation>(Assert.Single(migration.UpOperations)).Name;
+        await ExecAsync(_connectionString,
+            $"UPDATE agents SET Provider = 'pi', IsEnabled = 0, `{column}` = 1 WHERE Name = 'agent-a'");
+        await using var db = NewContext();
+        var applied = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => SeedStartupAsync(db));
+
+        Assert.Contains("agent-a", error.Message);
+        Assert.Contains("reprovision before upgrading", error.Message);
+        Assert.Equal(applied, (await db.Database.GetAppliedMigrationsAsync()).ToArray());
+        Assert.Contains(Target, await db.Database.GetPendingMigrationsAsync());
+        Assert.Equal(1L, await ColumnCountAsync(column));
+        Assert.Equal(1L, await ScalarAsync<long>($"SELECT `{column}` FROM agents WHERE Name = 'agent-a'"));
+
+        // The previous release can still read its column and move this agent off Pi.
+        await ExecAsync(_connectionString, "UPDATE agents SET Provider = 'codex' WHERE Name = 'agent-a'");
+        await SeedStartupAsync(db);
+        Assert.Contains(Target, await db.Database.GetAppliedMigrationsAsync());
+        Assert.Empty(await db.Database.GetPendingMigrationsAsync());
+        Assert.Equal(0L, await ColumnCountAsync(column));
+    }
+
+    [Fact]
+    public async Task Startup_FreshDatabase_SkipsLegacyRowQuery_AndMigratesNormally()
+    {
+        await using var db = NewContext();
+        Assert.Empty(await db.Database.GetAppliedMigrationsAsync());
+
+        await SeedStartupAsync(db);
+
+        Assert.Contains(Target, await db.Database.GetAppliedMigrationsAsync());
+        Assert.Empty(await db.Database.GetPendingMigrationsAsync());
+        Assert.Empty(await db.Agents.ToListAsync());
+    }
+
+    private static Task SeedStartupAsync(OrchestratorDbContext db)
+    {
+        var absent = Path.Combine(Path.GetTempPath(), $"no-seed-{Guid.NewGuid():N}");
+        return DbSeeder.SeedAsync(db, absent, outputStylesDir: absent);
+    }
+
     private Task<long> ColumnCountAsync(string column) => ScalarAsync<long>($"""
         SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()
         AND TABLE_NAME = 'agents' AND COLUMN_NAME = '{column}'

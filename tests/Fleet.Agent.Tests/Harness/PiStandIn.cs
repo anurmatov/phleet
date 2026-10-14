@@ -242,6 +242,7 @@ internal sealed class PiStandInProcess : IPiProcess
     private readonly SemaphoreSlim _emitLock = new(1, 1);
     private readonly SemaphoreSlim _frameArrived = new(0);
     private readonly List<JsonObject> _frames = [];
+    private readonly MemoryStream _stdinBytes = new();
     private readonly Dictionary<JsonObject, long> _frameTimes = new(ReferenceEqualityComparer.Instance);
     private readonly Stream _stdoutStream;
     private readonly TextReader _stderrReader;
@@ -255,7 +256,7 @@ internal sealed class PiStandInProcess : IPiProcess
         Index = index;
         _stdoutStream = _stdout.Reader.AsStream();
         _stderrReader = new StreamReader(_stderr.Reader.AsStream(), Encoding.UTF8);
-        _stdinStream = new BrokenPipeStream(_stdin.Writer, () => HasExited, () => owner.StdinGate?.Task);
+        _stdinStream = new BrokenPipeStream(_stdin.Writer, () => HasExited, () => owner.StdinGate?.Task, _stdinBytes);
     }
 
     /// <summary>0 for the first process the stand-in started.</summary>
@@ -267,6 +268,12 @@ internal sealed class PiStandInProcess : IPiProcess
     public Stream StandardInput => _stdinStream;
     public Stream StandardOutput => _stdoutStream;
     public TextReader StandardError => _stderrReader;
+
+    /// <summary>Every byte the executor wrote to stdin, whether or not the reader parsed it before an exit.</summary>
+    public string StdinText
+    {
+        get { lock (_stdinBytes) return Encoding.UTF8.GetString(_stdinBytes.ToArray()); }
+    }
 
     /// <summary>Every frame the executor wrote, in order.</summary>
     public IReadOnlyList<JsonObject> Frames
@@ -420,7 +427,7 @@ internal sealed class PiStandInProcess : IPiProcess
         RespondAsync(prompt, new JsonObject { ["disposition"] = disposition });
 
     /// <summary>A stdin stream that fails like a closed pipe once the process has gone.</summary>
-    private sealed class BrokenPipeStream(PipeWriter writer, Func<bool> exited, Func<Task?> gate) : Stream
+    private sealed class BrokenPipeStream(PipeWriter writer, Func<bool> exited, Func<Task?> gate, MemoryStream log) : Stream
     {
         public override bool CanRead => false;
         public override bool CanSeek => false;
@@ -450,6 +457,8 @@ internal sealed class PiStandInProcess : IPiProcess
                 await blocked.WaitAsync(cancellationToken);
             if (exited())
                 throw new IOException("Broken pipe");
+            lock (log)
+                log.Write(buffer.Span);
             await writer.WriteAsync(buffer, cancellationToken);
         }
     }

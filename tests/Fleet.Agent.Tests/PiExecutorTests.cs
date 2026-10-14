@@ -1155,6 +1155,277 @@ public sealed class PiExecutorTests
         Assert.Null(prompt["images"]);
     }
 
+    // ── #455: attachments on every path ─────────────────────────────────────
+
+    private MessageDocument TextPdf(Rig rig, string name = "report.pdf")
+    {
+        var path = Path.Combine(rig.TempPath, name);
+        File.WriteAllText(path, "%PDF-1.4\nsynthetic\n");
+        return new MessageDocument("file-id", "application/pdf", 20, name) { FilePath = path };
+    }
+
+    private static string ImagesJson(JsonObject frame) => frame["images"]?.ToJsonString() ?? "";
+
+    [Fact]
+    public async Task ImageInputOn_ThePromptCarriesImageBlocks_WithTheSniffedTypeAndExactBytes()
+    {
+        await using var rig = Rig.Create(imageInput: true);
+        var png = TestImages.Png(64, 48);
+
+        await rig.RunTurnAsync("what is this?", [new MessageImage(png, "image/jpeg")]);
+
+        var prompt = Assert.Single(rig.Pi.Current.FramesOfType("prompt"));
+        Assert.Equal("what is this?", PiExecutor.Str(prompt, "message"));
+        var image = Assert.Single(prompt["images"]!.AsArray())!.AsObject();
+        Assert.Equal("image", PiExecutor.Str(image, "type"));
+        Assert.Equal("image/png", PiExecutor.Str(image, "mimeType"));
+        Assert.Equal(png, Convert.FromBase64String(PiExecutor.Str(image, "data")!));
+        Assert.Contains(rig.Messages(LogLevel.Information), m => m.Contains("images on"));
+    }
+
+    [Fact]
+    public async Task A6_PromptAndSteer_CarryIdenticalImagesAndTheSamePdfText_ExtractedOnce()
+    {
+        await using var rig = Rig.Create(imageInput: true);
+        rig.Pi.OnPrompt = ToolThenFinal("answer");
+        var images = new List<MessageImage> { new(TestImages.Png(64, 48), "image/png") };
+        var documents = new List<MessageDocument> { TextPdf(rig) };
+        MidTurnInjectionResult? injection = null;
+
+        await foreach (var progress in rig.Executor.ExecuteAsync("look", images, documents))
+        {
+            if (progress.EventType == "tool_use")
+                injection = await rig.Executor.TryInjectMessageAsync("look", images, documents);
+        }
+
+        Assert.Equal(MidTurnInjectionStatus.Injected, injection!.Status);
+        var prompt = Assert.Single(rig.Pi.Current.FramesOfType("prompt"));
+        var steer = Assert.Single(rig.Pi.Current.FramesOfType("steer"));
+        Assert.Equal(ImagesJson(prompt), ImagesJson(steer));
+        Assert.Equal(PiExecutor.Str(prompt, "message"), PiExecutor.Str(steer, "message"));
+        Assert.Contains("[PDF text: report.pdf, pages 1–3 of 3;", PiExecutor.Str(steer, "message"));
+        Assert.Equal(1, rig.Tools.Count(PiPdfExtractor.PdfToText));
+    }
+
+    [Fact]
+    public async Task A6_ARefusedSteer_IsResentAsAPrompt_WithNoSecondExtraction()
+    {
+        await using var rig = Rig.Create(imageInput: true);
+        rig.Pi.OnPrompt = ToolThenFinal("answer");
+        rig.Pi.OnSteer = (p, f) => p.RespondAsync(f, success: false, error: "busy");
+        var documents = new List<MessageDocument> { TextPdf(rig) };
+        MidTurnInjectionResult? injection = null;
+
+        await foreach (var progress in rig.Executor.ExecuteAsync("work"))
+        {
+            if (progress.EventType == "tool_use")
+                injection = await rig.Executor.TryInjectMessageAsync("read this", documents: documents);
+        }
+        rig.Pi.OnPrompt = null;
+        await rig.RunTurnAsync("read this", documents: documents);
+
+        Assert.Equal(MidTurnInjectionStatus.Failed, injection!.Status);
+        Assert.Contains("[PDF text: report.pdf", PiExecutor.Str(rig.Pi.Current.FramesOfType("prompt")[^1], "message"));
+        Assert.Equal(1, rig.Tools.Count(PiPdfExtractor.PdfToText));
+    }
+
+    [Fact]
+    public async Task A6_AQueuedBatchOfThreeImages_IsOnePromptWithTwoImagesAndTheNote()
+    {
+        await using var rig = Rig.Create(imageInput: true);
+        var images = Enumerable.Range(1, 3)
+            .Select(i => new MessageImage(TestImages.Png(10 * i, 10), "image/jpeg") { FilePath = $"/workspace/example/{i}.jpg" })
+            .ToList();
+
+        await rig.RunTurnAsync("three parts", images);
+
+        var prompt = Assert.Single(rig.Pi.Current.FramesOfType("prompt"));
+        Assert.Equal(2, prompt["images"]!.AsArray().Count);
+        Assert.Equal(
+            "three parts\n\n[1 image attachment(s) omitted: 1 not inline: over the 2-image limit — open the path with read]",
+            PiExecutor.Str(prompt, "message"));
+    }
+
+    [Fact]
+    public async Task A6b_TheRunEndsWhileTheSteerIsExtracting_NoSteerIsWritten_AndThePromptUsesTheCache()
+    {
+        var gate = new TaskCompletionSource();
+        var tools = new FakePiLocalTools();
+        tools.Handler = async (tool, _, _, ct) =>
+        {
+            if (tool == PiPdfExtractor.PdfToText)
+                await gate.Task.WaitAsync(ct);
+            return null;
+        };
+        await using var rig = Rig.Create(imageInput: true, tools: tools);
+        var endRun = new TaskCompletionSource();
+        rig.Pi.OnPrompt = async (p, f) =>
+        {
+            await p.AckAsync(f);
+            await p.EmitAsync(AgentStart(), TurnStart(),
+                ToolCallMessage("c1", "bash", new JsonObject { ["command"] = "true" }),
+                ToolStart("c1", "bash", new JsonObject { ["command"] = "true" }));
+            await endRun.Task;
+            await p.EmitAsync(ToolEnd("c1", "bash", ""), TurnEnd(), TurnStart(), FinalText("first"), TurnEnd(), AgentEnd(), AgentSettled());
+        };
+        var documents = new List<MessageDocument> { TextPdf(rig) };
+        Task<MidTurnInjectionResult>? steer = null;
+
+        await foreach (var progress in rig.Executor.ExecuteAsync("work"))
+        {
+            if (progress.EventType != "tool_use")
+                continue;
+            steer = rig.Executor.TryInjectMessageAsync("read this", documents: documents);
+            while (tools.Count(PiPdfExtractor.PdfToText) == 0)
+                await Task.Delay(10);
+            endRun.SetResult();
+        }
+        gate.SetResult();
+        var injection = await steer!;
+
+        Assert.Equal(MidTurnInjectionStatus.NoActiveTurn, injection.Status);
+        Assert.Empty(rig.Pi.Current.FramesOfType("steer"));
+
+        rig.Pi.OnPrompt = null;
+        await rig.RunTurnAsync("read this", documents: documents);
+        Assert.Contains("[PDF text: report.pdf", PiExecutor.Str(rig.Pi.Current.FramesOfType("prompt")[^1], "message"));
+        Assert.Equal(1, tools.Count(PiPdfExtractor.PdfToText));
+    }
+
+    [Fact]
+    public async Task A7_CancelledDuringProcessing_NoFrameIsWritten()
+    {
+        var tools = new FakePiLocalTools();
+        tools.Handler = async (_, _, budget, ct) => await tools.BlockAsync(budget, ct);
+        await using var rig = Rig.Create(tools: tools);
+        using var cts = new CancellationTokenSource();
+        var documents = new List<MessageDocument> { TextPdf(rig) };
+
+        var turn = rig.RunTurnAsync("read this", ct: cts.Token, documents: documents);
+        while (tools.Calls.Count == 0)
+            await Task.Delay(10);
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => turn);
+        Assert.All(rig.Pi.Processes, p => Assert.Empty(p.FramesOfType("prompt")));
+    }
+
+    [Fact]
+    public async Task A7_CancelledDuringABlockedWrite_TheWholeFrameStillArrives()
+    {
+        await using var rig = Rig.Create();
+        await rig.RunTurnAsync("first");
+        var gate = new TaskCompletionSource();
+        rig.Pi.StdinGate = gate;
+        using var cts = new CancellationTokenSource();
+
+        var turn = rig.RunTurnAsync("second", ct: cts.Token);
+        await Task.Delay(200);
+        await cts.CancelAsync();
+        await Task.Delay(200);
+        gate.SetResult();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => turn);
+        // Every byte on stdin is a complete JSON line; the cancelled prompt went out whole.
+        var stdin = rig.Pi.Processes[0].StdinText;
+        Assert.EndsWith("\n", stdin);
+        var frames = stdin.TrimEnd('\n').Split('\n').Select(line => JsonNode.Parse(line)!.AsObject()).ToList();
+        var prompts = frames.Where(f => PiExecutor.Str(f, "type") == "prompt").ToList();
+        Assert.Equal(2, prompts.Count);
+        Assert.Equal("second", PiExecutor.Str(prompts[1], "message"));
+    }
+
+    [Fact]
+    public async Task A7_AWriteBlockedPastTheDeadline_KillsTheProcess_AndEndsWithProcessExitText()
+    {
+        await using var rig = Rig.Create(timings: PiStandIn.FastTimings with { StdinWrite = TimeSpan.FromSeconds(1) });
+        await rig.RunTurnAsync("first");
+        var gate = new TaskCompletionSource();
+        rig.Pi.StdinGate = gate;
+        try
+        {
+            var clock = Stopwatch.StartNew();
+            var result = Terminal(await rig.RunTurnAsync("second"));
+
+            Assert.Equal(PiExecutor.ProcessExitText, result.FinalResult);
+            Assert.True(result.IsErrorResult);
+            Assert.InRange(clock.Elapsed, TimeSpan.FromSeconds(0.9), TimeSpan.FromSeconds(10));
+            Assert.Equal(1, rig.Pi.Processes[0].Kills);
+            Assert.Contains(rig.Messages(LogLevel.Error), m => m.StartsWith("pi: a stdin frame was not written within 1 s"));
+        }
+        finally
+        {
+            rig.Pi.StdinGate = null;
+            gate.SetResult();
+        }
+    }
+
+    [Fact]
+    public async Task A13_PiEchoingFewerImagesThanSent_LogsOneDroppedWarning()
+    {
+        await using var rig = Rig.Create(imageInput: true);
+        rig.Pi.OnPrompt = async (p, f) =>
+        {
+            await p.AckAsync(f);
+            await p.EmitAsync(new JsonObject
+            {
+                ["type"] = "message_start",
+                ["message"] = new JsonObject
+                {
+                    ["role"] = "user",
+                    ["content"] = new JsonArray
+                    {
+                        new JsonObject { ["type"] = "text", ["text"] = "look" },
+                        new JsonObject { ["type"] = "image", ["data"] = "AAAA", ["mimeType"] = "image/png" },
+                    },
+                },
+            });
+            await p.EmitAsync(TextRun("OK"));
+        };
+
+        await rig.RunTurnAsync("look", [new MessageImage(TestImages.Png(10, 10), "image/png"), new MessageImage(TestImages.Png(20, 20), "image/png")]);
+
+        Assert.Single(rig.Messages(LogLevel.Warning), m => m == "pi images: Pi dropped 1 of 2 image(s) on the prompt path");
+    }
+
+    [Fact]
+    public async Task A13_ASessionFileOver256MiB_LogsOneWarningPerCrossing()
+    {
+        await using var rig = Rig.Create();
+        var session = rig.CreateSessionFile();
+        using (var stream = new FileStream(session, FileMode.Open))
+            stream.SetLength(PiLocalModel.SessionFileWarningBytes + 1024 * 1024); // sparse
+
+        await rig.RunTurnAsync("one");
+        await rig.RunTurnAsync("two");
+
+        Assert.Single(rig.Messages(LogLevel.Warning), m => m == "pi session file is 257 MiB; /reset starts a new one");
+    }
+
+    [Fact]
+    public async Task AnEchoLineOf24MiB_IsHandled_AndNeverLogged()
+    {
+        await using var rig = Rig.Create();
+        var big = new string('q', 24 * 1024 * 1024);
+        rig.Pi.OnPrompt = async (p, f) =>
+        {
+            await p.AckAsync(f);
+            await p.EmitAsync(new JsonObject
+            {
+                ["type"] = "message_start",
+                ["message"] = new JsonObject
+                {
+                    ["role"] = "user",
+                    ["content"] = new JsonArray { new JsonObject { ["type"] = "text", ["text"] = big } },
+                },
+            });
+            await p.EmitAsync(TextRun("OK"));
+        };
+
+        Assert.Equal("OK", Terminal(await rig.RunTurnAsync()).FinalResult);
+        Assert.DoesNotContain(rig.Logger.Entries, e => e.Message.Contains("qqqqqqqq"));
+    }
+
     [Fact]
     public async Task Run_IsAnRpcBashExcludedFromContext()
     {

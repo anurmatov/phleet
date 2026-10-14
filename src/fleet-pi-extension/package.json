@@ -18,7 +18,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.30.1"
+    "@modelcontextprotocol/sdk": "1.32.1"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "1.0.4",

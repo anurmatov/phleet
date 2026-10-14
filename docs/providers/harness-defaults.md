@@ -62,7 +62,7 @@ all kept.
 ## `harnessExtra`
 
 One nullable `text` column (`agents.harness_extra`), at most 4,096 characters and 50 lines. Claude and
-codex only; pi and gemini refuse a non-empty value with `unsupported_provider`.
+codex only; gemini refuses a non-empty value with `unsupported_provider`.
 
 | surface | name |
 |---|---|
@@ -97,7 +97,7 @@ error naming the line, the reason and the allowed names; nothing is written:
 Not settable: `--allowedTools`, `--strict-mcp-config`, `features.multi_agent`,
 `model_auto_compact_token_limit`, `project_doc_*`, and every row marked unchanged. A duplicate line is
 refused. Validation runs against the agent's **resulting** provider and mode on every write, so a
-switch that would leave a stored value outside the allowlist (to pi, or to local with
+switch that would leave a stored value outside the allowlist (to gemini, or to local with
 `web_search = "live"`) is refused until the value is changed in the same request.
 
 **Precedence.** An extra replaces the mode default for the same Codex key, Claude flag or env name;
@@ -124,7 +124,7 @@ Read-only, unauthenticated like `GET /api/agents/{name}/config`.
 | `startedPlanSha256` | the sha the running agent reported on registration and every heartbeat; `null` = not reported |
 | `pendingReprovision` | `true` when a started sha exists and differs from the computed one |
 
-Unknown agent → 404; pi or gemini → 404 `{"reason":"unsupported_provider"}`. The agent prints
+Unknown agent → 404; gemini → 404 `{"reason":"unsupported_provider"}`. The agent prints
 `harness: mode=<mode> plan=<sha256> extra=<state>` once at startup (`HarnessPlan.StartupLine`).
 
 ## Rollout and rollback

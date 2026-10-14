@@ -18,8 +18,7 @@ namespace Fleet.Orchestrator.Endpoints;
 /// Lifted verbatim from <c>Program.cs</c> (#386) so the endpoint tests can run the production
 /// handler over real HTTP and prove PV1 refuses an unknown provider before a row is written — the
 /// same pattern as <see cref="AgentConfigEndpoints"/> (#357). It also takes the local server URL and
-/// context window, checked like the PUT before anything is written, so a <c>pi</c> agent is created
-/// complete and provisions at once (PI1, PI3).
+/// context window, checked like the PUT before anything is written.
 /// </remarks>
 public static class AgentCreateEndpoints
 {
@@ -35,7 +34,7 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
 
     CreateAgentRequest? body;
     try { body = await request.ReadFromJsonAsync<CreateAgentRequest>(); }
-    // #455: a field of the wrong JSON type (piImageInput: "true") is a 400 before any write, not a 500.
+
     catch (JsonException ex) { return Results.BadRequest(new { error = AgentPatchHelpers.DescribeBodyFault(ex) }); }
     if (body is null || string.IsNullOrWhiteSpace(body.Name))
         return Results.BadRequest(new { error = "name is required" });
@@ -46,8 +45,7 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
     // PV1 (#386): refused before anything is written. Omitted or "" stays claude.
     if (AgentProviders.DescribeFault(body.Provider) is { } providerFault)
         return Results.BadRequest(new { error = providerFault });
-    // #386: the local server URL and context window are checked like the PUT (a pi agent needs
-    // both: PI1, PI3), before anything is written.
+    // The local server URL and context window are checked like the PUT before anything is written.
     var localModel = new Agent
     {
         Name = "", DisplayName = "", Role = "", ContainerName = "", // a validation probe, never saved
@@ -121,8 +119,7 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         Provider                  = body.Provider          ?? "claude",
         CodexSandboxMode          = string.IsNullOrEmpty(body.CodexSandboxMode) ? null : body.CodexSandboxMode,
         MountDockerSock           = body.MountDockerSock   ?? false,
-        // #455: stored for every provider; only pi applies it, on provisioning.
-        PiImageInput              = body.PiImageInput      ?? false,
+
         HarnessExtra              = localModel.HarnessExtra,
     };
     agent.LocalBaseUrl = localModel.LocalBaseUrl;

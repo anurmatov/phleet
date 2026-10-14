@@ -21,9 +21,6 @@ namespace Fleet.Agent.Tests.Harness;
 /// <c>ParseProgress</c>, so anything short of the full loop would not observe it.</item>
 /// <item><b>Codex</b> — <c>StreamTurnForTests</c> over a scripted notification channel. No process
 /// at all is required for the read path.</item>
-/// <item><b>Pi</b> (#386) — the full <c>ExecuteAsync</c> over the in-memory <see cref="PiStandIn"/>,
-/// which answers <c>get_state</c>, acks the prompt and then writes the fixture's lines to stdout
-/// verbatim, so the executor's own LF framing, ack routing and event mapping all run.</item>
 /// <item><b>Gemini</b> — <c>MapEvent</c> with a caller-owned accumulator. There is no process seam
 /// and no event-channel seam below <c>ExecuteAsync</c>, so the turn-start marker and the terminal
 /// are NOT observable here; they are recorded as <c>inferred</c> at L2 (D3). Opening a seam would
@@ -38,7 +35,6 @@ internal static class ProviderFrameReplay
     public const string ClaudeDirectory = "claude";
     public const string CodexDirectory = "codex";
     public const string GeminiDirectory = "gemini";
-    public const string PiDirectory = "pi";
 
     /// <summary>Absolute path of a fixture in the test output tree.</summary>
     public static string FixturePath(string provider, string fileName)
@@ -230,38 +226,6 @@ internal static class ProviderFrameReplay
             agentOptions, telegramOptions,
             new PromptBuilder(agentOptions, NullLogger<PromptBuilder>.Instance),
             NullLogger<CodexExecutor>.Instance);
-    }
-
-    // ── Pi ───────────────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Run one Pi turn whose stdout, after the prompt ack, is the fixture. With
-    /// <paramref name="exitAfterReplay"/> the stand-in process then exits, as a crash would.
-    /// </summary>
-    public static async Task<IReadOnlyList<AgentProgress>> ReplayPiAsync(
-        string fileName, bool exitAfterReplay = false, CancellationToken ct = default)
-    {
-        var lines = ReadLines(PiDirectory, fileName);
-        using var temp = new PiTempDirectory("pi-replay");
-        var pi = new PiStandIn
-        {
-            OnPrompt = async (process, prompt) =>
-            {
-                await process.AckAsync(prompt);
-                foreach (var line in lines)
-                    await process.EmitLineAsync(line);
-                if (exitAfterReplay)
-                    process.Exit();
-            },
-        };
-
-        await using var executor = pi.CreateExecutor(temp.Sub("work"), Path.Combine(temp.Path, "agent"));
-        using var guard = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        guard.CancelAfter(TimeSpan.FromSeconds(60));
-        var progress = new List<AgentProgress>();
-        await foreach (var item in executor.ExecuteAsync("synthetic fixture turn", ct: guard.Token))
-            progress.Add(item);
-        return progress;
     }
 
     // ── Gemini ───────────────────────────────────────────────────────────────

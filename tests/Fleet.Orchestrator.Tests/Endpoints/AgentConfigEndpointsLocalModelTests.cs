@@ -21,7 +21,6 @@ namespace Fleet.Orchestrator.Tests.Endpoints;
 /// <summary>
 /// #382 REST path over real HTTP: <c>localBaseUrl</c> and its alias <c>anthropicBaseUrl</c> (A1),
 /// codex local mode, the L1/L2/C1 rules, and a provider switch while local, one case per direction.
-/// #386: pi's rules (A5), switches into pi (A6) and PV1 on the PUT (A30). #455: <c>piImageInput</c>
 /// round-trips, a non-boolean is a 400, and the value survives a provider switch. Every rejected
 /// request is checked against the stored row, not the response alone.
 /// </summary>
@@ -74,7 +73,7 @@ public sealed class AgentConfigEndpointsLocalModelTests : IAsyncLifetime
     }
 
     private async Task SeedAsync(string provider, string model, string? url = null, int? window = null,
-        string? effort = null, bool piImageInput = false)
+        string? effort = null)
     {
         await using var scope = _app.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
@@ -82,7 +81,6 @@ public sealed class AgentConfigEndpointsLocalModelTests : IAsyncLifetime
         {
             Name = "agent1", DisplayName = "agent1", Role = "test", Model = model, Provider = provider,
             LocalBaseUrl = url, ContextWindow = window, Effort = effort, MemoryLimitMb = 1024, ContainerName = "agent1",
-            PiImageInput = piImageInput,
         });
         await db.SaveChangesAsync();
     }
@@ -193,7 +191,7 @@ public sealed class AgentConfigEndpointsLocalModelTests : IAsyncLifetime
     [Theory]
     [InlineData("codex", "qwen3.8:27b", Url, "ollama/<tag>")]
     [InlineData("codex", "zai/glm-5.3", Url, "ollama/<tag>")]
-    [InlineData("gemini", "gemini-2.5-pro", Url, "Local model runs on claude, codex or pi")]
+    [InlineData("gemini", "gemini-2.5-pro", Url, "Local model runs on claude or codex")]
     [InlineData("codex", "ollama/qwen3.8:27b", Url + "/v1", "Fleet adds")]
     public async Task Validation_RejectsWithTheRuleText_AndSavesNothing(
         string provider, string model, string url, string expected)
@@ -268,158 +266,16 @@ public sealed class AgentConfigEndpointsLocalModelTests : IAsyncLifetime
         Assert.Equal(("claude", "qwen3.8:27b"), (stored.Provider, stored.Model));
     }
 
-    // ── #386 provider pi ─────────────────────────────────────────────────────────────────────────
-
-    private const string PiUrl = "http://inference-host:8000";
-    private const string PiTag = "qwen3.8-flash-next";
-
     private async Task<(string Provider, string Model, string? Url, int? Window, string? Effort, int Memory)> RowAsync()
     {
         var stored = await StoredAsync();
         return (stored.Provider, stored.Model, stored.LocalBaseUrl, stored.ContextWindow, stored.Effort, stored.MemoryLimitMb);
     }
 
-    [Fact]
-    public async Task Pi_SetUpByASwitchFromClaudeCloud_IsStoredCanonical()
-    {
-        await SeedAsync("claude", "claude-opus-5-5");
-
-        var response = await _client.PutAsJsonAsync(Put, new
-        {
-            provider = "pi", model = PiTag, localBaseUrl = "HTTP://Inference-Host:8000/", contextWindow = 131_072, effort = "on",
-        });
-
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(("pi", PiTag, (string?)PiUrl, (int?)131_072, (string?)"on", 1024), await RowAsync());
-    }
-
-    // ── A5 over REST: each rule's text, and nothing saved ────────────────────────────────────────
-
-    public static TheoryData<string, string> A5Cases => new()
-    {
-        { "PI1 no url", Fleet.Shared.PiLocalModel.Pi1Text },
-        { "PI1 url cleared", Fleet.Shared.PiLocalModel.Pi1Text },
-        { "PI2 charset", Fleet.Shared.PiLocalModel.Pi2Text },
-        { "PI2 ollama/", Fleet.Shared.PiLocalModel.Pi2Text },
-        { "PI2 lmstudio/", Fleet.Shared.PiLocalModel.Pi2Text },
-        { "PI2 zai/", Fleet.Shared.PiLocalModel.Pi2Text },
-        { "PI3 unset", Fleet.Shared.PiLocalModel.Pi3Text },
-        { "PI3 65535", Fleet.Shared.PiLocalModel.Pi3Text },
-        { "PI4 xhigh", Fleet.Shared.PiLocalModel.Pi4Text },
-        { "L1 gemini url", Fleet.Shared.LocalModel.L1Text },
-    };
-
-    [Theory]
-    [MemberData(nameof(A5Cases))]
-    public async Task A5_PiRules_Return400WithTheRuleText_AndLeaveTheRowUnchanged(string @case, string expected)
-    {
-        if (@case == "PI1 no url") await SeedAsync("claude", "claude-opus-5-5");
-        else if (@case == "L1 gemini url") await SeedAsync("gemini", "gemini-2.5-pro");
-        else await SeedAsync("pi", PiTag, PiUrl, 131_072, effort: "on");
-        var before = await RowAsync();
-
-        object body = @case switch
-        {
-            "PI1 no url" => new { provider = "pi", model = PiTag, contextWindow = 131_072, memoryLimitMb = 2048 },
-            "PI1 url cleared" => new { localBaseUrl = "", memoryLimitMb = 2048 },
-            "PI2 charset" => new { model = "qwen 3.8", memoryLimitMb = 2048 },
-            "PI2 ollama/" => new { model = "ollama/" + PiTag, memoryLimitMb = 2048 },
-            "PI2 lmstudio/" => new { model = "lmstudio/" + PiTag, memoryLimitMb = 2048 },
-            "PI2 zai/" => new { model = "zai/glm-5.3", memoryLimitMb = 2048 },
-            "PI3 unset" => new { contextWindow = 0, memoryLimitMb = 2048 },
-            "PI3 65535" => new { contextWindow = 65_535, memoryLimitMb = 2048 },
-            "PI4 xhigh" => new { effort = "xhigh", memoryLimitMb = 2048 },
-            "L1 gemini url" => new { localBaseUrl = PiUrl, memoryLimitMb = 2048 },
-            _ => throw new ArgumentOutOfRangeException(nameof(@case)),
-        };
-
-        Assert.Equal(expected, await BadRequestErrorAsync(body));
-        Assert.Equal(before, await RowAsync());
-    }
-
-    // ── A6 over REST ─────────────────────────────────────────────────────────────────────────────
-
-    [Fact]
-    public async Task A6_CodexLocalToPi_WithTagAndEffort_Returns200_UrlAndWindowUnchanged()
-    {
-        await SeedAsync("codex", "ollama/qwen3.8:27b", Url, 131_072, effort: "none");
-
-        var response = await _client.PutAsJsonAsync(Put, new { provider = "pi", model = "qwen3.8:27b", effort = "off" });
-
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(("pi", "qwen3.8:27b", (string?)Url, (int?)131_072, (string?)"off", 1024), await RowAsync());
-    }
-
-    [Fact]
-    public async Task A6_CodexLocalToPi_ProviderAlone_Is400PI2()
-    {
-        await SeedAsync("codex", "ollama/qwen3.8:27b", Url, 131_072, effort: "none");
-        var before = await RowAsync();
-
-        Assert.Equal(Fleet.Shared.PiLocalModel.Pi2Text, await BadRequestErrorAsync(new { provider = "pi" }));
-        Assert.Equal(before, await RowAsync());
-    }
-
-    [Fact]
-    public async Task A6_ClaudeLocalWithXhighToPi_ProviderAlone_Is400PI4()
-    {
-        await SeedAsync("claude", "qwen3.8:27b", Url, 131_072, effort: "xhigh");
-        var before = await RowAsync();
-
-        Assert.Equal(Fleet.Shared.PiLocalModel.Pi4Text, await BadRequestErrorAsync(new { provider = "pi" }));
-        Assert.Equal(before, await RowAsync());
-    }
-
-    // ── Leaving pi over REST: its on/off effort never reaches a provider that cannot take it ──────
-
-    public static TheoryData<string, object, string> LeavingPiWithItsEffort => new()
-    {
-        { "on", new { provider = "claude", model = "claude-opus-5-5", localBaseUrl = "" },
-            "Effort 'on' applies only to provider pi; clear it or choose an effort for claude." },
-        { "on", new { provider = "codex", model = "ollama/qwen3.8:27b" },
-            "Effort 'on' applies only to provider pi; clear it or choose an effort for codex." },
-        { "off", new { provider = "codex", model = "ollama/qwen3.8:27b" },
-            "Effort 'off' applies only to pi and local claude models; clear it or choose an effort for codex." },
-        { "on", new { provider = "claude", model = PiTag },
-            "Effort on a local Claude model must be empty (model default, sent as xhigh), off, low, medium or xhigh." },
-    };
-
-    [Theory]
-    [MemberData(nameof(LeavingPiWithItsEffort))]
-    public async Task LeavingPi_WithItsStoredEffort_Is400_AndTheRowIsUnchanged(string effort, object body, string expected)
-    {
-        await SeedAsync("pi", PiTag, PiUrl, 131_072, effort: effort);
-        var before = await RowAsync();
-
-        Assert.Equal(expected, await BadRequestErrorAsync(body));
-        Assert.Equal(before, await RowAsync());
-    }
-
-    [Fact]
-    public async Task LeavingPi_ForClaudeLocalWithOff_Returns200()
-    {
-        await SeedAsync("pi", PiTag, PiUrl, 131_072, effort: "off");
-
-        var response = await _client.PutAsJsonAsync(Put, new { provider = "claude" });
-
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(("claude", PiTag, (string?)PiUrl, (int?)131_072, (string?)"off", 1024), await RowAsync());
-    }
-
-    [Fact]
-    public async Task LeavingPi_WithTheEffortCleared_Returns200()
-    {
-        await SeedAsync("pi", PiTag, PiUrl, 131_072, effort: "on");
-
-        var response = await _client.PutAsJsonAsync(Put, new { provider = "codex", model = $"ollama/{PiTag}", effort = "" });
-
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(("codex", $"ollama/{PiTag}", (string?)PiUrl, (int?)131_072, (string?)null, 1024), await RowAsync());
-    }
-
     // ── A30: PV1 over REST PUT ───────────────────────────────────────────────────────────────────
 
     [Theory]
+    [InlineData("pi")]
     [InlineData("foo")]
     [InlineData("Pi")]
     public async Task A30_AnUnknownProvider_Is400PV1_AndTheRowIsUnchanged(string provider)
@@ -429,7 +285,7 @@ public sealed class AgentConfigEndpointsLocalModelTests : IAsyncLifetime
 
         var error = await BadRequestErrorAsync(new { provider, memoryLimitMb = 2048 });
 
-        Assert.Equal($"Unknown provider '{provider}'; use claude, codex, gemini or pi.", error);
+        Assert.Equal($"Unknown provider '{provider}'; use claude, codex or gemini.", error);
         Assert.Equal(before, await RowAsync());
     }
 
@@ -438,88 +294,13 @@ public sealed class AgentConfigEndpointsLocalModelTests : IAsyncLifetime
     {
         await SeedAsync("foo", "claude-opus-5-5");
 
-        Assert.Equal("Unknown provider 'foo'; use claude, codex, gemini or pi.",
+        Assert.Equal("Unknown provider 'foo'; use claude, codex or gemini.",
             await BadRequestErrorAsync(new { memoryLimitMb = 2048 }));
         Assert.Equal(1024, (await StoredAsync()).MemoryLimitMb);
 
         var response = await _client.PutAsJsonAsync(Put, new { provider = "", memoryLimitMb = 2048 });
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(("", 2048), ((await StoredAsync()).Provider, (await StoredAsync()).MemoryLimitMb));
-    }
-
-    // ── #455 A1: piImageInput over REST ──────────────────────────────────────────────────────────
-
-    private async Task<bool> GetPiImageInputAsync() =>
-        (await _client.GetFromJsonAsync<JsonElement>(Put)).GetProperty("piImageInput").GetBoolean();
-
-    [Fact]
-    public async Task PiImageInput_PutTrueOmitFalse_RoundTrips_AndGetShowsIt()
-    {
-        await SeedAsync("pi", PiTag, PiUrl, 131_072);
-        Assert.False(await GetPiImageInputAsync());
-
-        Assert.Equal(HttpStatusCode.OK, (await _client.PutAsJsonAsync(Put, new { piImageInput = true })).StatusCode);
-        Assert.True((await StoredAsync()).PiImageInput);
-        Assert.True(await GetPiImageInputAsync());
-
-        // Omitted: kept.
-        Assert.Equal(HttpStatusCode.OK, (await _client.PutAsJsonAsync(Put, new { memoryLimitMb = 2048 })).StatusCode);
-        Assert.Equal((true, 2048), ((await StoredAsync()).PiImageInput, (await StoredAsync()).MemoryLimitMb));
-
-        Assert.Equal(HttpStatusCode.OK, (await _client.PutAsJsonAsync(Put, new { piImageInput = false })).StatusCode);
-        Assert.False((await StoredAsync()).PiImageInput);
-        Assert.False(await GetPiImageInputAsync());
-    }
-
-    [Theory]
-    [InlineData("\"true\"")]
-    [InlineData("\"false\"")]
-    [InlineData("1")]
-    [InlineData("0")]
-    [InlineData("{}")]
-    public async Task PiImageInput_ANonBoolean_Is400_AndTheRowIsUnchanged(string value)
-    {
-        await SeedAsync("pi", PiTag, PiUrl, 131_072, piImageInput: true);
-        var before = await RowAsync();
-
-        var response = await _client.PutAsync(Put, new StringContent(
-            $$"""{"memoryLimitMb":2048,"piImageInput":{{value}}}""", System.Text.Encoding.UTF8, "application/json"));
-
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        var error = (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString();
-        Assert.StartsWith("Invalid request body at '$.piImageInput'", error);
-        Assert.Equal(before, await RowAsync());
-        Assert.True((await StoredAsync()).PiImageInput);
-    }
-
-    [Theory]
-    [InlineData("claude", "qwen3.8-flash-next")]
-    [InlineData("codex", "ollama/qwen3.8-flash-next")]
-    public async Task PiImageInput_SurvivesAProviderSwitch_AwayFromPiAndBack(string provider, string model)
-    {
-        await SeedAsync("pi", PiTag, PiUrl, 131_072, piImageInput: true);
-
-        var away = await _client.PutAsJsonAsync(Put, new { provider, model });
-
-        Assert.Equal(HttpStatusCode.OK, away.StatusCode);
-        Assert.Equal((provider, true), ((await StoredAsync()).Provider, (await StoredAsync()).PiImageInput));
-        Assert.True(await GetPiImageInputAsync());
-
-        var back = await _client.PutAsJsonAsync(Put, new { provider = "pi", model = PiTag });
-
-        Assert.Equal(HttpStatusCode.OK, back.StatusCode);
-        Assert.Equal(("pi", true), ((await StoredAsync()).Provider, (await StoredAsync()).PiImageInput));
-    }
-
-    [Fact]
-    public async Task PiImageInput_OnANonPiAgent_IsStored()
-    {
-        await SeedAsync("claude", "claude-opus-5-5");
-
-        Assert.Equal(HttpStatusCode.OK, (await _client.PutAsJsonAsync(Put, new { piImageInput = true })).StatusCode);
-
-        Assert.True((await StoredAsync()).PiImageInput);
-        Assert.True(await GetPiImageInputAsync());
     }
 
     private sealed class NoopAclChangeNotifier : IAclChangeNotifier

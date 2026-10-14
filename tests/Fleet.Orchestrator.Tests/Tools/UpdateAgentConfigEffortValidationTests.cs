@@ -163,106 +163,12 @@ public class UpdateAgentConfigEffortValidationTests
         Assert.DoesNotContain("not supported", result);
     }
 
-    // ── #386: pi takes off/on (or empty), and its own fault text ─────────────
 
     /// <summary>The stored row, read through a fresh context: the tool's scope disposes the seeded one.</summary>
     private static Agent Stored(string dbName)
     {
         using var db = CreateDb(dbName);
         return db.Agents.AsNoTracking().Single();
-    }
-
-    private static Agent SeedPiAgent(OrchestratorDbContext db, string? effort = null)
-    {
-        var agent = SeedAgent(db, "agent1", "pi");
-        agent.Model = "qwen3.8-flash-next";
-        agent.LocalBaseUrl = "http://inference-host:8000";
-        agent.ContextWindow = 131_072;
-        agent.Effort = effort;
-        db.SaveChanges();
-        return agent;
-    }
-
-    [Theory]
-    [InlineData("off")]
-    [InlineData("on")]
-    public async Task Pi_ValidEffort_Accepted(string effort)
-    {
-        var db = CreateDb($"pi-valid-{effort}");
-        SeedPiAgent(db);
-        var tool = new UpdateAgentConfigTool(BuildScopeFactory(db), new NoOpAclChangeNotifier());
-
-        var result = await tool.UpdateAgentConfigAsync("agent1", effort: effort);
-
-        Assert.Contains("effort:", result);
-        Assert.DoesNotContain("Invalid", result);
-        Assert.Equal(effort, Stored($"pi-valid-{effort}").Effort);
-    }
-
-    [Theory]
-    [InlineData("none")]
-    [InlineData("low")]
-    [InlineData("medium")]
-    [InlineData("high")]
-    [InlineData("xhigh")]
-    [InlineData("max")]
-    [InlineData("OFF")]
-    public async Task Pi_InvalidEffort_ReturnsPI4_AndSavesNothing(string effort)
-    {
-        var db = CreateDb($"pi-invalid-{effort}");
-        SeedPiAgent(db, effort: "on");
-        var tool = new UpdateAgentConfigTool(BuildScopeFactory(db), new NoOpAclChangeNotifier());
-
-        var result = await tool.UpdateAgentConfigAsync("agent1", effort: effort);
-
-        Assert.Equal(Fleet.Shared.PiLocalModel.Pi4Text, result);
-        Assert.Equal("on", Stored($"pi-invalid-{effort}").Effort);
-    }
-
-    [Fact]
-    public async Task Pi_ClearEffort_Allowed()
-    {
-        var db = CreateDb("pi-clear-effort");
-        SeedPiAgent(db, effort: "off");
-        var tool = new UpdateAgentConfigTool(BuildScopeFactory(db), new NoOpAclChangeNotifier());
-
-        var result = await tool.UpdateAgentConfigAsync("agent1", effort: "");
-
-        Assert.Contains("effort: off → (none)", result);
-        Assert.Null(Stored("pi-clear-effort").Effort);
-    }
-
-    [Fact]
-    public async Task ClaudeLocalToPi_WithEffortOn_ValidatesAgainstPi()
-    {
-        // "on" is neither a claude cloud nor a claude local effort; it must be checked against pi.
-        var db = CreateDb("provider-switch-effort-pi");
-        var agent = SeedAgent(db, "agent1", "claude");
-        agent.Model = "qwen3.8-flash-next";
-        agent.LocalBaseUrl = "http://inference-host:8000";
-        agent.ContextWindow = 131_072;
-        db.SaveChanges();
-        var tool = new UpdateAgentConfigTool(BuildScopeFactory(db), new NoOpAclChangeNotifier());
-
-        var result = await tool.UpdateAgentConfigAsync("agent1", provider: "pi", effort: "on");
-
-        Assert.DoesNotContain("Invalid", result);
-        var stored = Stored("provider-switch-effort-pi");
-        Assert.Equal(("pi", "on"), (stored.Provider, stored.Effort));
-    }
-
-    [Fact]
-    public async Task PiToClaudeCloud_WithEffortOff_StillGetsTheV8Fault()
-    {
-        // V8 (off is local-only) applies to the resulting claude cloud agent, never to pi.
-        var db = CreateDb("provider-switch-pi-to-cloud");
-        SeedPiAgent(db, effort: "off");
-        var tool = new UpdateAgentConfigTool(BuildScopeFactory(db), new NoOpAclChangeNotifier());
-
-        var result = await tool.UpdateAgentConfigAsync("agent1",
-            provider: "claude", model: "claude-sonnet-5", local_base_url: "");
-
-        Assert.Contains("applies only to local Claude models", result);
     }
 
     [Fact]
@@ -274,7 +180,7 @@ public class UpdateAgentConfigEffortValidationTests
 
         var result = await tool.UpdateAgentConfigAsync("agent1", effort: "high");
 
-        Assert.Equal("Unknown provider 'foo'; use claude, codex, gemini or pi.", result);
+        Assert.Equal("Unknown provider 'foo'; use claude, codex or gemini.", result);
     }
 
     [Fact]

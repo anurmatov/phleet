@@ -1,26 +1,20 @@
 using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Migrations;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Migrations.Operations;
 using MySqlConnector;
 
 namespace Fleet.Orchestrator.Tests.Migrations;
 
-/// <summary>
-/// <c>AddAgentPiImageInput</c> (#455 A1) against a real MySQL 8.0: existing agent rows read false
-/// with no backfill, the column is a non-null bool with default false, and the migration
-/// round-trips. The default is also R1: an older image that inserts without the column gets false.
-/// </summary>
-/// <remarks>
-/// ⚠️ <b>These tests FAIL when the database is absent. They never skip.</b> The main CI job excludes
-/// this namespace; the <c>orchestrator-migrations</c> job runs it beside a <c>mysql:8.0</c> service.
-/// </remarks>
-public sealed class AddAgentPiImageInputMigrationTests : IAsyncLifetime
+// Runs against CI's real MySQL service; missing database is a failure, never a skip.
+public sealed class RemovedProviderColumnMigrationTests : IAsyncLifetime
 {
     public const string ConnectionVariable = "FLEET_ORCHESTRATOR_MIGRATION_CONNECTION";
 
-    private const string Before = "20261012223148_AddAutonomyCharters";
-    private const string Target = "20261014051428_AddAgentPiImageInput";
+    private const string Before = "20261014131235_AddAgentHarnessExtra";
+    private const string Target = "20261014141428_RemoveAgentPiImageInput";
 
     private string _admin = "";
     private string _database = "";
@@ -49,76 +43,50 @@ public sealed class AddAgentPiImageInputMigrationTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Existing_rows_read_false_without_backfill()
+    public async Task Removal_UpDropsColumn_DownRestoresFalse_UpReapplies()
     {
         await MigrateAsync(Before);
-
-        // A row written by the pre-#455 schema: no pi_image_input anywhere in the INSERT.
         await InsertAgentAsync("agent-a");
+        var migration = new RemoveAgentPiImageInput { ActiveProvider = "Pomelo.EntityFrameworkCore.MySql" };
+        var column = Assert.IsType<DropColumnOperation>(Assert.Single(migration.UpOperations)).Name;
+        await ExecAsync(_connectionString, $"UPDATE agents SET `{column}` = 1");
 
         await MigrateAsync(Target);
+        Assert.Equal(0L, await ColumnCountAsync(column));
+        await using (var db = NewContext())
+        {
+            Assert.Empty(await db.Database.GetPendingMigrationsAsync());
+            await RemovedProviderGuard.EnsureAsync(db);
+        }
 
-        Assert.Equal(1L, await ScalarAsync<long>("SELECT COUNT(*) FROM agents WHERE Name = 'agent-a' AND pi_image_input = 0"));
-    }
-
-    [Fact]
-    public async Task Column_is_non_null_bool_with_default_false()
-    {
-        await MigrateAsync(Target);
-
-        Assert.Equal("tinyint(1)|NO|0", await ScalarAsync<string>("""
-            SELECT CONCAT(COLUMN_TYPE, '|', IS_NULLABLE, '|', COLUMN_DEFAULT) FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'agents' AND COLUMN_NAME = 'pi_image_input'
-            """));
-
-        // An old image inserting without the column still gets false (R1, the rollback path).
-        await InsertAgentAsync("agent-b");
-        Assert.Equal(1L, await ScalarAsync<long>("SELECT COUNT(*) FROM agents WHERE Name = 'agent-b' AND pi_image_input = 0"));
-    }
-
-    [Fact]
-    public async Task Model_reads_false_and_writes_true()
-    {
-        // The model is the latest schema's, so this migrates all the way rather than to Target.
-        await using var db = NewContext();
-        await db.Database.MigrateAsync();
-        await InsertAgentAsync("agent-c");
-
-        var agent = await db.Agents.SingleAsync(a => a.Name == "agent-c");
-        Assert.False(agent.PiImageInput);
-        agent.PiImageInput = true;
-        await db.SaveChangesAsync();
-
-        Assert.Equal(1L, await ScalarAsync<long>("SELECT COUNT(*) FROM agents WHERE Name = 'agent-c' AND pi_image_input = 1"));
-    }
-
-    [Fact]
-    public async Task Every_migration_applies_and_contains_this_one()
-    {
-        await using var db = NewContext();
-        await db.Database.MigrateAsync();
-
-        Assert.Empty(await db.Database.GetPendingMigrationsAsync());
-        Assert.Contains(Target, await db.Database.GetAppliedMigrationsAsync());
-    }
-
-    [Fact]
-    public async Task Down_drops_the_column_and_up_applies_again()
-    {
-        await MigrateAsync(Target);
         await MigrateAsync(Before);
-
-        Assert.Equal(0L, await ScalarAsync<long>("""
-            SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()
-            AND TABLE_NAME = 'agents' AND COLUMN_NAME = 'pi_image_input'
+        Assert.Equal(1L, await ColumnCountAsync(column));
+        Assert.Equal("tinyint(1)|NO|0", await ScalarAsync<string>($"""
+            SELECT CONCAT(COLUMN_TYPE, '|', IS_NULLABLE, '|', COLUMN_DEFAULT) FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'agents' AND COLUMN_NAME = '{column}'
             """));
-
+        Assert.Equal(0L, await ScalarAsync<long>($"SELECT `{column}` FROM agents WHERE Name = 'agent-a'"));
         await MigrateAsync(Target);
-        Assert.Equal(1L, await ScalarAsync<long>("""
-            SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()
-            AND TABLE_NAME = 'agents' AND COLUMN_NAME = 'pi_image_input'
-            """));
+        Assert.Equal(0L, await ColumnCountAsync(column));
     }
+
+    [Fact]
+    public async Task Removal_PiRow_GuardNamesAgent_ChangingProviderClearsGuard()
+    {
+        await MigrateAsync(Target);
+        await InsertAgentAsync("agent-a");
+        await ExecAsync(_connectionString, "UPDATE agents SET Provider = 'pi', IsEnabled = 0 WHERE Name = 'agent-a'");
+        await using var db = NewContext();
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => RemovedProviderGuard.EnsureAsync(db));
+        Assert.Contains("agent-a", error.Message);
+        await ExecAsync(_connectionString, "UPDATE agents SET Provider = 'codex' WHERE Name = 'agent-a'");
+        await RemovedProviderGuard.EnsureAsync(db);
+    }
+
+    private Task<long> ColumnCountAsync(string column) => ScalarAsync<long>($"""
+        SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'agents' AND COLUMN_NAME = '{column}'
+        """);
 
     private Task InsertAgentAsync(string name) => ExecAsync(_connectionString, $"""
         INSERT INTO agents (Name, DisplayName, Role, Model, ContainerName, MemoryLimitMb, IsEnabled,

@@ -1,10 +1,7 @@
 import { useState } from 'react'
 import type { CreateForm, InstructionSummary } from '../types'
 import { PROVIDER_OPTIONS } from '../constants'
-import {
-  PI_IMAGE_INPUT_HINT, PI_MIN_CONTEXT_WINDOW, PI_RUNS_ON_NOTE, createFormLocalModel, createFormProviderPatch, isPi,
-  localModelSuggestions,
-} from '../localModel'
+import { createFormProviderPatch } from '../localModel'
 import ModelSelector from './ModelSelector'
 import FieldHint from './FieldHint'
 import InstructionPicker from './InstructionPicker'
@@ -40,9 +37,6 @@ export default function CreateAgentModal({
 }: CreateAgentModalProps) {
   const [shortNameTouched, setShortNameTouched] = useState(false)
   const provider = createForm.provider || 'claude'
-  // #386 H1: a Pi agent is created complete (URL, tag, context ≥ 65536), so Create waits for all three.
-  const localModel = createFormLocalModel({ ...createForm, provider })
-  const piFault = isPi(provider) && !localModel.ok ? localModel.error : null
 
   return (
     <div className="config-modal-overlay" onClick={onClose}>
@@ -116,81 +110,16 @@ export default function CreateAgentModal({
               {PROVIDER_OPTIONS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
             </select>
           </div>
-          {isPi(provider) ? (
-            // Pi has no cloud model list: the bare tag the local server serves, plus the server URL
-            // and its context window, all required here so the agent can provision at once.
-            <>
-            <div className="config-row">
-              <label className="config-label">Server URL <span style={{ color: 'var(--red)' }}>*</span></label>
-              <FieldHint>{PI_RUNS_ON_NOTE}. The server's origin (scheme://host[:port], no path); Fleet adds /v1/messages.</FieldHint>
-              <input
-                className="config-input"
-                value={createForm.localBaseUrl}
-                onChange={e => onFormChange({ localBaseUrl: e.target.value })}
-                placeholder="http://inference-host:8000"
-              />
-            </div>
-            <div className="config-row">
-              <label className="config-label">Context window <span style={{ color: 'var(--red)' }}>*</span></label>
-              <FieldHint>The server's --ctx in tokens, at least {PI_MIN_CONTEXT_WINDOW}.</FieldHint>
-              <input
-                className="config-input config-input-short"
-                type="number"
-                value={createForm.contextWindow}
-                onChange={e => onFormChange({ contextWindow: e.target.value })}
-                placeholder={String(PI_MIN_CONTEXT_WINDOW)}
-              />
-            </div>
-            <div className="config-row">
-              <label className="config-label">Model tag <span style={{ color: 'var(--red)' }}>*</span></label>
-              <FieldHint>The bare tag the server serves (no ollama/ or lmstudio/ prefix).</FieldHint>
-              <div className="model-selector">
-                <input
-                  className="config-input"
-                  value={createForm.model}
-                  onChange={e => onFormChange({ model: e.target.value })}
-                  placeholder="the server's model tag"
-                />
-                <div className="model-pills">
-                  {localModelSuggestions(provider).map(s => (
-                    <button
-                      key={s.tag}
-                      type="button"
-                      className={`model-pill${createForm.model.trim() === s.tag ? ' active' : ''}`}
-                      title={s.tag}
-                      onClick={() => onFormChange({ model: s.tag })}
-                    >
-                      {s.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-            <div className="config-row">
-              <label className="config-field config-field-checkbox">
-                <input
-                  type="checkbox"
-                  checked={createForm.piImageInput}
-                  onChange={e => onFormChange({ piImageInput: e.target.checked })}
-                />
-                <span className="config-label">Image input</span>
-              </label>
-              <FieldHint>{PI_IMAGE_INPUT_HINT}</FieldHint>
-            </div>
-            {piFault && <p className="config-feedback config-feedback-error">{piFault}</p>}
-            </>
-          ) : (
-            <div className="config-row">
-              <label className="config-label">
-                Model{provider !== 'codex' && <span style={{ color: 'var(--red)' }}> *</span>}
-              </label>
-              <ModelSelector
-                provider={provider}
-                value={createForm.model}
-                onChange={model => onFormChange({ model })}
-              />
-            </div>
-          )}
+          <div className="config-row">
+            <label className="config-label">
+              Model{provider !== 'codex' && <span style={{ color: 'var(--red)' }}> *</span>}
+            </label>
+            <ModelSelector
+              provider={provider}
+              value={createForm.model}
+              onChange={model => onFormChange({ model })}
+            />
+          </div>
           <div className="config-row">
             <label className="config-label">Memory (MB)</label>
             <input className="config-input config-input-short" type="number" value={createForm.memoryLimitMb} onChange={e => onFormChange({ memoryLimitMb: e.target.value })} />
@@ -216,7 +145,7 @@ export default function CreateAgentModal({
           <div className="config-save-row">
             <button
               className="config-save-btn"
-              disabled={createState === 'creating' || piFault !== null}
+              disabled={createState === 'creating'}
               onClick={onSubmit}
             >
               {createState === 'creating' ? '…' : 'Create'}

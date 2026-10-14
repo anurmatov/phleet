@@ -82,7 +82,6 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         agent.LocalBaseUrl,
         AnthropicBaseUrl = agent.LocalBaseUrl,
         agent.ContextWindow,
-        agent.PiImageInput,
         // #460: stored verbatim, so a GET returns exactly what was saved.
         agent.HarnessExtra,
         agent.CanReceiveChatRequests,
@@ -109,7 +108,7 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
 
     AgentConfigUpdateRequest? body;
     try { body = await request.ReadFromJsonAsync<AgentConfigUpdateRequest>(); }
-    // #455: a field of the wrong JSON type (piImageInput: "true") is a 400 with nothing saved, not a 500.
+
     catch (JsonException ex) { return Results.BadRequest(new { error = AgentPatchHelpers.DescribeBodyFault(ex) }); }
     if (body is null)
         return Results.BadRequest(new { error = "Invalid request body" });
@@ -220,8 +219,7 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
             return Results.BadRequest(new { error = windowFault });
         agent.ContextWindow = body.ContextWindow == 0 ? null : body.ContextWindow;
     }
-    // #455: stored for every provider and never cleared by a provider switch; only pi applies it.
-    if (body.PiImageInput is not null) agent.PiImageInput = body.PiImageInput.Value;
+
     // #460: "" clears; any other text is stored verbatim and checked below against the resulting
     // provider and mode.
     if (body.HarnessExtra is not null) agent.HarnessExtra = body.HarnessExtra == "" ? null : body.HarnessExtra;
@@ -333,7 +331,7 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
             .ToList();
     }
 
-    // #340, #382, #386: the agent's resulting state (PV1, then the local-model and pi rules), after
+    // The agent's resulting state (PV1, then the local-model rules), after
     // every field in the request is applied. A 400 here returns before SaveChanges, so nothing from
     // this request is persisted.
     if (AgentPatchHelpers.FinalizeLocalModel(agent) is { } localModelFault)
@@ -421,5 +419,4 @@ internal sealed record AgentConfigUpdateRequest(
     int? ContextWindow,
     string? LocalBaseUrl = null,
     bool? JournalCrossChatEnabled = null,
-    bool? PiImageInput = null,
     string? HarnessExtra = null);

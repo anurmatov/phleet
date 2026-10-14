@@ -1,6 +1,0 @@
-# Vendored byte for byte from earendil-works/pi; never edited here (#386 §15).
-# A Pi bump replaces both files and every line below in the same commit.
-tag v1.0.4
-commit 7c10bd4337495ee613f2224843ecdf349b80d1df
-file args.ts packages/coding-agent/src/cli/args.ts sha256 fda3e18a29dddd5ad56ffd95e5912109d76a5c3353bbf2fd631f21d824d87ab3
-file env-api-keys.ts packages/ai/src/env-api-keys.ts sha256 0bb1945f280a03b0dcb7cd24b9caa7dd59d4bf25ce7bc92699fb27b2eba05426

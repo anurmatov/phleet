@@ -38,7 +38,6 @@ public sealed class AgentProvidersTests
     [InlineData("claude", typeof(ClaudeExecutor))]
     [InlineData("codex", typeof(CodexExecutor))]
     [InlineData("gemini", typeof(GeminiExecutor))]
-    [InlineData("pi", typeof(PiExecutor))]
     public async Task EachKnownProvider_ResolvesItsOwnExecutor(string provider, Type executor)
     {
         await using var services = BuildCore(provider);
@@ -57,6 +56,7 @@ public sealed class AgentProvidersTests
     }
 
     [Theory]
+    [InlineData("pi")]
     [InlineData("foo")]
     [InlineData("Claude")]
     [InlineData("Pi")]
@@ -67,7 +67,7 @@ public sealed class AgentProvidersTests
 
         var ex = Assert.Throws<InvalidOperationException>(() => services.GetRequiredService<IAgentExecutor>());
 
-        Assert.Equal($"Unknown provider '{provider}'; use claude, codex, gemini or pi.", ex.Message);
+        Assert.Equal($"Unknown provider '{provider}'; use claude, codex or gemini.", ex.Message);
     }
 
     [Fact]
@@ -78,10 +78,9 @@ public sealed class AgentProvidersTests
         var ex = Assert.Throws<InvalidOperationException>(() => AgentHostRegistration.ValidateStartupConfiguration(
             services,
             _ => throw new InvalidOperationException("no environment read before PV1"),
-            _ => throw new InvalidOperationException("no file probe before PV1"),
-            _ => throw new InvalidOperationException("no directory probe before PV1")));
+            _ => throw new InvalidOperationException("no file probe before PV1")));
 
-        Assert.Equal("Unknown provider 'foo'; use claude, codex, gemini or pi.", ex.Message);
+        Assert.Equal("Unknown provider 'foo'; use claude, codex or gemini.", ex.Message);
     }
 
     [Fact]
@@ -93,11 +92,4 @@ public sealed class AgentProvidersTests
         Assert.All(AgentProviders.All, p => Assert.Null(AgentProviders.DescribeFault(p)));
     }
 
-    [Fact]
-    public async Task ThePiExecutorIsOneSingleton()
-    {
-        await using var services = BuildCore("pi");
-
-        Assert.Same(services.GetRequiredService<PiExecutor>(), services.GetRequiredService<IAgentExecutor>());
-    }
 }

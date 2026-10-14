@@ -27,6 +27,7 @@ public static class DbSeeder
         // ContextRemovalBlockedException, having migrated nothing, when a project would lose its only text.
         logger?.LogInformation("Running database migrations...");
         await ContextRemovalPreflight.MigrateAsync(db, logger, projectContextLimitBytes);
+        await RemovedProviderGuard.EnsureAsync(db);
 
         logger?.LogInformation("Seeding instructions from {RolesDir}...", rolesDir);
         await SeedInstructionsAsync(db, rolesDir, logger);

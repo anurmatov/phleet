@@ -187,14 +187,14 @@ evidence cell `canary@<YYYY-MM-DD>/pi-<version>` naming the dated canary run;
 | B11 | overflow recovery without `/reset` | not measured (B canary pending) | — |
 | B12 | errors or timeouts on the server's other clients | not measured (B canary pending) | — |
 | V1 | a PNG, a JPEG and a WebP by prompt, each code read: the vision proof | not measured (V canary pending) | — |
-| V2 | the V1 images by steer and by queued message | not measured (V canary pending) | — |
+| V2 | the V1 images by queued message, and sent during a turn (they wait for their own turn) | not measured (V canary pending) | — |
 | V3 | a 3-image album (2 inline, the third by `read`) and a 2560 px photo after downscale | not measured (V canary pending) | — |
 | V4 | per-image input tokens; 2 × delta ≤ 12288 and the largest cap that fits | not measured (V canary pending) | — |
 | V5 | prompt ack with 2 max-size images ≤ 10 s | not measured (V canary pending) | — |
 | V6 | a compaction with an image in history: answered, fast path or a named fallback | not measured (V canary pending) | — |
 | V7 | text PDF, scanned PDF and large scan answered; processing ≤ 60 s per command | not measured (V canary pending) | — |
-| V8 | a flag-off Pi agent and the non-Pi agents untouched; text and text-PDF turns answered | not measured (V canary pending) | — |
-| V9 | rollback: flag off and reprovision gives today's note and a fresh session | not measured (V canary pending) | — |
+| V8 | a text-only model: an image turn answered text-only after one rejection, the next turn sends no image; non-Pi agents untouched | not measured (V canary pending) | — |
+| V9 | rollback: the pin revert after the column's `Down()`; Pi agents run text-only on the older image | not measured (V canary pending) | — |
 
 ## Reading the `G` rows
 

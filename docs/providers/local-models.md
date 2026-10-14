@@ -286,11 +286,11 @@ Codex there is one exception: the agent's Env Refs contain exactly `CODEX_OSS_BA
   at start, the credential environment dropped from PID 1 and from Pi. The agent's queue is not
   bound to `fleet.relay`.
 - **Not a sandbox.** Pi has no approval step and no path limit; the model's shell runs as root.
-- **Attachments** (#455). Images are sent only with the per-agent **Image input** flag
-  (`PiImageInput`, default off; turn it on only after the model's vision passes V1), within
-  Fleet's own bounds: 2 per message, 2000 px, 3 MiB, larger photos downscaled with `ffmpeg`. Off,
-  they are dropped with a note and the model is declared text-only. Every Pi agent extracts PDF
-  text locally with poppler. See `pi.md` §8a–§8c.
+- **Attachments** (#455, #458). Images are always sent, within Fleet's own bounds: 2 per
+  message, 2000 px, 3 MiB, larger photos downscaled with `ffmpeg`. If the server rejects a turn's
+  images, Fleet drops that prompt from the session and sends the turn once more with a text-only
+  note; there is no setting. Every Pi agent extracts PDF text locally with poppler. See `pi.md`
+  §8a–§8c.
 
 ## 7. ⚠️ Known security gap: Codex local keeps the OpenAI credential (#383)
 

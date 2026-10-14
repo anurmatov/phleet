@@ -151,7 +151,8 @@ ids to the checklist, `human:charter:<reason>:<plan-id>` as next action, and one
 human ask. Never reset a run or reuse an attempt id to evade adoption or budgets.
 
 Pass WaiterWorkflowId to every child, AutonomyGrantId to Design/DesignToPr and
-RequireAcceptance=true to PR/DesignToPr. A design is done only with the exact
+RequireAcceptance=true to PR/DesignToPr. The wrapper refuses AutonomyGrantId
+without `RequireAcceptance=true` before starting design. A design is done only with the exact
 approved result and matching issue; PR requires MERGED and non-null mergedAt;
 DesignToPr needs both linked outcomes. A CREATE row records its returned issue,
 not an issue inferred from prose. An in-flight/start is working; all remaining

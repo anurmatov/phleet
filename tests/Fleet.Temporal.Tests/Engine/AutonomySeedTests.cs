@@ -46,11 +46,11 @@ public sealed class AutonomySeedTests
         }
     }
     [Fact]
-    public void DesignToPr_ForwardsOptionalCharterAndAcceptanceWithoutAddingSteps()
+    public void DesignToPr_ForwardsOptionalCharterAndNormalizedAcceptance()
     {
         var nodes=Walk(Definition("UweDesignToPrWorkflow")).ToArray();
         Assert.Equal("{{input.AutonomyGrantId | default: 'none'}}",nodes.Single(n=>n["name"]?.GetValue<string>()=="design_phase")["args"]!["AutonomyGrantId"]!.GetValue<string>());
-        Assert.Equal("{{input.RequireAcceptance | default: 'false'}}",nodes.Single(n=>n["name"]?.GetValue<string>()=="start_implementation")["args"]!["RequireAcceptance"]!.GetValue<string>());
+        Assert.Equal("{{vars.require_acceptance}}",nodes.Single(n=>n["name"]?.GetValue<string>()=="start_implementation")["args"]!["RequireAcceptance"]!.GetValue<string>());
     }
     [Fact]
     public void Driver_AllFiveNonRetryReasonsAndAdmissionArePresentInExistingTickOnly()

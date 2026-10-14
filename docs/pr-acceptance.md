@@ -1,12 +1,78 @@
 # PR acceptance runbook
 
 Contract: [#434](https://github.com/anurmatov/phleet/issues/434), overridden by
-[#441 revision 3](https://github.com/anurmatov/phleet/issues/441).
+[#441 revision 3](https://github.com/anurmatov/phleet/issues/441), with opt-in
+parent routing from [#453](https://github.com/anurmatov/phleet/issues/453).
 This is the required contract, not a record of deployment or acceptance.
 The parent, acceptance and cleanup seeds are source definitions with local
 definition/scenario tests. CI, independent review and exact-head isolated
 operator acceptance remain separate gates. Nothing here activates a live
 definition or claims a deployment.
+
+## RequireAcceptance opt-in
+
+`UwePrImplementationWorkflow` and `UweDesignToPrWorkflow` default to `off`.
+Both validate before application attributes, delegates or children using the exact
+rendered value. The SDK still publishes its existing `TemporalChangeVersion`
+patch metadata before seed execution, even for invalid input. JSON booleans render as `True`/`False`; matching is case-sensitive.
+
+| input | mode |
+|---|---|
+| absent, JSON null, `""` | `off` |
+| `"false"`, `"False"`, JSON false | `off` |
+| `"true"`, `"True"`, JSON true | `required` |
+| anything else, including `"TRUE"`, `"yes"`, `"1"`, whitespace, numbers or objects | `ExplicitFail` |
+
+Invalid input fails with `RequireAcceptance must be true, false or absent`.
+The wrapper forwards normalized literal `true` or `false`, never the raw input.
+An `AutonomyGrantId` other than exactly `none` or empty requires `required` mode
+before design starts. `"None"` and `" none"` count as grant ids.
+The failure is `AutonomyGrantId requires RequireAcceptance=true`.
+Charter children still require `RequireAcceptance=true`; autonomous merge
+still refuses `acceptance_missing`, including absent/false inputs and
+`not_required` records. This changes no human or delegated gate authority.
+
+In `off`, IMPLEMENT → REVIEW (five attested rounds) → UNRESOLVED → PIN remains.
+Exact head, `review_ref == H`, complete CI rollup, the bound human merge gate
+and `--match-head-commit H` still apply. CI failure returns to IMPLEMENT;
+pending uses the existing 12 × 300-second CI_WAIT. CI success for code or
+doc-only goes directly to MERGE_GATE without acceptance or cleanup children.
+Only `ci_timeout`, unknown-head `owner_unavailable` and `stale_signals` can
+reach BLOCKED. No plan, recovery, owner, harness or child reason can block.
+
+All four PIN instructions carry `REQUIRE_ACCEPTANCE: <off|required>`, including
+post-approval repin. In `off`, read only the actual head, every CI page and diff
+paths. Skip body hashing, design lookup, plans, receipts, prior rounds, owner
+and capability-map checks. Ignore missing/malformed acceptance tokens.
+Unchanged head plus successful CI after human approval still routes to MERGE;
+otherwise approval is invalidated. The required acceptance subtree is unchanged.
+The plan/receipt/lease sections below apply only in `required` mode. Empty JSON
+strings have an explicit off case because the engine default filter only covers
+empty CLR strings and null JSON values, not empty JSON strings.
+
+The `off` merge record is visibility only, never acceptance evidence:
+`v1;head=<H>;result=not_required;iso=production;block=none;fix=0;batch=0`.
+Merge notices print `basis require_acceptance_false` for off code PRs,
+`basis doc_only` for doc-only in either mode and `basis passed` after acceptance.
+The initial basis is `none`; blocked notices also show the mode.
+
+Design clear/publish/withdraw writes of `ReviewRef`/`ReviewScrub` are required.
+A bad value or unregistered local name fails non-retryably with
+`RequiredSearchAttribute` before the design gate or notice. Empty `ReviewRef`
+from `needs_human_review` remains valid and opens the human-only gate.
+
+Monitoring: a new off code run should show `not_required` at merge-approval
+with no acceptance child. `plan_missing` for absent/false input, unexpected
+`ExplicitFail` or Design `RequiredSearchAttribute` failures require investigation.
+
+This seed-only rollout needs separate human approval. Confirm ReviewRef and
+ReviewScrub are Keyword attributes in the target namespace, then update live
+Design → PR → wrapper definitions from reviewed source while preserving
+custom controls. DbSeeder is create-if-absent; running snapshots do not change.
+Rollback restores previous definitions as new versions in reverse order:
+wrapper → PR → Design. Keep registered attributes and running snapshots;
+no runtime rollback is needed. Old wrapper/new PR still validates raw input;
+new wrapper/old PR retains the stricter always-acceptance behavior.
 
 ## Validator interface
 
@@ -30,7 +96,7 @@ providers. A validation failure exits nonzero without echoing input values.
 | `reserve-harness-retry` | `--repo`, `--pr`, `--head`, `--attempt-hash` | `RESERVATION` |
 | `render-comment` | `--receipt`, `--ssh-targets` | sanitized comment or nonzero with empty stdout |
 
-The PIN delegate must collect **every** check/status/comment page; incomplete
+In required mode the PIN delegate must collect **every** check/status/comment page; incomplete
 files are not evidence of absence. The reservation command itself uses `gh api
 --paginate --slurp`, never retries a failed/ambiguous write, and re-lists before
 confirming its own unique marker. A reservation remains spent after a crash.
@@ -230,7 +296,9 @@ starts only after verified merge and retains issue/reviewer/preparation inputs.
 
 ## PIN evidence and routing
 
-The configured CTO performs a read-only PIN, bounded to 15 minutes. It emits
+The configured CTO performs a read-only PIN, bounded to 15 minutes, with
+`REQUIRE_ACCEPTANCE` on every PIN and post-approval repin. Off-mode PIN emits
+only HEAD_OID, CI and CHANGE_CLASS. Required-mode PIN emits
 PR, HEAD_OID, IS_DRAFT, CI, CI_FAILING, CHANGE_CLASS, PLAN, PLAN_SHA256,
 MAX_DURATION, WAIT_SECONDS, PRE_STAGES, POST_STAGES, OWNER, PRIOR_RECEIPTS,
 PRIOR_ATTEMPTS_CLEAN, PRIOR_ROUNDS, PRIOR_LAST_HEAD, MAP_COMMIT, MAP_SHA256,
@@ -404,7 +472,7 @@ not a synthesizer override. Render failure withholds the public comment, not the
 protected result; gate notice reports evidence comment withheld.
 
 Monitor Phase, GateRef and Acceptance. A merge gate is healthy only when the
-record head equals PR head and result passed (or doc-only not_required). Keyword
+record head equals PR head and result passed (or off/doc-only not_required). Keyword
 supports equality only: list by Phase and inspect each run's value. Invalid value
 is empty, never authority. Repeated owner_timeout/cleanup_residue/cleanup_pending/
 stale_signals or rising fix without implementer activity are broken signals.
@@ -480,7 +548,8 @@ may be reused to make these checks pass. Retain exact-head evidence and failures
 
 Deployment is separately authorized: drain active consensus/implementation/doc
 runs before bridge restart; deploy runtime AND orchestrator/dashboard together;
-confirm GateRef/Acceptance registered and script present; install cleanup definition,
+confirm GateRef/Acceptance registered and script present; for the acceptance
+foundation install cleanup definition,
 then acceptance child, then parent LAST. Fresh seeds create absent definitions;
 DbSeeder does not update existing definitions. No source PR activates a snapshot.
 Keep old parent definition and rollback images/configuration.

@@ -61,6 +61,18 @@ public sealed partial class AutonomyDecisionTests : IAsyncLifetime
         Assert.Equal("acceptance_missing", (await _world.DecideAsync()).Reason); await AssertNoWritesAsync();
     }
     [Theory]
+    [InlineData(null)]
+    [InlineData("false")]
+    public async Task AutonomousMerge_OffAcceptanceInput_NeverWaivesEvidence(string? value)
+    {
+        await StoreCharterAsync();
+        if (value is null) _world.PrRunRecord.Input!.Remove("RequireAcceptance");
+        else _world.PrRunRecord.Input!["RequireAcceptance"] = value;
+        Assert.Equal("acceptance_missing", (await _world.DecideAsync()).Reason);
+        await AssertNoWritesAsync();
+    }
+
+    [Theory]
     [InlineData(null, null, "missing")]
     [InlineData("{}", "bad", "mismatch")]
     [InlineData("{}", null, "malformed")]

@@ -190,7 +190,7 @@ export default function AgentConfigModal({
                   {!isLocal && (
                   <div className="config-field">
                     <label className="config-label">Model</label>
-                    <FieldHint>Codex only: a <code>zai/</code> model needs <code>ZAI_CODING_PLAN_API_KEY</code> in Env Refs; subscriber-only use.</FieldHint>
+                    <FieldHint>Claude and Codex offer model families, not dated versions: Claude resolves <code>opus</code>, <code>sonnet</code> and <code>haiku</code> itself; a Codex family runs the model id shown in Effective settings. A stored dated or <code>zai/</code> model keeps working and shows as current. Codex <code>zai/</code> models (set through <code>update_agent_config</code>) need <code>ZAI_CODING_PLAN_API_KEY</code> in Env Refs; subscriber-only use.</FieldHint>
                     <ModelSelector
                       provider={provider}
                       value={configEdits.model}

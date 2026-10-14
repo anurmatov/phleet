@@ -172,8 +172,8 @@ test('rendered dialog: six tabs with counts, one visible panel, every label in i
     assert.ok(claude.includes('MAX_MCP_OUTPUT_TOKENS=12000'), 'Claude placeholder')
 
     const gemini = render(edits('gemini'))
-    assert.equal(gemini.includes('Extra harness settings'), false)
-    assert.equal(gemini.includes('Effective settings'), false)
+    assert.equal(label('Extra harness settings').test(gemini), false)
+    assert.equal(label('Effective settings').test(gemini), false)
 
     // A refused harnessExtra shows its line and reason at the field too.
     const refused = 'harnessExtra line 2: \'notify\' is not an allowed setting for codex.'

@@ -1130,6 +1130,24 @@ public class CodexExecutorTests
         Assert.DoesNotContain("multi_agent", startParams.ToJsonString());
     }
 
+    /// <summary>#460 owner direction: a family alias runs its mapped id; a dated id is sent as stored.</summary>
+    [Theory]
+    [InlineData("sol", "gpt-6.1-sol")]
+    [InlineData("terra", "gpt-5.6-terra")]
+    [InlineData("luna", "gpt-6-luna")]
+    [InlineData("gpt-5.6-sol", "gpt-5.6-sol")]
+    public async Task ThreadStart_CloudModel_SendsTheResolvedAliasOrTheStoredId(string stored, string sent)
+    {
+        using var capture = new ThreadStartCapture();
+        using var workspace = new TempWorkspace();
+        var executor = CreateExecutor(model: stored, workDir: workspace.Path, environmentReader: _ => null, processStarter: capture.Start);
+
+        var startParams = await DriveThreadStartAsync(executor, capture);
+
+        Assert.Equal(sent, (string?)startParams["model"]);
+        Assert.False(startParams.ContainsKey("modelProvider"));
+    }
+
     /// <summary>MUST NOT 3: a hosted thread keeps every provider key; the defaults only add.</summary>
     [Fact]
     public async Task ThreadStart_Hosted_KeepsTheProviderKeys_AndAddsTheCloudDefaults()

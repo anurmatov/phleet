@@ -270,7 +270,8 @@ export interface EffectiveHarness {
   agent: string
   provider: 'claude' | 'codex'
   mode: 'cloud' | 'local'
-  codex: { configToml: string; threadConfig: Record<string, string | number | boolean> } | null
+  /** `model`: the id a Codex family alias resolves to, or null when the stored model is sent as is. */
+  codex: { configToml: string; threadConfig: Record<string, string | number | boolean>; model?: string | null } | null
   claude: { args: string[]; env: { name: string; value: string }[] } | null
   extra: { state: 'none' | 'applied' | 'ignored'; reason: string | null; replaced: string[]; notes?: string[] }
   planSha256: string

@@ -95,6 +95,27 @@ public sealed class HarnessExtraValidationTests : IAsyncLifetime
 
     private IServiceScopeFactory Scopes => _app.Services.GetRequiredService<IServiceScopeFactory>();
 
+    /// <summary>
+    /// #460 owner direction: a stored dated id still validates and is never rewritten; a family alias is
+    /// accepted and stored as the alias (Codex maps it when the agent starts, Claude Code resolves it).
+    /// </summary>
+    [Theory]
+    [InlineData("claude", "claude-opus-4-7", "opus")]
+    [InlineData("claude", "claude-haiku-4-5-20251001", "haiku")]
+    [InlineData("codex", "gpt-5.6-sol", "sol")]
+    [InlineData("codex", "gpt-5.5", "terra")]
+    public async Task Models_ADatedIdStillValidates_AndAnAliasIsStoredAsIs(string provider, string dated, string alias)
+    {
+        await SeedAsync(provider, dated);
+
+        Assert.Equal(HttpStatusCode.OK, (await _client.PutAsJsonAsync(Put, new { memoryLimitMb = 2048 })).StatusCode);
+        Assert.Equal(dated, (await StoredAsync()).Model);
+        Assert.Equal(HttpStatusCode.OK, (await _client.PutAsJsonAsync(Put, new { model = alias })).StatusCode);
+        Assert.Equal(alias, (await StoredAsync()).Model);
+        Assert.Equal(HttpStatusCode.OK, (await _client.PutAsJsonAsync(Put, new { model = dated })).StatusCode);
+        Assert.Equal(dated, (await StoredAsync()).Model);
+    }
+
     private async Task<JsonElement> BadRequestAsync(object body)
     {
         var response = await _client.PutAsJsonAsync(Put, body);

@@ -66,6 +66,19 @@ public sealed class ClaudeExecutorArgsDefaultsTests
         Assert.Equal(Quoted(executor.HarnessForTests.Plan!.ClaudeArgs!), Tail(executor));
     }
 
+    [Theory]
+    [InlineData("opus")]
+    [InlineData("sonnet")]
+    [InlineData("haiku")]
+    [InlineData("claude-opus-4-7")]   // a stored dated id keeps working
+    public void CloudModel_IsPassedThroughUnchanged(string model)
+    {
+        var options = Options();
+        options.Model = model;
+
+        Assert.Contains($"--model {model} ", Executor(options).BuildArgsForTests());
+    }
+
     [Fact]
     public void Extras_ReachTheArgs()
     {

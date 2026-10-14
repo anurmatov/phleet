@@ -302,6 +302,64 @@ public sealed class HarnessDefaultsTests
         Assert.Throws<ArgumentException>(() => HarnessDefaults.Build(new HarnessInput { Provider = provider, Local = false }));
     }
 
+    // ── family aliases (#460, owner direction) ─────────────────────────────────────────────────────
+
+    private static HarnessPlan CodexModel(string model, bool local = false) =>
+        HarnessDefaults.Build(new HarnessInput { Provider = "codex", Local = local, Model = model });
+
+    [Theory]
+    [InlineData("sol", "gpt-6.1-sol")]
+    [InlineData("terra", "gpt-5.6-terra")]
+    [InlineData("luna", "gpt-6-luna")]
+    public void CodexAlias_ResolvesToTheCurrentId_InThePlan(string alias, string id)
+    {
+        var plan = CodexModel(alias);
+
+        Assert.Equal(id, plan.CodexModel);
+        Assert.Equal(id, HarnessDefaults.ResolveCodexAlias(alias));
+        Assert.NotEqual(CodexModel("gpt-5.5").PlanSha256, plan.PlanSha256);
+    }
+
+    [Theory]
+    [InlineData("gpt-5.6-sol")]      // a stored dated id
+    [InlineData("gpt-6.1-sol")]
+    [InlineData("zai/glm-5.3")]      // hosted
+    [InlineData("Sol")]              // aliases are exact
+    public void CodexNonAlias_IsSentAsStored_AndKeepsItsPlan(string model)
+    {
+        var plan = CodexModel(model);
+
+        Assert.Null(plan.CodexModel);
+        Assert.Equal(Codex(local: false).PlanSha256, plan.PlanSha256);
+    }
+
+    [Fact]
+    public void CodexAlias_IsNotMappedInLocalMode()
+    {
+        Assert.Null(CodexModel("sol", local: true).CodexModel);
+    }
+
+    [Fact]
+    public void CodexAliases_AreExactlyTheThreeFamilies()
+    {
+        Assert.Equal(["sol", "terra", "luna"], HarnessDefaults.CodexModelAliases.Keys);
+    }
+
+    [Theory]
+    [InlineData("opus")]
+    [InlineData("sonnet")]
+    [InlineData("haiku")]
+    [InlineData("claude-opus-4-7")]
+    public void ClaudeModels_AreNeverMapped(string model)
+    {
+        var plan = Claude(local: false);
+        Assert.Equal(plan.PlanSha256, HarnessDefaults.Build(new HarnessInput
+        {
+            Provider = "claude", Local = false, AllowedTools = SixFileTools, Model = model,
+        }).PlanSha256);
+        Assert.Null(plan.CodexModel);
+    }
+
     [Fact]
     public void TheCodexRootTomlPath_IsPinned()
     {

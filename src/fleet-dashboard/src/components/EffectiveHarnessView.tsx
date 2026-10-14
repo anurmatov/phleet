@@ -24,6 +24,7 @@ export function EffectiveHarnessBlock({ harness }: { harness: EffectiveHarness }
     <div className="effective-harness-meta">
       <span>mode <strong>{harness.mode}</strong></span>
       <span>extra <strong>{harness.extra.state}</strong></span>
+      {harness.codex?.model && <span>model <code>{harness.codex.model}</code></span>}
       <span title={harness.computedPlanSha256}>plan <code>{shortSha(harness.computedPlanSha256)}</code></span>
       <span title={harness.startedPlanSha256 ?? undefined}>running <code>{shortSha(harness.startedPlanSha256)}</code></span>
       <span className={`effective-harness-drift effective-harness-drift-${drift}`}>{DRIFT_TEXT[drift]}</span>

@@ -62,7 +62,8 @@ public static class AgentHarnessEndpoints
                     int i => JsonValue.Create(i),
                     _ => JsonValue.Create((string)setting.Value),
                 };
-            codex = new JsonObject { ["configToml"] = plan.CodexRootToml, ["threadConfig"] = thread };
+            // model: the id a family alias resolves to, or null when the stored model is sent as is.
+            codex = new JsonObject { ["configToml"] = plan.CodexRootToml, ["threadConfig"] = thread, ["model"] = plan.CodexModel };
         }
 
         JsonObject? claude = null;

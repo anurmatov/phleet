@@ -222,6 +222,21 @@ public sealed class EffectiveHarnessEndpointTests : IAsyncLifetime
         Assert.Equal(8192, thread.GetProperty("tool_output_token_limit").GetInt32());
     }
 
+    [Theory]
+    [InlineData("sol", "gpt-6.1-sol")]
+    [InlineData("luna", "gpt-6-luna")]
+    [InlineData("gpt-5.6-sol", null)]
+    public async Task CodexModel_ShowsTheIdAnAliasResolvesTo(string stored, string? resolved)
+    {
+        var agent = NewAgent("codex-cloud");
+        agent.Model = stored;
+        await SeedAsync(agent);
+
+        var model = (await GetAsync()).GetProperty("codex").GetProperty("model");
+
+        Assert.Equal(resolved, model.ValueKind == JsonValueKind.Null ? null : model.GetString());
+    }
+
     [Fact]
     public async Task AStoredValueTheAllowlistRefuses_IsServedAsIgnored_OnTheModeDefaults()
     {

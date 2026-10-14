@@ -88,6 +88,8 @@ test('rendered block: masked credentials, overrides, both shas, the badge and th
 
     const running = render(codexCloud)
     assert.match(running, />running this plan</)
+    assert.equal(running.includes('model <code>'), false)
+    assert.match(render({ ...codexCloud, codex: { ...codexCloud.codex!, model: 'gpt-6.1-sol' } }), /model <code>gpt-6.1-sol<\/code>/)
     assert.match(running, /class="effective-harness-override">persistence = &quot;save-all&quot;/)
 
     const notReported = render({ ...codexCloud, startedPlanSha256: null })

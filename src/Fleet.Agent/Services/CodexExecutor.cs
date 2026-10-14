@@ -133,6 +133,10 @@ public sealed class CodexExecutor : IAgentExecutor
         // constructor, so a misconfigured model surfaces as a named startup failure instead of a
         // DI resolution error with no agent name in it.
         (_localModelProvider, _threadModel) = SplitLocalModel(_config.Model);
+        // #460: a family alias (sol, terra, luna) runs the id HarnessDefaults maps it to; any other
+        // model is sent as stored.
+        if (_harness.Plan?.CodexModel is { } resolvedAlias)
+            _threadModel = resolvedAlias;
         _inheritedOssBaseUrl = (environmentReader ?? Environment.GetEnvironmentVariable)(OssBaseUrlEnvVar);
         _ossBaseUrlFromConfig = !string.IsNullOrEmpty(_config.CodexOssBaseUrl);
         _ossBaseUrl = _ossBaseUrlFromConfig ? _config.CodexOssBaseUrl : _inheritedOssBaseUrl;

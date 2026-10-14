@@ -90,6 +90,29 @@ list and an explicit `--tools` narrowing loaded a deferred MCP tool through `Too
 and ran a background `Agent` task to `task_notification completed`. By default no built-in is removed;
 only local mode's `--disallowedTools WebSearch` removes one.
 
+## Model families (cloud)
+
+The dashboard's cloud model picker offers families, not dated versions, which go stale. **Claude:**
+`opus`, `sonnet`, `haiku`, passed to `--model` unchanged; Claude Code resolves them to its current model
+(a Claude CLI bump can move them, see `CLAUDE.md` "Provider CLI Pins"). **Codex:** `sol`, `terra`,
+`luna`. The pinned Codex 0.159.2 does not resolve these. `thread/start` accepts `sol` and sends it to
+`/v1/responses` unchanged, its bundled catalog has no bare family names, and a ChatGPT-account login
+refuses a model outside that catalog. So `HarnessDefaults.CodexModelAliases` maps them, the only place
+they are mapped:
+
+| alias | model id sent |
+|---|---|
+| `sol` | `gpt-6.1-sol` |
+| `terra` | `gpt-5.6-terra` |
+| `luna` | `gpt-6-luna` |
+
+The effective-settings view shows the resolved id (`codex.model`), and it is part of the plan sha. The
+codex CI job checks that every target is in the pinned CLI's `model/list` catalog
+(`tests/codex-harness-keys/run.py`). Move the map together with any Codex CLI bump. Local mode keeps
+free-text tags. A stored dated id (`gpt-5.6-sol`, `claude-opus-4-7`), a hosted `zai/` model or any other
+value keeps working and is never rewritten. The picker shows it as the current value until someone picks
+a family. Hosted `zai/` models are set through `update_agent_config`.
+
 ## `harnessExtra`
 
 One nullable `text` column (`agents.harness_extra`), at most 4,096 characters and 50 lines. Claude and

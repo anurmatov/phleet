@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import type {
   AgentConfig, ConfigEdits, ConfigSaveState, InstructionSummary, McpEndpointEntry, OutputStyleSummary,
   ProjectContextSummary, PromptSizeLimits,
 } from '../types'
-import { ADVANCED_DEFAULTS, countCustomized, CLAUDE_PERMISSION_MODES, CODEX_SANDBOX_MODES, PROVIDER_OPTIONS } from '../constants'
+import { CLAUDE_PERMISSION_MODES, CODEX_SANDBOX_MODES, PROVIDER_OPTIONS } from '../constants'
+import { harnessExtraPlaceholder } from '../effectiveHarness'
 import { crossChatDisabledReason, editedTools } from '../journalCrossChat'
 import { effortChoices, effortOptions, isLocalHarness, runsOnLocked, switchProvider } from '../localModel'
 import { apiFetch } from '../utils'
@@ -12,8 +13,8 @@ import FieldHint from './FieldHint'
 import LocalModelFields from './LocalModelFields'
 import InstructionPicker from './InstructionPicker'
 import ProjectAssignmentTable from './ProjectAssignmentTable'
-
-const SHOW_ADVANCED_KEY = 'fleet-dashboard-show-advanced'
+import EffectiveHarnessView from './EffectiveHarnessView'
+import { CONFIG_SECTIONS, DEFAULT_SECTION, sectionCustomizedCount, visibleFields, type SectionId } from './AgentConfigSections'
 
 interface AgentConfigModalProps {
   agentName: string
@@ -66,6 +67,16 @@ export function CrossChatToggle({ checked, reason, onChange }: {
   </div>
 }
 
+
+/** One section's panel. Hidden ones stay mounted, so edits in them are never lost. */
+function SectionPanel({ id, hidden, empty, children }: {
+  id: SectionId; hidden: boolean; empty: boolean; children: ReactNode
+}) {
+  return <section className="config-section-panel" data-section={id} role="tabpanel" hidden={hidden}>
+    {empty ? <div className="config-hint-text">No settings for this provider</div> : children}
+  </section>
+}
+
 export default function AgentConfigModal({
   agentName,
   configData,
@@ -88,12 +99,11 @@ export default function AgentConfigModal({
   onProjectAccessToggleWildcard,
   onClose,
 }: AgentConfigModalProps) {
-  const [showAdvanced, setShowAdvanced] = useState<boolean>(() => {
-    try { return localStorage.getItem(SHOW_ADVANCED_KEY) === 'true' }
-    catch { return false }
-  })
+  const [section, setSection] = useState<SectionId>(DEFAULT_SECTION)
   const [newProject, setNewProject] = useState('')
   const [journalDisabled, setJournalDisabled] = useState(false)
+  // Bumped after each successful save, so the effective settings follow the saved config.
+  const [saveCount, setSaveCount] = useState(0)
   useEffect(() => {
     let active = true
     apiFetch('/api/comms/journal/status')
@@ -105,16 +115,11 @@ export default function AgentConfigModal({
       .catch(() => { /* The server guard still applies when status cannot be loaded. */ })
     return () => { active = false }
   }, [])
+  useEffect(() => { if (configSaveState === 'success') setSaveCount(n => n + 1) }, [configSaveState])
 
-  function toggleAdvanced() {
-    const next = !showAdvanced
-    setShowAdvanced(next)
-    try { localStorage.setItem(SHOW_ADVANCED_KEY, String(next)) } catch { /* ignore */ }
-  }
-
-  const customizedCount = configEdits
-    ? countCustomized(configEdits as unknown as Record<string, unknown>)
-    : 0
+  // A refused harnessExtra names the field, the line and the reason (#460); show it at the field too.
+  const harnessExtraError = configSaveState === 'error' && configSaveMsg.includes('harnessExtra') ? configSaveMsg : null
+  useEffect(() => { if (harnessExtraError) setSection('advanced') }, [harnessExtraError])
 
   // The row behind the current selection, when there is one — the link and the description below
   // the select both describe the style the operator is actually about to assign.
@@ -127,423 +132,451 @@ export default function AgentConfigModal({
   const hasLocalMode = isLocalHarness(provider)
   const isLocal = runsOnLocked(provider) || (hasLocalMode && (configEdits?.localMode ?? false))
 
+  // One section shows at a time; the others stay mounted and hidden, so switching never touches the
+  // shared configEdits and the save sends exactly what the unsectioned dialog sent (#460 Part 2).
+  const panel = (id: SectionId) => {
+    const s = CONFIG_SECTIONS.find(x => x.id === id)!
+    return { id, hidden: section !== id, empty: visibleFields(s, provider).length === 0 }
+  }
+
   return (
     <div className="config-modal-overlay" onClick={onClose}>
-      <div className="config-modal" onClick={e => e.stopPropagation()}>
+      <div className="config-modal config-modal-sectioned" onClick={e => e.stopPropagation()}>
         <div className="config-modal-header">
           <span className="config-modal-title">Config — {agentName}</span>
           <button className="instructions-modal-close" onClick={onClose} title="Close">✕ close</button>
         </div>
-        <div className="config-modal-body">
-          {configLoading && <div className="config-loading">Loading…</div>}
-          {!configLoading && configData && configEdits && (
-            <>
-              <div className="config-section-label">Core</div>
-              <div className="config-field">
-                <label className="config-label">Provider</label>
-                <select
-                  className="config-input"
-                  value={provider}
-                  // Switching keeps local mode between Claude, Codex and Pi (the model and, to or
-                  // from Pi, the effort follow the harness's form) and clears it for Gemini. Pi's
-                  // image input is kept, hidden and unsent off Pi — see switchProvider.
-                  onChange={e => onEditsChange(switchProvider({ ...configEdits, provider }, e.target.value))}
-                >
-                  {PROVIDER_OPTIONS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
-                </select>
-              </div>
-              {hasLocalMode && (
-                <LocalModelFields edits={{ ...configEdits, provider }} onEditsChange={onEditsChange} />
-              )}
-              {!isLocal && (
-              <div className="config-field">
-                <label className="config-label">Model</label>
-                <FieldHint>Codex only: a <code>zai/</code> model needs <code>ZAI_CODING_PLAN_API_KEY</code> in Env Refs; subscriber-only use.</FieldHint>
-                <ModelSelector
-                  provider={provider}
-                  value={configEdits.model}
-                  onChange={model => onEditsChange({ model })}
-                />
-              </div>
-              )}
-              <div className="config-field">
-                <label className="config-label">Memory (MB)</label>
-                <input className="config-input config-input-short" type="number" min={128} value={configEdits.memoryLimitMb} onChange={e => onEditsChange({ memoryLimitMb: e.target.value })} />
-              </div>
-              <label className="config-field config-field-checkbox">
-                <input type="checkbox" checked={configEdits.isEnabled} onChange={e => onEditsChange({ isEnabled: e.target.checked })} />
-                <span className="config-label">Enabled</span>
-              </label>
-              <div className="config-field">
-                <label className="config-label">Image</label>
-                <FieldHint>Docker image for the agent container. Leave blank to use the provisioning default (<code>fleet:agent</code>).</FieldHint>
-                <input className="config-input" value={configEdits.image} onChange={e => onEditsChange({ image: e.target.value })} placeholder="e.g. fleet:agent (leave blank for default)" />
-              </div>
-              {/* ── Advanced toggle ── */}
-              <button className="config-advanced-toggle" onClick={toggleAdvanced}>
-                {showAdvanced ? 'Hide advanced settings ▴' : 'Show advanced settings ▾'}
-                {!showAdvanced && customizedCount > 0 && (
-                  <span className="config-advanced-indicator">Advanced ({customizedCount} customized)</span>
-                )}
-              </button>
-
-              {showAdvanced && (
-              <>
-              <div className="config-section-label">Behavior</div>
-              {isClaude && (
-              <div className="config-field">
-                <label className="config-label">Permission Mode <span className="config-provider-badge">Claude only</span></label>
-                <FieldHint>Controls which file operations Claude can perform without prompting. <code>acceptEdits</code> = auto-accept file edits; <code>bypassPermissions</code> = all operations auto-approved; <code>default</code> = ask for each.</FieldHint>
-                <select className="config-input" value={configEdits.permissionMode} onChange={e => onEditsChange({ permissionMode: e.target.value })}>
-                  {CLAUDE_PERMISSION_MODES.map(m => <option key={m} value={m}>{m}</option>)}
-                </select>
-              </div>
-              )}
-              {isClaude && (
-              <div className="config-field">
-                <label className="config-label">Max Turns <span className="config-provider-badge">Claude only</span></label>
-                <FieldHint>Maximum conversation turns before Claude stops. Prevents runaway tasks.</FieldHint>
-                <input className="config-input config-input-short" type="number" min={1} value={configEdits.maxTurns} onChange={e => onEditsChange({ maxTurns: e.target.value })} />
-              </div>
-              )}
-              <div className="config-field">
-                <label className="config-label">Work Dir</label>
-                <FieldHint>Working directory inside the container. Defaults to <code>/workspace</code>.</FieldHint>
-                <input className="config-input" value={configEdits.workDir} onChange={e => onEditsChange({ workDir: e.target.value })} placeholder="/workspace" />
-              </div>
-              <div className="config-field">
-                <label className="config-label">Short Name</label>
-                <FieldHint>Short alias shown in group chat references (e.g. <code>Acto</code>). Used as the display handle in Telegram group messages.</FieldHint>
-                <input className="config-input config-input-short" value={configEdits.shortName} onChange={e => onEditsChange({ shortName: e.target.value })} placeholder="e.g. my-agent" />
-              </div>
-              <div className="config-field">
-                <label className="config-label">Group Listen Mode</label>
-                <FieldHint><code>all</code> = respond to every message; <code>mention</code> = respond only when mentioned; <code>off</code> = ignore group messages entirely.</FieldHint>
-                <input className="config-input config-input-short" value={configEdits.groupListenMode} onChange={e => onEditsChange({ groupListenMode: e.target.value })} placeholder="mention" />
-              </div>
-              <div className="config-field">
-                <label className="config-label">Group Debounce (s)</label>
-                <FieldHint>Seconds to wait after the last message before responding in a group. Prevents reacting to mid-sentence message splits.</FieldHint>
-                <input className="config-input config-input-short" type="number" min={0} value={configEdits.groupDebounceSeconds} onChange={e => onEditsChange({ groupDebounceSeconds: e.target.value })} />
-              </div>
-              <div className="config-field">
-                <label className="config-label">Warmup Timeout (s)</label>
-                <FieldHint>Seconds the startup warmup ping may run before giving up (10–600). Default <code>60</code>; slow local-model cold starts may need <code>180</code>. Takes effect on the next reprovision.</FieldHint>
-                <input className="config-input config-input-short" type="number" min={10} max={600} step={1} value={configEdits.warmupTimeoutSeconds} onChange={e => onEditsChange({ warmupTimeoutSeconds: e.target.value })} />
-              </div>
-              <div className="config-field">
-                <label className="config-label">Proactive Interval (min)</label>
-                <FieldHint>How often (in minutes) the agent self-initiates a check-in task. <code>0</code> = disabled.</FieldHint>
-                <input className="config-input config-input-short" type="number" min={0} value={configEdits.proactiveIntervalMinutes} onChange={e => onEditsChange({ proactiveIntervalMinutes: e.target.value })} />
-              </div>
-              <div className="config-field">
-                <label className="config-field config-field-checkbox">
-                  <input type="checkbox" checked={configEdits.showStats} onChange={e => onEditsChange({ showStats: e.target.checked })} />
-                  <span className="config-label">Show Stats</span>
-                </label>
-                <FieldHint>Append token/time stats to each Telegram response.</FieldHint>
-              </div>
-              <div className="config-field">
-                <label className="config-field config-field-checkbox">
-                  <input type="checkbox" checked={configEdits.prefixMessages} onChange={e => onEditsChange({ prefixMessages: e.target.checked })} />
-                  <span className="config-label">Prefix Messages</span>
-                </label>
-                <FieldHint>Prepend the agent's short name to each Telegram message (e.g. <code>[Agent]:</code>).</FieldHint>
-              </div>
-              <div className="config-field">
-                <label className="config-label">Formatting Mode</label>
-                <FieldHint>PlainText: no formatting. LegacyHtml: Markdown-like syntax → Telegram HTML. Rich: sendRichMessage with LegacyHtml → PlainText fallback.</FieldHint>
-                <select
-                  value={configEdits.formattingMode}
-                  onChange={e => onEditsChange({ formattingMode: parseInt(e.target.value, 10) })}
-                  className="config-input"
-                >
-                  <option value={0}>PlainText</option>
-                  <option value={1}>LegacyHtml</option>
-                  <option value={2}>Rich</option>
-                </select>
-              </div>
-              <div className="config-field">
-                <label className="config-label">
-                  Output Style
-                  {/* Opens in a new tab on purpose: reading what you are about to impose on every
-                      message this agent sends should not cost the unsaved edits in this modal. */}
-                  <a
-                    className="setup-helper-link"
-                    // Naming the style in the hash is what makes "read <name>" land on that style
-                    // open rather than on a list with it collapsed.
-                    href={selectedStyle
-                      ? `#output-styles/${encodeURIComponent(selectedStyle.name)}`
-                      : '#output-styles'}
-                    target="_blank"
-                    rel="noreferrer"
-                    title="Open the Output Styles page to read or edit the style body"
-                  >
-                    {selectedStyle
-                      ? `read "${selectedStyle.name}" ↗`
-                      : 'browse styles ↗'}
-                  </a>
-                </label>
-                <FieldHint>Chat tone and register. Claude resolves it as a style file; Codex and Gemini get the same text inlined into their prompt. <strong>Needs a reprovision, not a restart</strong> — the value lands in the generated <code>settings.json</code> at provision time.</FieldHint>
-                {selectedStyle?.description && (
-                  <FieldHint>{selectedStyle.description}</FieldHint>
-                )}
-                <select
-                  value={configEdits.outputStyle}
-                  onChange={e => onEditsChange({ outputStyle: e.target.value })}
-                  className="config-input"
-                >
-                  <option value="">none</option>
-                  {outputStyles.map(s => (
-                    <option key={s.name} value={s.name}>{s.name}</option>
-                  ))}
-                  {configEdits.outputStyle !== '' && !outputStyles.some(s => s.name === configEdits.outputStyle) && (
-                    <option value={configEdits.outputStyle}>{configEdits.outputStyle} (not found)</option>
-                  )}
-                </select>
-              </div>
-              <div className="config-field">
-                <label className="config-field config-field-checkbox">
-                  <input type="checkbox" checked={configEdits.suppressToolMessages} onChange={e => onEditsChange({ suppressToolMessages: e.target.checked })} />
-                  <span className="config-label">Suppress Tool Messages</span>
-                </label>
-                <FieldHint>Hide intermediate tool-use progress messages from Telegram — only post the final response. Use for agents serving non-technical users.</FieldHint>
-              </div>
-              {hasLocalMode && (
-              <div className="config-field">
-                <label className="config-label">Effort <span className="config-provider-badge">Claude + Codex + Pi</span></label>
-                <FieldHint>Reasoning effort level. <code>low</code> = faster/cheaper; <code>max</code> = deepest reasoning (Codex maps max → xhigh). Affects latency and cost. Codex also takes none/minimal; local Claude models use off/low/medium/xhigh; Pi turns thinking off or on.</FieldHint>
-                {(() => {
-                  // #349: each harness and mode owns its vocabulary. A stored value invalid for the
-                  // current mode still renders (with a marker) — nothing is auto-cleared, and
-                  // Save surfaces the server fault.
-                  const choices = effortChoices(provider, isLocal)
-                  const current = configEdits.effort ?? ''
+        {configLoading && <div className="config-modal-body"><div className="config-loading">Loading…</div></div>}
+        {!configLoading && configData && configEdits && (
+          <>
+            <div className="config-modal-columns">
+              <nav className="config-section-nav" role="tablist" aria-label="Config sections">
+                {CONFIG_SECTIONS.map(s => {
+                  const customized = sectionCustomizedCount(s, configEdits as unknown as Record<string, unknown>)
                   return (
-                    <select className="config-input" value={current} onChange={e => onEditsChange({ effort: e.target.value })}>
-                      {effortOptions(provider, isLocal).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                      {!choices.includes(current) && <option value={current}>{current} (not valid in this mode)</option>}
-                    </select>
+                    <button key={s.id} type="button" role="tab" aria-selected={section === s.id}
+                      className={`config-section-tab${section === s.id ? ' active' : ''}`} onClick={() => setSection(s.id)}>
+                      {s.label}
+                      {customized > 0 && <span className="config-section-count" title={`${customized} customized`}>{customized}</span>}
+                    </button>
                   )
-                })()}
-              </div>
-              )}
-              {isClaude && (
-              <div className="config-field">
-                <label className="config-label">JSON Schema <span className="config-provider-badge">Claude only</span></label>
-                <FieldHint>JSON schema passed via <code>--json-schema</code> flag. Forces Claude to return structured output matching the schema. Leave blank to disable.</FieldHint>
-                <textarea className="config-textarea" value={configEdits.jsonSchema} onChange={e => onEditsChange({ jsonSchema: e.target.value })} placeholder='JSON schema for --json-schema flag (leave blank to disable)' rows={3} />
-              </div>
-              )}
-              {isClaude && (
-              <div className="config-field">
-                <label className="config-label">Agents JSON <span className="config-provider-badge">Claude only</span></label>
-                <FieldHint>JSON config passed via <code>--agents</code> flag to enable Claude's built-in subagent capabilities. Leave blank to disable.</FieldHint>
-                <textarea className="config-textarea" value={configEdits.agentsJson} onChange={e => onEditsChange({ agentsJson: e.target.value })} placeholder='JSON for --agents flag (leave blank to disable)' rows={3} />
-              </div>
-              )}
-              {isClaude && (
-              <div className="config-field">
-                <label className="config-label">Auto Memory <span className="config-provider-badge">Claude only</span></label>
-                <FieldHint>Enables Claude's built-in auto-memory feature. When off, suppresses Claude's internal memory. Fleet's own fleet-memory MCP is a separate system.</FieldHint>
-                <input type="checkbox" checked={configEdits.autoMemoryEnabled} onChange={e => onEditsChange({ autoMemoryEnabled: e.target.checked })} />
-              </div>
-              )}
-              {isCodex && (
-              <div className="config-field">
-                <label className="config-label">Sandbox Mode <span className="config-provider-badge">Codex only</span></label>
-                <FieldHint>Controls file system access. <code>danger-full-access</code> = unrestricted; <code>workspace-write</code> = writes limited to workspace; <code>read-only</code> = no writes.</FieldHint>
-                <select className="config-input" value={configEdits.codexSandboxMode ?? ''} onChange={e => onEditsChange({ codexSandboxMode: e.target.value })}>
-                  <option value="">default (danger-full-access)</option>
-                  {CODEX_SANDBOX_MODES.map(m => <option key={m} value={m}>{m}</option>)}
-                </select>
-              </div>
-              )}
-              <div className="config-section-label">Tools &amp; Projects</div>
-              <div className="config-field">
-                <label className="config-label">Tools</label>
-                <FieldHint>Comma-separated list of allowed tool names (e.g. <code>Read,Glob,mcp__fleet-memory__memory_search</code>). Controls exactly which tools Claude can call.</FieldHint>
-                <textarea className="config-textarea" value={configEdits.tools} onChange={e => onEditsChange({ tools: e.target.value })} placeholder="comma-separated tool names" rows={3} />
-              </div>
-              <div className="config-field">
-                <label className="config-label">Projects</label>
-                <FieldHint>Checked projects have their full context loaded into the agent's system prompt. Size is the current context in UTF-8 bytes. <strong>Takes effect on reprovision.</strong></FieldHint>
-                <ProjectAssignmentTable
-                  contexts={projectContexts}
-                  value={configEdits}
-                  sizeLimit={promptSizeLimits ? promptSizeLimits.projectContext.limitBytes : undefined}
-                  onChange={({ projects }) => onEditsChange({ projects })}
-                />
-              </div>
-              <div className="config-section-label">MCP Endpoints</div>
-              <FieldHint>MCP Transport Type: <code>http</code> = streamable HTTP (preferred); <code>sse</code> = Server-Sent Events (legacy).</FieldHint>
-              {configEdits.mcpEndpoints.map((ep, i) => (
-                <div key={i} className="config-related-row">
-                  <input
-                    className="config-input config-input-sm"
-                    value={ep.mcpName}
-                    onChange={e => {
-                      const eps = configEdits.mcpEndpoints.map((x, j) => j === i ? { ...x, mcpName: e.target.value } : x)
-                      onEditsChange({ mcpEndpoints: eps })
-                    }}
-                    placeholder="name"
-                  />
-                  <input
-                    className="config-input config-input-url"
-                    value={ep.url}
-                    onChange={e => {
-                      const eps = configEdits.mcpEndpoints.map((x, j) => j === i ? { ...x, url: e.target.value } : x)
-                      onEditsChange({ mcpEndpoints: eps })
-                    }}
-                    placeholder="url"
-                  />
-                  <input
-                    className="config-input config-input-sm"
-                    value={ep.transportType}
-                    onChange={e => {
-                      const eps = configEdits.mcpEndpoints.map((x, j) => j === i ? { ...x, transportType: e.target.value } : x)
-                      onEditsChange({ mcpEndpoints: eps })
-                    }}
-                    placeholder="sse"
-                  />
-                  <button className="config-remove-btn" onClick={() => {
-                    const eps = configEdits.mcpEndpoints.filter((_, j) => j !== i)
-                    onEditsChange({ mcpEndpoints: eps })
-                  }}>✕</button>
-                </div>
-              ))}
-              <button className="config-add-btn" onClick={() => {
-                const ep: McpEndpointEntry = { mcpName: '', url: '', transportType: 'sse' }
-                onEditsChange({ mcpEndpoints: [...configEdits.mcpEndpoints, ep] })
-              }}>+ add endpoint</button>
-              <div className="config-section-label">Networks</div>
-              <div className="config-field">
-                <FieldHint>Docker networks the container joins. Agents must share a network to reach each other and internal services (e.g. <code>fleet-net</code>).</FieldHint>
-                <input className="config-input" value={configEdits.networks} onChange={e => onEditsChange({ networks: e.target.value })} placeholder="comma-separated network names" />
-              </div>
-              <div className="config-section-label">Env Refs</div>
-              <div className="config-field">
-                <FieldHint>Names of <code>.env</code> keys to inject into the container as environment variables. Store key names only — not values (e.g. <code>TELEGRAM_BOT_TOKEN,GITHUB_APP_ID</code>).</FieldHint>
-                <input className="config-input" value={configEdits.envRefs} onChange={e => onEditsChange({ envRefs: e.target.value })} placeholder="comma-separated env key names" />
-              </div>
-              <JournalToggle checked={configEdits.journalEnabled} disabled={journalDisabled}
-                onChange={journalEnabled => onEditsChange({ journalEnabled })} />
-              <CrossChatToggle checked={configEdits.journalCrossChatEnabled}
-                reason={crossChatDisabledReason(configEdits.journalEnabled,
-                  editedTools(configEdits.tools, configData?.tools ?? []))}
-                onChange={journalCrossChatEnabled => onEditsChange({ journalCrossChatEnabled })} />
-              <div className="config-field">
-                <label className="config-field config-field-checkbox">
-                  <input type="checkbox" checked={configEdits.telegramSendOnly} onChange={e => onEditsChange({ telegramSendOnly: e.target.checked })} />
-                  <span className="config-label">Telegram Send-Only (no polling)</span>
-                </label>
-                <FieldHint>If checked, the agent sends Telegram messages but does not poll for incoming messages. Useful for notification-only agents.</FieldHint>
-              </div>
-              <div className="config-field">
-                <label className="config-field config-field-checkbox">
-                  <input type="checkbox" checked={configEdits.mountDockerSock} onChange={e => onEditsChange({ mountDockerSock: e.target.checked })} />
-                  <span className="config-label">Mount Docker socket</span>
-                </label>
-                <FieldHint>Grants the agent access to the host Docker daemon — required for agents that manage containers. Leave off unless the agent needs Docker access (grants host-root).</FieldHint>
-              </div>
-              <div className="config-section-label">Telegram Users</div>
-              <div className="config-field">
-                <FieldHint>Numeric Telegram user IDs allowed to send tasks to this agent (e.g. <code>123456789</code>). Find your ID via <code>@userinfobot</code>. Comma-separated.</FieldHint>
-                <input className="config-input" value={configEdits.telegramUsers} onChange={e => onEditsChange({ telegramUsers: e.target.value })} placeholder="comma-separated user IDs" />
-              </div>
-              <div className="config-section-label">Telegram Groups</div>
-              <div className="config-field">
-                <FieldHint>Numeric Telegram group IDs where this agent listens (typically negative, e.g. <code>-1001234567890</code>). Comma-separated.</FieldHint>
-                <input className="config-input" value={configEdits.telegramGroups} onChange={e => onEditsChange({ telegramGroups: e.target.value })} placeholder="comma-separated group IDs" />
-              </div>
-              <div className="config-section-label">Chat Requests</div>
-              <div className="config-field">
-                <label className="config-field config-field-checkbox">
-                  <input type="checkbox" checked={configEdits.canReceiveChatRequests} onChange={e => onEditsChange({ canReceiveChatRequests: e.target.checked })} />
-                  <span className="config-label">Accept Chat Requests</span>
-                </label>
-                <FieldHint>When enabled, messages from users not on the allowlist are forwarded to the CTO agent for access-request review instead of being silently dropped.</FieldHint>
-              </div>
-              <div className="config-field">
-                <label className="config-label">Request Received Message</label>
-                <FieldHint>Reply sent to a user after their access request is forwarded. Leave blank to send no reply. Max 500 characters.</FieldHint>
-                <textarea
-                  className="config-textarea"
-                  value={configEdits.requestReceivedMessage}
-                  onChange={e => onEditsChange({ requestReceivedMessage: e.target.value })}
-                  placeholder="e.g. Your request has been forwarded for review."
-                  rows={3}
-                  maxLength={500}
-                />
-              </div>
-              <div className="config-section-label">Instructions</div>
-              <div className="config-field">
-                <FieldHint>Role instructions composed into this agent's system prompt. Checked items are included; load order controls concatenation sequence. Size is the current version in UTF-8 bytes. <code>base</code> is auto-attached and excluded here.</FieldHint>
-                <InstructionPicker
-                  allInstructions={allInstructions}
-                  selected={configEdits.instructions}
-                  sizeLimit={promptSizeLimits ? promptSizeLimits.instruction.limitBytes : undefined}
-                  onChange={instructions => onEditsChange({ instructions })}
-                />
-              </div>
-              </>)}
-
-              <div className="config-section-label">Memory Project Access</div>
-              <div className="config-field">
-                <FieldHint>Projects this agent can read from fleet-memory. Add project names explicitly, or grant wildcard (*) for full access. Changes take effect immediately (no reprovision needed).</FieldHint>
-                {projectAccessLoading && <div className="config-loading">Loading…</div>}
-                {!projectAccessLoading && projectAccess !== null && (
-                  <>
-                    {projectAccess.length === 0 && (
-                      <div className="config-hint-text">No project access configured.</div>
+                })}
+              </nav>
+              <div className="config-modal-body config-section-panels">
+                <SectionPanel {...panel('general')}>
+                  <label className="config-field config-field-checkbox">
+                    <input type="checkbox" checked={configEdits.isEnabled} onChange={e => onEditsChange({ isEnabled: e.target.checked })} />
+                    <span className="config-label">Enabled</span>
+                  </label>
+                  <div className="config-field">
+                    <label className="config-label">Short Name</label>
+                    <FieldHint>Short alias shown in group chat references (e.g. <code>Acto</code>). Used as the display handle in Telegram group messages.</FieldHint>
+                    <input className="config-input config-input-short" value={configEdits.shortName} onChange={e => onEditsChange({ shortName: e.target.value })} placeholder="e.g. my-agent" />
+                  </div>
+                </SectionPanel>
+                <SectionPanel {...panel('model')}>
+                  <div className="config-field">
+                    <label className="config-label">Provider</label>
+                    <select
+                      className="config-input"
+                      value={provider}
+                      // Switching keeps local mode between Claude, Codex and Pi (the model and, to or
+                      // from Pi, the effort follow the harness's form) and clears it for Gemini. Pi's
+                      // image input is kept, hidden and unsent off Pi — see switchProvider.
+                      onChange={e => onEditsChange(switchProvider({ ...configEdits, provider }, e.target.value))}
+                    >
+                      {PROVIDER_OPTIONS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                    </select>
+                  </div>
+                  {hasLocalMode && (
+                    <LocalModelFields edits={{ ...configEdits, provider }} onEditsChange={onEditsChange} />
+                  )}
+                  {!isLocal && (
+                  <div className="config-field">
+                    <label className="config-label">Model</label>
+                    <FieldHint>Codex only: a <code>zai/</code> model needs <code>ZAI_CODING_PLAN_API_KEY</code> in Env Refs; subscriber-only use.</FieldHint>
+                    <ModelSelector
+                      provider={provider}
+                      value={configEdits.model}
+                      onChange={model => onEditsChange({ model })}
+                    />
+                  </div>
+                  )}
+                  {hasLocalMode && (
+                  <div className="config-field">
+                    <label className="config-label">Effort <span className="config-provider-badge">Claude + Codex + Pi</span></label>
+                    <FieldHint>Reasoning effort level. <code>low</code> = faster/cheaper; <code>max</code> = deepest reasoning (Codex maps max → xhigh). Affects latency and cost. Codex also takes none/minimal; local Claude models use off/low/medium/xhigh; Pi turns thinking off or on.</FieldHint>
+                    {(() => {
+                      // #349: each harness and mode owns its vocabulary. A stored value invalid for the
+                      // current mode still renders (with a marker) — nothing is auto-cleared, and
+                      // Save surfaces the server fault.
+                      const choices = effortChoices(provider, isLocal)
+                      const current = configEdits.effort ?? ''
+                      return (
+                        <select className="config-input" value={current} onChange={e => onEditsChange({ effort: e.target.value })}>
+                          {effortOptions(provider, isLocal).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                          {!choices.includes(current) && <option value={current}>{current} (not valid in this mode)</option>}
+                        </select>
+                      )
+                    })()}
+                  </div>
+                  )}
+                  {isCodex && (
+                  <div className="config-field">
+                    <label className="config-label">Sandbox Mode <span className="config-provider-badge">Codex only</span></label>
+                    <FieldHint>Controls file system access. <code>danger-full-access</code> = unrestricted; <code>workspace-write</code> = writes limited to workspace; <code>read-only</code> = no writes.</FieldHint>
+                    <select className="config-input" value={configEdits.codexSandboxMode ?? ''} onChange={e => onEditsChange({ codexSandboxMode: e.target.value })}>
+                      <option value="">default (danger-full-access)</option>
+                      {CODEX_SANDBOX_MODES.map(m => <option key={m} value={m}>{m}</option>)}
+                    </select>
+                  </div>
+                  )}
+                  {isClaude && (
+                  <div className="config-field">
+                    <label className="config-label">Auto Memory <span className="config-provider-badge">Claude only</span></label>
+                    <FieldHint>Enables Claude's built-in auto-memory feature. When off, suppresses Claude's internal memory. Fleet's own fleet-memory MCP is a separate system.</FieldHint>
+                    <input type="checkbox" checked={configEdits.autoMemoryEnabled} onChange={e => onEditsChange({ autoMemoryEnabled: e.target.checked })} />
+                  </div>
+                  )}
+                  {(isClaude || isCodex) && <EffectiveHarnessView agentName={agentName} refreshKey={saveCount} />}
+                </SectionPanel>
+                <SectionPanel {...panel('instructions')}>
+                  <div className="config-section-label">Instructions</div>
+                  <div className="config-field">
+                    <FieldHint>Role instructions composed into this agent's system prompt. Checked items are included; load order controls concatenation sequence. Size is the current version in UTF-8 bytes. <code>base</code> is auto-attached and excluded here.</FieldHint>
+                    <InstructionPicker
+                      allInstructions={allInstructions}
+                      selected={configEdits.instructions}
+                      sizeLimit={promptSizeLimits ? promptSizeLimits.instruction.limitBytes : undefined}
+                      onChange={instructions => onEditsChange({ instructions })}
+                    />
+                  </div>
+                  <div className="config-field">
+                    <label className="config-label">Projects</label>
+                    <FieldHint>Checked projects have their full context loaded into the agent's system prompt. Size is the current context in UTF-8 bytes. <strong>Takes effect on reprovision.</strong></FieldHint>
+                    <ProjectAssignmentTable
+                      contexts={projectContexts}
+                      value={configEdits}
+                      sizeLimit={promptSizeLimits ? promptSizeLimits.projectContext.limitBytes : undefined}
+                      onChange={({ projects }) => onEditsChange({ projects })}
+                    />
+                  </div>
+                  <div className="config-field">
+                    <label className="config-label">
+                      Output Style
+                      {/* Opens in a new tab on purpose: reading what you are about to impose on every
+                          message this agent sends should not cost the unsaved edits in this modal. */}
+                      <a
+                        className="setup-helper-link"
+                        // Naming the style in the hash is what makes "read <name>" land on that style
+                        // open rather than on a list with it collapsed.
+                        href={selectedStyle
+                          ? `#output-styles/${encodeURIComponent(selectedStyle.name)}`
+                          : '#output-styles'}
+                        target="_blank"
+                        rel="noreferrer"
+                        title="Open the Output Styles page to read or edit the style body"
+                      >
+                        {selectedStyle
+                          ? `read "${selectedStyle.name}" ↗`
+                          : 'browse styles ↗'}
+                      </a>
+                    </label>
+                    <FieldHint>Chat tone and register. Claude resolves it as a style file; Codex and Gemini get the same text inlined into their prompt. <strong>Needs a reprovision, not a restart</strong> — the value lands in the generated <code>settings.json</code> at provision time.</FieldHint>
+                    {selectedStyle?.description && (
+                      <FieldHint>{selectedStyle.description}</FieldHint>
                     )}
-                    {projectAccess.map(p => (
-                      <div key={p} className="config-related-row">
-                        <span className="config-project-chip">{p === '*' ? '* (wildcard — all projects)' : p}</span>
-                        <button className="config-remove-btn" onClick={() => p === '*' ? onProjectAccessToggleWildcard(false) : onProjectAccessRemove(p)}>✕</button>
-                      </div>
-                    ))}
-                    <div className="config-related-row">
+                    <select
+                      value={configEdits.outputStyle}
+                      onChange={e => onEditsChange({ outputStyle: e.target.value })}
+                      className="config-input"
+                    >
+                      <option value="">none</option>
+                      {outputStyles.map(s => (
+                        <option key={s.name} value={s.name}>{s.name}</option>
+                      ))}
+                      {configEdits.outputStyle !== '' && !outputStyles.some(s => s.name === configEdits.outputStyle) && (
+                        <option value={configEdits.outputStyle}>{configEdits.outputStyle} (not found)</option>
+                      )}
+                    </select>
+                  </div>
+                  <div className="config-section-label">Memory Project Access</div>
+                  <div className="config-field">
+                    <FieldHint>Projects this agent can read from fleet-memory. Add project names explicitly, or grant wildcard (*) for full access. Changes take effect immediately (no reprovision needed).</FieldHint>
+                    {projectAccessLoading && <div className="config-loading">Loading…</div>}
+                    {!projectAccessLoading && projectAccess !== null && (
+                      <>
+                        {projectAccess.length === 0 && (
+                          <div className="config-hint-text">No project access configured.</div>
+                        )}
+                        {projectAccess.map(p => (
+                          <div key={p} className="config-related-row">
+                            <span className="config-project-chip">{p === '*' ? '* (wildcard — all projects)' : p}</span>
+                            <button className="config-remove-btn" onClick={() => p === '*' ? onProjectAccessToggleWildcard(false) : onProjectAccessRemove(p)}>✕</button>
+                          </div>
+                        ))}
+                        <div className="config-related-row">
+                          <input
+                            className="config-input config-input-sm"
+                            value={newProject}
+                            onChange={e => setNewProject(e.target.value)}
+                            onKeyDown={e => { if (e.key === 'Enter' && newProject.trim()) { onProjectAccessAdd(newProject.trim()); setNewProject('') } }}
+                            placeholder="project name"
+                          />
+                          <button
+                            className="config-add-btn"
+                            onClick={() => { if (newProject.trim()) { onProjectAccessAdd(newProject.trim()); setNewProject('') } }}
+                          >+ add</button>
+                          {!projectAccess.includes('*') && (
+                            <button className="config-add-btn" onClick={() => onProjectAccessToggleWildcard(true)}>set wildcard (*)</button>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </SectionPanel>
+                <SectionPanel {...panel('tools')}>
+                  <div className="config-field">
+                    <label className="config-label">Tools</label>
+                    <FieldHint>Comma-separated list of allowed tool names (e.g. <code>Read,Glob,mcp__fleet-memory__memory_search</code>). Controls exactly which tools Claude can call.</FieldHint>
+                    <textarea className="config-textarea" value={configEdits.tools} onChange={e => onEditsChange({ tools: e.target.value })} placeholder="comma-separated tool names" rows={3} />
+                  </div>
+                  <div className="config-section-label">MCP Endpoints</div>
+                  <FieldHint>MCP Transport Type: <code>http</code> = streamable HTTP (preferred); <code>sse</code> = Server-Sent Events (legacy).</FieldHint>
+                  {configEdits.mcpEndpoints.map((ep, i) => (
+                    <div key={i} className="config-related-row">
                       <input
                         className="config-input config-input-sm"
-                        value={newProject}
-                        onChange={e => setNewProject(e.target.value)}
-                        onKeyDown={e => { if (e.key === 'Enter' && newProject.trim()) { onProjectAccessAdd(newProject.trim()); setNewProject('') } }}
-                        placeholder="project name"
+                        value={ep.mcpName}
+                        onChange={e => {
+                          const eps = configEdits.mcpEndpoints.map((x, j) => j === i ? { ...x, mcpName: e.target.value } : x)
+                          onEditsChange({ mcpEndpoints: eps })
+                        }}
+                        placeholder="name"
                       />
-                      <button
-                        className="config-add-btn"
-                        onClick={() => { if (newProject.trim()) { onProjectAccessAdd(newProject.trim()); setNewProject('') } }}
-                      >+ add</button>
-                      {!projectAccess.includes('*') && (
-                        <button className="config-add-btn" onClick={() => onProjectAccessToggleWildcard(true)}>set wildcard (*)</button>
-                      )}
+                      <input
+                        className="config-input config-input-url"
+                        value={ep.url}
+                        onChange={e => {
+                          const eps = configEdits.mcpEndpoints.map((x, j) => j === i ? { ...x, url: e.target.value } : x)
+                          onEditsChange({ mcpEndpoints: eps })
+                        }}
+                        placeholder="url"
+                      />
+                      <input
+                        className="config-input config-input-sm"
+                        value={ep.transportType}
+                        onChange={e => {
+                          const eps = configEdits.mcpEndpoints.map((x, j) => j === i ? { ...x, transportType: e.target.value } : x)
+                          onEditsChange({ mcpEndpoints: eps })
+                        }}
+                        placeholder="sse"
+                      />
+                      <button className="config-remove-btn" onClick={() => {
+                        const eps = configEdits.mcpEndpoints.filter((_, j) => j !== i)
+                        onEditsChange({ mcpEndpoints: eps })
+                      }}>✕</button>
                     </div>
-                  </>
-                )}
+                  ))}
+                  <button className="config-add-btn" onClick={() => {
+                    const ep: McpEndpointEntry = { mcpName: '', url: '', transportType: 'sse' }
+                    onEditsChange({ mcpEndpoints: [...configEdits.mcpEndpoints, ep] })
+                  }}>+ add endpoint</button>
+                </SectionPanel>
+                <SectionPanel {...panel('telegram')}>
+                  <div className="config-section-label">Telegram Users</div>
+                  <div className="config-field">
+                    <FieldHint>Numeric Telegram user IDs allowed to send tasks to this agent (e.g. <code>123456789</code>). Find your ID via <code>@userinfobot</code>. Comma-separated.</FieldHint>
+                    <input className="config-input" value={configEdits.telegramUsers} onChange={e => onEditsChange({ telegramUsers: e.target.value })} placeholder="comma-separated user IDs" />
+                  </div>
+                  <div className="config-section-label">Telegram Groups</div>
+                  <div className="config-field">
+                    <FieldHint>Numeric Telegram group IDs where this agent listens (typically negative, e.g. <code>-1001234567890</code>). Comma-separated.</FieldHint>
+                    <input className="config-input" value={configEdits.telegramGroups} onChange={e => onEditsChange({ telegramGroups: e.target.value })} placeholder="comma-separated group IDs" />
+                  </div>
+                  <div className="config-field">
+                    <label className="config-label">Group Listen Mode</label>
+                    <FieldHint><code>all</code> = respond to every message; <code>mention</code> = respond only when mentioned; <code>off</code> = ignore group messages entirely.</FieldHint>
+                    <input className="config-input config-input-short" value={configEdits.groupListenMode} onChange={e => onEditsChange({ groupListenMode: e.target.value })} placeholder="mention" />
+                  </div>
+                  <div className="config-field">
+                    <label className="config-label">Group Debounce (s)</label>
+                    <FieldHint>Seconds to wait after the last message before responding in a group. Prevents reacting to mid-sentence message splits.</FieldHint>
+                    <input className="config-input config-input-short" type="number" min={0} value={configEdits.groupDebounceSeconds} onChange={e => onEditsChange({ groupDebounceSeconds: e.target.value })} />
+                  </div>
+                  <div className="config-field">
+                    <label className="config-label">Proactive Interval (min)</label>
+                    <FieldHint>How often (in minutes) the agent self-initiates a check-in task. <code>0</code> = disabled.</FieldHint>
+                    <input className="config-input config-input-short" type="number" min={0} value={configEdits.proactiveIntervalMinutes} onChange={e => onEditsChange({ proactiveIntervalMinutes: e.target.value })} />
+                  </div>
+                  <div className="config-field">
+                    <label className="config-field config-field-checkbox">
+                      <input type="checkbox" checked={configEdits.showStats} onChange={e => onEditsChange({ showStats: e.target.checked })} />
+                      <span className="config-label">Show Stats</span>
+                    </label>
+                    <FieldHint>Append token/time stats to each Telegram response.</FieldHint>
+                  </div>
+                  <div className="config-field">
+                    <label className="config-field config-field-checkbox">
+                      <input type="checkbox" checked={configEdits.prefixMessages} onChange={e => onEditsChange({ prefixMessages: e.target.checked })} />
+                      <span className="config-label">Prefix Messages</span>
+                    </label>
+                    <FieldHint>Prepend the agent's short name to each Telegram message (e.g. <code>[Agent]:</code>).</FieldHint>
+                  </div>
+                  <div className="config-field">
+                    <label className="config-label">Formatting Mode</label>
+                    <FieldHint>PlainText: no formatting. LegacyHtml: Markdown-like syntax → Telegram HTML. Rich: sendRichMessage with LegacyHtml → PlainText fallback.</FieldHint>
+                    <select
+                      value={configEdits.formattingMode}
+                      onChange={e => onEditsChange({ formattingMode: parseInt(e.target.value, 10) })}
+                      className="config-input"
+                    >
+                      <option value={0}>PlainText</option>
+                      <option value={1}>LegacyHtml</option>
+                      <option value={2}>Rich</option>
+                    </select>
+                  </div>
+                  <div className="config-field">
+                    <label className="config-field config-field-checkbox">
+                      <input type="checkbox" checked={configEdits.suppressToolMessages} onChange={e => onEditsChange({ suppressToolMessages: e.target.checked })} />
+                      <span className="config-label">Suppress Tool Messages</span>
+                    </label>
+                    <FieldHint>Hide intermediate tool-use progress messages from Telegram — only post the final response. Use for agents serving non-technical users.</FieldHint>
+                  </div>
+                  <div className="config-field">
+                    <label className="config-field config-field-checkbox">
+                      <input type="checkbox" checked={configEdits.telegramSendOnly} onChange={e => onEditsChange({ telegramSendOnly: e.target.checked })} />
+                      <span className="config-label">Telegram Send-Only (no polling)</span>
+                    </label>
+                    <FieldHint>If checked, the agent sends Telegram messages but does not poll for incoming messages. Useful for notification-only agents.</FieldHint>
+                  </div>
+                  <JournalToggle checked={configEdits.journalEnabled} disabled={journalDisabled}
+                    onChange={journalEnabled => onEditsChange({ journalEnabled })} />
+                  <CrossChatToggle checked={configEdits.journalCrossChatEnabled}
+                    reason={crossChatDisabledReason(configEdits.journalEnabled,
+                      editedTools(configEdits.tools, configData?.tools ?? []))}
+                    onChange={journalCrossChatEnabled => onEditsChange({ journalCrossChatEnabled })} />
+                  <div className="config-section-label">Chat Requests</div>
+                  <div className="config-field">
+                    <label className="config-field config-field-checkbox">
+                      <input type="checkbox" checked={configEdits.canReceiveChatRequests} onChange={e => onEditsChange({ canReceiveChatRequests: e.target.checked })} />
+                      <span className="config-label">Accept Chat Requests</span>
+                    </label>
+                    <FieldHint>When enabled, messages from users not on the allowlist are forwarded to the CTO agent for access-request review instead of being silently dropped.</FieldHint>
+                  </div>
+                  <div className="config-field">
+                    <label className="config-label">Request Received Message</label>
+                    <FieldHint>Reply sent to a user after their access request is forwarded. Leave blank to send no reply. Max 500 characters.</FieldHint>
+                    <textarea
+                      className="config-textarea"
+                      value={configEdits.requestReceivedMessage}
+                      onChange={e => onEditsChange({ requestReceivedMessage: e.target.value })}
+                      placeholder="e.g. Your request has been forwarded for review."
+                      rows={3}
+                      maxLength={500}
+                    />
+                  </div>
+                </SectionPanel>
+                <SectionPanel {...panel('advanced')}>
+                  <div className="config-field">
+                    <label className="config-label">Image</label>
+                    <FieldHint>Docker image for the agent container. Leave blank to use the provisioning default (<code>fleet:agent</code>).</FieldHint>
+                    <input className="config-input" value={configEdits.image} onChange={e => onEditsChange({ image: e.target.value })} placeholder="e.g. fleet:agent (leave blank for default)" />
+                  </div>
+                  <div className="config-field">
+                    <label className="config-label">Memory (MB)</label>
+                    <input className="config-input config-input-short" type="number" min={128} value={configEdits.memoryLimitMb} onChange={e => onEditsChange({ memoryLimitMb: e.target.value })} />
+                  </div>
+                  <div className="config-field">
+                    <label className="config-label">Work Dir</label>
+                    <FieldHint>Working directory inside the container. Defaults to <code>/workspace</code>.</FieldHint>
+                    <input className="config-input" value={configEdits.workDir} onChange={e => onEditsChange({ workDir: e.target.value })} placeholder="/workspace" />
+                  </div>
+                  {isClaude && (
+                  <div className="config-field">
+                    <label className="config-label">Permission Mode <span className="config-provider-badge">Claude only</span></label>
+                    <FieldHint>Controls which file operations Claude can perform without prompting. <code>acceptEdits</code> = auto-accept file edits; <code>bypassPermissions</code> = all operations auto-approved; <code>default</code> = ask for each.</FieldHint>
+                    <select className="config-input" value={configEdits.permissionMode} onChange={e => onEditsChange({ permissionMode: e.target.value })}>
+                      {CLAUDE_PERMISSION_MODES.map(m => <option key={m} value={m}>{m}</option>)}
+                    </select>
+                  </div>
+                  )}
+                  {isClaude && (
+                  <div className="config-field">
+                    <label className="config-label">Max Turns <span className="config-provider-badge">Claude only</span></label>
+                    <FieldHint>Maximum conversation turns before Claude stops. Prevents runaway tasks.</FieldHint>
+                    <input className="config-input config-input-short" type="number" min={1} value={configEdits.maxTurns} onChange={e => onEditsChange({ maxTurns: e.target.value })} />
+                  </div>
+                  )}
+                  <div className="config-field">
+                    <label className="config-label">Warmup Timeout (s)</label>
+                    <FieldHint>Seconds the startup warmup ping may run before giving up (10–600). Default <code>60</code>; slow local-model cold starts may need <code>180</code>. Takes effect on the next reprovision.</FieldHint>
+                    <input className="config-input config-input-short" type="number" min={10} max={600} step={1} value={configEdits.warmupTimeoutSeconds} onChange={e => onEditsChange({ warmupTimeoutSeconds: e.target.value })} />
+                  </div>
+                  {isClaude && (
+                  <div className="config-field">
+                    <label className="config-label">JSON Schema <span className="config-provider-badge">Claude only</span></label>
+                    <FieldHint>JSON schema passed via <code>--json-schema</code> flag. Forces Claude to return structured output matching the schema. Leave blank to disable.</FieldHint>
+                    <textarea className="config-textarea" value={configEdits.jsonSchema} onChange={e => onEditsChange({ jsonSchema: e.target.value })} placeholder='JSON schema for --json-schema flag (leave blank to disable)' rows={3} />
+                  </div>
+                  )}
+                  {isClaude && (
+                  <div className="config-field">
+                    <label className="config-label">Agents JSON <span className="config-provider-badge">Claude only</span></label>
+                    <FieldHint>JSON config passed via <code>--agents</code> flag to enable Claude's built-in subagent capabilities. Leave blank to disable.</FieldHint>
+                    <textarea className="config-textarea" value={configEdits.agentsJson} onChange={e => onEditsChange({ agentsJson: e.target.value })} placeholder='JSON for --agents flag (leave blank to disable)' rows={3} />
+                  </div>
+                  )}
+                  <div className="config-section-label">Networks</div>
+                  <div className="config-field">
+                    <FieldHint>Docker networks the container joins. Agents must share a network to reach each other and internal services (e.g. <code>fleet-net</code>).</FieldHint>
+                    <input className="config-input" value={configEdits.networks} onChange={e => onEditsChange({ networks: e.target.value })} placeholder="comma-separated network names" />
+                  </div>
+                  <div className="config-section-label">Env Refs</div>
+                  <div className="config-field">
+                    <FieldHint>Names of <code>.env</code> keys to inject into the container as environment variables. Store key names only — not values (e.g. <code>TELEGRAM_BOT_TOKEN,GITHUB_APP_ID</code>).</FieldHint>
+                    <input className="config-input" value={configEdits.envRefs} onChange={e => onEditsChange({ envRefs: e.target.value })} placeholder="comma-separated env key names" />
+                  </div>
+                  <div className="config-field">
+                    <label className="config-field config-field-checkbox">
+                      <input type="checkbox" checked={configEdits.mountDockerSock} onChange={e => onEditsChange({ mountDockerSock: e.target.checked })} />
+                      <span className="config-label">Mount Docker socket</span>
+                    </label>
+                    <FieldHint>Grants the agent access to the host Docker daemon — required for agents that manage containers. Leave off unless the agent needs Docker access (grants host-root).</FieldHint>
+                  </div>
+                  {(isClaude || isCodex) && (
+                  <div className="config-field">
+                    <label className="config-label">Extra harness settings <span className="config-provider-badge">Claude + Codex</span></label>
+                    <FieldHint>Overrides the per-mode harness defaults shown in Model &amp; runtime → Effective settings. Allowlisted settings only, one per line; anything else is refused on save with the line and the reason. <strong>Takes effect on reprovision.</strong> See <code>docs/providers/harness-defaults.md</code>.</FieldHint>
+                    <textarea className="config-textarea config-textarea-mono" value={configEdits.harnessExtra} onChange={e => onEditsChange({ harnessExtra: e.target.value })} placeholder={harnessExtraPlaceholder(provider)} rows={4} spellCheck={false} />
+                    {harnessExtraError && <div className="config-feedback config-feedback-error">{harnessExtraError}</div>}
+                  </div>
+                  )}
+                </SectionPanel>
               </div>
-
-              <div className="config-actions">
-                <button className="config-save-btn" disabled={configSaveState === 'saving'} onClick={() => onSave(false)}>
-                  {configSaveState === 'saving' ? '…' : 'Save'}
-                </button>
-                <button
-                  className={`config-save-reprovision-btn${configReprovisionConfirm ? ' confirming' : ''}`}
-                  disabled={configSaveState === 'saving'}
-                  onClick={() => { if (configReprovisionConfirm) { onSave(true) } else { onReprovisionConfirmToggle() } }}
-                >
-                  {configReprovisionConfirm ? 'confirm reprovision?' : 'Save & Reprovision'}
-                </button>
-                {(configSaveState === 'success' || configSaveState === 'error') && (
-                  <span className={`config-feedback config-feedback-${configSaveState}`}>{configSaveMsg}</span>
-                )}
-              </div>
-            </>
-          )}
-          {!configLoading && configSaveState === 'error' && !configData && (
-            <div className="config-feedback config-feedback-error">{configSaveMsg}</div>
-          )}
-        </div>
+            </div>
+            <div className="config-modal-footer">
+                <div className="config-actions">
+                  <button className="config-save-btn" disabled={configSaveState === 'saving'} onClick={() => onSave(false)}>
+                    {configSaveState === 'saving' ? '…' : 'Save'}
+                  </button>
+                  <button
+                    className={`config-save-reprovision-btn${configReprovisionConfirm ? ' confirming' : ''}`}
+                    disabled={configSaveState === 'saving'}
+                    onClick={() => { if (configReprovisionConfirm) { onSave(true) } else { onReprovisionConfirmToggle() } }}
+                  >
+                    {configReprovisionConfirm ? 'confirm reprovision?' : 'Save & Reprovision'}
+                  </button>
+                  {(configSaveState === 'success' || configSaveState === 'error') && (
+                    <span className={`config-feedback config-feedback-${configSaveState}`}>{configSaveMsg}</span>
+                  )}
+                </div>
+            </div>
+          </>
+        )}
+        {!configLoading && configSaveState === 'error' && !configData && (
+          <div className="config-modal-body"><div className="config-feedback config-feedback-error">{configSaveMsg}</div></div>
+        )}
       </div>
     </div>
   )

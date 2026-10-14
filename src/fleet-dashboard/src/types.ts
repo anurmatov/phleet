@@ -203,6 +203,8 @@ export interface AgentConfig {
   contextWindow?: number | null
   /** Pi's image input (#455). Stored for every provider, applied only to Pi; an older orchestrator omits it. */
   piImageInput?: boolean
+  /** The one per-agent harness override (#460), verbatim, or null. Claude and Codex only. */
+  harnessExtra?: string | null
   tools: { toolName: string; isEnabled: boolean }[]
   projects: string[]
   mcpEndpoints: McpEndpointEntry[]
@@ -267,7 +269,23 @@ export interface ConfigEdits {
   contextWindow: string
   /** Pi's image input (#455). Kept across provider switches; sent only while the provider is Pi. */
   piImageInput: boolean
+  /** Extra harness settings (#460), '' for none. Sent only when it differs from the loaded value. */
+  harnessExtra: string
   instructions: { name: string; loadOrder: number }[]
+}
+
+/** GET /api/agents/{name}/effective-harness (#460): the computed plan and the running agent's report. */
+export interface EffectiveHarness {
+  agent: string
+  provider: 'claude' | 'codex'
+  mode: 'cloud' | 'local'
+  codex: { configToml: string; threadConfig: Record<string, string | number | boolean> } | null
+  claude: { args: string[]; env: { name: string; value: string }[] } | null
+  extra: { state: 'none' | 'applied' | 'ignored'; reason: string | null; replaced: string[]; notes?: string[] }
+  planSha256: string
+  computedPlanSha256: string
+  startedPlanSha256: string | null
+  pendingReprovision: boolean
 }
 
 /** The two local servers codex routes on (`ollama/<tag>`, `lmstudio/<tag>`). */

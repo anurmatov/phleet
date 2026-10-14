@@ -113,8 +113,10 @@ export const ADVANCED_DEFAULTS: Record<string, string | number | boolean | null>
   outputStyle: null,
 }
 
-export function countCustomized(config: Record<string, unknown>): number {
+/** How many advanced fields differ from their defaults; only the fields in `keys` when given. */
+export function countCustomized(config: Record<string, unknown>, keys?: readonly string[]): number {
   return Object.entries(ADVANCED_DEFAULTS).filter(([key, defaultVal]) => {
+    if (keys && !keys.includes(key)) return false
     const current = config[key]
     // Treat empty string and null as equivalent for nullable fields
     if (defaultVal === null) return current !== null && current !== '' && current !== undefined

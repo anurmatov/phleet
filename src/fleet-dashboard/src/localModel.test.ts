@@ -9,6 +9,8 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import * as constants from './constants.ts'
 import { LOCAL_MODEL_SUGGESTIONS, PROVIDER_DEFAULT_MODEL, PROVIDER_MODELS, PROVIDER_OPTIONS } from './constants.ts'
 import * as contextWindowModule from './contextWindow.ts'
+import * as agentConfigSections from './components/AgentConfigSections.ts'
+import * as effectiveHarness from './effectiveHarness.ts'
 import * as journalCrossChat from './journalCrossChat.ts'
 import * as localModel from './localModel.ts'
 import {
@@ -498,6 +500,8 @@ const AgentConfigModal = loadComponent('./components/AgentConfigModal.tsx', {
   '../utils': { apiFetch: () => new Promise(() => {}) }, './ModelSelector': stub('model-selector'),
   './FieldHint': FieldHintModule, './LocalModelFields': LocalModelFieldsModule,
   './InstructionPicker': stub('instruction-picker'), './ProjectAssignmentTable': stub('project-table'),
+  './EffectiveHarnessView': stub('effective-harness'), './AgentConfigSections': agentConfigSections,
+  '../effectiveHarness': effectiveHarness,
 }).default as React.ComponentType<Record<string, unknown>>
 const CreateAgentModal = loadComponent('./components/CreateAgentModal.tsx', {
   '../constants': constants, '../localModel': localModel, './ModelSelector': stub('model-selector'),
@@ -514,11 +518,11 @@ function configEdits(overrides: Partial<ConfigEdits>): ConfigEdits {
     codexSandboxMode: '', tools: '', projects: [], networks: '', envRefs: '', mcpEndpoints: [], telegramUsers: '',
     telegramGroups: '', canReceiveChatRequests: false, requestReceivedMessage: '', mountDockerSock: false,
     outputStyle: '', localMode: true, localBaseUrl: PI_ORIGIN, localServer: 'ollama', contextWindow: '131072',
-    piImageInput: false, instructions: [], ...overrides,
+    piImageInput: false, harnessExtra: '', instructions: [], ...overrides,
   }
 }
 
-/** The config modal with advanced settings shown (they hold Effort and the Claude/Codex-only fields). */
+/** The config modal; every section is rendered (unselected ones hidden), so all fields are in the markup. */
 function renderConfig(e: ConfigEdits): string {
   const global = globalThis as unknown as { localStorage?: unknown }
   global.localStorage = { getItem: () => 'true', setItem: () => {} }

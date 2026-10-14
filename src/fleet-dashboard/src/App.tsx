@@ -35,11 +35,11 @@ import type {
 } from './types'
 import { apiFetch, heartbeatAge } from './utils'
 import { buildSignalRequest, signalErrorMessage } from './signalRequest'
-import { projectPayload } from './projectAssignments'
 import { PROVIDER_DEFAULT_MODEL } from './constants'
 import { parseWarmupTimeoutSeconds, warmupTimeoutEditValue } from './warmupTimeout'
 import { contextWindowEditValue } from './contextWindow'
-import { createFormLocalModel, localModelEditValues, localModelSaveBody, parseEnvRefs } from './localModel'
+import { createFormLocalModel, localModelEditValues } from './localModel'
+import { configSaveBody } from './agentConfigSave'
 import AppHeader from './components/AppHeader'
 import AppFooter from './components/AppFooter'
 import Sidenav from './components/Sidenav'
@@ -864,6 +864,7 @@ export default function App() {
           outputStyle: cfg.outputStyle ?? '',
           ...localModelEditValues(cfg),
           contextWindow: contextWindowEditValue(cfg.contextWindow),
+          harnessExtra: cfg.harnessExtra ?? '',
           instructions: cfg.instructions ?? [],
         })
       })
@@ -909,20 +910,10 @@ export default function App() {
 
   function saveConfig(agentName: string, andReprovision: boolean) {
     if (!configEdits) return
-    const provider = (configEdits.provider ?? 'claude').trim()
-    // Model, local server URL (sent as `localBaseUrl` only) and context window, with the empty-URL rule;
-    // Pi also sends its image input, which every other provider omits (kept).
-    const localModel = localModelSaveBody({ ...configEdits, provider })
-    if (!localModel.ok) { setConfigSaveMsg(localModel.error); setConfigSaveState('error'); return }
-    const memoryLimitMb = parseInt(configEdits.memoryLimitMb, 10)
-    if (isNaN(memoryLimitMb) || memoryLimitMb < 128) { setConfigSaveMsg('Memory must be ≥ 128 MB'); setConfigSaveState('error'); return }
-    const maxTurns = parseInt(configEdits.maxTurns, 10)
-    const warmupTimeout = parseWarmupTimeoutSeconds(configEdits.warmupTimeoutSeconds)
-    if (!warmupTimeout.ok) { setConfigSaveMsg(warmupTimeout.error); setConfigSaveState('error'); return }
-    const tools = configEdits.tools.split(',').map(t => t.trim()).filter(Boolean)
-    const { projects } = projectPayload(configEdits)
-    const networks = configEdits.networks.split(',').map(n => n.trim()).filter(Boolean)
-    const envRefs = parseEnvRefs(configEdits.envRefs)
+    // The body is built in agentConfigSave.ts (#460 AC-D2: the same body the unsectioned dialog sent).
+    const save = configSaveBody(configEdits, configData?.harnessExtra)
+    if (!save.ok) { setConfigSaveMsg(save.error); setConfigSaveState('error'); return }
+    const projects = save.body.projects as string[]
     const newTelegramUsers = configEdits.telegramUsers.split(',').map(s => s.trim()).filter(Boolean).map(Number).filter(n => !isNaN(n))
     const newTelegramGroups = configEdits.telegramGroups.split(',').map(s => s.trim()).filter(Boolean).map(Number).filter(n => !isNaN(n))
     const prevUsers = configData?.telegramUsers ?? []
@@ -935,41 +926,7 @@ export default function App() {
     apiFetch(`/api/agents/${encodeURIComponent(agentName)}/config`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ...localModel.body,
-        memoryLimitMb,
-        isEnabled: configEdits.isEnabled,
-        image: configEdits.image,
-        permissionMode: configEdits.permissionMode,
-        maxTurns: isNaN(maxTurns) ? undefined : maxTurns,
-        workDir: configEdits.workDir,
-        proactiveIntervalMinutes: parseInt(configEdits.proactiveIntervalMinutes, 10) || 0,
-        groupListenMode: configEdits.groupListenMode,
-        groupDebounceSeconds: parseInt(configEdits.groupDebounceSeconds, 10) || 15,
-        warmupTimeoutSeconds: warmupTimeout.value,
-        shortName: configEdits.shortName,
-        displayName: configEdits.displayName,
-        showStats: configEdits.showStats,
-        prefixMessages: configEdits.prefixMessages,
-        formattingMode: configEdits.formattingMode,
-        suppressToolMessages: configEdits.suppressToolMessages,
-        telegramSendOnly: configEdits.telegramSendOnly,
-        provider: configEdits.provider,
-        effort: configEdits.effort,
-        jsonSchema: configEdits.jsonSchema,
-        agentsJson: configEdits.agentsJson,
-        autoMemoryEnabled: configEdits.autoMemoryEnabled,
-        journalEnabled: configEdits.journalEnabled,
-        journalCrossChatEnabled: configEdits.journalCrossChatEnabled,
-        codexSandboxMode: configEdits.codexSandboxMode,
-        hostPort: configEdits.hostPort ? parseInt(configEdits.hostPort, 10) : null,
-        canReceiveChatRequests: configEdits.canReceiveChatRequests,
-        requestReceivedMessage: configEdits.requestReceivedMessage || undefined,
-        mountDockerSock: configEdits.mountDockerSock,
-        outputStyle: configEdits.outputStyle,
-        tools, projects, mcpEndpoints: configEdits.mcpEndpoints, networks, envRefs,
-        instructions: configEdits.instructions.map(i => ({ instructionName: i.name, loadOrder: i.loadOrder })),
-      }),
+      body: JSON.stringify(save.body),
     })
       .then(async r => {
         if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
@@ -984,7 +941,7 @@ export default function App() {
         if (andReprovision) return apiFetch(`/api/agents/${encodeURIComponent(agentName)}/reprovision`, { method: 'POST' }).then(r2 => { if (!r2.ok) throw new Error('Reprovision failed') })
       })
       .then(() => {
-        setConfigData(prev => prev ? { ...prev, projects } : prev)
+        setConfigData(prev => prev ? { ...prev, projects, harnessExtra: configEdits.harnessExtra === '' ? null : configEdits.harnessExtra } : prev)
         setConfigSaveState('success')
         setConfigSaveMsg(andReprovision ? 'Saved & reprovisioning…' : 'Saved')
         setTimeout(() => setConfigSaveState('idle'), 4000)

@@ -36,6 +36,7 @@ internal sealed class PiStandIn
     public const string Tag = "qwen3.8-flash-next";
     public const string BaseUrl = "http://inference-host:8000";
     public const int ContextWindow = 131072;
+    public const string PopplerVersion = "24.02.0";
 
     /// <summary>The session file the stand-in reports. Never created on disk unless a test does.</summary>
     public string SessionFile { get; set; } = "/workspace/example/.pi/sessions/s-1.jsonl"; // hygiene-ok: corpus path
@@ -61,6 +62,12 @@ internal sealed class PiStandIn
     public Func<PiStandInProcess, JsonObject, Task>? OnSteer { get; set; }
     public Func<PiStandInProcess, JsonObject, Task>? OnAbort { get; set; }
     public Func<PiStandInProcess, JsonObject, Task>? OnBash { get; set; }
+
+    /// <summary>
+    /// While set and not completed, a stdin write blocks before any byte reaches the stand-in: a
+    /// Pi that stopped reading its stdin (#455 §3.5).
+    /// </summary>
+    public TaskCompletionSource? StdinGate { get; set; }
 
     public IReadOnlyList<PiStandInProcess> Processes
     {
@@ -172,7 +179,10 @@ internal sealed class PiStandIn
         IReadOnlyDictionary<string, string>? environment = null,
         string? effort = "",
         IEnumerable<string>? allowedTools = null,
-        ILogger<PiExecutor>? logger = null)
+        ILogger<PiExecutor>? logger = null,
+        bool imageInput = false,
+        IPiLocalTools? localTools = null,
+        TimeSpan? commandDeadline = null)
     {
         var options = Options.Create(new AgentOptions
         {
@@ -185,6 +195,7 @@ internal sealed class PiStandIn
             ContextWindow = ContextWindow,
             Effort = effort,
             AllowedTools = (allowedTools ?? ["mcp__fleet-memory__memory_get", "mcp__fleet-temporal__notify_cto"]).ToList(),
+            PiImageInput = imageInput,
         });
 
         return new PiExecutor(
@@ -197,6 +208,9 @@ internal sealed class PiStandIn
                 ProcessStarter = Start,
                 BaseEnvironment = environment ?? new Dictionary<string, string> { ["PATH"] = "/usr/bin:/bin" },
                 VersionProbe = _ => Task.FromResult<string?>(PiLocalModel.PinnedVersion),
+                PopplerVersionProbe = _ => Task.FromResult<string?>(PopplerVersion),
+                LocalTools = localTools ?? new FakePiLocalTools(),
+                CommandProcessingDeadline = commandDeadline ?? PiLocalModel.CommandProcessingDeadline,
                 Timings = timings ?? FastTimings,
             });
     }
@@ -221,7 +235,8 @@ internal sealed class PiStandIn
 internal sealed class PiStandInProcess : IPiProcess
 {
     private readonly PiStandIn _owner;
-    private readonly Pipe _stdin = new();
+    // No backpressure: an image frame (~8.5 MB) is one line the reader can only consume whole.
+    private readonly Pipe _stdin = new(new PipeOptions(pauseWriterThreshold: 0));
     private readonly Pipe _stdout = new();
     private readonly Pipe _stderr = new();
     private readonly SemaphoreSlim _emitLock = new(1, 1);
@@ -240,7 +255,7 @@ internal sealed class PiStandInProcess : IPiProcess
         Index = index;
         _stdoutStream = _stdout.Reader.AsStream();
         _stderrReader = new StreamReader(_stderr.Reader.AsStream(), Encoding.UTF8);
-        _stdinStream = new BrokenPipeStream(_stdin.Writer, () => HasExited);
+        _stdinStream = new BrokenPipeStream(_stdin.Writer, () => HasExited, () => owner.StdinGate?.Task);
     }
 
     /// <summary>0 for the first process the stand-in started.</summary>
@@ -405,7 +420,7 @@ internal sealed class PiStandInProcess : IPiProcess
         RespondAsync(prompt, new JsonObject { ["disposition"] = disposition });
 
     /// <summary>A stdin stream that fails like a closed pipe once the process has gone.</summary>
-    private sealed class BrokenPipeStream(PipeWriter writer, Func<bool> exited) : Stream
+    private sealed class BrokenPipeStream(PipeWriter writer, Func<bool> exited, Func<Task?> gate) : Stream
     {
         public override bool CanRead => false;
         public override bool CanSeek => false;
@@ -429,6 +444,10 @@ internal sealed class PiStandInProcess : IPiProcess
 
         public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
         {
+            if (exited())
+                throw new IOException("Broken pipe");
+            if (gate() is { } blocked)
+                await blocked.WaitAsync(cancellationToken);
             if (exited())
                 throw new IOException("Broken pipe");
             await writer.WriteAsync(buffer, cancellationToken);

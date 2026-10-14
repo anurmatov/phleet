@@ -90,6 +90,14 @@ public sealed class AgentOptions
     public string? PiBaseUrl { get; set; }
 
     /// <summary>
+    /// Provider <c>pi</c> only (#455): the model accepts images. <c>models.json</c> then declares
+    /// <c>["text","image"]</c> and <see cref="Services.PiExecutor"/> sends image bytes (and scanned PDF
+    /// pages) on every path, within Fleet's own bounds. False, the default, keeps today's honest
+    /// omission note. The orchestrator writes the key only when true; reprovision-only.
+    /// </summary>
+    public bool PiImageInput { get; set; }
+
+    /// <summary>
     /// Every instruction assigned to this agent, as <c>roles/</c> directory names, already in the
     /// orchestrator's load order (#309).
     /// </summary>

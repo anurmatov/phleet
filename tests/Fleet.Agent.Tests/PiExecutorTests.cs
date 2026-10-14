@@ -44,13 +44,20 @@ public sealed class PiExecutorTests
             PiExecutorTimings? timings = null,
             IReadOnlyDictionary<string, string>? environment = null,
             string? effort = "",
-            Action<PiStandIn>? arrange = null)
+            Action<PiStandIn>? arrange = null,
+            bool imageInput = false,
+            FakePiLocalTools? tools = null,
+            TimeSpan? commandDeadline = null)
         {
-            var rig = new Rig();
+            var rig = new Rig { Tools = tools ?? new FakePiLocalTools() };
             arrange?.Invoke(rig.Pi);
-            rig.Executor = rig.Pi.CreateExecutor(rig.WorkDir, rig.AgentDir, timings, environment, effort, logger: rig.Logger);
+            rig.Executor = rig.Pi.CreateExecutor(rig.WorkDir, rig.AgentDir, timings, environment, effort, logger: rig.Logger,
+                imageInput: imageInput, localTools: rig.Tools, commandDeadline: commandDeadline);
             return rig;
         }
+
+        /// <summary>The fake ffmpeg and poppler the executor's attachment processing calls (#455).</summary>
+        public FakePiLocalTools Tools { get; private init; } = null!;
 
         /// <summary>A real session file on disk, reported by the stand-in.</summary>
         public string CreateSessionFile()
@@ -62,12 +69,13 @@ public sealed class PiExecutorTests
         }
 
         public async Task<List<AgentProgress>> RunTurnAsync(
-            string task = "hello", IReadOnlyList<MessageImage>? images = null, CancellationToken ct = default)
+            string task = "hello", IReadOnlyList<MessageImage>? images = null, CancellationToken ct = default,
+            IReadOnlyList<MessageDocument>? documents = null)
         {
             using var guard = CancellationTokenSource.CreateLinkedTokenSource(ct);
             guard.CancelAfter(TimeSpan.FromSeconds(60));
             var progress = new List<AgentProgress>();
-            await foreach (var item in Executor.ExecuteAsync(task, images, ct: guard.Token))
+            await foreach (var item in Executor.ExecuteAsync(task, images, documents, guard.Token))
                 progress.Add(item);
             return progress;
         }
@@ -261,7 +269,7 @@ public sealed class PiExecutorTests
         Assert.Equal(0, process.Kills);
         Assert.Contains(rig.Messages(LogLevel.Information), m =>
             m == $"pi start: version 1.0.4 model {PiStandIn.Tag} server {PiStandIn.BaseUrl} context 131072 "
-               + "reserve 16384 tail 8192 summaryMax 1280 thinking on session new");
+               + $"reserve 16384 tail 8192 summaryMax 1280 thinking on session new images off poppler {PiStandIn.PopplerVersion}");
     }
 
     [Fact]
@@ -800,7 +808,7 @@ public sealed class PiExecutorTests
 
         await rig.RunTurnAsync();
         Assert.False(HasSession(rig.Pi.Starts[1], out _));
-        Assert.Contains(rig.Messages(LogLevel.Information), m => m.EndsWith("session new", StringComparison.Ordinal));
+        Assert.Contains(rig.Messages(LogLevel.Information), m => m.Contains("session new images off", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -833,7 +841,7 @@ public sealed class PiExecutorTests
         Assert.True(HasSession(rig.Pi.Starts[1], out var file));
         Assert.Equal(sessionFile, file);
         Assert.True(File.Exists(sessionFile));
-        Assert.Contains(rig.Messages(LogLevel.Information), m => m.EndsWith("session resumed", StringComparison.Ordinal));
+        Assert.Contains(rig.Messages(LogLevel.Information), m => m.Contains("session resumed images off", StringComparison.Ordinal));
     }
 
     [Fact]

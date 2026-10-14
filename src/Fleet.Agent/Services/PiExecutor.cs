@@ -68,6 +68,8 @@ public sealed class PiExecutor : IAgentExecutor
     private readonly ILogger<PiExecutor> _logger;
     private readonly PiExecutorSettings _settings;
     private readonly PiExecutorTimings _timings;
+    private readonly IPiLocalTools _localTools;
+    private readonly PiAttachments _attachments;
 
     // _turnLock serialises turns (ExecuteAsync, ReadInjectedTurnAnswersAsync). _lifecycleLock
     // serialises starting and stopping the process, so /stop cannot interleave with a start.
@@ -79,6 +81,8 @@ public sealed class PiExecutor : IAgentExecutor
     private string? _sessionFile;
     private string? _sessionId;
     private string? _piVersion;
+    private string? _popplerVersion;
+    private int _sessionOverLimit;
     private volatile bool _restartRequested;
     private long _nextId;
     private DateTimeOffset _lastActivity = DateTimeOffset.MinValue;
@@ -105,6 +109,8 @@ public sealed class PiExecutor : IAgentExecutor
         _logger = logger;
         _settings = settings;
         _timings = settings.Timings;
+        _localTools = settings.LocalTools ?? new PiLocalTools();
+        _attachments = new PiAttachments(_localTools, new PiPdfExtractor(_localTools, logger), logger);
     }
 
     public string? LastSessionId
@@ -158,9 +164,9 @@ public sealed class PiExecutor : IAgentExecutor
             while (_lateAnswers.TryDequeue(out var stale))
                 yield return AsRecovered(stale);
 
-            // Documents keep the PromptAssembler path (their paths are already in the text, and
-            // Pi's read tool opens them); images are not sent to a text-only model.
-            var message = WithMediaFallback(task, images);
+            // #455: images within Fleet's bounds (image input only) and PDF text, before the frame
+            // write and outside the ack timer. Other documents keep the PromptAssembler path hint.
+            var prepared = await PrepareAttachmentsAsync(task, images, documents, ct);
 
             var (gen, startFailure) = await TryStartAsync(ct);
             if (gen is null)
@@ -198,8 +204,8 @@ public sealed class PiExecutor : IAgentExecutor
             }
 
             // Step 2: send the prompt; DriveAsync waits for its ack and maps the run.
-            var run = new RunState(live: true);
-            var ackId = await SendPromptAsync(gen, message, ct);
+            var run = new RunState(live: true) { ImagesSent = prepared.Images.Count };
+            var ackId = await SendPromptAsync(gen, prepared, ct);
             if (ackId is null)
             {
                 yield return ProcessExited(gen, run);
@@ -219,6 +225,12 @@ public sealed class PiExecutor : IAgentExecutor
     /// Steers the live run (A11). No live run, or its answer already seen → <c>NoActiveTurn</c>, and
     /// TaskManager queues the message. Otherwise <c>steer</c>; no response within 2 s → <c>Failed</c>.
     /// </summary>
+    /// <remarks>
+    /// #455 §3.4: attachments are processed (up to the command deadline) between the first liveness
+    /// check and the write, so the check runs again after processing: the same generation must
+    /// still be the live one, alive, running and unanswered, or nothing is written and the message
+    /// queues as a prompt (its PDF text then comes from the extraction cache).
+    /// </remarks>
     public async Task<MidTurnInjectionResult> TryInjectMessageAsync(
         string task,
         IReadOnlyList<MessageImage>? images = null,
@@ -231,9 +243,24 @@ public sealed class PiExecutor : IAgentExecutor
         if (_finalSeen)
             return MidTurnInjectionResult.NoActiveTurn("Pi has already produced this run's answer.");
 
+        PiPreparedCommand prepared;
         try
         {
-            var response = await RequestAsync(gen, Command("steer", ("message", WithMediaFallback(task, images))),
+            prepared = await PrepareAttachmentsAsync(task, images, documents, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            return MidTurnInjectionResult.Failed("The steer was cancelled while its attachments were prepared.");
+        }
+
+        if (!ReferenceEquals(_liveGeneration, gen) || !gen.IsAlive || !_runActive)
+            return MidTurnInjectionResult.NoActiveTurn("Pi's run ended while the attachments were prepared.");
+        if (_finalSeen)
+            return MidTurnInjectionResult.NoActiveTurn("Pi produced this run's answer while the attachments were prepared.");
+
+        try
+        {
+            var response = await RequestAsync(gen, WithImages(Command("steer", ("message", prepared.Message)), prepared),
                 _timings.Steer, ct);
             if (IsSuccess(response))
             {
@@ -453,7 +480,7 @@ public sealed class PiExecutor : IAgentExecutor
         {
             PiRuntimeFiles.WriteAll(
                 _settings.AgentDir, _config.PiBaseUrl!, _config.Model, _config.ContextWindow!.Value, _config.AllowedTools,
-                _settings.McpConfigPath);
+                _settings.McpConfigPath, _config.PiImageInput);
         }
         catch (PiRuntimeFileWriteException ex)
         {
@@ -518,12 +545,14 @@ public sealed class PiExecutor : IAgentExecutor
             ApplySessionState(gen, state, force: true);
 
             var version = await GetPiVersionAsync(ct);
+            var poppler = await GetPopplerVersionAsync(ct);
             _logger.LogInformation(
                 "pi start: version {Version} model {Model} server {Origin} context {ContextWindow} reserve {Reserve} "
-                + "tail {Tail} summaryMax {SummaryMax} thinking {Thinking} session {Session}",
+                + "tail {Tail} summaryMax {SummaryMax} thinking {Thinking} session {Session} images {Images} poppler {Poppler}",
                 version, _config.Model, _config.PiBaseUrl, _config.ContextWindow, PiLocalModel.ReserveTokens,
                 PiLocalModel.KeepRecentTokens, PiLocalModel.SummaryMaxTokens,
-                _config.Effort == "off" ? "off" : "on", resume is null ? "new" : "resumed");
+                _config.Effort == "off" ? "off" : "on", resume is null ? "new" : "resumed",
+                _config.PiImageInput ? "on" : "off", poppler);
             return gen;
         }
         catch
@@ -659,6 +688,40 @@ public sealed class PiExecutor : IAgentExecutor
         }
     }
 
+    /// <summary>The installed poppler version for the start line, once per process; "unavailable" without it.</summary>
+    private async Task<string> GetPopplerVersionAsync(CancellationToken ct)
+    {
+        if (_popplerVersion is { } known)
+            return known;
+
+        if (_settings.PopplerVersionProbe is { } probe)
+            return _popplerVersion = await probe(ct) ?? "unavailable";
+
+        var result = await _localTools.RunAsync(
+            PiPdfExtractor.PdfToText, ["-v"], new PiProcessingBudget(_timings.VersionProbe), 4096, ct);
+        var output = Encoding.UTF8.GetString(result.Stdout) + "\n" + result.StderrTail;
+        var line = output.Split('\n').FirstOrDefault(l => l.StartsWith("pdftotext version ", StringComparison.Ordinal));
+        return _popplerVersion = line is null ? "unavailable" : line["pdftotext version ".Length..].Trim();
+    }
+
+    /// <summary>§3.2–§3.4 for one command; the line it logs carries counts and reason names only.</summary>
+    private Task<PiPreparedCommand> PrepareAttachmentsAsync(
+        string task, IReadOnlyList<MessageImage>? images, IReadOnlyList<MessageDocument>? documents,
+        CancellationToken ct) =>
+        _attachments.PrepareAsync(task, images, documents, _config.PiImageInput, _settings.CommandProcessingDeadline, ct);
+
+    /// <summary>The command with <c>images</c> when there are any; without, its bytes are exactly the pre-#455 frame.</summary>
+    private static JsonObject WithImages(JsonObject command, PiPreparedCommand prepared)
+    {
+        if (prepared.Images.Count == 0)
+            return command;
+        var images = new JsonArray();
+        foreach (var image in prepared.Images)
+            images.Add(image.ToJson());
+        command["images"] = images;
+        return command;
+    }
+
     // ── The run loop ─────────────────────────────────────────────────────────
 
     /// <summary>
@@ -666,13 +729,13 @@ public sealed class PiExecutor : IAgentExecutor
     /// into the event channel rather than a pending request, so it is read in stdout order: a fast
     /// run's events can never be consumed before the ack that starts it.
     /// </summary>
-    private static async Task<string?> SendPromptAsync(Generation gen, string message, CancellationToken ct)
+    private async Task<string?> SendPromptAsync(Generation gen, PiPreparedCommand prepared, CancellationToken ct)
     {
         var id = $"fleet-prompt-{Guid.NewGuid():N}";
         gen.PromptAckId = id;
         try
         {
-            await WriteAsync(gen, Command("prompt", ("message", message)).WithId(id), ct);
+            await WriteAsync(gen, WithImages(Command("prompt", ("message", prepared.Message)), prepared).WithId(id), ct);
             return id;
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException)
@@ -937,6 +1000,19 @@ public sealed class PiExecutor : IAgentExecutor
                 return null;
             }
 
+            case "message_start":
+                // §3.6: Pi drops an image it cannot normalize (photon) and inserts a hint instead.
+                if (run.ImagesSent > 0 && !run.ImageEchoChecked && json["message"] is JsonObject echoed
+                    && Str(echoed, "role") == "user")
+                {
+                    run.ImageEchoChecked = true;
+                    var received = (echoed["content"] as JsonArray)?.Count(b => Str(b, "type") == "image") ?? 0;
+                    if (received < run.ImagesSent)
+                        _logger.LogWarning("pi images: Pi dropped {Dropped} of {Sent} image(s) on the prompt path",
+                            run.ImagesSent - received, run.ImagesSent);
+                }
+                return null;
+
             case "message_end":
                 if (json["message"] is JsonObject message && Str(message, "role") == "assistant")
                     OnAssistantMessage(gen, run, message, evt.Timestamp);
@@ -998,6 +1074,7 @@ public sealed class PiExecutor : IAgentExecutor
             case "agent_settled":
                 gen.AwaitingSettle = false;
                 run.Settled = true;
+                CheckSessionSize();
                 if (!run.Started || run.Terminal)
                     return null;
                 return run.Final is not null ? Completed(gen, run) : Failed(run);
@@ -1351,7 +1428,7 @@ public sealed class PiExecutor : IAgentExecutor
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
-            await WriteAsync(gen, Command("abort").WithId(NextId()), cts.Token);
+            await WriteAsync(gen, Command("abort").WithId(NextId()), cts.Token, deadline: TimeSpan.FromSeconds(1));
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException or OperationCanceledException
                                        or InvalidOperationException)
@@ -1465,20 +1542,74 @@ public sealed class PiExecutor : IAgentExecutor
         return command;
     }
 
-    private static async Task WriteAsync(Generation gen, JsonObject command, CancellationToken ct)
+    /// <summary>
+    /// The §3.5 write rule for every frame. Cancellation is honoured only before the write starts;
+    /// once it has, the whole frame is written and flushed under a deadline not linked to
+    /// <paramref name="ct"/>, because a cut-off JSONL frame would corrupt Pi's stdin. A write past
+    /// the deadline, or an <see cref="IOException"/>, kills the generation and throws
+    /// <see cref="IOException"/>: the turn ends with <see cref="ProcessExitText"/> and the next one resumes.
+    /// </summary>
+    private async Task WriteAsync(Generation gen, JsonObject command, CancellationToken ct, TimeSpan? deadline = null)
     {
         // JsonNode escapes every control character, so a frame never contains a raw LF.
         var bytes = Encoding.UTF8.GetBytes(command.ToJsonString() + "\n");
+        ct.ThrowIfCancellationRequested();
         await gen.WriteLock.WaitAsync(ct);
         try
         {
-            await gen.Process.StandardInput.WriteAsync(bytes, ct);
-            await gen.Process.StandardInput.FlushAsync(ct);
+            var write = WriteFrameAsync(gen.Process.StandardInput, bytes);
+            var limit = deadline ?? _timings.StdinWrite;
+            if (await Task.WhenAny(write, Task.Delay(limit)) != write)
+            {
+                _ = write.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+                _logger.LogError("pi: a stdin frame was not written within {Seconds:0} s; killing the process",
+                    limit.TotalSeconds);
+                Kill(gen);
+                throw new IOException("Pi did not read its stdin.");
+            }
+
+            try
+            {
+                await write;
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+            {
+                Kill(gen);
+                throw new IOException("Pi's stdin is closed.", ex);
+            }
         }
         finally
         {
             gen.WriteLock.Release();
         }
+    }
+
+    private static async Task WriteFrameAsync(Stream stdin, byte[] bytes)
+    {
+        await stdin.WriteAsync(bytes, CancellationToken.None);
+        await stdin.FlushAsync(CancellationToken.None);
+    }
+
+    /// <summary>§3.6: one Warning each time the session file crosses the limit; Fleet never edits or resets it.</summary>
+    private void CheckSessionSize()
+    {
+        string? file;
+        lock (_stateLock)
+            file = _sessionFile;
+
+        long length;
+        try
+        {
+            length = file is not null && File.Exists(file) ? new FileInfo(file).Length : 0;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return;
+        }
+
+        var over = length > PiLocalModel.SessionFileWarningBytes ? 1 : 0;
+        if (Interlocked.Exchange(ref _sessionOverLimit, over) == 0 && over == 1)
+            _logger.LogWarning("pi session file is {MiB} MiB; /reset starts a new one", length / (1024 * 1024));
     }
 
     /// <summary>Sends a command and waits for its response. A timeout throws <see cref="TimeoutException"/>.</summary>
@@ -1688,9 +1819,6 @@ public sealed class PiExecutor : IAgentExecutor
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private static string WithMediaFallback(string task, IReadOnlyList<MessageImage>? images) =>
-        images is { Count: > 0 } ? $"{task}\n\n{ImagesOmittedText(images.Count)}" : task;
-
     private static bool IsSuccess(JsonNode? response) => Bool(response, "success") == true;
 
     private static string Bounded(string? text) =>
@@ -1806,6 +1934,8 @@ public sealed class PiExecutor : IAgentExecutor
         public string? LastError;
         public bool OverflowRecoveryFailed;
         public bool OverflowCompacted;
+        public int ImagesSent;
+        public bool ImageEchoChecked;
 
         public List<AgentProgress> TakeOutput()
         {
@@ -1886,6 +2016,15 @@ internal sealed class PiExecutorSettings
 
     /// <summary>The Pi version for the start line; null runs <c>pi --version</c> once.</summary>
     public Func<CancellationToken, Task<string?>>? VersionProbe { get; init; }
+
+    /// <summary>The poppler version for the start line; null runs <c>pdftotext -v</c> once (#455).</summary>
+    public Func<CancellationToken, Task<string?>>? PopplerVersionProbe { get; init; }
+
+    /// <summary>The isolated runner for ffmpeg and poppler; null is the real one (#455 §3.3).</summary>
+    public IPiLocalTools? LocalTools { get; init; }
+
+    /// <summary>One deadline for all local processing of a command (#455 §3.6).</summary>
+    public TimeSpan CommandProcessingDeadline { get; init; } = PiLocalModel.CommandProcessingDeadline;
 }
 
 /// <summary>Every deadline the executor keeps, injectable so the tests run in seconds (A14, A14b).</summary>
@@ -1902,6 +2041,9 @@ internal sealed record PiExecutorTimings
     public TimeSpan CompactionWarning { get; init; } = TimeSpan.FromSeconds(60);
     public TimeSpan PostCompactionTtftWarning { get; init; } = TimeSpan.FromSeconds(65);
     public TimeSpan VersionProbe { get; init; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>§3.5: a started stdin frame must be written and flushed within this, or the process is killed.</summary>
+    public TimeSpan StdinWrite { get; init; } = TimeSpan.FromSeconds(30);
 }
 
 /// <summary>The Pi child as the executor uses it: three streams, an exit check and a kill.</summary>

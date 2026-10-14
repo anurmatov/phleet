@@ -54,15 +54,21 @@ public static class PiRuntimeFiles
 
     /// <summary>
     /// <c>models.json</c>: one provider, <see cref="PiLocalModel.ProviderId"/>, speaking Anthropic
-    /// Messages at <paramref name="baseUrl"/>, with one text-only model.
+    /// Messages at <paramref name="baseUrl"/>, with one model: text-only, or text and image when
+    /// <paramref name="imageInput"/> (#455). Off, the bytes are exactly those before #455.
     /// </summary>
     /// <remarks>
     /// <paramref name="apiKey"/> is <see cref="ClaudeLocalModel.PlaceholderAuthToken"/>, a public
     /// non-secret literal; the parameter exists so the generator's refusal can be tested (A32).
     /// </remarks>
     public static string BuildModelsJson(
-        string baseUrl, string tag, int contextWindow, string apiKey = ClaudeLocalModel.PlaceholderAuthToken)
+        string baseUrl, string tag, int contextWindow, string apiKey = ClaudeLocalModel.PlaceholderAuthToken,
+        bool imageInput = false)
     {
+        var input = new JsonArray { "text" };
+        if (imageInput)
+            input.Add("image");
+
         if (DescribeApiKeyFault(apiKey) is { } fault)
             throw new InvalidOperationException(fault);
 
@@ -87,7 +93,7 @@ public static class PiRuntimeFiles
                             ["id"] = tag,
                             ["name"] = tag,
                             ["reasoning"] = true,
-                            ["input"] = new JsonArray { "text" },
+                            ["input"] = input,
                             ["contextWindow"] = contextWindow,
                             ["maxTokens"] = PiLocalModel.ModelMaxTokens,
                             ["cost"] = new JsonObject
@@ -231,7 +237,7 @@ public static class PiRuntimeFiles
     /// </summary>
     public static void WriteAll(
         string agentDir, string baseUrl, string tag, int contextWindow, IEnumerable<string> allowedTools,
-        string mcpConfigPath = PiLocalModel.McpConfigPath)
+        string mcpConfigPath = PiLocalModel.McpConfigPath, bool imageInput = false)
     {
         // Whatever the model's shell wrote into Pi's credential files does not survive a restart.
         foreach (var name in new[] { AuthFileName, McpAuthFileName })
@@ -249,7 +255,7 @@ public static class PiRuntimeFiles
 
         var files = new (string Name, string Content)[]
         {
-            (ModelsFileName, BuildModelsJson(baseUrl, tag, contextWindow)),
+            (ModelsFileName, BuildModelsJson(baseUrl, tag, contextWindow, imageInput: imageInput)),
             (SettingsFileName, BuildSettingsJson()),
             (ExtensionConfigFileName, BuildExtensionConfigJson(allowedTools, mcpConfigPath)),
         };

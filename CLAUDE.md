@@ -272,8 +272,16 @@ applies on reprovision. `--tools` extras only add names, never narrow. `GET
 `computedPlanSha256`, `startedPlanSha256` (from registration/heartbeat `PlanSha256`) and
 `pendingReprovision`. Provisioning writes `.generated/codex-root.toml` for codex agents before
 container create and mounts it read-only at `/app/codex-root.toml` (`HarnessDefaults.CodexRootTomlContainerPath`).
-Executors, `entrypoint.sh` and the sha report ship in the agent-image PR; until then agents ignore the
-field and the file. See `docs/providers/harness-defaults.md`.
+The agent's `AgentHarness` builds the same plan once at startup (log line `harness: mode=… plan=… extra=…`);
+`ClaudeExecutor` appends its args and child env, `CodexExecutor` merges its thread config without
+overwriting existing keys, `entrypoint.sh` writes `codex-root.toml` before the `[mcp_servers.*]` tables
+(a missing file WARNs and keeps the MCP tables), and heartbeats carry `PlanSha256`. ⚠️ The agent's
+`AllowedTools` always starts with the six baked file tools — the config binder appends the generated
+list to the `AgentOptions` default — so the orchestrator prepends them too
+(`HarnessDefaults.AgentDefaultAllowedTools`); `--tools` silently ignores unknown names, and `KeptTools`
+includes `TaskStop`/`SendMessage` because an explicit list drops them. An older image ignores the field
+and the file (view: "not reported"). The dashboard dialog is sectioned and shows the effective settings
+and the `harnessExtra` textarea. See `docs/providers/harness-defaults.md`.
 
 ## Project contexts
 

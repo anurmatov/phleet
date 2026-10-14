@@ -173,6 +173,12 @@ secret; local servers ignore it. None of this is set in `.env`, the container en
 argv difference is `--effort` (§2.1); `--model <Model>` already routes the main loop. Each
 process start logs `Claude local model mode: base URL …, model …` at `Information`.
 
+**Harness defaults (#460).** The child env also gets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and
+`MAX_MCP_OUTPUT_TOKENS = clamp(ContextWindow / 16, 4000, 25000)` (omitted when the window is unset), and
+argv ends with `--tools <kept set + AllowedTools built-ins>`, `--disallowedTools WebSearch`,
+`--exclude-dynamic-system-prompt-sections` and `--strict-mcp-config`. Against a local base URL Claude
+Code turns tool search off, so MCP tools load up front. See `harness-defaults.md`.
+
 **Credential isolation — four paths closed:**
 
 | path | local mode |

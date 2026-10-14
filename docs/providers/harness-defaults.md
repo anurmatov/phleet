@@ -3,12 +3,13 @@
 Phleet passes opinionated settings to the Codex and Claude Code CLIs based only on the mode an agent
 already runs in, and lets an operator adjust them through one per-agent field. `HarnessDefaults.Build`
 (`src/Fleet.Shared/HarnessDefaults.cs`) is the only code that computes them; the orchestrator's view,
-the generated `codex-root.toml` and (from the agent-image PR) the executors all call it.
+the generated `codex-root.toml`, both executors and the agent's started-plan report all call it.
 
-> **Rollout status.** The orchestrator part ships first: it stores and validates `harnessExtra`,
-> serves `GET /api/agents/{name}/effective-harness`, writes `.generated/codex-root.toml` and mounts it.
-> An agent image without the executor and `entrypoint.sh` changes ignores the file and the field, and
-> reports no plan sha, so the view shows "not reported" until agents are recreated on the new image.
+> **Rollout status.** The orchestrator part (#462) stores and validates `harnessExtra`, serves
+> `GET /api/agents/{name}/effective-harness`, writes `.generated/codex-root.toml` and mounts it. The
+> agent image applies the plan (executors, `entrypoint.sh`) and reports its sha; the dashboard shows it.
+> An agent still on an older image ignores the file and the field and reports no sha, so the view
+> shows "not reported" until the agent is **recreated on the new image** (a restart is not enough).
 
 **Mode** is derived, never configured: **local** when the agent has a local server URL (a Codex local
 provider, or `ClaudeLocalModel.IsEnabled`), **cloud** otherwise. Hosted Codex providers (`zai/`) are cloud.
@@ -53,11 +54,33 @@ all kept.
 `--tools` rules:
 
 - **Always kept:** `Agent`, `Task` (the pinned CLI reports `Agent` as `Task`), `ToolSearch`, `Skill`,
-  `TodoWrite`; in cloud mode also `WebFetch` and `WebSearch`. One fixed constant, `HarnessDefaults.KeptTools`.
+  `TodoWrite`, `TaskStop`, `SendMessage`; in cloud mode also `WebFetch` and `WebSearch`. One fixed
+  constant, `HarnessDefaults.KeptTools`.
 - **Name rule:** an `AllowedTools` entry adds the text before its first `(` (`Bash(git *)` → `Bash`).
   `mcp__*` entries are never passed. Duplicates are removed and the names sorted, so input order never
   changes the plan.
+- **The agent's own six.** `AgentOptions.AllowedTools` defaults to `Read, Write, Edit, Bash, Glob, Grep`,
+  and the .NET configuration binder **appends** the generated list to that default rather than
+  replacing it. Every running agent's `AllowedTools` — and the `--allowedTools` it has always passed —
+  therefore starts with those six, so they are in `--tools` too (`HarnessDefaults.AgentDefaultAllowedTools`;
+  the orchestrator prepends them in `HarnessInputFor`, so its computed plan is the one the agent runs).
 - An `AllowedTools` with no built-in name gets **no** `--tools` flag: the agent keeps every built-in.
+  Because of the six above, no provisioned agent reaches this case today.
+
+**Checked on the pinned CLI 2.1.280 (AC-C2).** With no `--tools`, `-p` mode offers `Bash`, `Cron*`,
+`DesignSync`, `Edit`, `EnterWorktree`, `ExitWorktree`, `ListAgents`, `Monitor`, `NotebookEdit`,
+`PushNotification`, `Read`, `ReportFindings`, `ScheduleWakeup`, `SendMessage`, `Skill`, `Task`,
+`TaskStop`, `WebFetch`, `WebSearch`, `Workflow` and `Write`. An explicit list keeps only the names it
+gives and **silently ignores unknown ones**, so a misspelled kept name fails without an error. That is
+why `SendMessage` (continue a sub-agent) and `TaskStop` (stop a background task) are kept; the
+`TaskCreate`/`TaskList` todo tools are not in the default `-p` set and are not added. `TodoWrite` is not
+offered on this pin and `ToolSearch` only against the first-party API: with a local base URL Claude Code
+turns tool search off and loads MCP tools up front. A real cloud session with the full cloud argument
+list loaded a deferred MCP tool through `ToolSearch`, called it, and ran a background `Agent` task to
+`task_notification completed`. Every agent's offered built-in set shrinks to the kept set plus its
+`AllowedTools` built-ins: the dropped names are `Cron*`, `DesignSync`, `EnterWorktree`, `ExitWorktree`,
+`ListAgents`, `Monitor`, `NotebookEdit`, `PushNotification`, `ReportFindings`, `ScheduleWakeup` and
+`Workflow`, unless `AllowedTools` names them. `harnessExtra` `--tools` can add any of them back.
 
 ## `harnessExtra`
 
@@ -103,11 +126,15 @@ switch that would leave a stored value outside the allowlist (to pi, or to local
 **Precedence.** An extra replaces the mode default for the same Codex key, Claude flag or env name;
 otherwise it is added. `--tools` only **adds** names to the computed list and never removes one; when
 the defaults compute no `--tools` flag (the agent keeps all built-ins), an extra `--tools` line is a
-no-op. Narrowing an agent's built-ins is done through its `AllowedTools`, never through this field.
+no-op, and the plan carries a note saying so (applying it would narrow that agent). Narrowing an agent's
+built-ins is done through its `AllowedTools`, never through this field.
 
 **At start.** The agent re-runs the same validator. A stored value that no longer passes (for example a
 newer image with a narrower allowlist) is skipped as a whole with one WARN, the agent starts on the mode
-defaults, and the view shows `ignored` with the reason. Provisioning logs the same WARN once.
+defaults, and the view shows `ignored` with the reason. Provisioning logs the same WARN once. If the
+Claude CLI exits before its `system/init` while an extra is applied, the executor starts it once more on
+the mode defaults alone and logs one ERROR naming `harnessExtra`; the reported sha changes with it, so
+the view shows the agent as pending reprovision.
 
 ## `GET /api/agents/{name}/effective-harness`
 
@@ -120,12 +147,44 @@ Read-only, unauthenticated like `GET /api/agents/{name}/config`.
 | `codex.threadConfig` | the thread `config` entries, typed |
 | `claude.args`, `claude.env` | the appended arguments and the child env; `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` shown as `***` |
 | `extra.state`, `extra.reason`, `extra.replaced` | `none`/`applied`/`ignored`, why ignored, defaults the extra replaced or removed |
+| `extra.notes` | accepted lines that change nothing (an extra `--tools` on an all-tools agent) |
 | `planSha256` = `computedPlanSha256` | SHA-256 over the canonical JSON of the effective settings |
 | `startedPlanSha256` | the sha the running agent reported on registration and every heartbeat; `null` = not reported |
 | `pendingReprovision` | `true` when a started sha exists and differs from the computed one |
 
 Unknown agent → 404; pi or gemini → 404 `{"reason":"unsupported_provider"}`. The agent prints
 `harness: mode=<mode> plan=<sha256> extra=<state>` once at startup (`HarnessPlan.StartupLine`).
+
+## Agent side
+
+`AgentHarness` (`src/Fleet.Agent/Services/`) builds the plan once at startup from the agent's own
+generated config with the orchestrator's rules: mode from `Agent.AnthropicBaseUrl` (Claude) or
+`Agent.CodexOssBaseUrl` (Codex), the context window from `CLAUDE_CODE_MAX_CONTEXT_TOKENS` in the
+container env (Claude local) or `Agent.ContextWindow` (Codex local), and the bound `AllowedTools`.
+
+| consumer | what it does with the plan |
+|---|---|
+| `ClaudeExecutor` | appends `ClaudeArgs` last in `BuildArgs`; sets `ClaudeEnv` on the claude child only (local mode first removes the OAuth token and thinking overrides, then today's local entries, then the defaults) |
+| `CodexExecutor` | merges `CodexThreadConfig` into `thread/start` `config` after the hosted-provider keys and `model_context_window`, never overwriting a key already there |
+| `entrypoint.sh` | writes `/app/codex-root.toml` first into `~/.codex/config.toml`, then today's `[mcp_servers.*]` tables byte for byte; written even without `.mcp.json` |
+| heartbeat and registration | `PlanSha256` on every message; absent for gemini and pi |
+
+`entrypoint.sh` failure paths: a missing, unreadable or directory `/app/codex-root.toml` prints
+`WARN: codex-root.toml unavailable: <reason>` and the MCP tables are still written (the CLI uses its
+built-in root defaults); a failure to build or write the file prints
+`WARN: codex config.toml not written: <reason>`. `tests/entrypoint-codex/run.sh` covers each case and
+parses every result with Python's `tomllib`.
+
+## Dashboard
+
+The agent config dialog is sectioned: General, Model & runtime, Instructions & projects, Tools & MCP,
+Telegram and Advanced, each with today's "N customized" count; below 720 px the list becomes a tab row.
+Every field keeps its component, hint and validation, and the save request is the one the unsectioned
+dialog sent (`agentConfigSave.ts`, checked against a recorded fixture). Model & runtime shows the
+read-only **Effective settings** from this endpoint (Codex root TOML and thread config, Claude arguments
+and env with credentials masked, overrides marked, both shas and the pending-reprovision badge). Advanced
+has the **Extra harness settings** textarea (Claude and Codex only); a refused save shows the line and
+the reason. `harnessExtra` is sent only when the text was edited.
 
 ## Rollout and rollback
 

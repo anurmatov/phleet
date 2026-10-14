@@ -211,7 +211,8 @@ Provider `pi` (#386) runs Pi 1.0.4 (`@earendil-works/pi-coding-agent`) as a loca
 (`src/fleet-pi-extension`, baked in at `/opt/fleet-pi-extension`) with `-e`. The extension bridges
 Fleet's MCP servers under their exact `mcp__<server>__<tool>` names and replaces Pi's compaction
 summary with a request that extends the last main request. A pi agent uses the existing
-`LocalBaseUrl`, `Model`, `ContextWindow` and `Effort` columns, so there is no migration.
+`LocalBaseUrl`, `Model`, `ContextWindow` and `Effort` columns, plus `PiImageInput` (#455, migration
+`AddAgentPiImageInput`).
 `PiLocalModel` (`src/Fleet.Shared/`) holds PI1–PI5, the constants (reserve 16384, tail 8192,
 summary 1280, minimum context 65536) and the credential denylist. `AgentProviders` holds **PV1**:
 an unknown provider string is refused at write time, at provisioning, in `entrypoint.sh` and at
@@ -236,8 +237,25 @@ agent startup, instead of falling through to Claude credentials. An empty provid
 - **What is measured.** The reopen gate (G1–G4) passed once, on one synthetic run on one server.
   Fleet integration (A1–A33), the production-path canary (B), L2c and L3 have not run. Do not
   claim cache reuse, compaction timing or recall for Pi agents beyond that.
+- **Attachments (#455).** The per-agent `PiImageInput` column (default false; REST `piImageInput`,
+  MCP `pi_image_input`, dashboard "Image input", shown only for pi) is written as
+  `Agent.PiImageInput: true` only for a pi agent with it on, so every other generated file is
+  unchanged; other providers log `PiImageInput ignored for '<agent>': pi only`. On, `models.json`
+  declares `["text","image"]` and `PiAttachments` sends images on prompt and steer within Fleet's
+  bounds (sniffed JPEG/PNG/GIF/WebP, decode bound, 2 per command checked before any downscale,
+  2000 px and 3 MiB, single-threaded `ffmpeg` downscale). Every pi agent extracts PDF text with
+  poppler (`PiPdfExtractor`: `pdfinfo`, `pdftotext`, `pdftoppm` renders only with image input; copy
+  restriction read from `pdfinfo` because poppler 24.02 `pdftotext` ignores it). All four tools run
+  through `PiLocalTools`: no shell, `prlimit --as=1GiB --cpu=60 --nofile=256`, 30 s per call, one
+  60 s deadline per command, output caps, the stripped environment plus `MALLOC_ARENA_MAX=2`. A
+  steer re-checks the live run after processing; a started stdin frame is finished within 30 s or
+  the process is killed. `poppler-utils` is unpinned in the image (security fixes on rebuild) and
+  `scripts/check-attachment-tools.sh` guards the build. Fixtures come from
+  `tests/Fleet.Agent.Tests/Fixtures/attachments/generate.py`. See `docs/providers/pi.md` §8a–§8c.
 - **Rollback.** Move every pi agent off `pi` before any pin revert: `get_agent_config` must show
   no `Provider: pi`. An older orchestrator mounts Claude credentials for an unknown provider.
+  An older agent image ignores `PiImageInput` (text-only, as before); an older orchestrator
+  ignores the column, which defaults to false.
 
 See `docs/providers/pi.md`.
 
@@ -297,6 +315,7 @@ instruction permits sharing. See `docs/comms-journal.md` and
 - **Media groups** (multiple photos sent together): Telegram delivers each photo as a separate `Message` update sharing the same `MediaGroupId`. `AgentTransport` buffers all photos for a group via `MediaGroupBuffer`: it debounces 1500 ms after the last photo, then flushes a single `IncomingMessage` carrying all images. A hard cap of `TelegramOptions.MaxGroupBufferMs` (default: 10 s) force-flushes the group if photos keep trickling in.
 - **Size limits**: individual photos exceeding `MaxImageBytes` (default: 10 MB) are skipped with a Telegram reply warning. Groups exceeding `MaxImagesPerGroup` (default: 10) drop extra photos with a warning.
 - **ClaudeExecutor**: forwards all images as separate content blocks in the multi-modal Claude CLI JSON payload.
+- **PiExecutor**: sends images only when the agent's `PiImageInput` is on, within Fleet's own bounds (`docs/providers/pi.md` §8a); otherwise the turn gets a text-only note.
 - **CodexExecutor**: forwards images that have a persisted `FilePath` as `{type:"localImage",path}` entries in the app-server v2 `UserInput[]` of `turn/start`. Images without a `FilePath` (persistence disabled, size limit exceeded, or file swept before dispatch) are skipped with a per-batch warning. PDFs remain hint-only (`[document attachment: path]`).
 
 ## Telegram Media Attachments

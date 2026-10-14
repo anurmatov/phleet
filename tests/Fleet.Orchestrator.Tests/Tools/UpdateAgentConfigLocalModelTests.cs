@@ -1,13 +1,8 @@
-using System.Text.Json;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Fleet.Orchestrator.Tools;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using ModelContextProtocol.Protocol;
-using ModelContextProtocol.Server;
-using NSubstitute;
 
 namespace Fleet.Orchestrator.Tests.Tools;
 
@@ -16,9 +11,7 @@ namespace Fleet.Orchestrator.Tests.Tools;
 /// its alias <c>anthropic_base_url</c> (A1), codex local mode, the gemini refusal, and a provider
 /// switch while local, one case per direction — the MCP mirror of
 /// <c>AgentConfigEndpointsLocalModelTests</c>. #386: pi's rules (A5), switches into pi (A6) and the
-/// <c>get_agent_config</c> lines (A25). #455: <c>pi_image_input</c> through <c>create_agent</c>,
-/// <c>update_agent_config</c> (directly and through the MCP SDK's argument binding, where a
-/// non-boolean is a tool error), <c>get_agent_config</c> and <c>list_agent_configs</c>.
+/// <c>get_agent_config</c> lines (A25).
 /// </summary>
 public class UpdateAgentConfigLocalModelTests
 {
@@ -44,14 +37,14 @@ public class UpdateAgentConfigLocalModelTests
     private UpdateAgentConfigTool Tool() => new(Scopes(), new NoOpAclChangeNotifier());
 
     private void Seed(string provider, string model, string? url = null, int? window = null, string? envRef = null,
-        string? effort = null, bool piImageInput = false, string name = "agent1")
+        string? effort = null)
     {
         using var db = new OrchestratorDbContext(_options);
         db.Agents.Add(new Agent
         {
-            Name = name, DisplayName = name, Role = "test", Model = model, Provider = provider,
-            MemoryLimitMb = 1024, ContainerName = name, LocalBaseUrl = url, ContextWindow = window,
-            Effort = effort, PiImageInput = piImageInput,
+            Name = "agent1", DisplayName = "agent1", Role = "test", Model = model, Provider = provider,
+            MemoryLimitMb = 1024, ContainerName = "agent1", LocalBaseUrl = url, ContextWindow = window,
+            Effort = effort,
             EnvRefs = envRef is null ? [] : [new AgentEnvRef { EnvKeyName = envRef }],
         });
         db.SaveChanges();
@@ -349,147 +342,5 @@ public class UpdateAgentConfigLocalModelTests
 
         Assert.DoesNotContain("Effort", result);
         Assert.Equal(("claude", PiTag, (string?)PiUrl, (int?)131_072, (string?)"off"), Row());
-    }
-
-    // ── #455 A1: pi_image_input over MCP ─────────────────────────────────────────────────────────
-
-    private async Task<string> GetConfigAsync() =>
-        (await new GetAgentConfigTool(Scopes()).GetAgentConfigAsync("agent1")).ReplaceLineEndings("\n");
-
-    [Fact]
-    public async Task PiImageInput_SetOmitClear_RoundTrips_AndGetShowsIt()
-    {
-        Seed("pi", PiTag, PiUrl, 131_072);
-        Assert.Contains("- Pi image input: False\n", await GetConfigAsync());
-
-        var set = await Tool().UpdateAgentConfigAsync("agent1", pi_image_input: true);
-
-        Assert.Contains("- pi_image_input: False → True", set);
-        Assert.True(Stored().PiImageInput);
-        Assert.Contains("- Pi image input: True\n", await GetConfigAsync());
-
-        // Omitted: kept. The same value again: no change reported.
-        await Tool().UpdateAgentConfigAsync("agent1", memory_limit_mb: 2048);
-        Assert.Equal((true, 2048), (Stored().PiImageInput, Stored().MemoryLimitMb));
-        Assert.Equal("No changes specified for agent 'agent1'.", await Tool().UpdateAgentConfigAsync("agent1", pi_image_input: true));
-
-        var clear = await Tool().UpdateAgentConfigAsync("agent1", pi_image_input: false);
-
-        Assert.Contains("- pi_image_input: True → False", clear);
-        Assert.False(Stored().PiImageInput);
-        Assert.Contains("- Pi image input: False\n", await GetConfigAsync());
-    }
-
-    [Fact]
-    public async Task PiImageInput_SurvivesAProviderSwitch_AndGetMarksItIgnoredOffPi()
-    {
-        Seed("pi", PiTag, PiUrl, 131_072, piImageInput: true);
-
-        var away = await Tool().UpdateAgentConfigAsync("agent1", provider: "codex", model: $"ollama/{PiTag}");
-
-        Assert.DoesNotContain("pi_image_input", away);
-        Assert.Equal(("codex", true), (Stored().Provider, Stored().PiImageInput));
-        Assert.Contains("- Pi image input: True (ignored: pi only)\n", await GetConfigAsync());
-
-        await Tool().UpdateAgentConfigAsync("agent1", provider: "pi", model: PiTag);
-
-        Assert.Equal(("pi", true), (Stored().Provider, Stored().PiImageInput));
-        Assert.Contains("- Pi image input: True\n", await GetConfigAsync());
-    }
-
-    [Fact]
-    public async Task PiImageInput_OnANonPiAgent_IsStored()
-    {
-        Seed("claude", "claude-opus-5-5");
-
-        var result = await Tool().UpdateAgentConfigAsync("agent1", pi_image_input: true);
-
-        Assert.Contains("- pi_image_input: False → True", result);
-        Assert.True(Stored().PiImageInput);
-    }
-
-    /// <summary>
-    /// Calls <c>update_agent_config</c> through the MCP SDK's argument binding, as a client does. An
-    /// argument the binding cannot convert throws before the method runs; the SDK's <c>tools/call</c>
-    /// handler (0.8.0-preview.1 <c>McpServerImpl</c>) returns that to the client as an <c>isError</c>
-    /// result, "An error occurred invoking 'update_agent_config'."
-    /// </summary>
-    private async Task<CallToolResult> CallThroughMcpAsync(Dictionary<string, string> arguments)
-    {
-        var method = typeof(UpdateAgentConfigTool).GetMethod(nameof(UpdateAgentConfigTool.UpdateAgentConfigAsync))!;
-        var tool = McpServerTool.Create(method, Tool());
-        var request = new RequestContext<CallToolRequestParams>(
-            Substitute.For<McpServer>(), new JsonRpcRequest { Method = RequestMethods.ToolsCall })
-        {
-            Params = new CallToolRequestParams
-            {
-                Name = "update_agent_config",
-                Arguments = arguments.ToDictionary(a => a.Key, a => JsonDocument.Parse(a.Value).RootElement.Clone()),
-            },
-        };
-        return await tool.InvokeAsync(request, CancellationToken.None);
-    }
-
-    [Theory]
-    [InlineData("\"true\"")]
-    [InlineData("\"false\"")]
-    [InlineData("1")]
-    [InlineData("0")]
-    public async Task PiImageInput_ANonBoolean_FailsTheBinding_AndTheRowIsUnchanged(string value)
-    {
-        Seed("pi", PiTag, PiUrl, 131_072, piImageInput: true);
-        var before = Row();
-
-        var error = await Assert.ThrowsAsync<JsonException>(() => CallThroughMcpAsync(new()
-        {
-            ["agent_name"] = "\"agent1\"", ["memory_limit_mb"] = "2048", ["pi_image_input"] = value,
-        }));
-
-        Assert.Contains("System.Nullable`1[System.Boolean]", error.Message);
-        Assert.Equal(before, Row());
-        Assert.Equal((true, 1024), (Stored().PiImageInput, Stored().MemoryLimitMb));
-    }
-
-    [Fact]
-    public async Task PiImageInput_ABooleanThroughTheMcpBinding_IsStored()
-    {
-        Seed("pi", PiTag, PiUrl, 131_072);
-
-        var result = await CallThroughMcpAsync(new() { ["agent_name"] = "\"agent1\"", ["pi_image_input"] = "true" });
-
-        Assert.NotEqual(true, result.IsError);
-        Assert.True(Stored().PiImageInput);
-    }
-
-    [Fact]
-    public async Task ListAgentConfigs_ShowsPiImageInput()
-    {
-        Seed("pi", PiTag, PiUrl, 131_072, piImageInput: true, name: "agent-a");
-        Seed("pi", PiTag, PiUrl, 131_072, name: "agent-b");
-        Seed("claude", "claude-opus-5-5", piImageInput: true, name: "agent-c");
-
-        var result = (await new ListAgentConfigsTool(Scopes()).ListAgentConfigsAsync()).ReplaceLineEndings("\n");
-
-        Assert.Contains("- **agent-a** (agent-a) — role: test, model: qwen3.8-flash-next, memory: 1024MB, warmup: 60s, pi image input: on, enabled\n", result);
-        Assert.Contains("- **agent-b** (agent-b) — role: test, model: qwen3.8-flash-next, memory: 1024MB, warmup: 60s, pi image input: off, enabled\n", result);
-        Assert.Contains("- **agent-c** (agent-c) — role: test, model: claude-opus-5-5, memory: 1024MB, warmup: 60s, pi image input: on (ignored: pi only), enabled\n", result);
-    }
-
-    [Fact]
-    public async Task CreateAgent_PiImageInput_IsStored_AndOmittedIsFalse()
-    {
-        var create = new CreateAgentTool(Scopes(), new ConfigurationBuilder().Build());
-
-        await create.CreateAgentAsync("agent-a", "developer", PiTag, provider: "pi",
-            local_base_url: PiUrl, context_window: 131_072, pi_image_input: true);
-        await create.CreateAgentAsync("agent-b", "developer", PiTag, provider: "pi",
-            local_base_url: PiUrl, context_window: 131_072);
-        await create.CreateAgentAsync("agent-c", "developer", "claude-opus-5-5", pi_image_input: true);
-
-        using var db = new OrchestratorDbContext(_options);
-        Assert.Equal(
-            [("agent-a", true), ("agent-b", false), ("agent-c", true)],
-            db.Agents.AsNoTracking().OrderBy(a => a.Name).Select(a => new { a.Name, a.PiImageInput })
-                .AsEnumerable().Select(a => (a.Name, a.PiImageInput)).ToList());
     }
 }

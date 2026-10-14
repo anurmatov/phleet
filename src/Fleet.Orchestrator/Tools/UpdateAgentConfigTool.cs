@@ -49,8 +49,7 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         [Description("Name of an output_styles row this agent runs with — its chat tone and register. Pass empty string to clear (no style). Omit to keep current. Takes effect on the next reprovision.")] string? output_style = null,
         [Description("Local model (#382, #386), claude, codex or pi agents: origin of the local inference server (e.g. Ollama), e.g. http://<server-address>:11434 — origin only, never …/v1; Fleet adds /v1/messages for claude and pi and /v1 for codex. Set, the agent runs against that server; claude needs the server's bare model tag and effort off/low/medium/xhigh (empty = model default, sent as xhigh), codex needs model ollama/<tag> or lmstudio/<tag>, pi needs the bare tag and effort off/on (it is required for pi, which runs only locally). Stored canonical. Pass empty string to clear (back to the cloud). Omit to keep current. Takes effect on the next reprovision.")] string? local_base_url = null,
         [Description("Deprecated alias of local_base_url. If both are sent they must agree.")] string? anthropic_base_url = null,
-        [Description("Local-model agents only (local_base_url set, claude, codex or pi): the server's context size in tokens (4096-1048576), e.g. its num_ctx or --ctx. Claude gets it as CLAUDE_CODE_MAX_CONTEXT_TOKENS, codex as model_context_window and pi as its model's contextWindow; pi requires it, at least 65536 and equal to the server's --ctx. Ignored for cloud agents. Codex compaction is best-effort: it compacts at 90% of the window, a single message or tool output larger than the space left reaches the server unchecked, and the server's HTTP 400 overflow leaves the thread failing every turn until it is reset (/cancel all, then /reset, or restart the agent). Pass 0 to clear. Omit to keep current. Takes effect on the next reprovision.")] int? context_window = null,
-        [Description("Provider pi only: the model accepts images (sends images and scanned PDF pages). Turn on only after the model's vision is verified. Stored for other providers but ignored, and kept across a provider switch. Takes effect on the next reprovision. Omit to keep current.")] bool? pi_image_input = null)
+        [Description("Local-model agents only (local_base_url set, claude, codex or pi): the server's context size in tokens (4096-1048576), e.g. its num_ctx or --ctx. Claude gets it as CLAUDE_CODE_MAX_CONTEXT_TOKENS, codex as model_context_window and pi as its model's contextWindow; pi requires it, at least 65536 and equal to the server's --ctx. Ignored for cloud agents. Codex compaction is best-effort: it compacts at 90% of the window, a single message or tool output larger than the space left reaches the server unchecked, and the server's HTTP 400 overflow leaves the thread failing every turn until it is reset (/cancel all, then /reset, or restart the agent). Pass 0 to clear. Omit to keep current. Takes effect on the next reprovision.")] int? context_window = null)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
@@ -337,13 +336,6 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
                 return windowFault;
             changes.AppendLine($"- context_window: {agent.ContextWindow?.ToString() ?? "(none)"} → {(context_window == 0 ? "(none)" : context_window.ToString())}");
             agent.ContextWindow = context_window == 0 ? null : context_window;
-        }
-
-        // #455: stored for every provider and never cleared by a provider switch; only pi applies it.
-        if (pi_image_input is not null && pi_image_input != agent.PiImageInput)
-        {
-            changes.AppendLine($"- pi_image_input: {agent.PiImageInput} → {pi_image_input}");
-            agent.PiImageInput = pi_image_input.Value;
         }
 
         var previousBaseUrl = agent.LocalBaseUrl;

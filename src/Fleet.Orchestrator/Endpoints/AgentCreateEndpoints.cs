@@ -35,7 +35,7 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
 
     CreateAgentRequest? body;
     try { body = await request.ReadFromJsonAsync<CreateAgentRequest>(); }
-    // #455: a field of the wrong JSON type (piImageInput: "true") is a 400 before any write, not a 500.
+    // A field of the wrong JSON type (mountDockerSock: "true") is a 400 before any write, not a 500.
     catch (JsonException ex) { return Results.BadRequest(new { error = AgentPatchHelpers.DescribeBodyFault(ex) }); }
     if (body is null || string.IsNullOrWhiteSpace(body.Name))
         return Results.BadRequest(new { error = "name is required" });
@@ -117,8 +117,6 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
         Provider                  = body.Provider          ?? "claude",
         CodexSandboxMode          = string.IsNullOrEmpty(body.CodexSandboxMode) ? null : body.CodexSandboxMode,
         MountDockerSock           = body.MountDockerSock   ?? false,
-        // #455: stored for every provider; only pi applies it, on provisioning.
-        PiImageInput              = body.PiImageInput      ?? false,
     };
     agent.LocalBaseUrl = localModel.LocalBaseUrl;
     agent.ContextWindow = localModel.ContextWindow;

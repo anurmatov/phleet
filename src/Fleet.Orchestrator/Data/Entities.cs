@@ -85,16 +85,6 @@ public class Agent
     /// </summary>
     public int? ContextWindow { get; set; }
 
-    /// <summary>
-    /// The local model accepts images (#455): Pi sends images and scanned PDF pages to it. Stored for
-    /// every provider but applied only to provider <c>pi</c>, like <see cref="ContextWindow"/>; it
-    /// survives a provider switch. Provisioning writes <c>Agent.PiImageInput</c> only when true, so
-    /// <c>false</c> (the default, and the rollback) keeps the generated config byte-identical. Never
-    /// detected from the server or model: turn it on only after the model's vision is verified.
-    /// Changing it requires <c>reprovision_agent</c>.
-    /// </summary>
-    public bool PiImageInput { get; set; } = false;
-
     public List<AgentTool> Tools { get; set; } = [];
     public List<AgentProject> Projects { get; set; } = [];
     public List<AgentMcpEndpoint> McpEndpoints { get; set; } = [];

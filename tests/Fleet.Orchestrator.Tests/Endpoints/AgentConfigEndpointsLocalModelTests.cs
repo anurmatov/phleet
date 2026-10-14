@@ -21,9 +21,8 @@ namespace Fleet.Orchestrator.Tests.Endpoints;
 /// <summary>
 /// #382 REST path over real HTTP: <c>localBaseUrl</c> and its alias <c>anthropicBaseUrl</c> (A1),
 /// codex local mode, the L1/L2/C1 rules, and a provider switch while local, one case per direction.
-/// #386: pi's rules (A5), switches into pi (A6) and PV1 on the PUT (A30). #455: <c>piImageInput</c>
-/// round-trips, a non-boolean is a 400, and the value survives a provider switch. Every rejected
-/// request is checked against the stored row, not the response alone.
+/// #386: pi's rules (A5), switches into pi (A6) and PV1 on the PUT (A30). A field of the wrong JSON
+/// type is a 400. Every rejected request is checked against the stored row, not the response alone.
 /// </summary>
 /// <remarks>Same harness as <see cref="AgentConfigEndpointsContextWindowTests"/>.</remarks>
 public sealed class AgentConfigEndpointsLocalModelTests : IAsyncLifetime
@@ -74,7 +73,7 @@ public sealed class AgentConfigEndpointsLocalModelTests : IAsyncLifetime
     }
 
     private async Task SeedAsync(string provider, string model, string? url = null, int? window = null,
-        string? effort = null, bool piImageInput = false)
+        string? effort = null)
     {
         await using var scope = _app.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
@@ -82,7 +81,6 @@ public sealed class AgentConfigEndpointsLocalModelTests : IAsyncLifetime
         {
             Name = "agent1", DisplayName = "agent1", Role = "test", Model = model, Provider = provider,
             LocalBaseUrl = url, ContextWindow = window, Effort = effort, MemoryLimitMb = 1024, ContainerName = "agent1",
-            PiImageInput = piImageInput,
         });
         await db.SaveChangesAsync();
     }
@@ -447,29 +445,7 @@ public sealed class AgentConfigEndpointsLocalModelTests : IAsyncLifetime
         Assert.Equal(("", 2048), ((await StoredAsync()).Provider, (await StoredAsync()).MemoryLimitMb));
     }
 
-    // ── #455 A1: piImageInput over REST ──────────────────────────────────────────────────────────
-
-    private async Task<bool> GetPiImageInputAsync() =>
-        (await _client.GetFromJsonAsync<JsonElement>(Put)).GetProperty("piImageInput").GetBoolean();
-
-    [Fact]
-    public async Task PiImageInput_PutTrueOmitFalse_RoundTrips_AndGetShowsIt()
-    {
-        await SeedAsync("pi", PiTag, PiUrl, 131_072);
-        Assert.False(await GetPiImageInputAsync());
-
-        Assert.Equal(HttpStatusCode.OK, (await _client.PutAsJsonAsync(Put, new { piImageInput = true })).StatusCode);
-        Assert.True((await StoredAsync()).PiImageInput);
-        Assert.True(await GetPiImageInputAsync());
-
-        // Omitted: kept.
-        Assert.Equal(HttpStatusCode.OK, (await _client.PutAsJsonAsync(Put, new { memoryLimitMb = 2048 })).StatusCode);
-        Assert.Equal((true, 2048), ((await StoredAsync()).PiImageInput, (await StoredAsync()).MemoryLimitMb));
-
-        Assert.Equal(HttpStatusCode.OK, (await _client.PutAsJsonAsync(Put, new { piImageInput = false })).StatusCode);
-        Assert.False((await StoredAsync()).PiImageInput);
-        Assert.False(await GetPiImageInputAsync());
-    }
+    // ── A field of the wrong JSON type ───────────────────────────────────────────────────────────
 
     [Theory]
     [InlineData("\"true\"")]
@@ -477,49 +453,18 @@ public sealed class AgentConfigEndpointsLocalModelTests : IAsyncLifetime
     [InlineData("1")]
     [InlineData("0")]
     [InlineData("{}")]
-    public async Task PiImageInput_ANonBoolean_Is400_AndTheRowIsUnchanged(string value)
+    public async Task ANonBoolean_Is400_AndTheRowIsUnchanged(string value)
     {
-        await SeedAsync("pi", PiTag, PiUrl, 131_072, piImageInput: true);
+        await SeedAsync("pi", PiTag, PiUrl, 131_072);
         var before = await RowAsync();
 
         var response = await _client.PutAsync(Put, new StringContent(
-            $$"""{"memoryLimitMb":2048,"piImageInput":{{value}}}""", System.Text.Encoding.UTF8, "application/json"));
+            $$"""{"memoryLimitMb":2048,"mountDockerSock":{{value}}}""", System.Text.Encoding.UTF8, "application/json"));
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         var error = (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString();
-        Assert.StartsWith("Invalid request body at '$.piImageInput'", error);
+        Assert.StartsWith("Invalid request body at '$.mountDockerSock'", error);
         Assert.Equal(before, await RowAsync());
-        Assert.True((await StoredAsync()).PiImageInput);
-    }
-
-    [Theory]
-    [InlineData("claude", "qwen3.8-flash-next")]
-    [InlineData("codex", "ollama/qwen3.8-flash-next")]
-    public async Task PiImageInput_SurvivesAProviderSwitch_AwayFromPiAndBack(string provider, string model)
-    {
-        await SeedAsync("pi", PiTag, PiUrl, 131_072, piImageInput: true);
-
-        var away = await _client.PutAsJsonAsync(Put, new { provider, model });
-
-        Assert.Equal(HttpStatusCode.OK, away.StatusCode);
-        Assert.Equal((provider, true), ((await StoredAsync()).Provider, (await StoredAsync()).PiImageInput));
-        Assert.True(await GetPiImageInputAsync());
-
-        var back = await _client.PutAsJsonAsync(Put, new { provider = "pi", model = PiTag });
-
-        Assert.Equal(HttpStatusCode.OK, back.StatusCode);
-        Assert.Equal(("pi", true), ((await StoredAsync()).Provider, (await StoredAsync()).PiImageInput));
-    }
-
-    [Fact]
-    public async Task PiImageInput_OnANonPiAgent_IsStored()
-    {
-        await SeedAsync("claude", "claude-opus-5-5");
-
-        Assert.Equal(HttpStatusCode.OK, (await _client.PutAsJsonAsync(Put, new { piImageInput = true })).StatusCode);
-
-        Assert.True((await StoredAsync()).PiImageInput);
-        Assert.True(await GetPiImageInputAsync());
     }
 
     private sealed class NoopAclChangeNotifier : IAclChangeNotifier

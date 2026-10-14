@@ -58,9 +58,6 @@ public sealed class GetAgentConfigTool(IServiceScopeFactory scopeFactory)
             + (agent.ContextWindow is null || localOn ? ""
                 : legacyCodexLocal ? " (ignored: legacy Env Ref; set the local server URL)"
                 : " (ignored: local model off)"));
-        // #455: stored for every provider, so a value kept across a provider switch is visible.
-        sb.AppendLine($"- Pi image input: {agent.PiImageInput}"
-            + (agent.PiImageInput && !PiLocalModel.IsPi(agent.Provider) ? " (ignored: pi only)" : ""));
         sb.AppendLine($"- Auto memory: {agent.AutoMemoryEnabled}");
         sb.AppendLine($"- Journal enabled: {agent.JournalEnabled}");
         sb.AppendLine($"- Journal cross-chat attachments: {agent.JournalCrossChatEnabled}");

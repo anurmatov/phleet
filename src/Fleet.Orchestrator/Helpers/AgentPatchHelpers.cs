@@ -120,7 +120,7 @@ internal static class AgentPatchHelpers
 
     /// <summary>
     /// The 400 text for a create or config body that does not deserialize (#455): malformed JSON,
-    /// or a field of the wrong JSON type such as <c>"piImageInput": "true"</c> or <c>1</c>. Shared
+    /// or a field of the wrong JSON type such as <c>"mountDockerSock": "true"</c> or <c>1</c>. Shared
     /// by <c>POST /api/agents</c> and <c>PUT /api/agents/{name}/config</c>; nothing is written.
     /// </summary>
     internal static string DescribeBodyFault(System.Text.Json.JsonException ex) =>

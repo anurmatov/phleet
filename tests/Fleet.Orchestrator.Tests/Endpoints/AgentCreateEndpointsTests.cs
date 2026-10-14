@@ -23,7 +23,7 @@ namespace Fleet.Orchestrator.Tests.Endpoints;
 /// #386 A30 over real HTTP: <c>POST /api/agents</c> refuses an unknown provider with the PV1 text
 /// and writes no row. A known or empty provider gets past PV1 to the next gate — Telegram is not
 /// configured in this host, so the request then stops with 409 and still writes nothing.
-/// #455: a non-boolean <c>piImageInput</c> is a 400 with no row, and a boolean is stored.
+/// A field of the wrong JSON type is a 400 with no row; a complete pi agent is created.
 /// </summary>
 /// <remarks>
 /// The handler is the production <see cref="AgentCreateEndpoints"/> lifted from <c>Program.cs</c>.
@@ -190,25 +190,25 @@ public sealed class AgentCreateEndpointsTests : IAsyncLifetime
         Assert.Equal(0, await AgentCountAsync());
     }
 
-    // ── #455 A1: piImageInput on create ──────────────────────────────────────────────────────────
+    // ── A field of the wrong JSON type; a pi create ──────────────────────────────────────────────
 
     [Theory]
     [InlineData("\"true\"")]
     [InlineData("1")]
     [InlineData("{}")]
-    public async Task PiImageInput_ANonBoolean_Is400_AndNoRowIsWritten(string value)
+    public async Task ANonBoolean_Is400_AndNoRowIsWritten(string value)
     {
         var response = await _client.PostAsync("/api/agents", new StringContent(
-            $$"""{"name":"agent1","role":"co-cto","model":"qwen3.8-flash-next","provider":"pi","localBaseUrl":"http://inference-host:8000","contextWindow":131072,"piImageInput":{{value}}}""",
+            $$"""{"name":"agent1","role":"co-cto","model":"qwen3.8-flash-next","provider":"pi","localBaseUrl":"http://inference-host:8000","contextWindow":131072,"mountDockerSock":{{value}}}""",
             System.Text.Encoding.UTF8, "application/json"));
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.StartsWith("Invalid request body at '$.piImageInput'", await ErrorAsync(response));
+        Assert.StartsWith("Invalid request body at '$.mountDockerSock'", await ErrorAsync(response));
         Assert.Equal(0, await AgentCountAsync());
     }
 
     [Fact]
-    public async Task PiImageInput_IsStoredOnCreate_AndOmittedIsFalse()
+    public async Task APiAgentAndAClaudeAgent_AreCreated()
     {
         // Telegram configured (placeholder tokens in the token format), and an existing co-cto so the
         // new rows skip the first-agent and FLEET_CTO_AGENT paths.
@@ -229,7 +229,7 @@ public sealed class AgentCreateEndpointsTests : IAsyncLifetime
         var pi = await _client.PostAsJsonAsync("/api/agents", new
         {
             name = "agent1", role = "developer", model = "qwen3.8-flash-next", provider = "pi",
-            localBaseUrl = "http://inference-host:8000", contextWindow = 131072, piImageInput = true, provision = false,
+            localBaseUrl = "http://inference-host:8000", contextWindow = 131072, provision = false,
         });
         var claude = await _client.PostAsJsonAsync("/api/agents", new
         {
@@ -239,8 +239,8 @@ public sealed class AgentCreateEndpointsTests : IAsyncLifetime
         Assert.Equal((HttpStatusCode.Created, HttpStatusCode.Created), (pi.StatusCode, claude.StatusCode));
         await using var check = _app.Services.CreateAsyncScope();
         var stored = await check.ServiceProvider.GetRequiredService<OrchestratorDbContext>().Agents.AsNoTracking()
-            .Where(a => a.Name != "agent0").OrderBy(a => a.Name).Select(a => new { a.Name, a.PiImageInput }).ToListAsync();
-        Assert.Equal([("agent1", true), ("agent2", false)], stored.Select(a => (a.Name, a.PiImageInput)).ToList());
+            .Where(a => a.Name != "agent0").OrderBy(a => a.Name).Select(a => new { a.Name, a.Provider }).ToListAsync();
+        Assert.Equal([("agent1", "pi"), ("agent2", "claude")], stored.Select(a => (a.Name, a.Provider)).ToList());
     }
 
     /// <summary>Fails the test if anything reaches Docker.</summary>

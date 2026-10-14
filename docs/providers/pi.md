@@ -34,7 +34,10 @@ Read this before you rely on any number on this page.
     media, steering, install, upgrade, rollback);
   - the production-path canary (B1–B13) on the target server;
   - the L2c and L3 latency budgets;
-  - the cold prefill rate `r` of the tested build. It is unknown.
+  - the cold prefill rate `r` of the tested build. It is unknown;
+  - attachments (#455): no image or PDF has gone end to end through Fleet, Pi and a real server.
+    The attachment baseline (B) and canary (V1–V9) have not run, so no local model is known to
+    read images (§8a).
 
 Until the canary runs, nothing on this page is evidence that Pi reuses the cache, compacts in
 time or recalls context inside Fleet. `docs/spikes/real-adapter-capability-matrix.md` (`## pi`)
@@ -52,13 +55,15 @@ holds only canary measurements, and every cell there is still pending.
 | compaction | Pi's threshold, with Fleet's prefix-reusing summary (§5) | Claude Code's | codex's, best-effort |
 | provider credential in the container | none | none | still present until #383 |
 | `fleet.relay` binding | none | none | bound |
-| images | dropped with a note (text-only) | sent | sent |
+| images | sent only with **Image input** on (§8a); otherwise dropped with a note | sent | sent |
+| PDFs | text extracted locally on every agent; scanned pages as images with Image input (§8b) | native document block | path only |
 
 Use Pi when a local model needs Fleet's MCP tools and a compaction path designed around the
 server's prefix cache, in a container that holds no provider credential.
 
-Do not use Pi for hosted models, servers that need an API key, image input, or a server that
-does not speak Anthropic Messages. Those are out of scope for this version.
+Do not use Pi for hosted models, servers that need an API key, or a server that does not speak
+Anthropic Messages. Those are out of scope for this version. Image input is opt-in per agent and
+only for a model whose vision has passed the V canary (§8a).
 
 ## 2. Server requirements
 
@@ -90,6 +95,7 @@ Model tag   [ qwen3.8-flash-next ]
 Context window (tokens)
             [ 131072 ]                   at least 65536; your server's --ctx
 Effort      [ Default (on) v ]           Default (on) · Off · On
+[ ] Image input                          off by default; §8a
 ```
 
 Screenshots (rendered from the dashboard components at the PR head, placeholder values):
@@ -108,6 +114,9 @@ An existing agent:
 3. Enter the bare **Model tag**, with no `ollama/` or `lmstudio/` prefix.
 4. Enter the **Context window**: exactly the server's `--ctx`. Save is blocked below 65536.
 5. Pick **Effort** (§7) and click **Save & Reprovision**. A restart is not enough.
+6. Leave **Image input** off unless the model's vision has passed V1 (§8a). It is shown only for
+   Pi, stored for every provider, sent only while the provider is Pi, and applies at the next
+   reprovision. "Copy from existing agent" never copies it.
 
 ### MCP
 
@@ -126,6 +135,11 @@ get_agent_config <agent>
 `get_agent_config` then prints `Provider: pi` and
 `Local model: on — server http://inference-host:8000 (Pi)`.
 
+Image input (§8a), only after V1 passes for this model: `update_agent_config agent_name=<agent>
+pi_image_input=true`, then `reprovision_agent <agent>`. `get_agent_config` prints
+`- Pi image input: True`; on another provider it adds `(ignored: pi only)`. A value that is not a
+boolean is a tool error and nothing is saved.
+
 ### REST
 
 ```
@@ -137,6 +151,9 @@ PUT /api/agents/<agent>/config
 
 POST /api/agents/<agent>/reprovision
 ```
+
+`piImageInput` (boolean, omit to keep) works on both calls and is in the config response. A value
+of the wrong JSON type, on any field, is an HTTP 400 and nothing is saved.
 
 ### Validation
 
@@ -160,6 +177,9 @@ fault before any container is created or removed) and at agent startup (exit 1).
 
 - `Agent.PiBaseUrl` (the canonical origin) and `Agent.ContextWindow` in the generated
   `appsettings.json`, added by JSON-node edit. Every other agent's generated files are unchanged.
+- `Agent.PiImageInput: true` only when Image input is on (#455); off, the key is absent and the
+  bytes are what they were before. On any other provider the flag is kept but ignored, with one
+  log line `PiImageInput ignored for '<agent>': pi only`.
 - `Agent.AllowedTools` gets the usual auto-grants: `mcp__fleet-memory__memory_get`, and
   `mcp__fleet-temporal__notify_cto` except on the configured CTO agent.
 - No credential mount and no `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
@@ -173,7 +193,8 @@ edit made from the model's shell cannot survive a restart.
 
 `models.json` declares one provider, `fleet-local`, with `api: anthropic-messages`, the
 placeholder key, `supportsStrictTools: false`, `supportsEagerToolInputStreaming: false`, and one
-model with your tag, `reasoning: true`, `input: ["text"]`, `contextWindow: W`,
+model with your tag, `reasoning: true`, `input: ["text"]` (`["text","image"]` with Image input),
+`contextWindow: W`,
 `maxTokens: 16384` and zero cost. The generator refuses a key that starts with `!` or `$` or
 contains `sk-ant-oat`: Pi would run the first as a command, read the second from the
 environment, and send the third down an OAuth path.
@@ -255,6 +276,14 @@ the pin. `scripts/check-pi-pin.sh` then fails the build unless `pi --version` is
 at least 22.19, `pi --help` lists `--mode`, `--offline`, `--no-approve`, `--no-mcp` and
 `--no-prompt-templates`, every installed `@earendil-works/*` package is exactly the pin, and the
 extension's `@modelcontextprotocol/sdk` is exactly 1.30.1.
+
+The image also installs `poppler-utils` (#455, §8b) on the same `--no-install-recommends` apt line
+as `ffmpeg`, **with no version pin**: it parses untrusted PDFs, so every image rebuild picks up the
+distro's security fixes. `scripts/check-attachment-tools.sh` fails the build unless `pdfinfo`,
+`pdftotext`, `pdftoppm`, `prlimit` and `ffmpeg` all run, and prints the poppler version (24.02.0
+on the current base). For a published poppler CVE that affects the installed version, rebuild and
+deploy the agent image; the §8b process limits bound the impact meanwhile. Other providers'
+executors never call it.
 
 ## 5. Compaction
 
@@ -406,8 +435,113 @@ Anything else is refused (PI4). The compaction summary always runs with thinking
   process is killed and the turn answers "The local model did not accept the message within
   10 s; it was not processed. Send it again."
 - No Pi event for 900 s during a run aborts it with "local model stopped responding".
-- Images are not sent. The turn gets "[N image attachment(s) omitted: this local model is
-  text-only]". Documents keep their path in the text, and Pi's `read` tool opens them.
+- Attachments: §8a (images), §8b (PDFs), §8c (every other type). A frame with images can be
+  about 8.5 MB; once a stdin write starts it is finished whole within 30 s, or the process is
+  killed and the next turn resumes the session ("Pi exited unexpectedly…"). Cancelling a turn
+  never cuts a frame.
+- The session file holds image bytes and inline PDF text verbatim until `/reset`, `/stop` or a
+  new container; the 48 h attachment sweep does not reach it. Each time it grows past 256 MiB the
+  agent logs one Warning; Fleet never edits or resets it.
+
+### 8a. Images
+
+**Image input** (`PiImageInput`, default off) declares the model's vision in `models.json` and
+makes Fleet send image bytes on every path: the prompt, a steer, and a queued batch. Fleet never
+detects vision from server metadata or a model name, because a text-only model behind a
+permissive server ignores images or fails every later turn. **Turn it on only after V1 passes**:
+one PNG, one JPEG and one WebP sent by prompt, each with a different code, all three read back.
+
+Off, nothing is processed and the turn gets exactly the old note, "[N image attachment(s) omitted:
+this local model is text-only]".
+
+On, Fleet enforces every bound itself, before writing to Pi. At Pi 1.0.4 only an idle prompt
+normalizes images; steer and streaming prompts pass them raw, and `inputLimits` is never read.
+Each user image, in order:
+
+| step | check | note reason |
+|---|---|---|
+| 1 | magic bytes are JPEG, PNG, GIF or WebP (the transport's label is ignored) | `unsupported format` |
+| 2 | the header gives width and height | `unreadable` |
+| 3 | each side ≤ 12 000 px and ≤ 50 MP | `too large to process` |
+| 4 | fewer than 2 images already inline, checked before any downscale | `not inline: over the 2-image limit — open the path with read` (with no saved file: `over the 2-image limit`) |
+| 5 | ≤ 2000 px and ≤ 3 MiB: sent byte for byte | — |
+| 6 | otherwise downscaled with `ffmpeg` (§8b limits, single-threaded), never upscaled: PNG for a PNG or GIF (first frame), JPEG otherwise, JPEG with alpha flattened on white when the PNG is still over 3 MiB | `processing failed`, `processing timed out`, `over 3 MiB` |
+
+- A downscaled image adds "[N image(s) resized to fit 2000 px]". An ordinary 2560 px Telegram
+  photo comes out at 2000×1500. ffmpeg 6.1 applies EXIF orientation, so a phone photo stored
+  rotated arrives upright (measured on the orientation-6 fixture).
+- An image holds its slot from step 4 even if its downscale then fails, so ffmpeg runs at most
+  twice per message.
+- Images over the limit keep their `[image attachment: path]` hint; with Image input on, Pi's
+  `read` returns them as images. That is the known difference from Claude, which takes a
+  10-photo album inline; raising the cap waits for V4's token measurement.
+- After the prompt is acknowledged Fleet counts the images in Pi's echo of the message and logs
+  `pi images: Pi dropped D of S image(s) on the prompt path` when Pi dropped one (its image
+  library failed to load).
+- A server that rejects image blocks (HTTP 4xx) fails the turn, and the images stay in the
+  session, so later turns fail too until `/reset`.
+
+### 8b. PDFs
+
+Every Pi agent extracts PDF text locally, whatever Image input says: Claude reads PDFs natively,
+so tool-only access would not be parity. For each PDF (`application/pdf` or a `.pdf` name), at
+most 3 per message:
+
+1. `pdfinfo` reads the page count and the encryption line.
+2. `pdftotext -enc UTF-8 -layout -f 1 -l 100` extracts pages 1 to min(100, P). Up to 4 MiB is
+   kept; more is cut and marked `truncated at 4 MiB` (not a failure).
+3. The full text goes atomically to `<file>.txt` next to the attachment (the 48 h sweep removes
+   it), and the message gets
+   `[PDF text: <name>, pages 1–p of P; full text: <file>.txt]`, the text, `[end of PDF text]`.
+   All PDFs of one message share 24 576 inline characters; the rest ends with
+   `…rest in <file>.txt`, which `read` can page through.
+4. A PDF with no text layer (under 32 non-whitespace characters), or one that does not allow
+   copying text, is rendered with `pdftoppm` as JPEG pages (1600 px, then 1200 and 800 for a page
+   over 3 MiB) into the image slots left, **only with Image input on**. Off, or with no slot left,
+   the note says so. There is no OCR.
+
+Named failures: `file missing`, `not a valid PDF`, `damaged`, `password-protected`,
+`text copying restricted by the PDF`, `extraction timed out`, `extractor unavailable`. No
+password is ever supplied and no permission is bypassed: a copy-restricted PDF is only ever
+viewed as page images.
+
+**Copy restriction comes from `pdfinfo`.** poppler 24.02's `pdftotext` ignores the restriction
+and exits 0 with the text, so Fleet reads `copy:no` from `pdfinfo`'s `Encrypted:` line and never
+runs `pdftotext` on such a file. Exit 3 from a build that enforces it is honoured too.
+
+**Limits for every local tool** (`pdfinfo`, `pdftotext`, `pdftoppm`, `ffmpeg`): an argument list
+with no shell; `prlimit --as=1073741824 --cpu=60 --nofile=256`; a 30 s wall timeout per call, cut
+to what is left of **one 60 s deadline per message**; an output cap; the credential-stripped
+environment plus `MALLOC_ARENA_MAX=2`; a private temporary directory, removed afterwards. A
+timeout, the cap or a cancellation kills the process tree. Work still pending at the deadline gets
+`processing timed out` or `extraction timed out`, and the turn goes on with the rest.
+
+The steer path processes attachments before writing, then checks again that the same run is
+still live and unanswered. If it is not, nothing is written and the message is queued as a
+prompt. A cache of the last 32 PDFs (text excerpts and outcomes only, never images, keyed by
+path, size and mtime) means that prompt does not extract again. Two steers that arrive together
+each process their own attachments, so two local tool processes can run at once; each stays
+within its own 60 s deadline and the §8b limits.
+
+### 8c. Attachment parity
+
+The baseline every Pi cell is held to is the better of Claude and Codex (#455 §2):
+
+| input | Claude | Codex | Pi |
+|---|---|---|---|
+| photo | native image | native image | native with Image input (§8a); otherwise a note |
+| PDF | native document block | path hint | extracted text (§8b); scanned pages as images with Image input |
+| image sent as a file | path + file tool | path + file tool | `read` returns an image with Image input |
+| txt, code, md, CSV, JSON | path + file and shell tools | same | path + `read`/`bash` (A9) |
+| docx, xlsx, pptx, odt, ods, odp | path + shell (`python3`) | same | same (A9) |
+| video, animation | path + `ffmpeg` | same | same; frames read as images with Image input (A11) |
+| audio file | path; no speech recognition | same | same |
+| voice and video notes | transcript | transcript | transcript |
+| legacy doc/xls/ppt, `.tgs`, unknown binary | path; no extractor | same | same |
+
+What has run: the source and CI rows (A1–A18). What has not: the separately approved baseline
+(B) with throwaway Claude, Codex and Pi agents, and the V canary. Until B runs, Claude's and
+Codex's handling of files reached by path is unverified.
 
 ## 9. Migration from Codex local and Claude local
 
@@ -455,7 +589,10 @@ Roll out only after the reopen gate has passed on the server the first Pi agents
 > older agent image falls back to the Claude executor. A `pi` row left behind would get Claude
 > credentials in a container whose model drives a shell.
 
-There is no schema change, so nothing else is reverted.
+#386 has no schema change. #455 adds the `PiImageInput` column; an older orchestrator ignores it
+and new rows default to false, so no down-migration is needed, and an older agent image ignores
+the generated `PiImageInput` key and runs text-only. To undo only images on one agent, turn
+Image input off and reprovision: the new container starts with no session.
 
 ## 12. Troubleshooting by log line
 
@@ -463,7 +600,14 @@ Log lines carry counts and names only, never prompt text or credentials.
 
 | where | line | level | meaning |
 |---|---|---|---|
-| agent, start | `pi start: version … model … server … context … reserve 16384 tail 8192 summaryMax 1280 thinking … session new\|resumed` | Information | Pi started and passed its `get_state` check |
+| agent, start | `pi start: version … model … server … context … reserve 16384 tail 8192 summaryMax 1280 thinking … session new\|resumed images on\|off poppler <version>\|unavailable` | Information | Pi started and passed its `get_state` check |
+| agent, per message with images or PDFs | `pi attachments: images sent S resized R omitted O (reason:k,…); pdf extracted E truncated T failed F (reason:k,…) chars C ms M` | Information | §8a, §8b; counts and reason names only. Healthy: `pdf extracted 1 failed 0` |
+| agent | `pi images: Pi dropped D of S image(s) on the prompt path` | Warning | Pi could not load its image library; the model got Pi's hint instead |
+| agent | `pi pdf: extractor unavailable` | Error, once per process | poppler or prlimit is missing from the image; rebuild it |
+| agent | `pi pdf: the full-text file could not be written; …` | Warning | the inline text was still sent |
+| agent | `pi: a stdin frame was not written within 30 s; killing the process` | Error | Pi stopped reading its stdin; the next turn resumes the session |
+| agent | `pi session file is N MiB; /reset starts a new one` | Warning | the session holds large images or PDF text; send `/reset` when convenient |
+| orchestrator | `PiImageInput ignored for '<agent>': pi only` | Information | the flag is stored on a non-pi agent and has no effect |
 | agent, per call | `pi call: prompt=… cached=… output=… ttft_ms=… total_ms=… stop=…` | Information | ordinary turns should keep `cached/prompt` high |
 | agent, compaction | `pi compaction <reason> path=prefix\|default tokensBefore=… tail=… splitTurn=… summary=… cached=… ms=…` | Information | `path=prefix` is the fast path |
 | agent | `post-compaction TTFT over 65 s` | **Warning** | **the first sign of a latency regression.** The tested margin was 3 s (62.0 s against 65 s), so a small slowdown of the server, a longer prompt or a bigger tail crosses it. Check the call's `prompt` and `cached`, the tail and the server load |
@@ -481,6 +625,8 @@ Log lines carry counts and names only, never prompt text or credentials.
 | orchestrator | `Pi agent '<agent>': server …, model …, context …` | Information | provisioning picked up the pi settings |
 | turn | "local model server unreachable (<origin>)" | turn error | the server is down or the URL is wrong; Fleet does not probe it |
 | turn | "context overflowed and automatic recovery failed — send /reset" | turn error | the context is above the server's; check `--ctx` against the Context window |
+| turn | error results on every turn after one with an image | turn error | the server rejects image blocks and the image is in the session: send `/reset`, then turn Image input off (§8a) |
+| turn | `extraction timed out` on ordinary PDFs, or `extractor unavailable` | note | the 60 s deadline is too short for the file, or poppler is missing |
 
 **Healthy:** `get_agent_config` prints the Local model line, ordinary turns keep a high
 `cached/prompt`, and compactions log `path=prefix`. There is no metrics endpoint.
@@ -510,6 +656,12 @@ Log lines carry counts and names only, never prompt text or credentials.
 - **`fleet.relay`:** a pi agent unbinds from it; it carries only OAuth token broadcasts.
 - **PV1:** an unknown provider string is refused everywhere (write, provisioning, entrypoint,
   agent startup). It used to fall through to Claude credentials.
+- **Attachments (#455).** PDFs and images are untrusted input to C parsers (poppler, ffmpeg).
+  Fleet runs them with no shell, under `prlimit`, timeouts, an output cap and the
+  credential-stripped environment (§8b). That bounds cost, not privilege: they run as the agent's
+  user, like the model's own shell. Inline PDF text is a prompt-injection surface equal to
+  Claude's document block. Logs never carry image bytes, base64, extracted text, file names,
+  paths or hashes; the session file and the `<file>.txt` sidecar do hold content (§8).
 
 ## 14. Checklist for a Pi bump
 
@@ -533,3 +685,7 @@ Log lines carry counts and names only, never prompt text or credentials.
    and the recorded fixtures must be re-recorded.
 7. **Gate and canary:** if compaction, the summary path or the RPC protocol changed upstream,
    rerun the reopen gate (G1–G4) and the production-path canary before rollout.
+8. **Attachments (#455):** recheck P1–P6 in the new source — the `images` field on `prompt`,
+   `steer` and `follow_up`, which paths normalize images, Pi's resize bounds, and whether
+   `inputLimits` is enforced — and the placeholder texts A11 asserts. The RealPi attachment rows
+   (A9–A12) must pass.

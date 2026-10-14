@@ -15,6 +15,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using NSubstitute;
 
 namespace Fleet.Orchestrator.Tests.Endpoints;
 
@@ -22,11 +23,14 @@ namespace Fleet.Orchestrator.Tests.Endpoints;
 /// #386 A30 over real HTTP: <c>POST /api/agents</c> refuses an unknown provider with the PV1 text
 /// and writes no row. A known or empty provider gets past PV1 to the next gate — Telegram is not
 /// configured in this host, so the request then stops with 409 and still writes nothing.
+/// #455: a non-boolean <c>piImageInput</c> is a 400 with no row, and a boolean is stored.
 /// </summary>
 /// <remarks>
 /// The handler is the production <see cref="AgentCreateEndpoints"/> lifted from <c>Program.cs</c>.
 /// Its services are real instances over SQLite; none of them is reached before PV1 or the Telegram
-/// gate, so no Docker, RabbitMQ or Temporal call is ever made.
+/// gate, so no Docker, RabbitMQ or Temporal call is ever made. The one test that configures
+/// Telegram creates a non-first, non-co-cto agent with <c>provision: false</c>, which reaches none
+/// of them either.
 /// </remarks>
 public sealed class AgentCreateEndpointsTests : IAsyncLifetime
 {
@@ -57,7 +61,7 @@ public sealed class AgentCreateEndpointsTests : IAsyncLifetime
         builder.Services.AddSingleton(new AgentRegistry(null!, NullLogger<AgentRegistry>.Instance));
         builder.Services.AddSingleton(sp => new SetupService(
             config, null!, null!, sp.GetRequiredService<IServiceScopeFactory>(),
-            NullLogger<SetupService>.Instance, null!));
+            NullLogger<SetupService>.Instance, Substitute.For<ICredentialsReader>()));
         builder.Services.AddSingleton(sp => new ConfigService(
             config, Options.Create(new RabbitMqOptions()), sp.GetRequiredService<IServiceScopeFactory>(),
             NullLogger<ConfigService>.Instance));
@@ -184,6 +188,59 @@ public sealed class AgentCreateEndpointsTests : IAsyncLifetime
         Assert.Equal("telegram_not_configured",
             (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
         Assert.Equal(0, await AgentCountAsync());
+    }
+
+    // ── #455 A1: piImageInput on create ──────────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("\"true\"")]
+    [InlineData("1")]
+    [InlineData("{}")]
+    public async Task PiImageInput_ANonBoolean_Is400_AndNoRowIsWritten(string value)
+    {
+        var response = await _client.PostAsync("/api/agents", new StringContent(
+            $$"""{"name":"agent1","role":"co-cto","model":"qwen3.8-flash-next","provider":"pi","localBaseUrl":"http://inference-host:8000","contextWindow":131072,"piImageInput":{{value}}}""",
+            System.Text.Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.StartsWith("Invalid request body at '$.piImageInput'", await ErrorAsync(response));
+        Assert.Equal(0, await AgentCountAsync());
+    }
+
+    [Fact]
+    public async Task PiImageInput_IsStoredOnCreate_AndOmittedIsFalse()
+    {
+        // Telegram configured (placeholder tokens in the token format), and an existing co-cto so the
+        // new rows skip the first-agent and FLEET_CTO_AGENT paths.
+        var token = "123456:" + new string('A', 35);
+        await File.WriteAllTextAsync(_app.Configuration["Provisioning:EnvFilePath"]!,
+            $"TELEGRAM_CTO_BOT_TOKEN={token}\nTELEGRAM_NOTIFIER_BOT_TOKEN={token}\n");
+        await using (var scope = _app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+            db.Agents.Add(new Agent
+            {
+                Name = "agent0", DisplayName = "agent0", Role = "co-cto", Model = "claude-opus-5-5",
+                MemoryLimitMb = 1024, ContainerName = "fleet-agent0",
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var pi = await _client.PostAsJsonAsync("/api/agents", new
+        {
+            name = "agent1", role = "developer", model = "qwen3.8-flash-next", provider = "pi",
+            localBaseUrl = "http://inference-host:8000", contextWindow = 131072, piImageInput = true, provision = false,
+        });
+        var claude = await _client.PostAsJsonAsync("/api/agents", new
+        {
+            name = "agent2", role = "developer", model = "claude-opus-5-5", provision = false,
+        });
+
+        Assert.Equal((HttpStatusCode.Created, HttpStatusCode.Created), (pi.StatusCode, claude.StatusCode));
+        await using var check = _app.Services.CreateAsyncScope();
+        var stored = await check.ServiceProvider.GetRequiredService<OrchestratorDbContext>().Agents.AsNoTracking()
+            .Where(a => a.Name != "agent0").OrderBy(a => a.Name).Select(a => new { a.Name, a.PiImageInput }).ToListAsync();
+        Assert.Equal([("agent1", true), ("agent2", false)], stored.Select(a => (a.Name, a.PiImageInput)).ToList());
     }
 
     /// <summary>Fails the test if anything reaches Docker.</summary>

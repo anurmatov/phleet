@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text;
 using Fleet.Orchestrator.Data;
+using Fleet.Shared;
 using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol.Server;
 
@@ -31,7 +32,10 @@ public sealed class ListAgentConfigsTool(IServiceScopeFactory scopeFactory)
         foreach (var a in agents)
         {
             var status = a.IsEnabled ? "enabled" : "disabled";
-            sb.AppendLine($"- **{a.Name}** ({a.DisplayName}) — role: {a.Role}, model: {a.Model}, memory: {a.MemoryLimitMb}MB, warmup: {a.WarmupTimeoutSeconds}s, {status}");
+            // #455: applied only to provider pi; another provider keeps the stored value but ignores it.
+            var piImages = (a.PiImageInput ? "on" : "off")
+                + (a.PiImageInput && !PiLocalModel.IsPi(a.Provider) ? " (ignored: pi only)" : "");
+            sb.AppendLine($"- **{a.Name}** ({a.DisplayName}) — role: {a.Role}, model: {a.Model}, memory: {a.MemoryLimitMb}MB, warmup: {a.WarmupTimeoutSeconds}s, pi image input: {piImages}, {status}");
         }
 
         return sb.ToString();

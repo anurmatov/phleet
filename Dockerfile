@@ -18,10 +18,15 @@ ARG MC_VERSION=RELEASE.2025-08-13T08-35-41Z
 # diagrams agents render show their text, Latin and Cyrillic (#371); ffmpeg pulls both in today,
 # and naming them keeps them if ffmpeg changes. --no-install-recommends is scoped to this line
 # so ffmpeg's X11/GUI recommends stay out without changing what the other packages pull in.
+# poppler-utils (#455) lets Pi agents extract PDF text and render image-only pages; Fleet runs it
+# itself under prlimit. It is the distro's current package, deliberately unpinned: it parses
+# untrusted files, so every image rebuild picks up its security fixes (docs/providers/pi.md §8b).
 RUN apt-get update && apt-get install -y curl git jq rsync cron openssh-client python3 && \
-    apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core fontconfig && rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core fontconfig poppler-utils && rm -rf /var/lib/apt/lists/*
 RUN ffmpeg -version >/dev/null && ffprobe -version >/dev/null || \
     (echo "ERROR: ffmpeg/ffprobe not runnable in the agent image" && exit 1)
+COPY scripts/check-attachment-tools.sh /opt/fleet/
+RUN /opt/fleet/check-attachment-tools.sh
 RUN fc-list | grep -qi dejavu || (echo "ERROR: no DejaVu font in the agent image" && exit 1)
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y nodejs && \

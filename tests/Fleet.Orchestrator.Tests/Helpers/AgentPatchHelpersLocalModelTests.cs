@@ -8,6 +8,8 @@ namespace Fleet.Orchestrator.Tests.Helpers;
 /// #382: every branch of the A1 alias rule in <see cref="AgentPatchHelpers.ResolveLocalBaseUrl"/>,
 /// and <see cref="AgentPatchHelpers.FinalizeLocalModel"/> for codex local mode — the two helpers
 /// both write paths (REST and MCP) call. #386: PV1, and pi's PI1–PI4 with the context window.
+/// #455: neither helper ever changes <c>PiImageInput</c>, so it survives a provider switch, and a
+/// non-boolean REST value gets a 400 text naming its path.
 /// </summary>
 public class AgentPatchHelpersLocalModelTests
 {
@@ -174,5 +176,67 @@ public class AgentPatchHelpersLocalModelTests
         agent.ContextWindow = window;
 
         Assert.Null(AgentPatchHelpers.FinalizeLocalModel(agent));
+    }
+
+    // ── #455: PiImageInput ───────────────────────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("pi", "qwen3.8-flash-next", true)]
+    [InlineData("claude", "qwen3.8-flash-next", true)]
+    [InlineData("codex", "ollama/qwen3.8-flash-next", true)]
+    [InlineData("pi", "qwen3.8-flash-next", false)]
+    [InlineData("codex", "ollama/qwen3.8-flash-next", false)]
+    public void Finalize_AProviderSwitchFromPi_NeverChangesPiImageInput(string provider, string model, bool flag)
+    {
+        var agent = Pi();
+        agent.PiImageInput = flag;
+        agent.Provider = provider;
+        agent.Model = model;
+
+        Assert.Null(AgentPatchHelpers.FinalizeLocalModel(agent));
+        Assert.Equal(flag, agent.PiImageInput);
+    }
+
+    [Fact]
+    public void Finalize_AFaultLeavesPiImageInputAsItWas()
+    {
+        var agent = Pi(window: null);
+        agent.PiImageInput = true;
+
+        Assert.Equal(PiLocalModel.Pi3Text, AgentPatchHelpers.FinalizeLocalModel(agent));
+        Assert.True(agent.PiImageInput);
+    }
+
+    [Theory]
+    [InlineData("pi", PiUrl, 131_072)]
+    [InlineData("claude", null, null)]
+    [InlineData("gemini", null, null)]
+    public void ApplyLocalModelOnCreate_NeverChangesPiImageInput(string provider, string? url, int? window)
+    {
+        var agent = Pi();
+        agent.Provider = provider;
+        agent.LocalBaseUrl = null;
+        agent.ContextWindow = null;
+        agent.Effort = null;
+        agent.PiImageInput = true;
+
+        Assert.Null(AgentPatchHelpers.ApplyLocalModelOnCreate(agent, url, window));
+        Assert.True(agent.PiImageInput);
+    }
+
+    [Theory]
+    [InlineData("\"true\"")]
+    [InlineData("1")]
+    [InlineData("[]")]
+    public void DescribeBodyFault_ANonBooleanPiImageInput_NamesItsPath(string value)
+    {
+        var ex = Assert.ThrowsAny<System.Text.Json.JsonException>(() =>
+            System.Text.Json.JsonSerializer.Deserialize<Fleet.Orchestrator.Endpoints.AgentConfigUpdateRequest>(
+                $$"""{"piImageInput":{{value}}}""",
+                new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)));
+
+        Assert.Equal(
+            "Invalid request body at '$.piImageInput': malformed JSON or a value of the wrong type (booleans take true or false).",
+            AgentPatchHelpers.DescribeBodyFault(ex));
     }
 }

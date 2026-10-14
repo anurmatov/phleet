@@ -82,6 +82,7 @@ const DEFAULT_CREATE_FORM: CreateForm = {
   codexSandboxMode: '',
   tools: '', projects: '', networks: '', envRefs: '',
   mcpEndpoints: [], telegramUsers: '', telegramGroups: '', instructions: [], localBaseUrl: '', contextWindow: '',
+  piImageInput: false,
 }
 
 export default function App() {
@@ -909,7 +910,8 @@ export default function App() {
   function saveConfig(agentName: string, andReprovision: boolean) {
     if (!configEdits) return
     const provider = (configEdits.provider ?? 'claude').trim()
-    // Model, local server URL (sent as `localBaseUrl` only) and context window, with the empty-URL rule.
+    // Model, local server URL (sent as `localBaseUrl` only) and context window, with the empty-URL rule;
+    // Pi also sends its image input, which every other provider omits (kept).
     const localModel = localModelSaveBody({ ...configEdits, provider })
     if (!localModel.ok) { setConfigSaveMsg(localModel.error); setConfigSaveState('error'); return }
     const memoryLimitMb = parseInt(configEdits.memoryLimitMb, 10)

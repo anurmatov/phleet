@@ -62,6 +62,90 @@ public static class PiLocalModel
     /// <summary>The provider id Fleet writes into <c>models.json</c>.</summary>
     public const string ProviderId = "fleet-local";
 
+    // ── Attachments (#455) ───────────────────────────────────────────────────
+
+    /// <summary>Inline images per command; the rest keep their path for <c>read</c>. V4 informs a raise.</summary>
+    public const int MaxImagesPerCommand = 2;
+
+    /// <summary>An inline image's raw bytes, after any downscale.</summary>
+    public const int MaxImageBytes = 3_145_728;
+
+    /// <summary>Pi's own resize bound (P5): an image within it and <see cref="MaxImageBytes"/> passes byte for byte.</summary>
+    public const int MaxImageDimension = 2000;
+
+    /// <summary>Decode bound: an image wider or taller than this is never handed to a decoder.</summary>
+    public const int MaxDecodeDimension = 12_000;
+
+    /// <summary>Decode bound: width × height, the conversation channel's 50 MP limit.</summary>
+    public const long MaxDecodePixels = 50_000_000;
+
+    /// <summary>PDFs extracted per command; further PDFs keep only their path hint.</summary>
+    public const int MaxPdfsPerCommand = 3;
+
+    /// <summary>PDF text inlined per command across all PDFs; the rest is in the sidecar file.</summary>
+    public const int MaxInlinePdfChars = 24_576;
+
+    /// <summary><c>pdftotext</c> output kept per PDF; more is truncated, not failed.</summary>
+    public const int MaxPdfTextBytes = 4 * 1024 * 1024;
+
+    /// <summary><c>pdftotext -l</c>: pages read per PDF.</summary>
+    public const int MaxPdfPages = 100;
+
+    /// <summary>Fewer non-whitespace characters than this means the PDF has no text layer.</summary>
+    public const int MinTextLayerChars = 32;
+
+    /// <summary>One deadline for every local tool call of one command (§3.6).</summary>
+    public static readonly TimeSpan CommandProcessingDeadline = TimeSpan.FromSeconds(60);
+
+    /// <summary>A single local tool call's wall timeout, cut to what is left of the command deadline.</summary>
+    public static readonly TimeSpan LocalToolCallTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary><c>prlimit --as</c> for every local tool.</summary>
+    public const long LocalToolAddressSpaceBytes = 1_073_741_824;
+
+    /// <summary><c>prlimit --cpu</c> for every local tool.</summary>
+    public const int LocalToolCpuSeconds = 60;
+
+    /// <summary><c>prlimit --nofile</c> for every local tool.</summary>
+    public const int LocalToolOpenFiles = 256;
+
+    /// <summary>PDF extraction cache entries (text excerpts and metadata only, never image bytes).</summary>
+    public const int PdfCacheEntries = 32;
+
+    /// <summary>A session file over this logs one Warning per crossing; <c>/reset</c> starts a new one.</summary>
+    public const long SessionFileWarningBytes = 256L * 1024 * 1024;
+
+    /// <summary>Why an image did not go inline, in the order the checks run (§3.2).</summary>
+    public static class ImageReasons
+    {
+        public const string UnsupportedFormat = "unsupported format";
+        public const string Unreadable = "unreadable";
+        public const string TooLargeToProcess = "too large to process";
+        public const string OverImageLimit = "over the 2-image limit";
+        public const string ProcessingFailed = "processing failed";
+        public const string ProcessingTimedOut = "processing timed out";
+        public const string Over3MiB = "over 3 MiB";
+
+        /// <summary>The order the omitted note lists reasons in.</summary>
+        public static IReadOnlyList<string> Order { get; } =
+            [UnsupportedFormat, Unreadable, TooLargeToProcess, OverImageLimit, ProcessingFailed, ProcessingTimedOut, Over3MiB];
+    }
+
+    /// <summary>Why a PDF gave no text (§3.3), and the informational truncation marker.</summary>
+    public static class PdfReasons
+    {
+        public const string FileMissing = "file missing";
+        public const string NotAPdf = "not a valid PDF";
+        public const string Damaged = "damaged";
+        public const string PasswordProtected = "password-protected";
+        public const string CopyRestricted = "text copying restricted by the PDF";
+        public const string TimedOut = "extraction timed out";
+        public const string ExtractorUnavailable = "extractor unavailable";
+        public const string NoTextLayer = "no text layer";
+        public const string NoImageSlotLeft = "no image slot left";
+        public const string Truncated = "truncated at 4 MiB";
+    }
+
     /// <summary>Pi's built-in tools, fixed. <c>grep</c> and <c>find</c> stay off (no rg/fd download).</summary>
     public static IReadOnlyList<string> BuiltInTools { get; } = ["read", "bash", "edit", "write"];
 

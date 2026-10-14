@@ -254,16 +254,24 @@ public class ProviderCapabilityMatrixTests
     // ── The `## pi` section (#386 B13) ───────────────────────────────────────
     //
     // Pi has no harness scenarios, so its section is not in the scenario grammar above and the
-    // scenario parser never reads it. It carries only production-path canary (B1–B12) results, one
-    // row per gate. The canary has not run, so every row must still say so: a number here before
-    // the canary would be a claim, not evidence (#386 MUST NOT 4).
+    // scenario parser never reads it. It carries only production-path canary results, one row per
+    // gate: B1–B12 (#386) and the attachment canary V1–V9 (#455). Neither canary has run, so every
+    // row must still say so: a number here before the canary would be a claim, not evidence
+    // (#386 MUST NOT 4, #455 §10 V).
 
     private const string PiHeading = "## pi";
     private const string PiPending = "not measured (B canary pending)";
+    private const string PiAttachmentPending = "not measured (V canary pending)";
     private const string PiNoEvidence = "—";
     private static readonly string[] PiHeader = ["gate", "measures", "result", "evidence"];
     private static readonly string[] PiGates =
-        ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10", "B11", "B12"];
+    [
+        "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10", "B11", "B12",
+        "V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8", "V9",
+    ];
+
+    /// <summary>The pending literal for a gate: the V rows belong to the #455 attachment canary.</summary>
+    private static string PendingFor(string gate) => gate.StartsWith('V') ? PiAttachmentPending : PiPending;
 
     /// <summary>The evidence a measured pi result must cite: the dated canary run and the Pi pin.</summary>
     private static readonly System.Text.RegularExpressions.Regex PiCanaryEvidence =
@@ -275,7 +283,7 @@ public class ProviderCapabilityMatrixTests
         "# probe\n\n" + PiHeading + "\n\nprose\n\n| gate | measures | result | evidence |\n|---|---|---|---|\n"
         + string.Join("\n", rows) + "\n\n## next\n";
 
-    private static string PendingRow(string gate) => $"| {gate} | something | {PiPending} | {PiNoEvidence} |";
+    private static string PendingRow(string gate) => $"| {gate} | something | {PendingFor(gate)} | {PiNoEvidence} |";
 
     private static string[] AllPendingRows() => PiGates.Select(PendingRow).ToArray();
 
@@ -330,7 +338,7 @@ public class ProviderCapabilityMatrixTests
             if (string.IsNullOrWhiteSpace(row.Measures))
                 return $"{row.Gate} does not say what it measures";
 
-            if (row.Result == PiPending)
+            if (row.Result == PendingFor(row.Gate))
             {
                 if (row.Evidence != PiNoEvidence)
                     return $"{row.Gate} is pending but cites evidence '{row.Evidence}'";
@@ -369,7 +377,7 @@ public class ProviderCapabilityMatrixTests
     {
         foreach (var row in CommittedPiRows())
         {
-            Assert.Equal(PiPending, row.Result);
+            Assert.Equal(PendingFor(row.Gate), row.Result);
             Assert.Equal(PiNoEvidence, row.Evidence);
             Assert.DoesNotMatch(@"\d", row.Result);
         }
@@ -398,6 +406,8 @@ public class ProviderCapabilityMatrixTests
     [InlineData("a reopen-gate row", 0, "| G1 | summary-call cache ratio | not measured (B canary pending) | — |")]
     [InlineData("a B13 row", 11, "| B13 | the matrix itself | not measured (B canary pending) | — |")]
     [InlineData("no measures", 2, "| B3 |  | not measured (B canary pending) | — |")]
+    [InlineData("a V row with the B pending text", 12, "| V1 | something | not measured (B canary pending) | — |")]
+    [InlineData("a V10 row", 20, "| V10 | something | not measured (V canary pending) | — |")]
     public void PiSectionRules_RejectABrokenRow(string _, int index, string replacement)
     {
         var rows = AllPendingRows();

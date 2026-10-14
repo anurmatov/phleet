@@ -1,9 +1,9 @@
 import type { CodexLocalServer } from '../types'
 import { CONTEXT_WINDOW_MAX, CONTEXT_WINDOW_MIN } from '../contextWindow'
 import {
-  LEGACY_CODEX_NOTICE, PI_MIN_CONTEXT_WINDOW, PI_RUNS_ON_NOTE, applySuggestion, localModelSuggestions, localModelTag,
-  piContextFault, runsOnLocked, setLocalServer, setLocalTag, showLegacyCodexNotice, suggestionNotes, switchRunsOn,
-  v1PathHint,
+  LEGACY_CODEX_NOTICE, PI_IMAGE_INPUT_HINT, PI_MIN_CONTEXT_WINDOW, PI_RUNS_ON_NOTE, applySuggestion, isPi,
+  localModelSuggestions, localModelTag, piContextFault, runsOnLocked, setLocalServer, setLocalTag,
+  showLegacyCodexNotice, suggestionNotes, switchRunsOn, v1PathHint,
 } from '../localModel'
 import type { LocalModelEdits, LocalModelPatch } from '../localModel'
 import FieldHint from './FieldHint'
@@ -19,7 +19,8 @@ interface LocalModelFieldsProps {
 /**
  * "Runs on" toggle and, in Local server mode, the server URL, server software (Codex), model tag
  * with suggestion chips, and context window (#382). Pi (#386) is locked to Local server and needs a
- * context window of at least 65536. The cloud model picker is the caller's.
+ * context window of at least 65536; it alone has the Image input checkbox (#455). The cloud model
+ * picker is the caller's.
  */
 export default function LocalModelFields({ edits, onEditsChange }: LocalModelFieldsProps) {
   const isCodex = edits.provider === 'codex'
@@ -128,6 +129,19 @@ export default function LocalModelFields({ edits, onEditsChange }: LocalModelFie
               <div className="size-warning-notice">⚠ Not set: the agent may not compact before the server rejects the prompt.</div>
             )}
           </div>
+          {isPi(edits.provider) && (
+            <div className="config-field">
+              <label className="config-field config-field-checkbox">
+                <input
+                  type="checkbox"
+                  checked={edits.piImageInput}
+                  onChange={e => onEditsChange({ piImageInput: e.target.checked })}
+                />
+                <span className="config-label">Image input</span>
+              </label>
+              <FieldHint>{PI_IMAGE_INPUT_HINT}</FieldHint>
+            </div>
+          )}
         </>
       )}
     </>

@@ -467,6 +467,10 @@ public sealed class ContainerProvisioningService(
                 agent.ContextWindow, agentName);
         }
 
+        // #455: stored for every provider and kept across a provider switch, but only pi reads it.
+        if (agent.PiImageInput && !PiLocalModel.IsPi(agent.Provider))
+            logger.LogInformation("PiImageInput ignored for '{Agent}': pi only", agentName);
+
         var spec      = BuildDesiredSpec(agent, envValues);
 
         // Apply image override if provided (e.g. CI uses a PR-specific image tag)
@@ -1361,6 +1365,10 @@ public sealed class ContainerProvisioningService(
             agentNode["PiBaseUrl"] = LocalModel.CanonicalizeBaseUrl(agent.LocalBaseUrl!);
             if (agent.ContextWindow is int window)
                 agentNode["ContextWindow"] = window;
+            // #455: written only when true, so a pi agent with the flag off keeps its bytes, and an
+            // older agent image ignores the unknown key (R2). Any other provider never gets it.
+            if (agent.PiImageInput)
+                agentNode["PiImageInput"] = true;
         }
         if (journal?.IngestToken is not null)
         {

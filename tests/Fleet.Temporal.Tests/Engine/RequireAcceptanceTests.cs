@@ -49,7 +49,7 @@ public sealed class RequireAcceptanceTests
         Assert.DoesNotContain(run.Upserts("Phase"), p => p is "acceptance-blocked" or "acceptance-continue");
         Assert.Contains($"v1;head={Head};result=not_required;iso=production;block=none;fix=0;batch=0", run.Upserts("Acceptance"));
         Assert.Contains(run.Calls, c => c.Instruction.Contains("basis require_acceptance_false", StringComparison.Ordinal));
-        Assert.DoesNotContain(run.Calls, c => c.Instruction.Contains("basis doc_only", StringComparison.Ordinal));
+        Assert.DoesNotContain("doc_only", Assert.Single(run.Calls, c => c.Instruction.StartsWith("Notify the primary human of verified exact-head readiness", StringComparison.Ordinal)).Instruction);
         Assert.Contains($"--match-head-commit {Head}", Assert.Single(run.Calls, c => c.Step == "phase4_merge").Instruction);
         Assert.Single(run.Calls, c => c.Step == "pin_after_approval");
     }

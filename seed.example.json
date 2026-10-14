@@ -5561,7 +5561,7 @@
                                 "notifyStep": {
                                   "type": "delegate",
                                   "target": "{{config.CtoAgent}}",
-                                  "instruction": "Notify the primary human of verified exact-head readiness for PR {{vars.pr_url}}, head {{vars.H}}, result {{vars.acceptance_result}}, receipts {{vars.child_result | default: \"not_required (doc_only)\"}}. Verify actual reviewer verdicts first. The dashboard is the human merge decision; configured CTO feedback remains changes_requested only, never approval. Use 1–3 plain sentences with verified results, the next action and owner, and at most one exact human ask. No invented progress or signal-sending instructions.\nAcceptance basis {{vars.acceptance_basis}}.",
+                                  "instruction": "Notify the primary human of verified exact-head readiness for PR {{vars.pr_url}}, head {{vars.H}}, result {{vars.acceptance_result}}, receipts {{vars.child_result | default: \"none\"}}. Verify actual reviewer verdicts first. The dashboard is the human merge decision; configured CTO feedback remains changes_requested only, never approval. Use 1–3 plain sentences with verified results, the next action and owner, and at most one exact human ask. No invented progress or signal-sending instructions.\nAcceptance basis {{vars.acceptance_basis}}.",
                                   "ignoreFailure": true,
                                   "timeoutMinutes": 5
                                 },

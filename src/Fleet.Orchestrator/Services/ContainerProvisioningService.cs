@@ -951,6 +951,8 @@ public sealed class ContainerProvisioningService(
             var plan = HarnessDefaults.Build(HarnessInputFor(agent));
             if (plan.ExtraState == HarnessDefaults.ExtraIgnored)
                 logger.LogWarning("harnessExtra ignored for '{Agent}', mode defaults apply: {Reason}", agent.Name, plan.ExtraReason);
+            foreach (var note in plan.Notes)
+                logger.LogWarning("harnessExtra for '{Agent}': {Note}", agent.Name, note);
             if (plan.CodexRootToml is not null)
                 await File.WriteAllTextAsync(Path.Combine(generatedDir, HarnessDefaults.CodexRootTomlFileName), plan.CodexRootToml);
         }
@@ -1269,8 +1271,10 @@ public sealed class ContainerProvisioningService(
     /// call this, so the view and the generated <c>codex-root.toml</c> come from one plan.
     /// </summary>
     /// <remarks>
-    /// <c>AllowedTools</c> is built without the CTO name: the plan reads only built-in names, and the
-    /// CTO auto-grant is an <c>mcp__</c> entry.
+    /// <c>AllowedTools</c> is the list the agent ends up with: the generated list bound onto the agent's
+    /// own six-tool default (<see cref="HarnessDefaults.AgentDefaultAllowedTools"/>), which the binder
+    /// appends to rather than replaces. It is built without the CTO name: the plan reads only built-in
+    /// names, and the CTO auto-grant is an <c>mcp__</c> entry.
     /// </remarks>
     internal static HarnessInput HarnessInputFor(Agent agent)
     {
@@ -1280,7 +1284,7 @@ public sealed class ContainerProvisioningService(
             Provider = agent.Provider,
             Local = local,
             ContextWindow = local ? agent.ContextWindow : null,
-            AllowedTools = AllowedToolsFor(agent, ctoAgentName: ""),
+            AllowedTools = [.. HarnessDefaults.AgentDefaultAllowedTools, .. AllowedToolsFor(agent, ctoAgentName: "")],
             HarnessExtra = agent.HarnessExtra,
             LocalBaseUrl = local ? LocalModel.CanonicalizeBaseUrl(agent.LocalBaseUrl!) : null,
             Model = agent.Model,

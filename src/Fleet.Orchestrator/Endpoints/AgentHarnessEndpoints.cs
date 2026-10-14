@@ -90,6 +90,7 @@ public static class AgentHarnessEndpoints
                 ["state"] = plan.ExtraState,
                 ["reason"] = plan.ExtraReason,
                 ["replaced"] = new JsonArray(plan.Replaced.Select(r => (JsonNode?)JsonValue.Create(r)).ToArray()),
+                ["notes"] = new JsonArray(plan.Notes.Select(n => (JsonNode?)JsonValue.Create(n)).ToArray()),
             },
             ["planSha256"] = plan.PlanSha256,
             ["computedPlanSha256"] = plan.PlanSha256,

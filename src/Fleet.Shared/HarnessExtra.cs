@@ -76,16 +76,17 @@ public static partial class HarnessExtra
     /// <summary>
     /// The built-in tool names an extra <c>--tools</c> line may add. A fixed constant: the
     /// orchestrator validates without the CLI. Read from the pinned Claude CLI 2.1.280's
-    /// <c>system/init</c> tool list (<c>Agent</c> is reported as <c>Task</c>), plus the always-kept
-    /// <c>ToolSearch</c> and <c>TodoWrite</c>; the agent-image PR re-verifies it (AC-C2).
+    /// <c>system/init</c> tool list — the default <c>-p</c> set, plus <c>Glob</c>, <c>Grep</c> and the
+    /// <c>Task*</c> todo tools, which it reports only when named (<c>Agent</c> is reported as
+    /// <c>Task</c>) — and the always-kept <c>ToolSearch</c> and <c>TodoWrite</c>. AC-C2 re-checks it.
     /// </summary>
     public static IReadOnlyList<string> KnownBuiltInTools { get; } =
     [
-        "Agent", "Bash", "CronCreate", "CronDelete", "CronList", "Edit", "EnterWorktree",
-        "ExitWorktree", "Glob", "Grep", "ListAgents", "NotebookEdit", "Read", "ReportFindings",
-        "ScheduleWakeup", "SendMessage", "Skill", "Task", "TaskCreate", "TaskGet", "TaskList",
-        "TaskStop", "TaskUpdate", "TodoWrite", "ToolSearch", "WebFetch", "WebSearch", "Workflow",
-        "Write",
+        "Agent", "Bash", "CronCreate", "CronDelete", "CronList", "DesignSync", "Edit", "EnterWorktree",
+        "ExitWorktree", "Glob", "Grep", "ListAgents", "Monitor", "NotebookEdit", "PushNotification",
+        "Read", "ReportFindings", "ScheduleWakeup", "SendMessage", "Skill", "Task", "TaskCreate",
+        "TaskGet", "TaskList", "TaskStop", "TaskUpdate", "TodoWrite", "ToolSearch", "WebFetch",
+        "WebSearch", "Workflow", "Write",
     ];
 
     /// <summary>The providers the field applies to; pi and gemini refuse a non-empty value.</summary>

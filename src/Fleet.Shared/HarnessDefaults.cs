@@ -56,6 +56,13 @@ public sealed record HarnessPlan(
 {
     /// <summary>The line the agent prints once at startup, matching the effective-settings view.</summary>
     public string StartupLine => $"harness: mode={Mode} plan={PlanSha256} extra={ExtraState}";
+
+    /// <summary>
+    /// Warnings about accepted extra lines that change nothing, e.g. a <c>--tools</c> line on an agent
+    /// that keeps every built-in: applying it would narrow that agent, so it is a no-op. Shown in the
+    /// view and logged by provisioning and the agent; not part of <see cref="PlanSha256"/>.
+    /// </summary>
+    public IReadOnlyList<string> Notes { get; init; } = [];
 }
 
 /// <summary>
@@ -91,10 +98,30 @@ public static class HarnessDefaults
 
     /// <summary>
     /// Built-in tools <c>--tools</c> always keeps, because <c>AllowedTools</c> never names them but
-    /// the harness needs them: sub-agents (<c>Agent</c>, which the pinned CLI reports as <c>Task</c>),
-    /// deferred MCP tool loading, skills and todos. A fixed constant; AC-C2 verifies each name.
+    /// the harness needs them: sub-agents (<c>Agent</c>, which the pinned CLI reports as <c>Task</c>)
+    /// with <c>SendMessage</c> to continue one and <c>TaskStop</c> to stop a background task, deferred
+    /// MCP tool loading, skills and todos. A fixed constant; AC-C2 verifies each name.
     /// </summary>
-    public static IReadOnlyList<string> KeptTools { get; } = ["Agent", "Task", "ToolSearch", "Skill", "TodoWrite"];
+    /// <remarks>
+    /// Checked against the pinned Claude CLI 2.1.280: an explicit <c>--tools</c> list drops
+    /// <c>SendMessage</c> and <c>TaskStop</c> from the default set, so they are named here. Unknown
+    /// names are silently ignored, never rejected. <c>TodoWrite</c> is not offered in <c>-p</c> mode on
+    /// this pin, and <c>ToolSearch</c> only with the first-party API (a local base URL turns tool search
+    /// off and MCP tools load up front); both stay listed so the set does not depend on either. The
+    /// <c>TaskCreate</c>/<c>TaskList</c> todo tools are not in the default <c>-p</c> set, so keeping
+    /// them would add tools, not preserve them.
+    /// </remarks>
+    public static IReadOnlyList<string> KeptTools { get; } =
+        ["Agent", "Task", "ToolSearch", "Skill", "TodoWrite", "TaskStop", "SendMessage"];
+
+    /// <summary>
+    /// The agent's own <c>AllowedTools</c> default (<c>AgentOptions</c>). The .NET configuration
+    /// binder appends the generated list to it rather than replacing it, so every running agent's
+    /// <c>AllowedTools</c> — and the <c>--allowedTools</c> it passes — starts with these six.
+    /// <c>HarnessInputFor</c> in the orchestrator prepends them, so the plan it computes is the one the
+    /// agent starts with, and <c>--tools</c> never drops a tool the agent pre-approves (MUST NOT 4).
+    /// </summary>
+    public static IReadOnlyList<string> AgentDefaultAllowedTools { get; } = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"];
 
     /// <summary>Kept as well in cloud mode only (MUST NOT 5).</summary>
     public static IReadOnlyList<string> CloudKeptTools { get; } = ["WebFetch", "WebSearch"];
@@ -136,6 +163,7 @@ public static class HarnessDefaults
         var extras = parse.Fault is null ? parse.Lines : [];
         var state = parse.Fault is not null ? ExtraIgnored : extras.Count == 0 ? ExtraNone : ExtraApplied;
         var replaced = new List<string>();
+        var notes = new List<string>();
 
         string? rootToml = null;
         List<HarnessSetting>? thread = null;
@@ -193,7 +221,13 @@ public static class HarnessDefaults
                 {
                     case HarnessExtraTarget.ClaudeFlag when extra.Name == HarnessExtra.ToolsFlag:
                         // Additive only (MUST NOT 4); a no-op when no --tools flag is computed.
-                        if (tools is null) break;
+                        if (tools is null)
+                        {
+                            notes.Add($"harnessExtra line {extra.Line}: '{HarnessExtra.ToolsFlag}' has no effect: "
+                                + "this agent keeps every built-in tool, and applying the line would narrow it to "
+                                + "the listed names. Extras only add tools; narrow an agent through its AllowedTools.");
+                            break;
+                        }
                         var added = ((string)extra.Value!).Split(',')
                             .Where(t => !tools.Contains(t, StringComparer.Ordinal)).ToList();
                         if (added.Count > 0)
@@ -234,7 +268,7 @@ public static class HarnessDefaults
         var mode = local ? ModeLocal : ModeCloud;
         var sha = Sha256(provider, mode, rootToml, thread, args, env, state);
         return new HarnessPlan(provider, mode, rootToml, thread, args, env, state,
-            parse.Fault?.Message, replaced, sha);
+            parse.Fault?.Message, replaced, sha) { Notes = notes };
     }
 
     private static void Merge(List<HarnessSetting> settings, HarnessSetting extra, List<string> replaced)

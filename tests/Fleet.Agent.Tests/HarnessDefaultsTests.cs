@@ -85,7 +85,7 @@ public sealed class HarnessDefaultsTests
         Assert.Null(plan.CodexThreadConfig);
         Assert.Equal(
         [
-            "--tools", "Agent,Task,ToolSearch,Skill,TodoWrite,WebFetch,WebSearch,Bash,Edit,Glob,Grep,Read,Write",
+            "--tools", "Agent,Task,ToolSearch,Skill,TodoWrite,TaskStop,SendMessage,WebFetch,WebSearch,Bash,Edit,Glob,Grep,Read,Write",
             "--exclude-dynamic-system-prompt-sections", "--strict-mcp-config",
         ], plan.ClaudeArgs);
         Assert.Equal([new("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")], plan.ClaudeEnv);
@@ -99,7 +99,7 @@ public sealed class HarnessDefaultsTests
         Assert.Equal("local", plan.Mode);
         Assert.Equal(
         [
-            "--tools", "Agent,Task,ToolSearch,Skill,TodoWrite,Bash,Edit,Glob,Grep,Read,Write",
+            "--tools", "Agent,Task,ToolSearch,Skill,TodoWrite,TaskStop,SendMessage,Bash,Edit,Glob,Grep,Read,Write",
             "--disallowedTools", "WebSearch",
             "--exclude-dynamic-system-prompt-sections", "--strict-mcp-config",
         ], plan.ClaudeArgs);
@@ -133,7 +133,7 @@ public sealed class HarnessDefaultsTests
     {
         var plan = Claude(local: true, tools: ["Bash(git *)", "Bash(npm test)", "Read", "mcp__fleet-memory__*", "Read", "Agent"]);
 
-        Assert.Equal("Agent,Task,ToolSearch,Skill,TodoWrite,Bash,Read", plan.ClaudeArgs![1]);
+        Assert.Equal("Agent,Task,ToolSearch,Skill,TodoWrite,TaskStop,SendMessage,Bash,Read", plan.ClaudeArgs![1]);
     }
 
     [Theory]
@@ -236,7 +236,7 @@ public sealed class HarnessDefaultsTests
 
         Assert.Equal(
         [
-            "--tools", "Agent,Task,ToolSearch,Skill,TodoWrite,WebFetch,WebSearch,Bash,Edit,Glob,Grep,Read,Write",
+            "--tools", "Agent,Task,ToolSearch,Skill,TodoWrite,TaskStop,SendMessage,WebFetch,WebSearch,Bash,Edit,Glob,Grep,Read,Write",
             "--disallowedTools", "WebSearch", "--strict-mcp-config",
         ], plan.ClaudeArgs);
         Assert.Equal(["--exclude-dynamic-system-prompt-sections"], plan.Replaced);
@@ -247,7 +247,7 @@ public sealed class HarnessDefaultsTests
     {
         var plan = Claude(local: true, tools: ["Read"], extra: "--tools NotebookEdit,Read,Agent");
 
-        Assert.Equal("Agent,Task,ToolSearch,Skill,TodoWrite,Read,NotebookEdit", plan.ClaudeArgs![1]);
+        Assert.Equal("Agent,Task,ToolSearch,Skill,TodoWrite,TaskStop,SendMessage,Read,NotebookEdit", plan.ClaudeArgs![1]);
         Assert.Equal(["--tools"], plan.Replaced);
     }
 
@@ -260,6 +260,22 @@ public sealed class HarnessDefaultsTests
         Assert.DoesNotContain("--tools", withExtra.ClaudeArgs!);
         Assert.Equal(without.ClaudeArgs, withExtra.ClaudeArgs);
         Assert.Empty(withExtra.Replaced);
+        // The line would have narrowed an all-tools agent: it is a no-op, and the plan says so.
+        var note = Assert.Single(withExtra.Notes);
+        Assert.StartsWith("harnessExtra line 1: '--tools' has no effect", note);
+        Assert.Contains("would narrow", note);
+        Assert.Empty(without.Notes);
+        Assert.Equal(HarnessDefaults.ExtraApplied, withExtra.ExtraState);
+    }
+
+    [Fact]
+    public void KeptTools_IncludeTheAgentCompanions_ThatAnExplicitListWouldDrop()
+    {
+        // Pinned CLI 2.1.280: an explicit --tools list drops SendMessage and TaskStop from the
+        // default -p set; both belong to the Agent tool's own workflow (AC-C2).
+        Assert.Equal(["Agent", "Task", "ToolSearch", "Skill", "TodoWrite", "TaskStop", "SendMessage"], HarnessDefaults.KeptTools);
+        Assert.All(HarnessDefaults.KeptTools.Concat(HarnessDefaults.CloudKeptTools),
+            t => Assert.Contains(t, HarnessExtra.KnownBuiltInTools));
     }
 
     // ── AC-X4 (helper part): a stored value the validator refuses is skipped as a whole ─────────────

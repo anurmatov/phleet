@@ -218,6 +218,11 @@ public sealed class ContainerProvisioningService(
             }
             case AgentProviders.Codex:
             {
+                // #460: the generated root keys, written by GenerateConfigFilesAsync before the
+                // container is created (a missing host file would mount as an empty directory).
+                // Codex agents only; entrypoint.sh reads the same container path.
+                binds.Add(CodexRootTomlBind(containerName));
+
                 // A hosted-provider agent must hold no OpenAI credential (#335 D6): its model is served
                 // by the vendor through the loopback adapter, and the credential would be one more
                 // secret in a container whose model runs a root shell.
@@ -254,6 +259,10 @@ public sealed class ContainerProvisioningService(
 
         return AppendCredentialMounts(agent, binds);
     }
+
+    /// <summary>The read-only bind of <c>.generated/codex-root.toml</c> (#460), codex agents only.</summary>
+    internal static string CodexRootTomlBind(string containerName) =>
+        $"./workspaces/{containerName}/.generated/{HarnessDefaults.CodexRootTomlFileName}:{HarnessDefaults.CodexRootTomlContainerPath}:ro";
 
     private static List<string> AppendCredentialMounts(Agent agent, List<string> binds)
     {
@@ -935,6 +944,17 @@ public sealed class ContainerProvisioningService(
         await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl, journal.ReadToken, journal.FilesEnabled || journal.SendEnabled));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent, ctoAgentName, style));
 
+        // #460: the same plan the effective-settings view serves. Written for codex agents only,
+        // before the container is created, so the read-only bind always finds a file.
+        if (HarnessExtra.IsSupportedProvider(agent.Provider))
+        {
+            var plan = HarnessDefaults.Build(HarnessInputFor(agent));
+            if (plan.ExtraState == HarnessDefaults.ExtraIgnored)
+                logger.LogWarning("harnessExtra ignored for '{Agent}', mode defaults apply: {Reason}", agent.Name, plan.ExtraReason);
+            if (plan.CodexRootToml is not null)
+                await File.WriteAllTextAsync(Path.Combine(generatedDir, HarnessDefaults.CodexRootTomlFileName), plan.CodexRootToml);
+        }
+
         logger.LogInformation(
             "Generated config files for '{Agent}' in {Dir}",
             agent.Name, generatedDir);
@@ -1214,23 +1234,9 @@ public sealed class ContainerProvisioningService(
             agent.Name, projectsDir, agent.Projects.Count);
     }
 
-    internal static string GenerateAppsettingsJson(
-        Agent agent,
-        string ctoAgentName,
-        OutputStyle? style = null,
-        JournalProvisioning? journal = null, string? primaryHumanUserId = null)
+    /// <summary>The generated <c>Agent.AllowedTools</c> list, which the agent reads as its own.</summary>
+    internal static List<string> AllowedToolsFor(Agent agent, string ctoAgentName)
     {
-        var primaryId = ParsePrimaryHumanUserId(primaryHumanUserId);
-        if (!string.IsNullOrWhiteSpace(agent.OutputStyle) && style is null)
-            throw new InvalidOperationException(
-                $"Agent '{agent.Name}' names output style '{agent.OutputStyle}', which has no row in " +
-                "output_styles — refusing to generate config that drops the style silently.");
-
-        // #340 D1 point 2: a row edited by hand into an invalid state stops here, and reprovision
-        // leaves the agent down with the named fault instead of starting it misconfigured.
-        if (DescribeLocalModelFault(agent) is { } localFault)
-            throw new InvalidOperationException($"Agent '{agent.Name}' cannot be provisioned: {localFault}");
-
         var tools = agent.Tools.Where(t => t.IsEnabled).OrderBy(t => t.ToolName)
             .Select(t => JournalGrants.IsSendGrant(t.ToolName) ? JournalGrants.SendGrant : string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase) ? JournalFilesGrant : t.ToolName).ToList();
 
@@ -1254,6 +1260,52 @@ public sealed class ContainerProvisioningService(
             tools.Sort(StringComparer.OrdinalIgnoreCase);
         }
 
+        return tools;
+    }
+
+    /// <summary>
+    /// The <see cref="HarnessDefaults.Build"/> input for a claude or codex agent (#460): the values the
+    /// agent itself reads from its generated config. Provisioning and the effective-settings view both
+    /// call this, so the view and the generated <c>codex-root.toml</c> come from one plan.
+    /// </summary>
+    /// <remarks>
+    /// <c>AllowedTools</c> is built without the CTO name: the plan reads only built-in names, and the
+    /// CTO auto-grant is an <c>mcp__</c> entry.
+    /// </remarks>
+    internal static HarnessInput HarnessInputFor(Agent agent)
+    {
+        var local = LocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl);
+        return new HarnessInput
+        {
+            Provider = agent.Provider,
+            Local = local,
+            ContextWindow = local ? agent.ContextWindow : null,
+            AllowedTools = AllowedToolsFor(agent, ctoAgentName: ""),
+            HarnessExtra = agent.HarnessExtra,
+            LocalBaseUrl = local ? LocalModel.CanonicalizeBaseUrl(agent.LocalBaseUrl!) : null,
+            Model = agent.Model,
+            Effort = agent.Effort,
+        };
+    }
+
+    internal static string GenerateAppsettingsJson(
+        Agent agent,
+        string ctoAgentName,
+        OutputStyle? style = null,
+        JournalProvisioning? journal = null, string? primaryHumanUserId = null)
+    {
+        var primaryId = ParsePrimaryHumanUserId(primaryHumanUserId);
+        if (!string.IsNullOrWhiteSpace(agent.OutputStyle) && style is null)
+            throw new InvalidOperationException(
+                $"Agent '{agent.Name}' names output style '{agent.OutputStyle}', which has no row in " +
+                "output_styles — refusing to generate config that drops the style silently.");
+
+        // #340 D1 point 2: a row edited by hand into an invalid state stops here, and reprovision
+        // leaves the agent down with the named fault instead of starting it misconfigured.
+        if (DescribeLocalModelFault(agent) is { } localFault)
+            throw new InvalidOperationException($"Agent '{agent.Name}' cannot be provisioned: {localFault}");
+
+        var tools = AllowedToolsFor(agent, ctoAgentName);
         var projects   = agent.Projects.Select(p => p.ProjectName).ToList();
         var hosted     = HostedModelProviders.TryResolve(agent.Provider, agent.Model, out var hostedProvider, out _);
 
@@ -1332,7 +1384,8 @@ public sealed class ContainerProvisioningService(
             && journal?.ReadToken is null
             && !codexLocal
             && !piLocal
-            && !HasTelegramBot(agent))
+            && !HasTelegramBot(agent)
+            && agent.HarnessExtra is null)
             return json;
 
         var node = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
@@ -1370,6 +1423,10 @@ public sealed class ContainerProvisioningService(
             if (agent.PiImageInput)
                 agentNode["PiImageInput"] = true;
         }
+        // #460: written only when set, so every agent without the field keeps its bytes and an older
+        // agent image ignores the unknown key.
+        if (agent.HarnessExtra is not null)
+            node["Agent"]!.AsObject()["HarnessExtra"] = agent.HarnessExtra;
         if (journal?.IngestToken is not null)
         {
             node["Journal"] = new System.Text.Json.Nodes.JsonObject

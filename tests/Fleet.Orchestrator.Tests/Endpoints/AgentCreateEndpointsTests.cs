@@ -243,6 +243,52 @@ public sealed class AgentCreateEndpointsTests : IAsyncLifetime
         Assert.Equal([("agent1", true), ("agent2", false)], stored.Select(a => (a.Name, a.PiImageInput)).ToList());
     }
 
+    // ── #460: harnessExtra on create, the same allowlist as the PUT, before any write ─────────────
+
+    [Theory]
+    [InlineData("codex", "gpt-5.5", "notify = [\"sh\"]", "invalid_line")]
+    [InlineData("claude", "claude-opus-5-5", "--dangerously-skip-permissions", "invalid_line")]
+    [InlineData("gemini", "gemini-2.5-pro", "# anything", "unsupported_provider")]
+    public async Task HarnessExtra_ARefusedValue_Is400_AndNoRowIsWritten(string provider, string model, string extra, string code)
+    {
+        var response = await _client.PostAsJsonAsync("/api/agents",
+            new { name = "agent1", role = "co-cto", model, provider, harnessExtra = extra });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal((code, "harnessExtra"), (body.GetProperty("code").GetString(), body.GetProperty("field").GetString()));
+        Assert.Equal(0, await AgentCountAsync());
+    }
+
+    [Fact]
+    public async Task HarnessExtra_IsStoredOnCreate_Verbatim()
+    {
+        var token = "123456:" + new string('A', 35);
+        await File.WriteAllTextAsync(_app.Configuration["Provisioning:EnvFilePath"]!,
+            $"TELEGRAM_CTO_BOT_TOKEN={token}\nTELEGRAM_NOTIFIER_BOT_TOKEN={token}\n");
+        await using (var scope = _app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+            db.Agents.Add(new Agent
+            {
+                Name = "agent0", DisplayName = "agent0", Role = "co-cto", Model = "claude-opus-5-5",
+                MemoryLimitMb = 1024, ContainerName = "fleet-agent0",
+            });
+            await db.SaveChangesAsync();
+        }
+
+        const string extra = "# cloud agent without web search\n--disallowedTools WebSearch\n";
+        var response = await _client.PostAsJsonAsync("/api/agents", new
+        {
+            name = "agent1", role = "developer", model = "claude-opus-5-5", harnessExtra = extra, provision = false,
+        });
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        await using var check = _app.Services.CreateAsyncScope();
+        Assert.Equal(extra, (await check.ServiceProvider.GetRequiredService<OrchestratorDbContext>().Agents
+            .AsNoTracking().SingleAsync(a => a.Name == "agent1")).HarnessExtra);
+    }
+
     /// <summary>Fails the test if anything reaches Docker.</summary>
     private sealed class RefusingDockerApi : HttpMessageHandler
     {

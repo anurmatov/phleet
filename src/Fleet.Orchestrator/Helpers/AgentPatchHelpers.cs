@@ -49,6 +49,21 @@ internal static class AgentPatchHelpers
     }
 
     /// <summary>
+    /// Validates the agent's resulting <c>HarnessExtra</c> against the allowlist for its resulting
+    /// provider and mode (#460 Part 3b). Returns the fault, or null; on a fault the caller returns an
+    /// error without saving. Run after <see cref="FinalizeLocalModel"/>, so the mode is final.
+    /// </summary>
+    /// <remarks>
+    /// Shared by <c>update_agent_config</c>, <c>PUT /api/agents/{name}/config</c> and both create
+    /// paths. Like <see cref="FinalizeLocalModel"/> it checks the resulting state on every write, so a
+    /// provider or mode switch that would leave a stored value outside the allowlist (pi, gemini, or a
+    /// local agent with <c>web_search = "live"</c>) is refused until the value is changed or cleared.
+    /// </remarks>
+    internal static HarnessExtraFault? DescribeHarnessExtraFault(Agent agent) =>
+        HarnessExtra.Parse(agent.HarnessExtra, agent.Provider,
+            LocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl)).Fault;
+
+    /// <summary>
     /// The local server URL and context window a create request carries (#386): validated by the same
     /// rules as the PUT, before the row is written, and stored in canonical form. Returns the fault,
     /// or null.
@@ -125,6 +140,10 @@ internal static class AgentPatchHelpers
     /// </summary>
     internal static string DescribeBodyFault(System.Text.Json.JsonException ex) =>
         $"Invalid request body at '{ex.Path ?? "$"}': malformed JSON or a value of the wrong type (booleans take true or false).";
+
+    /// <summary>The 400 body for a refused <c>harnessExtra</c>: the field, the line and the reason.</summary>
+    internal static object HarnessExtraBadRequest(HarnessExtraFault fault) =>
+        new { error = fault.Message, code = fault.Code, field = "harnessExtra", line = fault.Line };
 
     internal static readonly string[] ValidCodexSandboxModes =
         ["read-only", "workspace-write", "danger-full-access"];

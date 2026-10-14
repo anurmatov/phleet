@@ -95,6 +95,16 @@ public class Agent
     /// </summary>
     public bool PiImageInput { get; set; } = false;
 
+    /// <summary>
+    /// The one per-agent harness override (#460), or <c>null</c> for none: Codex <c>key = value</c>
+    /// lines or Claude <c>--flag</c>/<c>!--flag</c>/<c>NAME=value</c> lines, merged over the mode
+    /// defaults by <see cref="HarnessDefaults.Build"/>. Every write path validates it against the
+    /// allowlist through <see cref="Helpers.AgentPatchHelpers.DescribeHarnessExtraFault"/>; claude and
+    /// codex only. Stored verbatim (<see cref="Fleet.Shared.HarnessExtra.MaxChars"/> chars,
+    /// <see cref="Fleet.Shared.HarnessExtra.MaxLines"/> lines at most). Changing it requires <c>reprovision_agent</c>.
+    /// </summary>
+    public string? HarnessExtra { get; set; }
+
     public List<AgentTool> Tools { get; set; } = [];
     public List<AgentProject> Projects { get; set; } = [];
     public List<AgentMcpEndpoint> McpEndpoints { get; set; } = [];

@@ -83,6 +83,8 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         AnthropicBaseUrl = agent.LocalBaseUrl,
         agent.ContextWindow,
         agent.PiImageInput,
+        // #460: stored verbatim, so a GET returns exactly what was saved.
+        agent.HarnessExtra,
         agent.CanReceiveChatRequests,
         agent.RequestReceivedMessage,
         agent.MountDockerSock,
@@ -220,6 +222,9 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     }
     // #455: stored for every provider and never cleared by a provider switch; only pi applies it.
     if (body.PiImageInput is not null) agent.PiImageInput = body.PiImageInput.Value;
+    // #460: "" clears; any other text is stored verbatim and checked below against the resulting
+    // provider and mode.
+    if (body.HarnessExtra is not null) agent.HarnessExtra = body.HarnessExtra == "" ? null : body.HarnessExtra;
 
     // Replace-all for related tables (omit field = keep current)
     if (body.Tools is not null)
@@ -333,6 +338,9 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     // this request is persisted.
     if (AgentPatchHelpers.FinalizeLocalModel(agent) is { } localModelFault)
         return Results.BadRequest(new { error = localModelFault });
+    // #460 Part 3b: the allowlist, against the final provider and mode; nothing is saved on a fault.
+    if (AgentPatchHelpers.DescribeHarnessExtraFault(agent) is { } harnessExtraFault)
+        return Results.BadRequest(AgentPatchHelpers.HarnessExtraBadRequest(harnessExtraFault));
 
     await db.SaveChangesAsync();
     if (oldCrossChat != agent.JournalCrossChatEnabled)
@@ -413,4 +421,5 @@ internal sealed record AgentConfigUpdateRequest(
     int? ContextWindow,
     string? LocalBaseUrl = null,
     bool? JournalCrossChatEnabled = null,
-    bool? PiImageInput = null);
+    bool? PiImageInput = null,
+    string? HarnessExtra = null);

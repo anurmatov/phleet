@@ -78,6 +78,7 @@ public sealed class AgentRegistry
                     QueuedMessages   = heartbeat.QueuedMessages,
                     BackgroundTasks  = heartbeat.BackgroundTasks,
                     Journal          = heartbeat.Journal,
+                    StartedPlanSha256 = heartbeat.PlanSha256,
                 };
                 // New agent already doing a task — record start time
                 if (heartbeat.CurrentTask is not null)
@@ -120,6 +121,8 @@ public sealed class AgentRegistry
                 existing.QueuedMessages = heartbeat.QueuedMessages;
                 existing.BackgroundTasks = heartbeat.BackgroundTasks;
                 existing.Journal         = heartbeat.Journal;
+                // #460: every report carries it, so an image without it (or a rollback onto one) reads null.
+                existing.StartedPlanSha256 = heartbeat.PlanSha256;
                 // Update registration fields only when provided (registration messages)
                 if (heartbeat.Endpoint      is not null) existing.Endpoint      = heartbeat.Endpoint;
                 if (heartbeat.Role          is not null) existing.Role          = heartbeat.Role;

@@ -90,6 +90,12 @@ public sealed class GetAgentConfigTool(IServiceScopeFactory scopeFactory)
         sb.AppendLine("### Env Refs");
         if (agent.EnvRefs.Count == 0) sb.AppendLine("(none)");
         else foreach (var e in agent.EnvRefs) sb.AppendLine($"- {e.EnvKeyName}");
+        sb.AppendLine();
+
+        // #460: stored verbatim; GET /api/agents/{name}/effective-harness shows the merged result.
+        sb.AppendLine("### Harness extra");
+        if (agent.HarnessExtra is null) sb.AppendLine("(none)");
+        else sb.AppendLine("```").AppendLine(agent.HarnessExtra.TrimEnd('\n')).AppendLine("```");
 
         return sb.ToString();
     }

@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using System.Threading.Channels;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
@@ -36,10 +37,16 @@ namespace Fleet.Agent.Services;
 /// steer and is read by <see cref="ReadInjectedTurnAnswersAsync"/>.
 /// </para>
 /// <para>
+/// <b>Images</b> (#458) go to every Pi agent. When the server rejects a prompt's images before the
+/// model answers, the prompt is dropped from the session with <c>fork</c> and the turn runs once
+/// more text-only (<see cref="DropRejectedPromptAsync"/>). A message with images is never steered
+/// into a running turn: it waits for its own turn, where that retry is possible.
+/// </para>
+/// <para>
 /// <b>Logs</b> carry counts and names only — never prompt, answer or tool text (§12, §20).
 /// </para>
 /// </remarks>
-public sealed class PiExecutor : IAgentExecutor
+public sealed partial class PiExecutor : IAgentExecutor
 {
     /// <summary>The Pi binary, resolved on PATH.</summary>
     public const string PiBin = PiRuntimeFiles.PiBin;
@@ -56,6 +63,7 @@ public sealed class PiExecutor : IAgentExecutor
     internal static string StartFailureText(string field) => $"Pi failed to start: {field}";
     internal static string UnreachableText(string? origin) => $"local model server unreachable ({origin})";
     internal static string ImagesOmittedText(int count) => $"[{count} image attachment(s) omitted: this local model is text-only]";
+    internal const string ImagesInOwnTurnText = "Pi sends a message with images in its own turn.";
 
     private const int MaxServerTextChars = 300;
     private const int MaxToolArgsChars = 200;
@@ -83,6 +91,7 @@ public sealed class PiExecutor : IAgentExecutor
     private string? _piVersion;
     private string? _popplerVersion;
     private int _sessionOverLimit;
+    private int _imageRejectionLogged;
     private volatile bool _restartRequested;
     private long _nextId;
     private DateTimeOffset _lastActivity = DateTimeOffset.MinValue;
@@ -164,9 +173,9 @@ public sealed class PiExecutor : IAgentExecutor
             while (_lateAnswers.TryDequeue(out var stale))
                 yield return AsRecovered(stale);
 
-            // #455: images within Fleet's bounds (image input only) and PDF text, before the frame
-            // write and outside the ack timer. Other documents keep the PromptAssembler path hint.
-            var prepared = await PrepareAttachmentsAsync(task, images, documents, ct);
+            // #455: images within Fleet's bounds and PDF text, before the frame write and outside
+            // the ack timer. Other documents keep the PromptAssembler path hint.
+            var prepared = await PrepareAttachmentsAsync(task, images, documents, textOnly: false, ct);
 
             var (gen, startFailure) = await TryStartAsync(ct);
             if (gen is null)
@@ -212,7 +221,39 @@ public sealed class PiExecutor : IAgentExecutor
                 yield break;
             }
 
+            AgentProgress? rejected = null;
             await foreach (var progress in DriveAsync(gen, run, ackId, ct))
+            {
+                if (run.ImagesRejected && progress.EventType == "result")
+                    rejected = progress;
+                else
+                    yield return progress;
+            }
+
+            if (rejected is null)
+                yield break;
+
+            // #458: the server rejected the images. Once, and only for this prompt: drop it from the
+            // session, then send the same turn with each image replaced by the text-only note.
+            if (Interlocked.Exchange(ref _imageRejectionLogged, 1) == 0)
+                _logger.LogWarning("pi images: the local server rejected a turn with images; it is sent once more "
+                                   + "without them (logged once per process)");
+            if (!await DropRejectedPromptAsync(gen, prepared.Message, ct))
+            {
+                yield return rejected;
+                yield break;
+            }
+
+            var textOnly = await PrepareAttachmentsAsync(task, images, documents, textOnly: true, ct);
+            var retry = new RunState(live: true);
+            ackId = await SendPromptAsync(gen, textOnly, ct);
+            if (ackId is null)
+            {
+                yield return ProcessExited(gen, retry);
+                yield break;
+            }
+
+            await foreach (var progress in DriveAsync(gen, retry, ackId, ct))
                 yield return progress;
         }
         finally
@@ -230,6 +271,8 @@ public sealed class PiExecutor : IAgentExecutor
     /// check and the write, so the check runs again after processing: the same generation must
     /// still be the live one, alive, running and unanswered, or nothing is written and the message
     /// queues as a prompt (its PDF text then comes from the extraction cache).
+    /// #458: a message with images, or a PDF rendered as page images, is queued the same way. A
+    /// steer cannot be retried text-only (tools may already have run), its own turn can.
     /// </remarks>
     public async Task<MidTurnInjectionResult> TryInjectMessageAsync(
         string task,
@@ -242,16 +285,21 @@ public sealed class PiExecutor : IAgentExecutor
             return MidTurnInjectionResult.NoActiveTurn("Pi has no active run to steer.");
         if (_finalSeen)
             return MidTurnInjectionResult.NoActiveTurn("Pi has already produced this run's answer.");
+        if (images is { Count: > 0 })
+            return MidTurnInjectionResult.NoActiveTurn(ImagesInOwnTurnText);
 
         PiPreparedCommand prepared;
         try
         {
-            prepared = await PrepareAttachmentsAsync(task, images, documents, ct);
+            prepared = await PrepareAttachmentsAsync(task, images, documents, textOnly: false, ct);
         }
         catch (OperationCanceledException)
         {
             return MidTurnInjectionResult.Failed("The steer was cancelled while its attachments were prepared.");
         }
+
+        if (prepared.Images.Count > 0)
+            return MidTurnInjectionResult.NoActiveTurn(ImagesInOwnTurnText);
 
         if (!ReferenceEquals(_liveGeneration, gen) || !gen.IsAlive || !_runActive)
             return MidTurnInjectionResult.NoActiveTurn("Pi's run ended while the attachments were prepared.");
@@ -260,8 +308,7 @@ public sealed class PiExecutor : IAgentExecutor
 
         try
         {
-            var response = await RequestAsync(gen, WithImages(Command("steer", ("message", prepared.Message)), prepared),
-                _timings.Steer, ct);
+            var response = await RequestAsync(gen, Command("steer", ("message", prepared.Message)), _timings.Steer, ct);
             if (IsSuccess(response))
             {
                 _lastActivity = DateTimeOffset.UtcNow;
@@ -480,7 +527,7 @@ public sealed class PiExecutor : IAgentExecutor
         {
             PiRuntimeFiles.WriteAll(
                 _settings.AgentDir, _config.PiBaseUrl!, _config.Model, _config.ContextWindow!.Value, _config.AllowedTools,
-                _settings.McpConfigPath, _config.PiImageInput);
+                _settings.McpConfigPath);
         }
         catch (PiRuntimeFileWriteException ex)
         {
@@ -548,11 +595,10 @@ public sealed class PiExecutor : IAgentExecutor
             var poppler = await GetPopplerVersionAsync(ct);
             _logger.LogInformation(
                 "pi start: version {Version} model {Model} server {Origin} context {ContextWindow} reserve {Reserve} "
-                + "tail {Tail} summaryMax {SummaryMax} thinking {Thinking} session {Session} images {Images} poppler {Poppler}",
+                + "tail {Tail} summaryMax {SummaryMax} thinking {Thinking} session {Session} poppler {Poppler}",
                 version, _config.Model, _config.PiBaseUrl, _config.ContextWindow, PiLocalModel.ReserveTokens,
                 PiLocalModel.KeepRecentTokens, PiLocalModel.SummaryMaxTokens,
-                _config.Effort == "off" ? "off" : "on", resume is null ? "new" : "resumed",
-                _config.PiImageInput ? "on" : "off", poppler);
+                _config.Effort == "off" ? "off" : "on", resume is null ? "new" : "resumed", poppler);
             return gen;
         }
         catch
@@ -707,8 +753,63 @@ public sealed class PiExecutor : IAgentExecutor
     /// <summary>§3.2–§3.4 for one command; the line it logs carries counts and reason names only.</summary>
     private Task<PiPreparedCommand> PrepareAttachmentsAsync(
         string task, IReadOnlyList<MessageImage>? images, IReadOnlyList<MessageDocument>? documents,
-        CancellationToken ct) =>
-        _attachments.PrepareAsync(task, images, documents, _config.PiImageInput, _settings.CommandProcessingDeadline, ct);
+        bool textOnly, CancellationToken ct) =>
+        _attachments.PrepareAsync(task, images, documents, textOnly, _settings.CommandProcessingDeadline, ct);
+
+    /// <summary>
+    /// #458: takes the rejected prompt out of Pi's session, so no later turn sends its images again.
+    /// <c>fork</c> before the prompt's entry moves Pi to a new session file holding everything before
+    /// it (Pi reloads its runtime and the extension, as on a restart); the old file, which still holds
+    /// the images, is deleted. False, with nothing retried, when the prompt is not the session's last
+    /// user message (a steer after it would be lost) or Pi does not complete the fork.
+    /// </summary>
+    private async Task<bool> DropRejectedPromptAsync(Generation gen, string message, CancellationToken ct)
+    {
+        string? oldFile;
+        lock (_stateLock)
+            oldFile = _sessionFile;
+
+        try
+        {
+            var forkable = await RequestAsync(gen, Command("get_fork_messages"), _timings.StartupState, ct);
+            if (!IsSuccess(forkable)
+                || (forkable["data"] as JsonObject)?["messages"] is not JsonArray { Count: > 0 } messages
+                || messages[^1] is not JsonObject last || Str(last, "text") != message
+                || Str(last, "entryId") is not { } entryId)
+            {
+                _logger.LogWarning("pi images: the rejected prompt is not the session's last message; not retried");
+                return false;
+            }
+
+            var fork = await RequestAsync(gen, Command("fork", ("entryId", entryId)), _timings.StartupState, ct);
+            if (!IsSuccess(fork) || Bool(fork["data"], "cancelled") == true)
+            {
+                _logger.LogWarning("pi images: Pi did not drop the rejected prompt; not retried");
+                return false;
+            }
+
+            var state = await RequestAsync(gen, Command("get_state"), _timings.StartupState, ct);
+            if (!IsSuccess(state) || state["data"] is not JsonObject data)
+            {
+                _logger.LogWarning("pi images: Pi did not report its session after dropping the prompt; not retried");
+                return false;
+            }
+            ApplySessionState(gen, data, force: true);
+        }
+        catch (Exception ex) when (ex is TimeoutException or PiProcessExitedException or IOException
+                                       or ObjectDisposedException)
+        {
+            _logger.LogWarning("pi images: dropping the rejected prompt failed ({Error}); not retried", ex.GetType().Name);
+            return false;
+        }
+
+        string? newFile;
+        lock (_stateLock)
+            newFile = _sessionFile;
+        if (oldFile is not null && oldFile != newFile)
+            TryDelete(oldFile);
+        return true;
+    }
 
     /// <summary>The command with <c>images</c> when there are any; without, its bytes are exactly the pre-#455 frame.</summary>
     private static JsonObject WithImages(JsonObject command, PiPreparedCommand prepared)
@@ -1096,6 +1197,8 @@ public sealed class PiExecutor : IAgentExecutor
         run.OutputTokens += output;
 
         var stop = Str(message, "stopReason") ?? "unknown";
+        if (stop is not ("error" or "aborted"))
+            run.ModelAnswered = true;
         long? ttftMs = run.CallStart is { } start && run.FirstDelta is { } delta ? ElapsedMs(start, delta) : null;
         long? totalMs = run.CallStart is { } callStart ? ElapsedMs(callStart, timestamp) : null;
         _logger.LogInformation(
@@ -1214,6 +1317,9 @@ public sealed class PiExecutor : IAgentExecutor
     private AgentProgress Failed(RunState run)
     {
         run.Terminal = true;
+        // #458: the server refused the prompt's images before the model produced anything.
+        run.ImagesRejected = run.ImagesSent > 0 && !run.ModelAnswered && run.LastStopReason == "error"
+                             && IsImageRejection(run.LastError);
         string text;
         // Pi 1.0.4 does not always emit the failed-recovery compaction_end, so a run that already
         // compacted for an overflow and then ends on a context error counts as a failed recovery.
@@ -1292,6 +1398,18 @@ public sealed class PiExecutor : IAgentExecutor
         Summary = text,
         IsSignificant = true,
     };
+
+    /// <summary>
+    /// #458: an HTTP status that is not 2xx — Pi's error text starts with it (<c>400 {"type":"error",…}</c>)
+    /// — or an error that names images, vision or unsupported content.
+    /// </summary>
+    internal static bool IsImageRejection(string? error) =>
+        error is not null
+        && (NonSuccessStatus().IsMatch(error)
+            || new[] { "image", "vision", "unsupported" }.Any(marker => error.Contains(marker, StringComparison.OrdinalIgnoreCase)));
+
+    [GeneratedRegex(@"^\s*[345]\d\d\b|\bstatus(?: code)?:? [345]\d\d\b", RegexOptions.IgnoreCase)]
+    private static partial Regex NonSuccessStatus();
 
     private static bool IsUnreachable(string? error) =>
         error is not null
@@ -1940,6 +2058,8 @@ public sealed class PiExecutor : IAgentExecutor
         public bool OverflowCompacted;
         public int ImagesSent;
         public bool ImageEchoChecked;
+        public bool ModelAnswered;
+        public bool ImagesRejected;
 
         public List<AgentProgress> TakeOutput()
         {

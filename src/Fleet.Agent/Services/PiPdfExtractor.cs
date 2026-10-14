@@ -44,7 +44,7 @@ internal sealed record PiPdfResult
 
 /// <summary>
 /// Bounded local PDF extraction for every Pi agent (#455 §3.3): <c>pdfinfo</c>, then
-/// <c>pdftotext</c>, then — only with image input and a free image slot — <c>pdftoppm</c> JPEG
+/// <c>pdftotext</c>, then — with a free image slot, except on a text-only retry — <c>pdftoppm</c> JPEG
 /// renders of a PDF with no text layer or with text copying restricted. Every tool runs through
 /// <see cref="IPiLocalTools"/>. No password is ever supplied and no permission is bypassed.
 /// </summary>
@@ -98,7 +98,7 @@ internal sealed partial class PiPdfExtractor(IPiLocalTools tools, ILogger logger
     }
 
     public async Task<PiPdfResult> ExtractAsync(
-        MessageDocument document, int imageSlotsLeft, bool imageInput, PiProcessingBudget budget, CancellationToken ct)
+        MessageDocument document, int imageSlotsLeft, bool textOnly, PiProcessingBudget budget, CancellationToken ct)
     {
         var name = DisplayName(document);
         if (document.FilePath is not { Length: > 0 } path || !File.Exists(path))
@@ -139,7 +139,7 @@ internal sealed partial class PiPdfExtractor(IPiLocalTools tools, ILogger logger
             };
         }
 
-        return await RenderAsync(name, path, info.PageCount, why, imageSlotsLeft, imageInput, budget, ct);
+        return await RenderAsync(name, path, info.PageCount, why, imageSlotsLeft, textOnly, budget, ct);
     }
 
     // ── Steps 1 and 2: pdfinfo, pdftotext ────────────────────────────────────
@@ -239,7 +239,7 @@ internal sealed partial class PiPdfExtractor(IPiLocalTools tools, ILogger logger
     private enum RenderWhy { NoTextLayer, CopyRestricted }
 
     private async Task<PiPdfResult> RenderAsync(
-        string name, string path, int pageCount, RenderWhy why, int slots, bool imageInput,
+        string name, string path, int pageCount, RenderWhy why, int slots, bool textOnly,
         PiProcessingBudget budget, CancellationToken ct)
     {
         var what = why == RenderWhy.NoTextLayer ? "has no text layer" : "text copying restricted";
@@ -247,7 +247,7 @@ internal sealed partial class PiPdfExtractor(IPiLocalTools tools, ILogger logger
             ? PiLocalModel.PdfReasons.NoTextLayer
             : PiLocalModel.PdfReasons.CopyRestricted;
 
-        if (!imageInput)
+        if (textOnly)
             return Failed(name, reason, $"[PDF {name} {what} and this model is text-only: not readable]");
         if (slots < 1)
             return Failed(name, PiLocalModel.PdfReasons.NoImageSlotLeft,

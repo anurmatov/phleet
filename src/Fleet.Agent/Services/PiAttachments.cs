@@ -54,9 +54,9 @@ internal sealed class PiAttachmentCounts
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Image input off</b> (the default): no image is processed and the message is exactly the
-/// pre-#455 text plus <see cref="PiExecutor.ImagesOmittedText"/>. PDF text extraction runs for
-/// every Pi agent: it is the parity default.
+/// <b>Text only</b> (#458): the one retry after the server rejected a turn's images. No image is
+/// processed and each image is replaced by <see cref="PiExecutor.ImagesOmittedText"/>; a scanned PDF
+/// gets its text-only note. PDF text extraction runs on every command.
 /// </para>
 /// <para>
 /// <b>Slots.</b> An image holds one of the <see cref="PiLocalModel.MaxImagesPerCommand"/> slots from
@@ -84,7 +84,7 @@ internal sealed class PiAttachments(IPiLocalTools tools, PiPdfExtractor pdfs, IL
 
     public async Task<PiPreparedCommand> PrepareAsync(
         string task, IReadOnlyList<MessageImage>? images, IReadOnlyList<MessageDocument>? documents,
-        bool imageInput, TimeSpan deadline, CancellationToken ct)
+        bool textOnly, TimeSpan deadline, CancellationToken ct)
     {
         var userImages = images ?? [];
         var pdfDocuments = (documents ?? []).Where(PiPdfExtractor.IsPdf).ToList();
@@ -100,7 +100,7 @@ internal sealed class PiAttachments(IPiLocalTools tools, PiPdfExtractor pdfs, IL
 
         // Images first, in order.
         var slotsHeld = 0;
-        if (userImages.Count > 0 && !imageInput)
+        if (userImages.Count > 0 && textOnly)
         {
             counts.ImagesOmitted["text-only"] = userImages.Count;
         }
@@ -125,7 +125,7 @@ internal sealed class PiAttachments(IPiLocalTools tools, PiPdfExtractor pdfs, IL
         {
             var pdf = budget.Expired
                 ? Expired(document)
-                : await pdfs.ExtractAsync(document, slotsLeft, imageInput, budget, ct);
+                : await pdfs.ExtractAsync(document, slotsLeft, textOnly, budget, ct);
 
             if (pdf.Excerpt is { } excerpt)
             {
@@ -157,8 +157,8 @@ internal sealed class PiAttachments(IPiLocalTools tools, PiPdfExtractor pdfs, IL
             counts.PdfFailed["over the 3-PDF limit"] = over;
         }
 
-        // Flag off keeps the pre-#455 omission note, byte for byte, as the last part.
-        if (userImages.Count > 0 && !imageInput)
+        // Text only: the omission note, as the last part.
+        if (userImages.Count > 0 && textOnly)
             notes.Add(PiExecutor.ImagesOmittedText(userImages.Count));
 
         counts.ImagesSent = blocks.Count;

@@ -34,9 +34,9 @@ public sealed class PiPdfExtractorTests : IDisposable
     }
 
     private static Task<PiPreparedCommand> PrepareAsync(
-        PiAttachments attachments, IReadOnlyList<MessageDocument> documents, bool imageInput = false,
+        PiAttachments attachments, IReadOnlyList<MessageDocument> documents, bool textOnly = true,
         IReadOnlyList<MessageImage>? images = null, TimeSpan? deadline = null, CancellationToken ct = default) =>
-        attachments.PrepareAsync("task", images, documents, imageInput, deadline ?? TimeSpan.FromSeconds(60), ct);
+        attachments.PrepareAsync("task", images, documents, textOnly, deadline ?? TimeSpan.FromSeconds(60), ct);
 
     private static Func<string, IReadOnlyList<string>, PiProcessingBudget, CancellationToken, Task<PiToolResult?>> On(
         string tool, PiToolResult result) =>
@@ -220,12 +220,12 @@ public sealed class PiPdfExtractorTests : IDisposable
     }
 
     [Fact]
-    public async Task PdfToTextExit3_IsCopyRestricted_AndRendersWithImageInput()
+    public async Task PdfToTextExit3_IsCopyRestricted_AndRenders()
     {
         var tools = new FakePiLocalTools { Handler = On(PiPdfExtractor.PdfToText, FakePiLocalTools.Exit(3, "Copying of text from this document is not allowed.")) };
         var (attachments, _) = Create(tools);
 
-        var prepared = await PrepareAsync(attachments, [Pdf()], imageInput: true);
+        var prepared = await PrepareAsync(attachments, [Pdf()], textOnly: false);
 
         Assert.Equal(2, prepared.Images.Count);
         Assert.Contains("[PDF report.pdf text copying restricted: pages 1–2 of 3 sent as images]", prepared.Message);
@@ -275,12 +275,12 @@ public sealed class PiPdfExtractorTests : IDisposable
     }
 
     [Fact]
-    public async Task NoTextLayer_WithImageInput_RendersIntoTheSlotsLeft()
+    public async Task NoTextLayer_RendersIntoTheSlotsLeft()
     {
         var tools = new FakePiLocalTools { PdfText = "" };
         var (attachments, _) = Create(tools);
 
-        var prepared = await PrepareAsync(attachments, [Pdf("scan.pdf")], imageInput: true,
+        var prepared = await PrepareAsync(attachments, [Pdf("scan.pdf")], textOnly: false,
             images: [new MessageImage(TestImages.Png(10, 10), "image/jpeg")]);
 
         // One user image holds one slot: one page.
@@ -297,7 +297,7 @@ public sealed class PiPdfExtractorTests : IDisposable
         var tools = new FakePiLocalTools { PdfText = "" };
         var (attachments, _) = Create(tools);
 
-        var prepared = await PrepareAsync(attachments, [Pdf("scan.pdf")], imageInput: true,
+        var prepared = await PrepareAsync(attachments, [Pdf("scan.pdf")], textOnly: false,
             images: [new MessageImage(TestImages.Png(10, 10), "image/png"), new MessageImage(TestImages.Png(10, 10), "image/png")]);
 
         Assert.Equal(2, prepared.Images.Count);
@@ -321,7 +321,7 @@ public sealed class PiPdfExtractorTests : IDisposable
         };
         var (attachments, _) = Create(tools);
 
-        var prepared = await PrepareAsync(attachments, [Pdf("scan.pdf")], imageInput: true);
+        var prepared = await PrepareAsync(attachments, [Pdf("scan.pdf")], textOnly: false);
 
         Assert.Equal(["1600", "1200", "800"],
             tools.Calls.Where(c => c.Tool == PiPdfExtractor.PdfToPpm).Select(c => c.Args[c.Args.ToList().IndexOf("-scale-to") + 1]));
@@ -339,7 +339,7 @@ public sealed class PiPdfExtractorTests : IDisposable
         };
         var (attachments, _) = Create(tools);
 
-        var prepared = await PrepareAsync(attachments, [Pdf("scan.pdf")], imageInput: true);
+        var prepared = await PrepareAsync(attachments, [Pdf("scan.pdf")], textOnly: false);
 
         Assert.Empty(prepared.Images);
         Assert.Contains("[PDF scan.pdf page 1: over 3 MiB, not sent]", prepared.Message);
@@ -368,8 +368,8 @@ public sealed class PiPdfExtractorTests : IDisposable
         var (attachments, _) = Create(tools);
         var pdf = Pdf("scan.pdf");
 
-        await PrepareAsync(attachments, [pdf], imageInput: true);
-        var again = await PrepareAsync(attachments, [pdf], imageInput: true);
+        await PrepareAsync(attachments, [pdf], textOnly: false);
+        var again = await PrepareAsync(attachments, [pdf], textOnly: false);
 
         Assert.Equal(1, tools.Count(PiPdfExtractor.PdfToText));
         Assert.Equal(2, tools.Count(PiPdfExtractor.PdfToPpm));
@@ -461,7 +461,7 @@ public sealed class PiPdfExtractorTests : IDisposable
         var (attachments, _) = Create(tools);
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            PrepareAsync(attachments, [Pdf("scan.pdf")], imageInput: true, ct: cts.Token));
+            PrepareAsync(attachments, [Pdf("scan.pdf")], textOnly: false, ct: cts.Token));
 
         Assert.NotNull(prefix);
         Assert.False(Directory.Exists(Path.GetDirectoryName(prefix)));

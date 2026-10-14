@@ -218,7 +218,7 @@ public sealed class PiExecutorRealPiTests(ITestOutputHelper output)
         Assert.Equal("OK", Final(await rig.RunTurnAsync("after crash")));
         var resumed = rig.Starts[2].ArgumentList.ToList();
         Assert.Equal(Path.GetFullPath(secondSession!), resumed[resumed.IndexOf("--session") + 1]);
-        Assert.Contains(rig.Info, m => m.Contains("session resumed images off", StringComparison.Ordinal));
+        Assert.Contains(rig.Info, m => m.Contains("session resumed poppler", StringComparison.Ordinal));
     }
 
     // ── A14b (c): the watchdog ──────────────────────────────────────────────
@@ -347,7 +347,7 @@ public sealed class PiExecutorRealPiTests(ITestOutputHelper output)
         Assert.Equal(before, rig.Requests().Count);
     }
 
-    // ── #455: attachments through the real Pi (A8–A12) ──────────────────────
+    // ── #455: attachments through the real Pi (A8–A12); #458: a server that rejects images ──
 
     private static MessageDocument Document(AttachmentFixtures fixtures, string name, string mime = "application/pdf")
     {
@@ -419,7 +419,7 @@ public sealed class PiExecutorRealPiTests(ITestOutputHelper output)
     private static string Sha(byte[] bytes) => Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes));
 
     [Fact]
-    public async Task A9_TheToolRoutes_ReadEveryBaselineType_WithImageInputOff()
+    public async Task A9_TheToolRoutes_ReadEveryBaselineType()
     {
         using var fixtures = AttachmentFixtures.Generate();
         const string ooxml =
@@ -465,28 +465,29 @@ public sealed class PiExecutorRealPiTests(ITestOutputHelper output)
         await using var rig = await RealRig.StartAsync(new JsonObject
         {
             ["main"] = new JsonArray { ToolUse("bash", new JsonObject { ["command"] = "sleep 2" }), Text("steered") },
-        }, imageInput: true);
+        });
         var png = Photo(fixtures, "png");
         var jpeg = Photo(fixtures, "jpeg");
         var text = Document(fixtures, "pdf-text");
         var commands = 0;
 
-        // Steer: two images and the text PDF while a tool runs.
+        // Steer: the text PDF while a tool runs. Images wait for their own turn (#458).
         MidTurnInjectionResult? steer = null;
+        MidTurnInjectionResult? imageSteer = null;
         await foreach (var progress in rig.Executor.ExecuteAsync("start work"))
         {
             if (progress.EventType == "tool_use")
             {
-                steer = await rig.Executor.TryInjectMessageAsync("look at these", [png, jpeg], [text]);
+                steer = await rig.Executor.TryInjectMessageAsync("look at this", documents: [text]);
                 commands++;
+                imageSteer = await rig.Executor.TryInjectMessageAsync("and these", [png, jpeg]);
             }
         }
         Assert.Equal(MidTurnInjectionStatus.Injected, steer!.Status);
+        Assert.Equal(MidTurnInjectionStatus.NoActiveTurn, imageSteer!.Status);
         var steered = rig.Requests()[^1];
         Assert.Contains(fixtures.Code("pdf-text"), UserText(steered));
-        var steeredImages = Images(steered).Where(i => !i.InToolResult).ToList();
-        Assert.Contains(steeredImages, i => i.MediaType == "image/png" && Sha(i.Bytes) == Sha(png.Bytes));
-        Assert.Contains(steeredImages, i => i.MediaType == "image/jpeg" && Sha(i.Bytes) == Sha(jpeg.Bytes));
+        Assert.Empty(Images(steered).Where(i => !i.InToolResult));
 
         // Prompt: the same, then measure the ack-inclusive time to the answer.
         var clock = Stopwatch.StartNew();
@@ -540,29 +541,77 @@ public sealed class PiExecutorRealPiTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public async Task A10_ImageInputOff_ExtractsPdfText_ButSendsNoImage()
+    public async Task A10_AServerThatRejectsImages_GetsTheTurnOnceTextOnly_AndNeverTheImageAgain()
     {
+        // #458: the stub answers the image prompt with HTTP 400, then text.
         using var fixtures = AttachmentFixtures.Generate();
-        await using var rig = await RealRig.StartAsync(new JsonObject());
+        await using var rig = await RealRig.StartAsync(new JsonObject
+        {
+            ["main"] = new JsonArray
+            {
+                Text("first"), new JsonObject { ["status"] = 400 }, Text("text only"), Text("next turn"), Text("resumed"),
+            },
+        });
+        Assert.Equal("first", Final(await rig.RunTurnAsync("say first")));
+        var before = rig.Executor.SessionFileForTests!;
 
-        Assert.Equal("OK", Final(await rig.RunTurnAsync("documents and a photo", [Photo(fixtures, "png")],
-            [Document(fixtures, "pdf-text"), Document(fixtures, "pdf-scanned"), Document(fixtures, "pdf-copy-restricted")])));
+        var progress = await rig.RunTurnAsync("documents and a photo", [Photo(fixtures, "png")],
+            [Document(fixtures, "pdf-text"), Document(fixtures, "pdf-scanned"), Document(fixtures, "pdf-copy-restricted")]);
 
-        var request = rig.Requests()[^1];
-        var text = UserText(request);
+        Assert.Equal("text only", Final(progress));
+        Assert.DoesNotContain(progress, p => p.IsErrorResult);
+        var requests = rig.Requests();
+        Assert.Equal(3, requests.Count);
+        Assert.Contains(Images(requests[1]), i => i.MediaType == "image/png");
+
+        // The retry: the same turn with the text-only notes, and no image anywhere in the request.
+        var retry = requests[2];
+        var text = UserText(retry);
         Assert.Contains(fixtures.Code("pdf-text"), text);
         Assert.Contains("[PDF scanned.pdf has no text layer and this model is text-only: not readable]", text);
         Assert.Contains("[PDF copy-restricted.pdf text copying restricted and this model is text-only: not readable]", text);
         Assert.DoesNotContain(fixtures.Code("pdf-copy-restricted"), text);
-        Assert.Contains("[1 image attachment(s) omitted: this local model is text-only]", text);
-        Assert.Empty(Images(request));
+        Assert.Contains(PiExecutor.ImagesOmittedText(1), text);
+        Assert.Empty(Images(retry));
+        Assert.Equal(1, text.Split("documents and a photo").Length - 1);
+        Assert.Contains("say first", text);
+
+        // Pi moved to a forked session; the old file, which held the image, is gone.
+        var after = rig.Executor.SessionFileForTests!;
+        Assert.NotEqual(before, after);
+        Assert.False(File.Exists(before));
+        Assert.True(File.Exists(after));
+        Assert.Single(rig.Warnings, m => m.StartsWith("pi images: the local server rejected a turn with images", StringComparison.Ordinal));
+
+        // The next turn, and a resume of the forked session after a kill, never send the image again.
+        Assert.Equal("next turn", Final(await rig.RunTurnAsync("and now?")));
+        Assert.Empty(Images(rig.Requests()[^1]));
+        Process.GetProcessById(rig.Executor.ProcessIdForTests!.Value).Kill(entireProcessTree: true);
+        await Task.Delay(500);
+        Assert.Equal("resumed", Final(await rig.RunTurnAsync("still there?")));
+        Assert.Equal(new[] { "--session", Path.GetFullPath(after) }, rig.Starts[^1].ArgumentList.TakeLast(2));
+        Assert.Empty(Images(rig.Requests()[^1]));
+        Assert.Contains("and now?", UserText(rig.Requests()[^1]));
         rig.AssertRuntimeFiles();
     }
 
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task A11_ReadingAnImageFile_ReturnsAnImageBlockOnlyWithImageInput(bool imageInput)
+    [Fact]
+    public async Task A10_ATextOnlyTurnTheServerRejects_IsNotRetried()
+    {
+        await using var rig = await RealRig.StartAsync(new JsonObject
+        {
+            ["main"] = new JsonArray { new JsonObject { ["status"] = 400 } },
+        });
+
+        var result = Assert.Single(await rig.RunTurnAsync("hello"), p => p.EventType == "result");
+
+        Assert.True(result.IsErrorResult);
+        Assert.Contains("stub status 400", result.FinalResult);
+        Assert.Single(rig.Requests());
+    }
+
+    [Fact]
+    public async Task A11_ReadingAnImageFile_ReturnsAnImageBlock()
     {
         using var fixtures = AttachmentFixtures.Generate();
         var frame = Path.Combine(fixtures.Directory, "frame-a11.png");
@@ -578,21 +627,12 @@ public sealed class PiExecutorRealPiTests(ITestOutputHelper output)
                 ToolUse("read", new JsonObject { ["path"] = frame }),
                 Text("seen"),
             },
-        }, imageInput: imageInput);
+        });
 
         Assert.Equal("seen", Final(await rig.RunTurnAsync("open the image and a video frame")));
 
         var last = rig.Requests()[^1];
-        var toolImages = Images(last).Where(i => i.InToolResult).ToList();
-        if (imageInput)
-        {
-            Assert.Equal(2, toolImages.Count);
-        }
-        else
-        {
-            Assert.Empty(toolImages);
-            Assert.Contains("(tool image omitted: model does not support images)", UserText(last));
-        }
+        Assert.Equal(2, Images(last).Count(i => i.InToolResult));
         rig.AssertRuntimeFiles();
     }
 
@@ -617,7 +657,7 @@ public sealed class PiExecutorRealPiTests(ITestOutputHelper output)
                     },
                 },
             },
-            contextWindow: PiLocalModel.MinContextWindow, imageInput: true);
+            contextWindow: PiLocalModel.MinContextWindow);
 
         Assert.Equal("saw it", Final(await rig.RunTurnAsync("look", [Photo(fixtures, "png")], [Document(fixtures, "pdf-text")])));
         var session = rig.Executor.SessionFileForTests!;
@@ -724,17 +764,15 @@ public sealed class PiExecutorRealPiTests(ITestOutputHelper output)
 
         public int ContextWindow { get; private set; }
 
-        public bool ImageInput { get; private set; }
-
         public static Task<RealRig> StartAsync(
             JsonObject script, int contextWindow = PiStandIn.ContextWindow, PiExecutorTimings? timings = null,
-            string? piBinary = null, bool imageInput = false) =>
-            StartAsync(_ => script, contextWindow, timings, piBinary, imageInput);
+            string? piBinary = null) =>
+            StartAsync(_ => script, contextWindow, timings, piBinary);
 
         /// <summary>The script is built once the directories and the MCP stub's URL are known.</summary>
         public static async Task<RealRig> StartAsync(
             Func<RealRig, JsonObject> script, int contextWindow = PiStandIn.ContextWindow,
-            PiExecutorTimings? timings = null, string? piBinary = null, bool imageInput = false)
+            PiExecutorTimings? timings = null, string? piBinary = null)
         {
             var pi = piBinary ?? ResolvePi();
             if (!Directory.Exists(ExtensionDir))
@@ -742,7 +780,7 @@ public sealed class PiExecutorRealPiTests(ITestOutputHelper output)
                     $"The Fleet Pi extension directory '{ExtensionDir}' does not exist (set FLEET_PI_EXTENSION_DIR). "
                     + "This is a hard failure by design.");
 
-            var rig = new RealRig { ContextWindow = contextWindow, ImageInput = imageInput };
+            var rig = new RealRig { ContextWindow = contextWindow };
             try
             {
                 var tools = Path.Combine(rig._temp.Path, "mcp-tools.json");
@@ -779,7 +817,6 @@ public sealed class PiExecutorRealPiTests(ITestOutputHelper output)
                     ContextWindow = contextWindow,
                     Effort = "",
                     AllowedTools = [McpTool],
-                    PiImageInput = imageInput,
                 });
                 rig.Executor = new PiExecutor(options, new PromptBuilder(options, NullLogger<PromptBuilder>.Instance), rig.Logger,
                     new PiExecutorSettings
@@ -850,7 +887,7 @@ public sealed class PiExecutorRealPiTests(ITestOutputHelper output)
         public void AssertRuntimeFiles()
         {
             string Read(string name) => File.ReadAllText(Path.Combine(AgentDir, name));
-            Assert.Equal(PiRuntimeFiles.BuildModelsJson(Origin, Tag, ContextWindow, imageInput: ImageInput), Read("models.json"));
+            Assert.Equal(PiRuntimeFiles.BuildModelsJson(Origin, Tag, ContextWindow), Read("models.json"));
             Assert.Equal(PiRuntimeFiles.BuildSettingsJson(), Read("settings.json"));
             Assert.Equal(PiRuntimeFiles.BuildExtensionConfigJson([McpTool], McpConfigPath), Read("fleet-pi.json"));
         }

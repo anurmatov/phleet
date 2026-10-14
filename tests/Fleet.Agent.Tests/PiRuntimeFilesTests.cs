@@ -35,7 +35,8 @@ public sealed class PiRuntimeFilesTests
                   "name": "qwen3.8-flash-next",
                   "reasoning": true,
                   "input": [
-                    "text"
+                    "text",
+                    "image"
                   ],
                   "contextWindow": 131072,
                   "maxTokens": 16384,
@@ -98,29 +99,12 @@ public sealed class PiRuntimeFilesTests
         Assert.Equal(ModelsGolden, PiRuntimeFiles.BuildModelsJson(BaseUrl, Tag, 131072));
 
     [Fact]
-    public void A3_ImageInputOff_IsTheGoldenByteForByte() =>
-        Assert.Equal(ModelsGolden, PiRuntimeFiles.BuildModelsJson(BaseUrl, Tag, 131072, imageInput: false));
-
-    [Fact]
-    public void A3_ImageInputOn_ChangesOnlyTheInputArray()
-    {
-        var on = PiRuntimeFiles.BuildModelsJson(BaseUrl, Tag, 131072, imageInput: true);
-
-        var expected = ModelsGolden.Replace(
-            "\"input\": [\n            \"text\"\n          ],",
-            "\"input\": [\n            \"text\",\n            \"image\"\n          ],");
-        Assert.NotEqual(ModelsGolden, expected);
-        Assert.Equal(expected, on);
-    }
-
-    [Fact]
-    public void A3_WriteAll_WritesTheImageInput_AndLeavesTheOtherFilesUnchanged()
+    public void A3_WriteAll_WritesTheThreeFiles()
     {
         using var temp = new PiTempDirectory();
-        PiRuntimeFiles.WriteAll(temp.Path, BaseUrl, Tag, 131072, AllowedTools, imageInput: true);
+        PiRuntimeFiles.WriteAll(temp.Path, BaseUrl, Tag, 131072, AllowedTools);
 
-        Assert.Equal(PiRuntimeFiles.BuildModelsJson(BaseUrl, Tag, 131072, imageInput: true),
-            File.ReadAllText(Path.Combine(temp.Path, "models.json")));
+        Assert.Equal(ModelsGolden, File.ReadAllText(Path.Combine(temp.Path, "models.json")));
         Assert.Equal(PiRuntimeFiles.BuildSettingsJson(), File.ReadAllText(Path.Combine(temp.Path, "settings.json")));
         Assert.Equal(PiRuntimeFiles.BuildExtensionConfigJson(AllowedTools), File.ReadAllText(Path.Combine(temp.Path, "fleet-pi.json")));
     }

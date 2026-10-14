@@ -26,7 +26,7 @@ public sealed class PiAttachmentsTests
         new(bytes, label) { FilePath = path };
 
     private static Task<PiPreparedCommand> PrepareAsync(PiAttachments attachments, params MessageImage[] images) =>
-        attachments.PrepareAsync("task", images, null, imageInput: true, TimeSpan.FromSeconds(60), CancellationToken.None);
+        attachments.PrepareAsync("task", images, null, textOnly: false, TimeSpan.FromSeconds(60), CancellationToken.None);
 
     // ── Step 1 and 2 ────────────────────────────────────────────────────────
 
@@ -262,7 +262,7 @@ public sealed class PiAttachmentsTests
         var (attachments, _) = Create(tools);
 
         var prepared = await attachments.PrepareAsync("task", [Image(TestImages.Jpeg(2560, 1920)), Image(TestImages.Png(10, 10))],
-            null, imageInput: true, TimeSpan.FromMilliseconds(300), CancellationToken.None);
+            null, textOnly: false, TimeSpan.FromMilliseconds(300), CancellationToken.None);
 
         Assert.Single(prepared.Images);
         Assert.Equal("task\n\n[1 image attachment(s) omitted: 1 processing timed out]", prepared.Message);
@@ -287,16 +287,16 @@ public sealed class PiAttachmentsTests
             prepared.Message);
     }
 
-    // ── Image input off ─────────────────────────────────────────────────────
+    // ── Text only: the retry after a server rejected the images (#458) ──────
 
     [Fact]
-    public async Task ImageInputOff_ProcessesNothing_AndKeepsTodaysNoteByteForByte()
+    public async Task TextOnly_ProcessesNothing_AndKeepsTheOmissionNoteByteForByte()
     {
         var (attachments, tools) = Create();
 
         var prepared = await attachments.PrepareAsync("what is this?",
             [Image(TestImages.Jpeg(2560, 1920)), Image(TestImages.Png(10, 10))],
-            null, imageInput: false, TimeSpan.FromSeconds(60), CancellationToken.None);
+            null, textOnly: true, TimeSpan.FromSeconds(60), CancellationToken.None);
 
         Assert.Empty(prepared.Images);
         Assert.Empty(tools.Calls);
@@ -312,7 +312,7 @@ public sealed class PiAttachmentsTests
 
         var prepared = await attachments.PrepareAsync("task", null,
             [new MessageDocument("f", "text/plain", 10, "notes.txt") { FilePath = "/workspace/example/notes.txt" }],
-            imageInput: true, TimeSpan.FromSeconds(60), CancellationToken.None);
+            textOnly: false, TimeSpan.FromSeconds(60), CancellationToken.None);
 
         Assert.Equal("task", prepared.Message);
         Assert.Null(prepared.Counts);
@@ -328,7 +328,7 @@ public sealed class PiAttachmentsTests
 
         await attachments.PrepareAsync("task",
             [Image(TestImages.Jpeg(2560, 1920)), Image(TestImages.Png(10, 10)), Image(TestImages.Png(10, 10))],
-            null, imageInput: true, TimeSpan.FromSeconds(60), CancellationToken.None);
+            null, textOnly: false, TimeSpan.FromSeconds(60), CancellationToken.None);
 
         var line = Assert.Single(logger.Entries).Message;
         Assert.StartsWith("pi attachments: images sent 2 resized 1 omitted 1 (over the 2-image limit:1); "

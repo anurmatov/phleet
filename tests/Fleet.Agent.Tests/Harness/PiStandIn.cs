@@ -28,7 +28,9 @@ namespace Fleet.Agent.Tests.Harness;
 /// <para>
 /// Its defaults are a healthy Pi: <c>get_state</c> matches what the executor configured,
 /// <c>prompt</c> is acked <c>started</c> and answered "OK", <c>steer</c> is queued, <c>bash</c> runs.
-/// Each test overrides only the handler its row is about.
+/// <c>get_fork_messages</c> lists this process's prompts as user entries <c>u-1</c>, <c>u-2</c>, …
+/// and <c>fork</c> moves to a new session file, as Pi's does (#458). Each test overrides only the
+/// handler its row is about.
 /// </para>
 /// </remarks>
 internal sealed class PiStandIn
@@ -62,6 +64,8 @@ internal sealed class PiStandIn
     public Func<PiStandInProcess, JsonObject, Task>? OnSteer { get; set; }
     public Func<PiStandInProcess, JsonObject, Task>? OnAbort { get; set; }
     public Func<PiStandInProcess, JsonObject, Task>? OnBash { get; set; }
+    public Func<PiStandInProcess, JsonObject, Task>? OnGetForkMessages { get; set; }
+    public Func<PiStandInProcess, JsonObject, Task>? OnFork { get; set; }
 
     /// <summary>
     /// While set and not completed, a stdin write blocks before any byte reaches the stand-in: a
@@ -162,7 +166,33 @@ internal sealed class PiStandIn
                     ["truncated"] = false,
                 })))(process, frame);
                 break;
+            case "get_fork_messages":
+                await (OnGetForkMessages ?? DefaultForkMessagesAsync)(process, frame);
+                break;
+            case "fork":
+                await (OnFork ?? DefaultForkAsync)(process, frame);
+                break;
         }
+    }
+
+    /// <summary>Every prompt this process received, as Pi's forkable user messages.</summary>
+    public static JsonArray ForkMessages(PiStandInProcess process)
+    {
+        var messages = new JsonArray();
+        var prompts = process.FramesOfType("prompt");
+        for (var i = 0; i < prompts.Count; i++)
+            messages.Add(new JsonObject { ["entryId"] = $"u-{i + 1}", ["text"] = PiExecutor.Str(prompts[i], "message") });
+        return messages;
+    }
+
+    private static Task DefaultForkMessagesAsync(PiStandInProcess process, JsonObject frame) =>
+        process.RespondAsync(frame, new JsonObject { ["messages"] = ForkMessages(process) });
+
+    /// <summary>Pi's fork before a user entry: a new session file, which <c>get_state</c> then reports.</summary>
+    private Task DefaultForkAsync(PiStandInProcess process, JsonObject frame)
+    {
+        SessionFile = SessionFile.Replace(".jsonl", "-fork.jsonl", StringComparison.Ordinal);
+        return process.RespondAsync(frame, new JsonObject { ["text"] = "", ["cancelled"] = false });
     }
 
     private static async Task DefaultPromptAsync(PiStandInProcess process, JsonObject frame)
@@ -180,7 +210,6 @@ internal sealed class PiStandIn
         string? effort = "",
         IEnumerable<string>? allowedTools = null,
         ILogger<PiExecutor>? logger = null,
-        bool imageInput = false,
         IPiLocalTools? localTools = null,
         TimeSpan? commandDeadline = null)
     {
@@ -195,7 +224,6 @@ internal sealed class PiStandIn
             ContextWindow = ContextWindow,
             Effort = effort,
             AllowedTools = (allowedTools ?? ["mcp__fleet-memory__memory_get", "mcp__fleet-temporal__notify_cto"]).ToList(),
-            PiImageInput = imageInput,
         });
 
         return new PiExecutor(

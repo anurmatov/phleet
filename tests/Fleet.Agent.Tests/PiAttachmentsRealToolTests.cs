@@ -38,8 +38,8 @@ public sealed class PiAttachmentsRealToolTests(ITestOutputHelper output) : IDisp
         new(_fixtures.Bytes(fixture), "image/jpeg") { FilePath = _fixtures.PathOf(fixture) };
 
     private Task<PiPreparedCommand> PrepareAsync(
-        IReadOnlyList<MessageDocument>? documents = null, IReadOnlyList<MessageImage>? images = null, bool imageInput = false) =>
-        Create().PrepareAsync("task", images, documents, imageInput, PiLocalModel.CommandProcessingDeadline, CancellationToken.None);
+        IReadOnlyList<MessageDocument>? documents = null, IReadOnlyList<MessageImage>? images = null, bool textOnly = true) =>
+        Create().PrepareAsync("task", images, documents, textOnly, PiLocalModel.CommandProcessingDeadline, CancellationToken.None);
 
     // ── A5b: real poppler ───────────────────────────────────────────────────
 
@@ -96,9 +96,9 @@ public sealed class PiAttachmentsRealToolTests(ITestOutputHelper output) : IDisp
     }
 
     [Fact]
-    public async Task A5b_ScannedPdfs_RenderToJpegsWithinBounds_OnlyWithImageInput()
+    public async Task A5b_ScannedPdfs_RenderToJpegsWithinBounds_ExceptTextOnly()
     {
-        var on = await PrepareAsync([Pdf("pdf-scanned"), Pdf("pdf-large-scan")], imageInput: true);
+        var on = await PrepareAsync([Pdf("pdf-scanned"), Pdf("pdf-large-scan")], textOnly: false);
         var off = await PrepareAsync([Pdf("pdf-scanned")]);
 
         Assert.Equal(2, on.Images.Count);
@@ -114,9 +114,9 @@ public sealed class PiAttachmentsRealToolTests(ITestOutputHelper output) : IDisp
     }
 
     [Fact]
-    public async Task A5b_ACopyRestrictedPdf_IsOnlyViewed_AsPageImages_WithImageInput()
+    public async Task A5b_ACopyRestrictedPdf_IsOnlyViewed_AsPageImages()
     {
-        var prepared = await PrepareAsync([Pdf("pdf-copy-restricted")], imageInput: true);
+        var prepared = await PrepareAsync([Pdf("pdf-copy-restricted")], textOnly: false);
 
         Assert.Single(prepared.Images);
         Assert.Contains("[PDF copy-restricted.pdf text copying restricted: pages 1 of 1 sent as images]", prepared.Message);
@@ -129,7 +129,7 @@ public sealed class PiAttachmentsRealToolTests(ITestOutputHelper output) : IDisp
     public async Task A4_A2560PxPhoto_IsDownscaledUnder1GiBSingleThreaded_ToAJpegWithinBounds()
     {
         var clock = Stopwatch.StartNew();
-        var prepared = await PrepareAsync(images: [Image("photo-2560")], imageInput: true);
+        var prepared = await PrepareAsync(images: [Image("photo-2560")], textOnly: false);
 
         var image = Assert.Single(prepared.Images);
         Assert.Equal("image/jpeg", image.MimeType);
@@ -145,7 +145,7 @@ public sealed class PiAttachmentsRealToolTests(ITestOutputHelper output) : IDisp
         var source = _fixtures.Bytes("png-3_5mib");
         Assert.True(source.Length > PiLocalModel.MaxImageBytes);
 
-        var prepared = await PrepareAsync(images: [Image("png-3_5mib")], imageInput: true);
+        var prepared = await PrepareAsync(images: [Image("png-3_5mib")], textOnly: false);
 
         var image = Assert.Single(prepared.Images);
         Assert.Equal((1800, 680), PiAttachments.ReadDimensions(image.Bytes, image.MimeType));
@@ -156,7 +156,7 @@ public sealed class PiAttachmentsRealToolTests(ITestOutputHelper output) : IDisp
     [Fact]
     public async Task A4_TheExifOrientation6Photo_IsMeasured()
     {
-        var prepared = await PrepareAsync(images: [Image("photo-exif6")], imageInput: true);
+        var prepared = await PrepareAsync(images: [Image("photo-exif6")], textOnly: false);
 
         var image = Assert.Single(prepared.Images);
         var (width, height) = PiAttachments.ReadDimensions(image.Bytes, image.MimeType)!.Value;
@@ -169,7 +169,7 @@ public sealed class PiAttachmentsRealToolTests(ITestOutputHelper output) : IDisp
     [Fact]
     public async Task A4_ImagesWithinBounds_PassByteForByte_WithTheSniffedType()
     {
-        var prepared = await PrepareAsync(images: [Image("png"), Image("webp")], imageInput: true);
+        var prepared = await PrepareAsync(images: [Image("png"), Image("webp")], textOnly: false);
 
         Assert.Equal(_fixtures.Bytes("png"), prepared.Images[0].Bytes);
         Assert.Equal("image/png", prepared.Images[0].MimeType);
@@ -180,7 +180,7 @@ public sealed class PiAttachmentsRealToolTests(ITestOutputHelper output) : IDisp
     [Fact]
     public async Task A4_The13000PxPng_IsTooLargeToProcess()
     {
-        var prepared = await PrepareAsync(images: [Image("png-13000")], imageInput: true);
+        var prepared = await PrepareAsync(images: [Image("png-13000")], textOnly: false);
 
         Assert.Empty(prepared.Images);
         Assert.Contains("1 too large to process", prepared.Message);
@@ -192,7 +192,7 @@ public sealed class PiAttachmentsRealToolTests(ITestOutputHelper output) : IDisp
         static string[] Leftovers() => Directory.GetDirectories(Path.GetTempPath(), "fleet-pi-*");
         var before = Leftovers();
 
-        await PrepareAsync([Pdf("pdf-scanned"), Pdf("pdf-text")], [Image("photo-2560")], imageInput: true);
+        await PrepareAsync([Pdf("pdf-scanned"), Pdf("pdf-text")], [Image("photo-2560")], textOnly: false);
 
         Assert.Equal(before.Order(), Leftovers().Order());
     }

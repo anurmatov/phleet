@@ -45,14 +45,13 @@ public sealed class PiExecutorTests
             IReadOnlyDictionary<string, string>? environment = null,
             string? effort = "",
             Action<PiStandIn>? arrange = null,
-            bool imageInput = false,
             FakePiLocalTools? tools = null,
             TimeSpan? commandDeadline = null)
         {
             var rig = new Rig { Tools = tools ?? new FakePiLocalTools() };
             arrange?.Invoke(rig.Pi);
             rig.Executor = rig.Pi.CreateExecutor(rig.WorkDir, rig.AgentDir, timings, environment, effort, logger: rig.Logger,
-                imageInput: imageInput, localTools: rig.Tools, commandDeadline: commandDeadline);
+                localTools: rig.Tools, commandDeadline: commandDeadline);
             return rig;
         }
 
@@ -269,7 +268,7 @@ public sealed class PiExecutorTests
         Assert.Equal(0, process.Kills);
         Assert.Contains(rig.Messages(LogLevel.Information), m =>
             m == $"pi start: version 1.0.4 model {PiStandIn.Tag} server {PiStandIn.BaseUrl} context 131072 "
-               + $"reserve 16384 tail 8192 summaryMax 1280 thinking on session new images off poppler {PiStandIn.PopplerVersion}");
+               + $"reserve 16384 tail 8192 summaryMax 1280 thinking on session new poppler {PiStandIn.PopplerVersion}");
     }
 
     [Fact]
@@ -808,7 +807,7 @@ public sealed class PiExecutorTests
 
         await rig.RunTurnAsync();
         Assert.False(HasSession(rig.Pi.Starts[1], out _));
-        Assert.Contains(rig.Messages(LogLevel.Information), m => m.Contains("session new images off", StringComparison.Ordinal));
+        Assert.Contains(rig.Messages(LogLevel.Information), m => m.Contains("session new poppler", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -841,7 +840,7 @@ public sealed class PiExecutorTests
         Assert.True(HasSession(rig.Pi.Starts[1], out var file));
         Assert.Equal(sessionFile, file);
         Assert.True(File.Exists(sessionFile));
-        Assert.Contains(rig.Messages(LogLevel.Information), m => m.Contains("session resumed images off", StringComparison.Ordinal));
+        Assert.Contains(rig.Messages(LogLevel.Information), m => m.Contains("session resumed poppler", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -1141,20 +1140,6 @@ public sealed class PiExecutorTests
 
     // ── Media fallback, /run, background tasks ──────────────────────────────
 
-    [Fact]
-    public async Task Images_AreNotSent_TheMessageSaysHowManyWereOmitted()
-    {
-        await using var rig = Rig.Create();
-        var images = new List<MessageImage> { new([1, 2, 3], "image/png"), new([4], "image/jpeg") };
-
-        await rig.RunTurnAsync("what is this?", images);
-
-        var prompt = Assert.Single(rig.Pi.Current.FramesOfType("prompt"));
-        Assert.Equal("what is this?\n\n[2 image attachment(s) omitted: this local model is text-only]",
-            PiExecutor.Str(prompt, "message"));
-        Assert.Null(prompt["images"]);
-    }
-
     // ── #455: attachments on every path ─────────────────────────────────────
 
     private MessageDocument TextPdf(Rig rig, string name = "report.pdf")
@@ -1164,12 +1149,10 @@ public sealed class PiExecutorTests
         return new MessageDocument("file-id", "application/pdf", 20, name) { FilePath = path };
     }
 
-    private static string ImagesJson(JsonObject frame) => frame["images"]?.ToJsonString() ?? "";
-
     [Fact]
-    public async Task ImageInputOn_ThePromptCarriesImageBlocks_WithTheSniffedTypeAndExactBytes()
+    public async Task ThePromptCarriesImageBlocks_WithTheSniffedTypeAndExactBytes()
     {
-        await using var rig = Rig.Create(imageInput: true);
+        await using var rig = Rig.Create();
         var png = TestImages.Png(64, 48);
 
         await rig.RunTurnAsync("what is this?", [new MessageImage(png, "image/jpeg")]);
@@ -1180,37 +1163,67 @@ public sealed class PiExecutorTests
         Assert.Equal("image", PiExecutor.Str(image, "type"));
         Assert.Equal("image/png", PiExecutor.Str(image, "mimeType"));
         Assert.Equal(png, Convert.FromBase64String(PiExecutor.Str(image, "data")!));
-        Assert.Contains(rig.Messages(LogLevel.Information), m => m.Contains("images on"));
     }
 
     [Fact]
-    public async Task A6_PromptAndSteer_CarryIdenticalImagesAndTheSamePdfText_ExtractedOnce()
+    public async Task A6_PromptAndSteer_CarryTheSamePdfText_ExtractedOnce()
     {
-        await using var rig = Rig.Create(imageInput: true);
+        await using var rig = Rig.Create();
         rig.Pi.OnPrompt = ToolThenFinal("answer");
-        var images = new List<MessageImage> { new(TestImages.Png(64, 48), "image/png") };
         var documents = new List<MessageDocument> { TextPdf(rig) };
         MidTurnInjectionResult? injection = null;
 
-        await foreach (var progress in rig.Executor.ExecuteAsync("look", images, documents))
+        await foreach (var progress in rig.Executor.ExecuteAsync("look", documents: documents))
         {
             if (progress.EventType == "tool_use")
-                injection = await rig.Executor.TryInjectMessageAsync("look", images, documents);
+                injection = await rig.Executor.TryInjectMessageAsync("look", documents: documents);
         }
 
         Assert.Equal(MidTurnInjectionStatus.Injected, injection!.Status);
         var prompt = Assert.Single(rig.Pi.Current.FramesOfType("prompt"));
         var steer = Assert.Single(rig.Pi.Current.FramesOfType("steer"));
-        Assert.Equal(ImagesJson(prompt), ImagesJson(steer));
+        Assert.Null(steer["images"]);
         Assert.Equal(PiExecutor.Str(prompt, "message"), PiExecutor.Str(steer, "message"));
         Assert.Contains("[PDF text: report.pdf, pages 1–3 of 3;", PiExecutor.Str(steer, "message"));
         Assert.Equal(1, rig.Tools.Count(PiPdfExtractor.PdfToText));
     }
 
     [Fact]
+    public async Task A6_AMessageWithImages_IsNeverSteered_ItWaitsForItsOwnTurn()
+    {
+        // #458: only a prompt can be retried text-only when the server rejects its images.
+        await using var rig = Rig.Create();
+        var release = new TaskCompletionSource();
+        rig.Pi.OnPrompt = async (p, f) =>
+        {
+            await p.AckAsync(f);
+            await p.EmitAsync(AgentStart(), TurnStart(),
+                ToolCallMessage("c1", "bash", new JsonObject { ["command"] = "true" }),
+                ToolStart("c1", "bash", new JsonObject { ["command"] = "true" }));
+            await release.Task;
+            await p.EmitAsync(ToolEnd("c1", "bash", ""), TurnEnd(), TurnStart(), FinalText("answer"), TurnEnd(), AgentEnd(), AgentSettled());
+        };
+        var images = new List<MessageImage> { new(TestImages.Png(64, 48), "image/png") };
+        MidTurnInjectionResult? injection = null;
+
+        await foreach (var progress in rig.Executor.ExecuteAsync("work"))
+        {
+            if (progress.EventType != "tool_use")
+                continue;
+            injection = await rig.Executor.TryInjectMessageAsync("look", images);
+            release.SetResult();
+        }
+
+        Assert.Equal(MidTurnInjectionStatus.NoActiveTurn, injection!.Status);
+        Assert.Equal(PiExecutor.ImagesInOwnTurnText, injection.Error);
+        Assert.Empty(rig.Pi.Current.FramesOfType("steer"));
+        Assert.Empty(rig.Tools.Calls);
+    }
+
+    [Fact]
     public async Task A6_ARefusedSteer_IsResentAsAPrompt_WithNoSecondExtraction()
     {
-        await using var rig = Rig.Create(imageInput: true);
+        await using var rig = Rig.Create();
         rig.Pi.OnPrompt = ToolThenFinal("answer");
         rig.Pi.OnSteer = (p, f) => p.RespondAsync(f, success: false, error: "busy");
         var documents = new List<MessageDocument> { TextPdf(rig) };
@@ -1232,7 +1245,7 @@ public sealed class PiExecutorTests
     [Fact]
     public async Task A6_AQueuedBatchOfThreeImages_IsOnePromptWithTwoImagesAndTheNote()
     {
-        await using var rig = Rig.Create(imageInput: true);
+        await using var rig = Rig.Create();
         var images = Enumerable.Range(1, 3)
             .Select(i => new MessageImage(TestImages.Png(10 * i, 10), "image/jpeg") { FilePath = $"/workspace/example/{i}.jpg" })
             .ToList();
@@ -1246,6 +1259,217 @@ public sealed class PiExecutorTests
             PiExecutor.Str(prompt, "message"));
     }
 
+    // ── #458: a server that rejects images ──────────────────────────────────
+
+    private const string Rejection =
+        "400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"stub status 400\"}}";
+
+    private const string RejectionWarning = "pi images: the local server rejected a turn with images";
+
+    /// <summary>A run whose first model call the server refused.</summary>
+    private static async Task RejectAsync(PiStandInProcess p, JsonObject f, string error = Rejection)
+    {
+        await p.AckAsync(f);
+        await p.EmitAsync(AgentStart(), TurnStart(), ErrorMessage(error), TurnEnd(), AgentEnd(), AgentSettled());
+    }
+
+    /// <summary>A server that refuses every prompt carrying images and answers every other one "OK".</summary>
+    private static Func<PiStandInProcess, JsonObject, Task> RejectImages(string error = Rejection) => async (p, f) =>
+    {
+        if (f["images"] is not null)
+        {
+            await RejectAsync(p, f, error);
+            return;
+        }
+        await p.AckAsync(f);
+        await p.EmitAsync(TextRun("OK"));
+    };
+
+    private static List<MessageImage> OnePhoto() => [new(TestImages.Png(64, 48), "image/png")];
+
+    private static void AssertNotRetried(Rig rig)
+    {
+        Assert.Single(rig.Pi.Current.FramesOfType("prompt"));
+        Assert.Empty(rig.Pi.Current.FramesOfType("fork"));
+    }
+
+    [Fact]
+    public async Task AnImageTurn_ToAServerThatTakesImages_IsSentOnce_AndNothingIsForked()
+    {
+        await using var rig = Rig.Create();
+
+        var result = Terminal(await rig.RunTurnAsync("what is this?", OnePhoto()));
+
+        Assert.Equal(("OK", false), (result.FinalResult, result.IsErrorResult));
+        var prompt = Assert.Single(rig.Pi.Current.FramesOfType("prompt"));
+        Assert.Single(prompt["images"]!.AsArray());
+        Assert.Empty(rig.Pi.Current.FramesOfType("get_fork_messages"));
+        Assert.Empty(rig.Pi.Current.FramesOfType("fork"));
+        Assert.DoesNotContain(rig.Messages(LogLevel.Warning), m => m.StartsWith(RejectionWarning));
+    }
+
+    [Fact]
+    public async Task AnImageTurn_RejectedWith400_IsRetriedOnceTextOnly_AndSucceeds()
+    {
+        await using var rig = Rig.Create();
+        var oldSession = rig.CreateSessionFile();
+        rig.Pi.OnPrompt = RejectImages();
+
+        var progress = await rig.RunTurnAsync("what is this?", OnePhoto());
+
+        // Only the retry's answer reaches the caller.
+        var result = Terminal(progress);
+        Assert.Equal(("OK", false), (result.FinalResult, result.IsErrorResult));
+        var pi = rig.Pi.Current;
+        var prompts = pi.FramesOfType("prompt");
+        Assert.Equal(2, prompts.Count);
+        Assert.Single(prompts[0]["images"]!.AsArray());
+        Assert.Null(prompts[1]["images"]);
+        Assert.Equal("what is this?\n\n" + PiExecutor.ImagesOmittedText(1), PiExecutor.Str(prompts[1], "message"));
+
+        // The rejected prompt left the session before the retry: Pi forked before its entry.
+        var fork = Assert.Single(pi.FramesOfType("fork"));
+        Assert.Equal("u-1", PiExecutor.Str(fork, "entryId"));
+        Assert.True(pi.ReceivedAt(fork) < pi.ReceivedAt(prompts[1]));
+        Assert.Single(rig.Pi.Processes);
+
+        // The old session file held the image bytes; the executor follows the forked one.
+        Assert.False(File.Exists(oldSession));
+        Assert.NotEqual(oldSession, rig.Pi.SessionFile);
+        Assert.Equal(rig.Pi.SessionFile, rig.Executor.SessionFileForTests);
+        Assert.Single(rig.Messages(LogLevel.Warning), m => m.StartsWith(RejectionWarning));
+    }
+
+    [Fact]
+    public async Task AfterARetriedImageTurn_TheNextTurnSendsNoImage()
+    {
+        await using var rig = Rig.Create();
+        rig.Pi.OnPrompt = RejectImages();
+        await rig.RunTurnAsync("what is this?", OnePhoto());
+
+        var result = Terminal(await rig.RunTurnAsync("and now?"));
+
+        Assert.Equal(("OK", false), (result.FinalResult, result.IsErrorResult));
+        var prompts = rig.Pi.Current.FramesOfType("prompt");
+        Assert.Equal(3, prompts.Count);
+        Assert.Equal("and now?", PiExecutor.Str(prompts[2], "message"));
+        Assert.Null(prompts[2]["images"]);
+        Assert.Single(rig.Pi.Current.FramesOfType("fork"));
+    }
+
+    [Fact]
+    public async Task ATextOnlyTurnRejectedWith400_IsNotRetried()
+    {
+        await using var rig = Rig.Create();
+        rig.Pi.OnPrompt = (p, f) => RejectAsync(p, f);
+
+        var result = Terminal(await rig.RunTurnAsync("hello", documents: [TextPdf(rig)]));
+
+        Assert.True(result.IsErrorResult);
+        Assert.Equal($"The local model returned an error for model {PiStandIn.Tag}: {Rejection}", result.FinalResult);
+        AssertNotRetried(rig);
+        Assert.Empty(rig.Pi.Current.FramesOfType("get_fork_messages"));
+        Assert.DoesNotContain(rig.Messages(LogLevel.Warning), m => m.StartsWith(RejectionWarning));
+    }
+
+    [Fact]
+    public async Task ARetryRejectedAgain_IsNotRetriedASecondTime()
+    {
+        await using var rig = Rig.Create();
+        rig.Pi.OnPrompt = (p, f) => RejectAsync(p, f);
+
+        var result = Terminal(await rig.RunTurnAsync("what is this?", OnePhoto()));
+
+        Assert.True(result.IsErrorResult);
+        Assert.Equal(2, rig.Pi.Current.FramesOfType("prompt").Count);
+        Assert.Single(rig.Pi.Current.FramesOfType("fork"));
+    }
+
+    [Fact]
+    public async Task TheRejectionWarning_IsLoggedOncePerProcess()
+    {
+        await using var rig = Rig.Create();
+        rig.Pi.OnPrompt = RejectImages();
+
+        await rig.RunTurnAsync("one", OnePhoto());
+        await rig.RunTurnAsync("two", OnePhoto());
+
+        Assert.Equal(2, rig.Pi.Current.FramesOfType("fork").Count);
+        Assert.Single(rig.Messages(LogLevel.Warning), m => m.StartsWith(RejectionWarning));
+    }
+
+    [Fact]
+    public async Task AFailureAfterTheModelAnswered_IsNotRetried()
+    {
+        // The images were accepted and a tool ran: retrying would run the tool again.
+        await using var rig = Rig.Create();
+        rig.Pi.OnPrompt = async (p, f) =>
+        {
+            await p.AckAsync(f);
+            await p.EmitAsync(AgentStart(), TurnStart(),
+                ToolCallMessage("c1", "bash", new JsonObject { ["command"] = "true" }),
+                ToolStart("c1", "bash", new JsonObject { ["command"] = "true" }), ToolEnd("c1", "bash", ""), TurnEnd(),
+                TurnStart(), ErrorMessage(Rejection), TurnEnd(), AgentEnd(), AgentSettled());
+        };
+
+        var result = Terminal(await rig.RunTurnAsync("look", OnePhoto()));
+
+        Assert.True(result.IsErrorResult);
+        AssertNotRetried(rig);
+    }
+
+    [Fact]
+    public async Task ARejectedPromptThatIsNotTheLastUserMessage_IsNotRetried()
+    {
+        // A steer after the prompt would be lost with it.
+        await using var rig = Rig.Create();
+        rig.Pi.OnPrompt = RejectImages();
+        rig.Pi.OnGetForkMessages = (p, f) =>
+        {
+            var messages = PiStandIn.ForkMessages(p);
+            messages.Add(new JsonObject { ["entryId"] = "u-9", ["text"] = "steered" });
+            return p.RespondAsync(f, new JsonObject { ["messages"] = messages });
+        };
+
+        var result = Terminal(await rig.RunTurnAsync("look", OnePhoto()));
+
+        Assert.True(result.IsErrorResult);
+        AssertNotRetried(rig);
+        Assert.Contains(rig.Messages(LogLevel.Warning),
+            m => m == "pi images: the rejected prompt is not the session's last message; not retried");
+    }
+
+    [Fact]
+    public async Task AForkPiRefuses_ReturnsTheRejection_AndKeepsTheSessionFile()
+    {
+        await using var rig = Rig.Create();
+        var session = rig.CreateSessionFile();
+        rig.Pi.OnPrompt = RejectImages();
+        rig.Pi.OnFork = (p, f) => p.RespondAsync(f, success: false, error: "Invalid entry ID for forking");
+
+        var result = Terminal(await rig.RunTurnAsync("look", OnePhoto()));
+
+        Assert.True(result.IsErrorResult);
+        Assert.Single(rig.Pi.Current.FramesOfType("prompt"));
+        Assert.True(File.Exists(session));
+        Assert.Equal(session, rig.Executor.SessionFileForTests);
+    }
+
+    [Theory]
+    [InlineData(Rejection, true)]
+    [InlineData("413 {\"error\":\"request entity too large\"}", true)]
+    [InlineData("500 Internal Server Error", true)]
+    [InlineData("Request failed with status code 422", true)]
+    [InlineData("This model does not support image input", true)]
+    [InlineData("vision encoder not loaded", true)]
+    [InlineData("unsupported content block type", true)]
+    [InlineData("Connection error.", false)]
+    [InlineData("fetch failed", false)]
+    [InlineData("This operation was aborted", false)]
+    [InlineData(null, false)]
+    public void IsImageRejection_IsANonSuccessStatusOrAnImageError(string? error, bool expected) =>
+        Assert.Equal(expected, PiExecutor.IsImageRejection(error));
+
     [Fact]
     public async Task A6b_TheRunEndsWhileTheSteerIsExtracting_NoSteerIsWritten_AndThePromptUsesTheCache()
     {
@@ -1257,7 +1481,7 @@ public sealed class PiExecutorTests
                 await gate.Task.WaitAsync(ct);
             return null;
         };
-        await using var rig = Rig.Create(imageInput: true, tools: tools);
+        await using var rig = Rig.Create(tools: tools);
         var endRun = new TaskCompletionSource();
         rig.Pi.OnPrompt = async (p, f) =>
         {
@@ -1363,7 +1587,7 @@ public sealed class PiExecutorTests
     [Fact]
     public async Task A13_PiEchoingFewerImagesThanSent_LogsOneDroppedWarning()
     {
-        await using var rig = Rig.Create(imageInput: true);
+        await using var rig = Rig.Create();
         rig.Pi.OnPrompt = async (p, f) =>
         {
             await p.AckAsync(f);

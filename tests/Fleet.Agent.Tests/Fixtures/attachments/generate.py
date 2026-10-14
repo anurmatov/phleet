@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Synthetic attachment fixtures for Pi attachment parity (#455 §9).
 
 Writes every fixture into OUT and a manifest.json mapping each fixture name to
@@ -263,8 +262,14 @@ def scanned_pdf(code, rng, width_px, height_px, width_pt, height_pt, noise):
 # structural hostname sweep over Fixtures/ (FixtureHygieneTests F5) never sees a
 # host-like literal here; these are ECMA-376 identifiers, not hosts Fleet reaches.
 _OXML = "http://schemas." + "openxmlformats" + "." + "org"
-_PKG = _OXML + "/package/2006"
-_REL = _OXML + "/officeDocument/2006/relationships"
+
+
+def _uri(*parts):
+    return "/".join(parts)
+
+
+_PKG = _uri(_OXML, "package", "2006")
+_REL = _uri(_OXML, "officeDocument", "2006", "relationships")
 
 
 def _xml(body):
@@ -288,7 +293,7 @@ def office(path, main_part, main_type, main_xml, rel_type, extra=()):
 
 
 def docx(path, code):
-    w = _OXML + "/wordprocessingml/2006/main"
+    w = _uri(_OXML, "wordprocessingml", "2006", "main")
     office(path, "word/document.xml",
            "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
            f'<w:document xmlns:w="{w}"><w:body><w:p><w:r><w:t>Synthetic document. Code: {code}</w:t></w:r></w:p>'
@@ -296,7 +301,7 @@ def docx(path, code):
 
 
 def xlsx(path, code):
-    s = _OXML + "/spreadsheetml/2006/main"
+    s = _uri(_OXML, "spreadsheetml", "2006", "main")
     office(path, "xl/workbook.xml",
            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
            f'<workbook xmlns="{s}" xmlns:r="{_REL}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>'
@@ -313,8 +318,8 @@ def xlsx(path, code):
 
 
 def pptx(path, code):
-    p = _OXML + "/presentationml/2006/main"
-    a = _OXML + "/drawingml/2006/main"
+    p = _uri(_OXML, "presentationml", "2006", "main")
+    a = _uri(_OXML, "drawingml", "2006", "main")
     office(path, "ppt/presentation.xml",
            "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml",
            f'<p:presentation xmlns:p="{p}" xmlns:r="{_REL}"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst>'

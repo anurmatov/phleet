@@ -217,7 +217,7 @@ public sealed class PiExecutorRealPiTests
         Assert.Equal("OK", Final(await rig.RunTurnAsync("after crash")));
         var resumed = rig.Starts[2].ArgumentList.ToList();
         Assert.Equal(Path.GetFullPath(secondSession!), resumed[resumed.IndexOf("--session") + 1]);
-        Assert.Contains(rig.Info, m => m.EndsWith("session resumed", StringComparison.Ordinal));
+        Assert.Contains(rig.Info, m => m.Contains("session resumed images off", StringComparison.Ordinal));
     }
 
     // ── A14b (c): the watchdog ──────────────────────────────────────────────

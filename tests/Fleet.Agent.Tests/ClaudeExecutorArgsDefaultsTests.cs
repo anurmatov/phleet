@@ -10,7 +10,8 @@ namespace Fleet.Agent.Tests;
 /// <summary>
 /// #460: <see cref="ClaudeExecutor"/> appends the harness plan's arguments, exactly as
 /// <see cref="HarnessDefaults.Build"/> computed them (AC-X3 parity on the agent side), and restarts
-/// once without <c>harnessExtra</c> when the CLI exits before <c>system/init</c> (AC-X4).
+/// once without <c>harnessExtra</c> when the CLI exits on its own before <c>system/init</c> (AC-X4) —
+/// never after a kill Fleet asked for.
 /// </summary>
 public sealed class ClaudeExecutorArgsDefaultsTests
 {
@@ -34,10 +35,11 @@ public sealed class ClaudeExecutorArgsDefaultsTests
         HarnessExtra = extra,
     };
 
-    private static ClaudeExecutor Executor(AgentOptions options, ILogger? harnessLog = null)
+    private static ClaudeExecutor Executor(AgentOptions options, ILogger? harnessLog = null,
+        ILogger<ClaudeExecutor>? executorLog = null)
     {
         var wrapped = Microsoft.Extensions.Options.Options.Create(options);
-        return new ClaudeExecutor(wrapped, NullLogger<ClaudeExecutor>.Instance,
+        return new ClaudeExecutor(wrapped, executorLog ?? NullLogger<ClaudeExecutor>.Instance,
             new PromptBuilder(wrapped, NullLogger<PromptBuilder>.Instance),
             new AgentHarness(options, _ => null, harnessLog ?? NullLogger.Instance));
     }
@@ -93,6 +95,95 @@ public sealed class ClaudeExecutorArgsDefaultsTests
         Assert.DoesNotContain("NotebookEdit", Tail(executor));
         Assert.Equal(HarnessDefaults.ExtraNone, executor.HarnessForTests.Plan!.ExtraState);
         Assert.Contains("harnessExtra", Assert.Single(log.Entries, e => e.Level == LogLevel.Error).Message);
+    }
+
+    /// <summary>A real child the executor treats as its claude process.</summary>
+    private static System.Diagnostics.Process StartChild(ClaudeExecutor executor, string script)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo("/bin/sh") // hygiene-ok: OS stand-in, not the claude CLI
+        {
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+        };
+        psi.ArgumentList.Add("-c");
+        psi.ArgumentList.Add(script);
+        var process = System.Diagnostics.Process.Start(psi)!;
+        executor.SetProcessForTests(process);
+        return process;
+    }
+
+    /// <summary>A real child whose stdout the executor's reader follows, as EnsureProcess wires it.</summary>
+    private static (System.Diagnostics.Process Process, Task Reader) Attach(ClaudeExecutor executor, string script)
+    {
+        var process = StartChild(executor, script);
+        return (process, executor.RunStdoutReaderForTests(process.StandardOutput));
+    }
+
+    /// <summary>
+    /// Stdout that reports end of stream only when released and never throws for the cancel — the
+    /// case where the reader sees EOF after Fleet's kill instead of observing the cancel. (A plain
+    /// StreamReader turns the cancelled token into an exception, which hides the case.)
+    /// </summary>
+    private sealed class EofAfterKillReader(Task released) : StreamReader(Stream.Null)
+    {
+        public override async ValueTask<string?> ReadLineAsync(CancellationToken cancellationToken)
+        {
+            await released;
+            return null;
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]   // the reader observes the cancel
+    [InlineData(true)]    // the reader sees EOF only after the kill
+    public async Task IntentionalKillBeforeInit_KeepsTheExtra(bool eofAfterKill)
+    {
+        var log = new CapturingLogger<AgentHarness>();
+        var executorLog = new CapturingLogger<ClaudeExecutor>();
+        var executor = Executor(Options(extra: "--tools NotebookEdit"), log, executorLog);
+        var release = new TaskCompletionSource();
+        Task reader;
+        if (eofAfterKill)
+        {
+            StartChild(executor, "sleep 30");
+            reader = executor.RunStdoutReaderForTests(new EofAfterKillReader(release.Task));
+        }
+        else
+        {
+            reader = Attach(executor, "sleep 30").Reader;
+        }
+
+        // A cancel or a restart: Fleet kills a live process that has not reached system/init yet.
+        await executor.KillProcessForTestsAsync();
+        release.SetResult();
+        await reader.WaitAsync(TimeSpan.FromSeconds(10));
+        // The reader ended on end-of-stream or the cancel, never on an exception.
+        Assert.DoesNotContain(executorLog.Entries, e => e.Message.Contains("exited unexpectedly"));
+        executor.FallBackIfExitedBeforeInitForTests();
+
+        Assert.False(executor.ExitedBeforeInitForTests);
+        Assert.Contains("NotebookEdit", Tail(executor));
+        Assert.Equal(HarnessDefaults.ExtraApplied, executor.HarnessForTests.Plan!.ExtraState);
+        Assert.DoesNotContain(log.Entries, e => e.Level == LogLevel.Error);
+    }
+
+    [Fact]
+    public async Task UnpromptedExitBeforeInit_SurvivesTheCleanupKill_AndFallsBack()
+    {
+        var executor = Executor(Options(extra: "--tools NotebookEdit"));
+        var (process, reader) = Attach(executor, "exit 3");
+
+        await reader.WaitAsync(TimeSpan.FromSeconds(10));
+        await process.WaitForExitAsync();
+        Assert.True(executor.ExitedBeforeInitForTests);
+
+        // ExecuteAsync cleans up a dead process with the same kill before it retries.
+        await executor.KillProcessForTestsAsync();
+        Assert.True(executor.ExitedBeforeInitForTests);
+
+        executor.FallBackIfExitedBeforeInitForTests();
+        Assert.DoesNotContain("NotebookEdit", Tail(executor));
     }
 
     [Fact]

@@ -22,8 +22,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
     private readonly AgentOptions _config;
     private readonly ILogger<ClaudeExecutor> _logger;
     private readonly AgentHarness _harness;
-    // #460 failure at start: set by the stdout reader when the process's stdout ends before its
-    // system/init, read once by the next EnsureProcess.
+    // #460 failure at start: set by the stdout reader when the process's stdout ends on its own
+    // before its system/init, read once by the next EnsureProcess. Never set by a kill Fleet asked
+    // for: the kill cancels the reader first, and clears the flag when it stops a live process.
     private volatile bool _initSeen;
     private volatile bool _exitedBeforeInit;
 
@@ -858,9 +859,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
                 if (line is null)
                 {
-                    // The process ended on its own; before its first system/init that is the
-                    // harnessExtra start failure (#460), read by the next EnsureProcess.
-                    if (!_initSeen) _exitedBeforeInit = true;
+                    // End of stdout before the first system/init is the harnessExtra start failure
+                    // (#460) only when nothing asked for it: a kill cancels this token first.
+                    if (!_initSeen && !ct.IsCancellationRequested) _exitedBeforeInit = true;
                     break;
                 }
                 if (string.IsNullOrWhiteSpace(line)) continue;
@@ -1121,6 +1122,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 _logger.LogInformation("Killing claude process (PID {Pid})", _process.Id);
                 _process.Kill(entireProcessTree: true);
                 await _process.WaitForExitAsync();
+                // A prompted kill of a live process is never the harnessExtra start failure (#460).
+                // A process that already exited on its own keeps the flag for the next start.
+                _exitedBeforeInit = false;
             }
         }
         catch (InvalidOperationException) { }

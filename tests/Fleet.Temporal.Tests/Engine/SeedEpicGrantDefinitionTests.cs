@@ -615,7 +615,8 @@ internal sealed class SeedHarness
         Dictionary<string, object?> input,
         Func<Call, string> respond,
         Func<WorkflowHandle, SeedHarness, Task> drive,
-        bool captureWaiter = false)
+        bool captureWaiter = false,
+        Action<JsonNode>? mutateSeed = null)
     {
         await using var env = await WorkflowEnvironment.StartTimeSkippingAsync();
         var register = new AddSearchAttributesRequest { Namespace = env.Client.Options.Namespace };
@@ -660,7 +661,7 @@ internal sealed class SeedHarness
         const string taskQueue = "fleet";
         var workflowId = $"seed-{Guid.NewGuid():N}";
 
-        var loader = new LoadWorkflowDefinitionActivity(new SeedHttpClientFactory());
+        var loader = new LoadWorkflowDefinitionActivity(new SeedHttpClientFactory(mutateSeed));
         using var worker = new TemporalWorker(
             env.Client,
             new TemporalWorkerOptions(taskQueue) { LoggerFactory = loggerFactory }
@@ -730,6 +731,24 @@ internal sealed class SeedHarness
     internal static string DocOnlyPin(string head) =>
         $"HEAD_OID: {head}\nCI: success\nCHANGE_CLASS: doc_only\nPLAN: ok\nPLAN_SHA256: {new string('b',64)}\nMAX_DURATION: 14400\nWAIT_SECONDS: 0\nPOST_STAGES: 0\nOWNER: agent3\nPRIOR_RECEIPTS: no\nPRIOR_ATTEMPTS_CLEAN: yes\nPRIOR_ROUNDS: ok\nPRIOR_LAST_HEAD: none\nPLAN_APPROVAL: design\nACCEPTANCE_ISO: isolated\nHARNESS_RETRY_SPENT: no\nPINNED_AT: 2026-01-01T00:00:00Z\nPRE_STAGES: 1\nMAP_COMMIT: none\nMAP_SHA256: none\nSSH_TARGETS: none\nBODY_SHA256: {new string('c',64)}";
 
+    internal async Task<WorkflowHandle> WaitForChildAsync(WorkflowHandle parent, string type)
+    {
+        var end = DateTime.UtcNow.AddSeconds(30);
+        while (true)
+        {
+            var history = await parent.FetchHistoryAsync();
+            var started = history.Events.FirstOrDefault(e => e.EventType == EventType.ChildWorkflowExecutionStarted
+                && e.ChildWorkflowExecutionStartedEventAttributes.WorkflowType.Name == type);
+            if (started is not null)
+            {
+                var execution = started.ChildWorkflowExecutionStartedEventAttributes.WorkflowExecution;
+                return _environment!.Client.GetWorkflowHandle(execution.WorkflowId, execution.RunId);
+            }
+            if (DateTime.UtcNow > end) throw new TimeoutException(type);
+            await Task.Delay(20);
+        }
+    }
+
     internal Task AdvanceAsync(TimeSpan duration) => _environment!.DelayAsync(duration);
 
     public async Task SignalHumanApprovalAsync(WorkflowHandle handle)
@@ -759,18 +778,19 @@ internal sealed class SeedHarness
             .ToList();
 
     /// <summary>Serves every seed definition the way the orchestrator's REST API does.</summary>
-    private sealed class SeedHttpClientFactory : IHttpClientFactory
+    private sealed class SeedHttpClientFactory(Action<JsonNode>? mutateSeed = null) : IHttpClientFactory
     {
         public HttpClient CreateClient(string name) =>
-            new(new SeedHandler()) { BaseAddress = new Uri("http://orchestrator.test/") };
+            new(new SeedHandler(mutateSeed)) { BaseAddress = new Uri("http://orchestrator.test/") };
     }
 
-    private sealed class SeedHandler : HttpMessageHandler
+    private sealed class SeedHandler(Action<JsonNode>? mutateSeed) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             var name = request.RequestUri!.Segments.Last();
             var seed = JsonNode.Parse(File.ReadAllText(SeedPath()))!;
+            mutateSeed?.Invoke(seed);
             var entry = seed["workflowDefinitions"]!.AsArray().FirstOrDefault(d => d!["name"]!.GetValue<string>() == name);
             if (entry is null) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
 

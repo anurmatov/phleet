@@ -19,6 +19,7 @@ public sealed partial class AcceptanceScenarioTests
     private static Dictionary<string, object?> ParentInput() => new()
     {
         ["Repo"] = "example-org/example-repo",
+        ["RequireAcceptance"] = "true",
         ["IssueNumber"] = 7,
         ["BranchName"] = "feat/example",
         ["TargetAgent"] = "impl-agent",

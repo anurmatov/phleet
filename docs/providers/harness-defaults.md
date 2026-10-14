@@ -144,6 +144,7 @@ error naming the line, the reason and the allowed names; nothing is written:
 | codex | `history.persistence` | `"none"` or `"save-all"` |
 | claude | `--tools <names>` | comma-separated names from `HarnessExtra.KnownBuiltInTools`; local: not `WebSearch`. Narrows the agent's built-ins to the kept set, its `AllowedTools` built-ins and these names |
 | claude | `--disallowedTools WebSearch` | that value only, any mode |
+| claude | `--disable-slash-commands` | no value, any mode; never a mode default (#467). Removes the skills list and every slash command (see below) |
 | claude | `!--exclude-dynamic-system-prompt-sections` | the only removable default |
 | claude | `MAX_MCP_OUTPUT_TOKENS=<n>` | integer 1000–100000 |
 | claude | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=<n>` | `0` or `1` |
@@ -157,7 +158,18 @@ switch that would leave a stored value outside the allowlist (to gemini, or to l
 **Precedence.** An extra replaces the mode default for the same Codex key, Claude flag or env name;
 otherwise it is added. The defaults emit no `--tools`. A `--tools` line is the explicit narrowing
 described above, and it never drops a kept or `AllowedTools` built-in. The plan carries a note saying the
-line narrows the agent, shown in the view and logged by provisioning and the agent.
+line narrows the agent, shown in the view and logged by provisioning and the agent. `--disable-slash-commands`
+is added to the arguments after `--disallowedTools`, since no default emits it.
+
+**`--disable-slash-commands`** (#467) is opt-in per agent. On the pinned CLI 2.1.280 it removes the
+per-session skills list (about 5.7 KB in a local-model capture, more with plugin or managed skills), so
+cold starts prefill less. It also disables every slash command: `system/init` reports no
+`slash_commands` (58 without the flag), and a built-in such as `/context` answers "isn't available in
+this environment", so `/run /compact` stops working on that agent. With skills disabled the CLI expands
+the `Workflow` tool description from about 5.5 KB to about 22.9 KB, so pair the line with a `--tools`
+line that leaves out `Workflow`. While the effective built-ins still include `Workflow` (no `--tools`
+line, or `Workflow` named on it or in `AllowedTools`), the plan carries a note saying so. It is a note,
+never a refusal.
 
 **At start.** The agent re-runs the same validator. A stored value that no longer passes (for example a
 newer image with a narrower allowlist) is skipped as a whole with one WARN, the agent starts on the mode

@@ -248,6 +248,65 @@ public sealed class HarnessDefaultsTests
         Assert.Equal(["--exclude-dynamic-system-prompt-sections"], plan.Replaced);
     }
 
+    // ── #467: --disable-slash-commands, opt-in per agent ───────────────────────────────────────────
+
+    [Fact]
+    public void DisableSlashCommands_IsAddedToTheArgs_InEitherMode_AndChangesThePlan()
+    {
+        var cloud = Claude(local: false, extra: "--disable-slash-commands");
+        Assert.Equal(["--disable-slash-commands", "--exclude-dynamic-system-prompt-sections", "--strict-mcp-config"], cloud.ClaudeArgs);
+
+        var local = Claude(local: true, window: 131_072, extra: "--disable-slash-commands");
+        Assert.Equal(
+        [
+            "--disallowedTools", "WebSearch", "--disable-slash-commands",
+            "--exclude-dynamic-system-prompt-sections", "--strict-mcp-config",
+        ], local.ClaudeArgs);
+
+        foreach (var (plan, defaults) in new[] { (cloud, Claude(local: false)), (local, Claude(local: true, window: 131_072)) })
+        {
+            Assert.Equal(HarnessDefaults.ExtraApplied, plan.ExtraState);
+            Assert.Empty(plan.Replaced);
+            Assert.Equal(defaults.ClaudeEnv, plan.ClaudeEnv);
+            Assert.NotEqual(defaults.PlanSha256, plan.PlanSha256);
+        }
+    }
+
+    [Theory]
+    [InlineData(false, "--disable-slash-commands")]
+    [InlineData(true, "--disable-slash-commands")]
+    [InlineData(false, "--tools Workflow\n--disable-slash-commands")]
+    public void DisableSlashCommands_WithWorkflowKept_AddsANote(bool local, string extra)
+    {
+        var line = extra.Split('\n').ToList().IndexOf("--disable-slash-commands") + 1;
+        var note = Assert.Single(Claude(local, extra: extra).Notes, n => n.Contains("Workflow description"));
+
+        Assert.StartsWith($"harnessExtra line {line}: '--disable-slash-commands' with the Workflow tool kept", note);
+        Assert.EndsWith("add a '--tools' line that leaves out Workflow.", note);
+    }
+
+    [Fact]
+    public void DisableSlashCommands_WithWorkflowKeptThroughAllowedTools_AddsANote()
+    {
+        var plan = Claude(local: true, tools: [.. SixFileTools, "Workflow"], extra: "--tools WebFetch\n--disable-slash-commands");
+
+        Assert.Contains("Workflow", plan.ClaudeArgs![1].Split(','));
+        Assert.Single(plan.Notes, n => n.Contains("Workflow description"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DisableSlashCommands_WithAToolsLineThatDropsWorkflow_HasNoNote(bool local)
+    {
+        var plan = Claude(local, extra: "--tools WebFetch\n--disable-slash-commands");
+
+        Assert.DoesNotContain("Workflow", plan.ClaudeArgs![1].Split(','));
+        Assert.Contains("--disable-slash-commands", plan.ClaudeArgs);
+        // Only the --tools narrowing note remains.
+        Assert.StartsWith("harnessExtra line 1: '--tools' narrows", Assert.Single(plan.Notes));
+    }
+
     [Fact]
     public void KeptTools_IncludeTheAgentCompanions_ThatAnExplicitListWouldDrop()
     {

@@ -66,7 +66,8 @@ public sealed record HarnessPlan(
 
     /// <summary>
     /// Warnings about accepted extra lines the operator should notice: a <c>--tools</c> line narrows an
-    /// agent that otherwise keeps every built-in. Shown in the view and logged by provisioning and the
+    /// agent that otherwise keeps every built-in, and <c>--disable-slash-commands</c> with the Workflow
+    /// tool kept grows that tool's description. Shown in the view and logged by provisioning and the
     /// agent; not part of <see cref="PlanSha256"/>.
     /// </summary>
     public IReadOnlyList<string> Notes { get; init; } = [];
@@ -239,6 +240,7 @@ public static class HarnessDefaults
             // harnessExtra --tools line narrows it, below.
             List<string>? tools = null;
             var disallowWebSearch = local;
+            int? disableSlashCommandsLine = null;
             var excludeDynamic = true;
 
             env = [];
@@ -267,6 +269,9 @@ public static class HarnessDefaults
                     case HarnessExtraTarget.ClaudeFlag when extra.Name == HarnessExtra.DisallowedToolsFlag:
                         disallowWebSearch = true;
                         break;
+                    case HarnessExtraTarget.ClaudeFlag when extra.Name == HarnessExtra.DisableSlashCommandsFlag:
+                        disableSlashCommandsLine = extra.Line;
+                        break;
                     case HarnessExtraTarget.ClaudeFlagRemoved:
                         excludeDynamic = false;
                         replaced.Add(HarnessExtra.ExcludeDynamicSectionsFlag);
@@ -286,9 +291,18 @@ public static class HarnessDefaults
                 }
             }
 
+            // #467: with skills disabled the pinned CLI 2.1.280 expands the Workflow tool description
+            // from about 5.5 KB to about 22.9 KB, so the line pays off only with a --tools line that
+            // leaves Workflow out. A note, never a refusal.
+            if (disableSlashCommandsLine is int slashLine && (tools is null || tools.Contains("Workflow", StringComparer.Ordinal)))
+                notes.Add($"harnessExtra line {slashLine}: '{HarnessExtra.DisableSlashCommandsFlag}' with the Workflow "
+                    + "tool kept: Claude Code expands the Workflow description from about 5.5 KB to about 22.9 KB "
+                    + $"when skills are disabled; add a '{HarnessExtra.ToolsFlag}' line that leaves out Workflow.");
+
             args = [];
             if (tools is not null) args.AddRange([HarnessExtra.ToolsFlag, string.Join(',', tools)]);
             if (disallowWebSearch) args.AddRange([HarnessExtra.DisallowedToolsFlag, "WebSearch"]);
+            if (disableSlashCommandsLine is not null) args.Add(HarnessExtra.DisableSlashCommandsFlag);
             if (excludeDynamic) args.Add(HarnessExtra.ExcludeDynamicSectionsFlag);
             args.Add(HarnessExtra.StrictMcpConfigFlag);
         }

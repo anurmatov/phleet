@@ -48,7 +48,7 @@ into `~/.codex/config.toml`, then the `[mcp_servers.*]` tables.
 
 | setting | cloud | local |
 |---|---|---|
-| `--tools <kept set ∪ built-ins in AllowedTools>` | applied | applied |
+| `--tools` | not emitted: every built-in kept | not emitted: every built-in kept |
 | `--disallowedTools WebSearch` | unchanged | applied |
 | `--exclude-dynamic-system-prompt-sections` | applied | applied |
 | `--strict-mcp-config` | applied | applied |
@@ -58,21 +58,24 @@ into `~/.codex/config.toml`, then the `[mcp_servers.*]` tables.
 In local mode the env list starts with today's local-model entries (`ClaudeLocalModel.BuildEnvironment`),
 all kept.
 
-`--tools` rules:
+`--tools` rules (CEO direction, #460): **an agent keeps every built-in by default.** The plan emits
+`--tools` only when `harnessExtra` carries a `--tools <names>` line, the one explicit way to narrow.
+The narrowed list is:
 
 - **Always kept:** `Agent`, `Task` (the pinned CLI reports `Agent` as `Task`), `ToolSearch`, `Skill`,
   `TodoWrite`, `TaskStop`, `SendMessage`; in cloud mode also `WebFetch` and `WebSearch`. One fixed
   constant, `HarnessDefaults.KeptTools`.
-- **Name rule:** an `AllowedTools` entry adds the text before its first `(` (`Bash(git *)` → `Bash`).
-  `mcp__*` entries are never passed. Duplicates are removed and the names sorted, so input order never
-  changes the plan.
-- **The agent's own six.** `AgentOptions.AllowedTools` defaults to `Read, Write, Edit, Bash, Glob, Grep`,
-  and the .NET configuration binder **appends** the generated list to that default rather than
-  replacing it. Every running agent's `AllowedTools` — and the `--allowedTools` it has always passed —
-  therefore starts with those six, so they are in `--tools` too (`HarnessDefaults.AgentDefaultAllowedTools`;
-  the orchestrator prepends them in `HarnessInputFor`, so its computed plan is the one the agent runs).
-- An `AllowedTools` with no built-in name gets **no** `--tools` flag: the agent keeps every built-in.
-  Because of the six above, no provisioned agent reaches this case today.
+- **The agent's `AllowedTools` built-ins**, by base name: the text before the first `(`
+  (`Bash(git *)` → `Bash`). `mcp__*` entries are never passed. Duplicates are removed and the names
+  sorted, so input order never changes the plan.
+- **The names on the line.**
+
+**The agent's own six are no restriction.** `AgentOptions.AllowedTools` defaults to `Read, Write, Edit,
+Bash, Glob, Grep`, and the .NET configuration binder **appends** the generated list to that default
+rather than replacing it. Every running agent's `AllowedTools` therefore starts with those six. They never
+cause a `--tools` flag. In an explicit narrowing they stay in the list, because the agent pre-approves
+them (`HarnessDefaults.AgentDefaultAllowedTools`; the orchestrator prepends them in `HarnessInputFor`, so
+its computed plan is the one the agent runs).
 
 **Checked on the pinned CLI 2.1.280 (AC-C2).** With no `--tools`, `-p` mode offers `Bash`, `Cron*`,
 `DesignSync`, `Edit`, `EnterWorktree`, `ExitWorktree`, `ListAgents`, `Monitor`, `NotebookEdit`,
@@ -83,11 +86,9 @@ why `SendMessage` (continue a sub-agent) and `TaskStop` (stop a background task)
 `TaskCreate`/`TaskList` todo tools are not in the default `-p` set and are not added. `TodoWrite` is not
 offered on this pin and `ToolSearch` only against the first-party API: with a local base URL Claude Code
 turns tool search off and loads MCP tools up front. A real cloud session with the full cloud argument
-list loaded a deferred MCP tool through `ToolSearch`, called it, and ran a background `Agent` task to
-`task_notification completed`. Every agent's offered built-in set shrinks to the kept set plus its
-`AllowedTools` built-ins: the dropped names are `Cron*`, `DesignSync`, `EnterWorktree`, `ExitWorktree`,
-`ListAgents`, `Monitor`, `NotebookEdit`, `PushNotification`, `ReportFindings`, `ScheduleWakeup` and
-`Workflow`, unless `AllowedTools` names them. `harnessExtra` `--tools` can add any of them back.
+list and an explicit `--tools` narrowing loaded a deferred MCP tool through `ToolSearch`, called it,
+and ran a background `Agent` task to `task_notification completed`. By default no built-in is removed;
+only local mode's `--disallowedTools WebSearch` removes one.
 
 ## `harnessExtra`
 
@@ -118,7 +119,7 @@ error naming the line, the reason and the allowed names; nothing is written:
 | codex | `features.apps`, `features.remote_plugin`, `features.skill_mcp_dependency_install` | `true`/`false` |
 | codex | `check_for_update_on_startup`, `analytics.enabled` | `true`/`false` |
 | codex | `history.persistence` | `"none"` or `"save-all"` |
-| claude | `--tools <names>` | comma-separated names from `HarnessExtra.KnownBuiltInTools`; local: not `WebSearch` |
+| claude | `--tools <names>` | comma-separated names from `HarnessExtra.KnownBuiltInTools`; local: not `WebSearch`. Narrows the agent's built-ins to the kept set, its `AllowedTools` built-ins and these names |
 | claude | `--disallowedTools WebSearch` | that value only, any mode |
 | claude | `!--exclude-dynamic-system-prompt-sections` | the only removable default |
 | claude | `MAX_MCP_OUTPUT_TOKENS=<n>` | integer 1000–100000 |
@@ -131,10 +132,9 @@ switch that would leave a stored value outside the allowlist (to gemini, or to l
 `web_search = "live"`) is refused until the value is changed in the same request.
 
 **Precedence.** An extra replaces the mode default for the same Codex key, Claude flag or env name;
-otherwise it is added. `--tools` only **adds** names to the computed list and never removes one; when
-the defaults compute no `--tools` flag (the agent keeps all built-ins), an extra `--tools` line is a
-no-op, and the plan carries a note saying so (applying it would narrow that agent). Narrowing an agent's
-built-ins is done through its `AllowedTools`, never through this field.
+otherwise it is added. The defaults emit no `--tools`. A `--tools` line is the explicit narrowing
+described above, and it never drops a kept or `AllowedTools` built-in. The plan carries a note saying the
+line narrows the agent, shown in the view and logged by provisioning and the agent.
 
 **At start.** The agent re-runs the same validator. A stored value that no longer passes (for example a
 newer image with a narrower allowlist) is skipped as a whole with one WARN, the agent starts on the mode
@@ -154,7 +154,7 @@ Read-only, unauthenticated like `GET /api/agents/{name}/config`.
 | `codex.threadConfig` | the thread `config` entries, typed |
 | `claude.args`, `claude.env` | the appended arguments and the child env; `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` shown as `***` |
 | `extra.state`, `extra.reason`, `extra.replaced` | `none`/`applied`/`ignored`, why ignored, defaults the extra replaced or removed |
-| `extra.notes` | accepted lines that change nothing (an extra `--tools` on an all-tools agent) |
+| `extra.notes` | accepted lines to notice: a `--tools` line narrows the agent's built-ins |
 | `planSha256` = `computedPlanSha256` | SHA-256 over the canonical JSON of the effective settings |
 | `startedPlanSha256` | the sha the running agent reported on registration and every heartbeat; `null` = not reported |
 | `pendingReprovision` | `true` when a started sha exists and differs from the computed one |

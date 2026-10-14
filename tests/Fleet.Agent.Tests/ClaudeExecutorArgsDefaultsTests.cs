@@ -61,8 +61,7 @@ public sealed class ClaudeExecutorArgsDefaultsTests
         var executor = Executor(Options("http://inference-host:11434"));
 
         Assert.Equal(
-            "--tools \"Agent,Task,ToolSearch,Skill,TodoWrite,TaskStop,SendMessage,Bash,Edit,Glob,Grep,Read,Write\" "
-            + "--disallowedTools \"WebSearch\" --exclude-dynamic-system-prompt-sections --strict-mcp-config",
+            "--disallowedTools \"WebSearch\" --exclude-dynamic-system-prompt-sections --strict-mcp-config",
             Tail(executor));
         Assert.Equal(Quoted(executor.HarnessForTests.Plan!.ClaudeArgs!), Tail(executor));
     }

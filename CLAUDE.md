@@ -210,7 +210,8 @@ Code settings (MUST NOT compute them anywhere else). The one per-agent override 
 `harness_extra` on `update_agent_config` and `create_agent`; nullable `agents.harness_extra`, migration
 `AddAgentHarnessExtra`): claude and codex only, an **allowlist** with typed ranges in
 `HarnessExtra.cs`, checked on every write against the resulting provider and mode, `""` clears,
-applies on reprovision. `--tools` extras only add names, never narrow. `GET
+applies on reprovision. No `--tools` by default (every built-in kept); a `harnessExtra` `--tools` line is
+the one explicit narrowing (kept set + AllowedTools built-ins + named). `GET
 /api/agents/{name}/effective-harness` serves the computed plan (credentials masked) with
 `computedPlanSha256`, `startedPlanSha256` (from registration/heartbeat `PlanSha256`) and
 `pendingReprovision`. Provisioning writes `.generated/codex-root.toml` for codex agents before
@@ -221,8 +222,8 @@ overwriting existing keys, `entrypoint.sh` writes `codex-root.toml` before the `
 (a missing file WARNs and keeps the MCP tables), and heartbeats carry `PlanSha256`. ⚠️ The agent's
 `AllowedTools` always starts with the six baked file tools — the config binder appends the generated
 list to the `AgentOptions` default — so the orchestrator prepends them too
-(`HarnessDefaults.AgentDefaultAllowedTools`); `--tools` silently ignores unknown names, and `KeptTools`
-includes `TaskStop`/`SendMessage` because an explicit list drops them. An older image ignores the field
+(`HarnessDefaults.AgentDefaultAllowedTools`) and the six never cause `--tools`; `--tools` silently ignores
+unknown names, and `KeptTools` includes `TaskStop`/`SendMessage` because an explicit list drops them. An older image ignores the field
 and the file (view: "not reported"). The dashboard dialog is sectioned and shows the effective settings
 and the `harnessExtra` textarea. See `docs/providers/harness-defaults.md`.
 

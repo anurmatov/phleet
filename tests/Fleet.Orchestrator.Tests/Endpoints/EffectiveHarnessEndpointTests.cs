@@ -201,10 +201,8 @@ public sealed class EffectiveHarnessEndpointTests : IAsyncLifetime
         Assert.Equal((Url, "12000"), (env["ANTHROPIC_BASE_URL"], env["MAX_MCP_OUTPUT_TOKENS"]));
         Assert.DoesNotContain(ClaudeLocalModel.PlaceholderAuthToken, served.GetRawText());
         Assert.Equal(
-            // The agent's six-tool AllowedTools default comes first: the binder appends the
-            // generated list to it, and the plan mirrors that.
-            ["--tools", "Agent,Task,ToolSearch,Skill,TodoWrite,TaskStop,SendMessage,Bash,Edit,Glob,Grep,Read,Write",
-                "--disallowedTools", "WebSearch", "--strict-mcp-config"],
+            // No --tools: only an explicit harnessExtra --tools line narrows built-ins.
+            ["--disallowedTools", "WebSearch", "--strict-mcp-config"],
             served.GetProperty("claude").GetProperty("args").EnumerateArray().Select(x => x.GetString()).ToArray());
         var extra = served.GetProperty("extra");
         Assert.Equal("applied", extra.GetProperty("state").GetString());

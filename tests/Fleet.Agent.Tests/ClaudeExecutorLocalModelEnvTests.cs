@@ -191,10 +191,8 @@ public class ClaudeExecutorLocalModelEnvTests
         "-p --input-format stream-json --output-format stream-json --verbose --allowedTools \"Read,Write,Edit,Bash,Glob,Grep\" "
       + "--model claude-model-x --max-turns 50 --permission-mode acceptEdits ";
 
-    // #460: the harness plan's arguments follow, last: the kept set, cloud web tools and the agent's
-    // six default file tools, then the two flags applied in every mode.
+    // #460: the harness plan's arguments follow, last. No --tools: a cloud agent keeps every built-in.
     private const string CloudSuffix = "--append-system-prompt-file \"{WORKDIR}/system-prompt.md\" "
-      + "--tools \"Agent,Task,ToolSearch,Skill,TodoWrite,TaskStop,SendMessage,WebFetch,WebSearch,Bash,Edit,Glob,Grep,Read,Write\" "
       + "--exclude-dynamic-system-prompt-sections --strict-mcp-config";
 
     [Theory]

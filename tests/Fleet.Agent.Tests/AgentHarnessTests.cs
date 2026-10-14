@@ -81,7 +81,7 @@ public sealed class AgentHarnessTests
     }
 
     [Fact]
-    public void TheBoundAllowedTools_StartWithTheSixDefaults_AndTheyReachTools()
+    public void TheBoundAllowedTools_StartWithTheSixDefaults_WhichNeverNarrow_ButStayInAnExplicitList()
     {
         // The real binder over a generated appsettings.json: it appends to the default list.
         var json = """{"Agent":{"Name":"agent1","Role":"developer","WorkDir":"/tmp","Provider":"claude","AllowedTools":["mcp__fleet-memory__memory_get","Read","WebFetch"]}}""";
@@ -90,6 +90,18 @@ public sealed class AgentHarnessTests
         configuration.GetSection(AgentOptions.Section).Bind(options);
 
         Assert.Equal([.. HarnessDefaults.AgentDefaultAllowedTools, "mcp__fleet-memory__memory_get", "Read", "WebFetch"], options.AllowedTools);
+        Assert.DoesNotContain("--tools", Create(options).Harness.Plan!.ClaudeArgs!);
+
+        // The agent's real bound list with nothing else: still no --tools.
+        var sixOnly = new AgentOptions { Name = "", Role = "", WorkDir = "" };
+        new ConfigurationBuilder().AddJsonStream(new MemoryStream(Encoding.UTF8.GetBytes(
+            """{"Agent":{"Name":"agent1","Role":"developer","WorkDir":"/tmp","Provider":"claude"}}"""))).Build()
+            .GetSection(AgentOptions.Section).Bind(sixOnly);
+        Assert.Equal(HarnessDefaults.AgentDefaultAllowedTools, sixOnly.AllowedTools);
+        Assert.DoesNotContain("--tools", Create(sixOnly).Harness.Plan!.ClaudeArgs!);
+
+        // An explicit narrowing keeps them.
+        options.HarnessExtra = "--tools NotebookEdit";
         var tools = Create(options).Harness.Plan!.ClaudeArgs![1].Split(',');
         Assert.Superset(HarnessDefaults.AgentDefaultAllowedTools.ToHashSet(), tools.ToHashSet());
         Assert.Equal(HarnessDefaults.AgentDefaultAllowedTools, new AgentOptions { Name = "", Role = "", WorkDir = "" }.AllowedTools);

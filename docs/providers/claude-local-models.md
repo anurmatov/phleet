@@ -175,8 +175,8 @@ process start logs `Claude local model mode: base URL …, model …` at `Inform
 
 **Harness defaults (#460).** The child env also gets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and
 `MAX_MCP_OUTPUT_TOKENS = clamp(ContextWindow / 16, 4000, 25000)` (omitted when the window is unset), and
-argv ends with `--tools <kept set + AllowedTools built-ins>`, `--disallowedTools WebSearch`,
-`--exclude-dynamic-system-prompt-sections` and `--strict-mcp-config`. Against a local base URL Claude
+argv ends with `--disallowedTools WebSearch`, `--exclude-dynamic-system-prompt-sections` and
+`--strict-mcp-config` (no `--tools` unless `harnessExtra` narrows the built-ins). Against a local base URL Claude
 Code turns tool search off, so MCP tools load up front. See `harness-defaults.md`.
 
 **Credential isolation — four paths closed:**

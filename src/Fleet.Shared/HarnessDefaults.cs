@@ -58,9 +58,9 @@ public sealed record HarnessPlan(
     public string StartupLine => $"harness: mode={Mode} plan={PlanSha256} extra={ExtraState}";
 
     /// <summary>
-    /// Warnings about accepted extra lines that change nothing, e.g. a <c>--tools</c> line on an agent
-    /// that keeps every built-in: applying it would narrow that agent, so it is a no-op. Shown in the
-    /// view and logged by provisioning and the agent; not part of <see cref="PlanSha256"/>.
+    /// Warnings about accepted extra lines the operator should notice: a <c>--tools</c> line narrows an
+    /// agent that otherwise keeps every built-in. Shown in the view and logged by provisioning and the
+    /// agent; not part of <see cref="PlanSha256"/>.
     /// </summary>
     public IReadOnlyList<string> Notes { get; init; } = [];
 }
@@ -199,12 +199,9 @@ public static class HarnessDefaults
         }
         else
         {
-            var builtIns = AllowedBuiltInTools(input.AllowedTools);
-            List<string>? tools = builtIns.Count == 0
-                ? null // the agent keeps every built-in; no --tools flag
-                : [.. KeptTools, .. local ? [] : CloudKeptTools];
-            if (tools is not null)
-                tools.AddRange(builtIns.Where(t => !tools.Contains(t, StringComparer.Ordinal)).ToList());
+            // No --tools by default: the agent keeps every built-in (CEO, #460). Only an explicit
+            // harnessExtra --tools line narrows it, below.
+            List<string>? tools = null;
             var disallowWebSearch = local;
             var excludeDynamic = true;
 
@@ -221,21 +218,15 @@ public static class HarnessDefaults
                 switch (extra.Target)
                 {
                     case HarnessExtraTarget.ClaudeFlag when extra.Name == HarnessExtra.ToolsFlag:
-                        // Additive only (MUST NOT 4); a no-op when no --tools flag is computed.
-                        if (tools is null)
-                        {
-                            notes.Add($"harnessExtra line {extra.Line}: '{HarnessExtra.ToolsFlag}' has no effect: "
-                                + "this agent keeps every built-in tool, and applying the line would narrow it to "
-                                + "the listed names. Extras only add tools; narrow an agent through its AllowedTools.");
-                            break;
-                        }
-                        var added = ((string)extra.Value!).Split(',')
-                            .Where(t => !tools.Contains(t, StringComparer.Ordinal)).ToList();
-                        if (added.Count > 0)
-                        {
-                            tools.AddRange(added);
-                            replaced.Add(HarnessExtra.ToolsFlag);
-                        }
+                        // The one explicit narrowing. It never drops a kept tool or a built-in the
+                        // agent's AllowedTools names (MUST NOT 4); the six binder-seeded defaults are
+                        // in AllowedTools, so they stay too.
+                        tools = [.. KeptTools, .. local ? [] : CloudKeptTools];
+                        foreach (var name in AllowedBuiltInTools(input.AllowedTools).Concat(((string)extra.Value!).Split(',')))
+                            if (!tools.Contains(name, StringComparer.Ordinal)) tools.Add(name);
+                        notes.Add($"harnessExtra line {extra.Line}: '{HarnessExtra.ToolsFlag}' narrows this agent's "
+                            + "built-in tools to the kept set, its AllowedTools built-ins and the listed names; "
+                            + "every other built-in is removed.");
                         break;
                     case HarnessExtraTarget.ClaudeFlag when extra.Name == HarnessExtra.DisallowedToolsFlag:
                         disallowWebSearch = true;

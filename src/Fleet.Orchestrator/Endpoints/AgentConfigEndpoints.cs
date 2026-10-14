@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Fleet.Orchestrator.Data;
 using Fleet.Shared;
 using Fleet.Orchestrator.Helpers;
@@ -81,6 +82,7 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         agent.LocalBaseUrl,
         AnthropicBaseUrl = agent.LocalBaseUrl,
         agent.ContextWindow,
+        agent.PiImageInput,
         agent.CanReceiveChatRequests,
         agent.RequestReceivedMessage,
         agent.MountDockerSock,
@@ -103,7 +105,10 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     if (db is null)
         return Results.Problem("Database is not configured on this orchestrator");
 
-    var body = await request.ReadFromJsonAsync<AgentConfigUpdateRequest>();
+    AgentConfigUpdateRequest? body;
+    try { body = await request.ReadFromJsonAsync<AgentConfigUpdateRequest>(); }
+    // #455: a field of the wrong JSON type (piImageInput: "true") is a 400 with nothing saved, not a 500.
+    catch (JsonException ex) { return Results.BadRequest(new { error = AgentPatchHelpers.DescribeBodyFault(ex) }); }
     if (body is null)
         return Results.BadRequest(new { error = "Invalid request body" });
 
@@ -213,6 +218,8 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
             return Results.BadRequest(new { error = windowFault });
         agent.ContextWindow = body.ContextWindow == 0 ? null : body.ContextWindow;
     }
+    // #455: stored for every provider and never cleared by a provider switch; only pi applies it.
+    if (body.PiImageInput is not null) agent.PiImageInput = body.PiImageInput.Value;
 
     // Replace-all for related tables (omit field = keep current)
     if (body.Tools is not null)
@@ -405,4 +412,5 @@ internal sealed record AgentConfigUpdateRequest(
     string? AnthropicBaseUrl,
     int? ContextWindow,
     string? LocalBaseUrl = null,
-    bool? JournalCrossChatEnabled = null);
+    bool? JournalCrossChatEnabled = null,
+    bool? PiImageInput = null);

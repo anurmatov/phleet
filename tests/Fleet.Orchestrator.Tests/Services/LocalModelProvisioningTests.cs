@@ -11,7 +11,9 @@ namespace Fleet.Orchestrator.Tests.Services;
 /// stops a codex local model with no reachable server before any container exists; claude local
 /// and legacy codex output stay equal to <c>main</c>'s. #386: a pi agent gets <c>Agent.PiBaseUrl</c>,
 /// <c>Agent.ContextWindow</c> and the auto-grants but no credential (A4); PI1–PI5 and PV1 stop
-/// provisioning, and a reprovision, before Docker is called (A5b, A30).
+/// provisioning, and a reprovision, before Docker is called (A5b, A30). #455: a pi agent gets
+/// <c>Agent.PiImageInput: true</c> only with the flag on; any other agent keeps its bytes and logs
+/// one "ignored" line per provisioning.
 /// </summary>
 /// <remarks>
 /// The <c>Fixtures/LocalModelMain</c> files were produced by these same agents through
@@ -449,5 +451,85 @@ public class LocalModelProvisioningTests
         Assert.Equal((false, expected), (provision.Success, provision.Message));
         Assert.Equal((false, expected), (reprovision.Success, reprovision.Message));
         AssertNothingProvisioned(h, agent);
+    }
+
+    // ── #455: PiImageInput ───────────────────────────────────────────────────────────────────────
+
+    private static bool IsIgnoredLog((LogLevel Level, string Message) e) =>
+        e.Message.StartsWith("PiImageInput ignored", StringComparison.Ordinal);
+
+    [Fact]
+    public async Task PiImageInput_OnAPiAgent_WritesTheKeyTrue_AndLogsNoIgnoredLine()
+    {
+        await using var h = ProvisioningHarness.Create();
+        var agent = Pi();
+        agent.PiImageInput = true;
+
+        var (appsettings, _) = await ProvisionAsync(h, agent);
+
+        var node = JsonDocument.Parse(appsettings).RootElement.GetProperty("Agent");
+        Assert.Equal(JsonValueKind.True, node.GetProperty("PiImageInput").ValueKind);
+        Assert.DoesNotContain(h.Logs.Entries, IsIgnoredLog);
+    }
+
+    [Fact]
+    public async Task PiImageInput_OffOnAPiAgent_TheKeyIsAbsent_AndTheBytesAreUnchanged()
+    {
+        await using var on = ProvisioningHarness.Create();
+        await using var off = ProvisioningHarness.Create();
+        var withFlag = Pi();
+        withFlag.PiImageInput = true;
+
+        var (offSettings, offEnv) = await ProvisionAsync(off, Pi());
+        var (onSettings, onEnv) = await ProvisionAsync(on, withFlag);
+
+        Assert.False(JsonDocument.Parse(offSettings).RootElement.GetProperty("Agent").TryGetProperty("PiImageInput", out _));
+        Assert.Equal(offSettings, onSettings.Replace(",\n    \"PiImageInput\": true\n", "\n"));
+        Assert.Equal(offEnv, onEnv);
+        Assert.DoesNotContain(off.Logs.Entries, IsIgnoredLog);
+    }
+
+    [Theory]
+    [InlineData("claude-local")]
+    [InlineData("codex-legacy")]
+    public async Task PiImageInput_OnANonPiAgent_OutputEqualsMain_AndLogsIgnoredExactlyOnce(string which)
+    {
+        await using var h = ProvisioningHarness.Create();
+        AppendEnv(h, $"{OssEnvRef}={Url}/v1");
+        var agent = which == "claude-local" ? ClaudeLocal() : CodexLegacy();
+        agent.PiImageInput = true;
+
+        var (appsettings, env) = await ProvisionAsync(h, agent);
+
+        Assert.Equal(Fixture(which, "appsettings.json"), appsettings);
+        Assert.Equal(Fixture(which, "env.txt").Split('\n', StringSplitOptions.RemoveEmptyEntries), env);
+        var ignored = Assert.Single(h.Logs.Entries, IsIgnoredLog);
+        Assert.Equal((LogLevel.Information, $"PiImageInput ignored for '{agent.Name}': pi only"), ignored);
+    }
+
+    [Fact]
+    public async Task PiImageInput_OnANonPiAgent_Reprovision_LogsIgnoredExactlyOnce()
+    {
+        await using var h = ProvisioningHarness.Create();
+        var agent = CodexLocal();
+        agent.PiImageInput = true;
+        await h.SeedAsync(db => db.Agents.Add(agent));
+
+        var result = await h.Service.ReprovisionAsync(agent.Name);
+
+        Assert.True(result.Success, result.Message);
+        Assert.Single(h.Logs.Entries, IsIgnoredLog);
+        Assert.False(JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(h.GeneratedDir(agent.ContainerName), "appsettings.json")))
+            .RootElement.GetProperty("Agent").TryGetProperty("PiImageInput", out _));
+    }
+
+    [Fact]
+    public async Task PiImageInput_OffOnANonPiAgent_LogsNothing()
+    {
+        await using var h = ProvisioningHarness.Create();
+
+        await ProvisionAsync(h, CodexLocal());
+
+        Assert.DoesNotContain(h.Logs.Entries, IsIgnoredLog);
     }
 }

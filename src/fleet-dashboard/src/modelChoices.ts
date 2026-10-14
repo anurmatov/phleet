@@ -22,3 +22,13 @@ export function modelChoices(provider: string, value: string): ModelChoices {
     freeText: true,
   }
 }
+
+/**
+ * Whether the picker shows the custom input for `value`: false for a listed model, true for any other
+ * non-empty id (a stored one, or one a create-modal copy-from fills in), null for an empty value, which
+ * leaves the mode as it is so clearing the input does not switch back to the select.
+ */
+export function customModeFor(value: string, options: string[]): boolean | null {
+  if (options.includes(value)) return false
+  return value !== '' ? true : null
+}

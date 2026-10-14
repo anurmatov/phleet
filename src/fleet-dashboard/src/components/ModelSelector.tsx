@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { modelChoices } from '../modelChoices'
+import { customModeFor, modelChoices } from '../modelChoices'
 
 const PILL_LABELS: Record<string, string> = {
   'gemini-3-pro-preview': '3 pro preview',
@@ -23,11 +23,13 @@ export default function ModelSelector({ provider, value, onChange, className }: 
   const isKnown = models.includes(value)
 
   // #465: a stored value outside the list (a dated or zai/ id), or none, opens in the custom input, as is.
-  const [customMode, setCustomMode] = useState(choices.current !== null || value === '')
+  const [customMode, setCustomMode] = useState(customModeFor(value, models) ?? true)
 
-  // When the model value changes to a known model (e.g. provider reset), exit custom mode
+  // Follow value changes: a listed model (e.g. provider reset) shows the select; any other id (e.g. a
+  // create-modal copy-from of a dated or zai/ model) shows the custom input.
   useEffect(() => {
-    if (models.includes(value)) setCustomMode(false)
+    const next = customModeFor(value, models)
+    if (next !== null) setCustomMode(next)
   }, [value, models])
 
   if (customMode) {

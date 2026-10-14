@@ -7,7 +7,7 @@ import { createElement, type ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createServer } from 'vite'
 import { PROVIDER_DEFAULT_MODEL, PROVIDER_MODELS } from './constants.ts'
-import { modelChoices } from './modelChoices.ts'
+import { customModeFor, modelChoices } from './modelChoices.ts'
 
 test('Claude and Codex list the family aliases and take free text, like Gemini', () => {
   assert.deepEqual(PROVIDER_MODELS.claude, ['opus', 'sonnet', 'haiku'])
@@ -27,6 +27,27 @@ test('a stored dated or hosted id is kept as the current value, never rewritten'
   assert.equal(modelChoices('codex', 'zai/glm-5.3').current, 'zai/glm-5.3')
   assert.equal(modelChoices('codex', '').current, null)
   assert.equal(modelChoices('gemini', 'gemini-custom').current, 'gemini-custom')
+})
+
+test('custom mode follows the value: listed → select, other id → custom input, empty → unchanged', () => {
+  const claude = PROVIDER_MODELS.claude
+  assert.equal(customModeFor('opus', claude), false)
+  assert.equal(customModeFor('claude-opus-4-7', claude), true)
+  assert.equal(customModeFor('zai/glm-5.3', PROVIDER_MODELS.codex), true)
+  assert.equal(customModeFor('', claude), null)
+
+  // The picker's mount state and its value-change effect, applied to a sequence of values.
+  const modes = (options: string[], values: string[]) => {
+    let mode = customModeFor(values[0], options) ?? true
+    const out = [mode]
+    for (const v of values.slice(1)) { mode = customModeFor(v, options) ?? mode; out.push(mode) }
+    return out
+  }
+  // Create modal: mounted with the default alias, then "copy from" an agent on a dated or zai/ model.
+  assert.deepEqual(modes(claude, ['sonnet', 'claude-opus-4-7']), [false, true])
+  assert.deepEqual(modes(PROVIDER_MODELS.codex, ['sol', 'zai/glm-5.3']), [false, true])
+  // Typing in the custom input: clearing it stays custom; typing an alias goes back to the select.
+  assert.deepEqual(modes(claude, ['claude-opus-4-7', '', 'son', 'sonnet']), [true, true, true, false])
 })
 
 test('rendered picker: aliases plus a custom entry; a stored non-alias id opens in the custom input', async () => {

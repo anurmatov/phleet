@@ -1,6 +1,11 @@
+extern alias FleetAgent;
+
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
+using FleetAgent::Fleet.Agent.Configuration;
+using FleetAgent::Fleet.Agent.Services;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Endpoints;
 using Fleet.Orchestrator.Models;
@@ -12,6 +17,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -134,31 +140,35 @@ public sealed class EffectiveHarnessEndpointTests : IAsyncLifetime
         Assert.True(result.Success, result.Message);
         var dir = h.GeneratedDir("fleet-agent1");
 
-        // The agent's own inputs: its generated appsettings, plus the container env for a Claude
-        // local agent's context window.
-        var a = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(dir, "appsettings.json"))).RootElement.GetProperty("Agent");
-        string? Str(string key) => a.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
-        var provider = Str("Provider")!;
-        var claudeUrl = Str("AnthropicBaseUrl");
-        var codexLocal = Str("CodexOssBaseUrl") is not null;
-        int? window = a.TryGetProperty("ContextWindow", out var w) ? w.GetInt32()
-            : preview.Desired.Env.FirstOrDefault(e => e.StartsWith(ContextWindow.EnvVar + "=", StringComparison.Ordinal)) is { } env
-                ? int.Parse(env[(ContextWindow.EnvVar.Length + 1)..]) : null;
-        var agentSide = HarnessDefaults.Build(new HarnessInput
-        {
-            Provider = provider,
-            Local = claudeUrl is not null || codexLocal,
-            ContextWindow = window,
-            AllowedTools = a.GetProperty("AllowedTools").EnumerateArray().Select(t => t.GetString()!).ToList(),
-            HarnessExtra = Str("HarnessExtra"),
-            LocalBaseUrl = claudeUrl,
-            Model = Str("Model"),
-            Effort = Str("Effort"),
-        });
+        // The agent's own inputs, read the way the agent reads them: its generated appsettings bound
+        // by the real configuration binder (which appends AllowedTools to the six-tool default), and
+        // the container env, where a Claude local agent's window arrives.
+        var appsettingsJson = await File.ReadAllTextAsync(Path.Combine(dir, "appsettings.json"));
+        var options = new AgentOptions { Name = "", Role = "", WorkDir = "" };
+        new ConfigurationBuilder().AddJsonStream(new MemoryStream(Encoding.UTF8.GetBytes(appsettingsJson))).Build()
+            .GetSection(AgentOptions.Section).Bind(options);
+        var containerEnv = preview.Desired.Env.Select(e => e.Split('=', 2)).ToDictionary(p => p[0], p => p[1]);
+        var agentSide = new AgentHarness(options, name => containerEnv.GetValueOrDefault(name), NullLogger.Instance).Plan!;
+        string? Str(string key) => typeof(AgentOptions).GetProperty(key)!.GetValue(options) as string;
+        var provider = options.Provider;
 
         Assert.Equal(agentSide.PlanSha256, served.GetProperty("planSha256").GetString());
         Assert.Equal(agentSide.PlanSha256, served.GetProperty("computedPlanSha256").GetString());
         Assert.Equal(extra, Str("HarnessExtra"));
+        // What the executors apply is that same plan, entry for entry.
+        if (agentSide.ClaudeArgs is { } args)
+        {
+            Assert.Equal(args, served.GetProperty("claude").GetProperty("args").EnumerateArray().Select(a => a.GetString()!));
+            Assert.Equal(agentSide.ClaudeEnv!.Select(e => $"{e.Key}={HarnessDefaults.DisplayValue(e.Key, e.Value)}"),
+                served.GetProperty("claude").GetProperty("env").EnumerateArray()
+                    .Select(e => $"{e.GetProperty("name").GetString()}={e.GetProperty("value").GetString()}"));
+        }
+        else
+        {
+            var startParams = new System.Text.Json.Nodes.JsonObject();
+            CodexExecutor.MergeHarnessThreadConfig(startParams, agentSide.CodexThreadConfig!);
+            Assert.Equal(startParams["config"]!.ToJsonString(), served.GetProperty("codex").GetProperty("threadConfig").GetRawText());
+        }
 
         var rootFile = Path.Combine(dir, HarnessDefaults.CodexRootTomlFileName);
         if (provider == "codex")
@@ -191,7 +201,8 @@ public sealed class EffectiveHarnessEndpointTests : IAsyncLifetime
         Assert.Equal((Url, "12000"), (env["ANTHROPIC_BASE_URL"], env["MAX_MCP_OUTPUT_TOKENS"]));
         Assert.DoesNotContain(ClaudeLocalModel.PlaceholderAuthToken, served.GetRawText());
         Assert.Equal(
-            ["--tools", "Agent,Task,ToolSearch,Skill,TodoWrite,Bash,Read", "--disallowedTools", "WebSearch", "--strict-mcp-config"],
+            // No --tools: only an explicit harnessExtra --tools line narrows built-ins.
+            ["--disallowedTools", "WebSearch", "--strict-mcp-config"],
             served.GetProperty("claude").GetProperty("args").EnumerateArray().Select(x => x.GetString()).ToArray());
         var extra = served.GetProperty("extra");
         Assert.Equal("applied", extra.GetProperty("state").GetString());
@@ -207,8 +218,23 @@ public sealed class EffectiveHarnessEndpointTests : IAsyncLifetime
         var thread = (await GetAsync()).GetProperty("codex").GetProperty("threadConfig");
 
         Assert.Equal("disabled", thread.GetProperty("web_search").GetString());
-        Assert.False(thread.GetProperty("tools.view_image").GetBoolean());
+        Assert.False(thread.GetProperty("features.view_image").GetBoolean());
         Assert.Equal(8192, thread.GetProperty("tool_output_token_limit").GetInt32());
+    }
+
+    [Theory]
+    [InlineData("sol", "gpt-6.1-sol")]
+    [InlineData("luna", "gpt-6-luna")]
+    [InlineData("gpt-5.6-sol", null)]
+    public async Task CodexModel_ShowsTheIdAnAliasResolvesTo(string stored, string? resolved)
+    {
+        var agent = NewAgent("codex-cloud");
+        agent.Model = stored;
+        await SeedAsync(agent);
+
+        var model = (await GetAsync()).GetProperty("codex").GetProperty("model");
+
+        Assert.Equal(resolved, model.ValueKind == JsonValueKind.Null ? null : model.GetString());
     }
 
     [Fact]

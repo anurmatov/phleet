@@ -1,18 +1,8 @@
 import { useState, useEffect } from 'react'
 import { PROVIDER_MODELS } from '../constants'
+import { modelChoices } from '../modelChoices'
 
 const PILL_LABELS: Record<string, string> = {
-  'claude-sonnet-4-6': 'sonnet 4.6',
-  'claude-opus-4-8': 'opus 4.8',
-  'claude-fable-5': 'fable 5',
-  'claude-opus-4-7': 'opus 4.7',
-  'claude-opus-4-6': 'opus 4.6',
-  'claude-haiku-4-5-20251001': 'haiku 4.5',
-  'gpt-5': 'gpt-5',
-  'gpt-5.4': 'gpt-5.4',
-  'gpt-5.4-mini': 'gpt-5.4-mini',
-  'gpt-5.3-codex': 'gpt-5.3-codex',
-  'codex-mini-latest': 'codex-mini',
   'gemini-3-pro-preview': '3 pro preview',
   'gemini-3-flash-preview': '3 flash preview',
   'gemini-2.5-pro': '2.5 pro',
@@ -31,6 +21,7 @@ interface ModelSelectorProps {
 export default function ModelSelector({ provider, value, onChange, className }: ModelSelectorProps) {
   const models = PROVIDER_MODELS[provider] ?? []
   const isKnown = models.includes(value)
+  const choices = modelChoices(provider, value)
 
   const [customMode, setCustomMode] = useState(!isKnown && models.length > 0)
 
@@ -38,6 +29,26 @@ export default function ModelSelector({ provider, value, onChange, className }: 
   useEffect(() => {
     if (models.includes(value)) setCustomMode(false)
   }, [value, models])
+
+  // #460: Claude and Codex offer family aliases only. A stored dated or hosted id stays selected, as is,
+  // until an alias is picked.
+  if (!choices.freeText) {
+    return (
+      <div className="model-selector">
+        <select className={`config-input ${className ?? ''}`} value={value} onChange={e => onChange(e.target.value)}>
+          {choices.options.map(m => <option key={m} value={m}>{m}</option>)}
+          {choices.current !== null && <option value={choices.current}>{choices.current} (current)</option>}
+        </select>
+        <div className="model-pills">
+          {choices.options.map(m => (
+            <button key={m} type="button" className={`model-pill${value === m ? ' active' : ''}`} onClick={() => onChange(m)}>
+              {m}
+            </button>
+          ))}
+        </div>
+      </div>
+    )
+  }
 
   if (customMode) {
     return (

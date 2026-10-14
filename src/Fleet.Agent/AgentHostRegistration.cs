@@ -56,6 +56,8 @@ public static class AgentHostRegistration
 
         // Register services
         services.AddSingleton<PromptBuilder>();
+        // #460: the harness plan, computed once; the executors apply it and heartbeats report its sha.
+        services.AddSingleton<AgentHarness>();
         services.AddSingleton<ClaudeExecutor>();
         services.AddSingleton<CodexExecutor>();
         services.AddSingleton<GeminiExecutor>();

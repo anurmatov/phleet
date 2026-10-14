@@ -196,6 +196,8 @@ export interface AgentConfig {
   anthropicBaseUrl?: string | null
   /** The local server's context size in tokens, or null. Used only in local mode (#367, #382). */
   contextWindow?: number | null
+  /** The one per-agent harness override (#460), verbatim, or null. Claude and Codex only. */
+  harnessExtra?: string | null
   tools: { toolName: string; isEnabled: boolean }[]
   projects: string[]
   mcpEndpoints: McpEndpointEntry[]
@@ -258,7 +260,24 @@ export interface ConfigEdits {
   localServer: CodexLocalServer
   /** Context window in tokens, or '' for not set (sent as 0, which the API clears on). */
   contextWindow: string
+  /** Extra harness settings (#460), '' for none. Sent only when it differs from the loaded value. */
+  harnessExtra: string
   instructions: { name: string; loadOrder: number }[]
+}
+
+/** GET /api/agents/{name}/effective-harness (#460): the computed plan and the running agent's report. */
+export interface EffectiveHarness {
+  agent: string
+  provider: 'claude' | 'codex'
+  mode: 'cloud' | 'local'
+  /** `model`: the id a Codex family alias resolves to, or null when the stored model is sent as is. */
+  codex: { configToml: string; threadConfig: Record<string, string | number | boolean>; model?: string | null } | null
+  claude: { args: string[]; env: { name: string; value: string }[] } | null
+  extra: { state: 'none' | 'applied' | 'ignored'; reason: string | null; replaced: string[]; notes?: string[] }
+  planSha256: string
+  computedPlanSha256: string
+  startedPlanSha256: string | null
+  pendingReprovision: boolean
 }
 
 /** The two local servers codex routes on (`ollama/<tag>`, `lmstudio/<tag>`). */

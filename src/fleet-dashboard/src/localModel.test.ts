@@ -99,7 +99,7 @@ test('Local → Cloud: URL and context cleared (sent as 0), model reset, effort 
   assert.equal(cloud.effort, 'none')
   const saved = localModelSaveBody(cloud)
   assert.ok(saved.ok)
-  if (saved.ok) assert.deepEqual(saved.body, { model: 'gpt-5', localBaseUrl: '', contextWindow: 0 })
+  if (saved.ok) assert.deepEqual(saved.body, { model: PROVIDER_DEFAULT_MODEL.codex, localBaseUrl: '', contextWindow: 0 })
 })
 
 test('Codex → Claude while Local strips the server prefix; URL and context unchanged', () => {

@@ -61,7 +61,7 @@ public sealed class HarnessDefaultsTests
         Assert.Equal(RootToml, plan.CodexRootToml);
         Assert.Equal(
         [
-            ("web_search", "disabled"), ("tools.view_image", false), ("model_reasoning_summary", "none"),
+            ("web_search", "disabled"), ("features.view_image", false), ("model_reasoning_summary", "none"),
             ("tool_output_token_limit", 8192), ("features.apps", false), ("features.remote_plugin", false),
             ("features.skill_mcp_dependency_install", false),
         ], Thread(plan));
@@ -83,11 +83,8 @@ public sealed class HarnessDefaultsTests
         Assert.Equal(("claude", "cloud"), (plan.Provider, plan.Mode));
         Assert.Null(plan.CodexRootToml);
         Assert.Null(plan.CodexThreadConfig);
-        Assert.Equal(
-        [
-            "--tools", "Agent,Task,ToolSearch,Skill,TodoWrite,WebFetch,WebSearch,Bash,Edit,Glob,Grep,Read,Write",
-            "--exclude-dynamic-system-prompt-sections", "--strict-mcp-config",
-        ], plan.ClaudeArgs);
+        // No --tools: the agent keeps every built-in unless harnessExtra narrows it.
+        Assert.Equal(["--exclude-dynamic-system-prompt-sections", "--strict-mcp-config"], plan.ClaudeArgs);
         Assert.Equal([new("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")], plan.ClaudeEnv);
     }
 
@@ -99,7 +96,6 @@ public sealed class HarnessDefaultsTests
         Assert.Equal("local", plan.Mode);
         Assert.Equal(
         [
-            "--tools", "Agent,Task,ToolSearch,Skill,TodoWrite,Bash,Edit,Glob,Grep,Read,Write",
             "--disallowedTools", "WebSearch",
             "--exclude-dynamic-system-prompt-sections", "--strict-mcp-config",
         ], plan.ClaudeArgs);
@@ -126,33 +122,46 @@ public sealed class HarnessDefaultsTests
         Assert.Null(HarnessDefaults.OutputTokenLimit(null));
     }
 
-    // ── AC-U4: --tools ─────────────────────────────────────────────────────────────────────────────
+    // ── AC-U4: --tools — only from an explicit harnessExtra line ──────────────────────────────────
 
-    [Fact]
-    public void Tools_BaseNames_NoMcp_Deduplicated()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Tools_TheSixBinderDefaults_AreNoRestriction(bool local)
     {
-        var plan = Claude(local: true, tools: ["Bash(git *)", "Bash(npm test)", "Read", "mcp__fleet-memory__*", "Read", "Agent"]);
+        // An agent whose bound AllowedTools is exactly the six defaults keeps every built-in.
+        var plan = Claude(local, tools: HarnessDefaults.AgentDefaultAllowedTools.ToArray());
 
-        Assert.Equal("Agent,Task,ToolSearch,Skill,TodoWrite,Bash,Read", plan.ClaudeArgs![1]);
+        Assert.DoesNotContain("--tools", plan.ClaudeArgs!);
+        Assert.Empty(plan.Notes);
     }
 
     [Theory]
     [InlineData]
     [InlineData("mcp__fleet-memory__memory_search", "mcp__fleet-temporal__notify_cto")]
-    public void Tools_AnAllowListWithNoBuiltIn_OmitsTheFlag(params string[] tools)
+    [InlineData("Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebFetch", "NotebookEdit", "Bash(git *)")]
+    public void Tools_AllowedToolsAloneNeverNarrow(params string[] tools)
     {
-        var plan = Claude(local: false, tools: tools);
-
-        Assert.DoesNotContain("--tools", plan.ClaudeArgs!);
-        Assert.Equal(["--exclude-dynamic-system-prompt-sections", "--strict-mcp-config"], plan.ClaudeArgs);
+        Assert.DoesNotContain("--tools", Claude(local: false, tools: tools).ClaudeArgs!);
     }
 
     [Fact]
-    public void Tools_EveryKeptAndAllowedNameIsPresent_InEitherMode()
+    public void Tools_ExtraNarrows_KeepingTheKeptSet_TheAllowedBuiltIns_AndTheNames_WithANote()
+    {
+        var plan = Claude(local: true, tools: ["Bash(git *)", "Bash(npm test)", "Read", "mcp__fleet-memory__*", "Read", "Agent"],
+            extra: "--tools NotebookEdit,Read");
+
+        Assert.Equal("Agent,Task,ToolSearch,Skill,TodoWrite,TaskStop,SendMessage,Bash,Read,NotebookEdit", plan.ClaudeArgs![1]);
+        Assert.Empty(plan.Replaced);
+        Assert.StartsWith("harnessExtra line 1: '--tools' narrows this agent's built-in tools", Assert.Single(plan.Notes));
+    }
+
+    [Fact]
+    public void Tools_ExtraNarrowing_NeverDropsAKeptOrAllowedName_InEitherMode()
     {
         foreach (var local in new[] { false, true })
         {
-            var names = Claude(local, SixFileTools).ClaudeArgs![1].Split(',');
+            var names = Claude(local, SixFileTools, extra: "--tools Edit").ClaudeArgs![1].Split(',');
             Assert.Superset(HarnessDefaults.KeptTools.ToHashSet(), names.ToHashSet());
             Assert.Superset(SixFileTools.ToHashSet(), names.ToHashSet());
             Assert.Equal(!local, names.Contains("WebFetch") && names.Contains("WebSearch"));
@@ -162,7 +171,8 @@ public sealed class HarnessDefaultsTests
     [Fact]
     public void Tools_InputOrderDoesNotChangeThePlan()
     {
-        Assert.Equal(Claude(false, ["Read", "Bash"]).PlanSha256, Claude(false, ["Bash", "Read"]).PlanSha256);
+        Assert.Equal(Claude(false, ["Read", "Bash"], extra: "--tools Edit").PlanSha256,
+            Claude(false, ["Bash", "Read"], extra: "--tools Edit").PlanSha256);
     }
 
     // ── AC-U5: env ─────────────────────────────────────────────────────────────────────────────────
@@ -234,32 +244,18 @@ public sealed class HarnessDefaultsTests
     {
         var plan = Claude(local: false, extra: "--disallowedTools WebSearch\n!--exclude-dynamic-system-prompt-sections");
 
-        Assert.Equal(
-        [
-            "--tools", "Agent,Task,ToolSearch,Skill,TodoWrite,WebFetch,WebSearch,Bash,Edit,Glob,Grep,Read,Write",
-            "--disallowedTools", "WebSearch", "--strict-mcp-config",
-        ], plan.ClaudeArgs);
+        Assert.Equal(["--disallowedTools", "WebSearch", "--strict-mcp-config"], plan.ClaudeArgs);
         Assert.Equal(["--exclude-dynamic-system-prompt-sections"], plan.Replaced);
     }
 
     [Fact]
-    public void ClaudeExtra_ToolsOnlyAdds_AndNeverDropsAKeptOrAllowedName()
+    public void KeptTools_IncludeTheAgentCompanions_ThatAnExplicitListWouldDrop()
     {
-        var plan = Claude(local: true, tools: ["Read"], extra: "--tools NotebookEdit,Read,Agent");
-
-        Assert.Equal("Agent,Task,ToolSearch,Skill,TodoWrite,Read,NotebookEdit", plan.ClaudeArgs![1]);
-        Assert.Equal(["--tools"], plan.Replaced);
-    }
-
-    [Fact]
-    public void ClaudeExtra_ToolsOnAnAllToolsAgent_IsANoOp_SoAllBuiltInsStay()
-    {
-        var withExtra = Claude(local: false, tools: ["mcp__fleet-memory__memory_search"], extra: "--tools Edit");
-        var without = Claude(local: false, tools: ["mcp__fleet-memory__memory_search"]);
-
-        Assert.DoesNotContain("--tools", withExtra.ClaudeArgs!);
-        Assert.Equal(without.ClaudeArgs, withExtra.ClaudeArgs);
-        Assert.Empty(withExtra.Replaced);
+        // Pinned CLI 2.1.280: an explicit --tools list drops SendMessage and TaskStop from the
+        // default -p set; both belong to the Agent tool's own workflow (AC-C2).
+        Assert.Equal(["Agent", "Task", "ToolSearch", "Skill", "TodoWrite", "TaskStop", "SendMessage"], HarnessDefaults.KeptTools);
+        Assert.All(HarnessDefaults.KeptTools.Concat(HarnessDefaults.CloudKeptTools),
+            t => Assert.Contains(t, HarnessExtra.KnownBuiltInTools));
     }
 
     // ── AC-X4 (helper part): a stored value the validator refuses is skipped as a whole ─────────────
@@ -304,6 +300,64 @@ public sealed class HarnessDefaultsTests
     public void OtherProviders_AreRefused(string provider)
     {
         Assert.Throws<ArgumentException>(() => HarnessDefaults.Build(new HarnessInput { Provider = provider, Local = false }));
+    }
+
+    // ── family aliases (#460, owner direction) ─────────────────────────────────────────────────────
+
+    private static HarnessPlan CodexModel(string model, bool local = false) =>
+        HarnessDefaults.Build(new HarnessInput { Provider = "codex", Local = local, Model = model });
+
+    [Theory]
+    [InlineData("sol", "gpt-6.1-sol")]
+    [InlineData("terra", "gpt-5.6-terra")]
+    [InlineData("luna", "gpt-6-luna")]
+    public void CodexAlias_ResolvesToTheCurrentId_InThePlan(string alias, string id)
+    {
+        var plan = CodexModel(alias);
+
+        Assert.Equal(id, plan.CodexModel);
+        Assert.Equal(id, HarnessDefaults.ResolveCodexAlias(alias));
+        Assert.NotEqual(CodexModel("gpt-5.5").PlanSha256, plan.PlanSha256);
+    }
+
+    [Theory]
+    [InlineData("gpt-5.6-sol")]      // a stored dated id
+    [InlineData("gpt-6.1-sol")]
+    [InlineData("zai/glm-5.3")]      // hosted
+    [InlineData("Sol")]              // aliases are exact
+    public void CodexNonAlias_IsSentAsStored_AndKeepsItsPlan(string model)
+    {
+        var plan = CodexModel(model);
+
+        Assert.Null(plan.CodexModel);
+        Assert.Equal(Codex(local: false).PlanSha256, plan.PlanSha256);
+    }
+
+    [Fact]
+    public void CodexAlias_IsNotMappedInLocalMode()
+    {
+        Assert.Null(CodexModel("sol", local: true).CodexModel);
+    }
+
+    [Fact]
+    public void CodexAliases_AreExactlyTheThreeFamilies()
+    {
+        Assert.Equal(["sol", "terra", "luna"], HarnessDefaults.CodexModelAliases.Keys);
+    }
+
+    [Theory]
+    [InlineData("opus")]
+    [InlineData("sonnet")]
+    [InlineData("haiku")]
+    [InlineData("claude-opus-4-7")]
+    public void ClaudeModels_AreNeverMapped(string model)
+    {
+        var plan = Claude(local: false);
+        Assert.Equal(plan.PlanSha256, HarnessDefaults.Build(new HarnessInput
+        {
+            Provider = "claude", Local = false, AllowedTools = SixFileTools, Model = model,
+        }).PlanSha256);
+        Assert.Null(plan.CodexModel);
     }
 
     [Fact]

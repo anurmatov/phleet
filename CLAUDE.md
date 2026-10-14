@@ -210,13 +210,24 @@ Code settings (MUST NOT compute them anywhere else). The one per-agent override 
 `harness_extra` on `update_agent_config` and `create_agent`; nullable `agents.harness_extra`, migration
 `AddAgentHarnessExtra`): claude and codex only, an **allowlist** with typed ranges in
 `HarnessExtra.cs`, checked on every write against the resulting provider and mode, `""` clears,
-applies on reprovision. `--tools` extras only add names, never narrow. `GET
+applies on reprovision. No `--tools` by default (every built-in kept); a `harnessExtra` `--tools` line is
+the one explicit narrowing (kept set + AllowedTools built-ins + named). `GET
 /api/agents/{name}/effective-harness` serves the computed plan (credentials masked) with
 `computedPlanSha256`, `startedPlanSha256` (from registration/heartbeat `PlanSha256`) and
 `pendingReprovision`. Provisioning writes `.generated/codex-root.toml` for codex agents before
 container create and mounts it read-only at `/app/codex-root.toml` (`HarnessDefaults.CodexRootTomlContainerPath`).
-Executors, `entrypoint.sh` and the sha report ship in the agent-image PR; until then agents ignore the
-field and the file. See `docs/providers/harness-defaults.md`.
+The agent's `AgentHarness` builds the same plan once at startup (log line `harness: mode=… plan=… extra=…`);
+`ClaudeExecutor` appends its args and child env, `CodexExecutor` merges its thread config without
+overwriting existing keys, `entrypoint.sh` writes `codex-root.toml` before the `[mcp_servers.*]` tables
+(a missing file WARNs and keeps the MCP tables), and heartbeats carry `PlanSha256`. ⚠️ The agent's
+`AllowedTools` always starts with the six baked file tools — the config binder appends the generated
+list to the `AgentOptions` default — so the orchestrator prepends them too
+(`HarnessDefaults.AgentDefaultAllowedTools`) and the six never cause `--tools`; `--tools` silently ignores
+unknown names, and `KeptTools` includes `TaskStop`/`SendMessage` because an explicit list drops them. An older image ignores the field
+and the file (view: "not reported"). Cloud model picker: families only — Claude `opus`/`sonnet`/`haiku`
+passed through, Codex `sol`/`terra`/`luna` mapped in `HarnessDefaults.CodexModelAliases` (the pinned
+Codex does not resolve them); dated ids keep working, never rewritten. The dashboard dialog is sectioned and shows the effective settings
+and the `harnessExtra` textarea. See `docs/providers/harness-defaults.md`.
 
 ## Project contexts
 

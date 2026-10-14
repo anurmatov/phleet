@@ -65,6 +65,10 @@ catch (Exception ex)
     Environment.Exit(1);
 }
 
+// #460: compute the harness plan now, so its one startup line (`harness: mode=… plan=… extra=…`)
+// is logged at startup rather than at the first turn. Gemini logs nothing.
+app.Services.GetRequiredService<AgentHarness>();
+
 if (!isCliMode)
 {
     // One-shot startup sweep: clean up attachment files left over from prior runs.

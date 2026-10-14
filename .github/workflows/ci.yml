@@ -39,6 +39,11 @@ jobs:
           --filter "FullyQualifiedName!~Fleet.Conversations.Tests&FullyQualifiedName!~Fleet.Orchestrator.Tests.Migrations"
           --logger "console;verbosity=normal"
 
+      # #460 AC-U6: the codex branch writes codex-root.toml first, then byte-identical MCP tables,
+      # parsed with tomllib; a missing, unreadable or directory root file still keeps the MCP tables.
+      - name: Entrypoint codex config.toml
+        run: bash tests/entrypoint-codex/run.sh
+
       - name: Acceptance plan validators and public placeholders
         run: python3 -m unittest discover tests/scripts
 
@@ -585,6 +590,11 @@ jobs:
 
       - name: Install pinned codex CLI
         run: npm install -g @openai/codex@0.159.2 --silent
+
+      # #460 AC-C1: every harness key is one this codex reads (codex ignores unknown keys, so a renamed
+      # key would otherwise go silently inert), and the local defaults drop the two tools they target.
+      - name: Harness config keys read by the pinned codex
+        run: python3 tests/codex-harness-keys/run.py
 
       - name: Install jq
         run: sudo apt-get install -y jq

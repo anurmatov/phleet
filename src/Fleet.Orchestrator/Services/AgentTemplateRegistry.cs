@@ -116,7 +116,7 @@ public static class AgentTemplateRegistry
             DisplayName: "CTO Agent",
             Description: "Orchestration and oversight — manages agents, workflows, memory, and the fleet stack",
             Config: new AgentTemplateConfig(
-                Model: "claude-opus-4-7",
+                Model: "opus",
                 Role: "co-cto",
                 Provider: "claude",
                 MemoryLimitMb: 4096,

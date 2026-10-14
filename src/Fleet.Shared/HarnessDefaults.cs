@@ -56,6 +56,20 @@ public sealed record HarnessPlan(
 {
     /// <summary>The line the agent prints once at startup, matching the effective-settings view.</summary>
     public string StartupLine => $"harness: mode={Mode} plan={PlanSha256} extra={ExtraState}";
+
+    /// <summary>
+    /// The model id a Codex agent's family alias (<c>sol</c>, <c>terra</c>, <c>luna</c>) resolves to, or
+    /// null when its model is not an alias (a dated id, a local or a hosted model is sent as stored).
+    /// Part of <see cref="PlanSha256"/>: a new mapping is a different plan.
+    /// </summary>
+    public string? CodexModel { get; init; }
+
+    /// <summary>
+    /// Warnings about accepted extra lines the operator should notice: a <c>--tools</c> line narrows an
+    /// agent that otherwise keeps every built-in. Shown in the view and logged by provisioning and the
+    /// agent; not part of <see cref="PlanSha256"/>.
+    /// </summary>
+    public IReadOnlyList<string> Notes { get; init; } = [];
 }
 
 /// <summary>
@@ -91,10 +105,57 @@ public static class HarnessDefaults
 
     /// <summary>
     /// Built-in tools <c>--tools</c> always keeps, because <c>AllowedTools</c> never names them but
-    /// the harness needs them: sub-agents (<c>Agent</c>, which the pinned CLI reports as <c>Task</c>),
-    /// deferred MCP tool loading, skills and todos. A fixed constant; AC-C2 verifies each name.
+    /// the harness needs them: sub-agents (<c>Agent</c>, which the pinned CLI reports as <c>Task</c>)
+    /// with <c>SendMessage</c> to continue one and <c>TaskStop</c> to stop a background task, deferred
+    /// MCP tool loading, skills and todos. A fixed constant; AC-C2 verifies each name.
     /// </summary>
-    public static IReadOnlyList<string> KeptTools { get; } = ["Agent", "Task", "ToolSearch", "Skill", "TodoWrite"];
+    /// <remarks>
+    /// Checked against the pinned Claude CLI 2.1.280: an explicit <c>--tools</c> list drops
+    /// <c>SendMessage</c> and <c>TaskStop</c> from the default set, so they are named here. Unknown
+    /// names are silently ignored, never rejected. <c>TodoWrite</c> is not offered in <c>-p</c> mode on
+    /// this pin, and <c>ToolSearch</c> only with the first-party API (a local base URL turns tool search
+    /// off and MCP tools load up front); both stay listed so the set does not depend on either. The
+    /// <c>TaskCreate</c>/<c>TaskList</c> todo tools are not in the default <c>-p</c> set, so keeping
+    /// them would add tools, not preserve them.
+    /// </remarks>
+    public static IReadOnlyList<string> KeptTools { get; } =
+        ["Agent", "Task", "ToolSearch", "Skill", "TodoWrite", "TaskStop", "SendMessage"];
+
+    /// <summary>
+    /// The agent's own <c>AllowedTools</c> default (<c>AgentOptions</c>). The .NET configuration
+    /// binder appends the generated list to it rather than replacing it, so every running agent's
+    /// <c>AllowedTools</c> — and the <c>--allowedTools</c> it passes — starts with these six.
+    /// <c>HarnessInputFor</c> in the orchestrator prepends them, so the plan it computes is the one the
+    /// agent starts with, and <c>--tools</c> never drops a tool the agent pre-approves (MUST NOT 4).
+    /// </summary>
+    public static IReadOnlyList<string> AgentDefaultAllowedTools { get; } = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"];
+
+    /// <summary>
+    /// Codex cloud family aliases → the model id they run (#460, owner direction: pick a family, not a
+    /// dated version). The only place a Codex alias is mapped; the executor sends the resolved id and the
+    /// effective-settings view shows it. A model that is not a key — a dated id such as
+    /// <c>gpt-5.6-sol</c>, a local or a hosted model — is never rewritten.
+    /// </summary>
+    /// <remarks>
+    /// Mapped because the pinned Codex CLI 0.159.2 does not resolve them: <c>thread/start</c> accepts
+    /// <c>sol</c> and sends it to <c>/v1/responses</c> unchanged, and its bundled catalog has no bare
+    /// family names (only <c>gpt-6.1-sol</c>, <c>gpt-6-sol</c>, <c>gpt-5.6-sol</c>, <c>gpt-5.6-terra</c>,
+    /// <c>gpt-6-luna</c>, <c>gpt-5.6-luna</c>, …), and a ChatGPT-account login refuses a model outside
+    /// that catalog. Each alias maps to the newest id of its family in that catalog; move them together
+    /// with a Codex CLI bump. Claude aliases need no map: Claude Code resolves <c>opus</c>,
+    /// <c>sonnet</c> and <c>haiku</c> itself.
+    /// </remarks>
+    public static IReadOnlyDictionary<string, string> CodexModelAliases { get; } =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["sol"] = "gpt-6.1-sol",
+            ["terra"] = "gpt-5.6-terra",
+            ["luna"] = "gpt-6-luna",
+        };
+
+    /// <summary>The id a Codex alias resolves to, or null when <paramref name="model"/> is not an alias.</summary>
+    public static string? ResolveCodexAlias(string? model) =>
+        model is not null && CodexModelAliases.TryGetValue(model, out var id) ? id : null;
 
     /// <summary>Kept as well in cloud mode only (MUST NOT 5).</summary>
     public static IReadOnlyList<string> CloudKeptTools { get; } = ["WebFetch", "WebSearch"];
@@ -136,14 +197,17 @@ public static class HarnessDefaults
         var extras = parse.Fault is null ? parse.Lines : [];
         var state = parse.Fault is not null ? ExtraIgnored : extras.Count == 0 ? ExtraNone : ExtraApplied;
         var replaced = new List<string>();
+        var notes = new List<string>();
 
         string? rootToml = null;
+        string? codexModel = null;
         List<HarnessSetting>? thread = null;
         List<string>? args = null;
         List<KeyValuePair<string, string>>? env = null;
 
         if (provider == AgentProviders.Codex)
         {
+            codexModel = local ? null : ResolveCodexAlias(input.Model);
             var root = new List<HarnessSetting>
             {
                 new("check_for_update_on_startup", false),
@@ -154,7 +218,8 @@ public static class HarnessDefaults
             if (local)
             {
                 thread.Add(new("web_search", "disabled"));
-                thread.Add(new("tools.view_image", false));
+                // Not tools.view_image: codex 0.159.2 ignores that key; the feature flag removes the tool.
+                thread.Add(new("features.view_image", false));
                 thread.Add(new("model_reasoning_summary", "none"));
                 if (limit is int tokens) thread.Add(new("tool_output_token_limit", tokens));
             }
@@ -170,12 +235,9 @@ public static class HarnessDefaults
         }
         else
         {
-            var builtIns = AllowedBuiltInTools(input.AllowedTools);
-            List<string>? tools = builtIns.Count == 0
-                ? null // the agent keeps every built-in; no --tools flag
-                : [.. KeptTools, .. local ? [] : CloudKeptTools];
-            if (tools is not null)
-                tools.AddRange(builtIns.Where(t => !tools.Contains(t, StringComparer.Ordinal)).ToList());
+            // No --tools by default: the agent keeps every built-in (CEO, #460). Only an explicit
+            // harnessExtra --tools line narrows it, below.
+            List<string>? tools = null;
             var disallowWebSearch = local;
             var excludeDynamic = true;
 
@@ -192,15 +254,15 @@ public static class HarnessDefaults
                 switch (extra.Target)
                 {
                     case HarnessExtraTarget.ClaudeFlag when extra.Name == HarnessExtra.ToolsFlag:
-                        // Additive only (MUST NOT 4); a no-op when no --tools flag is computed.
-                        if (tools is null) break;
-                        var added = ((string)extra.Value!).Split(',')
-                            .Where(t => !tools.Contains(t, StringComparer.Ordinal)).ToList();
-                        if (added.Count > 0)
-                        {
-                            tools.AddRange(added);
-                            replaced.Add(HarnessExtra.ToolsFlag);
-                        }
+                        // The one explicit narrowing. It never drops a kept tool or a built-in the
+                        // agent's AllowedTools names (MUST NOT 4); the six binder-seeded defaults are
+                        // in AllowedTools, so they stay too.
+                        tools = [.. KeptTools, .. local ? [] : CloudKeptTools];
+                        foreach (var name in AllowedBuiltInTools(input.AllowedTools).Concat(((string)extra.Value!).Split(',')))
+                            if (!tools.Contains(name, StringComparer.Ordinal)) tools.Add(name);
+                        notes.Add($"harnessExtra line {extra.Line}: '{HarnessExtra.ToolsFlag}' narrows this agent's "
+                            + "built-in tools to the kept set, its AllowedTools built-ins and the listed names; "
+                            + "every other built-in is removed.");
                         break;
                     case HarnessExtraTarget.ClaudeFlag when extra.Name == HarnessExtra.DisallowedToolsFlag:
                         disallowWebSearch = true;
@@ -232,9 +294,9 @@ public static class HarnessDefaults
         }
 
         var mode = local ? ModeLocal : ModeCloud;
-        var sha = Sha256(provider, mode, rootToml, thread, args, env, state);
+        var sha = Sha256(provider, mode, rootToml, thread, args, env, state, codexModel);
         return new HarnessPlan(provider, mode, rootToml, thread, args, env, state,
-            parse.Fault?.Message, replaced, sha);
+            parse.Fault?.Message, replaced, sha) { Notes = notes, CodexModel = codexModel };
     }
 
     private static void Merge(List<HarnessSetting> settings, HarnessSetting extra, List<string> replaced)
@@ -278,7 +340,8 @@ public static class HarnessDefaults
     };
 
     private static string Sha256(string provider, string mode, string? rootToml, IReadOnlyList<HarnessSetting>? thread,
-        IReadOnlyList<string>? args, IReadOnlyList<KeyValuePair<string, string>>? env, string extraState)
+        IReadOnlyList<string>? args, IReadOnlyList<KeyValuePair<string, string>>? env, string extraState,
+        string? codexModel)
     {
         using var stream = new MemoryStream();
         using (var w = new Utf8JsonWriter(stream))
@@ -324,6 +387,8 @@ public static class HarnessDefaults
                 w.WriteEndArray();
             }
             w.WriteString("extraState", extraState);
+            // Only when an alias resolved, so every other plan keeps its canonical form.
+            if (codexModel is not null) w.WriteString("codexModel", codexModel);
             w.WriteEndObject();
         }
         return Convert.ToHexStringLower(SHA256.HashData(stream.ToArray()));

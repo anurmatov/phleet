@@ -11,27 +11,15 @@ export const PROVIDER_OPTIONS: { value: string; label: string }[] = [
 
 // ── Provider model lists ──────────────────────────────────────────────────────
 
+// Cloud Claude and Codex offer family aliases only (#460, owner direction): a dated version goes stale.
+// Claude Code resolves opus/sonnet/haiku itself; Codex aliases are mapped to the current model id in
+// HarnessDefaults.CodexModelAliases, and the effective settings show the resolved id. A stored dated,
+// hosted (zai/) or other id keeps working and is shown as the current value, never rewritten.
+export const ALIAS_ONLY_PROVIDERS = ['claude', 'codex']
+
 export const PROVIDER_MODELS: Record<string, string[]> = {
-  claude: [
-    'claude-fable-5',
-    'claude-opus-4-8',
-    'claude-sonnet-4-6',
-    'claude-opus-4-7',
-    'claude-opus-4-6',
-    'claude-haiku-4-5-20251001',
-  ],
-  codex: [
-    'gpt-5',
-    'gpt-5.4',
-    'gpt-5.4-mini',
-    'gpt-5.3-codex',
-    'codex-mini-latest',
-    // Local models are not listed here: "Runs on: Local server" edits them (LOCAL_MODEL_SUGGESTIONS).
-    // A `zai/` prefix runs GLM on the Z.ai GLM Coding Plan through the agent's loopback
-    // forwarder. Needs ZAI_CODING_PLAN_API_KEY as an Env Ref; subscriber-only use —
-    // see docs/providers/codex-hosted-models.md.
-    'zai/glm-5.3',
-  ],
+  claude: ['opus', 'sonnet', 'haiku'],
+  codex: ['sol', 'terra', 'luna'],
   gemini: [
     'gemini-3-pro-preview',
     'gemini-3-flash-preview',
@@ -43,8 +31,8 @@ export const PROVIDER_MODELS: Record<string, string[]> = {
 }
 
 export const PROVIDER_DEFAULT_MODEL: Record<string, string> = {
-  claude: 'claude-sonnet-4-6',
-  codex: 'gpt-5',
+  claude: 'sonnet',
+  codex: 'sol',
   gemini: 'gemini-2.5-flash',
 }
 // Local-mode suggestion chips never fill the server URL or context window.
@@ -109,8 +97,10 @@ export const ADVANCED_DEFAULTS: Record<string, string | number | boolean | null>
   outputStyle: null,
 }
 
-export function countCustomized(config: Record<string, unknown>): number {
+/** How many advanced fields differ from their defaults; only the fields in `keys` when given. */
+export function countCustomized(config: Record<string, unknown>, keys?: readonly string[]): number {
   return Object.entries(ADVANCED_DEFAULTS).filter(([key, defaultVal]) => {
+    if (keys && !keys.includes(key)) return false
     const current = config[key]
     // Treat empty string and null as equivalent for nullable fields
     if (defaultVal === null) return current !== null && current !== '' && current !== undefined

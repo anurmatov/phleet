@@ -24,6 +24,7 @@ public sealed class CodexExecutor : IAgentExecutor
 {
     private readonly AgentOptions _config;
     private readonly PromptBuilder _promptBuilder;
+    private readonly AgentHarness _harness;
     private readonly ILogger<CodexExecutor> _logger;
     private readonly string _normalizedAttachmentDir;
 
@@ -105,8 +106,9 @@ public sealed class CodexExecutor : IAgentExecutor
         IOptions<TelegramOptions> telegramConfig,
         PromptBuilder promptBuilder,
         ILogger<CodexExecutor> logger,
-        HostedProviderAdapterHost? adapterHost = null)
-        : this(config, telegramConfig, promptBuilder, logger, Process.Start, adapterHost: adapterHost)
+        HostedProviderAdapterHost? adapterHost = null,
+        AgentHarness? harness = null)
+        : this(config, telegramConfig, promptBuilder, logger, Process.Start, adapterHost: adapterHost, harness: harness)
     {
     }
 
@@ -117,11 +119,13 @@ public sealed class CodexExecutor : IAgentExecutor
         ILogger<CodexExecutor> logger,
         Func<ProcessStartInfo, Process?> processStarter,
         Func<string, string?>? environmentReader = null,
-        HostedProviderAdapterHost? adapterHost = null)
+        HostedProviderAdapterHost? adapterHost = null,
+        AgentHarness? harness = null)
     {
         _config = config.Value;
         _promptBuilder = promptBuilder;
         _logger = logger;
+        _harness = harness ?? new AgentHarness(_config, environmentReader ?? Environment.GetEnvironmentVariable, logger);
         _normalizedAttachmentDir = Path.GetFullPath(telegramConfig.Value.AttachmentDir);
         _processStarter = processStarter;
 
@@ -129,6 +133,10 @@ public sealed class CodexExecutor : IAgentExecutor
         // constructor, so a misconfigured model surfaces as a named startup failure instead of a
         // DI resolution error with no agent name in it.
         (_localModelProvider, _threadModel) = SplitLocalModel(_config.Model);
+        // #460: a family alias (sol, terra, luna) runs the id HarnessDefaults maps it to; any other
+        // model is sent as stored.
+        if (_harness.Plan?.CodexModel is { } resolvedAlias)
+            _threadModel = resolvedAlias;
         _inheritedOssBaseUrl = (environmentReader ?? Environment.GetEnvironmentVariable)(OssBaseUrlEnvVar);
         _ossBaseUrlFromConfig = !string.IsNullOrEmpty(_config.CodexOssBaseUrl);
         _ossBaseUrl = _ossBaseUrlFromConfig ? _config.CodexOssBaseUrl : _inheritedOssBaseUrl;
@@ -650,6 +658,30 @@ public sealed class CodexExecutor : IAgentExecutor
     }
 
     /// <summary>
+    /// Merges the harness plan's thread entries (#460) into the <c>thread/start</c> <c>config</c>
+    /// overrides, creating the object when absent. A key already there — a hosted-provider key or
+    /// <c>model_context_window</c> — is never overwritten (MUST NOT 3).
+    /// </summary>
+    internal static void MergeHarnessThreadConfig(JsonObject startParams, IReadOnlyList<HarnessSetting> settings)
+    {
+        if (settings.Count == 0) return;
+        if (startParams["config"] is not JsonObject config)
+            startParams["config"] = config = new JsonObject();
+
+        foreach (var setting in settings)
+        {
+            if (config.ContainsKey(setting.Name)) continue;
+            config[setting.Name] = setting.Value switch
+            {
+                bool b => JsonValue.Create(b),
+                int i => JsonValue.Create(i),
+                string str => JsonValue.Create(str),
+                _ => throw new ArgumentException($"Unsupported harness setting type {setting.Value.GetType().Name}."),
+            };
+        }
+    }
+
+    /// <summary>
     /// D7: a hosted provider receives <c>effort</c> only when the value is in its forwarded set.
     /// Otherwise the field is omitted — never remapped — and one Warning names the value.
     /// </summary>
@@ -889,6 +921,10 @@ public sealed class CodexExecutor : IAgentExecutor
         // so Fleet sets no second one; cloud and hosted models keep their model-owned limits.
         if (_localModelProvider is not null && _config.ContextWindow is int contextWindow)
             MergeModelContextWindow(startParams, contextWindow);
+
+        // #460: the per-mode defaults and harnessExtra, after the keys above so they never win.
+        if (_harness.Plan?.CodexThreadConfig is { } harnessThread)
+            MergeHarnessThreadConfig(startParams, harnessThread);
 
         startParams["cwd"] = _config.WorkDir;
         startParams["approvalPolicy"] = "never";

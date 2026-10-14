@@ -49,9 +49,10 @@ public sealed record HarnessExtraParse(IReadOnlyList<HarnessExtraLine> Lines, Ha
 /// permission, MCP, provider, URL or credential inputs — has no syntax here at all.
 /// </para>
 /// <para>
-/// <c>--tools</c> only adds names to the computed list; it never removes one (MUST NOT 4). When the
-/// mode defaults compute no <c>--tools</c> flag, the agent already keeps every built-in, so an extra
-/// <c>--tools</c> line is a no-op rather than a way to narrow it.
+/// The mode defaults emit no <c>--tools</c>, so an agent keeps every built-in. A <c>--tools</c> line is
+/// the one explicit way to narrow it: to the kept set, the cloud web tools, the agent's
+/// <c>AllowedTools</c> built-ins and the listed names, so it never drops a kept or allowed built-in
+/// (MUST NOT 4).
 /// </para>
 /// </remarks>
 public static partial class HarnessExtra
@@ -76,16 +77,17 @@ public static partial class HarnessExtra
     /// <summary>
     /// The built-in tool names an extra <c>--tools</c> line may add. A fixed constant: the
     /// orchestrator validates without the CLI. Read from the pinned Claude CLI 2.1.280's
-    /// <c>system/init</c> tool list (<c>Agent</c> is reported as <c>Task</c>), plus the always-kept
-    /// <c>ToolSearch</c> and <c>TodoWrite</c>; the agent-image PR re-verifies it (AC-C2).
+    /// <c>system/init</c> tool list — the default <c>-p</c> set, plus <c>Glob</c>, <c>Grep</c> and the
+    /// <c>Task*</c> todo tools, which it reports only when named (<c>Agent</c> is reported as
+    /// <c>Task</c>) — and the always-kept <c>ToolSearch</c> and <c>TodoWrite</c>. AC-C2 re-checks it.
     /// </summary>
     public static IReadOnlyList<string> KnownBuiltInTools { get; } =
     [
-        "Agent", "Bash", "CronCreate", "CronDelete", "CronList", "Edit", "EnterWorktree",
-        "ExitWorktree", "Glob", "Grep", "ListAgents", "NotebookEdit", "Read", "ReportFindings",
-        "ScheduleWakeup", "SendMessage", "Skill", "Task", "TaskCreate", "TaskGet", "TaskList",
-        "TaskStop", "TaskUpdate", "TodoWrite", "ToolSearch", "WebFetch", "WebSearch", "Workflow",
-        "Write",
+        "Agent", "Bash", "CronCreate", "CronDelete", "CronList", "DesignSync", "Edit", "EnterWorktree",
+        "ExitWorktree", "Glob", "Grep", "ListAgents", "Monitor", "NotebookEdit", "PushNotification",
+        "Read", "ReportFindings", "ScheduleWakeup", "SendMessage", "Skill", "Task", "TaskCreate",
+        "TaskGet", "TaskList", "TaskStop", "TaskUpdate", "TodoWrite", "ToolSearch", "WebFetch",
+        "WebSearch", "Workflow", "Write",
     ];
 
     /// <summary>The providers the field applies to; pi and gemini refuse a non-empty value.</summary>
@@ -102,7 +104,7 @@ public static partial class HarnessExtra
             (raw, local) => ReadEnum(raw, ["disabled", "cached", "live"]) is (string mode, null) && local && mode != "disabled"
                 ? (null, "cannot enable web search in local mode")
                 : ReadEnum(raw, ["disabled", "cached", "live"])),
-        new("tools.view_image", HarnessExtraTarget.CodexThread, "true or false (local: false only)",
+        new("features.view_image", HarnessExtraTarget.CodexThread, "true or false (local: false only)",
             (raw, local) => ReadBool(raw) is (true, null) && local
                 ? (null, "cannot enable the image tool in local mode")
                 : ReadBool(raw)),
@@ -264,13 +266,13 @@ public static partial class HarnessExtra
     private static (HarnessExtraLine? Line, string? Reason) ReadToolsValue(int number, string? value, bool local)
     {
         if (string.IsNullOrEmpty(value))
-            return (null, $"'{ToolsFlag}' needs built-in tool names to add, e.g. {ToolsFlag} Edit,Write; it can never remove tools.");
+            return (null, $"'{ToolsFlag}' needs built-in tool names to keep, e.g. {ToolsFlag} Edit,Write; the kept set and the agent's AllowedTools built-ins are always kept.");
 
         var names = value.Split(',', StringSplitOptions.TrimEntries);
         foreach (var name in names)
         {
             if (!KnownBuiltInTools.Contains(name, StringComparer.Ordinal))
-                return (null, $"'{ToolsFlag}' only adds known built-in tools and can never remove one; "
+                return (null, $"'{ToolsFlag}' takes known built-in tool names only; "
                             + $"'{name}' is not one. Known: {string.Join(", ", KnownBuiltInTools)}.");
             if (local && name == "WebSearch")
                 return (null, $"local mode removes WebSearch; '{ToolsFlag}' cannot add it back.");

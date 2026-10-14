@@ -24,19 +24,22 @@ public class CodexExecutorTests
         HostedProviderAdapterHost? adapterHost = null,
         string? effort = null,
         string? codexOssBaseUrl = null,
-        int? contextWindow = null)
+        int? contextWindow = null,
+        string? harnessExtra = null)
     {
         var agentOptions = Options.Create(new AgentOptions
         {
             Name = "test",
             Role = "test",
             WorkDir = workDir,
+            Provider = "codex",
         });
         if (model is not null)
             agentOptions.Value.Model = model;
         agentOptions.Value.Effort = effort;
         agentOptions.Value.CodexOssBaseUrl = codexOssBaseUrl;
         agentOptions.Value.ContextWindow = contextWindow;
+        agentOptions.Value.HarnessExtra = harnessExtra;
         var telegramOptions = Options.Create(new TelegramOptions
         {
             AttachmentDir = attachmentDir,
@@ -537,9 +540,11 @@ public class CodexExecutorTests
 
         var startParams = await DriveThreadStartAsync(executor, capture);
 
+        // No Agent:CodexOssBaseUrl, so the harness mode is cloud (#460): only its defaults in config.
         Assert.Equal(
-            ["model", "modelProvider", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"],
+            ["model", "modelProvider", "config", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"],
             startParams.Select(kv => kv.Key));
+        Assert.Equal(CloudHarnessConfig, startParams["config"]!.ToJsonString());
         Assert.Equal("gpt-oss:20b", (string?)startParams["model"]);
         Assert.Equal("ollama", (string?)startParams["modelProvider"]);
         Assert.Equal(workspace.Path, (string?)startParams["cwd"]);
@@ -550,7 +555,8 @@ public class CodexExecutorTests
     }
 
     // The regression that matters most: an agent that did not opt in must send the payload it
-    // always sent, key for key and in the same order — no modelProvider key at all.
+    // always sent, key for key and in the same order — no modelProvider key at all — plus only the
+    // #460 cloud defaults in config.
     [Fact]
     public async Task ThreadStart_UnprefixedModel_SendsPayloadUnchanged()
     {
@@ -565,8 +571,9 @@ public class CodexExecutorTests
         var startParams = await DriveThreadStartAsync(executor, capture);
 
         Assert.Equal(
-            ["model", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"],
+            ["model", "config", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"],
             startParams.Select(kv => kv.Key));
+        Assert.Equal(CloudHarnessConfig, startParams["config"]!.ToJsonString());
         Assert.Equal("gpt-5", (string?)startParams["model"]);
         Assert.Equal(workspace.Path, (string?)startParams["cwd"]);
         Assert.Equal("never", (string?)startParams["approvalPolicy"]);
@@ -629,6 +636,10 @@ public class CodexExecutorTests
             {
                 ["x-phleet-forwarder-token"] = endpoint.Token,
             },
+            // #460: the cloud defaults follow and never replace a provider key.
+            ["features.apps"] = false,
+            ["features.remote_plugin"] = false,
+            ["features.skill_mcp_dependency_install"] = false,
         };
         Assert.Equal(expectedConfig.ToJsonString(), startParams["config"]!.ToJsonString());
         var config = startParams["config"]!.ToJsonString();
@@ -649,9 +660,12 @@ public class CodexExecutorTests
         Assert.DoesNotContain(logger.Messages, m => m.Contains(endpoint.Token));
     }
 
-    /// <summary>AC2: an unknown prefix is inert — the payload carries no provider and no config.</summary>
+    /// <summary>
+    /// AC2: an unknown prefix is inert — the payload carries no provider, and config holds only the
+    /// #460 cloud defaults.
+    /// </summary>
     [Fact]
-    public async Task ThreadStart_UnknownPrefix_CarriesNoModelProviderOrConfig()
+    public async Task ThreadStart_UnknownPrefix_CarriesNoModelProvider_AndOnlyTheCloudDefaults()
     {
         using var capture = new ThreadStartCapture();
         using var workspace = new TempWorkspace();
@@ -664,8 +678,9 @@ public class CodexExecutorTests
         var startParams = await DriveThreadStartAsync(executor, capture);
 
         Assert.Equal(
-            ["model", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"],
+            ["model", "config", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"],
             startParams.Select(kv => kv.Key));
+        Assert.Equal(CloudHarnessConfig, startParams["config"]!.ToJsonString());
         Assert.Equal("acme/x", (string?)startParams["model"]);
     }
 
@@ -812,7 +827,11 @@ public class CodexExecutorTests
     private const string InheritedOssBaseUrl = "http://other-host:11434/v1";
 
     private static readonly string[] BaselineThreadStartKeys =
-        ["model", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"];
+        ["model", "config", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"];
+
+    /// <summary>#460: what every cloud codex thread now carries in <c>config</c>.</summary>
+    private const string CloudHarnessConfig =
+        """{"features.apps":false,"features.remote_plugin":false,"features.skill_mcp_dependency_install":false}""";
 
     /// <summary>
     /// AC6: the provisioned agent's <c>thread/start</c> carries the provider, the bare tag and the
@@ -845,7 +864,10 @@ public class CodexExecutorTests
                 startParams.Select(kv => kv.Key));
             Assert.Equal("qwen3.8:27b", (string?)startParams["model"]);
             Assert.Equal("ollama", (string?)startParams["modelProvider"]);
-            Assert.Equal("""{"model_context_window":131072}""", startParams["config"]!.ToJsonString());
+            // The window first, then the #460 local defaults (tool_output_token_limit = 131072 / 16).
+            Assert.Equal(
+                """{"model_context_window":131072,"web_search":"disabled","features.view_image":false,"model_reasoning_summary":"none","tool_output_token_limit":8192,"features.apps":false,"features.remote_plugin":false,"features.skill_mcp_dependency_install":false}""",
+                startParams["config"]!.ToJsonString());
             Assert.DoesNotContain("model_auto_compact_token_limit", startParams.ToJsonString());
 
             Assert.Equal(ConfigOssBaseUrl, capture.LastStartInfo!.Environment["CODEX_OSS_BASE_URL"]);
@@ -908,7 +930,7 @@ public class CodexExecutorTests
     }
 
     [Fact]
-    public async Task ThreadStart_LocalModelWithoutContextWindow_SendsNoConfig()
+    public async Task ThreadStart_LocalModelWithoutContextWindow_SendsNoWindowAndNoOutputLimit()
     {
         using var capture = new ThreadStartCapture();
         using var workspace = new TempWorkspace();
@@ -922,8 +944,12 @@ public class CodexExecutorTests
         var startParams = await DriveThreadStartAsync(executor, capture);
 
         Assert.Equal(
-            ["model", "modelProvider", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"],
+            ["model", "modelProvider", "config", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"],
             startParams.Select(kv => kv.Key));
+        // #460: the local defaults, without the two window-derived values.
+        Assert.Equal(
+            """{"web_search":"disabled","features.view_image":false,"model_reasoning_summary":"none","features.apps":false,"features.remote_plugin":false,"features.skill_mcp_dependency_install":false}""",
+            startParams["config"]!.ToJsonString());
     }
 
     /// <summary>
@@ -945,9 +971,11 @@ public class CodexExecutorTests
 
         var startParams = await DriveThreadStartAsync(executor, capture);
 
+        // Legacy Env Ref agents are cloud for the harness (#460), as the orchestrator computes them.
         Assert.Equal(
-            ["model", "modelProvider", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"],
+            ["model", "modelProvider", "config", "cwd", "approvalPolicy", "sandbox", "serviceName", "baseInstructions", "ephemeral"],
             startParams.Select(kv => kv.Key));
+        Assert.Equal(CloudHarnessConfig, startParams["config"]!.ToJsonString());
         var psi = capture.LastStartInfo!;
         Assert.Equal(
             Environment.GetEnvironmentVariable("CODEX_OSS_BASE_URL"),
@@ -978,6 +1006,7 @@ public class CodexExecutorTests
         Assert.Equal(BaselineThreadStartKeys, startParams.Select(kv => kv.Key));
         Assert.Equal(model, (string?)startParams["model"]);
         Assert.DoesNotContain("model_context_window", startParams.ToJsonString());
+        Assert.Equal(CloudHarnessConfig, startParams["config"]!.ToJsonString());
     }
 
     /// <summary>AC7: the hosted config keys are exactly the D3 set, with no window merged in.</summary>
@@ -1003,7 +1032,10 @@ public class CodexExecutorTests
         Assert.Equal(
             ["name", "base_url", "wire_api", "requires_openai_auth", "supports_websockets",
              "stream_idle_timeout_ms", "request_max_retries", "stream_max_retries", "http_headers"],
-            startParams["config"]!.AsObject().Select(kv => kv.Key["model_providers.phleet_zai.".Length..]));
+            startParams["config"]!.AsObject().Take(9).Select(kv => kv.Key["model_providers.phleet_zai.".Length..]));
+        // Then only the #460 cloud defaults: a hosted provider is cloud mode.
+        Assert.Equal(["features.apps", "features.remote_plugin", "features.skill_mcp_dependency_install"],
+            startParams["config"]!.AsObject().Skip(9).Select(kv => kv.Key));
         Assert.DoesNotContain("model_context_window", startParams.ToJsonString());
     }
 
@@ -1031,6 +1063,110 @@ public class CodexExecutorTests
         CodexExecutor.MergeModelContextWindow(startParams, 131072);
 
         Assert.Equal("""{"model":"m","config":{"model_context_window":131072}}""", startParams.ToJsonString());
+    }
+
+    // ── #460: harness thread config ──────────────────────────────────────────
+
+    /// <summary>AC-U3: a key already in <c>config</c> is never overwritten; the rest are added typed.</summary>
+    [Fact]
+    public void MergeHarnessThreadConfig_NeverOverwritesAnExistingKey()
+    {
+        var startParams = new JsonObject
+        {
+            ["model"] = "m",
+            ["config"] = new JsonObject
+            {
+                ["model_providers.p.name"] = "P",
+                ["model_context_window"] = 131072,
+                ["web_search"] = "cached",
+            },
+        };
+
+        CodexExecutor.MergeHarnessThreadConfig(startParams,
+        [
+            new("model_context_window", 1), new("web_search", "disabled"), new("features.view_image", false),
+            new("tool_output_token_limit", 8192),
+        ]);
+
+        Assert.Equal(
+            """{"model":"m","config":{"model_providers.p.name":"P","model_context_window":131072,"web_search":"cached","features.view_image":false,"tool_output_token_limit":8192}}""",
+            startParams.ToJsonString());
+    }
+
+    [Fact]
+    public void MergeHarnessThreadConfig_CreatesConfigWhenAbsent_AndAddsNothingForAnEmptyList()
+    {
+        var startParams = new JsonObject { ["model"] = "m" };
+        CodexExecutor.MergeHarnessThreadConfig(startParams, []);
+        Assert.Equal("""{"model":"m"}""", startParams.ToJsonString());
+
+        CodexExecutor.MergeHarnessThreadConfig(startParams, [new("features.apps", false)]);
+        Assert.Equal("""{"model":"m","config":{"features.apps":false}}""", startParams.ToJsonString());
+    }
+
+    /// <summary>
+    /// AC-X3 (agent side): the real <c>thread/start</c> carries exactly the plan's thread config, after
+    /// <c>model_context_window</c>, for a local agent with an extra.
+    /// </summary>
+    [Fact]
+    public async Task ThreadStart_Local_CarriesThePlanThreadConfig_AfterTheWindow()
+    {
+        using var capture = new ThreadStartCapture();
+        using var workspace = new TempWorkspace();
+        var executor = CreateExecutor(
+            model: "ollama/qwen3.8:27b",
+            workDir: workspace.Path,
+            environmentReader: _ => null,
+            processStarter: capture.Start,
+            codexOssBaseUrl: ConfigOssBaseUrl,
+            contextWindow: 131072,
+            harnessExtra: "tool_output_token_limit = 12000\nmodel_reasoning_summary = \"concise\"");
+
+        var startParams = await DriveThreadStartAsync(executor, capture);
+
+        Assert.Equal(
+            """{"model_context_window":131072,"web_search":"disabled","features.view_image":false,"model_reasoning_summary":"concise","tool_output_token_limit":12000,"features.apps":false,"features.remote_plugin":false,"features.skill_mcp_dependency_install":false}""",
+            startParams["config"]!.ToJsonString());
+        Assert.DoesNotContain("multi_agent", startParams.ToJsonString());
+    }
+
+    /// <summary>#460 owner direction: a family alias runs its mapped id; a dated id is sent as stored.</summary>
+    [Theory]
+    [InlineData("sol", "gpt-6.1-sol")]
+    [InlineData("terra", "gpt-5.6-terra")]
+    [InlineData("luna", "gpt-6-luna")]
+    [InlineData("gpt-5.6-sol", "gpt-5.6-sol")]
+    public async Task ThreadStart_CloudModel_SendsTheResolvedAliasOrTheStoredId(string stored, string sent)
+    {
+        using var capture = new ThreadStartCapture();
+        using var workspace = new TempWorkspace();
+        var executor = CreateExecutor(model: stored, workDir: workspace.Path, environmentReader: _ => null, processStarter: capture.Start);
+
+        var startParams = await DriveThreadStartAsync(executor, capture);
+
+        Assert.Equal(sent, (string?)startParams["model"]);
+        Assert.False(startParams.ContainsKey("modelProvider"));
+    }
+
+    /// <summary>MUST NOT 3: a hosted thread keeps every provider key; the defaults only add.</summary>
+    [Fact]
+    public async Task ThreadStart_Hosted_KeepsTheProviderKeys_AndAddsTheCloudDefaults()
+    {
+        using var capture = new ThreadStartCapture();
+        using var workspace = new TempWorkspace();
+        await using var adapter = await StartAdapterHostAsync();
+        var executor = CreateExecutor(
+            model: "zai/glm-5.3",
+            workDir: workspace.Path,
+            environmentReader: _ => null,
+            processStarter: capture.Start,
+            adapterHost: adapter);
+
+        var startParams = await DriveThreadStartAsync(executor, capture, echoedProvider: "phleet_zai");
+
+        var keys = startParams["config"]!.AsObject().Select(kv => kv.Key).ToList();
+        Assert.Equal(9, keys.Count(k => k.StartsWith("model_providers.phleet_zai.", StringComparison.Ordinal)));
+        Assert.Equal(["features.apps", "features.remote_plugin", "features.skill_mcp_dependency_install"], keys.Skip(9));
     }
 
     /// <summary>AC15: none and minimal reach turn/start verbatim, for cloud and local alike.</summary>

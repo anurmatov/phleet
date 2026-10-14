@@ -7,8 +7,7 @@ namespace Fleet.Orchestrator.Tests.Helpers;
 /// <summary>
 /// #382: every branch of the A1 alias rule in <see cref="AgentPatchHelpers.ResolveLocalBaseUrl"/>,
 /// and <see cref="AgentPatchHelpers.FinalizeLocalModel"/> for codex local mode — the two helpers
-/// both write paths (REST and MCP) call. #386: PV1, and pi's PI1–PI4 with the context window.
-/// #455: neither helper ever changes <c>PiImageInput</c>, so it survives a provider switch, and a
+/// both write paths (REST and MCP) call, including PV1 provider rejection.
 /// non-boolean REST value gets a 400 text naming its path.
 /// </summary>
 public class AgentPatchHelpersLocalModelTests
@@ -100,52 +99,6 @@ public class AgentPatchHelpersLocalModelTests
         Assert.Null(agent.LocalBaseUrl);
     }
 
-    // ── #386: provider pi and PV1 ────────────────────────────────────────────────────────────────
-
-    private const string PiUrl = "http://inference-host:8000";
-
-    private static Agent Pi(string model = "qwen3.8-flash-next", string? url = PiUrl, int? window = 131_072, string? effort = null) => new()
-    {
-        Name = "agent1", DisplayName = "agent1", Role = "test", Model = model, Provider = "pi",
-        MemoryLimitMb = 1024, ContainerName = "agent1", LocalBaseUrl = url, ContextWindow = window, Effort = effort,
-    };
-
-    [Theory]
-    [InlineData(null)]
-    [InlineData("off")]
-    [InlineData("on")]
-    public void Finalize_Pi_IsStoredCanonical_ModelAndEffortNeverRewritten(string? effort)
-    {
-        var agent = Pi(url: "HTTP://Inference-Host:8000/", effort: effort);
-
-        Assert.Null(AgentPatchHelpers.FinalizeLocalModel(agent));
-        Assert.Equal((PiUrl, "qwen3.8-flash-next", effort), (agent.LocalBaseUrl, agent.Model, agent.Effort));
-    }
-
-    public static TheoryData<Agent, string> PiFaults => new()
-    {
-        { Pi(url: null), PiLocalModel.Pi1Text },
-        { Pi(url: ""), PiLocalModel.Pi1Text },
-        { Pi(model: "qwen 3.8"), PiLocalModel.Pi2Text },
-        { Pi(model: "ollama/qwen3.8-flash-next"), PiLocalModel.Pi2Text },
-        { Pi(model: "lmstudio/qwen3.8-flash-next"), PiLocalModel.Pi2Text },
-        { Pi(model: "zai/glm-5.3"), PiLocalModel.Pi2Text },
-        { Pi(window: null), PiLocalModel.Pi3Text },
-        { Pi(window: 65_535), PiLocalModel.Pi3Text },
-        { Pi(effort: "xhigh"), PiLocalModel.Pi4Text },
-        { Pi(effort: "none"), PiLocalModel.Pi4Text },
-    };
-
-    [Theory]
-    [MemberData(nameof(PiFaults))]
-    public void Finalize_Pi_RefusesWithTheRuleText_AndChangesNothing(Agent agent, string expected)
-    {
-        var before = (agent.LocalBaseUrl, agent.Model, agent.Effort, agent.ContextWindow);
-
-        Assert.Equal(expected, AgentPatchHelpers.FinalizeLocalModel(agent));
-        Assert.Equal(before, (agent.LocalBaseUrl, agent.Model, agent.Effort, agent.ContextWindow));
-    }
-
     [Theory]
     [InlineData("foo")]
     [InlineData("Codex")]
@@ -154,7 +107,7 @@ public class AgentPatchHelpersLocalModelTests
         var agent = Codex("gpt-5", null);
         agent.Provider = provider;
 
-        Assert.Equal($"Unknown provider '{provider}'; use claude, codex, gemini or pi.", AgentPatchHelpers.FinalizeLocalModel(agent));
+        Assert.Equal($"Unknown provider '{provider}'; use claude, codex or gemini.", AgentPatchHelpers.FinalizeLocalModel(agent));
     }
 
     [Fact]
@@ -171,72 +124,11 @@ public class AgentPatchHelpersLocalModelTests
     [InlineData(4_096)]
     public void Finalize_CodexLocal_IgnoresTheContextWindow_AsBefore(int? window)
     {
-        // PI3 is pi's rule: a codex local agent below 65536, or with none, is still accepted.
+        // A codex local agent below 65536, or with no context window, is still accepted.
         var agent = Codex("ollama/qwen3.8:27b", Url);
         agent.ContextWindow = window;
 
         Assert.Null(AgentPatchHelpers.FinalizeLocalModel(agent));
     }
 
-    // ── #455: PiImageInput ───────────────────────────────────────────────────────────────────────
-
-    [Theory]
-    [InlineData("pi", "qwen3.8-flash-next", true)]
-    [InlineData("claude", "qwen3.8-flash-next", true)]
-    [InlineData("codex", "ollama/qwen3.8-flash-next", true)]
-    [InlineData("pi", "qwen3.8-flash-next", false)]
-    [InlineData("codex", "ollama/qwen3.8-flash-next", false)]
-    public void Finalize_AProviderSwitchFromPi_NeverChangesPiImageInput(string provider, string model, bool flag)
-    {
-        var agent = Pi();
-        agent.PiImageInput = flag;
-        agent.Provider = provider;
-        agent.Model = model;
-
-        Assert.Null(AgentPatchHelpers.FinalizeLocalModel(agent));
-        Assert.Equal(flag, agent.PiImageInput);
-    }
-
-    [Fact]
-    public void Finalize_AFaultLeavesPiImageInputAsItWas()
-    {
-        var agent = Pi(window: null);
-        agent.PiImageInput = true;
-
-        Assert.Equal(PiLocalModel.Pi3Text, AgentPatchHelpers.FinalizeLocalModel(agent));
-        Assert.True(agent.PiImageInput);
-    }
-
-    [Theory]
-    [InlineData("pi", PiUrl, 131_072)]
-    [InlineData("claude", null, null)]
-    [InlineData("gemini", null, null)]
-    public void ApplyLocalModelOnCreate_NeverChangesPiImageInput(string provider, string? url, int? window)
-    {
-        var agent = Pi();
-        agent.Provider = provider;
-        agent.LocalBaseUrl = null;
-        agent.ContextWindow = null;
-        agent.Effort = null;
-        agent.PiImageInput = true;
-
-        Assert.Null(AgentPatchHelpers.ApplyLocalModelOnCreate(agent, url, window));
-        Assert.True(agent.PiImageInput);
-    }
-
-    [Theory]
-    [InlineData("\"true\"")]
-    [InlineData("1")]
-    [InlineData("[]")]
-    public void DescribeBodyFault_ANonBooleanPiImageInput_NamesItsPath(string value)
-    {
-        var ex = Assert.ThrowsAny<System.Text.Json.JsonException>(() =>
-            System.Text.Json.JsonSerializer.Deserialize<Fleet.Orchestrator.Endpoints.AgentConfigUpdateRequest>(
-                $$"""{"piImageInput":{{value}}}""",
-                new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)));
-
-        Assert.Equal(
-            "Invalid request body at '$.piImageInput': malformed JSON or a value of the wrong type (booleans take true or false).",
-            AgentPatchHelpers.DescribeBodyFault(ex));
-    }
 }

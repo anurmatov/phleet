@@ -1967,5 +1967,4 @@ record CreateAgentRequest(
     bool? MountDockerSock,
     string? LocalBaseUrl = null,
     int? ContextWindow = null,
-    bool? PiImageInput = null,
     string? HarnessExtra = null);

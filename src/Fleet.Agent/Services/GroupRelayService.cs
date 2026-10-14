@@ -76,15 +76,14 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
 
     /// <summary>
     /// Whether this agent's queue is bound to the <c>fleet.relay</c> token-broadcast fanout. False
-    /// for a Claude local-model agent (#340) and for every pi agent (#386 §4.6): neither holds an
+    /// for a Claude local-model agent (#340): it holds an
     /// OAuth credential, so a broadcast has nothing to update and must never be applied.
     /// </summary>
     internal static bool BindsTokenBroadcasts(AgentOptions agent) =>
-        !ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl)
-        && !PiLocalModel.IsPi(agent.Provider);
+        !ClaudeLocalModel.IsEnabled(agent.Provider, agent.AnthropicBaseUrl);
 
     private string NoBroadcastMode =>
-        PiLocalModel.IsPi(_agentConfig.Provider) ? "Pi agent" : "Claude local model mode";
+        "Claude local model mode";
 
     public async Task InitializeAsync(CancellationToken ct)
     {
@@ -138,7 +137,7 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             if (!BindsTokenBroadcasts(_agentConfig))
             {
                 // #340 D3, #386 §4.6: fleet.relay carries only OAuth token broadcasts, and a Claude
-                // local-model agent or a pi agent holds none. Never bound, not even transiently; a
+                // local-model agent holds none. Never bound, not even transiently; a
                 // binding from an earlier life is removed. Runs after the QueueDeclare above:
                 // unbinding an undeclared queue is a 404.
                 await UnbindTokenBroadcastsAsync(queueName, ct);
@@ -177,7 +176,7 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
     /// On its own short-lived channel: a broker error closes the channel it happens on, and on the
     /// consume channel that would stop all relay delivery to this agent. A failure is a warning,
     /// not a startup failure — the token-update handler ignores claude broadcasts in local mode, and
-    /// every broadcast on a pi agent.
+    /// the local-mode handler rejects token broadcasts.
     /// </remarks>
     private async Task UnbindTokenBroadcastsAsync(string queueName, CancellationToken ct)
     {

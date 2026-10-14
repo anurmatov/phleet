@@ -36,13 +36,8 @@ jobs:
       - name: Test
         run: >
           dotnet test --no-build --configuration Release
-          --filter "FullyQualifiedName!~Fleet.Conversations.Tests&FullyQualifiedName!~Fleet.Orchestrator.Tests.Migrations&Category!=RealPi"
+          --filter "FullyQualifiedName!~Fleet.Conversations.Tests&FullyQualifiedName!~Fleet.Orchestrator.Tests.Migrations"
           --logger "console;verbosity=normal"
-
-      # #386 A16 without Docker: the pi branch cut from entrypoint.sh, run unprivileged against a
-      # scratch root. The image-level run is in agent-image; RealPi tests are in the `pi` job.
-      - name: Entrypoint pi branch
-        run: bash tests/entrypoint-pi/run.sh
 
       - name: Acceptance plan validators and public placeholders
         run: python3 -m unittest discover tests/scripts
@@ -113,98 +108,6 @@ jobs:
 
       - name: Test
         run: npm test
-
-  # Provider `pi` (#386): the extension's tests and the agent's RealPi tests against the real Pi,
-  # installed exactly as the agent image installs it. The version is the Dockerfile ARG and must equal
-  # PiLocalModel.PinnedVersion. A missing Pi or a filter that finds no test fails; nothing may skip.
-  pi:
-    name: Pi harness (real pinned Pi)
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # Pi needs node >= 22.19; check-pi-pin.sh fails the job if this resolves older.
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '10.0.x'
-
-      # A23 traces the Pi child's connect() calls. #455: the attachment rows run the real poppler and
-      # ffmpeg the agent image installs, and generate.py needs qpdf for the encrypted fixtures.
-      - name: Install strace, poppler, ffmpeg and qpdf
-        run: |
-          sudo apt-get update -q && sudo apt-get install -y -q strace poppler-utils ffmpeg qpdf
-          echo "poppler-utils $(dpkg-query -W -f='${Version}' poppler-utils)"
-
-      - name: Install the pinned Pi
-        run: |
-          set -euo pipefail
-          PI_VERSION=$(sed -n 's/^ARG PI_CODING_AGENT_VERSION=//p' Dockerfile)
-          grep -qF "PinnedVersion = \"${PI_VERSION}\";" src/Fleet.Shared/PiLocalModel.cs \
-            || { echo "ERROR: the Dockerfile pins Pi '${PI_VERSION}', PiLocalModel.PinnedVersion does not"; exit 1; }
-          bash scripts/install-pi.sh "$PI_VERSION" "$RUNNER_TEMP/pi"
-          { echo "PI_VERSION=$PI_VERSION"
-            echo "PI_BIN=$RUNNER_TEMP/pi/node_modules/.bin/pi"
-            echo "FLEET_PI_BIN=$RUNNER_TEMP/pi/node_modules/.bin/pi"; } >> "$GITHUB_ENV"
-
-      # A26: the image's guard passes on this install and fails on a copy with one
-      # @earendil-works/* package forced to another version.
-      - name: Pin guard, then a tampered tree must fail
-        run: |
-          set -euo pipefail
-          bash scripts/check-pi-pin.sh install "$PI_VERSION" "$PI_BIN" "$RUNNER_TEMP/pi/node_modules"
-          cp -a "$RUNNER_TEMP/pi" "$RUNNER_TEMP/pi-tampered"
-          node -e 'const fs = require("fs"), f = process.argv[1], m = JSON.parse(fs.readFileSync(f, "utf8"));
-            m.version = "0.0.0-tampered"; fs.writeFileSync(f, JSON.stringify(m));' \
-            "$RUNNER_TEMP/pi-tampered/node_modules/@earendil-works/pi-ai/package.json"
-          rc=0
-          bash scripts/check-pi-pin.sh tree "$PI_VERSION" "$RUNNER_TEMP/pi-tampered/node_modules" > "$RUNNER_TEMP/tampered.log" 2>&1 || rc=$?
-          cat "$RUNNER_TEMP/tampered.log"
-          if [ "$rc" -ne 1 ] || ! grep -q '@earendil-works/pi-ai is 0.0.0-tampered' "$RUNNER_TEMP/tampered.log"; then
-            echo "ERROR: the guard did not reject the tampered tree (exit $rc)"; exit 1
-          fi
-
-      - name: Extension tests (real Pi, strict)
-        working-directory: src/fleet-pi-extension
-        env:
-          PI_REALPI_STRICT: '1'
-        run: |
-          npm ci
-          npm test
-
-      - name: Agent RealPi tests
-        env:
-          FLEET_PI_EXTENSION_DIR: ${{ github.workspace }}/src/fleet-pi-extension
-          FLEET_PI_REALPI_STRICT: '1'
-        run: >
-          dotnet test tests/Fleet.Agent.Tests --configuration Release
-          --filter "Category=RealPi"
-          --logger "console;verbosity=normal"
-          --logger "trx;LogFileName=realpi.trx"
-          --results-directory ${{ github.workspace }}/testresults
-
-      - name: Refuse a run that skipped or found nothing
-        if: always()
-        run: |
-          set -euo pipefail
-          trx="${{ github.workspace }}/testresults/realpi.trx"
-          [ -f "$trx" ] || { echo "ERROR: no test result file — the RealPi suite did not run."; exit 1; }
-          counters=$(grep -o '<Counters[^>]*>' "$trx" | head -1)
-          echo "$counters"
-          read_count() { echo "$counters" | grep -o "$1=\"[0-9]*\"" | grep -o '[0-9]*' || echo ""; }
-          executed=$(read_count executed); notExecuted=$(read_count notExecuted); passed=$(read_count passed)
-          if [ -z "$executed" ] || [ "$notExecuted" != "0" ] || [ "$executed" -eq 0 ] || [ "$passed" -ne "$executed" ]; then
-            echo "ERROR: executed=$executed notExecuted=$notExecuted passed=$passed — evidence only when every test ran and passed."
-            exit 1
-          fi
-          echo "$passed RealPi test(s) executed against Pi $PI_VERSION, 0 skipped."
 
   conversations-tests:
     name: Conversations store (MySQL)
@@ -840,17 +743,6 @@ jobs:
           docker run --rm --entrypoint ffmpeg fleet:agent-ci -version
           docker run --rm --entrypoint ffprobe fleet:agent-ci -version
 
-      # #455 A15: the build guard passes in the image and fails once pdftotext is gone.
-      - name: The attachment tools guard passes, and fails without pdftotext
-        run: |
-          set -euo pipefail
-          docker run --rm --entrypoint /opt/fleet/check-attachment-tools.sh fleet:agent-ci
-          rc=0
-          docker run --rm --entrypoint bash fleet:agent-ci -c \
-            'rm -f "$(command -v pdftotext)" && /opt/fleet/check-attachment-tools.sh' > guard.log 2>&1 || rc=$?
-          cat guard.log
-          [ "$rc" -eq 1 ] && grep -q 'ERROR: pdftotext does not run' guard.log
-
       # The exact command CLAUDE.md gives agents, on an H.264 .mp4 like the ones Telegram sends.
       - name: Frame extraction from an .mp4 produces JPEGs
         run: |
@@ -903,12 +795,6 @@ jobs:
           node render.js
           EOF
 
-      # #386 A16 and the entrypoint half of A16b: this image's entrypoint as PID 1 removes every
-      # credential file, refuses a bind-mounted one, scrubs PID 1's environment, and PV1 refuses an
-      # unknown provider. A fake dotnet stands in for the agent.
-      - name: Entrypoint pi branch in the built image
-        run: bash tests/entrypoint-pi/run.sh --image fleet:agent-ci
-
       - name: Keep the rendered PNG
         uses: actions/upload-artifact@v4
         with:
@@ -931,7 +817,6 @@ jobs:
           [ -n "$pkgs" ] || { echo "ERROR: no ffmpeg install entry in apt history"; exit 1; }
           kib=$(dpkg-query -W -f='${Installed-Size}\n' $pkgs | awk '{s += $1} END {print s}')
           echo "ffmpeg and font install: $(echo $pkgs | wc -w) packages, $((kib / 1024)) MiB installed"
-          du -sh /opt/pi /opt/fleet-pi-extension
           EOF
 
       - name: Clean up

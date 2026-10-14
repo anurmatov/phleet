@@ -39,7 +39,7 @@ import { projectPayload } from './projectAssignments'
 import { PROVIDER_DEFAULT_MODEL } from './constants'
 import { parseWarmupTimeoutSeconds, warmupTimeoutEditValue } from './warmupTimeout'
 import { contextWindowEditValue } from './contextWindow'
-import { createFormLocalModel, localModelEditValues, localModelSaveBody, parseEnvRefs } from './localModel'
+import { localModelEditValues, localModelSaveBody, parseEnvRefs } from './localModel'
 import AppHeader from './components/AppHeader'
 import AppFooter from './components/AppFooter'
 import Sidenav from './components/Sidenav'
@@ -81,8 +81,7 @@ const DEFAULT_CREATE_FORM: CreateForm = {
   showStats: true, prefixMessages: false, formattingMode: 0, suppressToolMessages: false, telegramSendOnly: false, provider: 'claude',
   codexSandboxMode: '',
   tools: '', projects: '', networks: '', envRefs: '',
-  mcpEndpoints: [], telegramUsers: '', telegramGroups: '', instructions: [], localBaseUrl: '', contextWindow: '',
-  piImageInput: false,
+  mcpEndpoints: [], telegramUsers: '', telegramGroups: '', instructions: [],
 }
 
 export default function App() {
@@ -911,7 +910,6 @@ export default function App() {
     if (!configEdits) return
     const provider = (configEdits.provider ?? 'claude').trim()
     // Model, local server URL (sent as `localBaseUrl` only) and context window, with the empty-URL rule;
-    // Pi also sends its image input, which every other provider omits (kept).
     const localModel = localModelSaveBody({ ...configEdits, provider })
     if (!localModel.ok) { setConfigSaveMsg(localModel.error); setConfigSaveState('error'); return }
     const memoryLimitMb = parseInt(configEdits.memoryLimitMb, 10)
@@ -1647,8 +1645,6 @@ export default function App() {
     if (!createForm.role.trim()) { setCreateMsg('Role is required'); return }
     const createWarmupTimeout = parseWarmupTimeoutSeconds(createForm.warmupTimeoutSeconds)
     if (!createWarmupTimeout.ok) { setCreateMsg(createWarmupTimeout.error); return }
-    const createLocalModel = createFormLocalModel({ ...createForm, provider: createProvider, model: createModel })
-    if (!createLocalModel.ok) { setCreateMsg(createLocalModel.error); return }
     setCreateState('creating'); setCreateMsg('')
     try {
       const body = {
@@ -1687,7 +1683,6 @@ export default function App() {
         telegramUsers: createForm.telegramUsers.split('\n').map(s => parseInt(s.trim())).filter(n => !isNaN(n)),
         telegramGroups: createForm.telegramGroups.split('\n').map(s => parseInt(s.trim())).filter(n => !isNaN(n)),
         provision: !!createTemplateName,
-        ...createLocalModel.body,
       }
       const r = await apiFetch('/api/agents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       const data = await r.json().catch(() => ({}))

@@ -1,3 +1,0 @@
-These Pi fixtures were constructed in Pi 1.0.4 event shapes (docs/json.md and rpc-mode.ts at tag v1.0.4, commit 7c10bd4); they were not recorded from a Pi run, and every value in them is synthetic. Each file holds the stdout lines that follow the prompt ack, which the replay harness writes itself.
-
-`overflow-recovery-silent.ndjson` is `overflow-recovery-failed.ndjson` without its final failed-recovery `compaction_end`, and `stray-recovery-before-run.ndjson` is that `compaction_end` followed by `ordinary-turn.ndjson`. Both reproduce Pi 1.0.4 behaviour observed with the real binary against the extension's stub (#386 A20): the failed-recovery event is sometimes missing, and sometimes arrives at the start of the next run.

@@ -4,13 +4,13 @@ using System.Text.RegularExpressions;
 namespace Fleet.Shared;
 
 /// <summary>
-/// Local model mode for the claude, codex and pi harnesses (#382, #386): one stored server URL,
+/// Local model mode for the claude and codex harnesses (#382, #386): one stored server URL,
 /// validated by one set of rules at write time, at provision time and at agent startup.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Local mode ⇔ provider <c>claude</c>, <c>codex</c> or <c>pi</c> and a non-empty URL.</b>
-/// <c>null</c> and <c>""</c> are off. A pi agent is always local: PI1 refuses it without a URL. The URL is an origin (<c>scheme://host[:port]</c>); Fleet derives each
+/// <b>Local mode ⇔ provider <c>claude</c>, <c>codex</c> and a non-empty URL.</b>
+/// <c>null</c> and <c>""</c> are off. The URL is an origin (<c>scheme://host[:port]</c>); Fleet derives each
 /// harness's path: Claude Code appends <c>/v1/messages</c>, codex gets <see cref="CodexOssBaseUrl"/>.
 /// </para>
 /// <para>
@@ -23,8 +23,8 @@ public static partial class LocalModel
     public const int MaxBaseUrlLength = 500;
     public const int MaxModelTagLength = 100;
 
-    /// <summary>L1 (#386): a URL on any provider other than claude, codex or pi.</summary>
-    public const string L1Text = "Local model runs on claude, codex or pi; clear the local server URL first.";
+    /// <summary>L1 (#386): a URL on any provider other than claude or codex.</summary>
+    public const string L1Text = "Local model runs on claude or codex; clear the local server URL first.";
 
     // The tag reaches a CLI argument (claude --model) or a JSON field; one safe token either way.
     [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9._:/-]*$")]
@@ -32,27 +32,19 @@ public static partial class LocalModel
 
     public static bool IsEnabled(string? provider, string? baseUrl) =>
         (string.Equals(provider, "claude", StringComparison.Ordinal)
-         || string.Equals(provider, "codex", StringComparison.Ordinal)
-         || string.Equals(provider, "pi", StringComparison.Ordinal))
+         || string.Equals(provider, "codex", StringComparison.Ordinal))
         && !string.IsNullOrEmpty(baseUrl);
-
-    public static bool IsPiEnabled(string? provider, string? baseUrl) =>
-        string.Equals(provider, "pi", StringComparison.Ordinal) && !string.IsNullOrEmpty(baseUrl);
 
     public static bool IsCodexEnabled(string? provider, string? baseUrl) =>
         string.Equals(provider, "codex", StringComparison.Ordinal) && !string.IsNullOrEmpty(baseUrl);
 
     /// <summary>
     /// The first fault in a local-mode configuration (L1, L2, then the harness rules), or null.
-    /// Null as well when <paramref name="baseUrl"/> is null or empty, except for provider pi, which
-    /// is always local and is checked in full (PI1–PI4, <paramref name="contextWindow"/> for PI3).
+    /// Null as well when <paramref name="baseUrl"/> is null or empty.
     /// </summary>
     public static string? DescribeConfigFault(
         string? provider, string? baseUrl, string? model, string? effort, int? contextWindow = null)
     {
-        if (PiLocalModel.IsPi(provider))
-            return PiLocalModel.DescribeConfigFault(baseUrl, model, effort, contextWindow);
-
         if (string.IsNullOrEmpty(baseUrl))
             return null;
 

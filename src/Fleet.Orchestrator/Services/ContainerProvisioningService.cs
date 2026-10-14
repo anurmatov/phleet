@@ -36,17 +36,12 @@ public sealed class ContainerProvisioningService(
     /// Header support is a property of the pinned provider CLI, not something provisioning probes
     /// at runtime. Flip a false value only with a pinned-CLI tools/list transcript in the PR.
     /// </summary>
-    /// <remarks>
-    /// <c>pi</c> (#386): the Fleet Pi extension, not Pi itself, reads <c>.mcp.json</c> and sends
-    /// each server's <c>headers</c> (A17).
-    /// </remarks>
     internal static readonly IReadOnlyDictionary<string, bool> McpHeaderSupport =
         new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
         {
             ["claude"] = true,
             ["codex"] = true,
             ["gemini"] = false,
-            ["pi"] = true,
         };
 
     private static readonly JsonSerializerOptions IndentedJson = new() { WriteIndented = true };
@@ -54,7 +49,6 @@ public sealed class ContainerProvisioningService(
     // Actual Docker network names as reported by the Docker API.
     // fleet-net is declared with an explicit name so it keeps its name (not prefixed by Docker Compose).
     private const string FleetNetwork = "fleet-net";
-
 
     public async Task<ProvisionPreview> PreviewAsync(string agentName, CancellationToken ct = default)
     {
@@ -235,11 +229,6 @@ public sealed class ContainerProvisioningService(
                     binds.Add("./.codex-credentials.json:/root/.codex-host/auth.json:ro");
                 break;
             }
-            case AgentProviders.Pi:
-                // A pi agent holds no provider credential at all (#386): its model runs a root shell
-                // with no approval step or sandbox, and its server needs none. PI5 refuses an
-                // operator credential mount into a provider directory.
-                break;
             case AgentProviders.Claude:
             {
                 // A local-model agent must hold no Claude credential (#340 D3): its model is served by a
@@ -278,9 +267,8 @@ public sealed class ContainerProvisioningService(
 
     /// <summary>
     /// The local-model fault that must stop provisioning (#340 D1 point 2, #382, #386), or null:
-    /// PV1, L1, L2, V4–V8, C1, C2, PI1–PI4, or a credential mount that would hand a local agent the
-    /// credential the bind skip above withholds — into <c>/root/.claude*</c> for claude local mode,
-    /// into any provider directory for pi (PI5).
+    /// PV1, L1, L2, V4–V8, C1, C2, or a credential mount into <c>/root/.claude*</c>
+    /// that would hand a Claude local agent the credential the bind skip above withholds.
     /// </summary>
     internal static string? DescribeLocalModelFault(Agent agent)
     {
@@ -302,14 +290,6 @@ public sealed class ContainerProvisioningService(
             return effortFault;
         }
 
-        // PI5 (#386), next to the claude check below; the entrypoint's deletion is the backstop.
-        if (PiLocalModel.IsPi(agent.Provider))
-        {
-            return agent.CredentialMounts
-                .Select(m => PiLocalModel.DescribeCredentialMountFault(m.MountPath))
-                .FirstOrDefault(f => f is not null);
-        }
-
         if (!ClaudeLocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl))
             return null;
 
@@ -324,7 +304,7 @@ public sealed class ContainerProvisioningService(
 
     /// <summary>
     /// The faults that stop provisioning before Docker is called, and a reprovision before the old
-    /// container is removed (#386): PV1 for every agent, and every pi fault (PI1–PI5, L2). Null
+    /// container is removed: PV1 for every agent. Null
     /// when there is none.
     /// </summary>
     /// <remarks>
@@ -332,8 +312,7 @@ public sealed class ContainerProvisioningService(
     /// refuses them during provisioning, which a reprovision reaches after removing the container.
     /// </remarks>
     internal static string? DescribeProviderPreflightFault(Agent agent) =>
-        AgentProviders.DescribeFault(agent.Provider)
-        ?? (PiLocalModel.IsPi(agent.Provider) ? DescribeLocalModelFault(agent) : null);
+        AgentProviders.DescribeFault(agent.Provider);
 
     /// <summary>
     /// P1 (#382): a codex agent whose model is <c>ollama/…</c> or <c>lmstudio/…</c> and has no local
@@ -414,7 +393,7 @@ public sealed class ContainerProvisioningService(
 
         if (DescribePrimaryHumanFault() is { } priorityFault)
             return ProvisionResult.Fail(agentName, priorityFault);
-        // #386: PV1 and the pi rules, before Docker is called or any file is generated.
+        // #386: PV1, before Docker is called or any file is generated.
         if (DescribeProviderPreflightFault(agent) is { } providerFault)
             return ProvisionResult.Fail(agentName, providerFault);
         if (DescribeJournalProvisioningFault(agent) is { } journalFault)
@@ -449,14 +428,7 @@ public sealed class ContainerProvisioningService(
         await GenerateInstructionFilesAsync(agent, baseDir, instructionVersionOverrides);
         await GenerateProjectContextFilesAsync(agent, baseDir, projectContexts);
 
-        if (PiLocalModel.IsPi(agent.Provider))
-        {
-            // The pre-flight above guarantees an origin and a window; the origin carries no credentials (L2).
-            logger.LogInformation(
-                "Pi agent '{Agent}': server {Origin}, model {Tag}, context {W}",
-                agentName, LocalModel.CanonicalizeBaseUrl(agent.LocalBaseUrl!), agent.Model, agent.ContextWindow);
-        }
-        else if (LocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl))
+        if (LocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl))
         {
             logger.LogInformation(
                 "Local model for '{Agent}': harness {Provider}, server {Origin}, context window {ContextWindow}",
@@ -472,13 +444,9 @@ public sealed class ContainerProvisioningService(
         else if (agent.ContextWindow is not null)
         {
             logger.LogInformation(
-                "ContextWindow {ContextWindow} ignored for '{Agent}': it applies only to a claude, codex or pi agent with a local server URL",
+                "ContextWindow {ContextWindow} ignored for '{Agent}': it applies only to a claude or codex agent with a local server URL",
                 agent.ContextWindow, agentName);
         }
-
-        // #455: stored for every provider and kept across a provider switch, but only pi reads it.
-        if (agent.PiImageInput && !PiLocalModel.IsPi(agent.Provider))
-            logger.LogInformation("PiImageInput ignored for '{Agent}': pi only", agentName);
 
         var spec      = BuildDesiredSpec(agent, envValues);
 
@@ -587,7 +555,7 @@ public sealed class ContainerProvisioningService(
         if (DescribePrimaryHumanFault() is { } priorityFault)
             return ProvisionResult.Fail(agentName, priorityFault);
 
-        // #386: PV1 and the pi rules (PI5 included) likewise keep the old container.
+        // #386: PV1 likewise keep the old container.
         if (await DescribeProviderPreflightFaultAsync(agentName, ct) is { } providerFault)
             return ProvisionResult.Fail(agentName, providerFault);
 
@@ -1240,12 +1208,10 @@ public sealed class ContainerProvisioningService(
         var tools = agent.Tools.Where(t => t.IsEnabled).OrderBy(t => t.ToolName)
             .Select(t => JournalGrants.IsSendGrant(t.ToolName) ? JournalGrants.SendGrant : string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase) ? JournalFilesGrant : t.ToolName).ToList();
 
-        // Codex derives config.toml enabled_tools from AllowedTools (entrypoint.sh), and the Pi
-        // extension registers exactly the AllowedTools names (#386). Auto-grant the same baseline
-        // tools that GenerateSettingsJson grants for claude/gemini, but gate strictly to codex and
-        // pi — other providers don't read AllowedTools this way.
-        if (string.Equals(agent.Provider, "codex", StringComparison.OrdinalIgnoreCase)
-            || PiLocalModel.IsPi(agent.Provider))
+        // Codex derives config.toml enabled_tools from AllowedTools (entrypoint.sh). Auto-grant
+        // the same baseline tools that GenerateSettingsJson grants for claude/gemini, but only
+        // for codex: other providers do not read AllowedTools this way.
+        if (string.Equals(agent.Provider, "codex", StringComparison.OrdinalIgnoreCase))
         {
             if (!tools.Contains("mcp__fleet-memory__memory_get", StringComparer.OrdinalIgnoreCase))
                 tools.Add("mcp__fleet-memory__memory_get");
@@ -1371,19 +1337,17 @@ public sealed class ContainerProvisioningService(
 
         var json = JsonSerializer.Serialize(obj, IndentedJson);
 
-        // Inlined for codex, gemini, pi and local-model claude (#365). Cloud claude reads the style file
+        // Inlined for codex, gemini and local-model claude (#365). Cloud claude reads the style file
         // instead, and putting the text in both places would assert the same rules twice.
         //
         // Added by editing the serialized document rather than by a nullable property on the
         // anonymous type above, because a null property still SERIALIZES — and an agent with no
         // style must produce the same bytes it produced before this existed.
         var codexLocal = LocalModel.IsCodexEnabled(agent.Provider, agent.LocalBaseUrl);
-        var piLocal = LocalModel.IsPiEnabled(agent.Provider, agent.LocalBaseUrl);
         if ((style is null || HasStyleFile(agent))
             && journal?.IngestToken is null
             && journal?.ReadToken is null
             && !codexLocal
-            && !piLocal
             && !HasTelegramBot(agent)
             && agent.HarnessExtra is null)
             return json;
@@ -1410,19 +1374,6 @@ public sealed class ContainerProvisioningService(
                 agentNode["ContextWindow"] = window;
         }
 
-        // #386: pi agents only, the same way. Pi appends /v1/messages to the origin; the window is
-        // the server's --ctx, which PI3 has already required.
-        if (piLocal)
-        {
-            var agentNode = node["Agent"]!.AsObject();
-            agentNode["PiBaseUrl"] = LocalModel.CanonicalizeBaseUrl(agent.LocalBaseUrl!);
-            if (agent.ContextWindow is int window)
-                agentNode["ContextWindow"] = window;
-            // #455: written only when true, so a pi agent with the flag off keeps its bytes, and an
-            // older agent image ignores the unknown key (R2). Any other provider never gets it.
-            if (agent.PiImageInput)
-                agentNode["PiImageInput"] = true;
-        }
         // #460: written only when set, so every agent without the field keeps its bytes and an older
         // agent image ignores the unknown key.
         if (agent.HarnessExtra is not null)

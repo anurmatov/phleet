@@ -143,12 +143,6 @@ namespace Fleet.Orchestrator.Migrations
                         .HasColumnType("varchar(50)")
                         .HasDefaultValue("acceptEdits");
 
-                    b.Property<bool>("PiImageInput")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("tinyint(1)")
-                        .HasDefaultValue(false)
-                        .HasColumnName("pi_image_input");
-
                     b.Property<bool>("PrefixMessages")
                         .HasColumnType("tinyint(1)");
 

@@ -519,7 +519,9 @@ timeout, the cap or a cancellation kills the process tree. Work still pending at
 The steer path processes attachments before writing, then checks again that the same run is
 still live and unanswered. If it is not, nothing is written and the message is queued as a
 prompt. A cache of the last 32 PDFs (text excerpts and outcomes only, never images, keyed by
-path, size and mtime) means that prompt does not extract again.
+path, size and mtime) means that prompt does not extract again. Two steers that arrive together
+each process their own attachments, so two local tool processes can run at once; each stays
+within its own 60 s deadline and the §8b limits.
 
 ### 8c. Attachment parity
 

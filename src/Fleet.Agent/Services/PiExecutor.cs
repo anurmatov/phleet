@@ -1559,7 +1559,11 @@ public sealed class PiExecutor : IAgentExecutor
         {
             var write = WriteFrameAsync(gen.Process.StandardInput, bytes);
             var limit = deadline ?? _timings.StdinWrite;
-            if (await Task.WhenAny(write, Task.Delay(limit)) != write)
+            using var timer = new CancellationTokenSource();
+            var expired = await Task.WhenAny(write, Task.Delay(limit, timer.Token)) != write;
+            // Cancel the timer once the frame is out, so no 30 s delay outlives a written frame.
+            await timer.CancelAsync();
+            if (expired)
             {
                 _ = write.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
                 _logger.LogError("pi: a stdin frame was not written within {Seconds:0} s; killing the process",

@@ -151,6 +151,17 @@ public sealed class PiPdfExtractorTests : IDisposable
     }
 
     [Fact]
+    public void TheCacheKey_OfAFileSweptAfterTheExistsCheck_IsNull_NotAThrow()
+    {
+        var pdf = Pdf();
+        Assert.NotNull(PiPdfExtractor.CacheKey.TryOf(pdf.FilePath!));
+
+        File.Delete(pdf.FilePath!);
+
+        Assert.Null(PiPdfExtractor.CacheKey.TryOf(pdf.FilePath!));
+    }
+
+    [Fact]
     public async Task AFileWithoutPdfMagic_IsNotAValidPdf()
     {
         var tools = new FakePiLocalTools();

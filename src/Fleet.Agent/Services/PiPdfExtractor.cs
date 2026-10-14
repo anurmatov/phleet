@@ -107,7 +107,9 @@ internal sealed partial class PiPdfExtractor(IPiLocalTools tools, ILogger logger
         if (!StartsLikePdf(path))
             return Failed(name, PiLocalModel.PdfReasons.NotAPdf);
 
-        var key = CacheKey.Of(path);
+        // The sweep can remove the file between the checks above and here: still `file missing`.
+        if (CacheKey.TryOf(path) is not { } key)
+            return Failed(name, PiLocalModel.PdfReasons.FileMissing);
         var cached = Lookup(key);
         var info = cached?.Info;
         if (info is null)
@@ -392,12 +394,19 @@ internal sealed partial class PiPdfExtractor(IPiLocalTools tools, ILogger logger
         public RenderWhy? NeedsRender { get; init; }
     }
 
-    private readonly record struct CacheKey(string Path, long Size, long MtimeTicks)
+    internal readonly record struct CacheKey(string Path, long Size, long MtimeTicks)
     {
-        public static CacheKey Of(string path)
+        public static CacheKey? TryOf(string path)
         {
-            var info = new FileInfo(path);
-            return new CacheKey(info.FullName, info.Length, info.LastWriteTimeUtc.Ticks);
+            try
+            {
+                var info = new FileInfo(path);
+                return new CacheKey(info.FullName, info.Length, info.LastWriteTimeUtc.Ticks);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return null;
+            }
         }
     }
 

@@ -145,6 +145,8 @@ public sealed class HarnessExtraValidationTests : IAsyncLifetime
     [InlineData("claude", false, "--disallowedTools WebSearch")]
     [InlineData("claude", true, "--disallowedTools WebSearch")]
     [InlineData("claude", false, "!--exclude-dynamic-system-prompt-sections")]
+    [InlineData("claude", false, "--disable-slash-commands")]
+    [InlineData("claude", true, "--disable-slash-commands")]
     [InlineData("claude", true, "MAX_MCP_OUTPUT_TOKENS=12000")]
     [InlineData("claude", false, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=0")]
     [InlineData("", false, "MAX_MCP_OUTPUT_TOKENS=1000")]
@@ -183,6 +185,10 @@ public sealed class HarnessExtraValidationTests : IAsyncLifetime
     [InlineData("claude", false, "--dangerously-skip-permissions", "is not an allowed setting")]
     [InlineData("claude", false, "--disallowedTools Bash", "accepts only the value WebSearch")]
     [InlineData("claude", false, "--disallowedTools", "accepts only the value WebSearch")]
+    [InlineData("claude", false, "--disable-slash-commands foo", "'--disable-slash-commands' takes no value")]
+    [InlineData("claude", true, "--disable-slash-commands true", "'--disable-slash-commands' takes no value")]
+    [InlineData("claude", false, "!--disable-slash-commands", "cannot be removed")]
+    [InlineData("codex", false, "--disable-slash-commands", "expected 'key = value'")]
     [InlineData("claude", false, "!--strict-mcp-config", "cannot be removed")]
     [InlineData("claude", false, "!--tools", "cannot be removed")]
     [InlineData("claude", false, "--tools", "needs built-in tool names to keep")]
@@ -212,7 +218,8 @@ public sealed class HarnessExtraValidationTests : IAsyncLifetime
     public void Parse_AnUnknownName_ListsTheAllowedNames()
     {
         Assert.Contains("Allowed keys: web_search, features.view_image,", HarnessExtra.Parse("notify = 1", "codex", false).Fault!.Message);
-        Assert.Contains("Allowed: --tools <names>, --disallowedTools WebSearch", HarnessExtra.Parse("--x", "claude", false).Fault!.Message);
+        Assert.Contains("Allowed: --tools <names>, --disallowedTools WebSearch, --disable-slash-commands, !--exclude-dynamic-system-prompt-sections,",
+            HarnessExtra.Parse("--x", "claude", false).Fault!.Message);
     }
 
     [Fact]
@@ -221,6 +228,9 @@ public sealed class HarnessExtraValidationTests : IAsyncLifetime
         var fault = HarnessExtra.Parse("MAX_MCP_OUTPUT_TOKENS=2000\nMAX_MCP_OUTPUT_TOKENS=3000", "claude", false).Fault!;
 
         Assert.Equal("harnessExtra line 2: 'MAX_MCP_OUTPUT_TOKENS' is already set on line 1.", fault.Message);
+
+        var flag = HarnessExtra.Parse("--disable-slash-commands\n--tools WebFetch\n--disable-slash-commands", "claude", true).Fault!;
+        Assert.Equal("harnessExtra line 3: '--disable-slash-commands' is already set on line 1.", flag.Message);
     }
 
     [Fact]
@@ -340,6 +350,21 @@ public sealed class HarnessExtraValidationTests : IAsyncLifetime
         var cleared = await tool.UpdateAgentConfigAsync("agent1", harness_extra: "");
         Assert.Contains("- harness_extra: (set) → (none)", cleared);
         Assert.Null((await StoredAsync()).HarnessExtra);
+    }
+
+    [Fact]
+    public async Task UpdateAgentConfig_LocalClaude_AcceptsDisableSlashCommands_AndRefusesAValue()
+    {
+        await SeedAsync("claude", "qwen3.8:27b", Url);
+        var tool = new UpdateAgentConfigTool(Scopes, new NoopAclChangeNotifier());
+
+        var set = await tool.UpdateAgentConfigAsync("agent1", harness_extra: "--tools WebFetch\n--disable-slash-commands");
+        Assert.Contains("- harness_extra: (none) → (set)", set);
+        Assert.Equal("--tools WebFetch\n--disable-slash-commands", (await StoredAsync()).HarnessExtra);
+
+        var refused = await tool.UpdateAgentConfigAsync("agent1", harness_extra: "--disable-slash-commands foo");
+        Assert.Equal("Invalid harness_extra: harnessExtra line 1: '--disable-slash-commands' takes no value.", refused);
+        Assert.Equal("--tools WebFetch\n--disable-slash-commands", (await StoredAsync()).HarnessExtra);
     }
 
     [Fact]

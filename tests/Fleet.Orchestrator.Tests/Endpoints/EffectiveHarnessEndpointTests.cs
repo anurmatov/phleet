@@ -210,6 +210,21 @@ public sealed class EffectiveHarnessEndpointTests : IAsyncLifetime
             extra.GetProperty("replaced").EnumerateArray().Select(x => x.GetString()).ToArray());
     }
 
+    [Theory]
+    [InlineData("--tools WebFetch\n--disable-slash-commands", false)]
+    [InlineData("--disable-slash-commands", true)]
+    public async Task ClaudeLocal_DisableSlashCommands_IsInTheArgs_WithTheWorkflowNoteOnlyWhenWorkflowIsKept(string extra, bool note)
+    {
+        await SeedAsync(NewAgent("claude-local", extra));
+
+        var served = await GetAsync();
+
+        Assert.Contains("--disable-slash-commands",
+            served.GetProperty("claude").GetProperty("args").EnumerateArray().Select(x => x.GetString()));
+        var notes = served.GetProperty("extra").GetProperty("notes").EnumerateArray().Select(x => x.GetString()!).ToArray();
+        Assert.Equal(note, notes.Any(n => n.Contains("'--disable-slash-commands' with the Workflow tool kept", StringComparison.Ordinal)));
+    }
+
     [Fact]
     public async Task CodexLocal_ServesTheThreadConfigWithTypedValues()
     {

@@ -66,6 +66,7 @@ public static partial class HarnessExtra
 
     public const string ToolsFlag = "--tools";
     public const string DisallowedToolsFlag = "--disallowedTools";
+    public const string DisableSlashCommandsFlag = "--disable-slash-commands";
     public const string ExcludeDynamicSectionsFlag = "--exclude-dynamic-system-prompt-sections";
     public const string StrictMcpConfigFlag = "--strict-mcp-config";
     public const string MaxMcpOutputTokensEnv = "MAX_MCP_OUTPUT_TOKENS";
@@ -124,7 +125,7 @@ public static partial class HarnessExtra
     private static readonly string CodexAllowed = string.Join(", ", CodexKeys.Select(k => k.Name));
 
     private const string ClaudeAllowed =
-        $"{ToolsFlag} <names>, {DisallowedToolsFlag} WebSearch, !{ExcludeDynamicSectionsFlag}, "
+        $"{ToolsFlag} <names>, {DisallowedToolsFlag} WebSearch, {DisableSlashCommandsFlag}, !{ExcludeDynamicSectionsFlag}, "
         + $"{MaxMcpOutputTokensEnv}=<integer>, {NonessentialTrafficEnv}=0|1";
 
     /// <summary>The allowed names for <paramref name="provider"/>, as listed in error messages.</summary>
@@ -230,6 +231,11 @@ public static partial class HarnessExtra
                     return value == "WebSearch"
                         ? (new HarnessExtraLine(number, HarnessExtraTarget.ClaudeFlag, flag, value), null)
                         : (null, $"'{DisallowedToolsFlag}' accepts only the value WebSearch.");
+                case DisableSlashCommandsFlag:
+                    // #467: opt-in per agent, any mode; the mode defaults never emit it.
+                    return value is null
+                        ? (new HarnessExtraLine(number, HarnessExtraTarget.ClaudeFlag, flag, null), null)
+                        : (null, $"'{DisableSlashCommandsFlag}' takes no value.");
                 default:
                     return (null, $"'{flag}' is not an allowed setting for claude. Allowed: {ClaudeAllowed}.");
             }

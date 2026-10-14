@@ -136,9 +136,12 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      # A23 traces the Pi child's connect() calls.
-      - name: Install strace
-        run: sudo apt-get update -q && sudo apt-get install -y -q strace
+      # A23 traces the Pi child's connect() calls. #455: the attachment rows run the real poppler and
+      # ffmpeg the agent image installs, and generate.py needs qpdf for the encrypted fixtures.
+      - name: Install strace, poppler, ffmpeg and qpdf
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q strace poppler-utils ffmpeg qpdf
+          echo "poppler-utils $(dpkg-query -W -f='${Version}' poppler-utils)"
 
       - name: Install the pinned Pi
         run: |
@@ -836,6 +839,17 @@ jobs:
         run: |
           docker run --rm --entrypoint ffmpeg fleet:agent-ci -version
           docker run --rm --entrypoint ffprobe fleet:agent-ci -version
+
+      # #455 A15: the build guard passes in the image and fails once pdftotext is gone.
+      - name: The attachment tools guard passes, and fails without pdftotext
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint /opt/fleet/check-attachment-tools.sh fleet:agent-ci
+          rc=0
+          docker run --rm --entrypoint bash fleet:agent-ci -c \
+            'rm -f "$(command -v pdftotext)" && /opt/fleet/check-attachment-tools.sh' > guard.log 2>&1 || rc=$?
+          cat guard.log
+          [ "$rc" -eq 1 ] && grep -q 'ERROR: pdftotext does not run' guard.log
 
       # The exact command CLAUDE.md gives agents, on an H.264 .mp4 like the ones Telegram sends.
       - name: Frame extraction from an .mp4 produces JPEGs

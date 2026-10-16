@@ -577,24 +577,16 @@ internal static class ScenarioRunner
         return Observe(frames, chunks, terminals);
     }
 
-    /// <summary>
-    /// G3 — Codex's <c>ToolName</c> is not a tool name. For <c>commandExecution</c> it is the
-    /// executed shell command, and <c>ProtocolSanitizer.BoundToolName</c> only BOUNDS it to 64
-    /// UTF-16 units — it does not classify it. The protocol doc states that only the tool name
-    /// leaves the runtime and arguments never do; on this path that invariant is satisfied in
-    /// letter and violated in substance.
-    ///
-    /// <para>This row PINS the leak so a later fix flips a red test rather than silently changing
-    /// behaviour. Fixing it here is forbidden (MUST NOT #6).</para>
-    /// </summary>
+    /// <summary>G3 — shell commands expose a stable label, never command text (#408).</summary>
     private static async Task<ScenarioObservation> CommandExecutionToolNameAsync(CancellationToken ct)
     {
         var (frames, progress) = await ReplayAsync(CapabilityMatrix.Codex, "command-execution-turn", ct);
 
         var toolUse = Assert.Single(progress, p => p.EventType == "tool_use");
-        var command = toolUse.ToolName!;
-        Assert.True(command.Length > ProtocolLimits.MaxToolNameChars,
-            "The fixture command must exceed the 64-unit bound, or the truncation assertion proves nothing.");
+        Assert.Equal("shell", toolUse.ToolName);
+        var command = ProviderFrameReplay.ReadCodexFrames("command-execution-turn.jsonl")
+            .Single(f => (string?)f["method"] == "item/started")["params"]!["item"]!["command"]!.GetValue<string>();
+        Assert.True(command.Length > ProtocolLimits.MaxToolNameChars);
 
         var events = await ProjectAsync(progress, ct);
         var toolProgress = Assert.Single(
@@ -602,7 +594,8 @@ internal static class ScenarioRunner
                          && e.PayloadAs<TurnProgressPayload>()?.Activity == ProgressActivity.Tool);
 
         var clientVisible = toolProgress.PayloadAs<TurnProgressPayload>()!.ToolName;
-        Assert.Equal(command[..ProtocolLimits.MaxToolNameChars], clientVisible);
+        Assert.Equal("shell", clientVisible);
+        Assert.DoesNotContain(command[..ProtocolLimits.MaxToolNameChars], clientVisible);
 
         return Observe(frames, [toolUse], [toolProgress]);
     }

@@ -1,4 +1,6 @@
 using System.ComponentModel;
+using Fleet.Memory.Data;
+using Fleet.Memory.Models;
 using Fleet.Memory.Services;
 using Microsoft.AspNetCore.Http;
 using ModelContextProtocol.Server;
@@ -33,7 +35,9 @@ public sealed class MemoryDeleteTool(
         {
             // Fetch the memory to determine its project, then ACL-check before deleting.
             // Uniform denial (no existence leak) — same pattern as memory_get.
-            var probe = await memoryService.GetAsync(id);
+            MemoryDocument? probe;
+            try { probe = await memoryService.GetAsync(id); }
+            catch (AmbiguousMemoryIdException ex) { return $"memory_delete: {ex.Message}"; }
             var project = probe?.Project ?? "";
             var (allowed, denyReason) = aclCache.CanRead(agentName!, project);
             if (!allowed)
@@ -56,6 +60,10 @@ public sealed class MemoryDeleteTool(
         catch (FileNotFoundException)
         {
             return $"Memory not found with ID: {id}";
+        }
+        catch (AmbiguousMemoryIdException ex)
+        {
+            return $"memory_delete: {ex.Message}";
         }
     }
 }

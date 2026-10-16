@@ -234,25 +234,57 @@ public sealed partial class MemoryFileStore(IOptions<StorageOptions> storageOpti
         return results;
     }
 
+    /// <summary>
+    /// Finds a memory file by full UUID or 8-character short ID. Only the ID segment of the file name
+    /// is compared, never the slug, which can contain another memory's short ID (#469). An ID longer
+    /// than 8 characters must also prefix the file's front-matter <c>id</c> (a full UUID must equal it).
+    /// Returns null when nothing matches; throws <see cref="AmbiguousMemoryIdException"/> when several do.
+    /// </summary>
     public string? FindFileById(string id)
     {
+        var shortId = id.Length >= 8 ? id[..8] : id;
+        var matches = new List<string>();
+
         foreach (var type in MemoryDocument.ValidTypes)
         {
             var dir = Path.Combine(_basePath, type);
             if (!Directory.Exists(dir))
                 continue;
 
-            // ID prefix is in the filename: {date}_{shortId}_{slug}.md
-            var shortId = id.Length >= 8 ? id[..8] : id;
             foreach (var file in Directory.EnumerateFiles(dir, "*.md"))
             {
-                var fileName = Path.GetFileName(file);
-                if (fileName.Contains(shortId, StringComparison.OrdinalIgnoreCase))
-                    return file;
+                // ID prefix is in the filename: {date}_{shortId}_{slug}.md
+                var segments = Path.GetFileName(file).Split('_');
+                if (segments.Length < 3 || !segments[1].Equals(shortId, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (id.Length > 8 && !FrontMatterIdStartsWith(file, id))
+                    continue;
+
+                matches.Add(file);
             }
         }
 
-        return null;
+        return matches.Count switch
+        {
+            0 => null,
+            1 => matches[0],
+            _ => throw new AmbiguousMemoryIdException(id, matches.Count, fullId: id.Length > 8),
+        };
+    }
+
+    private bool FrontMatterIdStartsWith(string file, string id)
+    {
+        try
+        {
+            var doc = ParseMarkdown(File.ReadAllText(file), file);
+            return doc is not null && doc.Id.StartsWith(id, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or IOException)
+        {
+            logger.LogWarning(ex, "Cannot confirm the id of memory file {Path}; skipping it for id {Id}", file, id);
+            return false;
+        }
     }
 
     public Dictionary<string, int> GetStats()

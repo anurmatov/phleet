@@ -1,4 +1,6 @@
 using System.ComponentModel;
+using Fleet.Memory.Data;
+using Fleet.Memory.Models;
 using Fleet.Memory.Services;
 using Microsoft.AspNetCore.Http;
 using ModelContextProtocol.Server;
@@ -33,7 +35,9 @@ public sealed class MemoryUpdateTool(
             if (string.IsNullOrWhiteSpace(agentName))
                 return "memory_update: agent identity required — missing '?agent=' query parameter.";
 
-            var probe = await memoryService.GetAsync(id);
+            MemoryDocument? probe;
+            try { probe = await memoryService.GetAsync(id); }
+            catch (AmbiguousMemoryIdException ex) { return $"memory_update: {ex.Message}"; }
             var existingProject = probe?.Project ?? "";
             var (allowed, denyReason) = aclCache.CanRead(agentName!, existingProject);
             if (!allowed)
@@ -75,6 +79,10 @@ public sealed class MemoryUpdateTool(
         catch (FileNotFoundException)
         {
             return $"Memory not found with ID: {id}";
+        }
+        catch (AmbiguousMemoryIdException ex)
+        {
+            return $"memory_update: {ex.Message}";
         }
         catch (InvalidDataException ex)
         {

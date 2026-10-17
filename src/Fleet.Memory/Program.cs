@@ -1,5 +1,6 @@
 using Fleet.Memory.Configuration;
 using Fleet.Memory.Data;
+using Fleet.Memory.Models;
 using Fleet.Memory.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -134,7 +135,9 @@ app.MapGet("/internal/memory/search", async (string? q, MemoryService memoryServ
 // GET /internal/memory/{id} — full content + metadata
 app.MapGet("/internal/memory/{id}", async (string id, MemoryService memoryService, MemorySizeGuidance sizeGuidance) =>
 {
-    var doc = await memoryService.GetAsync(id);
+    MemoryDocument? doc;
+    try { doc = await memoryService.GetAsync(id); }
+    catch (AmbiguousMemoryIdException ex) { return Results.BadRequest(new { error = "ambiguous_id", detail = ex.Message }); }
     if (doc is null)
         return Results.NotFound(new { error = $"Memory not found: {id}" });
 
@@ -171,7 +174,9 @@ app.MapPut("/internal/memory/{id}", async (string id, HttpRequest request, Memor
     if (body is null)
         return Results.BadRequest(new { error = "empty_payload" });
 
-    var current = await memoryService.GetAsync(id);
+    MemoryDocument? current;
+    try { current = await memoryService.GetAsync(id); }
+    catch (AmbiguousMemoryIdException ex) { return Results.BadRequest(new { error = "ambiguous_id", detail = ex.Message }); }
     if (current is null)
         return Results.NotFound(new { error = $"Memory not found: {id}" });
 
@@ -200,6 +205,10 @@ app.MapPut("/internal/memory/{id}", async (string id, HttpRequest request, Memor
             size,
         });
     }
+    catch (AmbiguousMemoryIdException ex)
+    {
+        return Results.BadRequest(new { error = "ambiguous_id", detail = ex.Message });
+    }
     catch (InvalidDataException ex)
     {
         return Results.BadRequest(new { error = "error_serialization_validation", detail = ex.Message });
@@ -221,6 +230,10 @@ app.MapDelete("/internal/memory/{id}", async (string id, MemoryService memorySer
     catch (FileNotFoundException)
     {
         return Results.NotFound(new { error = $"Memory not found: {id}" });
+    }
+    catch (AmbiguousMemoryIdException ex)
+    {
+        return Results.BadRequest(new { error = "ambiguous_id", detail = ex.Message });
     }
 });
 

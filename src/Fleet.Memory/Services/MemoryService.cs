@@ -164,7 +164,16 @@ public sealed class MemoryService(
         {
             if (!payload.TryGetValue("memory_id", out var id) || string.IsNullOrEmpty(id))
                 continue;
-            var doc = await GetAsync(id);
+            MemoryDocument? doc;
+            try
+            {
+                doc = await GetAsync(id);
+            }
+            catch (AmbiguousMemoryIdException ex)
+            {
+                logger.LogWarning(ex, "Skipping memory {Id} in list: more than one file carries this id", id);
+                continue;
+            }
             if (doc is not null)
                 docs.Add(doc);
         }

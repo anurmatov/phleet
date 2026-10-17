@@ -7,8 +7,8 @@ ARG VITE_CONFIG_TOKEN=""
 ENV VITE_CONFIG_TOKEN=${VITE_CONFIG_TOKEN}
 
 WORKDIR /app
-COPY src/fleet-dashboard/package.json .
-RUN npm install
+COPY src/fleet-dashboard/package.json src/fleet-dashboard/package-lock.json ./
+RUN npm ci
 COPY src/fleet-dashboard/ .
 RUN npm run build
 

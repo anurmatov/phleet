@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text;
+using Fleet.Memory.Data;
 using Fleet.Memory.Models;
 using Fleet.Memory.Services;
 using Microsoft.AspNetCore.Http;
@@ -35,7 +36,9 @@ public sealed class MemoryGetTool(
         if (aclCache.IsAclEnabled)
         {
             // Fetch to determine project, but deny uniformly (no existence leak to unauthorized agents).
-            var probe = await memoryService.GetAsync(id);
+            MemoryDocument? probe;
+            try { probe = await memoryService.GetAsync(id); }
+            catch (AmbiguousMemoryIdException ex) { return $"memory_get: {ex.Message}"; }
             var project = probe?.Project ?? "";
             var (allowed, denyReason) = aclCache.CanRead(agentName!, project);
             if (!allowed)
@@ -52,7 +55,9 @@ public sealed class MemoryGetTool(
         }
 
         // ACL disabled — original path
-        var doc = await memoryService.GetAsync(id);
+        MemoryDocument? doc;
+        try { doc = await memoryService.GetAsync(id); }
+        catch (AmbiguousMemoryIdException ex) { return $"memory_get: {ex.Message}"; }
         if (doc is null)
             return $"Memory not found with ID: {id}";
 

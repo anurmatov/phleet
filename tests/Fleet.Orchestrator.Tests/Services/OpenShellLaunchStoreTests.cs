@@ -23,7 +23,7 @@ public sealed class OpenShellLaunchStoreTests : IAsyncLifetime
         _db.Agents.Add(agent);
         await _db.SaveChangesAsync();
         _agent = agent.Id;
-        _store = new(_db);
+        _store = new(_db, new FixedClock(_now));
     }
 
     public async Task DisposeAsync() { await _db.DisposeAsync(); await _connection.DisposeAsync(); }
@@ -74,7 +74,7 @@ public sealed class OpenShellLaunchStoreTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Retire_RevokesAndPermanentlyTombstones_ButDoesNotClaimStopped()
+    public async Task Retire_RevokesAndDurablyTombstones_ButDoesNotClaimStopped()
     {
         var launch = await Reserve();
         await _store.BindCreatedSandboxAsync(launch.Id, "gateway1", "sandbox1", _now);
@@ -105,6 +105,7 @@ public sealed class OpenShellLaunchStoreTests : IAsyncLifetime
         var agent = new Agent { Name = "agent2", DisplayName = "Agent 2", Role = "test", Model = "test", ContainerName = "test2" };
         _db.Agents.Add(agent); await _db.SaveChangesAsync();
         var next = await _store.ReserveAsync(agent.Id, null, _now, TimeSpan.FromSeconds(120));
+        await _store.ConfirmLegacyStoppedAsync(next.Id, _now, new EvidenceReader(_now));
         await Assert.ThrowsAsync<OpenShellStateConflictException>(() =>
             _store.BindCreatedSandboxAsync(next.Id, "gateway1", "sandbox1", _now));
     }
@@ -177,5 +178,110 @@ public sealed class OpenShellLaunchStoreTests : IAsyncLifetime
         }
     }
 
-    private Task<OpenShellLaunch> Reserve() => _store.ReserveAsync(_agent, null, _now, TimeSpan.FromSeconds(120));
+    [Fact]
+    public async Task ExternalBind_ThenRetireReloadsAuthoritativeMapping()
+    {
+        var launch = await Reserve();
+        await using var other = new OrchestratorDbContext(new DbContextOptionsBuilder<OrchestratorDbContext>().UseSqlite(_connection).Options);
+        await new OpenShellLaunchStore(other).BindCreatedSandboxAsync(launch.Id, "gateway1", "sandbox1", _now);
+        Assert.Null(launch.SandboxId); // this context still holds the pre-bind instance
+        await _store.RetireAsync(launch.Id, _now);
+        var tombstone = await _db.OpenShellRetiredIds.AsNoTracking().SingleAsync();
+        Assert.Equal("gateway1", tombstone.GatewayId);
+        Assert.Equal("sandbox1", tombstone.SandboxId);
+    }
+
+    [Fact]
+    public async Task ExternalRetirement_ThenIdempotentBindRejectsRevokedLaunch()
+    {
+        var launch = await Reserve();
+        await _store.BindCreatedSandboxAsync(launch.Id, "gateway1", "sandbox1", _now);
+        await using var other = new OrchestratorDbContext(new DbContextOptionsBuilder<OrchestratorDbContext>().UseSqlite(_connection).Options);
+        await new OpenShellLaunchStore(other).RetireAsync(launch.Id, _now);
+        Assert.Null(launch.RevokedAt); // stale positive state must not authorize a bind
+        await Assert.ThrowsAsync<OpenShellStateConflictException>(() =>
+            _store.BindCreatedSandboxAsync(launch.Id, "gateway1", "sandbox1", _now));
+        Assert.Single(await _db.OpenShellRetiredIds.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
+    public async Task PreparedLaunch_CannotBindBeforeConfirmedLegacyStop()
+    {
+        var launch = await _store.ReserveAsync(_agent, "legacy1", _now, TimeSpan.FromSeconds(120));
+        await Assert.ThrowsAsync<OpenShellStateConflictException>(() =>
+            _store.BindCreatedSandboxAsync(launch.Id, "gateway1", "sandbox1", _now));
+        await Assert.ThrowsAsync<OpenShellStateConflictException>(() =>
+            _store.ConfirmLegacyStoppedAsync(launch.Id, _now, new EvidenceReader(_now, drained: false)));
+        Assert.Equal("prepared", (await _db.OpenShellLaunches.AsNoTracking().SingleAsync()).Phase);
+    }
+
+    [Fact]
+    public async Task CleanupRequiresAbsenceAndDrain_ThenFreshLaunchCanReserve()
+    {
+        var launch = await Reserve();
+        await _store.BindCreatedSandboxAsync(launch.Id, "gateway1", "sandbox1", _now);
+        await _store.RetireAsync(launch.Id, _now);
+        await Assert.ThrowsAsync<OpenShellStateConflictException>(() =>
+            _store.CompleteCleanupAsync(launch.Id, _now, new EvidenceReader(_now, absent: false)));
+        await Assert.ThrowsAsync<OpenShellStateConflictException>(() =>
+            _store.CompleteCleanupAsync(launch.Id, _now, new EvidenceReader(_now, drained: false)));
+        Assert.Equal(_agent, (await _db.OpenShellLaunches.AsNoTracking().SingleAsync()).ActiveAgentId);
+        await _store.CompleteCleanupAsync(launch.Id, _now, new EvidenceReader(_now));
+        Assert.Empty(await _db.OpenShellLeases.ToListAsync());
+        Assert.Null((await _db.OpenShellLaunches.AsNoTracking().SingleAsync()).ActiveAgentId);
+        var next = await _store.ReserveAsync(_agent, null, _now.AddSeconds(1), TimeSpan.FromSeconds(120));
+        Assert.NotEqual(launch.Id, next.Id);
+        Assert.NotEqual(launch.IdentityEpoch, next.IdentityEpoch);
+        Assert.Single(await _db.OpenShellRetiredIds.ToListAsync());
+    }
+
+    [Fact]
+    public async Task CleanupRefusesStaleOrMissingRuntimeEvidence()
+    {
+        var launch = await Reserve();
+        await _store.RetireAsync(launch.Id, _now);
+        await Assert.ThrowsAsync<OpenShellStateConflictException>(() =>
+            _store.CompleteCleanupAsync(launch.Id, _now, new EvidenceReader(_now.AddSeconds(-6))));
+        await Assert.ThrowsAsync<ArgumentNullException>(() => _store.CompleteCleanupAsync(launch.Id, _now, null!));
+        Assert.Equal(_agent, (await _db.OpenShellLaunches.AsNoTracking().SingleAsync()).ActiveAgentId);
+    }
+
+    [Fact]
+    public async Task CleanupRejectsForeignEpochBeforeReleasingSlot()
+    {
+        var launch = await Reserve();
+        await _store.RetireAsync(launch.Id, _now);
+        await Assert.ThrowsAsync<OpenShellStateConflictException>(() =>
+            _store.CompleteCleanupAsync(launch.Id, _now, new ForeignEpochReader(_now)));
+        Assert.Equal(_agent, (await _db.OpenShellLaunches.AsNoTracking().SingleAsync()).ActiveAgentId);
+        Assert.Single(await _db.OpenShellLeases.ToListAsync());
+    }
+
+    private sealed class ForeignEpochReader(DateTime now) : IOpenShellRuntimeEvidenceReader
+    {
+        public Task<OpenShellRuntimeEvidence> ReadAsync(OpenShellRuntimeTarget target, CancellationToken ct) =>
+            Task.FromResult(new OpenShellRuntimeEvidence(target.LaunchId, Guid.NewGuid(), target.GatewayId,
+                target.RuntimeId, true, true, 0, 0, now));
+    }
+
+    private async Task<OpenShellLaunch> Reserve()
+    {
+        var launch = await _store.ReserveAsync(_agent, null, _now, TimeSpan.FromSeconds(120));
+        await _store.ConfirmLegacyStoppedAsync(launch.Id, _now, new EvidenceReader(_now));
+        return launch;
+    }
+
+    private sealed class FixedClock(DateTime utc) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => new(utc);
+    }
+
+    private sealed class EvidenceReader(DateTime now, bool drained = true,
+        bool absent = true) : IOpenShellRuntimeEvidenceReader
+    {
+        public Task<OpenShellRuntimeEvidence> ReadAsync(OpenShellRuntimeTarget target, CancellationToken ct) =>
+            Task.FromResult(new OpenShellRuntimeEvidence(target.LaunchId, target.IdentityEpoch,
+                target.GatewayId, target.RuntimeId,
+                true, absent, drained ? 0 : 1, 0, now));
+    }
 }

@@ -61,7 +61,7 @@ internal static class OpenShellModel
         tracker.DetectChanges();
         foreach (var row in tracker.Entries<OpenShellRetiredId>())
             if (row.State is EntityState.Modified or EntityState.Deleted)
-                throw new InvalidOperationException("OpenShell retired IDs are permanent.");
+                throw new InvalidOperationException("Tracked writes cannot remove or change OpenShell retirement IDs.");
         foreach (var row in tracker.Entries<OpenShellLaunch>().Where(x => x.State == EntityState.Modified))
         {
             foreach (var name in new[] { nameof(OpenShellLaunch.AgentId), nameof(OpenShellLaunch.IdentityEpoch),

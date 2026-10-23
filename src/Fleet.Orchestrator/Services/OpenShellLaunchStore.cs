@@ -1,18 +1,20 @@
 using System.Data;
 using Fleet.Orchestrator.Data;
 using Microsoft.EntityFrameworkCore;
+using MySqlConnector;
 
 namespace Fleet.Orchestrator.Services;
 
 public sealed class OpenShellStateConflictException(string message) : InvalidOperationException(message);
 
 /// <summary>
-/// Serialized launch intent, lease fencing and permanent ID retirement. No gateway calls, driver
+/// Serialized launch intent, lease fencing and append-only retirement through this store. No gateway calls, driver
 /// retries, activation or inferred runtime state. Lifecycle callers must use a non-retrying DB
 /// context: an ambiguous mutation must be reconciled, never replayed by EF's execution strategy.
 /// </summary>
-public sealed class OpenShellLaunchStore(OrchestratorDbContext db)
+public sealed class OpenShellLaunchStore(OrchestratorDbContext db, TimeProvider? timeProvider = null)
 {
+    private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
     public async Task<OpenShellLaunch> ReserveAsync(int agentId, string? expectedOldRuntimeId,
         DateTime now, TimeSpan duration, CancellationToken ct = default)
     {
@@ -24,6 +26,11 @@ public sealed class OpenShellLaunchStore(OrchestratorDbContext db)
         if (await db.OpenShellLaunches.AnyAsync(x => x.ActiveAgentId == agentId, ct))
             throw new OpenShellStateConflictException("An active or cleanup-pending launch requires reconciliation.");
         var lease = await db.OpenShellLeases.SingleOrDefaultAsync(x => x.AgentId == agentId, ct);
+        if (lease is not null)
+        {
+            await db.Entry(lease).ReloadAsync(ct);
+            if (db.Entry(lease).State == EntityState.Detached) lease = null;
+        }
         if (lease is not null && lease.ExpiresAt > now)
             throw new OpenShellStateConflictException("The lifecycle lease is busy.");
         var launch = new OpenShellLaunch
@@ -35,7 +42,13 @@ public sealed class OpenShellLaunchStore(OrchestratorDbContext db)
             db.OpenShellLeases.Add(new() { AgentId = agentId, Owner = launch.Id, ExpiresAt = now + duration });
         else { lease.Owner = launch.Id; lease.ExpiresAt = now + duration; }
         db.OpenShellLaunches.Add(launch);
-        await db.SaveChangesAsync(ct);
+        try { await db.SaveChangesAsync(ct); }
+        catch (DbUpdateException ex) when (ex.InnerException is MySqlException { Number: 1062 })
+        {
+            // The unique active-agent/lease slot is the final concurrent first-reserve guard.
+            // Roll back on disposal; never retry the mutation or expose a generic server error.
+            throw new OpenShellStateConflictException("The lifecycle slot was reserved concurrently; reconcile before retrying.");
+        }
         await tx.CommitAsync(ct);
         return launch;
     }
@@ -58,7 +71,7 @@ public sealed class OpenShellLaunchStore(OrchestratorDbContext db)
         ValidateTime(now, TimeSpan.FromSeconds(1));
         RequireNonRetryingContext();
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-        var launch = await db.OpenShellLaunches.SingleAsync(x => x.Id == launchId, ct);
+        var launch = await ReloadLaunchAsync(launchId, ct);
         if (launch.RevokedAt is not null || !await db.OpenShellLeases.AnyAsync(x =>
                 x.AgentId == launch.AgentId && x.Owner == launchId && x.ExpiresAt > now, ct))
             throw new OpenShellStateConflictException("The launch is revoked or its lease is unavailable.");
@@ -69,6 +82,8 @@ public sealed class OpenShellLaunchStore(OrchestratorDbContext db)
         }
         else
         {
+            if (launch.Phase != "legacy_stopped")
+                throw new OpenShellStateConflictException("Legacy stop must be confirmed before recording a created sandbox.");
             if (await db.OpenShellRetiredIds.AnyAsync(x => x.GatewayId == gatewayId && x.SandboxId == sandboxId, ct)
                 || await db.OpenShellLaunches.AnyAsync(x => x.GatewayId == gatewayId && x.SandboxId == sandboxId, ct))
                 throw new OpenShellStateConflictException("The sandbox ID was already used.");
@@ -83,7 +98,7 @@ public sealed class OpenShellLaunchStore(OrchestratorDbContext db)
         ValidateTime(now, TimeSpan.FromSeconds(1));
         RequireNonRetryingContext();
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-        var launch = await db.OpenShellLaunches.SingleAsync(x => x.Id == launchId, ct);
+        var launch = await ReloadLaunchAsync(launchId, ct);
         if (launch.RevokedAt is null)
         {
             launch.RevokedAt = now;
@@ -95,6 +110,83 @@ public sealed class OpenShellLaunchStore(OrchestratorDbContext db)
         // Keep the active slot, including on repeated retirement. Only a future verified stop/delete
         // transition may release it; revocation alone is not proof of consumer/poller absence.
         await tx.CommitAsync(ct);
+    }
+
+    public async Task ConfirmLegacyStoppedAsync(Guid launchId, DateTime now,
+        IOpenShellRuntimeEvidenceReader reader, CancellationToken ct = default)
+    {
+        ValidateTime(now, TimeSpan.FromSeconds(1));
+        RequireNonRetryingContext();
+        ArgumentNullException.ThrowIfNull(reader);
+        await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+        var launch = await ReloadLaunchAsync(launchId, ct);
+        if (launch.RevokedAt is not null || launch.Phase is not ("prepared" or "legacy_stopped")
+            || !await db.OpenShellLeases.AnyAsync(x => x.AgentId == launch.AgentId && x.Owner == launchId && x.ExpiresAt > now, ct))
+            throw new OpenShellStateConflictException("Legacy-stop confirmation requires the current prepared launch and lease.");
+        await VerifyEvidenceAsync(reader, launch, cleanup: false, ct);
+        launch.Phase = "legacy_stopped";
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task CompleteCleanupAsync(Guid launchId, DateTime now,
+        IOpenShellRuntimeEvidenceReader reader, CancellationToken ct = default)
+    {
+        ValidateTime(now, TimeSpan.FromSeconds(1));
+        RequireNonRetryingContext();
+        ArgumentNullException.ThrowIfNull(reader);
+        await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+        var launch = await ReloadLaunchAsync(launchId, ct);
+        if (launch.RevokedAt is null || launch.Phase is not ("cleanup_pending" or "retired"))
+            throw new OpenShellStateConflictException("Cleanup completion requires a revoked launch.");
+        await VerifyEvidenceAsync(reader, launch, cleanup: true, ct);
+        if (launch.SandboxId is not null && !await db.OpenShellRetiredIds.AnyAsync(x =>
+                x.GatewayId == launch.GatewayId && x.SandboxId == launch.SandboxId, ct))
+            throw new OpenShellStateConflictException("The retirement tombstone is missing.");
+        var lease = await db.OpenShellLeases.SingleOrDefaultAsync(x => x.AgentId == launch.AgentId, ct);
+        if (lease is not null)
+        {
+            await db.Entry(lease).ReloadAsync(ct);
+            if (lease.Owner != launchId)
+                throw new OpenShellStateConflictException("A different lifecycle owner holds the lease.");
+            db.OpenShellLeases.Remove(lease);
+        }
+        launch.ActiveAgentId = null;
+        launch.Phase = "retired";
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+    }
+
+    private async Task<OpenShellLaunch> ReloadLaunchAsync(Guid launchId, CancellationToken ct)
+    {
+        var launch = await db.OpenShellLaunches.SingleAsync(x => x.Id == launchId, ct);
+        // A tracking query does not refresh an existing instance. Reload within the serializable
+        // transaction before making any decision about mapping, revocation, phase or ownership.
+        await db.Entry(launch).ReloadAsync(ct);
+        if (db.Entry(launch).State == EntityState.Detached)
+            throw new OpenShellStateConflictException("The launch disappeared; reconciliation is required.");
+        return launch;
+    }
+
+    private async Task VerifyEvidenceAsync(IOpenShellRuntimeEvidenceReader reader, OpenShellLaunch launch,
+        bool cleanup, CancellationToken ct)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        var runtimeId = cleanup ? launch.SandboxId : launch.ExpectedOldRuntimeId;
+        var gatewayId = cleanup ? launch.GatewayId : null;
+        var target = new OpenShellRuntimeTarget(launch.Id, launch.IdentityEpoch, gatewayId, runtimeId, cleanup);
+        var evidence = await reader.ReadAsync(target, deadline.Token).WaitAsync(deadline.Token);
+        // Judge freshness at completion, not the caller's pre-I/O timestamp. Give the adapter
+        // an immutable target, never the mutable tracked entity used for the transaction.
+        var completedAt = _clock.GetUtcNow().UtcDateTime;
+        if (evidence.LaunchId != launch.Id || evidence.IdentityEpoch != launch.IdentityEpoch
+            || evidence.RuntimeId != runtimeId || evidence.GatewayId != gatewayId
+            || evidence.ObservedAt.Kind != DateTimeKind.Utc || evidence.ObservedAt > completedAt
+            || completedAt - evidence.ObservedAt > TimeSpan.FromSeconds(5)
+            || !evidence.Stopped || (cleanup && !evidence.Absent)
+            || evidence.Consumers != 0 || evidence.Pollers != 0)
+            throw new OpenShellStateConflictException("Current exact-runtime stop/absence and drained intake evidence is required.");
     }
 
     private void RequireNonRetryingContext()

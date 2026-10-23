@@ -10,7 +10,7 @@ Existing runtime/auth/provider/model selection is not changed by desired metadat
 | Component | Boundary |
 |---|---|
 | Additive EF migration | Required desired shell/policy/pending metadata, launch intents, leases, independent retired-ID table; generated designer and snapshot |
-| Launch store | Serialized intent, one active slot, exact-owner non-revivable lease, once-only sandbox binding, durable revocation/tombstone; no driver or gateway calls |
+| Launch store | Serialized intent, one active slot, exact-owner non-revivable lease, authoritative reloads, phase-ordered sandbox binding and revocation records; no driver or gateway calls |
 | Retire | Revokes before cleanup, retains active slot and cleanup-pending; never claims stopped, deleted, or safe to resume |
 | Operator guard | Existing `Orchestrator:AuthToken`, startup-only; blank 503, invalid/duplicate/malformed 401; all lifecycle/new policy route shapes and verbs before legacy exemptions/body/backend |
 | Tests | Actual relational EF store on isolated SQLite and actual middleware over TestServer; no duplicated lifecycle or authorization implementation |
@@ -20,9 +20,24 @@ strategies that replay mutations. The existing retrying orchestrator context is
 not wired to it. Ambiguous writes require future request-ID reconciliation.
 A created row is never provider readiness, authenticated supervisor evidence or
 activation. Metadata is not a claim that an existing agent already runs in OpenShell.
-The nullable unique active-agent slot remains held after revocation until a future
-verified stop/delete transition proves consumer/poller absence.
-Tombstones have no agent foreign key and must survive agent/workspace cleanup.
+The nullable unique active-agent slot remains held after revocation. The store can
+record cleanup completion only after fresh exact-launch/epoch/runtime evidence
+reports absence and zero consumers/pollers, and the retirement tombstone exists.
+It then releases only that launch's lease and active slot, allowing a fresh UUID.
+`prepared -> legacy_stopped -> created` is enforced through store methods.
+
+`IOpenShellRuntimeEvidenceReader` is an application adapter boundary, not an invented
+upstream hook. Its production authenticated driver/consumer/poller reader is still
+**unimplemented and unregistered**. Tests use owned synthetic observations to test
+these production transitions, not to claim live verified stop/delete or admission.
+Without a reader these transitions fail; no API accepts client-supplied evidence.
+
+Tombstones have no agent foreign key and survive ordinary agent/launch deletion.
+The append-only/mapping/revocation guards cover this store and tracked SaveChanges
+only. `ExecuteUpdate`, `ExecuteDelete`, raw SQL, destructive Down and privileged
+writers bypass them: **DB-enforced permanence is not implemented or claimed**.
+Such writes are outside the claimed boundary, and the existing persistence cleanup
+fixtures use them only on owned test databases, not as a production cleanup path.
 Application rollback retains the additive schema; do not execute destructive Down
 without separately approved backup, restore/query proof and tombstone preservation.
 
@@ -67,6 +82,31 @@ After separately approving a disposable MySQL target, supply
 The MySQL fixtures create/drop only their unique synthetic database; no existing
 database is a test target. Missing prerequisite returns BLOCKED (3), never PASS.
 
-Real-MySQL execution, backup/restore proof, current-supervisor/native CLI identity
-qualification, actual agent path, denial/revocation and runtime rollback are UNRUN.
+CI evidence for the previous head `30176489652c7d11d9a7d01a947764c0368b1e2a`:
+[Orchestrator migrations (MySQL), run 40001571787](https://github.com/anurmatov/phleet/actions/runs/40001571787/job/120578708257)
+passed 48/48 tests with zero skipped, including both new migration fixtures.
+This is real-MySQL fresh/upgrade/query evidence for that head only, not this revision's
+CI result, backup/restore proof, authenticated cleanup proof or agent acceptance.
+New-head CI is not assumed passed and must be checked independently after push.
+Backup/restore, current-supervisor/native identity qualification, the actual agent
+path, denial/revocation and runtime rollback remain UNRUN.
 SQLite/TestServer/source builds are not substitutes for those gates.
+
+## Deferred schema in this draft, not deferred to slice 2
+
+| Spec fields/table | Why still absent / required next owner |
+|---|---|
+| Launch workspace and policy/image/destination hashes | Compiler and workspace ownership writer are not implemented; add typed ownership and immutable hash validation with that adapter |
+| controlURL, capability secret reference and error | Control capability custody, safe URL compilation and bounded sanitized errors are not implemented; do not persist guessed handles or raw errors |
+| Poller lease owner/expiry and Telegram offset | Actual SDK handoff/drain/offset lifecycle is not implemented; source rows alone would not prevent twin polling |
+| agent_secret_bindings | Inventory/classification, source/endpoint/profile hashes and atomic API/version semantics are not implemented; no implicit classification or grant |
+| agent_identity_sessions | Verified issuer/receiver route and generation binding are not implemented; no caller-attributed session authority |
+| identity_request_nonces | Outside ingress atomic replay consumption and bounded retention are not implemented; no in-memory replay fallback |
+
+These omissions remain slice-1 blockers. Complete them in the same unmerged
+`AddOpenShellExecution` migration, regenerate its designer/snapshot and rerun
+fresh/upgrade/rollback/query qualification before requesting merge review.
+The remaining lifecycle caller/delete path must also retain rows until verified
+cleanup and map pending/conflict results explicitly; current restrict FKs do not
+implement that endpoint handling. Do not populate launch rows in an actual
+installation while that caller migration is missing.

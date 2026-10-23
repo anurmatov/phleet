@@ -52,6 +52,10 @@ public sealed class OpenShellExecutionMigrationTests : IAsyncLifetime
         var store = new OpenShellLaunchStore(db);
         var now = DateTime.UtcNow;
         var launch = await store.ReserveAsync(agent.Id, agent.ContainerName, now, TimeSpan.FromSeconds(120));
+        // This fixture exercises persistence, not a runtime stop. Set the prerequisite phase
+        // directly in its owned database; the real reader/driver qualification remains separate.
+        launch.Phase = "legacy_stopped";
+        await db.SaveChangesAsync();
         await store.BindCreatedSandboxAsync(launch.Id, "gateway1", "sandbox1", now);
         await store.RetireAsync(launch.Id, now);
         db.ChangeTracker.Clear();

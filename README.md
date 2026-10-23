@@ -70,6 +70,15 @@ Once setup finishes, the dashboard is live at:
 
 Auth is controlled by `ORCHESTRATOR_AUTH_TOKEN` in `./fleet/.env` — `setup.sh` generates it for you.
 
+Lifecycle REST reads now require the same operator bearer token as writes, including
+`GET /api/agents` and `GET /api/agents/{name}`, plus HEAD/OPTIONS and unknown child
+paths of lifecycle/policy routes. A blank operator token returns **503**, not open
+development mode; wrong or malformed credentials return **401** before backend access.
+`ORCHESTRATOR_CONFIG_TOKEN` is not a substitute.
+Before upgrading, review [the authentication upgrade notes](docs/upgrading/openshell-operator-auth.md)
+and [the operator runbook](docs/runbooks/openshell.md); this boundary applies even
+while the OpenShell implementation remains a draft.
+
 ### 4. Create your co-CTO agent
 
 `seed.example.json` ships with **no agents**. Your first agent — the co-CTO — is created interactively via the dashboard's SetupBanner. Click the **CTO template card** and follow the prompts. Once provisioning completes, you should receive a welcome DM from the CTO bot. **If you don't, send `/start` to your CTO bot first** — Telegram requires the user to initiate the conversation before a bot can DM them.

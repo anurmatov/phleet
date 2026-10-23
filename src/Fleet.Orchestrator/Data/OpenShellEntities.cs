@@ -25,7 +25,7 @@ public sealed class OpenShellLease
     public DateTime ExpiresAt { get; set; }
 }
 
-/// <summary>Independent of agent/launch foreign keys; deleting either cannot resurrect an ID.</summary>
+/// <summary>Independent of agent/launch foreign keys. Append-only through tracked writes; privileged bulk/SQL writes bypass this guard.</summary>
 public sealed class OpenShellRetiredId
 {
     public required string GatewayId { get; set; }

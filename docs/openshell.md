@@ -13,7 +13,8 @@ Existing runtime/auth/provider/model selection is not changed by desired metadat
 | Launch store | Serialized intent, one active slot, exact-owner non-revivable lease, authoritative reloads, phase-ordered sandbox binding and revocation records; no driver or gateway calls |
 | Retire | Revokes before cleanup, retains active slot and cleanup-pending; never claims stopped, deleted, or safe to resume |
 | Operator guard | Existing `Orchestrator:AuthToken`, startup-only; blank 503, invalid/duplicate/malformed 401; all lifecycle/new policy route shapes and verbs before legacy exemptions/body/backend |
-| Request ACL acquisition | Actual AclCacheService one-fetch immutable snapshot API, five-second deadline, malformed/operator/error rejection and synchronous pending-generation invalidation; not yet wired to a verified listener or tools |
+| Verified memory receiver source | Optional held-off HTTPS/mTLS listener, pinned ES256 request proof, authoritative mapping/consumed-nonce read, bounded local sessions, fresh HttpContext ACL and all six tools; actual TLS/DB/ingress integration UNRUN |
+| Request ACL acquisition | Actual AclCacheService one-fetch immutable snapshot API, five-second deadline, malformed/operator/error rejection and synchronous pending-generation invalidation |
 | Tests | Actual relational EF store on isolated SQLite, actual operator middleware over TestServer and actual ACL service through an isolated HTTP handler; none is daemon acceptance |
 
 The store requires a non-retrying relational context. It refuses EF execution
@@ -68,11 +69,11 @@ The shared lifecycle adapter and all REST/MCP/facade/Docker bypass callers,
 static endpoint/policy compiler, pinned gateway protobuf client, post-create
 current-supervisor readiness, bootstrap/activation gate and nonroot image/home
 changes are **not implemented** here.
-Outside identity middleware/issuer/ingress, receiving memory verified listener,
-request-scoped ACL middleware/six-tool wiring, nonce/session issuance and limit guards,
-secret binding inventory writers and production driver rollback are **not implemented**
-here. The authoritative snapshot acquisition API exists but is not a verified caller
-identity, listener, admission receipt or replacement for those missing consumers.
+Outside supervisor identity hook/issuer/ingress, durable issuer session/replay
+lifecycle, secret binding inventory writers and production driver rollback remain
+**not implemented** here. Memory receiver/proof/state-reader/six-tool source exists,
+but real TLS, DB and upstream/native wire compatibility is unqualified, not admission.
+Other receiving services remain unimplemented and blocked.
 Full install/config/example lockstep and actual daemon/native CLI/shell/verified
 memory/Rabbit-to-matching-workflow fixture entrypoints remain to be written.
 No upstream hook, header canonicalization or native compatibility is inferred.
@@ -85,6 +86,8 @@ change follows a source test or merge.
 ## Reproducible checks
 
 Run `bash tests/openshell/run.sh unit` for the local store and operator guard.
+Run `bash tests/openshell/run.sh memory-identity` for cryptographic receiver and
+six-tool boundary tests, not actual socket/DB/agent acceptance.
 Run `bash tests/openshell/run.sh memory-acl` for authoritative ACL acquisition tests;
 these use only an owned HTTP handler, never an orchestrator or external network.
 Run `dotnet test tests/Fleet.Orchestrator.Tests --filter FullyQualifiedName~ModelSnapshotTests`
@@ -154,9 +157,10 @@ locked generation check; an already authorized in-flight request may finish afte
 Legacy cache refresh and stale-on-failure behavior are intentionally not strengthened
 or represented as verified authorization by this change.
 
-This API is deliberately not exposed as an HTTP identity override or readiness flag.
-The six memory tools still use the legacy path until the cryptographic receiver,
-request-scoped HttpContext snapshot and verified-session boundary are implemented
-together. No new listener or direct-route exception is enabled, and the full slice-1
-blocker remains open. Tests of acquisition/revocation/error handling do not establish
-assertion verification, service reachability, native CLI behavior or daemon rollback.
+This API is not an HTTP identity override or readiness flag. The receiver now
+attaches its snapshot to HttpContext after certificate/proof/state/session checks,
+and all six tools consume it instead of legacy attribution/cache on that path.
+The listener defaults off and no actual listener, endpoint migration or deployment
+was enabled by source work. See [the receiver protocol and configuration boundary](openshell-request-identity.md).
+Actual TLS/DB/upstream/native integration and the full slice-1 blocker remain open;
+unit certificate/proof tests do not establish daemon admission or runtime rollback.

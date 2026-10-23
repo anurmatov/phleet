@@ -24,23 +24,27 @@ public sealed class MemoryGetTool(
         if (string.IsNullOrWhiteSpace(id))
             return "memory_get: missing required parameter 'id'.\nHint: pass the memory ID (full UUID or first 8 characters) from memory_search or memory_list.";
 
-        var agentName = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+        var context = httpContextAccessor?.HttpContext;
+        var verified = VerifiedMemoryRequest.Get(context);
+        if (context?.Connection.LocalPort == 3101 && verified is null)
+            return "memory_get: verified request authorization unavailable.";
+        var agentName = verified?.Identity.AgentName ?? context?.Request.Query["agent"].FirstOrDefault();
 
         // When ACL is enabled: fail-closed if cache unavailable, require agent identity
-        if (aclCache.IsAvailable is false && aclCache.IsAclEnabled)
+        if (verified is null && aclCache.IsAvailable is false && aclCache.IsAclEnabled)
             return "memory_get: ACL cache unavailable — orchestrator unreachable. Try again shortly.";
 
         if (string.IsNullOrWhiteSpace(agentName) && aclCache.IsAclEnabled)
             return "memory_get: agent identity required — missing '?agent=' query parameter.";
 
-        if (aclCache.IsAclEnabled)
+        if (verified is not null || aclCache.IsAclEnabled)
         {
             // Fetch to determine project, but deny uniformly (no existence leak to unauthorized agents).
             MemoryDocument? probe;
             try { probe = await memoryService.GetAsync(id); }
             catch (AmbiguousMemoryIdException ex) { return $"memory_get: {ex.Message}"; }
             var project = probe?.Project ?? "";
-            var (allowed, denyReason) = aclCache.CanRead(agentName!, project);
+            var (allowed, denyReason) = (verified is null ? aclCache.CanRead(agentName!, project) : aclCache.CanRead(verified.Snapshot, agentName!, project));
             if (!allowed)
             {
                 logger.LogInformation("memory_get: denied agent '{Agent}' on id '{Id}': {Reason}", agentName, id, denyReason);

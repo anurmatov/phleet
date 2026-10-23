@@ -16,6 +16,7 @@
     <PackageReference Include="Microsoft.ML.Tokenizers" Version="0.22.0" />
     <PackageReference Include="ModelContextProtocol" Version="0.8.0-preview.1" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="0.8.0-preview.1" />
+    <PackageReference Include="MySqlConnector" Version="2.4.0" />
     <PackageReference Include="Qdrant.Client" Version="1.13.0" />
     <PackageReference Include="YamlDotNet" Version="16.3.0" />
   </ItemGroup>

@@ -35,18 +35,22 @@ public sealed class MemoryStoreTool(
         if (string.IsNullOrWhiteSpace(content))
             return "memory_store: missing required parameter 'content'.\nHint: pass the full memory content to store.";
 
+        var context = httpContextAccessor?.HttpContext;
+        var verified = VerifiedMemoryRequest.Get(context);
+        if (context?.Connection.LocalPort == 3101 && verified is null)
+            return "memory_store: verified request authorization unavailable.";
+        var agentName = verified?.Identity.AgentName ?? context?.Request.Query["agent"].FirstOrDefault();
         // ACL gate: agent must be allowed to write to the target project.
         // Wildcard agents and agents with the target project in their allow-list may store.
-        if (aclCache.IsAclEnabled)
+        if (verified is not null || aclCache.IsAclEnabled)
         {
-            if (!aclCache.IsAvailable)
+            if (verified is null && !aclCache.IsAvailable)
                 return "memory_store: ACL cache unavailable — orchestrator unreachable. Try again shortly.";
 
-            var agentName = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
             if (string.IsNullOrWhiteSpace(agentName))
                 return "memory_store: agent identity required — missing '?agent=' query parameter.";
 
-            var (allowed, denyReason) = aclCache.CanRead(agentName!, project);
+            var (allowed, denyReason) = (verified is null ? aclCache.CanRead(agentName!, project) : aclCache.CanRead(verified.Snapshot, agentName!, project));
             if (!allowed)
                 return $"memory_store: access denied — {denyReason}. Agent must be in the project allow-list to store memories there.";
         }
@@ -57,7 +61,7 @@ public sealed class MemoryStoreTool(
             Type = type,
             Title = title,
             Content = content,
-            Agent = agent,
+            Agent = verified?.Identity.AgentName ?? agent,
             Project = project,
             Tags = string.IsNullOrWhiteSpace(tags) ? [] : tags.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToList(),
             Source = source

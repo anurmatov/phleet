@@ -155,6 +155,10 @@ if (!string.IsNullOrEmpty(connectionString))
     app.Logger.LogInformation("Epic grants are {State}", epicGrants.IsEnabled ? "enabled" : "disabled");
 }
 
+// Fail-closed lifecycle/policy operator guard precedes legacy auth exemptions and handlers.
+// Captures only the operator token at startup; ConfigToken and caller attribution are not authority.
+app.UseOpenShellOperatorAuthorization(app.Configuration["Orchestrator:AuthToken"] ?? "");
+
 // WebSocket support
 app.UseWebSockets();
 

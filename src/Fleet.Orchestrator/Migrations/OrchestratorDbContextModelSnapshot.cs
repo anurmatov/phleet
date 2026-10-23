@@ -64,6 +64,14 @@ namespace Fleet.Orchestrator.Migrations
                         .HasMaxLength(20)
                         .HasColumnType("varchar(20)");
 
+                    b.Property<string>("ExecutionShell")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)")
+                        .HasDefaultValue("openshell")
+                        .HasColumnName("execution_shell");
+
                     b.Property<byte>("FormattingMode")
                         .HasColumnType("tinyint unsigned");
 
@@ -131,6 +139,22 @@ namespace Fleet.Orchestrator.Migrations
                         .IsRequired()
                         .HasMaxLength(100)
                         .HasColumnType("varchar(100)");
+
+                    b.Property<string>("OpenShellMigrationState")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)")
+                        .HasDefaultValue("pending")
+                        .HasColumnName("open_shell_migration_state");
+
+                    b.Property<string>("OpenShellPolicy")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)")
+                        .HasDefaultValue("normal")
+                        .HasColumnName("open_shell_policy");
 
                     b.Property<string>("OutputStyle")
                         .HasMaxLength(100)
@@ -866,6 +890,94 @@ namespace Fleet.Orchestrator.Migrations
                     b.ToTable("instruction_versions", (string)null);
                 });
 
+            modelBuilder.Entity("Fleet.Orchestrator.Data.OpenShellLaunch", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("char(36)");
+
+                    b.Property<int?>("ActiveAgentId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("AgentId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("ExpectedOldRuntimeId")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<string>("GatewayId")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)")
+                        .UseCollation("utf8mb4_bin");
+
+                    b.Property<Guid>("IdentityEpoch")
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("Phase")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<DateTime?>("RevokedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("SandboxId")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)")
+                        .UseCollation("utf8mb4_bin");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ActiveAgentId")
+                        .IsUnique();
+
+                    b.HasIndex("AgentId");
+
+                    b.HasIndex("GatewayId", "SandboxId")
+                        .IsUnique();
+
+                    b.ToTable("agent_open_shell_launches", (string)null);
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.OpenShellLease", b =>
+                {
+                    b.Property<int>("AgentId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("ExpiresAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<Guid>("Owner")
+                        .HasColumnType("char(36)");
+
+                    b.HasKey("AgentId");
+
+                    b.ToTable("agent_open_shell_leases", (string)null);
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.OpenShellRetiredId", b =>
+                {
+                    b.Property<string>("GatewayId")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)")
+                        .UseCollation("utf8mb4_bin");
+
+                    b.Property<string>("SandboxId")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)")
+                        .UseCollation("utf8mb4_bin");
+
+                    b.Property<DateTime>("RetiredAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.HasKey("GatewayId", "SandboxId");
+
+                    b.ToTable("open_shell_retired_ids", (string)null);
+                });
+
             modelBuilder.Entity("Fleet.Orchestrator.Data.OutputStyle", b =>
                 {
                     b.Property<string>("Name")
@@ -1250,6 +1362,28 @@ namespace Fleet.Orchestrator.Migrations
                         .IsRequired();
 
                     b.Navigation("Instruction");
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.OpenShellLaunch", b =>
+                {
+                    b.HasOne("Fleet.Orchestrator.Data.Agent", "Agent")
+                        .WithMany()
+                        .HasForeignKey("AgentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Agent");
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.OpenShellLease", b =>
+                {
+                    b.HasOne("Fleet.Orchestrator.Data.Agent", "Agent")
+                        .WithMany()
+                        .HasForeignKey("AgentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Agent");
                 });
 
             modelBuilder.Entity("Fleet.Orchestrator.Data.ProjectContextVersion", b =>

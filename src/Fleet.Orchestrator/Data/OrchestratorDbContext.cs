@@ -48,8 +48,25 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
     public DbSet<EpicGrantRun> EpicGrantRuns => Set<EpicGrantRun>();
     public DbSet<EpicGrantDecision> EpicGrantDecisions => Set<EpicGrantDecision>();
 
+    public DbSet<OpenShellLaunch> OpenShellLaunches => Set<OpenShellLaunch>();
+    public DbSet<OpenShellLease> OpenShellLeases => Set<OpenShellLease>();
+    public DbSet<OpenShellRetiredId> OpenShellRetiredIds => Set<OpenShellRetiredId>();
+
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        OpenShellModel.ValidateChanges(ChangeTracker);
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    public override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
+    {
+        OpenShellModel.ValidateChanges(ChangeTracker);
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        OpenShellModel.Configure(modelBuilder, Database.ProviderName == "Pomelo.EntityFrameworkCore.MySql");
         modelBuilder.Entity<Agent>(e =>
         {
             e.ToTable("agents");

@@ -27,6 +27,9 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Google.Protobuf" Version="3.26.1" />
+    <PackageReference Include="Grpc.Net.Client" Version="2.67.0" />
+    <PackageReference Include="Grpc.Tools" Version="2.67.0" PrivateAssets="all" />
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="9.0.3" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.3">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
@@ -39,4 +42,7 @@
     <PackageReference Include="Temporalio" Version="1.11.1" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Protobuf Include="OpenShell/Proto/*.proto" ProtoRoot="OpenShell/Proto" GrpcServices="Client" />
+  </ItemGroup>
 </Project>

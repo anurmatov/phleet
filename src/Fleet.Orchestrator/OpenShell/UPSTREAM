@@ -1,0 +1,10 @@
+NVIDIA/OpenShell v0.1.5
+commit bdb956f2cd65a635f1294fccf1d138d263bf650f
+https://github.com/NVIDIA/OpenShell/tree/bdb956f2cd65a635f1294fccf1d138d263bf650f/proto
+Unmodified public API and complete local import closure; Apache-2.0 (LICENSE).
+Generated C# is build output, not committed.
+
+e50bd875a760f54b80269c65ee47984cae424fb623b7f59551ba62550c23e70b  Proto/datamodel.proto
+ea574b501987611ea637ba249013584fc566e24ad9a3db185a217158caee2927  Proto/openshell.proto
+b0e03562c92777978f6f3e0f46260cdb82f1d88d1c1837eab0e53cdd0f195eb7  Proto/options.proto
+93536b8fa5c1e253d0d3aef031fde273b1bd13ce819192b0a7727fa9f28d55fb  Proto/sandbox.proto

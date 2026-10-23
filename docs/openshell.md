@@ -70,7 +70,7 @@ migration API is available, so no OpenShell workload can be admitted through it.
 
 Shared dispatch and caller wiring now exist, but the OpenShell lifecycle backend is
 still unimplemented and returns 422 compatibility_blocked without a legacy fallback.
-Static endpoint/policy compiler, pinned gateway protobuf client, post-create
+Static endpoint/policy compiler, gateway mutations, post-create
 current-supervisor readiness, bootstrap/activation gate and nonroot image/home
 changes are **not implemented** here.
 Outside supervisor identity hook/issuer/ingress, durable issuer session/replay
@@ -234,3 +234,48 @@ REST start/stop/restart/delete, externally changed DB state, retired history,
 infrastructure name/ID/driver-label guards and legacy read-error/404 distinctions.
 Only isolated SQLite, TestServer, temporary generated files and owned HTTP handlers
 are used; actual OpenShell daemon/CLI/shell/callback/rollback remains unimplemented.
+
+## Pinned gateway observation source and mutation contract gap
+
+The unmodified OpenShell v0.1.5 protobuf import closure and Apache-2.0 license are
+vendored under `src/Fleet.Orchestrator/OpenShell`; UPSTREAM records exact commit
+`bdb956f2cd65a635f1294fccf1d138d263bf650f` and SHA256 for all four source files.
+Build generation uses Grpc.Tools 2.67.0, with Grpc.Net.Client 2.67.0 for native
+protobuf/gRPC and Google.Protobuf 3.26.1 matching the existing transitive pin.
+No generated C# or runtime executable/image is committed or installed.
+
+`OpenShellGatewayClient` implements authenticated named-workspace inventory and
+exact-ID observations through that generated client, not a fabricated JSON route.
+It exhausts all pages without a label selector and rejects repeated tokens,
+duplicate names/IDs, foreign workspaces, malformed records, size/page bounds,
+read failures and cancellation rather than returning partial absence evidence.
+A whole-operation five-second bound covers inventory plus refreshed GetSandbox;
+snapshots are immutable copies and a changed name-to-ID mapping is rejected.
+The pinned empty-workspace/default normalization is applied explicitly.
+
+The client is **read-only and not registered for runtime admission**; its outside
+HTTPS handler/credential custody and actual gateway wire acceptance remain UNRUN.
+A workspace-scoped authorized inventory is not a global launch-owned inventory,
+consumer/poller-drain proof, current-supervisor readiness or cleanup authorization.
+A Ready phase or nonempty supervisor instance ID cannot activate an agent.
+
+The pinned public [stop/delete requests](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/proto/openshell.proto#L1460-L1481)
+have names/workspace/request IDs but no caller expected immutable-ID/version guard.
+The [operator resolver](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/crates/openshell-server/src/grpc/sandbox.rs#L196-L234)
+uses get_message_by_name, and [delete](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/crates/openshell-server/src/grpc/sandbox.rs#L1690-L1730)
+uses default preconditions rather than caller-specified expected identity.
+This revision does not invent an ID field, pass an ID as a display name, or enable
+named mutations as if they provided the required immutable-ID authority.
+An upstream-compatible exact-ID mutation solution must be qualified before
+implementing/enabling those lifecycle transitions; a read/check alone is not CAS.
+The production stop/inventory/intake evidence reader, compiler/startup activation,
+outside identity hook/issuer/ingress/durable replay/session handling, actual agent
+callback path and rollback remain **missing code**, not merely unrun tests.
+No alternative architecture, upstream patch or activation is approved by this note.
+
+Owned HTTP handlers exercise the actual generated gRPC request/response framing,
+pagination, bearer metadata, mapping replacement, cancellation, immutable copies
+and descriptor/source-hash contracts, without sockets, TLS or a real gateway.
+Prior head `3cf2b337` had all reported [CI checks green](https://github.com/anurmatov/phleet/actions/runs/40018584811);
+new-head CI, approved actual daemon/native CLI/shell/memory/Rabbit/denial/revocation/
+rollback and MySQL backup/restore-query acceptance remain required before merge.

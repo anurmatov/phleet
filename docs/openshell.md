@@ -13,7 +13,8 @@ Existing runtime/auth/provider/model selection is not changed by desired metadat
 | Launch store | Serialized intent, one active slot, exact-owner non-revivable lease, authoritative reloads, phase-ordered sandbox binding and revocation records; no driver or gateway calls |
 | Retire | Revokes before cleanup, retains active slot and cleanup-pending; never claims stopped, deleted, or safe to resume |
 | Operator guard | Existing `Orchestrator:AuthToken`, startup-only; blank 503, invalid/duplicate/malformed 401; all lifecycle/new policy route shapes and verbs before legacy exemptions/body/backend |
-| Tests | Actual relational EF store on isolated SQLite and actual middleware over TestServer; no duplicated lifecycle or authorization implementation |
+| Request ACL acquisition | Actual AclCacheService one-fetch immutable snapshot API, five-second deadline, malformed/operator/error rejection and synchronous pending-generation invalidation; not yet wired to a verified listener or tools |
+| Tests | Actual relational EF store on isolated SQLite, actual operator middleware over TestServer and actual ACL service through an isolated HTTP handler; none is daemon acceptance |
 
 The store requires a non-retrying relational context. It refuses EF execution
 strategies that replay mutations. The existing retrying orchestrator context is
@@ -68,8 +69,10 @@ static endpoint/policy compiler, pinned gateway protobuf client, post-create
 current-supervisor readiness, bootstrap/activation gate and nonroot image/home
 changes are **not implemented** here.
 Outside identity middleware/issuer/ingress, receiving memory verified listener,
-request-scoped authoritative ACL, nonce/session issuance and limit guards, secret binding
-inventory writers and production driver rollback are **not implemented** here.
+request-scoped ACL middleware/six-tool wiring, nonce/session issuance and limit guards,
+secret binding inventory writers and production driver rollback are **not implemented**
+here. The authoritative snapshot acquisition API exists but is not a verified caller
+identity, listener, admission receipt or replacement for those missing consumers.
 Full install/config/example lockstep and actual daemon/native CLI/shell/verified
 memory/Rabbit-to-matching-workflow fixture entrypoints remain to be written.
 No upstream hook, header canonicalization or native compatibility is inferred.
@@ -82,6 +85,8 @@ change follows a source test or merge.
 ## Reproducible checks
 
 Run `bash tests/openshell/run.sh unit` for the local store and operator guard.
+Run `bash tests/openshell/run.sh memory-acl` for authoritative ACL acquisition tests;
+these use only an owned HTTP handler, never an orchestrator or external network.
 Run `dotnet test tests/Fleet.Orchestrator.Tests --filter FullyQualifiedName~ModelSnapshotTests`
 for migration target/snapshot consistency, without a database.
 After separately approving a disposable MySQL target, supply
@@ -90,9 +95,11 @@ After separately approving a disposable MySQL target, supply
 The MySQL fixtures create/drop only their unique synthetic database; no existing
 database is a test target. Missing prerequisite returns BLOCKED (3), never PASS.
 
-CI evidence for the previous head `a7bc3feaa4752a98c72fb409c235a1fdee74040a`:
-[Orchestrator migrations (MySQL), run 40005153372](https://github.com/anurmatov/phleet/actions/runs/40005153372/job/120591076531)
-passed 48/48 tests with zero skipped, including both new migration fixtures.
+CI evidence for the previous head `4d0fa6a243fa7c2383d8996fe37d8cac3029dad6`:
+[Orchestrator migrations (MySQL), run 40007094718](https://github.com/anurmatov/phleet/actions/runs/40007094718/job/120597653708)
+passed 49/49 tests with zero skipped, including the real-1062 context-reuse regression.
+The [Build and Test job](https://github.com/anurmatov/phleet/actions/runs/40007094718/job/120597653961)
+also passed for that head.
 This is real-MySQL fresh/upgrade/query evidence for that head only, not this revision's
 CI result, backup/restore proof, authenticated cleanup proof or agent acceptance.
 New-head CI is not assumed passed and must be checked independently after push.
@@ -116,7 +123,8 @@ receipts. Tables alone do not authorize sessions, prevent twin pollers or supply
 verified listener. No issuer/listener is registered and no request uses these rows
 as authority. Tests cover storage, key uniqueness and failed-save detachment only.
 The MySQL suite now also injects an actual duplicate lease during store SaveChanges
-to exercise 1062 and reused-context cleanup; that new case is UNRUN locally.
+to exercise 1062 and reused-context cleanup; it passed prior-head MySQL CI above,
+but is still UNRUN locally and does not prove backup/restore.
 The regenerated designer/snapshot match the model; new-head MySQL execution,
 restore/query and full-runtime acceptance are still required, not inherited from CI.
 
@@ -126,3 +134,29 @@ of the same migration ID. No production migration or destructive reset is author
 The remaining lifecycle caller/delete path must retain rows until verified cleanup
 and map pending/conflict explicitly; restrict FKs are not that endpoint handling.
 Do not populate launch rows in an actual installation while caller migration is missing.
+
+## Authoritative ACL dependency added, verified memory path still closed
+
+`AclCacheService.GetVerifiedSnapshotAsync` fetches the authoritative ACL exactly once
+per invocation with a five-second whole-operation deadline, no retry, no redirect
+and no read from or write to the legacy populated cache. Missing/invalid payloads,
+operator wildcard failure, timeout and transport/read errors reject the observation.
+Disabled project ACL also rejects verified acquisition rather than inheriting the
+legacy allow-all behavior. No grant or configured project access changes here.
+The snapshot freezes the ACL and public/no-project policy and uses the same project
+policy evaluator as legacy reads, retaining wildcard/case/filtering semantics.
+
+`TriggerRefresh`, including calls from `PeerConfigHostedService` on `config.changed`,
+synchronously advances the generation before scheduling the existing legacy refresh.
+A generation change during acquisition rejects the result; the next invocation always
+fetches authority, even if an event was lost. The authorization boundary is the final
+locked generation check; an already authorized in-flight request may finish after it.
+Legacy cache refresh and stale-on-failure behavior are intentionally not strengthened
+or represented as verified authorization by this change.
+
+This API is deliberately not exposed as an HTTP identity override or readiness flag.
+The six memory tools still use the legacy path until the cryptographic receiver,
+request-scoped HttpContext snapshot and verified-session boundary are implemented
+together. No new listener or direct-route exception is enabled, and the full slice-1
+blocker remains open. Tests of acquisition/revocation/error handling do not establish
+assertion verification, service reachability, native CLI behavior or daemon rollback.

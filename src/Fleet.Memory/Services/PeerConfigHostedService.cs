@@ -88,7 +88,7 @@ public sealed class PeerConfigHostedService : IHostedService, IAsyncDisposable
         try
         {
             _logger.LogInformation("config.changed received — triggering ACL cache refresh");
-            _aclCache.TriggerRefresh();
+            _ = _aclCache.TriggerRefresh();
         }
         catch (Exception ex)
         {

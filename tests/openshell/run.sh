@@ -7,6 +7,9 @@ case "${1:-unit}" in
     dotnet test tests/Fleet.Orchestrator.Tests --filter \
       'FullyQualifiedName~OpenShell&FullyQualifiedName!~.Migrations.'
     ;;
+  memory-acl)
+    dotnet test tests/Fleet.Memory.Tests --filter 'FullyQualifiedName~VerifiedAclTests'
+    ;;
   migration)
     if [ -z "${FLEET_ORCHESTRATOR_MIGRATION_CONNECTION:-}" ]; then
       echo 'BLOCKED: approved throwaway MySQL target is absent; migration acceptance UNRUN' >&2
@@ -15,5 +18,5 @@ case "${1:-unit}" in
     dotnet test tests/Fleet.Orchestrator.Tests --filter \
       'FullyQualifiedName~OpenShellExecutionMigrationTests'
     ;;
-  *) echo 'INVALID: available source suites: unit, migration' >&2; exit 2 ;;
+  *) echo 'INVALID: available source suites: unit, memory-acl, migration' >&2; exit 2 ;;
 esac

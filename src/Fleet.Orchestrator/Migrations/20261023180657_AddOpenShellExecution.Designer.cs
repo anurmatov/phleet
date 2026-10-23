@@ -893,6 +893,44 @@ namespace Fleet.Orchestrator.Migrations
                     b.ToTable("instruction_versions", (string)null);
                 });
 
+            modelBuilder.Entity("Fleet.Orchestrator.Data.OpenShellIdentitySession", b =>
+                {
+                    b.Property<string>("SessionHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("utf8mb4_bin");
+
+                    b.Property<string>("Service")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("utf8mb4_bin");
+
+                    b.Property<string>("Route")
+                        .HasMaxLength(256)
+                        .HasColumnType("varchar(256)")
+                        .UseCollation("utf8mb4_bin");
+
+                    b.Property<int>("AgentId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("ExpiresAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<Guid>("IdentityEpoch")
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid>("LaunchId")
+                        .HasColumnType("char(36)");
+
+                    b.HasKey("SessionHash", "Service", "Route");
+
+                    b.HasIndex("AgentId");
+
+                    b.HasIndex("LaunchId", "ExpiresAt");
+
+                    b.ToTable("agent_identity_sessions", (string)null);
+                });
+
             modelBuilder.Entity("Fleet.Orchestrator.Data.OpenShellLaunch", b =>
                 {
                     b.Property<Guid>("Id")
@@ -904,8 +942,30 @@ namespace Fleet.Orchestrator.Migrations
                     b.Property<int>("AgentId")
                         .HasColumnType("int");
 
+                    b.Property<DateTime?>("BotPollerLeaseExpiresAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<Guid?>("BotPollerLeaseOwner")
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("CapabilitySecretRef")
+                        .HasMaxLength(256)
+                        .HasColumnType("varchar(256)");
+
+                    b.Property<string>("ControlUrl")
+                        .HasMaxLength(2048)
+                        .HasColumnType("varchar(2048)");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime(6)");
+
+                    b.Property<string>("DestinationHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("Error")
+                        .HasMaxLength(256)
+                        .HasColumnType("varchar(256)");
 
                     b.Property<string>("ExpectedOldRuntimeId")
                         .HasMaxLength(128)
@@ -919,10 +979,18 @@ namespace Fleet.Orchestrator.Migrations
                     b.Property<Guid>("IdentityEpoch")
                         .HasColumnType("char(36)");
 
+                    b.Property<string>("ImageHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
                     b.Property<string>("Phase")
                         .IsRequired()
                         .HasMaxLength(32)
                         .HasColumnType("varchar(32)");
+
+                    b.Property<string>("PolicyHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
 
                     b.Property<DateTime?>("RevokedAt")
                         .HasColumnType("datetime(6)");
@@ -931,6 +999,16 @@ namespace Fleet.Orchestrator.Migrations
                         .HasMaxLength(128)
                         .HasColumnType("varchar(128)")
                         .UseCollation("utf8mb4_bin");
+
+                    b.Property<long?>("TelegramOffset")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Workspace")
+                        .HasMaxLength(1024)
+                        .HasColumnType("varchar(1024)");
 
                     b.HasKey("Id");
 
@@ -961,6 +1039,28 @@ namespace Fleet.Orchestrator.Migrations
                     b.ToTable("agent_open_shell_leases", (string)null);
                 });
 
+            modelBuilder.Entity("Fleet.Orchestrator.Data.OpenShellRequestNonce", b =>
+                {
+                    b.Property<string>("Jti")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)")
+                        .UseCollation("utf8mb4_bin");
+
+                    b.Property<DateTime>("ExpiresAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<Guid>("LaunchId")
+                        .HasColumnType("char(36)");
+
+                    b.HasKey("Jti");
+
+                    b.HasIndex("ExpiresAt");
+
+                    b.HasIndex("LaunchId");
+
+                    b.ToTable("identity_request_nonces", (string)null);
+                });
+
             modelBuilder.Entity("Fleet.Orchestrator.Data.OpenShellRetiredId", b =>
                 {
                     b.Property<string>("GatewayId")
@@ -979,6 +1079,60 @@ namespace Fleet.Orchestrator.Migrations
                     b.HasKey("GatewayId", "SandboxId");
 
                     b.ToTable("open_shell_retired_ids", (string)null);
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.OpenShellSecretBinding", b =>
+                {
+                    b.Property<int>("AgentId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Reference")
+                        .HasMaxLength(256)
+                        .HasColumnType("varchar(256)")
+                        .UseCollation("utf8mb4_bin");
+
+                    b.Property<string>("Alias")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<string>("Classification")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)")
+                        .HasDefaultValue("unclassified");
+
+                    b.Property<string>("EndpointHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<DateTime?>("ExpiresAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("ProfileHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("Provider")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("RiskApprovalRef")
+                        .HasMaxLength(512)
+                        .HasColumnType("varchar(512)");
+
+                    b.Property<string>("SourceKind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint");
+
+                    b.HasKey("AgentId", "Reference");
+
+                    b.ToTable("agent_secret_bindings", (string)null);
                 });
 
             modelBuilder.Entity("Fleet.Orchestrator.Data.OutputStyle", b =>
@@ -1367,6 +1521,25 @@ namespace Fleet.Orchestrator.Migrations
                     b.Navigation("Instruction");
                 });
 
+            modelBuilder.Entity("Fleet.Orchestrator.Data.OpenShellIdentitySession", b =>
+                {
+                    b.HasOne("Fleet.Orchestrator.Data.Agent", "Agent")
+                        .WithMany()
+                        .HasForeignKey("AgentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("Fleet.Orchestrator.Data.OpenShellLaunch", "Launch")
+                        .WithMany()
+                        .HasForeignKey("LaunchId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Agent");
+
+                    b.Navigation("Launch");
+                });
+
             modelBuilder.Entity("Fleet.Orchestrator.Data.OpenShellLaunch", b =>
                 {
                     b.HasOne("Fleet.Orchestrator.Data.Agent", "Agent")
@@ -1379,6 +1552,28 @@ namespace Fleet.Orchestrator.Migrations
                 });
 
             modelBuilder.Entity("Fleet.Orchestrator.Data.OpenShellLease", b =>
+                {
+                    b.HasOne("Fleet.Orchestrator.Data.Agent", "Agent")
+                        .WithMany()
+                        .HasForeignKey("AgentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Agent");
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.OpenShellRequestNonce", b =>
+                {
+                    b.HasOne("Fleet.Orchestrator.Data.OpenShellLaunch", "Launch")
+                        .WithMany()
+                        .HasForeignKey("LaunchId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Launch");
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.OpenShellSecretBinding", b =>
                 {
                     b.HasOne("Fleet.Orchestrator.Data.Agent", "Agent")
                         .WithMany()

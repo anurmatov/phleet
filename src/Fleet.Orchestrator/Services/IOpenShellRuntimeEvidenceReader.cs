@@ -11,7 +11,13 @@ public interface IOpenShellRuntimeEvidenceReader
 }
 
 public sealed record OpenShellRuntimeTarget(Guid LaunchId, Guid IdentityEpoch, string? GatewayId,
-    string? RuntimeId, bool RequireAbsence);
+    string? RuntimeId, bool RequireAbsence)
+{
+    // An ambiguous create can leave an owned sandbox even when no ID was durably bound.
+    // The reader must exhaust the authoritative ownership inventory, not search by display name.
+    public bool RequireLaunchInventory => RequireAbsence && RuntimeId is null;
+}
 
 public sealed record OpenShellRuntimeEvidence(Guid LaunchId, Guid IdentityEpoch, string? GatewayId,
-    string? RuntimeId, bool Stopped, bool Absent, int Consumers, int Pollers, DateTime ObservedAt);
+    string? RuntimeId, bool Stopped, bool Absent, int Consumers, int Pollers, DateTime ObservedAt,
+    bool LaunchInventoryComplete = false, int OwnedSandboxCount = -1);

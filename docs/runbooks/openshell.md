@@ -23,6 +23,9 @@ and an authenticated runtime evidence reader. The production reader is not yet
 implemented: synthetic reader tests are not proof that a runtime is gone.
 Retirement alone keeps cleanup pending; only verified absence/drained intake may
 release a slot, and the next launch must use a fresh sandbox ID and identity epoch.
+Without a bound sandbox ID, the reader must exhaust the authoritative launch/epoch
+ownership inventory and prove zero owned sandboxes before releasing the slot; a
+missing mapping or incomplete inventory is not absence evidence.
 Unknown state remains blocked, not success or permission for direct Docker cleanup.
 
 The database contains tracked-write immutability guards, not a DB-admin boundary.

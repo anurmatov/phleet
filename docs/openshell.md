@@ -9,7 +9,7 @@ Existing runtime/auth/provider/model selection is not changed by desired metadat
 
 | Component | Boundary |
 |---|---|
-| Additive EF migration | Required desired shell/policy/pending metadata, launch intents, leases, independent retired-ID table; generated designer and snapshot |
+| Additive EF migration | Desired shell/policy/pending metadata, full launch fields, leases, bindings, sessions, nonces and independent retired-ID table; generated designer and snapshot |
 | Launch store | Serialized intent, one active slot, exact-owner non-revivable lease, authoritative reloads, phase-ordered sandbox binding and revocation records; no driver or gateway calls |
 | Retire | Revokes before cleanup, retains active slot and cleanup-pending; never claims stopped, deleted, or safe to resume |
 | Operator guard | Existing `Orchestrator:AuthToken`, startup-only; blank 503, invalid/duplicate/malformed 401; all lifecycle/new policy route shapes and verbs before legacy exemptions/body/backend |
@@ -23,7 +23,15 @@ activation. Metadata is not a claim that an existing agent already runs in OpenS
 The nullable unique active-agent slot remains held after revocation. The store can
 record cleanup completion only after fresh exact-launch/epoch/runtime evidence
 reports absence and zero consumers/pollers, and the retirement tombstone exists.
+If no sandbox ID was bound, absence of that ID is insufficient: cleanup requires
+fresh, complete authoritative inventory for the launch and epoch with zero owned
+sandboxes, including ambiguous create results across the applicable gateways.
+Incomplete inventory, a negative/unknown count or any owned sandbox retains the slot.
+There is no display-name fallback and no inference from a missing DB mapping.
 It then releases only that launch's lease and active slot, allowing a fresh UUID.
+Failed reservation writes detach only their launch and lease entries, including the
+1062 conflict path, so a reused context cannot silently replay the reservation.
+Unrelated tracked changes are retained; an ambiguous commit still needs reconciliation.
 `prepared -> legacy_stopped -> created` is enforced through store methods.
 
 `IOpenShellRuntimeEvidenceReader` is an application adapter boundary, not an invented
@@ -60,8 +68,8 @@ static endpoint/policy compiler, pinned gateway protobuf client, post-create
 current-supervisor readiness, bootstrap/activation gate and nonroot image/home
 changes are **not implemented** here.
 Outside identity middleware/issuer/ingress, receiving memory verified listener,
-request-scoped authoritative ACL, nonce/session tables and guards, secret binding
-inventory and production driver rollback are **not implemented** here.
+request-scoped authoritative ACL, nonce/session issuance and limit guards, secret binding
+inventory writers and production driver rollback are **not implemented** here.
 Full install/config/example lockstep and actual daemon/native CLI/shell/verified
 memory/Rabbit-to-matching-workflow fixture entrypoints remain to be written.
 No upstream hook, header canonicalization or native compatibility is inferred.
@@ -82,8 +90,8 @@ After separately approving a disposable MySQL target, supply
 The MySQL fixtures create/drop only their unique synthetic database; no existing
 database is a test target. Missing prerequisite returns BLOCKED (3), never PASS.
 
-CI evidence for the previous head `30176489652c7d11d9a7d01a947764c0368b1e2a`:
-[Orchestrator migrations (MySQL), run 40001571787](https://github.com/anurmatov/phleet/actions/runs/40001571787/job/120578708257)
+CI evidence for the previous head `a7bc3feaa4752a98c72fb409c235a1fdee74040a`:
+[Orchestrator migrations (MySQL), run 40005153372](https://github.com/anurmatov/phleet/actions/runs/40005153372/job/120591076531)
 passed 48/48 tests with zero skipped, including both new migration fixtures.
 This is real-MySQL fresh/upgrade/query evidence for that head only, not this revision's
 CI result, backup/restore proof, authenticated cleanup proof or agent acceptance.
@@ -92,21 +100,29 @@ Backup/restore, current-supervisor/native identity qualification, the actual age
 path, denial/revocation and runtime rollback remain UNRUN.
 SQLite/TestServer/source builds are not substitutes for those gates.
 
-## Deferred schema in this draft, not deferred to slice 2
+## Storage added in this revision, not admission
 
-| Spec fields/table | Why still absent / required next owner |
+The same unmerged `20261023180657_AddOpenShellExecution` migration now includes:
+
+| Storage | Shape / still-required runtime consumer |
 |---|---|
-| Launch workspace and policy/image/destination hashes | Compiler and workspace ownership writer are not implemented; add typed ownership and immutable hash validation with that adapter |
-| controlURL, capability secret reference and error | Control capability custody, safe URL compilation and bounded sanitized errors are not implemented; do not persist guessed handles or raw errors |
-| Poller lease owner/expiry and Telegram offset | Actual SDK handoff/drain/offset lifecycle is not implemented; source rows alone would not prevent twin polling |
-| agent_secret_bindings | Inventory/classification, source/endpoint/profile hashes and atomic API/version semantics are not implemented; no implicit classification or grant |
-| agent_identity_sessions | Verified issuer/receiver route and generation binding are not implemented; no caller-attributed session authority |
-| identity_request_nonces | Outside ingress atomic replay consumption and bounded retention are not implemented; no in-memory replay fallback |
+| Launch | Nullable workspace, policy/image/destination hashes, control URL, capability reference, bounded error, updated timestamp, poller lease owner/expiry and offset; compiler and lifecycle validation still missing |
+| agent_secret_bindings | Unique ordinal agent/reference, unclassified default, source kind, provider/alias/profile/endpoint hashes, expiry, risk reference and optimistic version; no values or inventory API |
+| agent_identity_sessions | Ordinal hash/service/route key, agent/launch/epoch/expiry and expiry index per launch; verified session acquisition and 100-session bound still missing |
+| identity_request_nonces | Ordinal globally unique JTI, launch foreign key and expiry index; atomic request consumption, expiry+60s cleanup and 64-request bound still missing |
 
-These omissions remain slice-1 blockers. Complete them in the same unmerged
-`AddOpenShellExecution` migration, regenerate its designer/snapshot and rerun
-fresh/upgrade/rollback/query qualification before requesting merge review.
-The remaining lifecycle caller/delete path must also retain rows until verified
-cleanup and map pending/conflict results explicitly; current restrict FKs do not
-implement that endpoint handling. Do not populate launch rows in an actual
-installation while that caller migration is missing.
+Nullable launch fields allow prepared intent without fabricated compiler/readiness
+receipts. Tables alone do not authorize sessions, prevent twin pollers or supply a
+verified listener. No issuer/listener is registered and no request uses these rows
+as authority. Tests cover storage, key uniqueness and failed-save detachment only.
+The MySQL suite now also injects an actual duplicate lease during store SaveChanges
+to exercise 1062 and reused-context cleanup; that new case is UNRUN locally.
+The regenerated designer/snapshot match the model; new-head MySQL execution,
+restore/query and full-runtime acceptance are still required, not inherited from CI.
+
+This draft migration has not been released. Disposable databases that applied an
+older draft need a fresh database for qualification, not a misleading no-op reapply
+of the same migration ID. No production migration or destructive reset is authorized.
+The remaining lifecycle caller/delete path must retain rows until verified cleanup
+and map pending/conflict explicitly; restrict FKs are not that endpoint handling.
+Do not populate launch rows in an actual installation while caller migration is missing.

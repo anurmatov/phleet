@@ -30,9 +30,58 @@ internal static class OpenShellModel
                 e.Property(x => x.SandboxId).UseCollation("utf8mb4_bin");
             }
             e.Property(x => x.Phase).HasMaxLength(32).IsRequired();
+            e.Property(x => x.Workspace).HasMaxLength(1024);
+            e.Property(x => x.PolicyHash).HasMaxLength(64);
+            e.Property(x => x.ImageHash).HasMaxLength(64);
+            e.Property(x => x.DestinationHash).HasMaxLength(64);
+            e.Property(x => x.ControlUrl).HasMaxLength(2048);
+            e.Property(x => x.CapabilitySecretRef).HasMaxLength(256);
+            e.Property(x => x.Error).HasMaxLength(256);
             e.HasIndex(x => x.ActiveAgentId).IsUnique();
             e.HasIndex(x => new { x.GatewayId, x.SandboxId }).IsUnique();
             e.HasOne(x => x.Agent).WithMany().HasForeignKey(x => x.AgentId).OnDelete(DeleteBehavior.Restrict);
+        });
+        model.Entity<OpenShellSecretBinding>(e =>
+        {
+            e.ToTable("agent_secret_bindings");
+            e.HasKey(x => new { x.AgentId, x.Reference });
+            e.Property(x => x.Reference).HasMaxLength(256);
+            e.Property(x => x.Classification).HasMaxLength(32).IsRequired().HasDefaultValue("unclassified");
+            e.Property(x => x.SourceKind).HasMaxLength(32).IsRequired();
+            e.Property(x => x.Provider).HasMaxLength(64);
+            e.Property(x => x.Alias).HasMaxLength(128);
+            e.Property(x => x.ProfileHash).HasMaxLength(64);
+            e.Property(x => x.EndpointHash).HasMaxLength(64);
+            e.Property(x => x.RiskApprovalRef).HasMaxLength(512);
+            e.Property(x => x.Version).IsConcurrencyToken();
+            if (mysql) e.Property(x => x.Reference).UseCollation("utf8mb4_bin");
+            e.HasOne(x => x.Agent).WithMany().HasForeignKey(x => x.AgentId).OnDelete(DeleteBehavior.Restrict);
+        });
+        model.Entity<OpenShellIdentitySession>(e =>
+        {
+            e.ToTable("agent_identity_sessions");
+            e.HasKey(x => new { x.SessionHash, x.Service, x.Route });
+            e.Property(x => x.SessionHash).HasMaxLength(64);
+            e.Property(x => x.Service).HasMaxLength(64);
+            e.Property(x => x.Route).HasMaxLength(256);
+            if (mysql)
+            {
+                e.Property(x => x.SessionHash).UseCollation("utf8mb4_bin");
+                e.Property(x => x.Service).UseCollation("utf8mb4_bin");
+                e.Property(x => x.Route).UseCollation("utf8mb4_bin");
+            }
+            e.HasIndex(x => new { x.LaunchId, x.ExpiresAt });
+            e.HasOne(x => x.Agent).WithMany().HasForeignKey(x => x.AgentId).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne(x => x.Launch).WithMany().HasForeignKey(x => x.LaunchId).OnDelete(DeleteBehavior.Restrict);
+        });
+        model.Entity<OpenShellRequestNonce>(e =>
+        {
+            e.ToTable("identity_request_nonces");
+            e.HasKey(x => x.Jti);
+            e.Property(x => x.Jti).HasMaxLength(128);
+            if (mysql) e.Property(x => x.Jti).UseCollation("utf8mb4_bin");
+            e.HasIndex(x => x.ExpiresAt);
+            e.HasOne(x => x.Launch).WithMany().HasForeignKey(x => x.LaunchId).OnDelete(DeleteBehavior.Restrict);
         });
         model.Entity<OpenShellLease>(e =>
         {

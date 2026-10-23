@@ -2,6 +2,7 @@ using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Migrations;
 using MySqlConnector;
 
@@ -57,9 +58,33 @@ public sealed class OpenShellExecutionMigrationTests : IAsyncLifetime
         launch.Phase = "legacy_stopped";
         await db.SaveChangesAsync();
         await store.BindCreatedSandboxAsync(launch.Id, "gateway1", "sandbox1", now);
+        launch.Workspace = "/workspace/agent1";
+        launch.PolicyHash = new string('a', 64);
+        launch.ImageHash = new string('b', 64);
+        launch.DestinationHash = new string('c', 64);
+        launch.ControlUrl = "https://control.example.invalid";
+        launch.CapabilitySecretRef = "capability-ref1";
+        launch.Error = "compatibility_blocked";
+        launch.UpdatedAt = now;
+        launch.BotPollerLeaseOwner = launch.Id;
+        launch.BotPollerLeaseExpiresAt = now.AddSeconds(30);
+        launch.TelegramOffset = 17;
+        db.OpenShellSecretBindings.Add(new() { AgentId = agent.Id, Reference = "native-auth:codex", SourceKind = "native_auth" });
+        db.OpenShellIdentitySessions.Add(new() { SessionHash = new string('d', 64), Service = "memory", Route = "/mcp",
+            AgentId = agent.Id, LaunchId = launch.Id, IdentityEpoch = launch.IdentityEpoch, ExpiresAt = now.AddMinutes(1) });
+        db.OpenShellRequestNonces.Add(new() { Jti = "nonce1", LaunchId = launch.Id, ExpiresAt = now.AddMinutes(1) });
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        Assert.Equal("/workspace/agent1", (await db.OpenShellLaunches.SingleAsync()).Workspace);
+        Assert.Equal("unclassified", (await db.OpenShellSecretBindings.SingleAsync()).Classification);
+        Assert.Equal(launch.IdentityEpoch, (await db.OpenShellIdentitySessions.SingleAsync()).IdentityEpoch);
+        Assert.Single(await db.OpenShellRequestNonces.ToListAsync());
         await store.RetireAsync(launch.Id, now);
         db.ChangeTracker.Clear();
         // Only synthetic persistence cleanup, not a runtime stop/delete acceptance claim.
+        await db.OpenShellRequestNonces.ExecuteDeleteAsync();
+        await db.OpenShellIdentitySessions.ExecuteDeleteAsync();
+        await db.OpenShellSecretBindings.ExecuteDeleteAsync();
         await db.OpenShellLeases.ExecuteDeleteAsync();
         await db.OpenShellLaunches.ExecuteDeleteAsync();
         await db.Agents.ExecuteDeleteAsync();
@@ -75,8 +100,55 @@ public sealed class OpenShellExecutionMigrationTests : IAsyncLifetime
         Assert.Empty(await db.OpenShellLaunches.ToListAsync());
         Assert.Empty(await db.OpenShellLeases.ToListAsync());
         Assert.Empty(await db.OpenShellRetiredIds.ToListAsync());
+        Assert.Empty(await db.OpenShellSecretBindings.ToListAsync());
+        Assert.Empty(await db.OpenShellIdentitySessions.ToListAsync());
+        Assert.Empty(await db.OpenShellRequestNonces.ToListAsync());
         Assert.Empty(await db.Agents.ToListAsync());
         Assert.Empty(await db.Database.GetPendingMigrationsAsync());
+    }
+
+    [Fact]
+    public async Task DuplicateLease1062_DetachesFailedReservation_BeforeContextReuse()
+    {
+        await using (var setup = Context())
+        {
+            await setup.Database.MigrateAsync();
+            setup.Agents.Add(new() { Name = "agent1", DisplayName = "Agent 1", Role = "test", Model = "test", ContainerName = "test" });
+            await setup.SaveChangesAsync();
+        }
+        var collision = new InsertConflictingLease();
+        await using var db = new OrchestratorDbContext(new DbContextOptionsBuilder<OrchestratorDbContext>()
+            .UseMySql(_connection, new MySqlServerVersion(new Version(8, 0, 0))).AddInterceptors(collision).Options);
+        var agent = await db.Agents.SingleAsync();
+        await Assert.ThrowsAsync<OpenShellStateConflictException>(() => new OpenShellLaunchStore(db)
+            .ReserveAsync(agent.Id, null, DateTime.UtcNow, TimeSpan.FromSeconds(30)));
+        Assert.Empty(db.ChangeTracker.Entries<OpenShellLaunch>());
+        Assert.Empty(db.ChangeTracker.Entries<OpenShellLease>());
+        agent.DisplayName = "Updated";
+        await db.SaveChangesAsync();
+        Assert.Empty(await db.OpenShellLaunches.AsNoTracking().ToListAsync());
+        Assert.Empty(await db.OpenShellLeases.AsNoTracking().ToListAsync());
+    }
+
+    private sealed class InsertConflictingLease : SaveChangesInterceptor
+    {
+        private bool _inserted;
+        public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData,
+            InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            var db = eventData.Context!;
+            var lease = db.ChangeTracker.Entries<OpenShellLease>().SingleOrDefault(x => x.State == EntityState.Added);
+            if (!_inserted && lease is not null)
+            {
+                _inserted = true;
+                // Force a real MySQL 1062 during the actual store SaveChanges, in its owned
+                // transaction. This inserted collision must roll back with the failed reserve.
+                var owner = Guid.NewGuid();
+                var expires = DateTime.UtcNow.AddSeconds(30);
+                await db.Database.ExecuteSqlInterpolatedAsync($"INSERT INTO agent_open_shell_leases (AgentId, Owner, ExpiresAt) VALUES ({lease.Entity.AgentId}, {owner}, {expires})", cancellationToken);
+            }
+            return result;
+        }
     }
 
     private OrchestratorDbContext Context() => new(new DbContextOptionsBuilder<OrchestratorDbContext>()

@@ -39,17 +39,27 @@ public sealed class OpenShellLaunchStore(OrchestratorDbContext db, TimeProvider?
             ExpectedOldRuntimeId = expectedOldRuntimeId, IdentityEpoch = Guid.NewGuid(), CreatedAt = now,
         };
         if (lease is null)
-            db.OpenShellLeases.Add(new() { AgentId = agentId, Owner = launch.Id, ExpiresAt = now + duration });
+        {
+            lease = new() { AgentId = agentId, Owner = launch.Id, ExpiresAt = now + duration };
+            db.OpenShellLeases.Add(lease);
+        }
         else { lease.Owner = launch.Id; lease.ExpiresAt = now + duration; }
         db.OpenShellLaunches.Add(launch);
-        try { await db.SaveChangesAsync(ct); }
-        catch (DbUpdateException ex) when (ex.InnerException is MySqlException { Number: 1062 })
+        try
         {
-            // The unique active-agent/lease slot is the final concurrent first-reserve guard.
-            // Roll back on disposal; never retry the mutation or expose a generic server error.
-            throw new OpenShellStateConflictException("The lifecycle slot was reserved concurrently; reconcile before retrying.");
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
         }
-        await tx.CommitAsync(ct);
+        catch (Exception ex)
+        {
+            // A failed/ambiguous transaction must not leave writes queued for a later SaveChanges.
+            // Detach only this reservation's entities; never clear unrelated tracked work.
+            db.Entry(launch).State = EntityState.Detached;
+            db.Entry(lease).State = EntityState.Detached;
+            if (ex is DbUpdateException { InnerException: MySqlException { Number: 1062 } })
+                throw new OpenShellStateConflictException("The lifecycle slot was reserved concurrently; reconcile before retrying.");
+            throw;
+        }
         return launch;
     }
 
@@ -185,6 +195,9 @@ public sealed class OpenShellLaunchStore(OrchestratorDbContext db, TimeProvider?
             || evidence.ObservedAt.Kind != DateTimeKind.Utc || evidence.ObservedAt > completedAt
             || completedAt - evidence.ObservedAt > TimeSpan.FromSeconds(5)
             || !evidence.Stopped || (cleanup && !evidence.Absent)
+            // No bound receipt does not prove create never happened. Require a complete,
+            // authenticated inventory by launch/epoch, including ambiguous create results.
+            || (cleanup && runtimeId is null && (!evidence.LaunchInventoryComplete || evidence.OwnedSandboxCount != 0))
             || evidence.Consumers != 0 || evidence.Pollers != 0)
             throw new OpenShellStateConflictException("Current exact-runtime stop/absence and drained intake evidence is required.");
     }

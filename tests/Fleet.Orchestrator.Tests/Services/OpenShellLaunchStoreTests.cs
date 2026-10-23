@@ -2,6 +2,7 @@ using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 
 namespace Fleet.Orchestrator.Tests.Services;
 
@@ -139,6 +140,55 @@ public sealed class OpenShellLaunchStoreTests : IAsyncLifetime
     }
 
     [Fact]
+    public void Model_ContainsCompleteSliceOneStorage_WithoutIssuingIdentity()
+    {
+        var launch = _db.Model.FindEntityType(typeof(OpenShellLaunch))!;
+        foreach (var name in new[] { "Workspace", "PolicyHash", "ImageHash", "DestinationHash", "ControlUrl",
+                     "CapabilitySecretRef", "Error", "UpdatedAt", "BotPollerLeaseOwner", "BotPollerLeaseExpiresAt", "TelegramOffset" })
+            Assert.NotNull(launch.FindProperty(name));
+        foreach (var name in new[] { "OpenShellSecretBinding", "OpenShellIdentitySession", "OpenShellRequestNonce" })
+            Assert.Contains(_db.Model.GetEntityTypes(), x => x.ClrType.Name == name);
+    }
+
+    [Fact]
+    public async Task Metadata_RoundTripsAndSessionRouteAndNonceKeysAreUnique()
+    {
+        var launch = await Reserve();
+        launch.Workspace = "/workspace/agent1";
+        launch.PolicyHash = new string('a', 64);
+        launch.ImageHash = new string('b', 64);
+        launch.DestinationHash = new string('c', 64);
+        launch.ControlUrl = "https://control.example.invalid";
+        launch.CapabilitySecretRef = "capability-ref1";
+        launch.UpdatedAt = _now;
+        launch.Error = "compatibility_blocked";
+        launch.BotPollerLeaseOwner = launch.Id;
+        launch.BotPollerLeaseExpiresAt = _now.AddSeconds(30);
+        launch.TelegramOffset = 17;
+        _db.OpenShellSecretBindings.Add(new() { AgentId = _agent, Reference = "native-auth:codex", SourceKind = "native_auth" });
+        _db.OpenShellIdentitySessions.Add(new() { SessionHash = new string('d', 64), Service = "memory", Route = "/mcp",
+            AgentId = _agent, LaunchId = launch.Id, IdentityEpoch = launch.IdentityEpoch, ExpiresAt = _now.AddMinutes(1) });
+        _db.OpenShellRequestNonces.Add(new() { Jti = "nonce1", LaunchId = launch.Id, ExpiresAt = _now.AddSeconds(30) });
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+        var saved = await _db.OpenShellLaunches.SingleAsync();
+        Assert.Equal("/workspace/agent1", saved.Workspace);
+        Assert.Equal(new string('a', 64), saved.PolicyHash);
+        Assert.Equal(17, saved.TelegramOffset);
+        Assert.Equal(launch.Id, saved.BotPollerLeaseOwner);
+        Assert.Equal("unclassified", (await _db.OpenShellSecretBindings.SingleAsync()).Classification);
+        Assert.Equal(launch.IdentityEpoch, (await _db.OpenShellIdentitySessions.SingleAsync()).IdentityEpoch);
+        Assert.Single(await _db.OpenShellRequestNonces.ToListAsync());
+        _db.ChangeTracker.Clear();
+        _db.OpenShellRequestNonces.Add(new() { Jti = "nonce1", LaunchId = launch.Id, ExpiresAt = _now.AddMinutes(1) });
+        await Assert.ThrowsAsync<DbUpdateException>(() => _db.SaveChangesAsync());
+        _db.ChangeTracker.Clear();
+        _db.OpenShellIdentitySessions.Add(new() { SessionHash = new string('d', 64), Service = "memory", Route = "/mcp",
+            AgentId = _agent, LaunchId = launch.Id, IdentityEpoch = launch.IdentityEpoch, ExpiresAt = _now.AddMinutes(1) });
+        await Assert.ThrowsAsync<DbUpdateException>(() => _db.SaveChangesAsync());
+    }
+
+    [Fact]
     public async Task TrackedMappingMutation_RefusesAtWriteBoundary()
     {
         var launch = await Reserve();
@@ -257,6 +307,68 @@ public sealed class OpenShellLaunchStoreTests : IAsyncLifetime
         Assert.Single(await _db.OpenShellLeases.ToListAsync());
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FailedReserve_DetachesOnlyItsWrites_AndContextCanBeReused(bool existingLease)
+    {
+        var originalOwner = Guid.NewGuid();
+        if (existingLease)
+        {
+            _db.OpenShellLeases.Add(new() { AgentId = _agent, Owner = originalOwner, ExpiresAt = _now.AddSeconds(-1) });
+            await _db.SaveChangesAsync();
+        }
+        var failure = new FailReservationSave();
+        await using var context = new OrchestratorDbContext(new DbContextOptionsBuilder<OrchestratorDbContext>()
+            .UseSqlite(_connection).AddInterceptors(failure).Options);
+        var agent = await context.Agents.SingleAsync();
+        agent.DisplayName = "Updated";
+        await Assert.ThrowsAsync<DbUpdateException>(() => new OpenShellLaunchStore(context)
+            .ReserveAsync(_agent, null, _now, TimeSpan.FromSeconds(30)));
+        Assert.DoesNotContain(context.ChangeTracker.Entries<OpenShellLaunch>(), x => x.State != EntityState.Detached);
+        Assert.DoesNotContain(context.ChangeTracker.Entries<OpenShellLease>(),
+            x => x.State is EntityState.Added or EntityState.Modified);
+        failure.Enabled = false;
+        Assert.Equal(EntityState.Modified, context.Entry(agent).State);
+        await context.SaveChangesAsync();
+        Assert.Empty(await context.OpenShellLaunches.AsNoTracking().ToListAsync());
+        var savedLease = await context.OpenShellLeases.AsNoTracking().SingleOrDefaultAsync();
+        if (existingLease) Assert.Equal(originalOwner, savedLease!.Owner);
+        else Assert.Null(savedLease);
+        Assert.Equal("Updated", (await context.Agents.AsNoTracking().SingleAsync()).DisplayName);
+    }
+
+    [Fact]
+    public async Task UnboundCleanup_RequiresCompleteEmptyLaunchOwnedInventory()
+    {
+        var launch = await Reserve();
+        await _store.RetireAsync(launch.Id, _now);
+        foreach (var reader in new[] {
+            new EvidenceReader(_now, inventoryComplete: false),
+            new EvidenceReader(_now, ownedSandboxes: 1),
+            new EvidenceReader(_now, ownedSandboxes: -1) })
+        {
+            await Assert.ThrowsAsync<OpenShellStateConflictException>(() =>
+                _store.CompleteCleanupAsync(launch.Id, _now, reader));
+            Assert.Equal(_agent, (await _db.OpenShellLaunches.AsNoTracking().SingleAsync()).ActiveAgentId);
+            Assert.Single(await _db.OpenShellLeases.AsNoTracking().ToListAsync());
+        }
+        await _store.CompleteCleanupAsync(launch.Id, _now, new EvidenceReader(_now));
+        Assert.Null((await _db.OpenShellLaunches.AsNoTracking().SingleAsync()).ActiveAgentId);
+        Assert.Empty(await _db.OpenShellLeases.AsNoTracking().ToListAsync());
+    }
+
+    private sealed class FailReservationSave : SaveChangesInterceptor
+    {
+        public bool Enabled { get; set; } = true;
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData,
+            InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (Enabled) throw new DbUpdateException("Synthetic write failure");
+            return ValueTask.FromResult(result);
+        }
+    }
+
     private sealed class ForeignEpochReader(DateTime now) : IOpenShellRuntimeEvidenceReader
     {
         public Task<OpenShellRuntimeEvidence> ReadAsync(OpenShellRuntimeTarget target, CancellationToken ct) =>
@@ -277,11 +389,11 @@ public sealed class OpenShellLaunchStoreTests : IAsyncLifetime
     }
 
     private sealed class EvidenceReader(DateTime now, bool drained = true,
-        bool absent = true) : IOpenShellRuntimeEvidenceReader
+        bool absent = true, bool inventoryComplete = true, int ownedSandboxes = 0) : IOpenShellRuntimeEvidenceReader
     {
         public Task<OpenShellRuntimeEvidence> ReadAsync(OpenShellRuntimeTarget target, CancellationToken ct) =>
             Task.FromResult(new OpenShellRuntimeEvidence(target.LaunchId, target.IdentityEpoch,
                 target.GatewayId, target.RuntimeId,
-                true, absent, drained ? 0 : 1, 0, now));
+                true, absent, drained ? 0 : 1, 0, now, inventoryComplete, ownedSandboxes));
     }
 }

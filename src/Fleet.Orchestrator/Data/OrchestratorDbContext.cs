@@ -49,6 +49,9 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
     public DbSet<EpicGrantDecision> EpicGrantDecisions => Set<EpicGrantDecision>();
 
     public DbSet<OpenShellLaunch> OpenShellLaunches => Set<OpenShellLaunch>();
+    public DbSet<OpenShellSecretBinding> OpenShellSecretBindings => Set<OpenShellSecretBinding>();
+    public DbSet<OpenShellIdentitySession> OpenShellIdentitySessions => Set<OpenShellIdentitySession>();
+    public DbSet<OpenShellRequestNonce> OpenShellRequestNonces => Set<OpenShellRequestNonce>();
     public DbSet<OpenShellLease> OpenShellLeases => Set<OpenShellLease>();
     public DbSet<OpenShellRetiredId> OpenShellRetiredIds => Set<OpenShellRetiredId>();
 

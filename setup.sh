@@ -69,6 +69,7 @@ unset FLEET_BASE_DIR FLEET_CTO_AGENT FLEET_GROUP_CHAT_ID FLEET_PRIMARY_HUMAN_USE
       FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS
 
 # The recorded host .env, not an exported shell override, owns receiver configuration.
+unset FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS
 unset FLEET_MEMORY_IDENTITY_ENABLED \
       FLEET_MEMORY_IDENTITY_VERIFIED_PORT \
       FLEET_MEMORY_IDENTITY_PROTECTED_AGENTS \
@@ -715,6 +716,11 @@ if ! $DRY_RUN; then
 fi
 
 # OpenShell receiver defaults: preserve every recorded value and keep the new path held off.
+# Exact infrastructure mutation allowlist stays empty unless the operator records IDs.
+if ! grep -q "^FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS=" "$ENV_FILE" 2>/dev/null; then
+    write_env_var "$ENV_FILE" "FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS" ""
+fi
+
 for _identity_default in FLEET_MEMORY_IDENTITY_ENABLED=false \
     FLEET_MEMORY_IDENTITY_VERIFIED_PORT=3101 \
     FLEET_MEMORY_IDENTITY_PROTECTED_AGENTS= \

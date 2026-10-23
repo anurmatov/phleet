@@ -5,22 +5,14 @@ using ModelContextProtocol.Server;
 namespace Fleet.Orchestrator.Tools;
 
 [McpServerToolType]
-public sealed class StartAgentTool(AgentRegistry registry, DockerService docker)
+public sealed class StartAgentTool(IAgentRuntimeLifecycle lifecycle)
 {
     [McpServerTool(Name = "start_agent")]
-    [Description("Start a fleet agent's Docker container. Use this to bring back a stopped agent.")]
+    [Description("Start an agent through its authoritative runtime lifecycle; blocked or unknown state never falls back to Docker.")]
     public async Task<string> StartAgentAsync(
-        [Description("Agent name (e.g. my-agent)")] string name)
+        [Description("Agent name (e.g. agent1)")] string name)
     {
-        var agent = registry.Get(name);
-        if (agent is null)
-            return $"Agent '{name}' not found in registry. Use list_agents to see registered agents.";
-
-        var containerName = agent.ContainerName ?? name;
-        var ok = await docker.StartContainerAsync(containerName);
-
-        return ok
-            ? $"Container '{containerName}' started successfully. Wait for the next heartbeat to confirm the agent is online."
-            : $"Failed to start container '{containerName}'. Docker socket may be unavailable — check orchestrator logs.";
+        var result = await lifecycle.StartAsync(name);
+        return result.Success ? result.Message : $"{result.StatusCode}: {result.Message}";
     }
 }

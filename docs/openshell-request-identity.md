@@ -117,6 +117,6 @@ Run `python3 tests/openshell/config-test.py` for actual setup-block tests on own
 temporary files, not a setup or Docker run. Run the migration suite from
 [openshell.md](openshell.md) on a separately approved MySQL target to exercise
 VerifiedLaunchReader against the actual migration in current/revoked/wrong-epoch/
-missing-nonce states; those four new cases are authored and locally UNRUN here.
+missing-nonce states; all four passed prior-head real-MySQL CI at `3500fcd5` (53/53 total), remain locally UNRUN, and are not new-head or restore acceptance.
 Neither migration/query fixtures nor TestServer prove backup/restore or the
 actual daemon→CLI→shell→memory/Rabbit callback and rollback path.

@@ -17,6 +17,32 @@ public sealed class ContainerProvisioningService(
     JournalTokenService journalTokens,
     ILogger<ContainerProvisioningService> logger)
 {
+    // Compatibility facade. Resolution is deferred to avoid constructor recursion with the
+    // adapter's legacy implementation; all callers still enter the same registered boundary.
+    private IAgentRuntimeLifecycle Lifecycle
+    {
+        get
+        {
+            using var scope = scopeFactory.CreateScope();
+            return scope.ServiceProvider.GetRequiredService<IAgentRuntimeLifecycle>();
+        }
+    }
+
+    public Task<ProvisionPreview> PreviewAsync(string agentName, CancellationToken ct = default) =>
+        Lifecycle.PreviewAsync(agentName, ct);
+    public Task<ProvisionResult> ProvisionAsync(string agentName, string? imageOverride = null,
+        IReadOnlyDictionary<string, int>? instructionVersionOverrides = null, CancellationToken ct = default) =>
+        Lifecycle.ProvisionAsync(agentName, imageOverride, instructionVersionOverrides, ct);
+    public Task<ProvisionResult> ReprovisionAsync(string agentName, string? imageOverride = null,
+        IReadOnlyDictionary<string, int>? instructionVersionOverrides = null, CancellationToken ct = default) =>
+        DescribePrimaryHumanFault() is { } fault
+            ? Task.FromResult(ProvisionResult.Fail(agentName, fault))
+            : Lifecycle.ReprovisionAsync(agentName, imageOverride, instructionVersionOverrides, ct);
+    public Task<ProvisionResult> DeprovisionAsync(string agentName, CancellationToken ct = default) =>
+        Lifecycle.DeprovisionAsync(agentName, ct);
+    public Task<IReadOnlyList<ProvisionResult>> ReprovisionRunningAsync(string? imageOverride = null,
+        CancellationToken ct = default) => Lifecycle.ReprovisionRunningAsync(imageOverride, ct);
+
     private const string DefaultAgentImage = "fleet:agent";
     internal const string JournalMcpServerName = "fleet-comms-journal";
     internal const string JournalFilesServerName = "fleet-journal-files";
@@ -50,7 +76,7 @@ public sealed class ContainerProvisioningService(
     // fleet-net is declared with an explicit name so it keeps its name (not prefixed by Docker Compose).
     private const string FleetNetwork = "fleet-net";
 
-    public async Task<ProvisionPreview> PreviewAsync(string agentName, CancellationToken ct = default)
+    internal async Task<ProvisionPreview> LegacyPreviewAsync(string agentName, CancellationToken ct = default)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
@@ -365,7 +391,7 @@ public sealed class ContainerProvisioningService(
     /// Creates and starts a container from DB config.
     /// Fails if a container with that name already exists.
     /// </summary>
-    public async Task<ProvisionResult> ProvisionAsync(
+    internal async Task<ProvisionResult> LegacyProvisionAsync(
         string agentName,
         string? imageOverride = null,
         IReadOnlyDictionary<string, int>? instructionVersionOverrides = null,
@@ -498,7 +524,7 @@ public sealed class ContainerProvisioningService(
         }
 
         // Start the container
-        var started = await docker.StartContainerAsync(agent.ContainerName);
+        var started = await docker.StartLegacyAgentContainerAsync(agent.ContainerName);
         if (!started)
             return ProvisionResult.Fail(agentName,
                 $"container created (id={containerId[..12]}) but failed to start — check Docker logs");
@@ -512,7 +538,7 @@ public sealed class ContainerProvisioningService(
     /// Stops and removes the container for the given agent.
     /// Fails if the container is not found.
     /// </summary>
-    public async Task<ProvisionResult> DeprovisionAsync(string agentName, CancellationToken ct = default)
+    internal async Task<ProvisionResult> LegacyDeprovisionAsync(string agentName, CancellationToken ct = default)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
@@ -524,31 +550,30 @@ public sealed class ContainerProvisioningService(
         if (agent is null)
             return ProvisionResult.Fail(agentName, "agent not found in DB");
 
-        var existing = await docker.InspectContainerAsync(agent.ContainerName, ct);
-        if (existing is null)
-            return ProvisionResult.Fail(agentName,
-                $"container '{agent.ContainerName}' not found — nothing to deprovision");
+        var observed = await docker.ReadLegacyContainerAsync(agent.ContainerName, ct);
+        if (observed is null)
+            return ProvisionResult.Fail(agentName, "runtime absence is unverified", 503);
+        if (observed.Absent)
+            return ProvisionResult.Ok(agentName, "legacy container confirmed absent");
 
-        logger.LogInformation("Deprovisioning '{Agent}' (container='{Container}')", agentName, agent.ContainerName);
-
-        // Stop first (graceful), then remove with force
-        var stopped = await docker.StopContainerAsync(agent.ContainerName);
-        if (!stopped)
-            logger.LogWarning("Stop returned false for '{Container}' — will still attempt remove", agent.ContainerName);
-
-        var removed = await docker.RemoveContainerAsync(agent.ContainerName, ct);
-        if (!removed)
-            return ProvisionResult.Fail(agentName,
-                $"failed to remove container '{agent.ContainerName}' — check orchestrator logs");
-
-        return ProvisionResult.Ok(agentName, $"container '{agent.ContainerName}' stopped and removed");
+        // Pin deletion to the immutable inspected ID, not a replaceable name. Unknown stop/delete
+        // outcomes preserve DB/ACL/recovery state. A successful DELETE alone is not absence proof.
+        var id = observed.Id!;
+        if (!await docker.StopLegacyAgentContainerAsync(id))
+            return ProvisionResult.Fail(agentName, "legacy stop is unverified", 503);
+        if (!await docker.RemoveContainerAsync(id, ct))
+            return ProvisionResult.Fail(agentName, "legacy removal is unverified", 503);
+        var after = await docker.ReadLegacyContainerAsync(id, ct);
+        if (after is not { Absent: true })
+            return ProvisionResult.Fail(agentName, "runtime absence is unverified after removal", 503);
+        return ProvisionResult.Ok(agentName, "legacy container confirmed removed");
     }
 
     /// <summary>
     /// Deprovisions then re-provisions the container. Used when config has changed.
     /// An optional imageOverride overrides the DB-configured image (used by CI for PR-specific images).
     /// </summary>
-    public async Task<ProvisionResult> ReprovisionAsync(
+    internal async Task<ProvisionResult> LegacyReprovisionAsync(
         string agentName,
         string? imageOverride = null,
         IReadOnlyDictionary<string, int>? instructionVersionOverrides = null,
@@ -570,7 +595,7 @@ public sealed class ContainerProvisioningService(
         if (await DescribeCodexServerUrlFaultAsync(agentName, ct) is { } serverUrlFault)
             return ProvisionResult.Fail(agentName, serverUrlFault);
 
-        var deprovision = await DeprovisionAsync(agentName, ct);
+        var deprovision = await LegacyDeprovisionAsync(agentName, ct);
         if (!deprovision.Success)
         {
             // If the container simply doesn't exist, skip deprovision and go straight to provision.
@@ -587,7 +612,7 @@ public sealed class ContainerProvisioningService(
             }
         }
 
-        var provision = await ProvisionAsync(agentName, imageOverride, instructionVersionOverrides, ct);
+        var provision = await LegacyProvisionAsync(agentName, imageOverride, instructionVersionOverrides, ct);
         if (!provision.Success)
             return ProvisionResult.Fail(agentName,
                 $"deprovision succeeded but provision failed: {provision.Message}");
@@ -601,7 +626,7 @@ public sealed class ContainerProvisioningService(
     /// An optional imageOverride is applied to every agent (e.g. for bulk image upgrades).
     /// Returns per-agent results.
     /// </summary>
-    public async Task<IReadOnlyList<ProvisionResult>> ReprovisionRunningAsync(
+    internal async Task<IReadOnlyList<ProvisionResult>> LegacyReprovisionRunningAsync(
         string? imageOverride = null,
         CancellationToken ct = default)
     {
@@ -1800,8 +1825,9 @@ public record NetworkEnsureResult(
 
 public record ProvisionResult(string AgentName, bool Success, string Message)
 {
+    public int StatusCode { get; init; } = 200;
     public static ProvisionResult Ok(string agentName, string message)   => new(agentName, true,  message);
-    public static ProvisionResult Fail(string agentName, string message) => new(agentName, false, message);
+    public static ProvisionResult Fail(string agentName, string message, int statusCode = 500) => new(agentName, false, message) { StatusCode = statusCode };
 }
 
 internal sealed record JournalProvisioning(

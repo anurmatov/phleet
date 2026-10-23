@@ -8,6 +8,8 @@ example = (root / '.env.example').read_text()
 compose = (root / 'docker-compose.example.yml').read_text()
 keys = dict(re.findall(r'^(FLEET_MEMORY_IDENTITY_[A-Z_]+)=(.*)$', example, re.M))
 assert len(keys) == 12
+assert 'FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS=' in block
+assert 'Docker__InfrastructureContainerIds=${FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS:-}' in compose
 for key, value in keys.items():
     assert '${' + key + ':-' + value + '}' in compose, key
     assert key + '=' + value in block, key
@@ -24,6 +26,7 @@ with tempfile.TemporaryDirectory(prefix='identity-config-') as temp:
     assert all(actual[key] == value for key, value in keys.items())
     assert (base / 'identity/memory').stat().st_mode & 0o777 == 0o700
     env.write_text(env.read_text().replace('FLEET_MEMORY_IDENTITY_ENABLED=false', 'FLEET_MEMORY_IDENTITY_ENABLED=true'))
+    env.write_text(env.read_text().replace('FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS=', 'FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS=synthetic-id'))
     before = env.read_bytes()
     subprocess.run(['bash', '-c', script], env=environment, check=True, capture_output=True)
     assert env.read_bytes() == before
@@ -31,4 +34,4 @@ with tempfile.TemporaryDirectory(prefix='identity-config-') as temp:
     environment['DRY_RUN'] = 'true'
     subprocess.run(['bash', '-c', script], env=environment, check=True, capture_output=True)
     assert env.read_text() == 'KEEP=synthetic\n'
-print('PASS: 12 config-key mappings, fresh defaults, preserved values, dry-run and directory mode')
+print('PASS: 12 identity mappings plus infrastructure allowlist, fresh defaults, preserved values, dry-run and directory mode')

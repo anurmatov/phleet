@@ -32,3 +32,15 @@ Application rollback retains the additive schema and retirement records; do not
 run destructive migration Down or restore a retired sandbox ID to get unstuck.
 See [the implementation boundary](../openshell.md) and
 [the operator runbook](../runbooks/openshell.md).
+
+This revision also centralizes lifecycle callers and closes raw agent restart
+bypasses: `FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS` maps to
+`Docker:InfrastructureContainerIds` and defaults empty in setup/example/compose/
+appsettings, so infrastructure mutations are denied until an operator separately
+records exact full immutable IDs; existing recorded lists are preserved.
+Agent aliases and OpenShell driver labels cannot be allowlisted around the guard.
+Legacy never-launched pending agents retain their existing provider/model/auth
+provisioning path; migrated/unknown or previously launched agents remain blocked
+until the OpenShell backend and current-supervisor admission are implemented.
+Delete failures now retain agent/ACL/registry state rather than report deletion
+when the runtime's absence is unknown.

@@ -308,6 +308,7 @@ services:
     ports:
       - "3300:3300"
     environment:
+      - Docker__InfrastructureContainerIds=${FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS:-}
       - RabbitMq__Host=rabbitmq
       - RabbitMq__Exchange=fleet.group
       - Bridge__TimeoutSeconds=300

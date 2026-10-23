@@ -9,7 +9,7 @@ namespace Fleet.Orchestrator.Tools;
 
 [McpServerToolType]
 public sealed class RestartAgentWithVersionTool(
-    ContainerProvisioningService provisioning,
+    IAgentRuntimeLifecycle provisioning,
     IServiceScopeFactory scopeFactory)
 {
     [McpServerTool(Name = "restart_agent_with_version")]
@@ -23,6 +23,8 @@ public sealed class RestartAgentWithVersionTool(
         [Description("Version number to use")] int version_number,
         [Description("If true, pins the version in DB so future reprovisioning also uses it. Default: false (temporary override only).")] bool pin = false)
     {
+        var admission = await provisioning.ValidateAsync(agent_name);
+        if (!admission.Success) return $"{admission.StatusCode}: {admission.Message}";
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
 

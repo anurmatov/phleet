@@ -25,7 +25,7 @@ public static class AgentCreateEndpoints
     public static WebApplication MapAgentCreateEndpoints(this WebApplication app)
     {
 // REST: create a new agent (insert into DB + provision container)
-app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scopeFactory, ContainerProvisioningService provisioning, AgentRegistry registry, SetupService setupService, ConfigService configService, TemporalClientRegistry temporal, ILogger<Program> logger) =>
+app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scopeFactory, IAgentRuntimeLifecycle provisioning, AgentRegistry registry, SetupService setupService, ConfigService configService, TemporalClientRegistry temporal, ILogger<Program> logger) =>
 {
     using var scope = scopeFactory.CreateScope();
     var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();

@@ -57,6 +57,7 @@ public sealed class AgentCreateEndpointsTests : IAsyncLifetime
             NullLogger<DockerService>.Instance, new HttpClient(new RefusingDockerApi()) { BaseAddress = new Uri("http://localhost") }));
         builder.Services.AddSingleton(new JournalTokenService(config));
         builder.Services.AddSingleton<ContainerProvisioningService>();
+        builder.Services.AddSingleton<IAgentRuntimeLifecycle, AgentRuntimeLifecycle>();
         builder.Services.AddSingleton(new AgentRegistry(null!, NullLogger<AgentRegistry>.Instance));
         builder.Services.AddSingleton(sp => new SetupService(
             config, null!, null!, sp.GetRequiredService<IServiceScopeFactory>(),

@@ -9,11 +9,14 @@ Existing runtime/auth/provider/model selection is not changed by desired metadat
 
 | Component | Boundary |
 |---|---|
+| Shared lifecycle dispatch | REST/MCP start/stop/restart/version/create/delete/provision/preview/reprovision/bulk and compatibility facades use `IAgentRuntimeLifecycle`; only never-launched pending agents may retain legacy execution |
+| Legacy bypass guard | Any launch history, migrated/unknown metadata or failed ownership lookup rejects before legacy runtime/config access; infrastructure operations need host-listed full immutable IDs and reject agent aliases and pinned OpenShell driver labels |
+| Delete | DB/ACL/registry deletion requires confirmed deprovision, including exact-ID absence after removal; read errors do not mean absent |
 | Additive EF migration | Desired shell/policy/pending metadata, full launch fields, leases, bindings, sessions, nonces and independent retired-ID table; generated designer and snapshot |
 | Launch store | Serialized intent, one active slot, exact-owner non-revivable lease, authoritative reloads, phase-ordered sandbox binding and revocation records; no driver or gateway calls |
 | Retire | Revokes before cleanup, retains active slot and cleanup-pending; never claims stopped, deleted, or safe to resume |
 | Operator guard | Existing `Orchestrator:AuthToken`, startup-only; blank 503, invalid/duplicate/malformed 401; all lifecycle/new policy route shapes and verbs before legacy exemptions/body/backend |
-| Verified memory receiver source | Optional held-off HTTPS/mTLS listener, pinned ES256 request proof, authoritative mapping/consumed-nonce read, bounded local sessions, fresh HttpContext ACL and all six tools; actual TLS/DB/ingress integration UNRUN |
+| Verified memory receiver source | Optional held-off HTTPS/mTLS listener, pinned ES256 request proof, authoritative mapping/consumed-nonce read, bounded local sessions, fresh HttpContext ACL and all six tools; actual TLS/ingress/agent integration UNRUN; SQL reader cases passed prior-head CI |
 | Request ACL acquisition | Actual AclCacheService one-fetch immutable snapshot API, five-second deadline, malformed/operator/error rejection and synchronous pending-generation invalidation |
 | Tests | Actual relational EF store on isolated SQLite, actual operator middleware over TestServer and actual ACL service through an isolated HTTP handler; none is daemon acceptance |
 
@@ -60,13 +63,14 @@ routes, including their GET/HEAD/OPTIONS shapes. Existing ConfigToken and caller
 query/header attribution are not operator authority.
 No installer enables OpenShell, starts services, changes running/stopped sets or
 imports credentials. Default operator host `.env` sources and optional 1Password
-are unchanged. No gateway, identity listener or migration API is available in this
-partial implementation, so no OpenShell workload can be admitted through it.
+are unchanged. The receiver listener is held off by default and no outside gateway/issuer or
+migration API is available, so no OpenShell workload can be admitted through it.
 
 ## Remaining slice-1 implementation (not merely untested)
 
-The shared lifecycle adapter and all REST/MCP/facade/Docker bypass callers,
-static endpoint/policy compiler, pinned gateway protobuf client, post-create
+Shared dispatch and caller wiring now exist, but the OpenShell lifecycle backend is
+still unimplemented and returns 422 compatibility_blocked without a legacy fallback.
+Static endpoint/policy compiler, pinned gateway protobuf client, post-create
 current-supervisor readiness, bootstrap/activation gate and nonroot image/home
 changes are **not implemented** here.
 Outside supervisor identity hook/issuer/ingress, durable issuer session/replay
@@ -100,7 +104,16 @@ After separately approving a disposable MySQL target, supply
 The MySQL fixtures create/drop only their unique synthetic database; no existing
 database is a test target. Missing prerequisite returns BLOCKED (3), never PASS.
 
-CI evidence for the previous head `4d0fa6a243fa7c2383d8996fe37d8cac3029dad6`:
+CI evidence for the previous head `3500fcd506a4f67ef98ed7f218ae31bddc00d1cf`:
+[MySQL migration job](https://github.com/anurmatov/phleet/actions/runs/40015656609/job/120626933022)
+passed 53/53, including all four production VerifiedLaunchReader current/revoked/
+wrong-epoch/missing-nonce cases against the actual migrated schema.
+The [overall test job](https://github.com/anurmatov/phleet/actions/runs/40015656609/job/120626932554)
+failed `JournalAttachmentContentTests.DigestMismatchAbortsAndNeverCompletesBytes`
+in unchanged Comms code; overall green CI is not claimed.
+These results are not this new revision's CI, backup/restore or runtime acceptance.
+
+Earlier CI evidence for head `4d0fa6a243fa7c2383d8996fe37d8cac3029dad6`:
 [Orchestrator migrations (MySQL), run 40007094718](https://github.com/anurmatov/phleet/actions/runs/40007094718/job/120597653708)
 passed 49/49 tests with zero skipped, including the real-1062 context-reuse regression.
 The [Build and Test job](https://github.com/anurmatov/phleet/actions/runs/40007094718/job/120597653961)
@@ -125,8 +138,9 @@ The same unmerged `20261023180657_AddOpenShellExecution` migration now includes:
 
 Nullable launch fields allow prepared intent without fabricated compiler/readiness
 receipts. Tables alone do not authorize sessions, prevent twin pollers or supply a
-verified listener. No issuer/listener is registered and no request uses these rows
-as authority. Tests cover storage, key uniqueness and failed-save detachment only.
+verified listener. No outside issuer is registered; the held-off memory listener reads current launch
+and consumed nonce rows, but cannot mint them or activate a launch.
+Tests cover storage, key uniqueness, failed-save detachment and receiver reads.
 The MySQL suite now also injects an actual duplicate lease during store SaveChanges
 to exercise 1062 and reused-context cleanup; it passed prior-head MySQL CI above,
 but is still UNRUN locally and does not prove backup/restore.
@@ -136,9 +150,9 @@ restore/query and full-runtime acceptance are still required, not inherited from
 This draft migration has not been released. Disposable databases that applied an
 older draft need a fresh database for qualification, not a misleading no-op reapply
 of the same migration ID. No production migration or destructive reset is authorized.
-The remaining lifecycle caller/delete path must retain rows until verified cleanup
-and map pending/conflict explicitly; restrict FKs are not that endpoint handling.
-Do not populate launch rows in an actual installation while caller migration is missing.
+The shared delete endpoint retains rows on blocked/unverified cleanup; restrict FKs
+are not its absence proof, and no OpenShell cleanup backend is available.
+Do not populate launch rows in an actual installation while the backend is missing.
 
 ## Authoritative ACL dependency added, verified memory path still closed
 
@@ -175,10 +189,45 @@ is the fixed SHA256-of-zero-bytes digest shared by the receiver and signer vecto
 The real TestServer MapMcp initialize/session/memory_get test now checks allowed
 content then revoked access using fresh request ACL while the old cache is warm.
 Four real-MySQL reader cases use the actual migration for current, revoked,
-wrong-epoch and missing-nonce mappings; they compile but remain locally UNRUN.
+wrong-epoch and missing-nonce mappings; all four passed prior-head MySQL CI above and remain locally UNRUN.
 Configuration examples/setup and host-only custody restrictions move together;
 none enables a listener, changes a grant or runs a production migration here.
-The full lifecycle, compiler/current-supervisor readiness, outside hook/issuer/
+The OpenShell lifecycle backend, compiler/current-supervisor readiness, outside hook/issuer/
 ingress, production stop/absence reader and actual native callback/rollback path
 remain missing, and separately approved exact-head runtime/restore evidence and
 green CI are still required before merge.
+
+## Shared lifecycle boundary in this revision
+
+This is connected dispatch for existing production callers, not an implemented
+OpenShell launch/activation path or a completion claim for slice 1.
+`AgentRuntimeLifecycle` reads current DB ownership on every request, not a registry
+heartbeat or a retained EF instance; missing DB/ownership is 503, missing agent 404,
+and migrated/unknown or previously launched agents are 422 compatibility_blocked.
+A retired launch still blocks fallback when desired metadata is reset to pending.
+Version pinning checks admission before changing the instruction pointer.
+Bulk operations reject a mixed backend snapshot rather than infer sandbox state
+from Docker running names; no sandbox backend or migration writer is enabled.
+
+Legacy implementation stays internal to the provisioning facade and adapter.
+REST delete preserves agent/ACL/registry/recovery state on failed deprovision;
+legacy inspect 404 is absence, while transport/status/parse errors remain unknown.
+Deletion pins the observed immutable ID and checks absence after removal.
+This is not OpenShell cleanup, drained-consumer/poller proof, or a serialized live
+migration protocol; migration remains closed until that backend is implemented.
+
+Raw infrastructure start/stop/restart requires the host-owned comma-separated
+`FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS` -> `Docker:InfrastructureContainerIds`
+list of full lowercase 64-hex immutable IDs; empty is deny-all, including upgrades.
+The actual inspect must match an allowlisted ID, not a name/short ID, and current
+DB names/aliases plus all `openshell*` driver labels are rejected before mutation.
+The mutation uses the inspected full ID so a concurrent name replacement cannot
+redirect it; operator authentication does not replace ownership checks.
+Setup preserves any recorded list and never discovers/adds IDs automatically.
+The allowlist does not authorize an agent/supervisor/gateway rollout or host change.
+
+Tests exercise actual facades, all eight MCP lifecycle tool methods, in-process
+REST start/stop/restart/delete, externally changed DB state, retired history,
+infrastructure name/ID/driver-label guards and legacy read-error/404 distinctions.
+Only isolated SQLite, TestServer, temporary generated files and owned HTTP handlers
+are used; actual OpenShell daemon/CLI/shell/callback/rollback remains unimplemented.

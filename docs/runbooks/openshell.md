@@ -2,7 +2,7 @@
 
 No OpenShell workload is admitted by this draft. Do not invoke production migration,
 configure a real credential source or restart a runtime based on source tests.
-The full lifecycle/identity/compiler/native agent path remains incomplete.
+Shared lifecycle dispatch is wired, but its OpenShell backend and the identity/compiler/native agent path remain incomplete.
 
 For the authentication-only boundary, use a trusted outside-workload client with
 the operator host `ORCHESTRATOR_AUTH_TOKEN`. The existing mapping is
@@ -35,3 +35,12 @@ application rollback, with separately approved backup/restore/query evidence.
 
 See [the upgrade notes](../upgrading/openshell-operator-auth.md) for the route/status
 matrix and [current source/CI limits](../openshell.md) before any execution decision.
+
+Infrastructure restart now requires host-recorded full immutable IDs in
+`FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS`; the empty default denies all such
+mutations and is not populated automatically by setup or upgrade.
+Agent names, aliases and OpenShell-owned labels remain denied even if an ID was
+mistakenly listed; read/ownership failures are not successful restarts.
+Migrated/unknown metadata or any launch history blocks all legacy lifecycle entry
+points, including MCP, version pinning, provisioning facades and deletion.
+Do not clear launch history/reset metadata to work around compatibility_blocked.

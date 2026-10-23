@@ -5,7 +5,7 @@ using ModelContextProtocol.Server;
 namespace Fleet.Orchestrator.Tools;
 
 [McpServerToolType]
-public sealed class ProvisionAgentTool(ContainerProvisioningService provisioning)
+public sealed class ProvisionAgentTool(IAgentRuntimeLifecycle provisioning)
 {
     [McpServerTool(Name = "provision_agent")]
     [Description("Creates and starts a Docker container for an agent from its DB config. Fails if a container with that name already exists — use reprovision_agent to replace an existing one.")]

@@ -10,7 +10,7 @@ Existing runtime/auth/provider/model selection is not changed by desired metadat
 | Component | Boundary |
 |---|---|
 | Shared lifecycle dispatch | REST/MCP start/stop/restart/version/create/delete/provision/preview/reprovision/bulk and compatibility facades use `IAgentRuntimeLifecycle`; only never-launched pending agents may retain legacy execution |
-| Legacy bypass guard | Any launch history, migrated/unknown metadata or failed ownership lookup rejects before legacy runtime/config access; infrastructure operations need host-listed full immutable IDs and reject agent aliases and pinned OpenShell driver labels |
+| Legacy bypass guard | Any launch history, migrated/unknown metadata or failed ownership lookup rejects before legacy runtime/config access; infrastructure operations reject agent aliases and pinned OpenShell driver labels; an optional nonempty host ID list adds a restriction |
 | Delete | DB/ACL/registry deletion requires confirmed deprovision, including exact-ID absence after removal; read errors do not mean absent |
 | Additive EF migration | Desired shell/policy/pending metadata, full launch fields, leases, bindings, sessions, nonces and independent retired-ID table; generated designer and snapshot |
 | Launch store | Serialized intent, one active slot, exact-owner non-revivable lease, authoritative reloads, phase-ordered sandbox binding and revocation records; no driver or gateway calls |
@@ -216,11 +216,14 @@ Deletion pins the observed immutable ID and checks absence after removal.
 This is not OpenShell cleanup, drained-consumer/poller proof, or a serialized live
 migration protocol; migration remains closed until that backend is implemented.
 
-Raw infrastructure start/stop/restart requires the host-owned comma-separated
-`FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS` -> `Docker:InfrastructureContainerIds`
-list of full lowercase 64-hex immutable IDs; empty is deny-all, including upgrades.
-The actual inspect must match an allowlisted ID, not a name/short ID, and current
-DB names/aliases plus all `openshell*` driver labels are rejected before mutation.
+Raw infrastructure start/stop/restart requires fresh DB/driver ownership checks.
+The optional host-owned comma-separated `FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS`
+-> `Docker:InfrastructureContainerIds` list adds a restriction only when nonempty;
+empty preserves ordinary infrastructure restart, including after recreate.
+Current DB agent names/aliases plus all `openshell*` driver labels are rejected
+before mutation, regardless of that optional restriction.
+A configured list must contain the inspected full lowercase 64-hex immutable ID;
+a name/short ID in that list does not grant authority.
 The mutation uses the inspected full ID so a concurrent name replacement cannot
 redirect it; operator authentication does not replace ownership checks.
 Setup preserves any recorded list and never discovers/adds IDs automatically.

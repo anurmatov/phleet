@@ -40,7 +40,7 @@ public class OpenShellInfrastructureOwnershipTests
     }
 
     [Fact]
-    public async Task MissingOwnershipOrAllowlist_DeniesWithoutDockerMutation()
+    public async Task MissingOwnership_DeniesWithoutDockerMutation()
     {
         var handler = new InspectHandler(false, false);
         using var docker = new DockerService(NullLogger<DockerService>.Instance,
@@ -50,6 +50,47 @@ public class OpenShellInfrastructureOwnershipTests
         Assert.False(await docker.RestartContainerAsync(Id));
         Assert.Empty(handler.Mutations);
         Assert.Equal(0, handler.Requests);
+    }
+
+    [Fact]
+    public async Task EmptyAllowlist_PreservesInfrastructureRestart_WithAuthoritativeOwnershipCheck()
+    {
+        await using var h = ProvisioningHarness.Create();
+        await h.SeedAsync(db => db.Agents.Add(OpenShellLifecycleTests.Agent()));
+        var handler = new InspectHandler(false, false);
+        using var docker = new DockerService(NullLogger<DockerService>.Instance,
+            new HttpClient(handler) { BaseAddress = new Uri("http://owned.invalid") },
+            h.Services.GetRequiredService<IServiceScopeFactory>());
+        Assert.True(await docker.RestartContainerAsync("infrastructure1"));
+        Assert.Equal($"/v1.41/containers/{Id}/restart", Assert.Single(handler.Mutations));
+    }
+
+    [Theory]
+    [InlineData("agent1", false)]
+    [InlineData("agent1-container", false)]
+    [InlineData("short-id", true)]
+    public async Task EmptyAllowlist_NeverPermitsAgentOrOpenShellBypass(string target, bool supervisor)
+    {
+        await using var h = ProvisioningHarness.Create();
+        await h.SeedAsync(db => db.Agents.Add(OpenShellLifecycleTests.Agent()));
+        var handler = new InspectHandler(supervisor, false);
+        using var docker = new DockerService(NullLogger<DockerService>.Instance,
+            new HttpClient(handler) { BaseAddress = new Uri("http://owned.invalid") },
+            h.Services.GetRequiredService<IServiceScopeFactory>());
+        Assert.False(await docker.RestartContainerAsync(target));
+        Assert.Empty(handler.Mutations);
+    }
+
+    [Fact]
+    public async Task NonemptyAllowlist_IsOnlyAnExplicitAdditionalRestriction()
+    {
+        await using var h = ProvisioningHarness.Create();
+        var handler = new InspectHandler(false, false);
+        using var docker = new DockerService(NullLogger<DockerService>.Instance,
+            new HttpClient(handler) { BaseAddress = new Uri("http://owned.invalid") },
+            h.Services.GetRequiredService<IServiceScopeFactory>(), [new string('b', 64)]);
+        Assert.False(await docker.RestartContainerAsync("infrastructure1"));
+        Assert.Empty(handler.Mutations);
     }
 
     private sealed class InspectHandler(bool supervisor, bool agentName) : HttpMessageHandler

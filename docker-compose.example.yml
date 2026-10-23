@@ -308,7 +308,6 @@ services:
     ports:
       - "3300:3300"
     environment:
-      - Docker__InfrastructureContainerIds=${FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS:-}
       - RabbitMq__Host=rabbitmq
       - RabbitMq__Exchange=fleet.group
       - Bridge__TimeoutSeconds=300
@@ -431,6 +430,7 @@ services:
     env_file:
       - .env
     environment:
+      - Docker__InfrastructureContainerIds=${FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS:-}
       - ConnectionStrings__OrchestratorDb=Server=fleet-mysql;Port=3306;Database=fleet_orchestrator;User=fleet;Password=${FLEET_MYSQL_PASSWORD:-fleetpass}
       - RabbitMq__Host=rabbitmq
       - Temporal__Address=temporal-server:7233

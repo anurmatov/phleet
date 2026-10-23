@@ -36,8 +36,9 @@ See [the implementation boundary](../openshell.md) and
 This revision also centralizes lifecycle callers and closes raw agent restart
 bypasses: `FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS` maps to
 `Docker:InfrastructureContainerIds` and defaults empty in setup/example/compose/
-appsettings, so infrastructure mutations are denied until an operator separately
-records exact full immutable IDs; existing recorded lists are preserved.
+appsettings, so ordinary infrastructure restart uses DB/driver ownership checks
+without an ID allowlist and survives recreate; existing recorded lists are preserved
+as an explicit additional restriction that needs updating after recreate.
 Agent aliases and OpenShell driver labels cannot be allowlisted around the guard.
 Legacy never-launched pending agents retain their existing provider/model/auth
 provisioning path; migrated/unknown or previously launched agents remain blocked

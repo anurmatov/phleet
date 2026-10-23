@@ -36,9 +36,11 @@ application rollback, with separately approved backup/restore/query evidence.
 See [the upgrade notes](../upgrading/openshell-operator-auth.md) for the route/status
 matrix and [current source/CI limits](../openshell.md) before any execution decision.
 
-Infrastructure restart now requires host-recorded full immutable IDs in
-`FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS`; the empty default denies all such
-mutations and is not populated automatically by setup or upgrade.
+Infrastructure restart always checks DB/driver ownership and mutates the inspected
+full immutable ID, not a replaceable name; the empty default optional
+`FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS` does not break infrastructure restarts.
+A nonempty host-recorded list is an explicit additional restriction and must be
+updated after recreate; setup/upgrade never discovers or populates it automatically.
 Agent names, aliases and OpenShell-owned labels remain denied even if an ID was
 mistakenly listed; read/ownership failures are not successful restarts.
 Migrated/unknown metadata or any launch history blocks all legacy lifecycle entry

@@ -156,7 +156,7 @@ public sealed class DockerService : IDisposable
     }
 
     // Infrastructure callers have no access to the legacy-agent mutation methods. A host-owned
-    // exact immutable ID allowlist plus current DB ownership prevents name/short-ID alias bypass.
+    // optional exact ID restriction plus current DB/driver ownership prevents name/short-ID alias bypass.
     public async Task<bool> StartContainerAsync(string containerName) =>
         await InfrastructureIdAsync(containerName) is { } id && await StartLegacyAgentContainerAsync(id);
     public async Task<bool> StopContainerAsync(string containerName) =>
@@ -166,7 +166,7 @@ public sealed class DockerService : IDisposable
 
     private async Task<string?> InfrastructureIdAsync(string target)
     {
-        if (_scopes is null || _infrastructureIds.Count == 0) return null;
+        if (_scopes is null) return null;
         try
         {
             using var scope = _scopes.CreateScope();
@@ -183,7 +183,7 @@ public sealed class DockerService : IDisposable
             var id = root.GetProperty("Id").GetString();
             var name = root.GetProperty("Name").GetString();
             if (id is null || id.Length != 64 || id.Any(c => !char.IsAsciiHexDigitLower(c))
-                || !_infrastructureIds.Contains(id) || name is null || OwnedName(name)) return null;
+                || (_infrastructureIds.Count != 0 && !_infrastructureIds.Contains(id)) || name is null || OwnedName(name)) return null;
             // Pinned driver uses both openshell.* and openshell.ai/* labels, including supervisor,
             // identity and staging companions. No driver-owned object is an infrastructure target.
             var labels = root.GetProperty("Config").GetProperty("Labels");

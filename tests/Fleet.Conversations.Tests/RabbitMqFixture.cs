@@ -65,14 +65,14 @@ public sealed class RabbitMqFixture : IAsyncLifetime
     }
 
     /// <summary>Messages currently waiting on a queue. Used to assert an ack actually happened.</summary>
-    public async Task<uint> DepthAsync(string queue)
+    public async Task<uint> DepthAsync(string queue, CancellationToken ct = default)
     {
         var factory = new ConnectionFactory { Uri = new Uri(ConnectionString) };
-        await using var connection = await factory.CreateConnectionAsync();
-        await using var channel = await connection.CreateChannelAsync();
+        await using var connection = await factory.CreateConnectionAsync(cancellationToken: ct);
+        await using var channel = await connection.CreateChannelAsync(cancellationToken: ct);
 
         // Passive: never create the queue as a side effect of measuring it.
-        var declared = await channel.QueueDeclarePassiveAsync(queue);
+        var declared = await channel.QueueDeclarePassiveAsync(queue, cancellationToken: ct);
         return declared.MessageCount;
     }
 }

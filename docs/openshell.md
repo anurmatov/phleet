@@ -276,6 +276,6 @@ No alternative architecture, upstream patch or activation is approved by this no
 Owned HTTP handlers exercise the actual generated gRPC request/response framing,
 pagination, bearer metadata, mapping replacement, cancellation, immutable copies
 and descriptor/source-hash contracts, without sockets, TLS or a real gateway.
-Prior head `3cf2b337` had all reported [CI checks green](https://github.com/anurmatov/phleet/actions/runs/40018584811);
-new-head CI, approved actual daemon/native CLI/shell/memory/Rabbit/denial/revocation/
-rollback and MySQL backup/restore-query acceptance remain required before merge.
+Exact-head CI results belong in the PR evidence, not a moving prior-head status.
+Approved actual daemon/native CLI/shell/memory/Rabbit/denial/revocation/rollback
+and MySQL backup/restore-query acceptance remain required before merge.

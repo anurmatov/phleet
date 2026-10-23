@@ -25,7 +25,7 @@ public sealed class MemoryDeleteTool(
 
         var context = httpContextAccessor?.HttpContext;
         var verified = VerifiedMemoryRequest.Get(context);
-        if (context?.Connection.LocalPort == 3101 && verified is null)
+        if (VerifiedMemoryRequest.IsRequired(context) && verified is null)
             return "memory_delete: verified request authorization unavailable.";
         var agentName = verified?.Identity.AgentName ?? context?.Request.Query["agent"].FirstOrDefault();
 

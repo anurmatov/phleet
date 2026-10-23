@@ -13,6 +13,10 @@ public sealed class MemoryIdentityTrust : IDisposable
     public FleetRequestAssertionVerifier Assertions { get; }
     public MemoryIdentityTrust(FleetIdentityOptions options)
     {
+        var protectedAgents = options.ProtectedAgents.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (options.VerifiedPort is < 1 or > 65535 or 3100 || protectedAgents.Length == 0
+            || protectedAgents.Any(a => a.Length > 100 || a.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not '-' and not '_')))
+            throw new InvalidOperationException("A distinct valid verified port and explicit protected agent set are required.");
         if (options.Audience != "memory:/mcp" || string.IsNullOrWhiteSpace(options.IngressDnsName) || string.IsNullOrWhiteSpace(options.ConnectionString))
             throw new InvalidOperationException("Complete outside identity trust and state configuration is required.");
         var pem = File.ReadAllText(options.AssertionPublicKeyPath);

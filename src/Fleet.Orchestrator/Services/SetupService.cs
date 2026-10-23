@@ -181,6 +181,7 @@ public sealed class SetupService
         catch { /* DB optional */ }
 
         return env
+            .Where(kv => !kv.Key.StartsWith("FLEET_MEMORY_IDENTITY_", StringComparison.OrdinalIgnoreCase))
             .Select(kv =>
             {
                 var consumers = usedBy.TryGetValue(kv.Key, out var ub) ? [.. ub] : new List<string>();
@@ -192,6 +193,8 @@ public sealed class SetupService
 
     public async Task SetEnvVarAsync(string key, string value)
     {
+        if (key.StartsWith("FLEET_MEMORY_IDENTITY_", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("Receiver identity settings are host-managed only.");
         if (!System.Text.RegularExpressions.Regex.IsMatch(key, @"^[A-Z][A-Z0-9_]*$"))
             throw new ArgumentException($"Key '{key}' must be uppercase letters, digits, and underscores.");
 
@@ -200,6 +203,8 @@ public sealed class SetupService
 
     public async Task DeleteEnvVarAsync(string key)
     {
+        if (key.StartsWith("FLEET_MEMORY_IDENTITY_", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("Receiver identity settings are host-managed only.");
         var lines = File.Exists(_envFilePath)
             ? await File.ReadAllLinesAsync(_envFilePath)
             : Array.Empty<string>();
@@ -219,6 +224,7 @@ public sealed class SetupService
 
     public string? RevealEnvVar(string key)
     {
+        if (key.StartsWith("FLEET_MEMORY_IDENTITY_", StringComparison.OrdinalIgnoreCase)) return null;
         try
         {
             var env = LoadEnvFile(_envFilePath);

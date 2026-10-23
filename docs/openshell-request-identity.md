@@ -8,12 +8,19 @@ this draft in an installation or change agent endpoints based on source tests.
 ## Memory receiving boundary
 
 The startup-only `FleetIdentity:Enabled` setting defaults to false. When enabled,
-Memory adds HTTPS port 3101 with a required client certificate and rejects legacy
-MCP on other ports. Port 3101 exposes only `/mcp`, never internal/admin routes.
+Memory adds the configured `FleetIdentity:VerifiedPort` (default 3101) with a
+required client certificate. It exposes only `/mcp`, never internal/admin routes.
+`ProtectedAgents` is the explicit comma-separated staged set; those names are
+refused on legacy MCP, while a single named unprotected agent keeps its legacy
+path. Missing/duplicate legacy attribution is denied. Verified admission requires
+membership in the staged set, so it cannot silently migrate an unlisted agent.
+Legacy query attribution is not authenticated identity: workload policy must still
+block every direct legacy route before any protected workload is admitted.
 The existing internal listener remains outside workload policy and is not proxied.
 No compose host port, production config or grant is added by this source change.
 
-Startup requires project ACL enforcement, fixed audience `memory:/mcp`, issuer,
+Startup requires a nonempty valid protected-agent set, a verified port distinct
+from legacy port 3100, project ACL enforcement, fixed audience `memory:/mcp`, issuer,
 key ID, public P-256 assertion key, public ingress CA, exact ingress DNS SAN,
 server certificate/key paths and an outside-workload MySQL connection string.
 Blank/missing trust fails startup; keys are never generated, fetched or trusted on
@@ -43,7 +50,11 @@ are nonempty D-format UUIDs. No caller query/header/body attribution is identity
 `target` is the exact received origin-form raw target, including encoded query
 bytes, without decoding/reordering. `body_sha256` is lowercase SHA256 of the exact
 body bytes and `session_hash` is lowercase SHA256 of the exact UTF-8 MCP session
-header, or the empty string when initializing. No intermediary may mutate these
+header. With no session header during initialization, it is exactly
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`
+(the SHA256 digest of zero bytes), never an empty claim, null or a sentinel word.
+The signer/receiver initialization vector accepts this digest and rejects an empty
+claim. A present-but-empty session header is not an initialization escape. No intermediary may mutate these
 bytes after signing; real hook/proxy/native compatibility remains UNRUN.
 POST must be JSON and body size is limited to 256 KiB; GET/DELETE bodies and
 Upgrade/unsupported methods are denied. Response streaming is left unchanged.
@@ -80,6 +91,32 @@ invalid identity 401, and scope/session/mapping denial 403, without content.
 middleware, request ACL and tool code with owned fake keys, a stub state reader
 and an isolated ACL HTTP handler. No actual TLS socket, upstream hook, MySQL query,
 Qdrant search/list, daemon/native CLI, Rabbit callback or runtime rollback is
-qualified by these tests. The production SQL reader and Kestrel setup are source
+qualified by these tests. The TestServer MapMcp test now exercises a real MCP
+initialize/session/tools-call sequence through the production middleware and
+memory_get, proving that revoking its authoritative ACL changes the next call
+even while a legacy wildcard cache remains warm; its TLS/state/ACL transport seams
+remain isolated fixtures, not an outside hook or actual TLS socket. The production SQL reader and Kestrel setup are source
 only until separately approved exact-head integration and restore/query evidence.
 The complete slice-1 and merge blockers in [openshell.md](openshell.md) remain open.
+
+## Installation/configuration lockstep and database fixture
+
+`.env.example`, `setup.sh` and `docker-compose.example.yml` carry the twelve
+`FLEET_MEMORY_IDENTITY_*` keys for the options above. Setup clears exported shell
+overrides, adds only missing defaults and never changes recorded values, enables
+the path or generates/imports keys. It creates an empty 0700 `identity/memory`
+directory for the example's read-only `/run/fleet-identity` bind; no verified host
+port is published. Existing installs keep the same default-off behavior through
+compose fallbacks; host `.env` and optional 1Password choices are unchanged.
+The reserved prefix is excluded from config/setup API values and writes, cannot
+be saved as a workload Env Ref and is refused by provisioning even if a privileged
+writer bypasses the tracked-write guard. These are source restrictions, not a
+live grant or credential migration.
+
+Run `python3 tests/openshell/config-test.py` for actual setup-block tests on owned
+temporary files, not a setup or Docker run. Run the migration suite from
+[openshell.md](openshell.md) on a separately approved MySQL target to exercise
+VerifiedLaunchReader against the actual migration in current/revoked/wrong-epoch/
+missing-nonce states; those four new cases are authored and locally UNRUN here.
+Neither migration/query fixtures nor TestServer prove backup/restore or the
+actual daemon→CLI→shell→memory/Rabbit callback and rollback path.

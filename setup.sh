@@ -68,6 +68,20 @@ unset FLEET_BASE_DIR FLEET_CTO_AGENT FLEET_GROUP_CHAT_ID FLEET_PRIMARY_HUMAN_USE
       FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS FLEET_AUTONOMY_ENABLED \
       FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS
 
+# The recorded host .env, not an exported shell override, owns receiver configuration.
+unset FLEET_MEMORY_IDENTITY_ENABLED \
+      FLEET_MEMORY_IDENTITY_VERIFIED_PORT \
+      FLEET_MEMORY_IDENTITY_PROTECTED_AGENTS \
+      FLEET_MEMORY_IDENTITY_ISSUER \
+      FLEET_MEMORY_IDENTITY_AUDIENCE \
+      FLEET_MEMORY_IDENTITY_KEY_ID \
+      FLEET_MEMORY_IDENTITY_ASSERTION_PUBLIC_KEY_PATH \
+      FLEET_MEMORY_IDENTITY_INGRESS_CA_PATH \
+      FLEET_MEMORY_IDENTITY_INGRESS_DNS_NAME \
+      FLEET_MEMORY_IDENTITY_SERVER_CERTIFICATE_PATH \
+      FLEET_MEMORY_IDENTITY_SERVER_KEY_PATH \
+      FLEET_MEMORY_IDENTITY_CONNECTION_STRING
+
 # ── Canonical paths ───────────────────────────────────────────────────────────
 # FLEET_BASE_DIR is hardcoded to $SCRIPT_DIR/fleet — a nested, gitignored subdir
 # under the repo root. All runtime state (env file, seed, generated compose,
@@ -699,6 +713,29 @@ fi
 if ! $DRY_RUN; then
   write_env_var "$ENV_FILE" "FLEET_BASE_DIR" "$FLEET_BASE_DIR"
 fi
+
+# OpenShell receiver defaults: preserve every recorded value and keep the new path held off.
+for _identity_default in FLEET_MEMORY_IDENTITY_ENABLED=false \
+    FLEET_MEMORY_IDENTITY_VERIFIED_PORT=3101 \
+    FLEET_MEMORY_IDENTITY_PROTECTED_AGENTS= \
+    FLEET_MEMORY_IDENTITY_ISSUER= \
+    FLEET_MEMORY_IDENTITY_AUDIENCE=memory:/mcp \
+    FLEET_MEMORY_IDENTITY_KEY_ID= \
+    FLEET_MEMORY_IDENTITY_ASSERTION_PUBLIC_KEY_PATH= \
+    FLEET_MEMORY_IDENTITY_INGRESS_CA_PATH= \
+    FLEET_MEMORY_IDENTITY_INGRESS_DNS_NAME= \
+    FLEET_MEMORY_IDENTITY_SERVER_CERTIFICATE_PATH= \
+    FLEET_MEMORY_IDENTITY_SERVER_KEY_PATH= \
+    FLEET_MEMORY_IDENTITY_CONNECTION_STRING=; do
+  if ! grep -q "^${_identity_default%%=*}=" "$ENV_FILE" 2>/dev/null; then
+    write_env_var "$ENV_FILE" "${_identity_default%%=*}" "${_identity_default#*=}"
+  fi
+done
+if ! $DRY_RUN; then
+  mkdir -p "$FLEET_BASE_DIR/identity/memory"
+  chmod 700 "$FLEET_BASE_DIR/identity/memory"
+fi
+# End OpenShell receiver defaults.
 
 # Epic grants (#436): a fresh .env already has these from .env.example. An older .env gets the
 # defaults (feature off) when a key is missing; a present value is never changed. No prompts.

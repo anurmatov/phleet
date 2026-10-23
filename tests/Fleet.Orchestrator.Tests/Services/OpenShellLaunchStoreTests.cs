@@ -369,6 +369,13 @@ public sealed class OpenShellLaunchStoreTests : IAsyncLifetime
         }
     }
 
+    [Fact]
+    public async Task ReceiverHostConfigurationCannotBecomeAWorkloadEnvRef()
+    {
+        _db.AgentEnvRefs.Add(new() { AgentId = _agent, EnvKeyName = "FLEET_MEMORY_IDENTITY_CONNECTION_STRING" });
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _db.SaveChangesAsync());
+    }
+
     private sealed class ForeignEpochReader(DateTime now) : IOpenShellRuntimeEvidenceReader
     {
         public Task<OpenShellRuntimeEvidence> ReadAsync(OpenShellRuntimeTarget target, CancellationToken ct) =>

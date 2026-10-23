@@ -25,7 +25,7 @@ if (identityOptions.Enabled)
     builder.Services.AddSingleton(identityTrust);
     builder.Services.AddSingleton<IVerifiedLaunchReader, VerifiedLaunchReader>();
     builder.Services.AddSingleton<MemoryIdentitySessions>();
-    builder.WebHost.ConfigureKestrel(server => server.ListenAnyIP(3101, endpoint => endpoint.UseHttps(tls =>
+    builder.WebHost.ConfigureKestrel(server => server.ListenAnyIP(identityOptions.VerifiedPort, endpoint => endpoint.UseHttps(tls =>
     {
         tls.ServerCertificate = X509Certificate2.CreateFromPemFile(identityOptions.ServerCertificatePath, identityOptions.ServerKeyPath);
         tls.ClientCertificateMode = ClientCertificateMode.RequireCertificate;

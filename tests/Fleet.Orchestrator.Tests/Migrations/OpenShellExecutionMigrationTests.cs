@@ -5,6 +5,8 @@ using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Migrations;
 using MySqlConnector;
+using Microsoft.Extensions.Options;
+using Fleet.Shared.Security;
 
 namespace Fleet.Orchestrator.Tests.Migrations;
 
@@ -149,6 +151,31 @@ public sealed class OpenShellExecutionMigrationTests : IAsyncLifetime
             }
             return result;
         }
+    }
+
+    [Theory]
+    [InlineData("current", true)]
+    [InlineData("revoked", false)]
+    [InlineData("wrong_epoch", false)]
+    [InlineData("missing_nonce", false)]
+    public async Task VerifiedLaunchReader_UsesActualMigratedMySqlState(string state, bool expected)
+    {
+        await using var db = Context(); await db.Database.MigrateAsync();
+        var agent = new Agent { Name = "agent1", DisplayName = "Agent 1", Role = "test", Model = "test", ContainerName = "test" };
+        db.Agents.Add(agent); await db.SaveChangesAsync();
+        var now = DateTime.UtcNow;
+        // Persistence fixture only, not supervisor readiness or actual activation evidence.
+        var launch = new OpenShellLaunch { Id = Guid.NewGuid(), AgentId = agent.Id, ActiveAgentId = agent.Id,
+            IdentityEpoch = Guid.NewGuid(), GatewayId = "gateway1", SandboxId = "sandbox1", Phase = "activated", CreatedAt = now,
+            RevokedAt = state == "revoked" ? now : null };
+        db.OpenShellLaunches.Add(launch);
+        if (state != "missing_nonce") db.OpenShellRequestNonces.Add(new() { Jti = "nonce1", LaunchId = launch.Id, ExpiresAt = now.AddMinutes(5) });
+        await db.SaveChangesAsync();
+        var reader = new Fleet.Memory.Services.VerifiedLaunchReader(Options.Create(new Fleet.Memory.Configuration.FleetIdentityOptions { ConnectionString = _connection }));
+        var identity = new VerifiedAgentIdentity("agent1", "gateway1", "sandbox1", launch.Id,
+            state == "wrong_epoch" ? Guid.NewGuid() : launch.IdentityEpoch, "memory", "/mcp");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        Assert.Equal(expected, await reader.IsCurrentAsync(identity, "nonce1", deadline.Token));
     }
 
     private OrchestratorDbContext Context() => new(new DbContextOptionsBuilder<OrchestratorDbContext>()

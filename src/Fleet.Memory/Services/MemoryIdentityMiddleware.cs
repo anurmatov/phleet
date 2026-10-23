@@ -16,9 +16,14 @@ public sealed class MemoryIdentityMiddleware(RequestDelegate next)
         VerifiedMemoryRequest.Clear(context);
         var request = context.Request;
         if (!options.Value.Enabled) { await next(context); return; }
-        if (context.Connection.LocalPort != 3101)
+        if (context.Connection.LocalPort != options.Value.VerifiedPort)
         {
-            if (request.Path.StartsWithSegments("/mcp")) { context.Response.StatusCode = 403; return; }
+            if (request.Path.StartsWithSegments("/mcp"))
+            {
+                var legacyAgent = request.Query["agent"];
+                if (legacyAgent.Count != 1 || string.IsNullOrWhiteSpace(legacyAgent[0]) || legacyAgent[0] != legacyAgent[0]!.Trim() || options.Value.IsProtected(legacyAgent[0]!))
+                { context.Response.StatusCode = 403; return; }
+            }
             await next(context); return;
         }
         if (request.Path != "/mcp") { context.Response.StatusCode = 404; return; }
@@ -53,8 +58,9 @@ public sealed class MemoryIdentityMiddleware(RequestDelegate next)
             var bytes = body.ToArray();
             if (request.Method != "POST" && bytes.Length != 0) { context.Response.StatusCode = 400; return; }
             var binding = new FleetRequestBinding(request.Method, context.Features.Get<IHttpRequestFeature>()?.RawTarget
-                ?? request.Path + request.QueryString, Hash(bytes), Hash(Encoding.UTF8.GetBytes(session.ToString())));
+                ?? request.Path + request.QueryString, Hash(bytes), SessionHash(session.ToString()));
             var (identity, jti) = trust.Assertions.Verify(proof[0]!, binding, "memory", "/mcp");
+            if (!options.Value.IsProtected(identity.AgentName)) { context.Response.StatusCode = 403; return; }
             using var admission = sessions.TryEnter(identity.LaunchId);
             if (admission is null) { context.Response.StatusCode = 503; return; }
             if (!await launches.IsCurrentAsync(identity, jti, deadline.Token).WaitAsync(deadline.Token))
@@ -87,5 +93,7 @@ public sealed class MemoryIdentityMiddleware(RequestDelegate next)
             if (!context.Response.HasStarted) context.Response.StatusCode = 503; else context.Abort();
         }
     }
+    internal static string SessionHash(string? session) => string.IsNullOrEmpty(session)
+        ? FleetRequestBinding.AbsentSessionHash : Hash(Encoding.UTF8.GetBytes(session));
     internal static string Hash(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
 }

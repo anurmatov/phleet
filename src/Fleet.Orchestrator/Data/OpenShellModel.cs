@@ -108,6 +108,9 @@ internal static class OpenShellModel
     internal static void ValidateChanges(ChangeTracker tracker)
     {
         tracker.DetectChanges();
+        foreach (var row in tracker.Entries<AgentEnvRef>().Where(x => x.State is EntityState.Added or EntityState.Modified))
+            if (row.Entity.EnvKeyName.StartsWith("FLEET_MEMORY_IDENTITY_", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Receiver identity settings cannot be workload environment references.");
         foreach (var row in tracker.Entries<OpenShellRetiredId>())
             if (row.State is EntityState.Modified or EntityState.Deleted)
                 throw new InvalidOperationException("Tracked writes cannot remove or change OpenShell retirement IDs.");

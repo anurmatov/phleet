@@ -226,6 +226,8 @@ services:
       - "3100:3100"
     volumes:
       - ${FLEET_BASE_DIR}/memories:/data/memories
+      # Outside-workload receiver trust only. setup creates an EMPTY 0700 directory, never keys.
+      - ${FLEET_BASE_DIR}/identity/memory:/run/fleet-identity:ro
     environment:
       - Storage__Path=/data/memories
       - Qdrant__Url=http://qdrant:6334
@@ -238,6 +240,19 @@ services:
       - Embedding__Ollama__Model=${FLEET_MEMORY_OLLAMA_MODEL:-nomic-embed-text}
       # Embedding-input size guidance in UTF-8 bytes; empty or 0 = off (#346). Advisory only.
       - Embedding__InputGuidanceBytes=${FLEET_MEMORY_EMBEDDING_INPUT_GUIDANCE_BYTES:-}
+      # Held off until the complete path is qualified. Never publish the verified port.
+      - FleetIdentity__Enabled=${FLEET_MEMORY_IDENTITY_ENABLED:-false}
+      - FleetIdentity__VerifiedPort=${FLEET_MEMORY_IDENTITY_VERIFIED_PORT:-3101}
+      - FleetIdentity__ProtectedAgents=${FLEET_MEMORY_IDENTITY_PROTECTED_AGENTS:-}
+      - FleetIdentity__Issuer=${FLEET_MEMORY_IDENTITY_ISSUER:-}
+      - FleetIdentity__Audience=${FLEET_MEMORY_IDENTITY_AUDIENCE:-memory:/mcp}
+      - FleetIdentity__KeyId=${FLEET_MEMORY_IDENTITY_KEY_ID:-}
+      - FleetIdentity__AssertionPublicKeyPath=${FLEET_MEMORY_IDENTITY_ASSERTION_PUBLIC_KEY_PATH:-}
+      - FleetIdentity__IngressCaPath=${FLEET_MEMORY_IDENTITY_INGRESS_CA_PATH:-}
+      - FleetIdentity__IngressDnsName=${FLEET_MEMORY_IDENTITY_INGRESS_DNS_NAME:-}
+      - FleetIdentity__ServerCertificatePath=${FLEET_MEMORY_IDENTITY_SERVER_CERTIFICATE_PATH:-}
+      - FleetIdentity__ServerKeyPath=${FLEET_MEMORY_IDENTITY_SERVER_KEY_PATH:-}
+      - FleetIdentity__ConnectionString=${FLEET_MEMORY_IDENTITY_CONNECTION_STRING:-}
     mem_limit: 512m
     restart: unless-stopped
     depends_on:

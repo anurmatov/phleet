@@ -86,8 +86,10 @@ change follows a source test or merge.
 ## Reproducible checks
 
 Run `bash tests/openshell/run.sh unit` for the local store and operator guard.
-Run `bash tests/openshell/run.sh memory-identity` for cryptographic receiver and
-six-tool boundary tests, not actual socket/DB/agent acceptance.
+Run `bash tests/openshell/run.sh memory-identity` for cryptographic receiver,
+six-tool boundary and actual MapMcp session/dispatch tests, not socket/agent acceptance.
+Run `python3 tests/openshell/config-test.py` for the isolated actual setup block and
+twelve-key source/config mapping checks, not setup execution.
 Run `bash tests/openshell/run.sh memory-acl` for authoritative ACL acquisition tests;
 these use only an owned HTTP handler, never an orchestrator or external network.
 Run `dotnet test tests/Fleet.Orchestrator.Tests --filter FullyQualifiedName~ModelSnapshotTests`
@@ -164,3 +166,19 @@ The listener defaults off and no actual listener, endpoint migration or deployme
 was enabled by source work. See [the receiver protocol and configuration boundary](openshell-request-identity.md).
 Actual TLS/DB/upstream/native integration and the full slice-1 blocker remain open;
 unit certificate/proof tests do not establish daemon admission or runtime rollback.
+
+## Latest receiver corrections, not completed slice 1
+
+The verified port is configurable and the staged protected-agent set gates only
+those legacy MCP callers, not every legacy agent. The absent-session proof claim
+is the fixed SHA256-of-zero-bytes digest shared by the receiver and signer vector.
+The real TestServer MapMcp initialize/session/memory_get test now checks allowed
+content then revoked access using fresh request ACL while the old cache is warm.
+Four real-MySQL reader cases use the actual migration for current, revoked,
+wrong-epoch and missing-nonce mappings; they compile but remain locally UNRUN.
+Configuration examples/setup and host-only custody restrictions move together;
+none enables a listener, changes a grant or runs a production migration here.
+The full lifecycle, compiler/current-supervisor readiness, outside hook/issuer/
+ingress, production stop/absence reader and actual native callback/rollback path
+remain missing, and separately approved exact-head runtime/restore evidence and
+green CI are still required before merge.

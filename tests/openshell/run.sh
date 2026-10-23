@@ -7,6 +7,9 @@ case "${1:-unit}" in
     dotnet test tests/Fleet.Orchestrator.Tests --filter \
       'FullyQualifiedName~OpenShell&FullyQualifiedName!~.Migrations.'
     ;;
+  config)
+    python3 tests/openshell/config-test.py
+    ;;
   memory-identity)
     dotnet test tests/Fleet.Memory.Tests --filter 'FullyQualifiedName~MemoryIdentityTests'
     ;;
@@ -21,5 +24,5 @@ case "${1:-unit}" in
     dotnet test tests/Fleet.Orchestrator.Tests --filter \
       'FullyQualifiedName~OpenShellExecutionMigrationTests'
     ;;
-  *) echo 'INVALID: available source suites: unit, memory-acl, memory-identity, migration' >&2; exit 2 ;;
+  *) echo 'INVALID: available source suites: unit, config, memory-acl, memory-identity, migration' >&2; exit 2 ;;
 esac

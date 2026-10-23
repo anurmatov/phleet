@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -10,6 +11,11 @@ using Fleet.Memory.Services;
 using Fleet.Memory.Tools;
 using Fleet.Shared.Security;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -45,7 +51,7 @@ public sealed class MemoryIdentityTests : IDisposable
         _client = clientRequest.Create(ca, DateTimeOffset.UtcNow.AddSeconds(-30), DateTimeOffset.UtcNow.AddMinutes(10), RandomNumberGenerator.GetBytes(16));
         File.WriteAllText(Path.Combine(_dir, "ca.pem"), ca.ExportCertificatePem());
         File.WriteAllText(Path.Combine(_dir, "assertion.pem"), _key.ExportSubjectPublicKeyInfoPem());
-        _options = new() { Enabled = true, Issuer = "https://issuer.example.invalid", Audience = "memory:/mcp", KeyId = "key1",
+        _options = new() { Enabled = true, ProtectedAgents = "agent1", Issuer = "https://issuer.example.invalid", Audience = "memory:/mcp", KeyId = "key1",
             AssertionPublicKeyPath = Path.Combine(_dir, "assertion.pem"), IngressCaPath = Path.Combine(_dir, "ca.pem"),
             IngressDnsName = "ingress.example.invalid", ConnectionString = "fixture-only-never-opened" };
         _trust = new(_options);
@@ -151,6 +157,41 @@ public sealed class MemoryIdentityTests : IDisposable
     }
 
     [Fact]
+    public async Task StagedLegacyLeavesUnprotectedAgentRequestsAlone()
+    {
+        await using var acl = Acl();
+        var context = Context(); context.Connection.LocalPort = 3100;
+        context.Request.QueryString = new("?agent=agent2");
+        var called = false;
+        await Invoke(context, acl, _ => { called = true; return Task.CompletedTask; });
+        Assert.True(called);
+        context = Context(); context.Connection.LocalPort = 3100;
+        context.Request.QueryString = new("?agent=AGENT1");
+        await Invoke(context, acl, _ => throw new Exception("protected agent reached legacy MCP"));
+        Assert.Equal(403, context.Response.StatusCode);
+    }
+
+    [Fact]
+    public void DisabledReceiverDoesNotTurnItsPortSettingIntoALegacyToolGate()
+    {
+        var context = new DefaultHttpContext(); context.Connection.LocalPort = 3100;
+        using var services = new ServiceCollection().AddSingleton(Options.Create(new FleetIdentityOptions { Enabled = false, VerifiedPort = 3100 })).BuildServiceProvider();
+        context.RequestServices = services;
+        Assert.False(VerifiedMemoryRequest.IsRequired(context));
+    }
+
+    [Fact]
+    public async Task ConfiguredVerifiedPortUsesTheSameProofAndFreshAclBoundary()
+    {
+        _options.VerifiedPort = 4443;
+        var context = Context(); context.Connection.LocalPort = 4443;
+        await using var acl = Acl();
+        var called = false;
+        await Invoke(context, acl, c => { called = VerifiedMemoryRequest.Get(c) is not null; return Task.CompletedTask; });
+        Assert.True(called);
+    }
+
+    [Fact]
     public async Task WarmAclFetchFailureReturns503BeforeMapMcp()
     {
         await using var acl = Acl(fail: true);
@@ -221,6 +262,78 @@ public sealed class MemoryIdentityTests : IDisposable
         Assert.All(results, result => Assert.Contains("verified request authorization unavailable", result));
     }
 
+    [Fact]
+    public void InitializationSignerReceiverVectorUsesDigestOfZeroBytes_NotEmptyClaim()
+    {
+        Assert.Equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", FleetRequestBinding.AbsentSessionHash);
+        var binding = new FleetRequestBinding("POST", "/mcp", MemoryIdentityMiddleware.Hash(Encoding.UTF8.GetBytes(Body)), FleetRequestBinding.AbsentSessionHash);
+        Assert.Equal(_identity, _trust.Assertions.Verify(Sign(), binding, "memory", "/mcp").Identity);
+        Assert.Throws<CryptographicException>(() => _trust.Assertions.Verify(Sign(sessionClaim: ""), binding, "memory", "/mcp"));
+    }
+
+    [Fact]
+    public async Task RealMapMcpDispatchUsesCurrentRequestAcl_AfterSessionInitialization()
+    {
+        var files = new MemoryFileStore(Options.Create(new StorageOptions { Path = Path.Combine(_dir, "dispatch") }), NullLogger<MemoryFileStore>.Instance);
+        files.EnsureDirectories();
+        var document = await files.SaveAsync(new MemoryDocument { Id = Guid.NewGuid().ToString(), Type = "learning", Title = "fixture", Content = "synthetic dispatch content", Project = "alpha" });
+        var memory = new MemoryService(files, null!, null!, Options.Create(new QdrantOptions { Url = "https://unused.example.invalid" }),
+            new MemorySizeGuidance(0, NullLogger.Instance), NullLogger<MemoryService>.Instance);
+        var grants = true;
+        await using var acl = new AclCacheService(Options.Create(new AclOptions { EnableProjectScopedAcl = true }),
+            Options.Create(new OrchestratorOptions { BaseUrl = "https://authority.example.invalid" }), NullLogger<AclCacheService>.Instance,
+            new DynamicAclHandler(() => grants));
+        acl.InjectAclForTesting(new() { ["agent1"] = ["*"] });
+        var builder = WebApplication.CreateBuilder(); builder.WebHost.UseTestServer(); builder.Logging.ClearProviders();
+        builder.Services.AddSingleton(Options.Create(_options)); builder.Services.AddSingleton(_trust);
+        builder.Services.AddSingleton<IVerifiedLaunchReader>(new LaunchReader(_identity, true));
+        builder.Services.AddSingleton(_sessions); builder.Services.AddSingleton(acl);
+        builder.Services.AddSingleton(memory); builder.Services.AddSingleton<ReadCounterService>();
+        builder.Services.AddHttpContextAccessor();
+        builder.Services.AddMcpServer().WithHttpTransport().WithTools<MemoryGetTool>();
+        await using var app = builder.Build();
+        app.Use(async (context, next) =>
+        {
+            // In-process transport seam only: real TLS is separately qualified, never claimed here.
+            context.Connection.LocalPort = _options.VerifiedPort; context.Connection.ClientCertificate = _client;
+            context.Request.Scheme = "https";
+            context.Features.Get<IHttpRequestFeature>()!.RawTarget = context.Request.Path + context.Request.QueryString;
+            await next();
+        });
+        app.UseMiddleware<MemoryIdentityMiddleware>(); app.MapMcp("/mcp"); await app.StartAsync();
+        using var client = app.GetTestClient();
+        async Task<(string? Session, string Text)> Send(object rpc, string? session)
+        {
+            var body = JsonSerializer.Serialize(rpc);
+            using var request = new HttpRequestMessage(HttpMethod.Post, "/mcp");
+            request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+            request.Headers.Add("X-Fleet-Assertion", Sign(session: session, body: body));
+            if (session is not null) request.Headers.Add("Mcp-Session-Id", session);
+            using var response = await client.SendAsync(request).WaitAsync(TimeSpan.FromSeconds(5));
+            var text = await response.Content.ReadAsStringAsync();
+            Assert.True(response.IsSuccessStatusCode, $"{(int)response.StatusCode}: {text}");
+            return (response.Headers.TryGetValues("Mcp-Session-Id", out var values) ? values.Single() : null, text);
+        }
+        var initialize = await Send(new { jsonrpc = "2.0", id = 1, method = "initialize", @params = new {
+            protocolVersion = "2025-06-18", capabilities = new { }, clientInfo = new { name = "fixture", version = "1" } } }, null);
+        Assert.NotNull(initialize.Session);
+        await Send(new { jsonrpc = "2.0", method = "notifications/initialized" }, initialize.Session);
+        var call = new { jsonrpc = "2.0", id = 2, method = "tools/call", @params = new { name = "memory_get", arguments = new { id = document.Id } } };
+        Assert.Contains("synthetic dispatch content", (await Send(call, initialize.Session)).Text);
+        grants = false;
+        var denied = (await Send(call, initialize.Session)).Text;
+        Assert.Contains("access denied", denied); Assert.DoesNotContain("synthetic dispatch content", denied);
+        await app.StopAsync();
+    }
+
+    private sealed class DynamicAclHandler(Func<bool> allowed) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) => Task.FromResult(
+            new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(allowed() ? "{\"acl\":{\"agent1\":[\"alpha\"]}}" : "{\"acl\":{}}") });
+    }
+
     private DefaultHttpContext Context(string? session = null)
     {
         var context = new DefaultHttpContext();
@@ -234,15 +347,15 @@ public sealed class MemoryIdentityTests : IDisposable
     }
     private Task Invoke(HttpContext context, AclCacheService acl, RequestDelegate next, bool active = true) =>
         new MemoryIdentityMiddleware(next).InvokeAsync(context, Options.Create(_options), _trust, new LaunchReader(_identity, active), _sessions, acl);
-    private string Sign(string? audience = null, int age = 0, string? session = null)
+    private string Sign(string? audience = null, int age = 0, string? session = null, string? body = null, string? sessionClaim = null)
     {
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - age;
         var payload = new Dictionary<string, object> { ["iss"] = _options.Issuer, ["aud"] = audience ?? _options.Audience,
             ["sub"] = _identity.AgentName, ["gateway_id"] = _identity.GatewayId, ["sandbox_id"] = _identity.SandboxId,
             ["launch_id"] = _identity.LaunchId.ToString("D"), ["identity_epoch"] = _identity.IdentityEpoch.ToString("D"),
             ["iat"] = now, ["exp"] = now + 15, ["jti"] = Guid.NewGuid().ToString("N"), ["method"] = "POST", ["target"] = "/mcp",
-            ["body_sha256"] = MemoryIdentityMiddleware.Hash(Encoding.UTF8.GetBytes(Body)),
-            ["session_hash"] = MemoryIdentityMiddleware.Hash(Encoding.UTF8.GetBytes(session ?? "")) };
+            ["body_sha256"] = MemoryIdentityMiddleware.Hash(Encoding.UTF8.GetBytes(body ?? Body)),
+            ["session_hash"] = sessionClaim ?? MemoryIdentityMiddleware.SessionHash(session) };
         var prefix = B64(JsonSerializer.SerializeToUtf8Bytes(new { alg = "ES256", typ = "fleet-request+jwt", kid = "key1" })) + "." + B64(JsonSerializer.SerializeToUtf8Bytes(payload));
         return prefix + "." + B64(_key.SignData(Encoding.ASCII.GetBytes(prefix), HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation));
     }

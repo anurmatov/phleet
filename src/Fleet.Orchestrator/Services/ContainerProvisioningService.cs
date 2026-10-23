@@ -114,6 +114,8 @@ public sealed class ContainerProvisioningService(
         // Secret refs from DB — resolve values from .env if available
         foreach (var envRef in agent.EnvRefs.OrderBy(e => e.EnvKeyName))
         {
+            if (envRef.EnvKeyName.StartsWith("FLEET_MEMORY_IDENTITY_", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Receiver identity settings cannot enter a workload environment.");
             var value = envValues.TryGetValue(envRef.EnvKeyName, out var v) ? v : "<secret>";
             // Only *_BOT_TOKEN-shaped TELEGRAM_* keys map to the Telegram__BotToken ASP.NET config key.
             // Other TELEGRAM_* keys (e.g. TELEGRAM_USER_ID, TELEGRAM_GROUP_ID) pass through as-is

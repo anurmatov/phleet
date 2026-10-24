@@ -36,6 +36,9 @@ public sealed class WorkflowOutcomeReconcilerTests
 
     private static bool Eligible(WorkflowOutcomeRun row) => WorkflowOutcomeClassifier.IsEnqueueEligible(row, ObserverHarness.Coordinator);
 
+    /// <summary>A type the fixture classifier policy covers at its loaded seed hash.</summary>
+    private const string Covered = "UweDesignWorkflow";
+
     private static async Task<WorkflowOutcomeRun> WaitClassifiedAsync(ObserverHarness h, string wf, string run, int maxCycles = 30, string ns = Ns)
     {
         for (var i = 0; i < maxCycles; i++)
@@ -262,9 +265,9 @@ public sealed class WorkflowOutcomeReconcilerTests
     public async Task Reconcile_RetrySuccessorClassifiedBeforePredecessor_PredecessorRetrySucceeded()
     {
         await using var h = await ObserverHarness.CreateAsync(Options());
-        var first = Run(h, "wf-r", b => b.Failed(retry: RetryState.InProgress, newRunId: "run-2"), run: "run-1");
+        var first = Run(h, "wf-r", b => b.LoadSeed(Covered).Failed(retry: RetryState.InProgress, newRunId: "run-2"), run: "run-1", type: Covered);
         first.VisibleAt = DateTime.MaxValue;
-        Run(h, "wf-r", b => b.CompletedWith(new { ok = true }), run: "run-2", start: Old.AddMinutes(1),
+        Run(h, "wf-r", b => b.LoadSeed(Covered).CompletedWith(new { ok = true }), run: "run-2", start: Old.AddMinutes(1), type: Covered,
             started: a => { a.ContinuedExecutionRunId = "run-1"; a.Initiator = ContinueAsNewInitiator.Retry; a.Attempt = 2; });
 
         await h.CyclesAsync(1);
@@ -287,7 +290,7 @@ public sealed class WorkflowOutcomeReconcilerTests
     public async Task Reconcile_RetryInProgressThenSuccess_NoInboxAndVersionedRetrySucceeded()
     {
         await using var h = await ObserverHarness.CreateAsync(Options());
-        Run(h, "wf-r", b => b.Failed(retry: RetryState.InProgress, newRunId: "run-2"), run: "run-1");
+        Run(h, "wf-r", b => b.LoadSeed(Covered).Failed(retry: RetryState.InProgress, newRunId: "run-2"), run: "run-1", type: Covered);
 
         await h.CyclesAsync(1);
         var pending = await h.RunAsync(Ns, "wf-r", "run-1");
@@ -296,7 +299,7 @@ public sealed class WorkflowOutcomeReconcilerTests
         var tracked = await h.RunAsync(Ns, "wf-r", "run-2");
         Assert.Equal("Running", tracked.Status);
 
-        Run(h, "wf-r", b => b.CompletedWith(new { ok = true }), run: "run-2", start: Old.AddMinutes(1),
+        Run(h, "wf-r", b => b.LoadSeed(Covered).CompletedWith(new { ok = true }), run: "run-2", start: Old.AddMinutes(1), type: Covered,
             started: a => { a.ContinuedExecutionRunId = "run-1"; a.Initiator = ContinueAsNewInitiator.Retry; });
         await WaitClassifiedAsync(h, "wf-r", "run-2");
 
@@ -305,6 +308,63 @@ public sealed class WorkflowOutcomeReconcilerTests
         Assert.Equal(2, resolved.Version);
         Assert.False(Eligible(resolved));
         Assert.Contains(await h.ObservationsAsync(resolved.Id), o => o.EventType == WorkflowOutcomeStore.SuccessorOutcomeEvent);
+    }
+
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "chains")]
+    public async Task Reconcile_RetryThenCompletedUncoveredType_PredecessorJoinsTheGapNeitherSuccessNorFailure()
+    {
+        await using var h = await ObserverHarness.CreateAsync(Options());
+        Run(h, "wf-u", b => b.Failed(retry: RetryState.InProgress, newRunId: "run-2"), run: "run-1");
+        await h.CyclesAsync(1);
+        Run(h, "wf-u", b => b.CompletedWith(new { ok = true }), run: "run-2", start: Old.AddMinutes(1),
+            started: a => { a.ContinuedExecutionRunId = "run-1"; a.Initiator = ContinueAsNewInitiator.Retry; });
+        await WaitClassifiedAsync(h, "wf-u", "run-2");
+
+        foreach (var row in new[] { await h.RunAsync(Ns, "wf-u", "run-1"), await h.RunAsync(Ns, "wf-u", "run-2") })
+        {
+            Assert.Equal((WorkflowOutcomeClassifications.ClassificationPending, WorkflowOutcomeReasonCodes.ClassifierMissing), (row.Classification, row.ReasonCode));
+            Assert.False(Eligible(row));
+        }
+    }
+
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "failure-matrix")]
+    public async Task Reconcile_ClassifierMissingRow_StoresPolicyHashAndIsNotReReadEveryCycle()
+    {
+        await using var h = await ObserverHarness.CreateAsync(Options());
+        Run(h, "wf-gap", b => b.CompletedWith(new { ok = true }));
+        await h.CyclesAsync(1);
+        var row = await h.RunAsync(Ns, "wf-gap", "run-1");
+        Assert.Equal(OutcomeFixtures.Classifiers().Hash, row.ClassifierHash);
+
+        var store = h.Services.GetRequiredService<WorkflowOutcomeStore>();
+        Assert.Empty(await store.ListAwaitingHistoryAsync(Ns, row.ClassifierHash!, 100, default));
+        // A changed policy re-reads it exactly once more.
+        Assert.Single(await store.ListAwaitingHistoryAsync(Ns, new string('0', 64), 100, default));
+    }
+
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "failure-matrix")]
+    public async Task Reconcile_OneRunHistoryUnavailable_OtherRunsInTheCycleStillClassified()
+    {
+        await using var h = await ObserverHarness.CreateAsync(Options());
+        Run(h, "wf-poison", b => b.Failed(), start: Old);
+        Run(h, "wf-fine", b => b.Failed(), start: Old.AddSeconds(1));
+        h.Temporal.HistoryFault = (request, _) => request.Execution.WorkflowId == "wf-poison"
+            // What the production RPC seam raises for an RPC timeout or an unavailable server.
+            ? new WorkflowOutcomeReadException(WorkflowOutcomeReadFailure.Unavailable, "timeout")
+            : null;
+
+        await h.CyclesAsync(4);
+
+        Assert.True(Eligible(await h.RunAsync(Ns, "wf-fine", "run-1")));
+        Assert.Null((await h.RunAsync(Ns, "wf-poison", "run-1")).TerminalEventId);
+        Assert.Contains(await h.HealthAsync(), x => x.State == "open" && x.Component == WorkflowOutcomeHealthComponents.History);
+
+        h.Temporal.HistoryFault = null;
+        await h.CyclesAsync(15); // past the 5..60 s retry backoff
+        Assert.True(Eligible(await h.RunAsync(Ns, "wf-poison", "run-1")));
     }
 
     [Fact]
@@ -341,7 +401,9 @@ public sealed class WorkflowOutcomeReconcilerTests
         var rows = await h.RunsAsync();
         Assert.DoesNotContain(rows, Eligible);
         Assert.Equal(WorkflowOutcomeReasonCodes.ContinuedAsNew, rows.Single(r => r.RunId == "run-1").ReasonCode);
-        Assert.Equal(WorkflowOutcomeReasonCodes.NormalCompletion, rows.Single(r => r.RunId == "cron-1").ReasonCode);
+        // The cron type has no classifier rules: its Completed run is a visible coverage gap, never a success claim.
+        Assert.Equal(WorkflowOutcomeReasonCodes.ClassifierMissing, rows.Single(r => r.RunId == "cron-1").ReasonCode);
+        Assert.Equal(WorkflowOutcomeClassifications.ClassificationPending, rows.Single(r => r.RunId == "cron-1").Classification);
         // Successors are Described before any logical-failure claim; a missing one is not a failure.
         Assert.Contains(rows, r => r.RunId == "run-2" && r.PreviousRunId == "run-1");
         Assert.Contains(rows, r => r.RunId == "cron-2");
@@ -493,7 +555,8 @@ public sealed class WorkflowOutcomeReconcilerTests
         await using var h = await ObserverHarness.CreateAsync(Options());
         h.Temporal.RetentionSeconds[Ns] = 86400;
         var recent = h.Clock.UtcNow.AddHours(-1);
-        var ok = Run(h, "wf-ok", b => b.CompletedWith(new { ok = 1 }), start: recent);
+        var ok = Run(h, "wf-ok", b => b.LoadSeed(Covered).CompletedWith(new { ok = 1 }), start: recent, type: Covered);
+        var uncovered = Run(h, "wf-gap", b => b.CompletedWith(new { ok = 1 }), start: recent);
         var bad = Run(h, "wf-bad", b => b.Failed(), start: recent);
         await h.CyclesAsync(1);
 
@@ -504,12 +567,15 @@ public sealed class WorkflowOutcomeReconcilerTests
 
         h.Temporal.Remove(ok);
         h.Temporal.Remove(bad);
+        h.Temporal.Remove(uncovered);
         h.Clock.Advance(TimeSpan.FromSeconds(86400 + 400));
         await h.CyclesAsync(1);
 
         var rows = await h.RunsAsync();
         Assert.DoesNotContain(rows, r => r.WorkflowId == "wf-ok");
         Assert.Contains(rows, r => r.WorkflowId == "wf-bad" && Eligible(r));
+        // A coverage gap is never auto-deleted.
+        Assert.Contains(rows, r => r.WorkflowId == "wf-gap" && r.Classification == WorkflowOutcomeClassifications.ClassificationPending);
         Assert.Empty(await h.ObservationsAsync(okRow.Id));
     }
 
@@ -841,13 +907,17 @@ public sealed class WorkflowOutcomeReconcilerTests
         Assert.Equal(200, rows.Count(Eligible));
         Assert.All(rows.Where(r => r.WorkflowId.StartsWith("ok-")), r =>
         {
+            // No rules for these system types: a visible coverage gap, no inbox and no stored payload.
+            Assert.Equal(WorkflowOutcomeClassifications.ClassificationPending, r.Classification);
             Assert.False(Eligible(r));
             Assert.Null(r.PayloadCiphertext);
         });
         Assert.All(rows.Where(r => r.WorkflowId.StartsWith("bad-")), r => Assert.True(Eligible(r)));
         // The observer has read RPCs only: nothing it does can start a notification workflow.
         Assert.DoesNotContain(typeof(IWorkflowOutcomeRpc).GetMethods(), m => m.Name.Contains("Start") || m.Name.Contains("Signal") || m.Name.Contains("Cancel"));
-        Assert.DoesNotContain(await h.HealthAsync(), x => x.State == "open" && x.Component != WorkflowOutcomeHealthComponents.Capacity);
+        var health = await h.HealthAsync();
+        Assert.Contains(health, x => x.State == "open" && x.Component == WorkflowOutcomeHealthComponents.Coverage && x.OutageKey.StartsWith("classifier_missing:"));
+        Assert.DoesNotContain(health, x => x.State == "open" && x.Component != WorkflowOutcomeHealthComponents.Capacity && x.Component != WorkflowOutcomeHealthComponents.Coverage);
     }
 
     [Fact]

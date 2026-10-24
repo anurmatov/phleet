@@ -406,7 +406,8 @@ public sealed record WorkflowOutcomeVerdict(
     IReadOnlyList<string> CauseRefs,
     IReadOnlyList<string> SourceTaskRefs,
     string? TaskOwner,
-    string? GapReason);
+    string? GapReason,
+    string? ClassifierHash = null);
 
 /// <summary>A change to a <c>successor_pending</c> predecessor once its successor is classified.</summary>
 public sealed record WorkflowOutcomePredecessorChange(string Classification, string ReasonCode, string EvidenceState, bool ShareIncident);
@@ -419,7 +420,12 @@ public static class WorkflowOutcomeClassifier
     /// failures or deliberate only through an exact rule, otherwise cause_unresolved; Completed is a
     /// business failure only through an exact loaded-hash rule, otherwise not a failure.
     /// </summary>
-    public static WorkflowOutcomeVerdict Classify(WorkflowOutcomeRunFacts facts, WorkflowOutcomeClassifierPolicy policy)
+    public static WorkflowOutcomeVerdict Classify(WorkflowOutcomeRunFacts facts, WorkflowOutcomeClassifierPolicy policy) =>
+        // The policy hash is stored with the verdict so a pending row is re-read only after the
+        // policy actually changes, not on every cycle.
+        ClassifyUnderPolicy(facts, policy) with { ClassifierHash = policy.Hash };
+
+    private static WorkflowOutcomeVerdict ClassifyUnderPolicy(WorkflowOutcomeRunFacts facts, WorkflowOutcomeClassifierPolicy policy)
     {
         var t = facts.Terminal;
         if (!facts.HistoryComplete || t is null)
@@ -481,7 +487,11 @@ public static class WorkflowOutcomeClassifier
         WorkflowOutcomeTerminal t, string terminalRef)
     {
         var typeRules = policy.RulesFor(facts.WorkflowType, t.EventType).ToArray();
-        if (typeRules.Length > 0)
+        // No rules for this type: its business outcome is not covered. A visible gap, never an
+        // assumed success and never a failure claim.
+        if (typeRules.Length == 0)
+            return Pending(WorkflowOutcomeReasonCodes.ClassifierMissing, WorkflowOutcomeEvidenceStates.Complete, [terminalRef], "classifier_missing");
+
         {
             // A type with rules is only covered for the exact loaded definitions it pins; any other
             // snapshot (or no readable snapshot) is a visible gap, not an assumed success.
@@ -535,6 +545,12 @@ public static class WorkflowOutcomeClassifier
             return null; // the chain continues; wait for its final run
         if (successor.Classification == WorkflowOutcomeClassifications.ConfirmedFailure && successor.EvidenceState == WorkflowOutcomeEvidenceStates.SuccessorPending)
             return new WorkflowOutcomePredecessorChange(predecessorClassification, predecessorReason, WorkflowOutcomeEvidenceStates.SuccessorPending, true);
+        if (successor.Classification == WorkflowOutcomeClassifications.ClassificationPending
+            && successor.ReasonCode == WorkflowOutcomeReasonCodes.ClassifierMissing)
+            // The chain closed Completed but its business outcome is not covered: neither a
+            // provable retry success nor a final failure. The predecessor joins the visible gap.
+            return new WorkflowOutcomePredecessorChange(WorkflowOutcomeClassifications.ClassificationPending, WorkflowOutcomeReasonCodes.ClassifierMissing,
+                WorkflowOutcomeEvidenceStates.Complete, false);
         if (successor.Classification is WorkflowOutcomeClassifications.ExcludedNonfailure
             or WorkflowOutcomeClassifications.InsufficientEvidence or WorkflowOutcomeClassifications.IntentionalNonfailure)
             return new WorkflowOutcomePredecessorChange(WorkflowOutcomeClassifications.ExcludedNonfailure, WorkflowOutcomeReasonCodes.RetrySucceeded,

@@ -340,6 +340,11 @@ public static class WorkflowOutcomeHashes
 /// </summary>
 public static class WorkflowOutcomeTurnOutputParser
 {
+    private const string OutcomeRefPrefix = "outcome:";
+
+    /// <summary>A finish decision's artifact ref; the coordinator runtime sends the first one as <c>ArtifactRef</c>.</summary>
+    public const string ArtifactRefPrefix = "artifact:";
+
     private static readonly string[] RootKeys = ["schemaVersion", "batchId", "generation", "ack", "decisions"];
     private static readonly string[] AckKeys = ["id", "version"];
     private static readonly string[] DecisionKeys = ["id", "version", "operation", "owner", "reason", "evidenceRefs", "dueAt"];
@@ -426,6 +431,8 @@ public static class WorkflowOutcomeTurnOutputParser
 
                 var refsElement = d.GetProperty("evidenceRefs");
                 if (refsElement.ValueKind != JsonValueKind.Array || refsElement.GetArrayLength() > WorkflowOutcomeLimits.MaxEvidenceRefs) { error = "decision_evidence_shape"; return false; }
+                // The server refuses a decision without evidence; refusing it here keeps it from being acked first.
+                if (refsElement.GetArrayLength() == 0) { error = "decision_evidence_empty"; return false; }
                 var refs = new List<string>();
                 foreach (var r in refsElement.EnumerateArray())
                 {
@@ -441,6 +448,15 @@ public static class WorkflowOutcomeTurnOutputParser
                     dueAt = parsed;
                 }
                 if (WorkflowOutcomeOperations.RequiresDueAt(operation!) && (dueAt is null || dueAt <= now)) { error = "decision_due_at_required"; return false; }
+
+                // Mirrors of the server's disposition and scope rules that need no database.
+                if (refs.Any(r => r.StartsWith(OutcomeRefPrefix, StringComparison.Ordinal) && r != OutcomeRefPrefix + id.ToString("D")))
+                { error = "decision_evidence_out_of_scope"; return false; }
+                if (operation == WorkflowOutcomeOperations.Finish && !refs.Any(r => r.StartsWith(ArtifactRefPrefix, StringComparison.Ordinal)))
+                { error = "decision_finish_artifact_missing"; return false; }
+                if (operation == WorkflowOutcomeOperations.Close
+                    && !refs.Any(r => !r.StartsWith(OutcomeRefPrefix, StringComparison.Ordinal) && !r.StartsWith("run:", StringComparison.Ordinal)))
+                { error = "decision_close_evidence_missing"; return false; }
 
                 decisions.Add(new WorkflowOutcomeTurnDecision(id, version, operation!, owner, reason, refs, dueAt));
             }

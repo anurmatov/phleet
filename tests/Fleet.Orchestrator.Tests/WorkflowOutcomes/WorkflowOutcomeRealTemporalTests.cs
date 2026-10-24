@@ -202,22 +202,23 @@ public sealed class WorkflowOutcomeRealTemporalTests
 
             Is(One("a-failed"), WorkflowOutcomeClassifications.ConfirmedFailure, WorkflowOutcomeReasonCodes.WorkflowFailed, true);
             Is(One("a-timeout"), WorkflowOutcomeClassifications.ConfirmedFailure, WorkflowOutcomeReasonCodes.WorkflowTimedOut, true);
-            Is(One("a-result"), WorkflowOutcomeClassifications.ExcludedNonfailure, WorkflowOutcomeReasonCodes.NormalCompletion, false);
-            Is(One("a-null"), WorkflowOutcomeClassifications.InsufficientEvidence, WorkflowOutcomeReasonCodes.NullResultOnly, false);
+            // These compiled test types have no classifier rules: a Completed run is a coverage gap, not a success claim.
+            Is(One("a-result"), WorkflowOutcomeClassifications.ClassificationPending, WorkflowOutcomeReasonCodes.ClassifierMissing, false);
+            Is(One("a-null"), WorkflowOutcomeClassifications.ClassificationPending, WorkflowOutcomeReasonCodes.ClassifierMissing, false);
             var cap = One("a-review-cap");
             Is(cap, WorkflowOutcomeClassifications.ConfirmedFailure, WorkflowOutcomeReasonCodes.BusinessReviewCap, true);
             Assert.Equal(("project-a", "real-review-cap", 3), (cap.ProjectName, cap.ClassifierId, cap.DefinitionVersion));
             Is(One("b-canceled"), WorkflowOutcomeClassifications.CauseUnresolved, WorkflowOutcomeReasonCodes.AbortCauseUnknown, false);
             Is(One("b-terminated"), WorkflowOutcomeClassifications.CauseUnresolved, WorkflowOutcomeReasonCodes.AbortCauseUnknown, false);
             Is(One("b-can", "ContinuedAsNew"), WorkflowOutcomeClassifications.ExcludedNonfailure, WorkflowOutcomeReasonCodes.ContinuedAsNew, false);
-            Is(One("b-can", "Completed"), WorkflowOutcomeClassifications.ExcludedNonfailure, WorkflowOutcomeReasonCodes.NormalCompletion, false);
+            Is(One("b-can", "Completed"), WorkflowOutcomeClassifications.ClassificationPending, WorkflowOutcomeReasonCodes.ClassifierMissing, false);
             Assert.Equal(One("b-can", "ContinuedAsNew").NextRunId, One("b-can", "Completed").RunId);
             var task = One("b-task-failed");
             // Owned by the exact namespace+project rule's coordinator, so it enters only that coordinator's inbox.
             Is(task, WorkflowOutcomeClassifications.ConfirmedFailure, WorkflowOutcomeReasonCodes.BusinessTaskFailed, false);
             Assert.Equal(("agent1", "project-b", "coordinator-b"), (task.TaskOwner, task.ProjectName, task.Coordinator));
             Assert.True(WorkflowOutcomeClassifier.IsEnqueueEligible(task, "coordinator-b"));
-            Is(One("c-parent"), WorkflowOutcomeClassifications.ExcludedNonfailure, WorkflowOutcomeReasonCodes.NormalCompletion, false);
+            Is(One("c-parent"), WorkflowOutcomeClassifications.ClassificationPending, WorkflowOutcomeReasonCodes.ClassifierMissing, false);
             var child = One("c-parent-child");
             Is(child, WorkflowOutcomeClassifications.ConfirmedFailure, WorkflowOutcomeReasonCodes.WorkflowFailed, true);
             Assert.Equal(("c-parent", "project-c"), (child.ParentWorkflowId, child.ProjectName));
@@ -225,11 +226,12 @@ public sealed class WorkflowOutcomeRealTemporalTests
             Is(abandoned, WorkflowOutcomeClassifications.ConfirmedFailure, WorkflowOutcomeReasonCodes.WorkflowFailed, true);
             Assert.Equal("c-parent", abandoned.ParentWorkflowId);
             var firstAttempt = One("c-retry", "Failed");
-            Is(firstAttempt, WorkflowOutcomeClassifications.ExcludedNonfailure, WorkflowOutcomeReasonCodes.RetrySucceeded, false);
+            // The retry closed Completed under an uncovered type: the attempt joins the gap, neither success nor final failure.
+            Is(firstAttempt, WorkflowOutcomeClassifications.ClassificationPending, WorkflowOutcomeReasonCodes.ClassifierMissing, false);
             Assert.Equal(2, firstAttempt.Version);
-            Is(One("c-retry", "Completed"), WorkflowOutcomeClassifications.ExcludedNonfailure, WorkflowOutcomeReasonCodes.NormalCompletion, false);
+            Is(One("c-retry", "Completed"), WorkflowOutcomeClassifications.ClassificationPending, WorkflowOutcomeReasonCodes.ClassifierMissing, false);
             var cronRuns = rows.Where(r => r.WorkflowId == "c-cron").ToList();
-            Assert.Contains(cronRuns, r => r.Status == "Completed" && r.Classification == WorkflowOutcomeClassifications.ExcludedNonfailure);
+            Assert.Contains(cronRuns, r => r.Status == "Completed" && r.Classification == WorkflowOutcomeClassifications.ClassificationPending);
             Assert.DoesNotContain(cronRuns, Eligible);
 
             // Exactly the proven failures are enqueue-eligible; every success and unresolved abort is inbox-ineligible.

@@ -539,7 +539,12 @@ public sealed class WorkflowOutcomePullService : BackgroundService
             var d = pending.Decision;
             var call = await _client.PostDecisionAsync(d.Id, new WorkflowOutcomeDecisionRequest(
                 d.Version, d.Operation, d.Owner, d.Reason, d.EvidenceRefs, d.DueAt,
-                TaskRef: null, ArtifactRef: null, BatchId: local.Batch.BatchId, Generation: local.Batch.Generation), ct);
+                TaskRef: null,
+                // finish closes the item on an accepted artifact; the parser guaranteed one artifact ref.
+                ArtifactRef: d.Operation == WorkflowOutcomeOperations.Finish
+                    ? d.EvidenceRefs.FirstOrDefault(r => r.StartsWith(WorkflowOutcomeTurnOutputParser.ArtifactRefPrefix, StringComparison.Ordinal))
+                    : null,
+                BatchId: local.Batch.BatchId, Generation: local.Batch.Generation), ct);
 
             var state = call.State switch
             {

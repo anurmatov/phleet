@@ -57,10 +57,25 @@ public sealed class WorkflowOutcomeClassifierTests
     [Trait("WorkflowOutcomeSuite", "terminal-matrix")]
     public void Classify_CompletedWithResult_ExcludedNormalCompletion()
     {
-        var v = Classify(new HistoryBuilder("SomeWorkflow", "wf-1").CompletedWith(new { IssueNumber = 7 }));
+        var v = Classify(new HistoryBuilder("UweDesignWorkflow", "wf-1").LoadSeed("UweDesignWorkflow").CompletedWith(new { IssueNumber = 7 }));
 
         Assert.Equal(WorkflowOutcomeClassifications.ExcludedNonfailure, v.Classification);
         Assert.Equal(WorkflowOutcomeReasonCodes.NormalCompletion, v.ReasonCode);
+    }
+
+    [Theory]
+    [Trait("WorkflowOutcomeSuite", "terminal-matrix")]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Classify_CompletedTypeWithoutRules_ClassificationPendingCoverageGap(bool withResult)
+    {
+        var h = new HistoryBuilder("SomeWorkflow", "wf-1");
+        var v = Classify(withResult ? h.CompletedWith(new { IssueNumber = 7 }) : h.Completed(null));
+
+        Assert.Equal(WorkflowOutcomeClassifications.ClassificationPending, v.Classification);
+        Assert.Equal(WorkflowOutcomeReasonCodes.ClassifierMissing, v.ReasonCode);
+        Assert.Equal("classifier_missing", v.GapReason);
+        Assert.Equal(Fixture.Hash, v.ClassifierHash);
     }
 
     public static TheoryData<string> NullishResults => new() { "none", "binary_null", "json_null", "empty_string", "blank_string", "empty_object", "empty_array" };
@@ -80,7 +95,7 @@ public sealed class WorkflowOutcomeClassifierTests
             "empty_object" => HistoryBuilder.RawJson("{}"),
             _ => HistoryBuilder.RawJson("[]"),
         };
-        var v = Classify(new HistoryBuilder("SomeWorkflow", "wf-1").Completed(result));
+        var v = Classify(new HistoryBuilder("UweDesignWorkflow", "wf-1").LoadSeed("UweDesignWorkflow").Completed(result));
 
         Assert.Equal(WorkflowOutcomeClassifications.InsufficientEvidence, v.Classification);
         Assert.Equal(WorkflowOutcomeReasonCodes.NullResultOnly, v.ReasonCode);
@@ -90,13 +105,14 @@ public sealed class WorkflowOutcomeClassifierTests
     [Trait("WorkflowOutcomeSuite", "terminal-matrix")]
     public void Classify_CompletedEncryptedResult_InsufficientQuarantinedNeverInterpreted()
     {
-        var h = new HistoryBuilder("SomeWorkflow", "wf-1").Completed(HistoryBuilder.RawBytes("ciphertext"u8.ToArray(), "binary/encrypted"));
+        var h = new HistoryBuilder("UweDesignWorkflow", "wf-1").LoadSeed("UweDesignWorkflow")
+            .Completed(HistoryBuilder.RawBytes("ciphertext"u8.ToArray(), "binary/encrypted"));
         var facts = h.Facts();
         var v = WorkflowOutcomeClassifier.Classify(facts, Fixture);
 
         Assert.Equal(WorkflowOutcomeClassifications.InsufficientEvidence, v.Classification);
         Assert.Equal(WorkflowOutcomeEvidenceStates.Quarantined, v.EvidenceState);
-        Assert.Contains("event:2:result", facts.UnsupportedPayloadRefs);
+        Assert.Contains(facts.UnsupportedPayloadRefs, r => r == WorkflowOutcomeClassifier.EventRef(facts.Terminal!.EventId) + ":result");
         Assert.Null(facts.Terminal!.Result!.Json);
     }
 

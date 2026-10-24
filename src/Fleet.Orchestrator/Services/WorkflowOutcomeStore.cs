@@ -396,7 +396,8 @@ public sealed class WorkflowOutcomeStore(
             .Where(r => r.Namespace == ns && !r.Quarantined && !NonterminalStatuses.Contains(r.Status)
                 && ((r.TerminalEventId == null && r.ReasonCode == null)
                     || (r.Classification == WorkflowOutcomeClassifications.ClassificationPending
-                        && r.ReasonCode == WorkflowOutcomeReasonCodes.ClassifierMissing && r.ClassifierHash != classifierHash)
+                        && r.ReasonCode == WorkflowOutcomeReasonCodes.ClassifierMissing
+                        && (r.ClassifierHash == null || r.ClassifierHash != classifierHash))
                     || (r.TerminalEventId != null && r.EvidenceState == WorkflowOutcomeEvidenceStates.Pending && r.PayloadCiphertext == null
                         && EvidenceClassifications.Contains(r.Classification))))
             .OrderBy(r => r.DetectedAt).Take(max)
@@ -513,6 +514,7 @@ public sealed class WorkflowOutcomeStore(
             row.ReasonCode = verdict.ReasonCode;
             row.CauseRefsJson = JsonSerializer.Serialize(verdict.CauseRefs);
             row.ClassifierId = verdict.ClassifierId;
+            row.ClassifierHash = verdict.ClassifierHash;
             row.TaskOwner = verdict.TaskOwner;
             row.SourceTaskRefsJson = verdict.SourceTaskRefs.Count == 0 ? null : JsonSerializer.Serialize(verdict.SourceTaskRefs);
             var changed = !Equals(before, Material(row));
@@ -933,6 +935,9 @@ public sealed class WorkflowOutcomeStore(
     private bool ProtectEvidence(WorkflowOutcomeRun row, WorkflowOutcomeRunFacts facts, WorkflowOutcomeVerdict verdict)
     {
         if (!EvidenceClassifications.Contains(verdict.Classification) || row.PayloadCiphertext is not null) return true;
+        // An uncovered Completed run holds no failure or cause evidence, only its (success) result:
+        // nothing is stored, and the history is re-read once the classifier policy changes.
+        if (verdict.ReasonCode == WorkflowOutcomeReasonCodes.ClassifierMissing) return true;
         var bytes = JsonSerializer.SerializeToUtf8Bytes(EvidenceDocument(facts, verdict));
         try
         {

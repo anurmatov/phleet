@@ -477,6 +477,15 @@ public sealed class WorkflowOutcomeReconciler(
                     "history page token rejected or repeated; retrying", ns, ct: token);
                 return;
             }
+            catch (WorkflowOutcomeReadException ex)
+            {
+                // One unreadable run (unavailable, timed out) must not fail the namespace cycle:
+                // keep its resumable progress, record the read gap and classify the others.
+                logger.LogWarning("workflow_outcome_history_unavailable namespace={Namespace} outcome={OutcomeId} kind={Kind}", ns, run.Id, ex.Kind);
+                await _store.RaiseAsync(_lease!, WorkflowOutcomeHealthComponents.History, "history_read:" + ns,
+                    "a run history could not be read; retrying next cycle", ns, ct: token);
+                return;
+            }
 
             if (!progress.Complete)
             {
@@ -494,7 +503,19 @@ public sealed class WorkflowOutcomeReconciler(
             if (facts.Terminal is null) return; // visibility ran ahead of history; Describe again later
 
             var verdict = WorkflowOutcomeClassifier.Classify(facts, _policies.Classifiers);
-            var parent = await ResolveParentAsync(facts, 0, token);
+            WorkflowOutcomeParentOwnership? parent;
+            try
+            {
+                parent = await ResolveParentAsync(facts, 0, token);
+            }
+            catch (WorkflowOutcomeReadException ex)
+            {
+                // The parent is unreadable right now: leave this run unclassified for the next cycle.
+                logger.LogWarning("workflow_outcome_parent_unavailable namespace={Namespace} outcome={OutcomeId} kind={Kind}", ns, run.Id, ex.Kind);
+                await _store.RaiseAsync(_lease!, WorkflowOutcomeHealthComponents.History, "history_read:" + ns,
+                    "a parent run history could not be read; retrying next cycle", ns, ct: token);
+                return;
+            }
             var ownership = WorkflowOutcomeOwnership.Resolve(facts, _policies.Ownership, parent);
             var result = await _store.StoreOutcomeAsync(_lease!, facts, verdict, ownership, schedule.RetentionSeconds, token);
             if (result.KeyringFailed) Interlocked.Increment(ref keyringFailed);

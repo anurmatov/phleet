@@ -85,8 +85,10 @@ public static class WorkflowOutcomePrompt
             + "; ids and versions exactly as listed above; owner nonblank, at most "
             + WorkflowOutcomeLimits.MaxOwnerChars.ToString(CultureInfo.InvariantCulture)
             + " chars; reason nonblank, at most " + WorkflowOutcomeLimits.MaxReasonChars.ToString(CultureInfo.InvariantCulture)
-            + " chars; evidenceRefs at most " + WorkflowOutcomeLimits.MaxEvidenceRefs.ToString(CultureInfo.InvariantCulture)
+            + " chars; evidenceRefs 1 to " + WorkflowOutcomeLimits.MaxEvidenceRefs.ToString(CultureInfo.InvariantCulture)
             + ", each starting with one of " + string.Join(" ", WorkflowOutcomeLimits.EvidenceRefPrefixes)
+            + " and naming only this item's own records (outcome:<its id>, its run, events, tasks, late results, decisions, operations) or an artifact:/https:// ref"
+            + "; finish needs an artifact: ref for the accepted artifact; close needs a ref other than outcome:/run:"
             + "; dueAt is an ISO-8601 timestamp with an explicit offset, optional except that wait and hold require a future dueAt"
             + "; ack and decisions at most " + WorkflowOutcomeLimits.MaxBatchItems.ToString(CultureInfo.InvariantCulture)
             + " entries each with unique ids; every decision's id and version must also be in ack; no other keys)";

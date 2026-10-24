@@ -202,7 +202,7 @@ internal static class WorkflowOutcomeFixture
 
     /// <summary>A valid schema v1 output acknowledging <paramref name="ack"/> and deciding <paramref name="decide"/>.</summary>
     public static string Output(WorkflowOutcomeInboxBatch batch, IEnumerable<WorkflowOutcomeInboxItem> ack,
-        IEnumerable<WorkflowOutcomeInboxItem>? decide = null, string operation = "retry") =>
+        IEnumerable<WorkflowOutcomeInboxItem>? decide = null, string operation = "retry", string[]? evidence = null) =>
         JsonSerializer.Serialize(new
         {
             schemaVersion = 1,
@@ -212,7 +212,7 @@ internal static class WorkflowOutcomeFixture
             decisions = (decide ?? []).Select(i => new
             {
                 id = i.Id, version = i.Version, operation, owner = "agent1",
-                reason = "the delegate failed; retry after the fix", evidenceRefs = new[] { "event:7" },
+                reason = "the delegate failed; retry after the fix", evidenceRefs = evidence ?? ["event:7"],
             }),
         });
 }

@@ -510,12 +510,17 @@ public sealed class WorkflowOutcomeInboxService(
             return WorkflowOutcomeResult.Error(403, "foreign_outcome");
 
         var now = WorkflowOutcomeApi.Now(clock);
+        // Shape and generation first: a malformed, oversized or other-generation resend is never
+        // matched against a recorded decision.
+        var refusal = ValidateDecisionShape(request);
+        if (refusal is not null) return await RejectDecisionAsync(principal, run, request, refusal.Value.Status, refusal.Value.Reason, now, ct);
+
         // A lost reply is resent with the identical body: answer with the recorded decision rather
         // than a second audit row (and rather than "already_resolved" after a finish/close).
-        if (await AcceptedDuplicateAsync(principal, run, request, now, ct) is { } recorded)
+        if (await AcceptedDuplicateAsync(principal, run, request, ct) is { } recorded)
             return new(201, new { decisionId = recorded, status = "accepted", duplicate = true });
 
-        var refusal = await ValidateDecisionAsync(run, request, now, ct);
+        refusal = await ValidateDecisionStateAsync(run, request, now, ct);
         if (refusal is not null) return await RejectDecisionAsync(principal, run, request, refusal.Value.Status, refusal.Value.Reason, now, ct);
 
         var decisionId = Guid.NewGuid();
@@ -531,7 +536,7 @@ public sealed class WorkflowOutcomeInboxService(
             {
                 var closed = await db.WorkflowOutcomeRuns
                     .Where(r => r.Id == outcomeId && r.Version == request.ExpectedVersion && r.ResolvedAt == null)
-                    .ExecuteUpdateAsync(s => s.SetProperty(r => r.ResolvedAt, now), ct);
+                    .ExecuteUpdateAsync(u => u.SetProperty(r => r.ResolvedAt, now), ct);
                 if (closed != 1) return ((409, "stale_version"), false);
             }
             return ((201, null), true);
@@ -547,20 +552,8 @@ public sealed class WorkflowOutcomeInboxService(
             : (object)new { decisionId, status = "accepted" });
     }
 
-    private async Task<Guid?> AcceptedDuplicateAsync(
-        WorkflowOutcomePrincipal principal, WorkflowOutcomeRun run, WorkflowOutcomeDecisionRequest request, DateTime now, CancellationToken ct)
-    {
-        var wanted = DecisionRow(Guid.Empty, principal, run, request, "accepted", null, now);
-        var candidates = await db.WorkflowOutcomeDecisions.AsNoTracking()
-            .Where(d => d.OutcomeId == run.Id && d.Status == "accepted" && d.ExpectedVersion == wanted.ExpectedVersion
-                && d.Operation == wanted.Operation && d.DecidedVia == wanted.DecidedVia && d.DecidedBy == wanted.DecidedBy)
-            .ToListAsync(ct);
-        return candidates.FirstOrDefault(d => d.Owner == wanted.Owner && d.Reason == wanted.Reason
-            && d.EvidenceRefsJson == wanted.EvidenceRefsJson && d.DueAt == wanted.DueAt && d.TaskRef == wanted.TaskRef
-            && d.ArtifactRef == wanted.ArtifactRef && d.BatchId == wanted.BatchId)?.Id;
-    }
-
-    private async Task<(int Status, string Reason)?> ValidateDecisionAsync(WorkflowOutcomeRun run, WorkflowOutcomeDecisionRequest request, DateTime now, CancellationToken ct)
+    /// <summary>Request-only checks that need no database: enum, bounds, ref syntax and generation.</summary>
+    private (int Status, string Reason)? ValidateDecisionShape(WorkflowOutcomeDecisionRequest request)
     {
         if (!WorkflowOutcomeOperations.IsKnown(request.Operation)) return (422, "operation_unknown");
         if (string.IsNullOrWhiteSpace(request.Owner) || request.Owner.Length > WorkflowOutcomeLimits.MaxOwnerChars) return (422, "owner_invalid");
@@ -570,12 +563,39 @@ public sealed class WorkflowOutcomeInboxService(
             return (422, "evidence_invalid");
         if (request.TaskRef is not null && !WorkflowOutcomeLimits.IsEvidenceRef(request.TaskRef)) return (422, "task_ref_invalid");
         if (request.ArtifactRef is not null && !WorkflowOutcomeLimits.IsEvidenceRef(request.ArtifactRef)) return (422, "artifact_ref_invalid");
-        if (WorkflowOutcomeOperations.RequiresDueAt(request.Operation) && (request.DueAt is null || request.DueAt.Value.UtcDateTime <= now))
+        if (WorkflowOutcomeOperations.RequiresDueAt(request.Operation) && request.DueAt is null) return (422, "due_at_required");
+        if (request.Generation is { } g && g != auth.Generation) return (409, "generation_mismatch");
+        return null;
+    }
+
+    /// <summary>
+    /// The recorded accepted decision this request repeats exactly, or null. Only called after
+    /// <see cref="ValidateDecisionShape"/>, so every compared field is complete and in bounds.
+    /// </summary>
+    private async Task<Guid?> AcceptedDuplicateAsync(
+        WorkflowOutcomePrincipal principal, WorkflowOutcomeRun run, WorkflowOutcomeDecisionRequest request, CancellationToken ct)
+    {
+        var decidedBy = principal.IsCoordinator ? principal.Name : WorkflowOutcomePrincipal.OperatorKind;
+        var via = principal.IsCoordinator ? WorkflowOutcomePrincipal.CoordinatorKind : WorkflowOutcomePrincipal.OperatorKind;
+        var refsJson = JsonSerializer.Serialize(request.EvidenceRefs);
+        var dueAt = request.DueAt?.UtcDateTime;
+        var candidates = await db.WorkflowOutcomeDecisions.AsNoTracking()
+            .Where(d => d.OutcomeId == run.Id && d.Status == "accepted" && d.ExpectedVersion == request.ExpectedVersion
+                && d.Operation == request.Operation && d.DecidedVia == via && d.DecidedBy == decidedBy)
+            .ToListAsync(ct);
+        return candidates.FirstOrDefault(d => d.Owner == request.Owner && d.Reason == request.Reason
+            && d.EvidenceRefsJson == refsJson && d.DueAt == dueAt && d.TaskRef == request.TaskRef
+            && d.ArtifactRef == request.ArtifactRef && d.BatchId == request.BatchId)?.Id;
+    }
+
+    private async Task<(int Status, string Reason)?> ValidateDecisionStateAsync(WorkflowOutcomeRun run, WorkflowOutcomeDecisionRequest request, DateTime now, CancellationToken ct)
+    {
+        var refs = request.EvidenceRefs;
+        if (WorkflowOutcomeOperations.RequiresDueAt(request.Operation) && request.DueAt!.Value.UtcDateTime <= now)
             return (422, "due_at_required");
         if (run.Classification != WorkflowOutcomeClassifications.ConfirmedFailure) return (422, "not_confirmed_failure");
         if (run.ResolvedAt is not null) return (409, "already_resolved");
         if (run.Version != request.ExpectedVersion) return (409, "stale_version");
-        if (request.Generation is { } g && g != auth.Generation) return (409, "generation_mismatch");
 
         // The exact version must have been explicitly acknowledged in the current generation.
         var gen = auth.Generation;
@@ -583,6 +603,13 @@ public sealed class WorkflowOutcomeInboxService(
             && i.DeliveryGeneration == gen && i.AckedAt != null);
         if (request.BatchId is { } batchId) acked = acked.Where(i => i.BatchId == batchId);
         if (!await acked.AnyAsync(ct)) return (422, "not_acknowledged");
+
+        // Every ref must point at this outcome (or at an external artifact/URL): evidence from
+        // another outcome can never justify this decision.
+        var scoped = request.TaskRef is null ? refs : [.. refs, request.TaskRef];
+        if (request.ArtifactRef is not null) scoped = [.. scoped, request.ArtifactRef];
+        foreach (var r in scoped)
+            if (!await InScopeAsync(run, r, ct)) return (422, "evidence_out_of_scope");
 
         switch (request.Operation)
         {
@@ -596,10 +623,10 @@ public sealed class WorkflowOutcomeInboxService(
                 return (422, "disposition_evidence_missing");
             case WorkflowOutcomeOperations.AcceptLate:
             {
-                var lateIds = refs.Where(r => r.StartsWith("late-result:", StringComparison.Ordinal))
-                    .Select(r => Guid.TryParseExact(r["late-result:".Length..], "D", out var id) ? id : Guid.Empty)
+                var lateIds = refs.Where(r => r.StartsWith(LateRefPrefix, StringComparison.Ordinal))
+                    .Select(r => Guid.TryParseExact(r[LateRefPrefix.Length..], "D", out var id) ? id : Guid.Empty)
                     .Where(id => id != Guid.Empty).ToList();
-                if (lateIds.Count == 0 || !await db.WorkflowOutcomeLateResults.AnyAsync(l => lateIds.Contains(l.Id) && !l.Quarantined, ct))
+                if (lateIds.Count == 0 || !await db.WorkflowOutcomeLateResults.AnyAsync(l => lateIds.Contains(l.Id) && l.OutcomeId == run.Id && !l.Quarantined, ct))
                     return (422, "late_result_unverified");
                 break;
             }
@@ -611,6 +638,38 @@ public sealed class WorkflowOutcomeInboxService(
             }
         }
         return null;
+    }
+
+    private const string LateRefPrefix = "late-result:";
+
+    /// <summary>True when <paramref name="evidenceRef"/> names this outcome's own records, or an external artifact/URL.</summary>
+    private async Task<bool> InScopeAsync(WorkflowOutcomeRun run, string evidenceRef, CancellationToken ct)
+    {
+        var colon = evidenceRef.IndexOf(':');
+        var kind = evidenceRef[..(colon + 1)];
+        var value = evidenceRef[(colon + 1)..];
+        switch (kind)
+        {
+            case "artifact:":
+            case "https:":
+                return true;
+            case "outcome:":
+                return value == run.Id.ToString("D");
+            case "run:":
+                return value == run.Namespace + "/" + run.WorkflowId + "/" + run.RunId;
+            case "event:":
+                return long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var eventId) && eventId > 0;
+            case "task:":
+                return (WorkflowOutcomeApi.TaskIds(run) ?? []).Contains(value, StringComparer.Ordinal);
+        }
+        if (!Guid.TryParseExact(value, "D", out var id)) return false;
+        return kind switch
+        {
+            LateRefPrefix => await db.WorkflowOutcomeLateResults.AnyAsync(l => l.Id == id && l.OutcomeId == run.Id, ct),
+            "decision:" => await db.WorkflowOutcomeDecisions.AnyAsync(d => d.Id == id && d.OutcomeId == run.Id, ct),
+            "operation:" => await db.WorkflowRecoveryOperations.AnyAsync(o => o.Id == id && o.OutcomeId == run.Id, ct),
+            _ => false,
+        };
     }
 
     private async Task<WorkflowOutcomeResult> RejectDecisionAsync(
@@ -981,6 +1040,17 @@ public sealed class WorkflowOutcomeInboxService(
     /// committed before any 2xx. A reply that maps to no unique recorded task is quarantined; an
     /// oversize one keeps metadata only. Never accepted, never overwrites the current attempt.
     /// </summary>
+    private static readonly System.Text.RegularExpressions.Regex ContinuationSuffix =
+        new("/incomplete-retry-[0-9]+$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>The workflow id that scheduled <paramref name="taskId"/>, or null when it has no step segment.</summary>
+    internal static string? TaskOwnerWorkflowId(string taskId)
+    {
+        var baseId = ContinuationSuffix.Replace(taskId, "");
+        var slash = baseId.LastIndexOf('/');
+        return slash > 0 ? baseId[..slash] : null;
+    }
+
     public async Task<WorkflowOutcomeResult> StoreLateResultAsync(WorkflowOutcomePrincipal principal, WorkflowOutcomeLateResultRequest? request, CancellationToken ct)
     {
         if (!principal.IsBridge) return WorkflowOutcomeResult.Error(403, "wrong_scope");
@@ -1009,9 +1079,13 @@ public sealed class WorkflowOutcomeInboxService(
         if (quarantine is null)
         {
             var taskId = request.TaskId;
-            var candidates = (await db.WorkflowOutcomeRuns.AsNoTracking()
-                    .Where(r => r.SourceTaskRefsJson != null && r.SourceTaskRefsJson.Contains(taskId) && (ns == "" || r.Namespace == ns))
-                    .Take(5).ToListAsync(ct))
+            // A delegate task id is "<workflowId>/<step>" (a continuation appends
+            // "/incomplete-retry-N"), so only runs of that exact workflow id can own it. Every one of
+            // them is checked exactly; nothing is truncated before the exact match.
+            var owner = TaskOwnerWorkflowId(taskId);
+            var candidates = owner is null ? [] : (await db.WorkflowOutcomeRuns.AsNoTracking()
+                    .Where(r => r.WorkflowId == owner && r.SourceTaskRefsJson != null && (ns == "" || r.Namespace == ns))
+                    .ToListAsync(ct))
                 .Where(r => (WorkflowOutcomeApi.TaskIds(r) ?? []).Contains(taskId, StringComparer.Ordinal)).ToList();
             // Never assume a default namespace or guess the current run.
             if (candidates.Count == 1) outcomeId = candidates[0].Id;
@@ -1079,7 +1153,7 @@ public sealed class WorkflowOutcomeInboxService(
 
     private static WorkflowOutcomeResult Stored(WorkflowOutcomeLateResult row, bool created, bool tooLarge) =>
         new(tooLarge ? StatusCodes.Status413PayloadTooLarge : created ? StatusCodes.Status201Created : StatusCodes.Status200OK,
-            new { id = row.Id, status = row.Status, quarantineReason = row.QuarantineReason });
+            new { id = row.Id, status = row.Status, quarantineReason = row.QuarantineReason, outcomeId = row.OutcomeId });
 }
 
 /// <summary>

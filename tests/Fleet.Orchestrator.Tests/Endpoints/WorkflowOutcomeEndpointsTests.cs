@@ -489,7 +489,7 @@ public sealed class WorkflowOutcomeEndpointsTests : IAsyncLifetime
     {
         var sibling = await _host.SeedRunAsync();
         var (response, run) = await DecideAsync(ApiHost.Decision(1, operation,
-            evidence: ["decision:accepted-failure-review"], artifactRef: operation == "finish" ? "artifact:owner/repo#pr/7" : null));
+            evidence: ["https://example.com/review/1"], artifactRef: operation == "finish" ? "artifact:owner/repo#pr/7" : null));
 
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         var rows = await _host.Database.QueryAsync(db => db.WorkflowOutcomeRuns.AsNoTracking().ToDictionaryAsync(r => r.Id));
@@ -506,7 +506,16 @@ public sealed class WorkflowOutcomeEndpointsTests : IAsyncLifetime
         var url = $"{Root}/{run.Id}/decisions";
         var refused = await _host.AsCoordinator(HttpMethod.Post, url, ApiHost.Decision(1, "accept_late", evidence: ["late-result:" + Guid.NewGuid()]));
         Assert.Equal((HttpStatusCode)422, refused.StatusCode);
-        Assert.Equal("late_result_unverified", (await ApiHost.JsonAsync(refused)).GetProperty("error").GetString());
+        Assert.Equal("evidence_out_of_scope", (await ApiHost.JsonAsync(refused)).GetProperty("error").GetString());
+
+        // A stored late result that belongs to ANOTHER outcome cannot justify this one.
+        var other = await _host.SeedRunAsync();
+        var foreignLate = await ApiHost.JsonAsync(await _host.AsAdmin(HttpMethod.Post, $"{Root}/late-results", new WorkflowOutcomeLateResultRequest(
+            "namespace-a", other.WorkflowId + "/step-a", "m-0", WorkflowOutcomeHashes.Sha256Hex("other text"), "completed", "other text", 1, _host.Clock.GetUtcNow())));
+        Assert.Equal(other.Id, foreignLate.GetProperty("outcomeId").GetGuid());
+        var foreign = await _host.AsCoordinator(HttpMethod.Post, url, ApiHost.Decision(1, "accept_late", evidence: ["late-result:" + foreignLate.GetProperty("id").GetGuid()]));
+        Assert.Equal((HttpStatusCode)422, foreign.StatusCode);
+        Assert.Equal("evidence_out_of_scope", (await ApiHost.JsonAsync(foreign)).GetProperty("error").GetString());
 
         var taskId = run.WorkflowId + "/step-a";
         var late = await ApiHost.JsonAsync(await _host.AsAdmin(HttpMethod.Post, $"{Root}/late-results", new WorkflowOutcomeLateResultRequest(
@@ -514,7 +523,8 @@ public sealed class WorkflowOutcomeEndpointsTests : IAsyncLifetime
         var accepted = await _host.AsCoordinator(HttpMethod.Post, url, ApiHost.Decision(1, "accept_late", evidence: ["late-result:" + late.GetProperty("id").GetGuid()]));
         Assert.Equal(HttpStatusCode.Created, accepted.StatusCode);
         // Recorded evidence only: the late result is not auto-accepted.
-        Assert.Equal("stored", (await _host.Database.QueryAsync(db => db.WorkflowOutcomeLateResults.AsNoTracking().SingleAsync())).Status);
+        var lateId = late.GetProperty("id").GetGuid();
+        Assert.Equal("stored", (await _host.Database.QueryAsync(db => db.WorkflowOutcomeLateResults.AsNoTracking().SingleAsync(l => l.Id == lateId))).Status);
     }
 
     [Theory]
@@ -529,7 +539,7 @@ public sealed class WorkflowOutcomeEndpointsTests : IAsyncLifetime
     public async Task Decide_UnsafeOrInvalid_Is422AndAuditedAsRejected(string operation, string reason)
     {
         var (response, run) = await DecideAsync(ApiHost.Decision(1, operation, owner: operation == "reassign" ? "nobody" : "agent1",
-            evidence: ["outcome:self"]));
+            evidence: ["https://example.com/review/1"]));
 
         Assert.Equal((HttpStatusCode)422, response.StatusCode);
         var body = await ApiHost.JsonAsync(response);
@@ -545,7 +555,8 @@ public sealed class WorkflowOutcomeEndpointsTests : IAsyncLifetime
     {
         var (past, _) = await DecideAsync(ApiHost.Decision(1, "hold", dueAt: _host.Clock.GetUtcNow().AddMinutes(-1)));
         Assert.Equal((HttpStatusCode)422, past.StatusCode);
-        var (close, run) = await DecideAsync(ApiHost.Decision(1, "close", evidence: ["outcome:" + Guid.NewGuid()]));
+        var (run, _) = await _host.AckedFailureAsync();
+        var close = await _host.AsCoordinator(HttpMethod.Post, $"{Root}/{run.Id}/decisions", ApiHost.Decision(1, "close", evidence: ["outcome:" + run.Id]));
         Assert.Equal((HttpStatusCode)422, close.StatusCode);
         Assert.Equal("disposition_evidence_missing", (await ApiHost.JsonAsync(close)).GetProperty("error").GetString());
     }
@@ -593,7 +604,7 @@ public sealed class WorkflowOutcomeEndpointsTests : IAsyncLifetime
     {
         var (run, _) = await _host.AckedFailureAsync();
         var url = $"{Root}/{run.Id}/decisions";
-        var decision = ApiHost.Decision(1, "close", evidence: ["decision:accepted-failure-review"]);
+        var decision = ApiHost.Decision(1, "close", evidence: ["https://example.com/review/1"]);
         var first = await ApiHost.JsonAsync(await _host.AsCoordinator(HttpMethod.Post, url, decision));
         var resent = await _host.AsCoordinator(HttpMethod.Post, url, decision);
 
@@ -604,8 +615,76 @@ public sealed class WorkflowOutcomeEndpointsTests : IAsyncLifetime
         Assert.Equal("accepted", Assert.Single(await DecisionRowsAsync(run.Id)).Status);
 
         // A different body is a new decision attempt, not a duplicate: the item is already closed.
-        var other = await _host.AsCoordinator(HttpMethod.Post, url, ApiHost.Decision(1, "close", evidence: ["decision:another-review"]));
+        var other = await _host.AsCoordinator(HttpMethod.Post, url, ApiHost.Decision(1, "close", evidence: ["https://example.com/review/2"]));
         Assert.Equal(HttpStatusCode.Conflict, other.StatusCode);
+    }
+
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "receipts")]
+    public async Task Decide_ResendWithChangedGenerationOrOversizedField_IsNeverADuplicate()
+    {
+        var (run, _) = await _host.AckedFailureAsync();
+        var url = $"{Root}/{run.Id}/decisions";
+        var due = _host.Clock.GetUtcNow().AddHours(4);
+        var owner = new string('o', WorkflowOutcomeLimits.MaxOwnerChars);
+        var accepted = await _host.AsCoordinator(HttpMethod.Post, url, new
+        {
+            expectedVersion = 1, operation = "hold", owner, reason = "owned follow-up", evidenceRefs = new[] { "https://example.com/r" }, dueAt = due, generation = 1,
+        });
+        Assert.Equal(HttpStatusCode.Created, accepted.StatusCode);
+
+        // Same body under another generation: refused on generation, not answered as a duplicate.
+        var otherGeneration = await _host.AsCoordinator(HttpMethod.Post, url, new
+        {
+            expectedVersion = 1, operation = "hold", owner, reason = "owned follow-up", evidenceRefs = new[] { "https://example.com/r" }, dueAt = due, generation = 2,
+        });
+        Assert.Equal(HttpStatusCode.Conflict, otherGeneration.StatusCode);
+        Assert.Equal("generation_mismatch", (await ApiHost.JsonAsync(otherGeneration)).GetProperty("error").GetString());
+
+        // An owner one character over the limit whose stored prefix matches is invalid, not a duplicate.
+        var oversized = await _host.AsCoordinator(HttpMethod.Post, url, new
+        {
+            expectedVersion = 1, operation = "hold", owner = owner + "o", reason = "owned follow-up", evidenceRefs = new[] { "https://example.com/r" }, dueAt = due, generation = 1,
+        });
+        Assert.Equal((HttpStatusCode)422, oversized.StatusCode);
+        Assert.Equal("owner_invalid", (await ApiHost.JsonAsync(oversized)).GetProperty("error").GetString());
+
+        var rows = await DecisionRowsAsync(run.Id);
+        Assert.Equal(["accepted", "rejected", "rejected"], rows.OrderBy(r => r.CreatedAt).ThenBy(r => r.Status).Select(r => r.Status).Order().ToArray());
+    }
+
+    [Theory]
+    [Trait("WorkflowOutcomeSuite", "decisions")]
+    [InlineData("outcome")]
+    [InlineData("run")]
+    [InlineData("task")]
+    [InlineData("decision")]
+    [InlineData("operation")]
+    public async Task Decide_EvidenceOfAnotherOutcome_IsOutOfScope(string kind)
+    {
+        var other = await _host.SeedRunAsync();
+        var (run, _) = await _host.AckedFailureAsync();
+        var foreignRef = kind switch
+        {
+            "outcome" => "outcome:" + other.Id,
+            "run" => $"run:{other.Namespace}/{other.WorkflowId}/{other.RunId}",
+            "task" => "task:" + other.WorkflowId + "/step-a",
+            "decision" => "decision:" + Guid.NewGuid(),
+            _ => "operation:" + Guid.NewGuid(),
+        };
+        var refused = await _host.AsCoordinator(HttpMethod.Post, $"{Root}/{run.Id}/decisions", ApiHost.Decision(1, "close", evidence: [foreignRef]));
+
+        Assert.Equal((HttpStatusCode)422, refused.StatusCode);
+        Assert.Equal("evidence_out_of_scope", (await ApiHost.JsonAsync(refused)).GetProperty("error").GetString());
+
+        // The same kinds naming this outcome's own records are accepted.
+        var own = kind switch
+        {
+            "run" => $"run:{run.Namespace}/{run.WorkflowId}/{run.RunId}",
+            _ => "task:" + run.WorkflowId + "/step-a",
+        };
+        var accepted = await _host.AsCoordinator(HttpMethod.Post, $"{Root}/{run.Id}/decisions", ApiHost.Decision(1, "close", evidence: [own, "https://example.com/r"]));
+        Assert.Equal(HttpStatusCode.Created, accepted.StatusCode);
     }
 
     [Fact]
@@ -903,8 +982,8 @@ public sealed class WorkflowOutcomeEndpointsTests : IAsyncLifetime
     [Trait("WorkflowOutcomeSuite", "late-results")]
     public async Task LateResult_UnknownOrAmbiguousCorrelation_IsQuarantined_NeverGuessed()
     {
-        await _host.SeedRunAsync(r => { r.Namespace = "namespace-a"; r.SourceTaskRefsJson = "[\"shared/step\"]"; });
-        await _host.SeedRunAsync(r => { r.Namespace = "namespace-b"; r.SourceTaskRefsJson = "[\"shared/step\"]"; });
+        await _host.SeedRunAsync(r => { r.Namespace = "namespace-a"; r.WorkflowId = "shared"; r.SourceTaskRefsJson = "[\"shared/step\"]"; });
+        await _host.SeedRunAsync(r => { r.Namespace = "namespace-b"; r.WorkflowId = "shared"; r.SourceTaskRefsJson = "[\"shared/step\"]"; });
 
         var ambiguous = await ApiHost.JsonAsync(await _host.AsAdmin(HttpMethod.Post, Root + "/late-results", Late(null, "shared/step", "a")));
         var unknown = await ApiHost.JsonAsync(await _host.AsAdmin(HttpMethod.Post, Root + "/late-results", Late("namespace-a", "nobody/step", "b")));
@@ -914,6 +993,26 @@ public sealed class WorkflowOutcomeEndpointsTests : IAsyncLifetime
         Assert.All(await _host.Database.QueryAsync(db => db.WorkflowOutcomeLateResults.AsNoTracking().ToListAsync()), l => Assert.Null(l.OutcomeId));
         var incident = await _host.Database.QueryAsync(db => db.WorkflowOutcomeHealth.AsNoTracking().SingleAsync(h => h.Component == "late_results"));
         Assert.Equal(("open", 2L), (incident.State, incident.KnownRunCount));
+    }
+
+    [Theory]
+    [Trait("WorkflowOutcomeSuite", "late-results")]
+    [InlineData(1, "stored")]
+    [InlineData(2, "quarantined")]
+    public async Task LateResult_ExactMatchAfterManySubstringDecoys_IsNeverTruncatedAway(int exact, string expected)
+    {
+        // Five runs of the same workflow whose task refs merely CONTAIN the id, then the exact owner(s).
+        for (var i = 0; i < 5; i++)
+            await _host.SeedRunAsync(r => { r.WorkflowId = "chain"; r.SourceTaskRefsJson = $"[\"chain/step-{i}x\",\"x-chain/step\"]"; });
+        var owners = new List<WorkflowOutcomeRun>();
+        for (var i = 0; i < exact; i++)
+            owners.Add(await _host.SeedRunAsync(r => { r.WorkflowId = "chain"; r.SourceTaskRefsJson = "[\"chain/step\"]"; }));
+
+        var stored = await ApiHost.JsonAsync(await _host.AsAdmin(HttpMethod.Post, Root + "/late-results", Late("namespace-a", "chain/step", "late")));
+
+        Assert.Equal(expected, stored.GetProperty("status").GetString());
+        if (exact == 1) Assert.Equal(owners[0].Id, stored.GetProperty("outcomeId").GetGuid());
+        else Assert.Equal("correlation_ambiguous", stored.GetProperty("quarantineReason").GetString());
     }
 
     [Fact]

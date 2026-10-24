@@ -65,6 +65,26 @@ public sealed class WorkflowOutcomeInboxTests : IAsyncLifetime
 
     [Fact]
     [Trait(Suite, "coordinator")]
+    public async Task RunCycle_FinishDecision_SendsItsArtifactRefAsArtifactRef()
+    {
+        var a = Item();
+        var batch = Batch(a);
+        var rt = Runtime();
+        rt.Server.Batches.Add(batch);
+        rt.Executor.Enqueue([ScriptedExecutor.Final(Output(batch, [a], [a], operation: "finish",
+            evidence: ["event:7", "artifact:owner/repo#pr/7"]))]);
+
+        Assert.True(rt.Start());
+        await rt.CycleAsync();
+        await rt.UntilAsync(() => rt.Local(batch.BatchId).Completed, "the batch to complete");
+
+        var decision = Assert.Single(rt.Server.Decisions);
+        Assert.Equal(("finish", "artifact:owner/repo#pr/7"), (decision.Request.Operation, decision.Request.ArtifactRef));
+        AssertNoExternalOutput(rt);
+    }
+
+    [Fact]
+    [Trait(Suite, "coordinator")]
     [Trait(Suite, "receipts")]
     public async Task RunCycle_FailureBatch_FsyncsBeforeDeliveredThenOneSilentTurnAcksAndDecides()
     {

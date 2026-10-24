@@ -14,6 +14,7 @@ class KeyringDocumentationTests(unittest.TestCase):
         sections = {
             'readme setup': readme.split('### 2. Run the setup wizard', 1)[1].split('### 3.', 1)[0],
             'readme start-stop': readme.split('### Start/stop the stack later', 1)[1].split('### Upgrade', 1)[0],
+            'readme configuration': readme.split('## Configuration', 1)[1].split('### Size warnings', 1)[0],
             'claude quick-start': claude.split('## Quick Start', 1)[1].split('2. Fill in', 1)[0],
             'claude runtime state': claude.split('The tracked repo root stays clean:', 1)[1].split('Configuration priority', 1)[0],
         }

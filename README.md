@@ -249,7 +249,11 @@ Agent config is database-driven (MySQL via EF Core). On first run, the orchestra
 | `src/Fleet.Orchestrator/appsettings.json` | Orchestrator defaults |
 | `src/Fleet.Agent/appsettings.json` | Agent image defaults |
 
-The tracked repo root stays clean — only source, `.env.example`, `seed.example.json`, and `docker-compose.example.yml` live there. All runtime state is under `./fleet/`.
+The tracked repo root stays clean — only source, `.env.example`, `seed.example.json`, and `docker-compose.example.yml` live there.
+Runtime files live under `./fleet/`, but the named `workflow_outcomes_keys` evidence keyring is a
+separate Docker volume: archiving/removing `fleet/` neither captures nor resets it.
+A directory-only backup/reset is incomplete; follow the [paired MySQL/keyring backup, restore and key-retention guidance](docs/runbooks/workflow-outcomes.md#12-backup-keyring-restore-and-key-rotation)
+and retain keys while their encrypted records remain.
 
 ### Size warnings
 

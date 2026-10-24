@@ -39,7 +39,7 @@ internal static class ReadinessProcess
                 try
                 {
                     var request = probe(deadline.Token);
-                    if (await Task.WhenAny(request, exited) == exited)
+                    if (await Task.WhenAny(request, exited).WaitAsync(deadline.Token) == exited)
                     {
                         // Cancel and observe the in-flight request before releasing its client.
                         deadline.Cancel();

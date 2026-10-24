@@ -36,6 +36,40 @@ public sealed class ReadinessProcessTests
     }
 
     [Fact]
+    public async Task NeverCompletingProbeHonorsDeadlineAndReapsTheChild()
+    {
+        using var child = Child("exec sleep 30");
+        var never = new TaskCompletionSource<HttpStatusCode>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        var elapsed = Stopwatch.StartNew();
+        var readiness = ReadinessProcess.WaitAsync(child, Ready, North, _ =>
+        {
+            calls++;
+            return never.Task; // Deliberately ignores cancellation, unlike the normal HTTP probe.
+        }, TimeSpan.FromMilliseconds(300));
+        try
+        {
+            // An independent watchdog makes the old unbounded helper fail rather than hang tests.
+            var error = await Assert.ThrowsAsync<Xunit.Sdk.XunitException>(() =>
+                readiness.WaitAsync(TimeSpan.FromSeconds(3)));
+            Assert.Contains("deadline", error.Message);
+            Assert.Contains("cleanup=complete", error.Message);
+            Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(3));
+            Assert.Equal(1, calls);
+            Assert.False(never.Task.IsCompleted);
+            Assert.True(child.HasExited);
+        }
+        finally
+        {
+            if (!child.HasExited)
+                child.Kill(entireProcessTree: true);
+            await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2));
+            try { await readiness.WaitAsync(TimeSpan.FromSeconds(3)); }
+            catch (Xunit.Sdk.XunitException) { } // Observe the expected failure on both old/new helpers.
+        }
+    }
+
+    [Fact]
     public async Task BothPipesBeyondCapacityAreDrainedWithoutDeadlock()
     {
         using var child = Child("for ((i=0;i<10000;i++)); do printf 'fixture-startup-failure padding padding\\n'; printf 'fixture-startup-failure padding padding\\n' >&2; done; exit 9");

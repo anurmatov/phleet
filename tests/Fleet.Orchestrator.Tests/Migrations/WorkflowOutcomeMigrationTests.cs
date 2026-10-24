@@ -21,7 +21,8 @@ namespace Fleet.Orchestrator.Tests.Migrations.WorkflowOutcomes;
 /// AC19 (#476) against real MySQL 8.0: <c>AddWorkflowOutcomeAccountability</c> fresh and as an
 /// upgrade, its unique constraints, the guarded destructive Down, the once-only dispatch and
 /// reservation under real concurrency, the API's SQL on the production provider, and a
-/// dump+restore (with the keyring directory) that keeps pending failures. Fails rather than
+/// dump+restore into a fresh database with an independent keyring copy in a fresh directory that
+/// keeps pending failures, while an empty or wrong keyring is refused. Fails rather than
 /// skips without a server, like the other migration tests.
 /// </summary>
 public sealed class WorkflowOutcomeMigrationTests : IAsyncLifetime
@@ -289,13 +290,16 @@ public sealed class WorkflowOutcomeMigrationTests : IAsyncLifetime
 
     [Fact]
     [Trait("WorkflowOutcomeSuite", "migration")]
-    public async Task Api_OnRealMySql_EveryWritePathTranslates_AndDumpRestoreWithTheKeyringKeepsPendingFailures()
+    public async Task Api_OnRealMySql_EveryWritePathTranslates_AndRestoreWithAnIndependentKeyringCopyKeepsPendingFailures()
     {
         var keyring = Directory.CreateTempSubdirectory("wo-keyring-");
+        var scratch = new List<DirectoryInfo> { keyring };
         try
         {
-            IWorkflowOutcomePayloadProtector Protector() => new DataProtectionWorkflowOutcomePayloadProtector(
-                DataProtectionProvider.Create(keyring, b => b.SetApplicationName("phleet-workflow-outcomes")));
+            // The production application name, so a copied ring is read exactly as Program.cs reads it.
+            static IWorkflowOutcomePayloadProtector ProtectorFor(DirectoryInfo keys) => new DataProtectionWorkflowOutcomePayloadProtector(
+                DataProtectionProvider.Create(keys, b => b.SetApplicationName("phleet-workflow-outcomes")));
+            IWorkflowOutcomePayloadProtector Protector() => ProtectorFor(keyring);
 
             var clock = new ManualClock();
             var source = ApiDatabase.ForMySql(_connectionString);
@@ -367,12 +371,42 @@ public sealed class WorkflowOutcomeMigrationTests : IAsyncLifetime
                 (pendingBatch, pendingNonce, pendingRun) = (pendingInbox.BatchId, pendingInbox.Nonce, pending.Id);
             }
 
-            // Dump the live database and restore it into a new one, keyring directory unchanged.
+            // Back the synthetic keyring up as an independent copy, then remove the original: the restore
+            // below can only succeed from the backup, the way a fresh volume restored from it would.
+            var backup = CopyKeyring(keyring, "wo-keyring-backup-");
+            scratch.Add(backup);
+            Assert.NotEmpty(backup.GetFiles("*.xml"));
+            keyring.Delete(recursive: true);
+            keyring.Refresh();
+            Assert.False(keyring.Exists);
+
+            // Dump the live database and restore it into a fresh one, and the backup into a fresh directory.
             var restored = await CreateDatabaseAsync();
             await RestoreAsync(await DumpAsync(_connectionString), restored);
+            var restoredKeys = CopyKeyring(backup, "wo-keyring-restored-");
+            scratch.Add(restoredKeys);
             Assert.Equal(await CountsAsync(_connectionString), await CountsAsync(restored));
+            // Every pending id, version, nonce, generation, state, reservation and ciphertext digest survives.
+            var state = await StateAsync(restored);
+            Assert.Equal(await StateAsync(_connectionString), state);
 
-            await using var after = await ApiHost.StartAsync(ApiDatabase.ForMySql(restored), protector: Protector(), clock: clock);
+            // Without the right keys the payload is refused, and the refusal changes nothing: an empty ring
+            // and a ring holding an unrelated key of its own both answer 503 with ciphertext and counts intact.
+            var counts = await CountsAsync(restored);
+            var empty = Directory.CreateTempSubdirectory("wo-keyring-empty-");
+            var wrong = Directory.CreateTempSubdirectory("wo-keyring-wrong-");
+            scratch.AddRange([empty, wrong]);
+            ProtectorFor(wrong).Protect("run", Encoding.UTF8.GetBytes("unrelated"));
+            foreach (var keys in new[] { empty, wrong })
+            {
+                await using var denied = await ApiHost.StartAsync(ApiDatabase.ForMySql(restored), protector: ProtectorFor(keys), clock: clock);
+                var refused = await denied.AsAdmin(HttpMethod.Get, $"{Root}/{receiptRun}?detail=payload");
+                Assert.Equal(HttpStatusCode.ServiceUnavailable, refused.StatusCode);
+                Assert.Equal("payload_unavailable", (await ApiHost.JsonAsync(refused)).GetProperty("error").GetString());
+            }
+            Assert.Equal((counts, state), (await CountsAsync(restored), await StateAsync(restored)));
+
+            await using var after = await ApiHost.StartAsync(ApiDatabase.ForMySql(restored), protector: ProtectorFor(restoredKeys), clock: clock);
             var inbox = await after.InboxAsync();
             var batchAfter = inbox.Batches.Single(x => x.BatchId == pendingBatch);
             Assert.Equal((pendingNonce, pendingRun), (batchAfter.Nonce, batchAfter.Items.Single().Id));
@@ -386,7 +420,11 @@ public sealed class WorkflowOutcomeMigrationTests : IAsyncLifetime
         }
         finally
         {
-            keyring.Delete(recursive: true);
+            foreach (var dir in scratch)
+            {
+                dir.Refresh();
+                if (dir.Exists) dir.Delete(recursive: true);
+            }
         }
     }
 
@@ -451,6 +489,46 @@ public sealed class WorkflowOutcomeMigrationTests : IAsyncLifetime
             parts.Add($"{table}={await command.ExecuteScalarAsync()}");
         }
         return string.Join(",", parts);
+    }
+
+    /// <summary>A byte copy of every key file into a fresh directory, as a backup or a restored volume holds it.</summary>
+    private static DirectoryInfo CopyKeyring(DirectoryInfo from, string prefix)
+    {
+        var to = Directory.CreateTempSubdirectory(prefix);
+        foreach (var file in from.GetFiles())
+            file.CopyTo(Path.Combine(to.FullName, file.Name));
+        return to;
+    }
+
+    /// <summary>
+    /// What a restore must keep exactly: ids, versions, classifications and ciphertext digests of the
+    /// runs; batch nonces, generations, states and receipts; item delivery generations; decision
+    /// generations and statuses; and recovery reservations with their state.
+    /// </summary>
+    private static async Task<string> StateAsync(string connectionString)
+    {
+        string[] queries =
+        [
+            "SELECT CONCAT_WS('|', Id, Version, Classification, IFNULL(SHA2(PayloadCiphertext, 256), '-')) FROM workflow_outcome_runs ORDER BY Id",
+            "SELECT CONCAT_WS('|', Id, CoordinatorGeneration, State, Nonce, ItemVersionsHash, IFNULL(ReceiptHash, '-')) FROM workflow_outcome_batches ORDER BY Id",
+            "SELECT CONCAT_WS('|', BatchId, OutcomeId, OutcomeVersion, DeliveryGeneration, State) FROM workflow_outcome_batch_items ORDER BY Id",
+            "SELECT CONCAT_WS('|', Id, OutcomeId, ExpectedVersion, IFNULL(CoordinatorGeneration, '-'), Status) FROM workflow_outcome_decisions ORDER BY Id",
+            "SELECT CONCAT_WS('|', Id, DecisionId, State, ReplacementWorkflowId) FROM workflow_recovery_operations ORDER BY Id",
+        ];
+        var lines = new List<string>();
+        await using var connection = new MySqlConnection(connectionString);
+        await connection.OpenAsync();
+        foreach (var query in queries)
+        {
+            await using var command = new MySqlCommand(query, connection);
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync()) lines.Add(reader.GetString(0));
+            lines.Add("--");
+        }
+        // Not vacuous: the encrypted evidence and the unknown reservation are both in the snapshot.
+        Assert.Contains(lines.TakeWhile(l => l != "--"), l => !l.EndsWith("|-", StringComparison.Ordinal));
+        Assert.Contains(lines, l => l.Contains(WorkflowRecoveryStates.DispatchUnknown, StringComparison.Ordinal));
+        return string.Join("\n", lines);
     }
 
     private static ProcessStartInfo MySqlTool(string tool, string connectionString, params string[] args)

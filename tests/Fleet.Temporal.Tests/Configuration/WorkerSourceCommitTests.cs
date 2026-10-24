@@ -1,4 +1,5 @@
 using Fleet.Temporal.Configuration;
+using Fleet.Tests.Shared;
 using Temporalio.Api.Enums.V1;
 using Temporalio.Testing;
 using Temporalio.Worker;
@@ -53,7 +54,7 @@ public class WorkerSourceCommitTests
     [Fact]
     public async Task RealServer_EveryWorkflowTaskRecordsTheStampedCommit()
     {
-        await using var env = await WorkflowEnvironment.StartLocalAsync(new() { DevServerOptions = new() { LogLevel = "error" } });
+        await using var env = await TemporalDevServerSelection.StartLocalAsync(new() { DevServerOptions = new() { LogLevel = "error" } });
 
         async Task<IReadOnlyList<string>> BuildIdsAsync(string queue, string? commit)
         {

@@ -40,4 +40,9 @@
     <ProjectReference Include="..\..\src\Fleet.Agent\Fleet.Agent.csproj" Aliases="FleetAgent" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- #476: one fail-closed dev-server selection shared by the real-Temporal tests of both projects. -->
+    <Compile Include="..\shared\TemporalDevServerSelection.cs" Link="Shared\TemporalDevServerSelection.cs" />
+  </ItemGroup>
+
 </Project>

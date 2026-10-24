@@ -353,6 +353,15 @@ docker run --rm --entrypoint tar -v fleet_workflow_outcomes_keys:/k:ro -v "$PWD/
   keeps old keys for decryption. Never prune old keys while any encrypted row they protect is
   retained (resolved failures 90 days, unresolved indefinitely).
 - Rehearse a restore on a throwaway stack before enrollment and record the proof.
+- **Source-level restore proof (AC19, not the rehearsal):**
+  `FLEET_ORCHESTRATOR_MIGRATION_CONNECTION=<throwaway MySQL 8> bash tests/integration/workflow-outcomes/run.sh migration`
+  runs `Api_OnRealMySql_EveryWritePathTranslates_AndRestoreWithAnIndependentKeyringCopyKeepsPendingFailures`.
+  It copies a synthetic keyring as a backup, deletes the original, and restores the dump into a fresh
+  database and the copy into a fresh directory. Expected: equal table counts. Run ids and versions,
+  batch nonces and generations, item delivery generations, decision generations and the
+  `dispatch_unknown` reservation are equal, and so are ciphertext digests. The payload decrypts from
+  the copy. An empty ring and a ring with an unrelated key both answer `503 payload_unavailable`
+  with counts and ciphertext unchanged. Without the variable the suite FAILS; it never skips.
 
 ## 13. Disable and rollback (unresolved rows retained)
 
@@ -422,3 +431,20 @@ runs `tests/integration/workflow-outcomes/run.sh all --manifest <file>`. Creatin
 namespaces and clone before, and cleaning up only `cleanup.owned` after, are operator steps under the
 same approval. Actual production workflows, queues, agents and financial flows are untouched, and
 no real human messages are sent. Keep the receipt and provenance outside the repository.
+
+**Pinned Temporal dev server.** The real-server tests (`WorkflowOutcomeRealTemporalTests`,
+`WorkerSourceCommitTests`) download the SDK's default dev server unless both test-only variables are
+set:
+
+```bash
+WORKFLOW_OUTCOMES_TEMPORAL_CLI_PATH=/abs/path/to/cached/temporal \
+WORKFLOW_OUTCOMES_TEMPORAL_SERVER_VERSION=1.29.1 \
+  dotnet test tests/Fleet.Orchestrator.Tests --filter "FullyQualifiedName~WorkflowOutcomeRealTemporalTests"
+```
+
+The binary is started through the SDK's `ExistingPath`, which never downloads. A server reporting
+any other version fails the test (`the selected Temporal CLI started server <x>, not <y>`). Setting
+only one variable, a relative, missing, directory or non-executable path, or a version that is not
+exactly `x.y.z` fails before any server starts. Record the CLI's `--version` output and sha256 with
+the receipt. A matching dev server is not the production server: production history compatibility
+stays a separate check (§4, compiled source unverified).

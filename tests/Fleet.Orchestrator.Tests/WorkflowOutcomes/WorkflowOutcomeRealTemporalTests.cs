@@ -3,6 +3,7 @@ using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Fleet.Shared;
+using Fleet.Tests.Shared;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Temporalio.Activities;
@@ -124,8 +125,9 @@ public sealed class WorkflowOutcomeRealTemporalTests
     [Trait("WorkflowOutcomeSuite", "business")]
     public async Task RealTemporal_CompiledRule_AppliesOnlyToRunsWhoseWorkersRecordedItsCommit()
     {
-        // No skip: if the dev server cannot be downloaded/started the test fails loudly.
-        await using var env = await WorkflowEnvironment.StartLocalAsync(new WorkflowEnvironmentStartLocalOptions
+        // No skip: if the dev server cannot be downloaded/started the test fails loudly. The pinned
+        // CLI/version variables select an exact cached binary instead (TemporalDevServerSelection).
+        await using var env = await TemporalDevServerSelection.StartLocalAsync(new WorkflowEnvironmentStartLocalOptions
         {
             DevServerOptions = new DevServerOptions { LogLevel = "error" },
         });
@@ -174,8 +176,9 @@ public sealed class WorkflowOutcomeRealTemporalTests
     [Trait("WorkflowOutcomeSuite", "chains")]
     public async Task RealTemporal_ThreeNamespaces_ExactRowsFailuresEligibleSuccessesNot()
     {
-        // No skip: if the dev server cannot be downloaded/started the test fails loudly.
-        await using var env = await WorkflowEnvironment.StartLocalAsync(new WorkflowEnvironmentStartLocalOptions
+        // No skip: if the dev server cannot be downloaded/started the test fails loudly. The pinned
+        // CLI/version variables select an exact cached binary instead (TemporalDevServerSelection).
+        await using var env = await TemporalDevServerSelection.StartLocalAsync(new WorkflowEnvironmentStartLocalOptions
         {
             Namespace = Namespaces[0],
             DevServerOptions = new DevServerOptions { ExtraArgs = ["--namespace", Namespaces[1], "--namespace", Namespaces[2]], LogLevel = "error" },

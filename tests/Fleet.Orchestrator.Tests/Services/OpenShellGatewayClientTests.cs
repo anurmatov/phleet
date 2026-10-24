@@ -54,11 +54,15 @@ public class OpenShellGatewayClientTests
     }
 
     [Fact]
-    public void PinnedMutationProtocol_HasNoExpectedIdOrVersionPreconditions()
+    public void PinnedMutationProtocol_PreservesConditionalFieldPresenceAndTags()
     {
-        // Do not invent a sandbox_id/version field or enable lifecycle mutation on this contract.
-        Assert.Equal(new[] { "name", "workspace_scope", "request_id" }, StopSandboxRequest.Descriptor.Fields.InFieldNumberOrder().Select(x => x.Name));
-        Assert.Equal(new[] { "name", "workspace_scope", "allow_missing", "request_id" }, DeleteSandboxRequest.Descriptor.Fields.InFieldNumberOrder().Select(x => x.Name));
+        Assert.Equal(5, DeleteSandboxRequest.Descriptor.FindFieldByName("expected_sandbox_id").FieldNumber);
+        Assert.Equal(6, DeleteSandboxRequest.Descriptor.FindFieldByName("expected_resource_version").FieldNumber);
+        Assert.Equal(4, StopSandboxRequest.Descriptor.FindFieldByName("expected_sandbox_id").FieldNumber);
+        Assert.Equal(5, StopSandboxRequest.Descriptor.FindFieldByName("expected_resource_version").FieldNumber);
+        Assert.True(DeleteSandboxRequest.Descriptor.FindFieldByName("expected_sandbox_id").HasPresence);
+        Assert.True(StopSandboxRequest.Descriptor.FindFieldByName("expected_resource_version").HasPresence);
+        Assert.Equal(3, HealthResponse.Descriptor.FindFieldByName("capabilities").FieldNumber);
     }
 
     [Fact]

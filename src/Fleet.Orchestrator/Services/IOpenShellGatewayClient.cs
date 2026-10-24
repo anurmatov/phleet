@@ -4,11 +4,20 @@ namespace Fleet.Orchestrator.Services;
 
 public sealed record OpenShellSandboxSnapshot(string GatewayId, string Workspace, string Id, string Name,
     SandboxPhase Phase, string SupervisorInstanceId, uint PolicyVersion,
-    IReadOnlyDictionary<string, string> Labels);
+    IReadOnlyDictionary<string, string> Labels)
+{
+    public ulong ResourceVersion { get; init; }
+}
 
-/// <summary>Authenticated observations only; named mutation RPCs are not exact-ID authority.</summary>
+/// <summary>Acknowledgement only, not proof of intake or external cleanup.</summary>
+public sealed record OpenShellDeleteAcknowledgement(string SandboxId, DeletionOutcome Outcome);
+
+/// <summary>Authenticated observations and capability-gated expected-ID/version mutations.</summary>
 public interface IOpenShellGatewayClient
 {
     Task<IReadOnlyList<OpenShellSandboxSnapshot>> InventoryAsync(CancellationToken ct = default);
     Task<OpenShellSandboxSnapshot?> ReadExactAsync(string sandboxId, CancellationToken ct = default);
+    Task<OpenShellSandboxSnapshot> StopExactAsync(OpenShellSandboxSnapshot target, Guid requestId, CancellationToken ct = default);
+    Task<OpenShellDeleteAcknowledgement> DeleteExactAsync(OpenShellSandboxSnapshot target, Guid requestId,
+        bool allowMissing, CancellationToken ct = default);
 }

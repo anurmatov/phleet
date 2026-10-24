@@ -70,7 +70,7 @@ migration API is available, so no OpenShell workload can be admitted through it.
 
 Shared dispatch and caller wiring now exist, but the OpenShell lifecycle backend is
 still unimplemented and returns 422 compatibility_blocked without a legacy fallback.
-Static endpoint/policy compiler, gateway mutations, post-create
+Static endpoint/policy compiler, lifecycle mutation orchestration, post-create
 current-supervisor readiness, bootstrap/activation gate and nonroot image/home
 changes are **not implemented** here.
 Outside supervisor identity hook/issuer/ingress, durable issuer session/replay
@@ -81,8 +81,8 @@ Other receiving services remain unimplemented and blocked.
 Full install/config/example lockstep and actual daemon/native CLI/shell/verified
 memory/Rabbit-to-matching-workflow fixture entrypoints remain to be written.
 No upstream hook, header canonicalization or native compatibility is inferred.
-The upstream target remains OpenShell v0.1.5 at
-`bdb956f2cd65a635f1294fccf1d138d263bf650f`; this change does not implement its wire protocol.
+The gateway wire target is the conditional-mutation fork commit
+`80d76a5c72d2a752d811775b62c86e974bc2bf19`; a source pin is not runtime qualification.
 Unsupported service/SDK/provider combinations stay unadmitted; later slice 2 and
 AC1–34 are not claimed complete. No real credential, bot, account, grant or model
 change follows a source test or merge.
@@ -235,11 +235,11 @@ infrastructure name/ID/driver-label guards and legacy read-error/404 distinction
 Only isolated SQLite, TestServer, temporary generated files and owned HTTP handlers
 are used; actual OpenShell daemon/CLI/shell/callback/rollback remains unimplemented.
 
-## Pinned gateway observation source and mutation contract gap
+## Pinned gateway observations and conditional mutation checkpoint
 
-The unmodified OpenShell v0.1.5 protobuf import closure and Apache-2.0 license are
+The unmodified conditional-mutation fork protobuf closure and Apache-2.0 license are
 vendored under `src/Fleet.Orchestrator/OpenShell`; UPSTREAM records exact commit
-`bdb956f2cd65a635f1294fccf1d138d263bf650f` and SHA256 for all four source files.
+`80d76a5c72d2a752d811775b62c86e974bc2bf19` and SHA256 for all four source files.
 Build generation uses Grpc.Tools 2.67.0, with Grpc.Net.Client 2.67.0 for native
 protobuf/gRPC and Google.Protobuf 3.26.1 matching the existing transitive pin.
 No generated C# or runtime executable/image is committed or installed.
@@ -253,29 +253,40 @@ A whole-operation five-second bound covers inventory plus refreshed GetSandbox;
 snapshots are immutable copies and a changed name-to-ID mapping is rejected.
 The pinned empty-workspace/default normalization is applied explicitly.
 
-The client is **read-only and not registered for runtime admission**; its outside
+The client is **not registered for runtime admission**; its outside
 HTTPS handler/credential custody and actual gateway wire acceptance remain UNRUN.
 A workspace-scoped authorized inventory is not a global launch-owned inventory,
 consumer/poller-drain proof, current-supervisor readiness or cleanup authorization.
 A Ready phase or nonempty supervisor instance ID cannot activate an agent.
 
-The pinned public [stop/delete requests](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/proto/openshell.proto#L1460-L1481)
-have names/workspace/request IDs but no caller expected immutable-ID/version guard.
-The [operator resolver](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/crates/openshell-server/src/grpc/sandbox.rs#L196-L234)
-uses get_message_by_name, and [delete](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/crates/openshell-server/src/grpc/sandbox.rs#L1690-L1730)
-uses default preconditions rather than caller-specified expected identity.
-This revision does not invent an ID field, pass an ID as a display name, or enable
-named mutations as if they provided the required immutable-ID authority.
-An upstream-compatible exact-ID mutation solution must be qualified before
-implementing/enabling those lifecycle transitions; a read/check alone is not CAS.
+The pinned fork [Stop/Delete contract](https://github.com/anurmatov/openshell/blob/80d76a5c72d2a752d811775b62c86e974bc2bf19/proto/openshell.proto#L1464-L1499)
+adds optional expected immutable ID/version fields and the explicit
+`sandbox-mutation-preconditions-v1` Health capability. The generated client now
+implements conditional Stop/Delete, not a read/check followed by an unguarded call.
+Each call requires a nonzero caller-owned request UUID and exact configured gateway,
+workspace, ID, name and observed resource version. The caller must durably retain
+that UUID and the complete payload before sending; this transport does not create
+or persist operation intent, retry, fall back, or change a lease.
+
+Health is checked for every call within the same whole-operation five-second
+cancellation budget. Missing/unknown capability or a Health error sends zero
+mutations. A separate Health request is not atomic downgrade protection: a mixed
+or downgraded endpoint remains unqualified. Replaced response IDs/names/workspaces
+and unknown deletion outcomes fail closed without retry. Even Accepted, Completed
+or AlreadyAbsent is only an acknowledgement, never intake or external cleanup proof.
+Ambiguous results require reconciliation of the original request, not a new UUID.
+
+This is a bounded gateway transport checkpoint, **not a completed lifecycle backend**.
+Shared lifecycle callers still reject migrated operations before any legacy fallback.
 The production stop/inventory/intake evidence reader, compiler/startup activation,
 outside identity hook/issuer/ingress/durable replay/session handling, actual agent
 callback path and rollback remain **missing code**, not merely unrun tests.
-No alternative architecture, upstream patch or activation is approved by this note.
+No feature, lifecycle mutation route or workload admission is enabled by this pin.
 
 Owned HTTP handlers exercise the actual generated gRPC request/response framing,
 pagination, bearer metadata, mapping replacement, cancellation, immutable copies
-and descriptor/source-hash contracts, without sockets, TLS or a real gateway.
+and descriptor/source-hash contracts, plus actual generated guarded mutation RPCs,
+capability refusal, cancellation and no-retry outcomes, without sockets, TLS or a real gateway.
 Exact-head CI results belong in the PR evidence, not a moving prior-head status.
 Approved actual daemon/native CLI/shell/memory/Rabbit/denial/revocation/rollback
 and MySQL backup/restore-query acceptance remain required before merge.

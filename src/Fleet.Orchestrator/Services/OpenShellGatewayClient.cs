@@ -8,7 +8,7 @@ using GatewayRpc = Openshell.V1.OpenShell.OpenShellClient;
 namespace Fleet.Orchestrator.Services;
 
 /// <summary>
-/// Pinned upstream protobuf/gRPC reads with outside operator authorization. No retry, name/ID
+/// Pinned fork protobuf/gRPC calls with outside operator authorization. No retry, name/ID
 /// guessing, partial inventory or Ready==admission shortcut. Not registered for workload admission.
 /// </summary>
 public sealed class OpenShellGatewayClient : IOpenShellGatewayClient, IDisposable
@@ -98,6 +98,72 @@ public sealed class OpenShellGatewayClient : IOpenShellGatewayClient, IDisposabl
         return current;
     }
 
+    /// <summary>
+    /// Stop only the recorded ID/version. The caller must persist requestId and reuse the same
+    /// payload after an ambiguous outcome. This is not activation or intake/drain evidence.
+    /// </summary>
+    public async Task<OpenShellSandboxSnapshot> StopExactAsync(OpenShellSandboxSnapshot target,
+        Guid requestId, CancellationToken ct = default)
+    {
+        ValidateMutationTarget(target, requestId);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        await RequireConditionalMutationsAsync(deadline.Token);
+        var response = await _rpc.StopSandboxAsync(new StopSandboxRequest
+        {
+            WorkspaceScope = new WorkspaceSelector { Workspace = _workspace }, Name = target.Name,
+            ExpectedSandboxId = target.Id, ExpectedResourceVersion = target.ResourceVersion,
+            RequestId = requestId.ToString("D"),
+        }, Options(deadline.Token)).ResponseAsync.WaitAsync(deadline.Token);
+        var observed = Snapshot(response.Sandbox);
+        if (observed.Id != target.Id || observed.Name != target.Name)
+            throw new InvalidOperationException("Conditional stop outcome is unverified; reconcile the original request.");
+        return observed;
+    }
+
+    public async Task<OpenShellDeleteAcknowledgement> DeleteExactAsync(OpenShellSandboxSnapshot target,
+        Guid requestId, bool allowMissing, CancellationToken ct = default)
+    {
+        ValidateMutationTarget(target, requestId);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        await RequireConditionalMutationsAsync(deadline.Token);
+        var response = await _rpc.DeleteSandboxAsync(new DeleteSandboxRequest
+        {
+            WorkspaceScope = new WorkspaceSelector { Workspace = _workspace }, Name = target.Name,
+            ExpectedSandboxId = target.Id, ExpectedResourceVersion = target.ResourceVersion,
+            RequestId = requestId.ToString("D"), AllowMissing = allowMissing,
+        }, Options(deadline.Token)).ResponseAsync.WaitAsync(deadline.Token);
+        var verified = response.Outcome switch
+        {
+            DeletionOutcome.Completed or DeletionOutcome.Accepted => response.SandboxId == target.Id,
+            DeletionOutcome.AlreadyAbsent => allowMissing && response.SandboxId.Length == 0,
+            _ => false,
+        };
+        if (!verified)
+            throw new InvalidOperationException("Conditional delete outcome is unverified; reconcile the original request.");
+        return new(response.SandboxId, response.Outcome);
+    }
+
+    private async Task RequireConditionalMutationsAsync(CancellationToken ct)
+    {
+        // Fetch per request, not from cache or semver. Health and mutation are not atomic:
+        // endpoints containing mixed or downgraded replicas remain unqualified.
+        var response = await _rpc.HealthAsync(new HealthRequest(), Options(ct)).ResponseAsync.WaitAsync(ct);
+        if (!response.Capabilities.Contains("sandbox-mutation-preconditions-v1"))
+            throw new InvalidOperationException("Gateway conditional-mutation capability is unverified.");
+    }
+
+    private void ValidateMutationTarget(OpenShellSandboxSnapshot target, Guid requestId)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        ValidateOpaque(target.Id);
+        if (target.GatewayId != _gatewayId || target.Workspace != _workspace || target.ResourceVersion == 0
+            || requestId == Guid.Empty || string.IsNullOrWhiteSpace(target.Name) || target.Name.Length > 253
+            || target.Name.Any(char.IsControl))
+            throw new ArgumentException("An exact bound gateway/workspace/identity/version and request ID are required.");
+    }
+
     private OpenShellSandboxSnapshot Snapshot(Sandbox? sandbox)
     {
         if (sandbox?.Metadata is not { } meta
@@ -110,7 +176,7 @@ public sealed class OpenShellGatewayClient : IOpenShellGatewayClient, IDisposabl
         return new(_gatewayId, workspace, meta.Id, meta.Name,
             sandbox.Status?.Phase ?? SandboxPhase.Unspecified,
             sandbox.Status?.MainProcessInstanceId ?? "", sandbox.Status?.CurrentPolicyVersion ?? 0,
-            meta.Labels.ToFrozenDictionary(StringComparer.Ordinal));
+            meta.Labels.ToFrozenDictionary(StringComparer.Ordinal)) { ResourceVersion = meta.ResourceVersion };
     }
 
     private CallOptions Options(CancellationToken ct) => new(

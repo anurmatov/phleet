@@ -900,6 +900,10 @@ message HealthResponse {
 
   // Service version.
   string version = 2;
+
+  // Explicit, additive protocol capabilities. Unknown entries must be ignored.
+  // sandbox-mutation-preconditions-v1 covers conditional Stop AND Delete.
+  repeated string capabilities = 3;
 }
 
 // Current-user request. The identity comes from the authenticated request.
@@ -1468,6 +1472,12 @@ message DeleteSandboxRequest {
   // Optional nonzero UUID for durable at-most-once admission. Successful results
   // can be replayed for 24 hours; see the API errors and retries reference.
   string request_id = 4;
+  // Optional immutable identity guard. Present empty is INVALID_ARGUMENT.
+  // Require sandbox-mutation-preconditions-v1 capability before sending.
+  optional string expected_sandbox_id = 5;
+  // Optional nonzero version guard; requires expected_sandbox_id.
+  // Mismatches return ABORTED without mutating a replacement.
+  optional uint64 expected_resource_version = 6;
 }
 
 // Stop sandbox request.
@@ -1478,6 +1488,12 @@ message StopSandboxRequest {
   // Optional nonzero UUID for durable at-most-once admission. Successful results
   // can be replayed for 24 hours; see the API errors and retries reference.
   string request_id = 3;
+  // Optional immutable identity guard. Present empty is INVALID_ARGUMENT.
+  // Require sandbox-mutation-preconditions-v1 capability before sending.
+  optional string expected_sandbox_id = 4;
+  // Optional nonzero version guard; requires expected_sandbox_id.
+  // Mismatches return ABORTED without mutating a replacement.
+  optional uint64 expected_resource_version = 5;
 }
 
 // Start sandbox request.

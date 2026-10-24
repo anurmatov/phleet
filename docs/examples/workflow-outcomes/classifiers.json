@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "rules": [
+    {
+      "id": "pr-implementation-consensus-exhausted",
+      "workflowType": "UwePrImplementationWorkflow",
+      "sourceCommit": "OPERATOR-PINNED-SOURCE-COMMIT",
+      "definitionHash": "OPERATOR-PINNED-LOADED-DEFINITION-SHA256",
+      "terminalEventTypes": ["WorkflowExecutionCompleted"],
+      "evidence": { "kind": "failure_branch", "exitBranch": "notify_consensus_exhausted" },
+      "classification": "confirmed_failure",
+      "reasonCode": "business_review_cap"
+    },
+    {
+      "id": "pr-implementation-outer-loop-exhausted",
+      "workflowType": "UwePrImplementationWorkflow",
+      "sourceCommit": "OPERATOR-PINNED-SOURCE-COMMIT",
+      "definitionHash": "OPERATOR-PINNED-LOADED-DEFINITION-SHA256",
+      "terminalEventTypes": ["WorkflowExecutionCompleted"],
+      "evidence": { "kind": "failure_branch", "exitBranch": "notify_outer_loop_exhausted" },
+      "classification": "confirmed_failure",
+      "reasonCode": "business_review_cap"
+    },
+    {
+      "id": "pr-implementation-review-deadline",
+      "workflowType": "UwePrImplementationWorkflow",
+      "sourceCommit": "OPERATOR-PINNED-SOURCE-COMMIT",
+      "definitionHash": "OPERATOR-PINNED-LOADED-DEFINITION-SHA256",
+      "terminalEventTypes": ["WorkflowExecutionCompleted"],
+      "evidence": { "kind": "failure_branch", "exitBranch": "notify_post_feedback_human_review_timeout" },
+      "classification": "confirmed_failure",
+      "reasonCode": "business_deadline"
+    },
+    {
+      "id": "design-consensus-exhausted-error-sentinel",
+      "workflowType": "UweDesignWorkflow",
+      "sourceCommit": "OPERATOR-PINNED-SOURCE-COMMIT",
+      "definitionHash": "OPERATOR-PINNED-LOADED-DEFINITION-SHA256",
+      "terminalEventTypes": ["WorkflowExecutionCompleted"],
+      "evidence": { "kind": "delegate_result", "path": "/Text", "equals": "ERROR:consensus_exhausted", "exitBranch": "emit_exhausted_error" },
+      "classification": "confirmed_failure",
+      "reasonCode": "business_review_cap"
+    },
+    {
+      "id": "task-delegation-typed-failed-task",
+      "workflowType": "TaskDelegationWorkflow",
+      "sourceCommit": "OPERATOR-PINNED-SOURCE-COMMIT",
+      "definitionHash": "OPERATOR-PINNED-LOADED-DEFINITION-SHA256",
+      "terminalEventTypes": ["WorkflowExecutionCompleted"],
+      "evidence": { "kind": "delegate_result", "path": "/Status", "equals": "failed", "exitBranch": "delegate" },
+      "classification": "confirmed_failure",
+      "reasonCode": "business_task_failed"
+    }
+  ]
+}

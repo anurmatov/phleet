@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
 using Fleet.Shared;
 using Microsoft.EntityFrameworkCore;
@@ -908,7 +909,10 @@ public sealed class ContainerProvisioningService(
         var style = await ResolveOutputStyleAsync(agent);
         await WriteOutputStyleFileAsync(agent, generatedDir, style);
 
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName, style, journal, PrimaryHumanRawValue()));
+        var workflowOutcomes = BuildWorkflowOutcomeProvisioning(agent, ctoAgentName,
+            config.GetSection(WorkflowOutcomeOptions.Section).Get<WorkflowOutcomeOptions>() ?? new WorkflowOutcomeOptions(),
+            LoadEnvFile(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env"), logger);
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName, style, journal, PrimaryHumanRawValue(), workflowOutcomes));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl, journal.ReadToken, journal.FilesEnabled || journal.SendEnabled));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent, ctoAgentName, style));
 
@@ -1262,7 +1266,8 @@ public sealed class ContainerProvisioningService(
         Agent agent,
         string ctoAgentName,
         OutputStyle? style = null,
-        JournalProvisioning? journal = null, string? primaryHumanUserId = null)
+        JournalProvisioning? journal = null, string? primaryHumanUserId = null,
+        WorkflowOutcomeProvisioning? workflowOutcomes = null)
     {
         var primaryId = ParsePrimaryHumanUserId(primaryHumanUserId);
         if (!string.IsNullOrWhiteSpace(agent.OutputStyle) && style is null)
@@ -1353,7 +1358,8 @@ public sealed class ContainerProvisioningService(
             && journal?.ReadToken is null
             && !codexLocal
             && !HasTelegramBot(agent)
-            && agent.HarnessExtra is null)
+            && agent.HarnessExtra is null
+            && workflowOutcomes is null)
             return json;
 
         var node = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
@@ -1407,7 +1413,73 @@ public sealed class ContainerProvisioningService(
             if (journal.MediaEnabled)
                 node["Journal"]!.AsObject()["MediaEnabled"] = true;
         }
+
+        // #476: the configured coordinator only, so every other agent keeps its bytes.
+        if (workflowOutcomes is not null)
+        {
+            node["WorkflowOutcomes"] = new System.Text.Json.Nodes.JsonObject
+            {
+                ["Enabled"] = true,
+                ["BaseUrl"] = workflowOutcomes.BaseUrl,
+                ["ScopedToken"] = workflowOutcomes.ScopedToken,
+                ["Coordinator"] = workflowOutcomes.Coordinator,
+                ["CoordinatorGeneration"] = workflowOutcomes.CoordinatorGeneration,
+                ["PollSeconds"] = workflowOutcomes.PollSeconds,
+                ["InboxPath"] = workflowOutcomes.InboxPath,
+            };
+        }
         return node.ToJsonString(IndentedJson);
+    }
+
+    /// <summary>Poll interval written into the coordinator's generated config (#476).</summary>
+    internal const int WorkflowOutcomeClientPollSeconds = 30;
+
+    /// <summary>
+    /// The coordinator's generated <c>WorkflowOutcomes</c> section (#476), or null — and null is the
+    /// answer for every agent except the exact one named by <c>FLEET_CTO_AGENT</c>.
+    /// </summary>
+    /// <remarks>
+    /// Emitted only when orchestrator <c>WorkflowOutcomes:Enabled</c> is true and the <c>.env</c>
+    /// variable named by <c>WorkflowOutcomes:CoordinatorTokenKey</c> has a value; a key naming the
+    /// admin or config token is refused, so that token can never reach an agent this way. Nothing
+    /// else changes: no grant, MCP tool or ACL. Logs name keys, never the token.
+    /// </remarks>
+    internal static WorkflowOutcomeProvisioning? BuildWorkflowOutcomeProvisioning(
+        Agent agent, string? ctoAgentName, WorkflowOutcomeOptions options,
+        IReadOnlyDictionary<string, string> envValues, ILogger? logger = null)
+    {
+        if (!options.Enabled
+            || string.IsNullOrWhiteSpace(ctoAgentName)
+            || !string.Equals(agent.Name, ctoAgentName, StringComparison.Ordinal))
+            return null;
+
+        var tokenKey = options.CoordinatorTokenKey?.Trim() ?? "";
+        if (tokenKey.Length == 0)
+        {
+            logger?.LogWarning("Workflow outcomes enabled, but WorkflowOutcomes:CoordinatorTokenKey is empty; no intake config for '{Agent}'", agent.Name);
+            return null;
+        }
+        if (WorkflowOutcomeOptions.ForbiddenTokenKeys.Contains(tokenKey, StringComparer.OrdinalIgnoreCase))
+        {
+            logger?.LogWarning("WorkflowOutcomes:CoordinatorTokenKey names the admin or config token; refusing to write it for '{Agent}'", agent.Name);
+            return null;
+        }
+        if (!envValues.TryGetValue(tokenKey, out var token) || string.IsNullOrWhiteSpace(token))
+        {
+            logger?.LogWarning("Workflow outcomes enabled, but {TokenKey} has no value in .env; no intake config for '{Agent}'", tokenKey, agent.Name);
+            return null;
+        }
+        if (!WorkflowOutcomeOptions.IsOrigin(options.CoordinatorBaseUrl))
+            logger?.LogWarning("WorkflowOutcomes:CoordinatorBaseUrl is not an http(s) origin; '{Agent}' will report its intake disabled", agent.Name);
+
+        return new WorkflowOutcomeProvisioning(
+            options.CoordinatorBaseUrl,
+            token,
+            agent.Name,
+            options.CoordinatorGeneration,
+            WorkflowOutcomeClientPollSeconds,
+            (string.IsNullOrWhiteSpace(agent.WorkDir) ? "/workspace" : agent.WorkDir.TrimEnd('/'))
+                + "/.fleet/workflow-outcome-inbox.json");
     }
 
     /// <summary>
@@ -1821,3 +1893,7 @@ internal sealed record ProjectContextPlan(IReadOnlyList<ProjectContextAssignment
 {
     public static readonly ProjectContextPlan Empty = new([]);
 }
+
+/// <summary>The coordinator's generated failure inbox client config (#476). <see cref="ScopedToken"/> is a credential.</summary>
+internal sealed record WorkflowOutcomeProvisioning(
+    string BaseUrl, string ScopedToken, string Coordinator, long CoordinatorGeneration, int PollSeconds, string InboxPath);

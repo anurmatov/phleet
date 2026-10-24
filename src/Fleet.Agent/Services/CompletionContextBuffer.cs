@@ -69,6 +69,8 @@ public sealed class CompletionContextBuffer : IDisposable
         string? correlationId, string? taskId, CompletionKind kind)
     {
         if (string.IsNullOrEmpty(result)) return;
+        // #476: an internal workflow-outcome review never enters shared conversation context.
+        if (source == TaskSource.WorkflowOutcome) return;
 
         var lastSentId = _sink.GetLastSentMessageId(chatId);
         _groupBehavior.BufferBotResponse(chatId, result, telegramMessageId: lastSentId);

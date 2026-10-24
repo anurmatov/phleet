@@ -56,7 +56,8 @@ internal sealed class NorthTestHost : IAsyncDisposable
     public static async Task<NorthTestHost> StartAsync(
         ISecretHasher? hasher = null, IAuthStore? store = null, bool? trustForwardedHeaders = null,
         Fleet.Conversations.Contracts.IConversationStore? conversations = null,
-        string? attachmentRoot = null)
+        string? attachmentRoot = null,
+        Fleet.Comms.Configuration.ConversationRateLimiterFactory? conversationLimiter = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -107,6 +108,8 @@ internal sealed class NorthTestHost : IAsyncDisposable
         builder.Services.AddSingleton<TimeProvider>(time);
         if (hasher is not null)
             builder.Services.AddSingleton(hasher);
+        if (conversationLimiter is not null)
+            builder.Services.AddSingleton(conversationLimiter);
 
         var app = CommsApp.BuildNorthApp(builder);
 
@@ -117,6 +120,9 @@ internal sealed class NorthTestHost : IAsyncDisposable
         var resolvedTime = app.Services.GetRequiredService<TimeProvider>();
         if (!ReferenceEquals(resolvedTime, time))
             throw new InvalidOperationException("The test clock was not the resolved TimeProvider.");
+        if (conversationLimiter is not null
+            && !ReferenceEquals(app.Services.GetRequiredService<Fleet.Comms.Configuration.ConversationRateLimiterFactory>(), conversationLimiter))
+            throw new InvalidOperationException("The test conversation limiter was not the resolved factory.");
 
         var client = app.GetTestClient();
         return new NorthTestHost(app, inMemory, time,

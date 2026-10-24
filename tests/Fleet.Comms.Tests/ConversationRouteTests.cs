@@ -461,12 +461,20 @@ public class ConversationRouteTests
     /// Driven by actually exhausting a budget rather than by inspecting the partition key, because
     /// the key is an implementation detail and the independence is the contract.
     /// </para>
+    /// <para>
+    /// The window renews only when the test says so (<see cref="ControlledConversationWindows"/>).
+    /// Against the framework's own clock, 301 serial requests on a loaded runner can outlast the
+    /// 60-second window, and the renewed budget then answers the last request with a <c>200</c>.
+    /// The production values themselves are pinned by
+    /// <see cref="Production_conversation_budget_is_300_per_60_seconds_per_credential"/>.
+    /// </para>
     /// </remarks>
     [Fact]
     public async Task Two_devices_at_one_address_do_not_share_a_conversation_budget()
     {
         var store = new FakeConversationStore();
-        await using var host = await NorthTestHost.StartAsync(conversations: store);
+        var windows = new ControlledConversationWindows();
+        await using var host = await NorthTestHost.StartAsync(conversations: store, conversationLimiter: windows);
 
         var first = await AuthorizeAsync(host);
 
@@ -481,17 +489,21 @@ public class ConversationRouteTests
         var second = (await minted.Content.ReadFromJsonAsync<NorthTestHost.TokenBody>(
             FleetProtocolJson.Options))!.AccessToken;
 
-        // Spend the first device's whole window.
-        HttpStatusCode last = HttpStatusCode.OK;
-        for (var i = 0; i <= ConversationRateLimits.PermitsPerWindow; i++)
+        // Spend the first device's whole window: every permit is admitted, and the next is not.
+        for (var i = 0; i < ConversationRateLimits.PermitsPerWindow; i++)
         {
-            var response = await host.Client.SendAsync(
+            var admitted = await host.Client.SendAsync(
                 Get($"/v1/conversations/{store.ConversationId}/events?afterSeq=0", first));
-            last = response.StatusCode;
-            if (last == HttpStatusCode.TooManyRequests) break;
+            Assert.Equal(HttpStatusCode.OK, admitted.StatusCode);
         }
 
-        Assert.Equal(HttpStatusCode.TooManyRequests, last);
+        var throttled = await host.Client.SendAsync(
+            Get($"/v1/conversations/{store.ConversationId}/events?afterSeq=0", first));
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, throttled.StatusCode);
+        Assert.Equal(
+            ConversationRateLimits.WindowSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            Assert.Single(throttled.Headers.GetValues("Retry-After")));
 
         // The second device, from the same address, is unaffected.
         //
@@ -504,6 +516,64 @@ public class ConversationRouteTests
 
         Assert.NotEqual(HttpStatusCode.TooManyRequests, other.StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, other.StatusCode);
+
+        // Still exhausted until the window renews; then the first device is admitted again.
+        var stillThrottled = await host.Client.SendAsync(
+            Get($"/v1/conversations/{store.ConversationId}/events?afterSeq=0", first));
+        Assert.Equal(HttpStatusCode.TooManyRequests, stillThrottled.StatusCode);
+
+        windows.Renew();
+
+        var renewed = await host.Client.SendAsync(
+            Get($"/v1/conversations/{store.ConversationId}/events?afterSeq=0", first));
+        Assert.Equal(HttpStatusCode.OK, renewed.StatusCode);
+    }
+
+    /// <summary>
+    /// The production composition's conversation budget: 300 requests per 60-second window per
+    /// credential, no queue, renewed automatically.
+    /// </summary>
+    /// <remarks>
+    /// The route test above controls renewal, so this is the regression for the values a
+    /// deployment actually runs. The limiter is the one the production factory builds, exhausted
+    /// directly. The partition helper turns its own timer off and leaves renewal to the
+    /// partitioned limiter's heartbeat, which this standalone instance is not inside, so nothing
+    /// renews it mid-test; <c>IsAutoReplenishing</c> is asserted rather than assumed.
+    /// </remarks>
+    [Fact]
+    public async Task Production_conversation_budget_is_300_per_60_seconds_per_credential()
+    {
+        Assert.Equal(300, ConversationRateLimits.PermitsPerWindow);
+        Assert.Equal(60, ConversationRateLimits.WindowSeconds);
+        Assert.Equal(0, ConversationRateLimits.QueueLimit);
+
+        var options = ConversationRateLimits.LimiterOptions();
+        Assert.Equal(300, options.PermitLimit);
+        Assert.Equal(TimeSpan.FromSeconds(60), options.Window);
+        Assert.Equal(0, options.QueueLimit);
+        Assert.True(options.AutoReplenishment);
+
+        await using var host = await NorthTestHost.StartAsync(conversations: new FakeConversationStore());
+        var factory = host.Services.GetRequiredService<ConversationRateLimiterFactory>();
+        Assert.Equal(typeof(ConversationRateLimiterFactory), factory.GetType());
+
+        var partition = factory.Partition("cred:example");
+        Assert.Equal("cred:example", partition.PartitionKey);
+
+        using var limiter = Assert.IsType<System.Threading.RateLimiting.FixedWindowRateLimiter>(
+            partition.Factory(partition.PartitionKey));
+        Assert.Equal(TimeSpan.FromSeconds(60), limiter.ReplenishmentPeriod);
+        Assert.False(limiter.IsAutoReplenishing);
+        for (var i = 0; i < 300; i++)
+        {
+            using var lease = limiter.AttemptAcquire();
+            Assert.True(lease.IsAcquired);
+        }
+
+        using var refused = limiter.AttemptAcquire();
+        Assert.False(refused.IsAcquired);
+        Assert.True(refused.TryGetMetadata(System.Threading.RateLimiting.MetadataName.RetryAfter, out var retryAfter));
+        Assert.Equal(TimeSpan.FromSeconds(60), retryAfter);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

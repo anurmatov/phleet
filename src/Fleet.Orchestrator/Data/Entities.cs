@@ -568,3 +568,303 @@ public class CredentialsAudit
     [MaxLength(255)]
     public string Actor { get; set; } = "CEO";
 }
+
+// ─── Workflow failure accountability (#476) ───────────────────────────────────
+// Additive tables. Classification/stage/state strings use the constants in
+// Fleet.Shared.WorkflowOutcomeContracts. Only classification == confirmed_failure
+// (including proven Completed business failures with a business_* reason code) can
+// enter coordinator batches. Unresolved failures, cause gaps and health rows are
+// never auto-deleted.
+
+/// <summary>One exact run <c>(namespace, workflowId, runId)</c>; never deduplicated by WorkflowId or name.</summary>
+public class WorkflowOutcomeRun
+{
+    public Guid Id { get; set; }
+    public required string Namespace { get; set; }
+    public required string WorkflowId { get; set; }
+    public required string RunId { get; set; }
+
+    /// <summary>SHA-256 of the exact identity; the originals above are always compared on a match.</summary>
+    public required string IdentityHash { get; set; }
+
+    public string? FirstExecutionRunId { get; set; }
+    public string? PreviousRunId { get; set; }
+    public string? NextRunId { get; set; }
+    public string? ParentWorkflowId { get; set; }
+    public string? ParentRunId { get; set; }
+    public required string WorkflowType { get; set; }
+
+    /// <summary>From this run's own LoadWorkflowDefinition result, never the current DB row.</summary>
+    public string? DefinitionName { get; set; }
+    public int? DefinitionVersion { get; set; }
+    public string? DefinitionHash { get; set; }
+
+    public DateTime? StartTime { get; set; }
+    public DateTime? CloseTime { get; set; }
+
+    /// <summary>Temporal execution status name, e.g. <c>Running</c>, <c>Failed</c>, <c>ContinuedAsNew</c>.</summary>
+    public required string Status { get; set; }
+
+    public long? TerminalEventId { get; set; }
+    public string? TerminalEventType { get; set; }
+    public string? TerminalEventHash { get; set; }
+
+    /// <summary>One of <c>WorkflowOutcomeClassifications</c>.</summary>
+    public required string Classification { get; set; }
+    public string? ReasonCode { get; set; }
+    public string? CauseRefsJson { get; set; }
+    public string? ClassifierId { get; set; }
+    public string? ClassifierHash { get; set; }
+
+    public string? ProjectName { get; set; }
+    public string? ProjectEvidenceJson { get; set; }
+    public string? OwnershipPolicyHash { get; set; }
+
+    /// <summary>Material failure version; increments only on a material failure change and then requires a new ack.</summary>
+    public int Version { get; set; } = 1;
+
+    /// <summary>Coalescing key for a chain/cause; each run keeps its own row and version.</summary>
+    public Guid? FailureIncidentId { get; set; }
+
+    public string? SourceTaskRefsJson { get; set; }
+    public string? ArtifactRefsJson { get; set; }
+    public string? Repo { get; set; }
+    public long? IssueNumber { get; set; }
+    public long? PrNumber { get; set; }
+    public string? InputHash { get; set; }
+
+    /// <summary>Recovery owner (configured coordinator), or null for unassigned escalation.</summary>
+    public string? Coordinator { get; set; }
+
+    /// <summary>Original task owner (target agent), separate from the coordinator.</summary>
+    public string? TaskOwner { get; set; }
+
+    /// <summary>complete, pending, missing, unverified or quarantined.</summary>
+    public required string EvidenceState { get; set; }
+
+    /// <summary>Data-protection-encrypted evidence; never raw credentials.</summary>
+    public byte[]? PayloadCiphertext { get; set; }
+    public string? PayloadKeyPurpose { get; set; }
+
+    public bool Quarantined { get; set; }
+    public string? QuarantineReason { get; set; }
+
+    public DateTime DetectedAt { get; set; }
+    public DateTime StoredAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+    public DateTime? ClassificationPendingSince { get; set; }
+
+    /// <summary>TTL for nonfailure metadata only; null for failures, cause gaps and unresolved rows.</summary>
+    public DateTime? MetadataExpiresAt { get; set; }
+
+    /// <summary>Set when the failure item is closed by an explicit finish/close decision.</summary>
+    public DateTime? ResolvedAt { get; set; }
+}
+
+/// <summary>Append-only terminal/state observation; an older observation never overwrites a newer one.</summary>
+public class WorkflowOutcomeObservation
+{
+    public long Id { get; set; }
+    public Guid RunRowId { get; set; }
+    public long EventId { get; set; }
+    public required string EventType { get; set; }
+    public required string EventHash { get; set; }
+    public required string Status { get; set; }
+    public required string Classification { get; set; }
+    public string? ReasonCode { get; set; }
+    public bool Contradicting { get; set; }
+    public DateTime ObservedAt { get; set; }
+    public WorkflowOutcomeRun Run { get; set; } = null!;
+}
+
+/// <summary>Namespace scan window cursor. Page token and seen ids commit atomically. The lease row uses <c>WindowKind = "lease"</c>.</summary>
+public class WorkflowOutcomeCheckpoint
+{
+    public long Id { get; set; }
+    public required string Namespace { get; set; }
+
+    /// <summary>recent, full, enrollment or lease.</summary>
+    public required string WindowKind { get; set; }
+
+    /// <summary>Inclusive lower StartTime bound, or null (full sweep has none).</summary>
+    public DateTime? WindowStart { get; set; }
+
+    /// <summary>Exclusive upper StartTime bound.</summary>
+    public DateTime? WindowEnd { get; set; }
+
+    /// <summary>Stable key of (namespace, kind, start); unique.</summary>
+    public required string WindowKey { get; set; }
+
+    public required string QueryHash { get; set; }
+    public string? PageToken { get; set; }
+    public long SeenCount { get; set; }
+    public bool Complete { get; set; }
+    public DateTime? PassStartedAt { get; set; }
+    public DateTime? PassCompletedAt { get; set; }
+    public string? LastError { get; set; }
+    public long? RetentionSeconds { get; set; }
+    public string? ArchivalState { get; set; }
+    public DateTime? EnrolledAt { get; set; }
+    public string? EnrolledCoordinator { get; set; }
+    public string? PolicyHashes { get; set; }
+    public string? LeaseOwner { get; set; }
+    public long LeaseEpoch { get; set; }
+    public DateTime? LeaseExpiresAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+}
+
+/// <summary>One coordinator delivery batch. Membership is immutable per delivery generation.</summary>
+public class WorkflowOutcomeBatch
+{
+    public Guid Id { get; set; }
+    public required string Coordinator { get; set; }
+    public long CoordinatorGeneration { get; set; }
+    public int Priority { get; set; }
+
+    /// <summary>pending, delivered, partially_acknowledged, acknowledged or superseded.</summary>
+    public required string State { get; set; }
+
+    /// <summary>Random per-batch nonce (not a secret).</summary>
+    public required string Nonce { get; set; }
+    public required string ItemVersionsHash { get; set; }
+    public string? ReceiptHash { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime? LeasedAt { get; set; }
+    public DateTime? DeliveredAt { get; set; }
+    public DateTime? AckedAt { get; set; }
+    public List<WorkflowOutcomeBatchItem> Items { get; set; } = [];
+}
+
+/// <summary>Immutable <c>(outcomeId, version)</c> membership with individual ack state.</summary>
+public class WorkflowOutcomeBatchItem
+{
+    public long Id { get; set; }
+    public Guid BatchId { get; set; }
+    public Guid OutcomeId { get; set; }
+    public int OutcomeVersion { get; set; }
+    public long DeliveryGeneration { get; set; }
+
+    /// <summary>pending, delivered, acknowledged or superseded.</summary>
+    public required string State { get; set; }
+    public DateTime? DeliveredAt { get; set; }
+    public DateTime? AckedAt { get; set; }
+    public string? AckedBy { get; set; }
+
+    /// <summary>coordinator or operator.</summary>
+    public string? AckSource { get; set; }
+    public WorkflowOutcomeBatch Batch { get; set; } = null!;
+}
+
+/// <summary>Immutable audit of one record-only decision; never an ack-as-decision shortcut.</summary>
+public class WorkflowOutcomeDecision
+{
+    public Guid Id { get; set; }
+    public Guid OutcomeId { get; set; }
+    public int ExpectedVersion { get; set; }
+    public required string Operation { get; set; }
+    public required string DecidedBy { get; set; }
+
+    /// <summary>coordinator or operator.</summary>
+    public required string DecidedVia { get; set; }
+    public required string Owner { get; set; }
+    public required string Reason { get; set; }
+    public required string EvidenceRefsJson { get; set; }
+    public string? TaskRef { get; set; }
+    public string? ArtifactRef { get; set; }
+    public string? StopProofRef { get; set; }
+    public DateTime? DueAt { get; set; }
+    public string? AuthorityRef { get; set; }
+    public Guid? BatchId { get; set; }
+
+    /// <summary>The coordinator generation the decision was made in; a resend from another generation is never its duplicate.</summary>
+    public long? CoordinatorGeneration { get; set; }
+
+    /// <summary>accepted or rejected.</summary>
+    public required string Status { get; set; }
+    public string? RejectReason { get; set; }
+    public DateTime CreatedAt { get; set; }
+}
+
+/// <summary>Permanent reservation for one recovery attempt; ambiguity never releases it.</summary>
+public class WorkflowRecoveryOperation
+{
+    public Guid Id { get; set; }
+    public Guid DecisionId { get; set; }
+    public Guid OutcomeId { get; set; }
+    public int OutcomeVersion { get; set; }
+    public required string Operation { get; set; }
+    public required string SourceNamespace { get; set; }
+    public required string SourceWorkflowId { get; set; }
+    public required string SourceRunId { get; set; }
+    public string? SourceTaskHash { get; set; }
+    public string? SourceArtifactHash { get; set; }
+    public required string TargetNamespace { get; set; }
+    public string? TargetWorkflowType { get; set; }
+    public string? TargetTaskQueue { get; set; }
+    public string? TargetAgent { get; set; }
+    public string? InputSha256 { get; set; }
+
+    /// <summary><c>recovery-&lt;OperationUUID&gt;</c>, started with RejectDuplicate.</summary>
+    public required string ReplacementWorkflowId { get; set; }
+    public required string Scope { get; set; }
+    public required string Coordinator { get; set; }
+    public required string StopProofRefsJson { get; set; }
+    public required string AuthorityRef { get; set; }
+
+    /// <summary>One of <c>WorkflowRecoveryStates</c>.</summary>
+    public required string State { get; set; }
+    public required string ReservedBy { get; set; }
+    public DateTime ReservedAt { get; set; }
+    public DateTime? DispatchingAt { get; set; }
+    public string? ResultRunId { get; set; }
+    public string? ReceiptEventRef { get; set; }
+    public string? ReceiptJson { get; set; }
+    public string? BlockedReason { get; set; }
+    public DateTime UpdatedAt { get; set; }
+}
+
+/// <summary>A reply whose waiter was gone; never overwrites the current attempt and is never auto-accepted.</summary>
+public class WorkflowOutcomeLateResult
+{
+    public Guid Id { get; set; }
+
+    /// <summary>Empty string when the namespace is unknown (MySQL unique keys treat NULLs as distinct).</summary>
+    public required string Namespace { get; set; }
+    public required string TaskId { get; set; }
+    public required string ResultHash { get; set; }
+    public required string MessageId { get; set; }
+
+    /// <summary>stored, quarantined, accepted or discarded.</summary>
+    public required string Status { get; set; }
+    public required string ResultStatus { get; set; }
+    public byte[]? Ciphertext { get; set; }
+    public int SizeBytes { get; set; }
+    public string? SourceCorrelation { get; set; }
+    public Guid? OutcomeId { get; set; }
+    public bool Quarantined { get; set; }
+    public string? QuarantineReason { get; set; }
+    public int Attempt { get; set; }
+    public DateTime ReceivedAt { get; set; }
+    public DateTime StoredAt { get; set; }
+}
+
+/// <summary>Deduplicated component/outage incident; never a workflow or notification.</summary>
+public class WorkflowOutcomeHealth
+{
+    public long Id { get; set; }
+    public required string Component { get; set; }
+    public required string OutageKey { get; set; }
+
+    /// <summary>open or resolved.</summary>
+    public required string State { get; set; }
+    public required string Reason { get; set; }
+    public string? Namespace { get; set; }
+    public DateTime? GapStart { get; set; }
+    public DateTime? GapEnd { get; set; }
+    public long KnownRunCount { get; set; }
+    public bool UnknownRunCount { get; set; }
+    public string? CauseReviewRefsJson { get; set; }
+    public DateTime FirstSeenAt { get; set; }
+    public DateTime LastSeenAt { get; set; }
+    public DateTime? ResolvedAt { get; set; }
+}

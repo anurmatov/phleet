@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -18,6 +19,14 @@ namespace Fleet.Temporal.Services;
 /// When an agent sends a response/partial-response with a TaskId,
 /// routes it to TaskCompletionRegistry to complete the awaiting Temporal activity.
 /// When an agent sends a workflow-signal message, delivers it to the target workflow via TemporalClientFactory.
+///
+/// <para>
+/// #476: a reply whose waiter is already gone is, with
+/// <see cref="TemporalBridgeOptions.WorkflowOutcomeLateCaptureEnabled"/>, handed to the durable late
+/// queue first and acknowledged only after the broker confirmed that copy. When the handoff fails
+/// the reply is NOT acknowledged: the consumer is cancelled, the reply returns to the relay queue,
+/// and consumption resumes after a 5..60 s backoff. With capture off the legacy discard is unchanged.
+/// </para>
 /// </summary>
 public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
 {
@@ -25,24 +34,60 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
         new(@"^\[status:\s*(\w+)\]\s*", RegexOptions.Compiled);
 
     private readonly RabbitMqOptions _rabbitConfig;
+    private readonly TemporalBridgeOptions _bridgeOptions;
     private readonly TaskCompletionRegistry _registry;
     private readonly TemporalClientFactory _clientFactory;
+    private readonly IWorkflowOutcomeBroker? _outcomeBroker;
+    private readonly TimeProvider _time;
     private readonly ILogger<TemporalRelayListener> _logger;
+    private readonly WorkflowOutcomeBackoff _captureBackoff = new();
+    private readonly CancellationTokenSource _stopping = new();
 
     private IConnection? _connection;
     private IChannel? _channel;
+    private string? _consumerTag;
+
+    /// <summary>
+    /// Late replies whose handoff was not confirmed: unacknowledged (still the broker's), retried in
+    /// the background with backoff while the relay consumer keeps settling live replies.
+    /// </summary>
+    private readonly ConcurrentDictionary<long, HeldLateReply> _held = new();
+    private long _heldSequence;
+    private int _retrying;
+
+    /// <summary>Serializes settlements on the relay channel between the consumer and the retry loop.</summary>
+    private readonly SemaphoreSlim _settleGate = new(1, 1);
+
+    /// <summary>
+    /// How many late replies may be held at once. The relay prefetch is one more than this when
+    /// capture is enabled, so live replies keep flowing until the hold is full.
+    /// </summary>
+    internal const int MaxHeldLateReplies = 64;
+
+    private sealed record HeldLateReply(string TaskId, byte[] Body, string MessageId, DateTimeOffset ReceivedAt, IWorkflowOutcomeDelivery Delivery);
 
     public TemporalRelayListener(
         IOptions<RabbitMqOptions> rabbitConfig,
         TaskCompletionRegistry registry,
         TemporalClientFactory clientFactory,
-        ILogger<TemporalRelayListener> logger)
+        ILogger<TemporalRelayListener> logger,
+        IOptions<TemporalBridgeOptions>? bridgeOptions = null,
+        IWorkflowOutcomeBroker? outcomeBroker = null,
+        TimeProvider? timeProvider = null)
     {
         _rabbitConfig = rabbitConfig.Value;
+        _bridgeOptions = bridgeOptions?.Value ?? new TemporalBridgeOptions();
         _registry = registry;
         _clientFactory = clientFactory;
+        _outcomeBroker = outcomeBroker;
+        _time = timeProvider ?? TimeProvider.System;
         _logger = logger;
     }
+
+    private bool CaptureEnabled => _bridgeOptions.WorkflowOutcomeLateCaptureEnabled;
+
+    /// <summary>Test seam: the real-broker suite points the listener at its own throwaway broker.</summary>
+    internal ConnectionFactory? ConnectionFactoryOverride { get; init; }
 
     public async Task StartAsync(CancellationToken ct)
     {
@@ -54,7 +99,7 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
 
         try
         {
-            var factory = new ConnectionFactory
+            var factory = ConnectionFactoryOverride ?? new ConnectionFactory
             {
                 HostName = _rabbitConfig.Host,
                 ClientProvidedName = "fleet-temporal-bridge",
@@ -71,35 +116,34 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
                 return Task.CompletedTask;
             };
 
-            _channel = await _connection.CreateChannelAsync(cancellationToken: ct);
+            // Activation is checked up front so a broker without publisher confirms (or a queue
+            // declared with other arguments) is reported now, not at the first late reply.
+            if (CaptureEnabled)
+            {
+                string? blocked;
+                try
+                {
+                    blocked = _outcomeBroker is null ? "capture_not_configured" : await _outcomeBroker.ActivateAsync(ct);
+                }
+                catch (Exception ex)
+                {
+                    // Never let capture keep the relay consumer from starting: matched replies must flow.
+                    blocked = ex.GetType().Name;
+                }
 
-            // Idempotent exchange declare — must match what agents declare
-            await _channel.ExchangeDeclareAsync(
-                _rabbitConfig.Exchange, ExchangeType.Direct, durable: true, autoDelete: false,
-                cancellationToken: ct);
+                if (blocked is not null)
+                {
+                    _logger.LogError(
+                        "Workflow outcome late-result capture activation blocked ({Reason}). Replies whose waiter is gone will be held unacknowledged with the broker until capture activates; they are never acknowledged and discarded",
+                        blocked);
+                }
+            }
 
-            // Dedicated queue for the temporal bridge
-            const string queueName = "fleet.agent.temporal-bridge";
-            const string routingKey = "temporal-bridge";
-
-            await _channel.QueueDeclareAsync(
-                queue: queueName, durable: true, exclusive: false, autoDelete: false,
-                cancellationToken: ct);
-
-            await _channel.QueueBindAsync(queueName, _rabbitConfig.Exchange, routingKey: routingKey,
-                cancellationToken: ct);
-
-            await _channel.BasicQosAsync(prefetchSize: 0, prefetchCount: 1, global: false,
-                cancellationToken: ct);
-
-            var consumer = new AsyncEventingBasicConsumer(_channel);
-            consumer.ReceivedAsync += OnMessageReceivedAsync;
-            await _channel.BasicConsumeAsync(queueName, autoAck: false, consumer: consumer,
-                cancellationToken: ct);
+            await OpenRelayConsumerAsync(ct);
 
             _logger.LogInformation(
                 "TemporalRelayListener started on exchange={Exchange}, queue={Queue}",
-                _rabbitConfig.Exchange, queueName);
+                _rabbitConfig.Exchange, TemporalBridgeOptions.RelayQueue);
         }
         catch (Exception ex)
         {
@@ -107,22 +151,70 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
         }
     }
 
+    /// <summary>The relay channel and consumer exactly as they always were; reused after a pause.</summary>
+    private async Task OpenRelayConsumerAsync(CancellationToken ct)
+    {
+        var channel = await _connection!.CreateChannelAsync(cancellationToken: ct);
+        _channel = channel;
+
+        // Idempotent exchange declare — must match what agents declare
+        await channel.ExchangeDeclareAsync(
+            _rabbitConfig.Exchange, ExchangeType.Direct, durable: true, autoDelete: false,
+            cancellationToken: ct);
+
+        // Dedicated queue for the temporal bridge
+        const string queueName = TemporalBridgeOptions.RelayQueue;
+        const string routingKey = "temporal-bridge";
+
+        await channel.QueueDeclareAsync(
+            queue: queueName, durable: true, exclusive: false, autoDelete: false,
+            cancellationToken: ct);
+
+        await channel.QueueBindAsync(queueName, _rabbitConfig.Exchange, routingKey: routingKey,
+            cancellationToken: ct);
+
+        // Capture off keeps the original prefetch of 1. With capture on, an unconfirmed late reply
+        // stays unacknowledged while it is retried, so the prefetch leaves room for live replies.
+        await channel.BasicQosAsync(prefetchSize: 0, prefetchCount: CaptureEnabled ? (ushort)(MaxHeldLateReplies + 1) : (ushort)1, global: false,
+            cancellationToken: ct);
+
+        var consumer = new AsyncEventingBasicConsumer(channel);
+        consumer.ReceivedAsync += OnMessageReceivedAsync;
+        _consumerTag = await channel.BasicConsumeAsync(queueName, autoAck: false, consumer: consumer,
+            cancellationToken: ct);
+    }
+
     public async Task StopAsync(CancellationToken ct)
     {
+        _stopping.Cancel();
         _registry.CancelAll();
         await DisposeAsync();
     }
 
-    private async Task OnMessageReceivedAsync(object sender, BasicDeliverEventArgs ea)
+    private Task OnMessageReceivedAsync(object sender, BasicDeliverEventArgs ea)
+    {
+        var channel = ((AsyncEventingBasicConsumer)sender).Channel;
+        // The relay consumer is never paused for a late reply, so the delivery has no pause action.
+        return HandleDeliveryAsync(
+            ea.Body, ea.BasicProperties,
+            new SerializedDelivery(new RabbitMqOutcomeDelivery(channel, ea.DeliveryTag, static (_, _) => { }), _settleGate));
+    }
+
+    /// <summary>
+    /// One relay delivery. Matched replies, signals and everything else are settled exactly as
+    /// before; only a waiter miss with capture enabled takes the confirmed handoff path.
+    /// </summary>
+    internal async Task HandleDeliveryAsync(
+        ReadOnlyMemory<byte> body, IReadOnlyBasicProperties? properties, IWorkflowOutcomeDelivery delivery)
     {
         try
         {
-            var json = Encoding.UTF8.GetString(ea.Body.Span);
+            var json = Encoding.UTF8.GetString(body.Span);
             var message = JsonSerializer.Deserialize<RelayMessage>(json);
 
             if (message is null)
             {
-                await _channel!.BasicAckAsync(ea.DeliveryTag, multiple: false);
+                await delivery.AckAsync();
                 return;
             }
 
@@ -133,14 +225,14 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
             if (message.Type == RelayMessageType.WorkflowSignal)
             {
                 await HandleWorkflowSignalAsync(message);
-                await _channel!.BasicAckAsync(ea.DeliveryTag, multiple: false);
+                await delivery.AckAsync();
                 return;
             }
 
             // Only process responses that carry a TaskId
             if (message.TaskId is null || (message.Type != RelayMessageType.Response && message.Type != RelayMessageType.PartialResponse))
             {
-                await _channel!.BasicAckAsync(ea.DeliveryTag, multiple: false);
+                await delivery.AckAsync();
                 return;
             }
 
@@ -150,20 +242,164 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
             if (matched)
             {
                 // TCS fulfilled — safe to ack
-                await _channel!.BasicAckAsync(ea.DeliveryTag, multiple: false);
+                await delivery.AckAsync();
+            }
+            else if (CaptureEnabled)
+            {
+                await CaptureLateReplyAsync(message.TaskId, body, properties, delivery);
             }
             else
             {
                 // Orphan response: no pending TCS (already completed or expired) — nack without requeue
                 _logger.LogWarning("Orphan response for TaskId={TaskId} — nacking without requeue", message.TaskId);
-                await _channel!.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false);
+                await delivery.RejectWithoutRequeueAsync();
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error processing relay message — nacking without requeue");
-            try { await _channel!.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false); }
+            try { await delivery.RejectWithoutRequeueAsync(); }
             catch { /* channel may be closing */ }
+        }
+    }
+
+    /// <summary>
+    /// Publishes the ORIGINAL bytes to the late queue and acknowledges the relay delivery only
+    /// once the broker confirmed a copy. A refused late-queue handoff (return, nack including the
+    /// reject-publish quota, unknown confirm) parks the copy in the durable hold queue instead, so
+    /// late-result backpressure never occupies the relay consumer. Only when the broker confirms
+    /// neither copy is the reply held unacknowledged and retried in the background.
+    /// </summary>
+    private async Task CaptureLateReplyAsync(
+        string taskId, ReadOnlyMemory<byte> body, IReadOnlyBasicProperties? properties, IWorkflowOutcomeDelivery delivery)
+    {
+        var messageId = WorkflowOutcomeLateEnvelope.StableMessageId(properties?.MessageId, body.Span);
+        var now = _time.GetUtcNow();
+        var (queue, published) = await HandOffAsync(taskId, body, messageId, now);
+
+        if (queue is not null)
+        {
+            _captureBackoff.Reset();
+            await delivery.AckAsync();
+            return;
+        }
+
+        // The delivery body is only valid during the callback, so the held copy owns its bytes.
+        _held[Interlocked.Increment(ref _heldSequence)] = new HeldLateReply(taskId, body.ToArray(), messageId, now, delivery);
+        _logger.LogWarning(
+            "Late reply for TaskId={TaskId} not captured ({Status}: {Reason}) — left unacknowledged and held ({Held} held); live replies keep flowing",
+            taskId, published.Status, published.Reason, _held.Count);
+        if (_held.Count >= MaxHeldLateReplies)
+            _logger.LogError(
+                "Late-result hold is full ({Max}); relay deliveries stall until capture recovers", MaxHeldLateReplies);
+
+        // Without a broker nothing can ever confirm: hold only, the broker redelivers after a restart.
+        if (_outcomeBroker is not null && Interlocked.CompareExchange(ref _retrying, 1, 0) == 0)
+            _ = Task.Run(RetryHeldAsync);
+    }
+
+    /// <summary>
+    /// The confirmed copy's queue (late, else hold) or null with the last refusal. Logs the outcome;
+    /// a duplicate copy after an unknown confirm is deduplicated downstream by the stable MessageId.
+    /// </summary>
+    private async Task<(string? Queue, WorkflowOutcomePublishResult Result)> HandOffAsync(
+        string taskId, ReadOnlyMemory<byte> body, string messageId, DateTimeOffset receivedAt)
+    {
+        var late = await PublishCopyAsync(_bridgeOptions.WorkflowOutcomeLateQueue, taskId, body, messageId, receivedAt);
+        if (late.IsConfirmed)
+        {
+            _logger.LogInformation(
+                "Late reply for TaskId={TaskId} captured to {Queue} (messageId={MessageId})",
+                taskId, _bridgeOptions.WorkflowOutcomeLateQueue, messageId);
+            return (_bridgeOptions.WorkflowOutcomeLateQueue, late);
+        }
+
+        var hold = await PublishCopyAsync(_bridgeOptions.WorkflowOutcomeHoldQueue, taskId, body, messageId, receivedAt);
+        if (hold.IsConfirmed)
+        {
+            _logger.LogWarning(
+                "Late reply for TaskId={TaskId} parked in {Hold} (late-queue handoff {Status}: {Reason}; messageId={MessageId})",
+                taskId, _bridgeOptions.WorkflowOutcomeHoldQueue, late.Status, late.Reason, messageId);
+            return (_bridgeOptions.WorkflowOutcomeHoldQueue, hold);
+        }
+
+        return (null, new WorkflowOutcomePublishResult(hold.Status, $"late {late.Status}/{late.Reason}, hold {hold.Status}/{hold.Reason}"));
+    }
+
+    private async Task<WorkflowOutcomePublishResult> PublishCopyAsync(
+        string queue, string taskId, ReadOnlyMemory<byte> body, string messageId, DateTimeOffset receivedAt)
+    {
+        try
+        {
+            return _outcomeBroker is null
+                ? new(WorkflowOutcomePublishStatus.Unavailable, "capture_not_configured")
+                : await _outcomeBroker.PublishAsync(
+                    queue,
+                    body,
+                    messageId,
+                    WorkflowOutcomeLateEnvelope.LateHeaders(attempt: 0, dueAt: receivedAt, receivedAt: receivedAt, taskId),
+                    _stopping.Token);
+        }
+        catch (Exception ex)
+        {
+            return new(WorkflowOutcomePublishStatus.Unknown, ex.GetType().Name);
+        }
+    }
+
+    /// <summary>
+    /// The one background retry loop: waits the 5..60 s backoff, retries every held reply in
+    /// arrival order and acknowledges each only after its confirmed handoff. A reply whose channel
+    /// has closed is dropped from the hold — the broker has already returned it to the relay queue.
+    /// </summary>
+    private async Task RetryHeldAsync()
+    {
+        try
+        {
+            while (!_held.IsEmpty && !_stopping.IsCancellationRequested)
+            {
+                await Task.Delay(_captureBackoff.Next(), _time, _stopping.Token);
+                foreach (var (key, held) in _held.OrderBy(h => h.Key).ToList())
+                {
+                    if (!held.Delivery.CanSettle)
+                    {
+                        _held.TryRemove(key, out _);
+                        _logger.LogInformation("Held late reply for TaskId={TaskId} returned to the relay queue (channel closed)", held.TaskId);
+                        continue;
+                    }
+
+                    var (queue, published) = await HandOffAsync(held.TaskId, held.Body, held.MessageId, held.ReceivedAt);
+                    if (queue is null)
+                    {
+                        _logger.LogWarning(
+                            "Held late reply for TaskId={TaskId} retry failed ({Status}: {Reason}); still unacknowledged",
+                            held.TaskId, published.Status, published.Reason);
+                        break; // still failing: back off before trying any of them again
+                    }
+
+                    _held.TryRemove(key, out _);
+                    _captureBackoff.Reset();
+                    try
+                    {
+                        await held.Delivery.AckAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        // The copy is durable; the original returns to the relay queue and is captured again (stable MessageId).
+                        _logger.LogWarning("Held late reply for TaskId={TaskId} captured but its acknowledgement failed ({Error})",
+                            held.TaskId, ex.GetType().Name);
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Shutting down: held replies stay with the broker.
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _retrying, 0);
+            if (!_held.IsEmpty && !_stopping.IsCancellationRequested && Interlocked.CompareExchange(ref _retrying, 1, 0) == 0)
+                _ = Task.Run(RetryHeldAsync);
         }
     }
 
@@ -203,7 +439,7 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
     /// Parses the [status: X] prefix that agents inject when TaskId is set (TelegramTransport.FormatTaskResponse).
     /// Falls back to inferring status from message type.
     /// </summary>
-    private static AgentTaskResult ParseAgentResult(string text, string messageType)
+    internal static AgentTaskResult ParseAgentResult(string text, string messageType)
     {
         var match = StatusPrefixRegex.Match(text);
         if (match.Success)
@@ -220,9 +456,32 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_channel is not null)
+        _held.Clear(); // closing the channel returns every held reply to the relay queue
+        if (_channel is { IsOpen: true })
             await _channel.CloseAsync();
         if (_connection is not null)
             await _connection.CloseAsync();
     }
+}
+
+/// <summary>A relay delivery whose settlement is serialized with the late-reply retry loop.</summary>
+internal sealed class SerializedDelivery(IWorkflowOutcomeDelivery inner, SemaphoreSlim gate) : IWorkflowOutcomeDelivery
+{
+    public bool CanSettle => inner.CanSettle;
+
+    public async Task AckAsync()
+    {
+        await gate.WaitAsync();
+        try { await inner.AckAsync(); }
+        finally { gate.Release(); }
+    }
+
+    public async Task RejectWithoutRequeueAsync()
+    {
+        await gate.WaitAsync();
+        try { await inner.RejectWithoutRequeueAsync(); }
+        finally { gate.Release(); }
+    }
+
+    public void Pause(TimeSpan backoff, string reason) => inner.Pause(backoff, reason);
 }

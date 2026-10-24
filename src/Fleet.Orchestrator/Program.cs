@@ -7,6 +7,7 @@ using Fleet.Orchestrator.Endpoints;
 using Fleet.Orchestrator.Helpers;
 using Fleet.Orchestrator.Services;
 using Fleet.Shared;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -103,6 +104,24 @@ builder.Services.AddSingleton<EpicRunLinkage>();
 builder.Services.AddSingleton<EpicDriverStateService>();
 builder.Services.AddHostedService<EpicDriverWatcherService>();
 
+// Workflow failure accountability (#476): off unless WorkflowOutcomes:Enabled. The API, its own
+// authorization middleware and the failure batcher are always registered and answer 503 while off.
+var workflowOutcomeOptions = builder.Configuration.GetSection(WorkflowOutcomeOptions.Section).Get<WorkflowOutcomeOptions>() ?? new();
+builder.Services.AddWorkflowOutcomeApi(builder.Configuration);
+if (workflowOutcomeOptions.Enabled && !string.IsNullOrWhiteSpace(workflowOutcomeOptions.KeyringDir))
+{
+    // The keyring is the operator-owned persisted 0700 directory checked by the preflight below.
+    builder.Services.AddDataProtection()
+        .SetApplicationName("phleet-workflow-outcomes")
+        .PersistKeysToFileSystem(new DirectoryInfo(workflowOutcomeOptions.KeyringDir));
+    builder.Services.AddSingleton<IWorkflowOutcomePayloadProtector, DataProtectionWorkflowOutcomePayloadProtector>();
+}
+else
+{
+    builder.Services.AddSingleton<IWorkflowOutcomePayloadProtector, UnavailableWorkflowOutcomePayloadProtector>();
+}
+builder.Services.AddWorkflowOutcomeObserver();
+
 // MCP server (HTTP transport — same port as REST, path /mcp)
 builder.Services
     .AddMcpServer()
@@ -110,6 +129,18 @@ builder.Services
     .WithToolsFromAssembly();
 
 var app = builder.Build();
+
+// Workflow outcomes (#476): an enabled feature with an invalid option, a missing or non-0700
+// keyring or an unset coordinator token ends the process before anything starts. Messages name
+// keys only, never a value.
+var workflowOutcomeErrors = WorkflowOutcomePreflight.Check(workflowOutcomeOptions, app.Configuration);
+if (workflowOutcomeErrors.Count > 0)
+{
+    app.Logger.LogCritical("workflow_outcomes_misconfigured: {Errors}", string.Join("; ", workflowOutcomeErrors));
+    Console.Error.WriteLine($"Fleet.Orchestrator startup aborted, exiting 1: workflow_outcomes_misconfigured: {string.Join("; ", workflowOutcomeErrors)}");
+    Environment.Exit(1);
+}
+app.Logger.LogInformation("Workflow outcomes are {State}", workflowOutcomeOptions.Enabled ? "enabled" : "disabled");
 
 var epicGrantOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<EpicGrantOptions>>().Value;
 if (epicGrantOptions.DisableMisconfiguredAutonomy())
@@ -195,6 +226,10 @@ if (!string.IsNullOrWhiteSpace(orchestratorAuthToken))
         await next(context);
     });
 }
+
+// Workflow outcomes (#476): authorizes every method under /api/workflow-outcomes (reads included)
+// before routing; OrchestratorAuth exempts that prefix from the admin middleware above.
+app.UseWorkflowOutcomeAuthorization();
 
 // Config API auth — ORCHESTRATOR_CONFIG_TOKEN gates /api/config/* (all methods).
 // Separate from ORCHESTRATOR_AUTH_TOKEN so peers can read config without full admin access.
@@ -359,6 +394,9 @@ app.MapProjectContextEndpoints();
 // bridge-only decisions route. Mapped from Endpoints/EpicGrantEndpoints.cs.
 app.MapEpicGrantEndpoints();
 app.MapEpicDriverEndpoints();
+
+// Workflow failure accountability (#476). Mapped from Endpoints/WorkflowOutcomeEndpoints.cs.
+app.MapWorkflowOutcomeEndpoints();
 
 // REST: active workflows across all Temporal namespaces
 app.MapGet("/api/workflows", (WorkflowStore workflows) =>

@@ -4,6 +4,9 @@ public sealed class TemporalBridgeOptions
 {
     public const string Section = "TemporalBridge";
 
+    /// <summary>The relay queue the bridge consumes agent replies from. Never a late-result queue.</summary>
+    public const string RelayQueue = "fleet.agent.temporal-bridge";
+
     /// <summary>Temporal server address (host:port).</summary>
     public string TemporalAddress { get; set; } = "temporal-server:7233";
 
@@ -29,4 +32,59 @@ public sealed class TemporalBridgeOptions
     /// Set via TEMPORALBRIDGE__ORCHESTRATORAUTHTOKEN env var (same value as ORCHESTRATOR_AUTH_TOKEN).
     /// </summary>
     public string OrchestratorAuthToken { get; set; } = "";
+
+    /// <summary>
+    /// #476: capture agent replies whose waiter is already gone. Off (the default) keeps the legacy
+    /// behaviour — such a reply is rejected without requeue, i.e. discarded — and logs one startup
+    /// warning. On: the reply is handed to <see cref="WorkflowOutcomeLateQueue"/> with a publisher
+    /// confirm before the original is acknowledged, and stored through the orchestrator's
+    /// late-results API. Startup-only (TemporalBridge__WorkflowOutcomeLateCaptureEnabled).
+    /// </summary>
+    public bool WorkflowOutcomeLateCaptureEnabled { get; set; }
+
+    /// <summary>Durable private queue holding captured late replies until the orchestrator stores them.</summary>
+    public string WorkflowOutcomeLateQueue { get; set; } = "fleet.workflow-outcomes.late";
+
+    /// <summary>
+    /// Durable private queue for late replies that could not be stored. It has no consumer and no
+    /// replay: recovery from it is an operator action on an exact message.
+    /// </summary>
+    public string WorkflowOutcomeQuarantineQueue { get; set; } = "fleet.workflow-outcomes.quarantine";
+
+    /// <summary>
+    /// Durable overflow intake: a late reply whose handoff to the late queue is refused (quota,
+    /// missing queue, unknown confirm) is parked here, confirmed, so the relay delivery can be
+    /// acknowledged and live replies are never held behind it. The late-result consumer drains it.
+    /// </summary>
+    public string WorkflowOutcomeHoldQueue { get; set; } = "fleet.workflow-outcomes.hold";
+
+    /// <summary>
+    /// Null when the late-result settings are usable, otherwise why not. Only checked when capture is
+    /// enabled: an invalid value fails startup rather than being silently replaced.
+    /// </summary>
+    public string? ValidateWorkflowOutcomeLateCapture()
+    {
+        if (!WorkflowOutcomeLateCaptureEnabled) return null;
+        // Captured replies are stored through the orchestrator; without it every one would be
+        // retried into quarantine.
+        if (!Uri.TryCreate(OrchestratorUrl, UriKind.Absolute, out var orchestrator)
+            || (orchestrator.Scheme != Uri.UriSchemeHttp && orchestrator.Scheme != Uri.UriSchemeHttps))
+            return "TemporalBridge:OrchestratorUrl must be an absolute http(s) URL when late-result capture is enabled";
+        if (string.IsNullOrWhiteSpace(OrchestratorAuthToken))
+            return "TemporalBridge:OrchestratorAuthToken is required when late-result capture is enabled";
+        var queues = new[] { ("WorkflowOutcomeLateQueue", WorkflowOutcomeLateQueue), ("WorkflowOutcomeHoldQueue", WorkflowOutcomeHoldQueue),
+            ("WorkflowOutcomeQuarantineQueue", WorkflowOutcomeQuarantineQueue) };
+        foreach (var (name, value) in queues)
+        {
+            if (string.IsNullOrWhiteSpace(value) || value != value.Trim())
+                return $"TemporalBridge:{name} must be a nonblank queue name without surrounding whitespace";
+            if (value == RelayQueue)
+                return $"the late-result queues must not be the relay queue {RelayQueue}";
+            if (value.StartsWith("amq.", StringComparison.Ordinal))
+                return "the late-result queues must not use the reserved amq. prefix";
+        }
+        if (queues.Select(q => q.Item2).Distinct(StringComparer.Ordinal).Count() != queues.Length)
+            return "TemporalBridge:WorkflowOutcomeLateQueue, WorkflowOutcomeHoldQueue and WorkflowOutcomeQuarantineQueue must all differ";
+        return null;
+    }
 }

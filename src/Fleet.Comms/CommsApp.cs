@@ -107,6 +107,7 @@ public static class CommsApp
         // component, not the socket.
         services.TryAddSingleton<CredentialRevalidator>();
 
+        services.TryAddSingleton<ConversationRateLimiterFactory>();
         services.AddRateLimiter(ConfigureAuthRateLimiter);
         return services;
     }
@@ -755,15 +756,8 @@ public static class CommsApp
         // reason it is cheap. A caller inventing tokens therefore mints partitions, each still
         // bounded, and every one of those requests then fails authentication at the route.
         options.AddPolicy(ConversationRateLimits.PolicyName, context =>
-            RateLimitPartition.GetFixedWindowLimiter(
-                ConversationPartitionKey(context),
-                _ => new FixedWindowRateLimiterOptions
-                {
-                    PermitLimit = ConversationRateLimits.PermitsPerWindow,
-                    Window = TimeSpan.FromSeconds(ConversationRateLimits.WindowSeconds),
-                    QueueLimit = ConversationRateLimits.QueueLimit,
-                    AutoReplenishment = true,
-                }));
+            context.RequestServices.GetRequiredService<ConversationRateLimiterFactory>()
+                .Partition(ConversationPartitionKey(context)));
 
         options.AddPolicy(AuthRateLimits.PolicyName, context =>
             RateLimitPartition.GetFixedWindowLimiter(

@@ -33,10 +33,14 @@ jobs:
       # (never skips) without a database — which is the property that makes it evidence. Running it
       # here would fail this job for want of a service container it was never given, and "fix" that
       # by making it skip would put us back where a green summary proves nothing.
+      #
+      # The workflow-outcome MySQL tests (#476, trait WorkflowOutcomeSuite=migration) are excluded by
+      # trait and name as well as by namespace, for the same reason: they fail without a database and
+      # run in `orchestrator-migrations`. Every other WorkflowOutcome test runs here.
       - name: Test
         run: >
           dotnet test --no-build --configuration Release
-          --filter "FullyQualifiedName!~Fleet.Conversations.Tests&FullyQualifiedName!~Fleet.Orchestrator.Tests.Migrations"
+          --filter "FullyQualifiedName!~Fleet.Conversations.Tests&FullyQualifiedName!~Fleet.Orchestrator.Tests.Migrations&FullyQualifiedName!~WorkflowOutcomeMigration&WorkflowOutcomeSuite!=migration&FullyQualifiedName!~Fleet.Temporal.Tests.WorkflowOutcomes.RealBroker"
           --logger "console;verbosity=normal"
 
       # #460 AC-U6: the codex branch writes codex-root.toml first, then byte-identical MCP tables,
@@ -46,6 +50,9 @@ jobs:
 
       - name: Acceptance plan validators and public placeholders
         run: python3 -m unittest discover tests/scripts
+
+      - name: Workflow-outcome public-scrub rules
+        run: python3 -m unittest discover -s tests/integration/workflow-outcomes -p 'test_*.py'
 
       - name: GitHub API endpoint token routing
         run: |
@@ -524,12 +531,13 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # Includes the workflow-outcome MySQL tests (#476) by trait and by name, wherever their namespace is.
       - name: Run the migration suite
         env:
           FLEET_ORCHESTRATOR_MIGRATION_CONNECTION: "Server=127.0.0.1;Port=3306;User ID=root;Password=orchestrator-ci;AllowPublicKeyRetrieval=true;"
         run: >
           dotnet test tests/Fleet.Orchestrator.Tests --configuration Release
-          --filter "FullyQualifiedName~Fleet.Orchestrator.Tests.Migrations"
+          --filter "FullyQualifiedName~Fleet.Orchestrator.Tests.Migrations|FullyQualifiedName~WorkflowOutcomeMigration|WorkflowOutcomeSuite=migration"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=orchestrator-migrations.trx"
           --results-directory ${{ github.workspace }}/testresults
@@ -549,6 +557,58 @@ jobs:
             exit 1
           fi
           echo "$passed test(s) executed against mysql:8.0, 0 skipped."
+
+  workflow-outcome-broker:
+    name: Workflow outcome late results (RabbitMQ)
+    runs-on: ubuntu-latest
+
+    # The late-result capture (#476) is only evidence against a broker that really confirms,
+    # returns and rejects publishes. The tests FAIL without FLEET_WORKFLOW_OUTCOMES_BROKER.
+    services:
+      rabbitmq:
+        image: rabbitmq:4
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd="rabbitmq-diagnostics -q ping"
+          --health-interval=5s
+          --health-timeout=10s
+          --health-retries=20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Run the real-broker suite
+        env:
+          FLEET_WORKFLOW_OUTCOMES_BROKER: "amqp://guest:guest@127.0.0.1:5672/"
+        run: >
+          dotnet test tests/Fleet.Temporal.Tests --configuration Release
+          --filter "FullyQualifiedName~Fleet.Temporal.Tests.WorkflowOutcomes.RealBroker"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=workflow-outcome-broker.trx"
+          --results-directory ${{ github.workspace }}/testresults
+
+      - name: Refuse a run that skipped anything
+        if: always()
+        run: |
+          set -euo pipefail
+          trx="${{ github.workspace }}/testresults/workflow-outcome-broker.trx"
+          [ -f "$trx" ] || { echo "ERROR: no test result file — the suite did not run."; exit 1; }
+          counters=$(grep -o '<Counters[^>]*>' "$trx" | head -1)
+          echo "$counters"
+          read_count() { echo "$counters" | grep -o "$1=\"[0-9]*\"" | grep -o '[0-9]*' || echo ""; }
+          executed=$(read_count executed); notExecuted=$(read_count notExecuted); passed=$(read_count passed)
+          if [ -z "$executed" ] || [ "$notExecuted" != "0" ] || [ "$executed" -eq 0 ] || [ "$passed" -ne "$executed" ]; then
+            echo "ERROR: executed=$executed notExecuted=$notExecuted passed=$passed — evidence only when every test ran and passed."
+            exit 1
+          fi
+          echo "$passed test(s) executed against rabbitmq:4, 0 skipped."
 
   whisper-tests:
     name: Whisper service tests

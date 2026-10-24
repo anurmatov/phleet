@@ -25,6 +25,9 @@ deploy/.env
 #   credentials, mysql-backup/. Never commit.
 /fleet/
 
+# Workflow-outcome policy files for a manual repo-root compose run (#476); operator-owned.
+/workflow-outcomes/
+
 # Project context files (mounted at deploy time)
 projects/
 # Exception: orchestrator seed projects are baked into the Docker image

@@ -1,0 +1,111 @@
+# Workflow failure accountability (#476) — example Prometheus alerting rules.
+#
+# STATUS: the phleet source does NOT emit Prometheus metrics yet. Every `phleet_workflow_outcomes_*`
+# name below is a PLACEHOLDER for an exporter the operator wires to the operator-authenticated
+# GET /api/workflow-outcomes/coverage and /health endpoints (for example a JSON exporter). Only two
+# groups work with standard tooling as shipped:
+#   - `probe_success` from a blackbox exporter probing the anonymous GET /api/workflow-outcomes/health/public
+#     with a body check for "healthy":true (job name below is an example);
+#   - `rabbitmq_queue_messages` from the RabbitMQ Prometheus plugin with per-object metrics enabled.
+# Route these to your operator receiver in Alertmanager. Never route them to an approver DM or a
+# Temporal notification workflow, and never put payloads, tokens or full URLs into labels.
+# Thresholds follow docs/workflow-outcomes.md#monitoring. Runbook: docs/runbooks/workflow-outcomes.md.
+groups:
+  - name: phleet-workflow-outcomes
+    rules:
+      - alert: WorkflowOutcomesHealthProbeFailing
+        expr: probe_success{job="phleet-workflow-outcomes-health"} == 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Workflow failure observer reports unhealthy or is unreachable"
+          runbook: "docs/runbooks/workflow-outcomes.md (section 14)"
+
+      - alert: WorkflowOutcomesCoverageGap
+        # 1 while a configured namespace is healthy-covered, 0 otherwise (placeholder).
+        expr: min by (namespace) (phleet_workflow_outcomes_namespace_healthy) == 0
+        for: 300s
+        labels:
+          severity: page
+        annotations:
+          summary: "Namespace {{ $labels.namespace }} has had no healthy coverage for more than 300 s"
+          runbook: "docs/runbooks/workflow-outcomes.md (sections 1 and 5)"
+
+      - alert: WorkflowOutcomesFailureNotEnqueued
+        # Age of the oldest confirmed failure stored without a batch item (placeholder).
+        expr: max(phleet_workflow_outcomes_oldest_unqueued_failure_age_seconds) > 30
+        labels:
+          severity: page
+        annotations:
+          summary: "A confirmed failure has been stored for more than 30 s without being enqueued"
+          runbook: "docs/runbooks/workflow-outcomes.md (section 7)"
+
+      - alert: WorkflowOutcomesFailureUnacknowledged
+        expr: max(phleet_workflow_outcomes_oldest_unacked_failure_age_seconds) > 900
+        labels:
+          severity: ticket
+        annotations:
+          summary: "A delivered workflow failure is unacknowledged for more than 15 minutes"
+          runbook: "docs/runbooks/workflow-outcomes.md (sections 6 and 7)"
+
+      - alert: WorkflowOutcomesCauseUnresolved
+        expr: max(phleet_workflow_outcomes_oldest_cause_unresolved_age_seconds) > 300
+        labels:
+          severity: ticket
+        annotations:
+          summary: "A canceled/terminated run has had an unresolved cause for more than 300 s"
+          runbook: "docs/runbooks/workflow-outcomes.md (section 4)"
+
+      - alert: WorkflowOutcomesRetentionMargin
+        # margin = namespace retention - one full sweep; alert below two full-scan intervals.
+        expr: >
+          min by (namespace) (phleet_workflow_outcomes_retention_seconds - phleet_workflow_outcomes_full_scan_seconds)
+          < 2 * max by (namespace) (phleet_workflow_outcomes_full_scan_seconds)
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Retention margin of {{ $labels.namespace }} is below two full-scan intervals"
+          runbook: "docs/runbooks/workflow-outcomes.md (section 1)"
+
+      - alert: WorkflowOutcomesReceiptOrTurnAmbiguous
+        # Items with deliveryState=unknown or turnAmbiguous=true (placeholder).
+        expr: sum(phleet_workflow_outcomes_ambiguous_items) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "A failure batch has an ambiguous receipt or coordinator turn"
+          runbook: "docs/runbooks/workflow-outcomes.md (section 7)"
+
+      - alert: WorkflowOutcomesRecoveryBlocked
+        expr: sum by (state) (phleet_workflow_outcomes_recovery_operations{state=~"blocked|dispatch_unknown"}) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "A recovery operation is {{ $labels.state }}"
+          runbook: "docs/runbooks/workflow-outcomes.md (section 10)"
+
+      - alert: WorkflowOutcomesKeyringErrors
+        expr: increase(phleet_workflow_outcomes_keyring_errors_total[10m]) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "Workflow-outcome evidence keyring or decryption errors"
+          runbook: "docs/runbooks/workflow-outcomes.md (section 12)"
+
+      - alert: WorkflowOutcomesLateResultHoldBacklog
+        expr: max(rabbitmq_queue_messages{queue="fleet.workflow-outcomes.hold"}) > 0
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Refused late-queue handoffs are parked in the hold queue; if late and hold both fill, replies fall back to the in-memory hold"
+          runbook: "docs/runbooks/workflow-outcomes.md (section 8)"
+
+      - alert: WorkflowOutcomesLateResultQuarantine
+        expr: max(rabbitmq_queue_messages{queue="fleet.workflow-outcomes.quarantine"}) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Late agent results are waiting in the quarantine queue"
+          runbook: "docs/runbooks/workflow-outcomes.md (section 8)"

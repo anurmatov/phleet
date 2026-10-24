@@ -1093,6 +1093,815 @@ namespace Fleet.Orchestrator.Migrations
                     b.ToTable("workflow_definition_versions", (string)null);
                 });
 
+            modelBuilder.Entity("Fleet.Orchestrator.Data.WorkflowOutcomeBatch", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime?>("AckedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Coordinator")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<long>("CoordinatorGeneration")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<DateTime?>("DeliveredAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("ItemVersionsHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<DateTime?>("LeasedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Nonce")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<int>("Priority")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ReceiptHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Coordinator", "State", "CreatedAt");
+
+                    b.ToTable("workflow_outcome_batches", (string)null);
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.WorkflowOutcomeBatchItem", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("AckSource")
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)");
+
+                    b.Property<DateTime?>("AckedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("AckedBy")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<Guid>("BatchId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime?>("DeliveredAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<long>("DeliveryGeneration")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("OutcomeId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<int>("OutcomeVersion")
+                        .HasColumnType("int");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BatchId");
+
+                    b.HasIndex("OutcomeId", "OutcomeVersion", "DeliveryGeneration")
+                        .IsUnique();
+
+                    b.ToTable("workflow_outcome_batch_items", (string)null);
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.WorkflowOutcomeCheckpoint", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("ArchivalState")
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<bool>("Complete")
+                        .HasColumnType("tinyint(1)");
+
+                    b.Property<DateTime?>("EnrolledAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("EnrolledCoordinator")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
+                    b.Property<long>("LeaseEpoch")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime?>("LeaseExpiresAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("LeaseOwner")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<string>("Namespace")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("PageToken")
+                        .HasColumnType("longtext");
+
+                    b.Property<DateTime?>("PassCompletedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<DateTime?>("PassStartedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("PolicyHashes")
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
+                    b.Property<string>("QueryHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<long?>("RetentionSeconds")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("SeenCount")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<DateTime?>("WindowEnd")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("WindowKey")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("varchar(160)");
+
+                    b.Property<string>("WindowKind")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)");
+
+                    b.Property<DateTime?>("WindowStart")
+                        .HasColumnType("datetime(6)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("WindowKey")
+                        .IsUnique();
+
+                    b.ToTable("workflow_outcome_checkpoints", (string)null);
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.WorkflowOutcomeDecision", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("ArtifactRef")
+                        .HasMaxLength(500)
+                        .HasColumnType("varchar(500)");
+
+                    b.Property<string>("AuthorityRef")
+                        .HasMaxLength(500)
+                        .HasColumnType("varchar(500)");
+
+                    b.Property<Guid?>("BatchId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<long?>("CoordinatorGeneration")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("DecidedBy")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<string>("DecidedVia")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)");
+
+                    b.Property<DateTime?>("DueAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("EvidenceRefsJson")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
+                    b.Property<int>("ExpectedVersion")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Operation")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<Guid>("OutcomeId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("Owner")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("varchar(2000)");
+
+                    b.Property<string>("RejectReason")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)");
+
+                    b.Property<string>("StopProofRef")
+                        .HasMaxLength(500)
+                        .HasColumnType("varchar(500)");
+
+                    b.Property<string>("TaskRef")
+                        .HasMaxLength(500)
+                        .HasColumnType("varchar(500)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OutcomeId", "CreatedAt");
+
+                    b.ToTable("workflow_outcome_decisions", (string)null);
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.WorkflowOutcomeHealth", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("CauseReviewRefsJson")
+                        .HasColumnType("longtext");
+
+                    b.Property<string>("Component")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<DateTime>("FirstSeenAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<DateTime?>("GapEnd")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<DateTime?>("GapStart")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<long>("KnownRunCount")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("LastSeenAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Namespace")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("OutageKey")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("varchar(500)");
+
+                    b.Property<DateTime?>("ResolvedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)");
+
+                    b.Property<bool>("UnknownRunCount")
+                        .HasColumnType("tinyint(1)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("State");
+
+                    b.HasIndex("Component", "OutageKey")
+                        .IsUnique();
+
+                    b.ToTable("workflow_outcome_health", (string)null);
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.WorkflowOutcomeLateResult", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("char(36)");
+
+                    b.Property<int>("Attempt")
+                        .HasColumnType("int");
+
+                    b.Property<byte[]>("Ciphertext")
+                        .HasColumnType("longblob");
+
+                    b.Property<string>("MessageId")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
+                    b.Property<string>("Namespace")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<Guid?>("OutcomeId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("QuarantineReason")
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
+                    b.Property<bool>("Quarantined")
+                        .HasColumnType("tinyint(1)");
+
+                    b.Property<DateTime>("ReceivedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("ResultHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<string>("ResultStatus")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<int>("SizeBytes")
+                        .HasColumnType("int");
+
+                    b.Property<string>("SourceCorrelation")
+                        .HasMaxLength(500)
+                        .HasColumnType("varchar(500)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)");
+
+                    b.Property<DateTime>("StoredAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("TaskId")
+                        .IsRequired()
+                        .HasMaxLength(300)
+                        .HasColumnType("varchar(300)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Namespace", "TaskId", "ResultHash")
+                        .IsUnique();
+
+                    b.ToTable("workflow_outcome_late_results", (string)null);
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.WorkflowOutcomeObservation", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("Classification")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<bool>("Contradicting")
+                        .HasColumnType("tinyint(1)");
+
+                    b.Property<string>("EventHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<long>("EventId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<DateTime>("ObservedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("ReasonCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<Guid>("RunRowId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RunRowId", "EventId", "EventType", "EventHash")
+                        .IsUnique();
+
+                    b.ToTable("workflow_outcome_observations", (string)null);
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.WorkflowOutcomeRun", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("ArtifactRefsJson")
+                        .HasColumnType("longtext");
+
+                    b.Property<string>("CauseRefsJson")
+                        .HasColumnType("longtext");
+
+                    b.Property<string>("Classification")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<DateTime?>("ClassificationPendingSince")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("ClassifierHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("ClassifierId")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<DateTime?>("CloseTime")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Coordinator")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<string>("DefinitionHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("DefinitionName")
+                        .HasMaxLength(255)
+                        .HasColumnType("varchar(255)");
+
+                    b.Property<int?>("DefinitionVersion")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("DetectedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("EvidenceState")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<Guid?>("FailureIncidentId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("FirstExecutionRunId")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("IdentityHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength()
+                        .UseCollation("ascii_bin");
+
+                    b.Property<string>("InputHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<long?>("IssueNumber")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime?>("MetadataExpiresAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Namespace")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("NextRunId")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("OwnershipPolicyHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("ParentRunId")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("ParentWorkflowId")
+                        .HasMaxLength(255)
+                        .HasColumnType("varchar(255)");
+
+                    b.Property<byte[]>("PayloadCiphertext")
+                        .HasColumnType("longblob");
+
+                    b.Property<string>("PayloadKeyPurpose")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<long?>("PrNumber")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("PreviousRunId")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("ProjectEvidenceJson")
+                        .HasColumnType("longtext");
+
+                    b.Property<string>("ProjectName")
+                        .HasMaxLength(100)
+                        .HasColumnType("varchar(100)");
+
+                    b.Property<string>("QuarantineReason")
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
+                    b.Property<bool>("Quarantined")
+                        .HasColumnType("tinyint(1)");
+
+                    b.Property<string>("ReasonCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("Repo")
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
+                    b.Property<DateTime?>("ResolvedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("RunId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("SourceTaskRefsJson")
+                        .HasColumnType("longtext");
+
+                    b.Property<DateTime?>("StartTime")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<DateTime>("StoredAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("TaskOwner")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<string>("TerminalEventHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<long?>("TerminalEventId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("TerminalEventType")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<int>("Version")
+                        .HasColumnType("int");
+
+                    b.Property<string>("WorkflowId")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("varchar(255)");
+
+                    b.Property<string>("WorkflowType")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("varchar(255)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("FailureIncidentId");
+
+                    b.HasIndex("IdentityHash")
+                        .IsUnique();
+
+                    b.HasIndex("MetadataExpiresAt");
+
+                    b.HasIndex("Classification", "Version");
+
+                    b.HasIndex("Namespace", "Status");
+
+                    b.ToTable("workflow_outcome_runs", (string)null);
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.WorkflowRecoveryOperation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("AuthorityRef")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("varchar(500)");
+
+                    b.Property<string>("BlockedReason")
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
+                    b.Property<string>("Coordinator")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<Guid>("DecisionId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime?>("DispatchingAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("InputSha256")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("Operation")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<Guid>("OutcomeId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<int>("OutcomeVersion")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ReceiptEventRef")
+                        .HasMaxLength(500)
+                        .HasColumnType("varchar(500)");
+
+                    b.Property<string>("ReceiptJson")
+                        .HasColumnType("longtext");
+
+                    b.Property<string>("ReplacementWorkflowId")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("varchar(255)");
+
+                    b.Property<DateTime>("ReservedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("ReservedBy")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<string>("ResultRunId")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("Scope")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("varchar(500)");
+
+                    b.Property<string>("SourceArtifactHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("SourceNamespace")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("SourceRunId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("SourceTaskHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("SourceWorkflowId")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("varchar(255)");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<string>("StopProofRefsJson")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
+                    b.Property<string>("TargetAgent")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<string>("TargetNamespace")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("TargetTaskQueue")
+                        .HasMaxLength(255)
+                        .HasColumnType("varchar(255)");
+
+                    b.Property<string>("TargetWorkflowType")
+                        .HasMaxLength(255)
+                        .HasColumnType("varchar(255)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DecisionId")
+                        .IsUnique();
+
+                    b.HasIndex("ReplacementWorkflowId")
+                        .IsUnique();
+
+                    b.HasIndex("OutcomeId", "State");
+
+                    b.ToTable("workflow_recovery_operations", (string)null);
+                });
+
             modelBuilder.Entity("Fleet.Orchestrator.Data.AgentCredentialMount", b =>
                 {
                     b.HasOne("Fleet.Orchestrator.Data.Agent", "Agent")
@@ -1274,6 +2083,28 @@ namespace Fleet.Orchestrator.Migrations
                     b.Navigation("WorkflowDefinition");
                 });
 
+            modelBuilder.Entity("Fleet.Orchestrator.Data.WorkflowOutcomeBatchItem", b =>
+                {
+                    b.HasOne("Fleet.Orchestrator.Data.WorkflowOutcomeBatch", "Batch")
+                        .WithMany("Items")
+                        .HasForeignKey("BatchId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Batch");
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.WorkflowOutcomeObservation", b =>
+                {
+                    b.HasOne("Fleet.Orchestrator.Data.WorkflowOutcomeRun", "Run")
+                        .WithMany()
+                        .HasForeignKey("RunRowId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Run");
+                });
+
             modelBuilder.Entity("Fleet.Orchestrator.Data.Agent", b =>
                 {
                     b.Navigation("CredentialMounts");
@@ -1315,6 +2146,11 @@ namespace Fleet.Orchestrator.Migrations
             modelBuilder.Entity("Fleet.Orchestrator.Data.WorkflowDefinition", b =>
                 {
                     b.Navigation("Versions");
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.WorkflowOutcomeBatch", b =>
+                {
+                    b.Navigation("Items");
                 });
 #pragma warning restore 612, 618
         }

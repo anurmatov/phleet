@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "defaultCoordinator": "coordinator",
+  "repoProjects": [
+    { "namespace": "namespace-a", "repo": "owner/repo-a", "project": "project-a" },
+    { "namespace": "namespace-b", "repo": "owner/repo-b", "project": "project-b" }
+  ],
+  "namespaceProjects": [
+    { "namespace": "namespace-c", "project": "project-c" }
+  ],
+  "rules": [
+    { "namespace": "namespace-a", "project": "project-a", "coordinator": "coordinator" },
+    { "namespace": "namespace-b", "project": "project-b", "coordinator": "coordinator" }
+  ]
+}

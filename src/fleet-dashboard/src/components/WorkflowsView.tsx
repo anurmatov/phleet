@@ -8,6 +8,8 @@ import type {
 } from '../types'
 import { temporalUiUrl, heartbeatAge, decodeUnicode } from '../utils'
 import { PHASE_LABELS } from '../constants'
+import { navBadges, navSummaryNote } from '../workflowOutcomes'
+import type { OutcomeNavSummary } from '../workflowOutcomes'
 
 type CompletedStatusFilter = 'all' | 'failed' | 'completed' | 'canceled' | 'terminated'
 
@@ -135,6 +137,9 @@ interface WorkflowsViewProps {
   onStartWorkflow: () => void
   onRefreshWorkflows: () => void
   workflowsLoading: boolean
+  /** Workflow failure counts (#476); the strip is shown only when onOpenFailures is given. */
+  failureSummary?: OutcomeNavSummary | null
+  onOpenFailures?: () => void
 }
 
 export default function WorkflowsView({
@@ -177,6 +182,8 @@ export default function WorkflowsView({
   onStartWorkflow,
   onRefreshWorkflows,
   workflowsLoading,
+  failureSummary = null,
+  onOpenFailures,
 }: WorkflowsViewProps) {
   // ── Highlight / scroll-to ────────────────────────────────────────────────
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map())
@@ -259,6 +266,9 @@ export default function WorkflowsView({
   // Main table excludes signal-waiting workflows (they show in attention section instead)
   const mainTableWorkflows = filteredWorkflows.filter(wf => getSignalDefs(wf).length === 0)
 
+  const failureBadges = navBadges(failureSummary)
+  const failureNote = navSummaryNote(failureSummary)
+
   return (
     <div className="view-page">
       {/* ── Header ── */}
@@ -287,6 +297,22 @@ export default function WorkflowsView({
           <button className="wf-start-btn" onClick={onStartWorkflow} title="Start a new workflow">+ Start</button>
         </div>
       </div>
+
+      {/* ── Workflow failures (#476): failure items, cause reviews, coverage gaps ── */}
+      {onOpenFailures && (
+        <div className="attention-section" data-testid="workflow-failures-strip">
+          <div className="attention-header" style={{ flexWrap: 'wrap' }}>
+            Workflow failures
+            {failureBadges.map(b => (
+              <span key={b.key} className={b.attention ? 'attention-count' : 'section-count'} title={b.title}>
+                {b.label ? `${b.label} ` : ''}{b.value}
+              </span>
+            ))}
+            <button className="wfd-toggle-btn" style={{ marginLeft: 'auto' }} onClick={onOpenFailures}>Open Workflow Failures</button>
+          </div>
+          {failureNote && <div className="attention-empty">{failureNote}</div>}
+        </div>
+      )}
 
       {/* ── Needs your attention ── */}
       <div className="attention-section">

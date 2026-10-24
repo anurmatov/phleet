@@ -1,3 +1,5 @@
+using System.Threading.RateLimiting;
+
 namespace Fleet.Comms.Configuration;
 
 /// <summary>
@@ -593,6 +595,29 @@ public static class ConversationRateLimits
     public const int WindowSeconds = 60;
 
     public const int QueueLimit = 0;
+
+    /// <summary>The per-credential fixed window these constants describe.</summary>
+    public static FixedWindowRateLimiterOptions LimiterOptions() => new()
+    {
+        PermitLimit = PermitsPerWindow,
+        Window = TimeSpan.FromSeconds(WindowSeconds),
+        QueueLimit = QueueLimit,
+        AutoReplenishment = true,
+    };
+}
+
+/// <summary>
+/// Builds the conversation policy's partition for one credential key.
+/// </summary>
+/// <remarks>
+/// A registration seam and nothing else: the framework's fixed-window limiter renews on its own
+/// monotonic clock and takes no <see cref="TimeProvider"/>, so this is the only place a test can
+/// decide when a window renews. Production resolves this class itself.
+/// </remarks>
+public class ConversationRateLimiterFactory
+{
+    public virtual RateLimitPartition<string> Partition(string key) =>
+        RateLimitPartition.GetFixedWindowLimiter(key, _ => ConversationRateLimits.LimiterOptions());
 }
 
 public static class CommsLimits

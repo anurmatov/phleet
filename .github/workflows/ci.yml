@@ -33,10 +33,14 @@ jobs:
       # (never skips) without a database — which is the property that makes it evidence. Running it
       # here would fail this job for want of a service container it was never given, and "fix" that
       # by making it skip would put us back where a green summary proves nothing.
+      #
+      # The workflow-outcome MySQL tests (#476, trait WorkflowOutcomeSuite=migration) are excluded by
+      # trait and name as well as by namespace, for the same reason: they fail without a database and
+      # run in `orchestrator-migrations`. Every other WorkflowOutcome test runs here.
       - name: Test
         run: >
           dotnet test --no-build --configuration Release
-          --filter "FullyQualifiedName!~Fleet.Conversations.Tests&FullyQualifiedName!~Fleet.Orchestrator.Tests.Migrations"
+          --filter "FullyQualifiedName!~Fleet.Conversations.Tests&FullyQualifiedName!~Fleet.Orchestrator.Tests.Migrations&FullyQualifiedName!~WorkflowOutcomeMigration&WorkflowOutcomeSuite!=migration"
           --logger "console;verbosity=normal"
 
       # #460 AC-U6: the codex branch writes codex-root.toml first, then byte-identical MCP tables,
@@ -524,12 +528,13 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # Includes the workflow-outcome MySQL tests (#476) by trait and by name, wherever their namespace is.
       - name: Run the migration suite
         env:
           FLEET_ORCHESTRATOR_MIGRATION_CONNECTION: "Server=127.0.0.1;Port=3306;User ID=root;Password=orchestrator-ci;AllowPublicKeyRetrieval=true;"
         run: >
           dotnet test tests/Fleet.Orchestrator.Tests --configuration Release
-          --filter "FullyQualifiedName~Fleet.Orchestrator.Tests.Migrations"
+          --filter "FullyQualifiedName~Fleet.Orchestrator.Tests.Migrations|FullyQualifiedName~WorkflowOutcomeMigration|WorkflowOutcomeSuite=migration"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=orchestrator-migrations.trx"
           --results-directory ${{ github.workspace }}/testresults

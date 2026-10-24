@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "kind": "workflow-outcomes-suite-map",
+  "description": "Maps each run.sh suite (#476 AC2-AC24) to the test projects that carry [Trait(\"WorkflowOutcomeSuite\", \"<suite>\")], or to the dashboard npm scripts, or to the built-in public scrub. A suite passes only when at least one test ran and none failed or skipped across its projects. A missing prerequisite is BLOCKED, never PASS. An operator manifest (--manifest) may override 'projects' and add 'requires' for a suite; it cannot remove a prerequisite listed here.",
+  "traitName": "WorkflowOutcomeSuite",
+  "projects": {
+    "orchestrator": "tests/Fleet.Orchestrator.Tests/Fleet.Orchestrator.Tests.csproj",
+    "agent": "tests/Fleet.Agent.Tests/Fleet.Agent.Tests.csproj",
+    "temporal": "tests/Fleet.Temporal.Tests/Fleet.Temporal.Tests.csproj"
+  },
+  "suites": {
+    "terminal-matrix": { "ac": "AC2", "kind": "dotnet", "projects": ["orchestrator"], "requires": [] },
+    "business": { "ac": "AC3", "kind": "dotnet", "projects": ["orchestrator"], "requires": [] },
+    "kill": { "ac": "AC4", "kind": "dotnet", "projects": ["orchestrator"], "requires": [] },
+    "chains": { "ac": "AC5", "kind": "dotnet", "projects": ["orchestrator"], "requires": [] },
+    "pagination": { "ac": "AC6", "kind": "dotnet", "projects": ["orchestrator"], "requires": [] },
+    "ordering": { "ac": "AC7", "kind": "dotnet", "projects": ["orchestrator"], "requires": [] },
+    "catchup": { "ac": "AC8", "kind": "dotnet", "projects": ["orchestrator"], "requires": [] },
+    "retention": { "ac": "AC9", "kind": "dotnet", "projects": ["orchestrator"], "requires": [] },
+    "receipts": { "ac": "AC10", "kind": "dotnet", "projects": ["orchestrator", "agent"], "requires": [] },
+    "coordinator": { "ac": "AC11", "kind": "dotnet", "projects": ["agent", "orchestrator"], "requires": [] },
+    "recursion": { "ac": "AC12", "kind": "dotnet", "projects": ["orchestrator", "agent"], "requires": [] },
+    "privacy-auth": { "ac": "AC13", "kind": "dotnet", "projects": ["orchestrator", "agent", "temporal"], "requires": [] },
+    "decisions": { "ac": "AC14", "kind": "dotnet", "projects": ["orchestrator", "temporal"], "requires": [] },
+    "recovery": { "ac": "AC15", "kind": "dotnet", "projects": ["orchestrator"], "requires": [] },
+    "dispatch": { "ac": "AC16", "kind": "dotnet", "projects": ["temporal", "orchestrator"], "requires": [] },
+    "late-results": { "ac": "AC17", "kind": "dotnet", "projects": ["temporal", "orchestrator"], "requires": [] },
+    "ownership": { "ac": "AC18", "kind": "dotnet", "projects": ["orchestrator"], "requires": [] },
+    "migration": { "ac": "AC19", "kind": "dotnet", "projects": ["orchestrator"], "requires": ["FLEET_ORCHESTRATOR_MIGRATION_CONNECTION"] },
+    "timing": { "ac": "AC20", "kind": "dotnet", "projects": ["orchestrator"], "requires": [] },
+    "failure-matrix": { "ac": "AC21", "kind": "dotnet", "projects": ["orchestrator", "agent", "temporal"], "requires": [] },
+    "replay": { "ac": "AC22", "kind": "dotnet", "projects": ["temporal"], "requires": [] },
+    "dashboard": { "ac": "AC23", "kind": "npm", "prefix": "src/fleet-dashboard", "scripts": ["test", "run build"], "requires": [] },
+    "public-scrub": { "ac": "AC24", "kind": "scrub", "requires": [] }
+  }
+}

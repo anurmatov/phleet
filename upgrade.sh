@@ -20,6 +20,15 @@ unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY \
 # Epic grants (#436): .env is the record of the decision, never a stale shell export.
 unset FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS FLEET_AUTONOMY_ENABLED
 unset FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS
+# Workflow failure accountability (#476): same rule, including the coordinator token.
+unset FLEET_WORKFLOW_OUTCOMES_ENABLED FLEET_WORKFLOW_OUTCOMES_NAMESPACES \
+      FLEET_WORKFLOW_OUTCOMES_POLL_SECONDS FLEET_WORKFLOW_OUTCOMES_RECENT_SCAN_SECONDS \
+      FLEET_WORKFLOW_OUTCOMES_FULL_SCAN_SECONDS FLEET_WORKFLOW_OUTCOMES_BATCH_SECONDS \
+      FLEET_WORKFLOW_OUTCOMES_BATCH_SIZE FLEET_WORKFLOW_OUTCOMES_OWNERS_FILE \
+      FLEET_WORKFLOW_OUTCOMES_CLASSIFIERS_FILE FLEET_WORKFLOW_OUTCOMES_KEYRING_DIR \
+      FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN_KEY FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN \
+      FLEET_WORKFLOW_OUTCOMES_COORDINATOR_CREDENTIAL_VERSION FLEET_WORKFLOW_OUTCOMES_COORDINATOR_GENERATION \
+      FLEET_WORKFLOW_OUTCOMES_COORDINATOR_BASE_URL FLEET_WORKFLOW_OUTCOMES_LATE_CAPTURE_ENABLED
 # The journal decision in .env is preserved as it is: upgrade never asks, never flips it, and never
 # generates a key for a host that did not opt in. `conversations migrate` below applies 0004 either
 # way; it is additive.
@@ -99,6 +108,30 @@ add_missing_env_var FLEET_EPIC_GRANTS_ENABLED false
 add_missing_env_var FLEET_EPIC_GRANTS_MAX_DAYS 14
 add_missing_env_var FLEET_EPIC_GRANTS_DENIED_REPOS ""
 add_missing_env_var FLEET_AUTONOMY_ENABLED false
+
+# ── Workflow failure accountability keys (#476) ─────────────────────────────
+# Same contract: missing keys get their feature-off defaults, present values are never changed,
+# and the coordinator token is added BLANK — an upgrade never generates or prints a credential and
+# never enables the observer. The additive migration applies on orchestrator start either way.
+add_missing_env_var FLEET_WORKFLOW_OUTCOMES_ENABLED false
+add_missing_env_var FLEET_WORKFLOW_OUTCOMES_NAMESPACES ""
+add_missing_env_var FLEET_WORKFLOW_OUTCOMES_POLL_SECONDS 30
+add_missing_env_var FLEET_WORKFLOW_OUTCOMES_RECENT_SCAN_SECONDS 60
+add_missing_env_var FLEET_WORKFLOW_OUTCOMES_FULL_SCAN_SECONDS 300
+add_missing_env_var FLEET_WORKFLOW_OUTCOMES_BATCH_SECONDS 30
+add_missing_env_var FLEET_WORKFLOW_OUTCOMES_BATCH_SIZE 20
+add_missing_env_var FLEET_WORKFLOW_OUTCOMES_OWNERS_FILE /etc/phleet/workflow-outcomes/ownership.json
+add_missing_env_var FLEET_WORKFLOW_OUTCOMES_CLASSIFIERS_FILE /etc/phleet/workflow-outcomes/classifiers.json
+add_missing_env_var FLEET_WORKFLOW_OUTCOMES_KEYRING_DIR /var/lib/phleet/workflow-outcomes/keys
+add_missing_env_var FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN_KEY FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN
+add_missing_env_var FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN ""
+add_missing_env_var FLEET_WORKFLOW_OUTCOMES_COORDINATOR_CREDENTIAL_VERSION 1
+add_missing_env_var FLEET_WORKFLOW_OUTCOMES_COORDINATOR_GENERATION 1
+add_missing_env_var FLEET_WORKFLOW_OUTCOMES_COORDINATOR_BASE_URL ""
+add_missing_env_var FLEET_WORKFLOW_OUTCOMES_LATE_CAPTURE_ENABLED false
+# The read-only policy mount source. Created owner-only when absent so Docker does not create it
+# as root; an existing directory, its mode and its contents are never touched.
+[[ -d "$FLEET_BASE_DIR/workflow-outcomes" ]] || install -d -m 0700 "$FLEET_BASE_DIR/workflow-outcomes"
 
 # ── Stop services ────────────────────────────────────────────────────────────
 section "[1/4] Stopping services..."

@@ -67,6 +67,16 @@ unset FLEET_BASE_DIR FLEET_CTO_AGENT FLEET_GROUP_CHAT_ID FLEET_PRIMARY_HUMAN_USE
       AUTHTOKENREFRESH__CLAUDECLIENTID AUTHTOKENREFRESH__CODEXCLIENTID \
       FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS FLEET_AUTONOMY_ENABLED \
       FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS
+# Workflow failure accountability (#476): a stale export must never enable the observer or
+# substitute a coordinator token that .env does not hold.
+unset FLEET_WORKFLOW_OUTCOMES_ENABLED FLEET_WORKFLOW_OUTCOMES_NAMESPACES \
+      FLEET_WORKFLOW_OUTCOMES_POLL_SECONDS FLEET_WORKFLOW_OUTCOMES_RECENT_SCAN_SECONDS \
+      FLEET_WORKFLOW_OUTCOMES_FULL_SCAN_SECONDS FLEET_WORKFLOW_OUTCOMES_BATCH_SECONDS \
+      FLEET_WORKFLOW_OUTCOMES_BATCH_SIZE FLEET_WORKFLOW_OUTCOMES_OWNERS_FILE \
+      FLEET_WORKFLOW_OUTCOMES_CLASSIFIERS_FILE FLEET_WORKFLOW_OUTCOMES_KEYRING_DIR \
+      FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN_KEY FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN \
+      FLEET_WORKFLOW_OUTCOMES_COORDINATOR_CREDENTIAL_VERSION FLEET_WORKFLOW_OUTCOMES_COORDINATOR_GENERATION \
+      FLEET_WORKFLOW_OUTCOMES_COORDINATOR_BASE_URL FLEET_WORKFLOW_OUTCOMES_LATE_CAPTURE_ENABLED
 
 # ── Canonical paths ───────────────────────────────────────────────────────────
 # FLEET_BASE_DIR is hardcoded to $SCRIPT_DIR/fleet — a nested, gitignored subdir
@@ -708,6 +718,27 @@ for _epic_default in FLEET_EPIC_WATCHER_ENABLED=false FLEET_EPIC_WATCHER_INTERVA
   fi
 done
 
+# Workflow failure accountability (#476): same rule — a missing key gets its feature-off default,
+# a present value is never changed, and no prompt runs. The coordinator token stays BLANK: setup
+# never generates or prints it; enrollment is an explicit operator step (docs/workflow-outcomes.md).
+for _wo_default in FLEET_WORKFLOW_OUTCOMES_ENABLED=false FLEET_WORKFLOW_OUTCOMES_NAMESPACES= \
+    FLEET_WORKFLOW_OUTCOMES_POLL_SECONDS=30 FLEET_WORKFLOW_OUTCOMES_RECENT_SCAN_SECONDS=60 \
+    FLEET_WORKFLOW_OUTCOMES_FULL_SCAN_SECONDS=300 FLEET_WORKFLOW_OUTCOMES_BATCH_SECONDS=30 \
+    FLEET_WORKFLOW_OUTCOMES_BATCH_SIZE=20 \
+    FLEET_WORKFLOW_OUTCOMES_OWNERS_FILE=/etc/phleet/workflow-outcomes/ownership.json \
+    FLEET_WORKFLOW_OUTCOMES_CLASSIFIERS_FILE=/etc/phleet/workflow-outcomes/classifiers.json \
+    FLEET_WORKFLOW_OUTCOMES_KEYRING_DIR=/var/lib/phleet/workflow-outcomes/keys \
+    FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN_KEY=FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN \
+    FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN= \
+    FLEET_WORKFLOW_OUTCOMES_COORDINATOR_CREDENTIAL_VERSION=1 \
+    FLEET_WORKFLOW_OUTCOMES_COORDINATOR_GENERATION=1 \
+    FLEET_WORKFLOW_OUTCOMES_COORDINATOR_BASE_URL= \
+    FLEET_WORKFLOW_OUTCOMES_LATE_CAPTURE_ENABLED=false; do
+  if ! grep -q "^${_wo_default%%=*}=" "$ENV_FILE" 2>/dev/null; then
+    write_env_var "$ENV_FILE" "${_wo_default%%=*}" "${_wo_default#*=}"
+  fi
+done
+
 echo
 echo "  Fill in required configuration (press Enter to keep existing values):"
 echo
@@ -892,9 +923,13 @@ echo "  Creating runtime directories under $FLEET_BASE_DIR..."
 if ! $DRY_RUN; then
   mkdir -p "$FLEET_BASE_DIR/workspaces" "$FLEET_BASE_DIR/memories" \
            "$FLEET_BASE_DIR/mysql-backup" "$FLEET_BASE_DIR/projects"
+  # Workflow-outcome policy dir (#476), mounted read-only into the orchestrator. Created empty and
+  # owner-only; an existing directory and its contents are never touched. The policy files are
+  # operator-owned — nothing is copied in, so the feature cannot be enabled by default.
+  [[ -d "$FLEET_BASE_DIR/workflow-outcomes" ]] || install -d -m 0700 "$FLEET_BASE_DIR/workflow-outcomes"
   ok "Directories created"
 else
-  echo -e "  ${YELLOW}[dry-run]${NC} Would create: $FLEET_BASE_DIR/{workspaces,memories,mysql-backup,projects}"
+  echo -e "  ${YELLOW}[dry-run]${NC} Would create: $FLEET_BASE_DIR/{workspaces,memories,mysql-backup,projects,workflow-outcomes}"
 fi
 
 # Copy AI provider credentials (step 2 deferred until FLEET_BASE_DIR is known)

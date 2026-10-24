@@ -563,30 +563,16 @@ public sealed class DurableAuthStoreTests : IDisposable
             ["Comms__OpsUrl"] = $"http://127.0.0.1:{port}",
         });
 
-        try
+        using (service)
+        using (var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) })
         {
-            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-            HttpResponseMessage? ready = null;
-            for (var attempt = 0; attempt < 60 && ready is null; attempt++)
-            {
-                try
+            await ReadinessProcess.WaitAsync(service,
+                new Uri($"http://127.0.0.1:{port}/ready"),
+                new Uri($"http://127.0.0.1:{port + 1}"), async ct =>
                 {
-                    ready = await client.GetAsync($"http://127.0.0.1:{port}/ready");
-                }
-                catch (HttpRequestException)
-                {
-                    await Task.Delay(250);
-                }
-            }
-
-            Assert.NotNull(ready);
-            Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
-        }
-        finally
-        {
-            if (!service.HasExited)
-                service.Kill(entireProcessTree: true);
-            service.Dispose();
+                    using var response = await client.GetAsync($"http://127.0.0.1:{port}/ready", ct);
+                    return response.StatusCode;
+                });
         }
     }
 

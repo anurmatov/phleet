@@ -25,7 +25,7 @@ namespace Fleet.Orchestrator.Tests.Migrations.WorkflowOutcomes;
 /// keeps pending failures, while an empty or wrong keyring is refused. Fails rather than
 /// skips without a server, like the other migration tests.
 /// </summary>
-public sealed class WorkflowOutcomeMigrationTests : IAsyncLifetime
+public sealed partial class WorkflowOutcomeMigrationTests : IAsyncLifetime
 {
     private const string Before = "20261014141428_RemoveAgentPiImageInput";
     private const string Target = "20261024050000_AddWorkflowOutcomeAccountability";

@@ -421,7 +421,7 @@ public sealed class WorkflowOutcomeStore(
         FencedAsync(lease, async (db, now) =>
         {
             var hash = WorkflowOutcomeHashes.IdentityHash(facts.Namespace, facts.WorkflowId, facts.RunId);
-            var row = await db.WorkflowOutcomeRuns.SingleOrDefaultAsync(r => r.IdentityHash == hash, ct);
+            var row = await LockOwnershipRunAsync(db, hash, ct);
             if (row is null)
             {
                 row = DiscoveryRow(facts.Namespace, new WorkflowOutcomeListedRun(facts.WorkflowId, facts.RunId, facts.WorkflowType, "Running",
@@ -452,7 +452,7 @@ public sealed class WorkflowOutcomeStore(
         {
             var terminal = facts.Terminal ?? throw new ArgumentException("facts have no terminal event", nameof(facts));
             var hash = WorkflowOutcomeHashes.IdentityHash(facts.Namespace, facts.WorkflowId, facts.RunId);
-            var row = await db.WorkflowOutcomeRuns.SingleOrDefaultAsync(r => r.IdentityHash == hash, ct);
+            var row = await LockOwnershipRunAsync(db, hash, ct);
             if (row is not null && !SameIdentity(row, facts.Namespace, facts.WorkflowId, facts.RunId))
             {
                 await CollisionAsync(db, facts.Namespace, facts.WorkflowId, facts.RunId, now, ct);
@@ -769,6 +769,18 @@ public sealed class WorkflowOutcomeStore(
         }
     }
 
+    // TransferAsync locks this same run before changing ownership and appending its audit.
+    // A locking read is current even if the earlier lease read established an older MySQL snapshot.
+    private static async Task<WorkflowOutcomeRun?> LockOwnershipRunAsync(OrchestratorDbContext db, string hash, CancellationToken ct)
+    {
+        if (!db.Database.IsMySql())
+            return await db.WorkflowOutcomeRuns.SingleOrDefaultAsync(r => r.IdentityHash == hash, ct);
+        var rows = await db.WorkflowOutcomeRuns
+            .FromSqlInterpolated($"SELECT * FROM workflow_outcome_runs WHERE IdentityHash = {hash} FOR UPDATE")
+            .ToListAsync(ct);
+        return rows.SingleOrDefault();
+    }
+
     private static OrchestratorDbContext Db(IServiceScope scope) =>
         scope.ServiceProvider.GetService<OrchestratorDbContext>() ?? throw new InvalidOperationException("workflow outcome database unavailable");
 
@@ -830,15 +842,29 @@ public sealed class WorkflowOutcomeStore(
     private async Task ApplyOwnershipAsync(OrchestratorDbContext db, WorkflowOutcomeRun row, bool inserted,
         WorkflowOutcomeRunFacts facts, WorkflowOutcomeOwnershipResult ownership, CancellationToken ct)
     {
-        var transferredTo = inserted ? null : await db.WorkflowOutcomeDecisions.AsNoTracking()
-            .Where(d => d.OutcomeId == row.Id && d.Operation == WorkflowOutcomeInboxService.TransferOperation
-                && d.Status == WorkflowOutcomeInboxService.TransferredStatus)
-            .OrderByDescending(d => d.CreatedAt).Select(d => d.Owner).FirstOrDefaultAsync(ct);
+        var transferred = false;
+        if (!inserted)
+        {
+            if (db.Database.IsMySql())
+            {
+                // Do not use the transaction's consistent snapshot for the first transfer's audit.
+                // The run lock above serializes this current read with TransferAsync's whole commit.
+                var transfers = await db.WorkflowOutcomeDecisions
+                    .FromSqlInterpolated($"SELECT * FROM workflow_outcome_decisions WHERE OutcomeId = {row.Id} AND Operation = {WorkflowOutcomeInboxService.TransferOperation} AND Status = {WorkflowOutcomeInboxService.TransferredStatus} FOR UPDATE")
+                    .AsNoTracking().ToListAsync(ct);
+                transferred = transfers.Count != 0;
+            }
+            else
+                transferred = await db.WorkflowOutcomeDecisions.AnyAsync(d => d.OutcomeId == row.Id
+                    && d.Operation == WorkflowOutcomeInboxService.TransferOperation
+                    && d.Status == WorkflowOutcomeInboxService.TransferredStatus, ct);
+        }
+        var coordinator = row.Coordinator;
         ApplyOwnership(row, facts, ownership);
-        if (transferredTo is null) return;
-        if (!WorkflowOutcomeApi.SameName(ownership.Coordinator, transferredTo))
+        if (!transferred) return;
+        if (!WorkflowOutcomeApi.SameName(ownership.Coordinator, coordinator))
             logger.LogInformation("workflow_outcome_transfer_kept outcome={OutcomeId}", row.Id);
-        row.Coordinator = transferredTo;
+        row.Coordinator = coordinator;
     }
 
     private static void ApplyOwnership(WorkflowOutcomeRun row, WorkflowOutcomeRunFacts facts, WorkflowOutcomeOwnershipResult ownership)

@@ -1,10 +1,12 @@
 using System.ComponentModel;
 using System.Text;
 using System.Text.Json;
+using Fleet.Shared;
 using Fleet.Temporal.Configuration;
 using ModelContextProtocol.Server;
 using Temporalio.Api.Enums.V1;
 using Temporalio.Client;
+using Temporalio.Exceptions;
 
 namespace Fleet.Temporal.Mcp;
 
@@ -16,7 +18,8 @@ public sealed class TemporalWorkflowTools(
     IWorkflowGateStateReader gateStateReader,
     IEpicGrantDecisionForwarder grantForwarder,
     IHttpContextAccessor httpContextAccessor,
-    ILogger<TemporalWorkflowTools> logger)
+    ILogger<TemporalWorkflowTools> logger,
+    IWorkflowRecoveryForwarder? recoveryForwarder = null)
 {
     private const string DefaultNamespace = "fleet";
     private const string MergeApprovalSignal = "merge-approval";
@@ -65,8 +68,13 @@ public sealed class TemporalWorkflowTools(
         [Description("Workflow-specific input as a JSON object string. Schema depends on workflow type — use temporal_list_workflow_types to check. NOTE: this parameter is called 'input', not 'args'.")] string? input = null,
         [Description("Task queue name. Defaults to namespace name if omitted.")] string? task_queue = null,
         [Description("Temporal namespace. Default: fleet.")] string @namespace = DefaultNamespace,
-        [Description("Workflow ID reuse: allow_duplicate (default) or reject_duplicate.")] string id_reuse_policy = "allow_duplicate")
+        [Description("Workflow ID reuse: allow_duplicate (default) or reject_duplicate.")] string id_reuse_policy = "allow_duplicate",
+        [Description(RecoveryOperationIdDescription)] string? recovery_operation_id = null)
     {
+        // #476: only a present recovery id takes the guarded path; absent/null is unchanged below.
+        if (recovery_operation_id is not null)
+            return await StartRecoveryWorkflowAsync(workflow_type, workflow_id, input, task_queue, @namespace, id_reuse_policy, recovery_operation_id);
+
         if (id_reuse_policy is not ("allow_duplicate" or "reject_duplicate"))
             return "Error: unknown id_reuse_policy. Use allow_duplicate or reject_duplicate.";
         task_queue ??= @namespace;
@@ -212,8 +220,13 @@ public sealed class TemporalWorkflowTools(
         [Description("Workflow ID to signal")] string workflow_id,
         [Description("Signal name (e.g. human-review, merge-approval)")] string signal_name,
         [Description("Signal payload as a JSON object string. For 'human-review': {\"Decision\":\"approved\"} or {\"Decision\":\"changes_requested\",\"Comment\":\"your feedback\"}. For the CTO 'merge-approval' or 'design-approval' exception: {\"Decision\":\"changes_requested\",\"Comment\":\"required feedback\"}. For a CTO delegated approval under an epic grant: {\"Decision\":\"approved\",\"GrantId\":\"<grant id>\",\"VisitId\":\"<GateVisit>\",\"ArtifactRef\":\"<ReviewRef>\",\"Evidence\":\"<https url>\"}.")] string? args = null,
-        [Description("Temporal namespace. Default: fleet.")] string @namespace = DefaultNamespace)
+        [Description("Temporal namespace. Default: fleet.")] string @namespace = DefaultNamespace,
+        [Description(SignalRecoveryOperationIdDescription)] string? recovery_operation_id = null)
     {
+        // #476: only a present recovery id takes the guarded path; absent/null is unchanged below.
+        if (recovery_operation_id is not null)
+            return await SignalRecoveryWorkflowAsync(workflow_id, signal_name, recovery_operation_id);
+
         // #436 delegated approval. Only the exact delegated shape enters this branch; every other
         // payload, including a CTO 'approved' without a GrantId, falls through to the code below
         // unchanged. Gate matched like the feedback gates: case-insensitive, untrimmed.
@@ -648,8 +661,13 @@ public sealed class TemporalWorkflowTools(
     [Description("Request graceful cancellation of a running workflow.")]
     public async Task<string> CancelWorkflowAsync(
         [Description("Workflow ID to cancel")] string workflow_id,
-        [Description("Temporal namespace. Default: fleet.")] string @namespace = DefaultNamespace)
+        [Description("Temporal namespace. Default: fleet.")] string @namespace = DefaultNamespace,
+        [Description(RecoveryOperationIdDescription)] string? recovery_operation_id = null)
     {
+        // #476: only a present recovery id takes the guarded path; absent/null is unchanged below.
+        if (recovery_operation_id is not null)
+            return await CancelRecoveryWorkflowAsync(workflow_id, @namespace, recovery_operation_id);
+
         try
         {
             var client = await clientFactory.GetClientAsync(@namespace);
@@ -667,6 +685,370 @@ public sealed class TemporalWorkflowTools(
             return $"Error cancelling workflow: {ex.Message}";
         }
     }
+
+    // ── #476 guarded recovery dispatch ────────────────────────────────────────────
+
+    private const string RecoveryOperationIdDescription =
+        "Optional. Only for the configured coordinator executing an operator-reserved workflow recovery operation (its UUID). " +
+        "When set, the orchestrator authorizes this exact dispatch first and nothing is sent on refusal; a start uses the reserved " +
+        "replacement workflow id with reject_duplicate. Omit it for every other call: without it the tool behaves exactly as before.";
+
+    private const string SignalRecoveryOperationIdDescription =
+        "Optional. Omit it. No workflow recovery operation is executable by signal on this bridge, and a recovery id adds no " +
+        "gate authority: when set, the call is refused and nothing is sent.";
+
+    private const string StartToolName = "temporal_start_workflow";
+    private const string CancelToolName = "temporal_cancel_workflow";
+    private const string SignalToolName = "temporal_signal_workflow";
+
+    /// <summary>The deterministic replacement id the orchestrator reserves for an operation.</summary>
+    internal static string ReplacementWorkflowId(Guid operationId) => "recovery-" + operationId.ToString("D");
+
+    /// <summary>
+    /// A start with a recovery id: every local check first (caller, id, input, Temporal client),
+    /// then one authorize-dispatch, then one start under the reserved id with RejectDuplicate and
+    /// conflict-fail, then one receipt. An ambiguous start is reported unknown and never retried.
+    /// </summary>
+    private async Task<string> StartRecoveryWorkflowAsync(
+        string workflowType,
+        string? workflowId,
+        string? input,
+        string? taskQueue,
+        string @namespace,
+        string idReusePolicy,
+        string recoveryOperationId)
+    {
+        if (!TryParseOperationId(recoveryOperationId, out var operationId))
+            return RecoveryRefused(StartToolName, "recovery_operation_id must be a UUID");
+
+        var blockReason = RecoveryCallerBlockReason(out var coordinator, out var caller);
+        if (blockReason is not null)
+            return RecoveryBlocked(StartToolName, operationId, workflowId ?? workflowType, caller, blockReason);
+
+        if (recoveryForwarder is null)
+            return RecoveryBlocked(StartToolName, operationId, workflowId ?? workflowType, caller, "recovery dispatch is not configured on this bridge");
+
+        if (idReusePolicy is not ("allow_duplicate" or "reject_duplicate"))
+            return "Error: unknown id_reuse_policy. Use allow_duplicate or reject_duplicate.";
+
+        // The id is the reservation's, not the caller's; a recovery start always rejects duplicates.
+        var expectedId = ReplacementWorkflowId(operationId);
+        if (workflowId is not null && !string.Equals(workflowId, expectedId, StringComparison.Ordinal))
+            return RecoveryBlocked(StartToolName, operationId, workflowId, caller, $"workflow_id must be omitted or exactly '{expectedId}'");
+
+        taskQueue ??= @namespace;
+
+        object? inputObj = null;
+        if (!string.IsNullOrWhiteSpace(input))
+        {
+            try
+            {
+                inputObj = JsonSerializer.Deserialize<JsonElement>(input);
+            }
+            catch (JsonException ex)
+            {
+                return $"Error: invalid JSON in input — {ex.Message}";
+            }
+        }
+
+        if (inputObj is null)
+        {
+            var knownType = (await registry.GetAllAsync()).FirstOrDefault(t =>
+                string.Equals(t.Name, workflowType, StringComparison.OrdinalIgnoreCase));
+            var requiredFields = knownType is null ? [] : GetRequiredFields(knownType.InputSchema);
+            if (requiredFields.Count > 0)
+            {
+                return $"Error: workflow '{workflowType}' requires input but none was provided. " +
+                       $"Required fields: {string.Join(", ", requiredFields)}. Nothing was sent.";
+            }
+        }
+
+        ITemporalClient client;
+        try
+        {
+            client = await clientFactory.GetClientAsync(@namespace);
+        }
+        catch (Exception ex)
+        {
+            return RecoveryBlocked(StartToolName, operationId, expectedId, caller, $"the Temporal client is unavailable ({SanitizedFailure(ex)})");
+        }
+
+        var authorization = await AuthorizeAsync(operationId, new WorkflowRecoveryDispatchRequest(
+            Coordinator: coordinator,
+            Tool: StartToolName,
+            Namespace: @namespace,
+            WorkflowType: workflowType,
+            TaskQueue: taskQueue,
+            InputSha256: WorkflowOutcomeHashes.Sha256Hex(input ?? string.Empty),
+            TargetWorkflowId: null,
+            TargetRunId: null,
+            SignalName: null));
+        if (!authorization.Allowed)
+            return AuthorizationRefused(StartToolName, operationId, expectedId, caller, authorization);
+
+        var replacementId = authorization.ReplacementWorkflowId;
+        if (string.IsNullOrWhiteSpace(replacementId) ||
+            (workflowId is not null && !string.Equals(replacementId, workflowId, StringComparison.Ordinal)))
+        {
+            // Authorized but unusable: nothing is started, and the reservation is told so.
+            var mismatch = await RecordReceiptAsync(operationId, new WorkflowRecoveryReceiptRequest(
+                WorkflowRecoveryReceiptResults.Rejected, replacementId, null, null, "replacement_workflow_id_unusable"));
+            LogRecovery(LogLevel.Warning, StartToolName, operationId, expectedId, caller, "rejected", "replacement_workflow_id_unusable");
+            return $"Error: {StartToolName} for recovery operation {operationId:D} started nothing because the orchestrator's " +
+                   $"replacement workflow id is missing or differs from workflow_id. Receipt: {mismatch.Describe()}. No retry was made.";
+        }
+
+        WorkflowHandle handle;
+        try
+        {
+            handle = await client.StartWorkflowAsync(
+                workflowType,
+                inputObj is null ? [] : [inputObj],
+                new WorkflowOptions(id: replacementId, taskQueue: taskQueue)
+                {
+                    IdReusePolicy = WorkflowIdReusePolicy.RejectDuplicate,
+                    IdConflictPolicy = WorkflowIdConflictPolicy.Fail,
+                });
+        }
+        catch (Exception ex)
+        {
+            return await DispatchFailedAsync(StartToolName, operationId, replacementId, null, caller, ex);
+        }
+
+        var receipt = await RecordReceiptAsync(operationId, new WorkflowRecoveryReceiptRequest(
+            WorkflowRecoveryReceiptResults.Started, handle.Id, handle.ResultRunId, null, null));
+        LogRecovery(LogLevel.Information, StartToolName, operationId, handle.Id, caller, "started", receipt.Describe());
+
+        return JsonSerializer.Serialize(new
+        {
+            workflowId = handle.Id,
+            runId = handle.ResultRunId,
+            workflowType,
+            @namespace,
+            status = "started",
+            recoveryOperationId = operationId.ToString("D"),
+            receipt = receipt.Describe(),
+        });
+    }
+
+    /// <summary>
+    /// A cancel with a recovery id targets the exact current run it read first, and only after
+    /// authorize-dispatch accepted that exact target.
+    /// </summary>
+    private async Task<string> CancelRecoveryWorkflowAsync(string workflowId, string @namespace, string recoveryOperationId)
+    {
+        if (!TryParseOperationId(recoveryOperationId, out var operationId))
+            return RecoveryRefused(CancelToolName, "recovery_operation_id must be a UUID");
+
+        var blockReason = RecoveryCallerBlockReason(out var coordinator, out var caller);
+        if (blockReason is not null)
+            return RecoveryBlocked(CancelToolName, operationId, workflowId, caller, blockReason);
+
+        if (recoveryForwarder is null)
+            return RecoveryBlocked(CancelToolName, operationId, workflowId, caller, "recovery dispatch is not configured on this bridge");
+
+        ITemporalClient client;
+        WorkflowExecutionDescription target;
+        try
+        {
+            client = await clientFactory.GetClientAsync(@namespace);
+            target = await client.GetWorkflowHandle(workflowId)
+                .DescribeAsync(WorkflowGateStateReader.BuildDescribeOptions(CancellationToken.None));
+        }
+        catch (Exception ex)
+        {
+            return RecoveryBlocked(CancelToolName, operationId, workflowId, caller, $"the target run could not be read ({SanitizedFailure(ex)})");
+        }
+
+        var authorization = await AuthorizeAsync(operationId, new WorkflowRecoveryDispatchRequest(
+            Coordinator: coordinator,
+            Tool: CancelToolName,
+            Namespace: @namespace,
+            WorkflowType: target.WorkflowType,
+            TaskQueue: target.TaskQueue,
+            InputSha256: null,
+            TargetWorkflowId: workflowId,
+            TargetRunId: target.RunId,
+            SignalName: null));
+        if (!authorization.Allowed)
+            return AuthorizationRefused(CancelToolName, operationId, workflowId, caller, authorization);
+
+        try
+        {
+            await client.GetWorkflowHandle(workflowId, runId: target.RunId).CancelAsync();
+        }
+        catch (Exception ex)
+        {
+            return await DispatchFailedAsync(CancelToolName, operationId, workflowId, target.RunId, caller, ex);
+        }
+
+        var receipt = await RecordReceiptAsync(operationId, new WorkflowRecoveryReceiptRequest(
+            WorkflowRecoveryReceiptResults.CancelRequested, workflowId, target.RunId, null, null));
+        LogRecovery(LogLevel.Information, CancelToolName, operationId, workflowId, caller, "cancel_requested", receipt.Describe());
+
+        // A cancel request is not stop proof: the caller still has to observe the run close.
+        return JsonSerializer.Serialize(new
+        {
+            workflowId,
+            runId = target.RunId,
+            status = "cancel_requested",
+            recoveryOperationId = operationId.ToString("D"),
+            receipt = receipt.Describe(),
+        });
+    }
+
+    /// <summary>
+    /// A signal with a recovery id sends nothing and authorizes nothing. The only recovery
+    /// operations a signal could carry are resume and accept_late, and both need the separate
+    /// delegate-recovery handler, which this bridge does not have; a guessed signal is exactly what
+    /// they must never become. A recovery id also adds no gate authority: approver-only and
+    /// delegable gates keep their existing guards, which apply only without a recovery id.
+    /// </summary>
+    private Task<string> SignalRecoveryWorkflowAsync(string workflowId, string signalName, string recoveryOperationId)
+    {
+        if (!TryParseOperationId(recoveryOperationId, out var operationId))
+            return Task.FromResult(RecoveryRefused(SignalToolName, "recovery_operation_id must be a UUID"));
+
+        var caller = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+        var reason = CeoGateSignals.IsReserved(signalName)
+            ? $"'{signalName}' is an approver-only gate and a recovery_operation_id adds no gate authority; send it without one, under the existing rules"
+            : "no recovery operation is executable by signal on this bridge: resume and accept_late need the separate delegate-recovery handler, " +
+              "cancel uses temporal_cancel_workflow and retry/reassign use temporal_start_workflow";
+        return Task.FromResult(RecoveryBlocked(SignalToolName, operationId, workflowId, caller, reason));
+    }
+
+    private static bool TryParseOperationId(string value, out Guid operationId) =>
+        Guid.TryParseExact(value, "D", out operationId) && operationId != Guid.Empty;
+
+    /// <summary>The same attribution as the CTO feedback/delegated paths: configured, resolved, equal ignoring case.</summary>
+    private string? RecoveryCallerBlockReason(out string coordinator, out string? caller)
+    {
+        caller = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+        coordinator = ctoAgentConfig.GetCtoAgent();
+        if (string.IsNullOrWhiteSpace(coordinator))
+            return "the configured coordinator (CTO agent) is not configured";
+        if (string.IsNullOrWhiteSpace(caller))
+            return "the caller identity is unresolved";
+        if (!string.Equals(caller, coordinator, StringComparison.OrdinalIgnoreCase))
+            return "the caller is not the configured coordinator";
+        return null;
+    }
+
+    private async Task<WorkflowRecoveryAuthorization> AuthorizeAsync(Guid operationId, WorkflowRecoveryDispatchRequest request)
+    {
+        try
+        {
+            return await recoveryForwarder!.AuthorizeDispatchAsync(operationId, request);
+        }
+        catch (Exception ex)
+        {
+            return WorkflowRecoveryAuthorization.Ambiguous($"the authorization call failed ({ex.GetType().Name})");
+        }
+    }
+
+    private async Task<WorkflowRecoveryReceiptOutcome> RecordReceiptAsync(Guid operationId, WorkflowRecoveryReceiptRequest receipt)
+    {
+        try
+        {
+            return await recoveryForwarder!.RecordReceiptAsync(operationId, receipt);
+        }
+        catch (Exception ex)
+        {
+            return new WorkflowRecoveryReceiptOutcome(false, null, ex.GetType().Name);
+        }
+    }
+
+    private string AuthorizationRefused(
+        string tool, Guid operationId, string target, string? caller, WorkflowRecoveryAuthorization authorization)
+    {
+        if (!authorization.Unknown)
+            return RecoveryBlocked(tool, operationId, target, caller, $"the orchestrator did not authorize it ({authorization.Reason ?? "no reason"})");
+
+        // No usable answer: the reservation may now be dispatching. Nothing was sent to Temporal
+        // and no receipt is invented — a concurrent call could hold the authorization.
+        LogRecovery(LogLevel.Warning, tool, operationId, target, caller, "authorization_unknown", authorization.Reason);
+        return $"Error: {tool} for recovery operation {operationId:D} sent nothing because the authorization outcome is unknown " +
+               $"({authorization.Reason}). The reservation may now be dispatching: read the operation back before acting; do not resend.";
+    }
+
+    /// <summary>
+    /// Definitive rejections are recorded as <c>rejected</c>; everything else, including an id that
+    /// already exists (possibly this very dispatch, if a reply was lost), is <c>unknown</c>.
+    /// </summary>
+    private async Task<string> DispatchFailedAsync(
+        string tool, Guid operationId, string targetWorkflowId, string? targetRunId, string? caller, Exception ex)
+    {
+        var failure = SanitizedFailure(ex);
+        if (IsDefinitiveRejection(ex))
+        {
+            var rejected = await RecordReceiptAsync(operationId, new WorkflowRecoveryReceiptRequest(
+                WorkflowRecoveryReceiptResults.Rejected, targetWorkflowId, targetRunId, null, failure));
+            LogRecovery(LogLevel.Warning, tool, operationId, targetWorkflowId, caller, "rejected", failure);
+            return $"Error: {tool} for recovery operation {operationId:D} was rejected by Temporal ({failure}); this call changed " +
+                   $"nothing. Receipt: {rejected.Describe()}. The reservation is not reused and no retry was made.";
+        }
+
+        var existingRunId = (ex as WorkflowAlreadyStartedException)?.RunId;
+        var unknown = await RecordReceiptAsync(operationId, new WorkflowRecoveryReceiptRequest(
+            WorkflowRecoveryReceiptResults.Unknown, targetWorkflowId, existingRunId ?? targetRunId, null, failure));
+        var state = await ReadOperationStateAsync(operationId);
+        LogRecovery(LogLevel.Warning, tool, operationId, targetWorkflowId, caller, "unknown", failure);
+        return $"Error: the outcome of {tool} for recovery operation {operationId:D} is unknown ({failure}). The reservation stays " +
+               $"{WorkflowRecoveryStates.DispatchUnknown} (receipt: {unknown.Describe()}; operation state: {state ?? "unreadable"}). " +
+               $"Inspect workflow '{targetWorkflowId}' and its history before any further action. No retry was made.";
+    }
+
+    private async Task<string?> ReadOperationStateAsync(Guid operationId)
+    {
+        try
+        {
+            return await recoveryForwarder!.ReadStateAsync(operationId);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    internal static bool IsDefinitiveRejection(Exception ex) => ex is RpcException
+    {
+        Code: RpcException.StatusCode.InvalidArgument
+            or RpcException.StatusCode.NotFound
+            or RpcException.StatusCode.PermissionDenied
+            or RpcException.StatusCode.Unauthenticated
+            or RpcException.StatusCode.FailedPrecondition
+            or RpcException.StatusCode.Unimplemented,
+    };
+
+    /// <summary>Type and RPC code only: exception messages can carry internal addresses.</summary>
+    internal static string SanitizedFailure(Exception ex) => ex switch
+    {
+        RpcException rpc => "rpc_" + rpc.Code,
+        WorkflowAlreadyStartedException => "workflow_already_started",
+        _ => ex.GetType().Name,
+    };
+
+    private static string RecoveryRefused(string tool, string reason) =>
+        $"Error: {tool} with recovery_operation_id was refused because {reason}. Nothing was sent.";
+
+    private string RecoveryBlocked(string tool, Guid operationId, string target, string? caller, string reason)
+    {
+        LogRecovery(LogLevel.Warning, tool, operationId, target, caller, "blocked", reason);
+        return $"Error: {tool} for recovery operation {operationId:D} was refused because {reason}. Nothing was sent.";
+    }
+
+    /// <summary>One line per recovery attempt: ids, caller, outcome and reason only — never input or args.</summary>
+    private void LogRecovery(
+        LogLevel level, string tool, Guid operationId, string target, string? caller, string outcome, string? reason) =>
+        logger.Log(
+            level,
+            "Recovery dispatch {Tool} operation={OperationId} target={Target} caller={Caller} outcome={Outcome} reason={Reason}",
+            tool,
+            operationId,
+            target,
+            string.IsNullOrWhiteSpace(caller) ? "unresolved" : caller,
+            outcome,
+            reason ?? "none");
 
     [McpServerTool(Name = "temporal_terminate_workflow")]
     [Description("Forcefully terminate a workflow execution. Unlike cancel, this is immediate and does not allow cleanup.")]

@@ -427,7 +427,7 @@ feature unavailable, never clamped). The coordinator token is scoped (server kee
 written only into the `FLEET_CTO_AGENT` agent's generated `WorkflowOutcomes` section, and is never an
 Env Ref. Decisions are record-only; recovery is operator plan/reserve, then an existing guarded tool
 with `recovery_operation_id` (absent = byte-identical behaviour and gates). Late replies go to the
-durable `fleet.workflow-outcomes.late` queue only with `FLEET_WORKFLOW_OUTCOMES_LATE_CAPTURE_ENABLED=true`.
+durable `fleet.workflow-outcomes.late` queue only with `FLEET_WORKFLOW_OUTCOMES_LATE_CAPTURE_ENABLED=true`; a refused late-queue handoff is parked, confirmed, in `fleet.workflow-outcomes.hold` (drained by the same consumer) so relay prefetch is never occupied. A Completed run of a type with no classifier rules is `classifier_uncovered_type` bookkeeping with the nonfailure TTL, under one durable per-type coverage gap.
 Policy files are operator-owned and mounted read-only from `./fleet/workflow-outcomes/`; the
 `workflow_outcomes_keys` volume (orchestrator only) holds the evidence keyring and must be backed up
 with MySQL. Tests carry `[Trait("WorkflowOutcomeSuite", "<suite>")]` and live in namespaces containing

@@ -722,6 +722,7 @@ public sealed class WorkflowOutcomeLateResultTests
         Assert.False(bridge.GetProperty("WorkflowOutcomeLateCaptureEnabled").GetBoolean());
         Assert.Equal(LateQueue, bridge.GetProperty("WorkflowOutcomeLateQueue").GetString());
         Assert.Equal(QuarantineQueue, bridge.GetProperty("WorkflowOutcomeQuarantineQueue").GetString());
+        Assert.Equal(HoldQueue, bridge.GetProperty("WorkflowOutcomeHoldQueue").GetString());
     }
 
     [Fact]

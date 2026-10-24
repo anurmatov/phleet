@@ -127,14 +127,19 @@ health = {}
 if os.environ.get('HEALTH_RC', '1') != '0' or not (os.environ.get('HEALTH') or '').strip():
     gaps.append(f"health could not be read (curl exit {os.environ.get('HEALTH_RC')}): not clear")
 else:
+    # Only an object with an explicit state of exactly "healthy" is clear; {}, [], null and any
+    # other shape or state are not.
     try:
-        health = json.loads(os.environ['HEALTH'])
+        parsed = json.loads(os.environ['HEALTH'])
     except ValueError:
         gaps.append('health reply is not JSON: not clear')
-    if not isinstance(health, dict):
-        health = {}
-    elif health and health.get('state') != 'healthy':
-        gaps.append(f"health is {health.get('state')}")
+    else:
+        if not isinstance(parsed, dict):
+            gaps.append('health reply is not an object: not clear')
+        elif parsed.get('state') != 'healthy':
+            gaps.append(f"health state is {parsed.get('state')!r}: not clear")
+        else:
+            health = parsed
 if not cov.get('enabled'):
     gaps.append('feature disabled: no coverage is claimed')
 if cov.get('degraded'):

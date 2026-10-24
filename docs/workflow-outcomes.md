@@ -45,7 +45,8 @@ Every observed run gets exactly one classification (`WorkflowOutcomeClassificati
 | Completed + required artifact absent, only when the original contract requires it **and** a typed failure or branch proves the failed exit | `confirmed_failure` / `business_artifact_missing` |
 | Completed + null / empty / unparseable / unknown; `needs_human_review` or rejection text alone | `insufficient_evidence` / `null_result_only` — neither handoff |
 | Normal Completed, continue-as-new, successful scheduled run | `excluded_nonfailure` / `normal_completion`, `continued_as_new` |
-| Classifier absent, truncated or unknown for the loaded definition | `classification_pending` / `classifier_missing`, `history_incomplete` — a coverage gap, never an invented failure |
+| Completed run of a workflow type with **no** classifier rules (e.g. compiled system types), no failure evidence | `classification_pending` / `classifier_uncovered_type` — nonfailure-metadata TTL and no stored payload; one durable coverage gap per namespace and type (`type_uncovered:<ns>:<type>`) stays open after the rows expire and closes only once the loaded policy has Completed rules for the type; not a cause review |
+| A type with rules but no rule pinned to the run's loaded definition, or truncated/unknown classifier input | `classification_pending` / `classifier_missing`, `history_incomplete` — a durable coverage gap, never an invented failure |
 
 Evidence is typed events and payloads checked against pinned hashes — never sentiment, an LLM or a
 regular expression. A notifier's `_result` is not the original task's result. Encrypted evidence
@@ -340,7 +341,13 @@ token is provisioned into the coordinator.
 When the bridge's waiter for an agent reply is gone, it confirms a persistent, mandatory publish of
 the original bytes and stable MessageId (or body SHA-256) to the durable private queue
 `fleet.workflow-outcomes.late` **before** acknowledging the original — existing queue arguments are
-unchanged. `WorkflowOutcomeLateResultConsumer` (prefetch 1) stores it through `POST
+unchanged. If that handoff is refused (quota, missing queue, unknown confirm) the same copy is
+published, confirmed, to the durable `fleet.workflow-outcomes.hold` queue and the original is then
+acknowledged, so late-result backpressure never occupies the relay consumer's prefetch and live
+replies keep flowing. Only when the broker confirms neither copy is the reply held unacknowledged
+and retried in the background (5–60 s); the relay prefetch with capture on is 65, so at most 64 such
+held replies can be outstanding before relay deliveries stall (logged as an error). The consumer
+drains the hold queue exactly like the late queue. `WorkflowOutcomeLateResultConsumer` (prefetch 1) stores it through `POST
 /api/workflow-outcomes/late-results` (idempotent on namespace + taskId + resultSha256, committed
 before 2xx; at most 256 KiB, larger is 413 with quarantine metadata). On API failure it publishes a
 confirmed replacement with attempt 1/2/3 and a UTC due time 5/30/60 s later, then acknowledges the
@@ -348,7 +355,7 @@ previous; the consumer waits until the due time (at most 60 s; one delayed messa
 ones — an accepted head-of-line cost). After the third failure the message goes to
 `fleet.workflow-outcomes.quarantine`, which has no consumer and raises a deduplicated health alarm.
 
-Both queues are durable, non-exclusive, not auto-delete, `max-length-bytes` 268435456 with
+The late, hold and quarantine queues are durable, non-exclusive, not auto-delete, `max-length-bytes` 268435456 with
 `overflow=reject-publish`, no TTL and no main-queue DLX. A publish return, nack, unknown confirm or
 quota error is never acknowledged: the consumer is cancelled, the broker keeps the message and it
 reconnects after 5–60 s (an unknown confirm can duplicate; the stable id and hash dedupe). A broker

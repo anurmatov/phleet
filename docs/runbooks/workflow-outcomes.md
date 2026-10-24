@@ -133,6 +133,13 @@ wo /<id>/classification -X POST -d '{
 output, `needs_human_review`, rejection text) is not a failure and needs no action unless you hold
 typed proof. Do not "fix" it by writing a catch-all classifier.
 
+**Uncovered types.** An open `type_uncovered:<ns>:<type>` coverage incident means Completed runs of
+that type are not checked for business failures (Failed/TimedOut are still always failures). The
+per-run `classifier_uncovered_type` rows expire like other nonfailure metadata; the incident does
+not. It closes only after an approved policy change adds Completed rules for the type and the
+orchestrator restarts. Compiled types without a loaded definition cannot be pinned yet, so their
+incident is an accepted, visible gap.
+
 **Classifier evidence and hash maintenance.** A `classification_pending` row with
 `classifier_missing` means a Completed run of a type/definition hash with no pinned rule:
 
@@ -212,11 +219,17 @@ wo /<outcomeId>/decisions -X POST -d '{"expectedVersion": 2, "operation": "hold"
   "dueAt": "<future ISO-8601 UTC>", "taskRef": null, "artifactRef": null, "batchId": "<batchId>", "generation": 1}'
 ```
 
-## 8. Late results: delayed handoff, quarantine and consumer pause
+## 8. Late results: hold queue, delayed handoff, quarantine and consumer pause
 
 Enable capture only after the orchestrator intake is healthy (`FLEET_WORKFLOW_OUTCOMES_LATE_CAPTURE_ENABLED=true`,
 restart `fleet-temporal-bridge` — **never during an active consensus or delegate turn**).
 
+- Depth on `fleet.workflow-outcomes.hold` means late-queue handoffs were refused (late queue at its
+  quota or missing, or an unknown confirm); the originals were acknowledged only after the confirmed
+  hold copy and the consumer drains it. Find why the late queue refused (depth, disk/memory alarm).
+- Bridge log `not captured ... held`: the broker confirmed neither copy. The reply stays
+  unacknowledged and is retried every 5–60 s; once 64 are held, relay deliveries stall (Error log
+  `Late-result hold is full`) until the broker accepts publishes again. Fix the broker; do not purge.
 - Queue depth on `fleet.workflow-outcomes.late` that drains slowly is normal during an API outage
   (5/30/60 s delayed attempts, head-of-line ≤ 60 s). Check `wo /health/public` and the orchestrator.
 - **Consumer paused** (bridge log shows the consumer cancelled after a publish nack, unknown

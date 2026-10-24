@@ -446,9 +446,9 @@ Original observation age is not a substitute for the gateway's current live-leas
 |---|---|
 | Concrete static artifact/mount/hook qualifier and exact legacy stop/ownership adapter | Unregistered, refusal before mutation |
 | Concrete authenticated process/broker/poller evidence, including ambiguous Create ownership | Unregistered; no guessed zero or label-only ownership |
-| Bootstrap-only agent branch and outside hook/issuer/ingress → dedicated orchestrator receiver | Unimplemented; probe interface is unregistered |
-| `Identity__BootstrapReceiver`, receiver custody/listener and setup/example configuration | Not added or advertised as install support |
-| Actual hook/receiver/fresh-ACL and bootstrap-registration regressions | NOT RUN; coordinator fixtures are not these tests |
+| Bootstrap-only agent branch and D1 outside identity receiver | Source present below; concrete control-probe peer remains unregistered |
+| `Identity__BootstrapReceiver`, receiver custody/listener and setup/example configuration | Default-off source mapping below, not live install support |
+| Bootstrap identity and startup regressions | Owned source tests below; actual-agent/TLS/SQL acceptance UNRUN |
 
 The selected bootstrap contract remains `orchestrator:/identity/ready`, POST empty body, no session,
 security_ready/current exact owner and fresh current supervisor, 204 without activation or data access.
@@ -474,6 +474,29 @@ It has no activation handler, executor/warmup, tools, 8091, broker or poller; co
 uses an explicit capability file, never an assertion signing key, admin token or agent name.
 A successful HTTP probe is not yet an outside-identity acceptance result.
 
-D1 outside hook/issuer/ingress and dedicated orchestrator receiver/config remain unimplemented,
-as do concrete static/runtime/intake peers and authenticated ambiguous-Create reconciliation.
+D1 outside hook/issuer/ingress and dedicated orchestrator receiver/config are implemented below;
+concrete static/runtime/intake/control peers and authenticated ambiguous-Create reconciliation remain missing.
 Their default-off registration remains unchanged, and all prior parent acceptance holds remain.
+
+### Outside bootstrap identity source path
+
+The generated supervisor hook now accepts an explicitly configured `orchestrator` bootstrap service
+only for empty POST `/identity/ready`. Its separate SQL mapping requires security_ready, exact active
+ownership, current lease and fixed stage deadlines. It issues only `orchestrator:/identity/ready`;
+the ordinary memory path still requires activated/committed and accepts no bootstrap exception.
+Outside ingress consumes the nonce durably and forwards to pinned `Identity__BootstrapReceiver`
+using existing outside mTLS custody. The dedicated orchestrator listener verifies certificate/proof,
+rechecks authoritative mapping/deadlines, reads every current supervisor through the pinned gateway,
+matches saved session/process/network plus immutable approved provider tuples, and records a separate
+durable receiver replay marker before returning 204. It changes no activation, ACL, session or grant.
+The dedicated listener cannot fall through to normal/admin handlers, and its route is absent on the
+normal listener. Missing gateway custody/dependencies refuse; enablement still defaults off.
+
+The template plan binds bootstrap ingress and a read-only capability-file reference. Generated Create
+materializes the six guard inputs deterministically from that plan hash and the reserved immutable
+launch/epoch/fixed deadline; no capability bytes or signing key appear in arguments/environment.
+Logical read-only mount, TestServer certificate and generated-wire fixtures are source evidence,
+not actual mounting/TLS/runtime qualification. The outside Identity environment mapping is a disabled
+operator-owned deployment template; setup does not provision or activate that service or issue authority.
+Concrete preflight/runtime/intake/bootstrap-control peers and complete authenticated lost-Create
+reconciliation remain missing within #479; parent runtime/restore/full-audit holds remain unchanged.

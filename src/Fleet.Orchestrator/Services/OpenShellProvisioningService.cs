@@ -55,7 +55,7 @@ public sealed class OpenShellProvisioningService(Func<OrchestratorDbContext> cre
         try
         {
             var compiled = new OpenShellPolicyCompiler().Compile(selection.Plan.GatewayId, selection.Plan.Workspace,
-                selection.Plan.ReadSpec(), selection.Plan.InputHash, selection.Plan.ReadExpectedProviders());
+                selection.Plan.ReadSpec(), selection.Plan.InputHash, selection.Plan.ReadExpectedProviders(), selection.Plan.BootstrapIngress, selection.Plan.BootstrapCapabilityFile);
             if (compiled != selection.Plan) throw new OpenShellStateConflictException("preparation_plan_changed");
             await preflight.VerifyAsync(selection, ct).WaitAsync(ct);
             await preflight.VerifyLegacyOwnershipAsync(selection, ct).WaitAsync(ct);
@@ -79,7 +79,7 @@ public sealed class OpenShellProvisioningService(Func<OrchestratorDbContext> cre
             safetyDeadline = new DateTime(Math.Min(selection.Deadline.Ticks, launch.CreateAttemptedAt!.Value.AddSeconds(60).Ticks), DateTimeKind.Utc);
             operation.CancelAfter(safetyDeadline - DateTime.UtcNow - TimeSpan.FromSeconds(10));
             var created = await gateway.CreateAsync(selection.Plan, launch.Id, launch.IdentityEpoch,
-                launch.CreateRequestId!.Value, ct).WaitAsync(ct);
+                launch.CreateRequestId!.Value, safetyDeadline, ct).WaitAsync(ct);
             await store.BindCreatedSandboxAsync(launch.Id, created.GatewayId, created.Id, DateTime.UtcNow, ct);
             // A single current read is intentional. Pending is not Ready and is never a reason to
             // resend Create or retain an unbounded bootstrap process; follow-up reconciliation is explicit.

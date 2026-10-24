@@ -45,6 +45,18 @@ public static class RequestRules
         }
         else if (body.Length != 0 || session is null) throw new IdentityDeniedException("session_required");
     }
+    public static void ValidateBootstrap(string method, string target, byte[] body, IEnumerable<KeyValuePair<string, string>> headers, bool ingress)
+    {
+        if (method != "POST" || target != "/identity/ready" || body.Length != 0) throw new IdentityDeniedException("bootstrap_shape");
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, value) in headers)
+            if (!names.Add(name) || value.Length > 16384 || value.Any(c => c is '\r' or '\n' or '\0')
+                || name.Equals("Authorization", StringComparison.OrdinalIgnoreCase) || name.Equals("Mcp-Session-Id", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("Upgrade", StringComparison.OrdinalIgnoreCase) || name.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase)
+                || name.StartsWith("X-Fleet-", StringComparison.OrdinalIgnoreCase)
+                    && !(ingress && name.Equals("X-Fleet-Assertion", StringComparison.OrdinalIgnoreCase)))
+                throw new IdentityDeniedException("bootstrap_override");
+    }
     public static FleetRequestBinding Bind(string method, string target, byte[] body, string? session) =>
         new(method, target, Hash(body), SessionHash(session));
 }

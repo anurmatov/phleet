@@ -16,7 +16,7 @@ public sealed record OpenShellDeleteAcknowledgement(string SandboxId, DeletionOu
 public interface IOpenShellGatewayClient
 {
     Task<OpenShellSandboxSnapshot> CreateAsync(OpenShellLaunchPlan plan, Guid launchId, Guid epoch,
-        Guid requestId, CancellationToken ct = default) => throw new NotSupportedException("create_unqualified");
+        Guid requestId, DateTime bootstrapDeadline, CancellationToken ct = default) => throw new NotSupportedException("create_unqualified");
     Task<OpenShellSupervisorProof> ReadCurrentSupervisorAsync(OpenShellSandboxSnapshot target, string provider,
         CancellationToken ct = default) => throw new NotSupportedException("supervisor_unqualified");
     Task<IReadOnlyList<OpenShellSandboxSnapshot>> InventoryAsync(CancellationToken ct = default);

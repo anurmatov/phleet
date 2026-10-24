@@ -7,8 +7,24 @@ namespace Fleet.Orchestrator.Services;
 
 /// <summary>Immutable serialized request, never shared mutable protobufs or credentials.</summary>
 public sealed record OpenShellLaunchPlan(string GatewayId, string Workspace, string SpecBase64,
-    string InputHash, string PolicyHash, string ImageHash, string ExpectedProvidersJson = "[]")
+    string InputHash, string PolicyHash, string ImageHash, string ExpectedProvidersJson = "[]", string BootstrapIngress = "", string BootstrapCapabilityFile = "")
 {
+    public SandboxSpec MaterializeBootstrap(Guid launchId, Guid epoch, DateTime deadline)
+    {
+        if (launchId == Guid.Empty || epoch == Guid.Empty || deadline.Kind != DateTimeKind.Utc || deadline <= DateTime.UtcNow
+            || deadline > DateTime.UtcNow.AddSeconds(60) || !Uri.TryCreate(BootstrapIngress, UriKind.Absolute, out var ingress)
+            || ingress.Scheme != "https" || ingress.AbsolutePath != "/identity/ready" || ingress.Query != "" || ingress.Fragment != "" || ingress.UserInfo != ""
+            || BootstrapCapabilityFile != "/app/generated/bootstrap.capability")
+            throw new OpenShellStateConflictException("bootstrap_launch_inputs_invalid");
+        var spec = ReadSpec();
+        spec.Command.Add("--OpenShell:BootstrapIngress=" + BootstrapIngress);
+        spec.Command.Add("--OpenShell:LaunchId=" + launchId.ToString("D"));
+        spec.Command.Add("--OpenShell:IdentityEpoch=" + epoch.ToString("D"));
+        spec.Command.Add("--OpenShell:PlanHash=" + Hash);
+        spec.Command.Add("--OpenShell:Deadline=" + deadline.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
+        spec.Command.Add("--OpenShell:BootstrapCapabilityFile=" + BootstrapCapabilityFile);
+        return spec;
+    }
     public OpenShellExpectedProvider[] ReadExpectedProviders() => System.Text.Json.JsonSerializer.Deserialize<OpenShellExpectedProvider[]>(ExpectedProvidersJson)
         ?? throw new OpenShellStateConflictException("expected_providers_missing");
     public SandboxSpec ReadSpec() => SandboxSpec.Parser.ParseFrom(Convert.FromBase64String(SpecBase64));
@@ -31,7 +47,7 @@ public sealed record OpenShellExpectedProvider(string Name, string ProviderId, u
 
 public sealed class OpenShellPolicyCompiler
 {
-    public OpenShellLaunchPlan Compile(string gatewayId, string workspace, SandboxSpec spec, string inputHash, IReadOnlyList<OpenShellExpectedProvider>? expectedProviders = null)
+    public OpenShellLaunchPlan Compile(string gatewayId, string workspace, SandboxSpec spec, string inputHash, IReadOnlyList<OpenShellExpectedProvider>? expectedProviders = null, string bootstrapIngress = "", string bootstrapCapabilityFile = "")
     {
         if (!Opaque(gatewayId) || !Opaque(workspace) || !Hash(inputHash)) throw Blocked();
         var copy = spec.Clone();
@@ -70,11 +86,15 @@ public sealed class OpenShellPolicyCompiler
             || expectedProviders.Select(p => p.Name).Distinct(StringComparer.Ordinal).Count() != expectedProviders.Count
             || expectedProviders.Any(p => !copy.Providers.Contains(p.Name) || !Opaque(p.ProviderId) || p.ResourceVersion == 0
                 || !Hash(p.PolicyHash))) throw new OpenShellStateConflictException("expected_providers_missing_or_invalid");
+        if (!Uri.TryCreate(bootstrapIngress, UriKind.Absolute, out var bootstrap) || bootstrap.Scheme != "https"
+            || bootstrap.AbsolutePath != "/identity/ready" || bootstrap.UserInfo != "" || bootstrap.Query != "" || bootstrap.Fragment != ""
+            || hosts[0] != bootstrap.Host || policy.NetworkPolicies.Values.SelectMany(r => r.Endpoints).Any(e => e.Port != bootstrap.Port)
+            || bootstrapCapabilityFile != "/app/generated/bootstrap.capability") throw Blocked();
         var bytes = copy.ToByteArray();
         if (bytes.Length > 128 * 1024) throw Blocked();
         return new(gatewayId, workspace, Convert.ToBase64String(bytes), inputHash,
             Convert.ToHexStringLower(SHA256.HashData(policy.ToByteArray())), copy.Template.Image.Split("@sha256:").Last(),
-            System.Text.Json.JsonSerializer.Serialize(expectedProviders.OrderBy(p => p.Name, StringComparer.Ordinal)));
+            System.Text.Json.JsonSerializer.Serialize(expectedProviders.OrderBy(p => p.Name, StringComparer.Ordinal)), bootstrapIngress, bootstrapCapabilityFile);
     }
     private static bool PathSafe(string p) => p.StartsWith('/') && p.Length <= 4096
         && !p.Any(char.IsControl) && !p.Split('/').Any(x => x is ".." or ".") && !p.Contains("//");

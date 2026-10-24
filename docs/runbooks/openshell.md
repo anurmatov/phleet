@@ -188,5 +188,14 @@ It requires an exact HTTPS bootstrap ingress, launch/epoch UUIDs, plan hash, UTC
 60 seconds and a nonempty capability file. Missing configuration exits nonzero before core services.
 The capability authorizes only one empty `/bootstrap/probe` request on loopback; repeated requests,
 extra bodies/queries and invalid authorization deny. No workload assertion is authored or forwarded.
-Outside D1 receiver/configuration and concrete preparation peers remain unavailable, so do not
+D1 source receiver/configuration is described below, but concrete preparation peers remain unavailable; do not
 select production preparation or interpret these local guard regressions as a successful identity probe.
+
+D1 receiver custody is startup-only `OpenShellBootstrapReceiver` configuration, disabled by default
+on a distinct verified port. Pin issuer/public key, ingress CA/DNS and server certificate/key outside
+workloads; missing custody refuses rather than generating credentials. `Identity__BootstrapReceiver`
+is optional/empty by default and must be exact HTTPS `/identity/ready` with no query/userinfo/fragment.
+The example's outside-Identity mapping is commented, not a new enabled service or install claim.
+Receiver responses are 401 for proof/mTLS, 403 for scope/expired ownership/replay, 409 for changed
+supervisor/expected tuple and 503 for unavailable authority. No response authorizes activation or
+an automatic request retry. Keep pending launch state for separately implemented ownership recovery.

@@ -15,9 +15,17 @@ public sealed class RequestAssertionIssuer(IdentityOptions options, ECDsa key)
     {
         if (!_isP256)
             throw new InvalidOperationException("Outside P-256 key required.");
+        var audience = (identity.Service, identity.Route) switch
+        {
+            ("memory", "/mcp") => "memory:/mcp",
+            ("orchestrator", "/identity/ready") when binding.Method == "POST" && binding.RawTarget == "/identity/ready"
+                && binding.BodySha256 == FleetRequestBinding.AbsentSessionHash && binding.SessionHash == FleetRequestBinding.AbsentSessionHash
+                => "orchestrator:/identity/ready",
+            _ => throw new InvalidOperationException("assertion_scope_unsupported"),
+        };
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var claims = new Dictionary<string, object> {
-            ["iss"] = options.Issuer, ["aud"] = "memory:/mcp", ["sub"] = identity.AgentName,
+            ["iss"] = options.Issuer, ["aud"] = audience, ["sub"] = identity.AgentName,
             ["gateway_id"] = identity.GatewayId, ["sandbox_id"] = identity.SandboxId,
             ["launch_id"] = identity.LaunchId.ToString("D"), ["identity_epoch"] = identity.IdentityEpoch.ToString("D"),
             ["iat"] = now, ["exp"] = now + 15, ["jti"] = Guid.NewGuid().ToString("N"),

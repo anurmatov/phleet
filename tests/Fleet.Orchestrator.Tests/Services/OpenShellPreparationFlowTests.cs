@@ -96,7 +96,7 @@ public sealed class OpenShellPreparationFlowTests
     private sealed class OwnedGateway(string fault, DbContextOptions<OrchestratorDbContext> options) : IOpenShellGatewayClient
     {
         public int Creates, Stops, Deletes;
-        public Task<OpenShellSandboxSnapshot> CreateAsync(OpenShellLaunchPlan plan, Guid launchId, Guid epoch, Guid requestId, CancellationToken ct)
+        public Task<OpenShellSandboxSnapshot> CreateAsync(OpenShellLaunchPlan plan, Guid launchId, Guid epoch, Guid requestId, DateTime bootstrapDeadline, CancellationToken ct)
         { Creates++; if (fault == "create_lost") throw new Exception("ambiguous owned reply"); return Task.FromResult(OpenShellPreparationTests.Target()); }
         public Task<OpenShellSupervisorProof> ReadCurrentSupervisorAsync(OpenShellSandboxSnapshot target, string provider, CancellationToken ct)
         {

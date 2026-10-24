@@ -32,7 +32,7 @@ public sealed class OpenShellPreparationWireTests
     {
         var wire = new Wire("ready"); using var client = Client(wire);
         var launch = Guid.NewGuid(); var epoch = Guid.NewGuid(); var request = Guid.NewGuid();
-        var created = await client.CreateAsync(OpenShellPolicyCompilerTests.Plan(), launch, epoch, request);
+        var created = await client.CreateAsync(OpenShellPolicyCompilerTests.Plan(), launch, epoch, request, DateTime.UtcNow.AddSeconds(50));
         Assert.Equal("sandbox1", created.Id); Assert.Equal(1, wire.Mutations);
         Assert.Equal(request.ToString("D"), wire.Create!.RequestId);
         Assert.Equal(launch.ToString("D"), wire.Create.Labels["phleet-launch"]);

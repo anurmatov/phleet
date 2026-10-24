@@ -21,6 +21,9 @@ if (options.Enabled)
     builder.Services.AddSingleton<IIdentityConnectionFactory, MySqlIdentityConnectionFactory>();
     builder.Services.AddSingleton<LaunchIdentityStore>(); builder.Services.AddSingleton<ReplayStore>();
     builder.Services.AddSingleton(ReceiverTransport.Create(options)); builder.Services.AddSingleton<IdentityIngress>();
+    builder.Services.AddSingleton<BootstrapIdentityIngress>(sp => new(options,
+        new FleetRequestAssertionVerifier(signingKey.ExportSubjectPublicKeyInfo(), options.Issuer, "orchestrator:/identity/ready", options.KeyId),
+        sp.GetRequiredService<ReplayStore>(), sp.GetRequiredService<HttpClient>()));
     builder.Services.AddGrpc(o => { o.MaxReceiveMessageSize = 400000; o.EnableDetailedErrors = false; });
     var certificate = X509Certificate2.CreateFromPemFile(options.ServerCertificatePath, options.ServerKeyPath);
     builder.WebHost.ConfigureKestrel(server =>
@@ -43,6 +46,7 @@ if (options.Enabled)
         await next();
     });
     app.MapGrpcService<SupervisorMiddlewareService>();
+    app.MapPost("/identity/ready", (HttpContext context, BootstrapIdentityIngress ingress) => ingress.HandleAsync(context));
     app.MapMethods("/mcp", ["POST", "GET", "DELETE"], (HttpContext context, IdentityIngress ingress) => ingress.HandleAsync(context));
 }
 else app.MapGet("/health", () => Results.Ok(new { status = "disabled" }));

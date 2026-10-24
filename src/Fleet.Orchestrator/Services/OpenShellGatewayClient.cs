@@ -146,7 +146,7 @@ public sealed class OpenShellGatewayClient : IOpenShellGatewayClient, IDisposabl
     }
 
     public async Task<OpenShellSandboxSnapshot> CreateAsync(OpenShellLaunchPlan plan, Guid launchId,
-        Guid epoch, Guid requestId, CancellationToken ct = default)
+        Guid epoch, Guid requestId, DateTime bootstrapDeadline, CancellationToken ct = default)
     {
         if (plan.GatewayId != _gatewayId || plan.Workspace != _workspace || launchId == Guid.Empty
             || epoch == Guid.Empty || requestId == Guid.Empty) throw new ArgumentException("Exact create ownership required.");
@@ -155,7 +155,7 @@ public sealed class OpenShellGatewayClient : IOpenShellGatewayClient, IDisposabl
         await RequireConditionalMutationsAsync(deadline.Token);
         var request = new CreateSandboxRequest
         {
-            WorkspaceScope = new WorkspaceSelector { Workspace = _workspace }, Spec = plan.ReadSpec(),
+            WorkspaceScope = new WorkspaceSelector { Workspace = _workspace }, Spec = plan.MaterializeBootstrap(launchId, epoch, bootstrapDeadline),
             Name = "launch-" + launchId.ToString("N"), RequestId = requestId.ToString("D"),
         };
         // Metadata is correlation, NOT complete ownership evidence after an ambiguous Create.

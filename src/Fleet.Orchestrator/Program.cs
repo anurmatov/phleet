@@ -126,7 +126,9 @@ builder.Services
     .WithHttpTransport()
     .WithToolsFromAssembly();
 
+builder.AddOpenShellBootstrapReceiver();
 var app = builder.Build();
+app.UseOpenShellBootstrapReceiver();
 
 var epicGrantOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<EpicGrantOptions>>().Value;
 if (epicGrantOptions.DisableMisconfiguredAutonomy())

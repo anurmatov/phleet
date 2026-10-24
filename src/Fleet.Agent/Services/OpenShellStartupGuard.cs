@@ -21,7 +21,9 @@ public sealed class OpenShellStartupGuard
     private readonly byte[] _capabilityHash;
     private int _probeStarted;
 
-    public OpenShellStartupGuard(IConfiguration configuration)
+    public OpenShellStartupGuard(IConfiguration configuration) : this(configuration, File.ReadAllText) { }
+
+    internal OpenShellStartupGuard(IConfiguration configuration, Func<string, string> readOwnedCapability)
     {
         var ingress = configuration["OpenShell:BootstrapIngress"];
         if (!Uri.TryCreate(ingress, UriKind.Absolute, out var uri) || uri.Scheme != "https"
@@ -37,7 +39,7 @@ public sealed class OpenShellStartupGuard
             throw new InvalidOperationException("bootstrap_plan_invalid");
         var path = configuration["OpenShell:BootstrapCapabilityFile"];
         if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path)) throw new InvalidOperationException("bootstrap_capability_missing");
-        var capability = File.ReadAllText(path);
+        var capability = readOwnedCapability(path);
         if (capability.Length is < 32 or > 256 || capability.Any(c => c <= ' ' || c > '~'))
             throw new InvalidOperationException("bootstrap_capability_invalid");
         _capabilityHash = SHA256.HashData(Encoding.UTF8.GetBytes(capability));

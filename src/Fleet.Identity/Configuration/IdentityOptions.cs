@@ -18,12 +18,16 @@ public sealed class IdentityOptions
     public string AssertionPrivateKeyPath { get; set; } = "";
     public string ConnectionString { get; set; } = "";
     public string IngressHost { get; set; } = "";
+    public string BootstrapReceiver { get; set; } = "";
     public string MemoryReceiver { get; set; } = "";
     public string ReceiverCaPath { get; set; } = "";
     public string ClientCertificatePath { get; set; } = "";
     public string ClientKeyPath { get; set; } = "";
+    public bool HasBootstrapReceiver => Uri.TryCreate(BootstrapReceiver, UriKind.Absolute, out var receiver) && receiver.Scheme == "https"
+        && receiver.AbsolutePath == "/identity/ready" && receiver.Query == "" && receiver.Fragment == "" && receiver.UserInfo == "";
     public void Validate()
     {
+        if (BootstrapReceiver.Length != 0 && !HasBootstrapReceiver) throw new InvalidOperationException("bootstrap_receiver_invalid");
         if (UpstreamTimeoutSeconds is < 1 or > 600 || HookPort is < 1 or > 65535 || IngressPort is < 1 or > 65535 || HookPort == IngressPort
             || new[] { ServerCertificatePath, ServerKeyPath, GatewayId, GatewayIssuer, GatewayAudience, GatewayJwksPath,
                 Issuer, KeyId, AssertionPrivateKeyPath, ConnectionString, IngressHost, ReceiverCaPath,

@@ -12,8 +12,8 @@ public sealed class OpenShellPolicyCompilerTests
     {
         var input = Spec();
         var compiler = new OpenShellPolicyCompiler();
-        var plan = compiler.Compile("gateway1", "workspace1", input, new string('b', 64), Expected());
-        Assert.Equal(plan, compiler.Compile("gateway1", "workspace1", input, new string('b', 64), Expected()));
+        var plan = compiler.Compile("gateway1", "workspace1", input, new string('b', 64), Expected(), "https://ingress.example.invalid:17443/identity/ready", "/app/generated/bootstrap.capability");
+        Assert.Equal(plan, compiler.Compile("gateway1", "workspace1", input, new string('b', 64), Expected(), "https://ingress.example.invalid:17443/identity/ready", "/app/generated/bootstrap.capability"));
         Assert.Equal(64, plan.Hash.Length);
         input.Template.Image = "altered";
         Assert.Contains("@sha256:", plan.ReadSpec().Template.Image);
@@ -54,10 +54,10 @@ public sealed class OpenShellPolicyCompilerTests
             case "middleware": spec.Policy.NetworkMiddlewares["identity"].OnError = "fail_open"; break;
             case "host": spec.Policy.NetworkMiddlewares["identity"].Endpoints.Include[0] = "other.example.invalid"; break;
         }
-        Assert.Throws<OpenShellStateConflictException>(() => new OpenShellPolicyCompiler().Compile("gateway1", "workspace1", spec, new string('b', 64), Expected()));
+        Assert.Throws<OpenShellStateConflictException>(() => new OpenShellPolicyCompiler().Compile("gateway1", "workspace1", spec, new string('b', 64), Expected(), "https://ingress.example.invalid:17443/identity/ready", "/app/generated/bootstrap.capability"));
     }
 
-    internal static OpenShellLaunchPlan Plan() => new OpenShellPolicyCompiler().Compile("gateway1", "workspace1", Spec(), new string('b', 64), Expected());
+    internal static OpenShellLaunchPlan Plan() => new OpenShellPolicyCompiler().Compile("gateway1", "workspace1", Spec(), new string('b', 64), Expected(), "https://ingress.example.invalid:17443/identity/ready", "/app/generated/bootstrap.capability");
     internal static OpenShellExpectedProvider[] Expected() => [new("provider1", "provider-id1", 1, 2, 3, new string('a', 64))];
     internal static SandboxSpec Spec() => new()
     {

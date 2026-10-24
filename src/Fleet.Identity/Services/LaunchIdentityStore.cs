@@ -41,12 +41,44 @@ public sealed class LaunchIdentityStore(IIdentityConnectionFactory connections)
         return identity;
     }
 
+    public async Task<VerifiedAgentIdentity> ResolveBootstrapAsync(string gateway, string sandbox, CancellationToken ct)
+    {
+        await using var connection = connections.Create(); await connection.OpenAsync(ct);
+        await using var tx = await connection.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+        var identity = await ReadBootstrapAsync(connection, tx, gateway, sandbox, ct);
+        await tx.CommitAsync(ct); return identity;
+    }
+
+    private static async Task<VerifiedAgentIdentity> ReadBootstrapAsync(DbConnection connection, DbTransaction tx,
+        string gateway, string sandbox, CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+        await using var command = Command(connection, tx, """
+            SELECT a.Name,l.Id,l.IdentityEpoch,l.GatewayId,l.SandboxId FROM agent_open_shell_launches l
+            JOIN agents a ON a.Id=l.AgentId JOIN agent_open_shell_leases lease ON lease.AgentId=l.AgentId AND lease.Owner=l.Id
+            WHERE l.GatewayId=@gateway AND l.SandboxId=@sandbox AND l.ActiveAgentId=l.AgentId AND l.Phase='security_ready'
+              AND l.RevokedAt IS NULL AND lease.ExpiresAt>@now AND l.PreparationDeadline>@now
+              AND l.CreateAttemptedAt>@created AND (l.StopAttemptedAt IS NULL OR l.StopAttemptedAt>@stopped)
+              AND l.PreparationJson IS NOT NULL AND l.SecurityReadyJson IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM open_shell_retired_ids r WHERE r.GatewayId=l.GatewayId AND r.SandboxId=l.SandboxId)
+            """, ("@gateway", gateway), ("@sandbox", sandbox), ("@now", now), ("@created", now.AddSeconds(-60)), ("@stopped", now.AddSeconds(-120)));
+        await using var rows = await command.ExecuteReaderAsync(ct);
+        if (!await rows.ReadAsync(ct)) throw new IdentityDeniedException("bootstrap_inactive");
+        var identity = new VerifiedAgentIdentity(rows.GetString(0), rows.GetString(3), rows.GetString(4),
+            Guid.Parse(rows.GetValue(1).ToString()!), Guid.Parse(rows.GetValue(2).ToString()!), "orchestrator", "/identity/ready");
+        if (identity.GatewayId != gateway || identity.SandboxId != sandbox || await rows.ReadAsync(ct))
+            throw new IdentityDeniedException("bootstrap_ambiguous");
+        return identity;
+    }
+
     // Called only after cryptographic verification. Nonce insertion and fresh mapping/session admission are atomic.
     public async Task ConsumeAsync(VerifiedAgentIdentity expected, string jti, DateTime expires, string? session, CancellationToken ct)
     {
         await using var connection = connections.Create(); await connection.OpenAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-        var (identity, _) = await ReadAsync(connection, transaction, expected.GatewayId, expected.SandboxId, ct);
+        var identity = expected.Service == "orchestrator" && expected.Route == "/identity/ready" && session is null
+            ? await ReadBootstrapAsync(connection, transaction, expected.GatewayId, expected.SandboxId, ct)
+            : (await ReadAsync(connection, transaction, expected.GatewayId, expected.SandboxId, ct)).Item1;
         if (identity != expected) throw new IdentityDeniedException("launch_changed");
         await CheckSessionAsync(connection, transaction, identity, session, ct);
         await using (var duplicate = Command(connection, transaction,

@@ -430,6 +430,15 @@ services:
     env_file:
       - .env
     environment:
+      - OpenShellBootstrapReceiver__Enabled=${FLEET_BOOTSTRAP_RECEIVER_ENABLED:-false}
+      - OpenShellBootstrapReceiver__Port=${FLEET_BOOTSTRAP_RECEIVER_PORT:-3601}
+      - OpenShellBootstrapReceiver__Issuer=${FLEET_BOOTSTRAP_RECEIVER_ISSUER:-}
+      - OpenShellBootstrapReceiver__KeyId=${FLEET_BOOTSTRAP_RECEIVER_KEY_ID:-}
+      - OpenShellBootstrapReceiver__AssertionPublicKeyPath=${FLEET_BOOTSTRAP_RECEIVER_ASSERTION_PUBLIC_KEY_PATH:-}
+      - OpenShellBootstrapReceiver__IngressCaPath=${FLEET_BOOTSTRAP_RECEIVER_INGRESS_CA_PATH:-}
+      - OpenShellBootstrapReceiver__IngressDnsName=${FLEET_BOOTSTRAP_RECEIVER_INGRESS_DNS_NAME:-}
+      - OpenShellBootstrapReceiver__ServerCertificatePath=${FLEET_BOOTSTRAP_RECEIVER_SERVER_CERTIFICATE_PATH:-}
+      - OpenShellBootstrapReceiver__ServerKeyPath=${FLEET_BOOTSTRAP_RECEIVER_SERVER_KEY_PATH:-}
       - Docker__InfrastructureContainerIds=${FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS:-}
       - ConnectionStrings__OrchestratorDb=Server=fleet-mysql;Port=3306;Database=fleet_orchestrator;User=fleet;Password=${FLEET_MYSQL_PASSWORD:-fleetpass}
       - RabbitMq__Host=rabbitmq
@@ -859,3 +868,7 @@ networks:
     name: comms-media
     driver: bridge
     internal: true
+
+# Outside Fleet.Identity deployment (not provisioned/enabled by this example):
+# environment:
+#   Identity__BootstrapReceiver: ${FLEET_IDENTITY_BOOTSTRAP_RECEIVER:-}

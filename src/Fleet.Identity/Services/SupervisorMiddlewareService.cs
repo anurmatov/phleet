@@ -48,11 +48,14 @@ public sealed class SupervisorMiddlewareService(IdentityOptions options, Gateway
                 throw new IdentityDeniedException("hook_scope");
             var headers = request.Headers.Select(h => new KeyValuePair<string, string>(h.Name, h.Value)).ToArray();
             var body = request.Body.ToByteArray();
-            RequestRules.Validate(request.Target.Method, request.Target.Path, body, headers, false);
+            var bootstrap = request.Config.Fields["service"].StringValue == "orchestrator";
+            if (bootstrap) RequestRules.ValidateBootstrap(request.Target.Method, request.Target.Path, body, headers, false);
+            else RequestRules.Validate(request.Target.Method, request.Target.Path, body, headers, false);
             var session = headers.SingleOrDefault(h => h.Key.Equals("Mcp-Session-Id", StringComparison.OrdinalIgnoreCase)).Value;
             // An expired OWNED session can carry a proof to ingress for authenticated 404, never tool admission.
-            var identity = await launches.ResolveAsync(options.GatewayId, request.Context.SandboxId, session, deadline.Token, allowExpiredSession: true)
-                .WaitAsync(deadline.Token);
+            var identity = bootstrap
+                ? await launches.ResolveBootstrapAsync(options.GatewayId, request.Context.SandboxId, deadline.Token).WaitAsync(deadline.Token)
+                : await launches.ResolveAsync(options.GatewayId, request.Context.SandboxId, session, deadline.Token, allowExpiredSession: true).WaitAsync(deadline.Token);
             var assertion = issuer.Issue(identity, RequestRules.Bind(request.Target.Method, request.Target.Path, body, session));
             return new HttpRequestResult { Decision = Decision.Allow, HeaderMutations = {
                 new HeaderMutation { Write = new WriteHeader { Name = "X-Fleet-Assertion", Value = assertion,
@@ -64,8 +67,8 @@ public sealed class SupervisorMiddlewareService(IdentityOptions options, Gateway
             return new HttpRequestResult { Decision = Decision.Deny, ReasonCode = "identity_denied" };
         }
     }
-    private static bool ValidConfig(Struct? config) => config is not null && config.Fields.Count == 1
-        && config.Fields.TryGetValue("service", out var service) && service.KindCase == Value.KindOneofCase.StringValue && service.StringValue == "memory";
+    private bool ValidConfig(Struct? config) => config is not null && config.Fields.Count == 1
+        && config.Fields.TryGetValue("service", out var service) && service.KindCase == Value.KindOneofCase.StringValue && (service.StringValue == "memory" || service.StringValue == "orchestrator" && options.HasBootstrapReceiver);
     private void Authenticate(ServerCallContext context, string? sandbox)
     {
         var authorization = context.RequestHeaders.Where(h => h.Key == "authorization").ToArray();

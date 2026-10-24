@@ -43,6 +43,7 @@ internal sealed class IdentityFixture : IAsyncDisposable, IIdentityConnectionFac
     private readonly Ed25519PrivateKeyParameters _gatewayKey = new(RandomNumberGenerator.GetBytes(32));
     public readonly IdentityOptions Options = new() { GatewayId = "gateway1", GatewayIssuer = "gateway-issuer1", GatewayAudience = "urn:identity:hook",
         Issuer = "issuer1", KeyId = "key1", IngressHost = "ingress.example.invalid", MemoryReceiver = "https://memory.example.invalid/mcp" };
+    public X509Certificate2 OwnedIngressCertificate => _certificate;
     public LaunchIdentityStore Store { get; private set; } = null!;
     public SupervisorMiddleware.SupervisorMiddlewareClient Hook { get; private set; } = null!;
     public HttpClient Ingress { get; private set; } = null!;

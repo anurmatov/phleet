@@ -276,12 +276,35 @@ and unknown deletion outcomes fail closed without retry. Even Accepted, Complete
 or AlreadyAbsent is only an acknowledgement, never intake or external cleanup proof.
 Ambiguous results require reconciliation of the original request, not a new UUID.
 
-This is a bounded gateway transport checkpoint, **not a completed lifecycle backend**.
-Shared lifecycle callers still reject migrated operations before any legacy fallback.
-The production stop/inventory/intake evidence reader, compiler/startup activation,
-outside identity hook/issuer/ingress/durable replay/session handling, actual agent
-callback path and rollback remain **missing code**, not merely unrun tests.
-No feature, lifecycle mutation route or workload admission is enabled by this pin.
+This is a partial retirement checkpoint, **not a completed lifecycle backend**.
+Shared Stop/Deprovision dispatch now reaches `OpenShellRetirementService`, which
+requires both trusted gateway and runtime-evidence peers. Neither peer is registered
+in the production host, so the default route still refuses before storage mutation.
+All create/start/restart/reprovision and workload admission remain blocked.
+
+For an active bound launch, retirement commits revocation, a tombstone, a fresh
+120-second operation lease and the complete immutable request payload before its
+conditional Stop RPC. Exact stopped-runtime and zero consumer/poller evidence must
+be fresh within five seconds inside the completion transaction. Stop retains the
+active slot/configuration and forbids resuming the retired ID. Deprovision persists
+a separate exact-version Delete intent, then requires the existing cleanup gate's
+fresh absence/drain proof before releasing the slot. Acknowledgements alone never
+release it. Pending or ambiguous intent is preserved, not automatically replayed;
+operator reconciliation is still missing. The whole operation has a 120-second bound.
+
+The two nullable intent columns are in the single additive migration, with regenerated
+EF designer/snapshot metadata. Write-once protection is an EF tracked-write guard,
+not a claim that raw SQL or privileged database writers cannot change intent.
+Owned SQLite and generated-gRPC tests exercise actual shared MCP stop/provisioning
+facade dispatch, persisted pre-RPC revocation/intents, conditional Stop/Delete and
+completion/slot retention under failures. Their evidence-reader seam is synthetic,
+not runtime or actual-agent qualification.
+
+Creation/transitions, static compiler/current-supervisor startup activation,
+production stop/inventory/intake evidence reader (including ambiguous-create
+inventory), outside identity hook/issuer/ingress/durable sessions/replay, native
+callback, reconciliation and rollback remain **missing code**, not merely unrun tests.
+No feature or workload admission is enabled by this checkpoint.
 
 Owned HTTP handlers exercise the actual generated gRPC request/response framing,
 pagination, bearer metadata, mapping replacement, cancellation, immutable copies

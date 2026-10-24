@@ -19,6 +19,9 @@ public sealed class OpenShellLaunch
     public string? ControlUrl { get; set; }
     // Reference only. Never persist the capability, credentials or raw driver errors here.
     public string? CapabilitySecretRef { get; set; }
+    // Nonsecret immutable request payloads, committed before gateway mutations.
+    public string? StopIntentJson { get; set; }
+    public string? DeleteIntentJson { get; set; }
     public string? Error { get; set; }
     public DateTime? UpdatedAt { get; set; }
     public Guid? BotPollerLeaseOwner { get; set; }

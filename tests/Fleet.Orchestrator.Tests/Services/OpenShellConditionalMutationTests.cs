@@ -179,11 +179,13 @@ public class OpenShellConditionalMutationTests
     private static OpenShellGatewayClient Client(MutationWire wire) => new(
         new Uri("https://gateway.example.invalid"), "gateway1", "workspace1", "synthetic-token", wire);
 
-    private sealed class MutationWire(string? fault = null) : HttpMessageHandler
+    internal sealed class MutationWire(string? fault = null) : HttpMessageHandler
     {
         public List<string> Calls { get; } = [];
         public int Mutations { get; private set; }
+        private bool _stopped;
         public bool Supported { get; set; } = true;
+        public Func<Task>? BeforeMutation { get; set; }
         public StopSandboxRequest? Stop { get; private set; }
         public DeleteSandboxRequest? Delete { get; private set; }
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
@@ -208,8 +210,8 @@ public class OpenShellConditionalMutationTests
             {
                 var sandbox = new Sandbox
                 {
-                    Metadata = new ObjectMeta { Id = "sandbox1", Name = "name1", Workspace = "workspace1", ResourceVersion = 12 },
-                    Status = new SandboxStatus { Phase = SandboxPhase.Ready },
+                    Metadata = new ObjectMeta { Id = "sandbox1", Name = "name1", Workspace = "workspace1", ResourceVersion = _stopped ? 13ul : 12ul },
+                    Status = new SandboxStatus { Phase = _stopped ? SandboxPhase.Stopped : SandboxPhase.Ready },
                 };
                 if (method == "ListSandboxes")
                 {
@@ -227,11 +229,13 @@ public class OpenShellConditionalMutationTests
             }
             else
             {
+                if (BeforeMutation is not null) await BeforeMutation();
                 Mutations++;
                 if (fault == "mutation-hang") await Task.Delay(Timeout.InfiniteTimeSpan, ct);
                 if (method == "StopSandbox")
                 {
                     Stop = StopSandboxRequest.Parser.ParseFrom(frame, 5, frame.Length - 5);
+                    if (fault != "abort") _stopped = true;
                     reply = new SandboxResponse { Sandbox = new Sandbox
                     {
                         Metadata = new ObjectMeta
@@ -263,8 +267,8 @@ public class OpenShellConditionalMutationTests
             var response = new HttpResponseMessage(HttpStatusCode.OK)
             { Version = HttpVersion.Version20, Content = new ByteArrayContent(output) };
             response.Content.Headers.ContentType = new MediaTypeHeaderValue("application/grpc");
-            response.TrailingHeaders.Add("grpc-status", method != "Health" && fault == "abort" ? "10"
-                : (method != "Health" && fault == "lost") || fault == "health-error" ? "14" : "0");
+            response.TrailingHeaders.Add("grpc-status", method is "StopSandbox" or "DeleteSandbox" && fault == "abort" ? "10"
+                : (method is "StopSandbox" or "DeleteSandbox" && fault == "lost") || fault == "health-error" ? "14" : "0");
             return response;
         }
     }

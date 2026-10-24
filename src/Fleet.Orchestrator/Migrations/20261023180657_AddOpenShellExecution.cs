@@ -249,6 +249,22 @@ namespace Fleet.Orchestrator.Migrations
                 name: "IX_identity_request_nonces_LaunchId",
                 table: "identity_request_nonces",
                 column: "LaunchId");
+
+            migrationBuilder.AddColumn<string>(
+                name: "DeleteIntentJson",
+                table: "agent_open_shell_launches",
+                type: "varchar(2048)",
+                maxLength: 2048,
+                nullable: true)
+                .Annotation("MySql:CharSet", "utf8mb4");
+
+            migrationBuilder.AddColumn<string>(
+                name: "StopIntentJson",
+                table: "agent_open_shell_launches",
+                type: "varchar(2048)",
+                maxLength: 2048,
+                nullable: true)
+                .Annotation("MySql:CharSet", "utf8mb4");
         }
 
         /// <inheritdoc />

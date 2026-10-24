@@ -38,7 +38,7 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
     /// <summary>The JSON body of every <c>/containers/create</c> call; its <c>HostConfig.Binds</c> are the binds.</summary>
     public IReadOnlyList<string> CreateBodies => _dockerApi.CreateBodies;
 
-    private ProvisioningHarness(IReadOnlyDictionary<string, string?>? extraConfig)
+    private ProvisioningHarness(IReadOnlyDictionary<string, string?>? extraConfig, Action<IServiceCollection, SqliteConnection>? configure)
     {
         BaseDir = Path.Combine(Path.GetTempPath(), $"prov-harness-{Guid.NewGuid():N}");
         Directory.CreateDirectory(BaseDir);
@@ -53,7 +53,8 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
         services.AddSingleton<ContainerProvisioningService>(_ => Service!);
         services.AddSingleton<IAgentRuntimeLifecycle>(sp => new AgentRuntimeLifecycle(
             sp.GetRequiredService<IServiceScopeFactory>(), Service!, Docker!,
-            NullLogger<AgentRuntimeLifecycle>.Instance));
+            NullLogger<AgentRuntimeLifecycle>.Instance, sp.GetService<OpenShellRetirementService>()));
+        configure?.Invoke(services, _connection);
         Services = services.BuildServiceProvider();
 
         using (var scope = Services.CreateScope())
@@ -78,7 +79,8 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
             new JournalTokenService(config), Logs.For<ContainerProvisioningService>());
     }
 
-    public static ProvisioningHarness Create(IReadOnlyDictionary<string, string?>? extraConfig = null) => new(extraConfig);
+    public static ProvisioningHarness Create(IReadOnlyDictionary<string, string?>? extraConfig = null,
+        Action<IServiceCollection, SqliteConnection>? configure = null) => new(extraConfig, configure);
 
     public async Task SeedAsync(Action<OrchestratorDbContext> seed)
     {

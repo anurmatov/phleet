@@ -36,6 +36,8 @@ internal static class OpenShellModel
             e.Property(x => x.DestinationHash).HasMaxLength(64);
             e.Property(x => x.ControlUrl).HasMaxLength(2048);
             e.Property(x => x.CapabilitySecretRef).HasMaxLength(256);
+            e.Property(x => x.StopIntentJson).HasMaxLength(2048);
+            e.Property(x => x.DeleteIntentJson).HasMaxLength(2048);
             e.Property(x => x.Error).HasMaxLength(256);
             e.HasIndex(x => x.ActiveAgentId).IsUnique();
             e.HasIndex(x => new { x.GatewayId, x.SandboxId }).IsUnique();
@@ -120,9 +122,10 @@ internal static class OpenShellModel
                          nameof(OpenShellLaunch.ExpectedOldRuntimeId), nameof(OpenShellLaunch.CreatedAt) })
                 if (row.Property(name).IsModified)
                     throw new InvalidOperationException("OpenShell launch identity is immutable.");
-            foreach (var name in new[] { nameof(OpenShellLaunch.GatewayId), nameof(OpenShellLaunch.SandboxId) })
+            foreach (var name in new[] { nameof(OpenShellLaunch.GatewayId), nameof(OpenShellLaunch.SandboxId),
+                         nameof(OpenShellLaunch.StopIntentJson), nameof(OpenShellLaunch.DeleteIntentJson) })
                 if (row.Property(name).IsModified && row.Property(name).OriginalValue is not null)
-                    throw new InvalidOperationException("OpenShell sandbox IDs cannot be rebound.");
+                    throw new InvalidOperationException("OpenShell mappings and mutation intents cannot be replaced.");
             if (row.Property(x => x.RevokedAt).IsModified && row.Property(x => x.RevokedAt).OriginalValue is not null)
                 throw new InvalidOperationException("OpenShell revocation cannot be undone.");
         }

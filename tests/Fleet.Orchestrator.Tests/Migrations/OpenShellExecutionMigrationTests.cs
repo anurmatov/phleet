@@ -67,6 +67,8 @@ public sealed class OpenShellExecutionMigrationTests : IAsyncLifetime
         launch.ControlUrl = "https://control.example.invalid";
         launch.CapabilitySecretRef = "capability-ref1";
         launch.Error = "compatibility_blocked";
+        launch.StopIntentJson = "{\"operation\":\"synthetic-stop\"}";
+        launch.DeleteIntentJson = "{\"operation\":\"synthetic-delete\"}";
         launch.UpdatedAt = now;
         launch.BotPollerLeaseOwner = launch.Id;
         launch.BotPollerLeaseExpiresAt = now.AddSeconds(30);
@@ -77,7 +79,10 @@ public sealed class OpenShellExecutionMigrationTests : IAsyncLifetime
         db.OpenShellRequestNonces.Add(new() { Jti = "nonce1", LaunchId = launch.Id, ExpiresAt = now.AddMinutes(1) });
         await db.SaveChangesAsync();
         db.ChangeTracker.Clear();
-        Assert.Equal("/workspace/agent1", (await db.OpenShellLaunches.SingleAsync()).Workspace);
+        var storedLaunch = await db.OpenShellLaunches.SingleAsync();
+        Assert.Equal("/workspace/agent1", storedLaunch.Workspace);
+        Assert.Equal(launch.StopIntentJson, storedLaunch.StopIntentJson);
+        Assert.Equal(launch.DeleteIntentJson, storedLaunch.DeleteIntentJson);
         Assert.Equal("unclassified", (await db.OpenShellSecretBindings.SingleAsync()).Classification);
         Assert.Equal(launch.IdentityEpoch, (await db.OpenShellIdentitySessions.SingleAsync()).IdentityEpoch);
         Assert.Single(await db.OpenShellRequestNonces.ToListAsync());

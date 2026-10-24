@@ -140,13 +140,16 @@ public sealed class OpenShellLaunchStore(OrchestratorDbContext db, TimeProvider?
     }
 
     public async Task CompleteCleanupAsync(Guid launchId, DateTime now,
-        IOpenShellRuntimeEvidenceReader reader, CancellationToken ct = default)
+        IOpenShellRuntimeEvidenceReader reader, CancellationToken ct = default, Guid? retirementOwner = null)
     {
         ValidateTime(now, TimeSpan.FromSeconds(1));
         RequireNonRetryingContext();
         ArgumentNullException.ThrowIfNull(reader);
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
         var launch = await ReloadLaunchAsync(launchId, ct);
+        if (retirementOwner is not null && (launch.DeleteIntentJson is null
+            || System.Text.Json.JsonSerializer.Deserialize<OpenShellRetirementService.Intent>(launch.DeleteIntentJson)?.RequestId != retirementOwner))
+            throw new OpenShellStateConflictException("Retirement operation does not own the persisted intent.");
         if (launch.RevokedAt is null || launch.Phase is not ("cleanup_pending" or "retired"))
             throw new OpenShellStateConflictException("Cleanup completion requires a revoked launch.");
         await VerifyEvidenceAsync(reader, launch, cleanup: true, ct);
@@ -157,7 +160,7 @@ public sealed class OpenShellLaunchStore(OrchestratorDbContext db, TimeProvider?
         if (lease is not null)
         {
             await db.Entry(lease).ReloadAsync(ct);
-            if (lease.Owner != launchId)
+            if (lease.Owner != (retirementOwner ?? launchId))
                 throw new OpenShellStateConflictException("A different lifecycle owner holds the lease.");
             db.OpenShellLeases.Remove(lease);
         }

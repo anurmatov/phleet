@@ -959,6 +959,10 @@ namespace Fleet.Orchestrator.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime(6)");
 
+                    b.Property<string>("DeleteIntentJson")
+                        .HasMaxLength(2048)
+                        .HasColumnType("varchar(2048)");
+
                     b.Property<string>("DestinationHash")
                         .HasMaxLength(64)
                         .HasColumnType("varchar(64)");
@@ -999,6 +1003,10 @@ namespace Fleet.Orchestrator.Migrations
                         .HasMaxLength(128)
                         .HasColumnType("varchar(128)")
                         .UseCollation("utf8mb4_bin");
+
+                    b.Property<string>("StopIntentJson")
+                        .HasMaxLength(2048)
+                        .HasColumnType("varchar(2048)");
 
                     b.Property<long?>("TelegramOffset")
                         .HasColumnType("bigint");

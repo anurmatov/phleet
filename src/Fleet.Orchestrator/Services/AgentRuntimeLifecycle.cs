@@ -5,12 +5,12 @@ namespace Fleet.Orchestrator.Services;
 
 /// <summary>
 /// Shared REST/MCP/provisioning dispatch. Pending, never-launched agents retain the existing
-/// backend. No OpenShell runtime operation is enabled until its driver and admission are qualified.
+/// backend. OpenShell retirement requires trusted gateway and evidence peers; other operations stay blocked.
 /// An unknown backend or any launch history cannot fall back to Docker, even after retirement.
 /// </summary>
 public sealed class AgentRuntimeLifecycle(
     IServiceScopeFactory scopes, ContainerProvisioningService provisioning, DockerService docker,
-    ILogger<AgentRuntimeLifecycle> logger) : IAgentRuntimeLifecycle
+    ILogger<AgentRuntimeLifecycle> logger, OpenShellRetirementService? retirement = null) : IAgentRuntimeLifecycle
 {
     internal const string Blocked = "compatibility_blocked: OpenShell lifecycle driver and current-supervisor admission are not qualified";
 
@@ -55,7 +55,9 @@ public sealed class AgentRuntimeLifecycle(
     private async Task<ProvisionResult> ChangeLegacyStateAsync(string name, string operation, CancellationToken ct)
     {
         var (agent, error) = await ResolveAsync(name, ct);
-        if (error is not null) return error;
+        if (error is not null)
+            return operation == "stop" && agent?.ExecutionShell == "openshell" && retirement is not null
+                ? await retirement.StopAsync(name, ct) : error;
         ct.ThrowIfCancellationRequested();
         var ok = operation switch
         {
@@ -83,8 +85,10 @@ public sealed class AgentRuntimeLifecycle(
 
     public async Task<ProvisionResult> DeprovisionAsync(string name, CancellationToken ct = default)
     {
-        var (_, error) = await ResolveAsync(name, ct);
-        return error ?? await provisioning.LegacyDeprovisionAsync(name, ct);
+        var (agent, error) = await ResolveAsync(name, ct);
+        if (error is not null) return agent?.ExecutionShell == "openshell" && retirement is not null
+            ? await retirement.DeprovisionAsync(name, ct) : error;
+        return await provisioning.LegacyDeprovisionAsync(name, ct);
     }
 
     public async Task<ProvisionPreview> PreviewAsync(string name, CancellationToken ct = default)

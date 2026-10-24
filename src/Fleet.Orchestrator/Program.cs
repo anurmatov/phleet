@@ -36,6 +36,14 @@ builder.Services.AddSingleton<TaskHistoryStore>();
 builder.Services.AddSingleton<AgentRegistry>();
 builder.Services.AddSingleton<DockerService>();
 builder.Services.AddSingleton<ContainerProvisioningService>();
+builder.Services.AddSingleton<OpenShellRetirementService>(sp => new(() =>
+{
+    var connection = sp.GetRequiredService<IConfiguration>().GetConnectionString("OrchestratorDb");
+    if (string.IsNullOrWhiteSpace(connection)) throw new InvalidOperationException("Lifecycle database is unavailable.");
+    // Isolated non-retrying writer: an uncertain lifecycle mutation must never be replayed by EF.
+    return new OrchestratorDbContext(new DbContextOptionsBuilder<OrchestratorDbContext>()
+        .UseMySql(connection, new MySqlServerVersion(new Version(8, 0, 0))).Options);
+}, sp.GetRequiredService<IServiceScopeFactory>()));
 builder.Services.AddSingleton<IAgentRuntimeLifecycle, AgentRuntimeLifecycle>();
 builder.Services.AddSingleton<JournalTokenService>();
 builder.Services.AddSingleton(_ => new TelegramMembershipClient());

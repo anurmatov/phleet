@@ -485,12 +485,29 @@ public sealed class SouthRoundTripTests(
         Assert.Equal(0, agent.Counters.FenceRejectionCount);
 
         // The conversation is still usable: a later submission appends normally.
-        await SubmitAsync(conversation, "and again");
-        var after = await WaitForCountAsync(
-            conversation, ConversationEventKind.SubmissionAccepted, expected: 2);
+        var second = await SubmitAsync(conversation, "and again");
+
+        // #480: acceptance does not prove completion — the two happen in separate
+        // transactions — so this wait is bound to this submission's own terminal, not to the
+        // acceptance count that used to return at two-accepted/one-terminal and fail the
+        // terminal assertion below. The event id is the store's submission id, not the
+        // external ULID (see SubmissionRowIdAsync).
+        var secondId = await SubmissionRowIdAsync(second);
+        var after = await WaitForSecondCompletionAsync(conversation, secondId);
 
         Assert.Equal(2, after.Count(e => e.Kind == ConversationEventKind.SubmissionAccepted));
         Assert.Equal(2, after.Count(e => e.IsTerminal));
+
+        // The second turn's OWN terminal — turn.final, not merely "two terminals", and not the
+        // first submission's.
+        Assert.Equal(
+            ConversationEventKind.TurnFinal,
+            after.Single(e => e.IsTerminal && e.SubmissionId == secondId).Kind);
+
+        // Nothing was abandoned on the way, and the fence count is read AFTER the second
+        // completion, not only before it.
+        Assert.DoesNotContain(after, e => e.Kind == ConversationEventKind.TurnOutcomeUnknown);
+        Assert.Equal(0, agent.Counters.FenceRejectionCount);
     }
 
     // ── #480: the completion gate waits for the terminal, not the acceptance ──
@@ -513,8 +530,10 @@ public sealed class SouthRoundTripTests(
     /// </para>
     /// <para>
     /// Against the original acceptance-only gate this test is RED by construction: that gate
-    /// completes at the first poll inside the hold, and <see cref="WaitForSecondCompletionAsync"/>
-    /// on this commit is that gate verbatim.
+    /// completes at the first poll inside the hold — the <c>completion.IsCompleted</c> assertion
+    /// below fails there, with the count assertions behind it as a second net (the held snapshot
+    /// carries one terminal, not two). The red run is CI on the branch's first commit; the
+    /// corrected predicate is what ships.
     /// </para>
     /// </remarks>
     [Fact]
@@ -677,21 +696,19 @@ public sealed class SouthRoundTripTests(
         string conversationId, string kind, TimeSpan? timeout = null) =>
         WaitAsync(conversationId, events => events.Any(e => e.Kind == kind), timeout);
 
-    private Task<IReadOnlyList<StoredEvent>> WaitForCountAsync(
-        string conversationId, string kind, int expected, TimeSpan? timeout = null) =>
-        WaitAsync(conversationId, events => events.Count(e => e.Kind == kind) >= expected, timeout);
-
     /// <summary>
-    /// The completion gate for the second of two submissions.
+    /// The completion gate for the second of two submissions: both accepted, AND the second
+    /// submission's OWN terminal. Its acceptance is not enough.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// ⚠️ RED COMMIT ON PURPOSE (#480): the predicate below is the ORIGINAL acceptance-only gate
-    /// that this issue exists to fix — acceptance count and nothing else. The regression
-    /// <see cref="TheCompletionGateDoesNotFinishWhileTheSecondTerminalIsHeld"/> fails against it
-    /// deterministically, the way job 120882264918 failed in CI (expected 2 terminals, actual 1).
-    /// The next commit on this branch replaces it with the second submission's own terminal;
-    /// this line must not ship.
+    /// #480. Acceptance and terminal commit are separate transactions, so a two-accepted/
+    /// one-terminal snapshot is a legal mid-turn state. The gate this replaces waited on the
+    /// acceptance count alone and returned from exactly that snapshot — and the terminal-count
+    /// assertion that followed it failed (job 120882264918: expected 2, actual 1). A wait
+    /// completes on the event its assertions read: the second submission's own terminal, bound
+    /// to the store's submission id (<see cref="SubmissionRowIdAsync"/>), never a conversation's
+    /// first terminal and never the acceptance that preceded it.
     /// </para>
     /// <para>
     /// <paramref name="onPoll"/> receives every snapshot the gate evaluates. It exists so
@@ -704,7 +721,9 @@ public sealed class SouthRoundTripTests(
         Action<IReadOnlyList<StoredEvent>>? onPoll = null) =>
         WaitAsync(
             conversationId,
-            events => events.Count(e => e.Kind == ConversationEventKind.SubmissionAccepted) >= 2,
+            events =>
+                events.Count(e => e.Kind == ConversationEventKind.SubmissionAccepted) >= 2
+                && events.Any(e => e.IsTerminal && e.SubmissionId == secondSubmissionId),
             timeout,
             onPoll);
 

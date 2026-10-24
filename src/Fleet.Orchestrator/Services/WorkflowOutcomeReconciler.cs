@@ -587,17 +587,21 @@ public sealed class WorkflowOutcomeReconciler(
             foreach (var gap in ClassifierGapKeys)
                 await _store.ResolveAsync(_lease!, WorkflowOutcomeHealthComponents.Coverage, gap + ":" + ns, ct);
         // A per-type uncovered gap never closes because its TTL'd runs expired; only once the loaded
-        // classifier policy has Completed rules for the type (its runs are then re-read).
+        // classifier policy has Completed rules for the type (its runs are then re-read) and none of
+        // the type's runs is still pending classification — a compiled run whose source matched no
+        // rule's commit keeps its type uncovered.
         var coveredKeys = _policies!.Classifiers.Rules
             .Where(r => r.TerminalEventTypes.Contains(WorkflowOutcomeTerminalTypes.Completed, StringComparer.Ordinal))
             .Select(r => WorkflowOutcomeStore.UncoveredTypeKey(ns, r.WorkflowType))
             .ToHashSet(StringComparer.Ordinal);
+        coveredKeys.ExceptWith((await _store.PendingClassificationTypesAsync(ns, ct)).Select(t => WorkflowOutcomeStore.UncoveredTypeKey(ns, t)));
         foreach (var key in await _store.OpenUncoveredTypeKeysAsync(ns, ct))
             if (coveredKeys.Contains(key))
                 await _store.ResolveAsync(_lease!, WorkflowOutcomeHealthComponents.Coverage, key, ct);
     }
 
-    private static readonly string[] ClassifierGapKeys = ["classifier_missing", "classifier_conflict", "evidence_unreadable"];
+    private static readonly string[] ClassifierGapKeys =
+        ["classifier_missing", "classifier_conflict", "evidence_unreadable", WorkflowOutcomeClassifier.SourceUnverifiedGap];
 
     private ParallelOptions ReadOptions(CancellationToken ct) =>
         new() { MaxDegreeOfParallelism = Math.Max(1, _options.MaxConcurrentReads), CancellationToken = ct };

@@ -150,7 +150,8 @@ public sealed class WorkflowOutcomeClassifierPolicy
             }
             // A Completed rule with a definitionHash covers only runs that loaded exactly that
             // definition; one without it is pinned by workflowType + sourceCommit and covers only
-            // runs whose complete history proves no LoadWorkflowDefinition (compiled workflows).
+            // runs whose complete history proves no LoadWorkflowDefinition (compiled workflows) and
+            // whose every workflow task recorded that commit as the worker build id.
 
             var classification = PolicyJson.String(r, "classification", at);
             var reason = PolicyJson.String(r, "reasonCode", at);
@@ -202,7 +203,10 @@ public sealed class WorkflowOutcomeClassifierPolicy
 
             foreach (var terminal in terminals)
             {
-                var key = string.Join('\u001f', type, hash ?? "*", terminal, kind, path ?? "", equals?.Kind.ToString() ?? "", equals?.Raw ?? "", exitBranch ?? "");
+                // A compiled Completed rule is matched by its commit, so rules for two commits of one
+                // type (a bridge rollout) are distinct; an abort rule without a hash matches any run.
+                var pin = hash ?? (terminal == WorkflowOutcomeTerminalTypes.Completed ? "commit:" + commit : "*");
+                var key = string.Join('\u001f', type, pin, terminal, kind, path ?? "", equals?.Kind.ToString() ?? "", equals?.Raw ?? "", exitBranch ?? "");
                 if (!semantic.Add(key)) throw new WorkflowOutcomePolicyException(at + ": duplicates the evidence of another rule");
             }
 
@@ -497,13 +501,19 @@ public static class WorkflowOutcomeClassifier
         {
             // A run that loaded a definition is covered only by rules pinned to that exact hash. A
             // compiled run — complete history with no LoadWorkflowDefinition scheduled at all — only
-            // by rules pinned by workflowType + sourceCommit without a hash. Neither stands in for the
-            // other, and an unreadable or unresolved definition is never treated as compiled; any
-            // other snapshot is a visible gap, not an assumed success.
+            // by rules without a hash whose sourceCommit equals the build id every one of its
+            // workflow tasks recorded. Neither stands in for the other, and an unreadable or
+            // unresolved definition is never treated as compiled; any other snapshot is a visible
+            // gap, not an assumed success.
             var compiled = facts.HistoryComplete && !facts.DefinitionScheduled;
             var pinned = compiled
-                ? typeRules.Where(r => r.DefinitionHash is null).ToArray()
+                ? typeRules.Where(r => r.DefinitionHash is null && facts.WorkerBuildId is not null && r.SourceCommit == facts.WorkerBuildId).ToArray()
                 : typeRules.Where(r => facts.DefinitionHash is not null && r.DefinitionHash == facts.DefinitionHash).ToArray();
+            // Compiled rules exist for the type but this run's source is unknown or another commit:
+            // pending, never matched against code nobody reviewed.
+            if (pinned.Length == 0 && compiled && typeRules.Any(r => r.DefinitionHash is null))
+                return Pending(WorkflowOutcomeReasonCodes.ClassifierMissing, WorkflowOutcomeEvidenceStates.Complete,
+                    [terminalRef], SourceUnverifiedGap);
             if (pinned.Length == 0)
                 return Pending(WorkflowOutcomeReasonCodes.ClassifierMissing,
                     facts.DefinitionUnsupported ? WorkflowOutcomeEvidenceStates.Quarantined : WorkflowOutcomeEvidenceStates.Complete,
@@ -729,6 +739,9 @@ public static class WorkflowOutcomeClassifier
 
     /// <summary>Gap reason of an uncovered type; its health key is per namespace and type.</summary>
     public const string UncoveredTypeGap = "type_uncovered";
+
+    /// <summary>Gap reason of a compiled run whose recorded worker build id matches no compiled rule's sourceCommit.</summary>
+    public const string SourceUnverifiedGap = "source_unverified";
 
     private static WorkflowOutcomeVerdict Pending(string reason, string evidenceState, IReadOnlyList<string> refs, string gap) =>
         new(WorkflowOutcomeClassifications.ClassificationPending, reason, evidenceState, null, refs, [], null, gap);

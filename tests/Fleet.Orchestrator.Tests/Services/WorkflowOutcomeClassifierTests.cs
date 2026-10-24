@@ -800,14 +800,91 @@ public sealed class WorkflowOutcomeClassifierTests
     {
         var policy = Policy(Rule(NotifyFailed, hash: null, type: "CompiledWorkflow"));
 
-        var failed = WorkflowOutcomeClassifier.Classify(new HistoryBuilder("CompiledWorkflow", "wf-1")
-            .Delegate("notify_failed", "agent1", "could not deliver").CompletedWith(new { ok = false }).Facts(), policy);
-        var normal = WorkflowOutcomeClassifier.Classify(new HistoryBuilder("CompiledWorkflow", "wf-2")
+        var failed = WorkflowOutcomeClassifier.Classify(new HistoryBuilder("CompiledWorkflow", "wf-1").WorkflowTask(OutcomeFixtures.SourceCommit)
+            .Delegate("notify_failed", "agent1", "could not deliver").WorkflowTask(OutcomeFixtures.SourceCommit).CompletedWith(new { ok = false }).Facts(), policy);
+        var normal = WorkflowOutcomeClassifier.Classify(new HistoryBuilder("CompiledWorkflow", "wf-2").WorkflowTask(OutcomeFixtures.SourceCommit)
             .CompletedWith(new { ok = true }).Facts(), policy);
 
         Assert.Equal((WorkflowOutcomeClassifications.ConfirmedFailure, WorkflowOutcomeReasonCodes.BusinessTaskFailed), (failed.Classification, failed.ReasonCode));
         Assert.Equal((WorkflowOutcomeClassifications.ExcludedNonfailure, WorkflowOutcomeReasonCodes.NormalCompletion), (normal.Classification, normal.ReasonCode));
         Assert.Null(normal.GapReason);
+    }
+
+    private const string OtherCommit = "0123456789abcdef0123456789abcdef01234567";
+
+    /// <summary>Workflow-task build ids a compiled run's history may record that do not prove the rule's source.</summary>
+    public static TheoryData<string, string?[]> UnverifiedSources => new()
+    {
+        { "no workflow task recorded", [] },
+        { "build id missing", [null] },
+        { "one task missing it", [OutcomeFixtures.SourceCommit, null] },
+        { "another commit", [OtherCommit] },
+        { "spans two builds", [OutcomeFixtures.SourceCommit, OtherCommit] },
+        { "SDK default build id", ["79fd6733-de8b-4a98-9416-e3e2d8e217bf"] },
+        { "same commit, other case", [OutcomeFixtures.SourceCommit.ToUpperInvariant()] },
+    };
+
+    [Theory]
+    [Trait("WorkflowOutcomeSuite", "business")]
+    [MemberData(nameof(UnverifiedSources))]
+    public void Classify_CompiledRunWhoseSourceIsNotTheRuleCommit_StaysPendingWithASourceGap(string _, string?[] buildIds)
+    {
+        var policy = Policy(Rule(NotifyFailed, hash: null, type: "CompiledWorkflow"));
+        HistoryBuilder Run(string id)
+        {
+            var h = new HistoryBuilder("CompiledWorkflow", id);
+            foreach (var buildId in buildIds) h.WorkflowTask(buildId);
+            return h;
+        }
+
+        var failed = WorkflowOutcomeClassifier.Classify(Run("wf-1").Delegate("notify_failed", "agent1", "x").CompletedWith(new { ok = false }).Facts(), policy);
+        var normal = WorkflowOutcomeClassifier.Classify(Run("wf-2").CompletedWith(new { ok = true }).Facts(), policy);
+
+        foreach (var v in new[] { failed, normal })
+        {
+            Assert.Equal((WorkflowOutcomeClassifications.ClassificationPending, WorkflowOutcomeReasonCodes.ClassifierMissing), (v.Classification, v.ReasonCode));
+            Assert.Equal(WorkflowOutcomeClassifier.SourceUnverifiedGap, v.GapReason);
+            Assert.Null(v.ClassifierId);
+        }
+    }
+
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "business")]
+    public void ClassifierPolicy_CompiledRulesForTwoCommits_AreDistinctButOneCommitTwiceIsADuplicate()
+    {
+        var atOther = Rule(NotifyFailed, hash: null, type: "CompiledWorkflow", id: "r2").Replace(OutcomeFixtures.SourceCommit, OtherCommit);
+        Assert.Equal(2, Policy(Rule(NotifyFailed, hash: null, type: "CompiledWorkflow"), atOther).Rules.Count);
+
+        var ex = Assert.Throws<WorkflowOutcomePolicyException>(() =>
+            Policy(Rule(NotifyFailed, hash: null, type: "CompiledWorkflow"), Rule(NotifyFailed, hash: null, type: "CompiledWorkflow", id: "r2")));
+        Assert.Contains("duplicates the evidence", ex.Message);
+    }
+
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "business")]
+    public void Classify_CompiledRun_OnlyTheRuleWhoseCommitMatchesItsSourceApplies()
+    {
+        var policy = Policy(
+            Rule(NotifyFailed, hash: null, type: "CompiledWorkflow", id: "at-fixture"),
+            Rule(NotifyFailed, hash: null, type: "CompiledWorkflow", id: "at-other", reason: "business_review_cap").Replace(OutcomeFixtures.SourceCommit, OtherCommit));
+
+        var v = WorkflowOutcomeClassifier.Classify(new HistoryBuilder("CompiledWorkflow", "wf-1").WorkflowTask(OtherCommit)
+            .Delegate("notify_failed", "agent1", "x").WorkflowTask(OtherCommit).CompletedWith(new { ok = false }).Facts(), policy);
+
+        Assert.Equal((WorkflowOutcomeClassifications.ConfirmedFailure, WorkflowOutcomeReasonCodes.BusinessReviewCap, "at-other"),
+            (v.Classification, v.ReasonCode, v.ClassifierId));
+    }
+
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "business")]
+    public void Facts_WorkerBuildId_IsTheOneBuildIdEveryWorkflowTaskRecorded()
+    {
+        Assert.Equal(OutcomeFixtures.SourceCommit, new HistoryBuilder("T", "wf").WorkflowTask(OutcomeFixtures.SourceCommit)
+            .WorkflowTask(OutcomeFixtures.SourceCommit).CompletedWith(null).Facts().WorkerBuildId);
+        Assert.Null(new HistoryBuilder("T", "wf").CompletedWith(null).Facts().WorkerBuildId);
+        Assert.Null(new HistoryBuilder("T", "wf").WorkflowTask(OutcomeFixtures.SourceCommit).WorkflowTask(null).CompletedWith(null).Facts().WorkerBuildId);
+        Assert.Null(new HistoryBuilder("T", "wf").WorkflowTask(null).WorkflowTask(OutcomeFixtures.SourceCommit).CompletedWith(null).Facts().WorkerBuildId);
+        Assert.Null(new HistoryBuilder("T", "wf").WorkflowTask(OutcomeFixtures.SourceCommit).WorkflowTask(OtherCommit).CompletedWith(null).Facts().WorkerBuildId);
     }
 
     [Fact]

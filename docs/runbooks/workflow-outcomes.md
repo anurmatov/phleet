@@ -136,11 +136,28 @@ typed proof. Do not "fix" it by writing a catch-all classifier.
 **Uncovered types.** An open `type_uncovered:<ns>:<type>` coverage incident means Completed runs of
 that type are not checked for business failures (Failed/TimedOut are still always failures). The
 per-run `classifier_uncovered_type` rows expire like other nonfailure metadata; the incident does
-not. It closes only after an approved policy change adds Completed rules for the type and the
-orchestrator restarts. For a compiled type (its runs schedule no `LoadWorkflowDefinition`), add a
-compiled rule pinned by `workflowType` + the reviewed `sourceCommit` with no `definitionHash`, and
-evidence you confirmed in a recorded history of that source; for a UWE type pin the loaded hash as
-below. Until then the incident is an accepted, visible gap.
+not. It closes only after an approved policy change adds Completed rules for the type, the
+orchestrator restarts, and none of the type's runs is still `classification_pending`
+(`classifier_missing` or `classifier_uncovered_type`). For a compiled type (its runs schedule no
+`LoadWorkflowDefinition`), add a compiled rule pinned by `workflowType` + the reviewed `sourceCommit`
+with no `definitionHash`, and evidence you confirmed in a recorded history of that source; for a UWE
+type pin the loaded hash as below. Until then the incident is an accepted, visible gap.
+
+**Compiled source unverified.** An open `source_unverified:<ns>` incident means compiled runs whose
+workflow tasks did not all record a compiled rule's exact `sourceCommit` as the worker build id.
+Read the build ids from the run's history (`WorkflowTaskCompleted` → worker version build id):
+
+1. None, or not a 40-hex commit: the bridge image was built without `--build-arg GIT_COMMIT=<commit>`
+   (startup warning `FLEET_BUILD_COMMIT is not a 40-hex commit`). Rebuild it with the exact commit;
+   runs already recorded stay pending.
+2. Another commit: the bridge runs code no rule was reviewed for. Review that commit's compiled
+   workflow and add a rule pinned to it (a rule for the old commit may stay for older runs), or
+   leave the gap open.
+3. More than one build in one run: it spanned a bridge deploy and no single reviewed source
+   produced it. It stays pending; record an operator review decision if needed.
+
+Never pin a commit you did not verify the running image was built from; the gap closes only when no
+run in the namespace is pending on a classifier gap.
 
 **Classifier evidence and hash maintenance.** A `classification_pending` row with
 `classifier_missing` means a Completed run of a type/definition hash with no pinned rule:

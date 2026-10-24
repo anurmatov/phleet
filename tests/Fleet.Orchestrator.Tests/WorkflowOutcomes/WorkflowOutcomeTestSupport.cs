@@ -240,6 +240,31 @@ internal sealed class HistoryBuilder
         return this;
     }
 
+    /// <summary>
+    /// One workflow task, completed by a worker whose build id is <paramref name="buildId"/> (null:
+    /// none recorded), in the field the server records an unversioned worker's build id.
+    /// </summary>
+    public HistoryBuilder WorkflowTask(string? buildId)
+    {
+        var scheduled = Add(EventType.WorkflowTaskScheduled, e => e.WorkflowTaskScheduledEventAttributes = new WorkflowTaskScheduledEventAttributes
+        {
+            TaskQueue = new Temporalio.Api.TaskQueue.V1.TaskQueue { Name = "fleet" }, Attempt = 1,
+        });
+        var started = Add(EventType.WorkflowTaskStarted, e => e.WorkflowTaskStartedEventAttributes = new WorkflowTaskStartedEventAttributes
+        {
+            ScheduledEventId = scheduled.EventId,
+        });
+        Add(EventType.WorkflowTaskCompleted, e =>
+        {
+            var attrs = new WorkflowTaskCompletedEventAttributes { ScheduledEventId = scheduled.EventId, StartedEventId = started.EventId };
+#pragma warning disable CS0618 // the field the server records an unversioned worker's build id in
+            if (buildId is not null) attrs.WorkerVersion = new WorkerVersionStamp { BuildId = buildId };
+#pragma warning restore CS0618
+            e.WorkflowTaskCompletedEventAttributes = attrs;
+        });
+        return this;
+    }
+
     /// <summary>Workflow-task bookkeeping events that make a history long without adding facts.</summary>
     public HistoryBuilder Filler(int count)
     {

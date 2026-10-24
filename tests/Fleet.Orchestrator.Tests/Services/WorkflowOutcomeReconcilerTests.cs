@@ -406,8 +406,9 @@ public sealed class WorkflowOutcomeReconcilerTests
             });
             return await db.SaveChangesAsync();
         });
-        Run(h, "wf-ok", b => b.CompletedWith(new { ok = true }));
-        Run(h, "wf-bad", b => b.Delegate("notify_failed", "agent1", "undelivered").CompletedWith(new { ok = false }));
+        var source = OutcomeFixtures.SourceCommit;
+        Run(h, "wf-ok", b => b.WorkflowTask(source).CompletedWith(new { ok = true }));
+        Run(h, "wf-bad", b => b.WorkflowTask(source).Delegate("notify_failed", "agent1", "undelivered").WorkflowTask(source).CompletedWith(new { ok = false }));
         Run(h, "wf-other", b => b.CompletedWith(new { ok = true }), type: "OtherWorkflow");
 
         await h.CyclesAsync(3);
@@ -421,6 +422,58 @@ public sealed class WorkflowOutcomeReconcilerTests
         Assert.Contains(health, x => x.OutageKey == coveredKey && x.State != "open");
         // A type the policy still does not cover keeps its own durable gap.
         Assert.Contains(health, x => x.OutageKey == WorkflowOutcomeStore.UncoveredTypeKey(Ns, "OtherWorkflow") && x.State == "open");
+        Assert.DoesNotContain(health, x => x.OutageKey == WorkflowOutcomeClassifier.SourceUnverifiedGap + ":" + Ns && x.State == "open");
+    }
+
+    [Theory]
+    [Trait("WorkflowOutcomeSuite", "retention")]
+    [InlineData("unknown")]
+    [InlineData("another commit")]
+    [InlineData("two builds")]
+    public async Task Reconcile_CompiledRunWithUnverifiedSource_StaysPendingAndItsTypeGapStaysOpen(string source)
+    {
+        const string other = "0123456789abcdef0123456789abcdef01234567";
+        var policy = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(OutcomeFixtures.ClassifiersPath))!;
+        policy["rules"]!.AsArray().Add(System.Text.Json.Nodes.JsonNode.Parse($$"""
+            {"id":"compiled-notify-failed","workflowType":"SomeWorkflow","sourceCommit":"{{OutcomeFixtures.SourceCommit}}",
+             "terminalEventTypes":["WorkflowExecutionCompleted"],
+             "evidence":{"kind":"failure_branch","exitBranch":"notify_failed"},"classification":"confirmed_failure","reasonCode":"business_task_failed"}
+            """));
+        var file = Path.Combine(Directory.CreateTempSubdirectory("wo-compiled-unverified-").FullName, "classifiers.json");
+        await File.WriteAllTextAsync(file, policy.ToJsonString());
+        var options = Options();
+        options.ClassifiersFile = file;
+        await using var h = await ObserverHarness.CreateAsync(options);
+        var typeKey = WorkflowOutcomeStore.UncoveredTypeKey(Ns, "SomeWorkflow");
+        await h.DbAsync(async db =>
+        {
+            db.WorkflowOutcomeHealth.Add(new WorkflowOutcomeHealth
+            {
+                Component = WorkflowOutcomeHealthComponents.Coverage, OutageKey = typeKey, State = "open", Reason = "no classifier rules",
+                Namespace = Ns, GapStart = Old, FirstSeenAt = Old, LastSeenAt = Old,
+            });
+            return await db.SaveChangesAsync();
+        });
+        HistoryBuilder Tasks(HistoryBuilder b) => source switch
+        {
+            "unknown" => b.WorkflowTask(null),
+            "another commit" => b.WorkflowTask(other),
+            _ => b.WorkflowTask(OutcomeFixtures.SourceCommit).WorkflowTask(other),
+        };
+        Run(h, "wf-ok", b => Tasks(b).CompletedWith(new { ok = true }));
+        Run(h, "wf-bad", b => Tasks(b).Delegate("notify_failed", "agent1", "undelivered").CompletedWith(new { ok = false }));
+
+        await h.CyclesAsync(3);
+
+        foreach (var wf in new[] { "wf-ok", "wf-bad" })
+        {
+            var row = await h.RunAsync(Ns, wf, "run-1");
+            Assert.Equal((WorkflowOutcomeClassifications.ClassificationPending, WorkflowOutcomeReasonCodes.ClassifierMissing), (row.Classification, row.ReasonCode));
+            Assert.False(Eligible(row));
+        }
+        var health = await h.HealthAsync();
+        Assert.Contains(health, x => x.OutageKey == typeKey && x.State == "open");
+        Assert.Contains(health, x => x.OutageKey == WorkflowOutcomeClassifier.SourceUnverifiedGap + ":" + Ns && x.State == "open");
     }
 
     [Fact]

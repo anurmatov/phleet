@@ -216,6 +216,14 @@ public sealed record WorkflowOutcomeRunFacts
     /// </summary>
     public bool DefinitionScheduled { get; init; }
 
+    /// <summary>
+    /// The worker build id recorded on every <c>WorkflowTaskCompleted</c> event of this run, when
+    /// there is at least one and they all carry the same non-empty value; otherwise null (none
+    /// recorded, one missing, or the run spanned workers of different builds). The bridge stamps
+    /// its image's source commit here, so this is the run's own source provenance.
+    /// </summary>
+    public string? WorkerBuildId { get; init; }
+
     public IReadOnlyList<WorkflowOutcomeDelegate> Delegates { get; init; } = [];
     public IReadOnlyList<WorkflowOutcomeSignal> Signals { get; init; } = [];
     public IReadOnlyList<long> CancelRequestEventIds { get; init; } = [];
@@ -478,6 +486,9 @@ public sealed class WorkflowOutcomeFactsBuilder(string @namespace, string workfl
     private string? _definitionName, _definitionHash;
     private int? _definitionVersion;
     private bool _definitionUnsupported;
+    private int _workflowTasksCompleted;
+    private string? _workerBuildId;
+    private bool _workerBuildIdUnverified;
     private WorkflowOutcomeTerminal? _terminal;
 
     public long EventCount { get; private set; }
@@ -579,6 +590,16 @@ public sealed class WorkflowOutcomeFactsBuilder(string @namespace, string workfl
                 _cancelRequests.Add(e.EventId);
                 break;
 
+            case EventType.WorkflowTaskCompleted when e.WorkflowTaskCompletedEventAttributes is { } a:
+                _workflowTasksCompleted++;
+#pragma warning disable CS0618 // the field the bridge's (unversioned) worker build id is recorded in
+                var buildId = a.WorkerVersion?.BuildId;
+#pragma warning restore CS0618
+                if (string.IsNullOrEmpty(buildId) || (_workerBuildId is not null && _workerBuildId != buildId))
+                    _workerBuildIdUnverified = true;
+                _workerBuildId ??= Empty(buildId);
+                break;
+
             case EventType.WorkflowExecutionCompleted when e.WorkflowExecutionCompletedEventAttributes is { } a:
                 SetTerminal(e, "Completed", a, null, null, a.NewExecutionRunId, a.Result?.Payloads_);
                 break;
@@ -621,6 +642,7 @@ public sealed class WorkflowOutcomeFactsBuilder(string @namespace, string workfl
         DefinitionHash = _definitionHash,
         DefinitionUnsupported = _definitionUnsupported,
         DefinitionScheduled = _loadScheduledId is not null,
+        WorkerBuildId = _workflowTasksCompleted > 0 && !_workerBuildIdUnverified ? _workerBuildId : null,
         Delegates = _delegates.Select(d => new WorkflowOutcomeDelegate(d.ScheduledEventId, d.Target, d.TaskId, d.Attempt,
             d.Outcome, d.CloseEventId, d.CloseEventType, d.Result, d.ResultText, d.ResultStatus, d.FailureType,
             d.FailureMessage, d.ArgumentsUnsupported)).ToArray(),

@@ -72,6 +72,10 @@ public sealed class FixtureWorkflow
                 await Workflow.ExecuteActivityAsync<FixtureAgentResult>("DelegateToAgent", ["agent1", "implement", id + "/phase1_implement", false, 0], Quick);
                 await Workflow.ExecuteActivityAsync<FixtureAgentResult>("DelegateToAgent", ["coordinator", "notify", id + "/notify_consensus_exhausted", false, 0], Quick);
                 return null;
+            case "compiled-notify-failed":
+                // No LoadWorkflowDefinition: a compiled workflow taking its notify_failed exit.
+                await Workflow.ExecuteActivityAsync<FixtureAgentResult>("DelegateToAgent", ["agent1", "notify", id + "/notify_failed", false, 0], Quick);
+                return new Dictionary<string, object> { ["ok"] = false };
             case "task-failed":
                 await Workflow.ExecuteActivityAsync<JsonElement>("LoadWorkflowDefinition", [Workflow.Info.WorkflowType], Quick);
                 await Workflow.ExecuteActivityAsync<FixtureAgentResult>("DelegateToAgent", ["agent1", "FAIL", id + "/delegate", true, 3], Quick);
@@ -110,6 +114,58 @@ public sealed class WorkflowOutcomeRealTemporalTests
             "\",\"terminalEventTypes\":[\"WorkflowExecutionCompleted\"],\"evidence\":{\"kind\":\"failure_branch\",\"exitBranch\":\"notify_consensus_exhausted\"},\"classification\":\"confirmed_failure\",\"reasonCode\":\"business_review_cap\"}," +
             "{\"id\":\"real-task-failed\",\"workflowType\":\"TaskDelegationWorkflow\",\"sourceCommit\":\"" + commit + "\",\"definitionHash\":\"" + Hash("TaskDelegationWorkflow") +
             "\",\"terminalEventTypes\":[\"WorkflowExecutionCompleted\"],\"evidence\":{\"kind\":\"delegate_result\",\"exitBranch\":\"delegate\",\"path\":\"/Status\",\"equals\":\"failed\"},\"classification\":\"confirmed_failure\",\"reasonCode\":\"business_task_failed\"}]}";
+    }
+
+    /// <summary>
+    /// A compiled rule against real histories: the run whose worker build id is the rule's commit is
+    /// classified by it; the same workflow on a worker with the SDK default build id stays pending.
+    /// </summary>
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "business")]
+    public async Task RealTemporal_CompiledRule_AppliesOnlyToRunsWhoseWorkersRecordedItsCommit()
+    {
+        // No skip: if the dev server cannot be downloaded/started the test fails loudly.
+        await using var env = await WorkflowEnvironment.StartLocalAsync(new WorkflowEnvironmentStartLocalOptions
+        {
+            DevServerOptions = new DevServerOptions { LogLevel = "error" },
+        });
+        var policy = WorkflowOutcomeClassifierPolicy.Parse(System.Text.Encoding.UTF8.GetBytes(
+            "{\"schemaVersion\":1,\"rules\":[{\"id\":\"real-compiled\",\"workflowType\":\"SomeCompiledWorkflow\",\"sourceCommit\":\"" + OutcomeFixtures.SourceCommit +
+            "\",\"terminalEventTypes\":[\"WorkflowExecutionCompleted\"],\"evidence\":{\"kind\":\"failure_branch\",\"exitBranch\":\"notify_failed\"}," +
+            "\"classification\":\"confirmed_failure\",\"reasonCode\":\"business_task_failed\"}]}"));
+
+        async Task<(WorkflowOutcomeRunFacts Facts, WorkflowOutcomeVerdict Verdict)> RunOnAsync(string queue, string? buildId)
+        {
+            var options = new TemporalWorkerOptions(queue).AddWorkflow<FixtureWorkflow>().AddAllActivities(new FixtureActivities());
+#pragma warning disable CS0618 // the bridge's own stamping (WorkerSourceCommit) sets exactly this
+            if (buildId is not null) options.BuildId = buildId;
+#pragma warning restore CS0618
+            using var worker = new TemporalWorker(env.Client, options);
+            return await worker.ExecuteAsync(async () =>
+            {
+                var handle = await env.Client.StartWorkflowAsync("SomeCompiledWorkflow",
+                    [new Dictionary<string, object> { ["Mode"] = "compiled-notify-failed" }], new WorkflowOptions(queue, queue));
+                await handle.GetResultAsync();
+                var events = new List<Temporalio.Api.History.V1.HistoryEvent>();
+                await foreach (var e in handle.FetchHistoryEventsAsync()) events.Add(e);
+                var facts = WorkflowOutcomeFactsBuilder.FromEvents(env.Client.Options.Namespace, queue, handle.ResultRunId ?? "", events);
+                return (facts, WorkflowOutcomeClassifier.Classify(facts, policy));
+            });
+        }
+
+        var verified = await RunOnAsync("compiled-at-commit", OutcomeFixtures.SourceCommit);
+        var unverified = await RunOnAsync("compiled-default-build", null);
+
+        Assert.True(verified.Facts.HistoryComplete);
+        Assert.False(verified.Facts.DefinitionScheduled);
+        Assert.Equal(OutcomeFixtures.SourceCommit, verified.Facts.WorkerBuildId);
+        Assert.Equal((WorkflowOutcomeClassifications.ConfirmedFailure, WorkflowOutcomeReasonCodes.BusinessTaskFailed, "real-compiled"),
+            (verified.Verdict.Classification, verified.Verdict.ReasonCode, verified.Verdict.ClassifierId));
+
+        Assert.True(unverified.Facts.HistoryComplete);
+        Assert.NotEqual(OutcomeFixtures.SourceCommit, unverified.Facts.WorkerBuildId);
+        Assert.Equal((WorkflowOutcomeClassifications.ClassificationPending, WorkflowOutcomeReasonCodes.ClassifierMissing, WorkflowOutcomeClassifier.SourceUnverifiedGap),
+            (unverified.Verdict.Classification, unverified.Verdict.ReasonCode, unverified.Verdict.GapReason));
     }
 
     [Fact]

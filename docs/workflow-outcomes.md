@@ -108,7 +108,7 @@ field rules.
 | Field | Rule |
 |---|---|
 | `id` | Unique across the file |
-| `workflowType`, `sourceCommit`, `definitionHash` | Exact type, reviewed source and **loaded** definition hash; there is no catch-all type and no wildcard. A Completed rule **with** `definitionHash` covers only runs that loaded exactly that definition. A Completed rule **without** it is a compiled rule pinned by `workflowType` + `sourceCommit`: it covers only runs whose complete history proves no `LoadWorkflowDefinition` was scheduled (compiled workflows). A hashed rule never covers a compiled run, a compiled rule never covers a run with a loaded definition, and an unreadable, unresolved or incomplete history is never treated as compiled |
+| `workflowType`, `sourceCommit`, `definitionHash` | Exact type, reviewed source and **loaded** definition hash; there is no catch-all type and no wildcard. A Completed rule **with** `definitionHash` covers only runs that loaded exactly that definition. A Completed rule **without** it is a compiled rule pinned by `workflowType` + `sourceCommit`: it covers only runs whose complete history proves no `LoadWorkflowDefinition` was scheduled (compiled workflows) **and** whose every `WorkflowTaskCompleted` event recorded exactly that commit as the worker build id. A hashed rule never covers a compiled run, a compiled rule never covers a run with a loaded definition, and an unreadable, unresolved or incomplete history is never treated as compiled |
 | `terminalEventTypes` | Exact Temporal terminal event types the rule applies to |
 | `evidence.kind` | `terminal_event`, `delegate_result` or `failure_branch` |
 | `evidence.path` | RFC 6901 JSON pointer into the delegate result payload (`delegate_result` only) |
@@ -128,6 +128,17 @@ The public seed fixtures the example covers:
 | `UweDesignWorkflow` | `emit_exhausted_error` delegate result `ERROR:consensus_exhausted` | Human `REJECTED`, `emit_ceo_needs_human_error` |
 | `TaskDelegationWorkflow` | The original `delegate` step's typed `failed` result | The `notify-result` notifier output |
 | `NotifyCtoWorkflow`, `MemoryStoreRequestWorkflow`, `AuthTokenRefreshWorkflow` | Only a source-proven unresolved caught failure at exit, as a compiled rule pinned by `sourceCommit` (no public rule ships) | Void, null or no-op results |
+
+**Compiled-run source provenance.** The bridge stamps its image's source commit as the Temporal
+worker build id (`FLEET_BUILD_COMMIT`, baked from `--build-arg GIT_COMMIT=<40-hex>` in
+`Dockerfile.temporal`; worker versioning stays off, so the id is recorded, never routed on).
+Temporal records it on every workflow task, so a compiled run's source is read from its own
+history, not attested by an operator. A compiled run whose tasks recorded no build id, a value that
+is not the rule's exact commit, or more than one build (a run spanning a bridge deploy) stays
+`classification_pending` / `classifier_missing` under a `source_unverified:<ns>` coverage gap: never
+matched, never a nonfailure, and its type's `type_uncovered` gap stays open. An image built without
+the build arg logs a startup warning and every compiled run stays unverified. Rules for two commits
+of one type may coexist (a rollout); one commit twice is a duplicate.
 
 Pin `sourceCommit` (and, for UWE types, `definitionHash`) for every enrolled namespace **before** enrollment. The
 example values are deliberately not hex, so an unpinned copy fails startup instead of claiming

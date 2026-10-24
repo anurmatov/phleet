@@ -169,13 +169,21 @@ var caseInsensitiveDataConverter = DataConverter.Default with
     PayloadConverter = new DefaultPayloadConverter(new JsonSerializerOptions(JsonSerializerDefaults.Web))
 };
 
+// Workflow failure accountability (#476): the image's source commit becomes the worker build id,
+// which Temporal records on every workflow task — the provenance compiled classifier rules match.
+var workerSourceCommit = Environment.GetEnvironmentVariable(WorkerSourceCommit.EnvironmentVariable);
+
 foreach (var @namespace in configuredNamespaces)
 {
     // Register the same generic workflows/activities on every namespace worker.
     // Unused registrations are harmless and keep startup fully config-driven.
     builder.Services
         .AddHostedTemporalWorker(temporalOpts.TemporalAddress, @namespace, @namespace)
-        .ConfigureOptions(opt => opt.ClientOptions!.DataConverter = caseInsensitiveDataConverter)
+        .ConfigureOptions(opt =>
+        {
+            opt.ClientOptions!.DataConverter = caseInsensitiveDataConverter;
+            WorkerSourceCommit.Apply(opt, workerSourceCommit);
+        })
         .AddScopedActivities<DelegateToAgentActivity>()
         .AddScopedActivities<HttpRequestActivity>()
         .AddScopedActivities<BroadcastTokenUpdateActivity>()
@@ -209,6 +217,13 @@ if (!lateCapture.WorkflowOutcomeLateCaptureEnabled)
 {
     startupLogger.LogWarning(
         "Workflow outcome late-result capture is OFF (TemporalBridge:WorkflowOutcomeLateCaptureEnabled=false): agent replies whose waiter is gone are NOT captured and are discarded as before");
+}
+
+if (WorkerSourceCommit.Resolve(workerSourceCommit) is null)
+{
+    startupLogger.LogWarning(
+        "{Variable} is not a 40-hex commit: Temporal workers keep the SDK default build id, so compiled workflow runs cannot be source-verified by workflow outcome classifier rules",
+        WorkerSourceCommit.EnvironmentVariable);
 }
 
 if (configuredNamespaces.Length == 0)

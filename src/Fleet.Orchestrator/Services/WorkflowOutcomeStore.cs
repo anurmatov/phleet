@@ -681,6 +681,16 @@ public sealed class WorkflowOutcomeStore(
             && r.Classification == WorkflowOutcomeClassifications.ClassificationPending && r.ReasonCode == WorkflowOutcomeReasonCodes.ClassifierMissing, ct);
     }
 
+    /// <summary>Workflow types of <paramref name="ns"/> with a run still pending on a classifier gap or an uncovered type.</summary>
+    public async Task<IReadOnlyList<string>> PendingClassificationTypesAsync(string ns, CancellationToken ct)
+    {
+        using var scope = scopes.CreateScope();
+        return await Db(scope).WorkflowOutcomeRuns.AsNoTracking()
+            .Where(r => r.Namespace == ns && r.Classification == WorkflowOutcomeClassifications.ClassificationPending
+                && (r.ReasonCode == WorkflowOutcomeReasonCodes.ClassifierMissing || r.ReasonCode == WorkflowOutcomeReasonCodes.ClassifierUncoveredType))
+            .Select(r => r.WorkflowType).Distinct().ToListAsync(ct);
+    }
+
     /// <summary>Unresolved causes / pending classifications older than <paramref name="olderThan"/>.</summary>
     public async Task<(int Count, IReadOnlyList<string> Refs)> StalePendingAsync(string ns, DateTime olderThan, CancellationToken ct)
     {

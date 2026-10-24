@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Data;
 using System.Text.Json;
 using Fleet.Orchestrator.Data;
@@ -191,15 +192,23 @@ public sealed class OpenShellRetirementService(Func<OrchestratorDbContext> creat
                 || launches.Any(x => x.Phase != "retired" || x.RevokedAt is null || x.ActiveAgentId is not null)
                 || await db.OpenShellLeases.AnyAsync(x => x.AgentId == agent.Id, ct))
                 throw new OpenShellStateConflictException("Every launch must be retired with no active slot or lifecycle owner.");
-            var oldestProof = DateTime.MaxValue;
             foreach (var launch in launches)
             {
                 if (launch.SandboxId is not null && (!Bound(launch) || !await db.OpenShellRetiredIds.AnyAsync(x =>
                         x.GatewayId == launch.GatewayId && x.SandboxId == launch.SandboxId, ct)))
                     throw new OpenShellStateConflictException("Deletion cannot discard incomplete mapping or missing tombstone.");
-                var observedAt = await VerifyAsync(reader, launch, true, ct);
-                if (observedAt < oldestProof) oldestProof = observedAt;
             }
+            // Complete mapping checks before parallel I/O; never share the DbContext with workers.
+            // Bounded workers avoid one task per historical launch. A single cohort deadline also
+            // bounds queued reads, rather than serially spending five seconds per retired sandbox.
+            using var proofDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            proofDeadline.CancelAfter(TimeSpan.FromSeconds(5));
+            var observations = new ConcurrentBag<DateTime>();
+            await Parallel.ForEachAsync(launches, new ParallelOptions
+            {
+                MaxDegreeOfParallelism = 8, CancellationToken = proofDeadline.Token,
+            }, async (launch, token) => observations.Add(await VerifyAsync(reader, launch, true, token)));
+            var oldestProof = observations.Min();
             var ids = launches.Select(x => x.Id).ToHashSet();
             // Keep the SQL membership test relational, not a captured array/span expression.
             var ownedIds = db.OpenShellLaunches.Where(x => x.AgentId == agent.Id).Select(x => x.Id);

@@ -3,6 +3,8 @@ namespace Fleet.Orchestrator.Services;
 /// <summary>
 /// Trusted lifecycle adapter boundary, not an upstream wire message. An implementation must obtain
 /// current authenticated runtime and poller/consumer observations, or throw on unknown state.
+/// ReadAsync may run concurrently for immutable targets; each read must own its I/O/context,
+/// respect cancellation and never share EF tracking state across reads.
 /// No production implementation is registered yet: these transitions cannot admit a workload.
 /// </summary>
 public interface IOpenShellRuntimeEvidenceReader

@@ -155,6 +155,145 @@ public sealed class OpenShellAgentDeletionTests
         Assert.Equal(0, writes);
     }
 
+    [Theory]
+    [InlineData(4, "none")]
+    [InlineData(12, "none")]
+    [InlineData(4, "drain")]
+    [InlineData(4, "stale")]
+    public async Task MultipleRetiredLaunches_ReadProofsConcurrentlyWithABound_AndRejectAnyInvalidProof(int count, string fault)
+    {
+        await using var h = ProvisioningHarness.Create();
+        await SeedRetiredHistoryAsync(h, count);
+        var invalid = fault != "none";
+        var reader = new CohortEvidence(Math.Min(count, 8), fault == "drain", fault == "stale");
+        using var peers = new ServiceCollection().AddSingleton<IOpenShellRuntimeEvidenceReader>(reader).BuildServiceProvider();
+        var service = new OpenShellRetirementService(() => Db(h), peers.GetRequiredService<IServiceScopeFactory>());
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var completion = service.CompleteAgentDeletionAsync("agent1", 1, cancellation.Token);
+        try
+        {
+            // Slow I/O is held until an entire bounded cohort enters. Sequential reads cannot progress.
+            await reader.CohortEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(Math.Min(count, 8), reader.Reads);
+            Assert.Equal(Math.Min(count, 8), reader.MaximumConcurrent);
+            Assert.False(completion.IsCompleted);
+            reader.Release.TrySetResult();
+            var result = await completion;
+            Assert.Equal(!invalid, result.Result.Success);
+            Assert.Equal(count, reader.Reads);
+            Assert.InRange(reader.MaximumConcurrent, 2, 8);
+            await using var db = Db(h);
+            Assert.Equal(invalid ? count : 0, await db.OpenShellLaunches.CountAsync());
+            Assert.Equal(invalid, await db.Agents.AnyAsync());
+            Assert.Equal(count, await db.OpenShellRetiredIds.CountAsync());
+            Assert.Equal(0, reader.Active);
+        }
+        finally
+        {
+            reader.Release.TrySetResult(); cancellation.Cancel();
+            try { await completion; } catch (OperationCanceledException) { }
+        }
+    }
+
+    [Fact]
+    public async Task CancelledProofCohort_DrainsReadersAndPreservesAllConfiguration()
+    {
+        await using var h = ProvisioningHarness.Create();
+        await SeedRetiredHistoryAsync(h, 4);
+        var reader = new CohortEvidence(4, false);
+        using var peers = new ServiceCollection().AddSingleton<IOpenShellRuntimeEvidenceReader>(reader).BuildServiceProvider();
+        var service = new OpenShellRetirementService(() => Db(h), peers.GetRequiredService<IServiceScopeFactory>());
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var completion = service.CompleteAgentDeletionAsync("agent1", 1, cancellation.Token);
+        try
+        {
+            await reader.CohortEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => completion);
+            await reader.Drained.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(0, reader.Active);
+            await using var db = Db(h);
+            Assert.Equal(4, await db.OpenShellLaunches.CountAsync());
+            Assert.True(await db.Agents.AnyAsync());
+        }
+        finally
+        {
+            cancellation.Cancel(); reader.Release.TrySetResult();
+            try { await completion; } catch (OperationCanceledException) { }
+        }
+    }
+
+    [Fact]
+    public async Task ProofCohortDeadline_CancelsOutstandingReadsWithoutStartingQueuedHistory()
+    {
+        await using var h = ProvisioningHarness.Create();
+        await SeedRetiredHistoryAsync(h, 12);
+        var reader = new CohortEvidence(8, false);
+        using var peers = new ServiceCollection().AddSingleton<IOpenShellRuntimeEvidenceReader>(reader).BuildServiceProvider();
+        var service = new OpenShellRetirementService(() => Db(h), peers.GetRequiredService<IServiceScopeFactory>());
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var completion = service.CompleteAgentDeletionAsync("agent1", 1, cancellation.Token);
+        try
+        {
+            await reader.CohortEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            // Deliberately never release the owned I/O gate: the actual five-second cohort bound must fire.
+            var result = await completion.WaitAsync(TimeSpan.FromSeconds(7));
+            Assert.False(result.Result.Success);
+            Assert.Equal(503, result.Result.StatusCode);
+            await reader.Drained.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(0, reader.Active);
+            Assert.Equal(8, reader.Reads);
+            await using var db = Db(h);
+            Assert.Equal(12, await db.OpenShellLaunches.CountAsync());
+            Assert.True(await db.Agents.AnyAsync());
+        }
+        finally
+        {
+            cancellation.Cancel(); reader.Release.TrySetResult();
+            try { await completion; } catch (OperationCanceledException) { }
+        }
+    }
+
+    private static Task SeedRetiredHistoryAsync(ProvisioningHarness h, int count) => h.SeedAsync(db =>
+    {
+        db.Agents.Add(new() { Id = 1, Name = "agent1", DisplayName = "Agent 1", Role = "test", Model = "test",
+            ContainerName = "legacy", OpenShellMigrationState = "active" });
+        for (var i = 0; i < count; i++)
+        {
+            db.OpenShellLaunches.Add(new() { Id = Guid.NewGuid(), AgentId = 1, Phase = "retired", RevokedAt = DateTime.UtcNow,
+                GatewayId = "gateway1", Workspace = "workspace1", SandboxId = $"sandbox{i}", IdentityEpoch = Guid.NewGuid(), CreatedAt = DateTime.UtcNow });
+            db.OpenShellRetiredIds.Add(new() { GatewayId = "gateway1", SandboxId = $"sandbox{i}", RetiredAt = DateTime.UtcNow });
+        }
+    });
+
+    private sealed class CohortEvidence(int expected, bool invalid, bool stale = false) : IOpenShellRuntimeEvidenceReader
+    {
+        public TaskCompletionSource CohortEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Drained { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _reads, _active, _maximum;
+        public int Reads => Volatile.Read(ref _reads);
+        public int Active => Volatile.Read(ref _active);
+        public int MaximumConcurrent => Volatile.Read(ref _maximum);
+        public async Task<OpenShellRuntimeEvidence> ReadAsync(OpenShellRuntimeTarget target, CancellationToken ct)
+        {
+            Interlocked.Increment(ref _reads);
+            var active = Interlocked.Increment(ref _active);
+            int before;
+            do { before = Volatile.Read(ref _maximum); if (active <= before) break; }
+            while (Interlocked.CompareExchange(ref _maximum, active, before) != before);
+            if (active == expected) CohortEntered.TrySetResult();
+            try
+            {
+                await Release.Task.WaitAsync(ct);
+                return new(target.LaunchId, target.IdentityEpoch, target.GatewayId, target.RuntimeId,
+                    true, true, invalid && target.RuntimeId == "sandbox0" ? 1 : 0, 0,
+                    DateTime.UtcNow.AddSeconds(stale && target.RuntimeId == "sandbox0" ? -6 : 0));
+            }
+            finally { if (Interlocked.Decrement(ref _active) == 0) Drained.TrySetResult(); }
+        }
+    }
+
     private static OrchestratorDbContext Db(ProvisioningHarness h) => new(new DbContextOptionsBuilder<OrchestratorDbContext>().UseSqlite(h.Connection).Options);
 
     private sealed class Evidence(string fault) : IOpenShellRuntimeEvidenceReader
@@ -162,7 +301,7 @@ public sealed class OpenShellAgentDeletionTests
         private int _absenceReads;
         public Task<OpenShellRuntimeEvidence> ReadAsync(OpenShellRuntimeTarget target, CancellationToken cancellationToken)
         {
-            if (target.RequireAbsence) _absenceReads++;
+            if (target.RequireAbsence) Interlocked.Increment(ref _absenceReads);
             var absent = target.RequireAbsence && fault != "deprovision-proof" && !(fault == "delete-proof" && _absenceReads >= 2);
             return Task.FromResult(new OpenShellRuntimeEvidence(target.LaunchId, target.IdentityEpoch, target.GatewayId,
                 target.RuntimeId, true, absent, 0, 0, DateTime.UtcNow, fault == "complete-inventory", fault == "complete-inventory" ? 0 : -1));

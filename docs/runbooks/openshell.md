@@ -90,3 +90,12 @@ rows and retired-ID tombstones are retained. Registry removal follows commit.
 but the bounded notification failed; inspect authoritative state instead of replaying
 a delete or interpreting the response as rollback. The whole deprovision/cleanup
 request budget is 120 seconds, with no new runtime or rollout authority.
+
+Deletion proof acquisition has at most eight concurrent reads and a shared
+five-second cohort deadline, including queued history. It does not launch one task
+per history row or share the transaction context with concurrent readers. Every
+proof must still be fresh before save/commit; cohort timeout, cancellation, stale
+or inconsistent proof preserves configuration rather than weakening the gate.
+The reader implementation must support concurrent immutable-target requests with
+independent I/O/context ownership and cancellation; the production reader remains
+unimplemented and unregistered, not qualified by synthetic cohort tests.

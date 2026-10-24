@@ -330,7 +330,12 @@ It reloads all retained launches, requires retired/revoked/no-slot state and no
 lifecycle lease, verifies each mapping/tombstone and rechecks fresh absence/drain
 proof before removing configuration. An unbound history row requires complete
 launch-owned inventory with zero owned sandboxes, not a missing-ID assumption.
-Proofs must remain fresh through the deletion decision; unknown state rolls back.
+Mapping/tombstone checks finish before proof acquisition. At most eight proof
+reads run concurrently inside one five-second cohort deadline, including queued
+reads; no EF context is shared with workers. This avoids serial reader latency
+aging earlier proofs while keeping concurrency bounded. Each proof still passes
+its exact-target/absence/drain checks and five-second age checks before save/commit.
+A slow cohort, stale proof or unknown state still rolls back, not stale acceptance.
 
 Only the agent's nonce/session/binding/launch and configuration links are removed,
 with assignment-derived ACL rows staged atomically. Cross-agent session inconsistency

@@ -378,6 +378,7 @@ app.MapGet("/api/workflows", (WorkflowStore workflows) =>
     Results.Ok(workflows.GetAll()));
 
 app.MapAgentRuntimeEndpoints();
+app.MapOpenShellReconciliationEndpoint();
 
 // REST: cancel all running tasks on an agent by proxying to the agent's HTTP /cancel endpoint.
 // Resolves the agent URL via container name on the Docker network (fleet-orchestrator is containerized).

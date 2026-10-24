@@ -36,17 +36,21 @@ public sealed class OpenShellRetirementService(Func<OrchestratorDbContext> creat
             if (db.Database.CreateExecutionStrategy().RetriesOnFailure)
                 return ProvisionResult.Fail(name, "non-retrying lifecycle storage is required", 503);
             var launch = await FindAsync(db, name, ct);
-            if (launch is null) return ProvisionResult.Fail(name, "exact launch ownership is unavailable", 409);
+            if (launch is null || !Bound(launch)) return ProvisionResult.Fail(name, "exact launch ownership is unavailable", 409);
             if (launch.ActiveAgentId is not null && launch.ActiveAgentId != launch.AgentId
                 || launch.Phase is "stopped" or "retired" && launch.RevokedAt is null)
                 return ProvisionResult.Fail(name, "launch ownership or revocation is inconsistent", 409);
             if (launch.Phase is "stop_pending" or "cleanup_pending")
-                return ProvisionResult.Fail(name, $"retirement pending for launch {launch.Id:D}; reconcile the persisted intent without resending", 409);
+            {
+                var pending = JsonSerializer.Deserialize<Intent>((launch.Phase == "stop_pending"
+                    ? launch.StopIntentJson : launch.DeleteIntentJson) ?? "null");
+                return ProvisionResult.Fail(name, $"retirement pending for launch {launch.Id:D}, request {pending?.RequestId:D}; use explicit operator reconciliation", 409);
+            }
             if (launch.Phase is "stopped" or "retired")
             {
                 if (!await db.OpenShellRetiredIds.AnyAsync(x => x.GatewayId == launch.GatewayId && x.SandboxId == launch.SandboxId, ct))
                     throw new OpenShellStateConflictException("Retirement tombstone is missing.");
-                await VerifyAsync(reader, launch, launch.Phase == "retired", ct);
+                await VerifyTerminalAsync(db, reader, launch.Id, ct);
             }
             else
             {
@@ -61,6 +65,7 @@ public sealed class OpenShellRetirementService(Func<OrchestratorDbContext> creat
             }
             if (!delete) return ProvisionResult.Ok(name, "sandbox stopped and intake drain verified; retained ID cannot resume");
             launch = await FindAsync(db, name, ct) ?? throw new OpenShellStateConflictException("Launch disappeared.");
+            if (!Bound(launch)) throw new OpenShellStateConflictException("Current launch mapping is incomplete.");
             if (launch.Phase == "retired")
                 return ProvisionResult.Ok(name, "sandbox deprovisioned; absence and drained intake reverified");
             var observed = await gateway.ReadExactAsync(launch.SandboxId!, ct);
@@ -75,21 +80,117 @@ public sealed class OpenShellRetirementService(Func<OrchestratorDbContext> creat
         catch (OperationCanceledException) when (callerToken.IsCancellationRequested) { throw; }
         catch (OpenShellStateConflictException)
         {
-            return ProvisionResult.Fail(name, "retirement state conflict; reconciliation required", 409);
+            return ProvisionResult.Fail(name, submitted is { } requestId
+                ? $"retirement state conflict for request {requestId:D}; reconciliation required"
+                : "retirement state conflict; reconciliation required", 409);
         }
         catch (Exception)
         {
             // Do not log driver messages, tokens, connection strings or response bodies.
             return ProvisionResult.Fail(name, submitted is { } requestId
-                ? $"retirement unconfirmed for request {requestId:D}; preserve recovery state and reconcile without replay"
-                : "retirement unavailable; preserve recovery state and reconcile without replay", submitted is not null ? 202 : 503);
+                ? $"retirement unconfirmed for request {requestId:D}; preserve recovery state and use explicit operator reconciliation"
+                : "retirement unavailable; preserve recovery state and use explicit operator reconciliation", 503);
         }
+    }
+
+    /// <summary>Explicit outside-operator recovery only; never creates a new mutation payload or resumes an ID.</summary>
+    public async Task<ProvisionResult> ReconcileAsync(string name, Guid expectedLaunchId, Guid expectedRequestId,
+        bool replay, CancellationToken callerToken = default)
+    {
+        if (expectedLaunchId == Guid.Empty || expectedRequestId == Guid.Empty)
+            return ProvisionResult.Fail(name, "expected launch and request IDs are required", 400);
+        using var operation = CancellationTokenSource.CreateLinkedTokenSource(callerToken);
+        operation.CancelAfter(TimeSpan.FromSeconds(120));
+        var ct = operation.Token;
+        using var scope = scopes.CreateScope();
+        var gateway = scope.ServiceProvider.GetService<IOpenShellGatewayClient>();
+        var reader = scope.ServiceProvider.GetService<IOpenShellRuntimeEvidenceReader>();
+        if (gateway is null || reader is null)
+            return ProvisionResult.Fail(name, "compatibility_blocked: trusted retirement peers are unavailable", 503);
+        try
+        {
+            await using var db = createDb();
+            if (db.Database.CreateExecutionStrategy().RetriesOnFailure)
+                return ProvisionResult.Fail(name, "non-retrying lifecycle storage is required", 503);
+            var (intent, delete) = await ClaimReconciliationAsync(db, name, expectedLaunchId, expectedRequestId, ct);
+            // Replay is separately explicit. Do not look up a new name/version or mint a request UUID.
+            // The pinned gateway must deduplicate the original complete payload; a refusal stays pending.
+            if (replay)
+            {
+                if (delete) await gateway.DeleteExactAsync(intent.Target(), intent.RequestId, allowMissing: true, ct);
+                else await gateway.StopExactAsync(intent.Target(), intent.RequestId, ct);
+            }
+            if (delete) await new OpenShellLaunchStore(db).CompleteCleanupAsync(expectedLaunchId, DateTime.UtcNow, reader, ct, intent.RequestId);
+            else await FinishStopAsync(db, expectedLaunchId, intent.RequestId, reader, ct);
+            return ProvisionResult.Ok(name, $"request {intent.RequestId:D} reconciled with fresh runtime and drained-intake proof");
+        }
+        catch (OperationCanceledException) when (callerToken.IsCancellationRequested) { throw; }
+        catch (OpenShellStateConflictException)
+        {
+            return ProvisionResult.Fail(name, $"request {expectedRequestId:D} conflicts with current ownership or proof; recovery state retained", 409);
+        }
+        catch (Exception)
+        {
+            return ProvisionResult.Fail(name, $"request {expectedRequestId:D} remains unconfirmed; recovery state retained", 503);
+        }
+    }
+
+    private static async Task<(Intent Intent, bool Delete)> ClaimReconciliationAsync(OrchestratorDbContext db,
+        string name, Guid expectedLaunchId, Guid expectedRequestId, CancellationToken ct)
+    {
+        await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+        var selected = await FindAsync(db, name, ct);
+        if (selected is null || selected.Id != expectedLaunchId)
+            throw new OpenShellStateConflictException("The expected launch is not the current owner.");
+        var row = await db.OpenShellLaunches.SingleAsync(l => l.Id == selected.Id, ct);
+        await db.Entry(row).ReloadAsync(ct);
+        if (!Bound(row) || row.ActiveAgentId != row.AgentId || row.RevokedAt is null
+            || row.Phase is not ("stop_pending" or "cleanup_pending"))
+            throw new OpenShellStateConflictException("Reconciliation requires a bound, revoked, pending current launch.");
+        var delete = row.Phase == "cleanup_pending";
+        var json = delete ? row.DeleteIntentJson : row.StopIntentJson;
+        var intent = json is null ? null : JsonSerializer.Deserialize<Intent>(json);
+        if (intent is null || intent.RequestId != expectedRequestId || intent.RequestId == Guid.Empty
+            || intent.GatewayId != row.GatewayId || intent.Workspace != row.Workspace
+            || intent.SandboxId != row.SandboxId || string.IsNullOrWhiteSpace(intent.Name) || intent.ResourceVersion == 0
+            || !await db.OpenShellRetiredIds.AnyAsync(x => x.GatewayId == row.GatewayId && x.SandboxId == row.SandboxId, ct))
+            throw new OpenShellStateConflictException("The persisted mutation identity is unavailable or inconsistent.");
+        var lease = await db.OpenShellLeases.SingleOrDefaultAsync(l => l.AgentId == row.AgentId, ct);
+        if (lease is null) throw new OpenShellStateConflictException("The pending operation lease is missing.");
+        await db.Entry(lease).ReloadAsync(ct);
+        var now = DateTime.UtcNow;
+        if (lease.Owner != intent.RequestId || lease.ExpiresAt > now)
+            throw new OpenShellStateConflictException("Another or still-live operation owns the lease.");
+        // Only the original expired pending operation can be renewed by this explicit recovery path.
+        lease.ExpiresAt = now.AddSeconds(120);
+        row.UpdatedAt = now;
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return (intent, delete);
     }
 
     private static Task<OpenShellLaunch?> FindAsync(OrchestratorDbContext db, string name, CancellationToken ct) =>
         db.OpenShellLaunches.AsNoTracking().Where(l => l.Agent.Name == name && l.Agent.ExecutionShell == "openshell"
-            && l.Agent.OpenShellMigrationState == "active" && l.GatewayId != null && l.SandboxId != null && l.Workspace != null)
+            && l.Agent.OpenShellMigrationState == "active")
             .OrderByDescending(l => l.ActiveAgentId != null).ThenByDescending(l => l.CreatedAt).FirstOrDefaultAsync(ct);
+
+    private static bool Bound(OpenShellLaunch launch) => !string.IsNullOrWhiteSpace(launch.GatewayId)
+        && !string.IsNullOrWhiteSpace(launch.SandboxId) && !string.IsNullOrWhiteSpace(launch.Workspace);
+
+    private static async Task VerifyTerminalAsync(OrchestratorDbContext db, IOpenShellRuntimeEvidenceReader reader,
+        Guid id, CancellationToken ct)
+    {
+        await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+        var row = await db.OpenShellLaunches.SingleAsync(l => l.Id == id, ct);
+        await db.Entry(row).ReloadAsync(ct);
+        if (!Bound(row) || row.RevokedAt is null || row.Phase is not ("stopped" or "retired")
+            || (row.Phase == "stopped" ? row.ActiveAgentId != row.AgentId : row.ActiveAgentId is not null)
+            || await db.OpenShellLaunches.AnyAsync(l => l.AgentId == row.AgentId && l.Id != row.Id
+                && (l.ActiveAgentId != null || l.Phase != "retired"), ct))
+            throw new OpenShellStateConflictException("Current or ambiguous launch ownership prevents historical success.");
+        await VerifyAsync(reader, row, row.Phase == "retired", ct);
+        await tx.CommitAsync(ct);
+    }
 
     private static async Task<Intent> PrepareAsync(OrchestratorDbContext db, Guid id,
         OpenShellSandboxSnapshot target, bool delete, CancellationToken ct)

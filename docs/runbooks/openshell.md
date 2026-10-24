@@ -46,3 +46,30 @@ mistakenly listed; read/ownership failures are not successful restarts.
 Migrated/unknown metadata or any launch history blocks all legacy lifecycle entry
 points, including MCP, version pinning, provisioning facades and deletion.
 Do not clear launch history/reset metadata to work around compatibility_blocked.
+
+## Pending retirement reconciliation (source-only, admission still off)
+
+`POST /api/agents/{name}/openshell/reconcile` uses the same outside operator token
+and requires `expectedLaunchId` and `expectedRequestId` from the persisted pending
+operation. It accepts `replay` (default `false`); ordinary Stop/Deprovision never
+replays a pending operation automatically. This route is not runtime authorization.
+
+Wait for the original bounded operation lease to expire; a live lease or another
+owner returns 409 without mutation. The route transaction reloads authoritative
+ownership, revocation, tombstone and the complete recorded intent before renewing
+only that original operation's lease. Missing trusted peers returns 503 before
+storage access. Missing/empty IDs returns 400 after operator authentication.
+
+With `replay=false`, only fresh exact stop/absence and intake-drain proof can finish
+the original pending transition; no gateway mutation is sent. With `replay=true`,
+only the identical pinned conditional RPC is sent, retaining its name, workspace,
+sandbox ID, observed version, request ID and Delete allow-missing semantics. There
+is no fresh name lookup, new UUID, unguarded fallback or automatic retry. Lost
+responses, capability downgrade/refusal or failed proof preserve recovery state;
+409/503 includes the expected request ID, never a 2xx failure. A renewed lease
+must expire before another explicit attempt. Gateway replay retention/version
+refusal is not authority to rewrite the recorded intent or select a replacement.
+
+A confirmed Stop keeps config and the active slot, while confirmed cleanup releases
+the slot only after absence and drain verification. Reconciliation does not create
+or resume a sandbox, activate intake, complete migration or implement rollback.

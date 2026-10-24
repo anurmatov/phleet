@@ -289,8 +289,12 @@ be fresh within five seconds inside the completion transaction. Stop retains the
 active slot/configuration and forbids resuming the retired ID. Deprovision persists
 a separate exact-version Delete intent, then requires the existing cleanup gate's
 fresh absence/drain proof before releasing the slot. Acknowledgements alone never
-release it. Pending or ambiguous intent is preserved, not automatically replayed;
-operator reconciliation is still missing. The whole operation has a 120-second bound.
+release it. Pending or ambiguous intent is preserved, not automatically replayed. Explicit
+operator reconciliation can verify completion without RPCs or replay the original
+complete payload with its original request ID after its lease expires. Both paths
+require fresh completion evidence and never substitute a new target/version/UUID.
+Unconfirmed retirement returns 409/503 with its request ID, never 2xx with failure.
+The whole operation has a 120-second bound.
 
 The two nullable intent columns are in the single additive migration, with regenerated
 EF designer/snapshot metadata. Write-once protection is an EF tracked-write guard,
@@ -303,13 +307,19 @@ not runtime or actual-agent qualification.
 Creation/transitions, static compiler/current-supervisor startup activation,
 production stop/inventory/intake evidence reader (including ambiguous-create
 inventory), outside identity hook/issuer/ingress/durable sessions/replay, native
-callback, reconciliation and rollback remain **missing code**, not merely unrun tests.
+callback and rollback remain **missing code**, not merely unrun tests.
 No feature or workload admission is enabled by this checkpoint.
 
 Owned HTTP handlers exercise the actual generated gRPC request/response framing,
 pagination, bearer metadata, mapping replacement, cancellation, immutable copies
 and descriptor/source-hash contracts, plus actual generated guarded mutation RPCs,
-capability refusal, cancellation and no-retry outcomes, without sockets, TLS or a real gateway.
+capability refusal, cancellation, operator-requested same-intent replay and no automatic retry,
+without sockets, TLS or a real gateway.
 Exact-head CI results belong in the PR evidence, not a moving prior-head status.
 Approved actual daemon/native CLI/shell/memory/Rabbit/denial/revocation/rollback
 and MySQL backup/restore-query acceptance remain required before merge.
+
+Active ownership is selected before nullable gateway/workspace/ID validation. A
+prepared/unbound current launch blocks Stop/Deprovision rather than disappearing
+behind retired history. Historical success also checks for active or ambiguous
+other launches within a serializable transaction before fresh runtime proof.

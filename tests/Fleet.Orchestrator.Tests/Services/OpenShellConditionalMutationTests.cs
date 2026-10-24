@@ -185,6 +185,7 @@ public class OpenShellConditionalMutationTests
         public int Mutations { get; private set; }
         private bool _stopped;
         public bool Supported { get; set; } = true;
+        public bool FailNextMutationReply { get; set; }
         public Func<Task>? BeforeMutation { get; set; }
         public StopSandboxRequest? Stop { get; private set; }
         public DeleteSandboxRequest? Delete { get; private set; }
@@ -260,6 +261,8 @@ public class OpenShellConditionalMutationTests
                     };
                 }
             }
+            var loseReply = method is "StopSandbox" or "DeleteSandbox" && FailNextMutationReply;
+            if (loseReply) FailNextMutationReply = false;
             var payload = reply.ToByteArray();
             var output = new byte[5 + payload.Length];
             BinaryPrimitives.WriteInt32BigEndian(output.AsSpan(1, 4), payload.Length);
@@ -268,7 +271,7 @@ public class OpenShellConditionalMutationTests
             { Version = HttpVersion.Version20, Content = new ByteArrayContent(output) };
             response.Content.Headers.ContentType = new MediaTypeHeaderValue("application/grpc");
             response.TrailingHeaders.Add("grpc-status", method is "StopSandbox" or "DeleteSandbox" && fault == "abort" ? "10"
-                : (method is "StopSandbox" or "DeleteSandbox" && fault == "lost") || fault == "health-error" ? "14" : "0");
+                : (method is "StopSandbox" or "DeleteSandbox" && fault == "lost") || loseReply || fault == "health-error" ? "14" : "0");
             return response;
         }
     }

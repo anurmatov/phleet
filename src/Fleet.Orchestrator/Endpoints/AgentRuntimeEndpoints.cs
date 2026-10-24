@@ -16,6 +16,15 @@ public static class AgentRuntimeEndpoints
             ToResult(await lifecycle.RestartAsync(name, ct)));
     }
 
+    public static void MapOpenShellReconciliationEndpoint(this WebApplication app)
+    {
+        // Covered by the same fail-closed outside operator middleware as all /openshell children.
+        // Deliberately no MCP issuance/recovery tool and no automatic background replay.
+        app.MapPost("/api/agents/{name}/openshell/reconcile", async (string name,
+            OpenShellReconciliationRequest request, OpenShellRetirementService retirement, CancellationToken ct) =>
+            ToResult(await retirement.ReconcileAsync(name, request.ExpectedLaunchId, request.ExpectedRequestId, request.Replay, ct)));
+    }
+
     public static void MapAgentDeleteEndpoint(this WebApplication app)
     {
         // REST: delete an agent (deprovision container + remove DB records)
@@ -69,3 +78,5 @@ public static class AgentRuntimeEndpoints
         ? Results.Ok(new { message = result.Message })
         : Results.Json(new { error = result.Message }, statusCode: result.StatusCode);
 }
+
+public sealed record OpenShellReconciliationRequest(Guid ExpectedLaunchId, Guid ExpectedRequestId, bool Replay = false);

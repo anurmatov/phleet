@@ -168,11 +168,18 @@ def cmd_trx(args):
         emit(dict(record, status='error', reason='TRX has no Counters'))
         return PASS
 
+    names = ('total', 'executed', 'passed', 'failed', 'error', 'timeout', 'aborted',
+             'notExecuted', 'inconclusive', 'notRunnable')
+    try:
+        counts = {name: int(counters.attrib[name]) for name in names}
+        if any(value < 0 for value in counts.values()):
+            raise ValueError('negative counter')
+    except (KeyError, ValueError):
+        emit(dict(record, status='error', reason='TRX has invalid or missing nonnegative counters'))
+        return PASS
+
     def count(name):
-        try:
-            return int(counters.get(name, '0'))
-        except ValueError:
-            return -1
+        return counts[name]
     outcomes = [r.get('outcome', '') for r in root.iter(f'{TRX_NS}UnitTestResult')]
     # The summary under-reports skips (an xUnit Skip leaves notExecuted=0 and only shortens
     # `executed`), so take the worst of the counters, total-executed and the per-test rows.
@@ -440,14 +447,21 @@ def suite_verdict(parts):
         elif status == 'blocked':
             blocked.append(f'{where}: BLOCKED {p.get("reason")}')
         elif status == 'ran':
+            if p.get('kind') == 'dotnet':
+                names = ('total', 'executed', 'passed', 'rows', 'rowsNotPassed', 'failed', 'skipped')
+                if any(type(p.get(name)) is not int or p[name] < 0 for name in names):
+                    failing.append(f'{where}: invalid or missing nonnegative TRX counters')
+                    continue
+                if p['rowsNotPassed'] != 0:
+                    failing.append(f'{where}: TRX contains non-Passed result rows')
+                if len({p[name] for name in ('total', 'executed', 'passed', 'rows')}) != 1:
+                    failing.append(f'{where}: TRX total/executed/passed counters disagree with its result rows')
             if p.get('rc', 0) != 0:
                 failing.append(f'{where}: exit code {p.get("rc")}')
             if (p.get('failed') or 0) > 0:
                 failing.append(f'{where}: {p.get("failed")} failed')
             if (p.get('skipped') or 0) > 0:
                 failing.append(f'{where}: {p.get("skipped")} skipped (a skip is not evidence)')
-            if p.get('kind') == 'dotnet' and p.get('rows') != p.get('total'):
-                failing.append(f'{where}: TRX summary disagrees with its result rows')
         else:
             failing.append(f'{where}: unknown status {status!r}')
     reasons = failing + invalid + blocked

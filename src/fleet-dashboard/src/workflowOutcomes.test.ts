@@ -480,6 +480,7 @@ describe('dashboard: zero results while degraded is an error banner, never all c
     ['a gap count without gap rows', { counts: { failures: 0, unresolvedCauses: 0, coverageGaps: 2 } }],
     ['degraded health', { health: { state: 'degraded', incidents: [{ component: 'observer', outageKey: 'k', state: 'open', reason: 'db unavailable', namespace: null, firstSeenAt: null, lastSeenAt: null }] } }],
     ['health request failed', { health: null, healthError: 'HTTP 500' }],
+    ['health not loaded', { health: null }],
     ['the list failed', { listErrors: ['HTTP 500'] }],
   ]
   for (const [name, overrides] of degradedCases) {
@@ -509,7 +510,8 @@ describe('dashboard: zero results while degraded is an error banner, never all c
     assert.equal(outcomeBanner(bannerInput({ hasMore: true })).level, 'none')
     assert.equal(outcomeBanner(bannerInput({ counts: null })).level, 'none')
     assert.equal(outcomeBanner(bannerInput({ itemCount: 1, counts: { failures: 1, unresolvedCauses: 0, coverageGaps: 0 } })).level, 'none')
-    assert.equal(outcomeBanner(bannerInput({ health: null })).level, 'clear')
+    // Unloaded health is not healthy: the banner never says all clear without it.
+    assert.equal(outcomeBanner(bannerInput({ health: null })).level, 'error')
   })
 })
 

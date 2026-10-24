@@ -68,7 +68,7 @@ EOF
 }
 
 plan() {
-  local ns="" url token="" body_cov body_health rc
+  local ns="" url token="" body_cov body_health rc health_rc
   while [ $# -gt 0 ]; do
     case "$1" in
       --namespace) [ $# -ge 2 ] || usage; ns="$2"; shift 2 ;;
@@ -104,7 +104,7 @@ plan() {
   }
   set +e
   body_cov="$(get /api/workflow-outcomes/coverage)"; rc=$?
-  body_health="$(get /api/workflow-outcomes/health)"
+  body_health="$(get /api/workflow-outcomes/health)"; health_rc=$?
   set -e
   if [ "$rc" -ne 0 ] || [ -z "$body_cov" ]; then
     echo
@@ -113,7 +113,7 @@ plan() {
     exit 3
   fi
   echo
-  COVERAGE="$body_cov" HEALTH="$body_health" NS="$ns" FULL="${FLEET_WORKFLOW_OUTCOMES_FULL_SCAN_SECONDS:-300}" python3 - <<'PY'
+  COVERAGE="$body_cov" HEALTH="$body_health" HEALTH_RC="$health_rc" NS="$ns" FULL="${FLEET_WORKFLOW_OUTCOMES_FULL_SCAN_SECONDS:-300}" python3 - <<'PY'
 import json, os, sys
 from datetime import datetime, timezone
 ns, full = os.environ['NS'], int(os.environ['FULL'])
@@ -121,11 +121,20 @@ try:
     cov = json.loads(os.environ['COVERAGE'])
 except ValueError:
     print('BLOCKED: coverage reply is not JSON'); sys.exit(3)
-try:
-    health = json.loads(os.environ.get('HEALTH') or '{}')
-except ValueError:
-    health = {}
 gaps = []
+# Health that could not be read is unknown, never clear.
+health = {}
+if os.environ.get('HEALTH_RC', '1') != '0' or not (os.environ.get('HEALTH') or '').strip():
+    gaps.append(f"health could not be read (curl exit {os.environ.get('HEALTH_RC')}): not clear")
+else:
+    try:
+        health = json.loads(os.environ['HEALTH'])
+    except ValueError:
+        gaps.append('health reply is not JSON: not clear')
+    if not isinstance(health, dict):
+        health = {}
+    elif health and health.get('state') != 'healthy':
+        gaps.append(f"health is {health.get('state')}")
 if not cov.get('enabled'):
     gaps.append('feature disabled: no coverage is claimed')
 if cov.get('degraded'):

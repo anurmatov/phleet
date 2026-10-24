@@ -51,6 +51,9 @@ jobs:
       - name: Acceptance plan validators and public placeholders
         run: python3 -m unittest discover tests/scripts
 
+      - name: Workflow-outcome public-scrub rules
+        run: python3 -m unittest discover -s tests/integration/workflow-outcomes -p 'test_*.py'
+
       - name: GitHub API endpoint token routing
         run: |
           set -euo pipefail

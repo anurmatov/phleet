@@ -684,7 +684,9 @@ export function outcomeBanner(input: BannerInput): OutcomeBanner {
   if (input.counts && input.counts.coverageGaps > 0 && coverageGapRows(input.coverage).length === 0)
     problems.push(`${input.counts.coverageGaps} coverage gap(s) reported.`)
   if (input.healthError) problems.push(`Health unavailable: ${input.healthError}`)
-  else if (input.health && input.health.state !== 'healthy') {
+  // Unread health is unknown health: never part of an "all clear".
+  else if (!input.health) problems.push('Health has not been loaded.')
+  else if (input.health.state !== 'healthy') {
     problems.push(`Health is ${input.health.state}.`)
     for (const i of input.health.incidents)
       problems.push(`${i.component}${i.namespace ? ` (${i.namespace})` : ''}: ${i.state} — ${i.reason}`)

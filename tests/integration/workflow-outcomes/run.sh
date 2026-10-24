@@ -198,6 +198,12 @@ while IFS="$(printf '\t')" read -r suite ac kind requires detail; do
     scrub)
       echo "== $suite ($ac): git diff $SCRUB_BASE...HEAD" >&2
       set +e
+      # The scrub rules carry their own regression tests; a broken rule invalidates the scan.
+      if ! python3 -m unittest discover -s "$(dirname "$ASSERT")" -p 'test_*.py' > "$RESULTS/$suite.selftest.log" 2>&1; then
+        set -e
+        record invalid --kind scrub --suite "$suite" --ac "$ac" --reason "scrub rule self-test failed (see $suite.selftest.log)"
+        continue
+      fi
       python3 "$ASSERT" scrub --suite "$suite" --ac "$ac" --repo "$REPO_ROOT" --base "$SCRUB_BASE" > "$RESULTS/$suite.json" 2> "$RESULTS/$suite.err"
       rc=$?
       set -e

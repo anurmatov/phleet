@@ -77,6 +77,12 @@ public sealed class WorkflowOutcomeReconciler(
         public bool Enrolled;
         public long? RetentionSeconds;
         public bool KeyringDegraded;
+
+        /// <summary>
+        /// A transient history_read incident may be open. True at start, because an incident raised
+        /// before a restart is still open in the store and must clear on the first clean pass.
+        /// </summary>
+        public bool HistoryReadDegraded = true;
     }
 
     private DateTime Now => clock.GetUtcNow().UtcDateTime;
@@ -449,6 +455,7 @@ public sealed class WorkflowOutcomeReconciler(
         var awaiting = await _store!.ListAwaitingHistoryAsync(ns, _policies!.Classifiers.Hash, HistoryRunsPerCycle, ct);
         var keyringFailed = 0;
         var stored = 0;
+        var historyReadFailures = 0;
         await Parallel.ForEachAsync(awaiting, ReadOptions(ct), async (run, token) =>
         {
             var key = WorkflowOutcomeHashes.IdentityHash(ns, run.WorkflowId, run.RunId);
@@ -473,6 +480,7 @@ public sealed class WorkflowOutcomeReconciler(
             {
                 // Start this history over next slice; nothing partial is ever classified.
                 _partial.TryRemove(key, out _);
+                Interlocked.Increment(ref historyReadFailures);
                 await _store.RaiseAsync(_lease!, WorkflowOutcomeHealthComponents.History, "history_read:" + ns,
                     "history page token rejected or repeated; retrying", ns, ct: token);
                 return;
@@ -482,6 +490,7 @@ public sealed class WorkflowOutcomeReconciler(
                 // One unreadable run (unavailable, timed out) must not fail the namespace cycle:
                 // keep its resumable progress, record the read gap and classify the others.
                 logger.LogWarning("workflow_outcome_history_unavailable namespace={Namespace} outcome={OutcomeId} kind={Kind}", ns, run.Id, ex.Kind);
+                Interlocked.Increment(ref historyReadFailures);
                 await _store.RaiseAsync(_lease!, WorkflowOutcomeHealthComponents.History, "history_read:" + ns,
                     "a run history could not be read; retrying next cycle", ns, ct: token);
                 return;
@@ -512,6 +521,7 @@ public sealed class WorkflowOutcomeReconciler(
             {
                 // The parent is unreadable right now: leave this run unclassified for the next cycle.
                 logger.LogWarning("workflow_outcome_parent_unavailable namespace={Namespace} outcome={OutcomeId} kind={Kind}", ns, run.Id, ex.Kind);
+                Interlocked.Increment(ref historyReadFailures);
                 await _store.RaiseAsync(_lease!, WorkflowOutcomeHealthComponents.History, "history_read:" + ns,
                     "a parent run history could not be read; retrying next cycle", ns, ct: token);
                 return;
@@ -534,6 +544,19 @@ public sealed class WorkflowOutcomeReconciler(
                 result.DetectedAt is null || result.StoredAt is null ? -1 : (long)(result.StoredAt.Value - result.DetectedAt.Value).TotalMilliseconds,
                 eligible);
         });
+
+        // history_read is a transient incident: it clears once a whole pass read every history it
+        // attempted (runs and parents) without one read failure. history_missing and
+        // history_unverified are durable facts under their own keys and are never touched here.
+        if (historyReadFailures > 0)
+        {
+            schedule.HistoryReadDegraded = true;
+        }
+        else if (schedule.HistoryReadDegraded)
+        {
+            await _store.ResolveAsync(_lease!, WorkflowOutcomeHealthComponents.History, "history_read:" + ns, ct);
+            schedule.HistoryReadDegraded = false;
+        }
 
         if (keyringFailed > 0)
         {

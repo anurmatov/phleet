@@ -292,6 +292,25 @@ public sealed class WorkflowOutcomeMigrationTests : IAsyncLifetime
         Assert.Equal(1, await check.WorkflowRecoveryOperations.CountAsync());
     }
 
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "migration")]
+    public async Task Transfer_ConcurrentOnRealMySql_ExactlyOneReOwnsTheFailure()
+    {
+        await using var host = await ApiHost.StartAsync(ApiDatabase.ForMySql(_connectionString));
+        await host.GrantProjectAsync();
+        var run = await host.SeedRunAsync(r => r.Coordinator = "old-coordinator");
+        var request = new WorkflowOutcomeTransferRequest(1, 1, "old-coordinator", ApiHost.Coordinator, "owner change", "https://example.com/approvals/9");
+
+        var results = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => Task.Run(() =>
+            host.AsAdmin(HttpMethod.Post, $"{Root}/{run.Id}/transfer", request))));
+
+        Assert.Single(results, r => r.StatusCode == HttpStatusCode.OK);
+        Assert.All(results.Where(r => r.StatusCode != HttpStatusCode.OK), r => Assert.Equal(HttpStatusCode.Conflict, r.StatusCode));
+        await using var check = NewContext(_connectionString);
+        Assert.Equal(ApiHost.Coordinator, (await check.WorkflowOutcomeRuns.AsNoTracking().SingleAsync(r => r.Id == run.Id)).Coordinator);
+        Assert.Equal(1, await check.WorkflowOutcomeDecisions.CountAsync(d => d.Operation == WorkflowOutcomeInboxService.TransferOperation));
+    }
+
     // ── The API on the production provider, then dump + restore ──────────────
 
     [Fact]

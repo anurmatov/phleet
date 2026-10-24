@@ -192,6 +192,11 @@ or `LastError` on a checkpoint.
   cursor never advances past an uncommitted page. Persistent errors in one window: capture the
   checkpoint row and the orchestrator log line (ids and reason only), then escalate. Do not edit
   `PageToken`.
+- Unreadable run history (`history_read:<namespace>`): a run or parent history timed out, was
+  unavailable, or its page token was rejected or repeated. The run is retried next cycle, and the
+  incident resolves by itself after a classification pass that reads every history it attempts with
+  no read failure. One still-failing run keeps it open. `history_missing:<namespace>` and
+  `history_unverified:<namespace>` are durable facts about specific runs and never auto-resolve.
 - Lost lease (`component=lease`): another orchestrator instance or the DB fenced this one. Run a
   single orchestrator; a stale instance stops advancing pages and claiming batches by itself.
 - Full sweep slower than `FULL_SCAN_SECONDS` (`capacity_degraded`): set an explicit adjusted budget
@@ -220,7 +225,26 @@ preserved, and the new token reconciles existing nonces and items without rerunn
 **Change the coordinator (owner change):** approval first. Set the new `FLEET_CTO_AGENT`,
 increment `FLEET_WORKFLOW_OUTCOMES_COORDINATOR_GENERATION`, restart, reprovision both agents
 (the old one loses its section). Outstanding items need an explicit operator transfer and a fresh
-ack; acks from the old generation are 409.
+ack; acks from the old generation are 409. Transfer each unresolved failure, quoting its current
+state exactly:
+
+```bash
+wo /<outcomeId>/transfer -X POST -d '{
+  "expectedVersion": 3, "generation": 2,
+  "fromCoordinator": "<stored coordinator, or null when unassigned>", "toCoordinator": "<new FLEET_CTO_AGENT>",
+  "reason": "owner change", "authorityRef": "https://<the-owner-change-approval>"
+}'
+```
+
+The run is re-owned in the current generation, its open memberships are superseded and an
+immutable `transfer` record (status `transferred`) is written. The batcher then delivers it to the
+new coordinator, which must ack it before any decision or recovery. Use the same route for a
+failure stored under a rule's or the policy `defaultCoordinator`, or with none. Refusals change
+nothing: 409 `stale_version`, `stale_generation`, `coordinator_changed` (including a replay),
+`already_current`, `already_resolved`, or `generation_not_incremented` (the old owner still holds
+a membership in this generation; increment the generation first), and 422 `foreign_coordinator`
+(the target is always the configured coordinator), `authority_missing` or `not_confirmed_failure`.
+The coordinator token cannot call it. Never edit `Coordinator` in the database.
 
 **Local inbox restore.** The coordinator's `{WorkDir}/.fleet/workflow-outcome-inbox.json` lives in
 its workspace bind mount and survives container recreation. If it is lost or corrupt, stop the

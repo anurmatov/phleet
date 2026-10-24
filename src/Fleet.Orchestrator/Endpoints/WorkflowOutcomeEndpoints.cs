@@ -83,6 +83,10 @@ public static class WorkflowOutcomeEndpoints
         g.MapPost("/{id:guid}/classification", (HttpContext ctx, Guid id) =>
             RunWithBody<WorkflowOutcomeClassificationRequest>(ctx, [op], MaxBodyBytes, (s, p, body, ct) => Inbox(s).ClassifyAsync(p, id, body, ct)));
 
+        // Owner change: operator-only re-ownership of an unresolved failure for a fresh ack.
+        g.MapPost("/{id:guid}/transfer", (HttpContext ctx, Guid id) =>
+            RunWithBody<WorkflowOutcomeTransferRequest>(ctx, [op], MaxBodyBytes, (s, p, body, ct) => Inbox(s).TransferAsync(p, id, body, ct)));
+
         // ── Coordinator inbox ────────────────────────────────────────────────
         g.MapGet("/inbox", (HttpContext ctx, long? generation, string? cursor, int? limit) =>
             Run(ctx, [coord], (s, p, ct) => Inbox(s).GetInboxAsync(p, generation, cursor, limit, ct)));

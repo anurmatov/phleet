@@ -438,6 +438,7 @@ bypass. *operator* = the admin bearer `Orchestrator:AuthToken`; *coordinator* = 
 | `GET /?namespace=&state=&cursor=&limit=` | operator | `failures` (default), `unresolved_cause`, `all_attention`; limit 1–100, keyset cursor, per-namespace errors and counts |
 | `GET /{id}` (`?detail=payload` decrypts) | operator | Version, evidence refs, stages, owner, decisions, batches, observations |
 | `POST /{id}/classification` | operator | Cause review (above) |
+| `POST /{id}/transfer` | operator | Owner change: re-own one unresolved failure to the configured coordinator in the current generation for a fresh ack; exact `expectedVersion`, `generation`, `fromCoordinator`; audited, never a decision |
 | `GET /coverage` | operator | Per-namespace state, retention, enrollment, passes, known pending, gaps |
 | `GET /health`, `GET /health/public` | operator / anonymous | Incident detail; public is `{healthy}` only |
 | `GET /inbox`, `POST /batches/{id}/delivered`, `GET /batches/{id}/receipt`, `POST /batches/{id}/ack` | coordinator (receipt/ack also operator) | Inbox protocol |

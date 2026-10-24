@@ -499,6 +499,99 @@ public sealed class WorkflowOutcomeReconcilerTests
         Assert.True(Eligible(await h.RunAsync(Ns, "wf-poison", "run-1")));
     }
 
+    private static bool HistoryReadOpen(IEnumerable<WorkflowOutcomeHealth> health) =>
+        health.Any(x => x.OutageKey == "history_read:" + Ns && x.State == "open");
+
+    [Theory]
+    [Trait("WorkflowOutcomeSuite", "failure-matrix")]
+    [InlineData(WorkflowOutcomeReadFailure.Unavailable)]
+    [InlineData(WorkflowOutcomeReadFailure.RepeatedToken)]
+    [InlineData(WorkflowOutcomeReadFailure.InvalidArgument)]
+    public async Task Reconcile_HistoryReadIncident_StaysOpenWhileAnyReadFails_ResolvesAfterAFailureFreePass(WorkflowOutcomeReadFailure kind)
+    {
+        await using var h = await ObserverHarness.CreateAsync(Options());
+        Run(h, "wf-poison", b => b.Failed(), start: Old);
+        Run(h, "wf-fine", b => b.Failed(), start: Old.AddSeconds(1));
+        h.Temporal.HistoryFault = (request, _) => request.Execution.WorkflowId == "wf-poison"
+            ? new WorkflowOutcomeReadException(kind, "fault")
+            : null;
+
+        await h.CyclesAsync(4);
+        Assert.True(HistoryReadOpen(await h.HealthAsync()));
+        Assert.True(Eligible(await h.RunAsync(Ns, "wf-fine", "run-1")));
+
+        // Mixed: other histories read fine, but one still fails every pass, so the incident stays open.
+        await h.CyclesAsync(4);
+        Assert.True(HistoryReadOpen(await h.HealthAsync()));
+
+        h.Temporal.HistoryFault = null;
+        await h.CyclesAsync(15);
+        Assert.True(Eligible(await h.RunAsync(Ns, "wf-poison", "run-1")));
+        Assert.Contains(await h.HealthAsync(), x => x.OutageKey == "history_read:" + Ns && x.State == "resolved" && x.ResolvedAt is not null);
+
+        // A later failure reopens it; recovery clears it again.
+        Run(h, "wf-late", b => b.Failed(), start: Old.AddSeconds(2));
+        h.Temporal.HistoryFault = (request, _) => request.Execution.WorkflowId == "wf-late"
+            ? new WorkflowOutcomeReadException(kind, "fault")
+            : null;
+        // Long enough steps for the next sweep to discover the new run.
+        await h.CyclesAsync(20, TimeSpan.FromSeconds(30));
+        Assert.Null((await h.RunAsync(Ns, "wf-late", "run-1")).TerminalEventId);
+        Assert.True(HistoryReadOpen(await h.HealthAsync()));
+        h.Temporal.HistoryFault = null;
+        await h.CyclesAsync(15);
+        Assert.True(Eligible(await h.RunAsync(Ns, "wf-late", "run-1")));
+        Assert.False(HistoryReadOpen(await h.HealthAsync()));
+    }
+
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "failure-matrix")]
+    public async Task Reconcile_HistoryReadRecovery_LeavesDurableMissingAndUnverifiedFactsOpen()
+    {
+        await using var h = await ObserverHarness.CreateAsync(Options());
+        Run(h, "wf-gone", b => b.Failed(), start: Old).HistoryDeleted = true;
+        Run(h, "wf-raw", b => b.Failed(), start: Old.AddSeconds(1));
+        Run(h, "wf-flaky", b => b.Failed(), start: Old.AddSeconds(2));
+        var flakyFailures = 1;
+        h.Temporal.HistoryFault = (request, _) => request.Execution.WorkflowId switch
+        {
+            "wf-raw" => new WorkflowOutcomeReadException(WorkflowOutcomeReadFailure.Unsupported, "raw_history"),
+            "wf-flaky" when Interlocked.Decrement(ref flakyFailures) >= 0 => new WorkflowOutcomeReadException(WorkflowOutcomeReadFailure.Unavailable, "timeout"),
+            _ => null,
+        };
+
+        await h.CyclesAsync(1);
+        Assert.True(HistoryReadOpen(await h.HealthAsync()));
+
+        await h.CyclesAsync(15);
+        var health = await h.HealthAsync();
+        Assert.True(Eligible(await h.RunAsync(Ns, "wf-flaky", "run-1")));
+        Assert.False(HistoryReadOpen(health));
+        Assert.Contains(health, x => x.OutageKey == "history_missing:" + Ns && x.State == "open");
+        Assert.Contains(health, x => x.OutageKey == "history_unverified:" + Ns && x.State == "open");
+    }
+
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "failure-matrix")]
+    public async Task Reconcile_HistoryReadIncidentLeftOpenBeforeARestart_ClearsOnTheFirstFailureFreePass()
+    {
+        await using var h = await ObserverHarness.CreateAsync(Options());
+        await h.DbAsync(async db =>
+        {
+            db.WorkflowOutcomeHealth.Add(new WorkflowOutcomeHealth
+            {
+                Component = WorkflowOutcomeHealthComponents.History, OutageKey = "history_read:" + Ns, State = "open",
+                Reason = "a run history could not be read; retrying next cycle", Namespace = Ns, FirstSeenAt = Old, LastSeenAt = Old,
+            });
+            return await db.SaveChangesAsync();
+        });
+        Run(h, "wf-fine", b => b.Failed(), start: Old);
+
+        await h.CyclesAsync(2);
+
+        Assert.False(HistoryReadOpen(await h.HealthAsync()));
+    }
+
     [Fact]
     [Trait("WorkflowOutcomeSuite", "chains")]
     public async Task Reconcile_RetryChainEndsInFinalFailure_BothRetainedUnderOneIncident()

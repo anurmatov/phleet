@@ -805,6 +805,75 @@ public sealed class WorkflowOutcomeInboxService(
 
     // ── Operator views ────────────────────────────────────────────────────────
 
+    /// <summary>Audit operation and status of a transfer record; never an accepted decision.</summary>
+    public const string TransferOperation = "transfer";
+    public const string TransferredStatus = "transferred";
+
+    /// <summary>
+    /// Operator-only re-ownership of one unresolved confirmed failure to the configured coordinator
+    /// in the current generation: after an owner change, or for a run stored under another
+    /// coordinator (a rule's or the policy default) or none. The exact version, generation and
+    /// current owner must match, so a stale, replayed or racing transfer is 409 and changes nothing.
+    /// The run's open memberships are superseded and an immutable transfer record is written in the
+    /// same transaction; the batcher then delivers it to the current coordinator for a fresh ack.
+    /// No coordinator credential can call this, and nothing is dropped or resolved by it.
+    /// </summary>
+    public async Task<WorkflowOutcomeResult> TransferAsync(WorkflowOutcomePrincipal principal, Guid outcomeId, WorkflowOutcomeTransferRequest? request, CancellationToken ct)
+    {
+        if (!principal.IsOperator) return WorkflowOutcomeResult.Error(403, "wrong_scope");
+        if (request is null || request.ExpectedVersion < 1 || string.IsNullOrWhiteSpace(request.ToCoordinator) || request.ToCoordinator.Length > 128
+            || request.FromCoordinator is { Length: 0 or > 128 })
+            return WorkflowOutcomeResult.Error(400, "malformed_request");
+        if (string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Length > WorkflowOutcomeLimits.MaxReasonChars)
+            return WorkflowOutcomeResult.Error(422, "reason_invalid");
+        if (!WorkflowOutcomeApi.IsAuthorityRef(request.AuthorityRef)) return WorkflowOutcomeResult.Error(422, "authority_missing");
+        var current = auth.Coordinator;
+        if (current is null) return WorkflowOutcomeResult.Error(422, "coordinator_unconfigured");
+        // The target is always the configured coordinator; a request naming another one is refused.
+        if (!WorkflowOutcomeApi.SameName(request.ToCoordinator, current)) return WorkflowOutcomeResult.Error(422, "foreign_coordinator");
+        var gen = auth.Generation;
+        if (request.Generation != gen) return WorkflowOutcomeResult.Error(409, "stale_generation");
+
+        var now = WorkflowOutcomeApi.Now(clock);
+        var from = request.FromCoordinator;
+        var refusal = await WorkflowOutcomeApi.InTransactionAsync<(int Status, string Error)?>(db, async () =>
+        {
+            var run = await WorkflowOutcomeApi.LockRunAsync(db, outcomeId, ct);
+            if (run is null) return ((404, "outcome_not_found"), false);
+            if (run.Classification != WorkflowOutcomeClassifications.ConfirmedFailure) return ((422, "not_confirmed_failure"), false);
+            if (run.ResolvedAt is not null) return ((409, "already_resolved"), false);
+            if (run.Version != request.ExpectedVersion) return ((409, "stale_version"), false);
+            if (!string.Equals(run.Coordinator, from, StringComparison.Ordinal)) return ((409, "coordinator_changed"), false);
+            if (WorkflowOutcomeApi.SameName(run.Coordinator, current)) return ((409, "already_current"), false);
+            // A membership of this exact version already exists in the current generation (the owner
+            // changed without incrementing CoordinatorGeneration): no fresh ack is possible in it.
+            if (await db.WorkflowOutcomeBatchItems.AnyAsync(i => i.OutcomeId == run.Id && i.OutcomeVersion == run.Version && i.DeliveryGeneration == gen, ct))
+                return ((409, "generation_not_incremented"), false);
+
+            // Conditional on the state read above, so of two racing transfers exactly one moves the run.
+            var moved = await db.WorkflowOutcomeRuns
+                .Where(r => r.Id == run.Id && r.Version == run.Version && r.Coordinator == from && r.ResolvedAt == null)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.Coordinator, current).SetProperty(r => r.UpdatedAt, now), ct);
+            if (moved != 1) return ((409, "coordinator_changed"), false);
+            await db.WorkflowOutcomeBatchItems
+                .Where(i => i.OutcomeId == run.Id && (i.State == WorkflowOutcomeItemStates.Pending || i.State == WorkflowOutcomeItemStates.Delivered))
+                .ExecuteUpdateAsync(u => u.SetProperty(i => i.State, WorkflowOutcomeItemStates.Superseded), ct);
+            db.WorkflowOutcomeDecisions.Add(new WorkflowOutcomeDecision
+            {
+                Id = Guid.NewGuid(), OutcomeId = run.Id, ExpectedVersion = run.Version, Operation = TransferOperation,
+                DecidedBy = WorkflowOutcomePrincipal.OperatorKind, DecidedVia = WorkflowOutcomePrincipal.OperatorKind, Owner = current,
+                Reason = request.Reason, EvidenceRefsJson = JsonSerializer.Serialize(new[] { "coordinator:" + (from ?? "unassigned") }),
+                AuthorityRef = request.AuthorityRef, CoordinatorGeneration = gen, Status = TransferredStatus, CreatedAt = now,
+            });
+            await db.SaveChangesAsync(ct);
+            return (null, true);
+        }, ct);
+        if (refusal is { } r) return WorkflowOutcomeResult.Error(r.Status, r.Error);
+
+        logger.LogInformation("workflow_outcome_transferred outcome={OutcomeId} generation={Generation}", outcomeId, gen);
+        return WorkflowOutcomeResult.Ok(new { outcomeId, coordinator = current, generation = gen, version = request.ExpectedVersion });
+    }
+
     public async Task<WorkflowOutcomeResult> ListAsync(string? @namespace, string? state, string? cursor, int? limit, CancellationToken ct)
     {
         state = string.IsNullOrEmpty(state) ? "failures" : state;

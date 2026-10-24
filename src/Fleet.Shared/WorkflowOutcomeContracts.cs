@@ -246,6 +246,19 @@ public sealed record WorkflowOutcomeClassificationRequest(
     IReadOnlyList<string> CausalEvidenceRefs,
     string AuthorityRef);
 
+/// <summary>
+/// Body of the operator-only <c>POST /{id}/transfer</c>: re-owns one unresolved confirmed failure
+/// from <see cref="FromCoordinator"/> (null = unassigned) to the configured coordinator in the
+/// current generation. Every field must match the stored state exactly.
+/// </summary>
+public sealed record WorkflowOutcomeTransferRequest(
+    int ExpectedVersion,
+    long Generation,
+    string? FromCoordinator,
+    string ToCoordinator,
+    string Reason,
+    string AuthorityRef);
+
 public sealed record WorkflowOutcomeTurnDecision(
     Guid Id,
     int Version,

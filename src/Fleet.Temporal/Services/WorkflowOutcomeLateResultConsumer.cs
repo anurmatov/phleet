@@ -145,7 +145,7 @@ public static class WorkflowOutcomeLateEnvelope
 
     public static async Task DeclareQueuesAsync(IChannel channel, TemporalBridgeOptions options, CancellationToken ct)
     {
-        foreach (var queue in new[] { options.WorkflowOutcomeLateQueue, options.WorkflowOutcomeQuarantineQueue })
+        foreach (var queue in new[] { options.WorkflowOutcomeLateQueue, options.WorkflowOutcomeHoldQueue, options.WorkflowOutcomeQuarantineQueue })
         {
             await channel.QueueDeclareAsync(
                 queue, durable: true, exclusive: false, autoDelete: false,
@@ -637,8 +637,12 @@ public sealed class WorkflowOutcomeLateResultConsumer : BackgroundService
 
         var consumerTag = await channel.BasicConsumeAsync(
             _options.WorkflowOutcomeLateQueue, autoAck: false, consumer: consumer, cancellationToken: stoppingToken);
+        // The hold queue is overflow intake parked by the relay listener: same messages, same handling.
+        var holdTag = await channel.BasicConsumeAsync(
+            _options.WorkflowOutcomeHoldQueue, autoAck: false, consumer: consumer, cancellationToken: stoppingToken);
         _logger.LogInformation(
-            "Workflow outcome late-result consumer started on {Queue} (prefetch 1)", _options.WorkflowOutcomeLateQueue);
+            "Workflow outcome late-result consumer started on {Queue} and {Hold} (prefetch 1 each)",
+            _options.WorkflowOutcomeLateQueue, _options.WorkflowOutcomeHoldQueue);
 
         TimeSpan backoff;
         try
@@ -648,6 +652,7 @@ public sealed class WorkflowOutcomeLateResultConsumer : BackgroundService
         finally
         {
             try { if (channel.IsOpen) await channel.BasicCancelAsync(consumerTag); } catch { /* closing anyway */ }
+            try { if (channel.IsOpen) await channel.BasicCancelAsync(holdTag); } catch { /* closing anyway */ }
             try { if (channel.IsOpen) await channel.CloseAsync(); } catch { /* closing anyway */ }
         }
 

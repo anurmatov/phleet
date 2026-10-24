@@ -52,6 +52,13 @@ public sealed class TemporalBridgeOptions
     public string WorkflowOutcomeQuarantineQueue { get; set; } = "fleet.workflow-outcomes.quarantine";
 
     /// <summary>
+    /// Durable overflow intake: a late reply whose handoff to the late queue is refused (quota,
+    /// missing queue, unknown confirm) is parked here, confirmed, so the relay delivery can be
+    /// acknowledged and live replies are never held behind it. The late-result consumer drains it.
+    /// </summary>
+    public string WorkflowOutcomeHoldQueue { get; set; } = "fleet.workflow-outcomes.hold";
+
+    /// <summary>
     /// Null when the late-result settings are usable, otherwise why not. Only checked when capture is
     /// enabled: an invalid value fails startup rather than being silently replaced.
     /// </summary>
@@ -65,17 +72,19 @@ public sealed class TemporalBridgeOptions
             return "TemporalBridge:OrchestratorUrl must be an absolute http(s) URL when late-result capture is enabled";
         if (string.IsNullOrWhiteSpace(OrchestratorAuthToken))
             return "TemporalBridge:OrchestratorAuthToken is required when late-result capture is enabled";
-        if (string.IsNullOrWhiteSpace(WorkflowOutcomeLateQueue) || WorkflowOutcomeLateQueue != WorkflowOutcomeLateQueue.Trim())
-            return "TemporalBridge:WorkflowOutcomeLateQueue must be a nonblank queue name without surrounding whitespace";
-        if (string.IsNullOrWhiteSpace(WorkflowOutcomeQuarantineQueue) || WorkflowOutcomeQuarantineQueue != WorkflowOutcomeQuarantineQueue.Trim())
-            return "TemporalBridge:WorkflowOutcomeQuarantineQueue must be a nonblank queue name without surrounding whitespace";
-        if (string.Equals(WorkflowOutcomeLateQueue, WorkflowOutcomeQuarantineQueue, StringComparison.Ordinal))
-            return "TemporalBridge:WorkflowOutcomeLateQueue and WorkflowOutcomeQuarantineQueue must differ";
-        if (WorkflowOutcomeLateQueue == RelayQueue || WorkflowOutcomeQuarantineQueue == RelayQueue)
-            return $"the late-result queues must not be the relay queue {RelayQueue}";
-        if (WorkflowOutcomeLateQueue.StartsWith("amq.", StringComparison.Ordinal) ||
-            WorkflowOutcomeQuarantineQueue.StartsWith("amq.", StringComparison.Ordinal))
-            return "the late-result queues must not use the reserved amq. prefix";
+        var queues = new[] { ("WorkflowOutcomeLateQueue", WorkflowOutcomeLateQueue), ("WorkflowOutcomeHoldQueue", WorkflowOutcomeHoldQueue),
+            ("WorkflowOutcomeQuarantineQueue", WorkflowOutcomeQuarantineQueue) };
+        foreach (var (name, value) in queues)
+        {
+            if (string.IsNullOrWhiteSpace(value) || value != value.Trim())
+                return $"TemporalBridge:{name} must be a nonblank queue name without surrounding whitespace";
+            if (value == RelayQueue)
+                return $"the late-result queues must not be the relay queue {RelayQueue}";
+            if (value.StartsWith("amq.", StringComparison.Ordinal))
+                return "the late-result queues must not use the reserved amq. prefix";
+        }
+        if (queues.Select(q => q.Item2).Distinct(StringComparer.Ordinal).Count() != queues.Length)
+            return "TemporalBridge:WorkflowOutcomeLateQueue, WorkflowOutcomeHoldQueue and WorkflowOutcomeQuarantineQueue must all differ";
         return null;
     }
 }

@@ -38,6 +38,7 @@ public sealed class WorkflowOutcomeRabbitMqBrokerTests : IAsyncLifetime
     private string Source => "wo-test.relay." + _suffix;
     private string Late => _options.WorkflowOutcomeLateQueue;
     private string Quarantine => _options.WorkflowOutcomeQuarantineQueue;
+    private string Hold => _options.WorkflowOutcomeHoldQueue;
 
     public async Task InitializeAsync()
     {
@@ -53,6 +54,7 @@ public sealed class WorkflowOutcomeRabbitMqBrokerTests : IAsyncLifetime
             WorkflowOutcomeLateCaptureEnabled = true,
             WorkflowOutcomeLateQueue = "wo-test.late." + _suffix,
             WorkflowOutcomeQuarantineQueue = "wo-test.quarantine." + _suffix,
+            WorkflowOutcomeHoldQueue = "wo-test.hold." + _suffix,
             OrchestratorUrl = "https://orchestrator.example",
             OrchestratorAuthToken = WorkflowOutcomeTestValues.AdminToken,
         };
@@ -80,7 +82,7 @@ public sealed class WorkflowOutcomeRabbitMqBrokerTests : IAsyncLifetime
             }
         }
 
-        foreach (var queue in _ownsRelayTopology ? new[] { Source, Late, Quarantine, TemporalBridgeOptions.RelayQueue } : new[] { Source, Late, Quarantine })
+        foreach (var queue in _ownsRelayTopology ? new[] { Source, Late, Hold, Quarantine, TemporalBridgeOptions.RelayQueue } : new[] { Source, Late, Hold, Quarantine })
         {
             try
             {
@@ -316,9 +318,9 @@ public sealed class WorkflowOutcomeRabbitMqBrokerTests : IAsyncLifetime
         Assert.Equal("store_failed_after_retries", HeaderString(quarantined.BasicProperties, WorkflowOutcomeLateEnvelope.QuarantineReasonHeader));
     }
 
-    /// <summary>The late queue is at its 256 MiB quota: reject-publish nacks the copy, the reply stays unacknowledged.</summary>
+    /// <summary>The late queue is at its 256 MiB quota: reject-publish nacks the late copy, so it is parked in the hold queue and only then acknowledged.</summary>
     [Fact]
-    public async Task Capture_QueueAtQuota_RejectPublishPausesAndLeavesTheReplyQueued()
+    public async Task Capture_QueueAtQuota_RejectPublishParksTheCopyInTheHoldQueue()
     {
         await using var broker = Broker();
         Assert.Null(await broker.ActivateAsync(CancellationToken.None));
@@ -344,24 +346,27 @@ public sealed class WorkflowOutcomeRabbitMqBrokerTests : IAsyncLifetime
         Assert.True(nacked, "the quota never refused a publish");
 
         await PublishAsync(Source, WorkflowOutcomeTestValues.Reply(TaskId), new BasicProperties { Persistent = true });
-        var (pauses, sourceAfter) = await CaptureOneAsync(broker);
+        var (notCaptured, sourceAfter) = await CaptureOneAsync(broker);
 
-        Assert.Contains("Nacked", Assert.Single(pauses));
-        Assert.Equal(1u, sourceAfter);                     // still with the broker, never dropped
+        Assert.Empty(notCaptured);
+        Assert.Equal(0u, sourceAfter);                     // acknowledged after the confirmed hold copy
+        Assert.Equal(1u, await ReadyAsync(Hold));          // durable, never dropped
 
-        // Once the operator drains the late queue, the very same reply is captured.
+        // Once the operator drains the late queue, the next reply goes straight to it.
         await using (var connection = await Factory().CreateConnectionAsync())
         await using (var channel = await connection.CreateChannelAsync())
             await channel.QueuePurgeAsync(Late);
-        var (retryPauses, retrySource) = await CaptureOneAsync(broker);
-        Assert.Empty(retryPauses);
+        await PublishAsync(Source, WorkflowOutcomeTestValues.Reply(TaskId), new BasicProperties { Persistent = true });
+        var (retryNotCaptured, retrySource) = await CaptureOneAsync(broker);
+        Assert.Empty(retryNotCaptured);
         Assert.Equal(0u, retrySource);
         Assert.Equal(1u, await ReadyAsync(Late));
+        Assert.Equal(1u, await ReadyAsync(Hold));
     }
 
-    /// <summary>The late queue vanished: the mandatory copy is returned, nothing is ACKed, the next attempt re-declares it.</summary>
+    /// <summary>The late queue vanished: the mandatory late copy is returned, the copy is parked in the hold queue (which re-declares the topology), and the next reply reaches the late queue again.</summary>
     [Fact]
-    public async Task Capture_QueueMissing_ReturnIsNotAcked_AndTheNextAttemptRedeclares()
+    public async Task Capture_QueueMissing_ReturnParksInHold_AndTheNextAttemptRedeclares()
     {
         await using var broker = Broker();
         Assert.Null(await broker.ActivateAsync(CancellationToken.None));
@@ -370,13 +375,15 @@ public sealed class WorkflowOutcomeRabbitMqBrokerTests : IAsyncLifetime
             await channel.QueueDeleteAsync(Late, ifUnused: false, ifEmpty: false);
 
         await PublishAsync(Source, WorkflowOutcomeTestValues.Reply(TaskId), new BasicProperties { Persistent = true });
-        var (pauses, sourceAfter) = await CaptureOneAsync(broker);
+        var (notCaptured, sourceAfter) = await CaptureOneAsync(broker);
 
-        Assert.Contains("Returned", Assert.Single(pauses));
-        Assert.Equal(1u, sourceAfter);
+        Assert.Empty(notCaptured);
+        Assert.Equal(0u, sourceAfter);
+        Assert.Equal(1u, await ReadyAsync(Hold));
 
-        var (retryPauses, retrySource) = await CaptureOneAsync(broker);
-        Assert.Empty(retryPauses);
+        await PublishAsync(Source, WorkflowOutcomeTestValues.Reply(TaskId), new BasicProperties { Persistent = true });
+        var (retryNotCaptured, retrySource) = await CaptureOneAsync(broker);
+        Assert.Empty(retryNotCaptured);
         Assert.Equal(0u, retrySource);
         Assert.Equal(1u, await ReadyAsync(Late));
     }
@@ -393,9 +400,10 @@ public sealed class WorkflowOutcomeRabbitMqBrokerTests : IAsyncLifetime
         Assert.Equal("queue_declare_refused_406", await broker.ActivateAsync(CancellationToken.None));
 
         await PublishAsync(Source, WorkflowOutcomeTestValues.Reply(TaskId), new BasicProperties { Persistent = true });
-        var (pauses, sourceAfter) = await CaptureOneAsync(broker);
+        var (notCaptured, sourceAfter) = await CaptureOneAsync(broker);
 
-        Assert.Contains("Unavailable", Assert.Single(pauses));
+        // Neither copy can be confirmed: held unacknowledged, returned to the relay queue on close.
+        Assert.Contains("Unavailable", Assert.Single(notCaptured));
         Assert.Equal(1u, sourceAfter);
     }
 
@@ -458,48 +466,77 @@ public sealed class WorkflowOutcomeRabbitMqBrokerTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// The listener's own consumer glue on a real broker: the late queue is missing, so the first
-    /// handoff is returned — the orphan is held unacknowledged while a live matched reply is still
-    /// delivered and acknowledged (no consumer pause) — and the background retry re-declares the
-    /// late queue, captures the orphan and only then acknowledges it.
+    /// Backpressure isolation on a real broker: the late queue is at its quota, so every orphan
+    /// handoff is refused. More orphans than the relay prefetch (70 &gt; 65) are each parked in the
+    /// hold queue and acknowledged, a matched live reply behind them is still delivered at once, no
+    /// original is dropped, and the late-result consumer later stores every parked reply.
     /// </summary>
     [Fact]
-    public async Task Listener_RealConsumer_ReturnedHandoffHeldWhileLiveRepliesFlow_ThenCaptured()
+    public async Task Listener_RealConsumer_70RefusedOrphans_ParkInHold_LiveReplyFlows_ThenEveryOneIsStored()
     {
+        const int orphans = 70;
         await ClaimRelayQueueAsync();
         await using var broker = Broker();
         Assert.Null(await broker.ActivateAsync(CancellationToken.None));
-        await using (var connection = await Factory().CreateConnectionAsync())
-        await using (var channel = await connection.CreateChannelAsync())
-            await channel.QueueDeleteAsync(Late, ifUnused: false, ifEmpty: false);
+        await FillLateQueueToQuotaAsync();
 
         var logger = new RecordingLogger<TemporalRelayListener>();
         var registry = new TaskCompletionRegistry(NullLogger<TaskCompletionRegistry>.Instance);
         var waiter = registry.Register("wf-real/live");
-        // Real time: the retry backoff is 5 s, so the live reply is settled while the orphan is held.
         var listener = RunningListener(_options, broker, registry, logger, TimeProvider.System);
         await listener.StartAsync(CancellationToken.None);
         try
         {
-            await PublishReplyToRelayAsync(WorkflowOutcomeTestValues.Reply(TaskId));
-            await WaitUntilAsync(() => Task.FromResult(logger.AllText.Contains("not captured (Returned")), "the orphan to be held");
-
+            for (var i = 0; i < orphans; i++)
+                await PublishReplyToRelayAsync(WorkflowOutcomeTestValues.Reply("wf-real/orphan-" + i));
             await PublishReplyToRelayAsync(WorkflowOutcomeTestValues.Reply("wf-real/live"));
-            Assert.Equal("completed", (await waiter.Task.WaitAsync(TimeSpan.FromSeconds(4))).Status);
-            Assert.DoesNotContain("captured to " + Late, logger.AllText); // the orphan is still held
 
-            await WaitUntilAsync(async () => await ReadyOrNullAsync(Late) == 1 && logger.AllText.Contains("captured to " + Late),
-                "the held orphan to be captured by its retry");
+            Assert.Equal("completed", (await waiter.Task.WaitAsync(TimeSpan.FromSeconds(60))).Status);
+            await WaitUntilAsync(async () => await ReadyAsync(Hold) == orphans && await ReadyAsync(TemporalBridgeOptions.RelayQueue) == 0,
+                "every orphan to be parked in the hold queue");
         }
         finally
         {
             await listener.StopAsync(CancellationToken.None);
         }
 
-        Assert.DoesNotContain("paused", logger.AllText);
-        Assert.Equal(0u, await ReadyAsync(TemporalBridgeOptions.RelayQueue));
-        Assert.Equal(1u, await ReadyAsync(Late));
+        Assert.Equal(orphans, logger.Entries.Count(e => e.Message.Contains("parked in " + Hold)));
+        Assert.DoesNotContain(logger.Entries, e => e.Message.Contains("not captured") || e.Message.Contains("paused"));
+        Assert.Equal(0u, await ReadyAsync(TemporalBridgeOptions.RelayQueue)); // nothing redelivered or left behind
+
+        // The operator drains the full late queue; the consumer then stores every parked reply.
+        await using (var connection = await Factory().CreateConnectionAsync())
+        await using (var channel = await connection.CreateChannelAsync())
+            await channel.QueuePurgeAsync(Late);
+        var api = new FakeLateResultsApi();
+        var consumer = Consumer(broker, api, new AutoAdvanceTimeProvider(DateTimeOffset.UtcNow));
+        await consumer.StartAsync(CancellationToken.None);
+        await WaitUntilAsync(() => Task.FromResult(api.Stored.Count == orphans), "the consumer to store every parked reply");
+        await WaitUntilAsync(async () => await ReadyAsync(Hold) == 0, "the hold queue to drain");
+        await consumer.StopAsync(CancellationToken.None);
+
+        Assert.Equal(0u, await ReadyAsync(Quarantine));
         Assert.DoesNotContain(WorkflowOutcomeTestValues.SecretText, logger.AllText);
+    }
+
+    private async Task FillLateQueueToQuotaAsync()
+    {
+        var filler = new byte[16 * 1024 * 1024];
+        await using var connection = await Factory().CreateConnectionAsync();
+        await using var channel = await connection.CreateChannelAsync(new CreateChannelOptions(true, true));
+        for (var i = 0; i < 20; i++)
+        {
+            try
+            {
+                await channel.BasicPublishAsync(string.Empty, Late, mandatory: true, new BasicProperties(), filler);
+            }
+            catch (PublishException ex) when (!ex.IsReturn)
+            {
+                return;
+            }
+        }
+
+        Assert.Fail("the quota never refused a publish");
     }
 
     /// <summary>Matched replies are acknowledged with nothing captured; with capture off an orphan is discarded as before.</summary>
@@ -530,6 +567,7 @@ public sealed class WorkflowOutcomeRabbitMqBrokerTests : IAsyncLifetime
         {
             WorkflowOutcomeLateQueue = _options.WorkflowOutcomeLateQueue,
             WorkflowOutcomeQuarantineQueue = _options.WorkflowOutcomeQuarantineQueue,
+            WorkflowOutcomeHoldQueue = _options.WorkflowOutcomeHoldQueue,
         };
         var offLogger = new RecordingLogger<TemporalRelayListener>();
         var captureOff = RunningListener(off, broker: null, new TaskCompletionRegistry(NullLogger<TaskCompletionRegistry>.Instance), offLogger, TimeProvider.System);

@@ -265,23 +265,21 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
 
     /// <summary>
     /// Publishes the ORIGINAL bytes to the late queue and acknowledges the relay delivery only
-    /// once the broker confirmed that copy. Anything else — return, nack (including the
-    /// reject-publish quota), unknown confirm, capture unavailable — holds the reply
-    /// unacknowledged and retries it in the background; the relay consumer keeps running.
+    /// once the broker confirmed a copy. A refused late-queue handoff (return, nack including the
+    /// reject-publish quota, unknown confirm) parks the copy in the durable hold queue instead, so
+    /// late-result backpressure never occupies the relay consumer. Only when the broker confirms
+    /// neither copy is the reply held unacknowledged and retried in the background.
     /// </summary>
     private async Task CaptureLateReplyAsync(
         string taskId, ReadOnlyMemory<byte> body, IReadOnlyBasicProperties? properties, IWorkflowOutcomeDelivery delivery)
     {
         var messageId = WorkflowOutcomeLateEnvelope.StableMessageId(properties?.MessageId, body.Span);
         var now = _time.GetUtcNow();
-        var published = await PublishLateAsync(taskId, body, messageId, now);
+        var (queue, published) = await HandOffAsync(taskId, body, messageId, now);
 
-        if (published.IsConfirmed)
+        if (queue is not null)
         {
             _captureBackoff.Reset();
-            _logger.LogInformation(
-                "Late reply for TaskId={TaskId} captured to {Queue} (messageId={MessageId})",
-                taskId, _bridgeOptions.WorkflowOutcomeLateQueue, messageId);
             await delivery.AckAsync();
             return;
         }
@@ -300,14 +298,43 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
             _ = Task.Run(RetryHeldAsync);
     }
 
-    private async Task<WorkflowOutcomePublishResult> PublishLateAsync(string taskId, ReadOnlyMemory<byte> body, string messageId, DateTimeOffset receivedAt)
+    /// <summary>
+    /// The confirmed copy's queue (late, else hold) or null with the last refusal. Logs the outcome;
+    /// a duplicate copy after an unknown confirm is deduplicated downstream by the stable MessageId.
+    /// </summary>
+    private async Task<(string? Queue, WorkflowOutcomePublishResult Result)> HandOffAsync(
+        string taskId, ReadOnlyMemory<byte> body, string messageId, DateTimeOffset receivedAt)
+    {
+        var late = await PublishCopyAsync(_bridgeOptions.WorkflowOutcomeLateQueue, taskId, body, messageId, receivedAt);
+        if (late.IsConfirmed)
+        {
+            _logger.LogInformation(
+                "Late reply for TaskId={TaskId} captured to {Queue} (messageId={MessageId})",
+                taskId, _bridgeOptions.WorkflowOutcomeLateQueue, messageId);
+            return (_bridgeOptions.WorkflowOutcomeLateQueue, late);
+        }
+
+        var hold = await PublishCopyAsync(_bridgeOptions.WorkflowOutcomeHoldQueue, taskId, body, messageId, receivedAt);
+        if (hold.IsConfirmed)
+        {
+            _logger.LogWarning(
+                "Late reply for TaskId={TaskId} parked in {Hold} (late-queue handoff {Status}: {Reason}; messageId={MessageId})",
+                taskId, _bridgeOptions.WorkflowOutcomeHoldQueue, late.Status, late.Reason, messageId);
+            return (_bridgeOptions.WorkflowOutcomeHoldQueue, hold);
+        }
+
+        return (null, new WorkflowOutcomePublishResult(hold.Status, $"late {late.Status}/{late.Reason}, hold {hold.Status}/{hold.Reason}"));
+    }
+
+    private async Task<WorkflowOutcomePublishResult> PublishCopyAsync(
+        string queue, string taskId, ReadOnlyMemory<byte> body, string messageId, DateTimeOffset receivedAt)
     {
         try
         {
             return _outcomeBroker is null
                 ? new(WorkflowOutcomePublishStatus.Unavailable, "capture_not_configured")
                 : await _outcomeBroker.PublishAsync(
-                    _bridgeOptions.WorkflowOutcomeLateQueue,
+                    queue,
                     body,
                     messageId,
                     WorkflowOutcomeLateEnvelope.LateHeaders(attempt: 0, dueAt: receivedAt, receivedAt: receivedAt, taskId),
@@ -340,8 +367,8 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
                         continue;
                     }
 
-                    var published = await PublishLateAsync(held.TaskId, held.Body, held.MessageId, held.ReceivedAt);
-                    if (!published.IsConfirmed)
+                    var (queue, published) = await HandOffAsync(held.TaskId, held.Body, held.MessageId, held.ReceivedAt);
+                    if (queue is null)
                     {
                         _logger.LogWarning(
                             "Held late reply for TaskId={TaskId} retry failed ({Status}: {Reason}); still unacknowledged",
@@ -354,9 +381,6 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
                     try
                     {
                         await held.Delivery.AckAsync();
-                        _logger.LogInformation(
-                            "Late reply for TaskId={TaskId} captured to {Queue} (messageId={MessageId})",
-                            held.TaskId, _bridgeOptions.WorkflowOutcomeLateQueue, held.MessageId);
                     }
                     catch (Exception ex)
                     {

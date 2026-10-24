@@ -182,3 +182,11 @@ Never repair this by deleting its slot/tombstone, replaying Create, guessing an 
 starting a retained sandbox, enabling grants, or restarting the old runtime.
 The preparation-specific reconcile/operator workflow, concrete evidence/bootstrap peers and live
 acceptance are not implemented; preserve pending state for the separately scoped recovery work.
+
+Bootstrap startup is a separate minimal branch, not daemon mode with delayed intake.
+It requires an exact HTTPS bootstrap ingress, launch/epoch UUIDs, plan hash, UTC deadline within
+60 seconds and a nonempty capability file. Missing configuration exits nonzero before core services.
+The capability authorizes only one empty `/bootstrap/probe` request on loopback; repeated requests,
+extra bodies/queries and invalid authorization deny. No workload assertion is authored or forwarded.
+Outside D1 receiver/configuration and concrete preparation peers remain unavailable, so do not
+select production preparation or interpret these local guard regressions as a successful identity probe.

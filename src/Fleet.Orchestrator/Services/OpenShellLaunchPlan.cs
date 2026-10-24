@@ -7,8 +7,10 @@ namespace Fleet.Orchestrator.Services;
 
 /// <summary>Immutable serialized request, never shared mutable protobufs or credentials.</summary>
 public sealed record OpenShellLaunchPlan(string GatewayId, string Workspace, string SpecBase64,
-    string InputHash, string PolicyHash, string ImageHash)
+    string InputHash, string PolicyHash, string ImageHash, string ExpectedProvidersJson = "[]")
 {
+    public OpenShellExpectedProvider[] ReadExpectedProviders() => System.Text.Json.JsonSerializer.Deserialize<OpenShellExpectedProvider[]>(ExpectedProvidersJson)
+        ?? throw new OpenShellStateConflictException("expected_providers_missing");
     public SandboxSpec ReadSpec() => SandboxSpec.Parser.ParseFrom(Convert.FromBase64String(SpecBase64));
     [System.Text.Json.Serialization.JsonIgnore]
     public string Hash => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
@@ -19,9 +21,17 @@ public sealed record OpenShellLaunchPlan(string GatewayId, string Workspace, str
 /// Conservative bootstrap compiler. This is not upstream lint or image/mount qualification.
 /// Those independent prerequisites must succeed before the preparation driver stops anything.
 /// </summary>
+public sealed record OpenShellExpectedProvider(string Name, string ProviderId, ulong ResourceVersion,
+    ulong EnvironmentRevision, ulong ConfigurationRevision, string PolicyHash)
+{
+    public bool Matches(ProviderDesiredIdentity desired) => desired.ProviderId == ProviderId
+        && desired.ProviderResourceVersion == ResourceVersion && desired.ProviderEnvRevision == EnvironmentRevision
+        && desired.ConfigRevision == ConfigurationRevision && desired.PolicyHash == PolicyHash;
+}
+
 public sealed class OpenShellPolicyCompiler
 {
-    public OpenShellLaunchPlan Compile(string gatewayId, string workspace, SandboxSpec spec, string inputHash)
+    public OpenShellLaunchPlan Compile(string gatewayId, string workspace, SandboxSpec spec, string inputHash, IReadOnlyList<OpenShellExpectedProvider>? expectedProviders = null)
     {
         if (!Opaque(gatewayId) || !Opaque(workspace) || !Hash(inputHash)) throw Blocked();
         var copy = spec.Clone();
@@ -56,10 +66,15 @@ public sealed class OpenShellPolicyCompiler
                 || middleware.Config?.Fields.Count != 1
                 || !middleware.Config.Fields.TryGetValue("service", out var service)
                 || service.StringValue != "orchestrator") throw Blocked();
+        if (expectedProviders is null || expectedProviders.Count != copy.Providers.Count
+            || expectedProviders.Select(p => p.Name).Distinct(StringComparer.Ordinal).Count() != expectedProviders.Count
+            || expectedProviders.Any(p => !copy.Providers.Contains(p.Name) || !Opaque(p.ProviderId) || p.ResourceVersion == 0
+                || !Hash(p.PolicyHash))) throw new OpenShellStateConflictException("expected_providers_missing_or_invalid");
         var bytes = copy.ToByteArray();
         if (bytes.Length > 128 * 1024) throw Blocked();
         return new(gatewayId, workspace, Convert.ToBase64String(bytes), inputHash,
-            Convert.ToHexStringLower(SHA256.HashData(policy.ToByteArray())), copy.Template.Image.Split("@sha256:").Last());
+            Convert.ToHexStringLower(SHA256.HashData(policy.ToByteArray())), copy.Template.Image.Split("@sha256:").Last(),
+            System.Text.Json.JsonSerializer.Serialize(expectedProviders.OrderBy(p => p.Name, StringComparer.Ordinal)));
     }
     private static bool PathSafe(string p) => p.StartsWith('/') && p.Length <= 4096
         && !p.Any(char.IsControl) && !p.Split('/').Any(x => x is ".." or ".") && !p.Contains("//");

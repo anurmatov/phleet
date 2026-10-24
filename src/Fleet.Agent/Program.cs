@@ -15,6 +15,25 @@ using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// This branch must precede every core/CLI/daemon/8091/broker/poller registration.
+try
+{
+    if (builder.Services.TryAddOpenShellBootstrapServices(builder.Configuration))
+    {
+        builder.WebHost.ConfigureKestrel(options => options.Listen(System.Net.IPAddress.Loopback, 8080));
+        var bootstrap = builder.Build();
+        OpenShellStartupGuard.MapBootstrap(bootstrap);
+        await bootstrap.RunAsync();
+        return;
+    }
+}
+catch (Exception)
+{
+    Console.Error.WriteLine("Fleet.Agent bootstrap refused, exiting 1");
+    Environment.Exit(1);
+    return;
+}
+
 builder.Services.AddAgentCoreServices(builder.Configuration);
 
 // Determine mode from command-line args

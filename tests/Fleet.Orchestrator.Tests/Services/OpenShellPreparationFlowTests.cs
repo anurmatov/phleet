@@ -16,6 +16,14 @@ public sealed class OpenShellPreparationFlowTests
     [InlineData("probe")]
     [InlineData("create_lost")]
     [InlineData("readiness")]
+    [InlineData("prior_retired")]
+    [InlineData("drift_id")]
+    [InlineData("drift_version")]
+    [InlineData("drift_environment")]
+    [InlineData("drift_configuration")]
+    [InlineData("drift_policy")]
+    [InlineData("missing_provider")]
+    [InlineData("foreign_provider")]
     public async Task Preparation_UsesSingleCreate_AndRevokesBeforeExactHeldCleanup(string fault)
     {
         await using var sql = new SqliteConnection("Data Source=:memory:"); await sql.OpenAsync();
@@ -25,6 +33,13 @@ public sealed class OpenShellPreparationFlowTests
             await db.Database.EnsureCreatedAsync();
             db.Agents.Add(new() { Name = "agent1", DisplayName = "Agent 1", Role = "test", Model = "test", ContainerName = "unused" });
             await db.SaveChangesAsync();
+        }
+        if (fault == "prior_retired")
+        {
+            await using var history = new OrchestratorDbContext(options);
+            history.OpenShellLaunches.Add(new() { Id = Guid.NewGuid(), AgentId = 1, IdentityEpoch = Guid.NewGuid(),
+                CreatedAt = DateTime.UtcNow.AddHours(-1), RevokedAt = DateTime.UtcNow.AddHours(-1), Phase = "retired" });
+            await history.SaveChangesAsync();
         }
         var plan = OpenShellPolicyCompilerTests.Plan();
         var selection = new OpenShellPreparationScope(1, "start", null, plan.Hash, DateTime.UtcNow.AddSeconds(100), plan);
@@ -39,7 +54,7 @@ public sealed class OpenShellPreparationFlowTests
         var result = await driver.TryPrepareAsync("agent1", "start", false, default);
         Assert.NotNull(result); Assert.False(result.Success); Assert.Equal(1, wire.Creates);
         await using var read = new OrchestratorDbContext(options);
-        var row = await read.OpenShellLaunches.SingleAsync();
+        var row = await read.OpenShellLaunches.SingleAsync(l => l.CreateRequestId != null);
         Assert.NotNull(row.PreparationJson); Assert.NotNull(row.CreateRequestId); Assert.NotNull(row.CreateAttemptedAt);
         Assert.Equal(selection.Deadline, row.PreparationDeadline); Assert.NotNull(row.RevokedAt);
         if (fault == "create_lost")
@@ -52,7 +67,8 @@ public sealed class OpenShellPreparationFlowTests
             Assert.Equal(1, wire.Stops); Assert.Equal(1, wire.Deletes); Assert.Equal("retired", row.Phase);
             Assert.Null(row.ActiveAgentId); Assert.Empty(await read.OpenShellLeases.ToListAsync());
             Assert.Single(await read.OpenShellRetiredIds.ToListAsync());
-            if (fault == "held") { Assert.NotNull(row.SecurityReadyJson); Assert.Contains("activation_held", result.Message); }
+            if (fault.StartsWith("drift_") || fault is "missing_provider" or "foreign_provider") Assert.Null(row.SecurityReadyJson);
+            if (fault is "held" or "prior_retired") { Assert.NotNull(row.SecurityReadyJson); Assert.Contains("activation_held", result.Message); }
         }
     }
 
@@ -85,7 +101,18 @@ public sealed class OpenShellPreparationFlowTests
         public Task<OpenShellSupervisorProof> ReadCurrentSupervisorAsync(OpenShellSandboxSnapshot target, string provider, CancellationToken ct)
         {
             if (fault == "readiness") throw new Exception("unavailable current supervisor");
-            return Task.FromResult(OpenShellSupervisorProof.Verify(target, provider, OpenShellPreparationTests.Ready(), DateTime.UtcNow));
+            var status = OpenShellPreparationTests.Ready();
+            switch (fault)
+            {
+                case "drift_id": status.Receipt.Desired.ProviderId = "replacement1"; break;
+                case "drift_version": status.Receipt.Desired.ProviderResourceVersion++; break;
+                case "drift_environment": status.Receipt.Desired.ProviderEnvRevision++; status.Observed.ProviderEnvRevision++; break;
+                case "drift_configuration": status.Receipt.Desired.ConfigRevision++; status.Observed.ConfigRevision++; break;
+                case "drift_policy": status.Receipt.Desired.PolicyHash = new string('c', 64); status.Observed.PolicyHash = new string('c', 64); break;
+                case "missing_provider": status.Receipt.Desired.ProviderId = ""; break;
+                case "foreign_provider": status.Receipt.Provider = "foreign1"; break;
+            }
+            return Task.FromResult(OpenShellSupervisorProof.Verify(target, provider, status, DateTime.UtcNow));
         }
         public Task<IReadOnlyList<OpenShellSandboxSnapshot>> InventoryAsync(CancellationToken ct) => throw new Exception("No ambiguous inventory guess permitted.");
         public Task<OpenShellSandboxSnapshot?> ReadExactAsync(string id, CancellationToken ct) => Task.FromResult<OpenShellSandboxSnapshot?>(OpenShellPreparationTests.Target());
@@ -102,7 +129,7 @@ public sealed class OpenShellPreparationFlowTests
         private async Task AssertRevoked(CancellationToken ct)
         {
             await using var db = new OrchestratorDbContext(options);
-            Assert.NotNull((await db.OpenShellLaunches.AsNoTracking().SingleAsync(ct)).RevokedAt);
+            Assert.NotNull((await db.OpenShellLaunches.AsNoTracking().SingleAsync(l => l.CreateRequestId != null, ct)).RevokedAt);
             Assert.Single(await db.OpenShellRetiredIds.ToListAsync(ct));
         }
     }

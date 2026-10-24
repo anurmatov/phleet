@@ -55,7 +55,7 @@ public sealed class OpenShellProvisioningService(Func<OrchestratorDbContext> cre
         try
         {
             var compiled = new OpenShellPolicyCompiler().Compile(selection.Plan.GatewayId, selection.Plan.Workspace,
-                selection.Plan.ReadSpec(), selection.Plan.InputHash);
+                selection.Plan.ReadSpec(), selection.Plan.InputHash, selection.Plan.ReadExpectedProviders());
             if (compiled != selection.Plan) throw new OpenShellStateConflictException("preparation_plan_changed");
             await preflight.VerifyAsync(selection, ct).WaitAsync(ct);
             await preflight.VerifyLegacyOwnershipAsync(selection, ct).WaitAsync(ct);
@@ -63,7 +63,7 @@ public sealed class OpenShellProvisioningService(Func<OrchestratorDbContext> cre
             var agent = await db.Agents.AsNoTracking().SingleOrDefaultAsync(a => a.Name == name, ct);
             if (agent?.Id != selection.AgentId || agent.ExecutionShell != "openshell"
                 || agent.OpenShellMigrationState != "pending"
-                || await db.OpenShellLaunches.AnyAsync(l => l.AgentId == agent.Id, ct))
+                || await db.OpenShellLaunches.AnyAsync(l => l.AgentId == agent.Id && (l.ActiveAgentId != null || l.Phase != "retired" || l.RevokedAt == null), ct))
                 throw new OpenShellStateConflictException("preparation_owner_changed");
             var store = new OpenShellLaunchStore(db);
             launch = await store.ReserveAsync(agent.Id, selection.ExpectedOldRuntimeId, DateTime.UtcNow,
@@ -93,7 +93,8 @@ public sealed class OpenShellProvisioningService(Func<OrchestratorDbContext> cre
             foreach (var (provider, proof) in compiled.ReadSpec().Providers.Zip(proofs))
             {
                 var fresh = await gateway.ReadCurrentSupervisorAsync(current, provider, ct);
-                if (!fresh.Desired.Equals(proof.Desired) || fresh.SessionId != proof.SessionId
+                if (!compiled.ReadExpectedProviders().Single(e => e.Name == provider).Matches(fresh.Desired)
+                    || !fresh.Desired.Equals(proof.Desired) || fresh.SessionId != proof.SessionId
                     || fresh.ProcessInstanceId != proof.ProcessInstanceId || fresh.NetworkInstanceId != proof.NetworkInstanceId)
                     throw new OpenShellStateConflictException("supervisor_changed_after_probe");
             }

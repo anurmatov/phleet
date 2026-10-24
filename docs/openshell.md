@@ -455,3 +455,25 @@ security_ready/current exact owner and fresh current supervisor, 204 without act
 Memory still admits only activated/committed identities; no bootstrap/data exception was added.
 Activation/native callback/replacement/rollback, independent full-parent audit, green exact-head CI,
 approved actual-agent and MySQL cleanup/backup/restore-query acceptance remain parent merge holds.
+
+### Preparation review correction: expected authority and early bootstrap
+
+The immutable serialized plan now includes exact provider name, provider ID/resource version,
+environment/configuration revisions and policy hash. Compilation requires a complete unique set;
+relational security-ready commit rejects missing, duplicate, foreign or drifted proofs, even when
+current desired and observed values agree with each other. Post-probe revalidation also checks
+that original expectation, never a newly adopted gateway desired state.
+
+A retired, revoked launch without an active slot no longer blocks a fresh selected preparation;
+active or unresolved ownership still refuses, including under the reservation transaction.
+
+The actual Agent Program now selects `OpenShell:Bootstrap` before core, CLI or daemon registration.
+Invalid/missing bootstrap configuration exits before registration. The bootstrap graph has only a
+loopback control probe, bounded empty POST to outside `/identity/ready`, and fixed-deadline shutdown.
+It has no activation handler, executor/warmup, tools, 8091, broker or poller; control authorization
+uses an explicit capability file, never an assertion signing key, admin token or agent name.
+A successful HTTP probe is not yet an outside-identity acceptance result.
+
+D1 outside hook/issuer/ingress and dedicated orchestrator receiver/config remain unimplemented,
+as do concrete static/runtime/intake peers and authenticated ambiguous-Create reconciliation.
+Their default-off registration remains unchanged, and all prior parent acceptance holds remain.

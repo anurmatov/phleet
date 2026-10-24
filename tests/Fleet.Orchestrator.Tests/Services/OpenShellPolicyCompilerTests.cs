@@ -12,8 +12,8 @@ public sealed class OpenShellPolicyCompilerTests
     {
         var input = Spec();
         var compiler = new OpenShellPolicyCompiler();
-        var plan = compiler.Compile("gateway1", "workspace1", input, new string('b', 64));
-        Assert.Equal(plan, compiler.Compile("gateway1", "workspace1", input, new string('b', 64)));
+        var plan = compiler.Compile("gateway1", "workspace1", input, new string('b', 64), Expected());
+        Assert.Equal(plan, compiler.Compile("gateway1", "workspace1", input, new string('b', 64), Expected()));
         Assert.Equal(64, plan.Hash.Length);
         input.Template.Image = "altered";
         Assert.Contains("@sha256:", plan.ReadSpec().Template.Image);
@@ -54,10 +54,11 @@ public sealed class OpenShellPolicyCompilerTests
             case "middleware": spec.Policy.NetworkMiddlewares["identity"].OnError = "fail_open"; break;
             case "host": spec.Policy.NetworkMiddlewares["identity"].Endpoints.Include[0] = "other.example.invalid"; break;
         }
-        Assert.Throws<OpenShellStateConflictException>(() => new OpenShellPolicyCompiler().Compile("gateway1", "workspace1", spec, new string('b', 64)));
+        Assert.Throws<OpenShellStateConflictException>(() => new OpenShellPolicyCompiler().Compile("gateway1", "workspace1", spec, new string('b', 64), Expected()));
     }
 
-    internal static OpenShellLaunchPlan Plan() => new OpenShellPolicyCompiler().Compile("gateway1", "workspace1", Spec(), new string('b', 64));
+    internal static OpenShellLaunchPlan Plan() => new OpenShellPolicyCompiler().Compile("gateway1", "workspace1", Spec(), new string('b', 64), Expected());
+    internal static OpenShellExpectedProvider[] Expected() => [new("provider1", "provider-id1", 1, 2, 3, new string('a', 64))];
     internal static SandboxSpec Spec() => new()
     {
         Template = new() { Image = "example.invalid/agent@sha256:" + new string('a', 64) },

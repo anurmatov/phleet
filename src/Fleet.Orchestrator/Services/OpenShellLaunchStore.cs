@@ -26,7 +26,8 @@ public sealed class OpenShellLaunchStore(OrchestratorDbContext db, TimeProvider?
             throw new OpenShellStateConflictException("preparation_scope_conflict");
         RequireNonRetryingContext();
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-        if (await db.OpenShellLaunches.AnyAsync(x => x.ActiveAgentId == agentId, ct))
+        if (await db.OpenShellLaunches.AnyAsync(x => x.ActiveAgentId == agentId
+            || preparation != null && x.AgentId == agentId && (x.Phase != "retired" || x.RevokedAt == null), ct))
             throw new OpenShellStateConflictException("An active or cleanup-pending launch requires reconciliation.");
         var lease = await db.OpenShellLeases.SingleOrDefaultAsync(x => x.AgentId == agentId, ct);
         if (lease is not null)
@@ -208,14 +209,21 @@ public sealed class OpenShellLaunchStore(OrchestratorDbContext db, TimeProvider?
         await RequirePreparationOwnerAsync(launch, ct);
         var scope = System.Text.Json.JsonSerializer.Deserialize<OpenShellPreparationScope>(launch.PreparationJson!)!;
         var providers = scope.Plan.ReadSpec().Providers;
+        var expected = scope.Plan.ReadExpectedProviders();
         var now = _clock.GetUtcNow().UtcDateTime;
         if (launch.Phase != "created" || launch.GatewayId != target.GatewayId || launch.SandboxId != target.Id
-            || launch.Workspace != target.Workspace || proofs.Count != providers.Count || proofs.Count == 0
-            || proofs.Any(p => p.Desired.SandboxId != target.Id || p.Desired.Sandbox != target.Name
+            || launch.Workspace != target.Workspace || target.Phase != Openshell.V1.SandboxPhase.Ready || target.ResourceVersion == 0
+            || proofs.Count != providers.Count || proofs.Count == 0
+            || expected.Length != providers.Count || expected.Select(p => p.Name).Distinct(StringComparer.Ordinal).Count() != expected.Length
+            || proofs.Select(p => p.Provider).Distinct(StringComparer.Ordinal).Count() != proofs.Count
+            || expected.Any(p => !providers.Contains(p.Name))
+            || proofs.Any(p => !expected.Any(e => e.Name == p.Provider && e.Matches(p.Desired)))
+            || proofs.Any(p => string.IsNullOrWhiteSpace(p.SessionId) || string.IsNullOrWhiteSpace(p.NetworkInstanceId) || p.Sequence == 0
+                || p.Desired.SandboxId != target.Id || p.Desired.Sandbox != target.Name
                 || p.ProcessInstanceId != target.SupervisorInstanceId || p.EvaluatedAt > now
                 || now - p.EvaluatedAt > TimeSpan.FromSeconds(5))
             || proofs.Any(p => p.SessionId != proofs[0].SessionId || p.ProcessInstanceId != proofs[0].ProcessInstanceId
-                || p.NetworkInstanceId != proofs[0].NetworkInstanceId))
+                || p.NetworkInstanceId != proofs[0].NetworkInstanceId || p.Desired.AttachmentEpoch != proofs[0].Desired.AttachmentEpoch))
             throw new OpenShellStateConflictException("security_ready_proof_conflict");
         launch.SecurityReadyJson = System.Text.Json.JsonSerializer.Serialize(proofs);
         launch.Phase = "security_ready";

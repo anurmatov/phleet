@@ -4,7 +4,7 @@ namespace Fleet.Orchestrator.Services;
 
 /// <summary>Live gateway evaluation, not durable operation success. Session and process are distinct identities.</summary>
 public sealed record OpenShellSupervisorProof(ProviderDesiredIdentity Desired, string SessionId,
-    string ProcessInstanceId, string NetworkInstanceId, ulong Sequence, DateTime EvaluatedAt)
+    string ProcessInstanceId, string NetworkInstanceId, ulong Sequence, DateTime EvaluatedAt, string Provider = "")
 {
     public static OpenShellSupervisorProof Verify(OpenShellSandboxSnapshot target, string provider,
         ProviderReadinessStatus status, DateTime now)
@@ -32,6 +32,6 @@ public sealed record OpenShellSupervisorProof(ProviderDesiredIdentity Desired, s
         // The gateway separately evaluates the live session lease. An old accepted observation
         // is valid while that same session/process remains live; do not substitute an invented TTL.
         return new(desired.Clone(), observed.SessionId, observed.ProcessInstanceId, status.NetworkInstanceId,
-            observed.Sequence, evaluated.Value);
+            observed.Sequence, evaluated.Value, provider);
     }
 }

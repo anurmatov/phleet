@@ -79,6 +79,34 @@ builder.Services.AddHttpClient(OrchestratorEpicGrantForwarder.HttpClientName, (s
     client.Timeout = OrchestratorEpicGrantForwarder.Timeout;
 });
 
+// #476: the late-result store and the guarded recovery dispatch — registered after the existing
+// orchestrator credential wiring, with the same base address and admin bearer. The bridge never
+// holds the coordinator's scoped inbox token.
+builder.Services.AddHttpClient(WorkflowOutcomeLateResultConsumer.HttpClientName, (sp, client) =>
+{
+    var opts = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<TemporalBridgeOptions>>().Value;
+    if (!string.IsNullOrEmpty(opts.OrchestratorUrl))
+    {
+        client.BaseAddress = new Uri(opts.OrchestratorUrl.TrimEnd('/') + '/');
+        if (!string.IsNullOrEmpty(opts.OrchestratorAuthToken))
+            client.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", opts.OrchestratorAuthToken);
+    }
+    client.Timeout = WorkflowOutcomeLateResultConsumer.HttpTimeout;
+});
+builder.Services.AddHttpClient(WorkflowRecoveryForwarder.HttpClientName, (sp, client) =>
+{
+    var opts = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<TemporalBridgeOptions>>().Value;
+    if (!string.IsNullOrEmpty(opts.OrchestratorUrl))
+    {
+        client.BaseAddress = new Uri(opts.OrchestratorUrl.TrimEnd('/') + '/');
+        if (!string.IsNullOrEmpty(opts.OrchestratorAuthToken))
+            client.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", opts.OrchestratorAuthToken);
+    }
+    client.Timeout = WorkflowRecoveryForwarder.Timeout;
+});
+
 // HTTP context accessor — needed by NotifyCtoTool to read the ?agent= query param
 builder.Services.AddHttpContextAccessor();
 
@@ -90,9 +118,29 @@ builder.Services.AddSingleton<IWorkflowGateStateReader, WorkflowGateStateReader>
 // #436: forwards CTO delegated gate approvals to the orchestrator on the "orchestrator" client.
 builder.Services.AddSingleton<IEpicGrantDecisionForwarder, OrchestratorEpicGrantForwarder>();
 builder.Services.AddSingleton<IWorkflowDispatcher, TemporalWorkflowDispatcher>();
+// #476: authorize-dispatch + receipt for the existing tools' optional recovery_operation_id.
+builder.Services.AddSingleton<IWorkflowRecoveryForwarder, WorkflowRecoveryForwarder>();
 
 // Peer config — fetches FLEET_CTO_AGENT and other keys from orchestrator on startup
 builder.Services.AddHostedService<PeerConfigHostedService>();
+
+// #476 late-result capture: only when enabled does anything new connect or consume. Off keeps the
+// legacy orphan discard (and logs one warning at startup, below).
+var lateCapture = builder.Configuration
+    .GetSection(TemporalBridgeOptions.Section)
+    .Get<TemporalBridgeOptions>() ?? new TemporalBridgeOptions();
+if (lateCapture.ValidateWorkflowOutcomeLateCapture() is { } lateCaptureError)
+{
+    // Invalid values fail startup instead of being replaced. An explicit exit, not a throw: a throw
+    // alone is not a reliable way to stop a .NET host on every platform this image runs on.
+    Console.Error.WriteLine($"Invalid late-result capture configuration: {lateCaptureError}");
+    Environment.Exit(1);
+}
+if (lateCapture.WorkflowOutcomeLateCaptureEnabled)
+{
+    builder.Services.AddSingleton<IWorkflowOutcomeBroker, RabbitMqWorkflowOutcomeBroker>();
+    builder.Services.AddHostedService<WorkflowOutcomeLateResultConsumer>();
+}
 
 // RabbitMQ listener — feeds agent responses into the registry
 builder.Services.AddHostedService<TemporalRelayListener>();
@@ -156,6 +204,12 @@ builder.WebHost.ConfigureKestrel(opts =>
 
 var app = builder.Build();
 var startupLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Temporal.Startup");
+
+if (!lateCapture.WorkflowOutcomeLateCaptureEnabled)
+{
+    startupLogger.LogWarning(
+        "Workflow outcome late-result capture is OFF (TemporalBridge:WorkflowOutcomeLateCaptureEnabled=false): agent replies whose waiter is gone are NOT captured and are discarded as before");
+}
 
 if (configuredNamespaces.Length == 0)
 {

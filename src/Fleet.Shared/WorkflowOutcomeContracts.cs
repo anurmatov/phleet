@@ -54,6 +54,12 @@ public static class WorkflowOutcomeReasonCodes
     public const string AbortCauseConflicting = "abort_cause_conflicting";
     public const string NullResultOnly = "null_result_only";
     public const string ClassifierMissing = "classifier_missing";
+
+    /// <summary>
+    /// A Completed run of a workflow type with no classifier rules at all and no failure evidence:
+    /// nonfailure-metadata TTL, while the durable per-type coverage gap stays open.
+    /// </summary>
+    public const string ClassifierUncoveredType = "classifier_uncovered_type";
     public const string HistoryIncomplete = "history_incomplete";
     public const string CorrelationUnverified = "correlation_unverified";
     public const string RetrySucceeded = "retry_succeeded";

@@ -113,6 +113,7 @@ namespace Fleet.Orchestrator.Migrations
                     AuthorityRef = table.Column<string>(type: "varchar(500)", maxLength: 500, nullable: true)
                         .Annotation("MySql:CharSet", "utf8mb4"),
                     BatchId = table.Column<Guid>(type: "char(36)", nullable: true, collation: "ascii_general_ci"),
+                    CoordinatorGeneration = table.Column<long>(type: "bigint", nullable: true),
                     Status = table.Column<string>(type: "varchar(16)", maxLength: 16, nullable: false)
                         .Annotation("MySql:CharSet", "utf8mb4"),
                     RejectReason = table.Column<string>(type: "varchar(64)", maxLength: 64, nullable: true)

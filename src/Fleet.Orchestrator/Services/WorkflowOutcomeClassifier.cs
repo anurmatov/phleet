@@ -487,10 +487,11 @@ public static class WorkflowOutcomeClassifier
         WorkflowOutcomeTerminal t, string terminalRef)
     {
         var typeRules = policy.RulesFor(facts.WorkflowType, t.EventType).ToArray();
-        // No rules for this type: its business outcome is not covered. A visible gap, never an
-        // assumed success and never a failure claim.
+        // No rules for this type: its business outcome is not covered. Never an assumed success and
+        // never a failure claim; the run itself carries no failure evidence, so it is nonfailure
+        // bookkeeping with the normal TTL while the durable per-type gap stays open.
         if (typeRules.Length == 0)
-            return Pending(WorkflowOutcomeReasonCodes.ClassifierMissing, WorkflowOutcomeEvidenceStates.Complete, [terminalRef], "classifier_missing");
+            return Pending(WorkflowOutcomeReasonCodes.ClassifierUncoveredType, WorkflowOutcomeEvidenceStates.Complete, [terminalRef], UncoveredTypeGap);
 
         {
             // A type with rules is only covered for the exact loaded definitions it pins; any other
@@ -545,6 +546,12 @@ public static class WorkflowOutcomeClassifier
             return null; // the chain continues; wait for its final run
         if (successor.Classification == WorkflowOutcomeClassifications.ConfirmedFailure && successor.EvidenceState == WorkflowOutcomeEvidenceStates.SuccessorPending)
             return new WorkflowOutcomePredecessorChange(predecessorClassification, predecessorReason, WorkflowOutcomeEvidenceStates.SuccessorPending, true);
+        if (successor.Classification == WorkflowOutcomeClassifications.ClassificationPending
+            && successor.ReasonCode == WorkflowOutcomeReasonCodes.ClassifierUncoveredType)
+            // An uncovered type closed Completed with no failure evidence: the retry succeeded at
+            // the workflow level, under the per-type coverage gap.
+            return new WorkflowOutcomePredecessorChange(WorkflowOutcomeClassifications.ExcludedNonfailure, WorkflowOutcomeReasonCodes.RetrySucceeded,
+                WorkflowOutcomeEvidenceStates.Complete, false);
         if (successor.Classification == WorkflowOutcomeClassifications.ClassificationPending
             && successor.ReasonCode == WorkflowOutcomeReasonCodes.ClassifierMissing)
             // The chain closed Completed but its business outcome is not covered: neither a
@@ -712,6 +719,9 @@ public static class WorkflowOutcomeClassifier
 
     private static WorkflowOutcomeVerdict NonFailure(string classification, string reason, string evidenceState, string terminalRef) =>
         new(classification, reason, evidenceState, null, [terminalRef], [], null, null);
+
+    /// <summary>Gap reason of an uncovered type; its health key is per namespace and type.</summary>
+    public const string UncoveredTypeGap = "type_uncovered";
 
     private static WorkflowOutcomeVerdict Pending(string reason, string evidenceState, IReadOnlyList<string> refs, string gap) =>
         new(WorkflowOutcomeClassifications.ClassificationPending, reason, evidenceState, null, refs, [], null, gap);

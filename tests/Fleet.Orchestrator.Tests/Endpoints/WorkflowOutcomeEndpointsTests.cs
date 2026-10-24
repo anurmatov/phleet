@@ -621,6 +621,52 @@ public sealed class WorkflowOutcomeEndpointsTests : IAsyncLifetime
 
     [Fact]
     [Trait("WorkflowOutcomeSuite", "receipts")]
+    public async Task Decide_ResendAfterOwnerChange_IsNotAPriorGenerationDuplicate_AndNeedsTheNewAck()
+    {
+        var (run, _) = await _host.AckedFailureAsync();
+        var hold = ApiHost.Decision(1, "hold", dueAt: _host.Clock.GetUtcNow().AddHours(4));
+        Assert.Equal(HttpStatusCode.Created, (await _host.AsCoordinator(HttpMethod.Post, $"{Root}/{run.Id}/decisions", hold)).StatusCode);
+        await _host.App.StopAsync();
+
+        await using var next = await ApiHost.StartAsync(_host.Database, c => c["WorkflowOutcomes:CoordinatorGeneration"] = "2", clock: _host.Clock);
+        var resent = await next.AsCoordinator(HttpMethod.Post, $"{Root}/{run.Id}/decisions", hold);
+
+        // The generation-1 decision is not this request's duplicate: generation 2 has no ack yet.
+        Assert.Equal((HttpStatusCode)422, resent.StatusCode);
+        Assert.Equal("not_acknowledged", (await ApiHost.JsonAsync(resent)).GetProperty("error").GetString());
+        var rows = await next.Database.QueryAsync(db => db.WorkflowOutcomeDecisions.AsNoTracking().Where(d => d.OutcomeId == run.Id).ToListAsync());
+        Assert.Equal([(1L, "accepted"), (2L, "rejected")], rows.OrderBy(r => r.CoordinatorGeneration).Select(r => (r.CoordinatorGeneration ?? 0, r.Status)).ToArray());
+
+        // After the generation-2 ack the same request is a new accepted decision, and its own resend is the duplicate.
+        await next.FlushAsync();
+        var fresh = (await next.InboxAsync(generation: 2)).Batches.Single();
+        (await next.DeliverAsync(fresh)).EnsureSuccessStatusCode();
+        (await next.AckAsync(fresh, new WorkflowOutcomeItemRef(run.Id, 1))).EnsureSuccessStatusCode();
+        var accepted = await ApiHost.JsonAsync(await next.AsCoordinator(HttpMethod.Post, $"{Root}/{run.Id}/decisions", hold));
+        var again = await ApiHost.JsonAsync(await next.AsCoordinator(HttpMethod.Post, $"{Root}/{run.Id}/decisions", hold));
+        Assert.False(accepted.TryGetProperty("duplicate", out _));
+        Assert.Equal(accepted.GetProperty("decisionId").GetGuid(), again.GetProperty("decisionId").GetGuid());
+        Assert.True(again.GetProperty("duplicate").GetBoolean());
+    }
+
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "decisions")]
+    public async Task Decide_EventRefNotRecordedForTheRun_IsOutOfScope()
+    {
+        var (run, _) = await _host.AckedFailureAsync();
+        var url = $"{Root}/{run.Id}/decisions";
+
+        var fabricated = await _host.AsCoordinator(HttpMethod.Post, url, ApiHost.Decision(1, "close", evidence: ["event:1"]));
+        Assert.Equal((HttpStatusCode)422, fabricated.StatusCode);
+        Assert.Equal("evidence_out_of_scope", (await ApiHost.JsonAsync(fabricated)).GetProperty("error").GetString());
+
+        // The run's own recorded terminal event is in scope.
+        var own = await _host.AsCoordinator(HttpMethod.Post, url, ApiHost.Decision(1, "close", evidence: ["event:" + run.TerminalEventId, "https://example.com/r"]));
+        Assert.Equal(HttpStatusCode.Created, own.StatusCode);
+    }
+
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "receipts")]
     public async Task Decide_ResendWithChangedGenerationOrOversizedField_IsNeverADuplicate()
     {
         var (run, _) = await _host.AckedFailureAsync();
@@ -810,6 +856,27 @@ public sealed class WorkflowOutcomeEndpointsTests : IAsyncLifetime
 
     [Fact]
     [Trait("WorkflowOutcomeSuite", "pagination")]
+    public async Task List_UncoveredTypeBookkeeping_IsNotACauseReview()
+    {
+        await _host.SeedRunAsync(r =>
+        {
+            r.Status = "Completed"; r.TerminalEventType = "WorkflowExecutionCompleted";
+            r.Classification = WorkflowOutcomeClassifications.ClassificationPending; r.ReasonCode = WorkflowOutcomeReasonCodes.ClassifierUncoveredType;
+        });
+        var pinned = await _host.SeedRunAsync(r =>
+        {
+            r.Status = "Completed"; r.TerminalEventType = "WorkflowExecutionCompleted";
+            r.Classification = WorkflowOutcomeClassifications.ClassificationPending; r.ReasonCode = WorkflowOutcomeReasonCodes.ClassifierMissing;
+        });
+
+        var page = await ApiHost.JsonAsync(await _host.AsAdmin(HttpMethod.Get, $"{Root}?state=unresolved_cause"));
+
+        Assert.Equal([pinned.Id], page.GetProperty("items").EnumerateArray().Select(i => i.GetProperty("id").GetGuid()).ToArray());
+        Assert.Equal(1, page.GetProperty("counts").GetProperty("unresolvedCauses").GetInt32());
+    }
+
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "dashboard")]
     public async Task List_KeysetPagesEveryFailure_NeverASuccessfulRun()
     {
         var failures = new HashSet<Guid>();

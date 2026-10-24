@@ -73,8 +73,8 @@ public sealed class WorkflowOutcomeClassifierTests
         var v = Classify(withResult ? h.CompletedWith(new { IssueNumber = 7 }) : h.Completed(null));
 
         Assert.Equal(WorkflowOutcomeClassifications.ClassificationPending, v.Classification);
-        Assert.Equal(WorkflowOutcomeReasonCodes.ClassifierMissing, v.ReasonCode);
-        Assert.Equal("classifier_missing", v.GapReason);
+        Assert.Equal(WorkflowOutcomeReasonCodes.ClassifierUncoveredType, v.ReasonCode);
+        Assert.Equal(WorkflowOutcomeClassifier.UncoveredTypeGap, v.GapReason);
         Assert.Equal(Fixture.Hash, v.ClassifierHash);
     }
 

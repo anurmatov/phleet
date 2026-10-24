@@ -530,7 +530,7 @@ public sealed class WorkflowOutcomeInboxService(
             var locked = await WorkflowOutcomeApi.LockRunAsync(db, outcomeId, ct);
             if (locked is null || locked.Version != request.ExpectedVersion) return ((409, "stale_version"), false);
             if (locked.ResolvedAt is not null) return ((409, "already_resolved"), false);
-            db.WorkflowOutcomeDecisions.Add(DecisionRow(decisionId, principal, run, request, "accepted", null, now));
+            db.WorkflowOutcomeDecisions.Add(DecisionRow(decisionId, principal, run, request, "accepted", null, now, auth.Generation));
             await db.SaveChangesAsync(ct);
             if (resolves)
             {
@@ -581,7 +581,9 @@ public sealed class WorkflowOutcomeInboxService(
         var dueAt = request.DueAt?.UtcDateTime;
         var candidates = await db.WorkflowOutcomeDecisions.AsNoTracking()
             .Where(d => d.OutcomeId == run.Id && d.Status == "accepted" && d.ExpectedVersion == request.ExpectedVersion
-                && d.Operation == request.Operation && d.DecidedVia == via && d.DecidedBy == decidedBy)
+                && d.Operation == request.Operation && d.DecidedVia == via && d.DecidedBy == decidedBy
+                // Same generation only: after an owner change the item needs a new-generation ack first.
+                && d.CoordinatorGeneration == auth.Generation)
             .ToListAsync(ct);
         return candidates.FirstOrDefault(d => d.Owner == request.Owner && d.Reason == request.Reason
             && d.EvidenceRefsJson == refsJson && d.DueAt == dueAt && d.TaskRef == request.TaskRef
@@ -658,7 +660,8 @@ public sealed class WorkflowOutcomeInboxService(
             case "run:":
                 return value == run.Namespace + "/" + run.WorkflowId + "/" + run.RunId;
             case "event:":
-                return long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var eventId) && eventId > 0;
+                // Only events this run's own record names (its terminal event and cause refs).
+                return WorkflowOutcomeApi.EvidenceRefs(run).Contains(evidenceRef, StringComparer.Ordinal);
             case "task:":
                 return (WorkflowOutcomeApi.TaskIds(run) ?? []).Contains(value, StringComparer.Ordinal);
         }
@@ -679,7 +682,7 @@ public sealed class WorkflowOutcomeInboxService(
         try
         {
             db.ChangeTracker.Clear();
-            db.WorkflowOutcomeDecisions.Add(DecisionRow(decisionId, principal, run, request, "rejected", reason, now));
+            db.WorkflowOutcomeDecisions.Add(DecisionRow(decisionId, principal, run, request, "rejected", reason, now, auth.Generation));
             await db.SaveChangesAsync(ct);
         }
         finally
@@ -694,7 +697,7 @@ public sealed class WorkflowOutcomeInboxService(
 
     private static WorkflowOutcomeDecision DecisionRow(
         Guid id, WorkflowOutcomePrincipal principal, WorkflowOutcomeRun run, WorkflowOutcomeDecisionRequest request,
-        string status, string? rejectReason, DateTime now) => new()
+        string status, string? rejectReason, DateTime now, long generation) => new()
     {
         Id = id,
         OutcomeId = run.Id,
@@ -710,6 +713,7 @@ public sealed class WorkflowOutcomeInboxService(
         ArtifactRef = request.ArtifactRef is null ? null : Bound(request.ArtifactRef, 500),
         DueAt = request.DueAt?.UtcDateTime,
         BatchId = request.BatchId,
+        CoordinatorGeneration = generation,
         Status = status,
         RejectReason = rejectReason,
         CreatedAt = now,
@@ -835,7 +839,8 @@ public sealed class WorkflowOutcomeInboxService(
         {
             failures = await runs.CountAsync(r => r.Classification == WorkflowOutcomeClassifications.ConfirmedFailure && r.ResolvedAt == null, ct),
             unresolvedCauses = await runs.CountAsync(r => r.ResolvedAt == null
-                && (r.Classification == WorkflowOutcomeClassifications.CauseUnresolved || r.Classification == WorkflowOutcomeClassifications.ClassificationPending), ct),
+                && (r.Classification == WorkflowOutcomeClassifications.CauseUnresolved
+                    || (r.Classification == WorkflowOutcomeClassifications.ClassificationPending && r.ReasonCode != UncoveredType)), ct),
             coverageGaps = await db.WorkflowOutcomeHealth.CountAsync(h => h.State == "open" && h.GapStart != null && (ns == null || h.Namespace == ns), ct),
         };
         var namespaceErrors = (await db.WorkflowOutcomeHealth.AsNoTracking()
@@ -846,15 +851,18 @@ public sealed class WorkflowOutcomeInboxService(
         return WorkflowOutcomeResult.Ok(new { items = await ViewsAsync(page, ct), nextCursor = next, namespaceErrors, counts });
     }
 
+    private const string UncoveredType = WorkflowOutcomeReasonCodes.ClassifierUncoveredType;
+
     private static IQueryable<WorkflowOutcomeRun> Filter(IQueryable<WorkflowOutcomeRun> q, string state, string? ns)
     {
         q = state switch
         {
+            // An uncovered-type run is bookkeeping under a durable per-type coverage gap, not a cause review.
             "unresolved_cause" => q.Where(r => r.Classification == WorkflowOutcomeClassifications.CauseUnresolved
-                || r.Classification == WorkflowOutcomeClassifications.ClassificationPending),
+                || (r.Classification == WorkflowOutcomeClassifications.ClassificationPending && r.ReasonCode != UncoveredType)),
             "all_attention" => q.Where(r => r.ResolvedAt == null && (r.Classification == WorkflowOutcomeClassifications.ConfirmedFailure
                 || r.Classification == WorkflowOutcomeClassifications.CauseUnresolved
-                || r.Classification == WorkflowOutcomeClassifications.ClassificationPending)),
+                || (r.Classification == WorkflowOutcomeClassifications.ClassificationPending && r.ReasonCode != UncoveredType))),
             _ => q.Where(r => r.Classification == WorkflowOutcomeClassifications.ConfirmedFailure),
         };
         return ns is null ? q : q.Where(r => r.Namespace == ns);

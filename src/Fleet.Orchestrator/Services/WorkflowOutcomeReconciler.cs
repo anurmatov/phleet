@@ -586,6 +586,15 @@ public sealed class WorkflowOutcomeReconciler(
         if (await _store.ClassifierGapCountAsync(ns, ct) == 0)
             foreach (var gap in ClassifierGapKeys)
                 await _store.ResolveAsync(_lease!, WorkflowOutcomeHealthComponents.Coverage, gap + ":" + ns, ct);
+        // A per-type uncovered gap never closes because its TTL'd runs expired; only once the loaded
+        // classifier policy has Completed rules for the type (its runs are then re-read).
+        var coveredKeys = _policies!.Classifiers.Rules
+            .Where(r => r.TerminalEventTypes.Contains(WorkflowOutcomeTerminalTypes.Completed, StringComparer.Ordinal))
+            .Select(r => WorkflowOutcomeStore.UncoveredTypeKey(ns, r.WorkflowType))
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var key in await _store.OpenUncoveredTypeKeysAsync(ns, ct))
+            if (coveredKeys.Contains(key))
+                await _store.ResolveAsync(_lease!, WorkflowOutcomeHealthComponents.Coverage, key, ct);
     }
 
     private static readonly string[] ClassifierGapKeys = ["classifier_missing", "classifier_conflict", "evidence_unreadable"];

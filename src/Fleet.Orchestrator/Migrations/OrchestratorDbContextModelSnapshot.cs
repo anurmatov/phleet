@@ -1306,6 +1306,9 @@ namespace Fleet.Orchestrator.Migrations
                     b.Property<Guid?>("BatchId")
                         .HasColumnType("char(36)");
 
+                    b.Property<long?>("CoordinatorGeneration")
+                        .HasColumnType("bigint");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime(6)");
 

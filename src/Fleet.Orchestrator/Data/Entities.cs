@@ -776,6 +776,9 @@ public class WorkflowOutcomeDecision
     public string? AuthorityRef { get; set; }
     public Guid? BatchId { get; set; }
 
+    /// <summary>The coordinator generation the decision was made in; a resend from another generation is never its duplicate.</summary>
+    public long? CoordinatorGeneration { get; set; }
+
     /// <summary>accepted or rejected.</summary>
     public required string Status { get; set; }
     public string? RejectReason { get; set; }

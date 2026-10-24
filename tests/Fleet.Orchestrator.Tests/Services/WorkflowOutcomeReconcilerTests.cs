@@ -312,7 +312,7 @@ public sealed class WorkflowOutcomeReconcilerTests
 
     [Fact]
     [Trait("WorkflowOutcomeSuite", "chains")]
-    public async Task Reconcile_RetryThenCompletedUncoveredType_PredecessorJoinsTheGapNeitherSuccessNorFailure()
+    public async Task Reconcile_RetryThenCompletedUncoveredType_RetrySucceededUnderThePerTypeGap()
     {
         await using var h = await ObserverHarness.CreateAsync(Options());
         Run(h, "wf-u", b => b.Failed(retry: RetryState.InProgress, newRunId: "run-2"), run: "run-1");
@@ -321,11 +321,13 @@ public sealed class WorkflowOutcomeReconcilerTests
             started: a => { a.ContinuedExecutionRunId = "run-1"; a.Initiator = ContinueAsNewInitiator.Retry; });
         await WaitClassifiedAsync(h, "wf-u", "run-2");
 
-        foreach (var row in new[] { await h.RunAsync(Ns, "wf-u", "run-1"), await h.RunAsync(Ns, "wf-u", "run-2") })
-        {
-            Assert.Equal((WorkflowOutcomeClassifications.ClassificationPending, WorkflowOutcomeReasonCodes.ClassifierMissing), (row.Classification, row.ReasonCode));
-            Assert.False(Eligible(row));
-        }
+        var predecessor = await h.RunAsync(Ns, "wf-u", "run-1");
+        var successor = await h.RunAsync(Ns, "wf-u", "run-2");
+        Assert.Equal((WorkflowOutcomeClassifications.ExcludedNonfailure, WorkflowOutcomeReasonCodes.RetrySucceeded), (predecessor.Classification, predecessor.ReasonCode));
+        Assert.Equal((WorkflowOutcomeClassifications.ClassificationPending, WorkflowOutcomeReasonCodes.ClassifierUncoveredType), (successor.Classification, successor.ReasonCode));
+        Assert.False(Eligible(predecessor));
+        Assert.False(Eligible(successor));
+        Assert.Contains(await h.HealthAsync(), x => x.State == "open" && x.OutageKey == WorkflowOutcomeStore.UncoveredTypeKey(Ns, "SomeWorkflow"));
     }
 
     [Fact]
@@ -342,6 +344,41 @@ public sealed class WorkflowOutcomeReconcilerTests
         Assert.Empty(await store.ListAwaitingHistoryAsync(Ns, row.ClassifierHash!, 100, default));
         // A changed policy re-reads it exactly once more.
         Assert.Single(await store.ListAwaitingHistoryAsync(Ns, new string('0', 64), 100, default));
+    }
+
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "retention")]
+    public async Task Reconcile_UncoveredTypeGap_ClosesOnlyOncePolicyCoversTheType()
+    {
+        var policy = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(OutcomeFixtures.ClassifiersPath))!;
+        policy["rules"]!.AsArray().Add(System.Text.Json.Nodes.JsonNode.Parse($$"""
+            {"id":"some-review-cap","workflowType":"SomeWorkflow","sourceCommit":"{{OutcomeFixtures.SourceCommit}}",
+             "definitionHash":"{{new string('a', 64)}}","terminalEventTypes":["WorkflowExecutionCompleted"],
+             "evidence":{"kind":"failure_branch","exitBranch":"notify_cap"},"classification":"confirmed_failure","reasonCode":"business_review_cap"}
+            """));
+        var file = Path.Combine(Directory.CreateTempSubdirectory("wo-cover-").FullName, "classifiers.json");
+        await File.WriteAllTextAsync(file, policy.ToJsonString());
+        var options = Options();
+        options.ClassifiersFile = file;
+        await using var h = await ObserverHarness.CreateAsync(options);
+        var coveredKey = WorkflowOutcomeStore.UncoveredTypeKey(Ns, "SomeWorkflow");
+        var otherKey = WorkflowOutcomeStore.UncoveredTypeKey(Ns, "OtherWorkflow");
+        await h.DbAsync(async db =>
+        {
+            foreach (var key in new[] { coveredKey, otherKey })
+                db.WorkflowOutcomeHealth.Add(new WorkflowOutcomeHealth
+                {
+                    Component = WorkflowOutcomeHealthComponents.Coverage, OutageKey = key, State = "open", Reason = "no classifier rules",
+                    Namespace = Ns, GapStart = Old, FirstSeenAt = Old, LastSeenAt = Old,
+                });
+            return await db.SaveChangesAsync();
+        });
+
+        await h.CyclesAsync(2);
+
+        var health = await h.HealthAsync();
+        Assert.Contains(health, x => x.OutageKey == coveredKey && x.State != "open");
+        Assert.Contains(health, x => x.OutageKey == otherKey && x.State == "open");
     }
 
     [Fact]
@@ -402,7 +439,7 @@ public sealed class WorkflowOutcomeReconcilerTests
         Assert.DoesNotContain(rows, Eligible);
         Assert.Equal(WorkflowOutcomeReasonCodes.ContinuedAsNew, rows.Single(r => r.RunId == "run-1").ReasonCode);
         // The cron type has no classifier rules: its Completed run is a visible coverage gap, never a success claim.
-        Assert.Equal(WorkflowOutcomeReasonCodes.ClassifierMissing, rows.Single(r => r.RunId == "cron-1").ReasonCode);
+        Assert.Equal(WorkflowOutcomeReasonCodes.ClassifierUncoveredType, rows.Single(r => r.RunId == "cron-1").ReasonCode);
         Assert.Equal(WorkflowOutcomeClassifications.ClassificationPending, rows.Single(r => r.RunId == "cron-1").Classification);
         // Successors are Described before any logical-failure claim; a missing one is not a failure.
         Assert.Contains(rows, r => r.RunId == "run-2" && r.PreviousRunId == "run-1");
@@ -574,8 +611,10 @@ public sealed class WorkflowOutcomeReconcilerTests
         var rows = await h.RunsAsync();
         Assert.DoesNotContain(rows, r => r.WorkflowId == "wf-ok");
         Assert.Contains(rows, r => r.WorkflowId == "wf-bad" && Eligible(r));
-        // A coverage gap is never auto-deleted.
-        Assert.Contains(rows, r => r.WorkflowId == "wf-gap" && r.Classification == WorkflowOutcomeClassifications.ClassificationPending);
+        // An uncovered-type run without failure evidence takes the nonfailure TTL, but its per-type
+        // coverage gap is durable and stays open after the run row expired.
+        Assert.DoesNotContain(rows, r => r.WorkflowId == "wf-gap");
+        Assert.Contains(await h.HealthAsync(), x => x.State == "open" && x.OutageKey == WorkflowOutcomeStore.UncoveredTypeKey(Ns, "SomeWorkflow"));
         Assert.Empty(await h.ObservationsAsync(okRow.Id));
     }
 
@@ -916,7 +955,10 @@ public sealed class WorkflowOutcomeReconcilerTests
         // The observer has read RPCs only: nothing it does can start a notification workflow.
         Assert.DoesNotContain(typeof(IWorkflowOutcomeRpc).GetMethods(), m => m.Name.Contains("Start") || m.Name.Contains("Signal") || m.Name.Contains("Cancel"));
         var health = await h.HealthAsync();
-        Assert.Contains(health, x => x.State == "open" && x.Component == WorkflowOutcomeHealthComponents.Coverage && x.OutageKey.StartsWith("classifier_missing:"));
+        // One durable gap per uncovered type, not one per run.
+        foreach (var type in types)
+            Assert.Single(health, x => x.State == "open" && x.OutageKey == WorkflowOutcomeStore.UncoveredTypeKey(Ns, type));
+        Assert.All(rows.Where(r => r.WorkflowId.StartsWith("ok-")), r => Assert.NotNull(r.MetadataExpiresAt));
         Assert.DoesNotContain(health, x => x.State == "open" && x.Component != WorkflowOutcomeHealthComponents.Capacity && x.Component != WorkflowOutcomeHealthComponents.Coverage);
     }
 

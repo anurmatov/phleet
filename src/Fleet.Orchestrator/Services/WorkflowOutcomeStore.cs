@@ -396,7 +396,7 @@ public sealed class WorkflowOutcomeStore(
             .Where(r => r.Namespace == ns && !r.Quarantined && !NonterminalStatuses.Contains(r.Status)
                 && ((r.TerminalEventId == null && r.ReasonCode == null)
                     || (r.Classification == WorkflowOutcomeClassifications.ClassificationPending
-                        && r.ReasonCode == WorkflowOutcomeReasonCodes.ClassifierMissing
+                        && (r.ReasonCode == WorkflowOutcomeReasonCodes.ClassifierMissing || r.ReasonCode == WorkflowOutcomeReasonCodes.ClassifierUncoveredType)
                         && (r.ClassifierHash == null || r.ClassifierHash != classifierHash))
                     || (r.TerminalEventId != null && r.EvidenceState == WorkflowOutcomeEvidenceStates.Pending && r.PayloadCiphertext == null
                         && EvidenceClassifications.Contains(r.Classification))))
@@ -536,7 +536,12 @@ public sealed class WorkflowOutcomeStore(
             row.MetadataExpiresAt = ExpiresAt(row, observations, retentionSeconds);
             row.UpdatedAt = now;
 
-            if (verdict.GapReason is not null)
+            if (verdict.GapReason == WorkflowOutcomeClassifier.UncoveredTypeGap)
+                // Durable per type: it stays open after these TTL'd runs expire, until rules cover the type.
+                await RaiseInTxAsync(db, WorkflowOutcomeHealthComponents.Coverage, UncoveredTypeKey(facts.Namespace, facts.WorkflowType),
+                    "no classifier rules for workflow type " + Truncate(facts.WorkflowType, 300) + ": its business failures are not detected",
+                    facts.Namespace, facts.StartTime, terminal.EventTime, 1, false, [OutcomeRef(row.Id)], now, ct);
+            else if (verdict.GapReason is not null)
                 await RaiseInTxAsync(db, WorkflowOutcomeHealthComponents.Coverage, verdict.GapReason + ":" + facts.Namespace,
                     "classification pending: " + verdict.GapReason, facts.Namespace, facts.StartTime, terminal.EventTime, 1, false, [OutcomeRef(row.Id)], now, ct);
 
@@ -682,7 +687,8 @@ public sealed class WorkflowOutcomeStore(
         using var scope = scopes.CreateScope();
         var query = Db(scope).WorkflowOutcomeRuns.AsNoTracking()
             .Where(r => r.Namespace == ns && r.ClassificationPendingSince != null && r.ClassificationPendingSince < olderThan
-                && (r.Classification == WorkflowOutcomeClassifications.CauseUnresolved || r.Classification == WorkflowOutcomeClassifications.ClassificationPending));
+                && (r.Classification == WorkflowOutcomeClassifications.CauseUnresolved
+                    || (r.Classification == WorkflowOutcomeClassifications.ClassificationPending && r.ReasonCode != WorkflowOutcomeReasonCodes.ClassifierUncoveredType)));
         var count = await query.CountAsync(ct);
         var ids = await query.OrderBy(r => r.ClassificationPendingSince).Take(20).Select(r => r.Id).ToListAsync(ct);
         return (count, ids.Select(OutcomeRef).ToArray());
@@ -698,7 +704,8 @@ public sealed class WorkflowOutcomeStore(
         {
             var candidates = await db.WorkflowOutcomeRuns
                 .Where(r => r.MetadataExpiresAt != null && r.MetadataExpiresAt < now && r.Version == 1 && !r.Quarantined
-                    && ExpiringClassifications.Contains(r.Classification))
+                    && (ExpiringClassifications.Contains(r.Classification)
+                        || (r.Classification == WorkflowOutcomeClassifications.ClassificationPending && r.ReasonCode == WorkflowOutcomeReasonCodes.ClassifierUncoveredType)))
                 .OrderBy(r => r.MetadataExpiresAt).Take(max).ToListAsync(ct);
             if (candidates.Count == 0) return 0;
             var ids = candidates.Select(c => c.Id).ToList();
@@ -935,9 +942,9 @@ public sealed class WorkflowOutcomeStore(
     private bool ProtectEvidence(WorkflowOutcomeRun row, WorkflowOutcomeRunFacts facts, WorkflowOutcomeVerdict verdict)
     {
         if (!EvidenceClassifications.Contains(verdict.Classification) || row.PayloadCiphertext is not null) return true;
-        // An uncovered Completed run holds no failure or cause evidence, only its (success) result:
+        // An unclassified Completed run holds no failure or cause evidence, only its (success) result:
         // nothing is stored, and the history is re-read once the classifier policy changes.
-        if (verdict.ReasonCode == WorkflowOutcomeReasonCodes.ClassifierMissing) return true;
+        if (verdict.ReasonCode is WorkflowOutcomeReasonCodes.ClassifierMissing or WorkflowOutcomeReasonCodes.ClassifierUncoveredType) return true;
         var bytes = JsonSerializer.SerializeToUtf8Bytes(EvidenceDocument(facts, verdict));
         try
         {
@@ -990,7 +997,9 @@ public sealed class WorkflowOutcomeStore(
     {
         // Only never-failed nonfailure metadata expires: after the run itself has left Temporal
         // retention plus one full scan, so a later sweep cannot re-discover it as new.
-        if (!ExpiringClassifications.Contains(row.Classification) || row.Version != 1 || retentionSeconds is not > 0
+        var uncovered = row.Classification == WorkflowOutcomeClassifications.ClassificationPending
+            && row.ReasonCode == WorkflowOutcomeReasonCodes.ClassifierUncoveredType;
+        if (!(ExpiringClassifications.Contains(row.Classification) || uncovered) || row.Version != 1 || retentionSeconds is not > 0
             || observations.Any(o => o.EventType == OperatorClassificationEvent))
             return null;
         // Never in the past: a run Temporal has not yet deleted is kept for at least one more sweep.
@@ -1000,6 +1009,25 @@ public sealed class WorkflowOutcomeStore(
     }
 
     internal static string OutcomeRef(Guid id) => "outcome:" + id.ToString("D");
+
+    /// <summary>Health key of the per-namespace, per-type uncovered gap (bounded: a long type name is hashed).</summary>
+    public static string UncoveredTypeKey(string ns, string workflowType)
+    {
+        var key = UncoveredTypePrefix(ns) + workflowType;
+        return key.Length <= 200 ? key : UncoveredTypePrefix(ns) + "sha256:" + WorkflowOutcomeHashes.Sha256Hex(workflowType);
+    }
+
+    public static string UncoveredTypePrefix(string ns) => WorkflowOutcomeClassifier.UncoveredTypeGap + ":" + ns + ":";
+
+    /// <summary>Open per-type uncovered gaps of <paramref name="ns"/>, by health key.</summary>
+    public async Task<IReadOnlyList<string>> OpenUncoveredTypeKeysAsync(string ns, CancellationToken ct)
+    {
+        using var scope = scopes.CreateScope();
+        var prefix = UncoveredTypePrefix(ns);
+        return await Db(scope).WorkflowOutcomeHealth.AsNoTracking()
+            .Where(h => h.Component == WorkflowOutcomeHealthComponents.Coverage && h.State == "open" && h.OutageKey.StartsWith(prefix))
+            .Select(h => h.OutageKey).ToListAsync(ct);
+    }
 
     private static string Truncate(string value, int max) => value.Length <= max ? value : value[..max];
 }

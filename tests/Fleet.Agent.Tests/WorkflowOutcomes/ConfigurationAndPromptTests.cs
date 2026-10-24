@@ -79,7 +79,8 @@ public sealed class ConfigurationAndPromptTests
     // ── registration ──────────────────────────────────────────────────────────────────────
 
     /// <summary>The real registration graph, built the way Program.cs builds it (never started).</summary>
-    private static IHost Graph(Dictionary<string, string?> settings, out IServiceCollection services)
+    private static IHost Graph(Dictionary<string, string?> settings, out IServiceCollection services,
+        ILogger<WorkflowOutcomeConfigFaultReporter>? faultLogger = null)
     {
         settings["Agent:Name"] = Coordinator;
         settings["Agent:Role"] = "test";
@@ -88,6 +89,7 @@ public sealed class ConfigurationAndPromptTests
         var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings { DisableDefaults = true });
         builder.Configuration.AddInMemoryCollection(settings);
         builder.Services.AddLogging();
+        if (faultLogger is not null) builder.Services.AddSingleton(faultLogger);
         builder.Services.AddAgentCoreServices(builder.Configuration);
         builder.Services.AddAgentDaemonServices(builder.Configuration);
         builder.Services.AddSingleton(Substitute.For<IAgentExecutor>());
@@ -141,6 +143,56 @@ public sealed class ConfigurationAndPromptTests
         Assert.All(reporter.Faults, f => Assert.DoesNotContain(Token, f, StringComparison.Ordinal));
         Assert.NotNull(sp.GetRequiredService<TaskManager>());
         Assert.NotNull(sp.GetRequiredService<RelayCompletionPublisher>());
+    }
+
+    [Theory]
+    [Trait(Suite, "coordinator")]
+    [InlineData("Enabled", "malformed-secret-scalar")]
+    [InlineData("Enabled", "")]
+    [InlineData("PollSeconds", "malformed-secret-scalar")]
+    [InlineData("PollSeconds", "2147483648")]
+    [InlineData("CoordinatorGeneration", "malformed-secret-scalar")]
+    [InlineData("CoordinatorGeneration", "9223372036854775808")]
+    public async Task Registration_MalformedScalar_ReportsOnlyItsKeyAndKeepsOrdinaryTransport(string key, string value)
+    {
+        var settings = Enabled();
+        settings["WorkflowOutcomes:" + key] = value;
+        var logger = Substitute.For<ILogger<WorkflowOutcomeConfigFaultReporter>>();
+        using var host = Graph(settings, out var services, logger);
+        using var ordinary = Graph(new Dictionary<string, string?>(), out _);
+        Assert.Equal(
+            ordinary.Services.GetServices<IHostedService>().Select(h => h.GetType()).OrderBy(t => t.FullName),
+            host.Services.GetServices<IHostedService>().Where(h => h is not WorkflowOutcomeConfigFaultReporter)
+                .Select(h => h.GetType()).OrderBy(t => t.FullName));
+        var reporter = Assert.Single(host.Services.GetServices<IHostedService>().OfType<WorkflowOutcomeConfigFaultReporter>());
+        Assert.False(Has<WorkflowOutcomeInboxClient>(services));
+        Assert.False(Has<WorkflowOutcomePullService>(services));
+        Assert.False(Has<WorkflowOutcomeLocalStore>(services));
+        Assert.False(Has<WorkflowOutcomeCompletionHandler>(services));
+        Assert.NotNull(host.Services.GetRequiredService<TaskManager>());
+        Assert.NotNull(host.Services.GetRequiredService<RelayCompletionPublisher>());
+        Assert.Equal("WorkflowOutcomes:" + key + " has an invalid scalar", Assert.Single(reporter.Faults));
+        await reporter.StartAsync(CancellationToken.None);
+        var logged = string.Join("\n", logger.ReceivedCalls().SelectMany(c => c.GetArguments()).Select(a => a?.ToString()));
+        Assert.Contains("WorkflowOutcomes:" + key, logged, StringComparison.Ordinal);
+        Assert.DoesNotContain(Token, logged, StringComparison.Ordinal);
+        if (value.Length != 0) Assert.DoesNotContain(value, logged, StringComparison.Ordinal);
+        Assert.DoesNotContain(logger.ReceivedCalls().SelectMany(c => c.GetArguments()), a => a is Exception);
+    }
+
+    [Fact]
+    [Trait(Suite, "coordinator")]
+    public void Registration_Disabled_IgnoresMalformedUnusedScalars()
+    {
+        var settings = Enabled();
+        settings["WorkflowOutcomes:Enabled"] = "false";
+        settings["WorkflowOutcomes:PollSeconds"] = "malformed-secret-scalar";
+        settings["WorkflowOutcomes:CoordinatorGeneration"] = "malformed-secret-scalar";
+        using var host = Graph(settings, out var services);
+        Assert.False(Has<WorkflowOutcomeInboxClient>(services));
+        Assert.DoesNotContain(host.Services.GetServices<IHostedService>(), h => h is WorkflowOutcomeConfigFaultReporter);
+        Assert.NotNull(host.Services.GetRequiredService<TaskManager>());
+        Assert.NotNull(host.Services.GetRequiredService<RelayCompletionPublisher>());
     }
 
     [Fact]

@@ -537,12 +537,36 @@ public static class AgentHostRegistration
     internal static void AddWorkflowOutcomes(IServiceCollection services, IConfiguration configuration)
     {
         var section = configuration.GetSection(WorkflowOutcomeClientOptions.Section);
-        if (!section.GetValue<bool>(nameof(WorkflowOutcomeClientOptions.Enabled)))
+        var faults = new List<string>();
+        var enabled = Scalar(nameof(WorkflowOutcomeClientOptions.Enabled), false);
+        if (!enabled && faults.Count == 0)
             return;
 
-        var options = new WorkflowOutcomeClientOptions();
-        section.Bind(options);
-        var faults = options.Validate(configuration[$"{AgentOptions.Section}:{nameof(AgentOptions.Name)}"]);
+        // Bind this optional subsection without letting a conversion exception (whose inner
+        // message can contain the value) abort normal transport or escape into startup logs.
+        var options = new WorkflowOutcomeClientOptions
+        {
+            Enabled = enabled,
+            BaseUrl = section[nameof(WorkflowOutcomeClientOptions.BaseUrl)] ?? "",
+            ScopedToken = section[nameof(WorkflowOutcomeClientOptions.ScopedToken)] ?? "",
+            Coordinator = section[nameof(WorkflowOutcomeClientOptions.Coordinator)] ?? "",
+            InboxPath = section[nameof(WorkflowOutcomeClientOptions.InboxPath)] ?? "",
+            CoordinatorGeneration = Scalar(nameof(WorkflowOutcomeClientOptions.CoordinatorGeneration), 1L),
+            PollSeconds = Scalar(nameof(WorkflowOutcomeClientOptions.PollSeconds), 30),
+        };
+        if (faults.Count == 0)
+            faults.AddRange(options.Validate(configuration[$"{AgentOptions.Section}:{nameof(AgentOptions.Name)}"]));
+
+        T Scalar<T>(string key, T fallback)
+        {
+            try { return section.GetValue(key, fallback)!; }
+            catch (InvalidOperationException)
+            {
+                faults.Add($"{WorkflowOutcomeClientOptions.Section}:{key} has an invalid scalar");
+                return fallback;
+            }
+        }
+
         if (faults.Count > 0)
         {
             services.AddHostedService(sp => new WorkflowOutcomeConfigFaultReporter(
@@ -550,7 +574,8 @@ public static class AgentHostRegistration
             return;
         }
 
-        services.Configure<WorkflowOutcomeClientOptions>(section);
+        // Startup-only options: consumers use the same guarded, validated binding as the client.
+        services.AddSingleton<IOptions<WorkflowOutcomeClientOptions>>(Options.Create(options));
         services.AddSingleton(sp => new WorkflowOutcomeLocalStore(
             options.ResolveInboxPath(sp.GetRequiredService<IOptions<AgentOptions>>().Value.WorkDir)));
         services.AddHttpClient(WorkflowOutcomeInboxClient.HttpClientName, client =>

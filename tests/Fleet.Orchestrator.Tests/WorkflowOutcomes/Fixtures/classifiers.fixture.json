@@ -1,0 +1,163 @@
+{
+  "schemaVersion": 1,
+  "rules": [
+    {
+      "id": "uwe-pr-consensus-exhausted",
+      "workflowType": "UwePrImplementationWorkflow",
+      "sourceCommit": "8c7c9ddf87147a16556acc59483ad0a9b1e57676",
+      "definitionHash": "15db7b142b50b48157b14c65aaa4a984045327a9bf810708845f0af02f7c1825",
+      "terminalEventTypes": [
+        "WorkflowExecutionCompleted"
+      ],
+      "evidence": {
+        "kind": "failure_branch",
+        "exitBranch": "notify_consensus_exhausted"
+      },
+      "classification": "confirmed_failure",
+      "reasonCode": "business_review_cap"
+    },
+    {
+      "id": "uwe-pr-outer-loop-exhausted",
+      "workflowType": "UwePrImplementationWorkflow",
+      "sourceCommit": "8c7c9ddf87147a16556acc59483ad0a9b1e57676",
+      "definitionHash": "15db7b142b50b48157b14c65aaa4a984045327a9bf810708845f0af02f7c1825",
+      "terminalEventTypes": [
+        "WorkflowExecutionCompleted"
+      ],
+      "evidence": {
+        "kind": "failure_branch",
+        "exitBranch": "notify_outer_loop_exhausted"
+      },
+      "classification": "confirmed_failure",
+      "reasonCode": "business_review_cap"
+    },
+    {
+      "id": "uwe-pr-review-deadline",
+      "workflowType": "UwePrImplementationWorkflow",
+      "sourceCommit": "8c7c9ddf87147a16556acc59483ad0a9b1e57676",
+      "definitionHash": "15db7b142b50b48157b14c65aaa4a984045327a9bf810708845f0af02f7c1825",
+      "terminalEventTypes": [
+        "WorkflowExecutionCompleted"
+      ],
+      "evidence": {
+        "kind": "failure_branch",
+        "exitBranch": "notify_post_feedback_human_review_timeout"
+      },
+      "classification": "confirmed_failure",
+      "reasonCode": "business_deadline"
+    },
+    {
+      "id": "uwe-pr-human-stopped",
+      "workflowType": "UwePrImplementationWorkflow",
+      "sourceCommit": "8c7c9ddf87147a16556acc59483ad0a9b1e57676",
+      "definitionHash": "15db7b142b50b48157b14c65aaa4a984045327a9bf810708845f0af02f7c1825",
+      "terminalEventTypes": [
+        "WorkflowExecutionCompleted"
+      ],
+      "evidence": {
+        "kind": "failure_branch",
+        "exitBranch": "notify_stopped"
+      },
+      "classification": "intentional_nonfailure",
+      "reasonCode": "deliberate_disposition"
+    },
+    {
+      "id": "uwe-design-consensus-exhausted",
+      "workflowType": "UweDesignWorkflow",
+      "sourceCommit": "8c7c9ddf87147a16556acc59483ad0a9b1e57676",
+      "definitionHash": "71eab22b6c96cfc5199fe1884fa030f10ba8336ada56c60891505e10ce314bd4",
+      "terminalEventTypes": [
+        "WorkflowExecutionCompleted"
+      ],
+      "evidence": {
+        "kind": "delegate_result",
+        "exitBranch": "emit_exhausted_error",
+        "path": "/Text",
+        "equals": "ERROR:consensus_exhausted"
+      },
+      "classification": "confirmed_failure",
+      "reasonCode": "business_review_cap"
+    },
+    {
+      "id": "uwe-design-approved-artifact-changed",
+      "workflowType": "UweDesignWorkflow",
+      "sourceCommit": "8c7c9ddf87147a16556acc59483ad0a9b1e57676",
+      "definitionHash": "71eab22b6c96cfc5199fe1884fa030f10ba8336ada56c60891505e10ce314bd4",
+      "terminalEventTypes": [
+        "WorkflowExecutionCompleted"
+      ],
+      "evidence": {
+        "kind": "failure_branch",
+        "exitBranch": "notify_approved_body_changed"
+      },
+      "classification": "confirmed_failure",
+      "reasonCode": "business_artifact_missing"
+    },
+    {
+      "id": "uwe-design-cancel-after-exhaustion",
+      "workflowType": "UweDesignWorkflow",
+      "sourceCommit": "8c7c9ddf87147a16556acc59483ad0a9b1e57676",
+      "definitionHash": "71eab22b6c96cfc5199fe1884fa030f10ba8336ada56c60891505e10ce314bd4",
+      "terminalEventTypes": [
+        "WorkflowExecutionCanceled"
+      ],
+      "evidence": {
+        "kind": "failure_branch",
+        "exitBranch": "notify_consensus_exhausted"
+      },
+      "classification": "confirmed_failure",
+      "reasonCode": "failure_caused_cancel"
+    },
+    {
+      "id": "task-delegation-task-failed",
+      "workflowType": "TaskDelegationWorkflow",
+      "sourceCommit": "8c7c9ddf87147a16556acc59483ad0a9b1e57676",
+      "definitionHash": "9b205a9211d10ee03440d11bc86f8ed3f89a99069719eea8a3cfbcaf1be686bf",
+      "terminalEventTypes": [
+        "WorkflowExecutionCompleted"
+      ],
+      "evidence": {
+        "kind": "delegate_result",
+        "exitBranch": "delegate",
+        "path": "/Status",
+        "equals": "failed"
+      },
+      "classification": "confirmed_failure",
+      "reasonCode": "business_task_failed"
+    },
+    {
+      "id": "task-delegation-task-timed-out",
+      "workflowType": "TaskDelegationWorkflow",
+      "sourceCommit": "8c7c9ddf87147a16556acc59483ad0a9b1e57676",
+      "definitionHash": "9b205a9211d10ee03440d11bc86f8ed3f89a99069719eea8a3cfbcaf1be686bf",
+      "terminalEventTypes": [
+        "WorkflowExecutionCompleted"
+      ],
+      "evidence": {
+        "kind": "delegate_result",
+        "exitBranch": "delegate",
+        "path": "/activityFailure/eventType",
+        "equals": "ActivityTaskTimedOut"
+      },
+      "classification": "confirmed_failure",
+      "reasonCode": "business_task_failed"
+    },
+    {
+      "id": "task-delegation-task-activity-failed",
+      "workflowType": "TaskDelegationWorkflow",
+      "sourceCommit": "8c7c9ddf87147a16556acc59483ad0a9b1e57676",
+      "definitionHash": "9b205a9211d10ee03440d11bc86f8ed3f89a99069719eea8a3cfbcaf1be686bf",
+      "terminalEventTypes": [
+        "WorkflowExecutionCompleted"
+      ],
+      "evidence": {
+        "kind": "delegate_result",
+        "exitBranch": "delegate",
+        "path": "/activityFailure/eventType",
+        "equals": "ActivityTaskFailed"
+      },
+      "classification": "confirmed_failure",
+      "reasonCode": "business_task_failed"
+    }
+  ]
+}

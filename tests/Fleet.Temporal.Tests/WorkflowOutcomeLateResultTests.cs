@@ -159,27 +159,60 @@ public sealed class WorkflowOutcomeLateResultTests
         Assert.Equal(WorkflowOutcomeHashes.Sha256Hex(body), Assert.Single(h.Broker.In(LateQueue)).MessageId);
     }
 
+    private static async Task UntilAsync(Func<bool> condition, string what)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (!condition())
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("timed out waiting for " + what);
+            await Task.Delay(10);
+        }
+    }
+
     [Theory]
     [InlineData(WorkflowOutcomePublishStatus.Returned, "returned_unroutable")]
     [InlineData(WorkflowOutcomePublishStatus.Nacked, "nacked")]                     // includes reject-publish at the quota
     [InlineData(WorkflowOutcomePublishStatus.Unknown, "confirm_timeout")]
     [InlineData(WorkflowOutcomePublishStatus.Unavailable, "broker_lacks_publisher_confirms")]
-    public async Task HandleDelivery_HandoffNotConfirmed_PausesWithoutAckOrDrop(WorkflowOutcomePublishStatus status, string reason)
+    public async Task HandleDelivery_HandoffNotConfirmed_HeldWithoutAckOrPause_ThenAckedAfterConfirmedRetry(WorkflowOutcomePublishStatus status, string reason)
     {
         var h = new Harness();
         h.Broker.Results.Enqueue(new WorkflowOutcomePublishResult(status, reason));
         var delivery = h.Delivery();
 
         await h.Listener.HandleDeliveryAsync(WorkflowOutcomeTestValues.Reply(TaskId), null, delivery);
+        await UntilAsync(() => delivery.Acks == 1, "the held reply to be acknowledged after its confirmed retry");
 
-        Assert.False(delivery.Settled);                                  // never ACK, never reject-drop
-        var pause = Assert.Single(delivery.Pauses);
-        Assert.Equal(TimeSpan.FromSeconds(5), pause.Backoff);
-        Assert.Contains(reason, pause.Reason);
+        // Never rejected or dropped, never a consumer pause; acknowledged only after the confirmed copy.
+        Assert.Equal(0, delivery.Rejects);
+        Assert.Empty(delivery.Pauses);
+        Assert.Equal(["publish:" + LateQueue, $"confirm:{LateQueue}:{status}", "publish:" + LateQueue, $"confirm:{LateQueue}:Confirmed", "ack"], h.Log);
+        Assert.Contains(h.ListenerLog.Entries, e => e.Message.Contains("not captured") && e.Message.Contains(reason) && e.Message.Contains("held"));
     }
 
     [Fact]
-    public async Task HandleDelivery_NoBrokerConfigured_PausesInsteadOfLegacyDrop()
+    public async Task HandleDelivery_OrphanHeld_LiveMatchedRepliesKeepFlowing()
+    {
+        var h = new Harness();
+        h.Broker.ConfirmGate = null;
+        for (var i = 0; i < 3; i++)
+            h.Broker.Results.Enqueue(new WorkflowOutcomePublishResult(WorkflowOutcomePublishStatus.Nacked, "nacked"));
+        var orphan = h.Delivery();
+        await h.Listener.HandleDeliveryAsync(WorkflowOutcomeTestValues.Reply(TaskId), null, orphan);
+
+        var waiter = h.Registry.Register("wf-live/step");
+        var live = h.Delivery();
+        await h.Listener.HandleDeliveryAsync(WorkflowOutcomeTestValues.Reply("wf-live/step"), null, live);
+
+        Assert.Equal("completed", (await waiter.Task.WaitAsync(TimeSpan.FromSeconds(10))).Status);
+        Assert.Equal(1, live.Acks);
+        Assert.Empty(orphan.Pauses);
+        await UntilAsync(() => orphan.Acks == 1, "the held orphan to be captured");
+        Assert.Single(h.Broker.In(LateQueue));
+    }
+
+    [Fact]
+    public async Task HandleDelivery_NoBrokerConfigured_HeldInsteadOfLegacyDrop()
     {
         var h = new Harness();
         var listener = new TemporalRelayListener(
@@ -189,40 +222,38 @@ public sealed class WorkflowOutcomeLateResultTests
         var delivery = h.Delivery();
 
         await listener.HandleDeliveryAsync(WorkflowOutcomeTestValues.Reply(TaskId), null, delivery);
+        await Task.Delay(100);
 
         Assert.False(delivery.Settled);
-        Assert.Contains("capture_not_configured", Assert.Single(delivery.Pauses).Reason);
+        Assert.Empty(delivery.Pauses);
+        Assert.Contains(h.ListenerLog.Entries, e => e.Message.Contains("capture_not_configured"));
+        Assert.Empty(h.Time.Delays); // nothing can ever confirm: no retry loop
     }
 
     /// <summary>
-    /// Repeated failures back off 5, 10, 20, 40, 60, 60 s — every redelivery pauses again, none is
-    /// acknowledged or dropped — and the first confirmed handoff resets the backoff.
+    /// Repeated failures back off 5, 10, 20, 40, 60, 60 s in the background retry — the reply is
+    /// never acknowledged or dropped meanwhile — and the first confirmed handoff resets the backoff.
     /// </summary>
     [Fact]
     public async Task HandleDelivery_RepeatedFailures_BackOffFiveToSixtyWithoutHotLoop_ThenResetOnSuccess()
     {
         var h = new Harness();
         var body = WorkflowOutcomeTestValues.Reply(TaskId);
-        var backoffs = new List<TimeSpan>();
-        for (var i = 0; i < 6; i++)
-        {
+        for (var i = 0; i < 7; i++)
             h.Broker.Results.Enqueue(new WorkflowOutcomePublishResult(WorkflowOutcomePublishStatus.Nacked, "nacked"));
-            var delivery = h.Delivery();
-            await h.Listener.HandleDeliveryAsync(body, null, delivery);
-            Assert.False(delivery.Settled);
-            backoffs.Add(Assert.Single(delivery.Pauses).Backoff);
-        }
+        var delivery = h.Delivery();
 
-        Assert.Equal(new[] { 5, 10, 20, 40, 60, 60 }.Select(s => TimeSpan.FromSeconds(s)), backoffs);
+        await h.Listener.HandleDeliveryAsync(body, null, delivery);
+        await UntilAsync(() => delivery.Acks == 1, "the reply to be captured after the retries");
 
-        var success = h.Delivery();
-        await h.Listener.HandleDeliveryAsync(body, null, success);
-        Assert.Equal(1, success.Acks);
+        Assert.Equal(new[] { 5, 10, 20, 40, 60, 60, 60 }.Select(s => TimeSpan.FromSeconds(s)), h.Time.Delays);
+        Assert.Equal(0, delivery.Rejects);
 
         h.Broker.Results.Enqueue(new WorkflowOutcomePublishResult(WorkflowOutcomePublishStatus.Unknown, "confirm_timeout"));
         var again = h.Delivery();
         await h.Listener.HandleDeliveryAsync(body, null, again);
-        Assert.Equal(TimeSpan.FromSeconds(5), Assert.Single(again.Pauses).Backoff);
+        await UntilAsync(() => again.Acks == 1, "the second reply to be captured");
+        Assert.Equal(TimeSpan.FromSeconds(5), h.Time.Delays[^1]);
     }
 
     [Fact]
@@ -526,13 +557,10 @@ public sealed class WorkflowOutcomeLateResultTests
         h.Broker.Results.Enqueue(new WorkflowOutcomePublishResult(WorkflowOutcomePublishStatus.Unknown, "confirm_timeout"));
         var body = WorkflowOutcomeTestValues.Reply(TaskId);
 
+        // The unknown confirm leaves the reply held; its background retry publishes it again.
         var lost = h.Delivery();
         await h.Listener.HandleDeliveryAsync(body, null, lost);
-        Assert.False(lost.Settled);
-
-        var redelivered = h.Delivery();
-        await h.Listener.HandleDeliveryAsync(body, null, redelivered);
-        Assert.Equal(1, redelivered.Acks);
+        await UntilAsync(() => lost.Acks == 1, "the held reply to be captured by its retry");
 
         var copies = h.Broker.In(LateQueue);
         Assert.Equal(2, copies.Count);
@@ -576,9 +604,11 @@ public sealed class WorkflowOutcomeLateResultTests
         h.Broker.Results.Enqueue(new WorkflowOutcomePublishResult(WorkflowOutcomePublishStatus.Nacked, "nacked"));
         var body = WorkflowOutcomeTestValues.Reply(TaskId);
 
+        var held = h.Delivery();
+        await h.Listener.HandleDeliveryAsync(body, null, held);
+        await UntilAsync(() => held.Acks == 1, "the held reply to be captured by its retry");
         await h.Listener.HandleDeliveryAsync(body, null, h.Delivery());
-        await h.Listener.HandleDeliveryAsync(body, null, h.Delivery());
-        var copy = Assert.Single(h.Broker.In(LateQueue));
+        var copy = h.Broker.In(LateQueue)[0];
         await h.Consumer.ProcessAsync(copy.Body, copy.Properties(), h.Delivery(), CancellationToken.None);
         await h.Consumer.ProcessAsync(body, LateProperties(attempt: 8), h.Delivery(), CancellationToken.None);
 
@@ -630,10 +660,28 @@ public sealed class WorkflowOutcomeLateResultTests
             WorkflowOutcomeLateCaptureEnabled = true,
             WorkflowOutcomeLateQueue = late,
             WorkflowOutcomeQuarantineQueue = quarantine,
+            OrchestratorUrl = "http://orchestrator.example:8080",
+            OrchestratorAuthToken = "placeholder-token",
         };
 
         Assert.NotNull(options.ValidateWorkflowOutcomeLateCapture());
         options.WorkflowOutcomeLateCaptureEnabled = false;
+        Assert.Null(options.ValidateWorkflowOutcomeLateCapture());
+    }
+
+    [Theory]
+    [InlineData("", "placeholder-token", "OrchestratorUrl")]
+    [InlineData("orchestrator.example:8080", "placeholder-token", "OrchestratorUrl")]
+    [InlineData("ftp://orchestrator.example", "placeholder-token", "OrchestratorUrl")]
+    [InlineData("http://orchestrator.example:8080", "", "OrchestratorAuthToken")]
+    [InlineData("http://orchestrator.example:8080", "   ", "OrchestratorAuthToken")]
+    public void Options_CaptureEnabledWithoutTheOrchestratorEndpoint_FailsStartup(string url, string token, string missing)
+    {
+        var options = new TemporalBridgeOptions { WorkflowOutcomeLateCaptureEnabled = true, OrchestratorUrl = url, OrchestratorAuthToken = token };
+
+        Assert.Contains(missing, options.ValidateWorkflowOutcomeLateCapture());
+        options.OrchestratorUrl = "http://orchestrator.example:8080";
+        options.OrchestratorAuthToken = "placeholder-token";
         Assert.Null(options.ValidateWorkflowOutcomeLateCapture());
     }
 

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -162,11 +163,11 @@ public sealed class WorkflowOutcomeRabbitMqBrokerTests : IAsyncLifetime
     private RabbitMqWorkflowOutcomeBroker Broker() =>
         new(Factory(), _options, NullLogger<RabbitMqWorkflowOutcomeBroker>.Instance);
 
-    private TemporalRelayListener Listener(IWorkflowOutcomeBroker broker) => new(
+    private TemporalRelayListener Listener(IWorkflowOutcomeBroker broker, ILogger<TemporalRelayListener>? logger = null) => new(
         Options.Create(new RabbitMqOptions()),
         new TaskCompletionRegistry(NullLogger<TaskCompletionRegistry>.Instance),
         new TemporalClientFactory(Options.Create(new TemporalBridgeOptions())),
-        NullLogger<TemporalRelayListener>.Instance,
+        logger ?? NullLogger<TemporalRelayListener>.Instance,
         Options.Create(_options),
         broker);
 
@@ -189,23 +190,24 @@ public sealed class WorkflowOutcomeRabbitMqBrokerTests : IAsyncLifetime
     }
 
     /// <summary>Takes one relay delivery and lets the REAL listener settle it on a real channel.</summary>
-    private async Task<(List<string> Pauses, uint SourceAfterClose)> CaptureOneAsync(IWorkflowOutcomeBroker broker)
+    /// <returns>The listener's "not captured" log lines (a held, unacknowledged reply) and the source depth after close.</returns>
+    private async Task<(List<string> NotCaptured, uint SourceAfterClose)> CaptureOneAsync(IWorkflowOutcomeBroker broker)
     {
-        var pauses = new List<string>();
+        var logger = new RecordingLogger<TemporalRelayListener>();
         await using (var connection = await Factory().CreateConnectionAsync())
         {
             var channel = await connection.CreateChannelAsync();
             var delivery = await channel.BasicGetAsync(Source, autoAck: false);
             Assert.NotNull(delivery);
-            await Listener(broker).HandleDeliveryAsync(
+            await Listener(broker, logger).HandleDeliveryAsync(
                 delivery!.Body, delivery.BasicProperties,
-                new RabbitMqOutcomeDelivery(channel, delivery.DeliveryTag, (_, reason) => pauses.Add(reason)));
+                new RabbitMqOutcomeDelivery(channel, delivery.DeliveryTag, (_, reason) => Assert.Fail("the relay consumer is never paused: " + reason)));
 
-            // Closing returns anything left unacknowledged to the relay queue.
+            // Closing returns anything left unacknowledged (held) to the relay queue.
             await channel.CloseAsync();
         }
 
-        return (pauses, await ReadyAsync(Source));
+        return (logger.Entries.Select(e => e.Message).Where(m => m.Contains("not captured")).ToList(), await ReadyAsync(Source));
     }
 
     private static async Task WaitUntilAsync(Func<Task<bool>> condition, string what)
@@ -444,7 +446,10 @@ public sealed class WorkflowOutcomeRabbitMqBrokerTests : IAsyncLifetime
         var api = new FakeLateResultsApi();
         var consumer = Consumer(broker, api, new AutoAdvanceTimeProvider(DateTimeOffset.UtcNow));
         await consumer.StartAsync(CancellationToken.None);
-        await WaitUntilAsync(async () => await ReadyAsync(Quarantine) == 1, "the quarantined message");
+        // The alarm is raised only after the original is acknowledged, so waiting for it (not just
+        // the quarantine copy) keeps StopAsync from returning an unacknowledged original to the queue.
+        await WaitUntilAsync(async () => await ReadyAsync(Quarantine) == 1 && consumer.Alarm.Counts.ContainsKey("invalid_attempt"),
+            "the quarantined message and its acknowledged original");
         await consumer.StopAsync(CancellationToken.None);
 
         Assert.Empty(api.Requests);
@@ -454,12 +459,12 @@ public sealed class WorkflowOutcomeRabbitMqBrokerTests : IAsyncLifetime
 
     /// <summary>
     /// The listener's own consumer glue on a real broker: the late queue is missing, so the first
-    /// handoff is returned — the reply is not acknowledged, the consumer is cancelled and its
-    /// channel closed (the reply goes back to the relay queue) — and after the backoff the consumer
-    /// reopens, the reply is redelivered and captured, and only then acknowledged.
+    /// handoff is returned — the orphan is held unacknowledged while a live matched reply is still
+    /// delivered and acknowledged (no consumer pause) — and the background retry re-declares the
+    /// late queue, captures the orphan and only then acknowledges it.
     /// </summary>
     [Fact]
-    public async Task Listener_RealConsumer_ReturnedHandoffPausesWithoutAck_ThenResumesAndCaptures()
+    public async Task Listener_RealConsumer_ReturnedHandoffHeldWhileLiveRepliesFlow_ThenCaptured()
     {
         await ClaimRelayQueueAsync();
         await using var broker = Broker();
@@ -469,25 +474,31 @@ public sealed class WorkflowOutcomeRabbitMqBrokerTests : IAsyncLifetime
             await channel.QueueDeleteAsync(Late, ifUnused: false, ifEmpty: false);
 
         var logger = new RecordingLogger<TemporalRelayListener>();
-        var listener = RunningListener(_options, broker, new TaskCompletionRegistry(NullLogger<TaskCompletionRegistry>.Instance),
-            logger, new AutoAdvanceTimeProvider(DateTimeOffset.UtcNow));
+        var registry = new TaskCompletionRegistry(NullLogger<TaskCompletionRegistry>.Instance);
+        var waiter = registry.Register("wf-real/live");
+        // Real time: the retry backoff is 5 s, so the live reply is settled while the orphan is held.
+        var listener = RunningListener(_options, broker, registry, logger, TimeProvider.System);
         await listener.StartAsync(CancellationToken.None);
         try
         {
             await PublishReplyToRelayAsync(WorkflowOutcomeTestValues.Reply(TaskId));
+            await WaitUntilAsync(() => Task.FromResult(logger.AllText.Contains("not captured (Returned")), "the orphan to be held");
 
-            await WaitUntilAsync(async () => await ReadyOrNullAsync(Late) == 1 && await ReadyAsync(TemporalBridgeOptions.RelayQueue) == 0,
-                "the reply to be captured after the pause");
+            await PublishReplyToRelayAsync(WorkflowOutcomeTestValues.Reply("wf-real/live"));
+            Assert.Equal("completed", (await waiter.Task.WaitAsync(TimeSpan.FromSeconds(4))).Status);
+            Assert.DoesNotContain("captured to " + Late, logger.AllText); // the orphan is still held
+
+            await WaitUntilAsync(async () => await ReadyOrNullAsync(Late) == 1 && logger.AllText.Contains("captured to " + Late),
+                "the held orphan to be captured by its retry");
         }
         finally
         {
             await listener.StopAsync(CancellationToken.None);
         }
 
-        Assert.Contains(logger.Entries, e => e.Message.Contains("not captured (Returned"));
-        Assert.Contains(logger.Entries, e => e.Message.Contains("Relay consumer resumed"));
-        Assert.Contains(logger.Entries, e => e.Message.Contains("captured to " + Late));
+        Assert.DoesNotContain("paused", logger.AllText);
         Assert.Equal(0u, await ReadyAsync(TemporalBridgeOptions.RelayQueue));
+        Assert.Equal(1u, await ReadyAsync(Late));
         Assert.DoesNotContain(WorkflowOutcomeTestValues.SecretText, logger.AllText);
     }
 

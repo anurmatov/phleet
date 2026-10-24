@@ -83,6 +83,9 @@ public interface IWorkflowOutcomeDelivery
     Task RejectWithoutRequeueAsync();
 
     void Pause(TimeSpan backoff, string reason);
+
+    /// <summary>False once the delivery's channel has closed (the broker then holds the message again).</summary>
+    bool CanSettle => true;
 }
 
 /// <summary>Reconnect backoff 5, 10, 20, 40, then 60 s; reset after a successful handoff.</summary>
@@ -861,4 +864,6 @@ internal sealed class RabbitMqOutcomeDelivery(IChannel channel, ulong deliveryTa
         await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: false);
 
     public void Pause(TimeSpan backoff, string reason) => pause(backoff, reason);
+
+    public bool CanSettle => channel.IsOpen;
 }

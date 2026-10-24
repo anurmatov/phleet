@@ -58,6 +58,13 @@ public sealed class TemporalBridgeOptions
     public string? ValidateWorkflowOutcomeLateCapture()
     {
         if (!WorkflowOutcomeLateCaptureEnabled) return null;
+        // Captured replies are stored through the orchestrator; without it every one would be
+        // retried into quarantine.
+        if (!Uri.TryCreate(OrchestratorUrl, UriKind.Absolute, out var orchestrator)
+            || (orchestrator.Scheme != Uri.UriSchemeHttp && orchestrator.Scheme != Uri.UriSchemeHttps))
+            return "TemporalBridge:OrchestratorUrl must be an absolute http(s) URL when late-result capture is enabled";
+        if (string.IsNullOrWhiteSpace(OrchestratorAuthToken))
+            return "TemporalBridge:OrchestratorAuthToken is required when late-result capture is enabled";
         if (string.IsNullOrWhiteSpace(WorkflowOutcomeLateQueue) || WorkflowOutcomeLateQueue != WorkflowOutcomeLateQueue.Trim())
             return "TemporalBridge:WorkflowOutcomeLateQueue must be a nonblank queue name without surrounding whitespace";
         if (string.IsNullOrWhiteSpace(WorkflowOutcomeQuarantineQueue) || WorkflowOutcomeQuarantineQueue != WorkflowOutcomeQuarantineQueue.Trim())

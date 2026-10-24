@@ -346,7 +346,7 @@ export type StopStartState = 'idle' | 'confirming' | 'pending' | 'success' | 'er
 export type WfActionState = 'idle' | 'confirming-cancel' | 'confirming-restart' | 'confirming-terminate' | 'pending' | 'success' | 'error'
 export type CancelState = 'idle' | 'confirming' | 'cancelling' | 'success' | 'error'
 export type ConfigSaveState = 'idle' | 'saving' | 'success' | 'error'
-export type ActiveView = 'agents' | 'workflows' | 'instructions' | 'project-contexts' | 'output-styles' | 'wf-definitions' | 'alerts' | 'schedules' | 'namespaces' | 'repositories' | 'credentials' | 'memory' | 'epic-grants'
+export type ActiveView = 'agents' | 'workflows' | 'workflow-failures' | 'instructions' | 'project-contexts' | 'output-styles' | 'wf-definitions' | 'alerts' | 'schedules' | 'namespaces' | 'repositories' | 'credentials' | 'memory' | 'epic-grants'
 
 // ── Memory types ──────────────────────────────────────────────────────────────
 
@@ -608,4 +608,211 @@ export interface ScopeValidationReport {
   workflows: ScopeValidationWorkflow[]
   targets: ScopeValidationTarget[]
   expiresAt: string | null
+}
+
+// ── Workflow failure accountability (#476) — orchestrator `/api/workflow-outcomes`, camelCase ──
+// Failure items and cause reviews only: there is no success inbox and no success receipt here.
+
+export type WorkflowOutcomeStage =
+  | 'detected' | 'stored' | 'enqueued' | 'delivered' | 'acknowledged' | 'decision_made' | 'unresolved' | 'escalated'
+export type WorkflowOutcomeDeliveryState = 'none' | 'pending' | 'delivered' | 'acknowledged' | 'unknown'
+/** `state` query of the list route. */
+export type WorkflowOutcomeListState = 'failures' | 'unresolved_cause' | 'all_attention'
+export type WorkflowOutcomeOperation =
+  | 'wait' | 'hold' | 'resume' | 'retry' | 'reassign' | 'accept_late' | 'finish' | 'close' | 'cancel'
+
+/** Per-stage commit times; null until that stage is reached. */
+export interface WorkflowOutcomeStageTimes {
+  storedAt: string | null
+  enqueuedAt: string | null
+  deliveredAt: string | null
+  acknowledgedAt: string | null
+  decisionMadeAt: string | null
+}
+
+export interface WorkflowOutcomeLastDecision {
+  operation: string
+  owner: string
+  reason: string
+  dueAt: string | null
+  status: string
+  decidedVia: string
+  createdAt: string
+}
+
+export interface WorkflowOutcomeView {
+  id: string
+  version: number
+  namespace: string
+  workflowId: string
+  runId: string
+  workflowType: string
+  status: string
+  classification: string
+  reasonCode: string | null
+  terminalEventType: string | null
+  terminalEventId: number | null
+  startTime: string | null
+  closeTime: string | null
+  project: string | null
+  accessNeeded: boolean
+  coordinator: string | null
+  taskOwner: string | null
+  evidenceState: string | null
+  failureIncidentId: string | null
+  parentWorkflowId: string | null
+  parentRunId: string | null
+  previousRunId: string | null
+  nextRunId: string | null
+  stage: string
+  stages: WorkflowOutcomeStageTimes
+  /** Kept as a string: an unrecognised value is shown as unknown, never as delivered. */
+  deliveryState: string
+  turnAmbiguous: boolean
+  lastDecision: WorkflowOutcomeLastDecision | null
+  recovery: { operationId: string; state: string } | null
+  dueAt: string | null
+  attentionOverdue: boolean
+}
+
+export interface WorkflowOutcomeCounts {
+  failures: number
+  unresolvedCauses: number
+  coverageGaps: number
+}
+
+export interface WorkflowOutcomeListPage {
+  items: WorkflowOutcomeView[]
+  nextCursor: string | null
+  namespaceErrors: { namespace: string; error: string }[]
+  counts: WorkflowOutcomeCounts
+}
+
+export interface WorkflowOutcomeDecisionView {
+  decisionId: string | null
+  version: number | null
+  operation: string
+  owner: string
+  reason: string
+  dueAt: string | null
+  status: string
+  decidedVia: string
+  createdAt: string
+  evidenceRefs: string[]
+}
+
+/** One batch this run (at `version`) is a member of. `nonce` is needed to read the receipt. */
+export interface WorkflowOutcomeBatchMembership {
+  batchId: string
+  generation: number
+  state: string
+  deliveredAt: string | null
+  ackedAt: string | null
+  nonce: string | null
+  version: number | null
+}
+
+export interface WorkflowOutcomeObservationView {
+  eventId: number | null
+  eventType: string
+  classification: string | null
+  reasonCode: string | null
+  observedAt: string | null
+}
+
+export interface WorkflowOutcomeDetail extends WorkflowOutcomeView {
+  decisions: WorkflowOutcomeDecisionView[]
+  batches: WorkflowOutcomeBatchMembership[]
+  observations: WorkflowOutcomeObservationView[]
+  evidenceRefs: string[]
+}
+
+export interface WorkflowOutcomeCoverageGap {
+  start: string | null
+  end: string | null
+  reason: string
+  unknownRunCount: number | null
+}
+
+export interface WorkflowOutcomeNamespaceCoverage {
+  namespace: string
+  /** healthy | degraded | pending | disabled; anything else is treated as not healthy. */
+  state: string
+  retentionSeconds: number | null
+  enrolledAt: string | null
+  lastRecentPassAt: string | null
+  lastFullPassAt: string | null
+  knownPending: number
+  gaps: WorkflowOutcomeCoverageGap[]
+}
+
+export interface WorkflowOutcomeCoverage {
+  enabled: boolean
+  degraded: boolean
+  namespaces: WorkflowOutcomeNamespaceCoverage[]
+}
+
+export interface WorkflowOutcomeHealthIncident {
+  component: string
+  outageKey: string
+  state: string
+  reason: string
+  namespace: string | null
+  firstSeenAt: string | null
+  lastSeenAt: string | null
+}
+
+export interface WorkflowOutcomeHealth {
+  state: string
+  incidents: WorkflowOutcomeHealthIncident[]
+}
+
+export interface WorkflowOutcomeItemRef {
+  id: string
+  version: number
+}
+
+/** `GET /batches/{id}/receipt?nonce=` — exact delivered and acknowledged member versions. */
+export interface WorkflowOutcomeReceipt {
+  batchId: string
+  generation: number
+  nonce: string
+  itemVersionsHash: string
+  items: WorkflowOutcomeItemRef[]
+  deliveredVersions: WorkflowOutcomeItemRef[]
+  ackedVersions: WorkflowOutcomeItemRef[]
+  receiptHash: string | null
+  deliveredAt: string | null
+  acknowledgedAt: string | null
+}
+
+/** `POST /batches/{id}/ack`. Never a wildcard: only the listed exact versions. */
+export interface WorkflowOutcomeAckRequest {
+  generation: number
+  nonce: string
+  items: WorkflowOutcomeItemRef[]
+  taskId: string | null
+}
+
+/** `POST /{id}/decisions`. Record-only: the server never executes it. */
+export interface WorkflowOutcomeDecisionRequest {
+  expectedVersion: number
+  operation: WorkflowOutcomeOperation
+  owner: string
+  reason: string
+  evidenceRefs: string[]
+  dueAt: string | null
+  taskRef: string | null
+  artifactRef: string | null
+  batchId: string | null
+  generation: number | null
+}
+
+/** `POST /{id}/recovery-plan` — a read-only recheck, never a reservation or an approval. */
+export interface WorkflowRecoveryPlanResult {
+  allowed: boolean
+  operation: string | null
+  blockedReason: string | null
+  missingProofs: string[]
+  checkedAt: string | null
 }

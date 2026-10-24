@@ -33,7 +33,9 @@ import type {
   PromptSizeLimits,
   PromptSizeReport,
 } from './types'
-import { apiFetch, heartbeatAge } from './utils'
+import { apiFetch, AUTH_TOKEN, heartbeatAge } from './utils'
+import { loadNavSummary } from './workflowOutcomes'
+import type { OutcomeNavSummary } from './workflowOutcomes'
 import { buildSignalRequest, signalErrorMessage } from './signalRequest'
 import { PROVIDER_DEFAULT_MODEL } from './constants'
 import { parseWarmupTimeoutSeconds, warmupTimeoutEditValue } from './warmupTimeout'
@@ -45,6 +47,7 @@ import AppFooter from './components/AppFooter'
 import Sidenav from './components/Sidenav'
 import AgentsView from './components/AgentsView'
 import WorkflowsView from './components/WorkflowsView'
+import WorkflowOutcomesPanel from './components/WorkflowOutcomesPanel'
 import InstructionsView from './components/InstructionsView'
 import ProjectContextsView from './components/ProjectContextsView'
 import WorkflowDefinitionsView from './components/WorkflowDefinitionsView'
@@ -240,7 +243,7 @@ export default function App() {
   const [deleteMsg, setDeleteMsg] = useState<Record<string, string>>({})
 
   // Navigation state — synced with URL hash
-  const VALID_VIEWS: ActiveView[] = ['agents', 'workflows', 'instructions', 'project-contexts', 'output-styles', 'wf-definitions', 'alerts', 'schedules', 'namespaces', 'repositories', 'credentials', 'epic-grants']
+  const VALID_VIEWS: ActiveView[] = ['agents', 'workflows', 'workflow-failures', 'instructions', 'project-contexts', 'output-styles', 'wf-definitions', 'alerts', 'schedules', 'namespaces', 'repositories', 'credentials', 'epic-grants']
   // `#view` or `#view/param`. The second segment exists so a link can name a row rather than
   // only a page — without it `#output-styles/alpha` matches no view and silently lands on agents.
   // `#view` or `#view/param`. The second segment exists so a link can name a row rather than
@@ -275,6 +278,18 @@ export default function App() {
     if ((activeView === 'schedules' || activeView === 'namespaces') && !schedulesLoaded) loadSchedules()
   }, [activeView])
   const [navOpen, setNavOpen] = useState(false)
+
+  // Workflow failure counts (#476): failure items, cause reviews and coverage gaps — never a
+  // success count. Polled with the dashboard bearer; without one nothing is requested.
+  const [outcomeNav, setOutcomeNav] = useState<OutcomeNavSummary | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    const http = AUTH_TOKEN ? apiFetch : null
+    const poll = () => { void loadNavSummary(http).then(s => { if (!cancelled) setOutcomeNav(s) }) }
+    poll()
+    const timer = setInterval(poll, 60_000)
+    return () => { cancelled = true; clearInterval(timer) }
+  }, [])
 
   // Visual editor state: undefined=closed, null=new definition, string=editing named def
   const [wfEditorDef, setWfEditorDef] = useState<string | null | undefined>(undefined)
@@ -1914,7 +1929,13 @@ export default function App() {
             onStartWorkflow={() => setStartWfModalOpen(true)}
             onRefreshWorkflows={fetchWorkflows}
             workflowsLoading={workflowsLoading}
+            failureSummary={outcomeNav}
+            onOpenFailures={() => setActiveView('workflow-failures')}
           />
+        )}
+
+        {activeView === 'workflow-failures' && (
+          <WorkflowOutcomesPanel onSummary={setOutcomeNav} />
         )}
 
         {activeView === 'instructions' && (

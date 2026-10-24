@@ -63,7 +63,7 @@ routes, including their GET/HEAD/OPTIONS shapes. Existing ConfigToken and caller
 query/header attribution are not operator authority.
 No installer enables OpenShell, starts services, changes running/stopped sets or
 imports credentials. Default operator host `.env` sources and optional 1Password
-are unchanged. The receiver listener is held off by default and no outside gateway/issuer or
+are unchanged. The receiver listener is held off by default and no outside identity service is installed or
 migration API is available, so no OpenShell workload can be admitted through it.
 
 ## Remaining slice-1 implementation (not merely untested)
@@ -73,9 +73,9 @@ still unimplemented and returns 422 compatibility_blocked without a legacy fallb
 Static endpoint/policy compiler, lifecycle mutation orchestration, post-create
 current-supervisor readiness, bootstrap/activation gate and nonroot image/home
 changes are **not implemented** here.
-Outside supervisor identity hook/issuer/ingress, durable issuer session/replay
-lifecycle, secret binding inventory writers and production driver rollback remain
-**not implemented** here. Memory receiver/proof/state-reader/six-tool source exists,
+Outside supervisor identity hook/issuer/ingress and durable session/replay source
+are described in the #478 checkpoint below, not installed or runtime-qualified.
+Secret binding inventory writers and production driver rollback remain **not implemented** here. Memory receiver/proof/state-reader/six-tool source exists,
 but real TLS, DB and upstream/native wire compatibility is unqualified, not admission.
 Other receiving services remain unimplemented and blocked.
 Full install/config/example lockstep and actual daemon/native CLI/shell/verified
@@ -133,13 +133,14 @@ The same unmerged `20261023180657_AddOpenShellExecution` migration now includes:
 |---|---|
 | Launch | Nullable workspace, policy/image/destination hashes, control URL, capability reference, bounded error, updated timestamp, poller lease owner/expiry and offset; compiler and lifecycle validation still missing |
 | agent_secret_bindings | Unique ordinal agent/reference, unclassified default, source kind, provider/alias/profile/endpoint hashes, expiry, risk reference and optimistic version; no values or inventory API |
-| agent_identity_sessions | Ordinal hash/service/route key, agent/launch/epoch/expiry and expiry index per launch; verified session acquisition and 100-session bound still missing |
-| identity_request_nonces | Ordinal globally unique JTI, launch foreign key and expiry index; atomic request consumption, expiry+60s cleanup and 64-request bound still missing |
+| agent_identity_sessions | Ordinal hash/service/route key, agent/launch/epoch/expiry and expiry index per launch; outside immutable acquisition and 100-live-session bound now supplied by #478 source; runtime qualification remains open |
+| identity_request_nonces | Ordinal globally unique JTI, launch foreign key and expiry index; outside atomic consumption now supplied by #478 source; expiry+60s maintenance remains parent work, receiver bounds active requests to 64 |
 
 Nullable launch fields allow prepared intent without fabricated compiler/readiness
 receipts. Tables alone do not authorize sessions, prevent twin pollers or supply a
-verified listener. No outside issuer is registered; the held-off memory listener reads current launch
-and consumed nonce rows, but cannot mint them or activate a launch.
+verified listener. The standalone outside issuer now has source but is neither installed nor enabled;
+the held-off memory listener reads current launch and consumed nonce rows, but cannot
+mint them or activate a launch.
 Tests cover storage, key uniqueness, failed-save detachment and receiver reads.
 The MySQL suite now also injects an actual duplicate lease during store SaveChanges
 to exercise 1062 and reused-context cleanup; it passed prior-head MySQL CI above,
@@ -192,9 +193,9 @@ Four real-MySQL reader cases use the actual migration for current, revoked,
 wrong-epoch and missing-nonce mappings; all four passed prior-head MySQL CI above and remain locally UNRUN.
 Configuration examples/setup and host-only custody restrictions move together;
 none enables a listener, changes a grant or runs a production migration here.
-The OpenShell lifecycle backend, compiler/current-supervisor readiness, outside hook/issuer/
-ingress, production stop/absence reader and actual native callback/rollback path
-remain missing, and separately approved exact-head runtime/restore evidence and
+The OpenShell lifecycle backend, compiler/current-supervisor readiness, identity-service
+installation/activation integration, production stop/absence reader and actual native
+callback/rollback path remain missing, and separately approved exact-head runtime/restore evidence and
 green CI are still required before merge.
 
 ## Shared lifecycle boundary in this revision
@@ -306,7 +307,7 @@ not runtime or actual-agent qualification.
 
 Creation/transitions, static compiler/current-supervisor startup activation,
 production stop/inventory/intake evidence reader (including ambiguous-create
-inventory), outside identity hook/issuer/ingress/durable sessions/replay, native
+inventory), identity service installation/activation integration, native
 callback and rollback remain **missing code**, not merely unrun tests.
 No feature or workload admission is enabled by this checkpoint.
 
@@ -347,3 +348,54 @@ Owned endpoint/SQLite regressions cover successful cleanup, unknown/complete inv
 new ownership/leases, missing tombstones, foreign sessions, proof failures, rollback
 on an injected SQL failure and postcommit notification failure. These are not MySQL
 or runtime qualification, and the production evidence peer is still unregistered.
+
+## Outside identity to verified memory (#478 source checkpoint)
+
+`Fleet.Identity` now supplies the pinned generated `SupervisorMiddleware` gRPC
+Describe/ValidateConfig/EvaluateHttpRequest entrypoints, outside ES256 issuer,
+HTTPS ingress and transactional SQL mapping/session/replay consumers. This closes
+only the identity-request source package, not lifecycle startup or parent acceptance.
+The proto import closure and license are byte-pinned in `src/Fleet.Identity/Proto/UPSTREAM`.
+BouncyCastle.Cryptography supplies Ed25519 verification rather than handwritten
+cryptography; Grpc.AspNetCore supplies the actual generated server transport.
+
+The hook authenticates pinned EdDSA JWKS/kid/issuer/type/audience and 900-second
+maximum lifetime. Gateway-kind tokens may discover/validate; only supervisor-kind
+JWTs whose sandbox ID equals authenticated request context can issue a proof.
+Protocol 1.0 and the contract capability are required. Only configured HTTPS
+memory ingress, pre_credentials, JSON-RPC POST and session-bound GET/DELETE are
+supported. The checkpoint intentionally admits exactly raw `/mcp`, without query
+strings; no alternate route, bootstrap `/identity/ready`, WebSocket, binary request
+or arbitrary destination is accepted. The 256KiB and two-second budgets fail closed.
+
+The outside P-256 key signs visible `X-Fleet-Assertion` only, never Authorization.
+The existing receiver verifier checks byte target/body/session binding, exact
+service audience and 15-second proof lifetime. Ingress atomically reloads current
+activated/committed mapping, checks session ownership, and inserts the unique jti
+before any receiver request. Unknown commits, conflicts and replay are not retried.
+It proxies only to the configured memory receiver using outside mTLS custody,
+pinned receiver CA/name, no cookies, redirects, proxy environment or legacy fallback.
+Successful responses retain streaming; the authorization/header deadline does not
+truncate an admitted SSE response, and caller disconnect cancels the receiver read.
+
+Initialize's returned session is inserted with immutable agent/launch/epoch/service/
+route binding and fixed one-hour expiry before exposing the response. Collision,
+missing session or state change denies rather than rebinds. Successful DELETE expires
+only that binding. Receiver-local sessions remain an additional check, so losing
+receiver state cannot be repaired by accepting only a durable outside session.
+Every request still reaches the existing verified middleware and fresh request ACL;
+there is no positive mapping/ACL fallback and no pre-activation data-tool admission.
+Refusal logs contain fixed reason codes, never bodies, assertions, keys or subjects.
+
+The standalone project defaults `Identity:Enabled=false`; no image, Compose,
+installer, dashboard or running service is registered/enabled by this checkpoint.
+Explicit startup custody requirements and executable local commands are in the
+[runbook](runbooks/openshell.md#outside-identity-source-checkpoint).
+Owned relational/TestServer tests use real generated gRPC → issuer → ingress →
+verified memory middleware → MapMcp initialize/list/call and actual memory_get,
+including fresh ACL denial. The receiver SQL authority seam is SQLite-backed;
+production MySQL reader/store integration and real TLS/gateway remain UNRUN locally.
+Creation/compiler/current-supervisor/activation, production runtime evidence,
+actual daemon/native CLI/shell/Rabbit callback and rollback remain missing parent
+code, not results implied by this request package. Exact-head actual-agent and
+MySQL cleanup/backup/restore-query acceptance remain separate merge blockers.

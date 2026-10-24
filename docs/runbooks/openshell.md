@@ -99,3 +99,60 @@ or inconsistent proof preserves configuration rather than weakening the gate.
 The reader implementation must support concurrent immutable-target requests with
 independent I/O/context ownership and cancellation; the production reader remains
 unimplemented and unregistered, not qualified by synthetic cohort tests.
+
+## Outside identity source checkpoint
+
+No installer or default image starts `Fleet.Identity`; `Identity:Enabled` remains
+false. Enabling the standalone service is **not authorized by these source checks**.
+Missing custody values/files, invalid keys/certificates or unavailable database
+schema refuse enabled startup. No keys, CA, endpoints or launch grants are generated.
+The deployment must separately isolate ingress/hook from workload direct receiver
+access and configure the receiver's existing protected-agent set; source defaults
+are not network enforcement or permission to migrate an agent.
+
+Required startup-only `Identity` configuration (source shape, not new live env keys):
+
+| Keys | Custody contract |
+|---|---|
+| Enabled, HookPort, IngressPort | Off by default; distinct TLS listeners, defaults 17441/17443 |
+| ServerCertificatePath, ServerKeyPath | Operator-owned TLS server certificate/private key |
+| GatewayId, GatewayIssuer, GatewayAudience, GatewayJwksPath | Exact immutable gateway and pretrusted public Ed25519 JWKS; no network JWKS discovery/TOFU |
+| Issuer, KeyId, AssertionPrivateKeyPath | Outside-only P-256 private signing custody matching existing receiver public verification |
+| ConnectionString | Authoritative existing launch/session/nonce tables; enabled startup checks schema reachability |
+| IngressHost | Exact admitted HTTPS host/port, only `/mcp` without query |
+| MemoryReceiver, ReceiverCaPath | One immutable HTTPS `/mcp` receiver URL and pinned public server CA; DNS name still verified |
+| ClientCertificatePath, ClientKeyPath | Outside-only mTLS certificate/private key accepted by the receiver |
+
+Only static `service=memory` hook configuration is valid. Use the pinned generated
+manifest, protocol 1.0, `openshell.supervisor-middleware.contract`, pre_credentials,
+256KiB and a two-second fail-closed hook timeout. No caller `agent` parameter,
+identity header, Authorization override, arbitrary upstream or query is admitted.
+The issuer accepts only activated/committed mappings, never a bootstrap grant.
+`/identity/ready` remains an explicitly unresolved later-package boundary.
+
+Local source commands, with no gateway, socket, host or real credentials:
+
+```sh
+dotnet build src/Fleet.Identity
+dotnet test tests/Fleet.Identity.Tests
+dotnet test tests/Fleet.Memory.Tests
+```
+
+Run `dotnet test tests/Fleet.Orchestrator.Tests --filter 'FullyQualifiedName!~Migrations'`
+for the preserved lifecycle/store regressions. Counts belong to exact-head receipts;
+prior-head CI does not qualify a successor. Tests use owned keys, TestServer and
+SQLite, with an explicit certificate/raw-target transport seam and an owned receiver
+SQL seam. They do not prove real TLS, pinned gateway compatibility or MySQL isolation.
+Native daemon/CLI/shell/Rabbit, MySQL restore and production rollout remain UNRUN.
+
+Troubleshooting uses fixed refusal codes only: `gateway_token` means pinned trust or
+caller kind/context failed; `launch_inactive`/`launch_changed` mean authoritative
+mapping refused; `session_foreign` means missing/expired/mismatched durable ownership;
+`identity_override`/`request_shape` mean forbidden protocol/headers/route. Generic
+verification/dependency refusal is fail-closed, not absence or fallback permission.
+Do not log payloads, queries, tokens, assertions, certificates or connection strings.
+Nonce uniqueness or uncertain commit failures must not resend the same operation;
+request admission can remain denied even if the outside nonce was committed.
+A receiver restart invalidates its local sessions; initialize a fresh session rather
+than rebinding a retained/foreign session. Source rollback is a revert while admission
+is off, not authority for a runtime rollback, DB cleanup, key rotation or feature enablement.

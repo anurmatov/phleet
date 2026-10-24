@@ -375,14 +375,28 @@ activated/committed mapping, checks session ownership, and inserts the unique jt
 before any receiver request. Unknown commits, conflicts and replay are not retried.
 It proxies only to the configured memory receiver using outside mTLS custody,
 pinned receiver CA/name, no cookies, redirects, proxy environment or legacy fallback.
-Successful responses retain streaming; the authorization/header deadline does not
-truncate an admitted SSE response, and caller disconnect cancels the receiver read.
+The two-second admission deadline covers body/proof/mapping/session/nonce checks
+only. A separate startup-validated `UpstreamTimeoutSeconds` (default 120, range
+1–600) bounds admitted execution/header waits and finite response bodies, not an
+already admitted SSE lifetime. Post-response session persistence has a fresh
+two-second bound and rechecks current ownership; it never reuses an expired
+admission token. Caller disconnect cancels receiver I/O. There is no automatic retry;
+504 `upstream_unconfirmed` may follow a committed write and is not replay permission.
 
 Initialize's returned session is inserted with immutable agent/launch/epoch/service/
 route binding and fixed one-hour expiry before exposing the response. Collision,
 missing session or state change denies rather than rebinds. Successful DELETE expires
 only that binding. Receiver-local sessions remain an additional check, so losing
 receiver state cannot be repaired by accepting only a durable outside session.
+After current identity and exact durable ownership checks, an expired/terminated
+session returns non-cacheable 404 without invoking tools. The hook may issue a
+request proof for an expired OWNED session solely to reach that ingress refusal;
+it does not admit data tools or consume a new nonce for that request. Missing or
+foreign ownership, invalid proof and revoked mappings retain their denials.
+A missing receiver-local binding additionally requires a fresh durable ownership/
+current-mapping/consumed-nonce SQL check before returning 404, otherwise 403.
+Clients initialize a fresh session after 404 rather than reviving/rebinding the old
+ID, as required by the [MCP session contract](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#session-management).
 Every request still reaches the existing verified middleware and fresh request ACL;
 there is no positive mapping/ACL fallback and no pre-activation data-tool admission.
 Refusal logs contain fixed reason codes, never bodies, assertions, keys or subjects.
@@ -399,3 +413,14 @@ Creation/compiler/current-supervisor/activation, production runtime evidence,
 actual daemon/native CLI/shell/Rabbit callback and rollback remain missing parent
 code, not results implied by this request package. Exact-head actual-agent and
 MySQL cleanup/backup/restore-query acceptance remain separate merge blockers.
+
+The revision regressions execute actual MapMcp memory_get after a three-second owned
+receiver dispatch delay, and actual memory_store with a three-second owned embedding
+index dependency (indexing deferred, no vector service). They observe real read counters,
+committed file counts, index attempts and receiver calls, including an unconfirmed
+write timeout with exactly one committed write and no proxy retry. Receiver-binding
+reset/expiry/DELETE cases reinitialize end to end; foreign/revoked/signature cases
+remain refused. New MySQL ownership-reader cases are authored but locally UNRUN.
+Known duplicate nonces return 403 `replay`; uncertain database errors still return
+503, not inferred replay or retry permission. Gateway clock-skew tolerance remains
+zero/fail-closed and requires an explicit runtime decision before qualification.

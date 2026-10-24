@@ -53,3 +53,6 @@ public sealed class IdentityDeniedException(string code) : Exception(code)
 {
     public string Code { get; } = code;
 }
+
+// Only emitted after current identity and exact durable ownership were authenticated.
+public sealed class IdentitySessionExpiredException : Exception;

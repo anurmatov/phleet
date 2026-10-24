@@ -6,6 +6,7 @@ public sealed class IdentityOptions
     public bool Enabled { get; set; }
     public int HookPort { get; set; } = 17441;
     public int IngressPort { get; set; } = 17443;
+    public int UpstreamTimeoutSeconds { get; set; } = 120;
     public string ServerCertificatePath { get; set; } = "";
     public string ServerKeyPath { get; set; } = "";
     public string GatewayId { get; set; } = "";
@@ -23,7 +24,7 @@ public sealed class IdentityOptions
     public string ClientKeyPath { get; set; } = "";
     public void Validate()
     {
-        if (HookPort is < 1 or > 65535 || IngressPort is < 1 or > 65535 || HookPort == IngressPort
+        if (UpstreamTimeoutSeconds is < 1 or > 600 || HookPort is < 1 or > 65535 || IngressPort is < 1 or > 65535 || HookPort == IngressPort
             || new[] { ServerCertificatePath, ServerKeyPath, GatewayId, GatewayIssuer, GatewayAudience, GatewayJwksPath,
                 Issuer, KeyId, AssertionPrivateKeyPath, ConnectionString, IngressHost, ReceiverCaPath,
                 ClientCertificatePath, ClientKeyPath }.Any(string.IsNullOrWhiteSpace)

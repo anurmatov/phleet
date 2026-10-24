@@ -46,12 +46,16 @@ internal sealed class IdentityFixture : IAsyncDisposable, IIdentityConnectionFac
     public LaunchIdentityStore Store { get; private set; } = null!;
     public SupervisorMiddleware.SupervisorMiddlewareClient Hook { get; private set; } = null!;
     public HttpClient Ingress { get; private set; } = null!;
-    public bool Grants = true, AclUnavailable, Current = true;
+    public bool Grants = true, AclUnavailable, Current = true, OwnershipUnavailable;
     public HttpClient ReceiverClient { get; private set; } = null!;
     public int ReceiverRequests, ReceiverAdmitted;
     public readonly CapturedLogger Captured = new();
     public string DocumentId = "";
-    public readonly MemoryIdentitySessions ReceiverSessions = new();
+    public MemoryIdentitySessions ReceiverSessions = new();
+    public readonly ReadCounterService Reads = new();
+    public readonly DelayedEmbedding Embedding = new();
+    public MemoryFileStore Files = null!;
+    public TimeSpan ReadDispatchDelay;
     private WebApplication _memory = null!, _hook = null!, _ingress = null!;
     private GrpcChannel _channel = null!;
     private MemoryIdentityTrust _trust = null!;
@@ -104,9 +108,9 @@ internal sealed class IdentityFixture : IAsyncDisposable, IIdentityConnectionFac
             IngressDnsName = "ingress.example.invalid", ConnectionString = "unused-owned-fixture" };
         _trust = new(memoryOptions);
         var files = new MemoryFileStore(Microsoft.Extensions.Options.Options.Create(new StorageOptions { Path = Path.Combine(DirectoryPath, "memories") }), NullLogger<MemoryFileStore>.Instance);
-        files.EnsureDirectories();
+        files.EnsureDirectories(); Files = files;
         DocumentId = (await files.SaveAsync(new MemoryDocument { Id = Guid.NewGuid().ToString(), Type = "learning", Title = "fixture", Content = "owned secret content", Project = "alpha" })).Id;
-        var memory = new MemoryService(files, null!, null!, Microsoft.Extensions.Options.Options.Create(new QdrantOptions { Url = "https://unused.example.invalid" }),
+        var memory = new MemoryService(files, null!, Embedding, Microsoft.Extensions.Options.Options.Create(new QdrantOptions { Url = "https://unused.example.invalid", SimilarityThreshold = 0 }),
             new MemorySizeGuidance(0, NullLogger.Instance), NullLogger<MemoryService>.Instance);
         _acl = new(Microsoft.Extensions.Options.Options.Create(new AclOptions { EnableProjectScopedAcl = true }),
             Microsoft.Extensions.Options.Options.Create(new OrchestratorOptions { BaseUrl = "https://authority.example.invalid" }), NullLogger<AclCacheService>.Instance, new AclHandler(this));
@@ -114,9 +118,9 @@ internal sealed class IdentityFixture : IAsyncDisposable, IIdentityConnectionFac
         var builder = Builder();
         builder.Services.AddSingleton(Microsoft.Extensions.Options.Options.Create(memoryOptions)); builder.Services.AddSingleton(_trust);
         builder.Services.AddSingleton<IVerifiedLaunchReader>(new ReceiverReader(this));
-        builder.Services.AddSingleton(ReceiverSessions); builder.Services.AddSingleton(_acl); builder.Services.AddSingleton(memory);
-        builder.Services.AddSingleton<ReadCounterService>(); builder.Services.AddHttpContextAccessor();
-        builder.Services.AddMcpServer().WithHttpTransport().WithTools<MemoryGetTool>();
+        builder.Services.AddTransient(_ => ReceiverSessions); builder.Services.AddSingleton(_acl); builder.Services.AddSingleton(memory);
+        builder.Services.AddSingleton(Reads); builder.Services.AddHttpContextAccessor();
+        builder.Services.AddMcpServer().WithHttpTransport().WithTools<MemoryGetTool>().WithTools<MemoryStoreTool>();
         _memory = builder.Build();
         _memory.Use(async (context, next) => {
             Interlocked.Increment(ref ReceiverRequests);
@@ -126,7 +130,19 @@ internal sealed class IdentityFixture : IAsyncDisposable, IIdentityConnectionFac
             await next();
         });
         _memory.UseMiddleware<MemoryIdentityMiddleware>();
-        _memory.Use(async (_, next) => { Interlocked.Increment(ref ReceiverAdmitted); await next(); });
+        _memory.Use(async (context, next) => {
+            Interlocked.Increment(ref ReceiverAdmitted);
+            if (ReadDispatchDelay > TimeSpan.Zero && context.Request.Method == "POST")
+            {
+                using var reader = new StreamReader(context.Request.Body, leaveOpen: true);
+                var text = await reader.ReadToEndAsync(); context.Request.Body.Position = 0;
+                using var json = JsonDocument.Parse(text);
+                if (json.RootElement.TryGetProperty("params", out var parameters)
+                    && parameters.TryGetProperty("name", out var name) && name.GetString() == "memory_get")
+                    await Task.Delay(ReadDispatchDelay, context.RequestAborted);
+            }
+            await next();
+        });
         _memory.MapMcp("/mcp"); await _memory.StartAsync();
         builder = Builder(); builder.Services.AddGrpc(); builder.Services.AddSingleton(Options);
         builder.Services.AddSingleton(new GatewayTokenVerifier(Options, Jwks())); builder.Services.AddSingleton(Store); builder.Services.AddSingleton(signer);
@@ -212,6 +228,17 @@ internal sealed class IdentityFixture : IAsyncDisposable, IIdentityConnectionFac
     }
     private sealed class ReceiverReader(IdentityFixture fixture) : IVerifiedLaunchReader
     {
+        public async Task<bool> OwnsSessionAsync(VerifiedAgentIdentity identity, string sessionHash, string jti, CancellationToken ct)
+        {
+            if (!await IsCurrentAsync(identity, jti, ct)) return false;
+            if (fixture.OwnershipUnavailable) throw new InvalidOperationException("owned authority fixture unavailable");
+            await using var connection = fixture.Create(); await connection.OpenAsync(ct);
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT COUNT(*) FROM agent_identity_sessions WHERE SessionHash=@hash AND LaunchId=@launch AND IdentityEpoch=@epoch AND AgentId=1 AND Service='memory' AND Route='/mcp'";
+            foreach (var (name, value) in new[] { ("@hash", sessionHash), ("@launch", identity.LaunchId.ToString("D")), ("@epoch", identity.IdentityEpoch.ToString("D")) })
+            { var parameter = command.CreateParameter(); parameter.ParameterName = name; parameter.Value = value; command.Parameters.Add(parameter); }
+            return Convert.ToInt64(await command.ExecuteScalarAsync(ct)) == 1;
+        }
         public async Task<bool> IsCurrentAsync(VerifiedAgentIdentity identity, string consumedJti, CancellationToken ct)
         {
             if (!fixture.Current || identity != await fixture.Store.ResolveAsync(identity.GatewayId, identity.SandboxId, null, ct)) return false;
@@ -238,4 +265,17 @@ internal sealed class CapturedLogger : ILogger<IdentityIngress>
     public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
     public bool IsEnabled(LogLevel level) => true;
     public void Log<TState>(LogLevel level, EventId id, TState state, Exception? exception, Func<TState, Exception?, string> formatter) => Messages.Enqueue(formatter(state, exception));
+}
+
+internal sealed class DelayedEmbedding : IEmbeddingService
+{
+    public TimeSpan Delay;
+    public int Executions;
+    public readonly TaskCompletionSource Finished = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public async Task<float[]> EmbedAsync(string text, CancellationToken ct = default)
+    {
+        Interlocked.Increment(ref Executions);
+        try { await Task.Delay(Delay, ct); return [0]; }
+        finally { Finished.TrySetResult(); }
+    }
 }

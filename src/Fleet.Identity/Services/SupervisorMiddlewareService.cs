@@ -50,7 +50,8 @@ public sealed class SupervisorMiddlewareService(IdentityOptions options, Gateway
             var body = request.Body.ToByteArray();
             RequestRules.Validate(request.Target.Method, request.Target.Path, body, headers, false);
             var session = headers.SingleOrDefault(h => h.Key.Equals("Mcp-Session-Id", StringComparison.OrdinalIgnoreCase)).Value;
-            var identity = await launches.ResolveAsync(options.GatewayId, request.Context.SandboxId, session, deadline.Token)
+            // An expired OWNED session can carry a proof to ingress for authenticated 404, never tool admission.
+            var identity = await launches.ResolveAsync(options.GatewayId, request.Context.SandboxId, session, deadline.Token, allowExpiredSession: true)
                 .WaitAsync(deadline.Token);
             var assertion = issuer.Issue(identity, RequestRules.Bind(request.Target.Method, request.Target.Path, body, session));
             return new HttpRequestResult { Decision = Decision.Allow, HeaderMutations = {

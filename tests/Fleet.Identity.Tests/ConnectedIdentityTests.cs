@@ -110,7 +110,7 @@ public sealed class ConnectedIdentityTests
         var responses = await Task.WhenAll(f.Send(IdentityFixture.Initialize, assertion: proof), f.Send(IdentityFixture.Initialize, assertion: proof));
         Assert.Single(responses, r => r.IsSuccessStatusCode);
         foreach (var response in responses) response.Dispose();
-        using var replay = await f.Send(IdentityFixture.Initialize, assertion: proof); Assert.False(replay.IsSuccessStatusCode);
+        using var replay = await f.Send(IdentityFixture.Initialize, assertion: proof); Assert.Equal(HttpStatusCode.Forbidden, replay.StatusCode);
         Assert.Equal(1, await f.Count("identity_request_nonces")); Assert.Equal(1, f.ReceiverRequests);
     }
 
@@ -121,7 +121,7 @@ public sealed class ConnectedIdentityTests
         var first = await f.InitializeAsync(); var second = await f.InitializeAsync(); Assert.NotEqual(first, second);
         await Assert.ThrowsAnyAsync<DbException>(() => f.Store.BindSessionAsync(f.Identity, first, default));
         await f.Store.EndSessionAsync(f.Identity, first, default);
-        Assert.Equal(Decision.Deny, (await f.Evaluate(f.Evaluation(f.Call, first))).Decision);
+        using (var expired = await f.Send(f.Call, first)) Assert.Equal(HttpStatusCode.NotFound, expired.StatusCode);
         using var valid = await f.Send(f.Call, second); Assert.Contains("owned secret content", await valid.Content.ReadAsStringAsync());
         await f.Sql("UPDATE agent_identity_sessions SET IdentityEpoch='00000000-0000-0000-0000-000000000001'");
         Assert.Equal(Decision.Deny, (await f.Evaluate(f.Evaluation(f.Call, second))).Decision);

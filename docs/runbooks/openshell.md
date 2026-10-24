@@ -115,6 +115,7 @@ Required startup-only `Identity` configuration (source shape, not new live env k
 | Keys | Custody contract |
 |---|---|
 | Enabled, HookPort, IngressPort | Off by default; distinct TLS listeners, defaults 17441/17443 |
+| UpstreamTimeoutSeconds | Startup-only admitted execution/header and finite-body timeout, default 120 seconds, valid 1–600; independent of two-second admission |
 | ServerCertificatePath, ServerKeyPath | Operator-owned TLS server certificate/private key |
 | GatewayId, GatewayIssuer, GatewayAudience, GatewayJwksPath | Exact immutable gateway and pretrusted public Ed25519 JWKS; no network JWKS discovery/TOFU |
 | Issuer, KeyId, AssertionPrivateKeyPath | Outside-only P-256 private signing custody matching existing receiver public verification |
@@ -148,11 +149,24 @@ Native daemon/CLI/shell/Rabbit, MySQL restore and production rollout remain UNRU
 Troubleshooting uses fixed refusal codes only: `gateway_token` means pinned trust or
 caller kind/context failed; `launch_inactive`/`launch_changed` mean authoritative
 mapping refused; `session_foreign` means missing/expired/mismatched durable ownership;
-`identity_override`/`request_shape` mean forbidden protocol/headers/route. Generic
+`identity_override`/`request_shape` mean forbidden protocol/headers/route.
+An authenticated current identity with an exactly owned expired session gets 404
+`session_expired`; a receiver binding lost on restart gets 404 only after fresh
+durable ownership is proven. Neither invokes a tool; reinitialize without the old
+session ID. Unknown/foreign sessions, invalid assertions or revoked mappings retain
+401/403 denials and do not become a session-recovery fallback. Generic
 verification/dependency refusal is fail-closed, not absence or fallback permission.
 Do not log payloads, queries, tokens, assertions, certificates or connection strings.
 Nonce uniqueness or uncertain commit failures must not resend the same operation;
 request admission can remain denied even if the outside nonce was committed.
 A receiver restart invalidates its local sessions; initialize a fresh session rather
-than rebinding a retained/foreign session. Source rollback is a revert while admission
+than rebinding a retained/foreign session. The two-second authorization/body/nonce
+budget ends before dispatch; admitted tools use the independent configured upstream
+bound. A 504 `upstream_unconfirmed` may mean a write already committed: never
+blindly replay it, and no proxy retry occurs. SSE continues after response headers
+until caller cancellation; finite bodies remain bounded. Session persistence uses
+its own fresh two-second bound with authoritative ownership checks.
+Known nonce replays return 403 `replay`; ambiguous DB errors remain 503 and cannot
+be retried as if absent. Strict gateway clock-skew rejection is unchanged and its
+qualification decision remains held before runtime. Source rollback is a revert while admission
 is off, not authority for a runtime rollback, DB cleanup, key rotation or feature enablement.

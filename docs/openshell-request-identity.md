@@ -1,8 +1,8 @@
 # Request assertion receiver contract (draft)
 
 This is Phleet's receiving contract, not an OpenShell gateway JWT or a claim of
-qualified supervisor header mutation. The outside hook/issuer/ingress, current
-supervisor readiness and actual daemon path are still missing, so do not enable
+qualified supervisor header mutation. Outside hook/issuer/ingress source exists in
+#478, but current-supervisor readiness and the actual daemon path remain missing; do not enable
 this draft in an installation or change agent endpoints based on source tests.
 
 ## Memory receiving boundary
@@ -65,16 +65,21 @@ Caller identity headers, legacy Authorization and attribution queries are denied
 Every verified request performs a bounded authoritative MySQL read for exact
 agent/gateway/sandbox/launch/epoch, active slot, nonrevocation and activated or
 committed phase. The JTI must already exist for this launch and remain unexpired:
-only the missing outside ingress may atomically consume it before forwarding.
+only the outside ingress may atomically consume it before forwarding.
 The receiver does not mint assertions, consume that nonce a second time, or cache
 a positive mapping. SQL failure is unavailable, not an empty/authorized result.
 
 MCP initialization without a session is restricted to the initialize method.
 Response session IDs bind to immutable agent/launch/epoch/service/route tuples;
 foreign or unknown IDs cannot rebind. Receiver restart invalidates local sessions.
+A receiver-local miss returns 404 only after a fresh SQL check proves current launch,
+exact durable session ownership and consumed nonce. Missing/foreign ownership stays
+403, not a recovery fallback. Ingress returns 404 for an expired/terminated session
+only after current identity and ownership validation; the client must initialize
+anew without reviving the old ID, and no tool is invoked on that request.
 There are at most 100 local sessions and 64 concurrent requests per launch, with
-no eviction into acceptance; DB-backed issuer session/replay lifecycle is still
-missing. DELETE/GET and every subsequent POST repeat proof/state/ACL checks.
+no eviction into acceptance; DB-backed outside issuer session/replay source is implemented in the #478 checkpoint,
+not installed or runtime-qualified. DELETE/GET and every subsequent POST repeat proof/state/ACL checks.
 
 After identity and session checks, middleware calls `GetVerifiedSnapshotAsync`
 and attaches its immutable result to this HttpContext before MCP dispatch.
@@ -83,7 +88,8 @@ legacy warm cache or a query identity; existing project/record filtering remains
 Without the request marker, every tool refuses execution on port 3101 even if
 legacy project ACL is disabled. Store attribution is the verified agent, not the
 submitted metadata author. Authority failure produces 503 before tool dispatch,
-invalid identity 401, and scope/session/mapping denial 403, without content.
+invalid identity 401, scope/foreign-session/mapping denial 403, and authenticated
+owned terminated-session recovery 404, without content.
 
 ## Evidence boundary
 

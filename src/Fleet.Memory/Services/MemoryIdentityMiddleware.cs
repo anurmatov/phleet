@@ -72,7 +72,14 @@ public sealed class MemoryIdentityMiddleware(RequestDelegate next)
                 if (!json.RootElement.TryGetProperty("method", out var method) || method.GetString() != "initialize")
                 { context.Response.StatusCode = 403; return; }
             }
-            else if (!sessions.Matches(binding.SessionHash, identity)) { context.Response.StatusCode = 403; return; }
+            else if (!sessions.Matches(binding.SessionHash, identity))
+            {
+                // Loss of receiver-local state is session termination only after durable ownership is proven.
+                context.Response.Headers.CacheControl = "no-store";
+                context.Response.StatusCode = await launches.OwnsSessionAsync(identity, binding.SessionHash, jti, deadline.Token)
+                    .WaitAsync(deadline.Token) ? 404 : 403;
+                return;
+            }
             var snapshot = await acl.GetVerifiedSnapshotAsync(deadline.Token);
             VerifiedMemoryRequest.Set(context, new(identity, snapshot));
             context.Response.OnStarting(() =>

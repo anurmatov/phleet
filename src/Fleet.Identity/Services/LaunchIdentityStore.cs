@@ -31,12 +31,12 @@ public sealed class LaunchIdentityStore(IIdentityConnectionFactory connections)
         await command.ExecuteScalarAsync(ct);
     }
 
-    public async Task<VerifiedAgentIdentity> ResolveAsync(string gateway, string sandbox, string? session, CancellationToken ct)
+    public async Task<VerifiedAgentIdentity> ResolveAsync(string gateway, string sandbox, string? session, CancellationToken ct, bool allowExpiredSession = false)
     {
         await using var connection = connections.Create(); await connection.OpenAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(IsolationLevel.Serializable, ct);
         var (identity, _) = await ReadAsync(connection, transaction, gateway, sandbox, ct);
-        await CheckSessionAsync(connection, transaction, identity, session, ct);
+        await CheckSessionAsync(connection, transaction, identity, session, ct, allowExpiredSession);
         await transaction.CommitAsync(ct);
         return identity;
     }
@@ -49,10 +49,15 @@ public sealed class LaunchIdentityStore(IIdentityConnectionFactory connections)
         var (identity, _) = await ReadAsync(connection, transaction, expected.GatewayId, expected.SandboxId, ct);
         if (identity != expected) throw new IdentityDeniedException("launch_changed");
         await CheckSessionAsync(connection, transaction, identity, session, ct);
+        await using (var duplicate = Command(connection, transaction,
+            "SELECT COUNT(*) FROM identity_request_nonces WHERE Jti=@jti", ("@jti", jti)))
+            if (Convert.ToInt64(await duplicate.ExecuteScalarAsync(ct)) != 0) throw new IdentityDeniedException("replay");
         await using var insert = Command(connection, transaction,
             "INSERT INTO identity_request_nonces (Jti,LaunchId,ExpiresAt) VALUES (@jti,@launch,@expires)",
             ("@jti", jti), ("@launch", identity.LaunchId.ToString("D")), ("@expires", expires));
-        await insert.ExecuteNonQueryAsync(ct); // Unique violation, deadlock or uncertain commit denies; never retried.
+        try { await insert.ExecuteNonQueryAsync(ct); }
+        catch (MySqlException ex) when (ex.Number == 1062) { throw new IdentityDeniedException("replay"); }
+        // Deadlocks and uncertain commits remain unavailable; never retried.
         await transaction.CommitAsync(ct);
     }
 
@@ -110,17 +115,20 @@ public sealed class LaunchIdentityStore(IIdentityConnectionFactory connections)
         return (identity, agentId);
     }
     private static async Task CheckSessionAsync(DbConnection connection, DbTransaction transaction,
-        VerifiedAgentIdentity identity, string? session, CancellationToken ct)
+        VerifiedAgentIdentity identity, string? session, CancellationToken ct, bool allowExpiredSession = false)
     {
         if (session is null) return;
         await using var command = Command(connection, transaction, """
-            SELECT s.LaunchId,s.IdentityEpoch,a.Name FROM agent_identity_sessions s JOIN agents a ON a.Id=s.AgentId
-            WHERE s.SessionHash=@hash AND s.Service='memory' AND s.Route='/mcp' AND s.ExpiresAt>@now
-            """, ("@hash", RequestRules.SessionHash(session)), ("@now", DateTime.UtcNow));
+            SELECT s.LaunchId,s.IdentityEpoch,a.Name,s.ExpiresAt FROM agent_identity_sessions s JOIN agents a ON a.Id=s.AgentId
+            WHERE s.SessionHash=@hash AND s.Service='memory' AND s.Route='/mcp'
+            """, ("@hash", RequestRules.SessionHash(session)));
         await using var rows = await command.ExecuteReaderAsync(ct);
         if (!await rows.ReadAsync(ct) || rows.GetValue(0).ToString() != identity.LaunchId.ToString("D")
-            || rows.GetValue(1).ToString() != identity.IdentityEpoch.ToString("D") || rows.GetString(2) != identity.AgentName
-            || await rows.ReadAsync(ct)) throw new IdentityDeniedException("session_foreign");
+            || rows.GetValue(1).ToString() != identity.IdentityEpoch.ToString("D") || rows.GetString(2) != identity.AgentName)
+            throw new IdentityDeniedException("session_foreign");
+        var expired = rows.GetDateTime(3) <= DateTime.UtcNow;
+        if (await rows.ReadAsync(ct)) throw new IdentityDeniedException("session_foreign");
+        if (expired && !allowExpiredSession) throw new IdentitySessionExpiredException();
     }
     private static DbCommand Command(DbConnection connection, DbTransaction? transaction, string sql,
         params (string Key, object Value)[] parameters)

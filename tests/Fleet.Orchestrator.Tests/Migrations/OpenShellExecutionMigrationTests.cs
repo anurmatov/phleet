@@ -183,6 +183,36 @@ public sealed class OpenShellExecutionMigrationTests : IAsyncLifetime
         Assert.Equal(expected, await reader.IsCurrentAsync(identity, "nonce1", deadline.Token));
     }
 
+    [Theory]
+    [InlineData("current", true)]
+    [InlineData("expired", true)]
+    [InlineData("foreign_epoch", false)]
+    [InlineData("missing_session", false)]
+    [InlineData("revoked", false)]
+    [InlineData("bootstrap", false)]
+    [InlineData("missing_nonce", false)]
+    public async Task SessionOwnership404Reader_UsesActualMigratedMySqlState(string state, bool expected)
+    {
+        await using var db = Context(); await db.Database.MigrateAsync();
+        var agent = new Agent { Name = "agent1", DisplayName = "Agent 1", Role = "test", Model = "test", ContainerName = "test" };
+        db.Agents.Add(agent); await db.SaveChangesAsync(); var now = DateTime.UtcNow;
+        // Persistence fixture only, not live activation/session qualification.
+        var launch = new OpenShellLaunch { Id = Guid.NewGuid(), AgentId = agent.Id, ActiveAgentId = agent.Id,
+            IdentityEpoch = Guid.NewGuid(), GatewayId = "gateway1", SandboxId = "sandbox1",
+            Phase = state == "bootstrap" ? "security_ready" : "activated", CreatedAt = now,
+            RevokedAt = state == "revoked" ? now : null };
+        db.OpenShellLaunches.Add(launch);
+        if (state != "missing_nonce") db.OpenShellRequestNonces.Add(new() { Jti = "nonce1", LaunchId = launch.Id, ExpiresAt = now.AddMinutes(5) });
+        if (state != "missing_session") db.OpenShellIdentitySessions.Add(new() { SessionHash = new string('a', 64), Service = "memory", Route = "/mcp",
+            AgentId = agent.Id, LaunchId = launch.Id, IdentityEpoch = state == "foreign_epoch" ? Guid.NewGuid() : launch.IdentityEpoch,
+            ExpiresAt = state == "expired" ? now.AddMinutes(-1) : now.AddHours(1) });
+        await db.SaveChangesAsync();
+        var reader = new Fleet.Memory.Services.VerifiedLaunchReader(Options.Create(new Fleet.Memory.Configuration.FleetIdentityOptions { ConnectionString = _connection }));
+        var identity = new VerifiedAgentIdentity("agent1", "gateway1", "sandbox1", launch.Id, launch.IdentityEpoch, "memory", "/mcp");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        Assert.Equal(expected, await reader.OwnsSessionAsync(identity, new string('a', 64), "nonce1", deadline.Token));
+    }
+
     private OrchestratorDbContext Context() => new(new DbContextOptionsBuilder<OrchestratorDbContext>()
         .UseMySql(_connection, new MySqlServerVersion(new Version(8, 0, 0))).Options);
 

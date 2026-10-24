@@ -16,7 +16,7 @@ public sealed class BoundsAndSessionTests
         await using var f = new IdentityFixture(); await f.StartAsync();
         var first = await f.InitializeAsync(); var second = await f.InitializeAsync();
         using var removed = await f.Delete(first); Assert.True(removed.IsSuccessStatusCode);
-        Assert.Equal(Decision.Deny, (await f.Evaluate(f.Evaluation(f.Call, first))).Decision);
+        using var expired = await f.Send(f.Call, first); Assert.Equal(HttpStatusCode.NotFound, expired.StatusCode);
         using var valid = await f.Send(f.Call, second); Assert.Contains("owned secret content", await valid.Content.ReadAsStringAsync());
     }
 
@@ -33,7 +33,7 @@ public sealed class BoundsAndSessionTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task IngressAuthorizationAndHeaderBudgetAndCallerCancellationAreBounded_NoSecretLogs(bool cancelCaller)
+    public async Task ConfiguredExecutionBudgetAndCallerCancellationAreBounded_NoSecretLogs(bool cancelCaller)
     {
         await using var f = new IdentityFixture(); await f.StartAsync();
         var result = await f.Evaluate(f.Evaluation(IdentityFixture.Initialize));
@@ -45,13 +45,15 @@ public sealed class BoundsAndSessionTests
         context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(IdentityFixture.Initialize));
         using var cancellation = new CancellationTokenSource(); context.RequestAborted = cancellation.Token;
         var slow = new SlowReceiver(); using var client = new HttpClient(slow) { Timeout = Timeout.InfiniteTimeSpan };
+        f.Options.UpstreamTimeoutSeconds = 1;
         var ingress = f.CreateIngress(client); var elapsed = Stopwatch.StartNew();
         var task = ingress.HandleAsync(context);
         await slow.Entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
         if (cancelCaller) cancellation.Cancel();
         await task.WaitAsync(TimeSpan.FromSeconds(4));
-        Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(4)); Assert.True(slow.Cancelled);
-        if (!cancelCaller) Assert.Equal(503, context.Response.StatusCode);
+        Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(4));
+        await slow.Finished.Task.WaitAsync(TimeSpan.FromSeconds(2)); Assert.True(slow.Cancelled);
+        if (!cancelCaller) Assert.Equal(504, context.Response.StatusCode);
         Assert.Equal(0, f.ReceiverRequests);
         Assert.All(f.Captured.Messages, message => {
             Assert.DoesNotContain(proof, message); Assert.DoesNotContain(IdentityFixture.Initialize, message);
@@ -86,11 +88,12 @@ public sealed class BoundsAndSessionTests
     {
         public readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool Cancelled;
+        public readonly TaskCompletionSource Finished = new(TaskCreationOptions.RunContinuationsAsynchronously);
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             Entered.TrySetResult();
             try { await Task.Delay(Timeout.InfiniteTimeSpan, ct); }
-            catch (OperationCanceledException) { Cancelled = true; throw; }
+            catch (OperationCanceledException) { Cancelled = true; Finished.TrySetResult(); throw; }
             throw new InvalidOperationException("unreachable");
         }
     }

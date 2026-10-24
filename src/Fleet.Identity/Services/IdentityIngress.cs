@@ -10,8 +10,10 @@ public sealed class IdentityIngress(IdentityOptions options, FleetRequestAsserti
 {
     public async Task HandleAsync(HttpContext context)
     {
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
-        deadline.CancelAfter(TimeSpan.FromSeconds(2));
+        using var admissionDeadline = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
+        admissionDeadline.CancelAfter(TimeSpan.FromSeconds(2));
+        using var executionDeadline = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
+        var dispatched = false;
         try
         {
             if (!context.Request.IsHttps || context.Request.Host.Host != options.IngressHost
@@ -22,7 +24,7 @@ public sealed class IdentityIngress(IdentityOptions options, FleetRequestAsserti
             if (headers.Length > 128 || headers.Sum(h => h.Key.Length + h.Value.Length) > 65536)
                 throw new IdentityDeniedException("request_headers");
             using var buffered = new MemoryStream(); var buffer = new byte[8192]; int read;
-            while ((read = await request.Body.ReadAsync(buffer, deadline.Token)) > 0)
+            while ((read = await request.Body.ReadAsync(buffer, admissionDeadline.Token)) > 0)
             {
                 if (buffered.Length + read > RequestRules.MaxBody) throw new IdentityDeniedException("request_size");
                 buffered.Write(buffer, 0, read);
@@ -36,7 +38,7 @@ public sealed class IdentityIngress(IdentityOptions options, FleetRequestAsserti
             var binding = RequestRules.Bind(request.Method, target, body, session);
             var (identity, jti) = verifier.Verify(assertion[0]!, binding, "memory", "/mcp");
             if (identity.GatewayId != options.GatewayId) throw new IdentityDeniedException("gateway_scope");
-            await replay.ConsumeAsync(identity, jti, assertion[0]!, session, deadline.Token).WaitAsync(deadline.Token);
+            await replay.ConsumeAsync(identity, jti, assertion[0]!, session, admissionDeadline.Token).WaitAsync(admissionDeadline.Token);
             using var upstream = new HttpRequestMessage(new HttpMethod(request.Method), options.MemoryReceiver);
             if (request.Method == "POST")
             {
@@ -47,31 +49,46 @@ public sealed class IdentityIngress(IdentityOptions options, FleetRequestAsserti
             foreach (var name in new[] { "Accept", "Mcp-Session-Id", "MCP-Protocol-Version", "Last-Event-ID" })
                 if (request.Headers.TryGetValue(name, out var value)) upstream.Headers.TryAddWithoutValidation(name, value.ToArray());
             upstream.Headers.Add("X-Fleet-Assertion", assertion[0]);
-            using var response = await receiver.SendAsync(upstream, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+            admissionDeadline.Token.ThrowIfCancellationRequested();
+            // Admission is complete. Never use its timer to cancel already admitted tool work.
+            executionDeadline.CancelAfter(TimeSpan.FromSeconds(options.UpstreamTimeoutSeconds));
+            dispatched = true;
+            using var response = await receiver.SendAsync(upstream, HttpCompletionOption.ResponseHeadersRead, executionDeadline.Token)
+                .WaitAsync(executionDeadline.Token);
+            using var sessionDeadline = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
+            sessionDeadline.CancelAfter(TimeSpan.FromSeconds(2));
             if (session is null && response.IsSuccessStatusCode)
             {
                 if (!response.Headers.TryGetValues("Mcp-Session-Id", out var returned)) throw new IdentityDeniedException("session_missing");
                 var sessions = returned.ToArray();
                 if (sessions.Length != 1) throw new IdentityDeniedException("session_shape");
-                await launches.BindSessionAsync(identity, sessions[0], deadline.Token).WaitAsync(deadline.Token);
+                await launches.BindSessionAsync(identity, sessions[0], sessionDeadline.Token).WaitAsync(sessionDeadline.Token);
             }
             else if (response.Headers.TryGetValues("Mcp-Session-Id", out var echoed)
                 && (echoed.Count() != 1 || echoed.Single() != session)) throw new IdentityDeniedException("session_changed");
             if (request.Method == "DELETE" && response.IsSuccessStatusCode)
-                await launches.EndSessionAsync(identity, session!, deadline.Token).WaitAsync(deadline.Token);
+                await launches.EndSessionAsync(identity, session!, sessionDeadline.Token).WaitAsync(sessionDeadline.Token);
             context.Response.StatusCode = (int)response.StatusCode;
             foreach (var name in new[] { "Mcp-Session-Id", "MCP-Protocol-Version", "Cache-Control" })
                 if (response.Headers.TryGetValues(name, out var values)) context.Response.Headers[name] = values.ToArray();
             context.Response.ContentType = response.Content.Headers.ContentType?.ToString();
-            // Two seconds bounds authorization and response headers, not a successfully admitted SSE lifetime.
-            // Stream responses without buffering; caller disconnect cancels the receiver read as well.
-            await response.Content.CopyToAsync(context.Response.Body, context.RequestAborted);
+            // SSE remains request-cancelled after headers; finite bodies retain the upstream operation bound.
+            var stream = response.Content.Headers.ContentType?.MediaType == "text/event-stream";
+            await response.Content.CopyToAsync(context.Response.Body, stream ? context.RequestAborted : executionDeadline.Token);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            logger.LogWarning("Identity ingress refused: {Reason}", ex is IdentityDeniedException denied ? denied.Code : "verification_or_dependency");
+            var upstreamUnconfirmed = dispatched && executionDeadline.IsCancellationRequested && !context.RequestAborted.IsCancellationRequested;
+            logger.LogWarning("Identity ingress refused: {Reason}", upstreamUnconfirmed ? "upstream_unconfirmed"
+                : ex is IdentitySessionExpiredException ? "session_expired"
+                : ex is IdentityDeniedException denied ? denied.Code : "verification_or_dependency");
             if (context.Response.HasStarted || context.RequestAborted.IsCancellationRequested) context.Abort();
-            else context.Response.StatusCode = ex is IdentityDeniedException or System.Security.Cryptography.CryptographicException ? 403 : 503;
+            else
+            {
+                context.Response.Headers.CacheControl = "no-store";
+                context.Response.StatusCode = upstreamUnconfirmed ? 504 : ex is IdentitySessionExpiredException ? 404
+                    : ex is IdentityDeniedException or System.Security.Cryptography.CryptographicException ? 403 : 503;
+            }
         }
     }
 }

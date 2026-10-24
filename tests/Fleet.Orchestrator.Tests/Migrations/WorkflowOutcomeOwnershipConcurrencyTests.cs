@@ -22,7 +22,11 @@ public sealed partial class WorkflowOutcomeMigrationTests
     public async Task OwnershipRestore_FirstTransferCommitsAfterObserverSnapshot_CurrentOwnerSurvives(bool outcome)
     {
         await using var host = await ApiHost.StartAsync(ApiDatabase.ForMySql(_connectionString));
-        var run = await host.SeedRunAsync(r => r.Coordinator = "old-coordinator");
+        var run = await host.SeedRunAsync(r =>
+        {
+            r.Coordinator = "old-coordinator";
+            r.CauseRefsJson = "[]";
+        });
         var pause = new BeforeOwnershipRead();
         var services = new ServiceCollection();
         services.AddDbContext<OrchestratorDbContext>(o =>

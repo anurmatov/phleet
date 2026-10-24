@@ -13,6 +13,7 @@ public sealed class OpenShellPreparationFlowTests
 {
     [Theory]
     [InlineData("held")]
+    [InlineData("policy_mismatch")]
     [InlineData("probe")]
     [InlineData("create_lost")]
     [InlineData("readiness")]
@@ -48,11 +49,19 @@ public sealed class OpenShellPreparationFlowTests
         services.AddSingleton<IOpenShellGatewayClient>(wire);
         services.AddSingleton<IOpenShellRuntimeEvidenceReader>(new OwnedEvidence());
         services.AddSingleton<IOpenShellPreparationPreflight>(new OwnedPreflight());
+        services.AddSingleton<IOpenShellArtifactCleanup>(new OwnedCleanup());
         services.AddSingleton<IOpenShellBootstrapProbe>(new OwnedProbe(fault));
         using var peers = services.BuildServiceProvider();
         var driver = new OpenShellProvisioningService(() => new(options), new OwnedAuthority(selection), peers.GetRequiredService<IServiceScopeFactory>());
         var result = await driver.TryPrepareAsync("agent1", "start", false, default);
-        Assert.NotNull(result); Assert.False(result.Success); Assert.Equal(1, wire.Creates);
+        Assert.NotNull(result); Assert.False(result.Success);
+        if (fault == "policy_mismatch")
+        {
+            Assert.Equal(0, wire.Creates); Assert.Equal(0, wire.Stops); Assert.Equal(0, wire.Deletes);
+            await using var untouched = new OrchestratorDbContext(options); Assert.Empty(await untouched.OpenShellLaunches.ToListAsync());
+            return;
+        }
+        Assert.Equal(1, wire.Creates);
         await using var read = new OrchestratorDbContext(options);
         var row = await read.OpenShellLaunches.SingleAsync(l => l.CreateRequestId != null);
         Assert.NotNull(row.PreparationJson); Assert.NotNull(row.CreateRequestId); Assert.NotNull(row.CreateAttemptedAt);
@@ -82,6 +91,11 @@ public sealed class OpenShellPreparationFlowTests
         public Task VerifyLegacyOwnershipAsync(OpenShellPreparationScope scope, CancellationToken ct) => Task.CompletedTask;
         public Task StopLegacyExactAsync(string expectedId, CancellationToken ct) => throw new Exception("No legacy runtime is owned by this fresh fixture.");
     }
+    // This peer-only coordinator fixture creates no actual artifact; concrete cleanup is covered separately.
+    private sealed class OwnedCleanup : IOpenShellArtifactCleanup
+    {
+        public Task RetireAsync(OpenShellArtifactCleanupTarget target, CancellationToken ct) => Task.CompletedTask;
+    }
     private sealed class OwnedProbe(string fault) : IOpenShellBootstrapProbe
     {
         public Task VerifyAsync(Guid id, Guid epoch, OpenShellSandboxSnapshot target, IReadOnlyList<OpenShellSupervisorProof> proofs, CancellationToken ct)
@@ -96,6 +110,12 @@ public sealed class OpenShellPreparationFlowTests
     private sealed class OwnedGateway(string fault, DbContextOptions<OrchestratorDbContext> options) : IOpenShellGatewayClient
     {
         public int Creates, Stops, Deletes;
+        public Task VerifyBootstrapInputsAsync(OpenShellLaunchPlan plan, CancellationToken ct)
+        {
+            _ = plan.ReadResourceAdmission().Validate(plan.Workspace, fault == "policy_mismatch"
+                ? plan.ReadResourceAdmission().PolicyAcknowledgement.Replace("true", "false") : plan.ReadResourceAdmission().PolicyAcknowledgement);
+            return Task.CompletedTask;
+        }
         public Task<OpenShellSandboxSnapshot> CreateAsync(OpenShellLaunchPlan plan, Guid launchId, Guid epoch, Guid requestId, DateTime bootstrapDeadline, CancellationToken ct)
         { Creates++; if (fault == "create_lost") throw new Exception("ambiguous owned reply"); return Task.FromResult(OpenShellPreparationTests.Target()); }
         public Task<OpenShellSupervisorProof> ReadCurrentSupervisorAsync(OpenShellSandboxSnapshot target, string provider, CancellationToken ct)

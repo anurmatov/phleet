@@ -18,7 +18,7 @@ public sealed class OpenShellBootstrapArtifactTests
         using var fixture = new OwnedEngine();
         var plan = OpenShellPolicyCompilerTests.Plan(); var launch = Guid.NewGuid(); var epoch = Guid.NewGuid();
         using var engine = new HttpClient(fixture) { BaseAddress = new("http://owned-engine.invalid") };
-        var artifacts = new OpenShellBootstrapArtifacts(engine, fixture.Custody);
+        var artifacts = new OpenShellBootstrapArtifacts(engine, fixture.Custody, OpenShellPolicyCompilerTests.Admission().PolicyAcknowledgement);
         await artifacts.DeliverAsync(plan, launch, epoch, CancellationToken.None);
         var capability = artifacts.ReadCapability(plan.Hash, launch, epoch);
         Assert.Equal(64, capability.Length);
@@ -56,7 +56,7 @@ public sealed class OpenShellBootstrapArtifactTests
     {
         using var fixture = new OwnedEngine(fault);
         using var engine = new HttpClient(fixture) { BaseAddress = new("http://owned-engine.invalid") };
-        var artifacts = new OpenShellBootstrapArtifacts(engine, fixture.Custody);
+        var artifacts = new OpenShellBootstrapArtifacts(engine, fixture.Custody, OpenShellPolicyCompilerTests.Admission().PolicyAcknowledgement);
         var launch = Guid.NewGuid(); var epoch = Guid.NewGuid(); var plan = OpenShellPolicyCompilerTests.Plan();
         await Assert.ThrowsAnyAsync<Exception>(() => artifacts.DeliverAsync(plan, launch, epoch, CancellationToken.None));
         Assert.ThrowsAny<Exception>(() => artifacts.ReadCapability(plan.Hash, launch, epoch));
@@ -72,7 +72,7 @@ public sealed class OpenShellBootstrapArtifactTests
         using var a = new OwnedEngine(); using var b = new OwnedEngine();
         using var ea = new HttpClient(a) { BaseAddress = new("http://owned-engine.invalid") };
         using var eb = new HttpClient(b) { BaseAddress = new("http://owned-engine.invalid") };
-        var x = new OpenShellBootstrapArtifacts(ea, a.Custody); var y = new OpenShellBootstrapArtifacts(eb, b.Custody);
+        var x = new OpenShellBootstrapArtifacts(ea, a.Custody, OpenShellPolicyCompilerTests.Admission().PolicyAcknowledgement); var y = new OpenShellBootstrapArtifacts(eb, b.Custody, OpenShellPolicyCompilerTests.Admission().PolicyAcknowledgement);
         var plan = OpenShellPolicyCompilerTests.Plan(); var id = Guid.NewGuid(); var epoch = Guid.NewGuid();
         await x.DeliverAsync(plan, id, epoch, default); await y.DeliverAsync(plan, id, epoch, default);
         Assert.NotEqual(x.ReadCapability(plan.Hash, id, epoch), y.ReadCapability(plan.Hash, id, epoch));
@@ -88,7 +88,10 @@ public sealed class OpenShellBootstrapArtifactTests
         public string Root { get; } = Path.Combine(Path.GetTempPath(), "bootstrap-test-" + Guid.NewGuid().ToString("N"));
         public string Custody => Path.Combine(Root, "custody");
         public string MountRoot => Path.Combine(Root, "mount");
-        public int Starts, Archives, HelperCreates, HelperDeletes;
+        public int Starts, Archives, HelperCreates, HelperDeletes, VolumeDeletes, VolumeCreates;
+        public Dictionary<string, string> VolumeLabels = [];
+        public string CleanupFault = "";
+        private bool _volumeExists;
         private bool _deleted;
         private string _volume = "", _nonce = "", _image = "";
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
@@ -96,13 +99,28 @@ public sealed class OpenShellBootstrapArtifactTests
             var path = request.RequestUri!.AbsolutePath;
             if (path.EndsWith("/start")) { Starts++; throw new Exception("never start fixture helper"); }
             if (path.Contains("/volumes/") && request.Method == HttpMethod.Get)
-                return new(fault == "volume_exists" ? HttpStatusCode.OK : fault == "volume_error" ? HttpStatusCode.InternalServerError : HttpStatusCode.NotFound);
+            {
+                if (fault == "volume_error" || CleanupFault == "read_error") return new(HttpStatusCode.InternalServerError);
+                if (fault == "volume_exists") return new(HttpStatusCode.OK);
+                if (!_volumeExists) return new(HttpStatusCode.NotFound);
+                return Json(new { Name = _volume, Labels = new Dictionary<string, string> { ["bootstrap-owner"] = CleanupFault == "wrong_nonce" ? "foreign" : _nonce } });
+            }
+            if (path.Contains("/volumes/") && request.Method == HttpMethod.Delete)
+            {
+                VolumeDeletes++;
+                if (CleanupFault == "delete_error") return new(HttpStatusCode.InternalServerError);
+                if (CleanupFault != "still_present") _volumeExists = false;
+                return new(HttpStatusCode.NoContent);
+            }
             if (path == "/v1.41/volumes/create")
             {
                 using var json = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
+                VolumeCreates++;
+                VolumeLabels = json.RootElement.GetProperty("Labels").Deserialize<Dictionary<string, string>>()!;
+                _volumeExists = true;
                 _volume = json.RootElement.GetProperty("Name").GetString()!;
                 _nonce = json.RootElement.GetProperty("Labels").GetProperty("bootstrap-owner").GetString()!;
-                return Json(new { Name = _volume, Labels = new Dictionary<string, string> { ["bootstrap-owner"] = _nonce } });
+                return Json(new { Name = _volume, Labels = VolumeLabels });
             }
             if (path == "/v1.41/containers/create")
             {

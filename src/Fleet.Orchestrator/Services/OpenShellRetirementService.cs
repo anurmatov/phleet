@@ -68,14 +68,17 @@ public sealed class OpenShellRetirementService(Func<OrchestratorDbContext> creat
             launch = await FindAsync(db, name, ct) ?? throw new OpenShellStateConflictException("Launch disappeared.");
             if (!Bound(launch)) throw new OpenShellStateConflictException("Current launch mapping is incomplete.");
             if (launch.Phase == "retired")
+            {
+                await VerifyArtifactRetirementAsync(launch, scope.ServiceProvider.GetService<IOpenShellArtifactCleanup>(), ct);
                 return ProvisionResult.Ok(name, "sandbox deprovisioned; absence and drained intake reverified");
+            }
             var observed = await gateway.ReadExactAsync(launch.SandboxId!, ct);
             if (observed is null) return ProvisionResult.Fail(name, "delete requires reconciliation of missing runtime", 409);
             var deletion = await PrepareAsync(db, launch.Id, observed, delete: true, ct);
             submitted = deletion.RequestId;
             await gateway.DeleteExactAsync(deletion.Target(), deletion.RequestId, allowMissing: true, ct);
             // Completion is based on fresh exact-runtime and intake evidence, never the RPC acknowledgement.
-            await new OpenShellLaunchStore(db).CompleteCleanupAsync(launch.Id, DateTime.UtcNow, reader, ct, deletion.RequestId);
+            await new OpenShellLaunchStore(db, artifacts: scope.ServiceProvider.GetService<IOpenShellArtifactCleanup>()).CompleteCleanupAsync(launch.Id, DateTime.UtcNow, reader, ct, deletion.RequestId);
             return ProvisionResult.Ok(name, "sandbox deprovisioned after absence and intake drain verification; config retained");
         }
         catch (OperationCanceledException) when (callerToken.IsCancellationRequested) { throw; }
@@ -121,7 +124,7 @@ public sealed class OpenShellRetirementService(Func<OrchestratorDbContext> creat
                 if (delete) await gateway.DeleteExactAsync(intent.Target(), intent.RequestId, allowMissing: true, ct);
                 else await gateway.StopExactAsync(intent.Target(), intent.RequestId, ct);
             }
-            if (delete) await new OpenShellLaunchStore(db).CompleteCleanupAsync(expectedLaunchId, DateTime.UtcNow, reader, ct, intent.RequestId);
+            if (delete) await new OpenShellLaunchStore(db, artifacts: scope.ServiceProvider.GetService<IOpenShellArtifactCleanup>()).CompleteCleanupAsync(expectedLaunchId, DateTime.UtcNow, reader, ct, intent.RequestId);
             else await FinishStopAsync(db, expectedLaunchId, intent.RequestId, reader, ct);
             return ProvisionResult.Ok(name, $"request {intent.RequestId:D} reconciled with fresh runtime and drained-intake proof");
         }
@@ -198,6 +201,8 @@ public sealed class OpenShellRetirementService(Func<OrchestratorDbContext> creat
                         x.GatewayId == launch.GatewayId && x.SandboxId == launch.SandboxId, ct)))
                     throw new OpenShellStateConflictException("Deletion cannot discard incomplete mapping or missing tombstone.");
             }
+            foreach (var launch in launches)
+                await VerifyArtifactRetirementAsync(launch, scope.ServiceProvider.GetService<IOpenShellArtifactCleanup>(), ct);
             // Complete mapping checks before parallel I/O; never share the DbContext with workers.
             // Bounded workers avoid one task per historical launch. A single cohort deadline also
             // bounds queued reads, rather than serially spending five seconds per retired sandbox.
@@ -239,6 +244,15 @@ public sealed class OpenShellRetirementService(Func<OrchestratorDbContext> creat
         {
             return (ProvisionResult.Fail(name, "agent deletion unconfirmed; inspect authoritative state before retrying", 503), false);
         }
+    }
+
+    private static async Task VerifyArtifactRetirementAsync(OpenShellLaunch launch, IOpenShellArtifactCleanup? artifacts, CancellationToken ct)
+    {
+        if (launch.CapabilitySecretRef is null) return;
+        var preparation = launch.PreparationJson is null ? null : JsonSerializer.Deserialize<OpenShellPreparationScope>(launch.PreparationJson);
+        if (artifacts is null || preparation is null || preparation.PlanHash != preparation.Plan.Hash)
+            throw new OpenShellStateConflictException("bootstrap_retirement_unverified");
+        await artifacts.VerifyRetiredAsync(new(launch.Id, launch.IdentityEpoch, preparation.PlanHash, launch.CapabilitySecretRef), ct).WaitAsync(ct);
     }
 
     private static Task<OpenShellLaunch?> FindAsync(OrchestratorDbContext db, string name, CancellationToken ct) =>

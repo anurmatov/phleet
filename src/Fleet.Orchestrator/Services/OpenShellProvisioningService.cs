@@ -44,7 +44,8 @@ public sealed class OpenShellProvisioningService(Func<OrchestratorDbContext> cre
         var reader = dependencies.ServiceProvider.GetService<IOpenShellRuntimeEvidenceReader>();
         var preflight = dependencies.ServiceProvider.GetService<IOpenShellPreparationPreflight>();
         var probe = dependencies.ServiceProvider.GetService<IOpenShellBootstrapProbe>();
-        if (gateway is null || reader is null || preflight is null || probe is null)
+        var artifactCleanup = dependencies.ServiceProvider.GetService<IOpenShellArtifactCleanup>();
+        if (gateway is null || reader is null || preflight is null || probe is null || artifactCleanup is null)
             return ProvisionResult.Fail(name, "compatibility_blocked: preparation peers unqualified", 503);
         using var operation = CancellationTokenSource.CreateLinkedTokenSource(callerToken);
         operation.CancelAfter(selection.Deadline - DateTime.UtcNow - TimeSpan.FromSeconds(10));
@@ -55,8 +56,9 @@ public sealed class OpenShellProvisioningService(Func<OrchestratorDbContext> cre
         try
         {
             var compiled = new OpenShellPolicyCompiler().Compile(selection.Plan.GatewayId, selection.Plan.Workspace,
-                selection.Plan.ReadSpec(), selection.Plan.InputHash, selection.Plan.ReadExpectedProviders(), selection.Plan.BootstrapIngress, selection.Plan.BootstrapCapabilityFile);
+                selection.Plan.ReadSpec(), selection.Plan.InputHash, selection.Plan.ReadExpectedProviders(), selection.Plan.BootstrapIngress, selection.Plan.BootstrapCapabilityFile, selection.Plan.ReadResourceAdmission());
             if (compiled != selection.Plan) throw new OpenShellStateConflictException("preparation_plan_changed");
+            await gateway.VerifyBootstrapInputsAsync(selection.Plan, ct).WaitAsync(ct);
             await preflight.VerifyAsync(selection, ct).WaitAsync(ct);
             await preflight.VerifyLegacyOwnershipAsync(selection, ct).WaitAsync(ct);
             await using var db = createDb();
@@ -65,7 +67,7 @@ public sealed class OpenShellProvisioningService(Func<OrchestratorDbContext> cre
                 || agent.OpenShellMigrationState != "pending"
                 || await db.OpenShellLaunches.AnyAsync(l => l.AgentId == agent.Id && (l.ActiveAgentId != null || l.Phase != "retired" || l.RevokedAt == null), ct))
                 throw new OpenShellStateConflictException("preparation_owner_changed");
-            var store = new OpenShellLaunchStore(db);
+            var store = new OpenShellLaunchStore(db, artifacts: artifactCleanup);
             launch = await store.ReserveAsync(agent.Id, selection.ExpectedOldRuntimeId, DateTime.UtcNow,
                 selection.Deadline - DateTime.UtcNow, ct, selection);
             if (selection.ExpectedOldRuntimeId is not null)
@@ -112,7 +114,7 @@ public sealed class OpenShellProvisioningService(Func<OrchestratorDbContext> cre
                 try
                 {
                     await using var recovery = createDb();
-                    var recoveryStore = new OpenShellLaunchStore(recovery);
+                    var recoveryStore = new OpenShellLaunchStore(recovery, artifacts: artifactCleanup);
                     await recoveryStore.RetireAsync(launch.Id, DateTime.UtcNow, revoke.Token);
                     var owned = await recovery.OpenShellLaunches.AsNoTracking().SingleAsync(l => l.Id == launch.Id, revoke.Token);
                     // Unbound/ambiguous Create requires authoritative complete ownership reconciliation.

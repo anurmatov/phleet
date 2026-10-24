@@ -213,5 +213,22 @@ and `bootstrap_supervisor_changed` refuse the control probe after mapping/lease/
 
 The source writer is not registered and does not provision an engine client, outside custody root,
 image, service routing trust or preparation authority. Do not enable it or construct live clients from
-these synthetic tests. Complete artifact-volume cleanup, D2 inventory, lost-Create reconciliation and
-static preflight first; preserve pending ownership and private custody on unknown state.
+these synthetic tests. Artifact retirement below is source-only; complete D2 inventory, lost-Create
+reconciliation and static preflight first; preserve pending ownership and private custody on unknown state.
+
+## Admission metadata and artifact retirement refusals
+
+`bootstrap_resource_admission_missing` / `bootstrap_resource_admission_unqualified` refuse before
+artifact mutation; the shared preparation caller checks supplied plan/policy inputs before legacy stop.
+An ownership nonce alone never grants resource admission. Do not synthesize approval labels, turn off
+resource admission or caller-config checks, or reinterpret old plan hashes to bypass a refusal.
+No current-policy reader or authority issuer is provisioned by this checkpoint.
+
+`bootstrap_cleanup_authority_unavailable`, unknown ownership and unconfirmed helper/volume absence
+retain cleanup-pending state and the active slot. Preserve outside custody and the original immutable
+launch reference; no Create/Stop/Delete resend, force-volume deletion, name guess or manual DB repair
+is authorized. Confirmed volume absence precedes plaintext-record retirement; partial filesystem
+cleanup keeps a nonsecret retired marker and remains pending until separately scoped reconciliation.
+`bootstrap_retirement_unverified` blocks terminal/deletion success when retained artifacts cannot be
+independently verified absent. Old retired rows are not permission to discard their custody references.
+Default-off registration, remaining source gaps and actual-agent/MySQL acceptance holds are unchanged.

@@ -153,6 +153,15 @@ public sealed class OpenShellGatewayClient : IOpenShellGatewayClient, IDisposabl
         return new(response.SandboxId, response.Outcome);
     }
 
+    public Task VerifyBootstrapInputsAsync(OpenShellLaunchPlan plan, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (plan.GatewayId != _gatewayId || plan.Workspace != _workspace || _bootstrapArtifacts is null || _serviceRoutingOrigin is null)
+            throw new OpenShellStateConflictException("bootstrap_delivery_unqualified");
+        _bootstrapArtifacts.VerifyAdmission(plan);
+        return Task.CompletedTask;
+    }
+
     public async Task<OpenShellSandboxSnapshot> CreateAsync(OpenShellLaunchPlan plan, Guid launchId,
         Guid epoch, Guid requestId, DateTime bootstrapDeadline, CancellationToken ct = default)
     {
@@ -160,6 +169,7 @@ public sealed class OpenShellGatewayClient : IOpenShellGatewayClient, IDisposabl
             || epoch == Guid.Empty || requestId == Guid.Empty) throw new ArgumentException("Exact create ownership required.");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        await VerifyBootstrapInputsAsync(plan, deadline.Token);
         if (_bootstrapArtifacts is null) throw new OpenShellStateConflictException("bootstrap_delivery_unqualified");
         await RequireConditionalMutationsAsync(deadline.Token);
         await _bootstrapArtifacts.DeliverAsync(plan, launchId, epoch, deadline.Token);

@@ -22,7 +22,7 @@ public sealed class OpenShellBootstrapControlTests
     {
         using var owned = new OpenShellBootstrapArtifactTests.OwnedEngine();
         using var engine = new HttpClient(owned) { BaseAddress = new("http://owned-engine.invalid") };
-        var artifacts = new OpenShellBootstrapArtifacts(engine, owned.Custody);
+        var artifacts = new OpenShellBootstrapArtifacts(engine, owned.Custody, OpenShellPolicyCompilerTests.Admission().PolicyAcknowledgement);
         var launch = Guid.NewGuid(); var epoch = Guid.NewGuid(); var plan = OpenShellPolicyCompilerTests.Plan();
         await artifacts.DeliverAsync(plan, launch, epoch, default);
         await using var connection = new SqliteConnection("Data Source=:memory:"); await connection.OpenAsync();

@@ -37,8 +37,8 @@ public sealed class OpenShellPreparationWireTests
         var wire = new Wire("ready");
         using var owned = new OpenShellBootstrapArtifactTests.OwnedEngine();
         using var engine = new HttpClient(owned) { BaseAddress = new("http://owned-engine.invalid") };
-        var artifacts = new OpenShellBootstrapArtifacts(engine, owned.Custody);
-        using var client = new OpenShellGatewayClient(new("https://gateway.example.invalid"), "gateway1", "workspace1", "owned-token", wire, artifacts);
+        var artifacts = new OpenShellBootstrapArtifacts(engine, owned.Custody, OpenShellPolicyCompilerTests.Admission().PolicyAcknowledgement);
+        using var client = new OpenShellGatewayClient(new("https://gateway.example.invalid"), "gateway1", "workspace1", "owned-token", wire, artifacts, new("https://service.example.invalid"));
         var launch = Guid.NewGuid(); var epoch = Guid.NewGuid(); var request = Guid.NewGuid();
         var created = await client.CreateAsync(OpenShellPolicyCompilerTests.Plan(), launch, epoch, request, DateTime.UtcNow.AddSeconds(50));
         Assert.Equal("sandbox1", created.Id); Assert.Equal(1, wire.Mutations);

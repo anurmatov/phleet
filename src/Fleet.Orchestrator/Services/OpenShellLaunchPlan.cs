@@ -7,7 +7,7 @@ namespace Fleet.Orchestrator.Services;
 
 /// <summary>Immutable serialized request, never shared mutable protobufs or credentials.</summary>
 public sealed record OpenShellLaunchPlan(string GatewayId, string Workspace, string SpecBase64,
-    string InputHash, string PolicyHash, string ImageHash, string ExpectedProvidersJson = "[]", string BootstrapIngress = "", string BootstrapCapabilityFile = "")
+    string InputHash, string PolicyHash, string ImageHash, string ExpectedProvidersJson = "[]", string BootstrapIngress = "", string BootstrapCapabilityFile = "", string ResourceAdmissionJson = "")
 {
     public SandboxSpec MaterializeBootstrap(Guid launchId, Guid epoch, DateTime deadline)
     {
@@ -25,6 +25,8 @@ public sealed record OpenShellLaunchPlan(string GatewayId, string Workspace, str
         spec.Command.Add("--OpenShell:BootstrapCapabilityFile=" + BootstrapCapabilityFile);
         return spec;
     }
+    public OpenShellResourceAdmission ReadResourceAdmission() => System.Text.Json.JsonSerializer.Deserialize<OpenShellResourceAdmission>(ResourceAdmissionJson)
+        ?? throw new OpenShellStateConflictException("bootstrap_resource_admission_missing");
     public OpenShellExpectedProvider[] ReadExpectedProviders() => System.Text.Json.JsonSerializer.Deserialize<OpenShellExpectedProvider[]>(ExpectedProvidersJson)
         ?? throw new OpenShellStateConflictException("expected_providers_missing");
     public SandboxSpec ReadSpec() => SandboxSpec.Parser.ParseFrom(Convert.FromBase64String(SpecBase64));
@@ -47,9 +49,11 @@ public sealed record OpenShellExpectedProvider(string Name, string ProviderId, u
 
 public sealed class OpenShellPolicyCompiler
 {
-    public OpenShellLaunchPlan Compile(string gatewayId, string workspace, SandboxSpec spec, string inputHash, IReadOnlyList<OpenShellExpectedProvider>? expectedProviders = null, string bootstrapIngress = "", string bootstrapCapabilityFile = "")
+    public OpenShellLaunchPlan Compile(string gatewayId, string workspace, SandboxSpec spec, string inputHash, IReadOnlyList<OpenShellExpectedProvider>? expectedProviders = null, string bootstrapIngress = "", string bootstrapCapabilityFile = "", OpenShellResourceAdmission? resourceAdmission = null)
     {
         if (!Opaque(gatewayId) || !Opaque(workspace) || !Hash(inputHash)) throw Blocked();
+        if (resourceAdmission is null) throw new OpenShellStateConflictException("bootstrap_resource_admission_missing");
+        _ = resourceAdmission.Validate(workspace);
         var copy = spec.Clone();
         var policy = copy.Policy;
         if (copy.Template is null || !copy.Template.Image.Contains("@sha256:", StringComparison.Ordinal)
@@ -95,7 +99,7 @@ public sealed class OpenShellPolicyCompiler
         if (bytes.Length > 128 * 1024) throw Blocked();
         return new(gatewayId, workspace, Convert.ToBase64String(bytes), inputHash,
             Convert.ToHexStringLower(SHA256.HashData(policy.ToByteArray())), copy.Template.Image.Split("@sha256:").Last(),
-            System.Text.Json.JsonSerializer.Serialize(expectedProviders.OrderBy(p => p.Name, StringComparer.Ordinal)), bootstrapIngress, bootstrapCapabilityFile);
+            System.Text.Json.JsonSerializer.Serialize(expectedProviders.OrderBy(p => p.Name, StringComparer.Ordinal)), bootstrapIngress, bootstrapCapabilityFile, System.Text.Json.JsonSerializer.Serialize(resourceAdmission));
     }
     private static bool PathSafe(string p) => p.StartsWith('/') && p.Length <= 4096
         && !p.Any(char.IsControl) && !p.Split('/').Any(x => x is ".." or ".") && !p.Contains("//");

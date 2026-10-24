@@ -15,6 +15,8 @@ public sealed record OpenShellDeleteAcknowledgement(string SandboxId, DeletionOu
 /// <summary>Authenticated observations and capability-gated expected-ID/version mutations.</summary>
 public interface IOpenShellGatewayClient
 {
+    Task VerifyBootstrapInputsAsync(OpenShellLaunchPlan plan, CancellationToken ct = default)
+        => throw new NotSupportedException("bootstrap_inputs_unqualified");
     Task<OpenShellSandboxSnapshot> CreateAsync(OpenShellLaunchPlan plan, Guid launchId, Guid epoch,
         Guid requestId, DateTime bootstrapDeadline, CancellationToken ct = default) => throw new NotSupportedException("create_unqualified");
     Task<OpenShellSupervisorProof> ReadCurrentSupervisorAsync(OpenShellSandboxSnapshot target, string provider,

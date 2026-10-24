@@ -12,7 +12,7 @@ public sealed class OpenShellStateConflictException(string message) : InvalidOpe
 /// retries, activation or inferred runtime state. Lifecycle callers must use a non-retrying DB
 /// context: an ambiguous mutation must be reconciled, never replayed by EF's execution strategy.
 /// </summary>
-public sealed class OpenShellLaunchStore(OrchestratorDbContext db, TimeProvider? timeProvider = null)
+public sealed class OpenShellLaunchStore(OrchestratorDbContext db, TimeProvider? timeProvider = null, IOpenShellArtifactCleanup? artifacts = null)
 {
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
     public async Task<OpenShellLaunch> ReserveAsync(int agentId, string? expectedOldRuntimeId,
@@ -169,8 +169,17 @@ public sealed class OpenShellLaunchStore(OrchestratorDbContext db, TimeProvider?
             await db.Entry(lease).ReloadAsync(ct);
             if (lease.Owner != (retirementOwner ?? launchId))
                 throw new OpenShellStateConflictException("A different lifecycle owner holds the lease.");
-            db.OpenShellLeases.Remove(lease);
         }
+        if (launch.CapabilitySecretRef is not null)
+        {
+            var scope = launch.PreparationJson is null ? null : System.Text.Json.JsonSerializer.Deserialize<OpenShellPreparationScope>(launch.PreparationJson);
+            if (artifacts is null || scope is null || scope.PlanHash != scope.Plan.Hash)
+                throw new OpenShellStateConflictException("bootstrap_cleanup_authority_unavailable");
+            await artifacts.RetireAsync(new(launch.Id, launch.IdentityEpoch, scope.PlanHash, launch.CapabilitySecretRef), ct).WaitAsync(ct);
+            // Artifact I/O must not turn an older runtime proof into commit-time authority.
+            await VerifyEvidenceAsync(reader, launch, cleanup: true, ct);
+        }
+        if (lease is not null) db.OpenShellLeases.Remove(lease);
         launch.ActiveAgentId = null;
         launch.Phase = "retired";
         await db.SaveChangesAsync(ct);

@@ -21,9 +21,9 @@ public sealed class OpenShellStartupGuard
     private readonly byte[] _capabilityHash;
     private int _probeStarted;
 
-    public OpenShellStartupGuard(IConfiguration configuration) : this(configuration, File.ReadAllText) { }
+    public OpenShellStartupGuard(IConfiguration configuration) : this(configuration, "") { }
 
-    internal OpenShellStartupGuard(IConfiguration configuration, Func<string, string> readOwnedCapability)
+    internal OpenShellStartupGuard(IConfiguration configuration, string ownedFilesystemRoot)
     {
         var ingress = configuration["OpenShell:BootstrapIngress"];
         if (!Uri.TryCreate(ingress, UriKind.Absolute, out var uri) || uri.Scheme != "https"
@@ -39,7 +39,9 @@ public sealed class OpenShellStartupGuard
             throw new InvalidOperationException("bootstrap_plan_invalid");
         var path = configuration["OpenShell:BootstrapCapabilityFile"];
         if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path)) throw new InvalidOperationException("bootstrap_capability_missing");
-        var capability = readOwnedCapability(path);
+        // An internal owned mount root permits actual file I/O in isolated tests, not a replacement reader.
+        var actualPath = ownedFilesystemRoot.Length == 0 ? path : Path.Combine(ownedFilesystemRoot, path.TrimStart('/'));
+        var capability = File.ReadAllText(actualPath);
         if (capability.Length is < 32 or > 256 || capability.Any(c => c <= ' ' || c > '~'))
             throw new InvalidOperationException("bootstrap_capability_invalid");
         _capabilityHash = SHA256.HashData(Encoding.UTF8.GetBytes(capability));

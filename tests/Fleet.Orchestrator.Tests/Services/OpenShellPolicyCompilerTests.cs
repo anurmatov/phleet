@@ -23,6 +23,7 @@ public sealed class OpenShellPolicyCompilerTests
     }
 
     [Theory]
+    [InlineData("driver")]
     [InlineData("image")]
     [InlineData("root")]
     [InlineData("landlock")]
@@ -41,6 +42,7 @@ public sealed class OpenShellPolicyCompilerTests
         var endpoint = spec.Policy.NetworkPolicies["identity"].Endpoints[0];
         switch (fault)
         {
+            case "driver": spec.Template.DriverConfig = new Struct { Fields = { ["docker"] = Value.ForString("unqualified") } }; break;
             case "image": spec.Template.Image = "image:latest"; break;
             case "root": spec.Policy.Process.RunAsUser = "0"; break;
             case "landlock": spec.Policy.Landlock.Compatibility = "best_effort"; break;

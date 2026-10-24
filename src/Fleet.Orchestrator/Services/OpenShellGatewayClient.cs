@@ -18,9 +18,11 @@ public sealed class OpenShellGatewayClient : IOpenShellGatewayClient, IDisposabl
     private readonly string _gatewayId;
     private readonly string _workspace;
     private readonly string _token;
+    private readonly OpenShellBootstrapArtifacts? _bootstrapArtifacts;
+    private readonly Uri? _serviceRoutingOrigin;
 
     public OpenShellGatewayClient(Uri address, string gatewayId, string workspace, string operatorToken,
-        HttpMessageHandler handler)
+        HttpMessageHandler handler, OpenShellBootstrapArtifacts? bootstrapArtifacts = null, Uri? serviceRoutingOrigin = null)
     {
         if (!address.IsAbsoluteUri || address.Scheme != "https" || !string.IsNullOrEmpty(address.UserInfo)
             || address.AbsolutePath != "/" || address.Query.Length != 0 || address.Fragment.Length != 0)
@@ -29,13 +31,19 @@ public sealed class OpenShellGatewayClient : IOpenShellGatewayClient, IDisposabl
         if (string.IsNullOrWhiteSpace(operatorToken) || operatorToken.Length > 8192
             || operatorToken.Any(c => c <= ' ' || c > '~'))
             throw new ArgumentException("Outside gateway authorization is required.", nameof(operatorToken));
-        _gatewayId = gatewayId; _workspace = workspace; _token = operatorToken;
+        _gatewayId = gatewayId; _workspace = workspace; _token = operatorToken; _bootstrapArtifacts = bootstrapArtifacts;
         _channel = GrpcChannel.ForAddress(address, new GrpcChannelOptions
         {
             HttpHandler = handler, DisposeHttpClient = true, MaxRetryAttempts = 1,
             MaxReceiveMessageSize = 4 * 1024 * 1024, ThrowOperationCanceledOnCancellation = true,
         });
         _rpc = new GatewayRpc(_channel);
+        if (serviceRoutingOrigin is not null && (serviceRoutingOrigin.Scheme != "https"
+            || serviceRoutingOrigin.AbsolutePath != "/" || serviceRoutingOrigin.Query != ""
+            || serviceRoutingOrigin.Fragment != "" || serviceRoutingOrigin.UserInfo != ""
+            || Uri.CheckHostName(serviceRoutingOrigin.Host) != UriHostNameType.Dns))
+            throw new ArgumentException("Qualified HTTPS service routing origin required.");
+        _serviceRoutingOrigin = serviceRoutingOrigin;
     }
 
     public async Task<IReadOnlyList<OpenShellSandboxSnapshot>> InventoryAsync(CancellationToken ct = default)
@@ -152,12 +160,17 @@ public sealed class OpenShellGatewayClient : IOpenShellGatewayClient, IDisposabl
             || epoch == Guid.Empty || requestId == Guid.Empty) throw new ArgumentException("Exact create ownership required.");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        if (_bootstrapArtifacts is null) throw new OpenShellStateConflictException("bootstrap_delivery_unqualified");
         await RequireConditionalMutationsAsync(deadline.Token);
+        await _bootstrapArtifacts.DeliverAsync(plan, launchId, epoch, deadline.Token);
         var request = new CreateSandboxRequest
         {
-            WorkspaceScope = new WorkspaceSelector { Workspace = _workspace }, Spec = plan.MaterializeBootstrap(launchId, epoch, bootstrapDeadline),
+            WorkspaceScope = new WorkspaceSelector { Workspace = _workspace }, Spec = _bootstrapArtifacts.Materialize(plan, launchId, epoch, bootstrapDeadline),
             Name = "launch-" + launchId.ToString("N"), RequestId = requestId.ToString("D"),
         };
+        // Atomic service exposure is part of this single Create, not a later name-keyed mutation.
+        request.ServiceExposures.Add(new SandboxServiceExposure { Service = "bootstrap", TargetPort = 8080,
+            AuthorizationMode = ServiceAuthorizationMode.BearerPassthrough });
         // Metadata is correlation, NOT complete ownership evidence after an ambiguous Create.
         request.Labels.Add("phleet-launch", launchId.ToString("D"));
         request.Labels.Add("phleet-epoch", epoch.ToString("D"));
@@ -184,6 +197,28 @@ public sealed class OpenShellGatewayClient : IOpenShellGatewayClient, IDisposabl
         var after = await ReadExactAsync(target.Id, deadline.Token);
         RequireSame(after, before!);
         return OpenShellSupervisorProof.Verify(after!, provider, response.Status, DateTime.UtcNow);
+    }
+
+    public async Task<Uri> ReadBootstrapEndpointAsync(OpenShellSandboxSnapshot target, CancellationToken ct = default)
+    {
+        if (_serviceRoutingOrigin is null) throw new OpenShellStateConflictException("bootstrap_service_routing_unqualified");
+        ValidateMutationTarget(target, Guid.NewGuid());
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        RequireSame(await ReadExactAsync(target.Id, deadline.Token), target);
+        var service = await _rpc.GetServiceAsync(new GetServiceRequest
+        { WorkspaceScope = new WorkspaceSelector { Workspace = _workspace }, Sandbox = target.Name, Name = "bootstrap" },
+            Options(deadline.Token)).ResponseAsync.WaitAsync(deadline.Token);
+        RequireSame(await ReadExactAsync(target.Id, deadline.Token), target);
+        var endpoint = service.Endpoint;
+        // Exact pin service_routing::endpoint_url: workspace--sandbox--service.base-domain.
+        // No returned arbitrary URL can receive the capability or outside admin authorization.
+        var expected = new UriBuilder(_serviceRoutingOrigin)
+        { Host = _workspace + "--" + target.Name + "--bootstrap." + _serviceRoutingOrigin.Host }.Uri;
+        if (endpoint is null || endpoint.SandboxId != target.Id || endpoint.Sandbox != target.Name
+            || endpoint.Metadata?.Workspace != _workspace || endpoint.Name != "bootstrap" || endpoint.TargetPort != 8080
+            || endpoint.AuthorizationMode != ServiceAuthorizationMode.BearerPassthrough || service.Url != expected.AbsoluteUri)
+            throw new OpenShellStateConflictException("bootstrap_endpoint_identity_unverified");
+        return expected;
     }
 
     private static void RequireSame(OpenShellSandboxSnapshot? actual, OpenShellSandboxSnapshot expected)

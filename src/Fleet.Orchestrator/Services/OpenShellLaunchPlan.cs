@@ -54,6 +54,7 @@ public sealed class OpenShellPolicyCompiler
         var policy = copy.Policy;
         if (copy.Template is null || !copy.Template.Image.Contains("@sha256:", StringComparison.Ordinal)
             || !Hash(copy.Template.Image.Split("@sha256:").Last())
+            || copy.Template.DriverConfig is { Fields.Count: > 0 }
             || copy.Template.Environment.Count != 0 || copy.Environment.Count != 0 || copy.Template.AgentSocket.Length != 0
             || copy.RestartPolicy != SandboxRestartPolicy.Never || copy.Tty || copy.Providers.Count == 0
             || copy.Providers.Count != copy.Providers.Distinct(StringComparer.Ordinal).Count()

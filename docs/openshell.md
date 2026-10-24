@@ -500,3 +500,36 @@ not actual mounting/TLS/runtime qualification. The outside Identity environment 
 operator-owned deployment template; setup does not provision or activate that service or issue authority.
 Concrete preflight/runtime/intake/bootstrap-control peers and complete authenticated lost-Create
 reconciliation remain missing within #479; parent runtime/restore/full-audit holds remain unchanged.
+
+### Fresh bootstrap artifact and control checkpoint (still held)
+
+The generated Create path now requires outside bootstrap artifact delivery, not an image-baked
+capability. Before the single Create RPC, an unregistered outside adapter creates a fresh named
+volume and a stopped helper from the already-qualified digest, writes one random per-launch
+capability through Docker's archive API (UID/GID 1000, mode 0400), deletes that exact helper and
+verifies its absence. It never starts a helper, pulls an image, installs anything or uses host binds.
+Archive extraction explicitly preserves ownership and refuses directory/file replacement, per the
+[Docker archive contract](https://docs.docker.com/reference/api/engine/version/v1.40/#tag/Container/operation/PutContainerArchive).
+A failed or ambiguous delivery refuses Create and retains outside custody for reconciliation.
+The existing write-once capability reference is persisted with the Create attempt; secret bytes
+remain outside the DB, serialized plan, arguments and environment. Materialization adds only the
+pinned Docker driver's read-only named-volume mount at `/app/generated`. Other driver settings
+are currently unsupported and refused during compilation, before legacy stop.
+
+Create atomically requests the bootstrap service on port 8080 with bearer passthrough. A separate
+read-only GetService is bracketed by exact-ID/version/process observations and checks the pinned
+workspace--sandbox--service TLS routing origin before any capability disclosure. The concrete
+control probe rereads live launch/lease/deadline/tombstone state, matches the saved security-ready
+proof set and current supervisor expectations, then sends exactly one empty capability-authorized
+POST `/bootstrap/probe`. Redirects, missing routing custody and any non-204 response refuse.
+The Agent consumes an actual mounted file; owned tests use real archive bytes and file I/O, not a
+replacement file-reader function. Synthetic engine/gateway responses are not actual mount evidence.
+
+Neither adapter is registered or authorized by default. Concrete artifact/image/mount/hook and
+exact legacy-stop preflight, authenticated D2 process/broker/poller evidence, complete launch-owned
+ambiguous-Create inventory/reconciliation and artifact-volume cleanup remain outstanding. Outside
+custody and pending resources must be preserved; this checkpoint does not certify cleanup completion.
+The pinned public API has no read-only Create-request receipt lookup: full ListSandboxes pagination
+plus caller-supplied labels/name alone is not authoritative ownership for an unbound lost response.
+Do not retry Create, infer zero intake, release a pending slot or substitute those labels as proof.
+Parent activation/native callback/rollback, full audit, actual-agent and MySQL restore holds remain.

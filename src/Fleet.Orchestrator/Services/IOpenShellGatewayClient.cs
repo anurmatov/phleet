@@ -19,6 +19,8 @@ public interface IOpenShellGatewayClient
         Guid requestId, DateTime bootstrapDeadline, CancellationToken ct = default) => throw new NotSupportedException("create_unqualified");
     Task<OpenShellSupervisorProof> ReadCurrentSupervisorAsync(OpenShellSandboxSnapshot target, string provider,
         CancellationToken ct = default) => throw new NotSupportedException("supervisor_unqualified");
+    Task<Uri> ReadBootstrapEndpointAsync(OpenShellSandboxSnapshot target, CancellationToken ct = default)
+        => throw new NotSupportedException("bootstrap_service_unqualified");
     Task<IReadOnlyList<OpenShellSandboxSnapshot>> InventoryAsync(CancellationToken ct = default);
     Task<OpenShellSandboxSnapshot?> ReadExactAsync(string sandboxId, CancellationToken ct = default);
     Task<OpenShellSandboxSnapshot> StopExactAsync(OpenShellSandboxSnapshot target, Guid requestId, CancellationToken ct = default);

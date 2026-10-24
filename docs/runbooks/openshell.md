@@ -199,3 +199,19 @@ The example's outside-Identity mapping is commented, not a new enabled service o
 Receiver responses are 401 for proof/mTLS, 403 for scope/expired ownership/replay, 409 for changed
 supervisor/expected tuple and 503 for unavailable authority. No response authorizes activation or
 an automatic request retry. Keep pending launch state for separately implemented ownership recovery.
+
+## Bootstrap artifact/control checkpoint (not operator enablement)
+
+`bootstrap_delivery_unqualified` means generated Create has no qualified outside artifact writer;
+no Create RPC is sent. `bootstrap_artifact_already_attempted` refuses reuse of an attempted
+launch/epoch, including interrupted delivery. A failed archive, mount/identity read or helper deletion
+leaves outside custody and pending resources for exact reconciliation, not an automatic resend.
+`bootstrap_service_routing_unqualified` and `bootstrap_endpoint_identity_unverified` refuse any
+capability disclosure without the pinned exact-ID service/routing contract. `bootstrap_owner_not_current`
+and `bootstrap_supervisor_changed` refuse the control probe after mapping/lease/proof drift;
+`bootstrap_control_unconfirmed` never means activation or permission to retry a one-shot probe.
+
+The source writer is not registered and does not provision an engine client, outside custody root,
+image, service routing trust or preparation authority. Do not enable it or construct live clients from
+these synthetic tests. Complete artifact-volume cleanup, D2 inventory, lost-Create reconciliation and
+static preflight first; preserve pending ownership and private custody on unknown state.

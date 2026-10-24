@@ -126,7 +126,7 @@ internal static class OpenShellModel
                     throw new InvalidOperationException("OpenShell launch identity is immutable.");
             foreach (var name in new[] { nameof(OpenShellLaunch.GatewayId), nameof(OpenShellLaunch.SandboxId),
                          nameof(OpenShellLaunch.StopIntentJson), nameof(OpenShellLaunch.DeleteIntentJson),
-                         nameof(OpenShellLaunch.PreparationJson), nameof(OpenShellLaunch.SecurityReadyJson),
+                         nameof(OpenShellLaunch.CapabilitySecretRef), nameof(OpenShellLaunch.PreparationJson), nameof(OpenShellLaunch.SecurityReadyJson),
                          nameof(OpenShellLaunch.PreparationDeadline), nameof(OpenShellLaunch.StopAttemptedAt),
                          nameof(OpenShellLaunch.CreateAttemptedAt), nameof(OpenShellLaunch.CreateRequestId) })
                 if (row.Property(name).IsModified && row.Property(name).OriginalValue is not null)

@@ -188,6 +188,7 @@ public sealed class OpenShellLaunchStore(OrchestratorDbContext db, TimeProvider?
         {
             if (launch.Phase != "legacy_stopped" || launch.CreateAttemptedAt is not null || launch.CreateRequestId is null)
                 throw new OpenShellStateConflictException("create_attempt_already_owned_or_out_of_order");
+            launch.CapabilitySecretRef = OpenShellBootstrapArtifacts.Reference(launch.Id, launch.IdentityEpoch);
             launch.CreateAttemptedAt = now;
         }
         else

@@ -145,14 +145,19 @@ public sealed class ConfigurationAndPromptTests
         Assert.NotNull(sp.GetRequiredService<RelayCompletionPublisher>());
     }
 
+    public static TheoryData<string, string> MalformedScalars => new()
+    {
+        { "Enabled", "malformed-secret-scalar" },
+        { "Enabled", "" },
+        { "PollSeconds", "malformed-secret-scalar" },
+        { "PollSeconds", (1L + int.MaxValue).ToString(System.Globalization.CultureInfo.InvariantCulture) },
+        { "CoordinatorGeneration", "malformed-secret-scalar" },
+        { "CoordinatorGeneration", (1m + long.MaxValue).ToString(System.Globalization.CultureInfo.InvariantCulture) },
+    };
+
     [Theory]
     [Trait(Suite, "coordinator")]
-    [InlineData("Enabled", "malformed-secret-scalar")]
-    [InlineData("Enabled", "")]
-    [InlineData("PollSeconds", "malformed-secret-scalar")]
-    [InlineData("PollSeconds", "2147483648")]
-    [InlineData("CoordinatorGeneration", "malformed-secret-scalar")]
-    [InlineData("CoordinatorGeneration", "9223372036854775808")]
+    [MemberData(nameof(MalformedScalars))]
     public async Task Registration_MalformedScalar_ReportsOnlyItsKeyAndKeepsOrdinaryTransport(string key, string value)
     {
         var settings = Enabled();

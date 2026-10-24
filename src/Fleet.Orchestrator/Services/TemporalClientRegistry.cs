@@ -48,10 +48,15 @@ public sealed class TemporalClientRegistry(
             .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// The client for a CONFIGURED namespace only — the scope every dashboard, history, schedule and
+    /// signal route relies on. The configured check runs before the cache: observer-only clients
+    /// that <see cref="TryGetClientAsync"/> connected share that cache and must never be returned here.
+    /// </summary>
     public async Task<ITemporalClient?> GetClientAsync(string @namespace, CancellationToken ct = default)
     {
-        if (_clients is { } snapshot && snapshot.TryGetValue(@namespace, out var cached)) return cached;
         if (!_opts.Namespaces.Contains(@namespace, StringComparer.OrdinalIgnoreCase)) return null;
+        if (_clients is { } snapshot && snapshot.TryGetValue(@namespace, out var cached)) return cached;
         return (await TryGetClientAsync(@namespace, ct)).Client;
     }
 

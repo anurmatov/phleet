@@ -433,7 +433,7 @@ public sealed class WorkflowOutcomeStore(
                 await CollisionAsync(db, facts.Namespace, facts.WorkflowId, facts.RunId, now, ct);
                 return false;
             }
-            ApplyOwnership(row, facts, ownership);
+            await ApplyOwnershipAsync(db, row, inserted: db.Entry(row).State == EntityState.Added, facts, ownership, ct);
             row.UpdatedAt = now;
             return true;
         }, ct);
@@ -495,7 +495,7 @@ public sealed class WorkflowOutcomeStore(
 
             // Facts that are not classification: identity links, definition snapshot, correlation.
             ApplyRunFacts(row, facts, terminal);
-            ApplyOwnership(row, facts, ownership);
+            await ApplyOwnershipAsync(db, row, inserted, facts, ownership, ct);
 
             if (observations.Any(o => o.EventType == OperatorClassificationEvent))
             {
@@ -820,6 +820,25 @@ public sealed class WorkflowOutcomeStore(
         row.DefinitionHash = facts.DefinitionHash;
         row.InputHash = facts.Input?.Sha256;
         ApplyCorrelation(row, facts);
+    }
+
+    /// <summary>
+    /// Applies policy-derived ownership. A run an operator transferred keeps the transferred
+    /// coordinator: re-storing it (keyring recovery, a classifier change) re-derives project facts
+    /// from policy but never hands the run back to the coordinator it was transferred away from.
+    /// </summary>
+    private async Task ApplyOwnershipAsync(OrchestratorDbContext db, WorkflowOutcomeRun row, bool inserted,
+        WorkflowOutcomeRunFacts facts, WorkflowOutcomeOwnershipResult ownership, CancellationToken ct)
+    {
+        var transferredTo = inserted ? null : await db.WorkflowOutcomeDecisions.AsNoTracking()
+            .Where(d => d.OutcomeId == row.Id && d.Operation == WorkflowOutcomeInboxService.TransferOperation
+                && d.Status == WorkflowOutcomeInboxService.TransferredStatus)
+            .OrderByDescending(d => d.CreatedAt).Select(d => d.Owner).FirstOrDefaultAsync(ct);
+        ApplyOwnership(row, facts, ownership);
+        if (transferredTo is null) return;
+        if (!WorkflowOutcomeApi.SameName(ownership.Coordinator, transferredTo))
+            logger.LogInformation("workflow_outcome_transfer_kept outcome={OutcomeId}", row.Id);
+        row.Coordinator = transferredTo;
     }
 
     private static void ApplyOwnership(WorkflowOutcomeRun row, WorkflowOutcomeRunFacts facts, WorkflowOutcomeOwnershipResult ownership)

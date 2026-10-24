@@ -238,7 +238,11 @@ wo /<outcomeId>/transfer -X POST -d '{
 
 The run is re-owned in the current generation, its open memberships are superseded and an
 immutable `transfer` record (status `transferred`) is written. The batcher then delivers it to the
-new coordinator, which must ack it before any decision or recovery. Use the same route for a
+new coordinator, which must ack it before any decision or recovery. The latest `transferred`
+record outranks the ownership policy: when the observer re-stores the run (keyring recovery, a
+classifier change) it re-derives project facts but keeps the transferred coordinator, and logs
+`workflow_outcome_transfer_kept` if the policy names someone else. The record is audit only and
+never shows as the run's `lastDecision`. Use the same route for a
 failure stored under a rule's or the policy `defaultCoordinator`, or with none. Refusals change
 nothing: 409 `stale_version`, `stale_generation`, `coordinator_changed` (including a replay),
 `already_current`, `already_resolved`, or `generation_not_incremented` (the old owner still holds

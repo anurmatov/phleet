@@ -464,7 +464,7 @@ volume or an assignment, and never generates a credential.
 | `.env` key | Orchestrator option | Default | Notes |
 |---|---|---|---|
 | `FLEET_WORKFLOW_OUTCOMES_ENABLED` | `WorkflowOutcomes__Enabled` | `false` | Kill switch; off starts no observer, batcher or intake (routes 503) |
-| `FLEET_WORKFLOW_OUTCOMES_NAMESPACES` | `…__Namespaces` | blank | Required CSV; missing/unreachable namespace is degraded, never a filter |
+| `FLEET_WORKFLOW_OUTCOMES_NAMESPACES` | `…__Namespaces` | blank | Required CSV; missing/unreachable namespace is degraded, never a filter. An observer-only namespace is read by the observer and recovery probe only; it never joins the dashboard, history, schedule or signal routes |
 | `FLEET_WORKFLOW_OUTCOMES_POLL_SECONDS` | `…__PollSeconds` | `30` | 5–300; known-run Describe |
 | `FLEET_WORKFLOW_OUTCOMES_RECENT_SCAN_SECONDS` | `…__RecentScanSeconds` | `60` | 10–3600 |
 | `FLEET_WORKFLOW_OUTCOMES_FULL_SCAN_SECONDS` | `…__FullScanSeconds` | `300` | 60–86400; keep ≥ 2 sweeps inside retention |

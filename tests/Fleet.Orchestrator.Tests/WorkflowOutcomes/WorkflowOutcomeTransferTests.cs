@@ -75,6 +75,9 @@ public sealed class WorkflowOutcomeTransferTests : IAsyncLifetime
             (audit.OutcomeId, audit.ExpectedVersion, audit.Status, audit.Owner, audit.AuthorityRef, audit.CoordinatorGeneration));
         Assert.Equal((WorkflowOutcomePrincipal.OperatorKind, WorkflowOutcomePrincipal.OperatorKind), (audit.DecidedBy, audit.DecidedVia));
         Assert.Contains("coordinator:old-coordinator", audit.EvidenceRefsJson);
+        // The audit record is not shown as the run's last decision.
+        var view = await ApiHost.JsonAsync(await _host.AsAdmin(HttpMethod.Get, $"{Root}/{run.Id}"));
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, view.GetProperty("lastDecision").ValueKind);
 
         // The batcher now delivers it in the current generation; only a fresh ack makes a decision possible.
         Assert.Equal(1, await _host.FlushAsync());

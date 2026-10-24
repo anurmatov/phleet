@@ -1014,7 +1014,8 @@ public sealed class WorkflowOutcomeInboxService(
             var item = items.FirstOrDefault(i => i.OutcomeId == r.Id && i.OutcomeVersion == r.Version);
             var batch = item is null ? null : batches.GetValueOrDefault(item.BatchId);
             var current = decisions.Where(d => d.OutcomeId == r.Id && d.ExpectedVersion == r.Version && d.Status == "accepted").MaxBy(d => d.CreatedAt);
-            var last = decisions.Where(d => d.OutcomeId == r.Id).MaxBy(d => d.CreatedAt);
+            // A transfer is an ownership audit record, not a decision: it never shows as one.
+            var last = decisions.Where(d => d.OutcomeId == r.Id && d.Operation != TransferOperation).MaxBy(d => d.CreatedAt);
             var operation = operations.Where(o => o.OutcomeId == r.Id).MaxBy(o => o.ReservedAt);
             var failure = r.Classification == WorkflowOutcomeClassifications.ConfirmedFailure;
             var acked = item?.AckedAt is not null;

@@ -932,6 +932,50 @@ public sealed class WorkflowOutcomeReconcilerTests
         Assert.Equal("resolved", (await h.HealthAsync()).Single(x => x.Component == WorkflowOutcomeHealthComponents.Keyring).State);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    [Trait("WorkflowOutcomeSuite", "failure-matrix")]
+    [Trait("WorkflowOutcomeSuite", "recovery")]
+    public async Task Reconcile_KeyringRecoveryRestore_KeepsATransferredCoordinator(bool transferRecorded)
+    {
+        // A keyring-pending failure is re-listed and re-stored once the keyring recovers. An operator
+        // transfer made in between is an operator decision the re-store keeps; a coordinator change
+        // with no transfer record behind it is not, and goes back to the policy owner.
+        await using var h = await ObserverHarness.CreateAsync(Options());
+        Run(h, "wf-t", b => b.Failed());
+        h.Protector.Fail = true;
+        await h.CyclesAsync(1);
+        var row = await h.RunAsync(Ns, "wf-t", "run-1");
+        Assert.Equal(WorkflowOutcomeEvidenceStates.Pending, row.EvidenceState);
+        Assert.Equal("coordinator", row.Coordinator);
+
+        await h.DbAsync(async db =>
+        {
+            var stored = await db.WorkflowOutcomeRuns.SingleAsync(r => r.Id == row.Id);
+            stored.Coordinator = "coordinator-next";
+            db.WorkflowOutcomeDecisions.Add(new WorkflowOutcomeDecision
+            {
+                Id = Guid.NewGuid(), OutcomeId = row.Id, ExpectedVersion = row.Version,
+                Operation = transferRecorded ? WorkflowOutcomeInboxService.TransferOperation : "hold",
+                DecidedBy = WorkflowOutcomePrincipal.OperatorKind, DecidedVia = WorkflowOutcomePrincipal.OperatorKind,
+                Owner = "coordinator-next", Reason = "owner renamed", EvidenceRefsJson = "[\"coordinator:coordinator\"]",
+                AuthorityRef = "https://example.invalid/authority/1",
+                Status = transferRecorded ? WorkflowOutcomeInboxService.TransferredStatus : "accepted", CreatedAt = h.Clock.UtcNow,
+            });
+            return await db.SaveChangesAsync();
+        });
+
+        h.Protector.Fail = false;
+        await h.CyclesAsync(1);
+
+        row = await h.RunAsync(Ns, "wf-t", "run-1");
+        Assert.Equal(WorkflowOutcomeEvidenceStates.Complete, row.EvidenceState);
+        Assert.Equal(1, row.Version);
+        Assert.Equal(transferRecorded ? "coordinator-next" : "coordinator", row.Coordinator);
+        Assert.NotNull(row.OwnershipPolicyHash);
+    }
+
     [Fact]
     [Trait("WorkflowOutcomeSuite", "failure-matrix")]
     public async Task Reconcile_LeaseHeldByLiveOwner_IdleUntilExpiryThenFencedTakeover()

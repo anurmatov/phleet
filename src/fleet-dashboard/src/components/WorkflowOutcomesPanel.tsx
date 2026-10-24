@@ -617,7 +617,7 @@ export function OutcomeDetailView({ detail, nowMs, http, onChanged }: {
             <thead><tr><th>When</th><th>Decision</th><th>Owner</th><th>Status</th><th>Via</th><th>Due</th><th>Reason</th></tr></thead>
             <tbody>
               {detail.decisions.map((d, i) => (
-                <tr key={d.decisionId ?? i} className={d.status !== 'accepted' ? 'eg-row-bad' : undefined}>
+                <tr key={d.decisionId ?? i} className={d.status === 'rejected' ? 'eg-row-bad' : undefined}>
                   <td title={d.createdAt}>{formatWhen(d.createdAt)}</td>
                   <td>{d.operation}{d.version !== null ? ` (v${d.version})` : ''}</td>
                   <td>{d.owner}</td>

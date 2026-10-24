@@ -82,6 +82,35 @@ public sealed class TemporalClientRegistryReconnectTests
         Assert.Same(client, observed.Client);
         Assert.Null(observed.Error);
         Assert.Equal(["namespace-a"], (await registry.GetClientsAsync()).Keys);
+
+        // After the observer connected it, the dashboard/signal/history lookup still refuses it:
+        // the cached observer-only client is never returned outside the observer.
+        Assert.Null(await registry.GetClientAsync("namespace-z"));
+        Assert.Null(await registry.GetClientAsync("NAMESPACE-Z"));
+        Assert.DoesNotContain("namespace-z", registry.GetNamespaces());
+        Assert.Same(client, (await registry.TryGetClientAsync("namespace-z")).Client);
+        Assert.Same(client, await registry.GetClientAsync("namespace-a"));
+    }
+
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "recovery")]
+    public async Task RecoveryProbe_UsesTheObserverScope_AndRefusesUnwatchedNamespaces()
+    {
+        var clock = new OutcomeClock(DateTimeOffset.UtcNow);
+        var attempts = new List<(string Ns, DateTime At)>();
+        var registry = Registry(clock, attempts, (_, _) => Substitute.For<ITemporalClient>(), "namespace-a");
+        var probe = new TemporalWorkflowRecoveryProbe(registry, new AgentRegistry(null!, NullLogger<AgentRegistry>.Instance),
+            Options.Create(new Fleet.Orchestrator.Configuration.WorkflowOutcomeOptions { Namespaces = "namespace-z", RpcTimeoutSeconds = 1 }));
+
+        // Neither the outcome namespaces nor the dashboard list name it: refused before any connect.
+        var unwatched = await Assert.ThrowsAsync<InvalidOperationException>(() => probe.DescribeAsync("namespace-a", "wf", "run", default));
+        Assert.Equal("namespace_not_observed", unwatched.Message);
+        Assert.DoesNotContain(attempts, x => x.Ns == "namespace-a");
+
+        // An outcome namespace that is not a dashboard namespace is reached through the observer lookup.
+        await Assert.ThrowsAnyAsync<Exception>(() => probe.DescribeAsync("namespace-z", "wf", "run", default));
+        Assert.Contains(attempts, x => x.Ns == "namespace-z");
+        Assert.Null(await registry.GetClientAsync("namespace-z"));
     }
 
     [Fact]

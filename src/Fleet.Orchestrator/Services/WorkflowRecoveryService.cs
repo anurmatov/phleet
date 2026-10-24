@@ -44,8 +44,12 @@ public sealed class TemporalWorkflowRecoveryProbe(
         var bound = TimeSpan.FromSeconds(Math.Clamp(options.Value.RpcTimeoutSeconds, 1, 60));
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(bound);
-        var client = await registry.GetClientAsync(@namespace, cts.Token)
-            ?? throw new InvalidOperationException("namespace_unavailable");
+        // The workflow-outcome namespaces, which need not be dashboard namespaces: observer-scoped
+        // lookup, refused for anything the observer is not configured to watch.
+        if (!options.Value.NamespaceList().Contains(@namespace, StringComparer.Ordinal))
+            throw new InvalidOperationException("namespace_not_observed");
+        var connected = await registry.TryGetClientAsync(@namespace, cts.Token);
+        var client = connected.Client ?? throw new InvalidOperationException(connected.Error ?? "namespace_unavailable");
         try
         {
             var d = await client.GetWorkflowHandle(workflowId, runId: runId)

@@ -23,7 +23,7 @@ public class TemporalClientRegistrySignalTests
         handle.SignalAsync(Arg.Any<string>(), Arg.Any<IReadOnlyCollection<object?>>(), Arg.Any<WorkflowSignalOptions?>())
             .Returns(expected == "sent" ? Task.CompletedTask : Task.FromException(expected == "not_found"
                 ? new RpcException(RpcException.StatusCode.NotFound, "missing", []) : new InvalidOperationException("failed")));
-        var registry = new TemporalClientRegistry(Options.Create(new TemporalOptions { Address = "example:7233" }), NullLogger<TemporalClientRegistry>.Instance);
+        var registry = new TemporalClientRegistry(Options.Create(new TemporalOptions { Address = "example:7233", Namespaces = ["fleet"] }), NullLogger<TemporalClientRegistry>.Instance);
         typeof(TemporalClientRegistry).GetField("_clients", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(registry, new Dictionary<string, ITemporalClient> { ["fleet"] = client });
         var result = await registry.SignalWorkflowAsync("fleet", "driver", "exact-run", "blocker-resolved", new { decision = "wake" }, default);

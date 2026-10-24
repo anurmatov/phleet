@@ -40,7 +40,7 @@ jobs:
       - name: Test
         run: >
           dotnet test --no-build --configuration Release
-          --filter "FullyQualifiedName!~Fleet.Conversations.Tests&FullyQualifiedName!~Fleet.Orchestrator.Tests.Migrations&FullyQualifiedName!~WorkflowOutcomeMigration&WorkflowOutcomeSuite!=migration"
+          --filter "FullyQualifiedName!~Fleet.Conversations.Tests&FullyQualifiedName!~Fleet.Orchestrator.Tests.Migrations&FullyQualifiedName!~WorkflowOutcomeMigration&WorkflowOutcomeSuite!=migration&FullyQualifiedName!~Fleet.Temporal.Tests.WorkflowOutcomes.RealBroker"
           --logger "console;verbosity=normal"
 
       # #460 AC-U6: the codex branch writes codex-root.toml first, then byte-identical MCP tables,
@@ -554,6 +554,58 @@ jobs:
             exit 1
           fi
           echo "$passed test(s) executed against mysql:8.0, 0 skipped."
+
+  workflow-outcome-broker:
+    name: Workflow outcome late results (RabbitMQ)
+    runs-on: ubuntu-latest
+
+    # The late-result capture (#476) is only evidence against a broker that really confirms,
+    # returns and rejects publishes. The tests FAIL without FLEET_WORKFLOW_OUTCOMES_BROKER.
+    services:
+      rabbitmq:
+        image: rabbitmq:4
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd="rabbitmq-diagnostics -q ping"
+          --health-interval=5s
+          --health-timeout=10s
+          --health-retries=20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Run the real-broker suite
+        env:
+          FLEET_WORKFLOW_OUTCOMES_BROKER: "amqp://guest:guest@127.0.0.1:5672/"
+        run: >
+          dotnet test tests/Fleet.Temporal.Tests --configuration Release
+          --filter "FullyQualifiedName~Fleet.Temporal.Tests.WorkflowOutcomes.RealBroker"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=workflow-outcome-broker.trx"
+          --results-directory ${{ github.workspace }}/testresults
+
+      - name: Refuse a run that skipped anything
+        if: always()
+        run: |
+          set -euo pipefail
+          trx="${{ github.workspace }}/testresults/workflow-outcome-broker.trx"
+          [ -f "$trx" ] || { echo "ERROR: no test result file — the suite did not run."; exit 1; }
+          counters=$(grep -o '<Counters[^>]*>' "$trx" | head -1)
+          echo "$counters"
+          read_count() { echo "$counters" | grep -o "$1=\"[0-9]*\"" | grep -o '[0-9]*' || echo ""; }
+          executed=$(read_count executed); notExecuted=$(read_count notExecuted); passed=$(read_count passed)
+          if [ -z "$executed" ] || [ "$notExecuted" != "0" ] || [ "$executed" -eq 0 ] || [ "$passed" -ne "$executed" ]; then
+            echo "ERROR: executed=$executed notExecuted=$notExecuted passed=$passed — evidence only when every test ran and passed."
+            exit 1
+          fi
+          echo "$passed test(s) executed against rabbitmq:4, 0 skipped."
 
   whisper-tests:
     name: Whisper service tests

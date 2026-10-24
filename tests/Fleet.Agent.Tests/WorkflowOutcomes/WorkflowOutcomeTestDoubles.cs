@@ -171,7 +171,7 @@ internal static class WorkflowOutcomeFixture
 {
     public const string Coordinator = "coordinator";
     public const string Token = "scoped-token-placeholder";
-    public const string BaseUrl = "http://orchestrator.internal:5000";
+    public const string BaseUrl = "http://orchestrator.example:5000";
 
     public static WorkflowOutcomeInboxItem Item(Guid? id = null, int version = 1,
         string classification = WorkflowOutcomeClassifications.ConfirmedFailure, string workflowId = "wf-1") =>

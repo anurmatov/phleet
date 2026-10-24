@@ -260,7 +260,8 @@ PUBLIC_REPOS = {'anurmatov/phleet'}
 PUBLIC_OWNERS = {'owner', 'org', 'example', 'actions', 'temporalio', 'dotnet', 'microsoft', 'docker',
                  'minio', 'cli', 'openai', 'anthropics', 'google-gemini', 'nodejs', 'chrislusf'}
 GITHUB_NON_OWNERS = {'orgs', 'users', 'settings', 'apps', 'login', 'features', 'about', 'marketplace'}
-PRIVATE_HOST = re.compile(r'\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:internal|lan|corp|intranet|home\.arpa|ts\.net|local)(?![\w.-])', re.I)
+# Case-sensitive on purpose: hostnames are lowercase, while `x.Local(...)` is a method call.
+PRIVATE_HOST = re.compile(r'\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:internal|lan|corp|intranet|home\.arpa|ts\.net|local)(?![\w.-])')
 HOME_PATH = re.compile(r'(?<![\w.])/(?:home|Users)/([^/\s"\'`<>]+)/')
 PLACEHOLDER_USERS = {'user', 'you', 'runner', 'operator', '<user>', '$USER', '${USER}', 'me'}
 TOKENS = [

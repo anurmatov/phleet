@@ -588,6 +588,27 @@ public sealed class WorkflowOutcomeEndpointsTests : IAsyncLifetime
     }
 
     [Fact]
+    [Trait("WorkflowOutcomeSuite", "receipts")]
+    public async Task Decide_IdenticalResendAfterLostReply_ReturnsTheRecordedDecisionWithoutASecondRow()
+    {
+        var (run, _) = await _host.AckedFailureAsync();
+        var url = $"{Root}/{run.Id}/decisions";
+        var decision = ApiHost.Decision(1, "close", evidence: ["decision:accepted-failure-review"]);
+        var first = await ApiHost.JsonAsync(await _host.AsCoordinator(HttpMethod.Post, url, decision));
+        var resent = await _host.AsCoordinator(HttpMethod.Post, url, decision);
+
+        Assert.Equal(HttpStatusCode.Created, resent.StatusCode);
+        var body = await ApiHost.JsonAsync(resent);
+        Assert.Equal(first.GetProperty("decisionId").GetGuid(), body.GetProperty("decisionId").GetGuid());
+        Assert.True(body.GetProperty("duplicate").GetBoolean());
+        Assert.Equal("accepted", Assert.Single(await DecisionRowsAsync(run.Id)).Status);
+
+        // A different body is a new decision attempt, not a duplicate: the item is already closed.
+        var other = await _host.AsCoordinator(HttpMethod.Post, url, ApiHost.Decision(1, "close", evidence: ["decision:another-review"]));
+        Assert.Equal(HttpStatusCode.Conflict, other.StatusCode);
+    }
+
+    [Fact]
     [Trait("WorkflowOutcomeSuite", "decisions")]
     public async Task Decide_RacingOperator_SecondCloseOfTheSameVersionIsRefused()
     {
@@ -839,6 +860,19 @@ public sealed class WorkflowOutcomeEndpointsTests : IAsyncLifetime
         Assert.DoesNotContain("raw failure payload", plain.GetRawText());
         var detail = await ApiHost.JsonAsync(await _host.AsAdmin(HttpMethod.Get, $"{Root}/{run.Id}?detail=payload"));
         Assert.Equal("raw failure payload", detail.GetProperty("payload").GetString());
+    }
+
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "dashboard")]
+    public async Task Detail_BatchMembershipCarriesNonceAndMemberVersion()
+    {
+        var (run, _) = await _host.AckedFailureAsync();
+        var batch = await _host.Database.QueryAsync(db => db.WorkflowOutcomeBatches.AsNoTracking().SingleAsync());
+
+        var detail = await ApiHost.JsonAsync(await _host.AsAdmin(HttpMethod.Get, $"{Root}/{run.Id}"));
+        var member = Assert.Single(detail.GetProperty("batches").EnumerateArray());
+        Assert.Equal(batch.Nonce, member.GetProperty("nonce").GetString());
+        Assert.Equal(1, member.GetProperty("version").GetInt32());
     }
 
     // ── late results ─────────────────────────────────────────────────────────

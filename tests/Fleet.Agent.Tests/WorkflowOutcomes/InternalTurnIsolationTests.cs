@@ -280,7 +280,7 @@ public sealed class InternalTurnIsolationTests : IDisposable
             _ = kind switch
             {
                 "dm" => await rig.Manager.StartTask(4242, "hi", "hi", true, TaskSource.UserMessage, userId: 4242),
-                "group" => await rig.Manager.StartTask(-1001234567890, "hi", "hi", true, TaskSource.UserMessage, userId: 4242),
+                "group" => await rig.Manager.StartTask(-4242, "hi", "hi", true, TaskSource.UserMessage, userId: 4242),
                 "relay" => await rig.Manager.StartTask(0, "do it", "do it", false, TaskSource.Relay, relaySender: "peer", taskId: "wf/1"),
                 "bridge" => await rig.Manager.StartTask(0, "do it", "do it", false, TaskSource.Bridge, relaySender: "bridge",
                     correlationId: "corr-1", taskId: "wf/2"),

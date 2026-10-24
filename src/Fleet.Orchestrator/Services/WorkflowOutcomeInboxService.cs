@@ -510,6 +510,11 @@ public sealed class WorkflowOutcomeInboxService(
             return WorkflowOutcomeResult.Error(403, "foreign_outcome");
 
         var now = WorkflowOutcomeApi.Now(clock);
+        // A lost reply is resent with the identical body: answer with the recorded decision rather
+        // than a second audit row (and rather than "already_resolved" after a finish/close).
+        if (await AcceptedDuplicateAsync(principal, run, request, now, ct) is { } recorded)
+            return new(201, new { decisionId = recorded, status = "accepted", duplicate = true });
+
         var refusal = await ValidateDecisionAsync(run, request, now, ct);
         if (refusal is not null) return await RejectDecisionAsync(principal, run, request, refusal.Value.Status, refusal.Value.Reason, now, ct);
 
@@ -540,6 +545,19 @@ public sealed class WorkflowOutcomeInboxService(
         return new(201, noop
             ? new { decisionId, status = "accepted", effect = "closed_target_noop" }
             : (object)new { decisionId, status = "accepted" });
+    }
+
+    private async Task<Guid?> AcceptedDuplicateAsync(
+        WorkflowOutcomePrincipal principal, WorkflowOutcomeRun run, WorkflowOutcomeDecisionRequest request, DateTime now, CancellationToken ct)
+    {
+        var wanted = DecisionRow(Guid.Empty, principal, run, request, "accepted", null, now);
+        var candidates = await db.WorkflowOutcomeDecisions.AsNoTracking()
+            .Where(d => d.OutcomeId == run.Id && d.Status == "accepted" && d.ExpectedVersion == wanted.ExpectedVersion
+                && d.Operation == wanted.Operation && d.DecidedVia == wanted.DecidedVia && d.DecidedBy == wanted.DecidedBy)
+            .ToListAsync(ct);
+        return candidates.FirstOrDefault(d => d.Owner == wanted.Owner && d.Reason == wanted.Reason
+            && d.EvidenceRefsJson == wanted.EvidenceRefsJson && d.DueAt == wanted.DueAt && d.TaskRef == wanted.TaskRef
+            && d.ArtifactRef == wanted.ArtifactRef && d.BatchId == wanted.BatchId)?.Id;
     }
 
     private async Task<(int Status, string Reason)?> ValidateDecisionAsync(WorkflowOutcomeRun run, WorkflowOutcomeDecisionRequest request, DateTime now, CancellationToken ct)
@@ -827,7 +845,7 @@ public sealed class WorkflowOutcomeInboxService(
             var m = memberships.First(x => x.BatchId == b.Id);
             return new
             {
-                batchId = b.Id, generation = b.CoordinatorGeneration, state = b.State, version = m.OutcomeVersion, itemState = m.State,
+                batchId = b.Id, generation = b.CoordinatorGeneration, nonce = b.Nonce, state = b.State, version = m.OutcomeVersion, itemState = m.State,
                 deliveredAt = WorkflowOutcomeApi.Utc(m.DeliveredAt), ackedAt = WorkflowOutcomeApi.Utc(m.AckedAt), ackSource = m.AckSource,
             };
         }), WorkflowOutcomeApi.Json);

@@ -15,6 +15,10 @@ public sealed record OpenShellDeleteAcknowledgement(string SandboxId, DeletionOu
 /// <summary>Authenticated observations and capability-gated expected-ID/version mutations.</summary>
 public interface IOpenShellGatewayClient
 {
+    Task<OpenShellSandboxSnapshot> CreateAsync(OpenShellLaunchPlan plan, Guid launchId, Guid epoch,
+        Guid requestId, CancellationToken ct = default) => throw new NotSupportedException("create_unqualified");
+    Task<OpenShellSupervisorProof> ReadCurrentSupervisorAsync(OpenShellSandboxSnapshot target, string provider,
+        CancellationToken ct = default) => throw new NotSupportedException("supervisor_unqualified");
     Task<IReadOnlyList<OpenShellSandboxSnapshot>> InventoryAsync(CancellationToken ct = default);
     Task<OpenShellSandboxSnapshot?> ReadExactAsync(string sandboxId, CancellationToken ct = default);
     Task<OpenShellSandboxSnapshot> StopExactAsync(OpenShellSandboxSnapshot target, Guid requestId, CancellationToken ct = default);

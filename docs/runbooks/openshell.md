@@ -170,3 +170,15 @@ Known nonce replays return 403 `replay`; ambiguous DB errors remain 503 and cann
 be retried as if absent. Strict gateway clock-skew rejection is unchanged and its
 qualification decision remains held before runtime. Source rollback is a revert while admission
 is off, not authority for a runtime rollback, DB cleanup, key rotation or feature enablement.
+
+## Unqualified cold preparation
+
+The preparation authority defaults to deny; no operator selection route or installer is available.
+`preparation_scope_conflict` (409) rejects wrong immutable identity/hash/intent/deadline or overrides.
+`compatibility_blocked: preparation peers unqualified` (503) means no reserve/stop/create occurred.
+`preparation_verified_activation_held` (409) is a preparation receipt followed by verified retirement,
+not a running agent. `preparation_unconfirmed` retains the launch ID for authoritative inspection.
+Never repair this by deleting its slot/tombstone, replaying Create, guessing an unbound ID from labels,
+starting a retained sandbox, enabling grants, or restarting the old runtime.
+The preparation-specific reconcile/operator workflow, concrete evidence/bootstrap peers and live
+acceptance are not implemented; preserve pending state for the separately scoped recovery work.

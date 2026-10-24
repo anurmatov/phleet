@@ -16,11 +16,14 @@ public sealed class OpenShellLaunchStore(OrchestratorDbContext db, TimeProvider?
 {
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
     public async Task<OpenShellLaunch> ReserveAsync(int agentId, string? expectedOldRuntimeId,
-        DateTime now, TimeSpan duration, CancellationToken ct = default)
+        DateTime now, TimeSpan duration, CancellationToken ct = default, OpenShellPreparationScope? preparation = null)
     {
         ValidateTime(now, duration);
         if (agentId <= 0) throw new ArgumentOutOfRangeException(nameof(agentId));
         if (expectedOldRuntimeId is not null) ValidateId(expectedOldRuntimeId);
+        if (preparation is not null && (preparation.AgentId != agentId || preparation.ExpectedOldRuntimeId != expectedOldRuntimeId
+            || preparation.PlanHash != preparation.Plan.Hash || preparation.Deadline <= now || preparation.Deadline < now + duration))
+            throw new OpenShellStateConflictException("preparation_scope_conflict");
         RequireNonRetryingContext();
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
         if (await db.OpenShellLaunches.AnyAsync(x => x.ActiveAgentId == agentId, ct))
@@ -37,6 +40,9 @@ public sealed class OpenShellLaunchStore(OrchestratorDbContext db, TimeProvider?
         {
             Id = Guid.NewGuid(), AgentId = agentId, ActiveAgentId = agentId,
             ExpectedOldRuntimeId = expectedOldRuntimeId, IdentityEpoch = Guid.NewGuid(), CreatedAt = now,
+            PreparationJson = preparation is null ? null : System.Text.Json.JsonSerializer.Serialize(preparation),
+            PreparationDeadline = preparation?.Deadline, CreateRequestId = preparation is null ? null : Guid.NewGuid(),
+            Workspace = preparation?.Plan.Workspace, PolicyHash = preparation?.Plan.PolicyHash, ImageHash = preparation?.Plan.ImageHash,
         };
         if (lease is null)
         {
@@ -168,6 +174,64 @@ public sealed class OpenShellLaunchStore(OrchestratorDbContext db, TimeProvider?
         launch.Phase = "retired";
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
+    }
+
+    public async Task RecordPreparationAttemptAsync(Guid id, bool create, CancellationToken ct = default)
+    {
+        RequireNonRetryingContext();
+        await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+        var launch = await ReloadLaunchAsync(id, ct);
+        await RequirePreparationOwnerAsync(launch, ct);
+        var now = _clock.GetUtcNow().UtcDateTime;
+        if (create)
+        {
+            if (launch.Phase != "legacy_stopped" || launch.CreateAttemptedAt is not null || launch.CreateRequestId is null)
+                throw new OpenShellStateConflictException("create_attempt_already_owned_or_out_of_order");
+            launch.CreateAttemptedAt = now;
+        }
+        else
+        {
+            if (launch.Phase != "prepared" || launch.StopAttemptedAt is not null)
+                throw new OpenShellStateConflictException("stop_attempt_already_owned_or_out_of_order");
+            launch.StopAttemptedAt = now;
+        }
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task RecordSecurityReadyAsync(Guid id, OpenShellSandboxSnapshot target,
+        IReadOnlyList<OpenShellSupervisorProof> proofs, CancellationToken ct = default)
+    {
+        RequireNonRetryingContext();
+        await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+        var launch = await ReloadLaunchAsync(id, ct);
+        await RequirePreparationOwnerAsync(launch, ct);
+        var scope = System.Text.Json.JsonSerializer.Deserialize<OpenShellPreparationScope>(launch.PreparationJson!)!;
+        var providers = scope.Plan.ReadSpec().Providers;
+        var now = _clock.GetUtcNow().UtcDateTime;
+        if (launch.Phase != "created" || launch.GatewayId != target.GatewayId || launch.SandboxId != target.Id
+            || launch.Workspace != target.Workspace || proofs.Count != providers.Count || proofs.Count == 0
+            || proofs.Any(p => p.Desired.SandboxId != target.Id || p.Desired.Sandbox != target.Name
+                || p.ProcessInstanceId != target.SupervisorInstanceId || p.EvaluatedAt > now
+                || now - p.EvaluatedAt > TimeSpan.FromSeconds(5))
+            || proofs.Any(p => p.SessionId != proofs[0].SessionId || p.ProcessInstanceId != proofs[0].ProcessInstanceId
+                || p.NetworkInstanceId != proofs[0].NetworkInstanceId))
+            throw new OpenShellStateConflictException("security_ready_proof_conflict");
+        launch.SecurityReadyJson = System.Text.Json.JsonSerializer.Serialize(proofs);
+        launch.Phase = "security_ready";
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+    }
+
+    private async Task RequirePreparationOwnerAsync(OpenShellLaunch launch, CancellationToken ct)
+    {
+        var now = _clock.GetUtcNow().UtcDateTime;
+        if (launch.PreparationJson is null || launch.RevokedAt is not null || launch.ActiveAgentId != launch.AgentId
+            || launch.PreparationDeadline is null || launch.PreparationDeadline <= now
+            || launch.StopAttemptedAt is { } stopped && stopped.AddSeconds(120) <= now
+            || launch.CreateAttemptedAt is { } created && created.AddSeconds(60) <= now
+            || !await db.OpenShellLeases.AnyAsync(l => l.AgentId == launch.AgentId && l.Owner == launch.Id && l.ExpiresAt > now, ct))
+            throw new OpenShellStateConflictException("preparation_owner_or_deadline_unavailable");
     }
 
     private async Task<OpenShellLaunch> ReloadLaunchAsync(Guid launchId, CancellationToken ct)

@@ -424,3 +424,34 @@ remain refused. New MySQL ownership-reader cases are authored but locally UNRUN.
 Known duplicate nonces return 403 `replay`; uncertain database errors still return
 503, not inferred replay or retry permission. Gateway clock-skew tolerance remains
 zero/fail-closed and requires an explicit runtime decision before qualification.
+
+## Cold preparation source checkpoint (#479, incomplete)
+
+The production shared `StartAsync`/`ProvisionAsync` now consults `IOpenShellPreparationAuthority`.
+Its registered implementation always denies selection; it is not an operator approval issuer.
+A selected scope cannot use image/instruction overrides or fall back to Docker on refusal.
+
+The coordinator connects conservative bootstrap policy validation, a serialized immutable plan,
+lease/reservation, persisted stop/create attempts, one generated Create, current provider reads,
+security-ready recording, a bootstrap-probe boundary and exact-ID held retirement.
+The same unmerged additive migration carries the new preparation fields and generated target model.
+A preparation result is never running, activated or successful migration.
+
+`OpenShellGatewayClient` queries current provider state with an empty receipt ID, brackets the
+name-keyed read with exact-ID/version/process reads, and verifies the live session separately
+from `MainProcessInstanceId`; all required providers must agree on the supervisor/process/network.
+Original observation age is not a substitute for the gateway's current live-lease evaluation.
+
+| Still missing for #479 completion | Current behavior |
+|---|---|
+| Concrete static artifact/mount/hook qualifier and exact legacy stop/ownership adapter | Unregistered, refusal before mutation |
+| Concrete authenticated process/broker/poller evidence, including ambiguous Create ownership | Unregistered; no guessed zero or label-only ownership |
+| Bootstrap-only agent branch and outside hook/issuer/ingress → dedicated orchestrator receiver | Unimplemented; probe interface is unregistered |
+| `Identity__BootstrapReceiver`, receiver custody/listener and setup/example configuration | Not added or advertised as install support |
+| Actual hook/receiver/fresh-ACL and bootstrap-registration regressions | NOT RUN; coordinator fixtures are not these tests |
+
+The selected bootstrap contract remains `orchestrator:/identity/ready`, POST empty body, no session,
+security_ready/current exact owner and fresh current supervisor, 204 without activation or data access.
+Memory still admits only activated/committed identities; no bootstrap/data exception was added.
+Activation/native callback/replacement/rollback, independent full-parent audit, green exact-head CI,
+approved actual-agent and MySQL cleanup/backup/restore-query acceptance remain parent merge holds.

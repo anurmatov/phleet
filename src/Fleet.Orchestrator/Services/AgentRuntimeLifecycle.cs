@@ -10,7 +10,8 @@ namespace Fleet.Orchestrator.Services;
 /// </summary>
 public sealed class AgentRuntimeLifecycle(
     IServiceScopeFactory scopes, ContainerProvisioningService provisioning, DockerService docker,
-    ILogger<AgentRuntimeLifecycle> logger, OpenShellRetirementService? retirement = null) : IAgentRuntimeLifecycle
+    ILogger<AgentRuntimeLifecycle> logger, OpenShellRetirementService? retirement = null,
+    OpenShellProvisioningService? preparation = null) : IAgentRuntimeLifecycle
 {
     internal const string Blocked = "compatibility_blocked: OpenShell lifecycle driver and current-supervisor admission are not qualified";
 
@@ -45,8 +46,11 @@ public sealed class AgentRuntimeLifecycle(
         return error ?? ProvisionResult.Ok(name, "legacy backend selected; no OpenShell qualification");
     }
 
-    public async Task<ProvisionResult> StartAsync(string name, CancellationToken ct = default) =>
-        await ChangeLegacyStateAsync(name, "start", ct);
+    public async Task<ProvisionResult> StartAsync(string name, CancellationToken ct = default)
+    {
+        if (preparation is not null && await preparation.TryPrepareAsync(name, "start", false, ct) is { } result) return result;
+        return await ChangeLegacyStateAsync(name, "start", ct);
+    }
     public async Task<ProvisionResult> StopAsync(string name, CancellationToken ct = default) =>
         await ChangeLegacyStateAsync(name, "stop", ct);
     public async Task<ProvisionResult> RestartAsync(string name, CancellationToken ct = default) =>
@@ -72,6 +76,8 @@ public sealed class AgentRuntimeLifecycle(
     public async Task<ProvisionResult> ProvisionAsync(string name, string? imageOverride = null,
         IReadOnlyDictionary<string, int>? instructionVersionOverrides = null, CancellationToken ct = default)
     {
+        if (preparation is not null && await preparation.TryPrepareAsync(name, "provision",
+            imageOverride is not null || instructionVersionOverrides is not null, ct) is { } prepared) return prepared;
         var (_, error) = await ResolveAsync(name, ct);
         return error ?? await provisioning.LegacyProvisionAsync(name, imageOverride, instructionVersionOverrides, ct);
     }

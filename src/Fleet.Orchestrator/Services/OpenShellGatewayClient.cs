@@ -145,6 +145,56 @@ public sealed class OpenShellGatewayClient : IOpenShellGatewayClient, IDisposabl
         return new(response.SandboxId, response.Outcome);
     }
 
+    public async Task<OpenShellSandboxSnapshot> CreateAsync(OpenShellLaunchPlan plan, Guid launchId,
+        Guid epoch, Guid requestId, CancellationToken ct = default)
+    {
+        if (plan.GatewayId != _gatewayId || plan.Workspace != _workspace || launchId == Guid.Empty
+            || epoch == Guid.Empty || requestId == Guid.Empty) throw new ArgumentException("Exact create ownership required.");
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        await RequireConditionalMutationsAsync(deadline.Token);
+        var request = new CreateSandboxRequest
+        {
+            WorkspaceScope = new WorkspaceSelector { Workspace = _workspace }, Spec = plan.ReadSpec(),
+            Name = "launch-" + launchId.ToString("N"), RequestId = requestId.ToString("D"),
+        };
+        // Metadata is correlation, NOT complete ownership evidence after an ambiguous Create.
+        request.Labels.Add("phleet-launch", launchId.ToString("D"));
+        request.Labels.Add("phleet-epoch", epoch.ToString("D"));
+        var response = await _rpc.CreateSandboxAsync(request, Options(deadline.Token)).ResponseAsync.WaitAsync(deadline.Token);
+        var result = Snapshot(response.Sandbox);
+        if (result.Name != request.Name) throw new InvalidOperationException("create_identity_unconfirmed");
+        return result;
+    }
+
+    public async Task<OpenShellSupervisorProof> ReadCurrentSupervisorAsync(OpenShellSandboxSnapshot target,
+        string provider, CancellationToken ct = default)
+    {
+        ValidateMutationTarget(target, Guid.NewGuid());
+        ValidateOpaque(provider);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        var before = await ReadExactAsync(target.Id, deadline.Token);
+        RequireSame(before, target);
+        var response = await _rpc.GetSandboxProviderStatusAsync(new GetSandboxProviderStatusRequest
+        {
+            WorkspaceScope = new WorkspaceSelector { Workspace = _workspace }, Sandbox = target.Name, Provider = provider,
+            // Empty receipt requests CURRENT desired state, never persisted-operation-only readiness.
+        }, Options(deadline.Token)).ResponseAsync.WaitAsync(deadline.Token);
+        var after = await ReadExactAsync(target.Id, deadline.Token);
+        RequireSame(after, before!);
+        return OpenShellSupervisorProof.Verify(after!, provider, response.Status, DateTime.UtcNow);
+    }
+
+    private static void RequireSame(OpenShellSandboxSnapshot? actual, OpenShellSandboxSnapshot expected)
+    {
+        if (actual is null || actual.Id != expected.Id || actual.Name != expected.Name
+            || actual.GatewayId != expected.GatewayId || actual.Workspace != expected.Workspace
+            || actual.ResourceVersion != expected.ResourceVersion || actual.PolicyVersion != expected.PolicyVersion
+            || actual.SupervisorInstanceId != expected.SupervisorInstanceId || actual.Phase != expected.Phase)
+            throw new OpenShellStateConflictException("sandbox_changed_during_readiness");
+    }
+
     private async Task RequireConditionalMutationsAsync(CancellationToken ct)
     {
         // Fetch per request, not from cache or semver. Health and mutation are not atomic:

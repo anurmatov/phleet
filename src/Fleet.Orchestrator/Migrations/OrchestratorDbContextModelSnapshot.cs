@@ -953,6 +953,12 @@ namespace Fleet.Orchestrator.Migrations
                         .HasMaxLength(2048)
                         .HasColumnType("varchar(2048)");
 
+                    b.Property<DateTime?>("CreateAttemptedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<Guid?>("CreateRequestId")
+                        .HasColumnType("char(36)");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime(6)");
 
@@ -993,6 +999,12 @@ namespace Fleet.Orchestrator.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("varchar(64)");
 
+                    b.Property<DateTime?>("PreparationDeadline")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("PreparationJson")
+                        .HasColumnType("longtext");
+
                     b.Property<DateTime?>("RevokedAt")
                         .HasColumnType("datetime(6)");
 
@@ -1000,6 +1012,12 @@ namespace Fleet.Orchestrator.Migrations
                         .HasMaxLength(128)
                         .HasColumnType("varchar(128)")
                         .UseCollation("utf8mb4_bin");
+
+                    b.Property<string>("SecurityReadyJson")
+                        .HasColumnType("longtext");
+
+                    b.Property<DateTime?>("StopAttemptedAt")
+                        .HasColumnType("datetime(6)");
 
                     b.Property<string>("StopIntentJson")
                         .HasMaxLength(2048)

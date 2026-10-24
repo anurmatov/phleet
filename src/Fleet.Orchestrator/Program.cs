@@ -44,6 +44,14 @@ builder.Services.AddSingleton<OpenShellRetirementService>(sp => new(() =>
     return new OrchestratorDbContext(new DbContextOptionsBuilder<OrchestratorDbContext>()
         .UseMySql(connection, new MySqlServerVersion(new Version(8, 0, 0))).Options);
 }, sp.GetRequiredService<IServiceScopeFactory>()));
+builder.Services.AddSingleton<IOpenShellPreparationAuthority, DenyOpenShellPreparationAuthority>();
+builder.Services.AddSingleton<OpenShellProvisioningService>(sp => new(() =>
+{
+    var connection = sp.GetRequiredService<IConfiguration>().GetConnectionString("OrchestratorDb");
+    if (string.IsNullOrWhiteSpace(connection)) throw new InvalidOperationException("Lifecycle database is unavailable.");
+    return new OrchestratorDbContext(new DbContextOptionsBuilder<OrchestratorDbContext>()
+        .UseMySql(connection, new MySqlServerVersion(new Version(8, 0, 0))).Options);
+}, sp.GetRequiredService<IOpenShellPreparationAuthority>(), sp.GetRequiredService<IServiceScopeFactory>()));
 builder.Services.AddSingleton<IAgentRuntimeLifecycle, AgentRuntimeLifecycle>();
 builder.Services.AddSingleton<JournalTokenService>();
 builder.Services.AddSingleton(_ => new TelegramMembershipClient());

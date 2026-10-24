@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
@@ -265,6 +265,44 @@ namespace Fleet.Orchestrator.Migrations
                 maxLength: 2048,
                 nullable: true)
                 .Annotation("MySql:CharSet", "utf8mb4");
+            migrationBuilder.AddColumn<DateTime>(
+                name: "CreateAttemptedAt",
+                table: "agent_open_shell_launches",
+                type: "datetime(6)",
+                nullable: true);
+
+            migrationBuilder.AddColumn<Guid>(
+                name: "CreateRequestId",
+                table: "agent_open_shell_launches",
+                type: "char(36)",
+                nullable: true,
+                collation: "ascii_general_ci");
+
+            migrationBuilder.AddColumn<DateTime>(
+                name: "PreparationDeadline",
+                table: "agent_open_shell_launches",
+                type: "datetime(6)",
+                nullable: true);
+
+            migrationBuilder.AddColumn<string>(
+                name: "PreparationJson",
+                table: "agent_open_shell_launches",
+                type: "longtext",
+                nullable: true)
+                .Annotation("MySql:CharSet", "utf8mb4");
+
+            migrationBuilder.AddColumn<string>(
+                name: "SecurityReadyJson",
+                table: "agent_open_shell_launches",
+                type: "longtext",
+                nullable: true)
+                .Annotation("MySql:CharSet", "utf8mb4");
+
+            migrationBuilder.AddColumn<DateTime>(
+                name: "StopAttemptedAt",
+                table: "agent_open_shell_launches",
+                type: "datetime(6)",
+                nullable: true);
         }
 
         /// <inheritdoc />

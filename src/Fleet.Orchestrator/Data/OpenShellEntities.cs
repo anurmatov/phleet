@@ -22,6 +22,12 @@ public sealed class OpenShellLaunch
     // Nonsecret immutable request payloads, committed before gateway mutations.
     public string? StopIntentJson { get; set; }
     public string? DeleteIntentJson { get; set; }
+    public string? PreparationJson { get; set; }
+    public string? SecurityReadyJson { get; set; }
+    public DateTime? PreparationDeadline { get; set; }
+    public DateTime? StopAttemptedAt { get; set; }
+    public DateTime? CreateAttemptedAt { get; set; }
+    public Guid? CreateRequestId { get; set; }
     public string? Error { get; set; }
     public DateTime? UpdatedAt { get; set; }
     public Guid? BotPollerLeaseOwner { get; set; }

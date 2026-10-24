@@ -38,6 +38,8 @@ internal static class OpenShellModel
             e.Property(x => x.CapabilitySecretRef).HasMaxLength(256);
             e.Property(x => x.StopIntentJson).HasMaxLength(2048);
             e.Property(x => x.DeleteIntentJson).HasMaxLength(2048);
+            e.Property(x => x.PreparationJson).HasColumnType("longtext");
+            e.Property(x => x.SecurityReadyJson).HasColumnType("longtext");
             e.Property(x => x.Error).HasMaxLength(256);
             e.HasIndex(x => x.ActiveAgentId).IsUnique();
             e.HasIndex(x => new { x.GatewayId, x.SandboxId }).IsUnique();
@@ -123,7 +125,10 @@ internal static class OpenShellModel
                 if (row.Property(name).IsModified)
                     throw new InvalidOperationException("OpenShell launch identity is immutable.");
             foreach (var name in new[] { nameof(OpenShellLaunch.GatewayId), nameof(OpenShellLaunch.SandboxId),
-                         nameof(OpenShellLaunch.StopIntentJson), nameof(OpenShellLaunch.DeleteIntentJson) })
+                         nameof(OpenShellLaunch.StopIntentJson), nameof(OpenShellLaunch.DeleteIntentJson),
+                         nameof(OpenShellLaunch.PreparationJson), nameof(OpenShellLaunch.SecurityReadyJson),
+                         nameof(OpenShellLaunch.PreparationDeadline), nameof(OpenShellLaunch.StopAttemptedAt),
+                         nameof(OpenShellLaunch.CreateAttemptedAt), nameof(OpenShellLaunch.CreateRequestId) })
                 if (row.Property(name).IsModified && row.Property(name).OriginalValue is not null)
                     throw new InvalidOperationException("OpenShell mappings and mutation intents cannot be replaced.");
             if (row.Property(x => x.RevokedAt).IsModified && row.Property(x => x.RevokedAt).OriginalValue is not null)

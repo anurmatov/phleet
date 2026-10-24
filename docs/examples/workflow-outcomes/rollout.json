@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "kind": "workflow-outcomes-rollout-example",
+  "notice": "Generic placeholder plan. The real rollout file, namespace map, approvals and evidence are operator-owned and never committed. Every stage needs its own approval; nothing here authorizes one.",
+  "sourceCommit": "OPERATOR-PINNED-REVIEWED-MERGE-COMMIT",
+  "coordinator": "coordinator",
+  "namespaces": ["namespace-a", "namespace-b", "namespace-c"],
+  "stages": [
+    {
+      "id": "review",
+      "gate": "independent reviewers (not the author or coordinator), then the existing human approval gate",
+      "config": {},
+      "evidence": ["review records", "build and test receipts for the exact head"],
+      "rollback": "none: nothing deployed"
+    },
+    {
+      "id": "code-verification",
+      "gate": "approval for an exact-head isolated stack",
+      "config": {},
+      "evidence": [
+        "dotnet build of orchestrator, temporal bridge and agent at the exact head",
+        "tests/integration/workflow-outcomes/run.sh all receipt (migration against a throwaway MySQL)",
+        "DB dump + keyring restore rehearsal on the isolated stack"
+      ],
+      "constraints": ["no bridge deploy during consensus or delegate turns", "no production queues or agents"],
+      "rollback": "discard the isolated stack"
+    },
+    {
+      "id": "off-rollout",
+      "gate": "operator pin/config plan approval",
+      "config": { "FLEET_WORKFLOW_OUTCOMES_ENABLED": "false", "FLEET_WORKFLOW_OUTCOMES_LATE_CAPTURE_ENABLED": "false" },
+      "evidence": [
+        "previous and new image ids for orchestrator, agent and temporal bridge",
+        "additive migration 20261024050000_AddWorkflowOutcomeAccountability applied",
+        "Running workflow ids before and after (unchanged)",
+        "namespace retention and archival per namespace",
+        "fleet-mysql dump and workflow_outcomes_keys backup with a restore proof"
+      ],
+      "rollback": "redeploy the previous image ids; the additive tables stay"
+    },
+    {
+      "id": "enrollment",
+      "gate": "approved namespace manifest; pinned ownership.json and classifiers.json",
+      "config": {
+        "FLEET_WORKFLOW_OUTCOMES_ENABLED": "true",
+        "FLEET_WORKFLOW_OUTCOMES_NAMESPACES": "namespace-a,namespace-b,namespace-c",
+        "FLEET_WORKFLOW_OUTCOMES_COORDINATOR_BASE_URL": "http://fleet-orchestrator:3600",
+        "FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN": ""
+      },
+      "evidence": [
+        "scripts/verify-workflow-outcomes.sh plan output per namespace",
+        "GET /api/workflow-outcomes/coverage after the first full sweep",
+        "gap inventory from workflow_outcome_health"
+      ],
+      "constraints": ["store-only catch-up", "no restarts of workflows", "no definition edits"],
+      "rollback": "set FLEET_WORKFLOW_OUTCOMES_ENABLED=false and restart the orchestrator; rows retained"
+    },
+    {
+      "id": "delivery",
+      "gate": "separate coordinator reprovision and enable approval",
+      "config": { "FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN": "<set on the host, never in this file>" },
+      "evidence": [
+        "only the coordinator's generated config changed (hashes of the other agents' configs unchanged)",
+        "synthetic scoped-auth batch reached delivered and acknowledged",
+        "no approver DMs, no notification workflows started"
+      ],
+      "rollback": "blank the token, restart the orchestrator, reprovision the coordinator; backlog retained"
+    },
+    {
+      "id": "late-capture",
+      "gate": "approval after the intake reports healthy",
+      "config": { "FLEET_WORKFLOW_OUTCOMES_LATE_CAPTURE_ENABLED": "true" },
+      "evidence": ["broker publisher-confirm support verified", "quarantine depth 0 after a synthetic orphan"],
+      "constraints": ["restart fleet-temporal-bridge only outside consensus or delegate turns"],
+      "rollback": "set the flag false and restart the bridge; queued messages stay in the broker"
+    },
+    {
+      "id": "recovery",
+      "gate": "existing authority per action; no new grants",
+      "config": {},
+      "evidence": ["decision, plan, reservation and dispatch receipt per recovered outcome"],
+      "constraints": ["record-only decisions", "stop-proof checklist", "guarded existing tools with recovery_operation_id"],
+      "rollback": "none needed: reservations are permanent audit records"
+    },
+    {
+      "id": "host-qualification",
+      "gate": "separate approval URL for AC25",
+      "config": {},
+      "evidence": ["scripts/verify-workflow-outcomes.sh verify provenance.json and receipt.json"],
+      "constraints": ["throwaway namespaces and coordinator clone only", "bounded time", "owned cleanup"],
+      "rollback": "clean up cleanup.owned names only"
+    }
+  ],
+  "disable": "FLEET_WORKFLOW_OUTCOMES_ENABLED=false (and the late-capture flag), restart; keep DB, cursors, inbox, keyring and the unacked backlog; report monitoring disabled",
+  "rollback": "disable intake, roll back coordinator client and bridge, then orchestrator; keep the additive tables and the keyring; destructive Down or restore over unresolved evidence needs explicit approval"
+}

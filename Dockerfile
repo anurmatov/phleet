@@ -4,6 +4,11 @@ COPY src/Fleet.Agent/Fleet.Agent.csproj src/Fleet.Agent/
 RUN dotnet restore src/Fleet.Agent/Fleet.Agent.csproj
 COPY src/ src/
 RUN dotnet publish src/Fleet.Agent/Fleet.Agent.csproj -c Release -o /app
+# Workflow failure accountability (#476) build guard: the coordinator inbox client must be compiled
+# in. It stays inert unless provisioning writes an enabled WorkflowOutcomes section for the one
+# configured coordinator.
+RUN grep -qaF WorkflowOutcomeInboxClient /app/Fleet.Agent.dll || \
+    (echo "ERROR: Fleet.Agent.dll lacks WorkflowOutcomeInboxClient (#476)" && exit 1)
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0
 WORKDIR /app

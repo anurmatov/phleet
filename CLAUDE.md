@@ -413,3 +413,44 @@ isolated-stack verification and rollout remain separate from source/CI evidence.
 |---|---|---|
 | `FLEET_EPIC_WATCHER_ENABLED` | `false` | `EpicDriverWatcher__Enabled` |
 | `FLEET_EPIC_WATCHER_INTERVAL_SECONDS` | `300` | `EpicDriverWatcher__IntervalSeconds` |
+
+## Workflow failure accountability
+
+Default-off (`FLEET_WORKFLOW_OUTCOMES_ENABLED=false`) orchestrator observer for #476: it classifies
+every run in the configured namespaces and hands **only** `confirmed_failure` runs (Failed/TimedOut,
+failure-caused cancel/terminate, pinned Completed `business_*` failures) to the coordinator named by
+`FLEET_CTO_AGENT` through a durable pull-only inbox (`/api/workflow-outcomes/*`). Success, normal
+continue-as-new and deliberate human disposition never create an inbox item, ack or model turn.
+Shared wire contracts and the strict turn-output parser live in `src/Fleet.Shared/WorkflowOutcomeContracts.cs`;
+options in `src/Fleet.Orchestrator/Configuration/WorkflowOutcomeOptions.cs` (startup-only, invalid =
+feature unavailable, never clamped). The coordinator token is scoped (server keeps a verifier), is
+written only into the `FLEET_CTO_AGENT` agent's generated `WorkflowOutcomes` section, and is never an
+Env Ref. Decisions are record-only; recovery is operator plan/reserve, then an existing guarded tool
+with `recovery_operation_id` (absent = byte-identical behaviour and gates). Late replies go to the
+durable `fleet.workflow-outcomes.late` queue only with `FLEET_WORKFLOW_OUTCOMES_LATE_CAPTURE_ENABLED=true`.
+Policy files are operator-owned and mounted read-only from `./fleet/workflow-outcomes/`; the
+`workflow_outcomes_keys` volume (orchestrator only) holds the evidence keyring and must be backed up
+with MySQL. Tests carry `[Trait("WorkflowOutcomeSuite", "<suite>")]` and live in namespaces containing
+`WorkflowOutcomes`; `bash tests/integration/workflow-outcomes/run.sh <suite>|all` runs them (0 PASS,
+1 FAIL, 2 INVALID, 3 BLOCKED; zero tests or a skip is FAIL). Source merge is not deployment, and the
+operator-owned host qualification (AC25, `scripts/verify-workflow-outcomes.sh verify`) is unrun. See
+`docs/workflow-outcomes.md` and `docs/runbooks/workflow-outcomes.md`.
+
+| environment key | default | option |
+|---|---|---|
+| `FLEET_WORKFLOW_OUTCOMES_ENABLED` | `false` | `WorkflowOutcomes__Enabled` |
+| `FLEET_WORKFLOW_OUTCOMES_NAMESPACES` | blank (required when on) | `WorkflowOutcomes__Namespaces` |
+| `FLEET_WORKFLOW_OUTCOMES_POLL_SECONDS` | `30` (5–300) | `WorkflowOutcomes__PollSeconds` |
+| `FLEET_WORKFLOW_OUTCOMES_RECENT_SCAN_SECONDS` | `60` (10–3600) | `WorkflowOutcomes__RecentScanSeconds` |
+| `FLEET_WORKFLOW_OUTCOMES_FULL_SCAN_SECONDS` | `300` (60–86400) | `WorkflowOutcomes__FullScanSeconds` |
+| `FLEET_WORKFLOW_OUTCOMES_BATCH_SECONDS` | `30` (5–30) | `WorkflowOutcomes__BatchSeconds` |
+| `FLEET_WORKFLOW_OUTCOMES_BATCH_SIZE` | `20` (1–20) | `WorkflowOutcomes__BatchSize` |
+| `FLEET_WORKFLOW_OUTCOMES_OWNERS_FILE` | `/etc/phleet/workflow-outcomes/ownership.json` | `WorkflowOutcomes__OwnersFile` |
+| `FLEET_WORKFLOW_OUTCOMES_CLASSIFIERS_FILE` | `/etc/phleet/workflow-outcomes/classifiers.json` | `WorkflowOutcomes__ClassifiersFile` |
+| `FLEET_WORKFLOW_OUTCOMES_KEYRING_DIR` | `/var/lib/phleet/workflow-outcomes/keys` | `WorkflowOutcomes__KeyringDir` |
+| `FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN_KEY` | `FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN` | `WorkflowOutcomes__CoordinatorTokenKey` |
+| `FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN` | blank | read by the name above |
+| `FLEET_WORKFLOW_OUTCOMES_COORDINATOR_CREDENTIAL_VERSION` | `1` | `WorkflowOutcomes__CoordinatorCredentialVersion` |
+| `FLEET_WORKFLOW_OUTCOMES_COORDINATOR_GENERATION` | `1` | `WorkflowOutcomes__CoordinatorGeneration` |
+| `FLEET_WORKFLOW_OUTCOMES_COORDINATOR_BASE_URL` | blank (required when on) | `WorkflowOutcomes__CoordinatorBaseUrl` |
+| `FLEET_WORKFLOW_OUTCOMES_LATE_CAPTURE_ENABLED` | `false` | bridge `TemporalBridge__WorkflowOutcomeLateCaptureEnabled` |

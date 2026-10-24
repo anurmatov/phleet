@@ -61,10 +61,10 @@ The dashboard proxy resolves the orchestrator per request via Docker DNS (`resol
    ./setup.sh
    ```
 
-   This creates a `./fleet/` subdirectory next to the repo holding all
-   runtime state: `.env`, `seed.json`, generated `docker-compose.yml`,
-   `workspaces/`, `memories/`, credentials, mysql backups. The entire
-   dir is gitignored — `rm -rf fleet/` to reset.
+   This creates the gitignored `./fleet/` directory for runtime files: `.env`, `seed.json`,
+   generated `docker-compose.yml`, workspaces, memories, credentials and MySQL backups.
+   The named `workflow_outcomes_keys` volume is separate; archiving/removing `fleet/` neither captures nor resets it.
+   A directory-only backup/reset is incomplete: follow the [paired MySQL/keyring backup, restore and key-retention guidance](docs/runbooks/workflow-outcomes.md#12-backup-keyring-restore-and-key-rotation).
 
 2. Fill in the prompted values (Telegram bot tokens, GitHub App credentials, etc.) — setup.sh writes them to `./fleet/.env`.
 
@@ -365,7 +365,11 @@ default with one Warning. They are parsed from the raw config string — never a
 startup, so a change needs a recreate. Writes always succeed; REST adds `size`, MCP appends `Size:` lines. Suggested memory
 values are in the README.
 
-The tracked repo root stays clean: only source, `.env.example`, `seed.example.json`, and `docker-compose.example.yml`. All runtime state lives under `./fleet/`.
+The tracked repo root stays clean: only source, `.env.example`, `seed.example.json`, and `docker-compose.example.yml`.
+Runtime files live under `./fleet/`, but durable service data also uses Docker volumes: the separate
+`workflow_outcomes_keys` keyring is outside that directory, and archiving/removing `fleet/` neither captures nor resets it.
+Use the [paired MySQL/keyring backup, restore and key-retention guidance](docs/runbooks/workflow-outcomes.md#12-backup-keyring-restore-and-key-rotation),
+not directory removal as a complete reset, and retain keys while their encrypted records remain.
 
 Configuration priority (highest to lowest):
 1. Environment variables (from `.env`)

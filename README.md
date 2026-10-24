@@ -62,7 +62,12 @@ cd phleet
 ./setup.sh
 ```
 
-`setup.sh` prompts for the tokens and GitHub App details as it runs — keep this page open while it asks. It creates a `./fleet/` subdirectory next to the repo and puts all runtime state there: `.env`, `seed.json`, generated `docker-compose.yml`, `workspaces/`, `memories/`, credentials, MinIO, and MySQL backups. The whole dir is gitignored — to fully reset, stop containers and `rm -rf fleet/`.
+`setup.sh` prompts for the tokens and GitHub App details as it runs — keep this page open while it asks.
+It creates the gitignored `./fleet/` directory for runtime files: `.env`, `seed.json`, generated
+`docker-compose.yml`, workspaces, memories, credentials and backups, but the named
+`workflow_outcomes_keys` volume is separate and archiving/removing `fleet/` neither captures nor resets it.
+Follow the [paired MySQL/keyring backup, restore and key-retention guidance](docs/runbooks/workflow-outcomes.md#12-backup-keyring-restore-and-key-rotation)
+before any backup or reset; the directory alone is not the whole installation.
 
 ### 3. Open the dashboard
 
@@ -94,7 +99,11 @@ docker compose up -d
 docker compose down
 ```
 
-All stateful services bind-mount their data under `./fleet/` — no named Docker volumes. Back up or wipe the whole installation by archiving or removing that single directory.
+Runtime files under `./fleet/` are only part of the installation: durable service data also uses
+Docker volumes, including the separate `workflow_outcomes_keys` evidence keyring.
+Archiving/removing `fleet/` neither captures nor resets that named keyring, so it is not a complete backup or reset.
+Back up MySQL and the keyring together, restore them as a pair, and retain keys while their encrypted
+records remain, following the [backup, restore and retention runbook](docs/runbooks/workflow-outcomes.md#12-backup-keyring-restore-and-key-rotation).
 
 ### Upgrade after pulling new code
 

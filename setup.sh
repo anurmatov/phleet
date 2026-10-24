@@ -141,7 +141,9 @@ write_env_var() {
       sed -i "s|^${key}=.*|${key}=${value}|" "$file"
     fi
   else
-    echo "${key}=${value}" >> "$file"
+    # Existing env files may end without LF; never join a new key to their final value.
+    [[ -s "$file" && -n "$(tail -c 1 "$file")" ]] && printf '\n' >> "$file"
+    printf '%s=%s\n' "$key" "$value" >> "$file"
   fi
 }
 

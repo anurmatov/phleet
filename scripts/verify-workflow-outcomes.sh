@@ -277,26 +277,46 @@ for name in namespaces + [clone['name'], db['server']] + list(m.get('taskQueues'
     if name not in listed: refuse(f'{name!r} is created but not listed in cleanup.owned')
 
 def run(*argv):
-    r = subprocess.run(argv, capture_output=True, text=True)
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True)
+    except OSError:
+        return None
     return r.stdout.strip() if r.returncode == 0 else None
 
+head = run('git', '-C', root, 'rev-parse', '--verify', 'HEAD^{commit}')
+if head is None or not re.fullmatch(r'[0-9a-f]{40}', head):
+    refuse('Git HEAD read failed or did not return an exact commit')
+status = run('git', '-C', root, 'status', '--porcelain')
+if status is None:
+    refuse('Git status read failed: clean provenance is unknown')
+dirty = bool(status)
+
+refs = m.get('images')
+if not isinstance(refs, dict) or not {'orchestrator', 'agent', 'temporalBridge'} <= refs.keys():
+    refuse('images {orchestrator, agent, temporalBridge: <ref>} are required')
 images = {}
-for role, ref in (m.get('images') or {}).items():
-    image_id = run('docker', 'image', 'inspect', '--format', '{{.Id}}', ref) if isinstance(ref, str) else None
+for role, ref in refs.items():
+    if not isinstance(ref, str) or not ref.strip():
+        refuse('every image role needs a nonempty reference')
+    image_id = run('docker', 'image', 'inspect', '--format', '{{.Id}}', ref)
     if not image_id:
         print(f'BLOCKED: image {ref!r} for {role} cannot be inspected; exact image hashes are required', file=sys.stderr)
         sys.exit(3)
     images[role] = {'ref': ref, 'id': image_id}
-if not images:
-    refuse('images {orchestrator, agent, temporalBridge: <ref>} are required')
+files = m.get('configFiles')
+if not isinstance(files, list) or not all(isinstance(f, str) and f for f in files) \
+        or not {'ownership.json', 'classifiers.json'} <= {os.path.basename(f) for f in files}:
+    refuse('configFiles must include readable ownership.json and classifiers.json policies')
 configs = {}
-for f in (m.get('configFiles') or []):
+for f in files:
     p = f if os.path.isabs(f) else os.path.join(os.path.dirname(os.path.abspath(path)), f)
     if not os.path.isfile(p):
-        print(f'BLOCKED: config file {f!r} not found', file=sys.stderr); sys.exit(3)
-    configs[f] = hashlib.sha256(open(p, 'rb').read()).hexdigest()
-head = run('git', '-C', root, 'rev-parse', 'HEAD') or 'unknown'
-dirty = bool(run('git', '-C', root, 'status', '--porcelain'))
+        refuse(f'config file {f!r} not found')
+    try:
+        with open(p, 'rb') as stream:
+            configs[f] = hashlib.sha256(stream.read()).hexdigest()
+    except OSError:
+        refuse(f'config file {f!r} is not readable')
 provenance = {'receipt': 'workflow-outcomes-qualification-provenance', 'approval': approval,
               'manifestSha256': hashlib.sha256(raw).hexdigest(), 'head': head, 'dirty': dirty,
               'images': images, 'configFiles': configs, 'resourcePrefix': prefix,

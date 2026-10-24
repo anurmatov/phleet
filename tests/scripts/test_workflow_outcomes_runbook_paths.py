@@ -1,7 +1,8 @@
-"""Execute only documented path setup and verifier invocations with an owned stub, never APIs."""
+"""Exercise documented paths and the upgrade guard in owned directories, never live APIs."""
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -69,6 +70,47 @@ class RunbookPathsTests(unittest.TestCase):
         self.assertEqual([str(self.runtime), str(self.policy), 'verify', '--manifest',
                           str(self.policy / 'qualification.json'), '--approval', 'https://example.com/approval'],
                          Path(self.env['CALLS']).read_text().splitlines())
+
+    def upgrade_command(self):
+        needle = 'bash "$REPO_ROOT/upgrade.sh"'
+        for block in re.findall(r'```bash\n(.*?)```', self.doc, re.S):
+            if needle in block:
+                return block
+        # Also reproduce the prior inline command before the guard is documented.
+        self.assertIn('`' + needle + '`', self.doc)
+        return needle
+
+    def test_documented_upgrade_refuses_separate_runtime_before_actual_script(self):
+        source = DOC.parents[2]
+        shutil.copyfile(source / 'upgrade.sh', self.repo / 'upgrade.sh')
+        (self.repo / 'scripts/lib').mkdir(parents=True)
+        shutil.copyfile(source / 'scripts/lib/comms-profiles.sh', self.repo / 'scripts/lib/comms-profiles.sh')
+        other_runtime = self.repo / 'fleet'
+        other_runtime.mkdir()
+        other_env = other_runtime / '.env'
+        other_env.write_text('UNRELATED_ONLY=existing-installation\n')
+        before = other_env.read_bytes()
+        bin_dir = self.repo / 'bin'
+        bin_dir.mkdir()
+        docker = bin_dir / 'docker'
+        docker.write_text('#!/bin/bash\nprintf called > "$CALLS"\nexit 97\n')
+        docker.chmod(0o755)
+        env = {**self.env, 'PATH': str(bin_dir) + os.pathsep + os.environ['PATH']}
+        result = subprocess.run(['bash', '-euc', self.bootstrap + '\n' + self.upgrade_command()],
+                                cwd=self.repo, env=env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(3, result.returncode, result.stdout + result.stderr)
+        self.assertIn('REFUSED:', result.stderr)
+        self.assertFalse(Path(self.env['CALLS']).exists())
+        self.assertEqual(before, other_env.read_bytes())
+
+    def test_documented_upgrade_delegates_for_default_runtime_only(self):
+        default = self.repo / 'fleet'
+        default.mkdir()
+        self.bootstrap = self.bootstrap.replace(str(self.runtime), str(default))
+        # Positive guard/delegation proof only, not an upgrade/runtime qualification.
+        (self.repo / 'upgrade.sh').write_text('printf "%s\\n" "$PWD" > "$CALLS"\n')
+        self.run_paths(self.upgrade_command())
+        self.assertEqual(str(default), Path(self.env['CALLS']).read_text().strip())
 
 
 if __name__ == '__main__':

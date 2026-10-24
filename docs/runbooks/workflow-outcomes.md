@@ -159,8 +159,24 @@ Read the build ids from the run's history (`WorkflowTaskCompleted` → worker ve
 
 1. None, or not a 40-hex commit: the bridge image was built without a verified commit (startup
    warning `FLEET_BUILD_COMMIT is not a 40-hex commit`; at build time `source commit unknown: …`
-   from `$REPO_ROOT/scripts/source-commit.sh`). Rebuild from a clean checkout with `bash "$REPO_ROOT/upgrade.sh"`, or pass
-   `--build-arg GIT_COMMIT=$(bash "$REPO_ROOT/scripts/source-commit.sh")`; runs already recorded stay pending.
+   from `$REPO_ROOT/scripts/source-commit.sh`). Rebuild from a clean checkout only after the
+   deployment approval. `upgrade.sh` always targets `$REPO_ROOT/fleet`; it does not accept
+   `RUNTIME_ROOT`. Use this guarded command only for the default runtime:
+
+```bash
+(
+  if [ "$RUNTIME_ROOT" != "$REPO_ROOT/fleet" ]; then
+    printf '%s\n' 'REFUSED: upgrade.sh targets only REPO_ROOT/fleet' >&2
+    exit 3
+  fi
+  bash "$REPO_ROOT/upgrade.sh"
+)
+```
+
+   For a nondefault runtime, stop and use its separately reviewed deployment procedure; do not
+   point this helper at another installation or assume the exported root overrides it. An approved
+   build may pass `--build-arg GIT_COMMIT=$(bash "$REPO_ROOT/scripts/source-commit.sh")`;
+   runs already recorded stay pending.
    If the image does carry a 40-hex `FLEET_BUILD_COMMIT` but new runs still record none, your
    Temporal server does not keep the unversioned build id: compiled rules cannot match there.
 2. Another commit: the bridge runs code no rule was reviewed for. Review that commit's compiled

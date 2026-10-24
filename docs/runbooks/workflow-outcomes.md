@@ -24,10 +24,17 @@ evidence — is operator-owned and stays out of the repository. Examples use pla
 - The separate delegate-recovery capability and the human-gate DM delivery (#345) are unchanged;
   their exclusions stay in force.
 
-Operator session (host shell; the header file keeps the bearer out of argv and history):
+Operator session (host shell; the header file keeps the bearer out of argv and history).
+Set both absolute roots once: `REPO_ROOT` is the reviewed source checkout, while `RUNTIME_ROOT`
+is the installed runtime directory (setup defaults to `$REPO_ROOT/fleet`; use its actual location).
+All commands below keep the working directory at `RUNTIME_ROOT`; repository files use `REPO_ROOT`
+and policy files use `WORKFLOW_OUTCOMES_POLICY_DIR`.
 
 ```bash
-cd fleet                                   # the runtime dir created by setup.sh
+export REPO_ROOT="/absolute/path/to/phleet"
+export RUNTIME_ROOT="/absolute/path/to/runtime"
+export WORKFLOW_OUTCOMES_POLICY_DIR="$RUNTIME_ROOT/workflow-outcomes"
+cd "$RUNTIME_ROOT"
 export ORCH=http://127.0.0.1:3600          # orchestrator origin as the host reaches it
 umask 077
 printf 'Authorization: Bearer %s\n' "$(grep '^ORCHESTRATOR_AUTH_TOKEN=' .env | cut -d= -f2-)" > "$HOME/.wo-auth"
@@ -49,7 +56,7 @@ docker exec -i fleet-mysql mysql -ufleet -p fleet_orchestrator -e "<query>"
    is applied (`SELECT MigrationId FROM __EFMigrationsHistory ORDER BY MigrationId DESC LIMIT 3;`),
    and a DB dump plus keyring backup exist (section 12).
 2. Run the read-only plan for each namespace and keep its output with the approval:
-   `bash scripts/verify-workflow-outcomes.sh plan --namespace namespace-a` (exit 3 = static
+   `bash "$REPO_ROOT/scripts/verify-workflow-outcomes.sh" plan --namespace namespace-a` (exit 3 = static
    checklist only; 1 = gaps; 0 = no coverage gap).
 3. Record per namespace: retention and archival (Temporal `DescribeNamespace`, e.g.
    `temporal operator namespace describe --namespace namespace-a`), the number of Running runs and
@@ -57,9 +64,10 @@ docker exec -i fleet-mysql mysql -ufleet -p fleet_orchestrator -e "<query>"
    definitions are in scope.
 4. Check `FULL_SCAN_SECONDS`: retention minus one full sweep must leave at least two sweep
    intervals; otherwise lower the sweep target or accept a declared `retention_margin` gap.
-5. Write `fleet/workflow-outcomes/ownership.json` and `classifiers.json` from
-   `docs/examples/workflow-outcomes/`, pinning every placeholder (section 4). Keep the directory
-   owner-only (`chmod 700 fleet/workflow-outcomes; chmod 600 fleet/workflow-outcomes/*.json`).
+5. Write `$WORKFLOW_OUTCOMES_POLICY_DIR/ownership.json` and
+   `$WORKFLOW_OUTCOMES_POLICY_DIR/classifiers.json` from
+   `$REPO_ROOT/docs/examples/workflow-outcomes/`, pinning every placeholder (section 4). Keep the
+   directory owner-only (`chmod 700 "$WORKFLOW_OUTCOMES_POLICY_DIR"; chmod 600 "$WORKFLOW_OUTCOMES_POLICY_DIR/"*.json`).
 6. With the enrollment approval: set `FLEET_WORKFLOW_OUTCOMES_NAMESPACES`,
    `…_COORDINATOR_BASE_URL` (validated at startup even before delivery) and `…_ENABLED=true`; leave
    the coordinator token blank while delivery is not approved — provisioning then writes no client
@@ -91,7 +99,7 @@ loses the gap record.
 Before each stage record, outside the repository:
 
 ```bash
-git -C <repo> rev-parse HEAD; git -C <repo> status --porcelain        # exact reviewed commit, clean
+git -C "$REPO_ROOT" rev-parse HEAD; git -C "$REPO_ROOT" status --porcelain        # exact reviewed commit, clean
 for i in fleet:orchestrator fleet:agent fleet:temporal-bridge; do docker image inspect --format "$i {{.Id}} {{.Created}}" "$i"; done
 docker inspect --format '{{.Name}} {{.Image}}' fleet-orchestrator fleet-temporal-bridge
 ```
@@ -151,8 +159,8 @@ Read the build ids from the run's history (`WorkflowTaskCompleted` → worker ve
 
 1. None, or not a 40-hex commit: the bridge image was built without a verified commit (startup
    warning `FLEET_BUILD_COMMIT is not a 40-hex commit`; at build time `source commit unknown: …`
-   from `scripts/source-commit.sh`). Rebuild from a clean checkout with `./upgrade.sh`, or pass
-   `--build-arg GIT_COMMIT=$(bash scripts/source-commit.sh)`; runs already recorded stay pending.
+   from `$REPO_ROOT/scripts/source-commit.sh`). Rebuild from a clean checkout with `bash "$REPO_ROOT/upgrade.sh"`, or pass
+   `--build-arg GIT_COMMIT=$(bash "$REPO_ROOT/scripts/source-commit.sh")`; runs already recorded stay pending.
    If the image does carry a 40-hex `FLEET_BUILD_COMMIT` but new runs still record none, your
    Temporal server does not keep the unversioned build id: compiled rules cannot match there.
 2. Another commit: the bridge runs code no rule was reviewed for. Review that commit's compiled
@@ -363,7 +371,7 @@ a new workflow start without `recovery_operation_id`. Epic grants, gate guards a
 not widened by this feature.
 
 **Recording an approval.** Every reserve needs an entry in
-`fleet/workflow-outcomes/recovery-approvals.json` (mounted read-only; owner-only like the other
+`$WORKFLOW_OUTCOMES_POLICY_DIR/recovery-approvals.json` (mounted read-only; owner-only like the other
 policy files) that names exactly the action the reserve will take. Write it only after the human
 approval exists, with that approval's URL as `authorityRef`:
 
@@ -399,7 +407,7 @@ entry: an unspent reservation then blocks at dispatch with `authority_not_coveri
   `workflow_outcomes_keys` volume:
 
 ```bash
-docker run --rm --entrypoint tar -v fleet_workflow_outcomes_keys:/k:ro -v "$PWD/mysql-backup":/b \
+docker run --rm --entrypoint tar -v fleet_workflow_outcomes_keys:/k:ro -v "$RUNTIME_ROOT/mysql-backup":/b \
   fleet:orchestrator -C /k -czf /b/workflow-outcomes-keys-$(date -u +%Y%m%dT%H%M%SZ).tgz .
 ```
 
@@ -416,7 +424,7 @@ docker run --rm --entrypoint tar -v fleet_workflow_outcomes_keys:/k:ro -v "$PWD/
   retained (resolved failures 90 days, unresolved indefinitely).
 - Rehearse a restore on a throwaway stack before enrollment and record the proof.
 - **Source-level restore proof (AC19, not the rehearsal):**
-  `FLEET_ORCHESTRATOR_MIGRATION_CONNECTION=<throwaway MySQL 8> bash tests/integration/workflow-outcomes/run.sh migration`
+  `FLEET_ORCHESTRATOR_MIGRATION_CONNECTION=<throwaway MySQL 8> bash "$REPO_ROOT/tests/integration/workflow-outcomes/run.sh" migration`
   runs `Api_OnRealMySql_EveryWritePathTranslates_AndRestoreWithAnIndependentKeyringCopyKeepsPendingFailures`.
   It copies a synthetic keyring as a backup, deletes the original, and restores the dump into a fresh
   database and the copy into a fresh directory. Expected: equal table counts. Run ids and versions,
@@ -456,8 +464,10 @@ approver DMs. When monitoring itself fails:
 
 ## 15. Host qualification (AC25, separately approved)
 
-`scripts/verify-workflow-outcomes.sh verify --manifest <file> --approval <https-url>` refuses
-(exit 3) unless the manifest satisfies all of:
+`bash "$REPO_ROOT/scripts/verify-workflow-outcomes.sh" verify --manifest "$WORKFLOW_OUTCOMES_POLICY_DIR/qualification.json" --approval <https-url>` refuses
+(exit 3) unless the manifest satisfies all of the following. Store this operator-owned manifest
+beside the policy files: its `configFiles` paths resolve relative to the manifest directory,
+not the shell's working directory.
 
 ```json
 {
@@ -489,7 +499,7 @@ approver DMs. When monitoring itself fails:
   the env vars of a real test Temporal and coordinator clone) — it can never remove one.
 
 The script itself never starts workflows, migrates a live database or touches production names; it
-runs `tests/integration/workflow-outcomes/run.sh all --manifest <file>`. Creating the throwaway
+runs `$REPO_ROOT/tests/integration/workflow-outcomes/run.sh all --manifest <file>`. Creating the throwaway
 namespaces and clone before, and cleaning up only `cleanup.owned` after, are operator steps under the
 same approval. Actual production workflows, queues, agents and financial flows are untouched, and
 no real human messages are sent. Keep the receipt and provenance outside the repository.
@@ -501,7 +511,7 @@ set:
 ```bash
 WORKFLOW_OUTCOMES_TEMPORAL_CLI_PATH=/abs/path/to/cached/temporal \
 WORKFLOW_OUTCOMES_TEMPORAL_SERVER_VERSION=1.29.1 \
-  dotnet test tests/Fleet.Orchestrator.Tests --filter "FullyQualifiedName~WorkflowOutcomeRealTemporalTests"
+  dotnet test "$REPO_ROOT/tests/Fleet.Orchestrator.Tests" --filter "FullyQualifiedName~WorkflowOutcomeRealTemporalTests"
 ```
 
 The binary is started through the SDK's `ExistingPath`, which never downloads. A server reporting

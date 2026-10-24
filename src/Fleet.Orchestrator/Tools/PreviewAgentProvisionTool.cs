@@ -6,7 +6,7 @@ using ModelContextProtocol.Server;
 namespace Fleet.Orchestrator.Tools;
 
 [McpServerToolType]
-public sealed class PreviewAgentProvisionTool(ContainerProvisioningService provisioning)
+public sealed class PreviewAgentProvisionTool(IAgentRuntimeLifecycle provisioning)
 {
     [McpServerTool(Name = "preview_agent_provision")]
     [Description("Shadow-mode preview of what Docker container spec would be generated for an agent from DB config, and a diff against the actual running container. No changes are made.")]

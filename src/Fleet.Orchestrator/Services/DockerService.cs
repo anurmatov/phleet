@@ -1,3 +1,5 @@
+using Fleet.Orchestrator.Data;
+using Microsoft.EntityFrameworkCore;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
@@ -22,11 +24,16 @@ public sealed class DockerService : IDisposable
     internal const string DefaultLogMaxFile = "3";
 
     private readonly HttpClient _http;
+    private readonly IServiceScopeFactory? _scopes;
+    private readonly HashSet<string> _infrastructureIds = new(StringComparer.Ordinal);
     private readonly ILogger<DockerService> _logger;
 
-    public DockerService(ILogger<DockerService> logger, IConfiguration configuration)
+    public DockerService(ILogger<DockerService> logger, IConfiguration configuration, IServiceScopeFactory scopes)
     {
         _logger = logger;
+        _scopes = scopes;
+        _infrastructureIds = (configuration["Docker:InfrastructureContainerIds"] ?? "")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToHashSet(StringComparer.Ordinal);
 
         var socketPath = configuration["Docker:SocketPath"] ?? DefaultSocketPath;
 
@@ -48,10 +55,12 @@ public sealed class DockerService : IDisposable
     }
 
     /// <summary>Internal constructor for testing — accepts a pre-built HttpClient.</summary>
-    internal DockerService(ILogger<DockerService> logger, HttpClient httpClient)
+    internal DockerService(ILogger<DockerService> logger, HttpClient httpClient, IServiceScopeFactory? scopes = null, IEnumerable<string>? infrastructureIds = null)
     {
         _logger = logger;
         _http   = httpClient;
+        _scopes = scopes;
+        _infrastructureIds = (infrastructureIds ?? []).ToHashSet(StringComparer.Ordinal);
     }
 
     /// <summary>Returns the raw JSON from Docker container inspect, or null if not found / socket unavailable.</summary>
@@ -59,7 +68,7 @@ public sealed class DockerService : IDisposable
     {
         try
         {
-            var response = await _http.GetAsync($"/{DockerApiVer}/containers/{containerName}/json", ct);
+            var response = await _http.GetAsync($"/{DockerApiVer}/containers/{Uri.EscapeDataString(containerName)}/json", ct);
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogDebug("Container {Name} not found (HTTP {Status})", containerName, (int)response.StatusCode);
@@ -75,12 +84,33 @@ public sealed class DockerService : IDisposable
         }
     }
 
+    /// <summary>A 404 is absence; connection/read/parse failures are unknown, never absence.</summary>
+    internal async Task<LegacyContainerObservation?> ReadLegacyContainerAsync(string target, CancellationToken ct)
+    {
+        try
+        {
+            using var response = await _http.GetAsync($"/{DockerApiVer}/containers/{Uri.EscapeDataString(target)}/json", ct);
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound) return new(true, null);
+            if (!response.IsSuccessStatusCode) return null;
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            var id = doc.RootElement.GetProperty("Id").GetString();
+            if (id is null || id.Length != 64 || id.Any(c => !char.IsAsciiHexDigitLower(c))) return null;
+            return new(false, id);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Legacy runtime observation unavailable ({Type})", ex.GetType().Name);
+            return null;
+        }
+    }
+
     /// <summary>Returns the time the container was last started (State.StartedAt), or null if not found / not running.</summary>
     public async Task<DateTimeOffset?> GetContainerStartedAtAsync(string containerName)
     {
         try
         {
-            var response = await _http.GetAsync($"/{DockerApiVer}/containers/{containerName}/json");
+            var response = await _http.GetAsync($"/{DockerApiVer}/containers/{Uri.EscapeDataString(containerName)}/json");
             if (!response.IsSuccessStatusCode)
                 return null;
 
@@ -104,7 +134,7 @@ public sealed class DockerService : IDisposable
     {
         try
         {
-            var response = await _http.GetAsync($"/{DockerApiVer}/containers/{containerName}/json");
+            var response = await _http.GetAsync($"/{DockerApiVer}/containers/{Uri.EscapeDataString(containerName)}/json");
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogDebug("Container {Name} not found (HTTP {Status})", containerName, (int)response.StatusCode);
@@ -125,14 +155,58 @@ public sealed class DockerService : IDisposable
         }
     }
 
+    // Infrastructure callers have no access to the legacy-agent mutation methods. A host-owned
+    // optional exact ID restriction plus current DB/driver ownership prevents name/short-ID alias bypass.
+    public async Task<bool> StartContainerAsync(string containerName) =>
+        await InfrastructureIdAsync(containerName) is { } id && await StartLegacyAgentContainerAsync(id);
+    public async Task<bool> StopContainerAsync(string containerName) =>
+        await InfrastructureIdAsync(containerName) is { } id && await StopLegacyAgentContainerAsync(id);
+    public async Task<bool> RestartContainerAsync(string containerName) =>
+        await InfrastructureIdAsync(containerName) is { } id && await RestartLegacyAgentContainerAsync(id);
+
+    private async Task<string?> InfrastructureIdAsync(string target)
+    {
+        if (_scopes is null) return null;
+        try
+        {
+            using var scope = _scopes.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+            var agents = await db.Agents.AsNoTracking().Select(a => new { a.Name, a.ContainerName }).ToListAsync();
+            bool OwnedName(string name) => agents.Any(a =>
+                string.Equals(a.Name, name.TrimStart('/'), StringComparison.OrdinalIgnoreCase)
+                || string.Equals(a.ContainerName, name.TrimStart('/'), StringComparison.OrdinalIgnoreCase));
+            if (OwnedName(target)) return null;
+            var json = await InspectContainerAsync(target);
+            if (json is null) return null;
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var id = root.GetProperty("Id").GetString();
+            var name = root.GetProperty("Name").GetString();
+            if (id is null || id.Length != 64 || id.Any(c => !char.IsAsciiHexDigitLower(c))
+                || (_infrastructureIds.Count != 0 && !_infrastructureIds.Contains(id)) || name is null || OwnedName(name)) return null;
+            // Pinned driver uses both openshell.* and openshell.ai/* labels, including supervisor,
+            // identity and staging companions. No driver-owned object is an infrastructure target.
+            var labels = root.GetProperty("Config").GetProperty("Labels");
+            if (labels.ValueKind != JsonValueKind.Null && (labels.ValueKind != JsonValueKind.Object
+                || labels.EnumerateObject().Any(p => p.Name.StartsWith("openshell", StringComparison.OrdinalIgnoreCase)))) return null;
+            if (await db.OpenShellLaunches.AnyAsync(l => l.SandboxId == id || l.GatewayId == id)) return null;
+            return id;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Infrastructure ownership unavailable ({Type})", ex.GetType().Name);
+            return null;
+        }
+    }
+
     /// <summary>Sends a stop request to Docker for the named container. Returns true on success.</summary>
-    public async Task<bool> StopContainerAsync(string containerName)
+    internal async Task<bool> StopLegacyAgentContainerAsync(string containerName)
     {
         try
         {
             // t=10: wait up to 10 s for graceful shutdown before SIGKILL
             var response = await _http.PostAsync(
-                $"/{DockerApiVer}/containers/{containerName}/stop?t=10",
+                $"/{DockerApiVer}/containers/{Uri.EscapeDataString(containerName)}/stop?t=10",
                 content: null);
 
             // 304 Not Modified = container already stopped
@@ -154,12 +228,12 @@ public sealed class DockerService : IDisposable
     }
 
     /// <summary>Sends a start request to Docker for the named container. Returns true on success.</summary>
-    public async Task<bool> StartContainerAsync(string containerName)
+    internal async Task<bool> StartLegacyAgentContainerAsync(string containerName)
     {
         try
         {
             var response = await _http.PostAsync(
-                $"/{DockerApiVer}/containers/{containerName}/start",
+                $"/{DockerApiVer}/containers/{Uri.EscapeDataString(containerName)}/start",
                 content: null);
 
             // 304 Not Modified = container already running
@@ -181,13 +255,13 @@ public sealed class DockerService : IDisposable
     }
 
     /// <summary>Sends a restart request to Docker for the named container. Returns true on success.</summary>
-    public async Task<bool> RestartContainerAsync(string containerName)
+    internal async Task<bool> RestartLegacyAgentContainerAsync(string containerName)
     {
         try
         {
             // t=10: wait up to 10 s for graceful shutdown before SIGKILL
             var response = await _http.PostAsync(
-                $"/{DockerApiVer}/containers/{containerName}/restart?t=10",
+                $"/{DockerApiVer}/containers/{Uri.EscapeDataString(containerName)}/restart?t=10",
                 content: null);
 
             if (response.IsSuccessStatusCode)
@@ -210,7 +284,7 @@ public sealed class DockerService : IDisposable
     /// <summary>Fetches the last <paramref name="tail"/> log lines from a container as a single string. Non-streaming snapshot.</summary>
     public async Task<string?> GetContainerLogsAsync(string containerName, int tail = 100)
     {
-        var url = $"/{DockerApiVer}/containers/{containerName}/logs?follow=false&stdout=1&stderr=1&tail={tail}&timestamps=1";
+        var url = $"/{DockerApiVer}/containers/{Uri.EscapeDataString(containerName)}/logs?follow=false&stdout=1&stderr=1&tail={tail}&timestamps=1";
         HttpResponseMessage response;
         try
         {
@@ -283,7 +357,7 @@ public sealed class DockerService : IDisposable
         int tail,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        var url = $"/{DockerApiVer}/containers/{containerName}/logs?follow=true&stdout=1&stderr=1&tail={tail}&timestamps=1";
+        var url = $"/{DockerApiVer}/containers/{Uri.EscapeDataString(containerName)}/logs?follow=true&stdout=1&stderr=1&tail={tail}&timestamps=1";
         HttpResponseMessage response;
         try
         {
@@ -678,3 +752,5 @@ public sealed class DockerService : IDisposable
 
     public void Dispose() => _http.Dispose();
 }
+
+internal sealed record LegacyContainerObservation(bool Absent, string? Id);

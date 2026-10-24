@@ -163,7 +163,7 @@ public sealed class JournalMediaProvisioningTests : IDisposable
 
         return new ContainerProvisioningService(
             new StubScopeFactory(),
-            new DockerService(NullLogger<DockerService>.Instance, configuration),
+            new DockerService(NullLogger<DockerService>.Instance, configuration, new StubScopeFactory()),
             configuration,
             new JournalTokenService(configuration),
             NullLogger<ContainerProvisioningService>.Instance);

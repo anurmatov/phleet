@@ -50,6 +50,12 @@ public sealed class ConfigServiceDenylistTests : IDisposable
     }
 
     [Theory]
+    [InlineData("FLEET_MEMORY_IDENTITY_CONNECTION_STRING")]
+    [InlineData("FLEET_MEMORY_IDENTITY_ENABLED")]
+    [InlineData("fleet_memory_identity_protected_agents")]
+    public void ReceiverKeysAreDenylisted(string key) => Assert.True(ConfigService.IsDenylisted(key));
+
+    [Theory]
     [InlineData("FLEET_COMMS_JOURNAL_KEY")]
     [InlineData("FLEET_COMMS_JOURNAL_ENABLED")]
     [InlineData("FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS")]

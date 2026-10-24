@@ -16,7 +16,7 @@ namespace Fleet.Memory.Services;
 /// the previous snapshot and logs a warning. The cache is never expired on
 /// a failed refresh.
 /// </summary>
-public sealed class AclCacheService : IHostedService, IAsyncDisposable
+public sealed partial class AclCacheService : IHostedService, IAsyncDisposable
 {
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan BackgroundRetryInterval = TimeSpan.FromSeconds(30);
@@ -33,6 +33,7 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
     private readonly IOptions<OrchestratorOptions> _orchestratorOptions;
     private readonly ILogger<AclCacheService> _logger;
     private readonly HttpClient _http;
+    private readonly HttpClient _verifiedHttp;
 
     // Keyed by lowercase agent name, value is list of lowercase project names (or ["*"] for wildcard).
     private volatile Dictionary<string, List<string>> _cache = [];
@@ -46,11 +47,24 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
         IOptions<AclOptions> aclOptions,
         IOptions<OrchestratorOptions> orchestratorOptions,
         ILogger<AclCacheService> logger)
+        : this(aclOptions, orchestratorOptions, logger,
+            new HttpClient { Timeout = TimeSpan.FromSeconds(5) },
+            new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = Timeout.InfiniteTimeSpan }) { }
+
+    internal AclCacheService(IOptions<AclOptions> aclOptions, IOptions<OrchestratorOptions> orchestratorOptions,
+        ILogger<AclCacheService> logger, HttpMessageHandler handler)
+        : this(aclOptions, orchestratorOptions, logger,
+            new HttpClient(handler, disposeHandler: false) { Timeout = TimeSpan.FromSeconds(5) },
+            new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan }) { }
+
+    private AclCacheService(IOptions<AclOptions> aclOptions, IOptions<OrchestratorOptions> orchestratorOptions,
+        ILogger<AclCacheService> logger, HttpClient legacyHttp, HttpClient verifiedHttp)
     {
         _aclOptions = aclOptions;
         _orchestratorOptions = orchestratorOptions;
         _logger = logger;
-        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        _http = legacyHttp;
+        _verifiedHttp = verifiedHttp;
     }
 
     // ── IHostedService ────────────────────────────────────────────────────────
@@ -127,46 +141,19 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
         if (!_aclOptions.Value.EnableProjectScopedAcl)
             return (true, null);
 
-        var name = agentName.ToLowerInvariant();
-        var cache = _cache;
+        _cache.TryGetValue(agentName.ToLowerInvariant(), out var projects);
         var opts = _aclOptions.Value;
-
-        // Wildcard check
-        if (cache.TryGetValue(name, out var agentProjects) && agentProjects.Contains("*"))
-            return (true, null);
-
-        // Normalize memory project (empty string means no project set)
-        var memProject = (project ?? "").Trim().ToLowerInvariant();
-
-        // No project set — allow if AclAllowNoProject is on, otherwise deny
-        if (string.IsNullOrEmpty(memProject))
-        {
-            return opts.AclAllowNoProject
-                ? (true, null)
-                : (false, "memory has no project — denied to non-wildcard agents (set AclAllowNoProject=true to permit during rollout)");
-        }
-
-        // Built-in public projects
-        foreach (var pub in opts.AclPublicProjects)
-        {
-            if (string.Equals(pub.Trim(), memProject, StringComparison.OrdinalIgnoreCase))
-                return (true, null);
-        }
-
-        // Agent allow-list
-        if (agentProjects is not null && agentProjects.Contains(memProject))
-            return (true, null);
-
-        return (false, $"project '{memProject}' not in agent '{name}' allow-list");
+        return EvaluateRead(agentName, project, projects, opts.AclAllowNoProject, opts.AclPublicProjects);
     }
 
     /// <summary>
     /// Triggers an immediate ACL refresh (non-blocking). Called by PeerConfigHostedService
     /// on config.changed events.
     /// </summary>
-    public void TriggerRefresh()
+    public Task TriggerRefresh()
     {
-        _ = Task.Run(async () =>
+        InvalidateVerifiedRequests();
+        return Task.Run(async () =>
         {
             try { await RefreshAsync(CancellationToken.None); }
             catch (Exception ex) { _logger.LogWarning(ex, "ACL refresh triggered by config.changed failed"); }
@@ -284,6 +271,7 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
             _cts.Dispose();
         }
         _http.Dispose();
+        _verifiedHttp.Dispose();
     }
 
     // ── Test helpers ──────────────────────────────────────────────────────────

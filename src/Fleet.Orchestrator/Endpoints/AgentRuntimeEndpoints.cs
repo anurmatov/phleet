@@ -1,0 +1,117 @@
+using Fleet.Orchestrator.Data;
+using Microsoft.EntityFrameworkCore;
+using Fleet.Orchestrator.Services;
+
+namespace Fleet.Orchestrator.Endpoints;
+
+public static class AgentRuntimeEndpoints
+{
+    public static void MapAgentRuntimeEndpoints(this WebApplication app)
+    {
+        app.MapPost("/api/agents/{name}/start", async (string name, IAgentRuntimeLifecycle lifecycle, CancellationToken ct) =>
+            ToResult(await lifecycle.StartAsync(name, ct)));
+        app.MapPost("/api/agents/{name}/stop", async (string name, IAgentRuntimeLifecycle lifecycle, CancellationToken ct) =>
+            ToResult(await lifecycle.StopAsync(name, ct)));
+        app.MapPost("/api/agents/{name}/restart", async (string name, IAgentRuntimeLifecycle lifecycle, CancellationToken ct) =>
+            ToResult(await lifecycle.RestartAsync(name, ct)));
+    }
+
+    public static void MapOpenShellReconciliationEndpoint(this WebApplication app)
+    {
+        // Covered by the same fail-closed outside operator middleware as all /openshell children.
+        // Deliberately no MCP issuance/recovery tool and no automatic background replay.
+        app.MapPost("/api/agents/{name}/openshell/reconcile", async (string name,
+            OpenShellReconciliationRequest request, OpenShellRetirementService retirement, CancellationToken ct) =>
+            ToResult(await retirement.ReconcileAsync(name, request.ExpectedLaunchId, request.ExpectedRequestId, request.Replay, ct)));
+    }
+
+    public static void MapAgentDeleteEndpoint(this WebApplication app)
+    {
+        // REST: delete an agent (deprovision container + remove DB records)
+        app.MapDelete("/api/agents/{name}", async (string name, IServiceScopeFactory scopeFactory, IAgentRuntimeLifecycle provisioning, AgentRegistry registry, IAclChangeNotifier aclNotifier, CancellationToken ct) =>
+        {
+            using var scope = scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
+            if (db is null)
+                return Results.Problem("Database is not configured on this orchestrator");
+
+            var agent = await db.Agents
+                .Include(a => a.Tools)
+                .Include(a => a.Projects)
+                .Include(a => a.McpEndpoints)
+                .Include(a => a.Networks)
+                .Include(a => a.EnvRefs)
+                .Include(a => a.TelegramUsers)
+                .Include(a => a.TelegramGroups)
+                .Include(a => a.Instructions)
+                .AsSplitQuery()
+                .FirstOrDefaultAsync(a => a.Name == name);
+
+            if (agent is null)
+                return Results.NotFound(new { error = $"Agent '{name}' not found in DB" });
+
+            // Do not erase recovery/ACL state unless the shared lifecycle boundary confirms deprovision.
+            using var deletionDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            deletionDeadline.CancelAfter(TimeSpan.FromSeconds(120));
+            var lifecycleCt = deletionDeadline.Token;
+            try
+            {
+                var deprovision = await provisioning.DeprovisionAsync(name, lifecycleCt);
+                if (!deprovision.Success)
+                    return Results.Json(new { error = deprovision.Message }, statusCode: deprovision.StatusCode);
+
+                if (await db.OpenShellLaunches.AsNoTracking().AnyAsync(x => x.AgentId == agent.Id, lifecycleCt))
+                {
+                    var retirement = scope.ServiceProvider.GetService<OpenShellRetirementService>();
+                    if (retirement is null)
+                        return Results.Json(new { error = "compatibility_blocked: deletion evidence is unavailable" }, statusCode: 503);
+                    var cleanup = await retirement.CompleteAgentDeletionAsync(name, agent.Id, lifecycleCt);
+                    if (!cleanup.Result.Success) return ToResult(cleanup.Result);
+                    registry.Remove(name);
+                    if (cleanup.AclChanged)
+                    {
+                        try
+                        {
+                            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(lifecycleCt);
+                            deadline.CancelAfter(TimeSpan.FromSeconds(5));
+                            await aclNotifier.PublishAclChangedAsync(deadline.Token).WaitAsync(deadline.Token);
+                        }
+                        catch (Exception)
+                        {
+                            // The DB transaction committed. Do not imply it rolled back or repeat the delete.
+                            return Results.Json(new { error = "agent deleted; ACL notification unconfirmed" }, statusCode: 503);
+                        }
+                    }
+                    return ToResult(cleanup.Result);
+                }
+
+                db.Agents.Remove(agent);
+                await db.SaveChangesAsync();
+
+                // agent_project_access is keyed by name, not by a foreign key, so deleting the agent leaves its
+                // rows behind. Deleting an agent unassigns every project, so the same hook applies: the rows it
+                // created go, an operator's manual rows and any wildcard stay.
+                await AgentProjectAccessSync.SyncAndBroadcastAsync(db, aclNotifier, agent.Name, []);
+
+                // Remove from in-memory registry so the agent doesn't persist as a ghost in the dashboard.
+                registry.Remove(name);
+
+                return Results.Ok(new
+                {
+                    message = $"Agent '{name}' deleted after confirmed deprovision"
+                });
+            }
+            catch (OperationCanceledException) when (deletionDeadline.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                return Results.Json(new { error = "agent deletion deadline expired; reconcile authoritative state" }, statusCode: 503);
+            }
+        });
+
+    }
+
+    private static IResult ToResult(ProvisionResult result) => result.Success
+        ? Results.Ok(new { message = result.Message })
+        : Results.Json(new { error = result.Message }, statusCode: result.StatusCode);
+}
+
+public sealed record OpenShellReconciliationRequest(Guid ExpectedLaunchId, Guid ExpectedRequestId, bool Replay = false);

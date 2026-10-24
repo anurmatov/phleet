@@ -5,7 +5,7 @@ using ModelContextProtocol.Server;
 namespace Fleet.Orchestrator.Tools;
 
 [McpServerToolType]
-public sealed class ReprovisionAgentTool(ContainerProvisioningService provisioning)
+public sealed class ReprovisionAgentTool(IAgentRuntimeLifecycle provisioning)
 {
     [McpServerTool(Name = "reprovision_agent")]
     [Description("Stops, removes, and re-creates the Docker container for an agent from its current DB config. Use this after updating agent config (model, tools, memory). Workspace volume data is preserved.")]

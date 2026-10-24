@@ -14,6 +14,11 @@ public class Agent
     public required string ContainerName { get; set; }
     public bool IsEnabled { get; set; } = true;
 
+    // Desired OpenShell state only. Defaults do not migrate or start an existing runtime.
+    public string ExecutionShell { get; set; } = "openshell";
+    public string OpenShellPolicy { get; set; } = "normal";
+    public string OpenShellMigrationState { get; set; } = "pending";
+
     // Behavior
     public string PermissionMode { get; set; } = "acceptEdits";
     public int MaxTurns { get; set; } = 50;

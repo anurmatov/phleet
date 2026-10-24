@@ -24,9 +24,12 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
     private readonly FakeDockerApi _dockerApi = new();
 
     public string BaseDir { get; }
+    internal SqliteConnection Connection => _connection;
     public ServiceProvider Services { get; }
     public ContainerProvisioningService Service { get; }
+    public DockerService Docker { get; }
     public ProvisioningLogSink Logs { get; } = new();
+    public void StubInspectSequence(params int[] statuses) => _dockerApi.InspectStatuses = new Queue<int>(statuses);
     public int DockerRequestCount => _dockerApi.RequestCount;
 
     /// <summary>Every Docker API call, as <c>METHOD /path</c>, in order.</summary>
@@ -35,7 +38,7 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
     /// <summary>The JSON body of every <c>/containers/create</c> call; its <c>HostConfig.Binds</c> are the binds.</summary>
     public IReadOnlyList<string> CreateBodies => _dockerApi.CreateBodies;
 
-    private ProvisioningHarness(IReadOnlyDictionary<string, string?>? extraConfig)
+    private ProvisioningHarness(IReadOnlyDictionary<string, string?>? extraConfig, Action<IServiceCollection, SqliteConnection>? configure)
     {
         BaseDir = Path.Combine(Path.GetTempPath(), $"prov-harness-{Guid.NewGuid():N}");
         Directory.CreateDirectory(BaseDir);
@@ -47,6 +50,11 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
 
         var services = new ServiceCollection();
         services.AddDbContext<OrchestratorDbContext>(o => o.UseSqlite(_connection));
+        services.AddSingleton<ContainerProvisioningService>(_ => Service!);
+        services.AddSingleton<IAgentRuntimeLifecycle>(sp => new AgentRuntimeLifecycle(
+            sp.GetRequiredService<IServiceScopeFactory>(), Service!, Docker!,
+            NullLogger<AgentRuntimeLifecycle>.Instance, sp.GetService<OpenShellRetirementService>()));
+        configure?.Invoke(services, _connection);
         Services = services.BuildServiceProvider();
 
         using (var scope = Services.CreateScope())
@@ -62,16 +70,17 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
             foreach (var (k, v) in extraConfig) settings[k] = v;
 
         var config = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
-        var docker = new DockerService(
+        Docker = new DockerService(
             NullLogger<DockerService>.Instance,
             new HttpClient(_dockerApi) { BaseAddress = new Uri("http://localhost") });
 
         Service = new ContainerProvisioningService(
-            Services.GetRequiredService<IServiceScopeFactory>(), docker, config,
+            Services.GetRequiredService<IServiceScopeFactory>(), Docker, config,
             new JournalTokenService(config), Logs.For<ContainerProvisioningService>());
     }
 
-    public static ProvisioningHarness Create(IReadOnlyDictionary<string, string?>? extraConfig = null) => new(extraConfig);
+    public static ProvisioningHarness Create(IReadOnlyDictionary<string, string?>? extraConfig = null,
+        Action<IServiceCollection, SqliteConnection>? configure = null) => new(extraConfig, configure);
 
     public async Task SeedAsync(Action<OrchestratorDbContext> seed)
     {
@@ -102,6 +111,7 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
     /// <summary>No container exists; create and start succeed.</summary>
     private sealed class FakeDockerApi : HttpMessageHandler
     {
+        public Queue<int> InspectStatuses { get; set; } = new();
         public int RequestCount { get; private set; }
         public List<string> Requests { get; } = [];
         public List<string> CreateBodies { get; } = [];
@@ -111,6 +121,14 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
             RequestCount++;
             var path = request.RequestUri!.AbsolutePath;
             Requests.Add($"{request.Method} {path}");
+            if (request.Method == HttpMethod.Get && path.EndsWith("/json", StringComparison.Ordinal) && InspectStatuses.TryDequeue(out var status))
+                return new HttpResponseMessage((HttpStatusCode)status)
+                {
+                    Content = new StringContent("{\"Id\":\"" + new string('a', 64) + "\"}"),
+                };
+            if ((request.Method == HttpMethod.Post && path.EndsWith("/stop", StringComparison.Ordinal))
+                || request.Method == HttpMethod.Delete)
+                return new HttpResponseMessage(HttpStatusCode.NoContent);
             if (request.Method == HttpMethod.Post && path.EndsWith("/containers/create", StringComparison.Ordinal))
             {
                 CreateBodies.Add(request.Content is null ? "" : await request.Content.ReadAsStringAsync(ct));

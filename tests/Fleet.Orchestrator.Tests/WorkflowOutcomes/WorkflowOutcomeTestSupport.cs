@@ -156,6 +156,18 @@ internal sealed class HistoryBuilder
 
     public HistoryBuilder LoadSeed(string workflowType) => LoadDefinition(OutcomeFixtures.Loaded(workflowType));
 
+    /// <summary>A LoadWorkflowDefinition that was scheduled and started but never completed.</summary>
+    public HistoryBuilder LoadDefinitionUnresolved()
+    {
+        var scheduled = Add(EventType.ActivityTaskScheduled, e => e.ActivityTaskScheduledEventAttributes = new ActivityTaskScheduledEventAttributes
+        {
+            ActivityId = "1", ActivityType = new ActivityType { Name = "LoadWorkflowDefinition" },
+            Input = new Payloads { Payloads_ = { Json(WorkflowType) } },
+        });
+        Add(EventType.ActivityTaskStarted, e => e.ActivityTaskStartedEventAttributes = new ActivityTaskStartedEventAttributes { ScheduledEventId = scheduled.EventId, Attempt = 1 });
+        return this;
+    }
+
     /// <summary>A DelegateToAgent with the engine's exact argument shape and taskId <c>workflowId/step</c>.</summary>
     public long ScheduleDelegate(string step, string target, string? workflowId = null, Payload? taskIdPayload = null)
     {

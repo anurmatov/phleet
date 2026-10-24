@@ -148,8 +148,9 @@ public sealed class WorkflowOutcomeClassifierPolicy
                 if (terminals.Contains(value, StringComparer.Ordinal)) throw new WorkflowOutcomePolicyException(at + ": duplicate terminal event type");
                 terminals.Add(value);
             }
-            if (terminals.Contains(WorkflowOutcomeTerminalTypes.Completed) && hash is null)
-                throw new WorkflowOutcomePolicyException(at + ": a Completed rule requires definitionHash");
+            // A Completed rule with a definitionHash covers only runs that loaded exactly that
+            // definition; one without it is pinned by workflowType + sourceCommit and covers only
+            // runs whose complete history proves no LoadWorkflowDefinition (compiled workflows).
 
             var classification = PolicyJson.String(r, "classification", at);
             var reason = PolicyJson.String(r, "reasonCode", at);
@@ -494,9 +495,15 @@ public static class WorkflowOutcomeClassifier
             return Pending(WorkflowOutcomeReasonCodes.ClassifierUncoveredType, WorkflowOutcomeEvidenceStates.Complete, [terminalRef], UncoveredTypeGap);
 
         {
-            // A type with rules is only covered for the exact loaded definitions it pins; any other
-            // snapshot (or no readable snapshot) is a visible gap, not an assumed success.
-            var pinned = typeRules.Where(r => facts.DefinitionHash is not null && r.DefinitionHash == facts.DefinitionHash).ToArray();
+            // A run that loaded a definition is covered only by rules pinned to that exact hash. A
+            // compiled run — complete history with no LoadWorkflowDefinition scheduled at all — only
+            // by rules pinned by workflowType + sourceCommit without a hash. Neither stands in for the
+            // other, and an unreadable or unresolved definition is never treated as compiled; any
+            // other snapshot is a visible gap, not an assumed success.
+            var compiled = facts.HistoryComplete && !facts.DefinitionScheduled;
+            var pinned = compiled
+                ? typeRules.Where(r => r.DefinitionHash is null).ToArray()
+                : typeRules.Where(r => facts.DefinitionHash is not null && r.DefinitionHash == facts.DefinitionHash).ToArray();
             if (pinned.Length == 0)
                 return Pending(WorkflowOutcomeReasonCodes.ClassifierMissing,
                     facts.DefinitionUnsupported ? WorkflowOutcomeEvidenceStates.Quarantined : WorkflowOutcomeEvidenceStates.Complete,

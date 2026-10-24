@@ -382,6 +382,48 @@ public sealed class WorkflowOutcomeReconcilerTests
     }
 
     [Fact]
+    [Trait("WorkflowOutcomeSuite", "retention")]
+    public async Task Reconcile_CompiledTypeRule_ClassifiesItsRunsAndClosesItsUncoveredGap()
+    {
+        var policy = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(OutcomeFixtures.ClassifiersPath))!;
+        policy["rules"]!.AsArray().Add(System.Text.Json.Nodes.JsonNode.Parse($$"""
+            {"id":"compiled-notify-failed","workflowType":"SomeWorkflow","sourceCommit":"{{OutcomeFixtures.SourceCommit}}",
+             "terminalEventTypes":["WorkflowExecutionCompleted"],
+             "evidence":{"kind":"failure_branch","exitBranch":"notify_failed"},"classification":"confirmed_failure","reasonCode":"business_task_failed"}
+            """));
+        var file = Path.Combine(Directory.CreateTempSubdirectory("wo-compiled-").FullName, "classifiers.json");
+        await File.WriteAllTextAsync(file, policy.ToJsonString());
+        var options = Options();
+        options.ClassifiersFile = file;
+        await using var h = await ObserverHarness.CreateAsync(options);
+        var coveredKey = WorkflowOutcomeStore.UncoveredTypeKey(Ns, "SomeWorkflow");
+        await h.DbAsync(async db =>
+        {
+            db.WorkflowOutcomeHealth.Add(new WorkflowOutcomeHealth
+            {
+                Component = WorkflowOutcomeHealthComponents.Coverage, OutageKey = coveredKey, State = "open", Reason = "no classifier rules",
+                Namespace = Ns, GapStart = Old, FirstSeenAt = Old, LastSeenAt = Old,
+            });
+            return await db.SaveChangesAsync();
+        });
+        Run(h, "wf-ok", b => b.CompletedWith(new { ok = true }));
+        Run(h, "wf-bad", b => b.Delegate("notify_failed", "agent1", "undelivered").CompletedWith(new { ok = false }));
+        Run(h, "wf-other", b => b.CompletedWith(new { ok = true }), type: "OtherWorkflow");
+
+        await h.CyclesAsync(3);
+
+        var ok = await h.RunAsync(Ns, "wf-ok", "run-1");
+        var bad = await h.RunAsync(Ns, "wf-bad", "run-1");
+        Assert.Equal((WorkflowOutcomeClassifications.ExcludedNonfailure, WorkflowOutcomeReasonCodes.NormalCompletion), (ok.Classification, ok.ReasonCode));
+        Assert.Equal((WorkflowOutcomeClassifications.ConfirmedFailure, WorkflowOutcomeReasonCodes.BusinessTaskFailed), (bad.Classification, bad.ReasonCode));
+        Assert.True(Eligible(bad));
+        var health = await h.HealthAsync();
+        Assert.Contains(health, x => x.OutageKey == coveredKey && x.State != "open");
+        // A type the policy still does not cover keeps its own durable gap.
+        Assert.Contains(health, x => x.OutageKey == WorkflowOutcomeStore.UncoveredTypeKey(Ns, "OtherWorkflow") && x.State == "open");
+    }
+
+    [Fact]
     [Trait("WorkflowOutcomeSuite", "failure-matrix")]
     public async Task Reconcile_OneRunHistoryUnavailable_OtherRunsInTheCycleStillClassified()
     {

@@ -93,6 +93,15 @@ groups:
           summary: "Workflow-outcome evidence keyring or decryption errors"
           runbook: "docs/runbooks/workflow-outcomes.md (section 12)"
 
+      - alert: WorkflowOutcomesLateResultHoldBacklog
+        expr: max(rabbitmq_queue_messages{queue="fleet.workflow-outcomes.hold"}) > 0
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Refused late-queue handoffs are parked in the hold queue; if late and hold both fill, replies fall back to the in-memory hold"
+          runbook: "docs/runbooks/workflow-outcomes.md (section 8)"
+
       - alert: WorkflowOutcomesLateResultQuarantine
         expr: max(rabbitmq_queue_messages{queue="fleet.workflow-outcomes.quarantine"}) > 0
         labels:

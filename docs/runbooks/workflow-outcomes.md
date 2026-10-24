@@ -137,8 +137,10 @@ typed proof. Do not "fix" it by writing a catch-all classifier.
 that type are not checked for business failures (Failed/TimedOut are still always failures). The
 per-run `classifier_uncovered_type` rows expire like other nonfailure metadata; the incident does
 not. It closes only after an approved policy change adds Completed rules for the type and the
-orchestrator restarts. Compiled types without a loaded definition cannot be pinned yet, so their
-incident is an accepted, visible gap.
+orchestrator restarts. For a compiled type (its runs schedule no `LoadWorkflowDefinition`), add a
+compiled rule pinned by `workflowType` + the reviewed `sourceCommit` with no `definitionHash`, and
+evidence you confirmed in a recorded history of that source; for a UWE type pin the loaded hash as
+below. Until then the incident is an accepted, visible gap.
 
 **Classifier evidence and hash maintenance.** A `classification_pending` row with
 `classifier_missing` means a Completed run of a type/definition hash with no pinned rule:

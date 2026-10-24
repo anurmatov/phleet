@@ -759,7 +759,6 @@ public sealed class WorkflowOutcomeClassifierTests
         { "{\"schemaVersion\":1,\"rules\":[" + Rule(Branch) + "," + Rule(Branch, id: "r1", type: "Other") + "]}", "duplicate id" },
         { "{\"schemaVersion\":1,\"rules\":[" + Rule(Branch) + "," + Rule(Branch, id: "r2") + "]}", "duplicates the evidence" },
         { "{\"schemaVersion\":1,\"rules\":[" + Rule(Branch, type: "*") + "]}", "exact type" },
-        { "{\"schemaVersion\":1,\"rules\":[" + Rule(Branch, hash: null) + "]}", "requires definitionHash" },
         { "{\"schemaVersion\":1,\"rules\":[" + Rule(Branch, terminal: "\"WorkflowExecutionFailed\"") + "]}", "terminalEventTypes" },
         { "{\"schemaVersion\":1,\"rules\":[" + Rule(Branch, terminal: "\"Completed\"") + "]}", "terminalEventTypes" },
         { "{\"schemaVersion\":1,\"rules\":[" + Rule(Branch, terminal: "\"WorkflowExecutionCanceled\"") + "]}", "not allowed" },
@@ -778,6 +777,87 @@ public sealed class WorkflowOutcomeClassifierTests
         { "{\"schemaVersion\":1,\"rules\":[]} trailing", "not valid JSON" },
         { "{\"schemaVersion\":\"1\",\"rules\":[]}", "schemaVersion" },
     };
+
+    // ─── compiled (sourceCommit-pinned) Completed rules ─────────────────────
+
+    private static WorkflowOutcomeClassifierPolicy Policy(params string[] rules) =>
+        WorkflowOutcomeClassifierPolicy.Parse(Encoding.UTF8.GetBytes("{\"schemaVersion\":1,\"rules\":[" + string.Join(",", rules) + "]}"));
+
+    private const string NotifyFailed = "{\"kind\":\"failure_branch\",\"exitBranch\":\"notify_failed\"}";
+
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "business")]
+    public void ClassifierPolicy_CompletedRuleWithoutHash_ParsesAsACompiledRule()
+    {
+        var rule = Assert.Single(Policy(Rule(NotifyFailed, hash: null, type: "CompiledWorkflow")).Rules);
+        Assert.Null(rule.DefinitionHash);
+        Assert.Equal(OutcomeFixtures.SourceCommit, rule.SourceCommit);
+    }
+
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "business")]
+    public void Classify_CompiledRunWithCompiledRule_FailureBranchConfirmedOtherwiseNormalCompletion()
+    {
+        var policy = Policy(Rule(NotifyFailed, hash: null, type: "CompiledWorkflow"));
+
+        var failed = WorkflowOutcomeClassifier.Classify(new HistoryBuilder("CompiledWorkflow", "wf-1")
+            .Delegate("notify_failed", "agent1", "could not deliver").CompletedWith(new { ok = false }).Facts(), policy);
+        var normal = WorkflowOutcomeClassifier.Classify(new HistoryBuilder("CompiledWorkflow", "wf-2")
+            .CompletedWith(new { ok = true }).Facts(), policy);
+
+        Assert.Equal((WorkflowOutcomeClassifications.ConfirmedFailure, WorkflowOutcomeReasonCodes.BusinessTaskFailed), (failed.Classification, failed.ReasonCode));
+        Assert.Equal((WorkflowOutcomeClassifications.ExcludedNonfailure, WorkflowOutcomeReasonCodes.NormalCompletion), (normal.Classification, normal.ReasonCode));
+        Assert.Null(normal.GapReason);
+    }
+
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "business")]
+    public void Classify_RunWithALoadedDefinition_ACompiledRuleNeverStandsInForItsHash()
+    {
+        var policy = Policy(Rule(NotifyFailed, hash: null, type: "UweDesignWorkflow"));
+
+        var v = WorkflowOutcomeClassifier.Classify(new HistoryBuilder("UweDesignWorkflow", "wf-1").LoadSeed("UweDesignWorkflow")
+            .Delegate("notify_failed", "agent1", "x").CompletedWith(new { ok = false }).Facts(), policy);
+
+        Assert.Equal((WorkflowOutcomeClassifications.ClassificationPending, WorkflowOutcomeReasonCodes.ClassifierMissing), (v.Classification, v.ReasonCode));
+    }
+
+    [Fact]
+    [Trait("WorkflowOutcomeSuite", "business")]
+    public void Classify_CompiledRun_AHashPinnedRuleNeverApplies()
+    {
+        var policy = Policy(Rule(NotifyFailed, type: "CompiledWorkflow"));
+
+        var v = WorkflowOutcomeClassifier.Classify(new HistoryBuilder("CompiledWorkflow", "wf-1")
+            .Delegate("notify_failed", "agent1", "x").CompletedWith(new { ok = false }).Facts(), policy);
+
+        Assert.Equal((WorkflowOutcomeClassifications.ClassificationPending, WorkflowOutcomeReasonCodes.ClassifierMissing), (v.Classification, v.ReasonCode));
+    }
+
+    [Theory]
+    [Trait("WorkflowOutcomeSuite", "business")]
+    [InlineData("unreadable")]
+    [InlineData("unresolved")]
+    [InlineData("incomplete")]
+    public void Classify_DefinitionNotProvenAbsent_NeverTreatedAsCompiled(string kind)
+    {
+        var policy = Policy(Rule(NotifyFailed, hash: null, type: "CompiledWorkflow"));
+        var h = new HistoryBuilder("CompiledWorkflow", "wf-1");
+        h = kind switch
+        {
+            "unreadable" => h.LoadDefinition("ciphertext"u8.ToArray(), "binary/encrypted"),
+            "unresolved" => h.LoadDefinitionUnresolved(),
+            _ => h,
+        };
+        var facts = h.Delegate("notify_failed", "agent1", "x").CompletedWith(new { ok = false }).Facts();
+        if (kind == "incomplete") facts = facts with { HistoryComplete = false };
+
+        var v = WorkflowOutcomeClassifier.Classify(facts, policy);
+
+        Assert.Equal(WorkflowOutcomeClassifications.ClassificationPending, v.Classification);
+        Assert.NotEqual(WorkflowOutcomeClassifications.ConfirmedFailure, v.Classification);
+        Assert.Equal(kind == "incomplete" ? WorkflowOutcomeReasonCodes.HistoryIncomplete : WorkflowOutcomeReasonCodes.ClassifierMissing, v.ReasonCode);
+    }
 
     [Theory]
     [Trait("WorkflowOutcomeSuite", "business")]

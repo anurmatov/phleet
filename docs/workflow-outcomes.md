@@ -108,7 +108,7 @@ field rules.
 | Field | Rule |
 |---|---|
 | `id` | Unique across the file |
-| `workflowType`, `sourceCommit`, `definitionHash` | Exact type, reviewed source and **loaded** definition hash. Required for every Completed rule; there is no catch-all type and no wildcard |
+| `workflowType`, `sourceCommit`, `definitionHash` | Exact type, reviewed source and **loaded** definition hash; there is no catch-all type and no wildcard. A Completed rule **with** `definitionHash` covers only runs that loaded exactly that definition. A Completed rule **without** it is a compiled rule pinned by `workflowType` + `sourceCommit`: it covers only runs whose complete history proves no `LoadWorkflowDefinition` was scheduled (compiled workflows). A hashed rule never covers a compiled run, a compiled rule never covers a run with a loaded definition, and an unreadable, unresolved or incomplete history is never treated as compiled |
 | `terminalEventTypes` | Exact Temporal terminal event types the rule applies to |
 | `evidence.kind` | `terminal_event`, `delegate_result` or `failure_branch` |
 | `evidence.path` | RFC 6901 JSON pointer into the delegate result payload (`delegate_result` only) |
@@ -127,9 +127,9 @@ The public seed fixtures the example covers:
 | `UwePrImplementationWorkflow` | `notify_consensus_exhausted` and `notify_outer_loop_exhausted` exit branches (review cap); the exact review-deadline branch of your pinned fixture (deadline) | Human rejection, `needs_human_review`, normal merge |
 | `UweDesignWorkflow` | `emit_exhausted_error` delegate result `ERROR:consensus_exhausted` | Human `REJECTED`, `emit_ceo_needs_human_error` |
 | `TaskDelegationWorkflow` | The original `delegate` step's typed `failed` result | The `notify-result` notifier output |
-| `NotifyCtoWorkflow`, `MemoryStoreRequestWorkflow`, `AuthTokenRefreshWorkflow` | Only a source-proven unresolved caught failure at exit (no public rule ships) | Void, null or no-op results |
+| `NotifyCtoWorkflow`, `MemoryStoreRequestWorkflow`, `AuthTokenRefreshWorkflow` | Only a source-proven unresolved caught failure at exit, as a compiled rule pinned by `sourceCommit` (no public rule ships) | Void, null or no-op results |
 
-Pin `sourceCommit` and `definitionHash` for every enrolled namespace **before** enrollment. The
+Pin `sourceCommit` (and, for UWE types, `definitionHash`) for every enrolled namespace **before** enrollment. The
 example values are deliberately not hex, so an unpinned copy fails startup instead of claiming
 coverage it does not have. Verify the JSON pointer casing against your own pinned fixture.
 

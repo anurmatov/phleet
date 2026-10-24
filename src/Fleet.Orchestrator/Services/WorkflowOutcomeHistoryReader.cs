@@ -210,6 +210,12 @@ public sealed record WorkflowOutcomeRunFacts
     public string? DefinitionHash { get; init; }
     public bool DefinitionUnsupported { get; init; }
 
+    /// <summary>
+    /// True when the history schedules LoadWorkflowDefinition at all (resolved or not). Only a
+    /// complete history with this false proves a compiled workflow with no loaded definition.
+    /// </summary>
+    public bool DefinitionScheduled { get; init; }
+
     public IReadOnlyList<WorkflowOutcomeDelegate> Delegates { get; init; } = [];
     public IReadOnlyList<WorkflowOutcomeSignal> Signals { get; init; } = [];
     public IReadOnlyList<long> CancelRequestEventIds { get; init; } = [];
@@ -614,6 +620,7 @@ public sealed class WorkflowOutcomeFactsBuilder(string @namespace, string workfl
         DefinitionVersion = _definitionVersion,
         DefinitionHash = _definitionHash,
         DefinitionUnsupported = _definitionUnsupported,
+        DefinitionScheduled = _loadScheduledId is not null,
         Delegates = _delegates.Select(d => new WorkflowOutcomeDelegate(d.ScheduledEventId, d.Target, d.TaskId, d.Attempt,
             d.Outcome, d.CloseEventId, d.CloseEventType, d.Result, d.ResultText, d.ResultStatus, d.FailureType,
             d.FailureMessage, d.ArgumentsUnsupported)).ToArray(),

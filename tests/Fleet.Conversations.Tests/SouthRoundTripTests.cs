@@ -64,6 +64,9 @@ public sealed class SouthRoundTripTests(
     private const string PrincipalId = "p_round_trip";
     private const string Answer = "the answer";
 
+    /// <summary>Task text that arms the <see cref="TerminalHold"/> barrier (#480 regression).</summary>
+    private const string HeldTaskMarker = "hold-the-second-terminal";
+
     /// <summary>
     /// Shortened so the lease-expiry cases are seconds rather than minutes. The RELATIONSHIPS are
     /// what is asserted: heartbeat &lt; lease, and abandonment only after lease + scan + grace.
@@ -490,6 +493,89 @@ public sealed class SouthRoundTripTests(
         Assert.Equal(2, after.Count(e => e.IsTerminal));
     }
 
+    // ── #480: the completion gate waits for the terminal, not the acceptance ──
+
+    /// <summary>
+    /// Regression for #480. With the second turn's terminal held by a test-owned barrier, the
+    /// conversation sits in exactly the state the original acceptance-count gate returned from —
+    /// two accepted, the second turn started, one terminal — and the completion gate must NOT
+    /// finish there. Released, it must finish on the second submission's own <c>turn.final</c>
+    /// with both exact counts intact.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The hold makes the intermediate state deterministic instead of a timing accident: the held
+    /// turn is live — the disposition and <c>/turns:start</c> are committed, the heartbeat renews
+    /// the lease — and the only thing withheld is the result the commit is built from. While it
+    /// holds, the event log cannot change, so a wait that evaluated false once cannot complete;
+    /// observing the running wait evaluate that state is the execution proof a source-level
+    /// counterexample cannot give.
+    /// </para>
+    /// <para>
+    /// Against the original acceptance-only gate this test is RED by construction: that gate
+    /// completes at the first poll inside the hold, and <see cref="WaitForSecondCompletionAsync"/>
+    /// on this commit is that gate verbatim.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task TheCompletionGateDoesNotFinishWhileTheSecondTerminalIsHeld()
+    {
+        var hold = new TerminalHold(HeldTaskMarker);
+        await using var agent = await StartAgentAsync(terminalHold: hold);
+
+        var conversation = await OpenAsync();
+        await SubmitAsync(conversation, "first, unheld");
+        await WaitForTerminalAsync(conversation);
+
+        var second = await SubmitAsync(conversation, $"{HeldTaskMarker} second, mid-flight");
+        var secondId = await SubmissionRowIdAsync(second);
+
+        var reached = await Task.WhenAny(hold.Held, Task.Delay(TimeSpan.FromSeconds(20)));
+        Assert.True(
+            reached == hold.Held,
+            "the second turn never reached the terminal hold — the barrier did not fire");
+
+        // The intermediate state, observable: both submissions accepted, the second turn started,
+        // and still exactly ONE terminal — the snapshot the old gate returned from before
+        // job 120882264918 failed its terminal assertion (expected 2, actual 1).
+        var held = await WaitAsync(conversation, e =>
+            e.Count(x => x.Kind == ConversationEventKind.SubmissionAccepted) >= 2
+            && e.Any(x => x.Kind == ConversationEventKind.TurnStarted && x.SubmissionId == secondId)
+            && e.Count(x => x.IsTerminal) == 1, timeout: null);
+
+        Assert.Equal(2, held.Count(e => e.Kind == ConversationEventKind.SubmissionAccepted));
+        Assert.Contains(held, e => e.Kind == ConversationEventKind.TurnStarted && e.SubmissionId == secondId);
+        Assert.True(held.Count(e => e.IsTerminal) == 1, $"the hold did not hold; stored: {Describe(held)}");
+
+        // Run the completion gate itself against the held state. Observing it evaluate that
+        // snapshot while still waiting is the proof it cannot finish there: the event log is
+        // frozen, so its predicate reads false on every poll until the release below.
+        var polled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completion = WaitForSecondCompletionAsync(
+            conversation, secondId, onPoll: _ => polled.TrySetResult());
+
+        await Task.WhenAny(polled.Task, completion);
+
+        // The assertion the original gate fails: it completes at the first held poll. This is the
+        // red half of #480; the corrected gate can only complete after the release.
+        Assert.False(
+            completion.IsCompleted,
+            "the completion gate finished at a two-accepted/one-terminal snapshot");
+
+        // Released, the same wait must now finish — on the second submission's own final, with
+        // both exact counts intact.
+        hold.Release();
+        var after = await completion;
+
+        Assert.Equal(2, after.Count(e => e.Kind == ConversationEventKind.SubmissionAccepted));
+        Assert.Equal(2, after.Count(e => e.IsTerminal));
+        Assert.Equal(
+            ConversationEventKind.TurnFinal,
+            after.Single(e => e.IsTerminal && e.SubmissionId == secondId).Kind);
+        Assert.DoesNotContain(after, e => e.Kind == ConversationEventKind.TurnOutcomeUnknown);
+        Assert.Equal(0, agent.Counters.FenceRejectionCount);
+    }
+
     // ── harness ──────────────────────────────────────────────────────────────
 
     private async Task<string> OpenAsync()
@@ -595,19 +681,65 @@ public sealed class SouthRoundTripTests(
         string conversationId, string kind, int expected, TimeSpan? timeout = null) =>
         WaitAsync(conversationId, events => events.Count(e => e.Kind == kind) >= expected, timeout);
 
+    /// <summary>
+    /// The completion gate for the second of two submissions.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠️ RED COMMIT ON PURPOSE (#480): the predicate below is the ORIGINAL acceptance-only gate
+    /// that this issue exists to fix — acceptance count and nothing else. The regression
+    /// <see cref="TheCompletionGateDoesNotFinishWhileTheSecondTerminalIsHeld"/> fails against it
+    /// deterministically, the way job 120882264918 failed in CI (expected 2 terminals, actual 1).
+    /// The next commit on this branch replaces it with the second submission's own terminal;
+    /// this line must not ship.
+    /// </para>
+    /// <para>
+    /// <paramref name="onPoll"/> receives every snapshot the gate evaluates. It exists so
+    /// <see cref="TheCompletionGateDoesNotFinishWhileTheSecondTerminalIsHeld"/> can observe the
+    /// running gate at a held state without sleeping; nothing else needs it.
+    /// </para>
+    /// </remarks>
+    private Task<IReadOnlyList<StoredEvent>> WaitForSecondCompletionAsync(
+        string conversationId, string secondSubmissionId, TimeSpan? timeout = null,
+        Action<IReadOnlyList<StoredEvent>>? onPoll = null) =>
+        WaitAsync(
+            conversationId,
+            events => events.Count(e => e.Kind == ConversationEventKind.SubmissionAccepted) >= 2,
+            timeout,
+            onPoll);
+
     private async Task<IReadOnlyList<StoredEvent>> WaitAsync(
-        string conversationId, Func<IReadOnlyList<StoredEvent>, bool> done, TimeSpan? timeout)
+        string conversationId, Func<IReadOnlyList<StoredEvent>, bool> done, TimeSpan? timeout,
+        Action<IReadOnlyList<StoredEvent>>? onPoll = null)
     {
         var deadline = DateTimeOffset.UtcNow + (timeout ?? TimeSpan.FromSeconds(20));
 
         while (DateTimeOffset.UtcNow < deadline)
         {
             var events = await ReadAsync(conversationId);
+            onPoll?.Invoke(events);
             if (done(events)) return events;
             await Task.Delay(100);
         }
 
         return await ReadAsync(conversationId);
+    }
+
+    /// <summary>The store's submission id for an external ref — the id events bind to.</summary>
+    /// <remarks>
+    /// ⚠️ <c>conversation_events.submission_id</c> carries the store's internal
+    /// <c>submissions.id</c>, minted at accept; it is NOT the external ULID
+    /// <see cref="SubmitAsync"/> returns. A gate bound to the ULID would wait on an id no event
+    /// ever carries. The row exists the moment the accept transaction commits, so this is a
+    /// read, not a wait.
+    /// </remarks>
+    private async Task<string> SubmissionRowIdAsync(string externalRef)
+    {
+        var id = await mysql.ScalarRowAsync(
+            $"SELECT id FROM submissions WHERE external_ref = '{externalRef}'");
+
+        Assert.True(id.Length > 0, $"no submissions row for external_ref {externalRef}");
+        return id;
     }
 
     /// <summary>
@@ -670,7 +802,7 @@ public sealed class SouthRoundTripTests(
             is { Length: > 0 } rendered ? rendered : "<no events>";
 
     private async Task<AgentUnderTest> StartAgentAsync(
-        TimeSpan? turnDuration = null, int progressEvents = 0)
+        TimeSpan? turnDuration = null, int progressEvents = 0, TerminalHold? terminalHold = null)
     {
         var south = await SouthTestHost.StartAsync(_store);
 
@@ -708,7 +840,7 @@ public sealed class SouthRoundTripTests(
         var allocator = new ConversationOrdinalAllocator();
 
         var runtime = AgentRuntime.Start(
-            new StubExecutor(Answer, turnDuration ?? TimeSpan.Zero, progressEvents),
+            new StubExecutor(Answer, turnDuration ?? TimeSpan.Zero, progressEvents, terminalHold),
             new ConversationSouthAdapter(handoff, counters, _loggers.CreateLogger<ConversationSouthAdapter>()));
 
         var consumer = new ConversationSouthConsumer(
@@ -766,7 +898,8 @@ public sealed class SouthRoundTripTests(
     /// that never finishes. The progress events are what makes AC13 expressible — a terminal with
     /// earlier progress still queued behind it.
     /// </remarks>
-    private sealed class StubExecutor(string answer, TimeSpan duration, int progressEvents) : IAgentExecutor
+    private sealed class StubExecutor(
+        string answer, TimeSpan duration, int progressEvents, TerminalHold? hold = null) : IAgentExecutor
     {
         private readonly ConcurrentQueue<string> _executed = new();
 
@@ -791,6 +924,11 @@ public sealed class SouthRoundTripTests(
 
             if (duration > TimeSpan.Zero)
                 await Task.Delay(duration, ct);
+
+            // The #480 barrier sits on the last thing before the result: everything the hold must
+            // NOT stop — disposition, /turns:start, progress — has already gone out.
+            if (hold is { } h)
+                await h.HoldIfMarkedAsync(task, ct);
 
             yield return new AgentProgress
             {
@@ -818,5 +956,42 @@ public sealed class SouthRoundTripTests(
             Task.FromResult(false);
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    /// <summary>
+    /// A test-owned barrier that holds the terminal result of every turn whose task carries a
+    /// marker, until <see cref="Release"/> is called (#480).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The held turn is otherwise live: its disposition and <c>/turns:start</c> have committed and
+    /// the heartbeat keeps renewing the lease. The only thing withheld is the result the terminal
+    /// commit is built from, which pins the conversation in the two-accepted/one-terminal state
+    /// deterministically — no sleep-based timing, no weakened assertions, and the held event log
+    /// cannot change, which is what turns "the gate is still waiting" into a provable fact.
+    /// </para>
+    /// <para>
+    /// This is scheduling the test itself arranges, inside the same stubbed seam the executor
+    /// already is. Nothing on the production side is aware of it.
+    /// </para>
+    /// </remarks>
+    private sealed class TerminalHold(string taskMarker)
+    {
+        private readonly TaskCompletionSource _held = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>Completes when a marked turn has reached the hold point.</summary>
+        public Task Held => _held.Task;
+
+        /// <summary>Lets every marked turn finish.</summary>
+        public void Release() => _release.TrySetResult();
+
+        public async Task HoldIfMarkedAsync(string task, CancellationToken ct)
+        {
+            if (!task.Contains(taskMarker, StringComparison.Ordinal)) return;
+
+            _held.TrySetResult();
+            await _release.Task.WaitAsync(ct);
+        }
     }
 }

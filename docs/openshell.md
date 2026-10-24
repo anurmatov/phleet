@@ -323,3 +323,22 @@ Active ownership is selected before nullable gateway/workspace/ID validation. A
 prepared/unbound current launch blocks Stop/Deprovision rather than disappearing
 behind retired history. Historical success also checks for active or ambiguous
 other launches within a serializable transaction before fresh runtime proof.
+
+Agent deletion now follows shared Deprovision with a separate non-retrying,
+serializable configuration transaction inside the same 120-second request budget.
+It reloads all retained launches, requires retired/revoked/no-slot state and no
+lifecycle lease, verifies each mapping/tombstone and rechecks fresh absence/drain
+proof before removing configuration. An unbound history row requires complete
+launch-owned inventory with zero owned sandboxes, not a missing-ID assumption.
+Proofs must remain fresh through the deletion decision; unknown state rolls back.
+
+Only the agent's nonce/session/binding/launch and configuration links are removed,
+with assignment-derived ACL rows staged atomically. Cross-agent session inconsistency
+blocks cleanup. Shared credential files, workspace bytes, manual/wildcard ACL rows
+and independent retired-ID tombstones survive. Registry removal and the bounded ACL
+notification follow commit; notification failure returns 503 explicitly stating
+that deletion committed, rather than claiming rollback or retrying deletion.
+Owned endpoint/SQLite regressions cover successful cleanup, unknown/complete inventory,
+new ownership/leases, missing tombstones, foreign sessions, proof failures, rollback
+on an injected SQL failure and postcommit notification failure. These are not MySQL
+or runtime qualification, and the production evidence peer is still unregistered.

@@ -169,6 +169,69 @@ public sealed class OpenShellRetirementService(Func<OrchestratorDbContext> creat
         return (intent, delete);
     }
 
+    /// <summary>Delete configuration only after deprovision, rechecking every retained launch under the deletion transaction.</summary>
+    public async Task<(ProvisionResult Result, bool AclChanged)> CompleteAgentDeletionAsync(string name, int expectedAgentId, CancellationToken callerToken = default)
+    {
+        using var operation = CancellationTokenSource.CreateLinkedTokenSource(callerToken);
+        operation.CancelAfter(TimeSpan.FromSeconds(120));
+        var ct = operation.Token;
+        using var scope = scopes.CreateScope();
+        var reader = scope.ServiceProvider.GetService<IOpenShellRuntimeEvidenceReader>();
+        if (reader is null) return (ProvisionResult.Fail(name, "compatibility_blocked: trusted deletion evidence is unavailable", 503), false);
+        try
+        {
+            await using var db = createDb();
+            if (db.Database.CreateExecutionStrategy().RetriesOnFailure)
+                return (ProvisionResult.Fail(name, "non-retrying lifecycle storage is required", 503), false);
+            await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+            var agent = await db.Agents.SingleOrDefaultAsync(x => x.Name == name, ct);
+            if (agent is null) return (ProvisionResult.Fail(name, "agent not found in DB", 404), false);
+            var launches = await db.OpenShellLaunches.Where(x => x.AgentId == agent.Id).ToListAsync(ct);
+            if (agent.Id != expectedAgentId || agent.ExecutionShell != "openshell" || agent.OpenShellMigrationState != "active" || launches.Count == 0
+                || launches.Any(x => x.Phase != "retired" || x.RevokedAt is null || x.ActiveAgentId is not null)
+                || await db.OpenShellLeases.AnyAsync(x => x.AgentId == agent.Id, ct))
+                throw new OpenShellStateConflictException("Every launch must be retired with no active slot or lifecycle owner.");
+            var oldestProof = DateTime.MaxValue;
+            foreach (var launch in launches)
+            {
+                if (launch.SandboxId is not null && (!Bound(launch) || !await db.OpenShellRetiredIds.AnyAsync(x =>
+                        x.GatewayId == launch.GatewayId && x.SandboxId == launch.SandboxId, ct)))
+                    throw new OpenShellStateConflictException("Deletion cannot discard incomplete mapping or missing tombstone.");
+                var observedAt = await VerifyAsync(reader, launch, true, ct);
+                if (observedAt < oldestProof) oldestProof = observedAt;
+            }
+            var ids = launches.Select(x => x.Id).ToHashSet();
+            // Keep the SQL membership test relational, not a captured array/span expression.
+            var ownedIds = db.OpenShellLaunches.Where(x => x.AgentId == agent.Id).Select(x => x.Id);
+            var sessions = await db.OpenShellIdentitySessions.Where(x => x.AgentId == agent.Id || ownedIds.Contains(x.LaunchId)).ToListAsync(ct);
+            if (sessions.Any(x => x.AgentId != agent.Id || !ids.Contains(x.LaunchId)))
+                throw new OpenShellStateConflictException("Session ownership is inconsistent; preserve recovery state.");
+            // Remove only this agent's references, never shared credential files or owned workspace bytes.
+            db.OpenShellRequestNonces.RemoveRange(await db.OpenShellRequestNonces.Where(x => ownedIds.Contains(x.LaunchId)).ToListAsync(ct));
+            db.OpenShellIdentitySessions.RemoveRange(sessions);
+            db.OpenShellSecretBindings.RemoveRange(await db.OpenShellSecretBindings.Where(x => x.AgentId == agent.Id).ToListAsync(ct));
+            db.OpenShellLaunches.RemoveRange(launches);
+            var aclChanged = await AgentProjectAccessSync.StageAssignmentsAsync(db, name, [], ct);
+            db.Agents.Remove(agent); // Existing FK cascades remove configuration links, not their shared resources.
+            if (DateTime.UtcNow - oldestProof > TimeSpan.FromSeconds(5))
+                throw new OpenShellStateConflictException("Deletion proof aged out before configuration cleanup.");
+            await db.SaveChangesAsync(ct);
+            if (DateTime.UtcNow - oldestProof > TimeSpan.FromSeconds(5))
+                throw new OpenShellStateConflictException("Deletion proof aged out before commit.");
+            await tx.CommitAsync(ct);
+            return (ProvisionResult.Ok(name, "agent configuration deleted after fresh absence and intake-drain proof"), aclChanged);
+        }
+        catch (OperationCanceledException) when (callerToken.IsCancellationRequested) { throw; }
+        catch (OpenShellStateConflictException)
+        {
+            return (ProvisionResult.Fail(name, "agent deletion blocked by current ownership or proof; recovery state retained", 409), false);
+        }
+        catch (Exception)
+        {
+            return (ProvisionResult.Fail(name, "agent deletion unconfirmed; inspect authoritative state before retrying", 503), false);
+        }
+    }
+
     private static Task<OpenShellLaunch?> FindAsync(OrchestratorDbContext db, string name, CancellationToken ct) =>
         db.OpenShellLaunches.AsNoTracking().Where(l => l.Agent.Name == name && l.Agent.ExecutionShell == "openshell"
             && l.Agent.OpenShellMigrationState == "active")
@@ -249,7 +312,7 @@ public sealed class OpenShellRetirementService(Func<OrchestratorDbContext> creat
         await tx.CommitAsync(ct);
     }
 
-    private static async Task VerifyAsync(IOpenShellRuntimeEvidenceReader reader, OpenShellLaunch launch,
+    private static async Task<DateTime> VerifyAsync(IOpenShellRuntimeEvidenceReader reader, OpenShellLaunch launch,
         bool absence, CancellationToken ct)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -260,7 +323,9 @@ public sealed class OpenShellRetirementService(Func<OrchestratorDbContext> creat
         if (proof.LaunchId != target.LaunchId || proof.IdentityEpoch != target.IdentityEpoch
             || proof.GatewayId != target.GatewayId || proof.RuntimeId != target.RuntimeId
             || !proof.Stopped || absence && !proof.Absent || proof.Consumers != 0 || proof.Pollers != 0
+            || absence && target.RuntimeId is null && (!proof.LaunchInventoryComplete || proof.OwnedSandboxCount != 0)
             || proof.ObservedAt.Kind != DateTimeKind.Utc || proof.ObservedAt > now || now - proof.ObservedAt > TimeSpan.FromSeconds(5))
             throw new OpenShellStateConflictException("Fresh stopped/absent and drained-intake proof is required.");
+        return proof.ObservedAt;
     }
 }

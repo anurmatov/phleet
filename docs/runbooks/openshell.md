@@ -73,3 +73,20 @@ refusal is not authority to rewrite the recorded intent or select a replacement.
 A confirmed Stop keeps config and the active slot, while confirmed cleanup releases
 the slot only after absence and drain verification. Reconciliation does not create
 or resume a sandbox, activate intake, complete migration or implement rollback.
+
+## Agent deletion (source-only)
+
+`DELETE /api/agents/{name}` retains the existing outside-operator authentication.
+It first requires shared deprovision success, then rechecks all retained launches
+under a fresh serializable transaction before deleting configuration. Active or
+pending launches, any lifecycle lease, missing tombstones, inconsistent sessions,
+incomplete launch inventory or stale/failed absence/drain proof block deletion.
+Failure before commit retains configuration and recovery rows, not partial cleanup.
+
+A successful response removes agent-owned references and assignment-derived ACL
+rows only. Shared credential records/files, workspace bytes, manual/wildcard ACL
+rows and retired-ID tombstones are retained. Registry removal follows commit.
+`503 agent deleted; ACL notification unconfirmed` means database cleanup committed
+but the bounded notification failed; inspect authoritative state instead of replaying
+a delete or interpreting the response as rollback. The whole deprovision/cleanup
+request budget is 120 seconds, with no new runtime or rollout authority.

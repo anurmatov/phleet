@@ -20,6 +20,22 @@ public class MediaGroupBufferTests
             await Task.Delay(25);
     }
 
+    /// <summary>The buffer's debounce window (MediaGroupBuffer.DebounceWindowMs).</summary>
+    private const int DebounceWindowMs = 1500;
+
+    /// <summary>
+    /// Waits until <paramref name="expected"/> flushes arrived, then watches one more debounce
+    /// window. The debounce timer starts on a thread-pool work item and completes on a thread-pool
+    /// continuation, so on a loaded runner the flush can land well past 1500 ms; a fixed
+    /// <c>Task.Delay(1700)</c> then asserted on an empty list. The extra window keeps the caller's
+    /// exact-count assertion able to catch a duplicate or stray late flush.
+    /// </summary>
+    private static async Task WaitForFlushesAsync<T>(IReadOnlyCollection<T> received, int expected)
+    {
+        await WaitForCountAsync(received, expected);
+        await Task.Delay(DebounceWindowMs);
+    }
+
     private static IncomingMessage MakeTemplate(long chatId = 1) => new()
     {
         ChatId = chatId,
@@ -49,7 +65,7 @@ public class MediaGroupBufferTests
         });
 
         // Wait for the 1500 ms debounce + slack
-        await Task.Delay(1700);
+        await WaitForFlushesAsync(received, 1);
 
         // Assert
         Assert.Single(received);
@@ -72,7 +88,7 @@ public class MediaGroupBufferTests
         await buffer.AddPhotoAsync("g2", MakeImage(3), MakeTemplate(), flush);
 
         // Wait for debounce to fire
-        await Task.Delay(1700);
+        await WaitForFlushesAsync(received, 1);
 
         // All three photos in a single flush
         Assert.Single(received);
@@ -150,7 +166,7 @@ public class MediaGroupBufferTests
         Assert.Equal(2, buffer.GetImageCount("cnt"));
 
         // Wait for flush
-        await Task.Delay(1700);
+        await WaitForFlushesAsync(received, 1);
         // After flush the entry is removed
         Assert.Equal(0, buffer.GetImageCount("cnt"));
     }
@@ -178,7 +194,7 @@ public class MediaGroupBufferTests
 
         Assert.Equal(1, buffer.GetImageCount("g4"));
 
-        await Task.Delay(1700);
+        await WaitForFlushesAsync(received, 1);
 
         // Only the 1 non-null image in the result
         Assert.Single(received);
@@ -201,7 +217,7 @@ public class MediaGroupBufferTests
         await buffer.AddPhotoAsync("g5", MakeImage(1), firstTemplate, flush);
         await buffer.AddPhotoAsync("g5", MakeImage(2), secondTemplate, flush);
 
-        await Task.Delay(1700);
+        await WaitForFlushesAsync(received, 1);
 
         Assert.Single(received);
         Assert.Equal(42L, received[0].ChatId); // first template wins
@@ -228,7 +244,7 @@ public class MediaGroupBufferTests
         // duplicate of first — should appear only once
         await buffer.AddPhotoAsync("cap1", MakeImage(3), Captioned("photo one"), flush);
 
-        await Task.Delay(1700);
+        await WaitForFlushesAsync(received, 1);
 
         Assert.Single(received);
         // "photo one" and "photo two" joined; "photo one" deduped
@@ -246,7 +262,7 @@ public class MediaGroupBufferTests
         await buffer.AddPhotoAsync("cap2", MakeImage(1), MakeTemplate(), flush);
         await buffer.AddPhotoAsync("cap2", MakeImage(2), MakeTemplate(), flush);
 
-        await Task.Delay(1700);
+        await WaitForFlushesAsync(received, 1);
 
         Assert.Single(received);
         Assert.Equal("", received[0].StrippedText); // no captions → empty string
@@ -267,7 +283,7 @@ public class MediaGroupBufferTests
         // cap reached — third photo rejected
         Assert.False(await buffer.TryAddPhotoWithCapAsync("g6", MakeImage(3), MakeTemplate(), cap, flush));
 
-        await Task.Delay(1700);
+        await WaitForFlushesAsync(received, 1);
 
         // Only the two accepted photos in the flush
         Assert.Single(received);
@@ -286,7 +302,7 @@ public class MediaGroupBufferTests
         Assert.True(await buffer.TryAddPhotoWithCapAsync("g7", MakeImage(1), MakeTemplate(), 5, flush));
         Assert.True(await buffer.TryAddPhotoWithCapAsync("g7", null,         MakeTemplate(), 5, flush));
 
-        await Task.Delay(1700);
+        await WaitForFlushesAsync(received, 1);
 
         Assert.Single(received);
         // null photo skipped — only 1 real image

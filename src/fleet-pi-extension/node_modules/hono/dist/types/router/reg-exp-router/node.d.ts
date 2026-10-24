@@ -1,0 +1,15 @@
+//#region src/router/reg-exp-router/node.d.ts
+export declare const LABEL_REG_EXP_STR = "[^/]+";
+export declare const ONLY_WILDCARD_REG_EXP_STR = ".*";
+export declare const TAIL_WILDCARD_REG_EXP_STR = "(?:|/.*)";
+export declare const PATH_ERROR: unique symbol;
+export type ParamAssocArray = [string, number][];
+export interface Context {
+  varIndex: number;
+}
+export declare class Node {
+  
+  insert(tokens: readonly string[], index: number, paramMap: ParamAssocArray, context: Context, isStatic: boolean): void;
+  buildRegExpStr(): string;
+}
+//#endregion

@@ -47,6 +47,9 @@ public static class WorkflowOutcomeEndpoints
         services.AddScoped<WorkflowOutcomeInboxService>();
         services.AddScoped<WorkflowRecoveryService>();
         services.TryAddSingleton<IWorkflowRecoveryProbe, TemporalWorkflowRecoveryProbe>();
+        services.AddHttpClient<GitHubWorkflowRecoveryArtifactReader>(c => c.Timeout = GitHubWorkflowRecoveryArtifactReader.Timeout);
+        services.TryAddTransient<IWorkflowRecoveryArtifactReader>(sp => sp.GetRequiredService<GitHubWorkflowRecoveryArtifactReader>());
+        services.TryAddSingleton<WorkflowRecoveryApprovals>();
         services.AddSingleton<WorkflowOutcomeBatcher>();
         if (runBatcher) services.AddHostedService(sp => sp.GetRequiredService<WorkflowOutcomeBatcher>());
         return services;

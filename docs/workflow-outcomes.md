@@ -342,12 +342,40 @@ token is provisioned into the coordinator.
   history, agent task and late results, and the issue/PR/head/branch/checks. An unavailable,
   ambiguous or degraded probe, or an absent delegate-recovery ledger, blocks retry/reassign/resume
   with the missing proof named. A timeout is not stop proof.
+- **Artifact.** When the run names an issue or PR, the operator's artifact proof must be exactly
+  `artifact:<owner/repo>#pr/<n>` or `artifact:<owner/repo>#issue/<n>`. Any other `artifact:` proof
+  is `artifact_proof_mismatch`. The orchestrator then reads the artifact from the GitHub REST API,
+  unauthenticated (`WorkflowOutcomes:GitHubApiBaseUrl`): pull state, merge, head commit and branch,
+  and check runs on the head; for an issue, its state and the open pull requests that reference it.
+  Existing work blocks: `artifact_merged`, `artifact_pr_open`, `artifact_checks_running`,
+  `artifact_branch_moved` (the head branch moved past the PR), `artifact_issue_closed`. A 404 (a
+  private or missing repository), any other status, a truncated list or an odd shape is
+  `artifact_state_unverified`. No credential is used, so recovery for a private repository stays
+  blocked until a credentialed read is separately approved. The reservation binds a hash of the
+  exact reference and the facts read; at dispatch a changed artifact is `artifact_changed` and
+  blocks for good, while an unreadable one only refuses that call.
+- **Authority, deny-by-default.** Every reservation is treated as production/financial: it needs an
+  unexpired entry in the operator-owned `recovery-approvals.json`
+  (`WorkflowOutcomes:RecoveryApprovalsFile`) that names exactly the same action. Without one the
+  reserve is `authority_not_covering_action`; an expired entry is `authority_expired`; a blank path
+  or a missing, oversized or invalid file is `authority_unverified`. The file is read on every
+  reserve and dispatch, so removing an entry revokes it: a dispatch then blocks for good, while an
+  unreadable file only refuses that call. A namespace, a `decision:` reference or the shape of a URL
+  is never authority.
 - The bridge calls `POST /recovery/{operationId}/authorize-dispatch`, which moves
   `reserved → dispatching` exactly once; a second call is 409 `already_dispatching`. The start id is
   `recovery-<OperationUUID>` with RejectDuplicate and the exact input/task-queue/type hash.
 - An ambiguous start/signal/cancel is `dispatch_unknown`: the reservation is permanent, the same id
   and its history are read back before anything else, and it is never recycled. Recovery states:
   `reserved`, `dispatching`, `dispatched`, `dispatch_unknown`, `verified`, `blocked`.
+- **Verified means Temporal agrees.** The bridge's readback receipt is not trusted on its word. A
+  start becomes `verified` only when the orchestrator's own Describe of `recovery-<OperationUUID>`
+  at the reported run id returns that run with the reserved workflow type and task queue. A cancel
+  is verified only when the exact source run reads back `Canceled`. If Temporal cannot answer, a
+  positive receipt stays `dispatched` and a later readback may still verify it (409
+  `replacement_unverified` until then). If Temporal contradicts it (no such run, another run id,
+  type or queue), the operation becomes `dispatch_unknown` with its health incident, and resends
+  are 409 `replacement_mismatch`. The state change and its incident are committed together.
 - One reservation per version even under races; a late success or head change invalidates the
   proof and needs a renewed decision. A failed dispatch keeps the original PR/work/replacement links.
 - **Safe same-PR recovery:** a replacement for a PR workflow continues the existing PR only after the

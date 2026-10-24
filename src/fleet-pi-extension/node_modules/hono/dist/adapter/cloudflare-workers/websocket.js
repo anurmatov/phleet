@@ -1,0 +1,33 @@
+import { WSContext, defineWebSocketHelper } from "../../helper/websocket/index.js";
+//#region src/adapter/cloudflare-workers/websocket.ts
+/**
+* @deprecated `hono/cloudflare-workers` will be removed in v5. Install `@hono/cloudflare-workers` and import from there instead.
+*/
+const upgradeWebSocket = defineWebSocketHelper(async (c, events) => {
+	if (c.req.header("Upgrade") !== "websocket") return;
+	const webSocketPair = new WebSocketPair();
+	const client = webSocketPair[0];
+	const server = webSocketPair[1];
+	const wsContext = new WSContext({
+		close: (code, reason) => server.close(code, reason),
+		get protocol() {
+			return server.protocol;
+		},
+		raw: server,
+		get readyState() {
+			return server.readyState;
+		},
+		url: server.url ? new URL(server.url) : null,
+		send: (source) => server.send(source)
+	});
+	if (events.onClose) server.addEventListener("close", (evt) => events.onClose?.(evt, wsContext));
+	if (events.onMessage) server.addEventListener("message", (evt) => events.onMessage?.(evt, wsContext));
+	if (events.onError) server.addEventListener("error", (evt) => events.onError?.(evt, wsContext));
+	server.accept?.();
+	return new Response(null, {
+		status: 101,
+		webSocket: client
+	});
+});
+//#endregion
+export { upgradeWebSocket };

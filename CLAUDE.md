@@ -447,6 +447,7 @@ operator-owned host qualification (AC25, `scripts/verify-workflow-outcomes.sh ve
 | `FLEET_WORKFLOW_OUTCOMES_BATCH_SIZE` | `20` (1–20) | `WorkflowOutcomes__BatchSize` |
 | `FLEET_WORKFLOW_OUTCOMES_OWNERS_FILE` | `/etc/phleet/workflow-outcomes/ownership.json` | `WorkflowOutcomes__OwnersFile` |
 | `FLEET_WORKFLOW_OUTCOMES_CLASSIFIERS_FILE` | `/etc/phleet/workflow-outcomes/classifiers.json` | `WorkflowOutcomes__ClassifiersFile` |
+| `FLEET_WORKFLOW_OUTCOMES_RECOVERY_APPROVALS_FILE` | `/etc/phleet/workflow-outcomes/recovery-approvals.json` (absent = all recovery denied) | `WorkflowOutcomes__RecoveryApprovalsFile` |
 | `FLEET_WORKFLOW_OUTCOMES_KEYRING_DIR` | `/var/lib/phleet/workflow-outcomes/keys` | `WorkflowOutcomes__KeyringDir` |
 | `FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN_KEY` | `FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN` | `WorkflowOutcomes__CoordinatorTokenKey` |
 | `FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN` | blank | read by the name above |

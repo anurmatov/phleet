@@ -39,6 +39,16 @@ public sealed class WorkflowOutcomeOptions
     /// <summary>Read-only classifier policy (classifiers.json v1). Required when enabled.</summary>
     public string ClassifiersFile { get; set; } = "";
 
+    /// <summary>
+    /// Operator-owned record of human approvals (recovery-approvals.json v1), each covering one
+    /// exact recovery action. Read on every reserve and dispatch. Blank, missing or invalid denies
+    /// every recovery: production/financial recovery is deny-by-default.
+    /// </summary>
+    public string RecoveryApprovalsFile { get; set; } = "";
+
+    /// <summary>Base URL of the unauthenticated issue/PR/head/branch/checks read made before a recovery reserve.</summary>
+    public string GitHubApiBaseUrl { get; set; } = "https://api.github.com";
+
     /// <summary>Owned, persisted 0700 directory for data-protection keys. Required when enabled; never an ephemeral default.</summary>
     public string KeyringDir { get; set; } = "";
 

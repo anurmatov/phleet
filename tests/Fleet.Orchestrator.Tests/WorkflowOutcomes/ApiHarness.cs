@@ -43,6 +43,8 @@ public sealed class ApiHost : IAsyncDisposable
     public required ApiDatabase Database { get; init; }
     public required ManualClock Clock { get; init; }
     public required FakeRecoveryProbe Probe { get; init; }
+    public required FakeArtifactReader Artifacts { get; init; }
+    public required RecoveryApprovalsFixture Approvals { get; init; }
     public required CapturingLoggerProvider Logs { get; init; }
 
     public WorkflowOutcomeBatcher Batcher => App.Services.GetRequiredService<WorkflowOutcomeBatcher>();
@@ -74,6 +76,10 @@ public sealed class ApiHost : IAsyncDisposable
         configure?.Invoke(config);
         var logs = new CapturingLoggerProvider();
         var probe = new FakeRecoveryProbe();
+        var artifacts = new FakeArtifactReader();
+        // Deny-by-default: a host starts with an empty approvals file; tests add exact approvals.
+        var approvals = new RecoveryApprovalsFixture(Path.Combine(Path.GetTempPath(), "wo-approvals-" + Guid.NewGuid().ToString("N") + ".json"));
+        if (!config.ContainsKey("WorkflowOutcomes:RecoveryApprovalsFile")) config["WorkflowOutcomes:RecoveryApprovalsFile"] = approvals.Path;
 
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -84,6 +90,7 @@ public sealed class ApiHost : IAsyncDisposable
         builder.Services.AddDbContext<OrchestratorDbContext>(database.Configure);
         builder.Services.AddSingleton<TimeProvider>(clock);
         builder.Services.AddSingleton<IWorkflowRecoveryProbe>(probe);
+        builder.Services.AddSingleton<IWorkflowRecoveryArtifactReader>(artifacts);
         builder.Services.AddSingleton(protector ?? new DataProtectionWorkflowOutcomePayloadProtector(new EphemeralDataProtectionProvider()));
         builder.Services.AddWorkflowOutcomeApi(builder.Configuration, runBatcher: false);
 
@@ -113,13 +120,14 @@ public sealed class ApiHost : IAsyncDisposable
         await database.EnsureCreatedAsync();
         await app.StartAsync();
         database.Commands.Reset();
-        return new ApiHost { App = app, Client = app.GetTestClient(), Database = database, Clock = clock, Probe = probe, Logs = logs };
+        return new ApiHost { App = app, Client = app.GetTestClient(), Database = database, Clock = clock, Probe = probe, Artifacts = artifacts, Approvals = approvals, Logs = logs };
     }
 
     public async ValueTask DisposeAsync()
     {
         Client.Dispose();
         await App.DisposeAsync();
+        Approvals.Dispose();
     }
 
     // ── HTTP helpers ───────────────────────────────────────────────────────────
@@ -350,11 +358,15 @@ public sealed class FakeRecoveryProbe : IWorkflowRecoveryProbe
     public HashSet<string> ActiveTasks { get; } = new(StringComparer.Ordinal);
 
     /// <summary>Records the exact run's status and makes it the latest run of its workflow id.</summary>
-    public void SetRun(string ns, string workflowId, string runId, string status)
+    public void SetRun(string ns, string workflowId, string runId, string status, string? workflowType = null, string? taskQueue = null)
     {
-        _runs[Key(ns, workflowId, runId)] = new WorkflowRecoveryRunState(runId, status);
-        _runs[Key(ns, workflowId, null)] = new WorkflowRecoveryRunState(runId, status);
+        _runs[Key(ns, workflowId, runId)] = new WorkflowRecoveryRunState(runId, status, workflowType, taskQueue);
+        _runs[Key(ns, workflowId, null)] = new WorkflowRecoveryRunState(runId, status, workflowType, taskQueue);
     }
+
+    /// <summary>Answers a Describe of (<paramref name="ns"/>, <paramref name="workflowId"/>, <paramref name="askedRunId"/>) with <paramref name="state"/>.</summary>
+    public void SetAnswer(string ns, string workflowId, string? askedRunId, WorkflowRecoveryRunState? state) =>
+        _runs[Key(ns, workflowId, askedRunId)] = state;
 
     public void SetLatest(string ns, string workflowId, string runId, string status) =>
         _runs[Key(ns, workflowId, null)] = new WorkflowRecoveryRunState(runId, status);
@@ -369,6 +381,80 @@ public sealed class FakeRecoveryProbe : IWorkflowRecoveryProbe
     public IReadOnlyCollection<string> ActiveTaskIds() => ActiveTasks.ToList();
 
     private static string Key(string ns, string workflowId, string? runId) => ns + "|" + workflowId + "|" + (runId ?? "*");
+}
+
+/// <summary>A scripted issue/PR reader: one answer per artifact, unverified when none is set.</summary>
+public sealed class FakeArtifactReader : IWorkflowRecoveryArtifactReader
+{
+    private readonly ConcurrentDictionary<string, WorkflowRecoveryArtifactRead> _reads = new();
+    public ConcurrentQueue<string> Calls { get; } = new();
+
+    public void Set(string repo, long? issue, long? pr, WorkflowRecoveryArtifactRead read) => _reads[Key(repo, issue, pr)] = read;
+
+    /// <summary>A closed, unmerged pull request with finished checks and its head branch deleted: no existing work.</summary>
+    public static WorkflowRecoveryArtifactRead ClosedPull(string sha = "0123456789abcdef0123456789abcdef01234567") =>
+        new(new WorkflowRecoveryArtifactFacts(WorkflowRecoveryArtifactFacts.PullRequest, "closed", false, sha, "feat/x", null, 0, []), null);
+
+    public static WorkflowRecoveryArtifactRead OpenIssue(params long[] openPulls) =>
+        new(new WorkflowRecoveryArtifactFacts(WorkflowRecoveryArtifactFacts.Issue, "open", false, null, null, null, 0, openPulls), null);
+
+    public Task<WorkflowRecoveryArtifactRead> ReadAsync(string repo, long? issueNumber, long? prNumber, CancellationToken ct)
+    {
+        Calls.Enqueue(Key(repo, issueNumber, prNumber));
+        return Task.FromResult(_reads.GetValueOrDefault(Key(repo, issueNumber, prNumber)) ?? WorkflowRecoveryArtifactRead.Failed("artifact_read_failed"));
+    }
+
+    private static string Key(string repo, long? issue, long? pr) => repo + "|" + issue + "|" + pr;
+}
+
+/// <summary>The host's recovery-approvals.json: starts empty (deny-by-default) and is rewritten on every change.</summary>
+public sealed class RecoveryApprovalsFixture : IDisposable
+{
+    private readonly List<object> _entries = [];
+
+    public RecoveryApprovalsFixture(string path)
+    {
+        Path = path;
+        Write();
+    }
+
+    public string Path { get; }
+
+    /// <summary>Records a human approval covering exactly <paramref name="action"/>.</summary>
+    public void Add(WorkflowRecoveryAction action, DateTimeOffset? expiresAt = null)
+    {
+        var entry = new Dictionary<string, object?>
+        {
+            ["authorityRef"] = action.AuthorityRef, ["operation"] = action.Operation,
+            ["outcomeId"] = action.OutcomeId.ToString("D"), ["decisionId"] = action.DecisionId.ToString("D"),
+            ["targetNamespace"] = action.TargetNamespace,
+            ["expiresAt"] = (expiresAt ?? DateTimeOffset.UtcNow.AddDays(1)).UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture),
+        };
+        if (action.TargetWorkflowType is not null) entry["targetWorkflowType"] = action.TargetWorkflowType;
+        if (action.TargetTaskQueue is not null) entry["targetTaskQueue"] = action.TargetTaskQueue;
+        if (action.TargetAgent is not null) entry["targetAgent"] = action.TargetAgent;
+        if (action.InputSha256 is not null) entry["inputSha256"] = action.InputSha256;
+        _entries.Add(entry);
+        Write();
+    }
+
+    public void Clear()
+    {
+        _entries.Clear();
+        Write();
+    }
+
+    /// <summary>Replaces the file with arbitrary bytes (invalid-policy cases).</summary>
+    public void WriteRaw(string content) => File.WriteAllText(Path, content);
+
+    public void Delete() => File.Delete(Path);
+
+    private void Write() => File.WriteAllText(Path, JsonSerializer.Serialize(new { schemaVersion = 1, approvals = _entries }));
+
+    public void Dispose()
+    {
+        if (File.Exists(Path)) File.Delete(Path);
+    }
 }
 
 /// <summary>Captures every formatted log line (and its exception text) for the no-secret assertions.</summary>

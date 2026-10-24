@@ -30,7 +30,8 @@ public interface IWorkflowRecoveryProbe
     IReadOnlyCollection<string> ActiveTaskIds();
 }
 
-public sealed record WorkflowRecoveryRunState(string RunId, string Status);
+/// <summary>One Describe answer. Type and task queue let a replacement run be matched to its reservation.</summary>
+public sealed record WorkflowRecoveryRunState(string RunId, string Status, string? WorkflowType = null, string? TaskQueue = null);
 
 /// <summary><see cref="IWorkflowRecoveryProbe"/> over Temporal Describe and the agent heartbeat registry.</summary>
 public sealed class TemporalWorkflowRecoveryProbe(
@@ -50,7 +51,7 @@ public sealed class TemporalWorkflowRecoveryProbe(
             var d = await client.GetWorkflowHandle(workflowId, runId: runId)
                 .DescribeAsync(new WorkflowDescribeOptions { Rpc = new RpcOptions { CancellationToken = cts.Token, Timeout = bound } })
                 .WaitAsync(bound, ct);
-            return new WorkflowRecoveryRunState(d.RunId ?? "", d.Status.ToString());
+            return new WorkflowRecoveryRunState(d.RunId ?? "", d.Status.ToString(), d.WorkflowType, d.TaskQueue);
         }
         catch (RpcException ex) when (ex.Code == RpcException.StatusCode.NotFound)
         {
@@ -71,6 +72,8 @@ public sealed class WorkflowRecoveryService(
     OrchestratorDbContext db,
     WorkflowOutcomeAuthorization auth,
     IWorkflowRecoveryProbe probe,
+    IWorkflowRecoveryArtifactReader artifacts,
+    WorkflowRecoveryApprovals approvals,
     IOptions<WorkflowOutcomeOptions> options,
     TimeProvider clock,
     ILogger<WorkflowRecoveryService> logger)
@@ -79,7 +82,11 @@ public sealed class WorkflowRecoveryService(
     public const string LateSuccessStatus = "completed";
     private const int MaxStopProofs = 50;
 
-    private sealed record Check(string? BlockedReason, IReadOnlyList<string> MissingProofs)
+    public const string ReplacementUnverified = "replacement_unverified";
+    public const string ReplacementMismatch = "replacement_mismatch";
+
+    /// <summary>A safety verdict; <see cref="ArtifactHash"/> is what an allowed reservation binds about its issue/PR.</summary>
+    private sealed record Check(string? BlockedReason, IReadOnlyList<string> MissingProofs, string? ArtifactHash = null)
     {
         public static readonly Check Allowed = new(null, []);
         public static Check Block(string reason, params string[] missing) => new(reason, missing);
@@ -108,7 +115,8 @@ public sealed class WorkflowRecoveryService(
     /// <summary>
     /// Every safety rule, cheapest first, returning the first precise blocking reason. Retry and
     /// reassign need an authoritative terminal source, no running successor, task or replacement,
-    /// no late success, a stop proof per recorded task and an artifact proof when an issue/PR exists.
+    /// no late success, a stop proof per recorded task and, when an issue/PR exists, its exact
+    /// artifact proof plus a read of the issue/PR/head/branch/checks that finds no existing work.
     /// </summary>
     private async Task<Check> CheckAsync(
         WorkflowOutcomeRun run, WorkflowOutcomeDecision decision, IReadOnlyList<string> proofs, string? targetAgent,
@@ -182,11 +190,50 @@ public sealed class WorkflowRecoveryService(
 
         var missingTasks = taskIds.Select(t => "task:" + t).Where(r => !proofs.Contains(r, StringComparer.Ordinal)).ToList();
         if (missingTasks.Count > 0) return new Check("stop_proof_missing", missingTasks);
-        // No GitHub reads in v1: an issue/PR state is verified only by an operator artifact proof.
-        if (run.Repo is not null && (run.IssueNumber is not null || run.PrNumber is not null)
-            && !proofs.Any(p => p.StartsWith("artifact:", StringComparison.Ordinal)))
-            return Check.Block("artifact_state_unverified", ArtifactRef(run));
-        return Check.Allowed;
+        return await ArtifactAsync(run, proofs, ct);
+    }
+
+    /// <summary>
+    /// The run's issue/PR before a new attempt. At reserve the operator's artifact proof must be
+    /// exactly <see cref="ArtifactRef"/>, and any other artifact proof is refused; the artifact is
+    /// then read. A merged or open pull request, unfinished check runs, a head branch that moved
+    /// past the pull request, a closed issue or an open pull request referencing the issue is
+    /// existing work and blocks. An unreadable artifact is unverified. Allowed carries the hash of
+    /// the exact reference and the facts read, so a later change invalidates the reservation.
+    /// </summary>
+    private async Task<Check> ArtifactAsync(WorkflowOutcomeRun run, IReadOnlyList<string>? proofs, CancellationToken ct)
+    {
+        if (run.Repo is null) return Check.Allowed;
+        if (run.IssueNumber is null && run.PrNumber is null)
+            return Check.Allowed with { ArtifactHash = WorkflowOutcomeHashes.Sha256Hex("artifact:" + run.Repo) };
+
+        var expected = ArtifactRef(run);
+        if (proofs is not null)
+        {
+            var given = proofs.Where(p => p.StartsWith("artifact:", StringComparison.Ordinal)).ToList();
+            if (given.Any(p => !string.Equals(p, expected, StringComparison.Ordinal))) return Check.Block("artifact_proof_mismatch", expected);
+            if (given.Count == 0) return Check.Block("artifact_state_unverified", expected);
+        }
+
+        var read = await artifacts.ReadAsync(run.Repo, run.IssueNumber, run.PrNumber, ct);
+        if (read.Facts is not { } facts) return Check.Block("artifact_state_unverified", expected);
+        if (facts.Kind != (run.PrNumber is null ? WorkflowRecoveryArtifactFacts.Issue : WorkflowRecoveryArtifactFacts.PullRequest))
+            return Check.Block("artifact_state_unverified", expected);
+        if (facts.Kind == WorkflowRecoveryArtifactFacts.PullRequest)
+        {
+            if (facts.Merged) return Check.Block("artifact_merged", expected);
+            if (facts.State == "open") return Check.Block("artifact_pr_open", expected);
+            if (facts.PendingChecks > 0) return Check.Block("artifact_checks_running", expected);
+            if (facts.BranchSha is not null && facts.BranchSha != facts.HeadSha) return Check.Block("artifact_branch_moved", expected);
+        }
+        else
+        {
+            if (facts.State != "open") return Check.Block("artifact_issue_closed", expected);
+            if (facts.OpenPullRequests.Count > 0)
+                return new Check("artifact_pr_open", facts.OpenPullRequests
+                    .Select(n => "artifact:" + run.Repo + "#pr/" + n.ToString(CultureInfo.InvariantCulture)).ToArray());
+        }
+        return Check.Allowed with { ArtifactHash = WorkflowOutcomeHashes.Sha256Hex(expected + "\n" + facts.Digest) };
     }
 
     private Task<bool> LateSuccessAsync(WorkflowOutcomeRun run, IReadOnlyList<string> taskIds, CancellationToken ct) =>
@@ -259,7 +306,7 @@ public sealed class WorkflowRecoveryService(
             SourceWorkflowId = run.WorkflowId,
             SourceRunId = run.RunId,
             SourceTaskHash = WorkflowOutcomeHashes.Sha256Hex(string.Join('\n', taskIds.Order(StringComparer.Ordinal))),
-            SourceArtifactHash = run.Repo is null ? null : WorkflowOutcomeHashes.Sha256Hex(ArtifactRefOrRepo(run)),
+            SourceArtifactHash = check.ArtifactHash,
             TargetNamespace = request.TargetNamespace,
             TargetWorkflowType = start ? request.TargetWorkflowType : null,
             TargetTaskQueue = start ? request.TargetTaskQueue : null,
@@ -275,6 +322,9 @@ public sealed class WorkflowRecoveryService(
             ReservedAt = now,
             UpdatedAt = now,
         };
+
+        // Deny-by-default: an approval must cover this exact action; a namespace or URL shape is not authority.
+        if (approvals.Covers(ActionOf(row)) is { } unauthorized) return WorkflowOutcomeResult.Error(422, unauthorized);
 
         string? refusal;
         try
@@ -307,8 +357,8 @@ public sealed class WorkflowRecoveryService(
         return new(201, View(row));
     }
 
-    private static string ArtifactRefOrRepo(WorkflowOutcomeRun run) =>
-        run.IssueNumber is not null || run.PrNumber is not null ? ArtifactRef(run) : "artifact:" + run.Repo;
+    private static WorkflowRecoveryAction ActionOf(WorkflowRecoveryOperation o) =>
+        new(o.AuthorityRef, o.Operation, o.OutcomeId, o.DecisionId, o.TargetNamespace, o.TargetWorkflowType, o.TargetTaskQueue, o.TargetAgent, o.InputSha256);
 
     // ── Readback ──────────────────────────────────────────────────────────────
 
@@ -373,6 +423,12 @@ public sealed class WorkflowRecoveryService(
         string? invalidated = run is null || decision is null || run.Version != op.OutcomeVersion ? "stale_reservation"
             : run.ResolvedAt is not null ? "outcome_resolved"
             : null;
+        if (invalidated is null && approvals.Covers(ActionOf(op)) is { } unauthorized)
+        {
+            // An unreadable approvals file only refuses this call; a revoked or expired approval is final.
+            if (unauthorized == WorkflowRecoveryApprovals.Unverified) return Deny(422, unauthorized);
+            invalidated = unauthorized;
+        }
         if (invalidated is null)
         {
             var check = await RecheckAsync(op, run!, ct);
@@ -425,7 +481,12 @@ public sealed class WorkflowRecoveryService(
         {
             return Check.Block("successor_state_unverified");
         }
-        return Check.Allowed;
+
+        // The issue/PR the proof covered: a change since the reserve (new head, reopened, checks
+        // running, a new pull request) invalidates it; an unreadable artifact only refuses this call.
+        var artifact = await ArtifactAsync(run, null, ct);
+        if (artifact.BlockedReason is not null) return artifact;
+        return artifact.ArtifactHash == op.SourceArtifactHash ? Check.Allowed : Check.Block("artifact_changed");
     }
 
     private static bool IsStart(WorkflowRecoveryOperation op) =>
@@ -481,8 +542,14 @@ public sealed class WorkflowRecoveryService(
     /// <summary>
     /// Monotonic: started→dispatched (or verified with an event readback), rejected→blocked with the
     /// definitive rejection retained, unknown→dispatch_unknown. dispatch_unknown is permanent until a
-    /// receipt carries a readback run id and event ref; nothing ever returns to reserved.
+    /// readback is confirmed; nothing ever returns to reserved.
     /// </summary>
+    /// <remarks>
+    /// A readback is never trusted on the bridge's word: <see cref="VerifyReadbackAsync"/> asks
+    /// Temporal for the exact run first. An unreadable answer leaves a positive receipt dispatched
+    /// (a later readback may still verify it); an answer that contradicts the receipt makes the
+    /// dispatch outcome unknown, with its health incident, rather than verified.
+    /// </remarks>
     public async Task<WorkflowOutcomeResult> ReceiptAsync(WorkflowOutcomePrincipal principal, Guid operationId, WorkflowRecoveryReceiptRequest? request, CancellationToken ct)
     {
         if (!principal.IsBridge) return WorkflowOutcomeResult.Error(403, "wrong_scope");
@@ -509,20 +576,28 @@ public sealed class WorkflowRecoveryService(
                 return WorkflowOutcomeResult.Error(422, "receipt_mismatch");
         }
         var readback = positive && !string.IsNullOrEmpty(request.ResultRunId) && request.EventRef is not null;
+        // A readback the eligible transitions would accept is checked against Temporal first.
+        var eligible = readback && (op.State is WorkflowRecoveryStates.Dispatching or WorkflowRecoveryStates.DispatchUnknown
+            || op.State == WorkflowRecoveryStates.Dispatched && (op.ResultRunId is null || op.ResultRunId == request.ResultRunId));
+        var verification = eligible ? await VerifyReadbackAsync(op, request.ResultRunId!, ct) : null;
+        var confirmed = eligible && verification is null;
+        var contradicted = verification == ReplacementMismatch;
 
         var to = (op.State, request.Result) switch
         {
             (WorkflowRecoveryStates.Dispatching, WorkflowRecoveryReceiptResults.Rejected) => WorkflowRecoveryStates.Blocked,
             (WorkflowRecoveryStates.Dispatching, WorkflowRecoveryReceiptResults.Unknown) => WorkflowRecoveryStates.DispatchUnknown,
-            (WorkflowRecoveryStates.Dispatching, _) when positive => readback ? WorkflowRecoveryStates.Verified : WorkflowRecoveryStates.Dispatched,
-            (WorkflowRecoveryStates.Dispatched, _) when readback && (op.ResultRunId is null || op.ResultRunId == request.ResultRunId) => WorkflowRecoveryStates.Verified,
-            (WorkflowRecoveryStates.DispatchUnknown, _) when readback => WorkflowRecoveryStates.Verified,
+            (WorkflowRecoveryStates.Dispatching, _) when positive => contradicted ? WorkflowRecoveryStates.DispatchUnknown
+                : confirmed ? WorkflowRecoveryStates.Verified : WorkflowRecoveryStates.Dispatched,
+            (WorkflowRecoveryStates.Dispatched, _) when contradicted => WorkflowRecoveryStates.DispatchUnknown,
+            (WorkflowRecoveryStates.Dispatched, _) when confirmed => WorkflowRecoveryStates.Verified,
+            (WorkflowRecoveryStates.DispatchUnknown, _) when confirmed => WorkflowRecoveryStates.Verified,
             _ => null,
         };
         if (to is null)
             return new(409, new
             {
-                error = op.State switch
+                error = verification ?? op.State switch
                 {
                     WorkflowRecoveryStates.Reserved => "not_dispatching",
                     WorkflowRecoveryStates.DispatchUnknown => "dispatch_unknown_requires_readback",
@@ -533,22 +608,59 @@ public sealed class WorkflowRecoveryService(
 
         var now = WorkflowOutcomeApi.Now(clock);
         var blocked = to == WorkflowRecoveryStates.Blocked ? "dispatch_rejected" : op.BlockedReason;
-        var moved = await db.WorkflowRecoveryOperations.Where(o => o.Id == operationId && o.State == op.State)
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(o => o.State, to)
-                .SetProperty(o => o.ResultRunId, request.ResultRunId ?? op.ResultRunId)
-                .SetProperty(o => o.ReceiptEventRef, request.EventRef ?? op.ReceiptEventRef)
-                .SetProperty(o => o.ReceiptJson, receiptJson)
-                .SetProperty(o => o.BlockedReason, blocked)
-                .SetProperty(o => o.UpdatedAt, now), ct);
-        if (moved != 1) return new(409, new { error = "not_monotonic", state = op.State });
+        var incident = to == WorkflowRecoveryStates.DispatchUnknown || op.State == WorkflowRecoveryStates.DispatchUnknown;
+        var reason = contradicted
+            ? "recovery receipt contradicts Temporal for the replacement; inspect the replacement id before any further action"
+            : "recovery dispatch outcome unknown; inspect the replacement id before any further action";
+        // The state change and its incident commit together: an unknown dispatch never lacks its alert.
+        var moved = await WorkflowOutcomeApi.InTransactionAsync<bool>(db, async () =>
+        {
+            var changed = await db.WorkflowRecoveryOperations.Where(o => o.Id == operationId && o.State == op.State)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(o => o.State, to)
+                    .SetProperty(o => o.ResultRunId, request.ResultRunId ?? op.ResultRunId)
+                    .SetProperty(o => o.ReceiptEventRef, request.EventRef ?? op.ReceiptEventRef)
+                    .SetProperty(o => o.ReceiptJson, receiptJson)
+                    .SetProperty(o => o.BlockedReason, blocked)
+                    .SetProperty(o => o.UpdatedAt, now), ct);
+            if (changed != 1) return (false, false);
+            if (incident)
+                await WorkflowOutcomeApi.UpsertHealthAsync(db, "recovery", "dispatch_unknown:" + operationId.ToString("D"),
+                    to == WorkflowRecoveryStates.DispatchUnknown, reason, 1, now, ct);
+            return (true, true);
+        }, ct);
+        if (!moved) return new(409, new { error = "not_monotonic", state = op.State });
 
-        if (to == WorkflowRecoveryStates.DispatchUnknown || op.State == WorkflowRecoveryStates.DispatchUnknown)
-            await WorkflowOutcomeApi.UpsertHealthAsync(db, "recovery", "dispatch_unknown:" + operationId.ToString("D"),
-                to == WorkflowRecoveryStates.DispatchUnknown, "recovery dispatch outcome unknown; inspect the replacement id before any further action", 1, now, ct);
-
-        logger.LogInformation("workflow_recovery_receipt operation={OperationId} from={From} to={To}", operationId, op.State, to);
+        logger.LogInformation("workflow_recovery_receipt operation={OperationId} from={From} to={To} verification={Verification}",
+            operationId, op.State, to, verification ?? (confirmed ? "confirmed" : "none"));
         var fresh = await db.WorkflowRecoveryOperations.AsNoTracking().FirstAsync(o => o.Id == operationId, ct);
         return WorkflowOutcomeResult.Ok(View(fresh));
+    }
+
+    /// <summary>
+    /// Temporal's own answer for the run a readback names. A start is confirmed only as the exact
+    /// <c>recovery-&lt;id&gt;</c> run with the reserved workflow type and task queue; a cancel only as
+    /// the exact source run, now Canceled. Null when confirmed; <see cref="ReplacementMismatch"/> when
+    /// Temporal contradicts the receipt; <see cref="ReplacementUnverified"/> when it cannot tell yet.
+    /// </summary>
+    private async Task<string?> VerifyReadbackAsync(WorkflowRecoveryOperation op, string runId, CancellationToken ct)
+    {
+        var start = IsStart(op);
+        WorkflowRecoveryRunState? state;
+        try
+        {
+            state = start
+                ? await probe.DescribeAsync(op.TargetNamespace, op.ReplacementWorkflowId, runId, ct)
+                : await probe.DescribeAsync(op.SourceNamespace, op.SourceWorkflowId, runId, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            return ReplacementUnverified;
+        }
+        if (state is null || !string.Equals(state.RunId, runId, StringComparison.Ordinal)) return ReplacementMismatch;
+        if (start)
+            return string.Equals(state.WorkflowType, op.TargetWorkflowType, StringComparison.Ordinal)
+                && string.Equals(state.TaskQueue, op.TargetTaskQueue, StringComparison.Ordinal) ? null : ReplacementMismatch;
+        return state.Status == "Canceled" ? null : ReplacementUnverified;
     }
 }

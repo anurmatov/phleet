@@ -240,13 +240,15 @@ public sealed class WorkflowOutcomeMigrationTests : IAsyncLifetime
         }
         var probe = new FakeRecoveryProbe();
         probe.SetRun(run.Namespace, run.WorkflowId, run.RunId, "Failed");
+        using var approvals = new RecoveryApprovalsFixture(Path.Combine(Path.GetTempPath(), "wo-approvals-" + Guid.NewGuid().ToString("N") + ".json"));
+        approvals.Add(new WorkflowRecoveryAction("https://example.com/a", "retry", run.Id, decision.Id, "namespace-a", "TaskDelegationWorkflow", "fleet", null, new string('c', 64)));
 
         var request = new WorkflowRecoveryDispatchRequest("coordinator", "temporal_start_workflow", "namespace-a", "TaskDelegationWorkflow", "fleet",
             new string('c', 64), null, null, null);
         var results = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => Task.Run(async () =>
         {
             await using var db = NewContext(_connectionString);
-            return await Recovery(db, probe).AuthorizeDispatchAsync(Bridge, operationId, request, CancellationToken.None);
+            return await Recovery(db, probe, approvals).AuthorizeDispatchAsync(Bridge, operationId, request, CancellationToken.None);
         })));
 
         Assert.Single(results, r => r.Status == 200);
@@ -271,11 +273,15 @@ public sealed class WorkflowOutcomeMigrationTests : IAsyncLifetime
         }
         var probe = new FakeRecoveryProbe();
         probe.SetRun(run.Namespace, run.WorkflowId, run.RunId, "Failed");
+        // Every racing decision is approved, so the one-reservation rule is what decides.
+        using var approvals = new RecoveryApprovalsFixture(Path.Combine(Path.GetTempPath(), "wo-approvals-" + Guid.NewGuid().ToString("N") + ".json"));
+        foreach (var d in decisions)
+            approvals.Add(new WorkflowRecoveryAction("https://example.com/approvals/1", "retry", run.Id, d.Id, "namespace-a", "TaskDelegationWorkflow", "fleet", null, new string('c', 64)));
 
         var results = await Task.WhenAll(decisions.Select(d => Task.Run(async () =>
         {
             await using var db = NewContext(_connectionString);
-            return await Recovery(db, probe).ReserveAsync(Operator, Guid.NewGuid(), new WorkflowRecoveryReserveRequest(
+            return await Recovery(db, probe, approvals).ReserveAsync(Operator, Guid.NewGuid(), new WorkflowRecoveryReserveRequest(
                 d.Id, 1, "namespace-a", "TaskDelegationWorkflow", "fleet", null, new string('c', 64), "retry once",
                 ["task:wf/step-a"], "https://example.com/approvals/1"), CancellationToken.None);
         })));
@@ -356,6 +362,8 @@ public sealed class WorkflowOutcomeMigrationTests : IAsyncLifetime
                 var decisionId = (await ApiHost.JsonAsync(await host.AsCoordinator(HttpMethod.Post, $"{Root}/{retried.Id}/decisions", ApiHost.Decision(1, "retry"))))
                     .GetProperty("decisionId").GetGuid();
                 var operationId = Guid.NewGuid();
+                host.Approvals.Add(new WorkflowRecoveryAction("https://example.com/approvals/3", "retry", retried.Id, decisionId,
+                    "namespace-a", "TaskDelegationWorkflow", "fleet", "agent2", new string('c', 64)));
                 Assert.Equal(HttpStatusCode.Created, (await host.AsAdmin(HttpMethod.Post, $"{Root}/recovery/{operationId}/reserve", new WorkflowRecoveryReserveRequest(
                     decisionId, 1, "namespace-a", "TaskDelegationWorkflow", "fleet", "agent2", new string('c', 64), "retry once",
                     ["task:" + retried.WorkflowId + "/step-a"], "https://example.com/approvals/3"))).StatusCode);
@@ -433,15 +441,17 @@ public sealed class WorkflowOutcomeMigrationTests : IAsyncLifetime
     private static readonly WorkflowOutcomePrincipal Bridge = new(WorkflowOutcomePrincipal.BridgeKind, "bridge", 0);
     private static readonly WorkflowOutcomePrincipal Operator = new(WorkflowOutcomePrincipal.OperatorKind, "operator", 0);
 
-    private static WorkflowRecoveryService Recovery(OrchestratorDbContext db, IWorkflowRecoveryProbe probe)
+    private static WorkflowRecoveryService Recovery(OrchestratorDbContext db, IWorkflowRecoveryProbe probe, RecoveryApprovalsFixture approvals)
     {
-        var options = Options.Create(new WorkflowOutcomeOptions { Enabled = true, Namespaces = "namespace-a" });
+        var options = Options.Create(new WorkflowOutcomeOptions { Enabled = true, Namespaces = "namespace-a", RecoveryApprovalsFile = approvals.Path });
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["Orchestrator:AuthToken"] = "admin", ["FLEET_CTO_AGENT"] = "coordinator",
         }).Build();
         var auth = new WorkflowOutcomeAuthorization(options, configuration, NullLogger<WorkflowOutcomeAuthorization>.Instance);
-        return new WorkflowRecoveryService(db, auth, probe, options, TimeProvider.System, NullLogger<WorkflowRecoveryService>.Instance);
+        return new WorkflowRecoveryService(db, auth, probe, new FakeArtifactReader(),
+            new WorkflowRecoveryApprovals(options, TimeProvider.System, NullLogger<WorkflowRecoveryApprovals>.Instance),
+            options, TimeProvider.System, NullLogger<WorkflowRecoveryService>.Instance);
     }
 
     private static WorkflowOutcomeRun Run(DateTime now, string? workflowId = null, string? runId = null)

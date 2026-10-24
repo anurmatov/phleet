@@ -301,7 +301,9 @@ All items must be verified **for the exact ids**, with references recorded in th
    `accept_late`).
 2. Operator plans, read-only: `wo /<outcomeId>/recovery-plan -X POST -d '{"decisionId":"<id>"}'`.
    `allowed:false` lists `missingProofs`; stop there and keep or set a `hold`.
-3. Operator reserves with the exact target and proofs:
+3. Record the exact action's approval (section 11). For an issue/PR run, add the artifact proof
+   `artifact:<owner/repo>#pr/<n>` (or `#issue/<n>`) exactly; the plan names it in `missingProofs`.
+   Operator reserves with the exact target and proofs:
 
 ```bash
 wo /recovery/<operationId>/reserve -X POST -d '{
@@ -316,8 +318,9 @@ wo /recovery/<operationId>/reserve -X POST -d '{
 
 4. The coordinator calls the existing guarded tool with `recovery_operation_id=<operationId>`; the
    bridge authorizes dispatch once and starts `recovery-<operationId>` with RejectDuplicate.
-5. Read back: `wo /recovery/<operationId>`. `dispatched`/`verified`: done, follow the new run like
-   any other. `dispatch_unknown`: **do not retry and do not reserve again.** Look up the exact id
+5. Read back: `wo /recovery/<operationId>`. `verified`: Temporal confirmed the replacement; follow it
+   like any other run. `dispatched`: started but not yet confirmed by the orchestrator's own Temporal
+   read; a later readback receipt verifies it. `dispatch_unknown`: **do not retry and do not reserve again.** Look up the exact id
    `recovery-<operationId>` in Temporal (`temporal workflow describe --workflow-id
    recovery-<operationId>`) and its history; if it exists it is the replacement; if it provably
    does not, record that evidence in a new decision — the old reservation is never recycled.
@@ -330,6 +333,37 @@ authorized to perform, a human gate — the outcome stays an **owned `hold`** wi
 request in `reason` and a `dueAt`. Do not route around it with the admin restart, a manual signal or
 a new workflow start without `recovery_operation_id`. Epic grants, gate guards and tool grants are
 not widened by this feature.
+
+**Recording an approval.** Every reserve needs an entry in
+`fleet/workflow-outcomes/recovery-approvals.json` (mounted read-only; owner-only like the other
+policy files) that names exactly the action the reserve will take. Write it only after the human
+approval exists, with that approval's URL as `authorityRef`:
+
+```json
+{
+  "schemaVersion": 1,
+  "approvals": [
+    {
+      "authorityRef": "https://<the-human-approval-record>",
+      "operation": "retry",
+      "outcomeId": "<outcome uuid>",
+      "decisionId": "<decision uuid>",
+      "targetNamespace": "namespace-a",
+      "targetWorkflowType": "UwePrImplementationWorkflow",
+      "targetTaskQueue": "<task-queue>",
+      "targetAgent": "agent1",
+      "inputSha256": "<sha256 of the exact start input>",
+      "expiresAt": "2026-01-31T00:00:00Z"
+    }
+  ]
+}
+```
+
+`retry`/`reassign` name the workflow type, task queue and input hash (`reassign` also the agent);
+`cancel` names none of them. Every field must equal the reserve request, including an absent
+`targetAgent`. The file is read on each reserve and dispatch, with no restart. To revoke, remove the
+entry: an unspent reservation then blocks at dispatch with `authority_not_covering_action`.
+`authority_unverified` means the file is missing or invalid; fix it, since nothing is spent.
 
 ## 12. Backup, keyring restore and key rotation
 

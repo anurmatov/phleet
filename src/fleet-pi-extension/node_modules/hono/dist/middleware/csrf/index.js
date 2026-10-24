@@ -1,0 +1,105 @@
+import { HTTPException } from "../../http-exception.js";
+//#region src/middleware/csrf/index.ts
+const secFetchSiteValues = [
+	"same-origin",
+	"same-site",
+	"none",
+	"cross-site"
+];
+const isSecFetchSite = (value) => secFetchSiteValues.includes(value);
+const isSafeMethodRe = /^(GET|HEAD|OPTIONS)$/;
+const isRequestedByFormElementRe = /^\b(application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)\b/i;
+/**
+* CSRF Protection Middleware for Hono.
+*
+* Protects against Cross-Site Request Forgery attacks by validating request origins
+* and sec-fetch-site headers. The request is allowed if either validation passes.
+*
+* @see {@link https://hono.dev/docs/middleware/builtin/csrf}
+*
+* @param {CSRFOptions} [options] - The options for the CSRF protection middleware.
+* @param {string|string[]|(origin: string, context: Context) => boolean} [options.origin] -
+*   Allowed origins for requests.
+*   - string: Single allowed origin (e.g., 'https://example.com')
+*   - string[]: Multiple allowed origins
+*   - function: Custom validation logic
+*   - Default: Only same origin as the request URL
+* @param {string|string[]|(secFetchSite: string, context: Context) => boolean} [options.secFetchSite] -
+*   Sec-Fetch-Site header validation. Standard values include 'same-origin', 'same-site', 'cross-site', 'none'.
+*   - string: Single allowed value (e.g., 'same-origin')
+*   - string[]: Multiple allowed values (e.g., ['same-origin', 'same-site'])
+*   - function: Custom validation with access to context
+*   - Default: Only allows 'same-origin'
+* @returns {MiddlewareHandler} The middleware handler function.
+*
+* @example
+* ```ts
+* const app = new Hono()
+*
+* // Default: both origin and sec-fetch-site validation
+* app.use('*', csrf())
+*
+* // Allow specific origins
+* app.use('*', csrf({ origin: 'https://example.com' }))
+* app.use('*', csrf({ origin: ['https://app.com', 'https://api.com'] }))
+*
+* // Allow specific sec-fetch-site values
+* app.use('*', csrf({ secFetchSite: 'same-origin' }))
+* app.use('*', csrf({ secFetchSite: ['same-origin', 'same-site'] }))
+*
+* // Dynamic sec-fetch-site validation
+* app.use('*', csrf({
+*   secFetchSite: (secFetchSite, c) => {
+*     // Always allow same-origin
+*     if (secFetchSite === 'same-origin') return true
+*     // Allow cross-site for webhook endpoints
+*     if (secFetchSite === 'cross-site' && c.req.path.startsWith('/webhook/')) {
+*       return true
+*     }
+*     return false
+*   }
+* }))
+*
+* // Dynamic origin validation
+* app.use('*', csrf({
+*   origin: (origin, c) => {
+*     // Allow same origin
+*     if (origin === new URL(c.req.url).origin) return true
+*     // Allow specific trusted domains
+*     return ['https://app.example.com', 'https://admin.example.com'].includes(origin)
+*   }
+* }))
+* ```
+*/
+const csrf = (options) => {
+	const originHandler = ((optsOrigin) => {
+		if (!optsOrigin) return (origin, c) => origin === new URL(c.req.url).origin;
+		else if (typeof optsOrigin === "string") return (origin) => origin === optsOrigin;
+		else if (typeof optsOrigin === "function") return optsOrigin;
+		else return (origin) => optsOrigin.includes(origin);
+	})(options?.origin);
+	const isAllowedOrigin = async (origin, c) => {
+		if (origin === void 0) return false;
+		return await originHandler(origin, c);
+	};
+	const secFetchSiteHandler = ((optsSecFetchSite) => {
+		if (!optsSecFetchSite) return (secFetchSite) => secFetchSite === "same-origin";
+		else if (typeof optsSecFetchSite === "string") return (secFetchSite) => secFetchSite === optsSecFetchSite;
+		else if (typeof optsSecFetchSite === "function") return optsSecFetchSite;
+		else return (secFetchSite) => optsSecFetchSite.includes(secFetchSite);
+	})(options?.secFetchSite);
+	const isAllowedSecFetchSite = async (secFetchSite, c) => {
+		if (secFetchSite === void 0) return false;
+		if (!isSecFetchSite(secFetchSite)) return false;
+		return await secFetchSiteHandler(secFetchSite, c);
+	};
+	return async function csrf(c, next) {
+		if (!isSafeMethodRe.test(c.req.method) && isRequestedByFormElementRe.test(c.req.header("content-type") || "text/plain") && !await isAllowedSecFetchSite(c.req.header("sec-fetch-site"), c) && !await isAllowedOrigin(c.req.header("origin"), c)) {
+			const res = new Response("Forbidden", { status: 403 });
+			throw new HTTPException(403, { res });
+		}
+		await next();
+	};
+};
+//#endregion
+export { csrf };

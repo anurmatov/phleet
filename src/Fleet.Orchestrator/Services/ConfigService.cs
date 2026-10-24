@@ -49,6 +49,8 @@ public sealed class ConfigService : IConfigWriter, IAclChangeNotifier
             "TOTP_SECRET",
             "GITHUB_APP_PEM",
             "POLYMARKET_PRIVATE_KEY",
+            // Coordinator-only workflow-outcome inbox token (#476): never returned by the config API.
+            "FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN",
         ], StringComparer.OrdinalIgnoreCase);
 
     public static bool IsDenylisted(string key) =>

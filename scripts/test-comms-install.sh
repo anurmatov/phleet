@@ -79,7 +79,7 @@ rc=0; bash "$DIR/upgrade.sh" > "$DIR/output" 2>&1 || rc=$?
 ! grep -q '^compose ' "$CALLS"
 echo 'PASS invalid store fails before compose'
 # Comms disabled, even with an endpoint: remove every optional service but keep keys/volumes.
-# The epic watcher/grant keys are present, so upgrade has nothing to add and must not touch .env.
+# The epic watcher/grant and workflow-outcome keys are present, so upgrade has nothing to add and must not touch .env.
 cat > "$ENV" <<'ENV'
 FLEET_COMMS_ENABLED=false
 FLEET_COMMS_MEDIA_ENDPOINT=http://comms-minio:9000
@@ -91,6 +91,22 @@ FLEET_EPIC_GRANTS_ENABLED=false
 FLEET_EPIC_GRANTS_MAX_DAYS=14
 FLEET_EPIC_GRANTS_DENIED_REPOS=
 FLEET_AUTONOMY_ENABLED=false
+FLEET_WORKFLOW_OUTCOMES_ENABLED=false
+FLEET_WORKFLOW_OUTCOMES_NAMESPACES=
+FLEET_WORKFLOW_OUTCOMES_POLL_SECONDS=30
+FLEET_WORKFLOW_OUTCOMES_RECENT_SCAN_SECONDS=60
+FLEET_WORKFLOW_OUTCOMES_FULL_SCAN_SECONDS=300
+FLEET_WORKFLOW_OUTCOMES_BATCH_SECONDS=30
+FLEET_WORKFLOW_OUTCOMES_BATCH_SIZE=20
+FLEET_WORKFLOW_OUTCOMES_OWNERS_FILE=/etc/phleet/workflow-outcomes/ownership.json
+FLEET_WORKFLOW_OUTCOMES_CLASSIFIERS_FILE=/etc/phleet/workflow-outcomes/classifiers.json
+FLEET_WORKFLOW_OUTCOMES_KEYRING_DIR=/var/lib/phleet/workflow-outcomes/keys
+FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN_KEY=FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN
+FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN=
+FLEET_WORKFLOW_OUTCOMES_COORDINATOR_CREDENTIAL_VERSION=1
+FLEET_WORKFLOW_OUTCOMES_COORDINATOR_GENERATION=1
+FLEET_WORKFLOW_OUTCOMES_COORDINATOR_BASE_URL=
+FLEET_WORKFLOW_OUTCOMES_LATE_CAPTURE_ENABLED=false
 ENV
 cp "$ENV" "$DIR/before"
 : > "$CALLS"
@@ -106,12 +122,12 @@ echo 'PASS disabled Comms removes containers but preserves keys and volumes'
 # glues a key onto a last line that has no newline.
 printf 'FLEET_COMMS_ENABLED=false\nFLEET_EPIC_GRANTS_MAX_DAYS=7' > "$ENV"
 bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1
-[[ "$(cat "$ENV")" == "$(printf 'FLEET_COMMS_ENABLED=false\nFLEET_EPIC_GRANTS_MAX_DAYS=7\nFLEET_EPIC_WATCHER_ENABLED=false\nFLEET_EPIC_WATCHER_INTERVAL_SECONDS=300\nFLEET_EPIC_GRANTS_ENABLED=false\nFLEET_EPIC_GRANTS_DENIED_REPOS=\nFLEET_AUTONOMY_ENABLED=false')" ]]
-echo 'PASS upgrade adds missing epic watcher/grant keys with defaults and keeps present values'
+[[ "$(cat "$ENV")" == "$(printf 'FLEET_COMMS_ENABLED=false\nFLEET_EPIC_GRANTS_MAX_DAYS=7\nFLEET_EPIC_WATCHER_ENABLED=false\nFLEET_EPIC_WATCHER_INTERVAL_SECONDS=300\nFLEET_EPIC_GRANTS_ENABLED=false\nFLEET_EPIC_GRANTS_DENIED_REPOS=\nFLEET_AUTONOMY_ENABLED=false\nFLEET_WORKFLOW_OUTCOMES_ENABLED=false\nFLEET_WORKFLOW_OUTCOMES_NAMESPACES=\nFLEET_WORKFLOW_OUTCOMES_POLL_SECONDS=30\nFLEET_WORKFLOW_OUTCOMES_RECENT_SCAN_SECONDS=60\nFLEET_WORKFLOW_OUTCOMES_FULL_SCAN_SECONDS=300\nFLEET_WORKFLOW_OUTCOMES_BATCH_SECONDS=30\nFLEET_WORKFLOW_OUTCOMES_BATCH_SIZE=20\nFLEET_WORKFLOW_OUTCOMES_OWNERS_FILE=/etc/phleet/workflow-outcomes/ownership.json\nFLEET_WORKFLOW_OUTCOMES_CLASSIFIERS_FILE=/etc/phleet/workflow-outcomes/classifiers.json\nFLEET_WORKFLOW_OUTCOMES_KEYRING_DIR=/var/lib/phleet/workflow-outcomes/keys\nFLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN_KEY=FLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN\nFLEET_WORKFLOW_OUTCOMES_COORDINATOR_TOKEN=\nFLEET_WORKFLOW_OUTCOMES_COORDINATOR_CREDENTIAL_VERSION=1\nFLEET_WORKFLOW_OUTCOMES_COORDINATOR_GENERATION=1\nFLEET_WORKFLOW_OUTCOMES_COORDINATOR_BASE_URL=\nFLEET_WORKFLOW_OUTCOMES_LATE_CAPTURE_ENABLED=false')" ]]
+echo 'PASS upgrade adds missing epic watcher/grant and workflow-outcome keys with defaults and keeps present values'
 sed -i.bak 's/^FLEET_AUTONOMY_ENABLED=false$/FLEET_AUTONOMY_ENABLED=true/' "$ENV"
 bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1
 [[ "$(grep -c '^FLEET_AUTONOMY_ENABLED=' "$ENV")" == 1 ]]
-[[ "$(tail -n 1 "$ENV")" == FLEET_AUTONOMY_ENABLED=true ]]
+[[ "$(grep '^FLEET_AUTONOMY_ENABLED=' "$ENV")" == FLEET_AUTONOMY_ENABLED=true ]]
 echo 'PASS upgrade preserves existing autonomy values'
 
 # Pull failure must also precede every lifecycle operation.

@@ -120,7 +120,7 @@ else
 {
     builder.Services.AddSingleton<IWorkflowOutcomePayloadProtector, UnavailableWorkflowOutcomePayloadProtector>();
 }
-// builder.Services.AddWorkflowOutcomeObserver(); // observer (WorkflowOutcomeReconciler.cs) — wired at merge
+builder.Services.AddWorkflowOutcomeObserver();
 
 // MCP server (HTTP transport — same port as REST, path /mcp)
 builder.Services

@@ -1,4 +1,5 @@
 import type { ActiveView, ReprovisionAllState } from '../types'
+import type { NavBadge } from '../workflowOutcomes'
 
 interface SidenavProps {
   activeView: ActiveView
@@ -12,6 +13,8 @@ interface SidenavProps {
   wfDefinitionCount: number
   namespaceCount: number
   unreadAlertCount: number
+  /** Workflow failure items, cause reviews and coverage gaps (#476); never a success count. */
+  workflowFailureBadges?: NavBadge[]
   reprovisionAllState: ReprovisionAllState
   reprovisionAllMsg: string
   onReprovisionAll: () => void
@@ -25,6 +28,7 @@ interface SidenavProps {
 export default function Sidenav({
   activeView, onNavigate,
   agentCount, activeWorkflowCount, attentionWorkflowCount, instructionCount, projectContextCount, outputStyleCount, wfDefinitionCount, namespaceCount, unreadAlertCount,
+  workflowFailureBadges = [],
   reprovisionAllState, reprovisionAllMsg,
   onReprovisionAll, onReprovisionAllConfirm, onReprovisionAllCancel,
   onNewAgent,
@@ -57,6 +61,21 @@ export default function Sidenav({
             ? <span className="sidenav-badge sidenav-badge-attention">{attentionWorkflowCount}</span>
             : <span className="sidenav-badge">{activeWorkflowCount}</span>
           }
+        </button>
+
+        <button
+          className={`sidenav-item${activeView === 'workflow-failures' ? ' active' : ''}`}
+          style={{ flexWrap: 'wrap', rowGap: 4 }}
+          onClick={() => { onNavigate('workflow-failures'); onNavClose() }}
+        >
+          <span className="sidenav-item-label">Workflow Failures</span>
+          <span style={{ display: 'flex', gap: 3 }}>
+            {workflowFailureBadges.map(b => (
+              <span key={b.key} className={`sidenav-badge${b.attention ? ' sidenav-badge-attention' : ''}`} title={b.title}>
+                {b.label ? `${b.label} ` : ''}{b.value}
+              </span>
+            ))}
+          </span>
         </button>
 
         <div className="sidenav-section-label" style={{ marginTop: 16 }}>Agent Config</div>

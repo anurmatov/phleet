@@ -34,7 +34,7 @@ import type {
   PromptSizeReport,
 } from './types'
 import { apiFetch, AUTH_TOKEN, heartbeatAge } from './utils'
-import { loadNavSummary } from './workflowOutcomes'
+import { loadNavSummary, navBadges } from './workflowOutcomes'
 import type { OutcomeNavSummary } from './workflowOutcomes'
 import { buildSignalRequest, signalErrorMessage } from './signalRequest'
 import { PROVIDER_DEFAULT_MODEL } from './constants'
@@ -1780,6 +1780,7 @@ export default function App() {
         wfDefinitionCount={wfDefs.length}
         namespaceCount={apiNamespaces.length}
         unreadAlertCount={unreadAlerts.length}
+        workflowFailureBadges={navBadges(outcomeNav)}
         reprovisionAllState={reprovisionAllState}
         reprovisionAllMsg={reprovisionAllMsg}
         onReprovisionAll={handleReprovisionAll}

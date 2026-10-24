@@ -425,7 +425,9 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.Property(x => x.WorkflowId).HasMaxLength(255).IsRequired();
             e.Property(x => x.RunId).HasMaxLength(64).IsRequired();
             // Binary-collated hash key: the unique identity guard. Originals are compared on match.
-            e.Property(x => x.IdentityHash).HasMaxLength(64).IsFixedLength().IsRequired().UseCollation("ascii_bin");
+            var identityHash = e.Property(x => x.IdentityHash).HasMaxLength(64).IsFixedLength().IsRequired();
+            // SQLite test hosts have no ascii_bin collation; MySQL's model and snapshot keep it.
+            if (Database.IsMySql()) identityHash.UseCollation("ascii_bin");
             e.Property(x => x.FirstExecutionRunId).HasMaxLength(64);
             e.Property(x => x.PreviousRunId).HasMaxLength(64);
             e.Property(x => x.NextRunId).HasMaxLength(64);

@@ -138,6 +138,79 @@ public sealed class AgentOptions
     public string? ReplyLookup { get; set; }
 }
 
+/// <summary>
+/// The coordinator's failure inbox client (#476), section <c>WorkflowOutcomes</c>. Provisioning
+/// writes it only for the agent named by <c>FLEET_CTO_AGENT</c>; every other agent has no section,
+/// no client and no token. Startup-only: a change needs an approved reprovision.
+/// </summary>
+/// <remarks>
+/// Invalid values disable the outcome client with an explicit error and leave normal agent
+/// transport running. ⚠️ <see cref="ScopedToken"/> is a credential: never logged, never put in a
+/// prompt, never echoed in a fault.
+/// </remarks>
+public sealed class WorkflowOutcomeClientOptions
+{
+    public const string Section = "WorkflowOutcomes";
+
+    public bool Enabled { get; set; }
+
+    /// <summary>Exact internal orchestrator HTTP(S) origin: no userinfo, path, query or fragment.</summary>
+    public string BaseUrl { get; set; } = "";
+
+    /// <summary>Coordinator-only scoped bearer token. Never the admin token.</summary>
+    public string ScopedToken { get; set; } = "";
+
+    /// <summary>Configured coordinator name; must equal this agent's own <c>Agent:Name</c>.</summary>
+    public string Coordinator { get; set; } = "";
+
+    /// <summary>Current ownership generation; a stale one is refused by the server (409).</summary>
+    public long CoordinatorGeneration { get; set; } = 1;
+
+    /// <summary>Inbox poll interval, 5..300 seconds.</summary>
+    public int PollSeconds { get; set; } = 30;
+
+    /// <summary>Durable local inbox. Empty means <c>{WorkDir}/.fleet/workflow-outcome-inbox.json</c>.</summary>
+    public string InboxPath { get; set; } = "";
+
+    public string ResolveInboxPath(string workDir) =>
+        string.IsNullOrWhiteSpace(InboxPath)
+            ? Path.Combine(workDir, ".fleet", "workflow-outcome-inbox.json")
+            : InboxPath;
+
+    /// <summary>Every fault, empty when valid. Faults name keys, never values.</summary>
+    public IReadOnlyList<string> Validate(string? agentName)
+    {
+        var errors = new List<string>();
+        if (!IsOrigin(BaseUrl))
+            errors.Add($"{Section}:BaseUrl must be an http(s) origin without userinfo, path, query or fragment");
+        if (string.IsNullOrWhiteSpace(ScopedToken))
+            errors.Add($"{Section}:ScopedToken is required");
+        if (string.IsNullOrWhiteSpace(Coordinator))
+            errors.Add($"{Section}:Coordinator is required");
+        else if (!string.Equals(Coordinator, agentName, StringComparison.Ordinal))
+            errors.Add($"{Section}:Coordinator does not name this agent; only the configured coordinator runs the outcome client");
+        if (CoordinatorGeneration < 1)
+            errors.Add($"{Section}:CoordinatorGeneration must be >= 1");
+        if (PollSeconds is < 5 or > 300)
+            errors.Add($"{Section}:PollSeconds must be 5..300");
+        if (!string.IsNullOrWhiteSpace(InboxPath) && !Path.IsPathRooted(InboxPath))
+            errors.Add($"{Section}:InboxPath must be absolute");
+        return errors;
+    }
+
+    /// <summary>
+    /// True for an absolute http(s) origin with no userinfo, path, query or fragment. The same rule
+    /// as the orchestrator's <c>WorkflowOutcomeOptions.IsOrigin</c>; the two assemblies share no
+    /// configuration code, so it is restated here.
+    /// </summary>
+    public static bool IsOrigin(string? value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri)
+        && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
+        && string.IsNullOrEmpty(uri.UserInfo)
+        && uri.AbsolutePath == "/" && value!.TrimEnd('/').IndexOf('/', uri.Scheme.Length + 3) < 0
+        && string.IsNullOrEmpty(uri.Query) && string.IsNullOrEmpty(uri.Fragment);
+}
+
 public sealed class TelegramOptions
 {
     public const string Section = "Telegram";

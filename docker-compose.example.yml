@@ -320,6 +320,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.temporal
+      args:
+        # #476: the bridge's Temporal worker build id. setup.sh/upgrade.sh pass the verified commit
+        # themselves; for a manual build set it on the command line from the checkout, e.g.
+        # FLEET_SOURCE_COMMIT=$(bash <repo>/scripts/source-commit.sh) docker compose build fleet-temporal-bridge
+        # Never put it in .env: it would outlive the checkout it names. Unset means unknown.
+        GIT_COMMIT: ${FLEET_SOURCE_COMMIT:-unknown}
     image: fleet:temporal-bridge
     container_name: fleet-temporal-bridge
     volumes:

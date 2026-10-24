@@ -1079,11 +1079,18 @@ else
     rm -f "$tmplog"
   }
 
+  # #476: the temporal bridge stamps this as its Temporal worker build id. A dirty tree or a
+  # missing git gives `unknown`, which keeps compiled workflow runs source-unverified.
+  SOURCE_COMMIT=$(bash "$SCRIPT_DIR/scripts/source-commit.sh" "$SCRIPT_DIR")
+  [[ "$SOURCE_COMMIT" != unknown ]] \
+    || warn "temporal bridge has no source commit: compiled workflow runs stay source-unverified"
+
   build_image "fleet:agent"           "$SCRIPT_DIR/Dockerfile"                        "$SCRIPT_DIR"
   build_image "fleet:orchestrator"    "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile" "$SCRIPT_DIR"
   build_image "fleet:bridge"          "$SCRIPT_DIR/src/Fleet.Bridge/Dockerfile"       "$SCRIPT_DIR"
   build_image "fleet:memory"          "$SCRIPT_DIR/src/Fleet.Memory/Dockerfile"       "$SCRIPT_DIR"
-  build_image "fleet:temporal-bridge" "$SCRIPT_DIR/Dockerfile.temporal"               "$SCRIPT_DIR"
+  build_image "fleet:temporal-bridge" "$SCRIPT_DIR/Dockerfile.temporal"               "$SCRIPT_DIR" \
+    "--build-arg GIT_COMMIT=$SOURCE_COMMIT"
   build_image "fleet:telegram"        "$SCRIPT_DIR/src/Fleet.Telegram/Dockerfile"      "$SCRIPT_DIR"
   build_image "fleet:whisper"         "$SCRIPT_DIR/whisper/Dockerfile"                "$SCRIPT_DIR/whisper"
   # No quotes around $VITE_TOKEN / $CONFIG_TOKEN — the `docker build $extra_args`

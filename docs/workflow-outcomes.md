@@ -140,6 +140,16 @@ matched, never a nonfailure, and its type's `type_uncovered` gap stays open. An 
 the build arg logs a startup warning and every compiled run stays unverified. Rules for two commits
 of one type may coexist (a rollout); one commit twice is a duplicate.
 
+`setup.sh` and `upgrade.sh` pass the commit from `scripts/source-commit.sh`, which prints `HEAD`
+only for a clean checkout (no modified, staged or untracked files; gitignored runtime files such as
+`./fleet/` are fine) and `unknown` otherwise, with a warning. A manual Compose build reads
+`FLEET_SOURCE_COMMIT` from the command line
+(`FLEET_SOURCE_COMMIT=$(bash scripts/source-commit.sh) docker compose build fleet-temporal-bridge`)
+and defaults to `unknown`; never set it in `.env`, where it would outlive the checkout it names.
+The build id is read from the deprecated unversioned `WorkerVersion.BuildId` field. That was
+verified on the Temporal dev server, not on every server version, so confirm it on your server
+after rollout (runbook §4, compiled source unverified).
+
 Pin `sourceCommit` (and, for UWE types, `definitionHash`) for every enrolled namespace **before** enrollment. The
 example values are deliberately not hex, so an unpinned copy fails startup instead of claiming
 coverage it does not have. Verify the JSON pointer casing against your own pinned fixture.

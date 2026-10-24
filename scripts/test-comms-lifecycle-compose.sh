@@ -8,6 +8,7 @@ trap 'rm -rf "$DIR"' EXIT
 mkdir -p "$DIR/repo/scripts/lib" "$DIR/repo/fleet" "$DIR/bin"
 cp "$ROOT/setup.sh" "$ROOT/upgrade.sh" "$ROOT/docker-compose.example.yml" "$DIR/repo/"
 cp "$ROOT/scripts/lib/comms-profiles.sh" "$DIR/repo/scripts/lib/"
+cp "$ROOT/scripts/source-commit.sh" "$DIR/repo/scripts/"
 REAL_DOCKER=$(command -v docker)
 export REAL_DOCKER CALLS="$DIR/calls" CONFIG="$DIR/config.json"
 cat > "$DIR/bin/docker" <<'WRAPPER'

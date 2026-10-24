@@ -99,7 +99,9 @@ docker inspect --format '{{.Name}} {{.Image}}' fleet-orchestrator fleet-temporal
 Keep the previous image ids tagged for rollback. The orchestrator and agent builds fail if the
 outcome services are missing (`ERROR: Fleet.Orchestrator.dll lacks …`), so a successful build of
 the reviewed commit is the minimum; the running container's image id is the proof. Source on
-`main` or an agent's reported version alone proves nothing about the deployment.
+`main` or an agent's reported version alone proves nothing about the deployment. The bridge image
+must also carry that commit as `FLEET_BUILD_COMMIT` (a clean-checkout `setup.sh`/`upgrade.sh` build
+does); `unknown` leaves every compiled run source-unverified (§4).
 
 ## 4. Cause review and classifier maintenance
 
@@ -147,9 +149,12 @@ type pin the loaded hash as below. Until then the incident is an accepted, visib
 workflow tasks did not all record a compiled rule's exact `sourceCommit` as the worker build id.
 Read the build ids from the run's history (`WorkflowTaskCompleted` → worker version build id):
 
-1. None, or not a 40-hex commit: the bridge image was built without `--build-arg GIT_COMMIT=<commit>`
-   (startup warning `FLEET_BUILD_COMMIT is not a 40-hex commit`). Rebuild it with the exact commit;
-   runs already recorded stay pending.
+1. None, or not a 40-hex commit: the bridge image was built without a verified commit (startup
+   warning `FLEET_BUILD_COMMIT is not a 40-hex commit`; at build time `source commit unknown: …`
+   from `scripts/source-commit.sh`). Rebuild from a clean checkout with `./upgrade.sh`, or pass
+   `--build-arg GIT_COMMIT=$(bash scripts/source-commit.sh)`; runs already recorded stay pending.
+   If the image does carry a 40-hex `FLEET_BUILD_COMMIT` but new runs still record none, your
+   Temporal server does not keep the unversioned build id: compiled rules cannot match there.
 2. Another commit: the bridge runs code no rule was reviewed for. Review that commit's compiled
    workflow and add a rule pinned to it (a rule for the old commit may stay for older runs), or
    leave the gap open.
@@ -157,7 +162,11 @@ Read the build ids from the run's history (`WorkflowTaskCompleted` → worker ve
    produced it. It stays pending; record an operator review decision if needed.
 
 Never pin a commit you did not verify the running image was built from; the gap closes only when no
-run in the namespace is pending on a classifier gap.
+run in the namespace is pending on a classifier gap. After any bridge rollout, check one new
+compiled run: `temporal workflow show --workflow-id <id> --output json` must show
+`workerVersion.buildId` equal to the image's `FLEET_BUILD_COMMIT`
+(`docker inspect fleet:temporal-bridge --format '{{range .Config.Env}}{{println .}}{{end}}'`) on
+every `WorkflowTaskCompleted` event.
 
 **Classifier evidence and hash maintenance.** A `classification_pending` row with
 `classifier_missing` means a Completed run of a type/definition hash with no pinned rule:

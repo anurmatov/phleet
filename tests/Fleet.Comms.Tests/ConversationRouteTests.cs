@@ -536,7 +536,9 @@ public class ConversationRouteTests
     /// <remarks>
     /// The route test above controls renewal, so this is the regression for the values a
     /// deployment actually runs. The limiter is the one the production factory builds, exhausted
-    /// directly: it is not inside a partitioned limiter here, so nothing renews it mid-test.
+    /// directly. The partition helper turns its own timer off and leaves renewal to the
+    /// partitioned limiter's heartbeat, which this standalone instance is not inside, so nothing
+    /// renews it mid-test; <c>IsAutoReplenishing</c> is asserted rather than assumed.
     /// </remarks>
     [Fact]
     public async Task Production_conversation_budget_is_300_per_60_seconds_per_credential()
@@ -561,6 +563,7 @@ public class ConversationRouteTests
         using var limiter = Assert.IsType<System.Threading.RateLimiting.FixedWindowRateLimiter>(
             partition.Factory(partition.PartitionKey));
         Assert.Equal(TimeSpan.FromSeconds(60), limiter.ReplenishmentPeriod);
+        Assert.False(limiter.IsAutoReplenishing);
         for (var i = 0; i < 300; i++)
         {
             using var lease = limiter.AttemptAcquire();

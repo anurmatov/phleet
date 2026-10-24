@@ -124,7 +124,7 @@ public sealed class ConversationRegistry : IConversationRegistry
     }
 }
 
-/// <summary>Well-known channel ids. These two are owned by the existing runtime paths.</summary>
+/// <summary>Well-known channel ids, each owned by a built-in runtime path.</summary>
 public static class ChannelIds
 {
     /// <summary>The first-class Telegram adapter. No <c>IChannelAdapter</c> is registered for it.</summary>
@@ -133,8 +133,15 @@ public static class ChannelIds
     /// <summary>Relay/bridge traffic. Never delivered to a client adapter (Constraint 7).</summary>
     public const string Relay = "relay";
 
+    /// <summary>
+    /// The coordinator's internal workflow-outcome review conversations (#476). Runtime-owned so a
+    /// client cannot open one, no adapter can claim it and the event bus never routes it.
+    /// </summary>
+    public const string WorkflowOutcome = Fleet.Shared.WorkflowOutcomeTurnIdentity.ChannelId;
+
     /// <summary>True when the channel is a built-in runtime path rather than a client adapter.</summary>
     public static bool IsRuntimeOwned(string? channelId) =>
         string.Equals(channelId, Telegram, StringComparison.Ordinal)
-        || string.Equals(channelId, Relay, StringComparison.Ordinal);
+        || string.Equals(channelId, Relay, StringComparison.Ordinal)
+        || string.Equals(channelId, WorkflowOutcome, StringComparison.Ordinal);
 }

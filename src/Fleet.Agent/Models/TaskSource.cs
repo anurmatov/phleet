@@ -29,4 +29,12 @@ public enum TaskSource
     /// are never silently consumed by a failed-enqueue commit.
     /// </summary>
     DebouncedGroupBatch,
+
+    /// <summary>
+    /// The coordinator's internal review turn for one delivered workflow-failure batch (#476).
+    /// Set only by <c>WorkflowOutcomeCompletionHandler</c>, never by an intake path. It produces no
+    /// human, client, journal, relay or bridge output: its final text goes only to the outcome
+    /// handler, which acknowledges and records decisions through the orchestrator API.
+    /// </summary>
+    WorkflowOutcome,
 }

@@ -392,6 +392,7 @@ public static class AgentHostRegistration
 
         AddConversationSouthSeam(services, configuration);
         if (!journalFilesEnabled) AddJournal(services, configuration);
+        AddWorkflowOutcomes(services, configuration);
 
         // #394. With the journal off an agent declares nothing on the broker; it only removes a
         // receipt queue an earlier journal-on life left behind.
@@ -514,6 +515,57 @@ public static class AgentHostRegistration
             time: null,
             media: sp.GetService<JournalMediaUploader>()));
         services.AddHostedService(sp => sp.GetRequiredService<JournalDrainer>());
+    }
+
+    /// <summary>
+    /// The coordinator's failure inbox client (#476), registered only when
+    /// <c>WorkflowOutcomes:Enabled</c> is true — which provisioning writes for the configured
+    /// coordinator alone.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Disabled or absent, <b>nothing</b> is registered: no options, no store, no HTTP client, no
+    /// hosted service, no token in the graph. An unrelated agent is byte-identical to one built
+    /// before the feature.
+    /// </para>
+    /// <para>
+    /// Enabled but invalid is NOT a startup failure, unlike the conversation seam: the spec keeps
+    /// normal agent transport running and makes the intake failure explicit instead. Only a fault
+    /// reporter is registered, which logs every fault by key name at startup; no client exists.
+    /// </para>
+    /// </remarks>
+    internal static void AddWorkflowOutcomes(IServiceCollection services, IConfiguration configuration)
+    {
+        var section = configuration.GetSection(WorkflowOutcomeClientOptions.Section);
+        if (!section.GetValue<bool>(nameof(WorkflowOutcomeClientOptions.Enabled)))
+            return;
+
+        var options = new WorkflowOutcomeClientOptions();
+        section.Bind(options);
+        var faults = options.Validate(configuration[$"{AgentOptions.Section}:{nameof(AgentOptions.Name)}"]);
+        if (faults.Count > 0)
+        {
+            services.AddHostedService(sp => new WorkflowOutcomeConfigFaultReporter(
+                faults, sp.GetRequiredService<ILogger<WorkflowOutcomeConfigFaultReporter>>()));
+            return;
+        }
+
+        services.Configure<WorkflowOutcomeClientOptions>(section);
+        services.AddSingleton(sp => new WorkflowOutcomeLocalStore(
+            options.ResolveInboxPath(sp.GetRequiredService<IOptions<AgentOptions>>().Value.WorkDir)));
+        services.AddHttpClient(WorkflowOutcomeInboxClient.HttpClientName, client =>
+            {
+                client.BaseAddress = new Uri(options.BaseUrl);
+                client.Timeout = WorkflowOutcomeInboxClient.Timeout;
+            })
+            .ConfigurePrimaryHttpMessageHandler(WorkflowOutcomeInboxClient.CreateHandler);
+        services.AddSingleton(sp => new WorkflowOutcomeInboxClient(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(WorkflowOutcomeInboxClient.HttpClientName),
+            options.ScopedToken));
+        services.AddSingleton<WorkflowOutcomeCompletionHandler>();
+        // AddSingleton + factory-AddHostedService, the same load-bearing pair as the relay publisher.
+        services.AddSingleton<WorkflowOutcomePullService>();
+        services.AddHostedService(sp => sp.GetRequiredService<WorkflowOutcomePullService>());
     }
 
     internal const string JournalHttpClientName = "journal";

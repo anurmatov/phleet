@@ -3,6 +3,7 @@ using Fleet.Agent.Abstractions;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
 using Fleet.Protocol;
+using Fleet.Shared;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -40,6 +41,21 @@ public sealed class TaskManager
     /// </summary>
     private int _steeringResidue;
     internal bool SteeringResidueForTest => Volatile.Read(ref _steeringResidue) == 1;
+
+    /// <summary>
+    /// #476: 1 after an internal workflow-outcome turn ended. Claude preserves an answer that
+    /// arrived after a turn's read loop and yields it as the NEXT turn's leading
+    /// <c>recovered_answer</c>; after an internal turn that text is the internal review, so the
+    /// next executor turn consumes this flag and drops such a leading answer instead of sending it
+    /// to whichever human or relay that turn belongs to.
+    /// </summary>
+    private int _internalTurnResidue;
+
+    /// <summary>Internal turns whose end was already reported, so it is reported exactly once.</summary>
+    private readonly ConcurrentDictionary<string, bool> _workflowOutcomeEnded = new(StringComparer.Ordinal);
+
+    /// <summary>Admission check for internal turns (#476). Null in hosts without the registry.</summary>
+    private readonly IConversationRegistry? _registry;
 
     private enum PendingQueueResult
     {
@@ -103,8 +119,10 @@ public sealed class TaskManager
         ConversationEventCounters? counters = null,
         IMessageSink? sink = null,
         TurnBindingPublisher? turnBindings = null,
-        QueueLaneCounter? queueCounter = null)
+        QueueLaneCounter? queueCounter = null,
+        IConversationRegistry? registry = null)
     {
+        _registry = registry;
         _queueCounter = queueCounter ?? new();
         _messageQueue = new DispatchQueue(_queueCounter);
         _turnBindings = turnBindings;
@@ -216,6 +234,16 @@ public sealed class TaskManager
         // key so every dispatch decision has something to report against, and every existing call
         // site keeps compiling and behaving unchanged.
         identity ??= SynthesizeIdentity(chatId, source);
+
+        // #476: an internal review turn runs only under the exact conversation the outcome handler
+        // admitted, and nothing else runs in one. Rejected silently: no disposition event, no notice.
+        if (!AdmitsWorkflowOutcomeBoundary(chatId, source, taskId, identity))
+        {
+            _logger.LogWarning("Task rejected at the workflow-outcome boundary (source={Source}, reservedKey={Reserved})",
+                source, _registry?.IsReserved(chatId) == true);
+            if (skipDedupReservationAcquire && taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
+            return TaskDispatchOutcome.Dropped;
+        }
 
         var state = GetChatState(chatId);
 
@@ -418,6 +446,14 @@ public sealed class TaskManager
                     PublishEvent(chatId, ConversationEventKind.TurnOutcomeUnknown, running.Identity,
                         new TurnOutcomeUnknownPayload { Reason = OutcomeUnknownReason.TurnReaped });
                     running.TerminalPublished = true;
+                }
+                if (source == TaskSource.WorkflowOutcome)
+                {
+                    // #476: every exit reports the end once, BEFORE the task id is released, so
+                    // the outcome handler never sees "not active, never ended". A path that did
+                    // not report (an escaped exception) is a failed turn, never a retry.
+                    RaiseWorkflowOutcomeTurnEnded(chatId, taskId, null, CompletionKind.Failed, true);
+                    if (taskId is not null) _workflowOutcomeEnded.TryRemove(taskId, out _);
                 }
                 // Release taskId dedup slot so the agent can accept a re-send of the same task
                 if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
@@ -670,6 +706,9 @@ public sealed class TaskManager
         where TPayload : class
     {
         if (_events is null || identity is null) return;
+        // #476: nothing about an internal review turn reaches a client, by identity or by key.
+        if (string.Equals(identity.ChannelId, ChannelIds.WorkflowOutcome, StringComparison.Ordinal)
+            || IsWorkflowOutcomeConversation(chatId)) return;
         try
         {
             _events.Publish(chatId, kind, identity, payload);
@@ -754,6 +793,61 @@ public sealed class TaskManager
         _ => OutboundOrigin.Human,
     };
 
+    // --- Internal workflow-outcome review turns (#476) ---
+
+    /// <summary>True when <paramref name="chatId"/> is a registered internal review conversation.</summary>
+    private bool IsWorkflowOutcomeConversation(long chatId) =>
+        _registry is not null && _registry.IsReserved(chatId)
+        && string.Equals(_registry.Lookup(chatId)?.ChannelId, ChannelIds.WorkflowOutcome, StringComparison.Ordinal);
+
+    /// <summary>
+    /// The admission boundary. An internal source needs the reserved key the outcome handler
+    /// resolved, the ref registered under it, that batch's task id and an identity stamped with the
+    /// same ref. Every other source is refused only inside an internal conversation, so ordinary
+    /// dispatch is untouched.
+    /// </summary>
+    private bool AdmitsWorkflowOutcomeBoundary(long chatId, TaskSource source, string? taskId, ConversationIdentity identity)
+    {
+        if (source != TaskSource.WorkflowOutcome)
+            return !IsWorkflowOutcomeConversation(chatId);
+
+        if (_registry is null || !_registry.IsReserved(chatId)) return false;
+        var reference = _registry.Lookup(chatId);
+        return reference is not null
+            && string.Equals(reference.ChannelId, ChannelIds.WorkflowOutcome, StringComparison.Ordinal)
+            && Guid.TryParseExact(reference.ConversationId, "D", out var batchId)
+            && string.Equals(taskId, WorkflowOutcomeTurnIdentity.TaskId(batchId), StringComparison.Ordinal)
+            && string.Equals(identity.ChannelId, reference.ChannelId, StringComparison.Ordinal)
+            && string.Equals(identity.ConversationId, reference.ConversationId, StringComparison.Ordinal)
+            && string.Equals(identity.SubmissionId, reference.ConversationId, StringComparison.Ordinal)
+            && string.Equals(identity.PrincipalId, reference.PrincipalId, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Reports an internal turn's end to the outcome handler, exactly once per task id. The final
+    /// text is the turn's last result only, never the concatenated assistant texts.
+    /// </summary>
+    private void RaiseWorkflowOutcomeTurnEnded(long chatId, string? taskId, string? finalText, CompletionKind kind, bool isPartial)
+    {
+        if (taskId is null || !_workflowOutcomeEnded.TryAdd(taskId, true)) return;
+        try
+        {
+            OnWorkflowOutcomeTurnEnded?.Invoke(
+                new WorkflowOutcomeTurnEnded(chatId, taskId, TaskSource.WorkflowOutcome, finalText, kind, isPartial));
+        }
+        catch (Exception ex)
+        {
+            // Never the text: it is the model's output.
+            _logger.LogError("Workflow outcome turn-end handler failed: {Type}", ex.GetType().Name);
+        }
+    }
+
+    /// <summary>No running turn and nothing queued. The outcome handler admits a review only then.</summary>
+    public bool IsIdle => !_chatTasks.Values.Any(s => s.Count > 0) && _messageQueue.IsEmpty;
+
+    /// <summary>True while a task with this id is queued or running.</summary>
+    public bool IsTaskIdActive(string taskId) => _activeTaskIds.ContainsKey(taskId);
+
     private async Task ProcessTask(long chatId, int taskId, string task, string displayText,
         bool isSessionTask, TaskSource source, string? relaySender, string? correlationId, string? relayTaskId,
         IReadOnlyList<MessageImage>? images, IReadOnlyList<MessageDocument>? documents,
@@ -783,6 +877,19 @@ public sealed class TaskManager
         string Prefix() => state.Count > 1 ? $"[#{taskId}] " : "";
         var origin = OriginOf(source);
 
+        // #476: an internal review turn emits nothing — no typing, progress, notice, recovered
+        // answer, reply, status line or completion callback. Its end goes only to the outcome
+        // handler, through Complete below.
+        var internalTurn = source == TaskSource.WorkflowOutcome;
+
+        void Complete(string relayText, bool isPartial, CompletionKind kind, string? finalText)
+        {
+            if (internalTurn)
+                RaiseWorkflowOutcomeTurnEnded(chatId, relayTaskId, finalText, kind, isPartial);
+            else
+                OnTaskCompleted?.Invoke(chatId, relayText, relaySender, source, isPartial, correlationId, relayTaskId, kind);
+        }
+
         string? lastResult = null;
         string? lastError = null;
         var significantUpdates = 0;
@@ -793,7 +900,7 @@ public sealed class TaskManager
         var toolCalls = new List<(string Name, string Args)>();
 
         using var typingCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var typingTask = RunTypingLoopAsync(chatId, typingCts.Token, identity);
+        var typingTask = internalTurn ? Task.CompletedTask : RunTypingLoopAsync(chatId, typingCts.Token, identity);
 
         string StatsSuffix()
         {
@@ -809,6 +916,7 @@ public sealed class TaskManager
             // finish so that OnTaskCompleted runs and the bridge/relay gets its answer.
             // A failed Telegram echo (e.g., bot not a member of the chat) is non-fatal —
             // the authoritative response goes out via OnTaskCompleted → relay.
+            if (internalTurn) return;
             try
             {
                 var statsText = StatsSuffix();
@@ -904,10 +1012,12 @@ public sealed class TaskManager
             {
                 // #406: this executor turn consumes the late-result guard whatever its first event is.
                 var steeringResidue = Interlocked.Exchange(ref _steeringResidue, 0) == 1;
+                var internalResidue = Interlocked.Exchange(ref _internalTurnResidue, 0) == 1;
                 var firstEvent = true;
                 await foreach (var progress in _executor.ExecuteAsync(currentTask, currentImages, currentDocuments, ct))
                 {
                     var guardsThisEvent = steeringResidue && firstEvent;
+                    var guardsInternalResidue = internalResidue && firstEvent;
                     firstEvent = false;
                     if (isSessionTask && progress.SessionId is not null)
                         _sessions.SetSession(chatId, progress.SessionId);
@@ -930,7 +1040,18 @@ public sealed class TaskManager
                     if (progress.IsProcessExit)
                         processExitResult = true;
 
-                    if (progress.EventType == "warning" && progress.IsSignificant)
+                    if (progress.EventType == "recovered_answer" && (internalTurn || guardsInternalResidue))
+                    {
+                        // #476: stale text in or right after an internal review turn is that review
+                        // (or belongs to nobody). Delivered nowhere; only its length is logged.
+                        _logger.LogInformation("Task #{TaskId}: discarded a {Length}-char recovered answer at an internal turn boundary",
+                            taskId, progress.Summary.Length);
+                    }
+                    else if (progress.EventType == "warning" && progress.IsSignificant && internalTurn)
+                    {
+                        _logger.LogInformation("Task #{TaskId}: executor warning suppressed in an internal turn", taskId);
+                    }
+                    else if (progress.EventType == "warning" && progress.IsSignificant)
                     {
                         // User-facing warning (e.g. provider capability notice) — deliver immediately
                         await _sink.SendTextByOriginAsync(chatId, progress.Summary, origin);
@@ -962,7 +1083,7 @@ public sealed class TaskManager
                         toolCalls.Add((ShortenToolName(progress.ToolName), TruncateArgs(progress.ToolArgs ?? "{}", _agentConfig.ToolArgsTruncateLength)));
                         // Suppress progress messages for check-ins — they may end up IDLE
                         // Also suppress when SuppressToolMessages is configured (e.g. for non-technical users)
-                        if (!_agentConfig.SuppressToolMessages && source is not (TaskSource.CheckIn or TaskSource.DebouncedGroupBatch) && significantUpdates % 5 == 1)
+                        if (!_agentConfig.SuppressToolMessages && source is not (TaskSource.CheckIn or TaskSource.DebouncedGroupBatch or TaskSource.WorkflowOutcome) && significantUpdates % 5 == 1)
                         {
                             var summaryText = progress.Summary;
                             if (progress.Summary.StartsWith("Using") && progress.ToolArgs is { } rawArgs)
@@ -979,7 +1100,9 @@ public sealed class TaskManager
                             var encoded = System.Net.WebUtility.HtmlEncode($"{Prefix()}... {summaryText}");
                             await _sink.SendHtmlTextByOriginAsync(chatId, $"{htmlPrefix}<blockquote expandable>{encoded}</blockquote>", origin);
                         }
-                        OnToolUse?.Invoke(chatId, progress.ToolName, progress.Summary);
+                        // Tool use feeds the shared conversation buffer; an internal turn has none.
+                        if (!internalTurn)
+                            OnToolUse?.Invoke(chatId, progress.ToolName, progress.Summary);
 
                         // Only the tool NAME leaves the runtime. The Telegram string built a few
                         // lines above appends truncated tool ARGUMENTS, and reusing it here is
@@ -1188,8 +1311,8 @@ public sealed class TaskManager
                 await DiscardSteeringTurnAnswersAsync();
                 // Relay/bridge callers have a delegate step waiting — fire OnTaskCompleted with
                 // CompletionKind.Idle so the workflow can advance instead of hanging to retry exhaustion.
-                if (source is TaskSource.Relay or TaskSource.Bridge)
-                    OnTaskCompleted?.Invoke(chatId, "", relaySender, source, false, correlationId, relayTaskId, CompletionKind.Idle);
+                if (source is TaskSource.Relay or TaskSource.Bridge || internalTurn)
+                    Complete("", false, CompletionKind.Idle, lastResult);
 
                 // Publish for EVERY conversation, not only client-owned ones. This is not
                 // cosmetic: the terminal event is what sets TerminalPublished, and without it the
@@ -1244,7 +1367,7 @@ public sealed class TaskManager
                 var fullText = string.Join("\n", allAssistantTexts);
                 // errorResult covers max-turns exhaustion (IsErrorResult from executor) — use
                 // Incomplete so the workflow continuation loop can retry, not Failed which abandons.
-                OnTaskCompleted?.Invoke(chatId, fullText, relaySender, source, errorResult, correlationId, relayTaskId, errorResult ? CompletionKind.Incomplete : CompletionKind.Completed);
+                Complete(fullText, errorResult, errorResult ? CompletionKind.Incomplete : CompletionKind.Completed, lastResult);
 
                 // turn.final carries the CHAT-VISIBLE text (lastResult), matching what the main
                 // reply path delivers. The concatenated all-texts form above stays exclusive to
@@ -1269,7 +1392,7 @@ public sealed class TaskManager
                 var errorMsg = $"Task failed: {lastError}";
                 await SendWithStatsAsync($"{Prefix()}{errorMsg}");
                 await DiscardSteeringTurnAnswersAsync();
-                OnTaskCompleted?.Invoke(chatId, errorMsg, relaySender, source, true, correlationId, relayTaskId, CompletionKind.Failed);
+                Complete(errorMsg, true, CompletionKind.Failed, null);
 
                 // The client event carries the FIXED message for the code, never lastError.
                 // Provider text and executor output routinely contain absolute paths, session ids
@@ -1286,14 +1409,14 @@ public sealed class TaskManager
                 _logger.LogError("Task #{TaskId} for chat {ChatId}: {Error}", taskId, chatId, errorMsg);
                 await SendWithStatsAsync($"{Prefix()}{errorMsg}");
                 await DiscardSteeringTurnAnswersAsync();
-                OnTaskCompleted?.Invoke(chatId, errorMsg, relaySender, source, true, correlationId, relayTaskId, CompletionKind.Failed);
+                Complete(errorMsg, true, CompletionKind.Failed, null);
                 PublishTerminalError(chatId, taskId, identity, ProtocolErrorCode.ExecutorError);
             }
             else
             {
                 await SendWithStatsAsync($"{Prefix()}Done! (no text output)");
                 await DiscardSteeringTurnAnswersAsync();
-                OnTaskCompleted?.Invoke(chatId, "Done! (no text output)", relaySender, source, false, correlationId, relayTaskId, CompletionKind.Completed);
+                Complete("Done! (no text output)", false, CompletionKind.Completed, null);
                 PublishTerminal(chatId, taskId, ConversationEventKind.TurnFinal, identity,
                     new TurnFinalPayload
                     {
@@ -1309,7 +1432,7 @@ public sealed class TaskManager
         {
             _logger.LogInformation("Task #{TaskId} cancelled for chat {ChatId}", taskId, chatId);
             await SendWithStatsAsync($"{Prefix()}Task cancelled.");
-            OnTaskCompleted?.Invoke(chatId, "Task cancelled.", relaySender, source, false, correlationId, relayTaskId, CompletionKind.Failed);
+            Complete("Task cancelled.", false, CompletionKind.Failed, null);
 
             // The chat-visible string and the callback payload are unchanged; only the reason is
             // new, and it was recorded by the canceller before Cts.Cancel().
@@ -1324,13 +1447,15 @@ public sealed class TaskManager
             await SendWithStatsAsync($"{Prefix()}{errorMsg}");
             if (isSessionTask)
                 _sessions.ClearSession(chatId);
-            OnTaskCompleted?.Invoke(chatId, errorMsg, relaySender, source, true, correlationId, relayTaskId, CompletionKind.Failed);
+            Complete(errorMsg, true, CompletionKind.Failed, null);
 
             // `internal` in particular must never carry the exception message.
             PublishTerminalError(chatId, taskId, identity, ProtocolErrorCode.Internal);
         }
         finally
         {
+            // Set before the turn leaves its chat state, so no next turn can start ahead of it.
+            if (internalTurn) Volatile.Write(ref _internalTurnResidue, 1);
             await typingCts.CancelAsync();
             await typingTask;
         }
@@ -1619,8 +1744,9 @@ public sealed class TaskManager
         {
             _logger.LogWarning("Message queue full ({Max}) — dropping incoming task from chat {ChatId}", MaxQueueDepth, chatId);
             _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DroppedAtQueueCap);
-            // DebouncedGroupBatch drops silently — the notice is noise for automated checks.
-            if (part.Source != TaskSource.DebouncedGroupBatch)
+            // DebouncedGroupBatch drops silently — the notice is noise for automated checks. An
+            // internal review turn has nobody to tell; the outcome handler leaves it pending (#476).
+            if (part.Source is not (TaskSource.DebouncedGroupBatch or TaskSource.WorkflowOutcome))
                 _ = _sink.SendTextByOriginAsync(chatId, $"Queue is full ({MaxQueueDepth} messages waiting). Please wait for tasks to complete.", OriginOf(part.Source));
             // Production relay passes taskId but no correlationId — gate on either so relay
             // completions are not dead code when the source has only a taskId.
@@ -1714,6 +1840,10 @@ public sealed class TaskManager
     /// </summary>
     private bool BusyNoticeApplies(long chatId, TaskSource source)
     {
+        // #476: an internal review turn waits silently.
+        if (source == TaskSource.WorkflowOutcome)
+            return false;
+
         if (source is TaskSource.Relay or TaskSource.Bridge)
             return true;
 
@@ -1924,7 +2054,7 @@ public sealed class TaskManager
         _logger.LogInformation("Queue dispatch lane={lane} reason={reason} chat={chat} parts={parts} waitedMs={waitedMs}",
             queued.Priority == TaskPriority.PrimaryHuman ? "priority" : "routine", "queue_drain",
             queued.ChatId, queued.PartCount, Math.Max(0, (DateTimeOffset.Now - queued.QueuedAt).TotalMilliseconds));
-        if (queued.BusyNoticeSent)
+        if (queued.BusyNoticeSent && queued.Source != TaskSource.WorkflowOutcome)
             _ = _sink.SendTextByOriginAsync(queued.ChatId, "Now processing your queued message...", OriginOf(queued.Source));
         OnStatusChanged?.Invoke();
 
@@ -1966,6 +2096,13 @@ public sealed class TaskManager
     /// Parameters: chatId, result, relaySender (null if Telegram-originated), source, isPartial (hit max-turns/error), correlationId, taskId, kind.
     /// </summary>
     public event Action<long, string, string?, TaskSource, bool, string?, string?, CompletionKind>? OnTaskCompleted;
+
+    /// <summary>
+    /// Raised once when an internal <see cref="TaskSource.WorkflowOutcome"/> turn ends, on every
+    /// exit path (#476). Such a turn never raises <see cref="OnTaskCompleted"/> or
+    /// <see cref="OnToolUse"/>.
+    /// </summary>
+    public event Action<WorkflowOutcomeTurnEnded>? OnWorkflowOutcomeTurnEnded;
 
     /// <summary>
     /// Raised for each significant tool-use event during task execution.

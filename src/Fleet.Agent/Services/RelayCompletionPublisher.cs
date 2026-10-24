@@ -82,6 +82,10 @@ public sealed class RelayCompletionPublisher : IHostedService, IDisposable
         long chatId, string result, string? relaySender, TaskSource source, bool isPartial,
         string? correlationId, string? taskId, CompletionKind kind)
     {
+        // #476: an internal workflow-outcome review is never relayed or bridged, whatever its
+        // sender fields say. TaskManager does not raise this event for one; this is the backstop.
+        if (source == TaskSource.WorkflowOutcome) return;
+
         _ = Task.Run(async () =>
         {
             try

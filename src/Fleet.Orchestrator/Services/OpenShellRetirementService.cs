@@ -139,6 +139,156 @@ public sealed class OpenShellRetirementService(Func<OrchestratorDbContext> creat
         }
     }
 
+    /// <summary>
+    /// Explicit outside-operator recovery for a PENDING PREPARATION launch. The provisioning failure
+    /// path produces these and they are never visible to the selection above: migration state stays
+    /// "pending", the held-cleanup lease owner is the launch itself (reserved in
+    /// <see cref="OpenShellLaunchStore"/>), not a request UUID, and whether the held cleanup is a
+    /// Stop or a Delete is decided solely by the persisted intents — never by the phase, because
+    /// <c>cleanup_pending</c> is set before either intent exists. The original mutation identity is
+    /// replayed verbatim; a Delete continuation acquires its own fresh identity only after fresh
+    /// stop proof; the never-issued mutation is never replayed under a re-minted identity, no
+    /// metadata is promoted and Create is never retried. Anything unmatched leaves the launch pending.
+    /// </summary>
+    public async Task<ProvisionResult> ReconcilePreparationAsync(string name, Guid expectedLaunchId,
+        bool replay, CancellationToken callerToken = default)
+    {
+        if (expectedLaunchId == Guid.Empty)
+            return ProvisionResult.Fail(name, "expected launch ID is required", 400);
+        using var operation = CancellationTokenSource.CreateLinkedTokenSource(callerToken);
+        operation.CancelAfter(TimeSpan.FromSeconds(120));
+        var ct = operation.Token;
+        using var scope = scopes.CreateScope();
+        var gateway = scope.ServiceProvider.GetService<IOpenShellGatewayClient>();
+        var reader = scope.ServiceProvider.GetService<IOpenShellRuntimeEvidenceReader>();
+        if (gateway is null || reader is null)
+            return ProvisionResult.Fail(name, "compatibility_blocked: trusted retirement peers are unavailable", 503);
+        try
+        {
+            await using var db = createDb();
+            if (db.Database.CreateExecutionStrategy().RetriesOnFailure)
+                return ProvisionResult.Fail(name, "non-retrying lifecycle storage is required", 503);
+            var row = await ClaimPreparationReconciliationAsync(db, name, expectedLaunchId, replay, ct);
+            var store = new OpenShellLaunchStore(db, artifacts: scope.ServiceProvider.GetService<IOpenShellArtifactCleanup>());
+            var stop = row.StopIntentJson is null ? null : JsonSerializer.Deserialize<Intent>(row.StopIntentJson);
+            var delete = row.DeleteIntentJson is null ? null : JsonSerializer.Deserialize<Intent>(row.DeleteIntentJson);
+            if (delete is not null)
+            {
+                // Pending Delete lost its reply: replay only the original delete identity; completion
+                // is always the fresh exact absence/drain proof, never the acknowledgement.
+                if (replay) await gateway.DeleteExactAsync(delete.Target(), delete.RequestId, allowMissing: true, ct);
+                await store.CompleteCleanupAsync(row.Id, DateTime.UtcNow, reader, ct);
+                return ProvisionResult.Ok(name, $"preparation launch {row.Id:D} retired with fresh absence and drained-intake proof after delete {delete.RequestId:D}");
+            }
+            if (stop is not null)
+            {
+                // Pending Stop lost its reply: replay only the original stop identity, then the
+                // never-issued Delete of the same held-cleanup chain acquires its own identity —
+                // only after fresh stop proof, and the stop identity is never re-minted.
+                if (replay) await gateway.StopExactAsync(stop.Target(), stop.RequestId, ct);
+                var observed = await gateway.ReadExactAsync(row.SandboxId!, ct)
+                    ?? throw new OpenShellStateConflictException("preparation_recovery_runtime_missing");
+                await ProvePreparationStoppedAsync(reader, row, observed, ct);
+                var deletion = new Intent(Guid.NewGuid(), observed.GatewayId, observed.Workspace, observed.Id,
+                    observed.Name, observed.ResourceVersion);
+                row.DeleteIntentJson = JsonSerializer.Serialize(deletion);
+                await db.SaveChangesAsync(ct);
+                await gateway.DeleteExactAsync(observed, deletion.RequestId, allowMissing: true, ct);
+                await store.CompleteCleanupAsync(row.Id, DateTime.UtcNow, reader, ct);
+                return ProvisionResult.Ok(name, $"preparation launch {row.Id:D} retired after fresh absence proof following stop {stop.RequestId:D}");
+            }
+            // The preparation failed before any gateway mutation was persisted (for example an
+            // ambiguous Create): nothing exists to replay; only a complete authenticated
+            // launch-owned inventory can prove nothing owned survived, and then the slot releases.
+            await store.CompleteCleanupAsync(row.Id, DateTime.UtcNow, reader, ct);
+            return ProvisionResult.Ok(name, $"preparation launch {row.Id:D} retired after fresh absence and drained-intake proof; migration state unchanged");
+        }
+        catch (OperationCanceledException) when (callerToken.IsCancellationRequested) { throw; }
+        catch (OpenShellStateConflictException)
+        {
+            return ProvisionResult.Fail(name, $"preparation launch {expectedLaunchId:D} conflicts with current ownership or proof; recovery state retained", 409);
+        }
+        catch (Exception)
+        {
+            return ProvisionResult.Fail(name, $"preparation launch {expectedLaunchId:D} remains unconfirmed; recovery state retained", 503);
+        }
+    }
+
+    private static async Task<OpenShellLaunch> ClaimPreparationReconciliationAsync(OrchestratorDbContext db,
+        string name, Guid expectedLaunchId, bool replay, CancellationToken ct)
+    {
+        await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+        var agent = await db.Agents.AsNoTracking().SingleOrDefaultAsync(a => a.Name == name, ct);
+        if (agent is null || agent.ExecutionShell != "openshell")
+            throw new OpenShellStateConflictException("preparation_recovery_agent_unqualified");
+        // Preparation never promotes migration state; once it is not "pending" the launch belongs to
+        // the normal retirement paths above and this route must not compete with them.
+        if (agent.OpenShellMigrationState != "pending")
+            throw new OpenShellStateConflictException("preparation_recovery_state_promoted");
+        var row = await db.OpenShellLaunches.SingleOrDefaultAsync(l => l.Id == expectedLaunchId, ct);
+        if (row is null || row.AgentId != agent.Id)
+            throw new OpenShellStateConflictException("preparation_recovery_wrong_owner");
+        await db.Entry(row).ReloadAsync(ct);
+        if (await db.OpenShellLaunches.AnyAsync(l => l.AgentId == agent.Id && l.Id != row.Id
+                && (l.ActiveAgentId != null || l.Phase != "retired" || l.RevokedAt == null), ct))
+            throw new OpenShellStateConflictException("preparation_recovery_ambiguous_ownership");
+        // Producer contract (provisioning catch → OpenShellLaunchStore.RetireAsync): revoked, still
+        // holding the active slot, phase cleanup_pending.
+        if (row.RevokedAt is null || row.ActiveAgentId != row.AgentId || row.Phase != "cleanup_pending")
+            throw new OpenShellStateConflictException("preparation_recovery_not_pending");
+        if ((row.GatewayId is null) != (row.SandboxId is null))
+            throw new OpenShellStateConflictException("preparation_recovery_mapping_inconsistent");
+        var stop = row.StopIntentJson is null ? null : JsonSerializer.Deserialize<Intent>(row.StopIntentJson);
+        var delete = row.DeleteIntentJson is null ? null : JsonSerializer.Deserialize<Intent>(row.DeleteIntentJson);
+        if (row.SandboxId is null && (stop is not null || delete is not null))
+            throw new OpenShellStateConflictException("preparation_recovery_intent_unbound");
+        if (replay && stop is null && delete is null)
+            throw new OpenShellStateConflictException("preparation_recovery_nothing_to_replay");
+        foreach (var intent in new[] { stop, delete })
+            if (intent is not null && (intent.RequestId == Guid.Empty || intent.GatewayId != row.GatewayId
+                    || intent.Workspace != row.Workspace || intent.SandboxId != row.SandboxId
+                    || string.IsNullOrWhiteSpace(intent.Name) || intent.ResourceVersion == 0))
+                throw new OpenShellStateConflictException("preparation_recovery_intent_inconsistent");
+        if (row.SandboxId is not null && !await db.OpenShellRetiredIds.AnyAsync(
+                x => x.GatewayId == row.GatewayId && x.SandboxId == row.SandboxId, ct))
+            throw new OpenShellStateConflictException("preparation_recovery_tombstone_missing");
+        var lease = await db.OpenShellLeases.SingleOrDefaultAsync(l => l.AgentId == row.AgentId, ct);
+        if (lease is null)
+            // The preparation lease spans reserve through held cleanup; gone means another operation
+            // owns this agent's lifecycle now and recovery must not steal it.
+            throw new OpenShellStateConflictException("preparation_recovery_lease_missing");
+        await db.Entry(lease).ReloadAsync(ct);
+        // Preparation lease ownership is the LAUNCH itself (Reserve) — unlike retirement, which
+        // reassigns the owner to the intent request UUID.
+        if (lease.Owner != row.Id)
+            throw new OpenShellStateConflictException("preparation_recovery_foreign_lease");
+        var now = DateTime.UtcNow;
+        if (lease.ExpiresAt > now)
+            throw new OpenShellStateConflictException("preparation_recovery_lease_live");
+        // Only the original owner is re-armed, and only with a fresh expiry; identity never changes.
+        lease.ExpiresAt = now.AddSeconds(120);
+        row.UpdatedAt = now;
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return row;
+    }
+
+    private static async Task ProvePreparationStoppedAsync(IOpenShellRuntimeEvidenceReader reader,
+        OpenShellLaunch launch, OpenShellSandboxSnapshot target, CancellationToken ct)
+    {
+        // The same stopped-and-drained shape the provisioning held cleanup requires before Delete.
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        var proof = await reader.ReadAsync(new(launch.Id, launch.IdentityEpoch, target.GatewayId, target.Id, false),
+            deadline.Token).WaitAsync(deadline.Token);
+        var now = DateTime.UtcNow;
+        if (proof.LaunchId != launch.Id || proof.IdentityEpoch != launch.IdentityEpoch
+            || proof.GatewayId != target.GatewayId || proof.RuntimeId != target.Id || !proof.Stopped
+            || proof.Consumers != 0 || proof.Pollers != 0 || proof.ObservedAt.Kind != DateTimeKind.Utc
+            || proof.ObservedAt > now || now - proof.ObservedAt > TimeSpan.FromSeconds(5))
+            throw new OpenShellStateConflictException("preparation_recovery_stop_unconfirmed");
+    }
+
     private static async Task<(Intent Intent, bool Delete)> ClaimReconciliationAsync(OrchestratorDbContext db,
         string name, Guid expectedLaunchId, Guid expectedRequestId, CancellationToken ct)
     {

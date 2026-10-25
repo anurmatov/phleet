@@ -73,6 +73,36 @@ refusal is not authority to rewrite the recorded intent or select a replacement.
 A confirmed Stop keeps config and the active slot, while confirmed cleanup releases
 the slot only after absence and drain verification. Reconciliation does not create
 or resume a sandbox, activate intake, complete migration or implement rollback.
+Slot release additionally requires the matching lifecycle lease to be live at
+commit time, rechecked after artifact/evidence I/O against the trusted clock:
+`cleanup_lease_missing_before_slot_release` and
+`cleanup_lease_expired_before_slot_release` refuse while the launch stays pending.
+Already-retired rows remain idempotent without any lease.
+
+## Pending preparation recovery (source-only, admission still off)
+
+`POST /api/agents/{name}/openshell/reconcile-preparation` recovers only launches left
+`cleanup_pending` by the provisioning failure path. The ordinary reconcile route
+cannot see these: the agent's migration state must still be `pending`, the launch
+must be revoked and still hold the active slot, and the lifecycle lease owner must be
+the launch itself (reserve-time ownership, not a request UUID), expired, and re-armed
+only for that original owner. There is no expected request ID — the original mutation
+identity is taken only from the persisted intents, so a caller cannot substitute one.
+Whether the pending operation is a Stop or a Delete is decided solely by the intents,
+never by the phase, because `cleanup_pending` is set before either intent exists.
+
+With a persisted Delete, only that identity replays under `replay=true`. With a
+Stop-only intent, the stop replays under its original identity (or is verified already
+stopped with no replay), and only after fresh stopped-and-drained proof does the
+never-issued Delete of the same held-cleanup chain acquire its own new identity. With
+no persisted intent nothing is replayable (`replay=true` answers 409); only complete
+authenticated launch-owned inventory absence can release the slot. Migration state,
+plan hash, create identity and attempt timestamps are never modified and Create is
+never retried. Promoted state, a second open launch, unbound intents, intents
+inconsistent with the row, missing tombstones, live or foreign leases and non-pending
+phases all answer 409 with the pending state retained; a lost replay reply answers 503
+and retains recovery state. This route recovers bookkeeping; it does not qualify the
+unimplemented evidence reader or any runtime.
 
 ## Agent deletion (source-only)
 

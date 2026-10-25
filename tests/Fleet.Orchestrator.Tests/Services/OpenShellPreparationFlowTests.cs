@@ -81,6 +81,51 @@ public sealed class OpenShellPreparationFlowTests
         }
     }
 
+    [Fact]
+    public async Task PreparationRecovery_CompletesLostCreatePendingLaunch_WithoutRetryingCreate()
+    {
+        await using var sql = new SqliteConnection("Data Source=:memory:"); await sql.OpenAsync();
+        var options = new DbContextOptionsBuilder<OrchestratorDbContext>().UseSqlite(sql).Options;
+        await using (var db = new OrchestratorDbContext(options))
+        {
+            await db.Database.EnsureCreatedAsync();
+            db.Agents.Add(new() { Name = "agent1", DisplayName = "Agent 1", Role = "test", Model = "test", ContainerName = "unused" });
+            await db.SaveChangesAsync();
+        }
+        var plan = OpenShellPolicyCompilerTests.Plan();
+        var selection = new OpenShellPreparationScope(1, "start", null, plan.Hash, DateTime.UtcNow.AddSeconds(100), plan);
+        var wire = new OwnedGateway("create_lost", options);
+        var services = new ServiceCollection();
+        services.AddSingleton<IOpenShellGatewayClient>(wire);
+        services.AddSingleton<IOpenShellRuntimeEvidenceReader>(new OwnedEvidence());
+        services.AddSingleton<IOpenShellPreparationPreflight>(new OwnedPreflight());
+        services.AddSingleton<IOpenShellArtifactCleanup>(new OwnedCleanup());
+        services.AddSingleton<IOpenShellBootstrapProbe>(new OwnedProbe("held"));
+        using var peers = services.BuildServiceProvider();
+        var driver = new OpenShellProvisioningService(() => new(options), new OwnedAuthority(selection), peers.GetRequiredService<IServiceScopeFactory>());
+        Assert.False((await driver.TryPrepareAsync("agent1", "start", false, default))!.Success);
+        await using var db2 = new OrchestratorDbContext(options);
+        var row = await db2.OpenShellLaunches.SingleAsync(l => l.CreateRequestId != null);
+        Assert.Null(row.SandboxId); Assert.Equal("cleanup_pending", row.Phase);
+        var originalCreate = row.CreateRequestId; var originalAttempted = row.CreateAttemptedAt;
+        var lease = await db2.OpenShellLeases.SingleAsync();
+        lease.ExpiresAt = DateTime.UtcNow.AddSeconds(-1); // wait out the original bounded attempt
+        await db2.SaveChangesAsync();
+        var retirement = new OpenShellRetirementService(() => new OrchestratorDbContext(options),
+            peers.GetRequiredService<IServiceScopeFactory>());
+        var recovered = await retirement.ReconcilePreparationAsync("agent1", row.Id, replay: false);
+        Assert.True(recovered.Success);
+        Assert.Equal(1, wire.Creates); Assert.Equal(0, wire.Stops); Assert.Equal(0, wire.Deletes);
+        db2.ChangeTracker.Clear();
+        row = await db2.OpenShellLaunches.SingleAsync(l => l.CreateRequestId != null);
+        Assert.Equal("retired", row.Phase);
+        Assert.Null(row.ActiveAgentId);
+        Assert.Equal(originalCreate, row.CreateRequestId); // metadata untouched, Create never re-issued
+        Assert.Equal(originalAttempted, row.CreateAttemptedAt);
+        Assert.Equal("pending", (await db2.Agents.SingleAsync()).OpenShellMigrationState);
+        Assert.Empty(await db2.OpenShellLeases.ToListAsync());
+    }
+
     private sealed class OwnedAuthority(OpenShellPreparationScope selection) : IOpenShellPreparationAuthority
     {
         public Task<OpenShellPreparationScope?> SelectAsync(string name, string intent, CancellationToken ct) => Task.FromResult<OpenShellPreparationScope?>(selection);

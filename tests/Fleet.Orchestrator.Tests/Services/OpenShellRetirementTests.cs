@@ -344,6 +344,262 @@ public class OpenShellRetirementTests
         Assert.Single(await db.OpenShellLeases.ToListAsync());
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PreparationRecovery_LostStopReply_CompletesChainKeepingOriginalStopIdentity(bool replay)
+    {
+        var launchId = Guid.NewGuid();
+        var stopIntent = new OpenShellRetirementService.Intent(Guid.NewGuid(), "gateway1", "workspace1",
+            "sandbox1", "name1", 12);
+        await using var h = ProvisioningHarness.Create();
+        await h.SeedAsync(db =>
+        {
+            var agent = new Agent { Name = "agent1", DisplayName = "Agent 1", Role = "test", Model = "test",
+                ContainerName = "held", OpenShellMigrationState = "pending" };
+            db.Agents.Add(agent);
+            db.OpenShellLaunches.Add(new() { Id = launchId, Agent = agent, ActiveAgentId = 1,
+                GatewayId = "gateway1", SandboxId = "sandbox1", Workspace = "workspace1",
+                Phase = "cleanup_pending", RevokedAt = DateTime.UtcNow, IdentityEpoch = Guid.NewGuid(),
+                CreatedAt = DateTime.UtcNow.AddSeconds(-30),
+                StopIntentJson = System.Text.Json.JsonSerializer.Serialize(stopIntent) });
+            db.OpenShellRetiredIds.Add(new() { GatewayId = "gateway1", SandboxId = "sandbox1", RetiredAt = DateTime.UtcNow });
+        });
+        // The preparation lease is launch-owned (Reserve) and expired, unlike retirement leases.
+        await h.SeedAsync(db => db.OpenShellLeases.Add(new() { AgentId = 1, Owner = launchId, ExpiresAt = DateTime.UtcNow.AddSeconds(-1) }));
+        var wire = new OpenShellConditionalMutationTests.MutationWire();
+        using var client = new OpenShellGatewayClient(new Uri("https://gateway.example.invalid"), "gateway1", "workspace1", "synthetic-token", wire);
+        using var peers = new ServiceCollection().AddSingleton<IOpenShellGatewayClient>(client)
+            .AddSingleton<IOpenShellRuntimeEvidenceReader>(new Evidence()).BuildServiceProvider();
+        var service = new OpenShellRetirementService(() => Db(h), peers.GetRequiredService<IServiceScopeFactory>());
+        var result = await service.ReconcilePreparationAsync("agent1", launchId, replay);
+        Assert.True(result.Success);
+        Assert.Equal(replay, wire.Stop is not null); // without replay the lost Stop is never resent
+        if (replay) Assert.Equal(stopIntent.RequestId.ToString("D"), wire.Stop!.RequestId);
+        Assert.NotNull(wire.Delete); // the never-issued Delete continues the chain with its own identity
+        await using var db = Db(h);
+        var row = await db.OpenShellLaunches.SingleAsync();
+        Assert.Equal("retired", row.Phase);
+        Assert.Null(row.ActiveAgentId);
+        Assert.Equal(stopIntent.RequestId,
+            System.Text.Json.JsonSerializer.Deserialize<OpenShellRetirementService.Intent>(row.StopIntentJson!)!.RequestId);
+        var minted = System.Text.Json.JsonSerializer.Deserialize<OpenShellRetirementService.Intent>(row.DeleteIntentJson!)!;
+        Assert.NotEqual(stopIntent.RequestId, minted.RequestId);
+        Assert.Equal(minted.RequestId.ToString("D"), wire.Delete!.RequestId);
+        Assert.Equal("pending", (await db.Agents.SingleAsync()).OpenShellMigrationState); // never promoted
+        Assert.Empty(await db.OpenShellLeases.ToListAsync());
+        Assert.Equal(0, h.DockerRequestCount);
+    }
+
+    [Fact]
+    public async Task PreparationRecovery_LostDeleteReply_ReplaysOnlyOriginalDeleteIdentity()
+    {
+        var launchId = Guid.NewGuid();
+        var stopIntent = new OpenShellRetirementService.Intent(Guid.NewGuid(), "gateway1", "workspace1", "sandbox1", "name1", 12);
+        var deleteIntent = new OpenShellRetirementService.Intent(Guid.NewGuid(), "gateway1", "workspace1", "sandbox1", "name1", 13);
+        var stopJson = System.Text.Json.JsonSerializer.Serialize(stopIntent);
+        var deleteJson = System.Text.Json.JsonSerializer.Serialize(deleteIntent);
+        await using var h = ProvisioningHarness.Create();
+        await h.SeedAsync(db =>
+        {
+            var agent = new Agent { Name = "agent1", DisplayName = "Agent 1", Role = "test", Model = "test",
+                ContainerName = "held", OpenShellMigrationState = "pending" };
+            db.Agents.Add(agent);
+            db.OpenShellLaunches.Add(new() { Id = launchId, Agent = agent, ActiveAgentId = 1,
+                GatewayId = "gateway1", SandboxId = "sandbox1", Workspace = "workspace1",
+                Phase = "cleanup_pending", RevokedAt = DateTime.UtcNow, IdentityEpoch = Guid.NewGuid(),
+                CreatedAt = DateTime.UtcNow.AddSeconds(-30), StopIntentJson = stopJson, DeleteIntentJson = deleteJson });
+            db.OpenShellRetiredIds.Add(new() { GatewayId = "gateway1", SandboxId = "sandbox1", RetiredAt = DateTime.UtcNow });
+        });
+        await h.SeedAsync(db => db.OpenShellLeases.Add(new() { AgentId = 1, Owner = launchId, ExpiresAt = DateTime.UtcNow.AddSeconds(-1) }));
+        var wire = new OpenShellConditionalMutationTests.MutationWire();
+        using var client = new OpenShellGatewayClient(new Uri("https://gateway.example.invalid"), "gateway1", "workspace1", "synthetic-token", wire);
+        using var peers = new ServiceCollection().AddSingleton<IOpenShellGatewayClient>(client)
+            .AddSingleton<IOpenShellRuntimeEvidenceReader>(new Evidence()).BuildServiceProvider();
+        var service = new OpenShellRetirementService(() => Db(h), peers.GetRequiredService<IServiceScopeFactory>());
+        Assert.True((await service.ReconcilePreparationAsync("agent1", launchId, replay: true)).Success);
+        Assert.Null(wire.Stop); // Delete already owns the pending cleanup; the finished Stop is never replayed.
+        Assert.Equal(deleteIntent.RequestId.ToString("D"), wire.Delete!.RequestId);
+        await using var db = Db(h);
+        var row = await db.OpenShellLaunches.SingleAsync();
+        Assert.Equal("retired", row.Phase);
+        Assert.Null(row.ActiveAgentId);
+        Assert.Equal(stopJson, row.StopIntentJson);
+        Assert.Equal(deleteJson, row.DeleteIntentJson); // original identity byte-identical, never re-minted
+        Assert.Equal("pending", (await db.Agents.SingleAsync()).OpenShellMigrationState);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PreparationRecovery_LostCreateReply_CompletesFromInventoryProofWithoutMutation(bool replay)
+    {
+        var launchId = Guid.NewGuid();
+        await using var h = ProvisioningHarness.Create();
+        await h.SeedAsync(db =>
+        {
+            var agent = new Agent { Name = "agent1", DisplayName = "Agent 1", Role = "test", Model = "test",
+                ContainerName = "held", OpenShellMigrationState = "pending" };
+            db.Agents.Add(agent);
+            db.OpenShellLaunches.Add(new() { Id = launchId, Agent = agent, ActiveAgentId = 1, Workspace = "workspace1",
+                Phase = "cleanup_pending", RevokedAt = DateTime.UtcNow, IdentityEpoch = Guid.NewGuid(),
+                CreatedAt = DateTime.UtcNow.AddSeconds(-30) });
+        });
+        await h.SeedAsync(db => db.OpenShellLeases.Add(new() { AgentId = 1, Owner = launchId, ExpiresAt = DateTime.UtcNow.AddSeconds(-1) }));
+        var wire = new OpenShellConditionalMutationTests.MutationWire();
+        using var client = new OpenShellGatewayClient(new Uri("https://gateway.example.invalid"), "gateway1", "workspace1", "synthetic-token", wire);
+        using var peers = new ServiceCollection().AddSingleton<IOpenShellGatewayClient>(client)
+            .AddSingleton<IOpenShellRuntimeEvidenceReader>(new Evidence()).BuildServiceProvider();
+        var service = new OpenShellRetirementService(() => Db(h), peers.GetRequiredService<IServiceScopeFactory>());
+        var result = await service.ReconcilePreparationAsync("agent1", launchId, replay);
+        if (replay)
+        {
+            // Nothing was ever persisted to replay for an unbound ambiguous Create.
+            Assert.False(result.Success);
+            Assert.Equal(409, result.StatusCode);
+            Assert.Equal("preparation launch " + launchId.ToString("D") + " conflicts with current ownership or proof; recovery state retained", result.Message);
+            await using var kept = Db(h);
+            Assert.Equal("cleanup_pending", (await kept.OpenShellLaunches.SingleAsync()).Phase);
+            Assert.Single(await kept.OpenShellLeases.ToListAsync());
+            Assert.Empty(wire.Calls);
+            return;
+        }
+        Assert.True(result.Success);
+        Assert.Empty(wire.Calls); // absence/drain inventory is the only gate; zero gateway mutations.
+        await using var db = Db(h);
+        var row = await db.OpenShellLaunches.SingleAsync();
+        Assert.Equal("retired", row.Phase);
+        Assert.Null(row.ActiveAgentId);
+        Assert.Null(row.CreateRequestId); // no Create was ever recorded or retried
+        Assert.Equal("pending", (await db.Agents.SingleAsync()).OpenShellMigrationState);
+        Assert.Empty(await db.OpenShellLeases.ToListAsync());
+    }
+
+    [Fact]
+    public async Task PreparationRecovery_ReplayedStopWithLostReply_RetainsPendingWithoutDeleteIntent()
+    {
+        var launchId = Guid.NewGuid();
+        var stopIntent = new OpenShellRetirementService.Intent(Guid.NewGuid(), "gateway1", "workspace1", "sandbox1", "name1", 12);
+        var stopJson = System.Text.Json.JsonSerializer.Serialize(stopIntent);
+        await using var h = ProvisioningHarness.Create();
+        await h.SeedAsync(db =>
+        {
+            var agent = new Agent { Name = "agent1", DisplayName = "Agent 1", Role = "test", Model = "test",
+                ContainerName = "held", OpenShellMigrationState = "pending" };
+            db.Agents.Add(agent);
+            db.OpenShellLaunches.Add(new() { Id = launchId, Agent = agent, ActiveAgentId = 1,
+                GatewayId = "gateway1", SandboxId = "sandbox1", Workspace = "workspace1",
+                Phase = "cleanup_pending", RevokedAt = DateTime.UtcNow, IdentityEpoch = Guid.NewGuid(),
+                CreatedAt = DateTime.UtcNow.AddSeconds(-30), StopIntentJson = stopJson });
+            db.OpenShellRetiredIds.Add(new() { GatewayId = "gateway1", SandboxId = "sandbox1", RetiredAt = DateTime.UtcNow });
+        });
+        await h.SeedAsync(db => db.OpenShellLeases.Add(new() { AgentId = 1, Owner = launchId, ExpiresAt = DateTime.UtcNow.AddSeconds(-1) }));
+        var wire = new OpenShellConditionalMutationTests.MutationWire { FailNextMutationReply = true };
+        using var client = new OpenShellGatewayClient(new Uri("https://gateway.example.invalid"), "gateway1", "workspace1", "synthetic-token", wire);
+        using var peers = new ServiceCollection().AddSingleton<IOpenShellGatewayClient>(client)
+            .AddSingleton<IOpenShellRuntimeEvidenceReader>(new Evidence()).BuildServiceProvider();
+        var service = new OpenShellRetirementService(() => Db(h), peers.GetRequiredService<IServiceScopeFactory>());
+        var result = await service.ReconcilePreparationAsync("agent1", launchId, replay: true);
+        Assert.False(result.Success);
+        Assert.Equal(503, result.StatusCode);
+        Assert.Equal(stopIntent.RequestId.ToString("D"), wire.Stop!.RequestId); // sent under the original identity only
+        Assert.Null(wire.Delete);
+        await using var db = Db(h);
+        var row = await db.OpenShellLaunches.SingleAsync();
+        Assert.Equal("cleanup_pending", row.Phase);
+        Assert.Equal(stopJson, row.StopIntentJson);
+        Assert.Null(row.DeleteIntentJson); // the continuation stops at proof, never past a lost reply
+        Assert.Equal(1, row.ActiveAgentId);
+        Assert.Equal("pending", (await db.Agents.SingleAsync()).OpenShellMigrationState);
+    }
+
+    [Theory]
+    [InlineData("live_lease")]
+    [InlineData("foreign_lease")]
+    [InlineData("missing_lease")]
+    [InlineData("promoted_state")]
+    [InlineData("second_open_launch")]
+    [InlineData("wrong_launch")]
+    [InlineData("intent_mismatch")]
+    [InlineData("missing_tombstone")]
+    [InlineData("not_pending")]
+    public async Task PreparationRecovery_RefusesEveryMismatch_WithoutMutationOrPromotion(string fault)
+    {
+        var launchId = Guid.NewGuid();
+        var stopIntent = fault == "intent_mismatch"
+            ? new OpenShellRetirementService.Intent(Guid.NewGuid(), "gateway1", "workspace1", "other-sandbox", "name1", 12)
+            : new OpenShellRetirementService.Intent(Guid.NewGuid(), "gateway1", "workspace1", "sandbox1", "name1", 12);
+        await using var h = ProvisioningHarness.Create();
+        await h.SeedAsync(db =>
+        {
+            var agent = new Agent { Name = "agent1", DisplayName = "Agent 1", Role = "test", Model = "test",
+                ContainerName = "held", OpenShellMigrationState = fault == "promoted_state" ? "active" : "pending" };
+            db.Agents.Add(agent);
+            db.OpenShellLaunches.Add(new() { Id = launchId, Agent = agent, ActiveAgentId = 1,
+                GatewayId = "gateway1", SandboxId = "sandbox1", Workspace = "workspace1",
+                Phase = fault == "not_pending" ? "prepared" : "cleanup_pending",
+                RevokedAt = fault == "not_pending" ? null : DateTime.UtcNow, IdentityEpoch = Guid.NewGuid(),
+                CreatedAt = DateTime.UtcNow.AddSeconds(-30),
+                StopIntentJson = System.Text.Json.JsonSerializer.Serialize(stopIntent) });
+            if (fault != "missing_tombstone")
+                db.OpenShellRetiredIds.Add(new() { GatewayId = "gateway1", SandboxId = "sandbox1", RetiredAt = DateTime.UtcNow });
+        });
+        if (fault == "second_open_launch")
+            await h.SeedAsync(db => db.OpenShellLaunches.Add(new() { Id = Guid.NewGuid(), AgentId = 1,
+                Phase = "prepared", IdentityEpoch = Guid.NewGuid(), CreatedAt = DateTime.UtcNow.AddSeconds(-60) }));
+        if (fault != "missing_lease")
+            await h.SeedAsync(db => db.OpenShellLeases.Add(new()
+            {
+                AgentId = 1,
+                Owner = fault == "foreign_lease" ? Guid.NewGuid() : launchId,
+                ExpiresAt = fault == "live_lease" ? DateTime.UtcNow.AddMinutes(1) : DateTime.UtcNow.AddSeconds(-1),
+            }));
+        var wire = new OpenShellConditionalMutationTests.MutationWire();
+        using var client = new OpenShellGatewayClient(new Uri("https://gateway.example.invalid"), "gateway1", "workspace1", "synthetic-token", wire);
+        using var peers = new ServiceCollection().AddSingleton<IOpenShellGatewayClient>(client)
+            .AddSingleton<IOpenShellRuntimeEvidenceReader>(new Evidence()).BuildServiceProvider();
+        var service = new OpenShellRetirementService(() => Db(h), peers.GetRequiredService<IServiceScopeFactory>());
+        var result = await service.ReconcilePreparationAsync("agent1",
+            fault == "wrong_launch" ? Guid.NewGuid() : launchId, replay: true);
+        Assert.False(result.Success);
+        Assert.Equal(409, result.StatusCode);
+        Assert.Empty(wire.Calls);
+        await using var db = Db(h);
+        var row = await db.OpenShellLaunches.SingleAsync(l => l.Id == launchId);
+        Assert.Equal(fault == "not_pending" ? "prepared" : "cleanup_pending", row.Phase);
+        Assert.Equal(1, row.ActiveAgentId);
+        Assert.Equal(fault == "promoted_state" ? "active" : "pending",
+            (await db.Agents.AsNoTracking().SingleAsync()).OpenShellMigrationState); // never promoted here
+        var expectedLeases = fault is "missing_lease" ? 0 : 1;
+        Assert.Equal(expectedLeases, (await db.OpenShellLeases.ToListAsync()).Count);
+        Assert.Equal(0, h.DockerRequestCount);
+    }
+
+    [Theory]
+    [InlineData("", "synthetic-operator", 503)]
+    [InlineData("synthetic-operator", "wrong", 401)]
+    [InlineData("synthetic-operator", "synthetic-operator", 503)]
+    public async Task PreparationReconcileRoute_RequiresOperatorAndTrustedPeersBeforeStorage(string configured, string supplied, int status)
+    {
+        var reads = 0;
+        using var peers = new ServiceCollection().BuildServiceProvider();
+        var service = new OpenShellRetirementService(() => { reads++; throw new InvalidOperationException(); },
+            peers.GetRequiredService<IServiceScopeFactory>());
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer(); builder.Logging.ClearProviders();
+        builder.Services.AddSingleton(service);
+        await using var app = builder.Build();
+        app.UseOpenShellOperatorAuthorization(configured);
+        app.MapOpenShellReconciliationEndpoint();
+        await app.StartAsync();
+        using var http = app.GetTestClient();
+        http.DefaultRequestHeaders.Authorization = new("Bearer", supplied);
+        var response = await http.PostAsJsonAsync("/api/agents/agent1/openshell/reconcile-preparation",
+            new OpenShellPreparationReconciliationRequest(Guid.NewGuid(), true));
+        Assert.Equal(status, (int)response.StatusCode);
+        Assert.Equal(0, reads);
+    }
+
     private static Task SeedActiveAsync(ProvisioningHarness h) => h.SeedAsync(db =>
     {
         var agent = new Agent { Name = "agent1", DisplayName = "Agent 1", Role = "test", Model = "test",
@@ -361,6 +617,7 @@ public class OpenShellRetirementTests
     {
         public bool Drain { get; set; } = true;
         public bool ProveAbsence { get; set; } = true;
+        public bool Inventory { get; set; } = true;
         public bool Wrong { get; init; }
         public bool Stale { get; init; }
         public int Reads { get; private set; }
@@ -368,7 +625,8 @@ public class OpenShellRetirementTests
         {
             Reads++;
             return Task.FromResult(new OpenShellRuntimeEvidence(Wrong ? Guid.NewGuid() : target.LaunchId, target.IdentityEpoch,
-                target.GatewayId, target.RuntimeId, true, target.RequireAbsence && ProveAbsence, Drain ? 0 : 1, 0, DateTime.UtcNow.AddSeconds(Stale ? -6 : 0)));
+                target.GatewayId, target.RuntimeId, true, target.RequireAbsence && ProveAbsence, Drain ? 0 : 1, 0,
+                DateTime.UtcNow.AddSeconds(Stale ? -6 : 0), Inventory, Inventory ? 0 : -1));
         }
     }
 }

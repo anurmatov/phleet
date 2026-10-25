@@ -23,6 +23,11 @@ public static class AgentRuntimeEndpoints
         app.MapPost("/api/agents/{name}/openshell/reconcile", async (string name,
             OpenShellReconciliationRequest request, OpenShellRetirementService retirement, CancellationToken ct) =>
             ToResult(await retirement.ReconcileAsync(name, request.ExpectedLaunchId, request.ExpectedRequestId, request.Replay, ct)));
+        // Pending PREPARATION launches (migration state still "pending", launch-owned lease) are
+        // selected by their own guarded route; the ordinary reconcile route cannot see them.
+        app.MapPost("/api/agents/{name}/openshell/reconcile-preparation", async (string name,
+            OpenShellPreparationReconciliationRequest request, OpenShellRetirementService retirement, CancellationToken ct) =>
+            ToResult(await retirement.ReconcilePreparationAsync(name, request.ExpectedLaunchId, request.Replay, ct)));
     }
 
     public static void MapAgentDeleteEndpoint(this WebApplication app)
@@ -115,3 +120,7 @@ public static class AgentRuntimeEndpoints
 }
 
 public sealed record OpenShellReconciliationRequest(Guid ExpectedLaunchId, Guid ExpectedRequestId, bool Replay = false);
+
+// No expected request ID: the original mutation identity comes only from the persisted intents,
+// so a caller cannot substitute a different one.
+public sealed record OpenShellPreparationReconciliationRequest(Guid ExpectedLaunchId, bool Replay = false);

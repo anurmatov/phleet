@@ -4,40 +4,57 @@ using System.Text.Json;
 namespace Fleet.Orchestrator.Services;
 
 /// <summary>
-/// Concrete static external qualification run before any mutation: plan-pinned image artifact, the
-/// pinned hook binary with its recorded Describe/ValidateConfig, the CURRENT admission policy read
-/// live from the engine plugin, receiver binding, and the nonroot/no-socket/no-env/restart-never
-/// constraints re-verified independently of the compiler call that produced the plan.
+/// Authorized reader of the CURRENT admission policy from ComputeDriver.GetCapabilities
+/// .resource_admission_policy. NO production implementation exists: that capability field is not
+/// in the vendored upstream contract, and an approved reader depends on the reviewed upstream
+/// commit (the same ownership-contract dependency as the D2 evidence reader). Implementing it
+/// against any other surface — plugin Settings arrays, config files or caches — is invented wire
+/// and is a review blocker. A registered implementation returns the current qualified policy
+/// acknowledgement, or null only for a known-absent capability; unknown state must throw.
+/// </summary>
+public interface IOpenShellCurrentPolicyReader
+{
+    Task<string?> ReadCurrentPolicyAsync(CancellationToken ct);
+}
+
+/// <summary>
+/// Concrete static external qualification run before any mutation: the pinned hook binary with its
+/// actually-generated Describe/ValidateConfig replies (bound to that binary, its config and the
+/// approved plan), the qualified policy config, receiver binding, ingress shape, and the
+/// nonroot/no-socket/no-env/restart-never constraints re-verified independently of the compiler
+/// call that produced the plan. The live current policy comes only from
+/// <see cref="IOpenShellCurrentPolicyReader"/>; without that authorized reader the qualification
+/// refuses, it does not substitute a Docker-plugin Settings guess.
 /// </summary>
 /// <remarks>
 /// <para>
-/// The qualification root is outside-custody material an operator installs (owner-only permissions,
-/// same trust posture as the artifact custody root); this class reads, verifies digests and refuses —
-/// it never writes, installs, starts or pulls anything. A missing or unreadable input is a refusal,
-/// never a default: absence of evidence is never evidence of qualification.
+/// The qualification root is outside-custody material an operator installs (same trust posture as
+/// the artifact custody root); this class reads, verifies digests and refuses — it never writes,
+/// installs, starts or pulls anything. A missing or unreadable input is a refusal, never a
+/// default: absence of evidence is never evidence of qualification.
 /// </para>
 /// <para>
-/// The file contract inside the qualification root is exact: <c>hook</c> (pinned binary bytes),
-/// <c>hook-sha256</c> (64 lowercase hex of those bytes), <c>describe.json</c> (recorded hook
-/// Describe output, fields exactly <c>plugin</c>/<c>scope</c> with <c>scope</c> == "local" and
-/// <c>plugin</c> == the configured plugin name), <c>validate-config.json</c> (recorded hook
-/// ValidateConfig acceptance, fields exactly <c>accepted</c> == true).
+/// The file contract inside the qualification root is exact, and the whole set rotates together:
+/// <c>hook</c> (pinned binary bytes), <c>hook-sha256</c> (64 lowercase hex of those bytes),
+/// <c>config.json</c> (the qualified policy acknowledgement the hook was validated against),
+/// <c>describe.json</c> (recorded Describe reply, fields exactly <c>plugin</c>/<c>scope</c>/
+/// <c>hook_sha256</c>/<c>config_sha256</c>) and <c>validate-config.json</c> (recorded ValidateConfig
+/// reply, fields exactly <c>accepted</c>/<c>plugin</c>/<c>hook_sha256</c>/<c>config_sha256</c>/
+/// <c>plan_hash</c>). The digest and plan-hash fields bind each recorded reply to THIS binary,
+/// THIS config and THIS approved plan: a self-consistent record set generated for another hook,
+/// config or plan is refused, not accepted because it is internally valid.
 /// </para>
 /// <para>
-/// The current admission policy is read live from the engine plugin's published settings
-/// (<c>resource_admission_policy=v1:{…}</c>, exactly one entry) and bound to the plan through
-/// <see cref="OpenShellResourceAdmission.Validate"/>; a drifted or absent current policy refuses.
-/// It does NOT mint operator approval, register an adapter on the engine, or enable the authority;
-/// the coordinator remains default-deny, and the D2 runtime-evidence and lost-Create ownership
-/// readers stay blocked pending the reviewed upstream read-only ownership contract.
+/// Custody: the root lives outside the repository and outside any agent mount, is installed and
+/// owned by the operator, files are read-only (0400/0600), and rotation replaces all five files in
+/// one step because every record cross-binds the others' digests.
 /// </para>
 /// </remarks>
 public sealed class OpenShellPreparationPreflight(
     HttpClient engine, string qualificationRoot, string hookPluginName,
-    OpenShellBootstrapReceiverOptions receiver) : IOpenShellPreparationPreflight, IDisposable
+    OpenShellBootstrapReceiverOptions receiver, IOpenShellCurrentPolicyReader? currentPolicy)
+    : IOpenShellPreparationPreflight, IDisposable
 {
-    private const string PolicySettingPrefix = "resource_admission_policy=";
-
     public async Task VerifyAsync(OpenShellPreparationScope selection, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
@@ -71,40 +88,47 @@ public sealed class OpenShellPreparationPreflight(
         if (pinned.Length != 64 || !pinned.All(char.IsAsciiHexDigitLower)
             || Convert.ToHexStringLower(SHA256.HashData(hook)) != pinned)
             throw Blocked("bootstrap_hook_artifact_unqualified");
+
+        // The recorded replies must belong to this binary, this config and this approved plan —
+        // internal validity alone proves nothing about which hook or plan produced them.
+        var config = ReadText(Path.Combine(qualificationRoot, "config.json"));
+        var configDigest = Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(config)));
         var describe = ReadJson(Path.Combine(qualificationRoot, "describe.json"));
-        Fields(describe, "plugin", "scope");
+        Fields(describe, "plugin", "scope", "hook_sha256", "config_sha256");
         if (describe.GetProperty("plugin").GetString() != hookPluginName
-            || describe.GetProperty("scope").GetString() != "local")
+            || describe.GetProperty("scope").GetString() != "local"
+            || describe.GetProperty("hook_sha256").GetString() != pinned
+            || describe.GetProperty("config_sha256").GetString() != configDigest)
             throw Blocked("bootstrap_hook_describe_unqualified");
         var validated = ReadJson(Path.Combine(qualificationRoot, "validate-config.json"));
-        Fields(validated, "accepted");
-        if (validated.GetProperty("accepted").ValueKind != JsonValueKind.True)
-            throw Blocked("bootstrap_hook_validate_config_refused");
+        Fields(validated, "accepted", "plugin", "hook_sha256", "config_sha256", "plan_hash");
+        if (validated.GetProperty("accepted").ValueKind != JsonValueKind.True
+            || validated.GetProperty("plugin").GetString() != hookPluginName
+            || validated.GetProperty("hook_sha256").GetString() != pinned
+            || validated.GetProperty("config_sha256").GetString() != configDigest
+            || validated.GetProperty("plan_hash").GetString() != selection.PlanHash)
+            throw Blocked("bootstrap_hook_validate_config_unqualified");
 
-        // The plan's ingress must be the configured dedicated receiver, not merely some HTTPS URL.
+        // The external ingress is validated on its own, then bound to the dedicated receiver;
+        // the receiver is checked on its own (backend port must not collide with the API port).
+        if (!Uri.TryCreate(plan.BootstrapIngress, UriKind.Absolute, out var ingress)
+            || ingress.Scheme != "https" || ingress.AbsolutePath != "/identity/ready"
+            || ingress.Query != "" || ingress.Fragment != "" || ingress.UserInfo != "")
+            throw Blocked("bootstrap_ingress_unqualified");
         if (!receiver.Enabled || receiver.Port is < 1 or > 65535 or 3600
             || string.IsNullOrWhiteSpace(receiver.IngressDnsName)
-            || !Uri.TryCreate(plan.BootstrapIngress, UriKind.Absolute, out var ingress)
-            || ingress.Host != receiver.IngressDnsName
+            || !string.Equals(ingress.Host, receiver.IngressDnsName, StringComparison.OrdinalIgnoreCase)
             || (!ingress.IsDefaultPort && ingress.Port != receiver.Port))
             throw Blocked("bootstrap_receiver_binding_unqualified");
 
-        // Current policy, read live. A read failure refuses; it is never read as "no policy needed".
-        using (var response = await engine.GetAsync("/v1.41/plugins/" + hookPluginName + "/json", ct))
-        {
-            if (!response.IsSuccessStatusCode) throw Blocked("bootstrap_current_policy_unavailable");
-            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
-            var plugin = document.RootElement;
-            if ((plugin.GetProperty("Name").GetString() ?? "").Split(':')[0] != hookPluginName
-                || plugin.GetProperty("Enabled").ValueKind != JsonValueKind.True)
-                throw Blocked("bootstrap_plugin_identity_changed");
-            var published = plugin.GetProperty("Settings").EnumerateArray()
-                .Select(s => s.GetString() ?? "")
-                .Where(s => s.StartsWith(PolicySettingPrefix, StringComparison.Ordinal)).ToArray();
-            if (published.Length != 1) throw Blocked("bootstrap_current_policy_unavailable");
-            // Binds the plan's approval acknowledgement to the policy the plugin is running NOW.
-            plan.ReadResourceAdmission().Validate(plan.Workspace, published[0][PolicySettingPrefix.Length..]);
-        }
+        // Current policy only through the authorized capabilities reader. Absent reader or an
+        // absent/foreign policy refuses; a read failure propagates as refusal, never "unneeded".
+        var live = currentPolicy is null ? throw Blocked("bootstrap_current_policy_unavailable")
+            : await currentPolicy.ReadCurrentPolicyAsync(ct);
+        if (live is null) throw Blocked("bootstrap_current_policy_unavailable");
+        // Binds the plan's approval acknowledgement to the qualified config and the live policy.
+        plan.ReadResourceAdmission().Validate(plan.Workspace, live);
+        if (live.Trim() != config) throw Blocked("bootstrap_current_policy_unqualified");
     }
 
     /// <summary>
@@ -168,9 +192,13 @@ public sealed class OpenShellPreparationPreflight(
 }
 
 /// <summary>
-/// Registers the concrete preflight ONLY when explicitly configured. Empty/absent configuration
-/// registers nothing, and the coordinator then fails with "preparation peers unqualified" exactly
-/// as before — the default-deny posture of the preparation chain is unchanged by this source.
+/// Registers the concrete preflight ONLY when explicitly configured. Disabled means
+/// <c>OpenShellBootstrapPreflight:Enabled</c> is not exactly "true" (the default), or the
+/// qualification root / plugin name is missing — in every disabled case nothing is registered and
+/// the coordinator fails with "preparation peers unqualified" exactly as before, so the
+/// default-deny posture of the preparation chain is unchanged by this source. The authorized
+/// current-policy reader is resolved when present; it has no production implementation, so even an
+/// explicitly configured preflight refuses at the live-policy step until the upstream pin ships.
 /// </summary>
 public static class OpenShellPreparationPreflightRegistration
 {
@@ -194,6 +222,7 @@ public static class OpenShellPreparationPreflightRegistration
         };
         builder.Services.AddSingleton<IOpenShellPreparationPreflight>(sp => new OpenShellPreparationPreflight(
             new HttpClient(handler) { BaseAddress = new Uri("http://localhost") }, root, plugin,
-            sp.GetRequiredService<OpenShellBootstrapReceiverOptions>()));
+            sp.GetRequiredService<OpenShellBootstrapReceiverOptions>(),
+            sp.GetService<IOpenShellCurrentPolicyReader>()));
     }
 }

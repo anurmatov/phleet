@@ -1,6 +1,7 @@
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Fleet.Orchestrator.Services;
 using Google.Protobuf;
@@ -9,9 +10,10 @@ using Microsoft.Extensions.DependencyInjection;
 namespace Fleet.Orchestrator.Tests.Services;
 
 /// <summary>
-/// Connected source regressions for the concrete preflight (#479): every independently
-/// implementable qualification refuses on drift, and the paths that depend on the unshipped
-/// upstream ownership contract stay fail-closed with zero engine mutations.
+/// Connected source regressions for the concrete preflight (#479): qualification records are bound
+/// to the exact pinned binary, config and approved plan, the live policy flows only through the
+/// authorized capabilities reader (which has no production implementation), and every path that
+/// depends on the unshipped upstream contracts stays fail-closed with zero engine mutations.
 /// </summary>
 public sealed class OpenShellPreparationPreflightTests : IDisposable
 {
@@ -26,7 +28,7 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
     {
         Qualified();
         await _preflight().VerifyAsync(Selection(), default);
-        Assert.Contains("/v1.41/plugins/" + Plugin + "/json", _engine.Paths); // current policy read live
+        Assert.Empty(_engine.Paths); // qualification reads no engine surface at all
     }
 
     [Fact]
@@ -35,7 +37,6 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
         Qualified();
         var selection = Selection() with { PlanHash = new string('c', 64) };
         await AssertRefusal("bootstrap_preflight_plan_changed", selection);
-        Assert.Empty(_engine.Paths); // nothing is read before the binding check
     }
 
     [Theory]
@@ -48,14 +49,16 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
         var ex = await Assert.ThrowsAnyAsync<OpenShellStateConflictException>(() =>
             _preflight(root, plugin).VerifyAsync(Selection(), default));
         Assert.Contains("bootstrap_preflight_unconfigured", ex.Message);
-        Assert.Empty(_engine.Paths);
     }
 
     [Fact]
-    public async Task VerifyAsync_RefusesMissingHookArtifacts()
+    public async Task VerifyAsync_RefusesMissingQualificationArtifacts()
     {
         Qualified();
         File.Delete(Path.Combine(_root, "hook"));
+        await AssertRefusal("bootstrap_artifact_missing");
+        File.WriteAllBytes(Path.Combine(_root, "hook"), Encoding.UTF8.GetBytes("pinned-hook-bytes"));
+        File.Delete(Path.Combine(_root, "config.json"));
         await AssertRefusal("bootstrap_artifact_missing");
     }
 
@@ -68,27 +71,49 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
     }
 
     [Fact]
-    public async Task VerifyAsync_RefusesHookDescribeDrift()
+    public async Task VerifyAsync_RefusesDescribeBoundToAnotherHook()
     {
+        // Internally valid Describe for a DIFFERENT binary: self-consistency proves nothing.
         Qualified();
-        Write("describe.json", new JsonObject { ["plugin"] = "other", ["scope"] = "local" });
+        var other = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("another-hook")));
+        Write("describe.json", Describe(other, ConfigDigest()));
         await AssertRefusal("bootstrap_hook_describe_unqualified");
     }
 
     [Fact]
-    public async Task VerifyAsync_RefusesMalformedQualificationRecord()
+    public async Task VerifyAsync_RefusesValidateConfigBoundToAnotherConfig()
+    {
+        // Replace the qualified config and re-bind Describe to it; the ValidateConfig record is
+        // still a perfectly valid reply for the OTHER config — and must be refused.
+        Qualified();
+        File.WriteAllText(Path.Combine(_root, "config.json"), Policy() + " # rotated policy");
+        Write("describe.json", Describe(HookDigest(), ConfigDigest()));
+        await AssertRefusal("bootstrap_hook_validate_config_unqualified");
+    }
+
+    [Fact]
+    public async Task VerifyAsync_RefusesValidateConfigBoundToAnotherPlan()
     {
         Qualified();
-        Write("validate-config.json", new JsonObject { ["accepted"] = true, ["extra"] = 1 });
-        await AssertRefusal("bootstrap_qualification_record_malformed");
+        Write("validate-config.json", Validate(HookDigest(), ConfigDigest(), new string('f', 64)));
+        await AssertRefusal("bootstrap_hook_validate_config_unqualified");
     }
 
     [Fact]
     public async Task VerifyAsync_RefusesValidateConfigRefusal()
     {
         Qualified();
-        Write("validate-config.json", new JsonObject { ["accepted"] = false });
-        await AssertRefusal("bootstrap_hook_validate_config_refused");
+        Write("validate-config.json", new JsonObject { ["accepted"] = false, ["plugin"] = Plugin,
+            ["hook_sha256"] = HookDigest(), ["config_sha256"] = ConfigDigest(), ["plan_hash"] = Selection().PlanHash });
+        await AssertRefusal("bootstrap_hook_validate_config_unqualified");
+    }
+
+    [Fact]
+    public async Task VerifyAsync_RefusesMalformedQualificationRecord()
+    {
+        Qualified();
+        Write("describe.json", JsonNode.Parse("""{"accepted":true}""")!.AsObject());
+        await AssertRefusal("bootstrap_qualification_record_malformed");
     }
 
     [Theory]
@@ -111,69 +136,119 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
             case "image": spec.Template.Image = "example.invalid/agent@sha256:" + new string('d', 64); break;
         }
         var drifted = plan with { SpecBase64 = Convert.ToBase64String(spec.ToByteArray()) };
+        Qualified(drifted);
         await AssertRefusal("bootstrap_static_qualification_changed", Selection(drifted));
-        Assert.Empty(_engine.Paths);
+    }
+
+    [Theory]
+    [InlineData("http")]
+    [InlineData("path")]
+    [InlineData("query")]
+    public async Task VerifyAsync_RefusesMalformedIngressIndependently(string fault)
+    {
+        Qualified();
+        var plan = OpenShellPolicyCompilerTests.Plan();
+        var ingress = fault switch
+        {
+            "http" => "http://ingress.example.invalid:17443/identity/ready",
+            "path" => "https://ingress.example.invalid:17443/identity/other",
+            _ => "https://ingress.example.invalid:17443/identity/ready?retry=1",
+        };
+        var drifted = plan with { BootstrapIngress = ingress };
+        Qualified(drifted);
+        await AssertRefusal("bootstrap_ingress_unqualified", Selection(drifted));
+    }
+
+    [Fact]
+    public async Task VerifyAsync_AcceptsValidDifferentReceiverPort()
+    {
+        var plan = OpenShellPolicyCompilerTests.Plan() with { BootstrapIngress = "https://ingress.example.invalid:19443/identity/ready" };
+        Qualified(plan);
+        var receiver = new OpenShellBootstrapReceiverOptions
+        { Enabled = true, Port = 19443, IngressDnsName = "ingress.example.invalid" };
+        await new OpenShellPreparationPreflight(Http(_engine), _root, Plugin, receiver, Reader(Policy())).VerifyAsync(Selection(plan), default);
     }
 
     [Theory]
     [InlineData("disabled")]
-    [InlineData("foreign")]
-    public async Task VerifyAsync_RefusesPluginIdentityChange(string fault)
-    {
-        Qualified();
-        _engine.Respond = _ => Json(fault == "foreign"
-            ? PluginJson("other:latest", true, PolicySetting())
-            : PluginJson(Plugin + ":latest", false, PolicySetting()));
-        await AssertRefusal("bootstrap_plugin_identity_changed");
-    }
-
-    [Theory]
-    [InlineData(0)]
-    [InlineData(2)]
-    public async Task VerifyAsync_RefusesMissingOrAmbiguousCurrentPolicy(int policies)
-    {
-        Qualified();
-        var settings = new List<string>();
-        for (var i = 0; i < policies; i++) settings.Add("resource_admission_policy=" + Drifted());
-        if (policies == 0) settings.Add("something_else=1");
-        _engine.Respond = _ => Json(PluginJson(Plugin + ":latest", true, settings.ToArray()));
-        await AssertRefusal("bootstrap_current_policy_unavailable");
-    }
-
-    [Fact]
-    public async Task VerifyAsync_RefusesCurrentPolicyDrift()
-    {
-        Qualified();
-        _engine.Respond = _ => Json(PluginJson(Plugin + ":latest", true,
-            "resource_admission_policy=" + Drifted()));
-        await AssertRefusal("bootstrap_resource_admission_unqualified");
-    }
-
-    [Fact]
-    public async Task VerifyAsync_RefusesEngineReadFailureAsUnknownNotUnneeded()
-    {
-        Qualified();
-        _engine.Respond = _ => new HttpResponseMessage(HttpStatusCode.InternalServerError);
-        await AssertRefusal("bootstrap_current_policy_unavailable");
-    }
-
-    [Theory]
-    [InlineData("disabled")]
+    [InlineData("collision")]
     [InlineData("port")]
     [InlineData("dns")]
-    public async Task VerifyAsync_RefusesReceiverBindingMismatch(string fault)
+    public async Task VerifyAsync_RefusesReceiverBindingIndependently(string fault)
     {
         Qualified();
-        var receiver = Receiver();
-        receiver = fault switch
+        var plan = OpenShellPolicyCompilerTests.Plan();
+        var receiver = fault switch
         {
             "disabled" => new OpenShellBootstrapReceiverOptions { Port = 17443, IngressDnsName = "ingress.example.invalid" },
+            // Backend receiver alone is disqualifying: the API port may never host the receiver.
+            "collision" => new OpenShellBootstrapReceiverOptions { Enabled = true, Port = 3600, IngressDnsName = "ingress.example.invalid" },
             "port" => new OpenShellBootstrapReceiverOptions { Enabled = true, Port = 18000, IngressDnsName = "ingress.example.invalid" },
             _ => new OpenShellBootstrapReceiverOptions { Enabled = true, Port = 17443, IngressDnsName = "elsewhere.example.invalid" },
         };
+        OpenShellPreparationScope selection;
+        if (fault == "collision")
+        {
+            var collided = plan with { BootstrapIngress = "https://ingress.example.invalid:3600/identity/ready" };
+            Qualified(collided);
+            selection = Selection(collided);
+        }
+        else selection = Selection();
         var ex = await Assert.ThrowsAnyAsync<OpenShellStateConflictException>(() =>
-            new OpenShellPreparationPreflight(Http(_engine), _root, Plugin, receiver).VerifyAsync(Selection(), default));
+            new OpenShellPreparationPreflight(Http(_engine), _root, Plugin, receiver, Reader(Policy())).VerifyAsync(selection, default));
         Assert.Contains("bootstrap_receiver_binding_unqualified", ex.Message);
+    }
+
+    [Fact]
+    public async Task VerifyAsync_RefusesWithoutAuthorizedCapabilitiesReader()
+    {
+        // The missing-reader dependency is retained deliberately: no production reader exists
+        // until the reviewed upstream ComputeDriver.GetCapabilities contract ships.
+        Qualified();
+        await Assert.ThrowsAnyAsync<OpenShellStateConflictException>(() =>
+            new OpenShellPreparationPreflight(Http(_engine), _root, Plugin, Receiver(), null).VerifyAsync(Selection(), default));
+    }
+
+    [Fact]
+    public async Task VerifyAsync_RefusesAbsentCapabilityPolicy()
+    {
+        Qualified();
+        var ex = await Assert.ThrowsAnyAsync<OpenShellStateConflictException>(() =>
+            new OpenShellPreparationPreflight(Http(_engine), _root, Plugin, Receiver(), Reader(null)).VerifyAsync(Selection(), default));
+        Assert.Contains("bootstrap_current_policy_unavailable", ex.Message);
+    }
+
+    [Fact]
+    public async Task VerifyAsync_RefusesLivePolicyDrift()
+    {
+        Qualified();
+        var ex = await Assert.ThrowsAnyAsync<OpenShellStateConflictException>(() =>
+            new OpenShellPreparationPreflight(Http(_engine), _root, Plugin, Receiver(),
+                Reader(Policy().Replace("\"enabled\":true", "\"enabled\":false"))).VerifyAsync(Selection(), default));
+        Assert.Contains("bootstrap_resource_admission_unqualified", ex.Message);
+    }
+
+    [Fact]
+    public async Task VerifyAsync_RefusesLivePolicyNotMatchingQualifiedConfig()
+    {
+        // Records re-bound to the rotated config, live policy still the plan's ack: the live
+        // policy and the qualification config must be the same document, byte for byte.
+        Qualified();
+        File.WriteAllText(Path.Combine(_root, "config.json"), Policy() + " # rotated policy");
+        Write("describe.json", Describe(HookDigest(), ConfigDigest()));
+        Write("validate-config.json", Validate(HookDigest(), ConfigDigest(), Selection().PlanHash));
+        var ex = await Assert.ThrowsAnyAsync<OpenShellStateConflictException>(() =>
+            new OpenShellPreparationPreflight(Http(_engine), _root, Plugin, Receiver(), Reader(Policy())).VerifyAsync(Selection(), default));
+        Assert.Contains("bootstrap_current_policy_unqualified", ex.Message);
+    }
+
+    [Fact]
+    public async Task VerifyAsync_PropagatesReaderFailureAsRefusalNotUnneeded()
+    {
+        Qualified();
+        var reader = new ThrowingReader();
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new OpenShellPreparationPreflight(Http(_engine), _root, Plugin, Receiver(), reader).VerifyAsync(Selection(), default));
     }
 
     [Fact]
@@ -221,12 +296,13 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
         var gateway = new Gateway();
         var services = new ServiceCollection();
         services.AddSingleton<IOpenShellGatewayClient>(gateway);
-        services.AddSingleton<IOpenShellRuntimeEvidenceReader, Reader>();
+        services.AddSingleton<IOpenShellRuntimeEvidenceReader, Reader2>();
         services.AddSingleton<IOpenShellBootstrapProbe, Probe>();
         services.AddSingleton<IOpenShellArtifactCleanup, Cleanup>();
-        // Real preflight, qualification root deliberately absent: refuse, never simulate.
+        // Real preflight, qualification root deliberately absent, no authorized reader:
+        // refuse, never simulate.
         services.AddSingleton<IOpenShellPreparationPreflight>(new OpenShellPreparationPreflight(
-            Http(_engine), Path.Combine(_root, "not-installed"), Plugin, Receiver()));
+            Http(_engine), Path.Combine(_root, "not-installed"), Plugin, Receiver(), null));
         var dbCalls = 0;
         var driver = new OpenShellProvisioningService(
             () => { dbCalls++; throw new Exception("DB must not be reached"); },
@@ -268,7 +344,7 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
             Guid requestId, bool allowMissing, CancellationToken ct = default) => throw new NotSupportedException();
     }
 
-    private sealed class Reader : IOpenShellRuntimeEvidenceReader
+    private sealed class Reader2 : IOpenShellRuntimeEvidenceReader
     {
         public Task<OpenShellRuntimeEvidence> ReadAsync(OpenShellRuntimeTarget target, CancellationToken ct)
             => throw new NotSupportedException();
@@ -286,6 +362,17 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
             => throw new NotSupportedException();
     }
 
+    private sealed class PolicyReader(string? policy) : IOpenShellCurrentPolicyReader
+    {
+        public Task<string?> ReadCurrentPolicyAsync(CancellationToken ct) => Task.FromResult(policy);
+    }
+
+    private sealed class ThrowingReader : IOpenShellCurrentPolicyReader
+    {
+        public Task<string?> ReadCurrentPolicyAsync(CancellationToken ct)
+            => throw new InvalidOperationException("capabilities_transport_unavailable");
+    }
+
     private sealed class Engine : System.Net.Http.HttpMessageHandler
     {
         public List<string> Paths = [];
@@ -300,10 +387,14 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
     private static HttpClient Http(Engine engine) => new(engine) { BaseAddress = new Uri("http://localhost") };
 
     private OpenShellPreparationPreflight _preflight(string? root = null, string? plugin = null)
-        => new(Http(_engine), root ?? _root, plugin ?? Plugin, Receiver());
+        => new(Http(_engine), root ?? _root, plugin ?? Plugin, Receiver(), Reader(Policy()));
 
     private static OpenShellBootstrapReceiverOptions Receiver() => new()
     { Enabled = true, Port = 17443, IngressDnsName = "ingress.example.invalid" };
+
+    private static IOpenShellCurrentPolicyReader Reader(string? policy) => new PolicyReader(policy);
+
+    private static string Policy() => OpenShellPolicyCompilerTests.Admission().PolicyAcknowledgement;
 
     private static OpenShellPreparationScope Selection(OpenShellLaunchPlan? plan = null)
     {
@@ -311,34 +402,26 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
         return new OpenShellPreparationScope(1, "start", null, p.Hash, DateTime.UtcNow.AddSeconds(100), p);
     }
 
-    /// <summary>Writes the exact qualification-root contract the preflight expects.</summary>
-    private void Qualified()
+    private string HookDigest() => Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(Path.Combine(_root, "hook"))));
+    private string ConfigDigest() => Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(Path.Combine(_root, "config.json"))));
+
+    private static JsonObject Describe(string hookSha, string configSha) => new()
+    { ["plugin"] = Plugin, ["scope"] = "local", ["hook_sha256"] = hookSha, ["config_sha256"] = configSha };
+
+    private static JsonObject Validate(string hookSha, string configSha, string planHash) => new()
+    { ["accepted"] = true, ["plugin"] = Plugin, ["hook_sha256"] = hookSha, ["config_sha256"] = configSha, ["plan_hash"] = planHash };
+
+    /// <summary>Writes the exact bound qualification-root contract the preflight expects.</summary>
+    private void Qualified(OpenShellLaunchPlan? plan = null)
     {
-        var hook = Encoding.UTF8.GetBytes("pinned-hook-bytes");
-        File.WriteAllBytes(Path.Combine(_root, "hook"), hook);
-        File.WriteAllText(Path.Combine(_root, "hook-sha256"), Convert.ToHexStringLower(SHA256.HashData(hook)));
-        Write("describe.json", new JsonObject { ["plugin"] = Plugin, ["scope"] = "local" });
-        Write("validate-config.json", new JsonObject { ["accepted"] = true });
-        _engine.Respond = _ => Json(PluginJson(Plugin + ":latest", true, PolicySetting()));
+        File.WriteAllBytes(Path.Combine(_root, "hook"), Encoding.UTF8.GetBytes("pinned-hook-bytes"));
+        File.WriteAllText(Path.Combine(_root, "hook-sha256"), HookDigest());
+        File.WriteAllText(Path.Combine(_root, "config.json"), Policy());
+        Write("describe.json", Describe(HookDigest(), ConfigDigest()));
+        Write("validate-config.json", Validate(HookDigest(), ConfigDigest(), (plan ?? OpenShellPolicyCompilerTests.Plan()).Hash));
     }
-
-    private string PolicySetting() => "resource_admission_policy=" + OpenShellPolicyCompilerTests.Admission().PolicyAcknowledgement;
-
-    // Real drift: the live policy must not admit the workspace anymore.
-    private static string Drifted() => OpenShellPolicyCompilerTests.Admission().PolicyAcknowledgement
-        .Replace("\"enabled\":true", "\"enabled\":false");
 
     private void Write(string name, JsonNode node) => File.WriteAllText(Path.Combine(_root, name), node.ToJsonString());
-
-    private static HttpResponseMessage Json(string body)
-        => new(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
-
-    private static string PluginJson(string name, bool enabled, params string[] settings)
-    {
-        var json = new JsonObject { ["Name"] = name, ["Enabled"] = enabled,
-            ["Settings"] = new JsonArray(settings.Select(s => JsonValue.Create(s)).ToArray<JsonNode?>()) };
-        return json.ToJsonString();
-    }
 
     private async Task AssertRefusal(string code, OpenShellPreparationScope? selection = null)
     {

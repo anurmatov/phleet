@@ -35,6 +35,7 @@ builder.Services.AddHttpClient();
 builder.Services.AddSingleton<TaskHistoryStore>();
 builder.Services.AddSingleton<AgentRegistry>();
 builder.Services.AddSingleton<DockerService>();
+builder.Services.AddSingleton<StockRuntimeMutationHold>();
 builder.Services.AddSingleton<ContainerProvisioningService>();
 builder.Services.AddSingleton<JournalTokenService>();
 builder.Services.AddSingleton(_ => new TelegramMembershipClient());

@@ -78,6 +78,11 @@ public sealed class StockHeartbeatIdentityTests
     [InlineData("/api/agents/agent1/stop", "POST")]
     [InlineData("/api/agents/agent1/cancel", "POST")]
     [InlineData("/api/agents/agent1/reprovision", "POST")]
+    [InlineData("/api/agents/agent1/restart-with-version", "POST")]
+    [InlineData("/api/agents/agent1/cancel_bg/task1", "POST")]
+    [InlineData("/api/agents/agent1/cancel/task1", "POST")]
+    [InlineData("/api/services/restart", "POST")]
+    [InlineData("/api/services/restart/", "POST")]
     [InlineData("/api/agents/agent1", "DELETE")]
     [InlineData("/ws/logs/agent1", "GET")]
     public async Task ActualReceiverAndRouting_NeverSelectLegacyRuntime(string path, string method)

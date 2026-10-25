@@ -5,7 +5,7 @@ using ModelContextProtocol.Server;
 namespace Fleet.Orchestrator.Tools;
 
 [McpServerToolType]
-public sealed class AgentLogsTool(AgentRegistry registry, DockerService docker)
+public sealed class AgentLogsTool(AgentRegistry registry, DockerService docker, StockRuntimeMutationHold runtimeHold)
 {
     [McpServerTool(Name = "agent_logs")]
     [Description("Tail recent container logs for a fleet agent. Returns the last N lines (default 100, max 500).")]
@@ -13,6 +13,8 @@ public sealed class AgentLogsTool(AgentRegistry registry, DockerService docker)
         [Description("Agent name (e.g. my-agent)")] string name,
         [Description("Number of log lines to tail (default 100, max 500)")] int tail = 100)
     {
+        if (runtimeHold.Denies(name)) return StockRuntimeMutationHold.Reason;
+
         tail = Math.Clamp(tail, 1, 500);
 
         var agent = registry.Get(name);

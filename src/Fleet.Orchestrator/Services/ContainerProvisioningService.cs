@@ -15,8 +15,11 @@ public sealed class ContainerProvisioningService(
     DockerService docker,
     IConfiguration config,
     JournalTokenService journalTokens,
-    ILogger<ContainerProvisioningService> logger)
+    ILogger<ContainerProvisioningService> logger,
+    StockRuntimeMutationHold? mutationHold = null)
 {
+    public StockRuntimeMutationHold RuntimeHold { get; } = mutationHold ?? new(config);
+
     private const string DefaultAgentImage = "fleet:agent";
     internal const string JournalMcpServerName = "fleet-comms-journal";
     internal const string JournalFilesServerName = "fleet-journal-files";
@@ -369,6 +372,9 @@ public sealed class ContainerProvisioningService(
         IReadOnlyDictionary<string, int>? instructionVersionOverrides = null,
         CancellationToken ct = default)
     {
+        if (RuntimeHold.Denies(agentName))
+            return ProvisionResult.Fail(agentName, StockRuntimeMutationHold.Reason);
+
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
 
@@ -512,6 +518,9 @@ public sealed class ContainerProvisioningService(
     /// </summary>
     public async Task<ProvisionResult> DeprovisionAsync(string agentName, CancellationToken ct = default)
     {
+        if (RuntimeHold.Denies(agentName))
+            return ProvisionResult.Fail(agentName, StockRuntimeMutationHold.Reason);
+
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
 
@@ -552,6 +561,9 @@ public sealed class ContainerProvisioningService(
         IReadOnlyDictionary<string, int>? instructionVersionOverrides = null,
         CancellationToken ct = default)
     {
+        if (RuntimeHold.Denies(agentName))
+            return ProvisionResult.Fail(agentName, StockRuntimeMutationHold.Reason);
+
         if (DescribePrimaryHumanFault() is { } priorityFault)
             return ProvisionResult.Fail(agentName, priorityFault);
 
@@ -614,12 +626,16 @@ public sealed class ContainerProvisioningService(
             .Select(a => new { a.Name, a.ContainerName })
             .ToListAsync(ct);
 
+        var results = new List<ProvisionResult>();
+        foreach (var held in agents.Where(a => RuntimeHold.Denies(a.Name)))
+            results.Add(ProvisionResult.Fail(held.Name, StockRuntimeMutationHold.Reason));
+        agents = agents.Where(a => !RuntimeHold.Denies(a.Name)).ToList();
+        if (agents.Count == 0 && results.Count > 0) return results;
+
         // 2. Fetch set of currently running container names from Docker
         var runningNames = await docker.ListRunningContainerNamesAsync(ct);
         if (runningNames is null)
-            return [ProvisionResult.Fail("(all)", "Docker API unavailable — cannot list running containers")];
-
-        var results = new List<ProvisionResult>();
+            return [.. results, ProvisionResult.Fail("(all)", "Docker API unavailable — cannot list running containers")];
 
         foreach (var agent in agents)
         {
@@ -1757,6 +1773,8 @@ public sealed class ContainerProvisioningService(
     /// </summary>
     public string GetAgentBaseUrl(Agent agent)
     {
+        if (RuntimeHold.Denies(agent.Name)) throw new InvalidOperationException(StockRuntimeMutationHold.Reason);
+
         if (!string.IsNullOrWhiteSpace(agent.ContainerName))
             return $"http://{agent.ContainerName}:8080";
 

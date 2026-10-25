@@ -176,6 +176,13 @@ those workload-supplied selectors. The outside enrollment selects the control
 identity, never heartbeat metadata. Legacy local Docker lifecycle, cancellation
 and log routes return 409 for that enrolled agent, even after revocation, rather
 than falling back to a stale database container or same-named host runtime.
+The same immutable enrollment hold applies before shared provision/deprovision/
+reprovision and MCP start/stop/restart/version-pin actions, including after
+revocation. Bulk reprovision returns a held result for the enrolled agent before
+any runtime inspection of it, while other agents retain their normal behavior.
+The generic raw service-restart endpoint refuses while stock enrollment is
+configured because raw container names do not establish stock ownership.
+Named aliases (`restart-with-version`, `cancel_bg`) are also held before dispatch.
 Other agents and default-off routing are unchanged; stock lifecycle remains manual.
 These are mandatory operator/E2E prerequisites, not properties established by a fake
 channel, an enrollment file or a client-selected `UserId`. The source rejects missing

@@ -21,6 +21,9 @@ public sealed class StockOpenShellEnrollmentTests
 
     [Theory]
     [InlineData("true", null, "stock_enrollment_file_missing")]
+    [InlineData(" true", null, "stock_enrollment_file_missing")]
+    [InlineData("true ", null, "stock_enrollment_file_missing")]
+    [InlineData(" true ", null, "stock_enrollment_file_missing")]
     [InlineData("perhaps", null, "stock_enrollment_enabled_invalid")]
     [InlineData("false", "/synthetic/enrollment.json", "stock_enrollment_disabled_with_file")]
     public void MissingOrInconsistentOptIn_Refuses(string enabled, string? path, string reason)

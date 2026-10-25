@@ -1,100 +1,121 @@
 # Stock OpenShell whole-agent enrollment
 
-## Status: startup guard only, not a usable integration
+## Status: incomplete, keep the workload held
 
-This draft is an incomplete source checkpoint for #483. It does **not** yet run an
-enrolled agent or establish service identity. Every configured active enrollment
-currently refuses with `stock_enrollment_required_route_unverified:memory`.
-Do not deploy it as an OpenShell integration or bypass this refusal with `?agent`.
+This draft does not yet deliver #483's usable whole-agent workload. It now contains
+an authenticated stock-supervisor memory hook and receiving boundary, but the
+agent's startup guard still refuses active enrollment: the complete required route
+and native-workload configuration has not been connected. Do not bypass the guard.
+The intended workload remains Fleet.Agent, its installed native CLI and child tools,
+not a disposable command-only sandbox.
 
-The intended workload is the entire Fleet.Agent daemon, installed native provider
-CLI and its child tools, not a command-only sandbox. The upstream source baseline
-is NVIDIA/OpenShell v0.1.5, commit
-`bdb956f2cd65a635f1294fccf1d138d263bf650f`; no fork messages or lifecycle framework
-are imported. Matching a record's commit is not verification of an installed binary.
+The stock source pin is NVIDIA/OpenShell v0.1.5,
+`bdb956f2cd65a635f1294fccf1d138d263bf650f`. The middleware proto import closure is
+unmodified and hash-listed in `src/Fleet.StockIdentity/Proto/UPSTREAM`; generated
+C# is build output. No fork RPC, lifecycle framework, ownership database, migration,
+replacement or automatic recovery is introduced.
 
-## Implemented startup path
+## Implemented source paths
 
-`entrypoint.sh` invokes `Fleet.Agent.dll --validate-stock-enrollment` before its
-existing credential, MCP, tool and infrastructure setup. Direct process starts
-invoke the same gate through `AgentHostRegistration.AddAgentCoreServices` before
-executor/daemon registration. Refusal is nonzero and logs only a typed reason.
-With `StockOpenShell:Enabled` absent or false and no enrollment file, the .NET registration graph is unchanged;
-the entrypoint performs an additional validation-only process, then follows its
-existing order. There is no intake, readiness endpoint or provider execution in
-that validation-only process.
+| Path | Scope and limits |
+|---|---|
+| `entrypoint.sh` → validation-only Fleet.Agent → core registration gate | Parsed opt-in boolean drives enforcement, including padded true; refusal precedes credentials/MCP/tools/intake |
+| Stock `SupervisorMiddleware` → `Fleet.StockIdentity` | TLS plus pinned Ed25519 gateway JWT authenticates the exact supervisor/sandbox; outside operator enrollment supplies agent/epoch; the outside P-256 signer overwrites the assertion header |
+| Dedicated Fleet.Memory receiver → existing `MapMcp("/mcp")` → existing memory tools/ACL | Verifies signature, current enrollment, method/body/session binding, expiry and nonce; injects verified attribution only after rejecting caller query identity |
+| Receiving memory session | Receiver-local owner/epoch session map captures actual initialize responses; foreign/replayed assertions refuse; missing/terminated sessions return authenticated 404; clients may initialize anew |
+| Live memory admission | Reloads the operator file and public key each request, fetches fresh ACLs, and refuses failed ACL fetches instead of admitting on the legacy stale cache |
 
-The startup-only opt-in is `StockOpenShell__Enabled=true` together with
-`StockOpenShell__EnrollmentFile` in an operator's manually prepared workload
-environment, or the equivalent application config. Enabling without a file,
-an invalid boolean, or a file supplied while disabled refuses startup.
-It is deliberately **not** added to automated provisioning, setup or Compose:
-this checkpoint cannot enroll a workload, and fresh/existing installs remain off.
-No live-mutable configuration or new credential is introduced.
+The only accepted tool calls here are `memory_get`, `memory_search` and
+`memory_list`; writes and unrelated protocols refuse. Existing ACLs decide project
+access. This fixed route restriction does not change or create tool grants: the receiver
+also reads the existing orchestrator agent-config endpoint on each request and
+requires the enabled agent, exact memory endpoint and enabled tool-name grant.
+The old validator was reused individually for stock gateway JWT verification,
+not its old launch database, ingress proxy or lifecycle architecture.
 
-## Operator intent example (not activation)
+The dedicated memory mode rejects legacy/internal paths, query attribution and
+plaintext requests. The ordinary receiver's behavior remains unchanged when the
+startup-only `StockOpenShell:AuthorityFile` setting is absent. Never expose the
+separate legacy receiver to the workload: its network exclusion is a required
+operator policy condition, not something these unit tests prove.
 
-An outside, operator-owned enrollment file would contain the following synthetic
-record, mounted read-only. Neither the workload nor an assertion header is the
-source of authority for sandbox-to-agent enrollment. This schema is presently
-consumed only to refuse unsafe startup; it is not a trust store or signing key.
+## Operator-owned authority and trust inputs
+
+`Fleet.StockIdentity` and the dedicated memory receiver consume the same outside
+operator-owned authority file via `StockOpenShell:AuthorityFile`. The receiver
+additionally requires existing `Acl:EnableProjectScopedAcl=true`. These are
+startup-only source seams, not automatic enrollment/setup/deployment switches.
+Do not mount the private signing key, gateway private keys, or writable authority
+state into the workload. Mount the shared authority directory read-only in its
+outside consumers so an atomic operator-file replacement remains visible.
+
+The authority schema uses the exact property names below; all example values are
+synthetic and intentionally expired, and no key material is generated by setup:
 
 ```json
 {
-  "version": 1,
-  "state": "active",
-  "agent": "agent1",
-  "sandboxId": "synthetic-sandbox",
-  "stockCommit": "bdb956f2cd65a635f1294fccf1d138d263bf650f",
-  "policySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "expiresAt": "2026-01-01T00:00:00Z"
+  "State": "active",
+  "Agent": "agent1",
+  "SandboxId": "synthetic-sandbox",
+  "Epoch": "00000000-0000-0000-0000-000000000001",
+  "ExpiresAt": "2026-01-01T00:00:00Z",
+  "GatewayIssuer": "synthetic-gateway",
+  "GatewayAudience": "synthetic-hook",
+  "GatewayJwksPath": "/trust/gateway-public.jwks",
+  "AssertionPrivateKeyPath": "/trust/outside-private.pem",
+  "AssertionPublicKeyPath": "/trust/outside-public.pem",
+  "MemoryHost": "memory.example.test"
 }
 ```
 
-The example is intentionally expired. Revoked, unknown, expired, mismatched,
-malformed and fork-commit records fail before service registration. Unknown and
-duplicate properties fail closed. An active valid record still cannot self-attest
-that a required route has a working identity verifier.
+TLS serving/trust uses normal ASP.NET Core Kestrel configuration and the caller's
+existing trust configuration. The hook and receiving boundary reject plaintext;
+this source work has not installed certificates or qualified an actual TLS path.
+The stock role policy must fail closed on hook failure and limit exact destinations,
+executables and filesystem access. Use the pinned upstream
+[policy schema](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/docs/how-it-works/policies/schema.mdx),
+not a fork policy or guessed installed paths.
 
-## Required routes: all still blocked
+## Unfinished source, not deferred runtime success
 
-| Route | Current source gap |
+| Required area | Current gap |
 |---|---|
-| Memory MCP | Main reads caller-supplied `?agent`; stock supervisor authentication, outside signing, receiver/session verification and direct-bypass refusal are not implemented here |
-| Orchestrator registration/heartbeat and required control | No stock workload identity verifier is connected to these routes |
-| RabbitMQ intake/completion | Per-workload credential/permission binding and verified completion attribution remain unqualified |
-| Provider/model and native tool egress | Role policy compatibility and the installed native CLI/tool path remain unqualified |
+| Agent enrollment/startup | The minimal workload-intent validator and outside authority are not yet wired into one usable enrollment flow; every active workload remains held |
+| Control/registration/heartbeat/completion | Existing AMQP publishers and receivers lack the enrolled broker-principal bindings required for this slice |
+| Native daemon/CLI/tools and image | Credential/workspace paths and non-root startup remain unqualified; no workload image change or native execution is claimed |
+| Install/config | No usable activation is exposed through setup, Compose or automatic provisioning; there are no new live-mutable keys |
 
-Existing memory ACLs, grants, transport and provisioning behavior are unchanged.
-No active-enrollment success or containment claim follows from the guard tests.
-The remaining source work must connect the stock authenticated supervisor hook,
-outside enrollment/signing and the actual receiving routes with focused spoof,
-wrong-sandbox/session, expiry, revocation and changed-ACL tests. Network policy
-must not permit the workload to reach a legacy identity-bypass route.
-Use the stock policy format documented at the pinned upstream commit; no guessed
-role policy or trust material is generated by this checkpoint.
+Stock supports native TCP destination/executable rules, but no request inspection
+or credential rewriting on that protocol, as documented in
+[Native TCP](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/docs/how-it-works/policies/network-rules.mdx#allow-native-tcp).
+This is not evidence that AMQP is impossible or permission to replace the normal
+transport. No missing stock primitive has been established; the remaining source
+integration above is unfinished rather than blocked on an upstream fork.
 
-## Failure, revocation and rollback
+## Revocation, failure and rollback
 
-Enrollment/revocation remains explicit operator intent, never automated recovery.
-An ambiguous launch, shutdown or revocation is held for operator reconciliation:
-no Create retry, Stop/Delete, replacement, takeover or inferred absence is issued.
-This source contains no runtime client and cannot perform those actions.
-Revoking the file prevents the next startup; it is **not** live revocation of an
-already running process. Live receiving-route revocation remains unfinished.
-Do not resume legacy intake until an authorized operator has independently proved
-the workload quiescent. Preserve all workspaces, journals and credential references;
-this guide provides no destructive cleanup or automatic rollback commands.
+Setting the outside authority state to `revoked` denies subsequent hook and memory
+admissions, including assertions issued before revocation. Already-admitted work
+is not represented as canceled. Sessions/nonces are receiver-local; restart requires
+fresh initialization, not automatic replay. Assertion admission is bounded separately
+from MCP execution; requests are not automatically retried.
 
-## Acceptance limits
+Ambiguous launch, shutdown or revocation stays held for operator reconciliation.
+No Create/Stop/Delete, replacement, takeover or inferred absence is issued. Revoke
+and independently verify workload quiescence before resuming legacy intake; preserve
+workspaces, journals and credential references. No destructive cleanup is provided.
 
-Run the focused `StockOpenShellEnrollmentTests` in Fleet.Agent.Tests and
-`python3 tests/scripts/test_stock_openshell_startup.py`; these are source/fixture
-checks, not a whole-agent E2E. The Python tests execute only an extracted entrypoint
-guard with an owned synthetic `dotnet` executable.
-A separately authorized isolated target is still required for the exact reviewed
-build's stock workload → daemon → installed native CLI/tool → verified memory ACL
-→ normal completion transport, followed by explicit revoke and non-destructive
-rollback. No target, runtime compatibility or successful E2E is established here.
-Independent review, public scrub, existing CI and human merge approval remain
-required. Broader provider/platform/load permutations are deferred, not passed.
+## Acceptance
+
+Focused tests cover padded opt-in refusal through core and the actual validation-only
+entrypoint, authenticated hook signing → receiver → actual MapMcp/MemoryGetTool with
+owned file data, changed/foreign project ACLs, revocation, identity/body/session/expiry
+binding, spoof/direct bypass, session reinitialization and replay. Other tests use a
+synthetic receiver continuation to observe counts. TestServer is not a real gateway,
+TLS connection, installed native CLI, broker or whole-agent E2E.
+
+Mandatory exact-build whole-agent/native-tool/memory/completion/revoke/non-destructive
+rollback E2E and relevant real storage/restore evidence remain UNRUN/BLOCKED pending
+separate target authorization. Full independent final-head review/public scrub,
+existing CI and human merge approval remain required. Broad provider/platform/load
+permutations are deferred, not passed. This draft is not complete issue delivery.

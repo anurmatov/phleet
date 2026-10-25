@@ -20,9 +20,10 @@ public static class StockOpenShellEnrollment
     public static void Validate(IConfiguration configuration)
     {
         var enabled = configuration["StockOpenShell:Enabled"];
-        if (enabled is not (null or "") && !bool.TryParse(enabled, out _)) Deny("stock_enrollment_enabled_invalid");
+        var isEnabled = false;
+        if (enabled is not (null or "") && !bool.TryParse(enabled, out isEnabled)) Deny("stock_enrollment_enabled_invalid");
         var path = configuration[ConfigurationKey];
-        if (!string.Equals(enabled, "true", StringComparison.OrdinalIgnoreCase))
+        if (!isEnabled)
         {
             if (path is not (null or "")) Deny("stock_enrollment_disabled_with_file");
             return; // Opt-in only; no new behavior for existing installs.

@@ -26,6 +26,23 @@ class StockStartupTests(unittest.TestCase):
             self.assertEqual(marker.read_text().splitlines(),
                              ["/app/Fleet.Agent.dll", "--validate-stock-enrollment"])
 
+    def test_padded_true_actual_validator_refuses_before_entrypoint_continues(self):
+        # Requires the named Fleet.Agent build first; never substitutes a fake validator.
+        assembly = ROOT / "src/Fleet.Agent/bin/Debug/net10.0/Fleet.Agent.dll"
+        self.assertTrue(assembly.is_file(), "build Fleet.Agent before this source fixture")
+        guard = (ROOT / "entrypoint.sh").read_text().split("# Read provider", 1)[0]
+        guard = guard.replace("/app/Fleet.Agent.dll", str(assembly))
+        for value in ["true", " true", "true ", " true "]:
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                env = {"PATH": "/usr/bin:/bin", "HOME": directory, "DOTNET_CLI_HOME": directory,
+                       "StockOpenShell__Enabled": value}
+                result = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c",
+                                         guard + '\nprintf unexpected-side-effect'],
+                                        cwd=directory, env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stderr.strip(), "stock_enrollment_file_missing")
+
     def test_disabled_validation_continues_existing_entrypoint(self):
         guard = (ROOT / "entrypoint.sh").read_text().split("# Read provider", 1)[0]
         with tempfile.TemporaryDirectory() as directory:

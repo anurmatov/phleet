@@ -231,11 +231,12 @@ and the `harnessExtra` textarea. See `docs/providers/harness-defaults.md`.
 
 ## Stock OpenShell enrollment
 
-See `docs/openshell-stock.md`: this draft implements only an opt-in startup refusal,
-not working sandbox hosting or receiving-service identity. Keep automatic provisioning
-unchanged and never accept a record, query parameter or header as verifier coverage.
-`StockOpenShell:Enabled` and `StockOpenShell:EnrollmentFile` are startup-only; active records currently refuse before
-core service registration, and the entrypoint checks before credential/MCP setup.
+See `docs/openshell-stock.md`: the draft connects the stock authenticated HTTP hook
+and a dedicated memory identity/session/ACL receiver, but whole-agent startup and
+control/completion/native-workload integration remain incomplete. Keep provisioning
+unchanged and the active-enrollment guard held; do not infer readiness from guard tests.
+`StockOpenShell:Enabled`, `EnrollmentFile` and outside `AuthorityFile` are startup-only.
+The ordinary memory receiver stays unchanged without explicit dedicated-mode configuration.
 
 ## Project contexts
 

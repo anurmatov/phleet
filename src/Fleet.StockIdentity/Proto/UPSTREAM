@@ -1,0 +1,5 @@
+Source: NVIDIA/OpenShell v0.1.5 at bdb956f2cd65a635f1294fccf1d138d263bf650f
+Unmodified stock middleware import closure; generated C# is build output only.
+60f28ee9dc846d41152f4db7e82a439c78d024786efaceb464900d1d1ad129ad  extension.proto
+b3c2037a6b51285b48a39025b85e79a4c717a2b95accb89cf43dbe6079831c75  supervisor_middleware.proto
+d07c0367e2861e7fe70fa1b679f879f4fa2f9138ade4457d44ecf8b2e135bb45  LICENSE

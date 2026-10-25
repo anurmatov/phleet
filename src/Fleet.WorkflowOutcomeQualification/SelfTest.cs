@@ -29,6 +29,17 @@ public static class SelfTest
         Test("loopback_fixture_uses_actual_prompt_and_strict_production_parser", LoopbackUsesProductionContracts);
         foreach (var fault in new[] { "head-exit", "status-exit", "dirty", "engine", "image", "cli" })
             Test("target_validation_refuses_" + fault, () => TargetRefuses(fault));
+        foreach (var fault in new[] { "nested-id", "nested-image", "nested-config", "nested-owner", "nested-host", "nested-env", "nested-socket", "nested-read", "nested-missing" })
+            Test("nested_container_binding_refuses_" + fault, () => NestedTargetRefuses(fault));
+        foreach (var fault in new[] { "valid", "name", "404", "duplicate", "oversize", "secret", "reorder" })
+            Test("nested_actual_docker_reader_" + fault, () => NestedHttpInspect(fault));
+        foreach (var fault in new[] { "nested-host", "nested-env", "nested-socket" })
+            Test("nested_self_consistent_spec_refuses_" + fault, () => NestedSelfConsistentRefuses(fault));
+        foreach (var fault in new[] { "pinned", "unhashed", "symlink" })
+            Test("nested_owned_bind_" + fault, () => NestedOwnedBind(fault));
+        Test("missing_nested_registry_refuses_before_process", MissingNestedRegistryRefuses);
+        foreach (var fault in new[] { "unknown", "missing-role", "duplicate-id", "nonce", "symlink", "hash" })
+            Test("nested_registry_refuses_before_io_" + fault, () => NestedRegistryRefusesBeforeIo(fault));
         Test("changed_file_refuses_before_process_or_network", ChangedFileRefusesBeforeIo);
         Test("symlinked_custody_refuses_before_process_or_network", SymlinkRefusesBeforeIo);
         Test("manifest_accepts_only_the_explicit_target", ManifestParsesExplicitTarget);
@@ -326,6 +337,179 @@ public static class SelfTest
         throw new InvalidOperationException("target mismatch accepted: " + fault);
     }
 
+    private static void NestedTargetRefuses(string fault)
+    {
+        using var directory = new TemporaryDirectory();
+        var path = WriteManifest(directory.Path);
+        var manifest = QualificationManifestParser.Parse(File.ReadAllText(path));
+        var runner = new FakeRunner(manifest);
+        var driver = new ProcessQualificationDriver(path, runner, new FakeDocker(manifest) { Fault = fault }, new FakeTemporal());
+        try { driver.ValidateAsync().GetAwaiter().GetResult(); }
+        catch (QualificationException)
+        {
+            if (runner.Operations.Contains("codex-version"))
+                throw new InvalidOperationException("nested mismatch reached native CLI");
+            return;
+        }
+        throw new InvalidOperationException("foreign nested container configuration was accepted");
+    }
+
+    private static void NestedRegistryRefusesBeforeIo(string fault)
+    {
+        using var directory = new TemporaryDirectory();
+        var path = WriteManifest(directory.Path);
+        var file = Path.Combine(directory.Path,"runtime-bindings.json");
+        var node = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(file))!;
+        switch (fault)
+        {
+            case "unknown": node["OwnerNonce"] = "ambiguous-alias"; break;
+            case "missing-role": node["containers"]!.AsObject().Remove("agent"); break;
+            case "duplicate-id": node["containers"]!["agent"]!["id"] = RoleId("orchestrator"); break;
+            case "nonce": node["ownerNonce"] = "foreign"; break;
+            case "hash": node["socketTarget"] = "/run/changed.sock"; break;
+        }
+        File.WriteAllText(file,node.ToJsonString());
+        var root = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
+        if (fault != "hash")
+            foreach (var pin in root["configFiles"]!.AsArray())
+                if (pin!["path"]!.GetValue<string>() == "runtime-bindings.json") pin["sha256"] = Sha256(file);
+        File.WriteAllText(path,root.ToJsonString());
+        if (fault == "symlink")
+        {
+            var copy = Path.Combine(directory.Path,"other-owned.json");
+            File.Move(file,copy);
+            File.CreateSymbolicLink(file,copy);
+        }
+        var driver = new ProcessQualificationDriver(path,new RefuseRunner(),new RefuseDocker(),new RefuseTemporal());
+        try { driver.ValidateAsync().GetAwaiter().GetResult(); }
+        catch (Exception e) when (e is QualificationException or JsonException) { return; }
+        throw new InvalidOperationException("invalid nested registry reached a process or endpoint");
+    }
+
+    private static void NestedOwnedBind(string fault)
+    {
+        using var directory = new TemporaryDirectory();
+        using var other = new TemporaryDirectory();
+        var path = WriteManifest(directory.Path);
+        var manifest = QualificationManifestParser.Parse(File.ReadAllText(path));
+        var source = Path.Combine(directory.Path,"agent.json");
+        if (fault == "unhashed")
+        {
+            source = Path.Combine(directory.Path,"unhashed.json");
+            File.WriteAllText(source,"owned synthetic data");
+        }
+        if (fault == "symlink")
+        {
+            source = Path.Combine(directory.Path,"linked-directory");
+            Directory.CreateSymbolicLink(source,other.Path);
+        }
+        var docker = new FakeDocker(manifest) { ExtraMountSource=source };
+        var file = Path.Combine(directory.Path,"runtime-bindings.json");
+        var bindings = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(file))!;
+        foreach (var role in QualificationManifestParser.RequiredImageRoles)
+            bindings["containers"]![role]!["specSha256"] = docker.GetContainerAsync(RoleId(role)).GetAwaiter().GetResult().SpecSha256;
+        File.WriteAllText(file,bindings.ToJsonString());
+        var root = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
+        foreach (var pin in root["configFiles"]!.AsArray())
+            if (pin!["path"]!.GetValue<string>() == "runtime-bindings.json") pin["sha256"] = Sha256(file);
+        File.WriteAllText(path,root.ToJsonString());
+        var driver = new ProcessQualificationDriver(path,new FakeRunner(manifest),docker,new FakeTemporal());
+        try
+        {
+            driver.ValidateAsync().GetAwaiter().GetResult();
+            if (fault != "pinned") throw new InvalidOperationException("unowned bind was accepted");
+        }
+        catch (QualificationException) when (fault != "pinned") { }
+    }
+
+    private static void MissingNestedRegistryRefuses()
+    {
+        using var directory = new TemporaryDirectory();
+        var path = WriteManifest(directory.Path);
+        var node = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
+        var config = node["configFiles"]!.AsArray();
+        config.Remove(config.Single(f => f!["path"]!.GetValue<string>() == "runtime-bindings.json"));
+        File.WriteAllText(path, node.ToJsonString());
+        var driver = new ProcessQualificationDriver(path, new RefuseRunner(), new RefuseDocker(), new RefuseTemporal());
+        try { driver.ValidateAsync().GetAwaiter().GetResult(); }
+        catch (QualificationException) { return; }
+        throw new InvalidOperationException("missing nested registry reached a target");
+    }
+
+    private static void NestedSelfConsistentRefuses(string fault)
+    {
+        using var directory = new TemporaryDirectory();
+        var path = WriteManifest(directory.Path);
+        var manifest = QualificationManifestParser.Parse(File.ReadAllText(path));
+        var changed = new FakeDocker(manifest) { Fault = fault };
+        var bindings = Path.Combine(directory.Path, "runtime-bindings.json");
+        var data = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(bindings))!;
+        foreach (var role in QualificationManifestParser.RequiredImageRoles)
+            data["containers"]![role]!["specSha256"] = changed.GetContainerAsync(RoleId(role)).GetAwaiter().GetResult().SpecSha256;
+        File.WriteAllText(bindings, data.ToJsonString());
+        var root = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
+        foreach (var pin in root["configFiles"]!.AsArray())
+            if (pin!["path"]!.GetValue<string>() == "runtime-bindings.json") pin["sha256"] = Sha256(bindings);
+        File.WriteAllText(path, root.ToJsonString());
+        var runner = new FakeRunner(manifest);
+        var driver = new ProcessQualificationDriver(path, runner, changed, new FakeTemporal());
+        try { driver.ValidateAsync().GetAwaiter().GetResult(); }
+        catch (QualificationException)
+        {
+            if (runner.Operations.Contains("codex-version")) throw new InvalidOperationException("unsafe nested spec reached native CLI");
+            return;
+        }
+        throw new InvalidOperationException("unsafe self-consistent nested configuration passed");
+    }
+
+    private static void NestedHttpInspect(string fault)
+    {
+        var manifest = Manifest();
+        var doc = ContainerDocument(manifest, "agent");
+        var text = doc.GetRawText();
+        if (fault == "secret")
+        {
+            var node = System.Text.Json.Nodes.JsonNode.Parse(text)!;
+            node["Config"]!["Env"]!.AsArray().Add("IGNORED_PASSWORD=owned-synthetic-secret-sentinel");
+            text = node.ToJsonString();
+        }
+        if (fault == "duplicate") text = text.Replace("\"Id\":", "\"Id\":\"" + new string('4',64) + "\",\"Id\":", StringComparison.Ordinal);
+        if (fault == "oversize") text = new string(' ',4 * 1024 * 1024 + 1);
+        if (fault == "reorder")
+        {
+            var entries = doc.EnumerateObject().Reverse().Select(p => new KeyValuePair<string, JsonElement>(p.Name,p.Value));
+            text = JsonSerializer.Serialize(entries.ToDictionary(p => p.Key,p => p.Value));
+        }
+        var reads = 0;
+        using var handler = new StaticHandler(request =>
+        {
+            reads++;
+            if (request.Method != HttpMethod.Get || request.RequestUri!.AbsolutePath != "/v1.43/containers/" + RoleId("agent") + "/json")
+                throw new InvalidOperationException("inspect was not exact-ID/read-only");
+            return new HttpResponseMessage(fault == "404" ? HttpStatusCode.NotFound : HttpStatusCode.OK)
+                { Content = new StringContent(text) };
+        });
+        using var http = new HttpClient(handler) { BaseAddress = new Uri("http://localhost") };
+        using var client = new DockerEngineClient(http,"v1.43");
+        try
+        {
+            var observed = client.GetContainerAsync(fault == "name" ? "agent1" : RoleId("agent")).GetAwaiter().GetResult();
+            if (fault is "name" or "404" or "duplicate" or "oversize") throw new InvalidOperationException("invalid inspect was accepted");
+            if (fault == "secret" && JsonSerializer.Serialize(observed).Contains("owned-synthetic-secret",StringComparison.Ordinal))
+                throw new InvalidOperationException("protected environment escaped the observation");
+            if (fault == "reorder" && observed.SpecSha256 != ContainerBindingObservation.Parse(doc).SpecSha256)
+                throw new InvalidOperationException("JSON property order changed the immutable spec digest");
+        }
+        catch (QualificationException e) when (fault is "name" or "404" or "duplicate" or "oversize")
+        {
+            if (fault == "name" && reads != 0) throw new InvalidOperationException("name lookup reached Docker");
+            if (fault == "oversize" && !e.Message.Contains("size limit",StringComparison.Ordinal))
+                throw new InvalidOperationException("oversized inspect did not hit its byte bound");
+            return;
+        }
+        if (reads != 1) throw new InvalidOperationException("inspect was retried");
+    }
+
     private static void ChangedFileRefusesBeforeIo() => CustodyRefuses(false);
     private static void SymlinkRefusesBeforeIo() => CustodyRefuses(true);
     private static void CustodyRefuses(bool symlink)
@@ -495,6 +679,7 @@ public static class SelfTest
     {
         public Task<DockerEngineInfo> GetEngineInfoAsync(CancellationToken ct = default) => throw new InvalidOperationException("unexpected engine read");
         public Task<DockerImageInfo> GetImageAsync(string reference, CancellationToken ct = default) => throw new InvalidOperationException("unexpected image read");
+        public Task<ContainerBindingObservation> GetContainerAsync(string id, CancellationToken ct = default) => throw new InvalidOperationException("unexpected container read");
     }
     private sealed class RefuseTemporal : ITemporalMetadataReader
     { public Task<TemporalSystemInfo> GetSystemInfoAsync(CancellationToken ct = default) => throw new InvalidOperationException("unexpected server read"); }
@@ -571,6 +756,7 @@ public static class SelfTest
             || !string.Equals(plan.SourceTree, manifest.Target.SourceTree, StringComparison.Ordinal))
             throw new InvalidOperationException("source linkage failed");
         if (plan.ImageIds.Count != 3) throw new InvalidOperationException("image linkage failed");
+        if (plan.NestedContainerIds.Count != 3) throw new InvalidOperationException("nested container linkage failed");
         if (string.IsNullOrWhiteSpace(plan.TemporalServerVersion))
             throw new InvalidOperationException("Temporal metadata linkage failed");
     }
@@ -909,7 +1095,44 @@ public static class SelfTest
             WriteIndented = true,
             Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
         }));
+        var parsed = QualificationManifestParser.Parse(File.ReadAllText(manifestPath));
+        var pins = QualificationManifestParser.RequiredImageRoles.ToDictionary(role => role, role =>
+            new ContainerBindingPin(RoleId(role), "sha256:" + new string('9',64),
+                ContainerBindingObservation.Parse(ContainerDocument(parsed, role)).SpecSha256), StringComparer.Ordinal);
+        var bindings = Path.Combine(directory, "runtime-bindings.json");
+        File.WriteAllText(bindings, JsonSerializer.Serialize(new {
+            schemaVersion=1, ownerNonce=parsed.Runtime.ScenarioNonce,
+            socketTarget="/run/qualification/docker.sock", containers=pins
+        }, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        var updated = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(manifestPath))!;
+        updated["configFiles"]!.AsArray().Add(new System.Text.Json.Nodes.JsonObject
+            { ["path"]="runtime-bindings.json", ["sha256"]=Sha256(bindings) });
+        File.WriteAllText(manifestPath, updated.ToJsonString());
         return manifestPath;
+    }
+
+    private static string RoleId(string role) => new(role switch
+        { "agent" => '1', "orchestrator" => '2', "temporalBridge" => '3', _ => throw new InvalidOperationException() },64);
+
+    private static JsonElement ContainerDocument(ProcessQualificationManifest manifest, string role)
+    {
+        const string socket = "/run/qualification/docker.sock";
+        var env = new List<string> { "RabbitMq__Host=" + manifest.Runtime.BrokerEndpoint };
+        if (role == "agent") env.AddRange(["Agent__Provider=codex", "Agent__Model=ollama/" + manifest.Fixture.Model,
+            "Agent__CodexOssBaseUrl=" + manifest.Fixture.Endpoint.TrimEnd('/')]);
+        if (role == "orchestrator") env.Add("Docker__SocketPath=" + socket);
+        if (role == "temporalBridge") env.AddRange([
+            "TemporalBridge__TemporalAddress=" + new Uri(manifest.Temporal.Endpoint).Authority,
+            "TemporalBridge__Namespaces__0=" + manifest.Temporal.Namespace,
+            "TemporalBridge__OrchestratorUrl=" + manifest.Runtime.OrchestratorBaseUrl]);
+        return JsonSerializer.SerializeToElement(new {
+            Id=RoleId(role), Image="sha256:" + new string('9',64),
+            Config=new { Env=env, Labels=new Dictionary<string,string> { ["org.phleet.qualification.owner"]=manifest.Runtime.ScenarioNonce } },
+            HostConfig=new { Privileged=false, NetworkMode="qualification-network", PidMode="", IpcMode="private" },
+            State=new { Running=true, Pid=42, StartedAt="2026-01-01T00:00:00Z" },
+            Mounts=role=="orchestrator" ? new[]{new {Type="bind",Source=manifest.Docker.Endpoint["unix://".Length..],Destination=socket}} : [],
+            NetworkSettings=new { Networks=new Dictionary<string,object>() }
+        });
     }
 
     private static JsonElement Completion(string sse)
@@ -963,12 +1186,35 @@ public static class SelfTest
 
     private sealed class FakeDocker(ProcessQualificationManifest manifest) : IDockerEngineReader
     {
+        public string? ExtraMountSource { get; init; }
         public string? Fault { get; init; }
         public Task<DockerEngineInfo> GetEngineInfoAsync(CancellationToken ct = default) =>
             Task.FromResult(new DockerEngineInfo(Fault == "engine" ? "foreign" : manifest.Docker.EngineId, "1.2"));
 
         public Task<DockerImageInfo> GetImageAsync(string reference, CancellationToken ct = default) =>
             Task.FromResult(new DockerImageInfo(reference, "sha256:" + new string('9', 64), [reference], Fault == "image" ? "foreign" : manifest.Target.SourceCommit));
+
+        public Task<ContainerBindingObservation> GetContainerAsync(string id, CancellationToken ct = default)
+        {
+            if (Fault is "nested-read" or "nested-missing") throw new QualificationException("owned synthetic inspect unavailable");
+            var role = QualificationManifestParser.RequiredImageRoles.Single(r => RoleId(r) == id);
+            var node = System.Text.Json.Nodes.JsonNode.Parse(ContainerDocument(manifest, role).GetRawText())!;
+            switch (Fault)
+            {
+                case "nested-id": node["Id"] = new string('4',64); break;
+                case "nested-image": node["Image"] = "sha256:" + new string('8',64); break;
+                case "nested-config": node["Config"]!["Labels"]!["unexpected"] = "changed"; break;
+                case "nested-owner": node["Config"]!["Labels"]!["org.phleet.qualification.owner"] = "foreign"; break;
+                case "nested-host": node["HostConfig"]!["Privileged"] = true; break;
+                case "nested-env": node["Config"]!["Env"]![0] = "RabbitMq__Host=amqps://foreign.example"; break;
+                case "nested-socket": node["Mounts"] = System.Text.Json.Nodes.JsonNode.Parse("[{\"Type\":\"bind\",\"Source\":\"/foreign/docker.sock\",\"Destination\":\"/run/foreign.sock\"}]"); break;
+            }
+            if (ExtraMountSource is not null)
+                node["Mounts"]!.AsArray().Add(new System.Text.Json.Nodes.JsonObject
+                    { ["Type"]="bind", ["Source"]=ExtraMountSource, ["Destination"]="/run/qualification/extra.json" });
+            using var doc = JsonDocument.Parse(node.ToJsonString());
+            return Task.FromResult(ContainerBindingObservation.Parse(doc.RootElement));
+        }
     }
 
     private sealed class FakeTemporal : ITemporalMetadataReader

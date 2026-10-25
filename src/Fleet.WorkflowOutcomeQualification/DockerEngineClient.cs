@@ -10,6 +10,7 @@ public interface IDockerEngineReader
 {
     Task<DockerEngineInfo> GetEngineInfoAsync(CancellationToken ct = default);
     Task<DockerImageInfo> GetImageAsync(string reference, CancellationToken ct = default);
+    Task<ContainerBindingObservation> GetContainerAsync(string id, CancellationToken ct = default);
 }
 
 public sealed class DockerEngineClient : IDockerEngineReader, IDisposable
@@ -94,6 +95,30 @@ public sealed class DockerEngineClient : IDockerEngineReader, IDisposable
             && labels.TryGetProperty("org.opencontainers.image.revision", out var revision) && revision.ValueKind == JsonValueKind.String)
             commit = revision.GetString();
         return new DockerImageInfo(reference, id.GetString()!, digests, commit);
+    }
+
+    public async Task<ContainerBindingObservation> GetContainerAsync(string id, CancellationToken ct = default)
+    {
+        if (!ContainerBindingObservation.Hex(id, 64))
+            throw new QualificationException("nested inspect requires a full immutable container ID");
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(15));
+        using var response = await _http.GetAsync("/" + _apiVersion + "/containers/" + id + "/json",
+            HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+        if (!response.IsSuccessStatusCode) throw new QualificationException("nested container inspect failed");
+        await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token);
+        using var buffer = new MemoryStream();
+        var bytes = new byte[8192];
+        while (true)
+        {
+            var read = await stream.ReadAsync(bytes, timeout.Token);
+            if (read == 0) break;
+            if (buffer.Length + read > 4 * 1024 * 1024)
+                throw new QualificationException("nested container inspect exceeds size limit");
+            buffer.Write(bytes, 0, read);
+        }
+        using var doc = JsonDocument.Parse(buffer.ToArray(), new JsonDocumentOptions { MaxDepth = 32 });
+        return ContainerBindingObservation.Parse(doc.RootElement);
     }
 
     private async Task<HttpResponseMessage> GetAsync(string path, CancellationToken ct)

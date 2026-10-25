@@ -10,7 +10,8 @@ public sealed record ProcessQualificationPlan(
     string DockerEngineId,
     string TemporalServerVersion,
     IReadOnlyDictionary<string, string> ImageIds,
-    IReadOnlyDictionary<string, string> FileSha256s);
+    IReadOnlyDictionary<string, string> FileSha256s,
+    IReadOnlyDictionary<string, string> NestedContainerIds);
 
 public sealed record ProcessQualificationReceipt(
     int SchemaVersion,
@@ -83,6 +84,7 @@ public sealed class ProcessQualificationDriver
         }
 
         DockerConfigurationBinding.Verify(manifest, directory);
+        var nested = NestedContainerBindings.Load(manifest, directory);
 
         var source = await _runner.RunAsync(planner.Build(manifest, "git-source"), ct);
         RequireSuccess(source, "git-source");
@@ -114,6 +116,7 @@ public sealed class ProcessQualificationDriver
             imageIds[role] = image.ImageId;
         }
 
+        var nestedIds = await nested.VerifyAsync(manifest, directory, imageIds, _docker, ct);
         var temporal = await _temporal.GetSystemInfoAsync(ct);
         if (temporal.ServerVersion != manifest.Temporal.ServerVersion)
             throw new QualificationException("Temporal GetSystemInfo did not return a server version");
@@ -127,7 +130,7 @@ public sealed class ProcessQualificationDriver
         if (manifestHash != Sha256File(_manifestPath)) throw new QualificationException("manifest changed during validation");
         return new ProcessQualificationPlan(
             manifestHash, manifest.Target.SourceCommit, manifest.Target.SourceTree,
-            engine.EngineId, temporal.ServerVersion, imageIds, files);
+            engine.EngineId, temporal.ServerVersion, imageIds, files, nestedIds);
     }
 
     public async Task<ProcessQualificationReceipt> RunAsync(

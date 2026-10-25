@@ -55,3 +55,31 @@ contexts/meta/<SHA256(context-name)>/meta.json beside config.json. Both files ar
 hash-checked; currentContext, metadata Name and Docker Host must exactly match.
 Default/implicit contexts, unknown metadata/TLS material or mismatched endpoints
 refuse rather than falling back to ambient Docker configuration.
+
+The read-only `validate` path additionally requires one hash-pinned
+`runtime-bindings.json` in `configFiles`, with schemaVersion 1, ownerNonce equal
+to the scenario nonce, an explicit /run/ socketTarget, and exactly the agent,
+orchestrator and temporalBridge container pins (full 64-hex id, sha256 imageId,
+and 64-hex specSha256).
+These are immutable IDs, not container names or a Compose project lookup.
+The driver checks engine identity around each exact-ID GET, image/owner/spec,
+host isolation and owned bind mounts before the native version probe.
+It requires explicit nested Docker, Temporal, broker and local-model settings;
+unknown environment defaults or additional namespace entries refuse.
+
+The internal spec digest covers Config, HostConfig, Mounts and NetworkSettings,
+plus the exact State.Pid/StartedAt generation, using ordinal object-key order and
+preserved array order.
+It is not a new cross-SDK JCS format or permission to accept arbitrary observations.
+Raw environment/configuration is never serialized in the validation plan.
+HTTP errors, duplicate JSON, missing identities or over-4-MiB inspection responses
+refuse rather than invent an empty target.
+
+This checkpoint binds only the three application containers and their inspected
+nested configuration, not the complete infrastructure/helper/volume registry,
+effective live configuration, broker principal, SQL schema or native task history.
+A volume name, owner label or inspect hash alone is not an immutable cleanup
+precondition.
+Campaign mutation planning and RunAsync remain BLOCKED until connected collectors,
+full resource-generation custody and exact-owned campaign cleanup are implemented
+and separately qualified.

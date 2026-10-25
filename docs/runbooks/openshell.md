@@ -162,7 +162,10 @@ manifest, protocol 1.0, `openshell.supervisor-middleware.contract`, pre_credenti
 256KiB and a two-second fail-closed hook timeout. No caller `agent` parameter,
 identity header, Authorization override, arbitrary upstream or query is admitted.
 The issuer accepts only activated/committed mappings, never a bootstrap grant.
-`/identity/ready` remains an explicitly unresolved later-package boundary.
+`/identity/ready` is implemented as guarded source on both sides (outside
+issuer/ingress and the dedicated receiver listener, off by default); its
+concrete trusted peers remain unregistered, so no live readiness path is
+qualified.
 
 Local source commands, with no gateway, socket, host or real credentials:
 
@@ -213,8 +216,9 @@ The preparation authority defaults to deny; no operator selection route or insta
 not a running agent. `preparation_unconfirmed` retains the launch ID for authoritative inspection.
 Never repair this by deleting its slot/tombstone, replaying Create, guessing an unbound ID from labels,
 starting a retained sandbox, enabling grants, or restarting the old runtime.
-The preparation-specific reconcile/operator workflow, concrete evidence/bootstrap peers and live
-acceptance are not implemented; preserve pending state for the separately scoped recovery work.
+The preparation-specific reconcile routes above are implemented guarded source;
+concrete trusted evidence/bootstrap production peers remain unregistered and live
+acceptance is unexecuted, so preserve pending state wherever recovery refuses.
 
 Bootstrap startup is a separate minimal branch, not daemon mode with delayed intake.
 It requires an exact HTTPS bootstrap ingress, launch/epoch UUIDs, plan hash, UTC deadline within

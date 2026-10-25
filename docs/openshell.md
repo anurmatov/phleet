@@ -68,13 +68,17 @@ migration API is available, so no OpenShell workload can be admitted through it.
 
 ## Remaining slice-1 implementation (not merely untested)
 
-Shared dispatch and caller wiring now exist, but the OpenShell lifecycle backend is
-still unimplemented and returns 422 compatibility_blocked without a legacy fallback.
-Static endpoint/policy compiler, lifecycle mutation orchestration, post-create
-current-supervisor readiness, bootstrap/activation gate and nonroot image/home
-changes are **not implemented** here.
+Shared dispatch and caller wiring now exist; ordinary lifecycle dispatch still
+returns 422 compatibility_blocked without a legacy fallback because the
+production peers it requires are unregistered. The endpoint/policy compiler,
+lifecycle mutation orchestration, post-create current-supervisor readiness,
+guarded bootstrap `/identity/ready` receiver/issuer and the preparation
+reconcile routes are implemented guarded source under default-deny, not
+runtime-qualified; the activation consumer/gate and nonroot image/home changes
+are **not implemented** here.
 Outside supervisor identity hook/issuer/ingress and durable session/replay source
-are described in the #478 checkpoint below, not installed or runtime-qualified.
+exist as guarded source described in the #478 checkpoint below, not installed or
+runtime-qualified.
 Secret binding inventory writers and production driver rollback remain **not implemented** here. Memory receiver/proof/state-reader/six-tool source exists,
 but real TLS, DB and upstream/native wire compatibility is unqualified, not admission.
 Other receiving services remain unimplemented and blocked.

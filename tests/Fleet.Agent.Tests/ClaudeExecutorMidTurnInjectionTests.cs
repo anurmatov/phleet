@@ -170,8 +170,10 @@ public class ClaudeExecutorMidTurnInjectionTests
         }
     }
 
-    [Fact]
-    public async Task SendCommandAsync_DrainedAssistantText_DoesNotSurfaceInNextExecuteTurn()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(250)]
+    public async Task SendCommandAsync_DrainedAssistantText_DoesNotSurfaceInNextExecuteTurn(int scheduledDelayMs)
     {
         // Drives SendCommandAsync for real, then a normal ExecuteAsync turn, and asserts
         // at the sink (the yielded events a caller observes) that no recovered_answer
@@ -184,6 +186,10 @@ public class ClaudeExecutorMidTurnInjectionTests
             RedirectStandardOutput = true,
             UseShellExecute = false,
         })!;
+        // The executor may dispose its Process on cancellation; keep independent ownership
+        // so fixture cleanup cannot mask the first assertion/timeout with an unassociated object.
+        using var cleanup = System.Diagnostics.Process.GetProcessById(process.Id);
+        _ = cleanup.SafeHandle;
         try
         {
             var executor = BuildExecutor();
@@ -201,31 +207,35 @@ public class ClaudeExecutorMidTurnInjectionTests
             // --- /run turn ---
             var sendTask = Task.Run(async () =>
             {
+                await Task.Delay(scheduledDelayMs, cts.Token);
                 var events = new List<AgentProgress>();
                 await foreach (var p in executor.SendCommandAsync("/run echo hello", cts.Token))
                     events.Add(p);
                 return events;
             });
 
-            // SendCommandAsync synchronously drains the stale event, clears
-            // _preservedDrainedAnswerText, writes to stdin, then blocks on ReadAsync.
-            // A brief delay is enough — the drain and stdin write are microsecond operations.
-            await Task.Delay(100, cts.Token);
+            // Cat echoes only after the real stdin write, which follows the stale-event drain.
+            // Do not race a delayed worker by injecting its result after an arbitrary sleep.
+            var runInput = await process.StandardOutput.ReadLineAsync(cts.Token);
+            Assert.NotNull(runInput);
+            Assert.Contains("/run echo hello", runInput);
             channel.Writer.TryWrite(new ClaudeStreamEvent { Type = "result", Result = "run done" });
             await sendTask;
 
             // --- normal ExecuteAsync turn ---
             var executeTask = Task.Run(async () =>
             {
+                await Task.Delay(scheduledDelayMs, cts.Token);
                 var events = new List<AgentProgress>();
                 await foreach (var p in executor.ExecuteAsync("next task", ct: cts.Token))
                     events.Add(p);
                 return events;
             });
 
-            // ExecuteAsync drains (empty channel), finds _preservedDrainedAnswerText null,
-            // writes to stdin, then blocks on ReadAsync.
-            await Task.Delay(100, cts.Token);
+            // The second write also proves this turn has passed its drain before the result.
+            var nextInput = await process.StandardOutput.ReadLineAsync(cts.Token);
+            Assert.NotNull(nextInput);
+            Assert.Contains("next task", nextInput);
             channel.Writer.TryWrite(new ClaudeStreamEvent { Type = "result", Result = "real answer" });
             var executeEvents = await executeTask;
 
@@ -236,7 +246,8 @@ public class ClaudeExecutorMidTurnInjectionTests
         }
         finally
         {
-            process.Kill();
+            if (!cleanup.HasExited) cleanup.Kill();
+            await cleanup.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(1));
             process.Dispose();
         }
     }

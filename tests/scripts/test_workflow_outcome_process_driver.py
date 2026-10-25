@@ -48,11 +48,11 @@ class ProcessQualificationDriverTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         summary = json.loads(result.stdout.strip().splitlines()[-1])
         self.assertEqual(summary['kind'], 'workflow-outcome-process-self-test')
-        self.assertEqual(summary['total'], 48)
-        self.assertEqual(summary['passed'], 48)
+        self.assertEqual(summary['total'], 56)
+        self.assertEqual(summary['passed'], 56)
         self.assertEqual(summary['failed'], 0)
         self.assertEqual(summary['skipped'], 0)
-        self.assertEqual(sum(line.startswith('PASS ') for line in result.stdout.splitlines()), 48)
+        self.assertEqual(sum(line.startswith('PASS ') for line in result.stdout.splitlines()), 56)
 
     def test_validate_refuses_an_empty_manifest_before_any_process(self):
         manifest = Path(self.owned.name) / 'empty.json'

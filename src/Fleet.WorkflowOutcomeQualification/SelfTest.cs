@@ -23,6 +23,9 @@ public static class SelfTest
             Test("docker_context_binding_refuses_" + fault, () => DockerContextRefuses(fault));
         foreach (var fault in new[] { "exit", "deadline", "cancel", "overflow" })
             Test("parent_exit_descendant_cleanup_" + fault, () => ExitedParentCleanup(fault));
+        foreach (var fault in new[] { "exit", "deadline", "cancel", "overflow" })
+            foreach (var pipes in new[] { "inherited", "closed" })
+                Test("different_process_group_cleanup_" + fault + "_" + pipes, () => SeparateGroupCleanup(fault, pipes == "closed"));
         Test("loopback_fixture_uses_actual_prompt_and_strict_production_parser", LoopbackUsesProductionContracts);
         foreach (var fault in new[] { "head-exit", "status-exit", "dirty", "engine", "image", "cli" })
             Test("target_validation_refuses_" + fault, () => TargetRefuses(fault));
@@ -202,6 +205,74 @@ public static class SelfTest
                 }
             }
             else throw new InvalidOperationException("owned descendant fixture never started");
+        }
+    }
+
+    private static void SeparateGroupCleanup(string fault, bool closePipes)
+    {
+        using var directory = new TemporaryDirectory();
+        using var cancel = new CancellationTokenSource();
+        if (fault == "cancel") cancel.CancelAfter(TimeSpan.FromMilliseconds(700));
+        // The child deliberately changes process group but retains the reserved session.
+        // Parent exit and pipe ownership are independent of the child's lifetime.
+        const string script = """
+            import os, signal, sys, time
+            child = os.fork()
+            if child == 0:
+                os.setpgrp()
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                with open("separate.pid", "w") as f:
+                    f.write(str(os.getpid()) + " " + str(os.getsid(0)) + " " + str(os.getpgrp()))
+                if sys.argv[2] == "closed":
+                    for fd in (0, 1, 2):
+                        os.close(fd)
+                time.sleep(10)
+                os._exit(0)
+            until = time.monotonic() + 1
+            while not os.path.exists("separate.pid") and time.monotonic() < until:
+                time.sleep(0.005)
+            if sys.argv[1] == "overflow":
+                os.write(1, b"x" * 2097152)
+            if sys.argv[1] in ("exit", "overflow"):
+                os._exit(0)
+            time.sleep(10)
+            """;
+        var command = new PlannedCommand("synthetic-separate-group", "/usr/bin/python3",
+            ["-c", script, fault, closePipes ? "closed" : "inherited"],
+            new Dictionary<string, string> { ["PATH"] = "/usr/bin:/bin", ["HOME"] = directory.Path,
+                ["TMPDIR"] = directory.Path, ["PYTHONPYCACHEPREFIX"] = directory.Path },
+            directory.Path, TimeSpan.FromMilliseconds(900));
+        try
+        {
+            var result = new ProcessCommandRunner().RunAsync(command, cancel.Token)
+                .WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+            if (fault is "deadline" or "cancel" && !result.TimedOut)
+                throw new InvalidOperationException("cancellation/deadline was not retained");
+            if (fault == "exit" && (result.ExitCode != 0 || result.TimedOut))
+                throw new InvalidOperationException("normal target exit was not retained");
+            if (fault == "overflow") throw new InvalidOperationException("overflow was accepted");
+        }
+        catch (QualificationException e) when (fault == "overflow" && e.Message.Contains("output exceeded", StringComparison.Ordinal)) { }
+        finally
+        {
+            var file = Path.Combine(directory.Path, "separate.pid");
+            if (!File.Exists(file)) throw new InvalidOperationException("separate-group fixture never started");
+            var ids = File.ReadAllText(file).Split(' ').Select(int.Parse).ToArray();
+            if (ids.Length != 3 || ids[0] != ids[2] || ids[0] == ids[1])
+                throw new InvalidOperationException("fixture did not create a different process group in its session");
+            var path = "/proc/" + ids[0] + "/stat";
+            string state;
+            try { state = File.ReadAllText(path); }
+            catch (FileNotFoundException) { state = ""; }
+            catch (DirectoryNotFoundException) { state = ""; }
+            if (state.Length != 0 && !state[(state.LastIndexOf(')') + 2)..].StartsWith("Z ", StringComparison.Ordinal))
+            {
+                // Reap only this synthetic fixture's exact recorded child on red.
+                using var child = System.Diagnostics.Process.GetProcessById(ids[0]);
+                child.Kill();
+                child.WaitForExit(1000);
+                throw new InvalidOperationException("owned different-process-group child survived cleanup");
+            }
         }
     }
 

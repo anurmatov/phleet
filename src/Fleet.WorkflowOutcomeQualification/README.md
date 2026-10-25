@@ -40,8 +40,14 @@ image/server/process/AC25 DB-keyring backup/restore qualification still block me
 The process runner uses an internal helper from this same compiled artifact, not an
 unlisted shell/setsid executable. Its separate status pipe is close-on-exec for the
 target. The leader remains alive until cleanup so target exit cannot lose session
-ownership. An unexpected leader exit refuses confirmed cleanup; non-Linux execution
-is unsupported. This is not containment of hostile children escaping the session,
+ownership. Cleanup inventories the reserved session rather than only its original
+process group, pins each member with a Linux pidfd, and rechecks membership before
+signalling that handle; two consecutive empty live-member inventories precede leader
+termination. Same-session setpgrp descendants are covered with inherited and closed
+pipes on exit, deadline, cancellation and output-overflow paths.
+An unreadable inventory, missing pidfd support or unexpected leader exit refuses
+confirmed cleanup; non-Linux execution is unsupported.
+This is not containment of hostile children escaping the session,
 and it does not replace the still-missing immutable campaign cleanup registry.
 
 Docker context metadata must be present in configFiles under

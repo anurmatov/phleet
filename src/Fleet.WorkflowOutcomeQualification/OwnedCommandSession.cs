@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 
@@ -14,8 +15,10 @@ internal static class OwnedCommandSession
 {
     [DllImport("libc", SetLastError = true)] private static extern int setsid();
     [DllImport("libc", SetLastError = true)] private static extern int getsid(int pid);
-    [DllImport("libc", SetLastError = true)] private static extern int kill(int pid, int signal);
     [DllImport("libc", SetLastError = true)] private static extern int fcntl(int fd, int command, int value);
+    [DllImport("libc", SetLastError = true)] private static extern int pidfd_open(int pid, uint flags);
+    [DllImport("libc", SetLastError = true)] private static extern int pidfd_send_signal(int fd, int signal, IntPtr info, uint flags);
+    [DllImport("libc", SetLastError = true)] private static extern int close(int fd);
 
     internal static ProcessStartInfo StartInfo(PlannedCommand command, string pipe)
     {
@@ -44,18 +47,96 @@ internal static class OwnedCommandSession
         // session after an unexpected leader exit, where PID reuse cannot be disproved.
         if (leader.HasExited)
             throw new QualificationException("owned session leader exited unexpectedly; cleanup is unconfirmed");
-        if (getsid(leader.Id) == leader.Id)
+        var leaderHandle = pidfd_open(leader.Id, 0);
+        if (leaderHandle < 0)
+            throw new QualificationException("owned session leader could not be pinned");
+        var confirmed = false;
+        try
         {
-            if (kill(-leader.Id, 9) != 0)
-                throw new QualificationException("owned process-session termination failed");
+            if (leader.HasExited)
+                throw new QualificationException("owned session leader exited unexpectedly; cleanup is unconfirmed");
+            confirmed = true; // Own unreaped child is still alive at the time its handle was pinned.
+            if (getsid(leader.Id) == leader.Id) TerminateDescendants(leader.Id, leaderHandle);
+            // Before setsid/READY no target is allowed to start.
         }
-        else leader.Kill(entireProcessTree: true); // No target can start before setsid + READY.
+        finally
+        {
+            try
+            {
+                // Stable leader handle is signalled last, never a possibly reused numeric PID.
+                if (confirmed && pidfd_send_signal(leaderHandle, 9, IntPtr.Zero, 0) != 0
+                    && Marshal.GetLastPInvokeError() != 3 /* ESRCH */)
+                    throw new QualificationException("owned process-session leader termination failed");
+            }
+            finally { close(leaderHandle); }
+        }
+    }
+
+    private static void TerminateDescendants(int session, int leaderHandle)
+    {
+        var clock = Stopwatch.StartNew();
+        var emptyReads = 0;
+        do
+        {
+            if (pidfd_send_signal(leaderHandle, 0, IntPtr.Zero, 0) != 0 || getsid(session) != session)
+                throw new QualificationException("reserved session identity was lost; cleanup is unconfirmed");
+            var found = false;
+            // A process group is not a session: setpgrp descendants need their own stable handles.
+            foreach (var path in Directory.EnumerateDirectories("/proc"))
+            {
+                if (pidfd_send_signal(leaderHandle, 0, IntPtr.Zero, 0) != 0)
+                    throw new QualificationException("reserved session leader was lost; cleanup is unconfirmed");
+                if (!int.TryParse(Path.GetFileName(path), NumberStyles.None, CultureInfo.InvariantCulture, out var pid)
+                    || pid == session || SessionOf(pid) != session) continue;
+                var fd = pidfd_open(pid, 0);
+                if (fd < 0)
+                {
+                    if (Marshal.GetLastPInvokeError() == 3 /* ESRCH */) continue;
+                    throw new QualificationException("owned session member could not be pinned");
+                }
+                try
+                {
+                    // Recheck membership after pinning; the descriptor cannot signal a reused PID.
+                    if (SessionOf(pid) != session) continue;
+                    string record;
+                    try { record = File.ReadAllText(path + "/stat"); }
+                    catch (FileNotFoundException) { continue; }
+                    catch (DirectoryNotFoundException) { continue; }
+                    var stateIndex = record.LastIndexOf(')') + 2;
+                    if (stateIndex < 2 || stateIndex >= record.Length)
+                        throw new QualificationException("owned session member state is unreadable");
+                    if (record[stateIndex] is 'Z' or 'X') continue; // Already dead, cannot retain pipes or execute.
+                    found = true;
+                    if (pidfd_send_signal(fd, 9, IntPtr.Zero, 0) != 0
+                        && Marshal.GetLastPInvokeError() != 3 /* ESRCH */)
+                        throw new QualificationException("owned session member termination failed");
+                }
+                finally { close(fd); }
+            }
+            // Repeat the empty inventory: a parent can exit after forking while /proc is enumerated.
+            emptyReads = found ? 0 : emptyReads + 1;
+            if (emptyReads == 2) return;
+            Thread.Sleep(10);
+        } while (clock.Elapsed < TimeSpan.FromSeconds(2));
+        throw new QualificationException("owned session still has live descendants; cleanup is unconfirmed");
+    }
+
+    private static int SessionOf(int pid)
+    {
+        var session = getsid(pid);
+        if (session < 0 && Marshal.GetLastPInvokeError() != 3 /* ESRCH */)
+            throw new QualificationException("process session membership is unreadable; cleanup is unconfirmed");
+        return session;
     }
 
     internal static async Task<int> RunAsync(string handle)
     {
         if (!OperatingSystem.IsLinux() || !int.TryParse(handle, out var fd) || setsid() < 0)
             return 125;
+        // Refuse before target launch when the stable PID-handle primitive is unavailable.
+        var ownHandle = pidfd_open(Environment.ProcessId, 0);
+        if (ownHandle < 0) return 125;
+        // Keep this exact self handle until final cleanup.
         // Target executables must not inherit the controller's private status channel.
         if (fcntl(fd, 2 /* F_SETFD */, 1 /* FD_CLOEXEC */) != 0) return 125;
         using var pipe = new AnonymousPipeClientStream(PipeDirection.Out, handle);
@@ -105,7 +186,12 @@ internal static class OwnedCommandSession
         {
             // This process is itself the live reserved session leader, never a reused PID.
             // This also covers lost-controller EOF and unexpected helper errors.
-            kill(-Environment.ProcessId, 9);
+            try { TerminateDescendants(Environment.ProcessId, ownHandle); }
+            finally
+            {
+                pidfd_send_signal(ownHandle, 9, IntPtr.Zero, 0);
+                close(ownHandle);
+            }
         }
         return 125;
     }

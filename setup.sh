@@ -146,6 +146,9 @@ write_env_var() {
       sed -i "s|^${key}=.*|${key}=${value}|" "$file"
     fi
   else
+    # A recorded value with no final newline must stay its own record: insert the missing
+    # separator first (the same guard upgrade.sh uses), never concatenate onto the last line.
+    [[ -s "$file" && -n "$(tail -c 1 "$file")" ]] && printf '\n' >> "$file"
     echo "${key}=${value}" >> "$file"
   fi
 }

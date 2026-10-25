@@ -34,4 +34,25 @@ with tempfile.TemporaryDirectory(prefix='identity-config-') as temp:
     environment['DRY_RUN'] = 'true'
     subprocess.run(['bash', '-c', script], env=environment, check=True, capture_output=True)
     assert env.read_text() == 'KEEP=synthetic\n'
-print('PASS: 12 identity mappings plus infrastructure allowlist, fresh defaults, preserved values, dry-run and directory mode')
+
+# A recorded final value with no trailing newline must stay its own record: the backfill
+# inserts the missing separator instead of concatenating, and a repeated run preserves bytes.
+with tempfile.TemporaryDirectory(prefix='identity-nolf-') as temp:
+    base = pathlib.Path(temp)
+    env = base / '.env'
+    env.write_bytes(b'KEEP=synthetic')
+    environment = dict(os.environ, ENV_FILE=str(env), FLEET_BASE_DIR=str(base), DRY_RUN='false', YELLOW='', NC='', FLEET_MEMORY_IDENTITY_ENABLED='true')
+    subprocess.run(['bash', '-c', script], env=environment, check=True, capture_output=True)
+    lines = env.read_text().splitlines()
+    assert lines[0] == 'KEEP=synthetic', lines[0]
+    assert 'FLEET_MEMORY_IDENTITY_AUDIENCE=memory:/mcp' in lines
+    after_first = env.read_bytes()
+    assert after_first.startswith(b'KEEP=synthetic\n')
+    after_first = after_first.replace(b'FLEET_MEMORY_IDENTITY_ENABLED=false\n', b'FLEET_MEMORY_IDENTITY_ENABLED=true\n')
+    after_first = after_first.replace(b'FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS=\n', b'FLEET_DOCKER_INFRASTRUCTURE_CONTAINER_IDS=synthetic-id\n')
+    env.write_bytes(after_first)
+    subprocess.run(['bash', '-c', script], env=environment, check=True, capture_output=True)
+    assert env.read_bytes() == after_first
+    subprocess.run(['bash', '-c', script], env=environment, check=True, capture_output=True)
+    assert env.read_bytes() == after_first
+print('PASS: 12 identity mappings plus infrastructure allowlist, fresh defaults, preserved values, dry-run and directory mode, missing-final-newline backfill and repeated-run preservation')

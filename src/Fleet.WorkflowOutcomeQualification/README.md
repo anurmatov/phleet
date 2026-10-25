@@ -66,6 +66,20 @@ The driver checks engine identity around each exact-ID GET, image/owner/spec,
 host isolation and owned bind mounts before the native version probe.
 It requires explicit nested Docker, Temporal, broker and local-model settings;
 unknown environment defaults or additional namespace entries refuse.
+Keys follow .NET environment-provider semantics: case-insensitive comparison and
+double-underscore-to-colon normalization precede selection.
+Duplicate normalized aliases refuse instead of depending on enumeration order;
+additional namespace indices refuse in any casing or separator form.
+Run the separate actual-provider source oracle with the installed shared framework:
+
+```sh
+dotnet run --project \
+  tests/Fleet.WorkflowOutcomeQualification.SourceTests
+```
+
+That oracle feeds only owned dictionaries into the actual .NET provider loader,
+never mutates global environment, and invokes the actual internal observation
+parser without broadening its public API.
 
 The internal spec digest covers Config, HostConfig, Mounts and NetworkSettings,
 plus the exact State.Pid/StartedAt generation, using ordinal object-key order and

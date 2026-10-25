@@ -48,11 +48,25 @@ class ProcessQualificationDriverTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         summary = json.loads(result.stdout.strip().splitlines()[-1])
         self.assertEqual(summary['kind'], 'workflow-outcome-process-self-test')
-        self.assertEqual(summary['total'], 85)
-        self.assertEqual(summary['passed'], 85)
+        self.assertEqual(summary['total'], 88)
+        self.assertEqual(summary['passed'], 88)
         self.assertEqual(summary['failed'], 0)
         self.assertEqual(summary['skipped'], 0)
-        self.assertEqual(sum(line.startswith('PASS ') for line in result.stdout.splitlines()), 85)
+        self.assertEqual(sum(line.startswith('PASS ') for line in result.stdout.splitlines()), 88)
+
+    def test_actual_configuration_provider_refuses_alias_ambiguity(self):
+        project = REPO / 'tests/Fleet.WorkflowOutcomeQualification.SourceTests'
+        built = subprocess.run(
+            [self.dotnet, 'build', str(project), '-nologo', '-v', 'q',
+             '--source', str(Path(self.owned.name) / 'cache')],
+            cwd=REPO, env=self.environment, text=True, capture_output=True, timeout=120)
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        dll = project / 'bin/Debug/net10.0/Fleet.WorkflowOutcomeQualification.SourceTests.dll'
+        result = subprocess.run([self.dotnet, str(dll)], cwd=REPO, env=self.environment,
+                                text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        summary = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(summary, {'total': 17, 'passed': 17, 'failed': 0, 'skipped': 0})
 
     def test_validate_refuses_an_empty_manifest_before_any_process(self):
         manifest = Path(self.owned.name) / 'empty.json'

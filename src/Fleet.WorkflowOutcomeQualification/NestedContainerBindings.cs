@@ -40,19 +40,24 @@ public sealed class ContainerBindingObservation
         Mounts = root.GetProperty("Mounts").EnumerateArray().Select(m => new ContainerMount(
             m.GetProperty("Type").GetString()!, m.GetProperty("Source").GetString()!,
             m.GetProperty("Destination").GetString()!)).ToArray();
-        var env = new Dictionary<string, string>(StringComparer.Ordinal);
-        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var value in config.GetProperty("Env").EnumerateArray())
         {
             var text = value.GetString()!;
             var index = text.IndexOf('=');
-            if (index < 1 || !seen.Add(text[..index])) throw new QualificationException("ambiguous nested environment");
-            var key = text[..index];
-            if (key.StartsWith("TemporalBridge__Namespaces__", StringComparison.Ordinal) && key != "TemporalBridge__Namespaces__0")
+            if (index < 1) throw new QualificationException("ambiguous nested environment");
+            var key = NormalizeEnvironmentKey(text[..index]);
+            // The real .NET provider uses case-insensitive keys and converts __ to :.
+            // Refuse aliases before selection, never pick an order-dependent winner.
+            if (!seen.Add(key)) throw new QualificationException("ambiguous nested environment");
+            if ((key.StartsWith("TemporalBridge:Namespaces:", StringComparison.OrdinalIgnoreCase)
+                && !key.Equals("TemporalBridge:Namespaces:0", StringComparison.OrdinalIgnoreCase))
+                || key.Equals("TemporalBridge:Namespaces", StringComparison.OrdinalIgnoreCase))
                 throw new QualificationException("unregistered nested Temporal namespace");
             if (!SelectedEnvironment.Contains(key)) continue;
             var selected = text[(index + 1)..];
-            if (key == "RabbitMq__Host")
+            if (key.Equals("RabbitMq:Host", StringComparison.OrdinalIgnoreCase))
             {
                 var uri = new Uri(selected, UriKind.Absolute);
                 selected = uri.GetComponents(UriComponents.SchemeAndServer | UriComponents.Path, UriFormat.UriEscaped);
@@ -77,9 +82,11 @@ public sealed class ContainerBindingObservation
     }
 
     internal static readonly IReadOnlySet<string> SelectedEnvironment = new HashSet<string>(
-        ["Docker__SocketPath", "TemporalBridge__TemporalAddress", "TemporalBridge__Namespaces__0",
-         "TemporalBridge__OrchestratorUrl", "RabbitMq__Host", "Agent__Provider", "Agent__Model",
-         "Agent__CodexOssBaseUrl"], StringComparer.Ordinal);
+        ["Docker:SocketPath", "TemporalBridge:TemporalAddress", "TemporalBridge:Namespaces:0",
+         "TemporalBridge:OrchestratorUrl", "RabbitMq:Host", "Agent:Provider", "Agent:Model",
+         "Agent:CodexOssBaseUrl"], StringComparer.OrdinalIgnoreCase);
+
+    internal static string NormalizeEnvironmentKey(string key) => key.Replace("__", ":", StringComparison.Ordinal);
 
     internal static ContainerBindingObservation Parse(JsonElement root)
     {
@@ -257,7 +264,8 @@ internal sealed class NestedContainerBindings
 
     private static void RequireEnvironment(ContainerBindingObservation actual, string key, string expected)
     {
-        if (key == "RabbitMq__Host")
+        key = ContainerBindingObservation.NormalizeEnvironmentKey(key);
+        if (key.Equals("RabbitMq:Host", StringComparison.OrdinalIgnoreCase))
             expected = new Uri(expected).GetComponents(UriComponents.SchemeAndServer | UriComponents.Path, UriFormat.UriEscaped);
         if (!actual.EnvironmentHashes.TryGetValue(key, out var hash) || hash != ContainerBindingObservation.Hash(expected))
             throw new QualificationException("nested endpoint/configuration does not match the approved target");

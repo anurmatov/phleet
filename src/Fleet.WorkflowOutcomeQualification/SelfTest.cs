@@ -31,6 +31,8 @@ public static class SelfTest
             Test("target_validation_refuses_" + fault, () => TargetRefuses(fault));
         foreach (var fault in new[] { "nested-id", "nested-image", "nested-config", "nested-owner", "nested-host", "nested-env", "nested-socket", "nested-read", "nested-missing" })
             Test("nested_container_binding_refuses_" + fault, () => NestedTargetRefuses(fault));
+        foreach (var fault in new[] { "namespace-lower", "namespace-colon", "broker-alias" })
+            Test("nested_environment_alias_refuses_" + fault, () => NestedTargetRefuses(fault));
         foreach (var fault in new[] { "valid", "name", "404", "duplicate", "oversize", "secret", "reorder" })
             Test("nested_actual_docker_reader_" + fault, () => NestedHttpInspect(fault));
         foreach (var fault in new[] { "nested-host", "nested-env", "nested-socket" })
@@ -1209,6 +1211,12 @@ public static class SelfTest
                 case "nested-env": node["Config"]!["Env"]![0] = "RabbitMq__Host=amqps://foreign.example"; break;
                 case "nested-socket": node["Mounts"] = System.Text.Json.Nodes.JsonNode.Parse("[{\"Type\":\"bind\",\"Source\":\"/foreign/docker.sock\",\"Destination\":\"/run/foreign.sock\"}]"); break;
             }
+            if (Fault == "namespace-lower")
+                node["Config"]!["Env"]!.AsArray().Add("temporalbridge__namespaces__1=foreign-synthetic");
+            if (Fault == "namespace-colon")
+                node["Config"]!["Env"]!.AsArray().Add("TEMPORALBRIDGE:NAMESPACES:1=foreign-synthetic");
+            if (Fault == "broker-alias")
+                node["Config"]!["Env"]!.AsArray().Add("rabbitmq:host=amqp://foreign.example/");
             if (ExtraMountSource is not null)
                 node["Mounts"]!.AsArray().Add(new System.Text.Json.Nodes.JsonObject
                     { ["Type"]="bind", ["Source"]=ExtraMountSource, ["Destination"]="/run/qualification/extra.json" });

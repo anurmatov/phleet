@@ -45,6 +45,8 @@ public static class AgentHostRegistration
     public static IServiceCollection AddAgentCoreServices(
         this IServiceCollection services, IConfiguration configuration)
     {
+        StockOpenShellEnrollment.Validate(configuration);
+
         // Bind configuration sections
         services.Configure<AgentOptions>(configuration.GetSection(AgentOptions.Section));
         services.Configure<TelegramOptions>(configuration.GetSection(TelegramOptions.Section));

@@ -15,7 +15,21 @@ using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddAgentCoreServices(builder.Configuration);
+// Refuse stock enrollment before any registration. This catch must terminate direct dotnet
+// starts too, rather than relying on unhandled-exception behavior on a particular platform.
+var validateStockOnly = args.Contains("--validate-stock-enrollment", StringComparer.Ordinal);
+try
+{
+    if (validateStockOnly) StockOpenShellEnrollment.Validate(builder.Configuration);
+    else builder.Services.AddAgentCoreServices(builder.Configuration);
+}
+catch (InvalidOperationException ex) when (ex.Message.StartsWith("stock_enrollment_", StringComparison.Ordinal))
+{
+    Console.Error.WriteLine(ex.Message);
+    Environment.Exit(1);
+    return;
+}
+if (validateStockOnly) return;
 
 // Determine mode from command-line args
 var isCliMode = args.Any(a => a == "--task");

@@ -1,4 +1,10 @@
 #!/bin/bash
+# Stock enrollment is opt-in. Refuse before credential copying, MCP/tool setup, dependency
+# probes or intake. Normal starts with no enrollment key retain their existing startup order.
+if ! dotnet /app/Fleet.Agent.dll --validate-stock-enrollment; then
+    exit 1
+fi
+
 # Read provider from generated appsettings (default: claude). A missing, null or empty value means
 # claude; any other value is used verbatim and must name a known provider (PV1, below).
 PROVIDER=$(node -e "try{const p=require('/app/appsettings.json').Agent.Provider;console.log(p===undefined||p===null||p===''?'claude':String(p))}catch{console.log('claude')}" 2>/dev/null || echo "claude")

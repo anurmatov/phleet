@@ -136,6 +136,11 @@ The rest of this README is the plumbing — configuration, deployment, troublesh
 - `fleet-bridge` — RabbitMQ relay
 - `fleet-dashboard` — web UI at http://localhost:3700
 
+## Stock OpenShell integration (incomplete)
+
+The opt-in whole-agent path is not available yet; its [startup guard and route gaps](docs/openshell-stock.md)
+refuse enrollment rather than trust caller identity. Default provisioning is unchanged.
+
 ## Platform support
 
 | Platform | Provider | Status |

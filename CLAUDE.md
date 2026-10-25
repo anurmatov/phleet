@@ -229,6 +229,14 @@ passed through, Codex `sol`/`terra`/`luna` mapped in `HarnessDefaults.CodexModel
 Codex does not resolve them) — plus a **custom…** free-text entry (#465); dated ids keep working, never rewritten. The dashboard dialog is sectioned and shows the effective settings
 and the `harnessExtra` textarea. See `docs/providers/harness-defaults.md`.
 
+## Stock OpenShell enrollment
+
+See `docs/openshell-stock.md`: this draft implements only an opt-in startup refusal,
+not working sandbox hosting or receiving-service identity. Keep automatic provisioning
+unchanged and never accept a record, query parameter or header as verifier coverage.
+`StockOpenShell:Enabled` and `StockOpenShell:EnrollmentFile` are startup-only; active records currently refuse before
+core service registration, and the entrypoint checks before credential/MCP setup.
+
 ## Project contexts
 
 Every assignment renders the project's canonical context (the version row `CurrentVersion` points

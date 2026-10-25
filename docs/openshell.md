@@ -359,6 +359,11 @@ The proto import closure and license are byte-pinned in `src/Fleet.Identity/Prot
 BouncyCastle.Cryptography supplies Ed25519 verification rather than handwritten
 cryptography; Grpc.AspNetCore supplies the actual generated server transport.
 
+The preparation preflight qualifies a hook against these same generated wire messages —
+its copies of the middleware proto closure are byte-pinned in
+`src/Fleet.Orchestrator/OpenShell/Proto/UPSTREAM`; operator configuration, custody and refusal
+behavior are in `docs/openshell-preflight-runbook.md`.
+
 The hook authenticates pinned EdDSA JWKS/kid/issuer/type/audience and 900-second
 maximum lifetime. Gateway-kind tokens may discover/validate; only supervisor-kind
 JWTs whose sandbox ID equals authenticated request context can issue a proof.

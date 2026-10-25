@@ -22,7 +22,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Fleet.Identity\Fleet.Identity.csproj" />
-    <ProjectReference Include="..\..\src\Fleet.Orchestrator\Fleet.Orchestrator.csproj" />
+    <!-- Aliased: Fleet.Orchestrator compiles the same vendored middleware proto closure; without
+         the alias its generated types would be ambiguous with Fleet.Identity's copy. -->
+    <ProjectReference Include="..\..\src\Fleet.Orchestrator\Fleet.Orchestrator.csproj" Aliases="orchestrator" />
     <ProjectReference Include="..\..\src\Fleet.Memory\Fleet.Memory.csproj" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="9.0.3" />
     <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.12" />

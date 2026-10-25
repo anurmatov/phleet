@@ -43,6 +43,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Protobuf Include="OpenShell/Proto/*.proto" ProtoRoot="OpenShell/Proto" GrpcServices="Client" />
+    <Protobuf Include="OpenShell/Proto/*.proto" ProtoRoot="OpenShell/Proto" GrpcServices="Client" Exclude="OpenShell/Proto/extension.proto;OpenShell/Proto/supervisor_middleware.proto" />
+    <!-- Messages only: the preflight reads recorded replies and never calls a middleware gRPC.
+         Fleet.Identity exports the same generated types publicly; consumers that reference both
+         assemblies alias this one (see Fleet.Identity.Tests). -->
+    <Protobuf Include="OpenShell/Proto/extension.proto;OpenShell/Proto/supervisor_middleware.proto" ProtoRoot="OpenShell/Proto" GrpcServices="None" />
   </ItemGroup>
 </Project>

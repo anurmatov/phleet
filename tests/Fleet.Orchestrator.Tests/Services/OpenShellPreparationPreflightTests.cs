@@ -1,19 +1,23 @@
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
-using System.Text.Json.Nodes;
 using Fleet.Orchestrator.Services;
 using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
 using Microsoft.Extensions.DependencyInjection;
+using Openshell.Extension.V1;
+using Openshell.Middleware.V1;
 
 namespace Fleet.Orchestrator.Tests.Services;
 
 /// <summary>
-/// Connected source regressions for the concrete preflight (#479): qualification records are bound
-/// to the exact pinned binary, config and approved plan, the live policy flows only through the
-/// authorized capabilities reader (which has no production implementation), and every path that
-/// depends on the unshipped upstream contracts stays fail-closed with zero engine mutations.
+/// Connected source regressions for the concrete preflight (#479): qualification records are the
+/// ACTUAL generated MiddlewareManifest/ValidateConfig wire messages bound to the selected hook
+/// registration and the approved plan's middleware config inside a digest-sealed record set, the
+/// live policy flows only through the authorized capabilities reader (which has no production
+/// implementation), and every path that depends on the unshipped upstream contracts stays
+/// fail-closed with zero engine mutations. Fixtures are serialized generated messages, not
+/// handwritten shapes.
 /// </summary>
 public sealed class OpenShellPreparationPreflightTests : IDisposable
 {
@@ -32,11 +36,21 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
     }
 
     [Fact]
+    public async Task VerifyAsync_AcceptsDistinctIngressAndReceiverPorts()
+    {
+        // Compiler-valid plan (ingress :17443 == its own endpoint port) behind a fronting ingress
+        // while the backend receiver listens elsewhere: ports need not be equal.
+        Qualified();
+        var receiver = new OpenShellBootstrapReceiverOptions
+        { Enabled = true, Port = 19443, IngressDnsName = "ingress.example.invalid" };
+        await new OpenShellPreparationPreflight(Http(_engine), _root, Plugin, receiver, Reader(Policy())).VerifyAsync(Selection(), default);
+    }
+
+    [Fact]
     public async Task VerifyAsync_RefusesRewrittenPlanHash()
     {
         Qualified();
-        var selection = Selection() with { PlanHash = new string('c', 64) };
-        await AssertRefusal("bootstrap_preflight_plan_changed", selection);
+        await AssertRefusal("bootstrap_preflight_plan_changed", Selection() with { PlanHash = new string('c', 64) });
     }
 
     [Theory]
@@ -57,8 +71,8 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
         Qualified();
         File.Delete(Path.Combine(_root, "hook"));
         await AssertRefusal("bootstrap_artifact_missing");
-        File.WriteAllBytes(Path.Combine(_root, "hook"), Encoding.UTF8.GetBytes("pinned-hook-bytes"));
-        File.Delete(Path.Combine(_root, "config.json"));
+        File.WriteAllBytes(Path.Combine(_root, "hook"), HookBytes);
+        File.Delete(Path.Combine(_root, "validate-request.json"));
         await AssertRefusal("bootstrap_artifact_missing");
     }
 
@@ -71,48 +85,80 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
     }
 
     [Fact]
-    public async Task VerifyAsync_RefusesDescribeBoundToAnotherHook()
+    public async Task VerifyAsync_DetectsStaleRecordSubstitution()
     {
-        // Internally valid Describe for a DIFFERENT binary: self-consistency proves nothing.
+        // A refusal reply swapped in without resealing: the digest seal catches it first.
         Qualified();
-        var other = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("another-hook")));
-        Write("describe.json", Describe(other, ConfigDigest()));
+        File.WriteAllText(Path.Combine(_root, "validate-config.json"), Json(new ValidateConfigResponse { Valid = false, Reason = "nope" }));
+        await AssertRefusal("bootstrap_qualification_record_unqualified");
+    }
+
+    [Fact]
+    public async Task VerifyAsync_RefusesManifestWithoutRequiredBinding()
+    {
+        Qualified();
+        var manifest = Manifest();
+        manifest.Bindings.Clear();
+        manifest.Bindings.Add(new MiddlewareBinding { Operation = SupervisorMiddlewareOperation.WebsocketMessage,
+            Phase = SupervisorMiddlewarePhase.PreCredentials, MaxPayloadBytes = 4096 });
+        WriteRecord("describe.json", manifest); Seal();
         await AssertRefusal("bootstrap_hook_describe_unqualified");
     }
 
     [Fact]
-    public async Task VerifyAsync_RefusesValidateConfigBoundToAnotherConfig()
+    public async Task VerifyAsync_RefusesManifestWithoutAudienceOrProtocol()
     {
-        // Replace the qualified config and re-bind Describe to it; the ValidateConfig record is
-        // still a perfectly valid reply for the OTHER config — and must be refused.
         Qualified();
-        File.WriteAllText(Path.Combine(_root, "config.json"), Policy() + " # rotated policy");
-        Write("describe.json", Describe(HookDigest(), ConfigDigest()));
-        await AssertRefusal("bootstrap_hook_validate_config_unqualified");
+        var manifest = Manifest();
+        manifest.ExpectedAudience = "";
+        WriteRecord("describe.json", manifest); Seal();
+        await AssertRefusal("bootstrap_hook_describe_unqualified");
+        Qualified();
+        manifest = Manifest();
+        manifest.Extension.ProtocolVersion = new ProtocolVersion { Major = 2, Minor = 0 };
+        WriteRecord("describe.json", manifest); Seal();
+        await AssertRefusal("bootstrap_hook_describe_unqualified");
     }
 
     [Fact]
-    public async Task VerifyAsync_RefusesValidateConfigBoundToAnotherPlan()
+    public async Task VerifyAsync_RefusesValidateRequestForAnotherHook()
     {
+        // Fully self-consistent record set — generated schema, valid response — for ANOTHER hook.
         Qualified();
-        Write("validate-config.json", Validate(HookDigest(), ConfigDigest(), new string('f', 64)));
-        await AssertRefusal("bootstrap_hook_validate_config_unqualified");
+        WriteRecord("validate-request.json", new ValidateConfigRequest
+        { MiddlewareName = "otherhook", Config = PlanConfig() });
+        Seal();
+        await AssertRefusal("bootstrap_hook_validate_request_unqualified");
+    }
+
+    [Fact]
+    public async Task VerifyAsync_RefusesValidateRequestForAnotherConfig()
+    {
+        // The request config must be the approved plan's own middleware config, not a peer.
+        Qualified();
+        WriteRecord("validate-request.json", new ValidateConfigRequest
+        { MiddlewareName = Plugin, Config = new Struct { Fields = { ["service"] = Value.ForString("other") } } });
+        Seal();
+        await AssertRefusal("bootstrap_hook_validate_request_unqualified");
     }
 
     [Fact]
     public async Task VerifyAsync_RefusesValidateConfigRefusal()
     {
         Qualified();
-        Write("validate-config.json", new JsonObject { ["accepted"] = false, ["plugin"] = Plugin,
-            ["hook_sha256"] = HookDigest(), ["config_sha256"] = ConfigDigest(), ["plan_hash"] = Selection().PlanHash });
+        WriteRecord("validate-config.json", new ValidateConfigResponse { Valid = false, Reason = "config_unsupported" });
+        Seal();
         await AssertRefusal("bootstrap_hook_validate_config_unqualified");
     }
 
     [Fact]
-    public async Task VerifyAsync_RefusesMalformedQualificationRecord()
+    public async Task VerifyAsync_RefusesNonGeneratedRecordSchema()
     {
+        // The previous round's handwritten shape is not the generated wire schema.
         Qualified();
-        Write("describe.json", JsonNode.Parse("""{"accepted":true}""")!.AsObject());
+        File.WriteAllText(Path.Combine(_root, "describe.json"),
+            """{"plugin":"fleetbootstrap","scope":"local","hook_sha256":"aa","config_sha256":"bb"}""");
+        Seal(); // sealed so the digest cannot mask the schema failure being under test
         await AssertRefusal("bootstrap_qualification_record_malformed");
     }
 
@@ -136,7 +182,6 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
             case "image": spec.Template.Image = "example.invalid/agent@sha256:" + new string('d', 64); break;
         }
         var drifted = plan with { SpecBase64 = Convert.ToBase64String(spec.ToByteArray()) };
-        Qualified(drifted);
         await AssertRefusal("bootstrap_static_qualification_changed", Selection(drifted));
     }
 
@@ -154,48 +199,25 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
             "path" => "https://ingress.example.invalid:17443/identity/other",
             _ => "https://ingress.example.invalid:17443/identity/ready?retry=1",
         };
-        var drifted = plan with { BootstrapIngress = ingress };
-        Qualified(drifted);
-        await AssertRefusal("bootstrap_ingress_unqualified", Selection(drifted));
-    }
-
-    [Fact]
-    public async Task VerifyAsync_AcceptsValidDifferentReceiverPort()
-    {
-        var plan = OpenShellPolicyCompilerTests.Plan() with { BootstrapIngress = "https://ingress.example.invalid:19443/identity/ready" };
-        Qualified(plan);
-        var receiver = new OpenShellBootstrapReceiverOptions
-        { Enabled = true, Port = 19443, IngressDnsName = "ingress.example.invalid" };
-        await new OpenShellPreparationPreflight(Http(_engine), _root, Plugin, receiver, Reader(Policy())).VerifyAsync(Selection(plan), default);
+        await AssertRefusal("bootstrap_ingress_unqualified", Selection(plan with { BootstrapIngress = ingress }));
     }
 
     [Theory]
     [InlineData("disabled")]
     [InlineData("collision")]
-    [InlineData("port")]
     [InlineData("dns")]
     public async Task VerifyAsync_RefusesReceiverBindingIndependently(string fault)
     {
         Qualified();
-        var plan = OpenShellPolicyCompilerTests.Plan();
         var receiver = fault switch
         {
             "disabled" => new OpenShellBootstrapReceiverOptions { Port = 17443, IngressDnsName = "ingress.example.invalid" },
             // Backend receiver alone is disqualifying: the API port may never host the receiver.
             "collision" => new OpenShellBootstrapReceiverOptions { Enabled = true, Port = 3600, IngressDnsName = "ingress.example.invalid" },
-            "port" => new OpenShellBootstrapReceiverOptions { Enabled = true, Port = 18000, IngressDnsName = "ingress.example.invalid" },
             _ => new OpenShellBootstrapReceiverOptions { Enabled = true, Port = 17443, IngressDnsName = "elsewhere.example.invalid" },
         };
-        OpenShellPreparationScope selection;
-        if (fault == "collision")
-        {
-            var collided = plan with { BootstrapIngress = "https://ingress.example.invalid:3600/identity/ready" };
-            Qualified(collided);
-            selection = Selection(collided);
-        }
-        else selection = Selection();
         var ex = await Assert.ThrowsAnyAsync<OpenShellStateConflictException>(() =>
-            new OpenShellPreparationPreflight(Http(_engine), _root, Plugin, receiver, Reader(Policy())).VerifyAsync(selection, default));
+            new OpenShellPreparationPreflight(Http(_engine), _root, Plugin, receiver, Reader(Policy())).VerifyAsync(Selection(), default));
         Assert.Contains("bootstrap_receiver_binding_unqualified", ex.Message);
     }
 
@@ -205,50 +227,42 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
         // The missing-reader dependency is retained deliberately: no production reader exists
         // until the reviewed upstream ComputeDriver.GetCapabilities contract ships.
         Qualified();
-        await Assert.ThrowsAnyAsync<OpenShellStateConflictException>(() =>
+        var ex = await Assert.ThrowsAnyAsync<OpenShellStateConflictException>(() =>
             new OpenShellPreparationPreflight(Http(_engine), _root, Plugin, Receiver(), null).VerifyAsync(Selection(), default));
+        Assert.Contains("bootstrap_current_policy_unavailable", ex.Message);
     }
 
     [Fact]
     public async Task VerifyAsync_RefusesAbsentCapabilityPolicy()
     {
         Qualified();
-        var ex = await Assert.ThrowsAnyAsync<OpenShellStateConflictException>(() =>
-            new OpenShellPreparationPreflight(Http(_engine), _root, Plugin, Receiver(), Reader(null)).VerifyAsync(Selection(), default));
-        Assert.Contains("bootstrap_current_policy_unavailable", ex.Message);
+        await AssertRefusal("bootstrap_current_policy_unavailable", reader: Reader(null));
     }
 
     [Fact]
     public async Task VerifyAsync_RefusesLivePolicyDrift()
     {
         Qualified();
-        var ex = await Assert.ThrowsAnyAsync<OpenShellStateConflictException>(() =>
-            new OpenShellPreparationPreflight(Http(_engine), _root, Plugin, Receiver(),
-                Reader(Policy().Replace("\"enabled\":true", "\"enabled\":false"))).VerifyAsync(Selection(), default));
-        Assert.Contains("bootstrap_resource_admission_unqualified", ex.Message);
+        await AssertRefusal("bootstrap_resource_admission_unqualified",
+            reader: Reader(Policy().Replace("\"enabled\":true", "\"enabled\":false")));
     }
 
     [Fact]
     public async Task VerifyAsync_RefusesLivePolicyNotMatchingQualifiedConfig()
     {
-        // Records re-bound to the rotated config, live policy still the plan's ack: the live
-        // policy and the qualification config must be the same document, byte for byte.
+        // config.json rotated (sealed consistently); live policy is still the old document.
         Qualified();
         File.WriteAllText(Path.Combine(_root, "config.json"), Policy() + " # rotated policy");
-        Write("describe.json", Describe(HookDigest(), ConfigDigest()));
-        Write("validate-config.json", Validate(HookDigest(), ConfigDigest(), Selection().PlanHash));
-        var ex = await Assert.ThrowsAnyAsync<OpenShellStateConflictException>(() =>
-            new OpenShellPreparationPreflight(Http(_engine), _root, Plugin, Receiver(), Reader(Policy())).VerifyAsync(Selection(), default));
-        Assert.Contains("bootstrap_current_policy_unqualified", ex.Message);
+        Seal();
+        await AssertRefusal("bootstrap_current_policy_unqualified", reader: Reader(Policy()));
     }
 
     [Fact]
     public async Task VerifyAsync_PropagatesReaderFailureAsRefusalNotUnneeded()
     {
         Qualified();
-        var reader = new ThrowingReader();
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            new OpenShellPreparationPreflight(Http(_engine), _root, Plugin, Receiver(), reader).VerifyAsync(Selection(), default));
+            new OpenShellPreparationPreflight(Http(_engine), _root, Plugin, Receiver(), new ThrowingReader()).VerifyAsync(Selection(), default));
     }
 
     [Fact]
@@ -296,7 +310,7 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
         var gateway = new Gateway();
         var services = new ServiceCollection();
         services.AddSingleton<IOpenShellGatewayClient>(gateway);
-        services.AddSingleton<IOpenShellRuntimeEvidenceReader, Reader2>();
+        services.AddSingleton<IOpenShellRuntimeEvidenceReader, EvidenceNone>();
         services.AddSingleton<IOpenShellBootstrapProbe, Probe>();
         services.AddSingleton<IOpenShellArtifactCleanup, Cleanup>();
         // Real preflight, qualification root deliberately absent, no authorized reader:
@@ -318,7 +332,64 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
         Assert.Empty(_engine.Paths);
     }
 
-    // ---- helpers ----
+    // ---- fixtures: generated messages, serialized with proto3 JSON ----
+
+    private static readonly byte[] HookBytes = Encoding.UTF8.GetBytes("pinned-hook-bytes");
+
+    private static MiddlewareManifest Manifest() => new()
+    {
+        Name = "example-hook", ExpectedAudience = "orchestrator:/identity/ready",
+        Extension = new PeerMetadata
+        {
+            ProtocolVersion = new ProtocolVersion { Major = 1, Minor = 0 },
+            ImplementationName = "example-hook", ImplementationVersion = "1",
+            SupportedCapabilities = { "openshell.supervisor-middleware.contract" },
+        },
+        Bindings = { new MiddlewareBinding { Operation = SupervisorMiddlewareOperation.HttpRequest,
+            Phase = SupervisorMiddlewarePhase.PreCredentials, MaxPayloadBytes = 1_048_576,
+            RequestTimeout = Duration.FromTimeSpan(TimeSpan.FromSeconds(2)) } },
+    };
+
+    private static Struct PlanConfig() => OpenShellPolicyCompilerTests.Plan().ReadSpec()
+        .Policy.NetworkMiddlewares.Values.Single().Config;
+
+    private static string Policy() => OpenShellPolicyCompilerTests.Admission().PolicyAcknowledgement;
+
+    private static string Json(IMessage message) => JsonFormatter.Default.Format(message);
+
+    /// <summary>Writes the exact bound qualification-root contract the preflight expects.</summary>
+    private void Qualified()
+    {
+        File.WriteAllBytes(Path.Combine(_root, "hook"), HookBytes);
+        File.WriteAllText(Path.Combine(_root, "hook-sha256"),
+            Convert.ToHexStringLower(SHA256.HashData(HookBytes)));
+        File.WriteAllText(Path.Combine(_root, "describe.json"), Json(Manifest()));
+        File.WriteAllText(Path.Combine(_root, "validate-request.json"),
+            Json(new ValidateConfigRequest { MiddlewareName = Plugin, Config = PlanConfig() }));
+        File.WriteAllText(Path.Combine(_root, "validate-config.json"), Json(new ValidateConfigResponse { Valid = true }));
+        File.WriteAllText(Path.Combine(_root, "config.json"), Policy());
+        Seal();
+    }
+
+    private void WriteRecord(string name, IMessage message)
+        => File.WriteAllText(Path.Combine(_root, name), Json(message));
+
+    /// <summary>Seals the record set exactly as the operator custody procedure requires.</summary>
+    private void Seal()
+    {
+        using var sha = SHA256.Create();
+        foreach (var name in new[] { "config.json", "describe.json", "validate-config.json", "validate-request.json" })
+        {
+            var bytes = File.ReadAllBytes(Path.Combine(_root, name));
+            var header = Encoding.UTF8.GetBytes($"{name}\0{bytes.Length}\0");
+            sha.TransformBlock(header, 0, header.Length, null, 0);
+            sha.TransformBlock(bytes, 0, bytes.Length, null, 0);
+        }
+        sha.TransformFinalBlock([], 0, 0);
+        File.WriteAllText(Path.Combine(_root, "records-sha256"), Convert.ToHexStringLower(sha.Hash!));
+    }
+
+    // ---- peers and helpers ----
 
     private sealed class FixedAuthority(OpenShellPreparationScope selection) : IOpenShellPreparationAuthority
     {
@@ -344,7 +415,7 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
             Guid requestId, bool allowMissing, CancellationToken ct = default) => throw new NotSupportedException();
     }
 
-    private sealed class Reader2 : IOpenShellRuntimeEvidenceReader
+    private sealed class EvidenceNone : IOpenShellRuntimeEvidenceReader
     {
         public Task<OpenShellRuntimeEvidence> ReadAsync(OpenShellRuntimeTarget target, CancellationToken ct)
             => throw new NotSupportedException();
@@ -394,39 +465,18 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
 
     private static IOpenShellCurrentPolicyReader Reader(string? policy) => new PolicyReader(policy);
 
-    private static string Policy() => OpenShellPolicyCompilerTests.Admission().PolicyAcknowledgement;
-
     private static OpenShellPreparationScope Selection(OpenShellLaunchPlan? plan = null)
     {
         var p = plan ?? OpenShellPolicyCompilerTests.Plan();
         return new OpenShellPreparationScope(1, "start", null, p.Hash, DateTime.UtcNow.AddSeconds(100), p);
     }
 
-    private string HookDigest() => Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(Path.Combine(_root, "hook"))));
-    private string ConfigDigest() => Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(Path.Combine(_root, "config.json"))));
-
-    private static JsonObject Describe(string hookSha, string configSha) => new()
-    { ["plugin"] = Plugin, ["scope"] = "local", ["hook_sha256"] = hookSha, ["config_sha256"] = configSha };
-
-    private static JsonObject Validate(string hookSha, string configSha, string planHash) => new()
-    { ["accepted"] = true, ["plugin"] = Plugin, ["hook_sha256"] = hookSha, ["config_sha256"] = configSha, ["plan_hash"] = planHash };
-
-    /// <summary>Writes the exact bound qualification-root contract the preflight expects.</summary>
-    private void Qualified(OpenShellLaunchPlan? plan = null)
-    {
-        File.WriteAllBytes(Path.Combine(_root, "hook"), Encoding.UTF8.GetBytes("pinned-hook-bytes"));
-        File.WriteAllText(Path.Combine(_root, "hook-sha256"), HookDigest());
-        File.WriteAllText(Path.Combine(_root, "config.json"), Policy());
-        Write("describe.json", Describe(HookDigest(), ConfigDigest()));
-        Write("validate-config.json", Validate(HookDigest(), ConfigDigest(), (plan ?? OpenShellPolicyCompilerTests.Plan()).Hash));
-    }
-
-    private void Write(string name, JsonNode node) => File.WriteAllText(Path.Combine(_root, name), node.ToJsonString());
-
-    private async Task AssertRefusal(string code, OpenShellPreparationScope? selection = null)
+    private async Task AssertRefusal(string code, OpenShellPreparationScope? selection = null,
+        IOpenShellCurrentPolicyReader? reader = null)
     {
         var ex = await Assert.ThrowsAnyAsync<OpenShellStateConflictException>(() =>
-            _preflight().VerifyAsync(selection ?? Selection(), default));
+            new OpenShellPreparationPreflight(Http(_engine), _root, Plugin, Receiver(),
+                reader ?? Reader(Policy())).VerifyAsync(selection ?? Selection(), default));
         Assert.Contains(code, ex.Message);
     }
 }

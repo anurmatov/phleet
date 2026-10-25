@@ -1,8 +1,8 @@
+extern alias orchestrator;
 using System.Buffers.Binary;
 using System.Net;
 using System.Text.Json;
 using Fleet.Identity.Services;
-using Fleet.Orchestrator.Services;
 using Fleet.Shared.Security;
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
@@ -12,9 +12,10 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Logging;
-using Openshell.Datamodel.V1;
 using Openshell.Middleware.V1;
-using Openshell.V1;
+using orchestrator::Fleet.Orchestrator.Services;
+using orchestrator::Openshell.Datamodel.V1;
+using orchestrator::Openshell.V1;
 
 namespace Fleet.Identity.Tests;
 

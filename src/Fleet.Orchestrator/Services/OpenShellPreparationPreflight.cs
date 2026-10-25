@@ -1,5 +1,8 @@
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
+using Google.Protobuf;
+using Openshell.Middleware.V1;
 
 namespace Fleet.Orchestrator.Services;
 
@@ -18,9 +21,11 @@ public interface IOpenShellCurrentPolicyReader
 }
 
 /// <summary>
-/// Concrete static external qualification run before any mutation: the pinned hook binary with its
-/// actually-generated Describe/ValidateConfig replies (bound to that binary, its config and the
-/// approved plan), the qualified policy config, receiver binding, ingress shape, and the
+/// Concrete static external qualification run before any mutation: the pinned hook binary, its
+/// actually-generated Describe/ValidateConfig replies (the real <see cref="MiddlewareManifest"/>
+/// and <see cref="ValidateConfigResponse"/> wire messages, not handwritten shapes), the
+/// ValidateConfig request that binds those replies to the selected hook registration and the
+/// approved plan's middleware config, receiver binding, ingress shape, and the
 /// nonroot/no-socket/no-env/restart-never constraints re-verified independently of the compiler
 /// call that produced the plan. The live current policy comes only from
 /// <see cref="IOpenShellCurrentPolicyReader"/>; without that authorized reader the qualification
@@ -30,24 +35,27 @@ public interface IOpenShellCurrentPolicyReader
 /// <para>
 /// The qualification root is outside-custody material an operator installs (same trust posture as
 /// the artifact custody root); this class reads, verifies digests and refuses — it never writes,
-/// installs, starts or pulls anything. A missing or unreadable input is a refusal, never a
-/// default: absence of evidence is never evidence of qualification.
+/// installs, starts or pulls anything. A missing, unreadable or unparseable input is a refusal,
+/// never a default: absence of evidence is never evidence of qualification.
 /// </para>
 /// <para>
-/// The file contract inside the qualification root is exact, and the whole set rotates together:
-/// <c>hook</c> (pinned binary bytes), <c>hook-sha256</c> (64 lowercase hex of those bytes),
-/// <c>config.json</c> (the qualified policy acknowledgement the hook was validated against),
-/// <c>describe.json</c> (recorded Describe reply, fields exactly <c>plugin</c>/<c>scope</c>/
-/// <c>hook_sha256</c>/<c>config_sha256</c>) and <c>validate-config.json</c> (recorded ValidateConfig
-/// reply, fields exactly <c>accepted</c>/<c>plugin</c>/<c>hook_sha256</c>/<c>config_sha256</c>/
-/// <c>plan_hash</c>). The digest and plan-hash fields bind each recorded reply to THIS binary,
-/// THIS config and THIS approved plan: a self-consistent record set generated for another hook,
-/// config or plan is refused, not accepted because it is internally valid.
+/// File contract inside the qualification root (all files rotate together):
+/// <c>hook</c> — pinned binary bytes; <c>hook-sha256</c> — 64 lowercase hex of those bytes;
+/// <c>describe.json</c> — the hook's MiddlewareManifest reply in proto3 JSON;
+/// <c>validate-request.json</c> — the ValidateConfigRequest actually sent (registration name +
+/// the plan's middleware config); <c>validate-config.json</c> — the ValidateConfigResponse reply;
+/// <c>config.json</c> — the qualified current-policy acknowledgement; and <c>records-sha256</c> —
+/// 64 lowercase hex over the canonical framing of the four record files, so substituting or
+/// mixing record files across hook generations is detected. The digest is substitution/corruption
+/// detection, not authentication: the operator-owned read-only root is the trust root.
+/// Bindings: the binary is pinned by hook-sha256; the selected hook by the request's
+/// middleware_name; the selected config and approved plan by the request's config, which must
+/// equal the middleware config inside the approved plan; the record set by records-sha256.
 /// </para>
 /// <para>
 /// Custody: the root lives outside the repository and outside any agent mount, is installed and
-/// owned by the operator, files are read-only (0400/0600), and rotation replaces all five files in
-/// one step because every record cross-binds the others' digests.
+/// owned by the operator, files are read-only (0400/0600), and rotation replaces every file in
+/// one step because the records cross-bind each other. See docs/openshell-preflight-runbook.md.
 /// </para>
 /// </remarks>
 public sealed class OpenShellPreparationPreflight(
@@ -55,6 +63,8 @@ public sealed class OpenShellPreparationPreflight(
     OpenShellBootstrapReceiverOptions receiver, IOpenShellCurrentPolicyReader? currentPolicy)
     : IOpenShellPreparationPreflight, IDisposable
 {
+    private static readonly string[] RecordFiles = ["config.json", "describe.json", "validate-config.json", "validate-request.json"];
+
     public async Task VerifyAsync(OpenShellPreparationScope selection, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
@@ -67,11 +77,13 @@ public sealed class OpenShellPreparationPreflight(
         var template = spec.Template;
         var process = spec.Policy?.Process;
         var filesystem = spec.Policy?.Filesystem;
+        var middlewares = spec.Policy?.NetworkMiddlewares;
 
         // Re-verify the static bootstrap invariants at the mutation boundary rather than trusting
         // that the compiler ran: digest-pinned image, empty driver/socket/environment surfaces,
         // restart-never, the fixed uid/gid pair, workdir never included, and the exact command.
-        if (template is null || process is null || filesystem is null
+        if (template is null || process is null || filesystem is null || middlewares is null
+            || middlewares.Count != 1 || middlewares.Values.First().Config is null
             || plan.ImageHash.Length != 64 || !plan.ImageHash.All(char.IsAsciiHexDigitLower)
             || !template.Image.EndsWith("@sha256:" + plan.ImageHash, StringComparison.Ordinal)
             || template.DriverConfig is { Fields.Count: > 0 }
@@ -88,37 +100,40 @@ public sealed class OpenShellPreparationPreflight(
         if (pinned.Length != 64 || !pinned.All(char.IsAsciiHexDigitLower)
             || Convert.ToHexStringLower(SHA256.HashData(hook)) != pinned)
             throw Blocked("bootstrap_hook_artifact_unqualified");
+        VerifyRecordSet();
 
-        // The recorded replies must belong to this binary, this config and this approved plan —
-        // internal validity alone proves nothing about which hook or plan produced them.
-        var config = ReadText(Path.Combine(qualificationRoot, "config.json"));
-        var configDigest = Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(config)));
-        var describe = ReadJson(Path.Combine(qualificationRoot, "describe.json"));
-        Fields(describe, "plugin", "scope", "hook_sha256", "config_sha256");
-        if (describe.GetProperty("plugin").GetString() != hookPluginName
-            || describe.GetProperty("scope").GetString() != "local"
-            || describe.GetProperty("hook_sha256").GetString() != pinned
-            || describe.GetProperty("config_sha256").GetString() != configDigest)
+        // The recorded replies are the actual generated wire messages; internal validity alone
+        // proves nothing about which hook or plan produced them — the request binds them.
+        var manifest = Parse<MiddlewareManifest>(ReadText(Path.Combine(qualificationRoot, "describe.json")));
+        if (string.IsNullOrWhiteSpace(manifest.ExpectedAudience) || manifest.ExpectedAudience.Length > 256
+            || manifest.ExpectedAudience.Any(char.IsControl)
+            || manifest.Extension?.ProtocolVersion is not { Major: 1, Minor: 0 }
+            || !manifest.Extension.SupportedCapabilities.Contains("openshell.supervisor-middleware.contract")
+            || !manifest.Bindings.Any(b => b.Operation == SupervisorMiddlewareOperation.HttpRequest
+                && b.Phase == SupervisorMiddlewarePhase.PreCredentials && b.MaxPayloadBytes > 0
+                && (b.RequestTimeout is null || (b.RequestTimeout.ToTimeSpan() >= TimeSpan.FromMilliseconds(10)
+                    && b.RequestTimeout.ToTimeSpan() <= TimeSpan.FromSeconds(30)))))
             throw Blocked("bootstrap_hook_describe_unqualified");
-        var validated = ReadJson(Path.Combine(qualificationRoot, "validate-config.json"));
-        Fields(validated, "accepted", "plugin", "hook_sha256", "config_sha256", "plan_hash");
-        if (validated.GetProperty("accepted").ValueKind != JsonValueKind.True
-            || validated.GetProperty("plugin").GetString() != hookPluginName
-            || validated.GetProperty("hook_sha256").GetString() != pinned
-            || validated.GetProperty("config_sha256").GetString() != configDigest
-            || validated.GetProperty("plan_hash").GetString() != selection.PlanHash)
+        var request = Parse<ValidateConfigRequest>(ReadText(Path.Combine(qualificationRoot, "validate-request.json")));
+        // Selected hook registration and the approved plan's own middleware config — a record set
+        // for another hook/config is refused even when it is internally consistent.
+        if (request.MiddlewareName != hookPluginName || !request.Config.Equals(middlewares.Values.First().Config))
+            throw Blocked("bootstrap_hook_validate_request_unqualified");
+        var response = Parse<ValidateConfigResponse>(ReadText(Path.Combine(qualificationRoot, "validate-config.json")));
+        if (!response.Valid || response.Reason.Length != 0)
             throw Blocked("bootstrap_hook_validate_config_unqualified");
 
-        // The external ingress is validated on its own, then bound to the dedicated receiver;
-        // the receiver is checked on its own (backend port must not collide with the API port).
+        // The external ingress is validated on its own; the backend receiver on its own. The
+        // ingress front port and the receiver listen port are deliberately NOT required to be
+        // equal (a fronting ingress may publish a different port) — only the API port is refused
+        // as a receiver bind target.
         if (!Uri.TryCreate(plan.BootstrapIngress, UriKind.Absolute, out var ingress)
             || ingress.Scheme != "https" || ingress.AbsolutePath != "/identity/ready"
             || ingress.Query != "" || ingress.Fragment != "" || ingress.UserInfo != "")
             throw Blocked("bootstrap_ingress_unqualified");
         if (!receiver.Enabled || receiver.Port is < 1 or > 65535 or 3600
             || string.IsNullOrWhiteSpace(receiver.IngressDnsName)
-            || !string.Equals(ingress.Host, receiver.IngressDnsName, StringComparison.OrdinalIgnoreCase)
-            || (!ingress.IsDefaultPort && ingress.Port != receiver.Port))
+            || !string.Equals(ingress.Host, receiver.IngressDnsName, StringComparison.OrdinalIgnoreCase))
             throw Blocked("bootstrap_receiver_binding_unqualified");
 
         // Current policy only through the authorized capabilities reader. Absent reader or an
@@ -128,6 +143,7 @@ public sealed class OpenShellPreparationPreflight(
         if (live is null) throw Blocked("bootstrap_current_policy_unavailable");
         // Binds the plan's approval acknowledgement to the qualified config and the live policy.
         plan.ReadResourceAdmission().Validate(plan.Workspace, live);
+        var config = ReadText(Path.Combine(qualificationRoot, "config.json"));
         if (live.Trim() != config) throw Blocked("bootstrap_current_policy_unqualified");
     }
 
@@ -161,6 +177,31 @@ public sealed class OpenShellPreparationPreflight(
             throw Blocked("legacy_stop_unconfirmed");
     }
 
+    /// <summary>Canonical framing: sorted names, UTF-8 name + NUL + decimal byte length + NUL + bytes.</summary>
+    private void VerifyRecordSet()
+    {
+        var expected = ReadText(Path.Combine(qualificationRoot, "records-sha256")).Trim();
+        if (expected.Length != 64 || !expected.All(char.IsAsciiHexDigitLower))
+            throw Blocked("bootstrap_qualification_record_unqualified");
+        using var sha = SHA256.Create();
+        foreach (var name in RecordFiles.OrderBy(n => n, StringComparer.Ordinal))
+        {
+            var bytes = Read(Path.Combine(qualificationRoot, name));
+            var header = Encoding.UTF8.GetBytes($"{name}\0{bytes.Length}\0");
+            sha.TransformBlock(header, 0, header.Length, null, 0);
+            sha.TransformBlock(bytes, 0, bytes.Length, null, 0);
+        }
+        sha.TransformFinalBlock([], 0, 0);
+        if (Convert.ToHexStringLower(sha.Hash!) != expected) throw Blocked("bootstrap_qualification_record_unqualified");
+    }
+
+    private static T Parse<T>(string json) where T : class, IMessage, new()
+    {
+        try { return JsonParser.Default.Parse<T>(json); }
+        catch (Exception ex) when (ex is InvalidProtocolBufferException or JsonException)
+        { throw Blocked("bootstrap_qualification_record_malformed"); }
+    }
+
     private byte[] Read(string path)
     {
         if (!File.Exists(path)) throw Blocked("bootstrap_artifact_missing");
@@ -169,22 +210,7 @@ public sealed class OpenShellPreparationPreflight(
         { throw Blocked("bootstrap_artifact_missing"); }
     }
 
-    private string ReadText(string path) => System.Text.Encoding.UTF8.GetString(Read(path));
-
-    private JsonElement ReadJson(string path)
-    {
-        try { return JsonDocument.Parse(ReadText(path)).RootElement.Clone(); }
-        catch (JsonException) { throw Blocked("bootstrap_qualification_record_malformed"); }
-    }
-
-    private static void Fields(JsonElement value, params string[] expected)
-    {
-        if (value.ValueKind != JsonValueKind.Object) throw Blocked("bootstrap_qualification_record_malformed");
-        var names = value.EnumerateObject().Select(p => p.Name).ToArray();
-        if (names.Length != expected.Length || names.Distinct(StringComparer.Ordinal).Count() != expected.Length
-            || names.Any(n => !expected.Contains(n, StringComparer.Ordinal)))
-            throw Blocked("bootstrap_qualification_record_malformed");
-    }
+    private string ReadText(string path) => Encoding.UTF8.GetString(Read(path));
 
     private static OpenShellStateConflictException Blocked(string code) => new(code);
 
@@ -199,6 +225,7 @@ public sealed class OpenShellPreparationPreflight(
 /// default-deny posture of the preparation chain is unchanged by this source. The authorized
 /// current-policy reader is resolved when present; it has no production implementation, so even an
 /// explicitly configured preflight refuses at the live-policy step until the upstream pin ships.
+/// See docs/openshell-preflight-runbook.md for operator examples.
 /// </summary>
 public static class OpenShellPreparationPreflightRegistration
 {

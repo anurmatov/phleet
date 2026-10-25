@@ -101,8 +101,11 @@ plan hash, create identity and attempt timestamps are never modified and Create 
 never retried. Promoted state, a second open launch, unbound intents, intents
 inconsistent with the row, missing tombstones, live or foreign leases and non-pending
 phases all answer 409 with the pending state retained; a lost replay reply answers 503
-and retains recovery state. This route recovers bookkeeping; it does not qualify the
-unimplemented evidence reader or any runtime.
+and retains recovery state. A refreshed observation whose gateway, workspace or ID
+differs from the persisted launch is a replacement: `preparation_recovery_runtime_drift`
+refuses before proof, intent record or Delete, and even under `replay=true` only the
+original conditional identity was ever sent. This route recovers bookkeeping; it does
+not qualify the unimplemented evidence reader or any runtime.
 
 ## Agent deletion (source-only)
 

@@ -50,9 +50,10 @@ public interface IOpenShellCurrentPolicyReader
 /// binary and its <c>hook-sha256</c> sidecar as a self-consistent pair while keeping old
 /// replies — is detected. The digest is substitution/corruption detection, not authentication:
 /// the operator-owned read-only root is the trust root. Bindings are three-way on the
-/// registration: the configured name, the registration the approved plan selected (its single
-/// <c>NetworkMiddlewares</c> entry) and the request's <c>middleware_name</c> must all agree, and
-/// the request's config must equal the middleware config inside the approved plan.
+/// registration: the configured name, the registration the approved plan selected (the
+/// <c>Middleware</c> field of its single <c>NetworkMiddlewares</c> entry — the map key is
+/// policy-local and never the registration) and the request's <c>middleware_name</c> must all
+/// agree, and the request's config must equal the middleware config inside the approved plan.
 /// </para>
 /// <para>
 /// Custody: the root lives outside the repository and outside any agent mount, is installed and
@@ -88,7 +89,7 @@ public sealed class OpenShellPreparationPreflight(
         // restart-never, the fixed uid/gid pair, workdir never included, and the exact command.
         if (template is null || process is null || filesystem is null || middlewares is null
             || middlewares.Count != 1 || middlewares.Values.First().Config is null
-            || middlewares.First().Key != middlewares.First().Value.Middleware
+            || middlewares.First().Value.Middleware.Length == 0
             || plan.ImageHash.Length != 64 || !plan.ImageHash.All(char.IsAsciiHexDigitLower)
             || !template.Image.EndsWith("@sha256:" + plan.ImageHash, StringComparison.Ordinal)
             || template.DriverConfig is { Fields.Count: > 0 }
@@ -107,9 +108,10 @@ public sealed class OpenShellPreparationPreflight(
             throw Blocked("bootstrap_hook_artifact_unqualified");
         VerifyRecordSet();
 
-        // The configured registration, the registration the approved plan selected, and the
-        // registration the recorded request was sent to must be the SAME middleware registration.
-        var registration = middlewares.First().Key;
+        // The configured registration, the registration the approved plan selected (the
+        // Middleware field of its single entry — the map key is policy-local), and the
+        // registration the recorded request was sent to must all be the SAME registration.
+        var registration = middlewares.First().Value.Middleware;
         if (hookPluginName != registration) throw Blocked("bootstrap_hook_registration_mismatch");
 
         // The recorded replies are the actual generated wire messages; internal validity alone

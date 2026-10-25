@@ -133,6 +133,45 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
     }
 
     [Fact]
+    public async Task VerifyAsync_AcceptsDistinctPolicyKeyAndRegistration()
+    {
+        // Compiler-valid plan whose policy-local map key ("identity") differs from the selected
+        // registration ("bootstrap-hook"): the Middleware field governs and the plan qualifies.
+        var plan = AliasPlan();
+        Qualified(plan);
+        await new OpenShellPreparationPreflight(Http(_engine), _root, "bootstrap-hook", Receiver(), Reader(Policy()))
+            .VerifyAsync(Selection(plan), default);
+    }
+
+    [Fact]
+    public async Task VerifyAsync_RefusesRegistrationConfiguredToPolicyKey()
+    {
+        // Configuring the policy-local key instead of the selected registration must refuse.
+        var plan = AliasPlan();
+        Qualified(plan);
+        var ex = await Assert.ThrowsAnyAsync<OpenShellStateConflictException>(() =>
+            new OpenShellPreparationPreflight(Http(_engine), _root, "identity", Receiver(), Reader(Policy()))
+                .VerifyAsync(Selection(plan), default));
+        Assert.Contains("bootstrap_hook_registration_mismatch", ex.Message);
+    }
+
+    [Fact]
+    public async Task VerifyAsync_RefusesRecordRequestBoundToPolicyKey()
+    {
+        // Sealed, generated-schema and otherwise valid — but the request was sent to the
+        // policy-local key, not the registration the plan selected.
+        var plan = AliasPlan();
+        Qualified(plan);
+        File.WriteAllText(Path.Combine(_root, "validate-request.json"),
+            Json(new ValidateConfigRequest { MiddlewareName = "identity", Config = plan.ReadSpec().Policy.NetworkMiddlewares.First().Value.Config }));
+        Seal();
+        var ex = await Assert.ThrowsAnyAsync<OpenShellStateConflictException>(() =>
+            new OpenShellPreparationPreflight(Http(_engine), _root, "bootstrap-hook", Receiver(), Reader(Policy()))
+                .VerifyAsync(Selection(plan), default));
+        Assert.Contains("bootstrap_hook_validate_request_unqualified", ex.Message);
+    }
+
+    [Fact]
     public async Task VerifyAsync_RefusesConfiguredRegistrationDifferentFromPlan()
     {
         // The configured name must be the registration the approved plan selected.
@@ -383,24 +422,38 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
     };
 
     private static Struct PlanConfig() => OpenShellPolicyCompilerTests.Plan().ReadSpec()
-        .Policy.NetworkMiddlewares.Values.Single().Config;
+        .Policy.NetworkMiddlewares.First().Value.Config;
 
     private static string Policy() => OpenShellPolicyCompilerTests.Admission().PolicyAcknowledgement;
 
     private static string Json(IMessage message) => JsonFormatter.Default.Format(message);
 
     /// <summary>Writes the exact bound qualification-root contract the preflight expects.</summary>
-    private void Qualified()
+    private void Qualified(OpenShellLaunchPlan? plan = null)
     {
+        var p = plan ?? OpenShellPolicyCompilerTests.Plan();
         File.WriteAllBytes(Path.Combine(_root, "hook"), HookBytes);
         File.WriteAllText(Path.Combine(_root, "hook-sha256"),
             Convert.ToHexStringLower(SHA256.HashData(HookBytes)));
         File.WriteAllText(Path.Combine(_root, "describe.json"), Json(Manifest()));
         File.WriteAllText(Path.Combine(_root, "validate-request.json"),
-            Json(new ValidateConfigRequest { MiddlewareName = Plugin, Config = PlanConfig() }));
+            Json(new ValidateConfigRequest { MiddlewareName = Registration(p), Config = p.ReadSpec().Policy.NetworkMiddlewares.First().Value.Config }));
         File.WriteAllText(Path.Combine(_root, "validate-config.json"), Json(new ValidateConfigResponse { Valid = true }));
         File.WriteAllText(Path.Combine(_root, "config.json"), Policy());
         Seal();
+    }
+
+    // The registration the approved plan selects: the Middleware field, never the policy-local key.
+    private static string Registration(OpenShellLaunchPlan plan) =>
+        plan.ReadSpec().Policy.NetworkMiddlewares.First().Value.Middleware;
+
+    private static OpenShellLaunchPlan AliasPlan()
+    {
+        var spec = OpenShellPolicyCompilerTests.Spec();
+        spec.Policy.NetworkMiddlewares["identity"].Middleware = "bootstrap-hook";
+        return new OpenShellPolicyCompiler().Compile("gateway1", "workspace1", spec, new string('b', 64),
+            OpenShellPolicyCompilerTests.Expected(), "https://ingress.example.invalid:17443/identity/ready",
+            "/app/generated/bootstrap.capability", OpenShellPolicyCompilerTests.Admission());
     }
 
     private void WriteRecord(string name, IMessage message)

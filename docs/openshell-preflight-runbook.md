@@ -29,8 +29,9 @@ preflight and the preparation chain answers `compatibility_blocked: preparation 
 - `Enabled` must be the exact string `"true"`; absent, `false`, `"1"` or any other value keeps the
   preflight unregistered.
 - `HookQualificationRoot` must be an absolute path; `HookPluginName` (letters/digits/`-`/`_`,
-  ≤128) must equal the middleware registration the approved plan selects — the plan's single
-  `NetworkMiddlewares` entry — otherwise every qualification refuses with
+  ≤128) must equal the middleware registration the approved plan selects — the `Middleware`
+  field of the plan's single `NetworkMiddlewares` entry; the map key is policy-local and is never
+  the registration — otherwise every qualification refuses with
   `bootstrap_hook_registration_mismatch`. Configured-but-incomplete (either missing) stays
   unregistered.
 - `Docker:SocketPath` is the engine socket used only for the exact-ID legacy stop (defaults to
@@ -79,7 +80,7 @@ performed. Zero engine calls happen before the exact-ID stop step.
 | `bootstrap_hook_artifact_unqualified` | `hook` digest does not match `hook-sha256` |
 | `bootstrap_qualification_record_unqualified` | `records-sha256` does not cover the current record set |
 | `bootstrap_qualification_record_malformed` | a record is not parseable proto3 JSON of its schema |
-| `bootstrap_hook_registration_mismatch` | configured `HookPluginName` is not the registration the approved plan selected |
+| `bootstrap_hook_registration_mismatch` | configured `HookPluginName` is not the registration the approved plan selected (its entry's `Middleware` field) |
 | `bootstrap_hook_describe_unqualified` | manifest lacks the HTTP-request/`PRE_CREDENTIALS` binding, audience, or protocol declaration |
 | `bootstrap_hook_validate_request_config_missing` | the recorded ValidateConfigRequest carries no config |
 | `bootstrap_hook_validate_request_unqualified` | request names a registration other than the plan-selected one, or its config differs from the plan's middleware config |

@@ -45,12 +45,14 @@ public interface IOpenShellCurrentPolicyReader
 /// <c>validate-request.json</c> — the ValidateConfigRequest actually sent (registration name +
 /// the plan's middleware config); <c>validate-config.json</c> — the ValidateConfigResponse reply;
 /// <c>config.json</c> — the qualified current-policy acknowledgement; and <c>records-sha256</c> —
-/// 64 lowercase hex over the canonical framing of the four record files, so substituting or
-/// mixing record files across hook generations is detected. The digest is substitution/corruption
-/// detection, not authentication: the operator-owned read-only root is the trust root.
-/// Bindings: the binary is pinned by hook-sha256; the selected hook by the request's
-/// middleware_name; the selected config and approved plan by the request's config, which must
-/// equal the middleware config inside the approved plan; the record set by records-sha256.
+/// 64 lowercase hex over the canonical framing of the <c>hook</c> binary plus the four record
+/// files, so substituting or mixing record files across hook generations — or replacing the
+/// binary and its <c>hook-sha256</c> sidecar as a self-consistent pair while keeping old
+/// replies — is detected. The digest is substitution/corruption detection, not authentication:
+/// the operator-owned read-only root is the trust root. Bindings are three-way on the
+/// registration: the configured name, the registration the approved plan selected (its single
+/// <c>NetworkMiddlewares</c> entry) and the request's <c>middleware_name</c> must all agree, and
+/// the request's config must equal the middleware config inside the approved plan.
 /// </para>
 /// <para>
 /// Custody: the root lives outside the repository and outside any agent mount, is installed and
@@ -63,7 +65,9 @@ public sealed class OpenShellPreparationPreflight(
     OpenShellBootstrapReceiverOptions receiver, IOpenShellCurrentPolicyReader? currentPolicy)
     : IOpenShellPreparationPreflight, IDisposable
 {
-    private static readonly string[] RecordFiles = ["config.json", "describe.json", "validate-config.json", "validate-request.json"];
+    // The pinned binary itself is inside the seal: replacing hook AND hook-sha256 with a new
+    // self-consistent pair while keeping the old replies is caught before any reply is trusted.
+    private static readonly string[] SealedFiles = ["config.json", "describe.json", "hook", "validate-config.json", "validate-request.json"];
 
     public async Task VerifyAsync(OpenShellPreparationScope selection, CancellationToken ct)
     {
@@ -84,6 +88,7 @@ public sealed class OpenShellPreparationPreflight(
         // restart-never, the fixed uid/gid pair, workdir never included, and the exact command.
         if (template is null || process is null || filesystem is null || middlewares is null
             || middlewares.Count != 1 || middlewares.Values.First().Config is null
+            || middlewares.First().Key != middlewares.First().Value.Middleware
             || plan.ImageHash.Length != 64 || !plan.ImageHash.All(char.IsAsciiHexDigitLower)
             || !template.Image.EndsWith("@sha256:" + plan.ImageHash, StringComparison.Ordinal)
             || template.DriverConfig is { Fields.Count: > 0 }
@@ -102,6 +107,11 @@ public sealed class OpenShellPreparationPreflight(
             throw Blocked("bootstrap_hook_artifact_unqualified");
         VerifyRecordSet();
 
+        // The configured registration, the registration the approved plan selected, and the
+        // registration the recorded request was sent to must be the SAME middleware registration.
+        var registration = middlewares.First().Key;
+        if (hookPluginName != registration) throw Blocked("bootstrap_hook_registration_mismatch");
+
         // The recorded replies are the actual generated wire messages; internal validity alone
         // proves nothing about which hook or plan produced them — the request binds them.
         var manifest = Parse<MiddlewareManifest>(ReadText(Path.Combine(qualificationRoot, "describe.json")));
@@ -115,9 +125,10 @@ public sealed class OpenShellPreparationPreflight(
                     && b.RequestTimeout.ToTimeSpan() <= TimeSpan.FromSeconds(30)))))
             throw Blocked("bootstrap_hook_describe_unqualified");
         var request = Parse<ValidateConfigRequest>(ReadText(Path.Combine(qualificationRoot, "validate-request.json")));
-        // Selected hook registration and the approved plan's own middleware config — a record set
-        // for another hook/config is refused even when it is internally consistent.
-        if (request.MiddlewareName != hookPluginName || !request.Config.Equals(middlewares.Values.First().Config))
+        // The plan-selected registration and the approved plan's own middleware config — a record
+        // set for another hook/config is refused even when it is internally consistent.
+        if (request.Config is null) throw Blocked("bootstrap_hook_validate_request_config_missing");
+        if (request.MiddlewareName != registration || !request.Config.Equals(middlewares.First().Value.Config))
             throw Blocked("bootstrap_hook_validate_request_unqualified");
         var response = Parse<ValidateConfigResponse>(ReadText(Path.Combine(qualificationRoot, "validate-config.json")));
         if (!response.Valid || response.Reason.Length != 0)
@@ -184,7 +195,7 @@ public sealed class OpenShellPreparationPreflight(
         if (expected.Length != 64 || !expected.All(char.IsAsciiHexDigitLower))
             throw Blocked("bootstrap_qualification_record_unqualified");
         using var sha = SHA256.Create();
-        foreach (var name in RecordFiles.OrderBy(n => n, StringComparer.Ordinal))
+        foreach (var name in SealedFiles.OrderBy(n => n, StringComparer.Ordinal))
         {
             var bytes = Read(Path.Combine(qualificationRoot, name));
             var header = Encoding.UTF8.GetBytes($"{name}\0{bytes.Length}\0");

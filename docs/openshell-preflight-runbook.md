@@ -20,7 +20,7 @@ preflight and the preparation chain answers `compatibility_blocked: preparation 
   "OpenShellBootstrapPreflight": {
     "Enabled": "true",
     "HookQualificationRoot": "/opt/fleet/openshell-qualification",
-    "HookPluginName": "fleetbootstrap"
+    "HookPluginName": "identity"
   },
   "Docker": { "SocketPath": "/var/run/docker.sock" }
 }
@@ -28,9 +28,11 @@ preflight and the preparation chain answers `compatibility_blocked: preparation 
 
 - `Enabled` must be the exact string `"true"`; absent, `false`, `"1"` or any other value keeps the
   preflight unregistered.
-- `HookQualificationRoot` must be an absolute path; `HookPluginName` is the selected hook
-  registration name (letters/digits/`-`/`_`, ≤128). Configured-but-incomplete (either missing)
-  also stays unregistered.
+- `HookQualificationRoot` must be an absolute path; `HookPluginName` (letters/digits/`-`/`_`,
+  ≤128) must equal the middleware registration the approved plan selects — the plan's single
+  `NetworkMiddlewares` entry — otherwise every qualification refuses with
+  `bootstrap_hook_registration_mismatch`. Configured-but-incomplete (either missing) stays
+  unregistered.
 - `Docker:SocketPath` is the engine socket used only for the exact-ID legacy stop (defaults to
   `/var/run/docker.sock`).
 
@@ -48,13 +50,14 @@ substitution detection, not authentication.
 | `validate-request.json` | the `ValidateConfigRequest` actually sent: registration name + the approved plan's middleware config |
 | `validate-config.json` | the `ValidateConfigResponse` reply (`valid: true`, empty `reason`) |
 | `config.json` | the qualified current-policy acknowledgement (`v1:{…}`) |
-| `records-sha256` | 64 lowercase hex over the canonical framing of the four record files (sorted name + NUL + byte length + NUL + bytes) |
+| `records-sha256` | 64 lowercase hex over the canonical framing of the `hook` binary plus the four record files (sorted name + NUL + byte length + NUL + bytes) |
 
-Rotation replaces every file in one step: the records cross-bind each other through
-`records-sha256`, and each recorded reply is bound to the selected hook (request
-`middleware_name`) and to the approved plan (request `config` must equal the middleware config
-inside the plan). A record set that is internally valid for another hook, another config, or an
-older binary generation is refused.
+Rotation replaces every file in one step. The seal covers the pinned binary itself, so replacing
+`hook` and `hook-sha256` as a fresh self-consistent pair while keeping the old replies is caught;
+each recorded reply is further bound to the registration the approved plan selected (three-way:
+configured name = plan-selected registration = request `middleware_name`) and to the approved plan
+(request `config` must equal the middleware config inside the plan). A record set that is
+internally valid for another hook, another config, or an older binary generation is refused.
 
 Capture procedure: send `Describe` and `ValidateConfig` to the hook with the exact registration
 name and the plan's middleware config, serialize the generated replies with proto3 JSON, write all
@@ -76,8 +79,10 @@ performed. Zero engine calls happen before the exact-ID stop step.
 | `bootstrap_hook_artifact_unqualified` | `hook` digest does not match `hook-sha256` |
 | `bootstrap_qualification_record_unqualified` | `records-sha256` does not cover the current record set |
 | `bootstrap_qualification_record_malformed` | a record is not parseable proto3 JSON of its schema |
+| `bootstrap_hook_registration_mismatch` | configured `HookPluginName` is not the registration the approved plan selected |
 | `bootstrap_hook_describe_unqualified` | manifest lacks the HTTP-request/`PRE_CREDENTIALS` binding, audience, or protocol declaration |
-| `bootstrap_hook_validate_request_unqualified` | request names another hook registration, or its config differs from the plan's middleware config |
+| `bootstrap_hook_validate_request_config_missing` | the recorded ValidateConfigRequest carries no config |
+| `bootstrap_hook_validate_request_unqualified` | request names a registration other than the plan-selected one, or its config differs from the plan's middleware config |
 | `bootstrap_hook_validate_config_unqualified` | the hook refused the config |
 | `bootstrap_ingress_unqualified` | ingress URL is not exactly https + `/identity/ready`, without query/fragment/userinfo |
 | `bootstrap_receiver_binding_unqualified` | receiver disabled, bound to the API port 3600, port out of range, or DNS name mismatch |

@@ -21,7 +21,7 @@ namespace Fleet.Orchestrator.Tests.Services;
 /// </summary>
 public sealed class OpenShellPreparationPreflightTests : IDisposable
 {
-    private const string Plugin = "fleetbootstrap";
+    private const string Plugin = "identity"; // the registration the compiler fixture plan selects
     private readonly string _root = Directory.CreateTempSubdirectory("ospreflight").FullName;
     private readonly Engine _engine = new();
 
@@ -118,6 +118,38 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
         manifest.Extension.ProtocolVersion = new ProtocolVersion { Major = 2, Minor = 0 };
         WriteRecord("describe.json", manifest); Seal();
         await AssertRefusal("bootstrap_hook_describe_unqualified");
+    }
+
+    [Fact]
+    public async Task VerifyAsync_DetectsBinaryAndSidecarSwapWithOldSeal()
+    {
+        // A new self-consistent hook + hook-sha256 pair while replies and seal are untouched:
+        // the binary is inside the seal, so the old seal no longer covers the binary.
+        Qualified();
+        var swapped = Encoding.UTF8.GetBytes("different-hook-binary");
+        File.WriteAllBytes(Path.Combine(_root, "hook"), swapped);
+        File.WriteAllText(Path.Combine(_root, "hook-sha256"), Convert.ToHexStringLower(SHA256.HashData(swapped)));
+        await AssertRefusal("bootstrap_qualification_record_unqualified");
+    }
+
+    [Fact]
+    public async Task VerifyAsync_RefusesConfiguredRegistrationDifferentFromPlan()
+    {
+        // The configured name must be the registration the approved plan selected.
+        Qualified();
+        var ex = await Assert.ThrowsAnyAsync<OpenShellStateConflictException>(() =>
+            _preflight(null, "otherhook").VerifyAsync(Selection(), default));
+        Assert.Contains("bootstrap_hook_registration_mismatch", ex.Message);
+    }
+
+    [Fact]
+    public async Task VerifyAsync_RefusesMissingRequestConfig()
+    {
+        Qualified();
+        File.WriteAllText(Path.Combine(_root, "validate-request.json"),
+            "{\"middlewareName\":\"" + Plugin + "\"}");
+        Seal();
+        await AssertRefusal("bootstrap_hook_validate_request_config_missing");
     }
 
     [Fact]
@@ -378,7 +410,7 @@ public sealed class OpenShellPreparationPreflightTests : IDisposable
     private void Seal()
     {
         using var sha = SHA256.Create();
-        foreach (var name in new[] { "config.json", "describe.json", "validate-config.json", "validate-request.json" })
+        foreach (var name in new[] { "config.json", "describe.json", "hook", "validate-config.json", "validate-request.json" })
         {
             var bytes = File.ReadAllBytes(Path.Combine(_root, name));
             var header = Encoding.UTF8.GetBytes($"{name}\0{bytes.Length}\0");

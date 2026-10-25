@@ -1,0 +1,773 @@
+using Fleet.Shared;
+using Fleet.Agent.Services;
+using System.Globalization;
+using System.Net;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+
+namespace Fleet.WorkflowOutcomeQualification;
+
+public static class SelfTest
+{
+    private static int _total;
+    private static int _failed;
+
+    public static int Run()
+    {
+        Test("loopback_fixture_uses_actual_prompt_and_strict_production_parser", LoopbackUsesProductionContracts);
+        foreach (var fault in new[] { "head-exit", "status-exit", "dirty", "engine", "image", "cli" })
+            Test("target_validation_refuses_" + fault, () => TargetRefuses(fault));
+        Test("changed_file_refuses_before_process_or_network", ChangedFileRefusesBeforeIo);
+        Test("symlinked_custody_refuses_before_process_or_network", SymlinkRefusesBeforeIo);
+        Test("manifest_accepts_only_the_explicit_target", ManifestParsesExplicitTarget);
+        Test("campaign_refuses_uncollected_observations_before_any_io", CampaignRefusesUncollectedObservations);
+        Test("mutating_commands_refuse_incomplete_ownership_registry", MutationsRefuseIncompleteRegistry);
+        Test("scenario_rejects_foreign_batch_and_nonce", ScenarioRejectsForeignIdentity);
+        Test("fixture_requires_shell_result_not_nonce_in_prompt", FixtureRequiresShellResult);
+        Test("fixture_rejects_malformed_typed_fields", FixtureRejectsMalformedFields);
+        Test("http_rejects_ambiguous_body_framing", HttpRejectsAmbiguousFraming);
+        Test("http_header_read_is_cancelable", HeaderReadIsCancelable);
+        Test("process_runner_executes_only_explicit_environment", ProcessExplicitEnvironment);
+        Test("process_runner_deadline_reaps_owned_child", ProcessDeadlineReapsChild);
+        Test("process_runner_cancellation_reaps_owned_child", ProcessCancellationReapsChild);
+        Test("process_runner_large_output_does_not_deadlock", ProcessLargeOutputDoesNotDeadlock);
+        Test("command_planner_binds_argv_and_minimal_environment", CommandPlannerBindsArgvAndEnvironment);
+        Test("command_planner_refuses_missing_database_environment", CommandPlannerRefusesMissingDatabaseEnvironment);
+        Test("driver_validates_linked_source_image_and_metadata", DriverValidatesLinkedTarget);
+        Test("inference_fixture_returns_structured_turn", InferenceFixtureReturnsStructuredTurn);
+        Test("inference_fixture_shell_probe_binds_nonce", InferenceFixtureShellProbeBindsNonce);
+        Test("fixture_http_handler_serves_only_responses", FixtureHttpHandlerServesOnlyResponses);
+        Test("temporal_client_uses_read_only_grpc_getsysteminfo", TemporalClientUsesReadOnlyGetSystemInfo);
+        Test("docker_client_requires_explicit_engine_and_image", DockerClientRequiresExplicitEngineAndImage);
+        Test("scenario_assertions_accept_exact_base_oracles", ScenarioAssertionsAcceptBaseOracles);
+        Test("scenario_assertions_fail_second_turn", ScenarioAssertionsFailSecondTurn);
+        Test("runtime_oracles_stay_unrun_without_authorization", RuntimeOraclesStayUnrun);
+
+        var summary = new
+        {
+            kind = "workflow-outcome-process-self-test",
+            total = _total,
+            passed = _total - _failed,
+            failed = _failed,
+            skipped = 0
+        };
+        Console.WriteLine(JsonSerializer.Serialize(summary, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        return _failed == 0 ? 0 : 1;
+    }
+
+    private static void LoopbackUsesProductionContracts()
+    {
+        var facts = Facts();
+        var item = facts.Items.Single();
+        var batch = new WorkflowOutcomeInboxBatch(facts.BatchId, facts.Generation,
+            "qualificationsyntheticnonce", "operator", DateTimeOffset.UtcNow, "synthetic-hash",
+            [new WorkflowOutcomeInboxItem(item.Id, item.Version, item.Namespace, item.WorkflowId, item.RunId,
+                "synthetic", WorkflowOutcomeClassifications.ConfirmedFailure, "workflow_failed", "WorkflowExecutionFailed",
+                2, DateTimeOffset.UtcNow, "synthetic", false, "operator", null, [])]);
+        var prompt = WorkflowOutcomePrompt.Build(batch);
+        var server = new InferenceFixtureServer(FixtureTarget(), InferenceFixtureMode.Turn,
+            "qualificationsyntheticnonce", 0);
+        try
+        {
+            server.StartAsync().GetAwaiter().GetResult();
+            using var handler = new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false };
+            using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(2) };
+            using var response = http.PostAsync("http://127.0.0.1:" + server.Port + "/v1/responses",
+                new StringContent(Request(prompt), Encoding.UTF8, "application/json")).GetAwaiter().GetResult();
+            if (response.StatusCode != HttpStatusCode.OK) throw new InvalidOperationException("fixture response was not 200");
+            var text = Completion(response.Content.ReadAsStringAsync().GetAwaiter().GetResult())
+                .GetProperty("response").GetProperty("output")[0].GetProperty("content")[0].GetProperty("text").GetString();
+            if (!WorkflowOutcomeTurnOutputParser.TryParse(text, batch.BatchId, batch.Generation,
+                    [new WorkflowOutcomeItemRef(item.Id, item.Version)], DateTimeOffset.UtcNow, out var output, out var error)
+                || output!.Ack.Count != 1 || output.Decisions.Single().Operation != "hold")
+                throw new InvalidOperationException("actual turn parser refused the inference output: " + error);
+            if (WorkflowOutcomeTurnOutputParser.TryParse(text, Guid.NewGuid(), batch.Generation,
+                    [new WorkflowOutcomeItemRef(item.Id, item.Version)], DateTimeOffset.UtcNow, out _, out _))
+                throw new InvalidOperationException("foreign batch output was accepted");
+        }
+        finally { server.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3)).GetAwaiter().GetResult(); }
+    }
+
+    private static void TargetRefuses(string fault)
+    {
+        using var directory = new TemporaryDirectory();
+        var path = WriteManifest(directory.Path);
+        var manifest = QualificationManifestParser.Parse(File.ReadAllText(path));
+        var runner = new FakeRunner(manifest) { Fault = fault };
+        var driver = new ProcessQualificationDriver(path, runner, new FakeDocker(manifest) { Fault = fault }, new FakeTemporal());
+        try { driver.ValidateAsync().GetAwaiter().GetResult(); }
+        catch (QualificationException)
+        {
+            if ((fault is "head-exit" or "status-exit" or "dirty") && runner.Operations.Contains("codex-version"))
+                throw new InvalidOperationException("failed source read did not stop validation");
+            return;
+        }
+        throw new InvalidOperationException("target mismatch accepted: " + fault);
+    }
+
+    private static void ChangedFileRefusesBeforeIo() => CustodyRefuses(false);
+    private static void SymlinkRefusesBeforeIo() => CustodyRefuses(true);
+    private static void CustodyRefuses(bool symlink)
+    {
+        using var directory = new TemporaryDirectory();
+        var path = WriteManifest(directory.Path);
+        var file = System.IO.Path.Combine(directory.Path, "agent.json");
+        if (symlink)
+        {
+            File.Delete(file);
+            File.CreateSymbolicLink(file, System.IO.Path.Combine(directory.Path, "orchestrator.json"));
+        }
+        else File.WriteAllText(file, "changed");
+        var driver = new ProcessQualificationDriver(path, new RefuseRunner(), new RefuseDocker(), new RefuseTemporal());
+        try { driver.ValidateAsync().GetAwaiter().GetResult(); }
+        catch (QualificationException) { return; }
+        throw new InvalidOperationException("changed/symlinked custody accepted");
+    }
+
+    private static void CampaignRefusesUncollectedObservations()
+    {
+        using var directory = new TemporaryDirectory();
+        var path = WriteManifest(directory.Path);
+        var manifest = QualificationManifestParser.Parse(File.ReadAllText(path));
+        var observations = System.IO.Path.Combine(directory.Path, "forged.json");
+        File.WriteAllText(observations, "{}");
+        var driver = new ProcessQualificationDriver(path, new RefuseRunner(), new RefuseDocker(), new RefuseTemporal());
+        try { driver.RunAsync(manifest.Target.ApprovalRef, observations).GetAwaiter().GetResult(); }
+        catch (QualificationBlockedException) { return; }
+        throw new InvalidOperationException("uncollected caller assertions became runtime qualification");
+    }
+
+    private static void MutationsRefuseIncompleteRegistry()
+    {
+        var manifest = Manifest();
+        var planner = new CommandPlanner("/owned-fixture");
+        foreach (var operation in new[] { "compose-up", "compose-down", "mysql-seed", "mysql-verify" })
+        {
+            try { planner.Build(manifest, operation); }
+            catch (QualificationBlockedException) { continue; }
+            throw new InvalidOperationException("unsafe mutation was planned: " + operation);
+        }
+    }
+
+    private static void ScenarioRejectsForeignIdentity()
+    {
+        var manifest = Manifest();
+        var observation = Observation("failure-native-turn") with
+        { BatchId = Guid.NewGuid().ToString("D"), Nonce = "foreign" };
+        var result = ScenarioAssertionRunner.Evaluate(manifest, [observation])
+            .Single(item => item.Scenario == observation.Scenario);
+        if (result.Status != ScenarioAssertionRunner.Fail || !result.Failures.Contains("batch_id_mismatch")
+            || !result.Failures.Contains("nonce_mismatch"))
+            throw new InvalidOperationException("foreign observation passed identity matching");
+    }
+
+    private static void FixtureRequiresShellResult()
+    {
+        var nonce = "qualificationsyntheticnonce";
+        var request = Request(Prompt() + nonce);
+        if (!WorkflowOutcomeInferenceFixture.TryCreateResponse(request, FixtureTarget(), InferenceFixtureMode.ShellProbe,
+            nonce, out var sse, out var error) || !sse.Contains("local_shell_call", StringComparison.Ordinal))
+            throw new InvalidOperationException("nonce in untrusted text bypassed shell request: " + error);
+    }
+
+    private static void FixtureRejectsMalformedFields()
+    {
+        foreach (var request in new[] { "{\"model\":1,\"stream\":true}", "{\"model\":\"qualification-fixture\",\"stream\":1}" })
+            if (WorkflowOutcomeInferenceFixture.TryCreateResponse(request, FixtureTarget(), InferenceFixtureMode.Turn,
+                    "qualificationsyntheticnonce", out _, out _))
+                throw new InvalidOperationException("malformed typed field was accepted");
+    }
+
+    private static void HttpRejectsAmbiguousFraming()
+    {
+        foreach (var framing in new[] { "Content-Length: 0\r\nContent-Length: 1", "Content-Length: 0\r\nTransfer-Encoding: chunked" })
+        {
+            using var input = new MemoryStream(Encoding.ASCII.GetBytes(
+                "POST /v1/responses HTTP/1.1\r\nContent-Type: application/json\r\n" + framing + "\r\n\r\n"));
+            using var output = new MemoryStream();
+            try { InferenceFixtureHttpHandler.HandleAsync(input, output, FixtureTarget(), InferenceFixtureMode.Turn,
+                "qualificationsyntheticnonce", CancellationToken.None).GetAwaiter().GetResult(); }
+            catch (IOException) { continue; }
+            throw new InvalidOperationException("ambiguous HTTP framing accepted");
+        }
+    }
+
+    private static void HeaderReadIsCancelable()
+    {
+        using var input = new NeverReadStream();
+        using var output = new MemoryStream();
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+        var task = InferenceFixtureHttpHandler.HandleAsync(input, output, FixtureTarget(), InferenceFixtureMode.Turn,
+            "qualificationsyntheticnonce", cancellation.Token);
+        try { task.WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult(); }
+        catch (OperationCanceledException) { return; }
+        throw new InvalidOperationException("pending header read was not cancelled");
+    }
+
+    private static void ProcessExplicitEnvironment()
+    {
+        using var directory = new TemporaryDirectory();
+        const string key = "QUALIFICATION_SYNTHETIC_AMBIENT";
+        var previous = Environment.GetEnvironmentVariable(key);
+        Environment.SetEnvironmentVariable(key, "must-not-reach-child");
+        try
+        {
+            var command = new PlannedCommand("synthetic-environment", "/bin/sh",
+                ["-c", "test -z \"${QUALIFICATION_SYNTHETIC_AMBIENT+x}\" || exit 9; printf explicit; printf diagnostic >&2"],
+                new Dictionary<string, string> { ["PATH"] = "/usr/bin:/bin", ["HOME"] = directory.Path, ["TMPDIR"] = directory.Path },
+                directory.Path, TimeSpan.FromSeconds(2));
+            var result = new ProcessCommandRunner().RunAsync(command).WaitAsync(TimeSpan.FromSeconds(4)).GetAwaiter().GetResult();
+            if (result.ExitCode != 0 || result.TimedOut || result.Stdout != "explicit" || result.Stderr != "diagnostic"
+                || result.StdoutSha256 != Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("explicit"))))
+                throw new InvalidOperationException("explicit environment/process capture failed");
+        }
+        finally { Environment.SetEnvironmentVariable(key, previous); }
+    }
+
+    private static void ProcessDeadlineReapsChild() => RunOwnedChild(cancel: false);
+    private static void ProcessCancellationReapsChild() => RunOwnedChild(cancel: true);
+    private static void RunOwnedChild(bool cancel)
+    {
+        using var directory = new TemporaryDirectory();
+        using var cancellation = new CancellationTokenSource();
+        if (cancel) cancellation.CancelAfter(TimeSpan.FromMilliseconds(150));
+        var command = new PlannedCommand("synthetic-child", "/bin/sh", ["-c", "echo $$ > child.pid; exec sleep 10"],
+            new Dictionary<string, string> { ["PATH"] = "/usr/bin:/bin", ["HOME"] = directory.Path, ["TMPDIR"] = directory.Path },
+            directory.Path, TimeSpan.FromMilliseconds(200));
+        ProcessCommandResult result;
+        try { result = new ProcessCommandRunner().RunAsync(command, cancellation.Token)
+            .WaitAsync(TimeSpan.FromSeconds(3)).GetAwaiter().GetResult();
+            try { using var observed = System.Diagnostics.Process.GetProcessById(result.ProcessId);
+                if (!observed.HasExited) throw new InvalidOperationException("runner left its child alive"); }
+            catch (ArgumentException) { }
+        }
+        finally
+        {
+            var pidFile = System.IO.Path.Combine(directory.Path, "child.pid");
+            if (File.Exists(pidFile) && int.TryParse(File.ReadAllText(pidFile).Trim(), out var pid))
+                try { using var owned = System.Diagnostics.Process.GetProcessById(pid);
+                    if (!owned.HasExited) { owned.Kill(entireProcessTree: true); owned.WaitForExit(1000); } }
+                catch (ArgumentException) { }
+        }
+        if (!result.TimedOut || result.ExitCode != 124)
+            throw new InvalidOperationException("pending child was not reported timed out/cancelled");
+        try { using var child = System.Diagnostics.Process.GetProcessById(result.ProcessId);
+            if (!child.HasExited) throw new InvalidOperationException("owned child survived cleanup"); }
+        catch (ArgumentException) { }
+    }
+
+    private static void ProcessLargeOutputDoesNotDeadlock()
+    {
+        using var directory = new TemporaryDirectory();
+        var command = new PlannedCommand("synthetic-output", "/bin/sh",
+            ["-c", "head -c 2097152 /dev/zero; head -c 2097152 /dev/zero >&2"],
+            new Dictionary<string, string> { ["PATH"] = "/usr/bin:/bin", ["HOME"] = directory.Path, ["TMPDIR"] = directory.Path },
+            directory.Path, TimeSpan.FromSeconds(2));
+        try { new ProcessCommandRunner().RunAsync(command).WaitAsync(TimeSpan.FromSeconds(4)).GetAwaiter().GetResult(); }
+        catch (QualificationException exception) when (exception.Message.Contains("output exceeded", StringComparison.Ordinal)) { return; }
+        throw new InvalidOperationException("oversize output was not refused");
+    }
+
+    private sealed class RefuseRunner : IProcessCommandRunner
+    { public Task<ProcessCommandResult> RunAsync(PlannedCommand command, CancellationToken ct = default) => throw new InvalidOperationException("unexpected process"); }
+    private sealed class RefuseDocker : IDockerEngineReader
+    {
+        public Task<DockerEngineInfo> GetEngineInfoAsync(CancellationToken ct = default) => throw new InvalidOperationException("unexpected engine read");
+        public Task<DockerImageInfo> GetImageAsync(string reference, CancellationToken ct = default) => throw new InvalidOperationException("unexpected image read");
+    }
+    private sealed class RefuseTemporal : ITemporalMetadataReader
+    { public Task<TemporalSystemInfo> GetSystemInfoAsync(CancellationToken ct = default) => throw new InvalidOperationException("unexpected server read"); }
+    private sealed class NeverReadStream : MemoryStream
+    {
+        public override int ReadByte() => throw new InvalidOperationException("synchronous read is unbounded");
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+        { await Task.Delay(Timeout.InfiniteTimeSpan, ct); return 0; }
+    }
+
+    private static void ManifestParsesExplicitTarget()
+    {
+        using var directory = new TemporaryDirectory();
+        var manifest = WriteManifest(directory.Path);
+        using var stream = File.OpenRead(manifest);
+        var parsed = QualificationManifestParser.Parse(stream);
+        if (!string.Equals(parsed.Temporal.Namespace, parsed.Temporal.TaskQueue, StringComparison.Ordinal))
+            throw new InvalidOperationException("namespace and task queue were not bound equally");
+        if (!parsed.AllowedOperations.Contains("compose-up"))
+            throw new InvalidOperationException("required operation was not retained");
+        if (parsed.AuthorizedRuntimeOracles.Count != 0)
+            throw new InvalidOperationException("runtime oracle was authorized by a source fixture");
+    }
+
+    private static void CommandPlannerBindsArgvAndEnvironment()
+    {
+        using var directory = new TemporaryDirectory();
+        var manifestPath = WriteManifest(directory.Path);
+        using var stream = File.OpenRead(manifestPath);
+        var manifest = QualificationManifestParser.Parse(stream);
+        var planner = new CommandPlanner(directory.Path);
+        var codex = planner.Build(manifest, "codex-version");
+        if (!string.Equals(Path.GetFileName(codex.FileName), "codex", StringComparison.Ordinal)
+            || codex.Arguments.Count != 1 || codex.Arguments[0] != "--version")
+            throw new InvalidOperationException("codex argv was not exact");
+        if (!string.Equals(codex.Environment["CODEX_OSS_BASE_URL"], manifest.Fixture.Endpoint, StringComparison.Ordinal)
+            || codex.Environment.ContainsKey("QUALIFICATION_MYSQL_CONNECTION") || codex.Environment.ContainsKey("DOCKER_HOST"))
+            throw new InvalidOperationException("codex child environment was not minimal and explicit");
+
+
+    }
+
+    private static void CommandPlannerRefusesMissingDatabaseEnvironment()
+    {
+        using var directory = new TemporaryDirectory();
+        var manifestPath = WriteManifest(directory.Path);
+        using var stream = File.OpenRead(manifestPath);
+        var manifest = QualificationManifestParser.Parse(stream);
+        var planner = new CommandPlanner(directory.Path);
+        try
+        {
+            planner.Build(manifest, "mysql-seed");
+        }
+        catch (QualificationBlockedException)
+        {
+            return;
+        }
+        throw new InvalidOperationException("mysql operation did not refuse a missing explicit connection");
+    }
+
+    private static void DriverValidatesLinkedTarget()
+    {
+        using var directory = new TemporaryDirectory();
+        var manifestPath = WriteManifest(directory.Path);
+        using var stream = File.OpenRead(manifestPath);
+        var manifest = QualificationManifestParser.Parse(stream);
+        var driver = new ProcessQualificationDriver(
+            manifestPath,
+            new FakeRunner(manifest),
+            new FakeDocker(manifest),
+            new FakeTemporal());
+        var plan = driver.ValidateAsync().GetAwaiter().GetResult();
+        if (!string.Equals(plan.SourceCommit, manifest.Target.SourceCommit, StringComparison.Ordinal)
+            || !string.Equals(plan.SourceTree, manifest.Target.SourceTree, StringComparison.Ordinal))
+            throw new InvalidOperationException("source linkage failed");
+        if (plan.ImageIds.Count != 3) throw new InvalidOperationException("image linkage failed");
+        if (string.IsNullOrWhiteSpace(plan.TemporalServerVersion))
+            throw new InvalidOperationException("Temporal metadata linkage failed");
+    }
+
+    private static void InferenceFixtureReturnsStructuredTurn()
+    {
+        var target = FixtureTarget();
+        var prompt = Prompt();
+        var request = Request(prompt);
+        if (!WorkflowOutcomeInferenceFixture.TryCreateResponse(
+                request, target, InferenceFixtureMode.Turn, "qualificationsyntheticnonce", out var sse, out var error))
+            throw new InvalidOperationException("fixture refused a valid turn: " + error);
+        if (!sse.Contains("event: response.completed", StringComparison.Ordinal)
+            || sse.Contains("local_shell_call", StringComparison.Ordinal))
+            throw new InvalidOperationException("fixture did not return a text completion");
+        var facts = Facts();
+        if (Completion(sse).GetProperty("response").GetProperty("output")[0].GetProperty("content")[0].GetProperty("text").GetString()
+            != WorkflowOutcomeInferenceFixture.BuildTurnOutput(facts))
+            throw new InvalidOperationException("fixture did not return the linked structured output");
+    }
+
+    private static void InferenceFixtureShellProbeBindsNonce()
+    {
+        var target = FixtureTarget();
+        var request = Request(Prompt());
+        if (!WorkflowOutcomeInferenceFixture.TryCreateResponse(
+                request, target, InferenceFixtureMode.ShellProbe, "qualificationsyntheticnonce", out var sse, out var error))
+            throw new InvalidOperationException("fixture refused the shell probe: " + error);
+        var action = Completion(sse).GetProperty("response").GetProperty("output")[0].GetProperty("action");
+        if (!action.GetProperty("command").EnumerateArray().Select(item => item.GetString()).SequenceEqual(target.ShellArgv)
+            || action.GetProperty("env").GetProperty("PROCESS_QUALIFICATION_NONCE").GetString() != "qualificationsyntheticnonce")
+            throw new InvalidOperationException("fixture did not bind the nonce to exact shell argv");
+    }
+
+    private static void FixtureHttpHandlerServesOnlyResponses()
+    {
+        var body = Encoding.UTF8.GetBytes(Request(Prompt()));
+        var request = Encoding.ASCII.GetBytes(
+            "POST /v1/responses HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: "
+            + body.Length.ToString(CultureInfo.InvariantCulture) + "\r\n\r\n").Concat(body).ToArray();
+        using var input = new MemoryStream(request);
+        using var output = new MemoryStream();
+        InferenceFixtureHttpHandler.HandleAsync(
+            input, output, FixtureTarget(), InferenceFixtureMode.Turn, "qualificationsyntheticnonce", CancellationToken.None).GetAwaiter().GetResult();
+        var response = Encoding.UTF8.GetString(output.ToArray());
+        if (!response.StartsWith("HTTP/1.1 200 OK\r\n", StringComparison.Ordinal)
+            || !response.Contains("Content-Type: text/event-stream", StringComparison.Ordinal)
+            || !response.Contains("event: response.completed", StringComparison.Ordinal))
+            throw new InvalidOperationException("HTTP fixture handler did not serve the Responses route");
+    }
+
+    private static void TemporalClientUsesReadOnlyGetSystemInfo()
+    {
+        var payload = new byte[] { 0x0a, 5, (byte)'1', (byte)'.', (byte)'2', (byte)'.', (byte)'3' };
+        var frame = new byte[] { 0, 0, 0, 0, (byte)payload.Length }.Concat(payload).ToArray();
+        using var handler = new StaticHandler(request =>
+        {
+            if (request.Method != HttpMethod.Post
+                || request.RequestUri?.AbsolutePath != "/temporal.api.workflowservice.v1.WorkflowService/GetSystemInfo"
+                || request.Content?.Headers.ContentType?.MediaType != "application/grpc")
+                return new HttpResponseMessage(HttpStatusCode.BadRequest);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(frame)
+            };
+        });
+        using var http = new HttpClient(handler) { BaseAddress = new Uri("https://temporal.example:7233") };
+        using var client = new TemporalMetadataClient(http);
+        var info = client.GetSystemInfoAsync().GetAwaiter().GetResult();
+        if (info.ServerVersion != "1.2.3") throw new InvalidOperationException("Temporal metadata was not parsed");
+    }
+
+    private static void DockerClientRequiresExplicitEngineAndImage()
+    {
+        using var handler = new StaticHandler(request =>
+        {
+            if (request.RequestUri?.AbsolutePath == "/v1.43/info")
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("{\"ID\":\"engine-qualification\",\"ServerVersion\":\"1.2\"}")
+                };
+            if (request.RequestUri?.AbsolutePath.StartsWith("/v1.43/images/", StringComparison.Ordinal) == true)
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("{\"Id\":\"sha256:" + new string('c', 64) + "\"}")
+                };
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        });
+        using var http = new HttpClient(handler) { BaseAddress = new Uri("http://localhost") };
+        using var client = new DockerEngineClient(http, "v1.43");
+        var engine = client.GetEngineInfoAsync().GetAwaiter().GetResult();
+        var image = client.GetImageAsync("registry.example/agent@sha256:" + new string('c', 64)).GetAwaiter().GetResult();
+        if (engine.EngineId != "engine-qualification" || image.ImageId != "sha256:" + new string('c', 64))
+            throw new InvalidOperationException("Docker engine or image binding failed");
+    }
+
+    private static void ScenarioAssertionsAcceptBaseOracles()
+    {
+        var manifest = Manifest();
+        var observations = QualificationManifestParser.BaseScenarios.Select(Observation).ToList();
+        var results = ScenarioAssertionRunner.Evaluate(manifest, observations);
+        if (results.Where(result => QualificationManifestParser.BaseScenarios.Contains(result.Scenario))
+            .Any(result => result.Status != ScenarioAssertionRunner.Pass))
+            throw new InvalidOperationException("a valid base observation did not pass");
+    }
+
+    private static void ScenarioAssertionsFailSecondTurn()
+    {
+        var manifest = Manifest();
+        var observations = QualificationManifestParser.BaseScenarios
+            .Select(Observation)
+            .Select(item => item.Scenario == "failure-native-turn"
+                ? item with { SecondTurn = true }
+                : item)
+            .ToList();
+        var result = ScenarioAssertionRunner.Evaluate(manifest, observations)
+            .Single(item => item.Scenario == "failure-native-turn");
+        if (result.Status != ScenarioAssertionRunner.Fail || !result.Failures.Contains("second_turn_not_refused"))
+            throw new InvalidOperationException("second-turn regression was not failed");
+    }
+
+    private static void RuntimeOraclesStayUnrun()
+    {
+        var manifest = Manifest();
+        var observations = QualificationManifestParser.BaseScenarios.Select(Observation).ToList();
+        var results = ScenarioAssertionRunner.Evaluate(manifest, observations);
+        foreach (var oracle in QualificationManifestParser.RuntimeOracleScenarios)
+        {
+            var result = results.Single(item => item.Scenario == oracle);
+            if (result.Status != ScenarioAssertionRunner.Unrun
+                || result.Reason != "separate_runtime_authorization_required")
+                throw new InvalidOperationException("runtime oracle was not retained as UNRUN");
+        }
+    }
+
+    private static ProcessQualificationManifest Manifest()
+    {
+        using var directory = new TemporaryDirectory();
+        var path = WriteManifest(directory.Path);
+        using var stream = File.OpenRead(path);
+        return QualificationManifestParser.Parse(stream);
+    }
+
+    private static ProcessScenarioObservation Observation(string scenario) => scenario switch
+    {
+        "success-zero-turn" => new ProcessScenarioObservation(
+            scenario, 0, 0, 0, 0, 0, 0, 0, false, false, false, false, false, false, false,
+            false, false, false, false, null, null, null, null, null, null, null),
+        "denials" => new ProcessScenarioObservation(
+            scenario, 0, 0, 0, 0, 0, 0, 0, true, true, true, false, false, false, false,
+            false, false, false, false, null, null, null, null, null, null, null),
+        _ => new ProcessScenarioObservation(
+            scenario, 1, 1, 1, 1, 1, 0, scenario == "late-confirm-before-ack" ? 1 : 0,
+            false, false, false, scenario == "crash-after-admission", false,
+            scenario == "lost-post-reconciliation", scenario == "late-confirm-before-ack",
+            false, false, false, false,
+            "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222",
+            1, 1, new string('d', 64), "qualificationsyntheticnonce", "process ancestry")
+    };
+
+    private static InferenceFixtureTarget FixtureTarget() => new(
+        "0.159.2", "qualification-fixture", "openai-responses-v1", "http://localhost:49151/v1/",
+        ["/bin/sh", "-c", "printf '%s' \"$PROCESS_QUALIFICATION_NONCE\""],
+        ["PROCESS_QUALIFICATION_NONCE"], 5);
+
+    private static WorkflowOutcomePromptFacts Facts() => new(
+        Guid.Parse("11111111-1111-4111-8111-111111111111"),
+        1,
+        [new WorkflowOutcomeFixtureItem(
+            Guid.Parse("22222222-2222-4222-8222-222222222222"), 1,
+            "namespace-a", "workflow-a", "run-a")]);
+
+    private static string Prompt()
+    {
+        var facts = JsonSerializer.Serialize(new
+        {
+            batchId = Facts().BatchId,
+            generation = Facts().Generation,
+            items = Facts().Items.Select(item => new
+            {
+                id = item.Id, version = item.Version, @namespace = item.Namespace,
+                workflowId = item.WorkflowId, runId = item.RunId
+            })
+        }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        return WorkflowOutcomeInferenceFixture.PromptPrefix + facts + WorkflowOutcomeInferenceFixture.PromptSuffix;
+    }
+
+    private static string Request(string prompt) => JsonSerializer.Serialize(new
+    {
+        model = "qualification-fixture",
+        input = new[]
+        {
+            new
+            {
+                type = "message",
+                role = "user",
+                content = new[] { new { type = "input_text", text = prompt } }
+            }
+        },
+        stream = true,
+        prompt_cache_key = "019a0000-0000-7000-8000-000000000001"
+    }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+    private static string WriteManifest(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        var commit = new string('a', 40);
+        var tree = new string('b', 40);
+        var imageHash = new string('c', 64);
+        var files = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var name in new[] { "agent.json", "orchestrator.json", "temporal-bridge.json", "docker.json" })
+        {
+            var configPath = Path.Combine(directory, name);
+            File.WriteAllText(configPath, "{}\n");
+            files[name] = Sha256(configPath);
+        }
+        var policies = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var name in new[] { "ownership.json", "classifiers.json", "recovery-approvals.json" })
+        {
+            var policyPath = Path.Combine(directory, name);
+            File.WriteAllText(policyPath, "{}\n");
+            policies[name] = Sha256(policyPath);
+        }
+        var seed = Path.Combine(directory, "seed.sql");
+        File.WriteAllText(seed, "SELECT 1;\n");
+        foreach (var name in new[] { "runtime", "source", "home", "cache", "tmp", "tools" })
+            Directory.CreateDirectory(Path.Combine(directory, name));
+        foreach (var name in new[] { "git", "codex" }) File.WriteAllText(Path.Combine(directory, "tools", name), "owned synthetic executable");
+
+        var manifest = new
+        {
+            schemaVersion = 1,
+            kind = "workflow-outcomes-process-qualification",
+            target = new
+            {
+                registry = "registry.example",
+                approvalRef = "https://approval.example/records/qualification",
+                sourceRef = "refs/heads/qualification",
+                sourceCommit = commit,
+                sourceTree = tree,
+                images = new
+                {
+                    agent = new { reference = "registry.example/agent@sha256:" + imageHash, digest = "sha256:" + imageHash, buildCommit = commit },
+                    orchestrator = new { reference = "registry.example/orchestrator@sha256:" + imageHash, digest = "sha256:" + imageHash, buildCommit = commit },
+                    temporalBridge = new { reference = "registry.example/temporal-bridge@sha256:" + imageHash, digest = "sha256:" + imageHash, buildCommit = commit }
+                }
+            },
+            executables = new Dictionary<string, object>
+            {
+                ["git"] = new { path = "tools/git", sha256 = Sha256(Path.Combine(directory, "tools/git")) },
+                ["codex"] = new { path = "tools/codex", sha256 = Sha256(Path.Combine(directory, "tools/codex")) }
+            },
+            configFiles = files.Select(pair => new { path = pair.Key, sha256 = pair.Value }).ToArray(),
+            policyFiles = policies.Select(pair => new { path = pair.Key, sha256 = pair.Value }).ToArray(),
+            docker = new
+            {
+                endpoint = "unix:///run/example/docker.sock",
+                configFile = "docker.json",
+                context = "qualification-context",
+                engineId = "engine-qualification",
+                apiVersion = "v1.43",
+                serverVersion = "1.2"
+            },
+            temporal = new
+            {
+                endpoint = "https://temporal.example:7233",
+                @namespace = "namespace-a",
+                runId = "run-a",
+                taskQueue = "namespace-a",
+                tlsMode = "server-auth",
+                serverName = "temporal.example",
+                identitySha256 = new string('e', 64),
+                serverVersion = "1.2.3"
+            },
+            runtime = new
+            {
+                sourceDirectory = "source",
+                workingDirectory = "runtime",
+                pathEnvironment = "/usr/bin:/bin",
+                orchestratorBaseUrl = "https://orchestrator.example",
+                brokerEndpoint = "amqps://broker.example",
+                databaseServer = "qualification-db",
+                databaseName = "qualification-db",
+                connectionEnv = "QUALIFICATION_MYSQL_CONNECTION",
+                seedSql = "seed.sql",
+                seedSqlSha256 = Sha256(seed),
+                scenarioBatchId = "11111111-1111-4111-8111-111111111111",
+                scenarioNonce = "qualificationsyntheticnonce",
+                scenarioItemId = "22222222-2222-4222-8222-222222222222",
+                scenarioVersion = 1,
+                scenarioGeneration = 1,
+                scenarioAttempt = 1,
+                expectedTurnOutputSha256 = new string('d', 64),
+                terminalHash = new string('f', 64)
+            },
+            fixture = new
+            {
+                cliVersion = "0.159.2",
+                model = "qualification-fixture",
+                protocol = "openai-responses-v1",
+                endpoint = "http://localhost:49151/v1/",
+                shellArgv = new[] { "/bin/sh", "-c", "printf '%s' \"$PROCESS_QUALIFICATION_NONCE\"" },
+                shellEnvironment = new[] { "PROCESS_QUALIFICATION_NONCE" },
+                shellDeadlineSeconds = 5
+            },
+            allowedOperations = new[]
+            {
+                "docker-version", "docker-image-agent", "docker-image-orchestrator",
+                "docker-image-temporal-bridge", "compose-up", "compose-down", "mysql-seed",
+                "mysql-verify", "codex-version", "git-source", "git-status"
+            },
+            scenarios = QualificationManifestParser.BaseScenarios.ToArray(),
+            authorizedRuntimeOracles = Array.Empty<string>(),
+            cleanup = new
+            {
+                projectName = "qualification-run",
+                owned = new[] { "qualification-run", "namespace-a", "qualification-db" },
+                verify = true,
+                commands = new[] { "compose-down" }
+            },
+            maxDurationSeconds = 600
+        };
+        var manifestPath = Path.Combine(directory, "manifest.json");
+        File.WriteAllText(manifestPath, JsonSerializer.Serialize(manifest, new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+        }));
+        return manifestPath;
+    }
+
+    private static JsonElement Completion(string sse)
+    {
+        var block = sse.Split("\n\n").Single(item => item.StartsWith("event: response.completed\n", StringComparison.Ordinal));
+        using var document = JsonDocument.Parse(block[(block.IndexOf("data: ", StringComparison.Ordinal) + 6)..]);
+        return document.RootElement.Clone();
+    }
+
+    private static string Sha256(string path)
+    {
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexStringLower(SHA256.HashData(stream));
+    }
+
+    private static void Test(string name, Action action)
+    {
+        _total++;
+        try
+        {
+            action();
+            Console.WriteLine("PASS " + name);
+        }
+        catch (Exception exception)
+        {
+            _failed++;
+            Console.Error.WriteLine("FAIL " + name + ": " + exception.Message);
+        }
+    }
+
+    private sealed class FakeRunner(ProcessQualificationManifest manifest) : IProcessCommandRunner
+    {
+        public string? Fault { get; init; }
+        public List<string> Operations { get; } = [];
+        public Task<ProcessCommandResult> RunAsync(PlannedCommand command, CancellationToken ct = default)
+        {
+            Operations.Add(command.Operation);
+            var output = command.Operation switch
+            {
+                "git-source" => manifest.Target.SourceCommit + " " + manifest.Target.SourceTree,
+                "codex-version" => Fault == "cli" ? "foreign 0.159.2" : "codex-cli 0.159.2",
+                "git-status" => Fault == "dirty" ? "?? foreign" : "",
+                _ => throw new InvalidOperationException("unexpected operation " + command.Operation)
+            };
+            return Task.FromResult(new ProcessCommandResult(
+                command.Operation, (Fault == "head-exit" && command.Operation == "git-source"
+                    || Fault == "status-exit" && command.Operation == "git-status") ? 1 : 0, 4242, [], output, "",
+                "stdout-hash", "stderr-hash", TimeSpan.FromSeconds(1), false));
+        }
+    }
+
+    private sealed class FakeDocker(ProcessQualificationManifest manifest) : IDockerEngineReader
+    {
+        public string? Fault { get; init; }
+        public Task<DockerEngineInfo> GetEngineInfoAsync(CancellationToken ct = default) =>
+            Task.FromResult(new DockerEngineInfo(Fault == "engine" ? "foreign" : manifest.Docker.EngineId, "1.2"));
+
+        public Task<DockerImageInfo> GetImageAsync(string reference, CancellationToken ct = default) =>
+            Task.FromResult(new DockerImageInfo(reference, "sha256:" + new string('9', 64), [reference], Fault == "image" ? "foreign" : manifest.Target.SourceCommit));
+    }
+
+    private sealed class FakeTemporal : ITemporalMetadataReader
+    {
+        public Task<TemporalSystemInfo> GetSystemInfoAsync(CancellationToken ct = default) =>
+            Task.FromResult(new TemporalSystemInfo("1.2.3", new string('e', 64)));
+    }
+
+    private sealed class StaticHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var response = respond(request);
+            if (response.Content is ByteArrayContent bytes)
+                response.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/grpc");
+            response.TrailingHeaders.TryAddWithoutValidation("grpc-status", "0");
+            return Task.FromResult(response);
+        }
+    }
+
+    private sealed class TemporaryDirectory : IDisposable
+    {
+        public TemporaryDirectory() => Path = Directory.CreateTempSubdirectory("process-qualification-").FullName;
+        public string Path { get; }
+        public void Dispose()
+        {
+            try { Directory.Delete(Path, recursive: true); }
+            catch (IOException) { }
+        }
+    }
+}

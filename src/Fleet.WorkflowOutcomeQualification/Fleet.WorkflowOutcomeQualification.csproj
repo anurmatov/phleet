@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Fleet.WorkflowOutcomeQualification</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <!-- Compile the exact production prompt/contracts for the dependency-free source oracle.
+       These are not stand-ins for the daemon, API, storage or broker acceptance boundaries. -->
+  <ItemGroup>
+    <Compile Include="../Fleet.Shared/WorkflowOutcomeContracts.cs" Link="Production/WorkflowOutcomeContracts.cs" />
+    <Compile Include="../Fleet.Agent/Services/WorkflowOutcomePrompt.cs" Link="Production/WorkflowOutcomePrompt.cs" />
+  </ItemGroup>
+</Project>

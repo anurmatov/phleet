@@ -15,6 +15,14 @@ public static class SelfTest
 
     public static int Run()
     {
+        Test("docker_foreign_context_refuses_before_any_process", DockerForeignContextRefusesBeforeIo);
+        Test("git_local_fsmonitor_never_executes", GitLocalHookRefused);
+        foreach (var fault in new[] { "filter", "include", "promisor" })
+            Test("git_executable_configuration_refused_" + fault, () => GitExecutableConfigRefused(fault));
+        foreach (var fault in new[] { "missing", "host", "context", "symlink", "duplicate", "current-context", "default-context" })
+            Test("docker_context_binding_refuses_" + fault, () => DockerContextRefuses(fault));
+        foreach (var fault in new[] { "exit", "deadline", "cancel", "overflow" })
+            Test("parent_exit_descendant_cleanup_" + fault, () => ExitedParentCleanup(fault));
         Test("loopback_fixture_uses_actual_prompt_and_strict_production_parser", LoopbackUsesProductionContracts);
         foreach (var fault in new[] { "head-exit", "status-exit", "dirty", "engine", "image", "cli" })
             Test("target_validation_refuses_" + fault, () => TargetRefuses(fault));
@@ -54,6 +62,147 @@ public static class SelfTest
         };
         Console.WriteLine(JsonSerializer.Serialize(summary, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
         return _failed == 0 ? 0 : 1;
+    }
+
+    private static void GitLocalHookRefused()
+    {
+        if (!OperatingSystem.IsLinux()) throw new QualificationBlockedException("Linux source fixture required");
+        using var directory = new TemporaryDirectory();
+        var path = WriteManifest(directory.Path);
+        var manifest = QualificationManifestParser.Parse(File.ReadAllText(path));
+        var git = Path.Combine(directory.Path, "tools", "git");
+        File.Copy("/usr/bin/git", git, overwrite: true);
+        File.SetUnixFileMode(git, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        manifest = manifest with { Executables = new Dictionary<string, HashedFile>(manifest.Executables)
+            { ["git"] = new HashedFile("tools/git", Sha256(git)) } };
+        var planner = new CommandPlanner(directory.Path);
+        var planned = planner.Build(manifest, "git-status");
+        var runner = new ProcessCommandRunner();
+        ProcessCommandResult Git(params string[] argv) => runner.RunAsync(planned with { Arguments = argv })
+            .WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+        if (Git("init", "-q").ExitCode != 0) throw new InvalidOperationException("owned Git init failed");
+        var hook = Path.Combine(directory.Path, "hook.sh");
+        var marker = Path.Combine(directory.Path, "hook-ran");
+        File.WriteAllText(hook, "#!/bin/sh\nprintf unsafe > '" + marker + "'\n");
+        File.SetUnixFileMode(hook, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        if (Git("config", "core.fsmonitor", hook).ExitCode != 0) throw new InvalidOperationException("owned Git config failed");
+        var result = runner.RunAsync(planned).WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+        if (result.ExitCode != 0 || File.Exists(marker)) throw new InvalidOperationException("repository-local hook executed");
+        if (planned.Environment["GIT_NO_LAZY_FETCH"] != "1"
+            || !planned.Arguments.Contains("--ignore-submodules=all"))
+            throw new InvalidOperationException("Git executable configuration guards missing");
+    }
+
+    private static void GitExecutableConfigRefused(string fault)
+    {
+        using var directory = new TemporaryDirectory();
+        var path = WriteManifest(directory.Path);
+        var manifest = QualificationManifestParser.Parse(File.ReadAllText(path));
+        var config = Path.Combine(directory.Path, "source", ".git", "config");
+        File.AppendAllText(config, fault switch
+        {
+            "filter" => "[filter \"synthetic\"]\nclean = unallowlisted-command\n",
+            "include" => "[include]\npath = unowned-config\n",
+            _ => "[remote \"origin\"]\npromisor = true\n"
+        });
+        try { new CommandPlanner(directory.Path).Build(manifest, "git-status"); }
+        catch (QualificationBlockedException) { return; }
+        throw new InvalidOperationException("executable Git configuration was accepted");
+    }
+
+    private static void DockerForeignContextRefusesBeforeIo()
+    {
+        using var directory = new TemporaryDirectory();
+        var path = WriteManifest(directory.Path);
+        var config = Path.Combine(directory.Path, "config.json");
+        File.WriteAllText(config, "{\"currentContext\":\"foreign-context\"}");
+        var doc = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
+        foreach (var pin in doc["configFiles"]!.AsArray())
+            if (pin!["path"]!.GetValue<string>() == "config.json") pin["sha256"] = Sha256(config);
+        File.WriteAllText(path, doc.ToJsonString());
+        var driver = new ProcessQualificationDriver(path, new RefuseRunner(), new RefuseDocker(), new RefuseTemporal());
+        try { driver.ValidateAsync().GetAwaiter().GetResult(); }
+        catch (QualificationException) { return; }
+        throw new InvalidOperationException("foreign Docker context reached an unowned process");
+    }
+
+    private static void DockerContextRefuses(string fault)
+    {
+        using var directory = new TemporaryDirectory();
+        var path = WriteManifest(directory.Path);
+        var manifest = QualificationManifestParser.Parse(File.ReadAllText(path));
+        var relative = manifest.ConfigFiles.Single(f => f.Path.EndsWith("meta.json", StringComparison.Ordinal)).Path;
+        var metadata = Path.Combine(directory.Path, relative);
+        if (fault == "missing") manifest = manifest with { ConfigFiles = manifest.ConfigFiles.Where(f => f.Path != relative).ToArray() };
+        if (fault is "host" or "context" or "duplicate")
+        {
+            var text = File.ReadAllText(metadata);
+            text = fault switch
+            {
+                "host" => text.Replace("unix:///run/example/docker.sock", "unix:///run/foreign/docker.sock", StringComparison.Ordinal),
+                "context" => text.Replace("qualification-context", "foreign-context", StringComparison.Ordinal),
+                _ => text.Replace("\"Name\":", "\"Name\":\"ambiguous\",\"Name\":", StringComparison.Ordinal)
+            };
+            File.WriteAllText(metadata, text);
+            manifest = manifest with { ConfigFiles = manifest.ConfigFiles.Select(f => f.Path == relative ? f with { Sha256 = Sha256(metadata) } : f).ToArray() };
+        }
+        if (fault == "default-context") manifest = manifest with { Docker = manifest.Docker with { Context = "default" } };
+        if (fault == "current-context")
+        {
+            var config = Path.Combine(directory.Path, "config.json");
+            File.WriteAllText(config, "{\"currentContext\":\"foreign-context\"}");
+            manifest = manifest with { ConfigFiles = manifest.ConfigFiles.Select(f => f.Path == "config.json" ? f with { Sha256 = Sha256(config) } : f).ToArray() };
+        }
+        if (fault == "symlink")
+        {
+            var copy = Path.Combine(directory.Path, "other-meta.json");
+            File.Move(metadata, copy);
+            File.CreateSymbolicLink(metadata, copy);
+        }
+        try { DockerConfigurationBinding.Verify(manifest, directory.Path); }
+        catch (Exception e) when (e is QualificationException or QualificationBlockedException) { return; }
+        throw new InvalidOperationException("unsafe Docker binding accepted");
+    }
+
+    private static void ExitedParentCleanup(string fault)
+    {
+        using var directory = new TemporaryDirectory();
+        using var cancel = new CancellationTokenSource();
+        if (fault == "cancel") cancel.CancelAfter(TimeSpan.FromMilliseconds(400));
+        var script = "sleep 10 & echo $! > descendant.pid; ";
+        script += fault switch
+        {
+            "exit" => "exit 0",
+            "overflow" => "head -c 2097152 /dev/zero; exit 0",
+            _ => "wait"
+        };
+        var command = new PlannedCommand("synthetic-descendant", "/bin/sh", ["-c", script],
+            new Dictionary<string, string> { ["PATH"] = "/usr/bin:/bin", ["HOME"] = directory.Path, ["TMPDIR"] = directory.Path },
+            directory.Path, TimeSpan.FromMilliseconds(600));
+        try
+        {
+            var result = new ProcessCommandRunner().RunAsync(command, cancel.Token)
+                .WaitAsync(TimeSpan.FromSeconds(4)).GetAwaiter().GetResult();
+            if (fault is "deadline" or "cancel" && !result.TimedOut)
+                throw new InvalidOperationException("deadline/cancellation was not retained");
+            if (fault == "overflow") throw new InvalidOperationException("overflow was accepted");
+        }
+        catch (QualificationException e) when (fault == "overflow" && e.Message.Contains("output exceeded", StringComparison.Ordinal)) { }
+        finally
+        {
+            var pidFile = Path.Combine(directory.Path, "descendant.pid");
+            if (File.Exists(pidFile) && int.TryParse(File.ReadAllText(pidFile).Trim(), out var pid))
+            {
+                var stat = File.Exists("/proc/" + pid + "/stat") ? File.ReadAllText("/proc/" + pid + "/stat") : "";
+                if (stat.Length != 0 && !stat[(stat.LastIndexOf(')') + 2)..].StartsWith("Z ", StringComparison.Ordinal))
+                {
+                    try { using var child = System.Diagnostics.Process.GetProcessById(pid); child.Kill(); }
+                    catch (ArgumentException) { }
+                    throw new InvalidOperationException("owned descendant survived session cleanup");
+                }
+            }
+            else throw new InvalidOperationException("owned descendant fixture never started");
+        }
     }
 
     private static void LoopbackUsesProductionContracts()
@@ -561,12 +710,20 @@ public static class SelfTest
         var tree = new string('b', 40);
         var imageHash = new string('c', 64);
         var files = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var name in new[] { "agent.json", "orchestrator.json", "temporal-bridge.json", "docker.json" })
+        foreach (var name in new[] { "agent.json", "orchestrator.json", "temporal-bridge.json", "config.json" })
         {
             var configPath = Path.Combine(directory, name);
             File.WriteAllText(configPath, "{}\n");
             files[name] = Sha256(configPath);
         }
+        File.WriteAllText(Path.Combine(directory, "config.json"), "{\"currentContext\":\"qualification-context\"}");
+        files["config.json"] = Sha256(Path.Combine(directory, "config.json"));
+        var contextHash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("qualification-context")));
+        var metaRelative = Path.Combine("contexts", "meta", contextHash, "meta.json");
+        var metaPath = Path.Combine(directory, metaRelative);
+        Directory.CreateDirectory(Path.GetDirectoryName(metaPath)!);
+        File.WriteAllText(metaPath, "{\"Name\":\"qualification-context\",\"Endpoints\":{\"docker\":{\"Host\":\"unix:///run/example/docker.sock\",\"SkipTLSVerify\":false}}}");
+        files[metaRelative] = Sha256(metaPath);
         var policies = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var name in new[] { "ownership.json", "classifiers.json", "recovery-approvals.json" })
         {
@@ -578,6 +735,8 @@ public static class SelfTest
         File.WriteAllText(seed, "SELECT 1;\n");
         foreach (var name in new[] { "runtime", "source", "home", "cache", "tmp", "tools" })
             Directory.CreateDirectory(Path.Combine(directory, name));
+        Directory.CreateDirectory(Path.Combine(directory, "source", ".git"));
+        File.WriteAllText(Path.Combine(directory, "source", ".git", "config"), "[core]\nrepositoryformatversion = 0\nbare = false\n");
         foreach (var name in new[] { "git", "codex" }) File.WriteAllText(Path.Combine(directory, "tools", name), "owned synthetic executable");
 
         var manifest = new
@@ -608,7 +767,7 @@ public static class SelfTest
             docker = new
             {
                 endpoint = "unix:///run/example/docker.sock",
-                configFile = "docker.json",
+                configFile = "config.json",
                 context = "qualification-context",
                 engineId = "engine-qualification",
                 apiVersion = "v1.43",

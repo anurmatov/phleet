@@ -82,6 +82,8 @@ public sealed class ProcessQualificationDriver
             OwnedPaths.File(directory, pair.Key, pair.Value);
         }
 
+        DockerConfigurationBinding.Verify(manifest, directory);
+
         var source = await _runner.RunAsync(planner.Build(manifest, "git-source"), ct);
         RequireSuccess(source, "git-source");
         var sourceParts = source.Stdout.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);

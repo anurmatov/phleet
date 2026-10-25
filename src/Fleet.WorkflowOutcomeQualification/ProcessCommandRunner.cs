@@ -1,8 +1,9 @@
 using System.Diagnostics;
-using System.ComponentModel;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using System.IO.Pipes;
+using System.Text.Json;
 
 namespace Fleet.WorkflowOutcomeQualification;
 
@@ -34,54 +35,72 @@ public sealed class ProcessCommandRunner : IProcessCommandRunner
         if (string.IsNullOrWhiteSpace(command.FileName) || command.Arguments.Any(string.IsNullOrWhiteSpace))
             throw new QualificationException("refusing a command with an empty argv element");
 
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        deadline.CancelAfter(command.Deadline);
         if (command.Deadline <= TimeSpan.Zero || command.Deadline > TimeSpan.FromMinutes(5))
             throw new QualificationException("command deadline must be positive and at most five minutes");
         if (!Path.IsPathFullyQualified(command.FileName))
             throw new QualificationException("command executable must be an absolute pinned path");
+        ct.ThrowIfCancellationRequested();
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(command.Deadline);
         var started = Stopwatch.StartNew();
-        using var process = new Process
-        {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = command.FileName,
-                WorkingDirectory = command.WorkingDirectory,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                RedirectStandardInput = false,
-                CreateNoWindow = true
-            }
-        };
-        foreach (var argument in command.Arguments) process.StartInfo.ArgumentList.Add(argument);
-        process.StartInfo.Environment.Clear();
-        foreach (var pair in command.Environment) process.StartInfo.Environment[pair.Key] = pair.Value;
-
-        if (!process.Start()) throw new QualificationException("failed to start '" + command.Operation + "'");
-        var ancestry = ProcessAncestry.Capture(process.Id);
+        using var control = new AnonymousPipeServerStream(PipeDirection.In, HandleInheritability.Inheritable);
+        using var status = new StreamReader(control);
+        using var process = new Process { StartInfo = OwnedCommandSession.StartInfo(command, control.GetClientHandleAsString()) };
+        if (!process.Start()) throw new QualificationException("owned session did not start");
+        control.DisposeLocalCopyOfClientHandle();
         var stdout = CaptureAsync(process.StandardOutput);
         var stderr = CaptureAsync(process.StandardError);
         var timedOut = false;
+        var exitCode = 125;
+        var targetId = process.Id;
+        IReadOnlyList<ProcessAncestryRow> ancestry = [];
         try
         {
-            try { await process.WaitForExitAsync(deadline.Token); }
-            catch (OperationCanceledException) { timedOut = true; }
+            if (await status.ReadLineAsync(deadline.Token) != "READY")
+                throw new QualificationException("owned session did not initialize");
+            await process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(command).AsMemory(), deadline.Token);
+            await process.StandardInput.FlushAsync(deadline.Token);
+            var start = await status.ReadLineAsync(deadline.Token);
+            if (start is not null && start.StartsWith("START ", StringComparison.Ordinal)
+                && int.TryParse(start[6..], out var pid) && pid > 1)
+            {
+                targetId = pid;
+                ancestry = ProcessAncestry.Capture(pid);
+                start = await status.ReadLineAsync(deadline.Token);
+            }
+            if (start is null || !start.StartsWith("EXIT ", StringComparison.Ordinal)
+                || !int.TryParse(start[5..], out exitCode))
+                throw new QualificationException("owned command completion is unconfirmed");
         }
+        catch (OperationCanceledException) { timedOut = true; }
         finally
         {
-            // Disposal is not termination. Cancellation and all unexpected failures must reap
-            // the owned child, while output readers keep draining both pipes concurrently.
-            TryKill(process);
+            // Always kill the reserved session, including when the target has already exited.
+            // This closes descendant-held pipes on normal exit, cancellation and deadline paths.
+            OwnedCommandSession.Kill(process);
             await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2));
+            process.StandardInput.Close();
         }
-        var output = await stdout.WaitAsync(TimeSpan.FromSeconds(2));
-        var error = await stderr.WaitAsync(TimeSpan.FromSeconds(2));
+        Capture output;
+        Capture error;
+        try
+        {
+            await Task.WhenAll(stdout, stderr).WaitAsync(TimeSpan.FromSeconds(2));
+            output = await stdout;
+            error = await stderr;
+        }
+        catch (TimeoutException)
+        {
+            process.StandardOutput.Dispose();
+            process.StandardError.Dispose();
+            try { await Task.WhenAll(stdout, stderr).WaitAsync(TimeSpan.FromSeconds(2)); }
+            catch (Exception e) when (e is IOException or ObjectDisposedException or TimeoutException) { }
+            throw new QualificationException("owned output drain incomplete after session cleanup");
+        }
         if (output.Overflow || error.Overflow)
             throw new QualificationException("command output exceeded the bounded capture size");
-
         return new ProcessCommandResult(
-            command.Operation, timedOut ? 124 : process.ExitCode, process.Id, ancestry,
+            command.Operation, timedOut ? 124 : exitCode, targetId, ancestry,
             output.Text, error.Text, Sha256(output.Text), Sha256(error.Text), started.Elapsed, timedOut);
     }
 
@@ -103,20 +122,6 @@ public sealed class ProcessCommandRunner : IProcessCommandRunner
             overflow |= keep < read;
         }
         return new Capture(builder.ToString(), overflow);
-    }
-
-    private static void TryKill(Process process)
-    {
-        try
-        {
-            if (!process.HasExited) process.Kill(entireProcessTree: true);
-        }
-        catch (InvalidOperationException)
-        {
-        }
-        catch (Win32Exception)
-        {
-        }
     }
 
     private static string Sha256(string value) =>

@@ -30,20 +30,24 @@ public sealed class CommandPlanner(string manifestDirectory)
             ["TMPDIR"] = OwnedPaths.Directory(manifestDirectory, "tmp"),
             ["GIT_CONFIG_NOSYSTEM"] = "1",
             ["GIT_CONFIG_GLOBAL"] = "/dev/null",
-            ["GIT_TERMINAL_PROMPT"] = "0"
+            ["GIT_TERMINAL_PROMPT"] = "0",
+            ["GIT_NO_LAZY_FETCH"] = "1"
         };
         string[] argv;
         var deadline = TimeSpan.FromSeconds(30);
         var workingDirectory = OwnedPaths.Directory(manifestDirectory,
             operation.StartsWith("git-", StringComparison.Ordinal) ? manifest.Runtime.SourceDirectory : manifest.Runtime.WorkingDirectory);
 
+        if (operation.StartsWith("git-", StringComparison.Ordinal))
+            GitConfigurationGuard.Verify(workingDirectory);
+
         switch (operation)
         {
             case "git-source":
-                argv = ["git", "show", "-s", "--format=%H %T", "HEAD"];
+                argv = ["git", "--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "submodule.recurse=false", "show", "-s", "--format=%H %T", "HEAD"];
                 break;
             case "git-status":
-                argv = ["git", "status", "--porcelain=v1", "--untracked-files=all"];
+                argv = ["git", "--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "submodule.recurse=false", "status", "--ignore-submodules=all", "--porcelain=v1", "--untracked-files=all"];
                 break;
             case "codex-version":
                 argv = ["codex", "--version"];

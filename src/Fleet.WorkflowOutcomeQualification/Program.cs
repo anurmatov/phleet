@@ -17,6 +17,8 @@ static async Task<int> RunAsync(string[] args)
     {
         switch (args[0])
         {
+            case "__owned-command" when args.Length == 2:
+                return await OwnedCommandSession.RunAsync(args[1]);
             case "self-test":
                 return SelfTest.Run();
             case "validate":

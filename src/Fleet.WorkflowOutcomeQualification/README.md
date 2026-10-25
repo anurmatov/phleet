@@ -6,7 +6,9 @@ Application feature defaults are unchanged; no installation or deployment invoke
 The preserved candidate now builds with no external packages and includes:
 - strict target/config/policy/executable hashes, source HEAD/status, image revision/digest and server-version checks;
 - absolute command paths and a cleared, small child environment with owned HOME/cache/temp roots;
-- bounded concurrent output draining and owned-child termination on deadline or cancellation;
+- a reserved Linux session leader and bounded dual-pipe draining, terminating same-session descendants even after target exit, cancellation, deadline or output overflow;
+- allowlisted local Git configuration plus explicit fsmonitor/hooks/submodule/lazy-fetch guards;
+- hash-bound Docker config.json and named-context metadata checked against the exact pinned Unix endpoint before any source process or engine request;
 - an inference-only loopback Responses fixture, tested using the actual production prompt and strict turn parser;
 - named synthetic identity/denial/crash/reconciliation/emission/late-handoff assertion oracles.
 
@@ -34,3 +36,16 @@ Remaining source: connected shipped-daemon/native-CLI scenario collectors, authe
 API/broker/Temporal observations, immutable nested-target registry and exact-owned cleanup.
 Final-head independent review/manual scrub, green CI/current AC24 and separately authorized
 image/server/process/AC25 DB-keyring backup/restore qualification still block merge.
+
+The process runner uses an internal helper from this same compiled artifact, not an
+unlisted shell/setsid executable. Its separate status pipe is close-on-exec for the
+target. The leader remains alive until cleanup so target exit cannot lose session
+ownership. An unexpected leader exit refuses confirmed cleanup; non-Linux execution
+is unsupported. This is not containment of hostile children escaping the session,
+and it does not replace the still-missing immutable campaign cleanup registry.
+
+Docker context metadata must be present in configFiles under
+contexts/meta/<SHA256(context-name)>/meta.json beside config.json. Both files are
+hash-checked; currentContext, metadata Name and Docker Host must exactly match.
+Default/implicit contexts, unknown metadata/TLS material or mismatched endpoints
+refuse rather than falling back to ambient Docker configuration.

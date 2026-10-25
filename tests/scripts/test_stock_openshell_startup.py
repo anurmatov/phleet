@@ -27,9 +27,9 @@ class StockStartupTests(unittest.TestCase):
                              ["/app/Fleet.Agent.dll", "--validate-stock-enrollment"])
 
     def test_padded_true_actual_validator_refuses_before_entrypoint_continues(self):
-        # Requires the named Fleet.Agent build first; never substitutes a fake validator.
-        assembly = ROOT / "src/Fleet.Agent/bin/Debug/net10.0/Fleet.Agent.dll"
-        self.assertTrue(assembly.is_file(), "build Fleet.Agent before this source fixture")
+        # CI builds Release before Python discovery; never substitutes a fake validator.
+        assembly = ROOT / "src/Fleet.Agent/bin/Release/net10.0/Fleet.Agent.dll"
+        self.assertTrue(assembly.is_file(), "build Fleet.Agent with --configuration Release before this source fixture")
         guard = (ROOT / "entrypoint.sh").read_text().split("# Read provider", 1)[0]
         guard = guard.replace("/app/Fleet.Agent.dll", str(assembly))
         for value in ["true", " true", "true ", " true "]:

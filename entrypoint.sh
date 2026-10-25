@@ -1,7 +1,13 @@
 #!/bin/bash
 # Stock enrollment is opt-in. Refuse before credential copying, MCP/tool setup, dependency
 # probes or intake. Normal starts with no enrollment key retain their existing startup order.
-if ! dotnet /app/Fleet.Agent.dll --validate-stock-enrollment; then
+if ! STOCK_PROFILE=$(dotnet /app/Fleet.Agent.dll --validate-stock-enrollment); then
+    exit 1
+fi
+if [ "$STOCK_PROFILE" = stock ]; then
+    exec /app/stock-entrypoint.sh
+elif [ -n "$STOCK_PROFILE" ]; then
+    echo stock_enrollment_mode_invalid >&2
     exit 1
 fi
 

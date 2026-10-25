@@ -231,12 +231,13 @@ and the `harnessExtra` textarea. See `docs/providers/harness-defaults.md`.
 
 ## Stock OpenShell enrollment
 
-See `docs/openshell-stock.md`: the draft connects the stock authenticated HTTP hook
-and a dedicated memory identity/session/ACL receiver, but whole-agent startup and
-control/completion/native-workload integration remain incomplete. Keep provisioning
-unchanged and the active-enrollment guard held; do not infer readiness from guard tests.
-`StockOpenShell:Enabled`, `EnrollmentFile` and outside `AuthorityFile` are startup-only.
-The ordinary memory receiver stays unchanged without explicit dedicated-mode configuration.
+See `docs/openshell-stock.md`: the draft connects the stock authenticated HTTP hook,
+dedicated memory identity/session/ACL receiver, epoch-bound AMQP control/completion
+and a non-root Codex daemon/native-client profile. Source fixtures do not establish
+runtime acceptance: an authorized exact-build whole-agent E2E, review and CI remain required.
+`StockOpenShell:Enabled`, `EnrollmentFile`, `AuthorityFile` and `BrokerPasswordFile` are startup-only;
+the first two file aliases select one operator-owned public enrollment record on the workload.
+Default provisioning and the ordinary memory receiver remain unchanged without opt-in configuration.
 
 ## Project contexts
 

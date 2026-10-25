@@ -21,6 +21,9 @@ public sealed record StockEnrollmentAuthority
     public string AssertionPrivateKeyPath { get; init; } = "";
     public string AssertionPublicKeyPath { get; init; } = "";
     public string MemoryHost { get; init; } = "";
+    public string BrokerHost { get; init; } = "";
+    public string PolicySha256 { get; init; } = "";
+    public string StockCommit { get; init; } = "";
 
     public static byte[] ReadBounded(string path)
     {

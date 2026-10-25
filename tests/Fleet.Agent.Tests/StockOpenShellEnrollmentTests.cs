@@ -37,6 +37,18 @@ public sealed class StockOpenShellEnrollmentTests
         Assert.Empty(services);
     }
 
+    [Theory]
+    [InlineData("StockOpenShell:AuthorityFile")]
+    [InlineData("StockOpenShell:BrokerPasswordFile")]
+    public void BrokerInputsCannotBypassDisabledEnrollment(string key)
+    {
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { [key] = "/synthetic/file" }).Build();
+        var services = new ServiceCollection();
+        Assert.Equal("stock_enrollment_disabled_with_authority",
+            Assert.Throws<InvalidOperationException>(() => services.AddAgentCoreServices(configuration)).Message);
+        Assert.Empty(services);
+    }
+
     [Fact]
     public void MissingFile_RefusesBeforeCoreRegistration()
     {

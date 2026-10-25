@@ -45,7 +45,11 @@ public static class AgentHostRegistration
     public static IServiceCollection AddAgentCoreServices(
         this IServiceCollection services, IConfiguration configuration)
     {
-        StockOpenShellEnrollment.Validate(configuration);
+        if (StockOpenShellEnrollment.Validate(configuration) is { } stockBroker)
+        {
+            StockOpenShellEnrollment.RequirePrepared(configuration, stockBroker, Environment.GetEnvironmentVariable("HOME") ?? "");
+            services.AddSingleton(stockBroker);
+        }
 
         // Bind configuration sections
         services.Configure<AgentOptions>(configuration.GetSection(AgentOptions.Section));
@@ -397,7 +401,7 @@ public static class AgentHostRegistration
 
         // #394. With the journal off an agent declares nothing on the broker; it only removes a
         // receipt queue an earlier journal-on life left behind.
-        if (!JournalConfigured(configuration))
+        if (!JournalConfigured(configuration) && !configuration.GetValue<bool>("StockOpenShell:Enabled"))
             services.AddHostedService<ToolSendReceiptQueueCleanup>();
 
         return services;

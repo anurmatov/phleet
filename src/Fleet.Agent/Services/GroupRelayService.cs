@@ -3,6 +3,7 @@ using System.Text.Json;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
 using Fleet.Shared;
+using Fleet.Shared.Security;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
@@ -16,6 +17,7 @@ namespace Fleet.Agent.Services;
 /// </summary>
 public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
 {
+    private readonly StockBrokerIdentity? _stockBroker;
     private readonly AgentOptions _agentConfig;
     private readonly RabbitMqOptions _rabbitConfig;
     private readonly ILogger<GroupRelayService> _logger;
@@ -44,12 +46,14 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
     public GroupRelayService(
         IOptions<AgentOptions> agentConfig,
         IOptions<RabbitMqOptions> rabbitConfig,
-        ILogger<GroupRelayService> logger)
+        ILogger<GroupRelayService> logger, StockBrokerIdentity? stockBroker = null)
     {
+        _stockBroker = stockBroker;
         _agentConfig = agentConfig.Value;
         _rabbitConfig = rabbitConfig.Value;
         _logger = logger;
-        Connect = (factory, ct) => RabbitMqConnectionHelper.ConnectWithRetryAsync(factory, _logger, ct);
+        Connect = (factory, ct) => _stockBroker is null
+            ? RabbitMqConnectionHelper.ConnectWithRetryAsync(factory, _logger, ct) : factory.CreateConnectionAsync(ct);
     }
 
     public bool IsEnabled => _rabbitConfig.Host.Length > 0;
@@ -87,6 +91,7 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
 
     public async Task InitializeAsync(CancellationToken ct)
     {
+        if (_stockBroker is not null && !IsEnabled) throw new StockIdentityDenied("broker_target");
         if (!IsEnabled || _initialized)
             return;
 
@@ -102,10 +107,15 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
                 NetworkRecoveryInterval = TimeSpan.FromSeconds(5),
             };
 
+            _stockBroker?.Configure(factory);
+            if (_stockBroker is not null && _stockBroker.Agent != _agentConfig.ShortName)
+                throw new StockIdentityDenied("broker_agent_mismatch");
             _connection = await Connect(factory, ct);
             _connection.ConnectionShutdownAsync += (_, args) =>
             {
-                _logger.LogWarning("RabbitMQ connection lost (reason: {Reason}) — auto-recovery in progress", args.ReplyText);
+                if (_stockBroker is null)
+                    _logger.LogWarning("RabbitMQ connection lost (reason: {Reason}) — auto-recovery in progress", args.ReplyText);
+                else _logger.LogWarning("Stock broker connection lost; manual reconciliation required");
                 return Task.CompletedTask;
             };
 
@@ -134,7 +144,12 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             await _consumeChannel.QueueBindAsync(queueName, _rabbitConfig.Exchange, routingKey: shortName,
                 cancellationToken: ct);
 
-            if (!BindsTokenBroadcasts(_agentConfig))
+            if (_stockBroker is not null)
+            {
+                // A fresh epoch vhost has no legacy broadcast binding to remove.
+                // Only the single verified control queue is consumed in this mode.
+            }
+            else if (!BindsTokenBroadcasts(_agentConfig))
             {
                 // #340 D3, #386 §4.6: fleet.relay carries only OAuth token broadcasts, and a Claude
                 // local-model agent holds none. Never bound, not even transiently; a
@@ -162,6 +177,10 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             _logger.LogInformation(
                 "GroupRelayService initialized on exchange {Exchange}, queue {Queue}, routing key {RoutingKey}",
                 _rabbitConfig.Exchange, queueName, shortName);
+        }
+        catch (Exception) when (_stockBroker is not null)
+        {
+            throw new StockIdentityDenied("broker_startup_denied");
         }
         catch (Exception ex)
         {
@@ -214,11 +233,14 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
 
         try
         {
+            if (_stockBroker is not null && (targetAgent != "bridge" || type != RelayMessageType.BridgeResponse
+                || !Guid.TryParseExact(correlationId, "N", out _)))
+                throw new StockIdentityDenied("broker_route_denied");
             var routingKey = targetAgent.ToLowerInvariant();
             var message = new RelayMessage(chatId, _agentConfig.ShortName, text, DateTimeOffset.UtcNow, type, correlationId, taskId, workflowId, signalName);
             var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
 
-            var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
+            var props = _stockBroker?.Properties() ?? new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
             await _publishChannel.BasicPublishAsync(
                 _rabbitConfig.Exchange, routingKey: routingKey, mandatory: false, basicProperties: props, body: body);
 
@@ -226,6 +248,10 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
 
             _logger.LogInformation("Relay published to {Target} (type={Type}, chat={ChatId}, {Length} chars)",
                 targetAgent, type, chatId, text.Length);
+        }
+        catch (Exception) when (_stockBroker is not null)
+        {
+            _logger.LogWarning("Stock broker publication denied");
         }
         catch (Exception ex)
         {
@@ -237,20 +263,37 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
     {
         try
         {
+            if (_stockBroker is not null && ea.Body.Length > 262144) throw new StockIdentityDenied("broker_size");
             var json = Encoding.UTF8.GetString(ea.Body.Span);
             var message = JsonSerializer.Deserialize<RelayMessage>(json);
 
             if (message is null)
                 return Task.CompletedTask;
 
+            if (_stockBroker is not null)
+            {
+                _stockBroker.RequireDelivery(ea.BasicProperties.UserId, "control", ea.Exchange, _rabbitConfig.Exchange,
+                    ea.RoutingKey, _agentConfig.ShortName);
+                if (message.Type != RelayMessageType.BridgeRequest || !message.Sender.StartsWith("bridge:", StringComparison.Ordinal)
+                    || !Guid.TryParseExact(message.CorrelationId, "N", out _) || message.TaskId is not null
+                    || message.WorkflowId is not null || message.SignalName is not null)
+                    throw new StockIdentityDenied("broker_route_denied");
+            }
+
             // Skip messages from self
             if (message.Sender.Equals(_agentConfig.ShortName, StringComparison.OrdinalIgnoreCase))
                 return Task.CompletedTask;
 
-            _logger.LogInformation("Relay received from {Sender} (type={Type}, chat={ChatId}): {Text}",
-                message.Sender, message.Type, message.ChatId, TruncateForLog(message.Text));
+            if (_stockBroker is null)
+                _logger.LogInformation("Relay received from {Sender} (type={Type}, chat={ChatId}): {Text}",
+                    message.Sender, message.Type, message.ChatId, TruncateForLog(message.Text));
+            else _logger.LogInformation("Verified stock control delivery admitted");
 
             MessageReceived?.Invoke(message.ChatId, message.Sender, message.Text, message.Type, message.CorrelationId, message.TaskId, message.WorkflowId, message.SignalName);
+        }
+        catch (Exception) when (_stockBroker is not null)
+        {
+            _logger.LogWarning("Stock broker delivery denied");
         }
         catch (Exception ex)
         {
@@ -267,6 +310,7 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
     /// </summary>
     public async Task PublishAccessRequestAsync(AccessRequestPayload payload)
     {
+        if (_stockBroker is not null) return; // Not a verified route in this bounded enrollment.
         if (_publishChannel is null || !_initialized)
         {
             _logger.LogWarning("PublishAccessRequestAsync called before relay initialized — access request dropped");

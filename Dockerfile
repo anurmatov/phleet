@@ -5,7 +5,7 @@ RUN dotnet restore src/Fleet.Agent/Fleet.Agent.csproj
 COPY src/ src/
 RUN dotnet publish src/Fleet.Agent/Fleet.Agent.csproj -c Release -o /app
 
-FROM mcr.microsoft.com/dotnet/sdk:10.0
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS agent-runtime
 WORKDIR /app
 
 ARG CLAUDE_CODE_VERSION=2.1.280
@@ -97,5 +97,18 @@ RUN test -f /opt/fleet/acceptance_plan.py && python3 /opt/fleet/acceptance_plan.
 
 COPY gh-auth.sh /app/gh-auth.sh
 COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh /app/gh-auth.sh
+COPY stock-entrypoint.sh /app/stock-entrypoint.sh
+RUN chmod +x /app/entrypoint.sh /app/stock-entrypoint.sh /app/gh-auth.sh
+RUN bash -n /app/stock-entrypoint.sh
 ENTRYPOINT ["/app/entrypoint.sh"]
+
+# Explicit opt-in build target. The final default stage preserves legacy root startup.
+FROM agent-runtime AS stock-agent
+RUN groupadd --gid 10001 stockworker && \
+    useradd --uid 10001 --gid 10001 --create-home --home-dir /home/agent stockworker && \
+    chown 10001:10001 /workspace
+ENV HOME=/home/agent
+USER 10001:10001
+RUN test "$(id -u)" != 0 && test -w /home/agent && test -w /workspace
+
+FROM agent-runtime AS default

@@ -164,12 +164,7 @@ public sealed class OpenShellLaunchStore(OrchestratorDbContext db, TimeProvider?
                 x.GatewayId == launch.GatewayId && x.SandboxId == launch.SandboxId, ct))
             throw new OpenShellStateConflictException("The retirement tombstone is missing.");
         var lease = await db.OpenShellLeases.SingleOrDefaultAsync(x => x.AgentId == launch.AgentId, ct);
-        if (lease is not null)
-        {
-            await db.Entry(lease).ReloadAsync(ct);
-            if (lease.Owner != (retirementOwner ?? launchId))
-                throw new OpenShellStateConflictException("A different lifecycle owner holds the lease.");
-        }
+        await RequireCleanupLeaseAsync(launch, lease, retirementOwner, ct);
         if (launch.CapabilitySecretRef is not null)
         {
             var scope = launch.PreparationJson is null ? null : System.Text.Json.JsonSerializer.Deserialize<OpenShellPreparationScope>(launch.PreparationJson);
@@ -179,11 +174,38 @@ public sealed class OpenShellLaunchStore(OrchestratorDbContext db, TimeProvider?
             // Artifact I/O must not turn an older runtime proof into commit-time authority.
             await VerifyEvidenceAsync(reader, launch, cleanup: true, ct);
         }
+        // Artifact/evidence I/O must not turn a lease that lapsed or changed hands during it into
+        // commit-time authority either: re-read and recheck against the trusted clock immediately
+        // before the active slot is released.
+        lease = await db.OpenShellLeases.SingleOrDefaultAsync(x => x.AgentId == launch.AgentId, ct);
+        await RequireCleanupLeaseAsync(launch, lease, retirementOwner, ct);
         if (lease is not null) db.OpenShellLeases.Remove(lease);
         launch.ActiveAgentId = null;
         launch.Phase = "retired";
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
+    }
+
+    /// <summary>
+    /// Active-slot release (a still-cleanup_pending launch) requires exact matching LIVE lifecycle
+    /// ownership: a missing or expired lease is never proof that the cleanup finished. Freshness is
+    /// judged at the trusted clock at check time, so the caller's pre-I/O timestamp cannot authorize
+    /// the release. Already-retired idempotency keeps its lease-free path.
+    /// </summary>
+    private async Task RequireCleanupLeaseAsync(OpenShellLaunch launch, OpenShellLease? lease,
+        Guid? retirementOwner, CancellationToken ct)
+    {
+        var releasing = launch.Phase == "cleanup_pending";
+        if (lease is null)
+        {
+            if (releasing) throw new OpenShellStateConflictException("cleanup_lease_missing_before_slot_release");
+            return;
+        }
+        await db.Entry(lease).ReloadAsync(ct);
+        if (lease.Owner != (retirementOwner ?? launch.Id))
+            throw new OpenShellStateConflictException("A different lifecycle owner holds the lease.");
+        if (releasing && lease.ExpiresAt <= _clock.GetUtcNow().UtcDateTime)
+            throw new OpenShellStateConflictException("cleanup_lease_expired_before_slot_release");
     }
 
     public async Task RecordPreparationAttemptAsync(Guid id, bool create, CancellationToken ct = default)

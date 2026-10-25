@@ -370,6 +370,79 @@ public sealed class OpenShellLaunchStoreTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task CleanupPending_MissingLease_RefusesSlotRelease()
+    {
+        var launch = await Reserve();
+        await _store.RetireAsync(launch.Id, _now);
+        _db.ChangeTracker.Clear();
+        await _db.OpenShellLeases.ExecuteDeleteAsync();
+        var conflict = await Assert.ThrowsAsync<OpenShellStateConflictException>(() =>
+            _store.CompleteCleanupAsync(launch.Id, _now, new EvidenceReader(_now)));
+        Assert.Equal("cleanup_lease_missing_before_slot_release", conflict.Message);
+        var saved = await _db.OpenShellLaunches.AsNoTracking().SingleAsync();
+        Assert.Equal("cleanup_pending", saved.Phase);
+        Assert.Equal(_agent, saved.ActiveAgentId);
+    }
+
+    [Fact]
+    public async Task CleanupPending_ExpiredLease_RefusesSlotRelease()
+    {
+        var launch = await Reserve();
+        await _store.RetireAsync(launch.Id, _now);
+        var lease = await _db.OpenShellLeases.SingleAsync();
+        lease.ExpiresAt = _now.AddSeconds(-1);
+        await _db.SaveChangesAsync();
+        var conflict = await Assert.ThrowsAsync<OpenShellStateConflictException>(() =>
+            _store.CompleteCleanupAsync(launch.Id, _now, new EvidenceReader(_now)));
+        Assert.Equal("cleanup_lease_expired_before_slot_release", conflict.Message);
+        var saved = await _db.OpenShellLaunches.AsNoTracking().SingleAsync();
+        Assert.Equal("cleanup_pending", saved.Phase);
+        Assert.Equal(_agent, saved.ActiveAgentId);
+        Assert.Single(await _db.OpenShellLeases.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
+    public async Task Cleanup_LeaseExpiresDuringArtifactIo_RefusesSlotRelease()
+    {
+        var plan = OpenShellPolicyCompilerTests.Plan();
+        var selection = new OpenShellPreparationScope(_agent, "start", null, plan.Hash,
+            _now.AddSeconds(100), plan);
+        var clock = new MutableClock(_now);
+        await using var context = new OrchestratorDbContext(
+            new DbContextOptionsBuilder<OrchestratorDbContext>().UseSqlite(_connection).Options);
+        var store = new OpenShellLaunchStore(context, clock, new AdvancingCleanup(clock, TimeSpan.FromSeconds(200)));
+        var launch = await store.ReserveAsync(_agent, null, _now, TimeSpan.FromSeconds(90), preparation: selection);
+        await store.RecordPreparationAttemptAsync(launch.Id, create: false);
+        await store.ConfirmLegacyStoppedAsync(launch.Id, _now, new ClockEvidence(clock));
+        await store.RecordPreparationAttemptAsync(launch.Id, create: true);
+        await store.BindCreatedSandboxAsync(launch.Id, "gateway1", "sandbox1", _now);
+        await store.RetireAsync(launch.Id, _now);
+        // The lease is live at the first check; the artifact retirement I/O outlasts it, so the
+        // commit-time recheck must refuse instead of releasing the slot on a lapsed lease.
+        var conflict = await Assert.ThrowsAsync<OpenShellStateConflictException>(() =>
+            store.CompleteCleanupAsync(launch.Id, _now, new ClockEvidence(clock)));
+        Assert.Equal("cleanup_lease_expired_before_slot_release", conflict.Message);
+        var saved = await context.OpenShellLaunches.AsNoTracking().SingleAsync();
+        Assert.Equal("cleanup_pending", saved.Phase);
+        Assert.Equal(_agent, saved.ActiveAgentId);
+        Assert.Single(await context.OpenShellLeases.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
+    public async Task Cleanup_RetiredRowIsIdempotentWithoutAnyLease()
+    {
+        var launch = await Reserve();
+        await _store.BindCreatedSandboxAsync(launch.Id, "gateway1", "sandbox1", _now);
+        await _store.RetireAsync(launch.Id, _now);
+        await _store.CompleteCleanupAsync(launch.Id, _now, new EvidenceReader(_now));
+        await _store.CompleteCleanupAsync(launch.Id, _now, new EvidenceReader(_now));
+        var saved = await _db.OpenShellLaunches.AsNoTracking().SingleAsync();
+        Assert.Equal("retired", saved.Phase);
+        Assert.Null(saved.ActiveAgentId);
+        Assert.Empty(await _db.OpenShellLeases.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
     public async Task ReceiverHostConfigurationCannotBecomeAWorkloadEnvRef()
     {
         _db.AgentEnvRefs.Add(new() { AgentId = _agent, EnvKeyName = "FLEET_MEMORY_IDENTITY_CONNECTION_STRING" });
@@ -393,6 +466,30 @@ public sealed class OpenShellLaunchStoreTests : IAsyncLifetime
     private sealed class FixedClock(DateTime utc) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => new(utc);
+    }
+
+    private sealed class MutableClock(DateTime utc) : TimeProvider
+    {
+        public DateTime Utc { get; set; } = utc;
+        public override DateTimeOffset GetUtcNow() => new(Utc, TimeSpan.Zero);
+    }
+
+    private sealed class ClockEvidence(MutableClock clock) : IOpenShellRuntimeEvidenceReader
+    {
+        public Task<OpenShellRuntimeEvidence> ReadAsync(OpenShellRuntimeTarget target, CancellationToken ct) =>
+            Task.FromResult(new OpenShellRuntimeEvidence(target.LaunchId, target.IdentityEpoch,
+                target.GatewayId, target.RuntimeId, true, true, 0, 0, clock.GetUtcNow().UtcDateTime));
+    }
+
+    // Models artifact/evidence I/O that outlasts the lease: retirement itself succeeds but the
+    // trusted clock has moved past the expiry before the slot-release recheck.
+    private sealed class AdvancingCleanup(MutableClock clock, TimeSpan advance) : IOpenShellArtifactCleanup
+    {
+        public Task RetireAsync(OpenShellArtifactCleanupTarget target, CancellationToken ct)
+        {
+            clock.Utc += advance;
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class EvidenceReader(DateTime now, bool drained = true,

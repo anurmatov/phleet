@@ -143,8 +143,14 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
                 return Task.CompletedTask;
             }
 
-            if (_stockBroker is not null && heartbeat.AgentName != _stockBroker.Agent)
-                throw new StockIdentityDenied("broker_agent_mismatch");
+            if (_stockBroker is not null)
+            {
+                if (heartbeat.AgentName != _stockBroker.Agent)
+                    throw new StockIdentityDenied("broker_agent_mismatch");
+                // Authenticated telemetry is not authority to select a Docker or HTTP target.
+                if (heartbeat.ContainerName is not null || heartbeat.Endpoint is not null)
+                    throw new StockIdentityDenied("broker_runtime_selector");
+            }
             _logger.LogDebug("Heartbeat from {Agent} via key={RoutingKey}", heartbeat.AgentName, ea.RoutingKey);
             _registry.UpdateAgent(heartbeat);
         }

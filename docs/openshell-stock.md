@@ -171,6 +171,12 @@ The external broker MUST enforce [validated user-id](https://www.rabbitmq.com/do
 with distinct nonshared passwords, no impersonator users or trusted federation/shovel
 publisher into this vhost, and narrowly scoped configure/write/read permissions.
 No other broker or legacy receiver may be reachable under the stock role policy.
+Stock heartbeats carry no container name or HTTP endpoint; the receiver refuses
+those workload-supplied selectors. The outside enrollment selects the control
+identity, never heartbeat metadata. Legacy local Docker lifecycle, cancellation
+and log routes return 409 for that enrolled agent, even after revocation, rather
+than falling back to a stale database container or same-named host runtime.
+Other agents and default-off routing are unchanged; stock lifecycle remains manual.
 These are mandatory operator/E2E prerequisites, not properties established by a fake
 channel, an enrollment file or a client-selected `UserId`. The source rejects missing
 or foreign user-id and denies access-request, broadcast token, peer relay, workflow

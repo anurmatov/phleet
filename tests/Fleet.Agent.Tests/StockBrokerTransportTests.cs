@@ -183,6 +183,8 @@ public sealed class StockBrokerTransportTests
             await heartbeat.StartAsync(default);
             var args = fixture.Channel.ReceivedCalls().Single(c => c.GetMethodInfo().Name == "BasicPublishAsync").GetArguments();
             Assert.Equal("registration.agent1", args[1]);
+            using var body = JsonDocument.Parse(args.OfType<ReadOnlyMemory<byte>>().Single());
+            Assert.Equal(JsonValueKind.Null, body.RootElement.GetProperty("ContainerName").ValueKind);
             Assert.Equal(fixture.Binding.Principal("workload"), args.OfType<BasicProperties>().Single().UserId);
             Assert.Equal("60000", args.OfType<BasicProperties>().Single().Expiration);
         }

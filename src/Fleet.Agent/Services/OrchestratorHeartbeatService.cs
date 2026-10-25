@@ -194,7 +194,7 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
             CurrentTask: currentTask,
             CurrentTaskId: currentTaskId,
             Version: buildCommit,
-            ContainerName: containerName,
+            ContainerName: _stockBroker is null ? containerName : null,
             Role: _agentConfig.Role,
             Model: _agentConfig.Model,
             Projects: _agentConfig.Projects,

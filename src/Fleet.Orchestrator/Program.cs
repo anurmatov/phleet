@@ -196,6 +196,8 @@ if (!string.IsNullOrWhiteSpace(orchestratorAuthToken))
     });
 }
 
+app.UseStockLegacyRuntimeGuard(app.Configuration);
+
 // Config API auth — ORCHESTRATOR_CONFIG_TOKEN gates /api/config/* (all methods).
 // Separate from ORCHESTRATOR_AUTH_TOKEN so peers can read config without full admin access.
 // Fails CLOSED: if ORCHESTRATOR_CONFIG_TOKEN is not configured all /api/config/* requests

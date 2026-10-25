@@ -1,4 +1,8 @@
 using System.Text.Json;
+using System.Net;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
 using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Models;
 using Fleet.Orchestrator.Services;
@@ -39,6 +43,21 @@ public sealed class StockHeartbeatIdentityTests
         Assert.Empty(fixture.History.GetHistory("agent1"));
     }
 
+    [Theory]
+    [InlineData("foreign-container", null)]
+    [InlineData(null, "https://foreign.example.test")]
+    [InlineData("", "")]
+    public async Task ActualReceiver_RefusesRuntimeSelectors(string? container, string? endpoint)
+    {
+        using var fixture = new Fixture();
+        var props = new BasicProperties { UserId = fixture.Identity.Principal("workload") };
+        await fixture.Receiver.OnMessageReceived(this, new BasicDeliverEventArgs("owned", 1, false, "fleet.orchestrator", "registration.agent1", props,
+            JsonSerializer.SerializeToUtf8Bytes(new AgentHeartbeat("agent1", "idle", DateTimeOffset.UtcNow,
+                ContainerName: container, Endpoint: endpoint))));
+        Assert.Empty(fixture.Registry.GetAll());
+        Assert.Empty(fixture.History.GetHistory("agent1"));
+    }
+
     [Fact]
     public async Task ActualReceiver_AdmitsBoundRegistration_ThenRefusesRevocationWithoutDeletingState()
     {
@@ -53,6 +72,68 @@ public sealed class StockHeartbeatIdentityTests
         Assert.Equal("idle", fixture.Registry.Get("agent1")!.ReportedStatus);
     }
 
+    [Theory]
+    [InlineData("/api/agents/agent1/restart", "POST")]
+    [InlineData("/api/agents/agent1/start", "POST")]
+    [InlineData("/api/agents/agent1/stop", "POST")]
+    [InlineData("/api/agents/agent1/cancel", "POST")]
+    [InlineData("/api/agents/agent1/reprovision", "POST")]
+    [InlineData("/api/agents/agent1", "DELETE")]
+    [InlineData("/ws/logs/agent1", "GET")]
+    public async Task ActualReceiverAndRouting_NeverSelectLegacyRuntime(string path, string method)
+    {
+        using var fixture = new Fixture();
+        // Even a stale operator DB mapping must not become an automatic stock fallback.
+        fixture.Registry.PreloadFromDbConfig(new Fleet.Orchestrator.Data.Agent
+            { Name = "agent1", DisplayName = "Synthetic", Role = "synthetic", Model = "synthetic", ContainerName = "unrelated-container" });
+        var props = new BasicProperties { UserId = fixture.Identity.Principal("workload") };
+        await fixture.Receiver.OnMessageReceived(this, new BasicDeliverEventArgs("owned", 1, false, "fleet.orchestrator", "heartbeat.agent1", props,
+            JsonSerializer.SerializeToUtf8Bytes(new AgentHeartbeat("agent1", "idle", DateTimeOffset.UtcNow,
+                ContainerName: "foreign-container", Endpoint: "https://foreign.example.test"))));
+        Assert.Equal("offline", fixture.Registry.Get("agent1")!.ReportedStatus);
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        await using var app = builder.Build();
+        app.UseStockLegacyRuntimeGuard(fixture.Configuration);
+        var selected = new List<string>();
+        app.MapMethods(path, [method], () =>
+        {
+            selected.Add(fixture.Registry.Get("agent1")!.ContainerName!);
+            return "unexpected runtime action";
+        });
+        await app.StartAsync();
+        using var client = app.GetTestClient();
+        using var request = new HttpRequestMessage(new HttpMethod(method), path);
+        using var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Empty(selected);
+        // Revoking enrollment must not re-enable fallback to that legacy mapping.
+        fixture.Save(fixture.Record with { State = "revoked" });
+        using var afterRevoke = await client.SendAsync(new HttpRequestMessage(new HttpMethod(method), path));
+        Assert.Equal(HttpStatusCode.Conflict, afterRevoke.StatusCode);
+        Assert.Empty(selected);
+    }
+
+    [Theory]
+    [InlineData(false, "/api/agents/agent1/restart", "POST")]
+    [InlineData(true, "/api/agents/agent2/restart", "POST")]
+    [InlineData(true, "/api/agents/agent1/status", "GET")]
+    public async Task TrustedRouting_DefaultOffAndUnrelatedRoutesRemainUnchanged(bool enabled, string path, string method)
+    {
+        using var fixture = new Fixture();
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        await using var app = builder.Build();
+        app.UseStockLegacyRuntimeGuard(enabled ? fixture.Configuration : new ConfigurationBuilder().Build());
+        var calls = 0;
+        app.MapMethods(path, [method], () => { calls++; return "allowed"; });
+        await app.StartAsync();
+        using var client = app.GetTestClient();
+        using var response = await client.SendAsync(new HttpRequestMessage(new HttpMethod(method), path));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(1, calls);
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly string _directory = Path.Combine(Path.GetTempPath(), "stock-heartbeat-" + Guid.NewGuid().ToString("N"));
@@ -63,6 +144,7 @@ public sealed class StockHeartbeatIdentityTests
         public TaskHistoryStore History { get; } = new();
         public AgentRegistry Registry { get; }
         public HeartbeatConsumerService Receiver { get; }
+        public IConfiguration Configuration { get; }
         public Fixture()
         {
             Directory.CreateDirectory(_directory);
@@ -78,12 +160,12 @@ public sealed class StockHeartbeatIdentityTests
             Identity = new(Authority, Password, "workload");
             Registry = new(History, NullLogger<AgentRegistry>.Instance);
             var options = Options.Create(new RabbitMqOptions { Host = "broker.example.test", Exchange = "fleet.orchestrator" });
-            var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            Configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["StockOpenShell:AuthorityFile"] = Authority, ["StockOpenShell:BrokerPasswordFile"] = Password
             }).Build();
             Receiver = new(options, Registry, new AgentConfigPublisherService(options, NullLogger<AgentConfigPublisherService>.Instance),
-                configuration, NullLogger<HeartbeatConsumerService>.Instance);
+                Configuration, NullLogger<HeartbeatConsumerService>.Instance);
         }
         public void Save(StockEnrollmentAuthority record) => File.WriteAllText(Authority, JsonSerializer.Serialize(record));
         public void Dispose() => Directory.Delete(_directory, true);

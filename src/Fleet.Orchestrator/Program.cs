@@ -127,6 +127,7 @@ builder.Services
     .WithToolsFromAssembly();
 
 builder.AddOpenShellBootstrapReceiver();
+builder.AddOpenShellPreparationPreflight();
 var app = builder.Build();
 app.UseOpenShellBootstrapReceiver();
 

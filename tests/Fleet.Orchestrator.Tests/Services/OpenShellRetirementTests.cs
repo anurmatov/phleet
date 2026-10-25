@@ -576,6 +576,122 @@ public class OpenShellRetirementTests
     }
 
     [Theory]
+    [InlineData("gateway", false)]
+    [InlineData("gateway", true)]
+    [InlineData("workspace", false)]
+    [InlineData("workspace", true)]
+    [InlineData("id", false)]
+    [InlineData("id", true)]
+    public async Task PreparationRecovery_DriftedRefresh_RefusesBeforeProofIntentOrDelete(string drift, bool replay)
+    {
+        var launchId = Guid.NewGuid();
+        await using var h = ProvisioningHarness.Create();
+        var stopIntent = await SeedPreparationStopPendingAsync(h, launchId);
+        var binding = new OpenShellRetirementService.Intent(stopIntent.RequestId, "gateway1", "workspace1",
+            "sandbox1", "name1", 12).Target();
+        var wire = new DriftGateway(drift switch
+        {
+            "id" => binding with { Id = "replacement1" },
+            "gateway" => binding with { GatewayId = "gateway2" },
+            _ => binding with { Workspace = "workspace2" },
+        });
+        using var peers = new ServiceCollection().AddSingleton<IOpenShellGatewayClient>(wire)
+            .AddSingleton<IOpenShellRuntimeEvidenceReader>(new Evidence()).BuildServiceProvider();
+        var service = new OpenShellRetirementService(() => Db(h), peers.GetRequiredService<IServiceScopeFactory>());
+        var result = await service.ReconcilePreparationAsync("agent1", launchId, replay);
+        Assert.False(result.Success);
+        Assert.Equal(409, result.StatusCode);
+        Assert.Equal(replay ? 1 : 0, wire.Stops); // replay sends only the original persisted identity
+        if (replay) Assert.Equal(stopIntent.RequestId, wire.LastStopRequestId);
+        Assert.Equal(0, wire.Deletes); // a replacement under the old ID earns no Delete
+        await using var db = Db(h);
+        var row = await db.OpenShellLaunches.SingleAsync();
+        Assert.Equal("cleanup_pending", row.Phase);
+        Assert.Equal(stopIntent.RequestId,
+            System.Text.Json.JsonSerializer.Deserialize<OpenShellRetirementService.Intent>(row.StopIntentJson!)!.RequestId);
+        Assert.Null(row.DeleteIntentJson); // no replacement intent recorded
+        Assert.Equal(1, row.ActiveAgentId);
+        Assert.Equal("pending", (await db.Agents.AsNoTracking().SingleAsync()).OpenShellMigrationState);
+        Assert.Single(await db.OpenShellLeases.ToListAsync());
+    }
+
+    [Fact]
+    public async Task PreparationReconcileRoute_DriftedRefresh_AnswersConflictWithUnchangedIntentsAndZeroDeletes()
+    {
+        var launchId = Guid.NewGuid();
+        await using var h = ProvisioningHarness.Create();
+        await SeedPreparationStopPendingAsync(h, launchId);
+        var wire = new DriftGateway(new OpenShellRetirementService.Intent(Guid.NewGuid(), "gateway2",
+            "workspace1", "sandbox1", "name1", 12).Target());
+        using var peers = new ServiceCollection().AddSingleton<IOpenShellGatewayClient>(wire)
+            .AddSingleton<IOpenShellRuntimeEvidenceReader>(new Evidence()).BuildServiceProvider();
+        var service = new OpenShellRetirementService(() => Db(h), peers.GetRequiredService<IServiceScopeFactory>());
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer(); builder.Logging.ClearProviders();
+        builder.Services.AddSingleton(service);
+        await using var app = builder.Build();
+        app.UseOpenShellOperatorAuthorization("synthetic-operator");
+        app.MapOpenShellReconciliationEndpoint();
+        await app.StartAsync();
+        using var http = app.GetTestClient();
+        http.DefaultRequestHeaders.Authorization = new("Bearer", "synthetic-operator");
+        var response = await http.PostAsJsonAsync("/api/agents/agent1/openshell/reconcile-preparation",
+            new OpenShellPreparationReconciliationRequest(launchId, Replay: true));
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(0, wire.Deletes);
+        await using var db = Db(h);
+        var row = await db.OpenShellLaunches.SingleAsync();
+        Assert.Null(row.DeleteIntentJson);
+        Assert.NotNull(row.StopIntentJson); // unchanged original
+        Assert.Equal("cleanup_pending", row.Phase);
+    }
+
+    private static async Task<OpenShellRetirementService.Intent> SeedPreparationStopPendingAsync(
+        ProvisioningHarness h, Guid launchId)
+    {
+        var stopIntent = new OpenShellRetirementService.Intent(Guid.NewGuid(), "gateway1", "workspace1",
+            "sandbox1", "name1", 12);
+        await h.SeedAsync(db =>
+        {
+            var agent = new Agent { Name = "agent1", DisplayName = "Agent 1", Role = "test", Model = "test",
+                ContainerName = "held", OpenShellMigrationState = "pending" };
+            db.Agents.Add(agent);
+            db.OpenShellLaunches.Add(new() { Id = launchId, Agent = agent, ActiveAgentId = 1,
+                GatewayId = "gateway1", SandboxId = "sandbox1", Workspace = "workspace1",
+                Phase = "cleanup_pending", RevokedAt = DateTime.UtcNow, IdentityEpoch = Guid.NewGuid(),
+                CreatedAt = DateTime.UtcNow.AddSeconds(-30),
+                StopIntentJson = System.Text.Json.JsonSerializer.Serialize(stopIntent) });
+            db.OpenShellRetiredIds.Add(new() { GatewayId = "gateway1", SandboxId = "sandbox1", RetiredAt = DateTime.UtcNow });
+        });
+        await h.SeedAsync(db => db.OpenShellLeases.Add(new() { AgentId = 1, Owner = launchId, ExpiresAt = DateTime.UtcNow.AddSeconds(-1) }));
+        return stopIntent;
+    }
+
+    private sealed class DriftGateway(OpenShellSandboxSnapshot observed) : IOpenShellGatewayClient
+    {
+        public int Stops, Deletes;
+        public Guid? LastStopRequestId;
+        public Task VerifyBootstrapInputsAsync(OpenShellLaunchPlan plan, CancellationToken ct) => throw new NotSupportedException();
+        public Task<OpenShellSandboxSnapshot> CreateAsync(OpenShellLaunchPlan plan, Guid launchId, Guid epoch, Guid requestId, DateTime bootstrapDeadline, CancellationToken ct)
+            => throw new NotSupportedException("recovery never creates");
+        public Task<OpenShellSupervisorProof> ReadCurrentSupervisorAsync(OpenShellSandboxSnapshot target, string provider, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<IReadOnlyList<OpenShellSandboxSnapshot>> InventoryAsync(CancellationToken ct) => throw new NotSupportedException();
+        public Task<OpenShellSandboxSnapshot?> ReadExactAsync(string id, CancellationToken ct) => Task.FromResult<OpenShellSandboxSnapshot?>(observed);
+        public Task<OpenShellSandboxSnapshot> StopExactAsync(OpenShellSandboxSnapshot target, Guid requestId, CancellationToken ct)
+        {
+            Stops++; LastStopRequestId = requestId;
+            Assert.Equal("sandbox1", target.Id); // replay is always the persisted conditional target
+            return Task.FromResult(target);
+        }
+        public Task<OpenShellDeleteAcknowledgement> DeleteExactAsync(OpenShellSandboxSnapshot target, Guid requestId, bool allowMissing, CancellationToken ct)
+        {
+            Deletes++;
+            return Task.FromResult(new OpenShellDeleteAcknowledgement(target.Id, Openshell.V1.DeletionOutcome.Completed));
+        }
+    }
+
+    [Theory]
     [InlineData("", "synthetic-operator", 503)]
     [InlineData("synthetic-operator", "wrong", 401)]
     [InlineData("synthetic-operator", "synthetic-operator", 503)]

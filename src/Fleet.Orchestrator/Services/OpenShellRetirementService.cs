@@ -188,6 +188,12 @@ public sealed class OpenShellRetirementService(Func<OrchestratorDbContext> creat
                 if (replay) await gateway.StopExactAsync(stop.Target(), stop.RequestId, ct);
                 var observed = await gateway.ReadExactAsync(row.SandboxId!, ct)
                     ?? throw new OpenShellStateConflictException("preparation_recovery_runtime_missing");
+                // A refreshed observation only describes the launch if its gateway, workspace and
+                // ID still equal the persisted values: drift means a replacement under the old ID,
+                // which earns no proof, no intent record and no mutation. Checked before all three.
+                if (observed.GatewayId != row.GatewayId || observed.Workspace != row.Workspace
+                    || observed.Id != row.SandboxId)
+                    throw new OpenShellStateConflictException("preparation_recovery_runtime_drift");
                 await ProvePreparationStoppedAsync(reader, row, observed, ct);
                 var deletion = new Intent(Guid.NewGuid(), observed.GatewayId, observed.Workspace, observed.Id,
                     observed.Name, observed.ResourceVersion);

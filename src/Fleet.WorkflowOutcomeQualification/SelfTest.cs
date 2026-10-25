@@ -42,6 +42,12 @@ public static class SelfTest
         Test("missing_nested_registry_refuses_before_process", MissingNestedRegistryRefuses);
         foreach (var fault in new[] { "unknown", "missing-role", "duplicate-id", "nonce", "symlink", "hash" })
             Test("nested_registry_refuses_before_io_" + fault, () => NestedRegistryRefusesBeforeIo(fault));
+        foreach (var fault in new[] { "valid", "acked", "batch", "generation", "nonce", "items", "delivered", "acked-item",
+            "time", "hash", "duplicate", "oversize", "401", "403", "404", "409", "503", "redirect", "cancel",
+            "malformed", "unknown", "missing", "transport", "ack-time", "bad-receipt-hash", "content-type" })
+            Test("actual_api_receipt_collector_" + fault, () => ApiReceiptCollector(fault));
+        foreach (var fault in new[] { "valid", "approval", "operation", "token-hash", "token-mode", "unlisted-token", "foreign-reader", "post-read-drift" })
+            Test("connected_receipt_read_" + fault, () => ConnectedReceiptRead(fault));
         Test("changed_file_refuses_before_process_or_network", ChangedFileRefusesBeforeIo);
         Test("symlinked_custody_refuses_before_process_or_network", SymlinkRefusesBeforeIo);
         Test("manifest_accepts_only_the_explicit_target", ManifestParsesExplicitTarget);
@@ -337,6 +343,132 @@ public static class SelfTest
             return;
         }
         throw new InvalidOperationException("target mismatch accepted: " + fault);
+    }
+
+    private static void ConnectedReceiptRead(string fault)
+    {
+        using var directory = new TemporaryDirectory();
+        var path = WriteManifest(directory.Path);
+        var tokenPath = Path.Combine(directory.Path,"receipt-token");
+        File.WriteAllText(tokenPath,"synthetic-token-sentinel");
+        File.SetUnixFileMode(tokenPath,UnixFileMode.UserRead|UnixFileMode.UserWrite);
+        var root = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
+        root["configFiles"]!.AsArray().Add(new System.Text.Json.Nodes.JsonObject {
+            ["path"]="receipt-token", ["sha256"]=Sha256(tokenPath)
+        });
+        if (fault!="operation") root["allowedOperations"]!.AsArray().Add("receipt-read");
+        File.WriteAllText(path,root.ToJsonString());
+        var manifest = QualificationManifestParser.Parse(File.ReadAllText(path));
+        var item = new WorkflowOutcomeItemRef(manifest.Runtime.ScenarioItemId,manifest.Runtime.ScenarioVersion);
+        var receipt = new WorkflowOutcomeReceipt(manifest.Runtime.ScenarioBatchId,manifest.Runtime.ScenarioGeneration,
+            manifest.Runtime.ScenarioNonce,WorkflowOutcomeHashes.ItemVersionsHash([item]),[item],[item],[],
+            new string('a',64),DateTimeOffset.Parse("2026-01-01T00:00:00Z",CultureInfo.InvariantCulture),null);
+        var calls = 0;
+        using var http = new HttpClient(new StaticHandler(request => {
+            calls++;
+            if (request.Method != HttpMethod.Get) throw new InvalidOperationException("collector mutated API");
+            if (fault == "post-read-drift") File.AppendAllText(Path.Combine(directory.Path,"agent.json"),"changed");
+            return new HttpResponseMessage(HttpStatusCode.OK) {
+                Content=new StringContent(JsonSerializer.Serialize(receipt,new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+                    Encoding.UTF8,"application/json")
+            };
+        }));
+        var factoryCalls = 0;
+        var runner = new FakeRunner(manifest);
+        var driver = new ProcessQualificationDriver(path,runner,new FakeDocker(manifest),new FakeTemporal(),
+            receiptFactory:(origin,token) => {
+                factoryCalls++;
+                return fault=="foreign-reader" ? new ForeignReceiptReader() : new ProcessReceiptClient(origin,token,http);
+            });
+        if (fault=="token-hash") File.AppendAllText(tokenPath,"changed");
+        if (fault=="token-mode") File.SetUnixFileMode(tokenPath,UnixFileMode.UserRead|UnixFileMode.GroupRead);
+        try
+        {
+            var readback = driver.ReadReceiptAsync(fault=="approval" ? "foreign" : manifest.Target.ApprovalRef,
+                fault=="unlisted-token" ? "unlisted" : "receipt-token").GetAwaiter().GetResult();
+            if (fault!="valid" || !readback.Receipt.Delivered || readback.Target.NestedContainerIds.Count!=3)
+                throw new InvalidOperationException("unbound receipt observation returned");
+        }
+        catch (QualificationException) { if (fault=="valid") throw; }
+        if (calls != (fault is "valid" or "post-read-drift" ? 1 : 0))
+            throw new InvalidOperationException("receipt request escaped preflight or retried");
+        if (fault is "approval" or "operation" or "token-hash" or "token-mode" or "unlisted-token" && factoryCalls != 0)
+            throw new InvalidOperationException("token/client construction escaped guard");
+    }
+
+    private sealed class ForeignReceiptReader : IProcessReceiptReader
+    {
+        public string Origin => "https://foreign.example";
+        public Task<ProcessReceiptObservation> ReadAsync(RuntimeTarget target,CancellationToken ct=default) =>
+            throw new InvalidOperationException("foreign receipt reader invoked");
+        public void Dispose() { }
+    }
+
+    private static void ApiReceiptCollector(string fault)
+    {
+        using var directory = new TemporaryDirectory();
+        var path = WriteManifest(directory.Path);
+        var manifest = QualificationManifestParser.Parse(File.ReadAllText(path));
+        var runtime = manifest.Runtime;
+        var item = new WorkflowOutcomeItemRef(runtime.ScenarioItemId, runtime.ScenarioVersion);
+        var at = DateTimeOffset.Parse("2026-01-01T00:00:00Z", CultureInfo.InvariantCulture);
+        var receipt = new WorkflowOutcomeReceipt(runtime.ScenarioBatchId, runtime.ScenarioGeneration,
+            runtime.ScenarioNonce, WorkflowOutcomeHashes.ItemVersionsHash([item]), [item], [item],
+            fault == "acked" ? [item] : [], new string('a',64), at, fault == "acked" ? at : null);
+        var node = System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(receipt,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web)))!;
+        switch (fault)
+        {
+            case "batch": node["batchId"] = Guid.NewGuid().ToString(); break;
+            case "generation": node["generation"] = runtime.ScenarioGeneration + 1; break;
+            case "nonce": node["nonce"] = "foreign"; break;
+            case "items": node["items"]!.AsArray().Add(node["items"]![0]!.DeepClone()); break;
+            case "delivered": node["deliveredVersions"] = new System.Text.Json.Nodes.JsonArray(); break;
+            case "acked-item": node["ackedVersions"] = System.Text.Json.Nodes.JsonNode.Parse(
+                "[{\"id\":\"11111111-1111-4111-8111-111111111111\",\"version\":1}]"); break;
+            case "time": node["deliveredAt"] = null; break;
+            case "hash": node["itemVersionsHash"] = new string('0',64); break;
+            case "ack-time": node["acknowledgedAt"] = at; break;
+            case "bad-receipt-hash": node["receiptHash"] = "invalid"; break;
+            case "unknown": node["foreign"] = "synthetic"; break;
+            case "missing": node.AsObject().Remove("deliveredAt"); break;
+        }
+        var calls = 0;
+        const string token = "synthetic-token-sentinel";
+        using var http = new HttpClient(new StaticHandler(request => {
+            calls++;
+            if (request.Method != HttpMethod.Get
+                || request.RequestUri!.PathAndQuery != "/api/workflow-outcomes/batches/" + runtime.ScenarioBatchId.ToString("D")
+                    + "/receipt?nonce=" + Uri.EscapeDataString(runtime.ScenarioNonce)
+                || request.Headers.Authorization?.ToString() != "Bearer " + token)
+                throw new InvalidOperationException("receipt method/scope/header changed");
+            if (fault == "transport") throw new HttpRequestException("synthetic-token-sentinel");
+            var body = fault == "malformed" ? "not JSON" : node.ToJsonString();
+            if (fault == "duplicate") body = body.Insert(1, "\"batchId\":\""+runtime.ScenarioBatchId.ToString("D")+"\",");
+            if (fault == "oversize") body = new string('x',131073);
+            var status = int.TryParse(fault,out var code) ? code : fault == "redirect" ? 302 : 200;
+            return new HttpResponseMessage((HttpStatusCode)status) {
+                Content = new StringContent(body,Encoding.UTF8,fault=="content-type" ? "text/plain" : "application/json")
+            };
+        })) { BaseAddress = new Uri(runtime.OrchestratorBaseUrl) };
+        using var client = new ProcessReceiptClient(runtime.OrchestratorBaseUrl, token, http);
+        using var cancel = new CancellationTokenSource();
+        if (fault == "cancel") cancel.Cancel();
+        try
+        {
+            var observed = client.ReadAsync(runtime,cancel.Token).GetAwaiter().GetResult();
+            if (fault is not ("valid" or "acked")) throw new InvalidOperationException("invalid receipt accepted");
+            if (observed.BatchId != runtime.ScenarioBatchId || observed.Acknowledged != (fault == "acked"))
+                throw new InvalidOperationException("readback identity/state lost");
+            if (JsonSerializer.Serialize(observed).Contains(token,StringComparison.Ordinal))
+                throw new InvalidOperationException("token leaked");
+        }
+        catch (Exception e) when (e is QualificationException or OperationCanceledException)
+        {
+            if (fault is "valid" or "acked") throw;
+            if (e.Message.Contains(token,StringComparison.Ordinal)) throw new InvalidOperationException("token leaked in error");
+        }
+        if (calls != (fault=="cancel" ? 0 : 1)) throw new InvalidOperationException("receipt read retried or ignored cancellation");
     }
 
     private static void NestedTargetRefuses(string fault)
@@ -1237,7 +1369,7 @@ public static class SelfTest
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var response = respond(request);
-            if (response.Content is ByteArrayContent bytes)
+            if (response.Content is ByteArrayContent bytes && bytes.Headers.ContentType is null)
                 response.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/grpc");
             response.TrailingHeaders.TryAddWithoutValidation("grpc-status", "0");
             return Task.FromResult(response);

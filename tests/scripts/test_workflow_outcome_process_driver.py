@@ -48,11 +48,11 @@ class ProcessQualificationDriverTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         summary = json.loads(result.stdout.strip().splitlines()[-1])
         self.assertEqual(summary['kind'], 'workflow-outcome-process-self-test')
-        self.assertEqual(summary['total'], 88)
-        self.assertEqual(summary['passed'], 88)
+        self.assertEqual(summary['total'], 122)
+        self.assertEqual(summary['passed'], 122)
         self.assertEqual(summary['failed'], 0)
         self.assertEqual(summary['skipped'], 0)
-        self.assertEqual(sum(line.startswith('PASS ') for line in result.stdout.splitlines()), 88)
+        self.assertEqual(sum(line.startswith('PASS ') for line in result.stdout.splitlines()), 122)
 
     def test_actual_configuration_provider_refuses_alias_ambiguity(self):
         project = REPO / 'tests/Fleet.WorkflowOutcomeQualification.SourceTests'

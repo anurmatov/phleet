@@ -97,3 +97,20 @@ precondition.
 Campaign mutation planning and RunAsync remain BLOCKED until connected collectors,
 full resource-generation custody and exact-owned campaign cleanup are implemented
 and separately qualified.
+
+The connected `read-receipt` command is a separate live read, not campaign execution.
+It requires the exact approvalRef, an explicit `receipt-read` allowed operation and
+an owner-private, hash-pinned token file from configFiles; it has no ambient token
+or endpoint fallback.
+After target validation it performs exactly one GET of the existing coordinator
+receipt route for the exact batch/nonce/generation/item/version, then validates
+the target again before returning selected state and a response digest.
+Non-200/redirect, malformed/duplicate/oversized JSON, foreign membership, conflicting
+delivery/ack state, cancellation or changed custody refuses without POST or retry.
+Only owned HTTP-handler/process/metadata stand-ins are used by the source tests.
+
+This readback is not proof of the daemon/native CLI/shell path, local fsync,
+broker confirmation, effective server configuration, actual worker build ID or
+database/keyring restore.
+No campaign PASS is generated; RunAsync and all mutation planning remain BLOCKED
+until the full collectors, resource registry and exact-owned cleanup are complete.

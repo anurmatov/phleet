@@ -44,7 +44,7 @@ public static class QualificationManifestParser
         ], StringComparer.Ordinal);
 
     public static readonly IReadOnlySet<string> AllowedOperationNames =
-        new HashSet<string>(RequiredOperations.Concat(["crash-coordinator", "restart-coordinator"]), StringComparer.Ordinal);
+        new HashSet<string>(RequiredOperations.Concat(["crash-coordinator", "restart-coordinator", "receipt-read"]), StringComparer.Ordinal);
 
     public static readonly IReadOnlyList<string> BaseScenarios =
     [

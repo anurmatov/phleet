@@ -23,6 +23,8 @@ static async Task<int> RunAsync(string[] args)
                 return SelfTest.Run();
             case "validate":
                 return await ValidateAsync(ParseArguments(args[1..], ["manifest"]));
+            case "read-receipt":
+                return await ReadReceiptAsync(ParseArguments(args[1..], ["manifest","approval","token-file"]));
             case "fixture":
                 return await RunFixtureAsync(ParseArguments(args[1..], ["manifest", "mode", "nonce"]));
             case "run":
@@ -105,6 +107,18 @@ static async Task<int> ValidateAsync(Dictionary<string, string> args)
     return 0;
 }
 
+static async Task<int> ReadReceiptAsync(Dictionary<string,string> args)
+{
+    var path = Required(args,"manifest");
+    var manifest = ReadManifest(path,out var hash);
+    using var docker = new DockerEngineClient(manifest.Docker);
+    using var temporal = new TemporalMetadataClient(manifest.Temporal);
+    var driver = new ProcessQualificationDriver(path,new ProcessCommandRunner(),docker,temporal,hash);
+    var readback = await driver.ReadReceiptAsync(Required(args,"approval"),Required(args,"token-file"));
+    Console.WriteLine(JsonSerializer.Serialize(readback,new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+    return 0;
+}
+
 static async Task<int> RunFixtureAsync(Dictionary<string, string> args)
 {
     var path = Required(args, "manifest");
@@ -161,6 +175,7 @@ static void Usage()
         Usage:
           Fleet.WorkflowOutcomeQualification self-test
           Fleet.WorkflowOutcomeQualification validate --manifest <file>
+          Fleet.WorkflowOutcomeQualification read-receipt --manifest <file> --approval <https-url> --token-file <pinned-relative-file>
           Fleet.WorkflowOutcomeQualification fixture --manifest <file> [--mode turn|shell-probe] [--nonce <value>]
           Fleet.WorkflowOutcomeQualification run --manifest <file> --approval <https-url> --observations <file> [--results-dir <dir>]
         """);

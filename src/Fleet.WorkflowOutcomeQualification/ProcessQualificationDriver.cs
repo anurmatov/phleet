@@ -29,6 +29,8 @@ public sealed record ProcessQualificationReceipt(
     int Blocked,
     int Unrun);
 
+public sealed record ProcessReceiptReadback(ProcessQualificationPlan Target, ProcessReceiptObservation Receipt);
+
 public sealed class ProcessQualificationDriver
 {
     public const string ReceiptKind = "workflow-outcomes-process-qualification-receipt";
@@ -39,13 +41,15 @@ public sealed class ProcessQualificationDriver
     private readonly IProcessCommandRunner _runner;
     private readonly IDockerEngineReader _docker;
     private readonly ITemporalMetadataReader _temporal;
+    private readonly Func<string, string, IProcessReceiptReader> _receiptFactory;
 
     public ProcessQualificationDriver(
         string manifestPath,
         IProcessCommandRunner runner,
         IDockerEngineReader docker,
         ITemporalMetadataReader temporal,
-        string? expectedManifestSha256 = null)
+        string? expectedManifestSha256 = null,
+        Func<string, string, IProcessReceiptReader>? receiptFactory = null)
     {
         if (string.IsNullOrWhiteSpace(manifestPath) || !File.Exists(manifestPath))
             throw new QualificationException("manifest file does not exist");
@@ -60,6 +64,7 @@ public sealed class ProcessQualificationDriver
         _runner = runner;
         _docker = docker;
         _temporal = temporal;
+        _receiptFactory = receiptFactory ?? ((origin, token) => new ProcessReceiptClient(origin,token));
     }
 
     public async Task<ProcessQualificationPlan> ValidateAsync(CancellationToken ct = default)
@@ -132,6 +137,67 @@ public sealed class ProcessQualificationDriver
             manifestHash, manifest.Target.SourceCommit, manifest.Target.SourceTree,
             engine.EngineId, temporal.ServerVersion, imageIds, files, nestedIds);
     }
+
+    /// <summary>
+    /// Read-only API collector, not a campaign result. The endpoint and exact scenario are bound
+    /// to the unchanged target before and after GET; it never posts delivery/ack/decision.
+    /// </summary>
+    public async Task<ProcessReceiptReadback> ReadReceiptAsync(
+        string approval, string tokenFile, CancellationToken ct = default)
+    {
+        var manifest = await ParseManifestAsync(ct);
+        if (approval != manifest.Target.ApprovalRef)
+            throw new QualificationException("receipt approval does not match the target");
+        if (!manifest.AllowedOperations.Contains("receipt-read"))
+            throw new QualificationException("receipt-read is not in allowedOperations");
+        if (!OperatingSystem.IsLinux()) throw new QualificationBlockedException("Linux receipt custody is required");
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(manifest.MaxDurationSeconds));
+        ct = deadline.Token;
+        var pins = manifest.ConfigFiles.Where(p => p.Path == tokenFile).ToArray();
+        if (pins.Length != 1) throw new QualificationException("receipt token must be an exact hash-pinned config file");
+        var before = await ValidateAsync(ct);
+        var directory = Path.GetDirectoryName(_manifestPath)!;
+        var path = OwnedPaths.File(directory,tokenFile,pins[0].Sha256);
+        if (new FileInfo(path).Length is < 1 or > 4096) throw new QualificationException("receipt token file exceeds limit");
+        if (OperatingSystem.IsLinux())
+        {
+            var mode = File.GetUnixFileMode(path);
+            if ((mode & (UnixFileMode.GroupRead|UnixFileMode.GroupWrite|UnixFileMode.GroupExecute
+                |UnixFileMode.OtherRead|UnixFileMode.OtherWrite|UnixFileMode.OtherExecute|UnixFileMode.UserExecute)) != 0
+                || (mode & UnixFileMode.UserRead) == 0)
+                throw new QualificationException("receipt token file must be owner-readable and private");
+        }
+        await using var tokenStream = File.OpenRead(path);
+        using var tokenBytes = new MemoryStream();
+        var chunk = new byte[1024];
+        int read;
+        while ((read = await tokenStream.ReadAsync(chunk,ct)) != 0)
+        {
+            if (tokenBytes.Length + read > 4096) throw new QualificationException("receipt token file exceeds limit");
+            tokenBytes.Write(chunk,0,read);
+        }
+        var bytes = tokenBytes.ToArray();
+        if (Convert.ToHexStringLower(SHA256.HashData(bytes)) != pins[0].Sha256)
+            throw new QualificationException("receipt token changed before read");
+        var token = System.Text.Encoding.UTF8.GetString(bytes).TrimEnd((char)13,(char)10);
+        using var reader = _receiptFactory(manifest.Runtime.OrchestratorBaseUrl,token);
+        if (reader.Origin != new Uri(manifest.Runtime.OrchestratorBaseUrl).GetLeftPart(UriPartial.Authority))
+            throw new QualificationException("receipt reader origin differs from target");
+        var receipt = await reader.ReadAsync(manifest.Runtime,ct);
+        var after = await ValidateAsync(ct);
+        if (before.ManifestSha256 != after.ManifestSha256 || before.DockerEngineId != after.DockerEngineId
+            || before.SourceCommit != after.SourceCommit || before.SourceTree != after.SourceTree
+            || before.TemporalServerVersion != after.TemporalServerVersion
+            || !Same(before.ImageIds,after.ImageIds) || !Same(before.FileSha256s,after.FileSha256s)
+            || !Same(before.NestedContainerIds,after.NestedContainerIds))
+            throw new QualificationException("receipt target changed during collection");
+        ct.ThrowIfCancellationRequested();
+        return new ProcessReceiptReadback(after,receipt);
+    }
+
+    private static bool Same(IReadOnlyDictionary<string,string> left, IReadOnlyDictionary<string,string> right) =>
+        left.Count == right.Count && left.All(p => right.TryGetValue(p.Key,out var value) && value == p.Value);
 
     public async Task<ProcessQualificationReceipt> RunAsync(
         string approval,

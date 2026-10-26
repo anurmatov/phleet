@@ -547,6 +547,30 @@
             },
             "method": {
               "enum": [
+                "thread/attachmentOwner/list"
+              ],
+              "title": "Thread/attachmentOwner/listRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadAttachmentOwnerListParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/attachmentOwner/listRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "thread/attachment/remove"
               ],
               "title": "Thread/attachment/removeRequestMethod",
@@ -2368,6 +2392,30 @@
             "params"
           ],
           "title": "Feedback/uploadRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "feedback/save"
+              ],
+              "title": "Feedback/saveRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/FeedbackSaveParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Feedback/saveRequest",
           "type": "object"
         },
         {
@@ -4663,6 +4711,26 @@
           "properties": {
             "method": {
               "enum": [
+                "thread/readState/changed"
+              ],
+              "title": "Thread/readState/changedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadReadStateChangedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Thread/readState/changedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
                 "thread/archived"
               ],
               "title": "Thread/archivedNotificationMethod",
@@ -4837,6 +4905,26 @@
             "params"
           ],
           "title": "Thread/goal/updatedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "thread/prediction/updated"
+              ],
+              "title": "Thread/prediction/updatedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadPredictionUpdatedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Thread/prediction/updatedNotification",
           "type": "object"
         },
         {
@@ -7692,6 +7780,42 @@
                 "type": "null"
               }
             ]
+          },
+          "storage": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ApplicationStorageRequirements"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ApplicationStorageRequirements": {
+        "description": "Managed storage settings for new Desktop workspaces, not filesystem access restrictions.",
+        "properties": {
+          "defaultProjectParent": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/LegacyAppPathString"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "projectlessWorkspaceRoot": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/LegacyAppPathString"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object"
@@ -8148,6 +8272,20 @@
         },
         "type": "object"
       },
+      "BrowserUseExtensionRequirements": {
+        "properties": {
+          "requestHeaders": {
+            "items": {
+              "$ref": "#/definitions/v2/RequestHeader"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "BrowserUseOriginPolicy": {
         "properties": {
           "access": {
@@ -8300,6 +8438,16 @@
               "null"
             ]
           },
+          "extension": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/BrowserUseExtensionRequirements"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "origins": {
             "additionalProperties": {
               "$ref": "#/definitions/v2/BrowserUseOriginPolicy"
@@ -8405,8 +8553,7 @@
         "type": "string"
       },
       "CodexErrorInfo": {
-        "description": "This translation layer make sure that we expose codex error code in camel case.\n\nWhen an upstream HTTP status is available (for example, from the Responses API or a provider), it is forwarded in `httpStatusCode` on the relevant `codexErrorInfo` variant.",
-        "oneOf": [
+        "anyOf": [
           {
             "enum": [
               "contextWindowExceeded",
@@ -8543,8 +8690,15 @@
             ],
             "title": "ActiveTurnNotSteerableCodexErrorInfo",
             "type": "object"
+          },
+          {
+            "type": [
+              "string",
+              "object"
+            ]
           }
-        ]
+        ],
+        "description": "This translation layer make sure that we expose codex error code in camel case.\n\nWhen an upstream HTTP status is available (for example, from the Responses API or a provider), it is forwarded in `httpStatusCode` on the relevant `codexErrorInfo` variant."
       },
       "CodexResponseHandoffMode": {
         "enum": [
@@ -10144,6 +10298,14 @@
               }
             ],
             "description": "Null if no requirements are configured (e.g. no requirements.toml/MDM entries)."
+          },
+          "supportsIndependentSpeedModes": {
+            "default": null,
+            "description": "Whether Fast and Ultra Fast requirements are enforced independently. Older servers omit this field and use Fast mode as a shared speed gate.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "title": "ConfigRequirementsReadResponse",
@@ -10644,6 +10806,20 @@
           },
           {
             "properties": {
+              "annotations": {
+                "items": true,
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "logprobs": {
+                "items": true,
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
               "text": {
                 "type": "string"
               },
@@ -10712,7 +10888,7 @@
         "type": "object"
       },
       "CyberAccessProgram": {
-        "description": "Requested cyber treatment for a ChatGPT-authenticated Codex turn. Authorization and model-tier restrictions remain server-owned.",
+        "description": "Requested cyber treatment for an OpenAI model turn. Authorization and model-tier restrictions remain server-owned.",
         "enum": [
           "standard",
           "daybreakBlue",
@@ -10931,6 +11107,21 @@
           "threadId"
         ],
         "title": "EnvironmentConnectionNotification",
+        "type": "object"
+      },
+      "EnvironmentSkillsParams": {
+        "properties": {
+          "required": {
+            "description": "Exact catalog names that must be available from this environment.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "ErrorNotification": {
@@ -11674,6 +11865,85 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "FeedbackSaveParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "classification": {
+            "type": "string"
+          },
+          "extraLogFiles": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "includeLogs": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "savePath": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/v2/LegacyAppPathString"
+              }
+            ],
+            "description": "Absolute, previously unused ZIP path on the app-server host. The caller owns this file, including after a disconnected RPC."
+          },
+          "tags": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "threadId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "classification",
+          "savePath"
+        ],
+        "title": "FeedbackSaveParams",
+        "type": "object"
+      },
+      "FeedbackSaveResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "promptHash": {
+            "description": "Same prompt hash as feedback/upload; null when prompt metadata is absent.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "savedPath": {
+            "$ref": "#/definitions/v2/LegacyAppPathString"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "savedPath",
+          "threadId"
+        ],
+        "title": "FeedbackSaveResponse",
         "type": "object"
       },
       "FeedbackUploadParams": {
@@ -13194,6 +13464,8 @@
       },
       "HookEventName": {
         "enum": [
+          "preModelRequest",
+          "postModelRequest",
           "preToolUse",
           "permissionRequest",
           "postToolUse",
@@ -13675,6 +13947,23 @@
             "type": "object"
           }
         ]
+      },
+      "ImageGenerationInputImage": {
+        "description": "A local image file successfully read for this exact image-generation request.",
+        "properties": {
+          "path": {
+            "$ref": "#/definitions/v2/AbsolutePathBuf"
+          },
+          "sha256": {
+            "description": "Lowercase SHA-256 of the file bytes read before image normalization.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "sha256"
+        ],
+        "type": "object"
       },
       "InAppBrowserRequirements": {
         "properties": {
@@ -14354,6 +14643,13 @@
             },
             "type": "array"
           },
+          "PostModelRequest": {
+            "default": [],
+            "items": {
+              "$ref": "#/definitions/v2/ConfiguredHookMatcherGroup"
+            },
+            "type": "array"
+          },
           "PostToolUse": {
             "items": {
               "$ref": "#/definitions/v2/ConfiguredHookMatcherGroup"
@@ -14361,6 +14657,13 @@
             "type": "array"
           },
           "PreCompact": {
+            "items": {
+              "$ref": "#/definitions/v2/ConfiguredHookMatcherGroup"
+            },
+            "type": "array"
+          },
+          "PreModelRequest": {
+            "default": [],
             "items": {
               "$ref": "#/definitions/v2/ConfiguredHookMatcherGroup"
             },
@@ -14838,6 +15141,13 @@
               "null"
             ]
           },
+          "loginId": {
+            "description": "Identifies the explicit login attempt. Older servers omit this field.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "name": {
             "type": "string"
           },
@@ -14909,6 +15219,14 @@
         "properties": {
           "authorizationUrl": {
             "type": "string"
+          },
+          "loginId": {
+            "default": null,
+            "description": "Identifies this login attempt across the response and completion notification. Older servers omit this field; current servers always return it.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -14993,6 +15311,9 @@
                 "type": "null"
               }
             ]
+          },
+          "toolListMeta": {
+            "description": "Opaque `_meta` from the first page of the corresponding MCP tool catalog. Null when unavailable."
           },
           "tools": {
             "additionalProperties": {
@@ -15257,7 +15578,7 @@
         "type": "string"
       },
       "MessagePhase": {
-        "description": "Classifies an assistant message as interim commentary or final answer text.\n\nProviders do not emit this consistently, so callers must treat `None` as \"phase unknown\" and keep compatibility behavior for legacy models.",
+        "description": "Classifies assistant text as commentary, a partial answer, or a terminal answer.\n\nProviders do not emit this consistently, so callers must treat `None` as \"phase unknown\" and keep compatibility behavior for legacy models.",
         "oneOf": [
           {
             "description": "Mid-turn assistant text (for example preamble/progress narration).\n\nAdditional tool calls or assistant output may follow before turn completion.",
@@ -15267,7 +15588,14 @@
             "type": "string"
           },
           {
-            "description": "The assistant's terminal answer text for the current turn.",
+            "description": "Stable answer text that may be followed by more assistant output or tools.",
+            "enum": [
+              "partial_answer"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "The assistant's declared terminal answer text for the current turn.",
             "enum": [
               "final_answer"
             ],
@@ -15346,6 +15674,13 @@
           },
           "errorType": {
             "description": "Open-ended classification; clients must accept categories added by Responses.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reviewTarget": {
+            "description": "Opaque server-issued block target. Presence alone does not enable target-based continuation.",
             "type": [
               "string",
               "null"
@@ -15611,16 +15946,12 @@
           "imageGeneration": {
             "type": "boolean"
           },
-          "namespaceTools": {
-            "type": "boolean"
-          },
           "webSearch": {
             "type": "boolean"
           }
         },
         "required": [
           "imageGeneration",
-          "namespaceTools",
           "webSearch"
         ],
         "title": "ModelProviderCapabilitiesReadResponse",
@@ -16255,6 +16586,8 @@
           "edu",
           "edu_plus",
           "edu_pro",
+          "sci",
+          "sci_plus",
           "unknown"
         ],
         "type": "string"
@@ -18150,22 +18483,38 @@
           "alloy",
           "arbor",
           "ash",
+          "aube",
           "ballad",
           "breeze",
+          "bubbie",
           "cedar",
           "coral",
           "cove",
           "echo",
           "ember",
+          "haetsal",
+          "hanul",
+          "himari",
           "juniper",
+          "leher",
           "maple",
           "marin",
+          "miko",
+          "neer",
+          "porto",
+          "rindo",
+          "rio",
+          "rivage",
           "sage",
+          "selva",
           "shimmer",
           "sol",
+          "sonna",
           "spruce",
+          "tinta",
           "vale",
-          "verse"
+          "verse",
+          "viola"
         ],
         "type": "string"
       },
@@ -18184,6 +18533,13 @@
             "type": "array"
           },
           "v2": {
+            "items": {
+              "$ref": "#/definitions/v2/RealtimeVoice"
+            },
+            "type": "array"
+          },
+          "v3": {
+            "default": [],
             "items": {
               "$ref": "#/definitions/v2/RealtimeVoice"
             },
@@ -18445,6 +18801,21 @@
         "title": "RemoteControlStatusChangedNotification",
         "type": "object"
       },
+      "RequestHeader": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ],
+        "type": "object"
+      },
       "RequestId": {
         "anyOf": [
           {
@@ -18628,11 +18999,48 @@
         "oneOf": [
           {
             "properties": {
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "role": {
+                "type": "string"
+              },
+              "tools": {
+                "items": true,
+                "type": "array"
+              },
+              "type": {
+                "enum": [
+                  "additional_tools"
+                ],
+                "title": "AdditionalToolsResponseItemType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "role",
+              "tools",
+              "type"
+            ],
+            "title": "AdditionalToolsResponseItem",
+            "type": "object"
+          },
+          {
+            "properties": {
               "content": {
                 "items": {
                   "$ref": "#/definitions/v2/ContentItem"
                 },
                 "type": "array"
+              },
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "id": {
                 "type": [
@@ -18662,6 +19070,12 @@
               },
               "role": {
                 "type": "string"
+              },
+              "status": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "type": {
                 "enum": [
@@ -18793,6 +19207,12 @@
                   "null"
                 ]
               },
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "id": {
                 "description": "Legacy id field retained for compatibility with older payloads.",
                 "type": [
@@ -18837,6 +19257,12 @@
               "call_id": {
                 "type": "string"
               },
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "encrypted_function_args": {
                 "items": {
                   "type": "string"
@@ -18871,6 +19297,12 @@
                   "null"
                 ]
               },
+              "status": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "type": {
                 "enum": [
                   "function_call"
@@ -18892,6 +19324,12 @@
             "properties": {
               "arguments": true,
               "call_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "encrypted_content": {
                 "type": [
                   "string",
                   "null"
@@ -18996,6 +19434,12 @@
             "properties": {
               "call_id": {
                 "type": "string"
+              },
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "id": {
                 "type": [
@@ -19157,6 +19601,12 @@
                   }
                 ]
               },
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "id": {
                 "type": [
                   "string",
@@ -19195,6 +19645,12 @@
           },
           {
             "properties": {
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "id": {
                 "type": [
                   "string",
@@ -20219,7 +20675,7 @@
             "type": "string"
           },
           "path": {
-            "$ref": "#/definitions/v2/AbsolutePathBuf"
+            "$ref": "#/definitions/v2/LegacyAppPathString"
           },
           "pluginId": {
             "description": "Owning plugin ID, matching `PluginSummary.id`, when known.",
@@ -20292,7 +20748,7 @@
           "path": {
             "anyOf": [
               {
-                "$ref": "#/definitions/v2/AbsolutePathBuf"
+                "$ref": "#/definitions/v2/LegacyAppPathString"
               },
               {
                 "type": "null"
@@ -21136,6 +21592,85 @@
         ],
         "type": "string"
       },
+      "ThreadAttachmentOwner": {
+        "description": "A thread that currently owns an attachment with the requested identity.",
+        "properties": {
+          "archived": {
+            "description": "Whether the owning thread is archived, not whether it is currently executing a turn.",
+            "type": "boolean"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "archived",
+          "threadId"
+        ],
+        "type": "object"
+      },
+      "ThreadAttachmentOwnerListParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "Parameters for reverse lookup by attachment identity within this server's store.",
+        "properties": {
+          "archived": {
+            "description": "Omitted or null returns all matches; false returns non-archived threads only.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "attachmentType": {
+            "type": "string"
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "identityKey": {
+            "type": "string"
+          },
+          "limit": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "attachmentType",
+          "identityKey"
+        ],
+        "title": "ThreadAttachmentOwnerListParams",
+        "type": "object"
+      },
+      "ThreadAttachmentOwnerListResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "One page of matching owners, including threads without their own user messages.",
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/definitions/v2/ThreadAttachmentOwner"
+            },
+            "type": "array"
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "ThreadAttachmentOwnerListResponse",
+        "type": "object"
+      },
       "ThreadAttachmentRemoveParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "description": "Parameters for deleting an attachment by its stable thread-local identity.",
@@ -21525,6 +22060,17 @@
       "ThreadGoalClearParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "origin": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadGoalMutationOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Missing provenance does not supply user authorization."
+          },
           "threadId": {
             "type": "string"
           }
@@ -21591,6 +22137,14 @@
         "title": "ThreadGoalGetResponse",
         "type": "object"
       },
+      "ThreadGoalMutationOrigin": {
+        "description": "Distinguishes explicit user actions from automatic goal lifecycle mutations.",
+        "enum": [
+          "user",
+          "automatic"
+        ],
+        "type": "string"
+      },
       "ThreadGoalSetParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
@@ -21599,6 +22153,17 @@
               "string",
               "null"
             ]
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadGoalMutationOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Missing provenance does not supply user authorization."
           },
           "status": {
             "anyOf": [
@@ -22321,6 +22886,24 @@
               "kind": {
                 "$ref": "#/definitions/v2/SubAgentActivityKind"
               },
+              "model": {
+                "description": "Resolved model at sub-agent creation; absent from older records and other activities.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reasoningEffort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/v2/ReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Resolved reasoning effort at sub-agent creation, when known."
+              },
               "type": {
                 "enum": [
                   "subAgentActivity"
@@ -22434,6 +23017,33 @@
             "type": "object"
           },
           {
+            "anyOf": [
+              {
+                "properties": {
+                  "fileId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "fileId"
+                ],
+                "title": "FileIdThreadItem",
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "result": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "result"
+                ],
+                "title": "ResultThreadItem",
+                "type": "object"
+              }
+            ],
+            "description": "Either inline generated-image data or its durable attachment-store identity.\n\n`File` must remain first so rollouts written during the migration, which contain both an empty `result` and a `fileId`, retain the file reference when deserialized.",
             "properties": {
               "failure": {
                 "anyOf": [
@@ -22449,8 +23059,12 @@
               "id": {
                 "type": "string"
               },
-              "result": {
-                "type": "string"
+              "inputImages": {
+                "description": "Observed local inputs for a completed generation, absent on older items.",
+                "items": {
+                  "$ref": "#/definitions/v2/ImageGenerationInputImage"
+                },
+                "type": "array"
               },
               "revisedPrompt": {
                 "type": [
@@ -22488,7 +23102,6 @@
             },
             "required": [
               "id",
-              "result",
               "status",
               "type"
             ],
@@ -22755,6 +23368,16 @@
             ],
             "description": "Optional cwd filter or filters; when set, only threads whose session cwd exactly matches one of these paths are returned."
           },
+          "excludedThreadIds": {
+            "description": "Thread IDs to exclude before applying the result limit. Up to 100 entries; invalid IDs or a larger list are rejected, never truncated. Send the same exclusions on each page. Omitted, null, or empty means no exclusions.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "limit": {
             "description": "Optional page size; defaults to a reasonable server-side value.",
             "format": "uint32",
@@ -23004,6 +23627,69 @@
         "title": "ThreadNameUpdatedNotification",
         "type": "object"
       },
+      "ThreadPredictionResult": {
+        "oneOf": [
+          {
+            "properties": {
+              "text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "enum": [
+                  "completed"
+                ],
+                "title": "CompletedThreadPredictionResultType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "CompletedThreadPredictionResult",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "failed"
+                ],
+                "title": "FailedThreadPredictionResultType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "FailedThreadPredictionResult",
+            "type": "object"
+          }
+        ]
+      },
+      "ThreadPredictionUpdatedNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "result": {
+            "$ref": "#/definitions/v2/ThreadPredictionResult"
+          },
+          "sourceTurnId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result",
+          "sourceTurnId",
+          "threadId"
+        ],
+        "title": "ThreadPredictionUpdatedNotification",
+        "type": "object"
+      },
       "ThreadProjectUpdatedNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
@@ -23066,6 +23752,81 @@
         ],
         "title": "ThreadReadResponse",
         "type": "object"
+      },
+      "ThreadReadState": {
+        "description": "The first unread position in a durable local thread. A null position means read. The opaque revision guards edits against activity or marks the caller has not seen.",
+        "properties": {
+          "firstUnread": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadUnreadPosition"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision"
+        ],
+        "type": "object"
+      },
+      "ThreadReadStateChangedNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "readState": {
+            "$ref": "#/definitions/v2/ThreadReadState"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "readState",
+          "threadId"
+        ],
+        "title": "ThreadReadStateChangedNotification",
+        "type": "object"
+      },
+      "ThreadReadStateOperation": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "read"
+                ],
+                "title": "ReadThreadReadStateOperationType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "ReadThreadReadStateOperation",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "unread"
+                ],
+                "title": "UnreadThreadReadStateOperationType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "UnreadThreadReadStateOperation",
+            "type": "object"
+          }
+        ]
       },
       "ThreadRealtimeAudioChunk": {
         "description": "EXPERIMENTAL - thread realtime audio chunk.",
@@ -24972,6 +25733,48 @@
         "title": "ThreadUnarchivedNotification",
         "type": "object"
       },
+      "ThreadUnreadPosition": {
+        "oneOf": [
+          {
+            "description": "Explicitly marked unread, including when the thread has no turns.",
+            "properties": {
+              "type": {
+                "enum": [
+                  "threadStart"
+                ],
+                "title": "ThreadStartThreadUnreadPositionType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "ThreadStartThreadUnreadPosition",
+            "type": "object"
+          },
+          {
+            "description": "The earliest completed result needing attention.",
+            "properties": {
+              "turnId": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "turn"
+                ],
+                "title": "TurnThreadUnreadPositionType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "turnId",
+              "type"
+            ],
+            "title": "TurnThreadUnreadPosition",
+            "type": "object"
+          }
+        ]
+      },
       "ThreadUnsubscribeParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
@@ -25263,6 +26066,13 @@
             ],
             "default": "full",
             "description": "Describes how much of `items` has been loaded for this turn."
+          },
+          "rootTurnId": {
+            "description": "ID of the first turn in the chain of work that led to this turn. Pass this as `rootTurnId` when starting work on behalf of this turn. May be null in older history or a `review/start` response.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "startedAt": {
             "description": "Unix timestamp (in seconds) when the turn started.",
@@ -25581,6 +26391,13 @@
           "outputSchema": {
             "description": "Optional JSON Schema used to constrain the final assistant message for this turn."
           },
+          "parentTurnId": {
+            "description": "ID of the turn that caused this new turn to start.\n\nSet this when starting work on behalf of another turn, such as delegated work in a different thread. Leave unset for work started directly by the user. Ignored when this request adds input to an active turn.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "personality": {
             "anyOf": [
               {
@@ -25591,6 +26408,13 @@
               }
             ],
             "description": "@deprecated `friendly` and `pragmatic` no longer select a style. Changing this does not rewrite the thread's existing instructions."
+          },
+          "rootTurnId": {
+            "description": "ID of the first turn in the chain of work that led to this new turn.\n\nWhen setting `parentTurnId`, set this to the parent turn's `rootTurnId` when known. This keeps descendant work attributed to the original turn. If omitted, the new turn becomes its own root. Ignored when this request adds input to an active turn.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "sandboxPolicy": {
             "anyOf": [
@@ -25752,6 +26576,10 @@
           },
           "output": {
             "$ref": "#/definitions/v2/FunctionCallOutputBody"
+          },
+          "retain": {
+            "description": "Requests retention of this output in the thread's model history.",
+            "type": "boolean"
           }
         },
         "required": [

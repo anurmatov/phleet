@@ -107,6 +107,12 @@ Only this target sets all three startup scripts (`entrypoint.sh`,
 checks read/execute access and Bash parsing for each, even when the build context
 has owner-only script read permissions. CI builds that restrictive context and
 repeats the checks without network, credentials or product startup.
+The stock target also normalizes only the copied public skills directories to
+`0755`, their files to `0644`, `/opt/fleet` to `0755` and its public
+`acceptance_plan.py` helper to `0644`. Build and networkless CI guards read the
+entire skills tree and run the helper's `--help` as UID/GID 10001; CI supplies
+skills directories at `0700` and those public files at `0600` before building.
+No credential, runtime mount, auth/ACL or confinement policy is changed.
 Initial enrollment validation and the final stock daemon both explicitly select
 `/app` as the configuration content root, independent of the working directory;
 unrelated cwd settings cannot silently disable enrollment. The default image

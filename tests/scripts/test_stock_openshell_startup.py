@@ -93,7 +93,7 @@ class StockStartupTests(unittest.TestCase):
     def test_restrictive_context_startup_scripts_get_explicit_read_execute_modes(self):
         docker = (ROOT / "Dockerfile").read_text()
         runtime, stock = docker.split("FROM agent-runtime AS stock-agent", 1)
-        stock, default = stock.split("FROM agent-runtime AS default", 1)
+        stock = stock.split("FROM agent-runtime AS default", 1)[0]
         scripts = ["entrypoint.sh", "stock-entrypoint.sh", "gh-auth.sh"]
         # Replay only the actual chmod instructions on owned copies, never startup.
         with tempfile.TemporaryDirectory() as directory:
@@ -107,7 +107,40 @@ class StockStartupTests(unittest.TestCase):
             for name in scripts:
                 with self.subTest(script=name):
                     self.assertEqual(0o755, (app / name).stat().st_mode & 0o777)
-        self.assertEqual("", default.strip())
+
+    def test_restrictive_context_public_artifacts_get_readable_modes(self):
+        stock = (ROOT / "Dockerfile").read_text().split("FROM agent-runtime AS stock-agent", 1)[1]
+        commands = re.findall(r"^RUN (find /app/skills[^\n]+)", stock.replace("\\\n", ""), re.MULTILINE)
+        self.assertEqual(1, len(commands), "stock-only public artifact mode normalization required")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            skills = root / "app/skills"
+            shutil.copytree(ROOT / "skills", skills)
+            helper = root / "opt/fleet/acceptance_plan.py"
+            helper.parent.mkdir(parents=True)
+            shutil.copyfile(ROOT / "scripts/acceptance_plan.py", helper)
+            paths = [skills, *skills.rglob("*"), helper.parent, helper]
+            for path in paths:
+                path.chmod(0o700 if path.is_dir() else 0o600)
+            command = commands[0].replace("/app/", str(root / "app") + "/").replace("/opt/", str(root / "opt") + "/")
+            subprocess.run(["/bin/sh", "-ec", command], check=True)
+            for path in paths:
+                with self.subTest(path=path.relative_to(root)):
+                    self.assertEqual(0o755 if path.is_dir() else 0o644, path.stat().st_mode & 0o777)
+
+    def test_stock_build_and_ci_check_public_artifact_access(self):
+        stock = (ROOT / "Dockerfile").read_text().split("USER 10001:10001", 1)[1].split("FROM agent-runtime AS default", 1)[0]
+        ci = (ROOT / ".github/workflows/ci.yml").read_text().split("  agent-image:", 1)[1].split("  minio-init-dependencies:", 1)[0]
+        for guard in [stock, ci]:
+            for check in ['test -r /app/skills/fleet-review/SKILL.md',
+                          'find /app/skills -type f -exec cat {} +',
+                          'test -r /opt/fleet/acceptance_plan.py',
+                          'python3 /opt/fleet/acceptance_plan.py --help']:
+                self.assertIn(check, guard)
+        for check in ['find skills -type d -exec chmod 0700 {} +',
+                      'find skills -type f -exec chmod 0600 {} +',
+                      'chmod 0600 scripts/acceptance_plan.py']:
+            self.assertIn(check, ci)
 
     def test_stock_build_checks_all_startup_scripts_as_runtime_user(self):
         stock = (ROOT / "Dockerfile").read_text().split("FROM agent-runtime AS stock-agent", 1)[1]

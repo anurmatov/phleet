@@ -745,11 +745,20 @@ jobs:
       - name: Build the image
         run: docker build -t fleet:agent-ci .
 
-      - name: Build the opt-in stock image from restrictive script modes
+      - name: Build the opt-in stock image from restrictive context modes
         run: |
           set -euo pipefail
-          trap 'chmod 0755 entrypoint.sh stock-entrypoint.sh; chmod 0644 gh-auth.sh' EXIT
+          restore_context_modes() {
+            chmod 0755 entrypoint.sh stock-entrypoint.sh
+            chmod 0644 gh-auth.sh scripts/acceptance_plan.py
+            find skills -type d -exec chmod 0755 {} +
+            find skills -type f -exec chmod 0644 {} +
+          }
+          trap restore_context_modes EXIT
           chmod 0600 entrypoint.sh stock-entrypoint.sh gh-auth.sh
+          find skills -type d -exec chmod 0700 {} +
+          find skills -type f -exec chmod 0600 {} +
+          chmod 0600 scripts/acceptance_plan.py
           docker build --target stock-agent -t fleet:stock-agent-ci .
 
       - name: Stock and default image identity and workspace
@@ -772,6 +781,10 @@ jobs:
               test -x "$script"
               bash -n "$script"
             done
+            test -r /app/skills/fleet-review/SKILL.md
+            find /app/skills -type f -exec cat {} + > /dev/null
+            test -r /opt/fleet/acceptance_plan.py
+            python3 /opt/fleet/acceptance_plan.py --help > /dev/null
             for directory in "$PWD" /workspace; do
               probe=$(mktemp "$directory/workspace-probe.XXXXXX")
               printf "owned workspace probe\n" > "$probe"

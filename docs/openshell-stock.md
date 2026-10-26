@@ -49,10 +49,14 @@ Do not mount the private signing key, gateway private keys, or writable authorit
 state into the workload. Mount the shared authority directory read-only in its
 outside consumers so an atomic operator-file replacement remains visible.
 
-Gateway `Describe` and `ValidateConfig` authenticate TLS and a gateway-kind JWT
-using only configured `GatewayIssuer`, `GatewayAudience` and `GatewayJwksPath` in
-this file, even before a sandbox is allocated or while enrollment is revoked.
-They validate protocol/configuration only and never sign or grant workload access.
+`Describe` and `ValidateConfig` authenticate TLS and the pinned issuer/audience/JWKS
+for both stock callers: gateway-kind has issuer-as-subject and no sandbox claim;
+supervisor-kind has a nonempty signed sandbox claim and the exact subject
+`spiffe://openshell/sandbox/<sandbox-id>`, also matching the outside sandbox ID
+when one is already configured. The [pinned issuer](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/crates/openshell-server/src/auth/sandbox_jwt.rs#L422-L448)
+constructs these distinct identities; the supervisor negotiates through the same
+remote middleware connector as the gateway. These methods work before active
+enrollment and validate protocol/configuration only, never sign or grant data access.
 `EvaluateHttpRequest`, assertion signing and every receiver retain active,
 nonexpired exact workload enrollment checks; a bootstrap response cannot bypass them.
 
@@ -237,3 +241,16 @@ rollback E2E and relevant real storage/restore evidence remain UNRUN/BLOCKED pen
 separate target authorization. Full independent final-head review/public scrub,
 existing CI and human merge approval remain required. Broad provider/platform/load
 permutations are deferred, not passed. This draft is not complete issue delivery.
+
+## Canonical execution failure is not enrollment refusal
+
+An observed `/app/entrypoint.sh` exit 126 with `Permission denied` precedes the
+enrollment validator and must not authorize binding, credential transfer or Start.
+The source records executable scripts, applies image `chmod +x`, and selects
+`#!/bin/bash`; that does not establish the installed file's effective DAC, mount
+flags, interpreter access or applied filesystem policy. Retain the exact image,
+policy bytes/hash and effective file/interpreter/mount evidence before selecting
+a narrow correction; do not assume Landlock from the exit code, add writable
+`/app`, switch to root, disable admission or substitute a shell command.
+The current execution-denial cause remains unqualified; the authenticated caller
+fix and its in-process regressions do not qualify the real launch.

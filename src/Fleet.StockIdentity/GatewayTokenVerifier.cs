@@ -31,7 +31,11 @@ public sealed class GatewayTokenVerifier
         StockRequestProof.Unique(element);
         return element.EnumerateObject().ToDictionary(p => p.Name, p => p.Value, StringComparer.Ordinal);
     }
-    public void Verify(string token, string? sandboxId)
+    // Both gateway and supervisor call the same stock remote control-plane connector.
+    // This mode never authenticates evaluation/signing or bypasses active enrollment.
+    public void VerifyControlPlane(string token) => Verify(token, null, supervisorControlPlane: true);
+    public void Verify(string token, string? sandboxId) => Verify(token, sandboxId, supervisorControlPlane: false);
+    private void Verify(string token, string? sandboxId, bool supervisorControlPlane)
     {
         try
         {
@@ -55,7 +59,21 @@ public sealed class GatewayTokenVerifier
             var kind = p["caller_kind"].GetString();
             if (sandboxId is null)
             {
-                if (kind != "gateway" || p.ContainsKey("sandbox_id")) throw new FormatException();
+                if (kind == "gateway")
+                {
+                    if (p.ContainsKey("sandbox_id") || p["sub"].GetString() != _options.GatewayIssuer) throw new FormatException();
+                }
+                else if (supervisorControlPlane && kind == "supervisor")
+                {
+                    var claimedSandbox = p["sandbox_id"].GetString();
+                    // Pinned upstream mint_extension_token_with_metadata binds supervisor sub
+                    // to its sandbox ID. An existing outside binding also pins that exact ID.
+                    if (string.IsNullOrWhiteSpace(claimedSandbox) || claimedSandbox.Length > 256
+                        || p["sub"].GetString() != "spiffe://openshell/sandbox/" + claimedSandbox
+                        || !string.IsNullOrWhiteSpace(_options.SandboxId) && claimedSandbox != _options.SandboxId)
+                        throw new FormatException();
+                }
+                else throw new FormatException();
             }
             else if (kind != "supervisor" || p["sandbox_id"].GetString() != sandboxId || sandboxId.Length == 0) throw new FormatException();
         }

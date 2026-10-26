@@ -211,10 +211,11 @@ public sealed class StockIdentityPathTests
     [InlineData("expired_gateway")]
     [InlineData("malformed_jwt")]
     [InlineData("duplicate_jwt")]
-    [InlineData("supervisor")]
     [InlineData("missing_issuer")]
     [InlineData("missing_audience")]
     [InlineData("missing_jwks")]
+    [InlineData("gateway_wrong_subject")]
+    [InlineData("gateway_with_sandbox")]
     public async Task GatewayBootstrap_BadTrustOrAuthentication_RefusesBothMethods(string fault)
     {
         await using var fixture = new Fixture();
@@ -225,6 +226,40 @@ public sealed class StockIdentityPathTests
         var validate = await Assert.ThrowsAsync<RpcException>(() => fixture.ValidateConfig(fault));
         Assert.Equal(StatusCode.Unauthenticated, describe.StatusCode);
         Assert.Equal(StatusCode.Unauthenticated, validate.StatusCode);
+        Assert.Equal(0, fixture.Executions);
+    }
+
+    [Theory]
+    [InlineData("revoked")]
+    [InlineData("active")]
+    public async Task SupervisorBootstrap_UsesPinnedSubjectWithoutActiveAllocation_ButCannotEvaluate(string state)
+    {
+        await using var fixture = new Fixture();
+        fixture.Save(fixture.Record with { State = state, SandboxId = "", Epoch = Guid.Empty,
+            ExpiresAt = DateTimeOffset.MinValue });
+        Assert.Equal("stock-memory", (await fixture.Describe("supervisor")).Name);
+        Assert.True((await fixture.ValidateConfig("supervisor")).Valid);
+        Assert.Equal(Decision.Deny, (await fixture.Hook("initialize", null)).Decision);
+        Assert.Equal(0, fixture.Executions);
+        Assert.Equal(0, fixture.AclFetches);
+    }
+
+    [Theory]
+    [InlineData("supervisor_foreign")]
+    [InlineData("supervisor_no_id")]
+    [InlineData("supervisor_empty_id")]
+    [InlineData("supervisor_subject")]
+    [InlineData("supervisor_gateway_subject")]
+    [InlineData("supervisor_plaintext")]
+    [InlineData("supervisor_missing_jwt")]
+    [InlineData("supervisor_wrong_signature")]
+    [InlineData("supervisor_wrong_audience")]
+    [InlineData("supervisor_expired_gateway")]
+    public async Task SupervisorBootstrap_RejectsForeignMalformedOrUnauthenticatedCallers(string fault)
+    {
+        await using var fixture = new Fixture();
+        Assert.Equal(StatusCode.Unauthenticated, (await Assert.ThrowsAsync<RpcException>(() => fixture.Describe(fault))).StatusCode);
+        Assert.Equal(StatusCode.Unauthenticated, (await Assert.ThrowsAsync<RpcException>(() => fixture.ValidateConfig(fault))).StatusCode);
         Assert.Equal(0, fixture.Executions);
     }
 
@@ -325,14 +360,24 @@ public sealed class StockIdentityPathTests
         public void RemoveGatewayKey() => File.Delete(Record.GatewayJwksPath);
         private CallContext GatewayContext(string? fault)
         {
+            var supervisor = fault?.StartsWith("supervisor", StringComparison.Ordinal) == true;
+            if (supervisor && fault!.StartsWith("supervisor_", StringComparison.Ordinal)) fault = fault[11..];
             var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             var claims = new Dictionary<string, object> {
                 ["iss"] = fault == "wrong_issuer" ? "foreign" : Record.GatewayIssuer,
                 ["aud"] = fault == "wrong_audience" ? "foreign" : Record.GatewayAudience,
                 ["sub"] = "synthetic-gateway", ["iat"] = now - 2,
                 ["exp"] = fault == "expired_gateway" ? now - 1 : now + 60,
-                ["jti"] = Guid.NewGuid().ToString("N"), ["caller_kind"] = fault == "supervisor" ? "supervisor" : "gateway" };
-            if (fault == "supervisor") claims["sandbox_id"] = "sandbox1";
+                ["jti"] = Guid.NewGuid().ToString("N"), ["caller_kind"] = supervisor ? "supervisor" : "gateway" };
+            if (fault == "gateway_wrong_subject") claims["sub"] = "foreign-subject";
+            if (fault == "gateway_with_sandbox") claims["sandbox_id"] = "sandbox1";
+            if (supervisor)
+            {
+                var id = fault == "foreign" ? "sandbox2" : fault == "empty_id" ? "" : "sandbox1";
+                if (fault != "no_id") claims["sandbox_id"] = id;
+                claims["sub"] = fault == "subject" ? "foreign-subject" : fault == "gateway_subject"
+                    ? Record.GatewayIssuer : "spiffe://openshell/sandbox/" + id;
+            }
             var unsigned = StockRequestProof.Encode(JsonSerializer.SerializeToUtf8Bytes(new { alg = "EdDSA", typ = "openshell-ext+jwt", kid = "synthetic" }))
                 + "." + StockRequestProof.Encode(JsonSerializer.SerializeToUtf8Bytes(claims));
             var signer = new Ed25519Signer();

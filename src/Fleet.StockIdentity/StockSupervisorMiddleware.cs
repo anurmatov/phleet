@@ -25,7 +25,9 @@ public sealed class StockSupervisorMiddleware(StockAuthorityFile file) : Supervi
             var headers = context.RequestHeaders.Where(h => h.Key == "authorization").ToArray();
             if (headers.Length != 1 || headers[0].IsBinary || !headers[0].Value.StartsWith("Bearer ", StringComparison.Ordinal))
                 throw new StockIdentityDenied("gateway_token");
-            new GatewayTokenVerifier(record, StockEnrollmentAuthority.ReadText(record.GatewayJwksPath)).Verify(headers[0].Value[7..], sandbox);
+            var verifier = new GatewayTokenVerifier(record, StockEnrollmentAuthority.ReadText(record.GatewayJwksPath));
+            if (sandbox is null) verifier.VerifyControlPlane(headers[0].Value[7..]);
+            else verifier.Verify(headers[0].Value[7..], sandbox);
             return record;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException

@@ -109,6 +109,8 @@ RUN groupadd --gid 10001 stockworker && \
     chown 10001:10001 /workspace
 ENV HOME=/home/agent
 USER 10001:10001
-RUN test "$(id -u)" != 0 && test -w /home/agent && test -w /workspace
+WORKDIR /home/agent
+RUN test "$(id -u)" != 0 && test -w "$PWD" && test -w /workspace && \
+    test -r /app/Fleet.Agent.dll && test ! -w /app
 
 FROM agent-runtime AS default

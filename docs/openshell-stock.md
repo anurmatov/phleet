@@ -88,6 +88,13 @@ This first profile supports the existing Codex cloud executor only, without host
 local overrides or harness extras. Use the optional `stock-agent` Dockerfile target;
 the default target still inherits the legacy root entrypoint unchanged. The stock
 target runs UID/GID 10001, with `/home/agent` and `/workspace` owned by that account.
+Its OCI working directory is `/home/agent`, which the stock runtime can validate
+as writable without granting write access to `/app`. The opt-in build guard
+checks effective-identity workspace writes and application readability/protection.
+Initial enrollment validation and the final stock daemon both explicitly select
+`/app` as the configuration content root, independent of the working directory;
+unrelated cwd settings cannot silently disable enrollment. The default image
+retains its original `/app` working directory and startup path.
 A real stock launch must honor that UID and the approved role policy; no image was
 built or runtime started during source tests. Do not mount a Docker socket, host shell,
 private signing keys or unrelated global credentials into the workload; do not pass

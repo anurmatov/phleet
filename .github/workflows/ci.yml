@@ -745,8 +745,12 @@ jobs:
       - name: Build the image
         run: docker build -t fleet:agent-ci .
 
-      - name: Build the opt-in stock image
-        run: docker build --target stock-agent -t fleet:stock-agent-ci .
+      - name: Build the opt-in stock image from restrictive script modes
+        run: |
+          set -euo pipefail
+          trap 'chmod 0755 entrypoint.sh stock-entrypoint.sh; chmod 0644 gh-auth.sh' EXIT
+          chmod 0600 entrypoint.sh stock-entrypoint.sh gh-auth.sh
+          docker build --target stock-agent -t fleet:stock-agent-ci .
 
       - name: Stock and default image identity and workspace
         run: |
@@ -763,6 +767,11 @@ jobs:
             test "$PWD" = /home/agent
             test ! -w /app
             test -r /app/Fleet.Agent.dll
+            for script in /app/entrypoint.sh /app/stock-entrypoint.sh /app/gh-auth.sh; do
+              test -r "$script"
+              test -x "$script"
+              bash -n "$script"
+            done
             for directory in "$PWD" /workspace; do
               probe=$(mktemp "$directory/workspace-probe.XXXXXX")
               printf "owned workspace probe\n" > "$probe"

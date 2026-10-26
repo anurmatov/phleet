@@ -102,6 +102,11 @@ target runs UID/GID 10001, with `/home/agent` and `/workspace` owned by that acc
 Its OCI working directory is `/home/agent`, which the stock runtime can validate
 as writable without granting write access to `/app`. The opt-in build guard
 checks effective-identity workspace writes and application readability/protection.
+Only this target sets all three startup scripts (`entrypoint.sh`,
+`stock-entrypoint.sh`, `gh-auth.sh`) to `0755`; its UID/GID 10001 build guard
+checks read/execute access and Bash parsing for each, even when the build context
+has owner-only script read permissions. CI builds that restrictive context and
+repeats the checks without network, credentials or product startup.
 Initial enrollment validation and the final stock daemon both explicitly select
 `/app` as the configuration content root, independent of the working directory;
 unrelated cwd settings cannot silently disable enrollment. The default image
@@ -246,11 +251,12 @@ permutations are deferred, not passed. This draft is not complete issue delivery
 
 An observed `/app/entrypoint.sh` exit 126 with `Permission denied` precedes the
 enrollment validator and must not authorize binding, credential transfer or Start.
-The source records executable scripts, applies image `chmod +x`, and selects
-`#!/bin/bash`; that does not establish the installed file's effective DAC, mount
-flags, interpreter access or applied filesystem policy. Retain the exact image,
-policy bytes/hash and effective file/interpreter/mount evidence before selecting
-a narrow correction; do not assume Landlock from the exit code, add writable
-`/app`, switch to root, disable admission or substitute a shell command.
-The current execution-denial cause remains unqualified; the authenticated caller
-fix and its in-process regressions do not qualify the real launch.
+Installed metadata identified a concrete defect: a root-owned `0711` startup
+script is executable but unreadable by UID 10001, and `chmod +x` does not add the
+missing read bits. The stock-only explicit modes correct that source defect;
+they do not establish that the real launch now succeeds or that this was its
+only cause. Preserve the original failed attempts and exact image, policy and
+effective file/interpreter/mount evidence. Do not assume Landlock from the exit
+code, add writable `/app`, switch to root, disable admission or substitute a shell
+command. Fresh exact-head review and a separately approved actual-path launch
+and whole-agent qualification remain required; source checks are not that pass.

@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 import subprocess
 import shlex
+import re
+import shutil
 import tempfile
 import unittest
 
@@ -88,9 +90,38 @@ class StockStartupTests(unittest.TestCase):
         self.assertIn("test -r /app/Fleet.Agent.dll", stock)
         self.assertEqual("", default.strip())
 
+    def test_restrictive_context_startup_scripts_get_explicit_read_execute_modes(self):
+        docker = (ROOT / "Dockerfile").read_text()
+        runtime, stock = docker.split("FROM agent-runtime AS stock-agent", 1)
+        stock, default = stock.split("FROM agent-runtime AS default", 1)
+        scripts = ["entrypoint.sh", "stock-entrypoint.sh", "gh-auth.sh"]
+        # Replay only the actual chmod instructions on owned copies, never startup.
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory)
+            for name in scripts:
+                shutil.copyfile(ROOT / name, app / name)
+                (app / name).chmod(0o600)
+            for stage in [runtime, stock.split("USER 10001:10001", 1)[0]]:
+                for command in re.findall(r"^RUN (chmod [^\n]+)", stage, re.MULTILINE):
+                    subprocess.run(shlex.split(command.replace("/app/", str(app) + "/")), check=True)
+            for name in scripts:
+                with self.subTest(script=name):
+                    self.assertEqual(0o755, (app / name).stat().st_mode & 0o777)
+        self.assertEqual("", default.strip())
+
+    def test_stock_build_checks_all_startup_scripts_as_runtime_user(self):
+        stock = (ROOT / "Dockerfile").read_text().split("FROM agent-runtime AS stock-agent", 1)[1]
+        guard = stock.split("USER 10001:10001", 1)[1].split("FROM agent-runtime AS default", 1)[0]
+        for name in ["entrypoint.sh", "stock-entrypoint.sh", "gh-auth.sh"]:
+            self.assertIn("/app/" + name, guard)
+        for check in ['test "$(id -u)" = 10001', 'test "$(id -g)" = 10001',
+                      'test -r "$script"', 'test -x "$script"', 'bash -n "$script"']:
+            self.assertIn(check, guard)
+
     def test_ci_qualifies_both_image_profiles_without_network(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text().split("  agent-image:", 1)[1].split("  minio-init-dependencies:", 1)[0]
         self.assertIn("docker build --target stock-agent -t fleet:stock-agent-ci .", ci)
+        self.assertIn("chmod 0600 entrypoint.sh stock-entrypoint.sh gh-auth.sh", ci)
         self.assertIn("{{.Config.User}}", ci)
         self.assertIn("{{.Config.WorkingDir}}", ci)
         self.assertIn('= "10001:10001"', ci)
@@ -100,6 +131,10 @@ class StockStartupTests(unittest.TestCase):
         for check in ['test "$(id -u)" = 10001', 'test "$(id -g)" = 10001',
                       'test ! -w /app', 'test -r /app/Fleet.Agent.dll',
                       'for directory in "$PWD" /workspace', 'cmp "$probe" "$probe.copy"']:
+            self.assertIn(check, ci)
+        for name in ["entrypoint.sh", "stock-entrypoint.sh", "gh-auth.sh"]:
+            self.assertIn("/app/" + name, ci)
+        for check in ['test -r "$script"', 'test -x "$script"', 'bash -n "$script"']:
             self.assertIn(check, ci)
 
     def test_disabled_validation_continues_existing_entrypoint(self):

@@ -104,13 +104,20 @@ ENTRYPOINT ["/app/entrypoint.sh"]
 
 # Explicit opt-in build target. The final default stage preserves legacy root startup.
 FROM agent-runtime AS stock-agent
+# COPY can retain owner-only read bits from a restrictive local build context.
+# Shell scripts need read as well as execute access for the stock runtime user.
+RUN chmod 0755 /app/entrypoint.sh /app/stock-entrypoint.sh /app/gh-auth.sh
 RUN groupadd --gid 10001 stockworker && \
     useradd --uid 10001 --gid 10001 --create-home --home-dir /home/agent stockworker && \
     chown 10001:10001 /workspace
 ENV HOME=/home/agent
 USER 10001:10001
 WORKDIR /home/agent
-RUN test "$(id -u)" != 0 && test -w "$PWD" && test -w /workspace && \
-    test -r /app/Fleet.Agent.dll && test ! -w /app
+RUN test "$(id -u)" = 10001 && test "$(id -g)" = 10001 && \
+    test -w "$PWD" && test -w /workspace && \
+    test -r /app/Fleet.Agent.dll && test ! -w /app && \
+    for script in /app/entrypoint.sh /app/stock-entrypoint.sh /app/gh-auth.sh; do \
+        test -r "$script" && test -x "$script" && bash -n "$script" || exit 1; \
+    done
 
 FROM agent-runtime AS default

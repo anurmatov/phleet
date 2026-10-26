@@ -182,6 +182,14 @@ this source path does not depend on an upstream fork.
 
 ## Native broker boundary: source, not activation
 
+The outside stock Bridge uses static `Bridge`/`RabbitMq` configuration and does
+not register the ordinary peer-config subscription. Nonempty `PEER_CONFIG_KEYS`
+or `PEER_AGENT_DERIVED_KEYS` refuses before service construction/connections,
+including whitespace-only values. Its control connection still uses the same
+epoch authority, TLS, principal and revocation checks; no legacy broker connection
+or additional principal is introduced. Ordinary Bridge peer subscriptions remain
+unchanged when both stock authority/password settings are absent.
+
 `StockOpenShell:AuthorityFile` and `StockOpenShell:BrokerPasswordFile` are startup-only
 inputs for the outside Bridge and heartbeat receiver; the workload relay/heartbeat
 receive the same validated binding through core registration after the enrollment gate. Password files reference pre-existing credentials: no user,

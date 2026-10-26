@@ -11,7 +11,7 @@ builder.Services.Configure<TelegramOptions>(builder.Configuration.GetSection(Tel
 // Services
 builder.Services.AddSingleton<BridgeRelayService>();
 builder.Services.AddSingleton<TelegramNotifier>();
-builder.Services.AddHostedService<PeerConfigHostedService>();
+builder.Services.AddPeerConfiguration(builder.Configuration);
 
 // MCP Server
 builder.Services

@@ -183,6 +183,72 @@ public sealed class StockIdentityPathTests
         Assert.Equal(Decision.Deny, result.Decision);
     }
 
+    [Theory]
+    [InlineData("revoked")]
+    [InlineData("active")]
+    public async Task GatewayBootstrap_WithNoAllocatedSandbox_NegotiatesButCannotEvaluateOrReceive(string state)
+    {
+        await using var fixture = new Fixture();
+        var issued = await fixture.Hook("initialize", null);
+        var signed = issued.HeaderMutations.Single().Write.Value;
+        fixture.Save(fixture.Record with { State = state, SandboxId = "", Epoch = Guid.Empty,
+            ExpiresAt = DateTimeOffset.MinValue });
+        fixture.RemoveSigningKeys(); // Manifest/config authentication needs only configured gateway trust.
+        Assert.Equal("stock-memory", (await fixture.Describe()).Name);
+        Assert.True((await fixture.ValidateConfig()).Valid);
+        Assert.Equal(Decision.Deny, (await fixture.Hook("initialize", null)).Decision);
+        Assert.Equal(HttpStatusCode.Forbidden, (await fixture.Raw(Fixture.Body("initialize"), null, signed)).StatusCode);
+        Assert.Equal(0, fixture.Executions);
+        Assert.Equal(0, fixture.AclFetches);
+    }
+
+    [Theory]
+    [InlineData("plaintext")]
+    [InlineData("missing_jwt")]
+    [InlineData("wrong_issuer")]
+    [InlineData("wrong_audience")]
+    [InlineData("wrong_signature")]
+    [InlineData("expired_gateway")]
+    [InlineData("malformed_jwt")]
+    [InlineData("duplicate_jwt")]
+    [InlineData("supervisor")]
+    [InlineData("missing_issuer")]
+    [InlineData("missing_audience")]
+    [InlineData("missing_jwks")]
+    public async Task GatewayBootstrap_BadTrustOrAuthentication_RefusesBothMethods(string fault)
+    {
+        await using var fixture = new Fixture();
+        if (fault == "missing_issuer") fixture.Save(fixture.Record with { GatewayIssuer = "" });
+        if (fault == "missing_audience") fixture.Save(fixture.Record with { GatewayAudience = "" });
+        if (fault == "missing_jwks") fixture.RemoveGatewayKey();
+        var describe = await Assert.ThrowsAsync<RpcException>(() => fixture.Describe(fault));
+        var validate = await Assert.ThrowsAsync<RpcException>(() => fixture.ValidateConfig(fault));
+        Assert.Equal(StatusCode.Unauthenticated, describe.StatusCode);
+        Assert.Equal(StatusCode.Unauthenticated, validate.StatusCode);
+        Assert.Equal(0, fixture.Executions);
+    }
+
+    [Fact]
+    public async Task GatewayBootstrap_UnsupportedProtocol_StillRefuses()
+    {
+        await using var fixture = new Fixture();
+        fixture.Save(fixture.Record with { State = "revoked", SandboxId = "" });
+        var error = await Assert.ThrowsAsync<RpcException>(() => fixture.Describe("wrong_protocol"));
+        Assert.Equal(StatusCode.Unauthenticated, error.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("extra")]
+    [InlineData("wrong_type")]
+    [InlineData("wrong_service")]
+    public async Task GatewayBootstrap_MalformedConfig_RemainsInvalid(string fault)
+    {
+        await using var fixture = new Fixture();
+        fixture.Save(fixture.Record with { State = "revoked", SandboxId = "" });
+        Assert.False((await fixture.ValidateConfig(configFault: fault)).Valid);
+    }
+
     private sealed class Fixture : IAsyncDisposable
     {
         private readonly string _directory = Path.Combine(Path.GetTempPath(), "stock-identity-" + Guid.NewGuid().ToString("N"));
@@ -254,6 +320,42 @@ public sealed class StockIdentityPathTests
                 });
             }));
             _client = _server.CreateClient(); _client.BaseAddress = new Uri("https://memory.example.test");
+        }
+        public void RemoveSigningKeys() { File.Delete(Record.AssertionPrivateKeyPath); File.Delete(Record.AssertionPublicKeyPath); }
+        public void RemoveGatewayKey() => File.Delete(Record.GatewayJwksPath);
+        private CallContext GatewayContext(string? fault)
+        {
+            var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            var claims = new Dictionary<string, object> {
+                ["iss"] = fault == "wrong_issuer" ? "foreign" : Record.GatewayIssuer,
+                ["aud"] = fault == "wrong_audience" ? "foreign" : Record.GatewayAudience,
+                ["sub"] = "synthetic-gateway", ["iat"] = now - 2,
+                ["exp"] = fault == "expired_gateway" ? now - 1 : now + 60,
+                ["jti"] = Guid.NewGuid().ToString("N"), ["caller_kind"] = fault == "supervisor" ? "supervisor" : "gateway" };
+            if (fault == "supervisor") claims["sandbox_id"] = "sandbox1";
+            var unsigned = StockRequestProof.Encode(JsonSerializer.SerializeToUtf8Bytes(new { alg = "EdDSA", typ = "openshell-ext+jwt", kid = "synthetic" }))
+                + "." + StockRequestProof.Encode(JsonSerializer.SerializeToUtf8Bytes(claims));
+            var signer = new Ed25519Signer();
+            signer.Init(true, fault == "wrong_signature" ? new Ed25519PrivateKeyParameters(RandomNumberGenerator.GetBytes(32)) : _gateway);
+            var bytes = Encoding.ASCII.GetBytes(unsigned); signer.BlockUpdate(bytes, 0, bytes.Length);
+            var context = new CallContext(unsigned + "." + StockRequestProof.Encode(signer.GenerateSignature()));
+            if (fault == "duplicate_jwt") context.RequestHeaders.Add("authorization", "Bearer duplicate");
+            if (fault == "plaintext") context.GetHttpContext().Request.Scheme = "http";
+            if (fault == "missing_jwt") context.RequestHeaders.Clear();
+            if (fault == "malformed_jwt") { context.RequestHeaders.Clear(); context.RequestHeaders.Add("authorization", "Bearer malformed"); }
+            return context;
+        }
+        public Task<MiddlewareManifest> Describe(string? fault = null) => _hook.Describe(new MiddlewareDescribeRequest {
+            Gateway = new Openshell.Extension.V1.PeerMetadata {
+                ProtocolVersion = new Openshell.Extension.V1.ProtocolVersion { Major = fault == "wrong_protocol" ? 2U : 1U, Minor = 0 },
+                SupportedCapabilities = { "openshell.supervisor-middleware.contract" } } }, GatewayContext(fault));
+        public Task<ValidateConfigResponse> ValidateConfig(string? fault = null, string? configFault = null)
+        {
+            var config = new Struct();
+            if (configFault != "missing") config.Fields["service"] = configFault == "wrong_type" ? Value.ForBool(true)
+                : Value.ForString(configFault == "wrong_service" ? "foreign" : "memory");
+            if (configFault == "extra") config.Fields["extra"] = Value.ForString("foreign");
+            return _hook.ValidateConfig(new ValidateConfigRequest { Config = config }, GatewayContext(fault));
         }
         public void Save(StockEnrollmentAuthority record) { Record = record; File.WriteAllText(FilePath, JsonSerializer.Serialize(record)); }
         public static byte[] Body(string method, string? fault = null) => method == "DELETE" ? [] : Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new {

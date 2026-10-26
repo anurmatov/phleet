@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Fleet.Shared.Security;
 using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
@@ -14,12 +16,33 @@ public sealed class StockSupervisorMiddleware(StockAuthorityFile file) : Supervi
 {
     private StockEnrollmentAuthority Authenticate(ServerCallContext context, string? sandbox)
     {
-        if (!context.GetHttpContext().Request.IsHttps) throw new StockIdentityDenied("tls_required");
-        var record = StockEnrollmentAuthority.Load(file.Path);
-        var headers = context.RequestHeaders.Where(h => h.Key == "authorization").ToArray();
-        if (headers.Length != 1 || headers[0].IsBinary || !headers[0].Value.StartsWith("Bearer ", StringComparison.Ordinal))
-            throw new StockIdentityDenied("gateway_token");
-        new GatewayTokenVerifier(record, StockEnrollmentAuthority.ReadText(record.GatewayJwksPath)).Verify(headers[0].Value[7..], sandbox);
+        try
+        {
+            if (!context.GetHttpContext().Request.IsHttps) throw new StockIdentityDenied("tls_required");
+            // Gateway control-plane negotiation precedes allocation. Only data evaluation may
+            // load active workload authority; a manifest/config response never grants data access.
+            var record = sandbox is null ? LoadGatewayTrust() : StockEnrollmentAuthority.Load(file.Path);
+            var headers = context.RequestHeaders.Where(h => h.Key == "authorization").ToArray();
+            if (headers.Length != 1 || headers[0].IsBinary || !headers[0].Value.StartsWith("Bearer ", StringComparison.Ordinal))
+                throw new StockIdentityDenied("gateway_token");
+            new GatewayTokenVerifier(record, StockEnrollmentAuthority.ReadText(record.GatewayJwksPath)).Verify(headers[0].Value[7..], sandbox);
+            return record;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException
+            or InvalidOperationException or ArgumentException or FormatException or KeyNotFoundException)
+        { throw new StockIdentityDenied("gateway_trust_invalid"); }
+    }
+
+    private StockEnrollmentAuthority LoadGatewayTrust()
+    {
+        var bytes = StockEnrollmentAuthority.ReadBounded(file.Path);
+        using var document = JsonDocument.Parse(bytes);
+        StockRequestProof.Unique(document.RootElement);
+        var record = JsonSerializer.Deserialize<StockEnrollmentAuthority>(bytes,
+            new JsonSerializerOptions { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow });
+        if (record is null || string.IsNullOrWhiteSpace(record.GatewayIssuer)
+            || string.IsNullOrWhiteSpace(record.GatewayAudience) || !Path.IsPathFullyQualified(record.GatewayJwksPath))
+            throw new StockIdentityDenied("gateway_trust_invalid");
         return record;
     }
     public override Task<MiddlewareManifest> Describe(MiddlewareDescribeRequest request, ServerCallContext context)

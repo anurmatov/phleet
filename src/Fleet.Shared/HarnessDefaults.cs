@@ -138,7 +138,7 @@ public static class HarnessDefaults
     /// <c>gpt-5.6-sol</c>, a local or a hosted model — is never rewritten.
     /// </summary>
     /// <remarks>
-    /// Mapped because the pinned Codex CLI 0.159.2 does not resolve them: <c>thread/start</c> accepts
+    /// Mapped because the pinned Codex CLI 0.164.0 does not resolve them: <c>thread/start</c> accepts
     /// <c>sol</c> and sends it to <c>/v1/responses</c> unchanged, and its bundled catalog has no bare
     /// family names (only <c>gpt-6.1-sol</c>, <c>gpt-6-sol</c>, <c>gpt-5.6-sol</c>, <c>gpt-5.6-terra</c>,
     /// <c>gpt-6-luna</c>, <c>gpt-5.6-luna</c>, …), and a ChatGPT-account login refuses a model outside
@@ -219,7 +219,7 @@ public static class HarnessDefaults
             if (local)
             {
                 thread.Add(new("web_search", "disabled"));
-                // Not tools.view_image: codex 0.159.2 ignores that key; the feature flag removes the tool.
+                // Not tools.view_image: codex 0.164.0 ignores that key; the feature flag removes the tool.
                 thread.Add(new("features.view_image", false));
                 thread.Add(new("model_reasoning_summary", "none"));
                 if (limit is int tokens) thread.Add(new("tool_output_token_limit", tokens));

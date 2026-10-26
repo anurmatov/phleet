@@ -27,7 +27,7 @@ provider, or `ClaudeLocalModel.IsEnabled`), **cloud** otherwise. Hosted Codex pr
 | `analytics.enabled` | `[analytics]` | `false` | `false` |
 | `history.persistence` | `[history]` | `"none"` | `"none"` |
 
-**Checked on the pinned codex 0.159.2 (AC-C1, `tests/codex-harness-keys/run.py` in CI).** Codex's
+**Checked on the pinned codex 0.164.0 (AC-C1, `tests/codex-harness-keys/run.py` in CI).** Codex's
 config parser ignores unknown keys, so each key is sent with a wrong-typed value: every key above makes
 `thread/start` fail naming it, so the CLI reads it. The design's `tools.view_image` is **not** read by
 this pin (any value is accepted and the tool stays); `features.view_image` is, and is what Fleet sets.
@@ -95,7 +95,7 @@ only local mode's `--disallowedTools WebSearch` removes one.
 The dashboard's cloud model picker offers families, not dated versions, which go stale. **Claude:**
 `opus`, `sonnet`, `haiku`, passed to `--model` unchanged; Claude Code resolves them to its current model
 (a Claude CLI bump can move them, see `CLAUDE.md` "Provider CLI Pins"). **Codex:** `sol`, `terra`,
-`luna`. The pinned Codex 0.159.2 does not resolve these. `thread/start` accepts `sol` and sends it to
+`luna`. The pinned Codex 0.164.0 does not resolve these. `thread/start` accepts `sol` and sends it to
 `/v1/responses` unchanged, its bundled catalog has no bare family names, and a ChatGPT-account login
 refuses a model outside that catalog. So `HarnessDefaults.CodexModelAliases` maps them, the only place
 they are mapped:

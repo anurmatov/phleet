@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import subprocess
+import shlex
 import tempfile
 import unittest
 
@@ -34,10 +35,13 @@ class StockStartupTests(unittest.TestCase):
         guard = guard.replace("/app/Fleet.Agent.dll", str(assembly))
         for value in ["true", " true", "true ", " true "]:
             with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                canonical = Path(directory) / "canonical"
+                canonical.mkdir()
+                command = guard.replace("--contentRoot /app", "--contentRoot " + shlex.quote(str(canonical)))
                 env = {"PATH": "/usr/bin:/bin", "HOME": directory, "DOTNET_CLI_HOME": directory,
                        "StockOpenShell__Enabled": value}
                 result = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c",
-                                         guard + '\nprintf unexpected-side-effect'],
+                                         command + '\nprintf unexpected-side-effect'],
                                         cwd=directory, env=env, capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(result.stdout, "")
@@ -83,6 +87,20 @@ class StockStartupTests(unittest.TestCase):
         self.assertIn("test ! -w /app", stock)
         self.assertIn("test -r /app/Fleet.Agent.dll", stock)
         self.assertEqual("", default.strip())
+
+    def test_ci_qualifies_both_image_profiles_without_network(self):
+        ci = (ROOT / ".github/workflows/ci.yml").read_text().split("  agent-image:", 1)[1].split("  minio-init-dependencies:", 1)[0]
+        self.assertIn("docker build --target stock-agent -t fleet:stock-agent-ci .", ci)
+        self.assertIn("{{.Config.User}}", ci)
+        self.assertIn("{{.Config.WorkingDir}}", ci)
+        self.assertIn('= "10001:10001"', ci)
+        self.assertIn('= "/home/agent"', ci)
+        self.assertIn('= "/app"', ci)
+        self.assertIn("docker run --rm --network none", ci)
+        for check in ['test "$(id -u)" = 10001', 'test "$(id -g)" = 10001',
+                      'test ! -w /app', 'test -r /app/Fleet.Agent.dll',
+                      'for directory in "$PWD" /workspace', 'cmp "$probe" "$probe.copy"']:
+            self.assertIn(check, ci)
 
     def test_disabled_validation_continues_existing_entrypoint(self):
         guard = (ROOT / "entrypoint.sh").read_text().split("# Read provider", 1)[0]

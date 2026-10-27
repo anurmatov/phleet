@@ -36,6 +36,23 @@ builder.Services.AddSingleton<TaskHistoryStore>();
 builder.Services.AddSingleton<AgentRegistry>();
 builder.Services.AddSingleton<DockerService>();
 builder.Services.AddSingleton<ContainerProvisioningService>();
+builder.Services.AddSingleton<OpenShellRetirementService>(sp => new(() =>
+{
+    var connection = sp.GetRequiredService<IConfiguration>().GetConnectionString("OrchestratorDb");
+    if (string.IsNullOrWhiteSpace(connection)) throw new InvalidOperationException("Lifecycle database is unavailable.");
+    // Isolated non-retrying writer: an uncertain lifecycle mutation must never be replayed by EF.
+    return new OrchestratorDbContext(new DbContextOptionsBuilder<OrchestratorDbContext>()
+        .UseMySql(connection, new MySqlServerVersion(new Version(8, 0, 0))).Options);
+}, sp.GetRequiredService<IServiceScopeFactory>()));
+builder.Services.AddSingleton<IOpenShellPreparationAuthority, DenyOpenShellPreparationAuthority>();
+builder.Services.AddSingleton<OpenShellProvisioningService>(sp => new(() =>
+{
+    var connection = sp.GetRequiredService<IConfiguration>().GetConnectionString("OrchestratorDb");
+    if (string.IsNullOrWhiteSpace(connection)) throw new InvalidOperationException("Lifecycle database is unavailable.");
+    return new OrchestratorDbContext(new DbContextOptionsBuilder<OrchestratorDbContext>()
+        .UseMySql(connection, new MySqlServerVersion(new Version(8, 0, 0))).Options);
+}, sp.GetRequiredService<IOpenShellPreparationAuthority>(), sp.GetRequiredService<IServiceScopeFactory>()));
+builder.Services.AddSingleton<IAgentRuntimeLifecycle, AgentRuntimeLifecycle>();
 builder.Services.AddSingleton<JournalTokenService>();
 builder.Services.AddSingleton(_ => new TelegramMembershipClient());
 builder.Services.AddSingleton<CommsJournalStatusProxy>();
@@ -109,7 +126,10 @@ builder.Services
     .WithHttpTransport()
     .WithToolsFromAssembly();
 
+builder.AddOpenShellBootstrapReceiver();
+builder.AddOpenShellPreparationPreflight();
 var app = builder.Build();
+app.UseOpenShellBootstrapReceiver();
 
 var epicGrantOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<EpicGrantOptions>>().Value;
 if (epicGrantOptions.DisableMisconfiguredAutonomy())
@@ -154,6 +174,10 @@ if (!string.IsNullOrEmpty(connectionString))
     var epicGrants = epicGrantScope.ServiceProvider.GetRequiredService<EpicGrantService>();
     app.Logger.LogInformation("Epic grants are {State}", epicGrants.IsEnabled ? "enabled" : "disabled");
 }
+
+// Fail-closed lifecycle/policy operator guard precedes legacy auth exemptions and handlers.
+// Captures only the operator token at startup; ConfigToken and caller attribution are not authority.
+app.UseOpenShellOperatorAuthorization(app.Configuration["Orchestrator:AuthToken"] ?? "");
 
 // WebSocket support
 app.UseWebSockets();
@@ -364,29 +388,8 @@ app.MapEpicDriverEndpoints();
 app.MapGet("/api/workflows", (WorkflowStore workflows) =>
     Results.Ok(workflows.GetAll()));
 
-// REST: restart an agent's container via Docker API
-app.MapPost("/api/agents/{name}/restart", async (string name, AgentRegistry registry, DockerService docker, IServiceScopeFactory scopeFactory) =>
-{
-    // Prefer registry (live state), fall back to DB for container name (handles stopped/crashed agents)
-    var containerName = registry.Get(name)?.ContainerName;
-    if (containerName is null)
-    {
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-        var dbAgent = db is null ? null : await db.Agents.AsNoTracking().FirstOrDefaultAsync(a => a.Name == name);
-        containerName = dbAgent?.ContainerName;
-    }
-
-    if (containerName is null)
-        return Results.NotFound(new { error = $"Agent '{name}' not found in registry or DB" });
-
-    var ok = await docker.RestartContainerAsync(containerName);
-
-    return ok
-        ? Results.Ok(new { message = $"Container '{containerName}' restart requested" })
-        : Results.Problem($"Failed to restart container '{containerName}' — check orchestrator logs");
-});
-
+app.MapAgentRuntimeEndpoints();
+app.MapOpenShellReconciliationEndpoint();
 
 // REST: cancel all running tasks on an agent by proxying to the agent's HTTP /cancel endpoint.
 // Resolves the agent URL via container name on the Docker network (fleet-orchestrator is containerized).
@@ -484,8 +487,11 @@ app.MapPost("/api/agents/{name}/cancel/{**taskId}", async (string name, string t
 });
 
 // REST: restart an agent using a specific instruction version (temporary or pinned)
-app.MapPost("/api/agents/{name}/restart-with-version", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, ContainerProvisioningService provisioning) =>
+app.MapPost("/api/agents/{name}/restart-with-version", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, IAgentRuntimeLifecycle provisioning) =>
 {
+    var admission = await provisioning.ValidateAsync(name);
+    if (!admission.Success)
+        return Results.Json(new { error = admission.Message }, statusCode: admission.StatusCode);
     using var scope = scopeFactory.CreateScope();
     var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
     if (db is null)
@@ -517,7 +523,7 @@ app.MapPost("/api/agents/{name}/restart-with-version", async (string name, HttpR
         var pinnedResult = await provisioning.ReprovisionAsync(name);
         return pinnedResult.Success
             ? Results.Ok(new { message = $"Pinned '{body.InstructionName}' to v{body.VersionNumber} and reprovisioned '{name}'" })
-            : Results.Problem(pinnedResult.Message);
+            : Results.Json(new { error = pinnedResult.Message }, statusCode: pinnedResult.StatusCode);
     }
     else
     {
@@ -525,24 +531,24 @@ app.MapPost("/api/agents/{name}/restart-with-version", async (string name, HttpR
         var result = await provisioning.ReprovisionAsync(name, instructionVersionOverrides: overrides);
         return result.Success
             ? Results.Ok(new { message = $"Reprovisioned '{name}' with '{body.InstructionName}' v{body.VersionNumber} (temporary)" })
-            : Results.Problem(result.Message);
+            : Results.Json(new { error = result.Message }, statusCode: result.StatusCode);
     }
 });
 
 // REST: reprovision an agent's container (deprovision + provision from DB config)
 // Optional ?image= query param overrides the DB-configured image (used by CI for PR-specific tags)
-app.MapPost("/api/agents/{name}/reprovision", async (string name, HttpRequest request, ContainerProvisioningService provisioning) =>
+app.MapPost("/api/agents/{name}/reprovision", async (string name, HttpRequest request, IAgentRuntimeLifecycle provisioning) =>
 {
     var imageOverride = request.Query["image"].FirstOrDefault();
     var result = await provisioning.ReprovisionAsync(name, imageOverride);
     return result.Success
         ? Results.Ok(new { message = result.Message })
-        : Results.Problem(result.Message);
+        : Results.Json(new { error = result.Message }, statusCode: result.StatusCode);
 });
 
 // REST: bulk reprovision all currently running agents
 // Optional ?image= query param overrides the image for all agents (e.g. bulk image upgrade)
-app.MapPost("/api/agents/reprovision-running", async (HttpRequest request, ContainerProvisioningService provisioning) =>
+app.MapPost("/api/agents/reprovision-running", async (HttpRequest request, IAgentRuntimeLifecycle provisioning) =>
 {
     var imageOverride = request.Query["image"].FirstOrDefault();
     var results = await provisioning.ReprovisionRunningAsync(imageOverride);
@@ -558,80 +564,7 @@ app.MapPost("/api/agents/reprovision-running", async (HttpRequest request, Conta
 // REST: create a new agent — Endpoints/AgentCreateEndpoints.cs
 app.MapAgentCreateEndpoints();
 
-// REST: delete an agent (deprovision container + remove DB records)
-app.MapDelete("/api/agents/{name}", async (string name, IServiceScopeFactory scopeFactory, ContainerProvisioningService provisioning, AgentRegistry registry, IAclChangeNotifier aclNotifier) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
-
-    var agent = await db.Agents
-        .Include(a => a.Tools)
-        .Include(a => a.Projects)
-        .Include(a => a.McpEndpoints)
-        .Include(a => a.Networks)
-        .Include(a => a.EnvRefs)
-        .Include(a => a.TelegramUsers)
-        .Include(a => a.TelegramGroups)
-        .Include(a => a.Instructions)
-        .AsSplitQuery()
-        .FirstOrDefaultAsync(a => a.Name == name);
-
-    if (agent is null)
-        return Results.NotFound(new { error = $"Agent '{name}' not found in DB" });
-
-    // Best-effort deprovision — if container doesn't exist that's fine, proceed with DB delete
-    var deprovision = await provisioning.DeprovisionAsync(name);
-
-    db.Agents.Remove(agent);
-    await db.SaveChangesAsync();
-
-    // agent_project_access is keyed by name, not by a foreign key, so deleting the agent leaves its
-    // rows behind. Deleting an agent unassigns every project, so the same hook applies: the rows it
-    // created go, an operator's manual rows and any wildcard stay.
-    await AgentProjectAccessSync.SyncAndBroadcastAsync(db, aclNotifier, agent.Name, []);
-
-    // Remove from in-memory registry so the agent doesn't persist as a ghost in the dashboard.
-    registry.Remove(name);
-
-    return Results.Ok(new
-    {
-        message = deprovision.Success
-            ? $"Agent '{name}' deleted and container removed"
-            : $"Agent '{name}' deleted (container was not running)"
-    });
-});
-
-// REST: stop an agent's container via Docker API
-app.MapPost("/api/agents/{name}/stop", async (string name, AgentRegistry registry, DockerService docker) =>
-{
-    var agent = registry.Get(name);
-    if (agent is null)
-        return Results.NotFound(new { error = $"Agent '{name}' not found in registry" });
-
-    var containerName = agent.ContainerName ?? name;
-    var ok = await docker.StopContainerAsync(containerName);
-
-    return ok
-        ? Results.Ok(new { message = $"Container '{containerName}' stop requested" })
-        : Results.Problem($"Failed to stop container '{containerName}' — check orchestrator logs");
-});
-
-// REST: start an agent's container via Docker API
-app.MapPost("/api/agents/{name}/start", async (string name, AgentRegistry registry, DockerService docker) =>
-{
-    var agent = registry.Get(name);
-    if (agent is null)
-        return Results.NotFound(new { error = $"Agent '{name}' not found in registry" });
-
-    var containerName = agent.ContainerName ?? name;
-    var ok = await docker.StartContainerAsync(containerName);
-
-    return ok
-        ? Results.Ok(new { message = $"Container '{containerName}' start requested" })
-        : Results.Problem($"Failed to start container '{containerName}' — check orchestrator logs");
-});
+app.MapAgentDeleteEndpoint();
 
 // REST: cancel a running Temporal workflow (graceful shutdown)
 app.MapPost("/api/workflows/{ns}/cancel/{**id}", async (string ns, string id, HttpRequest request, TemporalClientRegistry temporal) =>
@@ -1379,9 +1312,10 @@ app.MapPost("/api/services/restart", async (HttpRequest request, DockerService d
     {
         try
         {
-            await docker.StopContainerAsync(svc);
-            await docker.StartContainerAsync(svc);
-            restarted.Add(svc);
+            if (!await docker.RestartContainerAsync(svc))
+                errors[svc] = "runtime ownership unavailable, protected target or restart failed";
+            else
+                restarted.Add(svc);
         }
         catch (Exception ex)
         {

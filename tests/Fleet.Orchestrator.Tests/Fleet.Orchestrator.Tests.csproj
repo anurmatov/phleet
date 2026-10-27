@@ -34,6 +34,8 @@
     <ProjectReference Include="..\..\src\Fleet.Conversations\Fleet.Conversations.csproj" />
     <ProjectReference Include="..\..\src\Fleet.Journal.Client\Fleet.Journal.Client.csproj" />
     <ProjectReference Include="..\..\src\Fleet.Orchestrator\Fleet.Orchestrator.csproj" />
+    <!-- Exercise the actual receiving SQL reader against the actual orchestrator migration. -->
+    <ProjectReference Include="..\..\src\Fleet.Memory\Fleet.Memory.csproj" />
     <!-- #460 AC-X3: the effective-harness parity test binds the generated appsettings.json into the
          agent's own AgentOptions and builds the plan with the agent's own AgentHarness. Aliased, so
          the Fleet.Agent namespace never shadows the orchestrator's Agent entity in other tests. -->

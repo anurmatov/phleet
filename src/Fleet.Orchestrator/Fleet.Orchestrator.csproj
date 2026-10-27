@@ -27,6 +27,9 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Google.Protobuf" Version="3.26.1" />
+    <PackageReference Include="Grpc.Net.Client" Version="2.67.0" />
+    <PackageReference Include="Grpc.Tools" Version="2.67.0" PrivateAssets="all" />
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="9.0.3" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.3">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
@@ -39,4 +42,11 @@
     <PackageReference Include="Temporalio" Version="1.11.1" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Protobuf Include="OpenShell/Proto/*.proto" ProtoRoot="OpenShell/Proto" GrpcServices="Client" Exclude="OpenShell/Proto/extension.proto;OpenShell/Proto/supervisor_middleware.proto" />
+    <!-- Messages only: the preflight reads recorded replies and never calls a middleware gRPC.
+         Fleet.Identity exports the same generated types publicly; consumers that reference both
+         assemblies alias this one (see Fleet.Identity.Tests). -->
+    <Protobuf Include="OpenShell/Proto/extension.proto;OpenShell/Proto/supervisor_middleware.proto" ProtoRoot="OpenShell/Proto" GrpcServices="None" />
+  </ItemGroup>
 </Project>

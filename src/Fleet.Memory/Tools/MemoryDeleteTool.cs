@@ -23,15 +23,19 @@ public sealed class MemoryDeleteTool(
         if (string.IsNullOrWhiteSpace(id))
             return "memory_delete: missing required parameter 'id'.\nHint: pass the memory ID (full UUID or first 8 characters) from memory_search or memory_list.";
 
-        var agentName = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+        var context = httpContextAccessor?.HttpContext;
+        var verified = VerifiedMemoryRequest.Get(context);
+        if (VerifiedMemoryRequest.IsRequired(context) && verified is null)
+            return "memory_delete: verified request authorization unavailable.";
+        var agentName = verified?.Identity.AgentName ?? context?.Request.Query["agent"].FirstOrDefault();
 
-        if (aclCache.IsAclEnabled && !aclCache.IsAvailable)
+        if (verified is null && aclCache.IsAclEnabled && !aclCache.IsAvailable)
             return "memory_delete: ACL cache unavailable — orchestrator unreachable. Try again shortly.";
 
         if (aclCache.IsAclEnabled && string.IsNullOrWhiteSpace(agentName))
             return "memory_delete: agent identity required — missing '?agent=' query parameter.";
 
-        if (aclCache.IsAclEnabled)
+        if (verified is not null || aclCache.IsAclEnabled)
         {
             // Fetch the memory to determine its project, then ACL-check before deleting.
             // Uniform denial (no existence leak) — same pattern as memory_get.
@@ -39,7 +43,7 @@ public sealed class MemoryDeleteTool(
             try { probe = await memoryService.GetAsync(id); }
             catch (AmbiguousMemoryIdException ex) { return $"memory_delete: {ex.Message}"; }
             var project = probe?.Project ?? "";
-            var (allowed, denyReason) = aclCache.CanRead(agentName!, project);
+            var (allowed, denyReason) = (verified is null ? aclCache.CanRead(agentName!, project) : aclCache.CanRead(verified.Snapshot, agentName!, project));
             if (!allowed)
             {
                 logger.LogInformation(

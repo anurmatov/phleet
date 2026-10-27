@@ -2,6 +2,8 @@ using Fleet.Memory.Configuration;
 using Fleet.Memory.Data;
 using Fleet.Memory.Models;
 using Fleet.Memory.Services;
+using Microsoft.AspNetCore.Server.Kestrel.Https;
+using System.Security.Cryptography.X509Certificates;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -11,6 +13,25 @@ builder.Services.Configure<QdrantOptions>(builder.Configuration.GetSection(Qdran
 builder.Services.Configure<EmbeddingOptions>(builder.Configuration.GetSection(EmbeddingOptions.Section));
 builder.Services.Configure<AclOptions>(builder.Configuration.GetSection(AclOptions.Section));
 builder.Services.Configure<OrchestratorOptions>(builder.Configuration.GetSection(OrchestratorOptions.Section));
+
+// Startup-only, held off until the full OpenShell path is independently qualified.
+var identityOptions = builder.Configuration.GetSection(FleetIdentityOptions.Section).Get<FleetIdentityOptions>() ?? new();
+builder.Services.Configure<FleetIdentityOptions>(builder.Configuration.GetSection(FleetIdentityOptions.Section));
+if (identityOptions.Enabled)
+{
+    if (!builder.Configuration.GetValue<bool>("Acl:EnableProjectScopedAcl"))
+        throw new InvalidOperationException("Verified memory requires project ACL enforcement.");
+    var identityTrust = new MemoryIdentityTrust(identityOptions);
+    builder.Services.AddSingleton(identityTrust);
+    builder.Services.AddSingleton<IVerifiedLaunchReader, VerifiedLaunchReader>();
+    builder.Services.AddSingleton<MemoryIdentitySessions>();
+    builder.WebHost.ConfigureKestrel(server => server.ListenAnyIP(identityOptions.VerifiedPort, endpoint => endpoint.UseHttps(tls =>
+    {
+        tls.ServerCertificate = X509Certificate2.CreateFromPemFile(identityOptions.ServerCertificatePath, identityOptions.ServerKeyPath);
+        tls.ClientCertificateMode = ClientCertificateMode.RequireCertificate;
+        tls.ClientCertificateValidation = (certificate, _, _) => identityTrust.AcceptCertificate(certificate);
+    })));
+}
 
 // Data layer
 builder.Services.AddSingleton<MemoryFileStore>();
@@ -68,6 +89,7 @@ app.Services.GetRequiredService<MemorySizeGuidance>().LogStartup(
         ? embeddingConfig.Ollama.Model
         : Path.GetFileNameWithoutExtension(embeddingConfig.Onnx.ModelPath));
 
+if (identityOptions.Enabled) app.UseMiddleware<MemoryIdentityMiddleware>();
 app.MapMcp();
 
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "fleet-memory" }));

@@ -38,6 +38,26 @@ namespace Fleet.Agent;
 /// </summary>
 public static class AgentHostRegistration
 {
+    public static bool TryAddOpenShellBootstrapServices(this IServiceCollection services, IConfiguration configuration)
+    {
+        if (!configuration.GetValue<bool>("OpenShell:Bootstrap")) return false;
+        // Validate BEFORE even one executor/intake service can be registered or resolved.
+        var guard = new OpenShellStartupGuard(configuration);
+        if (services.Any(d => d.ServiceType == typeof(AgentHarness) || d.ServiceType == typeof(TaskManager)))
+            throw new InvalidOperationException("bootstrap_registration_order");
+        services.AddSingleton(guard);
+        services.AddSingleton(new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false, UseCookies = false })
+            { Timeout = Timeout.InfiniteTimeSpan });
+        services.AddHostedService<OpenShellBootstrapDeadline>();
+        return true;
+    }
+
+    private static void RejectBootstrapRegistration(IServiceCollection services, IConfiguration? configuration = null)
+    {
+        if (configuration?.GetValue<bool>("OpenShell:Bootstrap") == true || services.Any(d => d.ServiceType == typeof(OpenShellStartupGuard)))
+            throw new InvalidOperationException("bootstrap_cannot_register_intake");
+    }
+
     /// <summary>
     /// Options binding and the services both modes need. Called before either
     /// <see cref="AddAgentCliServices"/> or <see cref="AddAgentDaemonServices"/>.
@@ -45,6 +65,7 @@ public static class AgentHostRegistration
     public static IServiceCollection AddAgentCoreServices(
         this IServiceCollection services, IConfiguration configuration)
     {
+        RejectBootstrapRegistration(services, configuration);
         // Bind configuration sections
         services.Configure<AgentOptions>(configuration.GetSection(AgentOptions.Section));
         services.Configure<TelegramOptions>(configuration.GetSection(TelegramOptions.Section));
@@ -297,6 +318,7 @@ public static class AgentHostRegistration
     /// <summary>CLI mode: run a single task and exit.</summary>
     public static IServiceCollection AddAgentCliServices(this IServiceCollection services)
     {
+        RejectBootstrapRegistration(services);
         services.AddHostedService<CliRunner>();
         return services;
     }
@@ -305,6 +327,7 @@ public static class AgentHostRegistration
     public static IServiceCollection AddAgentDaemonServices(
         this IServiceCollection services, IConfiguration configuration)
     {
+        RejectBootstrapRegistration(services, configuration);
         // File listener startup completes before task intake and CLI warmup can start.
         // Without files, preserve the existing capture service startup order.
         var journalFilesEnabled = configuration.GetValue<bool>("Journal:FilesEnabled") || configuration.GetValue<bool>("Journal:SendEnabled");

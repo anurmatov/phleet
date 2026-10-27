@@ -30,9 +30,13 @@ public sealed class MemorySearchTool(
         if (type is not null && !MemoryDocument.ValidTypes.Contains(type))
             return $"memory_search: invalid value for 'type' filter: '{type}'.\nValid types: {string.Join(", ", MemoryDocument.ValidTypes)}.";
 
-        var agentName = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+        var context = httpContextAccessor?.HttpContext;
+        var verified = VerifiedMemoryRequest.Get(context);
+        if (VerifiedMemoryRequest.IsRequired(context) && verified is null)
+            return "memory_search: verified request authorization unavailable.";
+        var agentName = verified?.Identity.AgentName ?? context?.Request.Query["agent"].FirstOrDefault();
 
-        if (aclCache.IsAclEnabled && !aclCache.IsAvailable)
+        if (verified is null && aclCache.IsAclEnabled && !aclCache.IsAvailable)
             return "memory_search: ACL cache unavailable — orchestrator unreachable. Try again shortly.";
 
         if (aclCache.IsAclEnabled && string.IsNullOrWhiteSpace(agentName))
@@ -46,12 +50,12 @@ public sealed class MemorySearchTool(
         var results = await memoryService.SearchAsync(query, fetchLimit, type, project, agent);
 
         // Post-filter by ACL with explicit denial logging
-        if (aclCache.IsAclEnabled)
+        if (verified is not null || aclCache.IsAclEnabled)
         {
             var filtered = new List<MemoryDocument>();
             foreach (var d in results)
             {
-                var (allowed, denyReason) = aclCache.CanRead(agentName!, d.Project ?? "");
+                var (allowed, denyReason) = (verified is null ? aclCache.CanRead(agentName!, d.Project ?? "") : aclCache.CanRead(verified.Snapshot, agentName!, d.Project ?? ""));
                 if (allowed)
                 {
                     filtered.Add(d);

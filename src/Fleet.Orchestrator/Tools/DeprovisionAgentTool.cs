@@ -5,7 +5,7 @@ using ModelContextProtocol.Server;
 namespace Fleet.Orchestrator.Tools;
 
 [McpServerToolType]
-public sealed class DeprovisionAgentTool(ContainerProvisioningService provisioning)
+public sealed class DeprovisionAgentTool(IAgentRuntimeLifecycle provisioning)
 {
     [McpServerTool(Name = "deprovision_agent")]
     [Description("Stops and removes the Docker container for an agent. Fails if the container is not found. Data in the workspace volume is preserved.")]

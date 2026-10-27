@@ -289,9 +289,11 @@ public sealed class SouthRoundTripTests(
             await WaitForKindAsync(conversation, ConversationEventKind.TurnStarted);
         }
 
-        // The terminal was never committed, so the message is still unacked and the lease is the
-        // only thing that resolves the attempt.
-        Assert.NotEqual(0u, await broker.DepthAsync(Queue));
+        // Closing the consumer/connection does not synchronously make a quorum delivery READY.
+        // MessageCount excludes unacked deliveries, so an immediate zero is not evidence of an ack.
+        // Keep the positive requeue assertion, but wait for that broker observation with a bound.
+        Assert.NotEqual(0u, await WaitForRequeuedDeliveryAsync(
+            ct => broker.DepthAsync(Queue, ct), TimeSpan.FromSeconds(20)));
 
         // The REAL maintenance loop resolves it, not a hand-driven Reconciler.
         //
@@ -785,6 +787,20 @@ public sealed class SouthRoundTripTests(
         {
             if (await broker.DepthAsync(Queue) == 0) return;
             await Task.Delay(100);
+        }
+    }
+
+    /// <summary>Observe requeue after shutdown, not a momentary ready-only zero.</summary>
+    /// <remarks>No retry on read errors and no success on timeout; used by the real broker case above.</remarks>
+    internal static async Task<uint> WaitForRequeuedDeliveryAsync(
+        Func<CancellationToken, Task<uint>> readDepth, TimeSpan timeout)
+    {
+        using var deadline = new CancellationTokenSource(timeout);
+        while (true)
+        {
+            var ready = await readDepth(deadline.Token).WaitAsync(deadline.Token);
+            if (ready > 0) return ready;
+            await Task.Delay(TimeSpan.FromMilliseconds(100), deadline.Token);
         }
     }
 

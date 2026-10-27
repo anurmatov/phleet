@@ -1,0 +1,8 @@
+Source: https://github.com/anurmatov/openshell/tree/80d76a5c72d2a752d811775b62c86e974bc2bf19/proto
+Commit: 80d76a5c72d2a752d811775b62c86e974bc2bf19
+Apache-2.0; unmodified local import closure, Google well-known types supplied by Grpc.Tools.
+Generated C# is build output only.
+
+60f28ee9dc846d41152f4db7e82a439c78d024786efaceb464900d1d1ad129ad  src/Fleet.Orchestrator/OpenShell/Proto/extension.proto
+b3c2037a6b51285b48a39025b85e79a4c717a2b95accb89cf43dbe6079831c75  src/Fleet.Orchestrator/OpenShell/Proto/supervisor_middleware.proto
+d07c0367e2861e7fe70fa1b679f879f4fa2f9138ade4457d44ecf8b2e135bb45  src/Fleet.Orchestrator/OpenShell/Proto/LICENSE

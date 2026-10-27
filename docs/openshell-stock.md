@@ -196,8 +196,10 @@ receive the same validated binding through core registration after the enrollmen
 permission, certificate or grant is created by this source. No setup/Compose activation
 or new live-mutable configuration key is exposed.
 
-`BrokerHost` must match existing `RabbitMq:Host` exactly. The epoch derives the isolated
-vhost `stock-<epoch-N>` and three distinct principal names ending in `-workload`,
+`BrokerHost` must match the workload and outside Bridge `RabbitMq:Host` exactly.
+The observer selects its host from the enrolled `BrokerHost` independently of the
+ordinary orchestrator `RabbitMq:Host`, preserving the exact-host identity check.
+The epoch derives the isolated vhost `stock-<epoch-N>` and three distinct principal names ending in `-workload`,
 `-control` and `-observer`, without additional identity knobs. All three roles use
 plain AMQP on private port `5672`, with AMQP TLS explicitly disabled and no stock
 connection retry or automatic recovery. For example, the endpoint is

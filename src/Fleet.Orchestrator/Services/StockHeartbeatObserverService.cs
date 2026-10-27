@@ -25,7 +25,14 @@ public sealed class StockHeartbeatObserverService(
             var identity = StockBrokerIdentity.Optional(configuration["StockOpenShell:AuthorityFile"],
                 configuration["StockOpenShell:BrokerPasswordFile"], "observer");
             if (identity is null) return;
-            receiver = new(options, registry, publisher, configuration, consumerLogger, hold, identity) { Connect = Connect };
+            // Select the enrolled endpoint without mutating the ordinary consumer's options.
+            // Configure still checks this exact host against fresh authority before connecting.
+            var observerOptions = Options.Create(new RabbitMqOptions
+            {
+                Host = identity.BrokerHost,
+                Exchange = options.Value.Exchange
+            });
+            receiver = new(observerOptions, registry, publisher, configuration, consumerLogger, hold, identity) { Connect = Connect };
             await receiver.StartAsync(stoppingToken);
             await Task.Delay(Timeout.Infinite, stoppingToken);
         }

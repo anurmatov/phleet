@@ -17,11 +17,14 @@ namespace Fleet.Orchestrator.Tests;
 public sealed class StockObserverIsolationTests
 {
     [Theory]
-    [InlineData("active")]
-    [InlineData("revoked")]
-    public async Task SeparateSubscriptions_OrdinaryRegistrationHeartbeatAndAccessContinue(string state)
+    [InlineData("active", "broker.example.test")]
+    [InlineData("revoked", "broker.example.test")]
+    [InlineData("active", "127.0.0.1")]
+    [InlineData("revoked", "127.0.0.1")]
+    public async Task SeparateSubscriptions_OrdinaryRegistrationHeartbeatAndAccessContinue(string state, string ordinaryHost)
     {
         using var f = new Fixture();
+        f.Options.Value.Host = ordinaryHost;
         var ordinaryChannel = Substitute.For<IChannel>();
         var stockChannel = Substitute.For<IChannel>();
         var publisherChannel = Substitute.For<IChannel>();
@@ -51,7 +54,10 @@ public sealed class StockObserverIsolationTests
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         while (stockChannel.ReceivedCalls().All(c => c.GetMethodInfo().Name != "BasicConsumeAsync"))
             await Task.Delay(1, timeout.Token);
-        Assert.Equal("/", ordinaryFactory!.VirtualHost);
+        Assert.Equal(ordinaryHost, ordinaryFactory!.HostName);
+        Assert.Equal(ordinaryHost, f.Options.Value.Host);
+        Assert.Equal(f.Record.BrokerHost, stockFactory!.HostName);
+        Assert.Equal("/", ordinaryFactory.VirtualHost);
         Assert.Equal("guest", ordinaryFactory.UserName);
         Assert.True(ordinaryFactory.AutomaticRecoveryEnabled);
         Assert.Equal("stock-" + f.Record.Epoch.ToString("N"), stockFactory!.VirtualHost);
@@ -91,7 +97,6 @@ public sealed class StockObserverIsolationTests
     [InlineData("revoked")]
     [InlineData("authority_missing")]
     [InlineData("password_missing")]
-    [InlineData("wrong_host")]
     [InlineData("cleanup")]
     public async Task StockStartupFailure_DoesNotStopHostOrOrdinaryFlows(string fault)
     {
@@ -102,7 +107,6 @@ public sealed class StockObserverIsolationTests
         if (fault == "revoked") f.Save(f.Record with { State = "revoked" });
         if (fault == "authority_missing") File.Delete(f.Authority);
         if (fault == "password_missing") File.Delete(f.Password);
-        if (fault == "wrong_host") f.Save(f.Record with { BrokerHost = "foreign.example.test" });
         var hold = new StockRuntimeMutationHold(f.Config);
         var ordinary = new HeartbeatConsumerService(f.Options, f.Registry, publisher, f.Config,
             NullLogger<HeartbeatConsumerService>.Instance, hold)
@@ -130,6 +134,19 @@ public sealed class StockObserverIsolationTests
         Assert.True(hold.Denies("agent1"));
         if (fault == "authority_missing") Assert.True(hold.Denies("agent2"));
         await host.StopAsync();
+    }
+
+    [Fact]
+    public void ObserverIdentity_WrongHostRefusesBeforeChangingFactory()
+    {
+        using var f = new Fixture();
+        var identity = new StockBrokerIdentity(f.Authority, f.Password, "observer");
+        var factory = new ConnectionFactory { HostName = "foreign.example.test" };
+        var error = Assert.Throws<StockIdentityDenied>(() => identity.Configure(factory));
+        Assert.Equal("broker_target", error.Message);
+        Assert.Equal("foreign.example.test", factory.HostName);
+        Assert.Equal("/", factory.VirtualHost);
+        Assert.Equal("guest", factory.UserName);
     }
 
     [Theory]

@@ -41,6 +41,7 @@ public sealed class StockBrokerIdentity
     public string Principal(string role) => role is "workload" or "control" or "observer"
         ? VirtualHost + "-" + role : throw new StockIdentityDenied("broker_role");
     public string Agent => _agent;
+    public string BrokerHost => _host;
 
     public void Current()
     {

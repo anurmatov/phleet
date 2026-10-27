@@ -18,6 +18,30 @@ namespace Fleet.Orchestrator.Tests;
 public sealed class StockHeartbeatIdentityTests
 {
     [Theory]
+    [InlineData("heartbeat.agent2")]
+    [InlineData("registration.agent2")]
+    public async Task OrdinaryReceiver_StillUpdatesUnrelatedAgent_WithStockKeys(string route)
+    {
+        using var fixture = new Fixture();
+        var receiver = fixture.OrdinaryReceiver();
+        await receiver.OnMessageReceived(this, new BasicDeliverEventArgs("ordinary", 1, false,
+            "fleet.orchestrator", route, new BasicProperties(),
+            JsonSerializer.SerializeToUtf8Bytes(new AgentHeartbeat("agent2", "idle", DateTimeOffset.UtcNow))));
+        Assert.Equal("idle", fixture.Registry.Get("agent2")!.ReportedStatus);
+    }
+
+    [Fact]
+    public void RevokedEnrollment_DoesNotBreakOrdinaryConstruction_AndRetainsHold()
+    {
+        using var fixture = new Fixture();
+        fixture.Save(fixture.Record with { State = "revoked" });
+        _ = fixture.OrdinaryReceiver();
+        var hold = new StockRuntimeMutationHold(fixture.Configuration);
+        Assert.True(hold.Denies("agent1"));
+        Assert.False(hold.Denies("agent2"));
+    }
+
+    [Theory]
     [InlineData("foreign_user")]
     [InlineData("foreign_payload")]
     [InlineData("foreign_route")]
@@ -170,6 +194,12 @@ public sealed class StockHeartbeatIdentityTests
                 ["StockOpenShell:AuthorityFile"] = Authority, ["StockOpenShell:BrokerPasswordFile"] = Password
             }).Build();
             Receiver = new(options, Registry, new AgentConfigPublisherService(options, NullLogger<AgentConfigPublisherService>.Instance),
+                Configuration, NullLogger<HeartbeatConsumerService>.Instance, new(Configuration), new(Authority, Password, "observer"));
+        }
+        public HeartbeatConsumerService OrdinaryReceiver()
+        {
+            var options = Options.Create(new RabbitMqOptions { Host = "broker.example.test", Exchange = "fleet.orchestrator" });
+            return new(options, Registry, new AgentConfigPublisherService(options, NullLogger<AgentConfigPublisherService>.Instance),
                 Configuration, NullLogger<HeartbeatConsumerService>.Instance);
         }
         public void Save(StockEnrollmentAuthority record) => File.WriteAllText(Authority, JsonSerializer.Serialize(record));

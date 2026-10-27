@@ -59,6 +59,8 @@ builder.Services.AddSingleton<AgentConfigPublisherService>();
 builder.Services.AddSingleton<HeartbeatConsumerService>();
 builder.Services.AddSingleton<IRabbitMqStatus>(sp => sp.GetRequiredService<HeartbeatConsumerService>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<HeartbeatConsumerService>());
+// A distinct hosted service/connection must never replace the default-vhost consumer.
+builder.Services.AddHostedService<StockHeartbeatObserverService>();
 
 builder.Services.AddHostedService<AgentStateMonitorService>();
 

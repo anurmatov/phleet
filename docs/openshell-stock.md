@@ -191,7 +191,7 @@ or additional principal is introduced. Ordinary Bridge peer subscriptions remain
 unchanged when both stock authority/password settings are absent.
 
 `StockOpenShell:AuthorityFile` and `StockOpenShell:BrokerPasswordFile` are startup-only
-inputs for the outside Bridge and heartbeat receiver; the workload relay/heartbeat
+inputs for the outside Bridge and separate stock heartbeat observer; the workload relay/heartbeat
 receive the same validated binding through core registration after the enrollment gate. Password files reference pre-existing credentials: no user,
 permission, certificate or grant is created by this source. No setup/Compose activation
 or new live-mutable configuration key is exposed.
@@ -218,6 +218,19 @@ This is a fixed stock-only profile, not a global transport option or TLS fallbac
 ordinary non-stock connections keep their existing behavior.
 The workload, outside Bridge and observer need exact-build operator qualification
 with this transport; previously qualified TLS-era images are not evidence for it.
+
+The orchestrator always keeps its ordinary default-vhost heartbeat, registration
+and access-request consumer, including its existing recovery behavior and health
+status. Stock telemetry uses a distinct hosted observer and connection; enrollment,
+connection, delivery and cleanup failures stay inside that observer, log a fixed
+manual-reconciliation warning, and never select the ordinary broker as fallback.
+Ordinary telemetry/access requests cannot impersonate the known enrolled agent.
+The mutation hold snapshots the public identity without requiring an active record,
+so revocation does not break ordinary startup or reopen legacy mutation paths.
+If stock configuration is present but its public identity cannot be read unambiguously,
+all runtime mutations remain held until manual reconciliation; ordinary telemetry
+still flows. This conservative hold is not broker authentication or authority to
+admit a stock delivery, which still requires the full fresh active binding.
 
 The external broker MUST enforce [validated user-id](https://www.rabbitmq.com/docs/validated-user-id),
 with distinct nonshared passwords, no impersonator users or trusted federation/shovel

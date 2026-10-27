@@ -18,6 +18,8 @@ public sealed class AgentConfigPublisherService : IAsyncDisposable
     private readonly RabbitMqOptions _rabbitConfig;
     private readonly ILogger<AgentConfigPublisherService> _logger;
 
+    internal Func<ConnectionFactory, CancellationToken, Task<IConnection>>? Connect { get; init; }
+
     private IConnection? _connection;
     private IChannel? _channel;
     private volatile bool _initialized;
@@ -166,7 +168,8 @@ public sealed class AgentConfigPublisherService : IAsyncDisposable
                 NetworkRecoveryInterval = TimeSpan.FromSeconds(5),
             };
 
-            _connection = await RabbitMqConnectionHelper.ConnectWithRetryAsync(factory, _logger, ct);
+            _connection = Connect is not null ? await Connect(factory, ct)
+                : await RabbitMqConnectionHelper.ConnectWithRetryAsync(factory, _logger, ct);
             _channel = await _connection.CreateChannelAsync(cancellationToken: ct);
 
             // Declare the agent-direct exchange so publish works even if agents haven't started yet.

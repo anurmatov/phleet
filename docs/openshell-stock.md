@@ -5,7 +5,7 @@
 This draft connects one manually enrolled, non-root Codex whole-agent profile to
 the existing daemon/native CLI/tool path, verified memory and normal broker control/
 completion. It is not a command-only sandbox. Source fixtures do not demonstrate
-installed-image compatibility, stock TLS/native transport or an actual whole-agent
+installed-image compatibility, gateway/memory TLS, native AMQP or an actual whole-agent
 turn; those require the separately authorized exact-build E2E before merge/deploy.
 
 The stock source pin is NVIDIA/OpenShell v0.1.5,
@@ -186,7 +186,7 @@ The outside stock Bridge uses static `Bridge`/`RabbitMq` configuration and does
 not register the ordinary peer-config subscription. Nonempty `PEER_CONFIG_KEYS`
 or `PEER_AGENT_DERIVED_KEYS` refuses before service construction/connections,
 including whitespace-only values. Its control connection still uses the same
-epoch authority, TLS, principal and revocation checks; no legacy broker connection
+epoch authority, principal and revocation checks; no legacy broker connection
 or additional principal is introduced. Ordinary Bridge peer subscriptions remain
 unchanged when both stock authority/password settings are absent.
 
@@ -198,11 +198,26 @@ or new live-mutable configuration key is exposed.
 
 `BrokerHost` must match existing `RabbitMq:Host` exactly. The epoch derives the isolated
 vhost `stock-<epoch-N>` and three distinct principal names ending in `-workload`,
-`-control` and `-observer`, without additional identity knobs. Connections use port 5671
-with hostname/chain-verified TLS and no stock connection retry or automatic recovery.
+`-control` and `-observer`, without additional identity knobs. All three roles use
+plain AMQP on private port `5672`, with AMQP TLS explicitly disabled and no stock
+connection retry or automatic recovery. For example, the endpoint is
+`amqp://broker.example.test:5672/stock-<epoch-N>`; passwords still come only from
+the protected role-specific file, never the URL or logs.
 Every publication/delivery reloads active enrollment and refuses changed epoch,
 sandbox, agent, policy/source pin or broker; revoked delivery cannot complete a pending request or update
 registry state. Already-admitted native work is not represented as canceled.
+
+This profile requires an isolated operator-trusted private network, with the broker
+unreachable from public networks and unrelated workloads. Credentials and broker
+traffic are unencrypted: epoch authentication and validated user-id do not protect
+against a hostile peer, packet capture or network MITM. The stock role policy must
+allow only the exact broker host/IP, port `5672` and approved native executable;
+do not widen egress or expose a broker host port to make it connect. Memory HTTPS,
+gateway/supervisor TLS and assertion verification remain required and unchanged.
+This is a fixed stock-only profile, not a global transport option or TLS fallback;
+ordinary non-stock connections keep their existing behavior.
+The workload, outside Bridge and observer need exact-build operator qualification
+with this transport; previously qualified TLS-era images are not evidence for it.
 
 The external broker MUST enforce [validated user-id](https://www.rabbitmq.com/docs/validated-user-id),
 with distinct nonshared passwords, no impersonator users or trusted federation/shovel
@@ -245,6 +260,18 @@ Ambiguous launch, shutdown or revocation stays held for operator reconciliation.
 No Create/Stop/Delete, replacement, takeover or inferred absence is issued. Revoke
 and independently verify workload quiescence before resuming legacy intake; preserve
 workspaces, journals and credential references. No destructive cleanup is provided.
+
+Operator cleanup evidence must establish that both the mounted test copy at
+`/home/agent/.codex-host/auth.json` and the native-home copy written by
+`stock-entrypoint.sh` at `/home/agent/.codex/auth.json` are absent, with the exact
+owned workload stopped. Removing only the mounted copy is not complete cleanup.
+Prove ownership before removing only those temporary test copies, preserve the
+approved donor/reference, and never read, hash, archive or export credential contents.
+This source does not automate that removal or attest that it occurred.
+
+Reverting the stock broker transport requires the matching TLS broker fixture and
+exact application images; there is no silent plaintext/TLS retry or runtime switch.
+Both forward qualification and rollback still require independent operator evidence.
 
 ## Acceptance
 

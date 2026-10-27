@@ -1,5 +1,3 @@
-using System.Net.Security;
-using System.Security.Authentication;
 using RabbitMQ.Client;
 
 namespace Fleet.Shared.Security;
@@ -70,15 +68,13 @@ public sealed class StockBrokerIdentity
         { throw new StockIdentityDenied("broker_credential_unavailable"); }
         if (password.Length is < 1 or > 4096 || password.Contains('\0') || password.Contains('\n') || password.Contains('\r'))
             throw new StockIdentityDenied("broker_credential_invalid");
-        factory.Port = 5671;
+        // This bounded profile requires an isolated operator-trusted private network.
+        // Broker credentials and AMQP messages are not encrypted on this transport.
+        factory.Port = 5672;
         factory.UserName = Principal(_role);
         factory.Password = password;
         factory.VirtualHost = VirtualHost;
-        factory.Ssl = new SslOption(_host, enabled: true)
-        {
-            Version = SslProtocols.Tls12 | SslProtocols.Tls13,
-            AcceptablePolicyErrors = SslPolicyErrors.None
-        };
+        factory.Ssl = new SslOption { Enabled = false };
         // A reconnected consumer must not quietly resume under changed/revoked enrollment.
         // Failure stays held for manual reconciliation; no new stock reconnect loop is added.
         factory.AutomaticRecoveryEnabled = false;

@@ -16,6 +16,88 @@ namespace Fleet.Agent.Tests;
 
 public sealed class StockBrokerTransportTests
 {
+    [Theory]
+    [InlineData("workload")]
+    [InlineData("control")]
+    [InlineData("observer")]
+    public void Configure_AllRolesSelectPrivateAmqpAndRetainEpochAuthentication(string role)
+    {
+        using var fixture = new Fixture();
+        var identity = new StockBrokerIdentity(fixture.Authority, fixture.Password, role);
+        var factory = new ConnectionFactory
+        {
+            HostName = "broker.example.test", Port = 5671,
+            Ssl = new SslOption { Enabled = true },
+            UserName = "foreign", Password = "foreign", VirtualHost = "foreign",
+            AutomaticRecoveryEnabled = true, TopologyRecoveryEnabled = true
+        };
+        identity.Configure(factory);
+        Assert.Equal("broker.example.test", factory.HostName);
+        Assert.Equal(5672, factory.Port);
+        Assert.False(factory.Ssl.Enabled);
+        Assert.Null(factory.Ssl.CertificateValidationCallback);
+        Assert.Equal("stock-" + fixture.Epoch.ToString("N"), factory.VirtualHost);
+        Assert.Equal(identity.Principal(role), factory.UserName);
+        Assert.Equal("synthetic-password", factory.Password);
+        Assert.Equal(identity.Principal(role), identity.Properties().UserId);
+        Assert.False(factory.AutomaticRecoveryEnabled);
+        Assert.False(factory.TopologyRecoveryEnabled);
+        fixture.Save("revoked");
+        Assert.Throws<StockIdentityDenied>(() => identity.Configure(factory));
+        Assert.Throws<StockIdentityDenied>(() => identity.Properties());
+    }
+
+    [Theory]
+    [InlineData("workload")]
+    [InlineData("control")]
+    [InlineData("observer")]
+    public void Configure_WrongHostRefusesBeforeChangingFactory(string role)
+    {
+        using var fixture = new Fixture();
+        var identity = new StockBrokerIdentity(fixture.Authority, fixture.Password, role);
+        var factory = new ConnectionFactory { HostName = "foreign.example.test", Port = 5671, Ssl = new SslOption { Enabled = true } };
+        var error = Assert.Throws<StockIdentityDenied>(() => identity.Configure(factory));
+        Assert.Equal("broker_target", error.Message);
+        Assert.Equal(5671, factory.Port);
+        Assert.True(factory.Ssl.Enabled);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("foreign")]
+    public void Configure_UnknownRoleNeverCreatesAnIdentity(string role)
+    {
+        using var fixture = new Fixture();
+        Assert.Throws<StockIdentityDenied>(() => new StockBrokerIdentity(fixture.Authority, fixture.Password, role));
+    }
+
+    [Fact]
+    public async Task OrdinaryBridge_StillUsesItsExistingFactoryWithoutStockOverrides()
+    {
+        var channel = Substitute.For<IChannel>();
+        var connection = Substitute.For<IConnection>();
+        connection.CreateChannelAsync(Arg.Any<CreateChannelOptions?>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult(channel));
+        await using var bridge = new BridgeRelayService(
+            Options.Create(new Fleet.Bridge.Configuration.BridgeOptions { TargetAgent = "agent1" }),
+            Options.Create(new Fleet.Bridge.Configuration.RabbitMqOptions { Host = "broker.example.test" }),
+            NullLogger<BridgeRelayService>.Instance)
+        {
+            Connect = (factory, _) =>
+            {
+                var defaults = new ConnectionFactory();
+                Assert.Equal(defaults.Port, factory.Port);
+                Assert.Equal(defaults.Ssl.Enabled, factory.Ssl.Enabled);
+                Assert.Equal(defaults.UserName, factory.UserName);
+                Assert.Equal(defaults.VirtualHost, factory.VirtualHost);
+                Assert.True(factory.AutomaticRecoveryEnabled);
+                Assert.True(factory.TopologyRecoveryEnabled);
+                return Task.FromResult(connection);
+            }
+        };
+        await bridge.InitializeAsync(default);
+        Assert.Contains(channel.ReceivedCalls(), c => c.GetMethodInfo().Name == "BasicConsumeAsync");
+    }
+
     [Fact]
     public async Task ActualRelay_RequiresBrokerValidatedControlIdentity_AndPublishesBoundCompletion()
     {
@@ -25,9 +107,8 @@ public sealed class StockBrokerTransportTests
         relay.MessageReceived += (_, _, _, _, _, _, _, _) => received++;
         await relay.InitializeAsync(default);
         Assert.True(relay.IsInitializedForTesting);
-        Assert.Equal(5671, fixture.Factory!.Port);
-        Assert.True(fixture.Factory.Ssl.Enabled);
-        Assert.Equal("broker.example.test", fixture.Factory.Ssl.ServerName);
+        Assert.Equal(5672, fixture.Factory!.Port);
+        Assert.False(fixture.Factory.Ssl.Enabled);
         Assert.Equal(fixture.Binding.Principal("workload"), fixture.Factory.UserName);
         Assert.Equal(fixture.Binding.VirtualHost, fixture.Factory.VirtualHost);
         var consumer = fixture.Channel.ReceivedCalls().SelectMany(c => c.GetArguments()).OfType<AsyncEventingBasicConsumer>().Single();
@@ -105,7 +186,8 @@ public sealed class StockBrokerTransportTests
             Connect = (factory, _) =>
             {
                 Assert.Equal(fixture.Binding.Principal("control"), factory.UserName);
-                Assert.True(factory.Ssl.Enabled);
+                Assert.Equal(5672, factory.Port);
+                Assert.False(factory.Ssl.Enabled);
                 return Task.FromResult(connection);
             }
         };
@@ -160,7 +242,7 @@ public sealed class StockBrokerTransportTests
     }
 
     [Fact]
-    public async Task ActualRegistrationPublisher_UsesTheSameEnrolledTlsIdentity()
+    public async Task ActualRegistrationPublisher_UsesTheSameEnrolledPrivateNetworkIdentity()
     {
         using var fixture = new Fixture();
         var options = Options.Create(new AgentOptions { Name = "agent1", ShortName = "agent1", Role = "synthetic", WorkDir = fixture.WorkDir });
@@ -174,7 +256,8 @@ public sealed class StockBrokerTransportTests
             {
                 Assert.Equal(fixture.Binding.Principal("workload"), factory.UserName);
                 Assert.Equal(fixture.Binding.VirtualHost, factory.VirtualHost);
-                Assert.True(factory.Ssl.Enabled);
+                Assert.Equal(5672, factory.Port);
+                Assert.False(factory.Ssl.Enabled);
                 return Task.FromResult(connection);
             }
         };
@@ -208,6 +291,7 @@ public sealed class StockBrokerTransportTests
             _ => record with { SandboxId = "another-sandbox" }
         };
         File.WriteAllText(fixture.Authority, JsonSerializer.Serialize(record));
+        Assert.Throws<StockIdentityDenied>(() => binding.Configure(new ConnectionFactory { HostName = "broker.example.test" }));
         Assert.Throws<StockIdentityDenied>(() => binding.Properties());
         Assert.Throws<StockIdentityDenied>(() => binding.RequireDelivery(binding.Principal("workload"), "workload", "group", "group", "bridge", "bridge"));
     }

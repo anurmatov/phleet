@@ -266,7 +266,7 @@ public sealed class ManagedStockAgentTests
 }
 
 /// <summary>#492: the managed adapter's loopback POST cancel is the only extra HTTP route.</summary>
-public sealed class ManagedStockLoopbackCancelTests
+public sealed class ManagedStockAgentLoopbackCancelTests
 {
     [Theory]
     [InlineData(true, "POST", "/cancel", "127.0.0.1", true)]
@@ -288,9 +288,9 @@ public sealed class ManagedStockLoopbackCancelTests
 
 /// <summary>
 /// #492: the shipped guard and cancel routes on a real Kestrel host over actual loopback TCP. Non-loopback
-/// refusal is covered by <see cref="ManagedStockLoopbackCancelTests"/>.
+/// refusal is covered by <see cref="ManagedStockAgentLoopbackCancelTests"/>.
 /// </summary>
-public sealed class ManagedStockCancelHostTests
+public sealed class ManagedStockAgentCancelHostTests
 {
     private static async Task<(Microsoft.AspNetCore.Builder.WebApplication App, HttpClient Client)> HostAsync(bool stockMode, bool managed)
     {

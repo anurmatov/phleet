@@ -278,4 +278,28 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         Assert.Equal("needs_attention", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
         Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
     }
+
+    [Fact]
+    public async Task Failed_authority_retirement_is_persisted_and_reported_as_an_unresolved_docker_handoff()
+    {
+        var binding = _t.Binding("fleet-agent1-12121212", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "docker", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        _t.WriteAuthority("active");
+        // After the cut, the revoked record becomes unreadable, so retirement after the handoff fails (review F6).
+        _t._cli.OnExec = script =>
+        {
+            File.WriteAllText(_t.AuthorityPath(), "{not json");
+            return 0;
+        };
+
+        var result = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal("docker_handoff_unresolved", result.Code);
+        Assert.Equal("docker", _t._store.Get("agent1").AppliedRuntimeKind);
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal("needs_attention", record.State);
+        Assert.Contains("authority_retire_failed", record.Errors);
+    }
 }

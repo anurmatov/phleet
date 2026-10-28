@@ -614,9 +614,10 @@ public sealed class StockOpenShellRuntime(
         }
 
         var final = outcome.Next with { Operation = null };
+        var finalJson = final.Serialize();
         try
         {
-            if (!await store.SwapAsync(agent.Id, saved, final.Serialize(), outcome.AppliedKind, outcome.AppliedPolicy, CancellationToken.None))
+            if (!await store.SwapAsync(agent.Id, saved, finalJson, outcome.AppliedKind, outcome.AppliedPolicy, CancellationToken.None))
                 return Result.Refused(409, "managed_state_changed_during_" + kind, outcome.Result.Errors);
         }
         catch (Exception ex) when (ex is DbException or InvalidOperationException)
@@ -624,7 +625,20 @@ public sealed class StockOpenShellRuntime(
             // Post-action DB failure: the claimed operation stays recorded and is reported as interrupted next time.
             return Result.Refused(503, kind + "_state_unknown", outcome.Result.Errors);
         }
-        if (outcome.Result.Ok && outcome.AppliedKind == "docker" && !final.Unresolved) RetireAuthority(name);
+        if (outcome.Result.Ok && outcome.AppliedKind == "docker" && !final.Unresolved && !RetireAuthority(name))
+        {
+            // Review F6: Docker is committed but the managed record still holds ordinary traffic: an
+            // unresolved handoff, persisted and reported, never a clean applied_docker.
+            var held = final with { State = "needs_attention", Errors = [.. final.Errors, "authority_retire_failed"] };
+            outcome = (held, null, null, Result.Refused(502, "docker_handoff_unresolved", ["authority_retire_failed"]));
+            try
+            {
+                if (!await store.SwapAsync(agent.Id, finalJson, held.Serialize(), null, null, CancellationToken.None))
+                    outcome = (held, null, null, Result.Refused(409, "managed_state_changed_during_" + kind, ["authority_retire_failed"]));
+            }
+            catch (Exception ex) when (ex is DbException or InvalidOperationException)
+            { outcome = (held, null, null, Result.Refused(503, kind + "_state_unknown", ["authority_retire_failed"])); }
+        }
         await PublishAsync(name);
         logger.LogInformation("Managed {Kind} for {Agent}: {Code}", kind, name, outcome.Result.Code);
         return outcome.Result;
@@ -1638,22 +1652,26 @@ public sealed class StockOpenShellRuntime(
 
     /// <summary>
     /// After the verified Docker handoff is committed, the revoked record is kept for custody but marked
-    /// retired so ordinary telemetry and control for the Docker agent are no longer held. Failure keeps the hold.
+    /// retired so ordinary telemetry and control for the Docker agent are no longer held. Failure keeps the hold
+    /// and returns false (no record to retire is true).
     /// </summary>
-    internal void RetireAuthority(string agentName)
+    internal bool RetireAuthority(string agentName)
     {
         try
         {
             var path = AuthorityPath(agentName);
-            if (!File.Exists(path) || new FileInfo(path).LinkTarget is not null) return;
+            if (!File.Exists(path)) return true;
+            if (new FileInfo(path).LinkTarget is not null) return false;
             var current = JsonNode.Parse(StockEnrollmentAuthority.ReadBounded(path))!.AsObject();
-            if (current["State"]?.GetValue<string>() is not ("revoked" or StockAuthoritySource.RetiredState)) return;
+            if (current["State"]?.GetValue<string>() is not ("revoked" or StockAuthoritySource.RetiredState)) return false;
             current["State"] = StockAuthoritySource.RetiredState;
             WriteRecord(path, current);
+            return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException
             or InvalidOperationException or StockIdentityDenied)
         { logger.LogWarning("Retiring the managed record for {Agent} failed; ordinary traffic stays held", agentName); }
+        return false;
     }
 
     private static void WriteRecord(string path, JsonObject record) => WriteText(path, record.ToJsonString());

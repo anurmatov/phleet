@@ -52,10 +52,23 @@ public sealed class BridgeRelayService : IAsyncDisposable
         IOptions<BridgeOptions> bridgeConfig,
         IOptions<RabbitMqOptions> rabbitConfig,
         ILogger<BridgeRelayService> logger, IConfiguration? configuration = null)
+        : this(bridgeConfig, rabbitConfig, logger, configuration is null ? null
+            : StockBrokerIdentity.Optional(configuration["StockOpenShell:AuthorityFile"],
+                configuration["StockOpenShell:BrokerPasswordFile"], "control"))
     {
-        if (configuration is not null)
-            _stockBroker = StockBrokerIdentity.Optional(configuration["StockOpenShell:AuthorityFile"],
-                configuration["StockOpenShell:BrokerPasswordFile"], "control");
+        var directory = configuration?["StockOpenShell:AuthorityDirectory"];
+        if (string.IsNullOrEmpty(directory)) return;
+        // Managed lanes keep this ordinary connection for ordinary targets; a process-wide single-file
+        // stock identity has no ordinary connection, so the two modes never combine.
+        if (_stockBroker is not null || !Path.IsPathFullyQualified(directory)) throw new StockIdentityDenied("broker_configuration");
+        Lanes = new BridgeControlLanes(directory, bridgeConfig.Value.TimeoutSeconds, _rabbitConfig.Exchange, logger);
+    }
+
+    /// <summary>One relay bound to an explicit epoch identity: the single-file process or a managed lane.</summary>
+    internal BridgeRelayService(IOptions<BridgeOptions> bridgeConfig, IOptions<RabbitMqOptions> rabbitConfig,
+        ILogger<BridgeRelayService> logger, StockBrokerIdentity? stockBroker)
+    {
+        _stockBroker = stockBroker;
         var opts = bridgeConfig.Value;
         TargetAgent = opts.TargetAgent;
         BridgeChatId = opts.BridgeChatId;
@@ -67,6 +80,9 @@ public sealed class BridgeRelayService : IAsyncDisposable
     }
 
     internal Func<ConnectionFactory, CancellationToken, Task<IConnection>> Connect { get; init; }
+
+    /// <summary>Per-agent managed control lanes; null unless <c>StockOpenShell:AuthorityDirectory</c> is set.</summary>
+    internal BridgeControlLanes? Lanes { get; }
 
     public bool IsEnabled => _rabbitConfig.Host.Length > 0;
 
@@ -136,6 +152,21 @@ public sealed class BridgeRelayService : IAsyncDisposable
     /// </summary>
     public async Task<string> AskAsync(string question, string agentName, string? project, int? timeoutSeconds, CancellationToken ct)
     {
+        if (Lanes is not null)
+        {
+            // agentName only labels the caller; the destination (and so the lane) is TargetAgent.
+            // A managed target never falls back to this ordinary connection.
+            BridgeControlLanes.Route route;
+            try { route = await Lanes.RouteAsync(TargetAgent, connect: true, ct); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { return "Request cancelled."; }
+            if (route.Managed)
+            {
+                if (route.Lane is null) return BridgeControlLanes.Denied;
+                route.Lane.BridgeChatId = BridgeChatId;
+                return await route.Lane.AskAsync(question, agentName, project, timeoutSeconds, ct);
+            }
+        }
+
         if (!_initialized || _publishChannel is null)
             return "Error: Bridge relay service is not connected to RabbitMQ.";
 
@@ -211,6 +242,8 @@ public sealed class BridgeRelayService : IAsyncDisposable
     public async Task<string> CheckStatusAsync(CancellationToken ct)
     {
         if (_stockBroker is not null) return "Error: stock status route is not enrolled.";
+        if (Lanes is not null && (await Lanes.RouteAsync(TargetAgent, connect: false, ct)).Managed)
+            return "Error: stock status route is not enrolled.";
         if (!_initialized || _publishChannel is null)
             return "Error: Bridge relay service is not connected to RabbitMQ.";
 
@@ -312,6 +345,8 @@ public sealed class BridgeRelayService : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (Lanes is not null) await Lanes.DisposeAsync();
+
         // Cancel all pending requests
         foreach (var (_, tcs) in _pendingRequests)
             tcs.TrySetCanceled();

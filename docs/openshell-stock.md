@@ -439,8 +439,31 @@ The adapter writes per-agent records and control/observer broker passwords under
 `managed/authority` directory on `Fleet.StockIdentity` and each receiver (memory, Temporal, Telegram), keeping
 `AuthorityFile` for gateway trust. The gateway-verified sandbox claim (hook) or the assertion's
 sandbox (receiver, still signature-verified against the selected record) is only an index hint:
-exactly one active, non-symlink record must claim it, else the request refuses. Broker control and
-observer connections still bind one enrolled epoch per process. The orchestrator image carries
+exactly one active, non-symlink record must claim it, else the request refuses.
+
+**Broker control and observer lanes.** Set the same startup-only `StockOpenShell:AuthorityDirectory` on the outside
+Fleet.Bridge and on the orchestrator to open one epoch-bound broker lane per managed agent instead of
+one per process:
+- **Bridge (control).** The ordinary connection, peer config and `ask_acto` behaviour stay as they are
+  for ordinary targets. When the target (`Bridge:TargetAgent` / `FLEET_CTO_AGENT`) has a record
+  `<agent>.json` in the directory, the request goes only through that agent's own lane: the record's
+  `BrokerHost`, vhost `stock-<epoch-N>`, principal `stock-<epoch-N>-control`, password
+  `<agent>.control.password`. The lane is opened on first use, with the single-file principal, route
+  and correlation checks. A managed target never falls back to the ordinary connection. These all
+  refuse: an inactive, expired, ambiguous or linked record; a record removed after use; an unreadable
+  directory. A lane is replaced when the agent's record binding changes, for example a new epoch. A
+  lane that fails to connect stays refused until then, because there is no stock reconnect loop.
+  `check_acto_status` keeps its stock refusal for a managed target. To return an agent to the ordinary
+  connection, remove its record and restart the Bridge.
+- **Observer.** The orchestrator's stock observer keeps one `-observer` receiver for each active
+  record. It uses that record's `BrokerHost` and `<agent>.observer.password` and reconciles every 30 s:
+  new or re-enrolled records get a receiver, and vanished, revoked or changed ones are closed. A failed
+  or dropped receiver is not retried until its record changes. One lane never affects other lanes or
+  the ordinary consumer, and warnings carry no exception text or credentials.
+
+The single-file `AuthorityFile`/`BrokerPasswordFile` mode is unchanged. On the Bridge it cannot be
+combined with `AuthorityDirectory`: that combination refuses at startup. Without the directory key
+nothing changes. The orchestrator image carries
 `LABEL org.phleet.managed-stock-runtime=1`; the stock CLI is installed only with the
 `OPENSHELL_CLI_URL` and `OPENSHELL_CLI_SHA256` build args (digest and version checked).
 

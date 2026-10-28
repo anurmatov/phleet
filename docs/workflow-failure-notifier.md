@@ -62,19 +62,20 @@ Every first attempt hits an unreachable endpoint (closed port, 3 s connect timeo
 It consumes the reply queue `fleet.agent.temporal-bridge`, so run it only through the owned recipe. It never points at a broker a real bridge uses:
 
 ```bash
-bash scripts/run-workflow-failure-real-broker.sh
+bash scripts/run-workflow-failure-real-broker.sh <reviewed-commit-sha>
 ```
 
 The recipe:
-- creates its own Docker network and RabbitMQ container with no host port, and fails fast if either cannot be created;
-- waits at most `READY_SECONDS` (default 90) for the broker;
-- runs the test in a `mcr.microsoft.com/dotnet/sdk:10.0` container on that network, from a read-only copy of the repo;
-- removes only the network and container it created;
-- exits with the test's status, with `RESULT: PASS` or `RESULT: FAIL (exit N)`. A skipped or unmatched test is a failure (exit 3).
+- takes the full reviewed commit SHA and refuses (exit 2) if that commit is not local or the recipe being run differs from that commit's copy;
+- feeds the SDK container only `git archive <sha>`, the commit's tracked files, so ignored files such as `.env`, untracked files and uncommitted edits never reach it; it prints the commit and tree it used;
+- creates its own Docker network, RabbitMQ container (data on tmpfs, so no volume) and named SDK container, with no host port and no bind mount, and fails fast if any cannot be created;
+- waits at most `READY_SECONDS` (default 90) for the broker, and bounds the SDK container run with `TEST_SECONDS` (default 1800, exit 124);
+- removes each container and the network by the ID it recorded, plus its temp directory, then lists them to confirm they are gone;
+- exits with the test's status, with `RESULT: PASS` or `RESULT: FAIL (exit N)`. A skipped or unmatched test is a failure (exit 3). A resource that is left or cannot be confirmed gone prints `CLEANUP: UNRESOLVED …`; it turns a passing run into exit 4 and never replaces an earlier failure status.
 
 The SDK container needs internet egress for NuGet restore and the Temporal dev-server download.
 `FLEET_TEST_RABBITMQ_UNREACHABLE_PORT` (default `1`) sets the closed port the first attempts use.
-`scripts/test-run-workflow-failure-real-broker.sh` checks the recipe's failure handling with a stub `docker`.
+`scripts/test-run-workflow-failure-real-broker.sh` checks the recipe's input and cleanup handling with a stub `docker` and a throwaway Git repo.
 
 ## Not covered
 

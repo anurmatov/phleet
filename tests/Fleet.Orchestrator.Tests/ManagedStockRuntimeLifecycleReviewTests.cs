@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 
 namespace Fleet.Orchestrator.Tests;
@@ -180,5 +181,38 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         Assert.False(result.Ok);
         Assert.NotEqual("applied", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
         Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+    }
+
+    private Agent StoppedPeer(string name, string sandbox)
+    {
+        var binding = _t.Binding(sandbox, Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
+        var agent = _t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding });
+        agent.Name = name;
+        agent.ShortName = name;
+        agent.ContainerName = name;
+        return _t._store.Add(agent);
+    }
+
+    [Fact]
+    public async Task Planned_gateway_restart_starts_every_stopped_agent_after_the_first_is_rebound()
+    {
+        StoppedPeer("agent1", "fleet-agent1-aaaaaaaa");
+        StoppedPeer("agent2", "fleet-agent2-bbbbbbbb");
+        var runtime = _t.Runtime();
+        _t._host.Generation = "gateway-2@planned";
+
+        var first = await runtime.StartAsync("agent1", default);
+        var second = await runtime.StartAsync("agent2", default);
+
+        // Review F5/N1: the running, rebound first agent is a verified current-generation peer.
+        Assert.True(first.Ok, first.Code + ":" + string.Join(",", first.Errors));
+        Assert.True(second.Ok, second.Code + ":" + string.Join(",", second.Errors));
+        foreach (var name in new[] { "agent1", "agent2" })
+        {
+            var record = ManagedRecord.Parse(_t._store.Get(name).AppliedRuntimeBinding);
+            Assert.Equal("applied", record.State);
+            Assert.Equal("gateway-2@planned", record.Applied!.GatewayGeneration);
+        }
     }
 }

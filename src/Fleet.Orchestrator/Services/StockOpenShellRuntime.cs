@@ -1115,6 +1115,7 @@ public sealed class StockOpenShellRuntime(
         IReadOnlyList<Agent> agents;
         try { agents = await store.ListAsync(ct); }
         catch (Exception ex) when (ex is DbException or InvalidOperationException) { return false; }
+        if (await host.GatewayGenerationAsync(ct) is not { } generation) return false;
         foreach (var other in agents.Where(a => !string.Equals(a.Name, agentName, StringComparison.OrdinalIgnoreCase)))
         {
             if (string.IsNullOrEmpty(other.AppliedRuntimeBinding)) continue;
@@ -1122,7 +1123,14 @@ public sealed class StockOpenShellRuntime(
             try { owned = ManagedRecord.Parse(other.AppliedRuntimeBinding); }
             catch (JsonException) { return false; }
             if (owned.Applied is null && owned.Candidate is null) continue;
-            if (owned.Operation is not null || owned.Candidate is not null || owned.State is not ("stopped" or "revoked")) return false;
+            if (owned.Operation is not null || owned.Candidate is not null) return false;
+            // A peer already rebound to the current generation (same UUID, no hold) is fine running or stopped.
+            if (owned.Applied!.GatewayGeneration == generation && owned.State is ("applied" or "stopped") && owned.Errors.Count == 0)
+            {
+                if (await VerifyIdentityAsync(owned.Applied, ct) is not null) return false;
+                continue;
+            }
+            if (owned.State is not ("stopped" or "revoked")) return false;
             if (await StoppedQuiescentAsync(owned.Applied!, ct) is not null) return false;
         }
         return true;

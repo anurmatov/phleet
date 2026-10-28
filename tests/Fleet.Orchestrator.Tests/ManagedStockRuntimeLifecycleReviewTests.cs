@@ -215,4 +215,45 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
             Assert.Equal("gateway-2@planned", record.Applied!.GatewayGeneration);
         }
     }
+
+    private void DeletedPeer(string appliedKind, string state)
+    {
+        // Its sandbox was deleted after the clean revoke/handoff: it no longer exists on the gateway.
+        var binding = _t.Binding("fleet-agent2-cccccccc", Guid.NewGuid());
+        var agent = _t.ManagedAgent(desired: appliedKind, applied: appliedKind, record: new ManagedRecord { State = state, Applied = binding });
+        agent.Name = agent.ShortName = agent.ContainerName = "agent2";
+        _t._store.Add(agent);
+        var path = Path.Combine(_t._dir, "managed", "authority", "agent2.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, new System.Text.Json.Nodes.JsonObject { ["State"] = appliedKind == "docker" ? "retired" : "revoked", ["Agent"] = "agent2" }.ToJsonString());
+    }
+
+    [Theory]
+    [InlineData("docker")]
+    [InlineData("openshell")]
+    public async Task Deleted_retired_sandbox_of_another_agent_never_blocks_a_planned_restart(string peerKind)
+    {
+        StoppedPeer("agent1", "fleet-agent1-dddddddd");
+        DeletedPeer(peerKind, "revoked");
+        var runtime = _t.Runtime();
+        _t._host.Generation = "gateway-2@planned";
+
+        var start = await runtime.StartAsync("agent1", default);
+
+        Assert.True(start.Ok, start.Code + ":" + string.Join(",", start.Errors));
+        Assert.Equal("gateway-2@planned", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).Applied!.GatewayGeneration);
+    }
+
+    [Fact]
+    public async Task Unresolved_peer_with_a_deleted_sandbox_still_holds_a_planned_restart()
+    {
+        StoppedPeer("agent1", "fleet-agent1-eeeeeeee");
+        DeletedPeer("docker", "needs_attention");
+        var runtime = _t.Runtime();
+        _t._host.Generation = "gateway-2@planned";
+
+        var start = await runtime.StartAsync("agent1", default);
+
+        Assert.Equal((409, "gateway_generation_changed"), (start.Status, start.Code));
+    }
 }

@@ -1130,10 +1130,46 @@ public sealed class StockOpenShellRuntime(
                 if (await VerifyIdentityAsync(owned.Applied, ct) is not null) return false;
                 continue;
             }
+            // A clean revoke that was retired to Docker, or whose sandbox is verifiably deleted, holds nothing
+            // (reviews F6r/F9) once no container runs under its UUID; unresolved state still holds.
+            if (owned.State == "revoked" && owned.Errors.Count == 0 && await RetiredOrDeletedAsync(other, owned.Applied!, ct)) continue;
             if (owned.State is not ("stopped" or "revoked")) return false;
             if (await StoppedQuiescentAsync(owned.Applied!, ct) is not null) return false;
         }
         return true;
+    }
+
+    private async Task<bool> RetiredOrDeletedAsync(Agent other, ManagedBinding binding, CancellationToken ct)
+    {
+        var retired = false;
+        if (other.AppliedRuntimeKind == "docker")
+        {
+            try
+            {
+                var path = AuthorityPath(other.Name);
+                retired = File.Exists(path) && new FileInfo(path).LinkTarget is null
+                    && JsonNode.Parse(StockEnrollmentAuthority.ReadBounded(path))?["State"]?.GetValue<string>() == StockAuthoritySource.RetiredState;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException
+                or InvalidOperationException or StockIdentityDenied) { retired = false; }
+        }
+        if (!retired && !await SandboxDeletedAsync(binding.SandboxName, ct)) return false;
+        return await QuiescentAsync(binding, ct) is null;
+    }
+
+    /// <summary>Deleted only when the gateway lists successfully without the name; a failed get alone is unobservable.</summary>
+    private async Task<bool> SandboxDeletedAsync(string name, CancellationToken ct)
+    {
+        if (await GetAsync(name, ct) is not null) return false;
+        var list = await cli.RunAsync(["sandbox", "list", "-o", "json"], null, LegTimeout, ct);
+        if (list.Missing || list.TimedOut || list.ExitCode != 0) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(list.Stdout);
+            return document.RootElement.ValueKind == JsonValueKind.Array && document.RootElement.EnumerateArray().All(e =>
+                e.ValueKind == JsonValueKind.Object && e.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String && n.GetString() != name);
+        }
+        catch (JsonException) { return false; }
     }
 
     private async Task<string?> StoppedQuiescentAsync(ManagedBinding binding, CancellationToken ct)

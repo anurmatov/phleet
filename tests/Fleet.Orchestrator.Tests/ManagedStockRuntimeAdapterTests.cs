@@ -179,6 +179,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     [InlineData("telegram_invalid", "telegram_bot_token_invalid")]
     [InlineData("journal", "managed_route_unsupported:journal")]
     [InlineData("journal_send", "managed_route_unsupported:journal_files")]
+    [InlineData("journal_receipts", "managed_route_unsupported:journal_tool_send_receipts")]
     [InlineData("journal_mcp", "managed_route_unsupported:mcp:fleet-comms-journal")]
     [InlineData("mcp", "managed_route_unsupported:mcp:other")]
     [InlineData("unrouted", "managed_route_unsupported:mcp:fleet-temporal")]
@@ -204,6 +205,12 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
                 agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "TELEGRAM_AGENT1_BOT_TOKEN" });
                 _broker.Credentials.Extra["TELEGRAM_AGENT1_BOT_TOKEN"] = BotToken;
                 agent.Tools.Add(new AgentTool { ToolName = JournalGrants.SendGrant });
+                break;
+            case "journal_receipts": // Telegram MCP sends would lose their receipts: refused, not silently unjournaled
+                agent.JournalEnabled = true;
+                agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "TELEGRAM_AGENT1_BOT_TOKEN" });
+                _broker.Credentials.Extra["TELEGRAM_AGENT1_BOT_TOKEN"] = BotToken;
+                agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "fleet-telegram", Url = "https://telegram.example.test/mcp", TransportType = "http" });
                 break;
             case "journal_mcp":
                 agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "fleet-comms-journal", Url = "http://comms.example.test/journal/v1/mcp", TransportType = "http" });

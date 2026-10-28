@@ -504,8 +504,8 @@ Refusal codes, all raised before the old runtime stops:
 `fleet-comms-journal` read MCP and every other MCP name refuse apply with
 `managed_route_unsupported:<route>`. A supported endpoint without a configured receiving host refuses
 with `managed_route_unsupported:mcp:<name>`. Tool-send receipts (#394) are not consumed in stock
-mode, because the epoch broker identity has no receipt queue. Messages a Telegram MCP tool delivers
-for the agent's own bot are therefore not journaled there. A dedicated Fleet.Temporal receiver still
+mode, because the epoch broker identity has no receipt queue, so journal capture together with a
+`fleet-telegram` MCP grant refuses with `managed_route_unsupported:journal_tool_send_receipts`. A dedicated Fleet.Temporal receiver still
 starts its configured workers and the relay consumer on the fixed `fleet.agent.temporal-bridge`
 queue, so it competes with the ordinary bridge on a shared broker. None of the following is
 qualified:

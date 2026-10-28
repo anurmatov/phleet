@@ -486,6 +486,10 @@ public sealed class StockOpenShellRuntime(
         // Journal files/send (and cross-chat, which needs send) have no managed route; refuse rather than drop them.
         if ((ContainerProvisioningService.HasFilesGrant(agent) && JournalCapture(agent)) || JournalGrants.SendEffective(agent))
             return "managed_route_unsupported:journal_files";
+        // Tool-send receipts (#394) arrive on the ordinary broker, which the epoch identity cannot read; with
+        // capture on, Telegram MCP sends would go unjournaled, so the combination refuses instead.
+        if (JournalCapture(agent) && agent.McpEndpoints.Any(e => e.McpName == "fleet-telegram"))
+            return "managed_route_unsupported:journal_tool_send_receipts";
         if (JournalCapture(agent) && services.GetService<JournalTokenService>()?.DescribeKeyFault() is { } journalKeyFault) return journalKeyFault;
         // Only first-party HTTP MCP receivers that verify the outside assertion are routed; others refuse.
         if (agent.McpEndpoints.FirstOrDefault(e => e.McpName != "memory" && !ServiceByMcpName.ContainsKey(e.McpName)) is { } extra)

@@ -627,7 +627,8 @@ public sealed class StockOpenShellRuntime(
     }
 
     private static (ManagedRecord, string?, int?, Result) Hold(ManagedRecord record, int status, string code, params string[] extra) =>
-        (record with { State = "needs_attention", Errors = [code, .. extra] }, null, null, Result.Refused(status, code, extra));
+        // Appends: an earlier hold's errors and partial names are never overwritten by a later one.
+        (record with { State = "needs_attention", Errors = [.. record.Errors, code, .. extra] }, null, null, Result.Refused(status, code, extra));
 
     // ── steps ──────────────────────────────────────────────────────────────
 

@@ -20,7 +20,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     private const string Key = "sk-synthetic-value-never-in-argv";
     private const string BotToken = "424242:synthetic-bot-secret-never-in-argv";
     private const string IngestToken = "cj1.ingest.agent1.synthetic-journal-mac-never-in-argv";
-    private readonly string _dir = Directory.CreateTempSubdirectory("managed-stock-").FullName;
+    internal readonly string _dir = Directory.CreateTempSubdirectory("managed-stock-").FullName;
     internal readonly FakeCli _cli = new();
     internal readonly FakeStore _store = new();
     internal readonly FakeHost _host = new();
@@ -926,13 +926,13 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
 
     // ── fixtures ───────────────────────────────────────────────────────────
 
-    private readonly List<string> _dockerProvisions = [];
+    internal readonly List<string> _dockerProvisions = [];
     private (bool Ok, string Message) _dockerResult = (true, "provisioned");
     private JsonObject? _serviceHosts = new() { ["temporal"] = "temporal.example.test", ["telegram"] = "telegram.example.test" };
     private string? _journalHost;
     private string? _generatedMcp;
     private string _generatedSettings = "{\"Agent\":{\"Name\":\"agent1\"}}";
-    private string DockerWorkspaceDir => Path.Combine(_dir, "docker-workspace");
+    internal string DockerWorkspaceDir => Path.Combine(_dir, "docker-workspace");
 
     internal StockOpenShellRuntime Runtime(Func<string, Task<bool>>? dockerStop = null)
     {
@@ -1006,9 +1006,9 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         new(name, Guid.NewGuid().ToString(), epoch, "stock-agent:synthetic", 1, new string('b', 64), "api_key",
             "SYNTHETIC_API_KEY", "fleet-agent1-openai", _host.Generation);
 
-    private string AuthorityPath() => Path.Combine(_dir, "managed", "authority", "agent1.json");
+    internal string AuthorityPath() => Path.Combine(_dir, "managed", "authority", "agent1.json");
 
-    private void WriteAuthority(string state)
+    internal void WriteAuthority(string state)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(AuthorityPath())!);
         File.WriteAllText(AuthorityPath(), new JsonObject { ["State"] = state, ["Agent"] = "agent1" }.ToJsonString());

@@ -296,6 +296,15 @@ public sealed class StockOpenShellRuntime(
     public static bool Owns(Agent agent) => agent.RuntimeKind == "openshell" || agent.AppliedRuntimeKind == "openshell";
 
     private string ConfigDir => config["StockOpenShell:ConfigDir"] ?? "";
+
+    /// <summary>
+    /// The stock image's non-root HOME (uid 10001); /app and / are not writable there, so every input lands
+    /// under it. Pinned 0.1.5 <c>sandbox upload NAME DIR DEST</c> extracts at <c>DEST/basename(DIR)/</c>, so
+    /// the bundle's <c>app</c>/<c>trust</c> go to HOME and <c>workspace</c> to <c>/</c>.
+    /// </summary>
+    internal string WorkloadHome => (config["StockOpenShell:WorkloadHome"] is { Length: > 0 } home ? home : "/home/agent").TrimEnd('/');
+    internal string WorkloadAppRoot => WorkloadHome + "/app";
+    internal string WorkloadEnrollmentFile => WorkloadHome + "/trust/enrollment.json";
     private string AuthorityDir => Path.Combine(ConfigDir, "managed", "authority");
     private string AuthorityPath(string agent) => Path.Combine(AuthorityDir, agent + ".json");
 
@@ -802,8 +811,8 @@ public sealed class StockOpenShellRuntime(
         // Staging: the launcher waits without a daemon, so transfers race no native task or file writer.
         if (await StageAsync(candidate, ct) is { } stage) return await HoldStoppedAsync(applying, candidate, stage, [], ct);
         // Reuse keeps the workspace but refreshes its MCP routes, which follow the current grants.
-        foreach (var (local, remote) in reuse ? new[] { ("app", "/app"), ("trust", "/trust"), (Path.Combine("workspace", ".mcp.json"), "/workspace/.mcp.json") }
-                     : [("app", "/app"), ("trust", "/trust"), ("workspace", "/workspace")])
+        foreach (var (local, remote) in reuse ? new[] { ("app", WorkloadHome), ("trust", WorkloadHome), (Path.Combine("workspace", ".mcp.json"), "/workspace/.mcp.json") }
+                     : [("app", WorkloadHome), ("trust", WorkloadHome), ("workspace", "/")])
             if (await UploadAsync(candidate, Path.Combine(bundle, local), remote, ct) is { } upload)
                 return await HoldStoppedAsync(applying, candidate, upload, [], ct);
         if (reuse)
@@ -832,7 +841,7 @@ public sealed class StockOpenShellRuntime(
             WriteRecord(Path.Combine(bundle, "trust", "enrollment.json"), active);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return await HoldStoppedAsync(applying, candidate, "managed_files_failed", [], ct); }
-        if (await UploadAsync(candidate, Path.Combine(bundle, "trust", "enrollment.json"), "/trust/enrollment.json", ct) is { } enrollment)
+        if (await UploadAsync(candidate, Path.Combine(bundle, "trust", "enrollment.json"), WorkloadEnrollmentFile, ct) is { } enrollment)
             return await HoldStoppedAsync(applying, candidate, enrollment, [], ct);
         if (await ActivateAsync(candidate, ct) is { } activate) return await HoldStoppedAsync(applying, candidate, activate, [], ct);
         return (record with { State = "applied", Applied = candidate, Candidate = null, Errors = [] }, "openshell", policy.Id, Result.Done("applied_openshell"));
@@ -1463,9 +1472,11 @@ public sealed class StockOpenShellRuntime(
         settings["StockOpenShell"] = new JsonObject
         {
             ["Enabled"] = true,
-            ["EnrollmentFile"] = "/trust/enrollment.json",
-            ["AuthorityFile"] = "/trust/enrollment.json",
-            ["BrokerPasswordFile"] = "/trust/workload-broker-password",
+            ["EnrollmentFile"] = WorkloadEnrollmentFile,
+            ["AuthorityFile"] = WorkloadEnrollmentFile,
+            ["BrokerPasswordFile"] = WorkloadHome + "/trust/workload-broker-password",
+            // The staged launcher reads this tree as its content root; roles/projects are read here too.
+            ["AppRoot"] = WorkloadAppRoot,
         };
         var agentNode = settings["Agent"]!.AsObject();
         agentNode["NativeAuthMode"] = "api_key";

@@ -146,6 +146,30 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         Assert.Equal("{\"docker\":true}", File.ReadAllText(Path.Combine(ws, ".mcp.json")));
     }
 
+    [Fact]
+    public async Task Pinned_uploads_land_under_the_non_root_home_where_the_agent_reads_them()
+    {
+        Directory.CreateDirectory(_t.DockerWorkspaceDir);
+        File.WriteAllText(Path.Combine(_t.DockerWorkspaceDir, "marker.txt"), "keep");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+
+        Assert.True((await _t.Runtime().ApplyAsync("agent1", default)).Ok);
+
+        var remote = _t._cli.Uploads.Select(u => u.Remote).ToHashSet();
+        // Nothing nests (/app/app, /workspace/workspace) or targets the image-owned /app or root-owned /trust.
+        Assert.DoesNotContain(remote, r => r.StartsWith("/app/", StringComparison.Ordinal) || r.StartsWith("/trust/", StringComparison.Ordinal)
+            || r.StartsWith("/home/agent/app/app/", StringComparison.Ordinal) || r.StartsWith("/workspace/workspace/", StringComparison.Ordinal));
+        Assert.Contains("/workspace/marker.txt", remote);
+        Assert.Contains("/workspace/.mcp.json", remote);
+        Assert.Contains("/home/agent/app/" + Fleet.Shared.HarnessDefaults.CodexRootTomlFileName, remote);
+        var settings = JsonNode.Parse(_t._cli.Uploads.Last(u => u.Remote == "/home/agent/app/appsettings.json").Content!)!["StockOpenShell"]!;
+        // Every trust path the agent is configured with is exactly where an upload placed it.
+        foreach (var key in new[] { "EnrollmentFile", "AuthorityFile", "BrokerPasswordFile" })
+            Assert.Contains(settings[key]!.GetValue<string>(), remote);
+        Assert.Equal("/home/agent/app", settings["AppRoot"]!.GetValue<string>());
+        Assert.Equal("/home/agent/trust/enrollment.json", _t._cli.Uploads.Last().Remote); // activated enrollment, same path
+    }
+
     [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "chown")]
     private static extern int Chown([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, uint owner, uint group);
 

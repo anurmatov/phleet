@@ -65,7 +65,7 @@ class StockNativeStartupTests(unittest.TestCase):
                 for path in [root, *root.rglob("*")]:
                     os.chown(path, 10001, 10001)
                 identity = {"user": 10001, "group": 10001, "extra_groups": []}
-            script = (ROOT / "stock-entrypoint.sh").read_text().replace("/app/", str(app) + "/").replace("--contentRoot /app", "--contentRoot " + str(app))
+            script = (ROOT / "stock-entrypoint.sh").read_text().replace("/app/", str(app) + "/").replace("--contentRoot /app", "--contentRoot " + str(app)).replace("APP_ROOT=/app", "APP_ROOT=" + str(app))
             env = {"PATH": str(bin_dir) + (":" + system_path if system_path else ""), "HOME": str(home),
                    "DOTNET_CLI_HOME": str(home), "SYNTHETIC_UID": uid, "MARKER": str(root / "executed")}
             if api:

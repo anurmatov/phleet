@@ -61,7 +61,11 @@ public static class AgentHostRegistration
         services.Configure<ConversationsOptions>(configuration.GetSection(ConversationsOptions.Section));
 
         // Register services
-        services.AddSingleton<PromptBuilder>();
+        // Managed stock (#492): roles/projects are uploaded under the non-root HOME, not beside the binary.
+        if (configuration.GetValue<bool>("StockOpenShell:Enabled") && configuration["StockOpenShell:AppRoot"] is { Length: > 0 } stockAppRoot)
+            services.AddSingleton(sp => new PromptBuilder(sp.GetRequiredService<IOptions<AgentOptions>>(),
+                sp.GetRequiredService<ILogger<PromptBuilder>>(), sp.GetService<IOptions<TelegramOptions>>()) { ContentRoot = stockAppRoot });
+        else services.AddSingleton<PromptBuilder>();
         // #460: the harness plan, computed once; the executors apply it and heartbeats report its sha.
         services.AddSingleton<AgentHarness>();
         services.AddSingleton<ClaudeExecutor>();

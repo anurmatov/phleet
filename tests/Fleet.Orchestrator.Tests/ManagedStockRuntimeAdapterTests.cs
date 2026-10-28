@@ -60,7 +60,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "exec"]) && c.Args[^1].Contains(".fleet-activate"));
         // N5/F15: the guest gets the active enrollment bound to the exact UUID/epoch, accepted by the real loader.
         var guestFile = Path.Combine(_dir, "guest-enrollment.json");
-        File.WriteAllText(guestFile, _cli.Uploads.Last(u => u.Remote == "/trust/enrollment.json").Content!);
+        File.WriteAllText(guestFile, _cli.Uploads.Last(u => u.Remote == "/home/agent/trust/enrollment.json").Content!);
         var loaded = Fleet.Shared.Security.StockEnrollmentAuthority.Load(guestFile);
         Assert.Equal((record.Applied!.SandboxId, record.Applied.Epoch), (loaded.SandboxId, loaded.Epoch));
         var create = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
@@ -249,10 +249,10 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             + "\"temporal\":{\"Host\":\"temporal.example.test\",\"Tools\":[\"temporal_start_workflow\"],\"Query\":\"\"}}",
             authority["Services"]!.ToJsonString());
         var guestFile = Path.Combine(_dir, "guest-enrollment.json");
-        File.WriteAllText(guestFile, _cli.Uploads.Last(u => u.Remote == "/trust/enrollment.json").Content!);
+        File.WriteAllText(guestFile, _cli.Uploads.Last(u => u.Remote == "/home/agent/trust/enrollment.json").Content!);
         Assert.Equal(["temporal_start_workflow"], Fleet.Shared.Security.StockEnrollmentAuthority.Load(guestFile).ServiceTools("temporal"));
         // The workload's MCP config names each routed service like memory: exact HTTPS host, no query identity.
-        var staged = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && c.Args[4] == "/workspace").Args[3];
+        var staged = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && Path.GetFileName(c.Args[3]) == "workspace").Args[3];
         Assert.Equal("{\"mcpServers\":{\"memory\":{\"url\":\"https://memory.example.test/mcp\"},"
             + "\"fleet-telegram\":{\"url\":\"https://telegram.example.test/mcp\"},\"fleet-temporal\":{\"url\":\"https://temporal.example.test/mcp\"}}}",
             File.ReadAllText(Path.Combine(staged, ".mcp.json")));
@@ -434,7 +434,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
 
         Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
         var create = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
-        var staged = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && c.Args[4] == "/workspace").Args[3];
+        var staged = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && Path.GetFileName(c.Args[3]) == "workspace").Args[3];
         Assert.True(File.Exists(Path.Combine(staged, "marker.txt")));
         Assert.False(Directory.Exists(Path.Combine(staged, ".generated")));
         Assert.Equal(["--", "/app/stock-entrypoint.sh"], create.Args.TakeLast(2)); // explicit canonical launcher
@@ -710,7 +710,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.Equal(["fleet-agent1-telegram", "fleet-agent1-journal"], applied.ServiceProviders);
 
         // Workload inputs: empty credential slots, the public bot id, the capture switch and the journal route.
-        var app = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && c.Args[4] == "/app").Args[3];
+        var app = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && Path.GetFileName(c.Args[3]) == "app").Args[3];
         var bundle = Directory.GetParent(app)!.FullName;
         foreach (var file in Directory.EnumerateFiles(bundle, "*", SearchOption.AllDirectories))
             foreach (var secret in new[] { Key, BotToken, IngestToken, "synthetic-bot-secret", "synthetic-journal-mac" })
@@ -773,7 +773,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.Equal(["fleet-agent1-openai", "fleet-agent1-journal-read"],
             create.Args.Select((a, i) => (a, i)).Where(p => p.a == "--provider").Select(p => create.Args[p.i + 1]));
 
-        var app = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && c.Args[4] == "/app").Args[3];
+        var app = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && Path.GetFileName(c.Args[3]) == "app").Args[3];
         var bundle = Directory.GetParent(app)!.FullName;
         foreach (var file in Directory.EnumerateFiles(bundle, "*", SearchOption.AllDirectories))
             foreach (var secret in new[] { Key, ReadToken, "synthetic-read-mac" })
@@ -828,7 +828,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.Equal(["fleet-agent1-openai", "fleet-agent1-telegram", "fleet-agent1-journal", "fleet-agent1-journal-read", "fleet-agent1-journal-cross-chat"],
             create.Args.Select((a, i) => (a, i)).Where(p => p.a == "--provider").Select(p => create.Args[p.i + 1]));
 
-        var app = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && c.Args[4] == "/app").Args[3];
+        var app = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && Path.GetFileName(c.Args[3]) == "app").Args[3];
         var bundle = Directory.GetParent(app)!.FullName;
         foreach (var file in Directory.EnumerateFiles(bundle, "*", SearchOption.AllDirectories))
             foreach (var secret in new[] { Key, BotToken, IngestToken, ReadToken, CrossChatToken, "synthetic-read-mac", "synthetic-cross-mac" })
@@ -921,7 +921,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
 
         Assert.True((await Runtime().ApplyAsync("agent1", default)).Ok);
         Assert.DoesNotContain(_cli.Calls, c => c.Args.Contains("fleet-agent1-journal"));
-        var app = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && c.Args[4] == "/app").Args[3];
+        var app = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && Path.GetFileName(c.Args[3]) == "app").Args[3];
         Assert.Null(JsonNode.Parse(File.ReadAllText(Path.Combine(app, "appsettings.json")))!["StockOpenShell"]!["JournalCapture"]);
     }
 
@@ -1043,7 +1043,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
                 ("sandbox", "start") => Phase(Name(2), "Ready"),
                 ("sandbox", "stop") => Phase(Name(2), "Stopped"),
                 ("sandbox", "download") => Transfer(Name(2), () => Download(args[4])),
-                ("sandbox", "upload") => Transfer(Name(2), () => { Uploads.Add((args[4], File.Exists(args[3]) ? File.ReadAllText(args[3]) : null)); return new(0, ""); }),
+                ("sandbox", "upload") => Transfer(Name(2), () => Upload(args[3], args[4])),
                 ("sandbox", "exec") => Transfer(args[3], () => new(OnExec?.Invoke(args[^1]) ?? 0, "")),
                 ("sandbox", "list") => ListFails ? new(1, "") : new(0, "[]"),
                 ("profile", "export") => new(0, ProfileYaml),
@@ -1070,6 +1070,30 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         // Pinned SSH admission accepts transfers only for a running (Ready) sandbox.
         private StockCliResult Transfer(string name, Func<StockCliResult> action) =>
             Sandboxes.TryGetValue(name, out var s) && s.Phase == "Ready" ? action() : new(1, "");
+
+        /// <summary>Remote directories created by uploads (the stock image's own dirs are not modelled).</summary>
+        public readonly HashSet<string> RemoteDirs = [];
+
+        // Pinned 0.1.5 (openshell-cli ssh.rs sandbox_sync_up/ssh_tar_upload): a directory is archived under its
+        // basename and extracted at DEST, landing at DEST/basename/...; a file lands at DEST/basename when DEST is
+        // a directory, top-level or ends in '/', else at DEST itself. Uploads records each resolved remote file.
+        private StockCliResult Upload(string local, string dest)
+        {
+            if (Directory.Exists(local))
+            {
+                var root = dest.TrimEnd('/') + "/" + Path.GetFileName(local.TrimEnd('/'));
+                RemoteDirs.Add(root);
+                foreach (var dir in Directory.GetDirectories(local, "*", SearchOption.AllDirectories))
+                    RemoteDirs.Add(root + "/" + Path.GetRelativePath(local, dir).Replace('\\', '/'));
+                foreach (var file in Directory.GetFiles(local, "*", SearchOption.AllDirectories))
+                    Uploads.Add((root + "/" + Path.GetRelativePath(local, file).Replace('\\', '/'), File.ReadAllText(file)));
+                return new(0, "");
+            }
+            var target = dest.EndsWith('/') || dest.LastIndexOf('/') == 0 || RemoteDirs.Contains(dest)
+                ? dest.TrimEnd('/') + "/" + Path.GetFileName(local) : dest;
+            Uploads.Add((target, File.Exists(local) ? File.ReadAllText(local) : null));
+            return new(0, "");
+        }
 
         // The pinned CLI extracts the directory's contents directly into the destination.
         private static StockCliResult Download(string staging)

@@ -9,7 +9,11 @@ fi
 # clears any earlier activation and marks itself staged; the orchestrator transfers inputs while
 # no daemon or writer runs, then writes a fresh activation for this boot. Without that activation
 # the daemon never starts. The manual profile (no FLEET_STOCK_STAGED) is unchanged.
+# Managed inputs are uploaded under the non-root HOME (/app is image-owned and read-only), so the
+# staged launch reads its configuration from $HOME/app; the manual profile keeps /app.
+APP_ROOT=/app
 if [ "${FLEET_STOCK_STAGED:-}" = 1 ]; then
+    APP_ROOT="$HOME/app"
     rm -f "$HOME/.fleet-activate" "$HOME/.fleet-ready"
     : > "$HOME/.fleet-staged"
     waited=0
@@ -26,7 +30,7 @@ fi
 # No environment discovery, provider substitution, account login or trust installation.
 # The same validator is used by shell bootstrap and direct dotnet startup. It creates only
 # the native profile and returns the already-validated workspace, never credentials.
-WORKDIR=$(dotnet /app/Fleet.Agent.dll --contentRoot /app --prepare-stock-native)
+WORKDIR=$(dotnet /app/Fleet.Agent.dll --contentRoot "$APP_ROOT" --prepare-stock-native)
 # Do not inherit an alternate native config root. The generated home is the only profile here.
 unset CODEX_HOME
 cd "$WORKDIR"
@@ -37,4 +41,4 @@ if [ "${FLEET_STOCK_STAGED:-}" = 1 ]; then
     rm -f "$HOME/.fleet-staged"
     printf '%s' "$$" > "$HOME/.fleet-ready"
 fi
-exec dotnet /app/Fleet.Agent.dll --contentRoot /app
+exec dotnet /app/Fleet.Agent.dll --contentRoot "$APP_ROOT"

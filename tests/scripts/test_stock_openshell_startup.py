@@ -37,7 +37,7 @@ class StockStartupTests(unittest.TestCase):
         bin_dir.mkdir()
         (bin_dir / "id").write_text("#!/bin/sh\nprintf 10001")
         (bin_dir / "dotnet").write_text(
-            '#!/bin/sh\ncase "$*" in *--prepare-stock-native*)\n'
+            '#!/bin/sh\necho "$*" >> "$MARKER.args"\ncase "$*" in *--prepare-stock-native*)\n'
             '  [ -f "$HOME/.fleet-ready" ] && echo early >> "$MARKER"\n'
             + ('  printf "%s" "$HOME"; exit 0;;\n' if prepare_ok else '  exit 1;;\n') +
             'esac\nstaged=no; [ -f "$HOME/.fleet-staged" ] && staged=yes\n'
@@ -64,6 +64,9 @@ class StockStartupTests(unittest.TestCase):
         self.assertEqual(1, len(lines))
         pid = lines[0].split()[1]
         self.assertEqual(f"daemon {pid} ready={pid} staged=no", lines[0])
+        # Managed inputs are uploaded under the non-root HOME (#492 review F2); /app is read-only there.
+        self.assertEqual([f"/app/Fleet.Agent.dll --contentRoot {root}/app --prepare-stock-native",
+                          f"/app/Fleet.Agent.dll --contentRoot {root}/app"], (root / "calls.args").read_text().splitlines())
 
     def test_failed_staged_preparation_never_acknowledges_readiness(self):
         code, root = self._staged_boot(prepare_ok=False)

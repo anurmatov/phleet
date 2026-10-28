@@ -135,6 +135,8 @@ public sealed class DelegateToAgentActivity
         if (budgetIsExplicit)
             GuardTimerOrdering(ctx, timeout, agentName, taskId);
 
+        await GuardManagedTargetAsync(agentName, taskId, ctx.CancellationToken);
+
         // Register before publishing — avoids a race where response arrives before TCS is registered
         var tcs = _registry.Register(taskId);
 
@@ -263,6 +265,54 @@ public sealed class DelegateToAgentActivity
             $"while the agent is still working. Fix the caller's ActivityOptions, not this budget. " +
             $"(taskId={taskId}, workflowId={ctx.Info.WorkflowId})",
             errorType: "MisorderedAgentTimeouts",
+            nonRetryable: true);
+    }
+
+    /// <summary>Named refusal for a workflow directive to a managed stock OpenShell agent (#492).</summary>
+    public const string ManagedTargetUnsupported = "managed_route_unsupported:workflow_delegation";
+
+    /// <summary>
+    /// A managed stock OpenShell agent (#492) only reads bridge control requests on its epoch broker, so an
+    /// ordinary-broker directive would never be read and the task would silently wait out its budget.
+    /// Refuse it up front, non-retryably, with a named code. Uses the orchestrator's agent state (applied
+    /// runtime); without an orchestrator URL, or when the lookup fails, delegation proceeds unchanged.
+    /// </summary>
+    private async Task GuardManagedTargetAsync(string agentName, string taskId, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(_bridgeConfig.OrchestratorUrl)) return;
+        string? applied = null;
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(10));
+            var client = _httpClientFactory.CreateClient("orchestrator-cancel");
+            using var request = new HttpRequestMessage(HttpMethod.Get,
+                $"{_bridgeConfig.OrchestratorUrl.TrimEnd('/')}/api/agents/{Uri.EscapeDataString(agentName)}");
+            if (!string.IsNullOrEmpty(_bridgeConfig.OrchestratorAuthToken))
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _bridgeConfig.OrchestratorAuthToken);
+            using var response = await client.SendAsync(request, cts.Token);
+            if (!response.IsSuccessStatusCode) return;
+            var body = await response.Content.ReadAsStringAsync(cts.Token);
+            if (string.IsNullOrWhiteSpace(body)) return;
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.ValueKind != JsonValueKind.Object) return;
+            foreach (var property in document.RootElement.EnumerateObject())
+                if (string.Equals(property.Name, "appliedRuntimeKind", StringComparison.OrdinalIgnoreCase)
+                    && property.Value.ValueKind == JsonValueKind.String)
+                    applied = property.Value.GetString();
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested && ex is HttpRequestException or JsonException or OperationCanceledException)
+        {
+            _logger.LogWarning("Managed-runtime lookup for {Agent} failed ({Type}); delegating unchanged", agentName, ex.GetType().Name);
+            return;
+        }
+        if (applied != "openshell") return;
+        _logger.LogError("DelegateToAgent refused: {Agent} runs on the managed stock OpenShell runtime ({Code}), taskId={TaskId}",
+            agentName, ManagedTargetUnsupported, taskId);
+        throw new ApplicationFailureException(
+            $"{ManagedTargetUnsupported}: agent {agentName} runs on the managed stock OpenShell runtime, which does not " +
+            $"receive workflow directives or send workflow signals. Delegate to a Docker agent or switch it back. (taskId={taskId})",
+            errorType: "ManagedAgentWorkflowUnsupported",
             nonRetryable: true);
     }
 

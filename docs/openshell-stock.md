@@ -549,7 +549,13 @@ and the only principals in the `stock-<epoch>` vhost are the workload, control a
 #489 §6. Delivery would need a new per-epoch publishing principal handed to Fleet.Telegram, a grant
 on the ordinary vhost, or an orchestrator relay consumer, each of which widens that table. So journal
 capture together with a `fleet-telegram` MCP grant refuses with
-`managed_route_unsupported:journal_tool_send_receipts`. A dedicated Fleet.Temporal receiver still
+`managed_route_unsupported:journal_tool_send_receipts`. Workflow directives and signals are not
+routed either: a managed agent's epoch identity reads only bridge control requests, and its relay
+publishes only bridge responses, so Temporal `DelegateToAgent` (and any workflow signal it would
+send back) has no lane. With `TemporalBridge:OrchestratorUrl` set, `DelegateToAgent` reads the
+target's applied runtime and fails non-retryably with `managed_route_unsupported:workflow_delegation`
+(error type `ManagedAgentWorkflowUnsupported`) instead of publishing a directive nobody reads; after a
+verified handoff back to Docker, delegation works again. A dedicated Fleet.Temporal receiver still
 starts its configured workers and the relay consumer on the fixed `fleet.agent.temporal-bridge`
 queue, so it competes with the ordinary bridge on a shared broker. None of the following is
 qualified:

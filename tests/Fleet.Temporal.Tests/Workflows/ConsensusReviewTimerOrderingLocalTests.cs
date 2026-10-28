@@ -297,7 +297,8 @@ internal sealed class LocalHarness
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            lock (requests) requests.Add(request.RequestUri!.ToString());
+            // Only cancels (POST); the managed-target lookup (GET, #492) is not a cancel.
+            if (request.Method == HttpMethod.Post) lock (requests) requests.Add(request.RequestUri!.ToString());
             return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK));
         }
     }

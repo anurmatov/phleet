@@ -47,6 +47,48 @@ public static class StockOpenShellEnrollment
         return binding;
     }
 
+    /// <summary>
+    /// #492 review F7: the one <c>codex-root.toml</c> both staged preparation and daemon registration
+    /// validate. A managed launch uploads it under <c>StockOpenShell:AppRoot</c>, which must also be the
+    /// launcher's content root; the manual profile is unchanged (its content root for preparation, the
+    /// image's <see cref="HarnessDefaults.CodexRootTomlContainerPath"/> for registration).
+    /// </summary>
+    public static string CodexRootFile(IConfiguration configuration, string? contentRoot = null)
+    {
+        if (bool.TryParse(configuration["StockOpenShell:Enabled"], out var enabled) && enabled
+            && configuration["StockOpenShell:AppRoot"] is { Length: > 0 } appRoot)
+        {
+            if (!Path.IsPathFullyQualified(appRoot)) Deny("stock_enrollment_app_root_invalid");
+            if (contentRoot is not null && NormalizeRoot(contentRoot) != NormalizeRoot(appRoot))
+                Deny("stock_enrollment_app_root_mismatch");
+            return Path.Combine(appRoot, HarnessDefaults.CodexRootTomlFileName);
+        }
+        return contentRoot is null
+            ? HarnessDefaults.CodexRootTomlContainerPath
+            : Path.Combine(contentRoot, HarnessDefaults.CodexRootTomlFileName);
+    }
+
+    private static string NormalizeRoot(string path) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+
+    /// <summary>
+    /// The daemon registration gate: validates the enrollment against the same root file preparation
+    /// read (<see cref="CodexRootFile"/>), then requires the prepared native profile.
+    /// </summary>
+    public static StockBrokerIdentity? ValidateForRegistration(IConfiguration configuration)
+    {
+        var binding = Validate(configuration, CodexRootFile(configuration));
+        if (binding is not null) RequirePrepared(configuration, binding, Environment.GetEnvironmentVariable("HOME") ?? "");
+        return binding;
+    }
+
+    internal static StockBrokerIdentity? ValidateForRegistration(IConfiguration configuration, string home, Func<uint> effectiveUid,
+        Func<string, string?>? environment = null)
+    {
+        var binding = Validate(configuration, home, effectiveUid, CodexRootFile(configuration), environment);
+        if (binding is not null) RequirePrepared(configuration, binding, home, environment);
+        return binding;
+    }
+
     [DllImport("libc", EntryPoint = "geteuid")]
     private static extern uint GetEffectiveUid();
 

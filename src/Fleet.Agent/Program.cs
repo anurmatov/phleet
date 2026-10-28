@@ -23,7 +23,9 @@ try
 {
     if (validateStockOnly)
     {
-        var rootFile = Path.Combine(builder.Environment.ContentRootPath, Fleet.Shared.HarnessDefaults.CodexRootTomlFileName);
+        // #492 review F7: managed preparation reads StockOpenShell:AppRoot (which must be this content
+        // root), exactly the file daemon registration validates; the manual profile keeps its content root.
+        var rootFile = StockOpenShellEnrollment.CodexRootFile(builder.Configuration, builder.Environment.ContentRootPath);
         var binding = StockOpenShellEnrollment.Validate(builder.Configuration, rootFile);
         if (prepareStockNative)
         {

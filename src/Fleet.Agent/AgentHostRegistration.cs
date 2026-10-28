@@ -45,11 +45,10 @@ public static class AgentHostRegistration
     public static IServiceCollection AddAgentCoreServices(
         this IServiceCollection services, IConfiguration configuration)
     {
-        if (StockOpenShellEnrollment.Validate(configuration) is { } stockBroker)
-        {
-            StockOpenShellEnrollment.RequirePrepared(configuration, stockBroker, Environment.GetEnvironmentVariable("HOME") ?? "");
+        // #492 review F7: the same codex-root.toml staged preparation read (StockOpenShell:AppRoot when
+        // managed, /app for the manual profile), never a fixed /app path the managed launch never wrote.
+        if (StockOpenShellEnrollment.ValidateForRegistration(configuration) is { } stockBroker)
             services.AddSingleton(stockBroker);
-        }
 
         // Bind configuration sections
         services.Configure<AgentOptions>(configuration.GetSection(AgentOptions.Section));

@@ -154,7 +154,11 @@ intent record cannot self-attest a supported enrollment and continues to refuse.
 Provide the existing provider credential reference at
 `/home/agent/.codex-host/auth.json`, the exact normal `HarnessDefaults`-generated artifact
 at `/app/codex-root.toml`, normal generated read-only instruction/project inputs beside
-the binary (`roles/.../system.md`, `projects/.../context.md`), and one read-only `/workspace/.mcp.json`:
+the binary (`roles/.../system.md`, `projects/.../context.md`), and one read-only `/workspace/.mcp.json`.
+A managed staged launch instead uploads the artifact and instruction/project inputs under
+`StockOpenShell:AppRoot` (`$HOME/app`), which must equal the launcher's content root
+(`stock_enrollment_app_root_mismatch` otherwise); preparation and daemon registration both validate
+that same `codex-root.toml`. Without `AppRoot` (the manual profile) the paths above are unchanged:
 
 ```json
 {"mcpServers":{"memory":{"url":"https://memory.example.test/mcp"}}}

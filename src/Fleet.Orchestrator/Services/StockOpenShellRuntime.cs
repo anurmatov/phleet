@@ -1296,7 +1296,8 @@ public sealed class StockOpenShellRuntime(
         var download = await cli.RunAsync(["sandbox", "download", binding.SandboxName, "/workspace", staging], null, TimeSpan.FromMinutes(5), ct);
         if (download.ExitCode != 0 || download.TimedOut) return "workspace_download_unknown";
         if (await VerifyIdentityAsync(binding, ct) is { } after) return after.Code;
-        try { CopyTree(staging, target, PrivateWorkspaceEntries); return null; }
+        // Mirror the working tree (deletions included); excluded account/control state is never touched.
+        try { CopyTree(staging, target, PrivateWorkspaceEntries, prune: true); return null; }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return "workspace_restore_failed"; }
     }
 
@@ -1506,8 +1507,12 @@ public sealed class StockOpenShellRuntime(
             if (entry.LinkTarget is not null) throw new IOException("symlink_refused");
     }
 
-    /// <summary>Refuses symlinks in the source tree, on either root's ancestors, or at any destination entry.</summary>
-    private static void CopyTree(string source, string target, IReadOnlyCollection<string> exclude)
+    /// <summary>
+    /// Refuses symlinks in the source tree, on either root's ancestors, or at any destination entry. With
+    /// <paramref name="prune"/>, destination entries absent from the source (or of another kind) are removed
+    /// first, so the target mirrors the source; top-level excluded entries are neither copied nor removed.
+    /// </summary>
+    private static void CopyTree(string source, string target, IReadOnlyCollection<string> exclude, bool prune = false)
     {
         RefuseLinkedAncestors(source);
         RefuseLinks(source);
@@ -1517,6 +1522,16 @@ public sealed class StockOpenShellRuntime(
         void Copy(string from, string to, bool top)
         {
             if (new DirectoryInfo(to).LinkTarget is not null) throw new IOException("symlink_refused");
+            if (prune && Directory.Exists(to))
+                foreach (var stale in new DirectoryInfo(to).EnumerateFileSystemInfos())
+                {
+                    if (top && exclude.Contains(stale.Name)) continue;
+                    var kept = stale is DirectoryInfo ? Directory.Exists(Path.Combine(from, stale.Name)) : File.Exists(Path.Combine(from, stale.Name));
+                    if (stale.LinkTarget is not null) throw new IOException("symlink_refused");
+                    if (kept) continue;
+                    if (stale is DirectoryInfo staleDir) { RefuseLinks(staleDir.FullName); staleDir.Delete(recursive: true); }
+                    else stale.Delete();
+                }
             Directory.CreateDirectory(to);
             foreach (var dir in Directory.GetDirectories(from))
                 if (!(top && exclude.Contains(Path.GetFileName(dir)))) Copy(dir, Path.Combine(to, Path.GetFileName(dir)), false);

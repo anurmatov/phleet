@@ -119,6 +119,33 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Docker_handoff_mirrors_sandbox_deletions_but_never_touches_control_state()
+    {
+        var ws = _t.DockerWorkspaceDir;
+        Directory.CreateDirectory(Path.Combine(ws, "gone-dir", "nested"));
+        File.WriteAllText(Path.Combine(ws, "gone-dir", "nested", "old.txt"), "deleted in sandbox");
+        File.WriteAllText(Path.Combine(ws, "deleted.txt"), "deleted in sandbox");
+        File.WriteAllText(Path.Combine(ws, "only-dir"), "became a directory in sandbox");
+        Directory.CreateDirectory(Path.Combine(ws, ".ssh"));
+        File.WriteAllText(Path.Combine(ws, ".ssh", "id"), "control");
+        File.WriteAllText(Path.Combine(ws, ".mcp.json"), "{\"docker\":true}");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+        var runtime = _t.Runtime();
+        Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
+
+        _t._store.Get("agent1").RuntimeKind = "docker";
+        Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
+
+        // The synthetic sandbox /workspace holds only marker-back.txt and only-dir/.
+        Assert.Equal("from sandbox", File.ReadAllText(Path.Combine(ws, "marker-back.txt")));
+        Assert.True(Directory.Exists(Path.Combine(ws, "only-dir")));
+        Assert.False(File.Exists(Path.Combine(ws, "deleted.txt")));
+        Assert.False(Directory.Exists(Path.Combine(ws, "gone-dir")));
+        Assert.Equal("control", File.ReadAllText(Path.Combine(ws, ".ssh", "id")));
+        Assert.Equal("{\"docker\":true}", File.ReadAllText(Path.Combine(ws, ".mcp.json")));
+    }
+
     [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "chown")]
     private static extern int Chown([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, uint owner, uint group);
 

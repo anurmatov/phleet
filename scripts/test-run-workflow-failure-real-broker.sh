@@ -31,6 +31,10 @@ case "$mode" in
   "rm -f")
     [[ $last == *-rabbit ]] && stuck rabbit && exit 44
     rm -f "$STATE/$last"; exit 0 ;;
+  "logs --tail")
+    [[ -e $STATE/$last ]] || exit 73
+    echo 'synthetic broker startup error'
+    exit "${FAKE_LOG_RC:-0}" ;;
   "exec "*) exit "${FAKE_PING_RC:-0}" ;;
   "run -d"|"run -i")
     shift 2
@@ -38,6 +42,7 @@ case "$mode" in
       case $1 in --cidfile) cid=$2; shift ;; --name) name=$2; shift ;; esac
       shift
     done
+    if [[ $mode == "run -d" && ${FAKE_BROKER_NO_CID:-0} == 1 ]]; then exit "${FAKE_BROKER_RC:-23}"; fi
     echo "id-$name" > "$cid"; touch "$STATE/id-$name"
     [[ $mode == "run -d" ]] && exit "${FAKE_BROKER_RC:-0}"
     cat > "$INPUT"
@@ -80,13 +85,17 @@ case_() {
   [[ -z $(ls -A "$tmp") ]] || { echo "FAIL $name: temp files left"; ls -A "$tmp"; exit 1; }
   ! grep -Eq -- ' (-p|--publish)( |=)[0-9[]| (-P|--publish-all)( |$)' "$CALLS" || { echo "FAIL $name: published a host port"; exit 1; }
   ! grep -Eq -- 'type=bind|--volume|(^| )-v [^ ]*:' "$CALLS" || { echo "FAIL $name: bind-mounted a host path"; exit 1; }
+  ! grep -Eq -- '--mount|--tmpfs|(^| )--user([ =]|$)' "$CALLS" || { echo "FAIL $name: overrides image-default data handling or user"; exit 1; }
   echo "PASS $name"
 }
 
 case_ usage 2 - not-a-sha
 case_ unknown-commit 2 - 0123456789abcdef0123456789abcdef01234567
 case_ network-create-fails 5 - "$SHA" FAKE_NETWORK_RC=5
-case_ broker-start-fails 23 - "$SHA" FAKE_BROKER_RC=23
+case_ broker-start-fails 23 - "$SHA" FAKE_BROKER_RC=23 ready=true
+case_ broker-start-without-cid 23 - "$SHA" FAKE_BROKER_RC=23 FAKE_BROKER_NO_CID=1
+case_ startup-log-fails 23 - "$SHA" FAKE_BROKER_RC=23 FAKE_LOG_RC=77
+case_ startup-log-times-out 23 - "$SHA" FAKE_BROKER_RC=23 FAKE_LOG_RC=124
 case_ readiness-times-out 70 - "$SHA" FAKE_PING_RC=1
 case_ test-fails 42 - "$SHA" FAKE_TEST_RC=42 "FAKE_TEST_OUTPUT=$PASSED"
 case_ test-times-out 124 - "$SHA" FAKE_TEST_RC=124
@@ -108,6 +117,25 @@ for name in cleanup-stuck-after-pass cleanup-stuck-after-test-failure cleanup-un
   ! grep -q '^RESULT: PASS$' "$DIR/out-$name" || { echo "FAIL $name: reported PASS"; exit 1; }
 done
 echo 'PASS recipe reports the test status through owned cleanup'
+
+# Only startup failures read logs, using the owned CID while it still exists, before removal.
+for name in broker-start-fails readiness-times-out startup-log-fails startup-log-times-out; do
+  logs=$(grep -nE '^docker logs --tail 100 id-phleet488-[0-9]+-[0-9]+-rabbit$' "$DIR/calls-$name" | cut -d: -f1)
+  removed=$(grep -nE '^docker rm -f -v id-phleet488-[0-9]+-[0-9]+-rabbit$' "$DIR/calls-$name" | cut -d: -f1)
+  [[ -n $logs && -n $removed && $logs -lt $removed ]]
+  grep -q 'synthetic broker startup error' "$DIR/out-$name"
+  ! grep -q '^docker run -i' "$DIR/calls-$name"
+done
+for name in startup-log-fails startup-log-times-out; do
+  grep -q 'BROKER STARTUP LOGS: capture unavailable' "$DIR/out-$name"
+  grep -q '^RESULT: FAIL (exit 23)' "$DIR/out-$name"
+done
+for name in test-passes test-fails broker-start-without-cid network-create-fails; do
+  ! grep -q '^docker logs ' "$DIR/calls-$name"
+done
+echo 'PASS owned startup logs precede cleanup, and capture failures preserve status and cleanup'
+grep -Eq '^docker rm -f -v id-phleet488-[0-9]+-[0-9]+-rabbit$' "$DIR/calls-test-passes"
+echo 'PASS image-default broker data handling retains owned-ID volume cleanup'
 
 # A recipe that is not the reviewed commit's copy runs nothing.
 printf '# unreviewed\n' >> "$REPO/$RECIPE"

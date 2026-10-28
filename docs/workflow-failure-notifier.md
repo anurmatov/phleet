@@ -68,8 +68,9 @@ bash scripts/run-workflow-failure-real-broker.sh <reviewed-commit-sha>
 The recipe:
 - takes the full reviewed commit SHA and refuses (exit 2) if that commit is not local or the recipe being run differs from that commit's copy;
 - feeds the SDK container only `git archive <sha>`, the commit's tracked files, so ignored files such as `.env`, untracked files and uncommitted edits never reach it; it prints the commit and tree it used;
-- creates its own Docker network, RabbitMQ container (data on tmpfs, so no volume) and named SDK container, with no host port and no bind mount, and fails fast if any cannot be created;
+- creates its own Docker network, RabbitMQ container (image-default data directory, owned anonymous volume removed with its container) and named SDK container, with no host port and no bind mount, and fails fast if any cannot be created;
 - waits at most `READY_SECONDS` (default 90) for the broker, and bounds the SDK container run with `TEST_SECONDS` (default 1800, exit 124);
+- on startup failure, emits the last 100 log lines from the owned broker ID before cleanup, bounded to 5 seconds plus 2 seconds to kill; capture failure preserves the original exit and still cleans up, and operators must retain stderr with their run output;
 - removes each container and the network by the ID it recorded, plus its temp directory, then lists them to confirm they are gone;
 - exits with the test's status, with `RESULT: PASS` or `RESULT: FAIL (exit N)`. A skipped or unmatched test is a failure (exit 3). A resource that is left or cannot be confirmed gone prints `CLEANUP: UNRESOLVED …`; it turns a passing run into exit 4 and never replaces an earlier failure status.
 

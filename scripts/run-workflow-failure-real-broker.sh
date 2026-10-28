@@ -28,6 +28,7 @@ SDK="$RUN-sdk"
 FILTER="FullyQualifiedName~WorkflowFailureNotifierRealBrokerTests"
 TEST_NAME="Fleet.Temporal.Tests.Services.WorkflowFailureNotifierRealBrokerTests"
 WORK=""
+ready=false
 owned=() # creation order: "net:<id>" or "cid:<cidfile>"
 
 # Removes one owned resource and succeeds only if a listing confirms it is gone.
@@ -47,8 +48,17 @@ remove_owned() {
 }
 
 cleanup() {
-  local rc=$? i unresolved=()
+  local rc=$? i id unresolved=()
   trap - EXIT
+  # Retain startup evidence before removing the owned container. Diagnostic failure never
+  # masks the original status or suppresses cleanup; no name-based read of a colliding broker.
+  if ((rc != 0)) && [[ ${ready:-false} != true && -n $WORK && -s $WORK/broker.cid ]] \
+      && id=$(<"$WORK/broker.cid") && [[ -n $id ]]; then
+    echo "BROKER STARTUP LOGS: owned container $id (last 100 lines)" >&2
+    if ! timeout --kill-after=2 5 docker logs --tail 100 "$id" >&2; then
+      echo "BROKER STARTUP LOGS: capture unavailable; continuing owned cleanup" >&2
+    fi
+  fi
   # Newest first: the SDK and broker containers, then the network they are attached to.
   for ((i = ${#owned[@]} - 1; i >= 0; i--)); do
     remove_owned "${owned[$i]}" || unresolved+=("${owned[$i]}")
@@ -89,12 +99,11 @@ echo "SOURCE: commit $SHA tree $TREE (git archive, tracked files only)"
 
 NET_ID=$(docker network create "$NET")
 owned+=("net:$NET_ID")
-# The image declares a volume for /var/lib/rabbitmq; tmpfs keeps that from becoming an anonymous volume.
+# Keep image-default data-directory initialization; owned-ID rm -f -v removes its anonymous volume.
 owned+=("cid:$WORK/broker.cid")
 docker run -d --cidfile "$WORK/broker.cid" --name "$BROKER" --network "$NET" \
-  --mount type=tmpfs,dst=/var/lib/rabbitmq "$BROKER_IMAGE" >/dev/null
+  "$BROKER_IMAGE" >/dev/null
 
-ready=false
 deadline=$((SECONDS + READY_SECONDS))
 while ((SECONDS < deadline)); do
   if docker exec "$BROKER" rabbitmq-diagnostics -q ping >/dev/null 2>&1; then ready=true; break; fi

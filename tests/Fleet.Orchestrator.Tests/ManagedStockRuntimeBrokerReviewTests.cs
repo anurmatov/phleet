@@ -74,4 +74,29 @@ public sealed class ManagedStockRuntimeBrokerReviewTests : IDisposable
         if (expected is not null) // no registry or Docker service: any legacy Docker dispatch would throw
             Assert.Equal(expected, await new Fleet.Orchestrator.Tools.StartAgentTool(null!, null!, hold).StartAgentAsync("agent1"));
     }
+
+    [Fact]
+    public void Verified_docker_retirement_releases_the_ordinary_hold_but_a_revoked_or_linked_record_does_not()
+    {
+        var authority = Path.Combine(_root, "managed", "authority");
+        Directory.CreateDirectory(authority);
+        var record = Path.Combine(authority, "agent1.json");
+        var hold = new StockRuntimeMutationHold(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["StockOpenShell:AuthorityDirectory"] = authority }).Build());
+        File.WriteAllText(record, """{"State":"revoked","Agent":"agent1"}""");
+        Assert.True(hold.HoldsOrdinaryTraffic("agent1"));
+        Assert.False(StockAuthoritySource.IsRetired(authority, "agent1"));
+        File.WriteAllText(record, """{"State":"retired","Agent":"agent1"}""");
+        Assert.False(hold.HoldsOrdinaryTraffic("agent1"));
+        Assert.False(hold.HoldsOrdinaryTraffic("Agent1"));
+        Assert.True(StockAuthoritySource.IsRetired(authority, "AGENT1"));
+        Assert.True(File.Exists(record)); // custody: the record stays in place
+        // A link is never trusted as retirement, even to a retired record.
+        var elsewhere = Path.Combine(_root, "retired.json");
+        File.Move(record, elsewhere);
+        File.CreateSymbolicLink(record, elsewhere);
+        Assert.True(hold.HoldsOrdinaryTraffic("agent1"));
+        Assert.False(StockAuthoritySource.IsRetired(authority, "agent1"));
+    }
+
 }

@@ -41,6 +41,12 @@ internal sealed class BridgeControlLanes(string directory, int timeoutSeconds, s
         IReadOnlyDictionary<string, StockActiveRecord?> active;
         try { active = StockAuthoritySource.Active(directory); }
         catch (StockIdentityDenied) { return new(true, null); } // unknown directory state is never "ordinary"
+        // A record retired after a verified Docker handoff releases the agent back to the ordinary path.
+        if (!active.ContainsKey(agent) && StockAuthoritySource.IsRetired(directory, agent))
+        {
+            _managed.TryRemove(agent, out _);
+            return new(false, null);
+        }
         if (!_managed.ContainsKey(agent) && !active.ContainsKey(agent) && !StockAuthoritySource.HasEntry(directory, agent))
             return new(false, null);
         _managed.TryAdd(agent, 0);

@@ -105,7 +105,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.True(result.Ok, result.Message);
         Assert.Equal("applied_docker", result.Code);
         Assert.Equal("docker", _store.Get("agent1").AppliedRuntimeKind);
-        Assert.Equal("revoked", JsonNode.Parse(File.ReadAllText(AuthorityPath()))!["State"]!.GetValue<string>());
+        Assert.Equal(Fleet.Shared.Security.StockAuthoritySource.RetiredState, JsonNode.Parse(File.ReadAllText(AuthorityPath()))!["State"]!.GetValue<string>());
         Assert.Contains(_cli.Calls, c => c.Args.Take(3).SequenceEqual(["sandbox", "provider", "detach"]));
         Assert.Contains(_cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
         Assert.Equal(6, _broker.Deletes.Count); // permission and user for each principal; no live connections

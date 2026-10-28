@@ -59,22 +59,53 @@ public static class StockAuthoritySource
             StringComparer.OrdinalIgnoreCase);
     }
 
-    /// <summary>True when the directory holds any entry for the agent's record, active or not.</summary>
+    /// <summary>
+    /// True when the directory holds any entry for the agent's record, active or not, except a plain
+    /// file retired after a verified OpenShell→Docker handoff (kept in place for custody).
+    /// </summary>
     public static bool HasEntry(string directory, string agent)
     {
         if (!ValidAgent(agent)) return false;
+        try { return Entry(directory, agent) is { } entry && !RetiredFile(entry); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return true; } // unknown is not absent
+    }
+
+    /// <summary>The agent's record is a plain file the managed runtime retired after a verified Docker handoff.</summary>
+    public static bool IsRetired(string directory, string agent)
+    {
+        if (!ValidAgent(agent)) return false;
+        try { return Entry(directory, agent) is { } entry && RetiredFile(entry); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
+    }
+
+    /// <summary>State written over a record only after a verified, committed OpenShell→Docker handoff.</summary>
+    public const string RetiredState = "retired";
+
+    private static FileInfo? Entry(string directory, string agent)
+    {
         var info = new FileInfo(Path.Combine(directory, agent + ".json"));
+        if (info.Exists || info.LinkTarget is not null) return info;
+        // Agent identity is case-insensitive everywhere else (AgentRegistry): a case-changed name
+        // still names the managed agent. Compare entry names only; entries are never followed.
+        if (!Directory.Exists(directory)) return null;
+        var name = agent + ".json";
+        var match = Directory.EnumerateFileSystemEntries(directory).FirstOrDefault(p =>
+            string.Equals(Path.GetFileName(p), name, StringComparison.OrdinalIgnoreCase));
+        return match is null ? null : new FileInfo(match);
+    }
+
+    private static bool RetiredFile(FileInfo entry)
+    {
+        if (entry.LinkTarget is not null) return false; // a link is never trusted as retirement
         try
         {
-            if (info.Exists || info.LinkTarget is not null) return true;
-            // Agent identity is case-insensitive everywhere else (AgentRegistry): a case-changed name
-            // still names the managed agent. Compare entry names only; entries are never followed.
-            if (!Directory.Exists(directory)) return false;
-            var name = agent + ".json";
-            return Directory.EnumerateFileSystemEntries(directory).Any(p =>
-                string.Equals(Path.GetFileName(p), name, StringComparison.OrdinalIgnoreCase));
+            using var document = JsonDocument.Parse(StockEnrollmentAuthority.ReadBounded(entry.FullName));
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("State", out var state)
+                && state.ValueKind == JsonValueKind.String && state.GetString() == RetiredState;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return true; } // unknown is not absent
+        catch (Exception ex) when (ex is JsonException or StockIdentityDenied or IOException or UnauthorizedAccessException)
+        { return false; } // unreadable is not retired
     }
 
     /// <summary>The outside <c>control</c>/<c>observer</c> broker credential beside an agent's record. Refuses links.</summary>

@@ -624,6 +624,7 @@ public sealed class StockOpenShellRuntime(
             // Post-action DB failure: the claimed operation stays recorded and is reported as interrupted next time.
             return Result.Refused(503, kind + "_state_unknown", outcome.Result.Errors);
         }
+        if (outcome.Result.Ok && outcome.AppliedKind == "docker" && !final.Unresolved) RetireAuthority(name);
         await PublishAsync(name);
         logger.LogInformation("Managed {Kind} for {Agent}: {Code}", kind, name, outcome.Result.Code);
         return outcome.Result;
@@ -1567,6 +1568,26 @@ public sealed class StockOpenShellRuntime(
     {
         if (OperatingSystem.IsWindows()) Directory.CreateDirectory(path);
         else Directory.CreateDirectory(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+    }
+
+    /// <summary>
+    /// After the verified Docker handoff is committed, the revoked record is kept for custody but marked
+    /// retired so ordinary telemetry and control for the Docker agent are no longer held. Failure keeps the hold.
+    /// </summary>
+    internal void RetireAuthority(string agentName)
+    {
+        try
+        {
+            var path = AuthorityPath(agentName);
+            if (!File.Exists(path) || new FileInfo(path).LinkTarget is not null) return;
+            var current = JsonNode.Parse(StockEnrollmentAuthority.ReadBounded(path))!.AsObject();
+            if (current["State"]?.GetValue<string>() is not ("revoked" or StockAuthoritySource.RetiredState)) return;
+            current["State"] = StockAuthoritySource.RetiredState;
+            WriteRecord(path, current);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException
+            or InvalidOperationException or StockIdentityDenied)
+        { logger.LogWarning("Retiring the managed record for {Agent} failed; ordinary traffic stays held", agentName); }
     }
 
     private static void WriteRecord(string path, JsonObject record) => WriteText(path, record.ToJsonString());

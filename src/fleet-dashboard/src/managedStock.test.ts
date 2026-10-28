@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { savedRuntimeSelection, policyResponse, managedRuntimeView, revokeOutcome, managedStatusLines } from './managedStock.ts'
+import { savedRuntimeSelection, policyResponse, managedRuntimeView, revokeOutcome, managedStatusLines, backupLine, formatAge } from './managedStock.ts'
 
 test('save pins exact desired version and contains no applied fields', () => {
   assert.deepEqual(savedRuntimeSelection({ runtimeKind: 'openshell', sandboxPolicyVersionId: '17', nativeAuthMode: 'api_key', providerApiKeyEnvRef: 'TEST_API_KEY' }), {
@@ -50,4 +50,43 @@ test('managed status lines summarize the applied binding, admission, pending ope
   assert.equal(idle.admission, 'active')
   assert.deepEqual(managedStatusLines(null, true), { pending: true, pendingLabel: 'revoking…', admission: null, binding: [], errors: [] })
   assert.deepEqual(managedStatusLines(undefined), { pending: false, pendingLabel: null, admission: null, binding: [], errors: [] })
+})
+
+const baseStatus = {
+  state: 'applied', errors: [] as string[], admissionState: 'active', pending: false, operation: null as string | null,
+  appliedSandboxId: 'sb-1', appliedSandboxName: 'test-agent-sandbox', epoch: null, policyVersionId: null, policySha256: null,
+  gatewayGeneration: null, providers: [] as string[],
+}
+
+test('pending clears when the record shows no operation, even for a held candidate', () => {
+  // Older servers reported pending for a held candidate / stale applying with no operation: never a permanent badge.
+  const held = managedStatusLines({ ...baseStatus, state: 'needs_attention', admissionState: 'needs_attention', pending: true, operation: null })
+  assert.equal(held.pending, false)
+  assert.equal(held.pendingLabel, null)
+  const applying = managedStatusLines({ ...baseStatus, state: 'applying', pending: true, operation: 'apply', admissionState: 'applying' })
+  assert.deepEqual([applying.pending, applying.pendingLabel], [true, 'apply…'])
+  // The same record once the operation completes.
+  const done = managedStatusLines({ ...baseStatus, pending: false, operation: null })
+  assert.deepEqual([done.pending, done.pendingLabel], [false, null])
+  // A local in-flight revoke still shows until its request settles.
+  assert.equal(managedStatusLines({ ...baseStatus }, true).pendingLabel, 'revoking…')
+})
+
+test('workload/supervisor IDs are shortened and stopped/removed status and backup age are shown', () => {
+  const lines = managedStatusLines({
+    ...baseStatus, state: 'stopped', workloadContainerId: 'aaaaaaaaaaaa1111111111111111', supervisorContainerId: 'bbbbbbbbbbbb2222222222222222',
+    containerStatus: 'stopped', backupState: 'recorded', backupAgeSeconds: 7260,
+  })
+  assert.deepEqual(lines.binding, ['sandbox test-agent-sandbox (sb1)', 'workload aaaaaaaaaaaa', 'supervisor bbbbbbbbbbbb', 'containers stopped', 'backup 2h ago'])
+  const removed = managedStatusLines({ ...baseStatus, state: 'revoked', workloadContainerId: 'aaaaaaaaaaaa1111', containerStatus: 'removed', backupState: 'unknown', backupAgeSeconds: null })
+  assert.deepEqual(removed.binding.slice(1), ['workload aaaaaaaaaaaa', 'containers removed', 'backup unknown'])
+  // Older servers without the fields add no lines.
+  assert.deepEqual(managedStatusLines(baseStatus).binding, ['sandbox test-agent-sandbox (sb1)'])
+})
+
+test('backup age is unknown without a last-success stamp and never reads as fresh', () => {
+  assert.equal(backupLine({ backupState: 'unknown', backupAgeSeconds: null }), 'backup unknown')
+  assert.equal(backupLine({ backupState: 'recorded' }), 'backup unknown')
+  assert.equal(backupLine({ backupState: 'failed', backupAgeSeconds: 90000 }), 'backup failed (last success 1d ago)')
+  assert.deepEqual([formatAge(45), formatAge(720), formatAge(-5)], ['45s', '12m', '0s'])
 })

@@ -50,9 +50,11 @@ export interface ManagedStatusLines { pending: boolean; pendingLabel: string | n
 export function managedStatusLines(status: ManagedStatus | null | undefined, revoking = false): ManagedStatusLines {
   const short = (v: string | null | undefined, n = 8) => (v ? v.replace(/-/g, '').slice(0, n) : null)
   const errors = status?.errors ?? []
-  const pending = revoking || !!status?.pending
-  const pendingLabel = revoking || status?.operation === 'revoke' ? 'revoking…'
-    : pending ? `${status?.operation ?? status?.state ?? 'pending'}…` : null
+  // Pending only while an operation is in flight: a record with no operation (completed, or a held
+  // candidate / stale "applying" from an older server) never shows a permanent pending badge.
+  const pending = revoking || (!!status?.pending && !!status?.operation)
+  const pendingLabel = revoking || (pending && status?.operation === 'revoke') ? 'revoking…'
+    : pending ? `${status?.operation}…` : null
   if (!status) return { pending, pendingLabel, admission: null, binding: [], errors }
   const binding: string[] = []
   const sandbox = status.appliedSandboxName && status.appliedSandboxId
@@ -65,5 +67,25 @@ export function managedStatusLines(status: ManagedStatus | null | undefined, rev
   }
   if (status.gatewayGeneration) binding.push(`gateway gen ${status.gatewayGeneration}`)
   if (status.providers?.length) binding.push(`providers ${status.providers.join(', ')}`)
+  const containerId = (v: string | null | undefined) => (v ? v.replace(/^sha256:/, '').slice(0, 12) : null)
+  const workload = containerId(status.workloadContainerId)
+  const supervisor = containerId(status.supervisorContainerId)
+  if (workload) binding.push(`workload ${workload}`)
+  if (supervisor) binding.push(`supervisor ${supervisor}`)
+  if (status.containerStatus) binding.push(`containers ${status.containerStatus}`)
+  if (status.backupState !== undefined || status.backupAgeSeconds !== undefined) binding.push(backupLine(status))
   return { pending, pendingLabel, admission: status.admissionState.replace(/_/g, ' '), binding, errors }
+}
+
+/** Compact age: 45s, 12m, 5h, 3d. */
+export function formatAge(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds))
+  return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h` : `${Math.floor(s / 86400)}d`
+}
+
+/** Gateway backup age from the last-success stamp; a missing stamp is unknown, never fresh. */
+export function backupLine(status: Pick<ManagedStatus, 'backupState' | 'backupAgeSeconds'>): string {
+  const age = typeof status.backupAgeSeconds === 'number' ? formatAge(status.backupAgeSeconds) : null
+  if (!age) return 'backup unknown'
+  return status.backupState === 'failed' ? `backup failed (last success ${age} ago)` : `backup ${age} ago`
 }

@@ -606,9 +606,10 @@ exit.** Administrator Docker commands that bypass this procedure are not protect
 **Backup.** Run `scripts/backup-stock-gateway.sh BACKUP_DIR GATEWAY_TOML [/var/lib/openshell]` from the
 operator's daily host job and before gateway changes. It refuses incomplete coverage (database, gateway TOML, TLS cert/key/client CA, JWT keys and kid), then takes a stdlib SQLite online backup with
 an integrity check, copies config and trust files, and checks their inode/mtime before and after.
-Directories are 0700 and files 0600, and seven complete snapshots are kept. A failure or a
-changed trust file deletes the partial snapshot (it may already hold keys), stamps `BACKUP_DIR/last-failure`
-and exits nonzero. Linked OS ancestors above `STATE_DIR` (macOS `/var` -> `/private/var`) are resolved; a
+Directories are 0700 and files 0600, and seven complete snapshots are kept. A failure, a
+changed trust file or an interruption (SIGTERM/SIGINT/SIGHUP) marks the partial snapshot `INVALID` and
+deletes it (it may already hold keys), stamps `BACKUP_DIR/last-failure` and exits nonzero; `last-success`
+is replaced atomically and only after the snapshot is `COMPLETE`. Linked OS ancestors above `STATE_DIR` (macOS `/var` -> `/private/var`) are resolved; a
 linked `STATE_DIR` or anything under it still refuses. Staleness is surfaced by
 `scripts/check-stock-gateway-backup.sh BACKUP_DIR [MAX_AGE_HOURS]` (default 26): it exits nonzero when
 `last-success` is missing, malformed, older than the limit or not newer than `last-failure`. With

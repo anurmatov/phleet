@@ -183,6 +183,40 @@ class GatewayBackupTests(unittest.TestCase):
         self.assertEqual(len(complete), 7)
         self.assertNotIn("gateway-20260105T000000Z", names)  # invalid snapshots hold keys: deleted
 
+    def test_sigterm_mid_run_deletes_the_snapshot_and_never_stamps_success(self):
+        """#492 review F17r: a job-runner SIGTERM must not leave a key-bearing snapshot or last-success."""
+        import signal
+        import time
+        stub_bin = Path(self.tmp.name, "slow-bin")
+        stub_bin.mkdir()
+        marker = Path(self.tmp.name, "copying")
+        stub = stub_bin / "python3"
+        # Stands in for the copy step: writes key material into the snapshot, then is still running.
+        stub.write_text("#!/usr/bin/env bash\ncat > /dev/null\n"
+                        f'echo synthetic-key > "$4/gateway-key.pem"\n: > "{marker}"\nexec sleep 30\n')
+        stub.chmod(0o755)
+        env = {**os.environ, "PATH": f"{stub_bin}:{os.environ['PATH']}"}
+        proc = subprocess.Popen(["bash", str(BACKUP), str(self.backups), str(self.config), str(self.state)],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            deadline = time.monotonic() + 10
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(marker.exists(), "backup never reached the copy step")
+            self.assertEqual(len(list(self.backups.glob("gateway-*"))), 1)
+            os.killpg(proc.pid, signal.SIGTERM)  # what a job runner or `timeout` sends to the group
+            _, stderr = proc.communicate(timeout=10)
+        finally:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+        self.assertEqual(proc.returncode, 143, stderr)
+        self.assertIn("backup_interrupted", stderr)
+        self.assertEqual(list(self.backups.glob("gateway-*")), [])  # the key-bearing partial is gone
+        self.assertFalse((self.backups / "last-success").exists())
+        self.assertFalse((self.backups / "last-success.tmp").exists())
+        self.assertTrue((self.backups / "last-failure").exists())
+
     def test_missing_database_fails_without_a_success_marker(self):
         result = self.run_backup(Path(self.tmp.name, "absent"))
         self.assertEqual(result.returncode, 1)

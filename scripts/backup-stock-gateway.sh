@@ -8,8 +8,8 @@
 # (TLS server cert/key, client CA, JWT signing/public key and kid under STATE_DIR/tls) must exist.
 # SQLite is copied with the stdlib online backup API (never a raw copy of an open DB/WAL) and
 # integrity-checked. Config and trust files are copied as-is, and their inode/mtime is compared
-# before and after; any change, missing file or failure deletes the partial snapshot (it may hold
-# keys), stamps BACKUP_DIR/last-failure and exits nonzero so the operator alert fires. Directories
+# before and after; any change, missing file, failure or SIGTERM/SIGINT/SIGHUP deletes the partial
+# snapshot (it may hold keys), stamps BACKUP_DIR/last-failure and exits nonzero so the operator alert fires. Directories
 # are 0700, files 0600; seven complete snapshots are kept. Snapshots hold key material: keep them
 # host-local unless an operator-approved encrypted transfer exists. Never upload them to a public
 # share or an unencrypted sync. Linked OS ancestors above STATE_DIR (macOS /var -> /private/var) are
@@ -26,11 +26,31 @@ KEEP=7
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
 snapshot="$BACKUP_DIR/gateway-$(date -u +%Y%m%dT%H%M%SZ)"
+created=false
+succeeded=false
+# Any exit before last-success is stamped (a failure, or SIGTERM/SIGINT/SIGHUP from a job runner)
+# marks this run's snapshot INVALID, deletes it (it may already hold keys) and stamps last-failure,
+# so an interrupted run never leaves a usable-looking snapshot or a fresh last-success.
+on_exit() {
+  $succeeded && return
+  if $created; then
+    : > "$snapshot/INVALID" 2>/dev/null || true  # if deletion fails, the next run's pruning removes it
+    rm -rf -- "$snapshot"
+  fi
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$BACKUP_DIR/last-failure" 2>/dev/null || true
+}
+on_signal() {
+  echo "backup_interrupted: partial snapshot deleted" >&2
+  exit "$1"
+}
+trap on_exit EXIT
+trap 'on_signal 129' HUP
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
 mkdir "$snapshot"
-# A snapshot that never completes may already hold keys: delete it on any exit after reporting.
-trap '[[ -f "$snapshot/COMPLETE" ]] || rm -rf -- "$snapshot"' EXIT
+created=true
 
-python3 - "$STATE_DIR" "$CONFIG_FILE" "$snapshot" <<'PY' || { date -u +%Y-%m-%dT%H:%M:%SZ > "$BACKUP_DIR/last-failure"; echo "backup_failed: partial snapshot deleted" >&2; exit 1; }
+python3 - "$STATE_DIR" "$CONFIG_FILE" "$snapshot" <<'PY' || { echo "backup_failed: partial snapshot deleted" >&2; exit 1; }
 import hashlib, os, shutil, sqlite3, stat, sys
 def anchored(path):
     """Resolve OS-level links above the leaf (macOS /var -> /private/var) but keep the leaf itself."""
@@ -109,7 +129,10 @@ os.chmod(os.path.join(out, "SHA256SUMS"), 0o600)
 PY
 
 : > "$snapshot/COMPLETE"
-date -u +%Y-%m-%dT%H:%M:%SZ > "$BACKUP_DIR/last-success"
+# Atomic stamp: an interruption leaves either the old last-success or the new one, never a torn file.
+date -u +%Y-%m-%dT%H:%M:%SZ > "$BACKUP_DIR/last-success.tmp"
+mv -f -- "$BACKUP_DIR/last-success.tmp" "$BACKUP_DIR/last-success"
+succeeded=true
 # Keep the newest complete snapshots; INVALID ones left by older versions hold keys and are deleted.
 kept=0
 find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -name 'gateway-*' | sort -r | while IFS= read -r dir; do

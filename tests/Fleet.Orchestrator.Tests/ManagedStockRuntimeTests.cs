@@ -111,6 +111,13 @@ public class ManagedStockRuntimeApiTests : IAsyncLifetime
             Microsoft.Extensions.Logging.Abstractions.NullLogger<Fleet.Orchestrator.Services.AgentConfigPublisherService>.Instance));
         builder.Services.AddSingleton(sp => new Fleet.Orchestrator.Services.SetupService(builder.Configuration, null!, null!,
             sp.GetRequiredService<IServiceScopeFactory>(), Microsoft.Extensions.Logging.Abstractions.NullLogger<Fleet.Orchestrator.Services.SetupService>.Instance, null!));
+        // The real managed adapter, disabled (no ManagedEnabled): routes exercise auth and the real DB store.
+        builder.Services.AddSingleton<Fleet.Orchestrator.Services.IStockCli, Fleet.Orchestrator.Services.ProcessStockCli>();
+        builder.Services.AddSingleton<Fleet.Orchestrator.Services.ICredentialsReader>(new NoCredentials());
+        builder.Services.AddSingleton<Fleet.Orchestrator.Services.StockBrokerProvisioner>();
+        builder.Services.AddSingleton<Fleet.Orchestrator.Services.IManagedBindingStore, Fleet.Orchestrator.Services.EfManagedBindingStore>();
+        builder.Services.AddSingleton<Fleet.Orchestrator.Services.IStockHostView>(new NoHost());
+        builder.Services.AddSingleton<Fleet.Orchestrator.Services.StockOpenShellRuntime>();
         App = builder.Build();
         App.MapSandboxPolicyEndpoints();
         App.MapAgentConfigEndpoints();
@@ -254,11 +261,48 @@ public class ManagedStockRuntimeApiTests : IAsyncLifetime
         Assert.Equal("docker", await WithDb(db => db.Agents.Select(a => a.AppliedRuntimeKind).SingleAsync()));
     }
     [Fact]
+    public async Task Revoke_and_rollback_preflight_are_operator_only_and_read_the_real_store()
+    {
+        await WithDb(async db =>
+        {
+            var desired = ManagedStockRuntimeTests.Agent();
+            desired.RuntimeKind = "openshell";
+            db.Agents.Add(desired);
+            return await db.SaveChangesAsync();
+        });
+        using var anonymous = App.GetTestClient();
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, (await anonymous.PostAsync("/api/agents/agent1/revoke", null)).StatusCode);
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, (await anonymous.GetAsync("/api/managed-runtime/rollback-preflight")).StatusCode);
+
+        var revoke = await Client.PostAsync("/api/agents/agent1/revoke", null);
+        Assert.Equal(System.Net.HttpStatusCode.Conflict, revoke.StatusCode);
+        Assert.Contains("managed_runtime_unavailable", await revoke.Content.ReadAsStringAsync());
+        var preflight = await Client.GetAsync("/api/managed-runtime/rollback-preflight");
+        Assert.Equal(System.Net.HttpStatusCode.OK, preflight.StatusCode);
+        Assert.Equal("{\"desiredOpenShell\":1,\"appliedOpenShell\":0,\"unresolvedBindings\":0}", await preflight.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
     public async Task Missing_operator_auth_configuration_fails_closed()
     {
         App.Configuration["Orchestrator:AuthToken"] = "";
         Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, (await Client.GetAsync("/api/sandbox-policies")).StatusCode);
         Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, (await Client.PostAsync("/api/agents/agent1/runtime/apply", null)).StatusCode);
+        Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, (await Client.PostAsync("/api/agents/agent1/revoke", null)).StatusCode);
+        Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, (await Client.GetAsync("/api/managed-runtime/rollback-preflight")).StatusCode);
+    }
+
+    private sealed class NoCredentials : Fleet.Orchestrator.Services.ICredentialsReader
+    {
+        public string? Get(string key) => null;
+        public void InvalidateCache() { }
+    }
+
+    private sealed class NoHost : Fleet.Orchestrator.Services.IStockHostView
+    {
+        public Task<string?> GatewayGenerationAsync(CancellationToken ct) => Task.FromResult<string?>(null);
+        public Task<IReadOnlyList<string>?> RunningSandboxContainersAsync(string sandboxId, CancellationToken ct) => Task.FromResult<IReadOnlyList<string>?>(null);
+        public Task<IReadOnlyList<string>?> DockerContainerStatesAsync(string containerName, CancellationToken ct) => Task.FromResult<IReadOnlyList<string>?>(null);
     }
     [Fact]
     public async Task First_version_write_failure_rolls_back_policy_row()

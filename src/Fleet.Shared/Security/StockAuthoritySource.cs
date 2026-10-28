@@ -64,7 +64,16 @@ public static class StockAuthoritySource
     {
         if (!ValidAgent(agent)) return false;
         var info = new FileInfo(Path.Combine(directory, agent + ".json"));
-        try { return info.Exists || info.LinkTarget is not null; }
+        try
+        {
+            if (info.Exists || info.LinkTarget is not null) return true;
+            // Agent identity is case-insensitive everywhere else (AgentRegistry): a case-changed name
+            // still names the managed agent. Compare entry names only; entries are never followed.
+            if (!Directory.Exists(directory)) return false;
+            var name = agent + ".json";
+            return Directory.EnumerateFileSystemEntries(directory).Any(p =>
+                string.Equals(Path.GetFileName(p), name, StringComparison.OrdinalIgnoreCase));
+        }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return true; } // unknown is not absent
     }
 

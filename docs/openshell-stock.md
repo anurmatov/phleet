@@ -574,9 +574,10 @@ publishes only bridge responses, so Temporal `DelegateToAgent` (and any workflow
 send back) has no lane. With `TemporalBridge:OrchestratorUrl` set, `DelegateToAgent` reads the
 target's applied runtime and fails non-retryably with `managed_route_unsupported:workflow_delegation`
 (error type `ManagedAgentWorkflowUnsupported`) instead of publishing a directive nobody reads; after a
-verified handoff back to Docker, delegation works again. A dedicated Fleet.Temporal receiver still
-starts its configured workers and the relay consumer on the fixed `fleet.agent.temporal-bridge`
-queue, so it competes with the ordinary bridge on a shared broker. None of the following is
+verified handoff back to Docker, delegation works again. A dedicated Fleet.Temporal receiver
+(`StockOpenShell:AuthorityFile` set) is receiver-only: it serves the authenticated `/mcp` route but
+starts no namespace workers and no relay consumer on the fixed `fleet.agent.temporal-bridge` queue,
+so it never competes with the ordinary bridge for replies on a shared broker. None of the following is
 qualified:
 - that topology;
 - the stock gateway Compose unit;

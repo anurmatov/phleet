@@ -23,11 +23,12 @@ try
 {
     if (validateStockOnly)
     {
-        var binding = StockOpenShellEnrollment.Validate(builder.Configuration);
+        var rootFile = Path.Combine(builder.Environment.ContentRootPath, Fleet.Shared.HarnessDefaults.CodexRootTomlFileName);
+        var binding = StockOpenShellEnrollment.Validate(builder.Configuration, rootFile);
         if (prepareStockNative)
         {
             if (binding is null) throw new InvalidOperationException("stock_enrollment_native_preparation_disabled");
-            StockOpenShellEnrollment.PrepareNative(builder.Configuration, Environment.GetEnvironmentVariable("HOME") ?? "", binding);
+            StockOpenShellEnrollment.PrepareNative(builder.Configuration, Environment.GetEnvironmentVariable("HOME") ?? "", binding, rootFile);
         }
     }
     else builder.Services.AddAgentCoreServices(builder.Configuration);

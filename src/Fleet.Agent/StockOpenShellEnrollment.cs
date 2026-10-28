@@ -23,10 +23,10 @@ public static class StockOpenShellEnrollment
         "version", "state", "agent", "sandboxId", "stockCommit", "policySha256", "expiresAt"
     };
 
-    public static StockBrokerIdentity? Validate(IConfiguration configuration)
+    public static StockBrokerIdentity? Validate(IConfiguration configuration, string rootFile = HarnessDefaults.CodexRootTomlContainerPath)
     {
         var binding = Validate(configuration, Environment.GetEnvironmentVariable("HOME") ?? "",
-            () => OperatingSystem.IsLinux() ? GetEffectiveUid() : uint.MaxValue);
+            () => OperatingSystem.IsLinux() ? GetEffectiveUid() : uint.MaxValue, rootFile);
         if (binding is not null && !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CODEX_HOME")))
             Deny("stock_enrollment_native_config_override");
         return binding;
@@ -208,7 +208,7 @@ public static class StockOpenShellEnrollment
         var mode = configuration["Agent:NativeAuthMode"];
         var reference = configuration["Agent:ProviderApiKeyEnvRef"];
         if (string.IsNullOrEmpty(mode) && string.IsNullOrEmpty(reference)) return null;
-        if (mode != "api_key" || reference is null || !System.Text.RegularExpressions.Regex.IsMatch(reference, @"\A[A-Z_][A-Z0-9_]{0,127}\z"))
+        if (mode != "api_key" || reference is null || !System.Text.RegularExpressions.Regex.IsMatch(reference, @"\A[A-Za-z_][A-Za-z0-9_]{0,127}\z"))
             Deny("stock_enrollment_native_auth_invalid");
         // Never read the host credential reference in the workload. Stock supplies the standard
         // child environment variable after outside attachment, containing only an issued handle.
@@ -251,6 +251,7 @@ public static class StockOpenShellEnrollment
                 + JsonSerializer.Serialize($"https://{authority.MemoryHost}/mcp")
                 + "\nenabled_tools = " + JsonSerializer.Serialize(tools) + "\n";
             var directory = Path.Combine(home, ".codex");
+            RequireDirectoryAncestors(directory);
             if (api)
             {
                 if (Path.Exists(directory)) RequirePrivateDirectory(directory);
@@ -260,7 +261,7 @@ public static class StockOpenShellEnrollment
                 var authPath = Path.Combine(directory, "auth.json");
                 if (File.Exists(authPath)) RequireApiAuth(StockEnrollmentAuthority.ReadBounded(authPath), placeholder!);
             }
-            else Directory.CreateDirectory(directory);
+            else Directory.CreateDirectory(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             var auth = api ? JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, string?> { ["OPENAI_API_KEY"] = placeholder })
                 : StockEnrollmentAuthority.ReadBounded(Path.Combine(home, ".codex-host", "auth.json"));
             PrivateWrite(Path.Combine(directory, "auth.json"), auth);
@@ -273,12 +274,17 @@ public static class StockOpenShellEnrollment
         { throw new InvalidOperationException("stock_enrollment_native_not_prepared"); }
     }
 
+    private static void RequireDirectoryAncestors(string path)
+    {
+        // Check the not-yet-created leaf AND every existing ancestor before mkdir or writes.
+        for (var current = new DirectoryInfo(path); current is not null; current = current.Parent)
+            if (current.LinkTarget is not null) Deny("stock_enrollment_native_path_invalid");
+    }
+
     private static void RequirePrivateDirectory(string path)
     {
         if (!OperatingSystem.IsLinux()) Deny("stock_enrollment_nonroot_required");
-        // Refuse symlink ancestors too, rather than trusting a private mode on an escaped leaf.
-        for (var current = new DirectoryInfo(path); current is not null; current = current.Parent)
-            if (current.LinkTarget is not null) Deny("stock_enrollment_native_path_invalid");
+        RequireDirectoryAncestors(path);
         if (!Directory.Exists(path) || (File.GetUnixFileMode(path) & ~(
             UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute)) != 0)
             Deny("stock_enrollment_native_path_invalid");

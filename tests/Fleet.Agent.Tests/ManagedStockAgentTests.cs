@@ -147,7 +147,48 @@ public sealed class ManagedStockAgentTests
         StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, NoEnvironment);
         StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, NoEnvironment);
         Assert.Equal(manual, File.ReadAllText(Path.Combine(f.Home, ".codex", "auth.json")));
+        if (OperatingSystem.IsLinux()) Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
+            File.GetUnixFileMode(Path.Combine(f.Home, ".codex")));
         Assert.DoesNotContain("forced_login_method", File.ReadAllText(Path.Combine(f.Home, ".codex", "config.toml")));
+    }
+
+    [Theory]
+    [InlineData("key_ref")]
+    [InlineData("mixedCaseRef")]
+    public void Saved_reference_names_are_accepted_without_resolving_them(string reference)
+    {
+        using var f = new Fixture();
+        f.Settings["Agent:ProviderApiKeyEnvRef"] = reference;
+        var c = f.Config();
+        string? ChildEnvironment(string key)
+        {
+            Assert.Equal("OPENAI_API_KEY", key);
+            return Placeholder;
+        }
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, ChildEnvironment)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, ChildEnvironment);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Fresh_profile_under_symlinked_home_refuses_before_directory_or_file_writes(bool manual)
+    {
+        using var f = new Fixture();
+        if (manual)
+        {
+            f.Settings.Remove("Agent:NativeAuthMode");
+            f.Settings.Remove("Agent:ProviderApiKeyEnvRef");
+            Directory.CreateDirectory(Path.Combine(f.Home, ".codex-host"));
+            File.WriteAllText(Path.Combine(f.Home, ".codex-host", "auth.json"), "{\"synthetic\":true}");
+        }
+        var actual = f.Home + ".actual";
+        Directory.Move(f.Home, actual);
+        Directory.CreateSymbolicLink(f.Home, actual);
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder));
+        Assert.False(Directory.Exists(Path.Combine(actual, ".codex")));
     }
 
     [Fact]

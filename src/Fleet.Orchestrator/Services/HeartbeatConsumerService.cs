@@ -161,7 +161,7 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
                     throw new StockIdentityDenied("broker_runtime_selector");
             }
             // Ordinary telemetry cannot overwrite the separately authenticated enrollment.
-            if (_stockBroker is null && _hold.IsEnrolledAgent(heartbeat.AgentName))
+            if (_stockBroker is null && _hold.HoldsOrdinaryTraffic(heartbeat.AgentName))
                 return Task.CompletedTask;
             _logger.LogDebug("Heartbeat from {Agent} via key={RoutingKey}", heartbeat.AgentName, ea.RoutingKey);
             _registry.UpdateAgent(heartbeat);
@@ -195,7 +195,7 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
                 return;
             }
 
-            if (_hold.IsEnrolledAgent(payload.TargetAgent)) return;
+            if (_hold.HoldsOrdinaryTraffic(payload.TargetAgent)) return;
 
             var ctoAgent = _configuration["FLEET_CTO_AGENT"];
             if (string.IsNullOrWhiteSpace(ctoAgent))

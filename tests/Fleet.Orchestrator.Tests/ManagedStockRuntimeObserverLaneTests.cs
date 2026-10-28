@@ -211,4 +211,29 @@ public sealed class ManagedStockRuntimeObserverLaneTests : IDisposable
         Assert.All(_lanes, l => Assert.True(Closed(l.Connection)));
         Assert.False(observer.ExecuteTask!.IsFaulted);
     }
+
+    [Theory]
+    [InlineData("agent1", false)] // managed record present: ordinary telemetry cannot speak for it
+    [InlineData("agent9", true)]  // ordinary agent unaffected
+    public async Task OrdinaryConsumer_DropsHeartbeatsClaimingAManagedAgent(string agent, bool accepted)
+    {
+        Save("agent1", "sandbox-1");
+        var channel = Substitute.For<IChannel>();
+        var connection = Substitute.For<IConnection>();
+        connection.CreateChannelAsync(Arg.Any<CreateChannelOptions?>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult(channel));
+        await using var ordinary = new HeartbeatConsumerService(_options, _registry,
+            new AgentConfigPublisherService(_options, NullLogger<AgentConfigPublisherService>.Instance), _config,
+            NullLogger<HeartbeatConsumerService>.Instance, new StockRuntimeMutationHold(_config)) { Connect = (_, _) => Task.FromResult(connection) };
+        await ordinary.StartAsync(default);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        while (channel.ReceivedCalls().All(c => c.GetMethodInfo().Name != "BasicConsumeAsync")) await Task.Delay(1, timeout.Token);
+        var consumer = (AsyncEventingBasicConsumer)channel.ReceivedCalls().First(c => c.GetMethodInfo().Name == "BasicConsumeAsync")
+            .GetArguments().Single(a => a is AsyncEventingBasicConsumer)!;
+
+        await consumer.HandleBasicDeliverAsync("consumer", 1, false, "fleet.orchestrator", "heartbeat." + agent,
+            new BasicProperties(), JsonSerializer.SerializeToUtf8Bytes(new AgentHeartbeat(agent, "busy", DateTimeOffset.UtcNow)), default);
+
+        Assert.Equal(accepted, _registry.Get(agent)?.ReportedStatus == "busy");
+        await ordinary.StopAsync(default);
+    }
 }

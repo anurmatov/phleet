@@ -13,10 +13,16 @@ public sealed class StockRuntimeMutationHold
     public const string Reason = "stock_runtime_manual_control_required";
     private readonly string? _agent;
     private readonly IServiceScopeFactory? _scopeFactory;
+    private readonly string? _managedDirectory;
 
     public StockRuntimeMutationHold(IConfiguration configuration, IServiceScopeFactory? scopeFactory = null)
     {
         _scopeFactory = scopeFactory;
+        // Managed records (#492) live in the adapter's authority directory; the observer key names it explicitly.
+        var configDir = configuration["StockOpenShell:ConfigDir"];
+        var managed = configuration["StockOpenShell:AuthorityDirectory"]
+            ?? (string.IsNullOrEmpty(configDir) ? null : Path.Combine(configDir, "managed", "authority"));
+        _managedDirectory = managed is not null && Path.IsPathFullyQualified(managed) ? managed : null;
         var authority = configuration["StockOpenShell:AuthorityFile"];
         HasEnrollment = !string.IsNullOrEmpty(authority)
             || !string.IsNullOrEmpty(configuration["StockOpenShell:BrokerPasswordFile"]);
@@ -66,5 +72,11 @@ public sealed class StockRuntimeMutationHold
     public bool HasEnrollment { get; }
     internal bool IsEnrolledAgent(string agentName) =>
         _agent is not null && string.Equals(_agent, agentName, StringComparison.OrdinalIgnoreCase);
+    /// <summary>
+    /// Ordinary-broker telemetry and access requests never speak for an enrolled or managed agent. Any
+    /// managed record entry, active or not, holds them; an unreadable entry counts as present.
+    /// </summary>
+    internal bool HoldsOrdinaryTraffic(string agentName) => IsEnrolledAgent(agentName)
+        || _managedDirectory is not null && StockAuthoritySource.HasEntry(_managedDirectory, agentName);
     public bool Denies(string agentName) => HasEnrollment && (_agent is null || IsEnrolledAgent(agentName));
 }

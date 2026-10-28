@@ -99,4 +99,24 @@ public sealed class ManagedStockRuntimeBrokerReviewTests : IDisposable
         Assert.False(StockAuthoritySource.IsRetired(authority, "agent1"));
     }
 
+    [Fact]
+    public void Observer_derives_the_managed_authority_directory_from_ConfigDir_like_the_mutation_hold()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            { ["StockOpenShell:ConfigDir"] = _root }).Build();
+        var hold = new StockRuntimeMutationHold(config);
+        var observer = new StockHeartbeatObserverService(
+            Microsoft.Extensions.Options.Options.Create(new Fleet.Orchestrator.Configuration.RabbitMqOptions()), null!, null!,
+            config, hold, Microsoft.Extensions.Logging.Abstractions.NullLogger<HeartbeatConsumerService>.Instance,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<StockHeartbeatObserverService>.Instance);
+        // The shipped compose sets only ConfigDir: the observer must still run managed lanes.
+        Assert.Equal(Path.Combine(_root, "managed", "authority"), observer.ManagedDirectory);
+        Assert.Equal(hold.ManagedDirectory, observer.ManagedDirectory);
+        var unset = new ConfigurationBuilder().Build();
+        Assert.Null(new StockHeartbeatObserverService(
+            Microsoft.Extensions.Options.Options.Create(new Fleet.Orchestrator.Configuration.RabbitMqOptions()), null!, null!,
+            unset, new StockRuntimeMutationHold(unset),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<HeartbeatConsumerService>.Instance,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<StockHeartbeatObserverService>.Instance).ManagedDirectory);
+    }
 }

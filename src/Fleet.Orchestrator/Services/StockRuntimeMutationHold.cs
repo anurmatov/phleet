@@ -79,6 +79,8 @@ public sealed class StockRuntimeMutationHold
     }
 
     public bool HasEnrollment { get; }
+    /// <summary>The managed authority directory: explicit <c>AuthorityDirectory</c>, else <c>&lt;ConfigDir&gt;/managed/authority</c>.</summary>
+    internal string? ManagedDirectory => _managedDirectory;
     internal bool IsEnrolledAgent(string agentName) =>
         _agent is not null && string.Equals(_agent, agentName, StringComparison.OrdinalIgnoreCase);
     /// <summary>

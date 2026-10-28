@@ -17,7 +17,7 @@ public sealed class StockHeartbeatObserverService(
 {
     internal Func<ConnectionFactory, CancellationToken, Task<IConnection>>? Connect { get; init; }
 
-    /// <summary>How often managed lanes (<c>StockOpenShell:AuthorityDirectory</c>) are reconciled.</summary>
+    /// <summary>How often managed lanes (<c>StockOpenShell:AuthorityDirectory</c>, else <c>&lt;ConfigDir&gt;/managed/authority</c>) are reconciled.</summary>
     internal TimeSpan ReconcileInterval { get; init; } = TimeSpan.FromSeconds(30);
 
     private sealed record Lane(StockActiveRecord Source, HeartbeatConsumerService? Receiver);
@@ -28,9 +28,12 @@ public sealed class StockHeartbeatObserverService(
     /// <summary>Agents with a lane, and whether that lane's receiver started.</summary>
     internal IReadOnlyDictionary<string, bool> Lanes => _lanes.ToDictionary(l => l.Key, l => l.Value.Receiver is not null);
 
+    /// <summary>Same derivation as the mutation hold, so shipped ConfigDir-only wiring still observes managed lanes.</summary>
+    internal string? ManagedDirectory => configuration["StockOpenShell:AuthorityDirectory"] ?? hold.ManagedDirectory;
+
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var directory = configuration["StockOpenShell:AuthorityDirectory"];
+        var directory = ManagedDirectory;
         return string.IsNullOrEmpty(directory) ? ObserveEnrolledAsync(stoppingToken)
             : Task.WhenAll(ObserveEnrolledAsync(stoppingToken), ObserveManagedAsync(directory, stoppingToken));
     }

@@ -21,11 +21,13 @@ public sealed class AgentRegistry
     private readonly ConcurrentBag<WebSocket> _sockets = [];
     private readonly TaskHistoryStore _taskHistory;
     private readonly ILogger<AgentRegistry> _logger;
+    private readonly string? _backupDir;
 
-    public AgentRegistry(TaskHistoryStore taskHistory, ILogger<AgentRegistry> logger)
+    public AgentRegistry(TaskHistoryStore taskHistory, ILogger<AgentRegistry> logger, IConfiguration? config = null)
     {
         _taskHistory = taskHistory;
         _logger = logger;
+        _backupDir = config?["StockOpenShell:BackupDir"];
     }
 
     /// <summary>
@@ -50,7 +52,7 @@ public sealed class AgentRegistry
             AppliedRuntimeKind = dbAgent.AppliedRuntimeKind,
             RuntimePending = AgentPatchHelpers.RuntimePending(dbAgent),
         };
-        (state.ManagedState, state.ManagedErrors, state.Managed) = ManagedView(dbAgent.AppliedRuntimeBinding);
+        (state.ManagedState, state.ManagedErrors, state.Managed) = ManagedView(dbAgent.AppliedRuntimeBinding, _backupDir);
         // Only add if not already present (heartbeat may have arrived first)
         if (_agents.TryAdd(dbAgent.Name, state))
             BroadcastIfChanged(state, force: true);
@@ -63,7 +65,7 @@ public sealed class AgentRegistry
         state.RuntimeKind = agent.RuntimeKind;
         state.AppliedRuntimeKind = agent.AppliedRuntimeKind;
         state.RuntimePending = AgentPatchHelpers.RuntimePending(agent);
-        (state.ManagedState, state.ManagedErrors, state.Managed) = ManagedView(agent.AppliedRuntimeBinding);
+        (state.ManagedState, state.ManagedErrors, state.Managed) = ManagedView(agent.AppliedRuntimeBinding, _backupDir);
         BroadcastIfChanged(state, force: true);
     }
 
@@ -290,19 +292,19 @@ public sealed class AgentRegistry
         int PriorityQueuedCount);
 
     /// <summary>Content-free view of the managed record: state and error codes only.</summary>
-    internal static (string? State, IReadOnlyList<string>? Errors, ManagedStatusView? Status) ManagedView(string? binding)
+    internal static (string? State, IReadOnlyList<string>? Errors, ManagedStatusView? Status) ManagedView(string? binding, string? backupDir = null)
     {
         if (string.IsNullOrEmpty(binding)) return (null, null, null);
         try
         {
             var record = ManagedRecord.Parse(binding);
-            return (record.Operation is not null ? "busy" : record.State, record.Errors, ManagedStatus(record));
+            return (record.Operation is not null ? "busy" : record.State, record.Errors, ManagedStatus(record, backupDir));
         }
         catch (System.Text.Json.JsonException) { return ("unreadable", null, null); }
     }
 
     /// <summary>Applied-binding/lifecycle summary. Operation is reduced to its kind (no owner instance).</summary>
-    internal static ManagedStatusView ManagedStatus(ManagedRecord record)
+    internal static ManagedStatusView ManagedStatus(ManagedRecord record, string? backupDir = null)
     {
         var operation = record.Operation?.Split(':')[0];
         var admission = operation switch
@@ -319,9 +321,12 @@ public sealed class AgentRegistry
             },
         };
         var applied = record.Applied;
+        var backup = ManagedBackupStamp.Read(backupDir);
         return new ManagedStatusView(
             record.State, record.Errors, admission,
-            Pending: operation is not null || record.State == "applying" || record.Candidate is not null,
+            // Pending means an operation is in flight: a held candidate or a stale "applying" with no
+            // operation is an unresolved hold (shown by its state/errors), not a permanent spinner.
+            Pending: operation is not null,
             Operation: operation,
             AppliedSandboxId: applied?.SandboxId,
             AppliedSandboxName: applied?.SandboxName,
@@ -329,6 +334,14 @@ public sealed class AgentRegistry
             PolicyVersionId: applied?.PolicyVersionId,
             PolicySha256: applied?.PolicySha256,
             GatewayGeneration: applied?.GatewayGeneration,
-            Providers: applied?.AllProviders() ?? []);
+            Providers: applied?.AllProviders() ?? [])
+        {
+            WorkloadContainerId = applied?.Containers?.WorkloadId,
+            SupervisorContainerId = applied?.Containers?.SupervisorId,
+            ContainerStatus = applied?.Containers?.Status,
+            ContainersObservedAt = applied?.Containers?.ObservedAt,
+            BackupLastSuccessAt = backup.LastSuccess,
+            BackupState = backup.State,
+        };
     }
 }

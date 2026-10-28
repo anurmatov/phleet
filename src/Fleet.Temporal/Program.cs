@@ -95,8 +95,8 @@ builder.Services.AddSingleton<IWorkflowDispatcher, TemporalWorkflowDispatcher>()
 // Peer config — fetches FLEET_CTO_AGENT and other keys from orchestrator on startup
 builder.Services.AddHostedService<PeerConfigHostedService>();
 
-// RabbitMQ listener — feeds agent responses into the registry
-builder.Services.AddHostedService<TemporalRelayListener>();
+// RabbitMQ listener — feeds agent responses into the registry (#492: never in a dedicated stock receiver)
+StockReceiverStartup.AddReplyConsumer(builder.Services, builder.Configuration);
 
 // Namespace initializer — creates configured Temporal namespaces on startup if they don't exist
 builder.Services.AddHostedService<NamespaceInitializer>();
@@ -111,10 +111,8 @@ builder.Services.AddSingleton<ITemporalClientFactory>(sp => sp.GetRequiredServic
 var temporalOpts = builder.Configuration
     .GetSection(TemporalBridgeOptions.Section)
     .Get<TemporalBridgeOptions>() ?? new TemporalBridgeOptions();
-var configuredNamespaces = temporalOpts.Namespaces
-    .Where(ns => !string.IsNullOrWhiteSpace(ns))
-    .Distinct(StringComparer.OrdinalIgnoreCase)
-    .ToArray();
+// #492: a dedicated stock receiver starts no namespace workers (their activities wait on replies it never consumes).
+var configuredNamespaces = StockReceiverStartup.WorkerNamespaces(builder.Configuration, temporalOpts.Namespaces);
 
 // Case-insensitive data converter — ensures camelCase JSON from agents maps correctly to PascalCase C# records
 var caseInsensitiveDataConverter = DataConverter.Default with

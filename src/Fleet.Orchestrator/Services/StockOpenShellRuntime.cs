@@ -975,8 +975,24 @@ public sealed class StockOpenShellRuntime(
         return await QuiescentAsync(binding, ct);
     }
 
+    /// <summary>
+    /// A request cancellation during staging/activation is a named fault, never an exception, so every
+    /// caller still reaches its bounded <see cref="HoldStoppedAsync"/> Stop (review N2).
+    /// </summary>
+    private static async Task<string?> UncancelledAsync(Func<Task<string?>> leg, string code, CancellationToken ct)
+    {
+        try { return await leg(); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return code; }
+    }
+
+    private Task<string?> StageAsync(ManagedBinding binding, CancellationToken ct) =>
+        UncancelledAsync(() => StageOnceAsync(binding, ct), "staging_cancelled", ct);
+
+    private Task<string?> ActivateAsync(ManagedBinding binding, CancellationToken ct) =>
+        UncancelledAsync(() => ActivateOnceAsync(binding, ct), "activation_cancelled", ct);
+
     /// <summary>Start into the staged launcher (no daemon) and wait until it reports staged.</summary>
-    private async Task<string?> StageAsync(ManagedBinding binding, CancellationToken ct)
+    private async Task<string?> StageOnceAsync(ManagedBinding binding, CancellationToken ct)
     {
         var sandbox = await GetAsync(binding.SandboxName, ct);
         if (sandbox is null) return "sandbox_unobservable";
@@ -1001,7 +1017,7 @@ public sealed class StockOpenShellRuntime(
         + " && grep -qa 'Fleet.Agent.dll' \"/proc/$p/cmdline\" && ! grep -qa 'prepare-stock-native' \"/proc/$p/cmdline\"";
 
     /// <summary>Writes this boot's activation; the launcher consumes it, prepares and starts the daemon.</summary>
-    private async Task<string?> ActivateAsync(ManagedBinding binding, CancellationToken ct)
+    private async Task<string?> ActivateOnceAsync(ManagedBinding binding, CancellationToken ct)
     {
         if (await ExecAsync(binding, "printf 1 > \"$HOME/.fleet-activate\"", ct) != 0) return "activation_unknown";
         var until = DateTimeOffset.UtcNow + StopSettle;

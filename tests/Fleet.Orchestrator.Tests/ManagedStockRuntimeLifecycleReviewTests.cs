@@ -256,4 +256,26 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
 
         Assert.Equal((409, "gateway_generation_changed"), (start.Status, start.Code));
     }
+
+    [Theory]
+    [InlineData("staging_cancelled")]
+    [InlineData("activation_cancelled")]
+    public async Task Client_disconnect_during_staging_or_activation_still_reaches_the_bounded_stop(string code)
+    {
+        // The poll for the staged/ready marker waits on the cancelled request token (review N2).
+        _t._cli.OnExec = script => code == "staging_cancelled"
+            ? (script.Contains("-f \"$HOME/.fleet-staged\"") && !script.Contains('!') ? 1 : 0)
+            : (script == StockOpenShellRuntime.DaemonReadyScript ? 1 : 0);
+        var binding = _t.Binding("fleet-agent1-ffffffff", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+        using var disconnected = new CancellationTokenSource();
+        disconnected.Cancel();
+
+        var result = await _t.Runtime().StartAsync("agent1", disconnected.Token);
+
+        Assert.Equal(code, result.Code);
+        Assert.Equal("needs_attention", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+        Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+    }
 }

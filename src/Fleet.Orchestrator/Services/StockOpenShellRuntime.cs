@@ -1043,6 +1043,8 @@ public sealed class StockOpenShellRuntime(
                 var error = await finished;
                 return error is null ? null : label + ":" + error;
             }
+            // The leg's own deadline can cancel the work before the delay continuation wins the race.
+            catch (OperationCanceledException) when (deadline.IsCancellationRequested) { return label + ":timeout"; }
             catch (Exception ex) when (ex is not OutOfMemoryException) { return label + ":" + ex.GetType().Name; }
         }
     }

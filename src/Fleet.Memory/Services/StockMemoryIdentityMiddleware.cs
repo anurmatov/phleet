@@ -9,7 +9,7 @@ namespace Fleet.Memory.Services;
 /// Sessions/nonces are local to this receiver process; restart requires authenticated initialize.
 /// </summary>
 public sealed class StockMemoryIdentityMiddleware(string authorityFile, RequestDelegate next,
-    ILogger<StockMemoryIdentityMiddleware>? logger = null)
+    ILogger<StockMemoryIdentityMiddleware>? logger = null, string? authorityDirectory = null)
 {
     private readonly object _gate = new();
     private readonly Dictionary<string, long> _nonces = new(StringComparer.Ordinal);
@@ -40,7 +40,8 @@ public sealed class StockMemoryIdentityMiddleware(string authorityFile, RequestD
             var bytes = body.ToArray();
             var session = context.Request.Headers["Mcp-Session-Id"].FirstOrDefault();
             StockMemoryRequest.Validate(context.Request.Method, bytes, session);
-            var record = StockEnrollmentAuthority.Load(authorityFile);
+            var assertion = context.Request.Headers[StockRequestProof.Header].FirstOrDefault() ?? throw new StockIdentityDenied("assertion_missing");
+            var record = StockAuthoritySource.Resolve(authorityFile, authorityDirectory, StockAuthoritySource.SandboxHint(assertion));
             if (context.Request.Host.Host != record.MemoryHost || context.Request.Host.Port is not (null or 443))
                 throw new StockIdentityDenied("receiver_host");
             var proof = StockRequestProof.Verify(record, context.Request.Headers[StockRequestProof.Header][0]!,
@@ -80,7 +81,7 @@ public sealed class StockMemoryIdentityMiddleware(string authorityFile, RequestD
             {
                 context.Response.OnStarting(() =>
                 {
-                    var current = StockEnrollmentAuthority.Load(authorityFile);
+                    var current = StockAuthoritySource.Resolve(authorityFile, authorityDirectory, record.SandboxId);
                     if (current.Agent != record.Agent || current.SandboxId != record.SandboxId || current.Epoch != record.Epoch)
                         throw new StockIdentityDenied("session_enrollment_changed");
                     var created = context.Response.Headers["Mcp-Session-Id"];

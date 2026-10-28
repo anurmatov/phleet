@@ -432,9 +432,12 @@ into the orchestrator at `/var/lib/fleet-openshell-client`:
 - `broker-ca.pem`.
 
 The adapter writes per-agent records and control/observer broker passwords under
-`managed/authority/` (0600). For one managed agent, point the existing outside consumers'
-`StockOpenShell:AuthorityFile` at `managed/authority/<agent>.json`. Multi-agent selection by
-sandbox UUID is not implemented yet. The orchestrator image carries
+`managed/authority/` (0600). Outside consumers select records by sandbox: set `StockOpenShell:AuthorityDirectory` to that
+`managed/authority` directory on `Fleet.StockIdentity` and the memory receiver, keeping
+`AuthorityFile` for gateway trust. The gateway-verified sandbox claim (hook) or the assertion's
+sandbox (receiver, still signature-verified against the selected record) is only an index hint:
+exactly one active, non-symlink record must claim it, else the request refuses. Broker control and
+observer connections still bind one enrolled epoch per process. The orchestrator image carries
 `LABEL org.phleet.managed-stock-runtime=1`; the stock CLI is installed only with the
 `OPENSHELL_CLI_URL` and `OPENSHELL_CLI_SHA256` build args (digest and version checked).
 

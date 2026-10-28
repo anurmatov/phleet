@@ -8,7 +8,7 @@ using Openshell.Middleware.V1;
 
 namespace Fleet.StockIdentity;
 
-public sealed record StockAuthorityFile(string Path);
+public sealed record StockAuthorityFile(string Path, string? Directory = null);
 
 // The stock gateway supplies authenticated sandbox context. No identity is accepted from a
 // workload header/query; the assertion key and operator enrollment stay outside the workload.
@@ -21,7 +21,8 @@ public sealed class StockSupervisorMiddleware(StockAuthorityFile file) : Supervi
             if (!context.GetHttpContext().Request.IsHttps) throw new StockIdentityDenied("tls_required");
             // Gateway control-plane negotiation precedes allocation. Only data evaluation may
             // load active workload authority; a manifest/config response never grants data access.
-            var record = sandbox is null ? LoadGatewayTrust() : StockEnrollmentAuthority.Load(file.Path);
+            // Managed mode selects the per-agent record by the gateway-verified sandbox claim.
+            var record = sandbox is null ? LoadGatewayTrust() : StockAuthoritySource.Resolve(file.Path, file.Directory, sandbox);
             var headers = context.RequestHeaders.Where(h => h.Key == "authorization").ToArray();
             if (headers.Length != 1 || headers[0].IsBinary || !headers[0].Value.StartsWith("Bearer ", StringComparison.Ordinal))
                 throw new StockIdentityDenied("gateway_token");

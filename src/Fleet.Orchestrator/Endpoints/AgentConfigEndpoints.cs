@@ -84,6 +84,10 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         agent.ContextWindow,
         // #460: stored verbatim, so a GET returns exactly what was saved.
         agent.HarnessExtra,
+        agent.RuntimeKind, agent.SandboxPolicyVersionId, agent.NativeAuthMode, agent.ProviderApiKeyEnvRef,
+        agent.AppliedRuntimeKind, agent.AppliedSandboxPolicyVersionId, agent.AppliedRuntimeBinding,
+        RuntimePending = AgentPatchHelpers.RuntimePending(agent),
+        RuntimeBlocker = AgentPatchHelpers.RuntimeApplyFault(agent),
         agent.CanReceiveChatRequests,
         agent.RequestReceivedMessage,
         agent.MountDockerSock,
@@ -340,7 +344,11 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     if (AgentPatchHelpers.DescribeHarnessExtraFault(agent) is { } harnessExtraFault)
         return Results.BadRequest(AgentPatchHelpers.HarnessExtraBadRequest(harnessExtraFault));
 
+    if (await AgentPatchHelpers.ApplyRuntimeSelectionAsync(db, agent, body.RuntimeKind, body.SandboxPolicyVersionId,
+            body.NativeAuthMode, body.ProviderApiKeyEnvRef) is { } runtimeFault)
+        return Results.Json(new { error = runtimeFault.Code }, statusCode: runtimeFault.Status);
     await db.SaveChangesAsync();
+    scope.ServiceProvider.GetService<AgentRegistry>()?.UpdateRuntimeSelection(agent);
     if (oldCrossChat != agent.JournalCrossChatEnabled)
         app.Logger.LogInformation("Agent config changed: agent={name} field=journal_cross_chat_enabled old={old} new={new} via=rest",
             agent.Name, oldCrossChat, agent.JournalCrossChatEnabled);
@@ -368,7 +376,7 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
             addedGroupIds: addedGroups, removedGroupIds: removedGroups);
 
     return Results.Ok(new { message = $"Agent '{name}' config updated" });
-});
+}).AddEndpointFilter(SandboxPolicyEndpoints.DatabaseErrors);
 
         return app;
     }
@@ -419,4 +427,8 @@ internal sealed record AgentConfigUpdateRequest(
     int? ContextWindow,
     string? LocalBaseUrl = null,
     bool? JournalCrossChatEnabled = null,
-    string? HarnessExtra = null);
+    string? HarnessExtra = null,
+    string? RuntimeKind = null,
+    int? SandboxPolicyVersionId = null,
+    string? NativeAuthMode = null,
+    string? ProviderApiKeyEnvRef = null);

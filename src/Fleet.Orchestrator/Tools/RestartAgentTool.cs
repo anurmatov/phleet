@@ -16,6 +16,7 @@ public sealed class RestartAgentTool(AgentRegistry registry, DockerService docke
         [Description("Agent name (e.g. my-agent)")] string name)
     {
         if (runtimeHold.Denies(name)) return StockRuntimeMutationHold.Reason;
+        if (await runtimeHold.DescribeAppliedFaultAsync(name) is { } appliedFault) return appliedFault;
 
         // Prefer registry (live state), fall back to DB for container name (handles stopped/crashed agents)
         var containerName = registry.Get(name)?.ContainerName;

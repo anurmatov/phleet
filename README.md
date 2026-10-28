@@ -390,3 +390,10 @@ MIT — see [LICENSE](LICENSE).
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Saved sandbox policies
+
+The dashboard can save/list immutable stock policy versions and select an agent's desired
+runtime/version and API-key reference. Saving does not activate or migrate a runtime, change
+applied bindings, or grant service access. Managed apply is unavailable in this release.
+See [saved policies and errors](docs/openshell-stock.md#saved-managed-policies-no-activation).

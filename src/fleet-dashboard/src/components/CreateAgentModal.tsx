@@ -3,6 +3,7 @@ import type { CreateForm, InstructionSummary } from '../types'
 import { PROVIDER_OPTIONS } from '../constants'
 import { createFormProviderPatch } from '../localModel'
 import ModelSelector from './ModelSelector'
+import { RuntimeSelection } from './SandboxPoliciesView'
 import FieldHint from './FieldHint'
 import InstructionPicker from './InstructionPicker'
 
@@ -68,6 +69,7 @@ export default function CreateAgentModal({
             {copyFromLoading && <span className="config-feedback" style={{ marginLeft: 8 }}>loading…</span>}
           </div>
 
+          <RuntimeSelection edits={createForm} onChange={onFormChange} />
           <div className="config-row">
             <label className="config-label">Name <span style={{ color: 'var(--red)' }}>*</span></label>
             <FieldHint>Unique identifier used as the container name prefix and DB key. Lowercase, no spaces (e.g. <code>anew</code>).</FieldHint>

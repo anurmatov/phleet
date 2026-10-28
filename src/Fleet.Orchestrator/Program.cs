@@ -338,6 +338,7 @@ app.MapGet("/api/agents/{name}/history", (string name, TaskHistoryStore taskHist
 // REST: agent config read/write lives in Endpoints/AgentConfigEndpoints.cs so the
 // production handlers can be exercised over real HTTP by the endpoint tests (#357).
 app.MapAgentConfigEndpoints();
+app.MapSandboxPolicyEndpoints();
 // REST: GET /api/agents/{name}/effective-harness — the computed harness plan and drift (#460).
 app.MapAgentHarnessEndpoints();
 app.MapJournalCrossChatAuthorization();
@@ -1972,4 +1973,8 @@ record CreateAgentRequest(
     bool? MountDockerSock,
     string? LocalBaseUrl = null,
     int? ContextWindow = null,
-    string? HarnessExtra = null);
+    string? HarnessExtra = null,
+    string? RuntimeKind = null,
+    int? SandboxPolicyVersionId = null,
+    string? NativeAuthMode = null,
+    string? ProviderApiKeyEnvRef = null);

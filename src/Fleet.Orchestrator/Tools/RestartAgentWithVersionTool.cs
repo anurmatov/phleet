@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Helpers;
 using System.ComponentModel;
 using System.Text;
 using Fleet.Orchestrator.Data;
@@ -35,6 +36,8 @@ public sealed class RestartAgentWithVersionTool(
 
         if (agent is null)
             return $"Agent '{agent_name}' not found in DB.";
+
+        if (AgentPatchHelpers.RuntimeApplyFault(agent) is { } blocker) return blocker;
 
         // Validate instruction exists and the requested version exists
         var instruction = await db.Instructions

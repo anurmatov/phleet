@@ -23,7 +23,11 @@ public sealed class CreateAgentTool(IServiceScopeFactory scopeFactory, IConfigur
         [Description("When true, /var/run/docker.sock is bind-mounted into the container. Grants host Docker access — only set for agents that manage containers (e.g. devops, developer, co-cto). Defaults to false.")] bool? mount_docker_sock = null,
         [Description("Local model server origin (scheme://host[:port], no path), e.g. http://inference-host:8000. Optional local mode for claude or codex. Checked like update_agent_config before anything is written.")] string? local_base_url = null,
         [Description("The local server's context size in tokens (its --ctx). Used only for local models.")] int? context_window = null,
-        [Description("Claude and codex only: extra harness settings merged over the mode defaults, one per line; checked against the same allowlist as update_agent_config before anything is written. Omit for none.")] string? harness_extra = null)
+        [Description("Claude and codex only: extra harness settings merged over the mode defaults, one per line; checked against the same allowlist as update_agent_config before anything is written. Omit for none.")] string? harness_extra = null,
+        [Description("Desired runtime: docker or openshell. Saves only; managed activation is unavailable.")] string? runtime_kind = null,
+        [Description("Exact immutable policy version ID. 0 clears; omitted keeps current.")] int? sandbox_policy_version_id = null,
+        [Description("Native auth: api_key only. Empty clears; never send secret values.")] string? native_auth_mode = null,
+        [Description("Existing credential environment reference NAME only, never its value. Empty clears.")] string? provider_api_key_env_ref = null)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
@@ -80,6 +84,9 @@ public sealed class CreateAgentTool(IServiceScopeFactory scopeFactory, IConfigur
         if (AgentPatchHelpers.DescribeHarnessExtraFault(agent) is { } harnessExtraFault)
             return $"Invalid harness_extra: {harnessExtraFault.Message}";
 
+        if (await AgentPatchHelpers.ApplyRuntimeSelectionAsync(db, agent, runtime_kind, sandbox_policy_version_id,
+                native_auth_mode, provider_api_key_env_ref) is { } runtimeFault)
+            return $"{runtimeFault.Code} ({runtimeFault.Status})";
         db.Agents.Add(agent);
         await db.SaveChangesAsync();
 

@@ -55,7 +55,9 @@ public sealed class RemovedProviderColumnMigrationTests : IAsyncLifetime
         Assert.Equal(0L, await ColumnCountAsync(column));
         await using (var db = NewContext())
         {
-            Assert.Empty(await db.Database.GetPendingMigrationsAsync());
+            // This explicit target is historical; later additive migrations may remain pending.
+            Assert.Equal(Target, (await db.Database.GetAppliedMigrationsAsync()).Last());
+            Assert.DoesNotContain(Target, await db.Database.GetPendingMigrationsAsync());
             await RemovedProviderGuard.EnsureAsync(db);
         }
 

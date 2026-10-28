@@ -58,6 +58,10 @@ public sealed class AgentState
     private static readonly TimeSpan StaleThreshold = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan DeadThreshold  = TimeSpan.FromSeconds(90);
 
+    // Database selection only; heartbeats cannot publish or replace these fields.
+    public string RuntimeKind { get; set; } = "docker";
+    public string AppliedRuntimeKind { get; set; } = "docker";
+    public bool RuntimePending { get; set; }
     public required string AgentName     { get; init; }
     public string  ReportedStatus        { get; set; } = "unknown";
     public string? CurrentTask           { get; set; }

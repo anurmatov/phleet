@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Helpers;
 using System.ComponentModel;
 using System.Text;
 using Fleet.Orchestrator.Data;
@@ -34,6 +35,10 @@ public sealed class GetAgentConfigTool(IServiceScopeFactory scopeFactory)
 
         var sb = new StringBuilder();
         sb.AppendLine($"## {agent.Name} ({agent.DisplayName})");
+        sb.AppendLine($"- Runtime desired/applied: {agent.RuntimeKind}/{agent.AppliedRuntimeKind} (pending: {AgentPatchHelpers.RuntimePending(agent)})");
+        sb.AppendLine($"- Policy version desired/applied: {agent.SandboxPolicyVersionId}/{agent.AppliedSandboxPolicyVersionId}");
+        sb.AppendLine($"- Native auth mode/ref: {agent.NativeAuthMode}/{agent.ProviderApiKeyEnvRef} (reference name only)");
+        sb.AppendLine($"- Runtime blocker: {AgentPatchHelpers.RuntimeApplyFault(agent) ?? "none"}");
         sb.AppendLine($"- Role: {agent.Role}");
         // #386: the stored value verbatim, so a row PV1 would refuse is visible before a deploy.
         sb.AppendLine($"- Provider: {(agent.Provider == "" ? "(empty: claude)" : agent.Provider)}");

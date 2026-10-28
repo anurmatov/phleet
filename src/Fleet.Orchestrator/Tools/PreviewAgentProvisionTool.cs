@@ -24,6 +24,8 @@ public sealed class PreviewAgentProvisionTool(ContainerProvisioningService provi
     /// </summary>
     internal static string Render(ProvisionPreview preview)
     {
+        if (preview.Diffs.Any(d => d.Contains("managed_runtime_unavailable", StringComparison.Ordinal)))
+            return string.Join("\n", preview.Diffs) + "\nSave-only selection; no runtime inspected or activated.";
         var sb = new StringBuilder();
         sb.AppendLine($"## Provision Preview: {preview.AgentName} ({preview.ContainerName})");
         sb.AppendLine();

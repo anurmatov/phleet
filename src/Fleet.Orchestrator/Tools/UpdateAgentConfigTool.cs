@@ -50,7 +50,11 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         [Description("Local model (#382, #386), claude or codex agents: origin of the local inference server (e.g. Ollama), e.g. http://<server-address>:11434 — origin only, never …/v1; Fleet adds /v1/messages for claude and /v1 for codex. Set, the agent runs against that server; claude needs the server's bare model tag and effort off/low/medium/xhigh (empty = model default, sent as xhigh), codex needs model ollama/<tag> or lmstudio/<tag>. Stored canonical. Pass empty string to clear (back to the cloud). Omit to keep current. Takes effect on the next reprovision.")] string? local_base_url = null,
         [Description("Deprecated alias of local_base_url. If both are sent they must agree.")] string? anthropic_base_url = null,
         [Description("Local-model agents only (local_base_url set, claude or codex): the server's context size in tokens (4096-1048576), e.g. its num_ctx or --ctx. Claude gets it as CLAUDE_CODE_MAX_CONTEXT_TOKENS, codex as model_context_window. Ignored for cloud agents. Codex compaction is best-effort: it compacts at 90% of the window, a single message or tool output larger than the space left reaches the server unchecked, and the server's HTTP 400 overflow leaves the thread failing every turn until it is reset (/cancel all, then /reset, or restart the agent). Pass 0 to clear. Omit to keep current. Takes effect on the next reprovision.")] int? context_window = null,
-        [Description("Claude and codex only: extra harness settings merged over the mode defaults, one per line (max 4096 chars, 50 lines; blank and # lines ignored). Allowlist only — anything else is refused, naming the line. Codex: key = value for web_search (\"disabled\"/\"cached\"/\"live\", local: \"disabled\" only), features.view_image (bool, local: false only), model_reasoning_summary (\"none\"/\"auto\"/\"concise\"/\"detailed\"), tool_output_token_limit (1000-100000), features.apps, features.remote_plugin, features.skill_mcp_dependency_install, check_for_update_on_startup, analytics.enabled (bool), history.persistence (\"none\"/\"save-all\"). Claude: --tools <names> (the one way to narrow built-in tools: keeps the kept set, the agent's AllowedTools built-ins and these names; without it the agent keeps every built-in), --disallowedTools WebSearch, --disable-slash-commands (no value, any mode: removes the skills list and every slash command, including /compact; pair it with a --tools line that leaves out Workflow, or the plan notes the larger Workflow description), !--exclude-dynamic-system-prompt-sections, MAX_MCP_OUTPUT_TOKENS=<1000-100000>, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=0|1. Pass empty string to clear. Omit to keep current. Takes effect on the next reprovision.")] string? harness_extra = null)
+        [Description("Claude and codex only: extra harness settings merged over the mode defaults, one per line (max 4096 chars, 50 lines; blank and # lines ignored). Allowlist only — anything else is refused, naming the line. Codex: key = value for web_search (\"disabled\"/\"cached\"/\"live\", local: \"disabled\" only), features.view_image (bool, local: false only), model_reasoning_summary (\"none\"/\"auto\"/\"concise\"/\"detailed\"), tool_output_token_limit (1000-100000), features.apps, features.remote_plugin, features.skill_mcp_dependency_install, check_for_update_on_startup, analytics.enabled (bool), history.persistence (\"none\"/\"save-all\"). Claude: --tools <names> (the one way to narrow built-in tools: keeps the kept set, the agent's AllowedTools built-ins and these names; without it the agent keeps every built-in), --disallowedTools WebSearch, --disable-slash-commands (no value, any mode: removes the skills list and every slash command, including /compact; pair it with a --tools line that leaves out Workflow, or the plan notes the larger Workflow description), !--exclude-dynamic-system-prompt-sections, MAX_MCP_OUTPUT_TOKENS=<1000-100000>, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=0|1. Pass empty string to clear. Omit to keep current. Takes effect on the next reprovision.")] string? harness_extra = null,
+        [Description("Desired runtime: docker or openshell. Saves only; managed activation is unavailable.")] string? runtime_kind = null,
+        [Description("Exact immutable policy version ID. 0 clears; omitted keeps current.")] int? sandbox_policy_version_id = null,
+        [Description("Native auth: api_key only. Empty clears; never send secret values.")] string? native_auth_mode = null,
+        [Description("Existing credential environment reference NAME only, never its value. Empty clears.")] string? provider_api_key_env_ref = null)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
@@ -358,10 +362,16 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         if (agent.LocalBaseUrl != previousBaseUrl)
             changes.AppendLine($"- local_base_url: {previousBaseUrl ?? "(none)"} → {agent.LocalBaseUrl ?? "(none)"}");
 
+        if (await AgentPatchHelpers.ApplyRuntimeSelectionAsync(db, agent, runtime_kind, sandbox_policy_version_id,
+                native_auth_mode, provider_api_key_env_ref) is { } runtimeFault)
+            return $"{runtimeFault.Code} ({runtimeFault.Status})";
+        if (runtime_kind is not null || sandbox_policy_version_id is not null || native_auth_mode is not null || provider_api_key_env_ref is not null)
+            changes.AppendLine("- desired runtime selection saved (activation unavailable)");
         if (changes.Length == 0)
             return $"No changes specified for agent '{agent_name}'.";
 
         await db.SaveChangesAsync();
+        scope.ServiceProvider.GetService<AgentRegistry>()?.UpdateRuntimeSelection(agent);
 
         // Project assignment IS the memory-ACL grant. Sync after the save so the hook sees the
         // committed assignment list, and only when the caller actually touched projects.
@@ -371,6 +381,6 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
                 db, aclNotifier, agent.Name, agent.Projects.Select(p => p.ProjectName));
         }
 
-        return $"Agent '{agent_name}' updated:\n{changes}Note: restart the agent container for changes to take effect.";
+        return $"Agent '{agent_name}' updated:\n{changes}Runtime selection is save-only; managed activation is unavailable. Other provision-time changes require reprovision.";
     }
 }

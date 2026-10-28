@@ -13,6 +13,7 @@ public sealed class StopAgentTool(AgentRegistry registry, DockerService docker, 
         [Description("Agent name (e.g. my-agent)")] string name)
     {
         if (runtimeHold.Denies(name)) return StockRuntimeMutationHold.Reason;
+        if (await runtimeHold.DescribeAppliedFaultAsync(name) is { } appliedFault) return appliedFault;
 
         var agent = registry.Get(name);
         if (agent is null)

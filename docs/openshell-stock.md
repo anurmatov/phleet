@@ -399,3 +399,9 @@ Run `dotnet test tests/Fleet.Orchestrator.Tests --filter FullyQualifiedName~Mana
 with `FLEET_ORCHESTRATOR_MIGRATION_CONNECTION` pointing only to a disposable MySQL 8 server;
 the suite creates/drops uniquely owned databases and uses mysql/mysqldump for restore/query.
 Missing MySQL is a failure, not a skip. Runtime integration is a separate slice under [#489](https://github.com/anurmatov/phleet/issues/489).
+
+## Managed API-key bootstrap (partial #492)
+
+Explicit `Agent:NativeAuthMode=api_key` and `Agent:ProviderApiKeyEnvRef` prepare a private `auth.json` containing only the standard `OPENAI_API_KEY` placeholder and force Codex API login without a manual auth cache, using the [official OpenAI login-method setting](https://learn.chatgpt.com/docs/auth#enforce-a-login-method-or-workspace).
+The reference is never resolved inside the workload, and placeholder syntax is not proof of stock issuance, acknowledged provider attachment, or secret isolation.
+Managed apply remains unavailable until the remaining runtime, broker and receiving-service identity paths are implemented and reviewed, while the existing manual profile still requires its original auth input.

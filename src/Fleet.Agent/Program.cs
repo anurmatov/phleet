@@ -17,10 +17,19 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Refuse stock enrollment before any registration. This catch must terminate direct dotnet
 // starts too, rather than relying on unhandled-exception behavior on a particular platform.
-var validateStockOnly = args.Contains("--validate-stock-enrollment", StringComparer.Ordinal);
+var prepareStockNative = args.Contains("--prepare-stock-native", StringComparer.Ordinal);
+var validateStockOnly = prepareStockNative || args.Contains("--validate-stock-enrollment", StringComparer.Ordinal);
 try
 {
-    if (validateStockOnly) StockOpenShellEnrollment.Validate(builder.Configuration);
+    if (validateStockOnly)
+    {
+        var binding = StockOpenShellEnrollment.Validate(builder.Configuration);
+        if (prepareStockNative)
+        {
+            if (binding is null) throw new InvalidOperationException("stock_enrollment_native_preparation_disabled");
+            StockOpenShellEnrollment.PrepareNative(builder.Configuration, Environment.GetEnvironmentVariable("HOME") ?? "", binding);
+        }
+    }
     else builder.Services.AddAgentCoreServices(builder.Configuration);
 }
 catch (InvalidOperationException ex) when (ex.Message.StartsWith("stock_enrollment_", StringComparison.Ordinal))
@@ -31,7 +40,8 @@ catch (InvalidOperationException ex) when (ex.Message.StartsWith("stock_enrollme
 }
 if (validateStockOnly)
 {
-    if (builder.Configuration.GetValue<bool>("StockOpenShell:Enabled")) Console.WriteLine("stock");
+    if (prepareStockNative) Console.WriteLine(builder.Configuration["Agent:WorkDir"]);
+    else if (builder.Configuration.GetValue<bool>("StockOpenShell:Enabled")) Console.WriteLine("stock");
     return;
 }
 

@@ -52,6 +52,10 @@ public sealed class AgentOptions
     public int ToolArgsTruncateLength { get; set; } = 300;
     public string Provider { get; set; } = "claude";
     public string? CodexSandboxMode { get; set; }
+    /// <summary>Explicit stock API-key startup, absent for the existing manual profile.</summary>
+    public string? NativeAuthMode { get; set; }
+    /// <summary>Outside credential reference only. Never resolved by the workload.</summary>
+    public string? ProviderApiKeyEnvRef { get; set; }
 
     /// <summary>
     /// True when the orchestrator resolved this agent's model to a hosted provider (#335 D5).

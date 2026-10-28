@@ -12,6 +12,34 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class StockStartupTests(unittest.TestCase):
+    def test_native_preparation_refusal_never_starts_agent(self):
+        script = (ROOT / "stock-entrypoint.sh").read_text()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "id").write_text("#!/bin/sh\nprintf 10001")
+            (root / "dotnet").write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$MARKER"\nexit 1\n')
+            (root / "id").chmod(0o700)
+            (root / "dotnet").chmod(0o700)
+            result = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", script],
+                env={"PATH": directory, "HOME": directory, "MARKER": str(root / "calls")},
+                capture_output=True, text=True, timeout=5)
+            self.assertEqual(1, result.returncode)
+            self.assertEqual(["/app/Fleet.Agent.dll --contentRoot /app --prepare-stock-native"],
+                (root / "calls").read_text().splitlines())
+            self.assertEqual("", result.stdout)
+
+    def test_actual_preparation_command_cannot_fall_back_to_ordinary_start(self):
+        assembly = ROOT / "src/Fleet.Agent/bin/Release/net10.0/Fleet.Agent.dll"
+        self.assertTrue(assembly.is_file(), "build Release Fleet.Agent first")
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(["dotnet", str(assembly), "--contentRoot", directory, "--prepare-stock-native"],
+                env={"PATH": "/usr/bin:/bin", "HOME": directory, "DOTNET_CLI_HOME": directory},
+                cwd=directory, capture_output=True, text=True, timeout=10)
+            self.assertEqual(1, result.returncode)
+            self.assertEqual("", result.stdout)
+            self.assertEqual("stock_enrollment_native_preparation_disabled", result.stderr.strip())
+            self.assertFalse((Path(directory) / ".codex").exists())
+
     def test_enrollment_refusal_precedes_all_existing_side_effects(self):
         text = (ROOT / "entrypoint.sh").read_text()
         guard = text.split("# Read provider", 1)[0]

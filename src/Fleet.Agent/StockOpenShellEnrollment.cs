@@ -35,7 +35,7 @@ public static class StockOpenShellEnrollment
     [DllImport("libc", EntryPoint = "geteuid")]
     private static extern uint GetEffectiveUid();
 
-    internal static StockBrokerIdentity? Validate(IConfiguration configuration, string home, Func<uint> effectiveUid, string rootFile = HarnessDefaults.CodexRootTomlContainerPath)
+    internal static StockBrokerIdentity? Validate(IConfiguration configuration, string home, Func<uint> effectiveUid, string rootFile = HarnessDefaults.CodexRootTomlContainerPath, Func<string, string?>? environment = null)
     {
         var enabled = configuration["StockOpenShell:Enabled"];
         var isEnabled = false;
@@ -47,6 +47,9 @@ public static class StockOpenShellEnrollment
             if (!string.IsNullOrEmpty(configuration["StockOpenShell:AuthorityFile"])
                 || !string.IsNullOrEmpty(configuration["StockOpenShell:BrokerPasswordFile"]))
                 Deny("stock_enrollment_disabled_with_authority");
+            if (!string.IsNullOrEmpty(configuration["Agent:NativeAuthMode"])
+                || !string.IsNullOrEmpty(configuration["Agent:ProviderApiKeyEnvRef"]))
+                Deny("stock_enrollment_disabled_with_native_auth");
             return null; // Opt-in only; no new behavior for existing installs.
         }
         if (path is null or "") Deny("stock_enrollment_file_missing");
@@ -57,7 +60,7 @@ public static class StockOpenShellEnrollment
             // One operator-owned public enrollment record, shared read-only with the outside receivers.
             // EnrollmentFile is retained as a compatibility alias, never an independent identity.
             if (path != authorityFile) Deny("stock_enrollment_authority_mismatch");
-            return ValidateProfile(configuration, home, effectiveUid, rootFile, authorityFile);
+            return ValidateProfile(configuration, home, effectiveUid, rootFile, authorityFile, environment ?? Environment.GetEnvironmentVariable);
         }
         string json;
         try
@@ -106,7 +109,7 @@ public static class StockOpenShellEnrollment
     }
 
     private static StockBrokerIdentity ValidateProfile(IConfiguration configuration, string home, Func<uint> effectiveUid,
-        string rootFile, string authorityFile)
+        string rootFile, string authorityFile, Func<string, string?> environment)
     {
         try
         {
@@ -132,7 +135,7 @@ public static class StockOpenShellEnrollment
             if (effectiveUid() is 0 or uint.MaxValue || !Path.IsPathFullyQualified(home) || home == "/root")
                 Deny("stock_enrollment_nonroot_required");
             var work = configuration["Agent:WorkDir"];
-            if (string.IsNullOrEmpty(work) || !Path.IsPathFullyQualified(work)) Deny("stock_enrollment_workspace_invalid");
+            if (string.IsNullOrEmpty(work) || !Path.IsPathFullyQualified(work) || work.Contains('\r') || work.Contains('\n')) Deny("stock_enrollment_workspace_invalid");
             using var mcp = JsonDocument.Parse(StockEnrollmentAuthority.ReadBounded(Path.Combine(work!, ".mcp.json")));
             StockRequestProof.Unique(mcp.RootElement);
             var servers = mcp.RootElement.GetProperty("mcpServers"); StockRequestProof.Unique(servers);
@@ -143,7 +146,9 @@ public static class StockOpenShellEnrollment
             if (!configuration.GetSection("Agent:AllowedTools").GetChildren().Any(c => c.Value is
                 "mcp__memory__memory_get" or "mcp__memory__memory_search" or "mcp__memory__memory_list"))
                 Deny("stock_enrollment_memory_tools_missing");
-            if (!File.Exists(Path.Combine(home, ".codex-host", "auth.json")) || !File.Exists(rootFile))
+            var placeholder = ApiPlaceholder(configuration, home, environment);
+            var api = placeholder is not null;
+            if ((!api && !File.Exists(Path.Combine(home, ".codex-host", "auth.json"))) || !File.Exists(rootFile))
                 Deny("stock_enrollment_native_inputs_missing");
             var options = configuration.GetSection(AgentOptions.Section).Get<AgentOptions>()!;
             var expectedRoot = HarnessDefaults.Build(AgentHarness.InputFor(options, _ => null)!).CodexRootToml;
@@ -160,7 +165,7 @@ public static class StockOpenShellEnrollment
         { throw new InvalidOperationException("stock_enrollment_profile_invalid"); }
     }
 
-    internal static void RequirePrepared(IConfiguration configuration, StockBrokerIdentity binding, string home)
+    internal static void RequirePrepared(IConfiguration configuration, StockBrokerIdentity binding, string home, Func<string, string?>? environment = null)
     {
         try
         {
@@ -171,18 +176,135 @@ public static class StockOpenShellEnrollment
             var tools = configuration.GetSection("Agent:AllowedTools").GetChildren().Select(c => c.Value)
                 .Where(t => t is "mcp__memory__memory_get" or "mcp__memory__memory_search" or "mcp__memory__memory_list")
                 .Select(t => t!["mcp__memory__".Length..]).ToArray();
-            var expected = root + "\n[mcp_servers.memory]\nurl = " + JsonSerializer.Serialize($"https://{authority.MemoryHost}/mcp")
+            var placeholder = ApiPlaceholder(configuration, home, environment ?? Environment.GetEnvironmentVariable);
+            var api = placeholder is not null;
+            var expected = (api ? ApiLogin : "") + root + "\n[mcp_servers.memory]\nurl = " + JsonSerializer.Serialize($"https://{authority.MemoryHost}/mcp")
                 + "\nenabled_tools = " + JsonSerializer.Serialize(tools) + "\n";
             var directory = Path.Combine(home, ".codex");
+            if (api)
+            {
+                RequirePrivateDirectory(directory);
+                RequirePrivateFile(Path.Combine(directory, "auth.json"));
+                RequirePrivateFile(Path.Combine(directory, "config.toml"));
+            }
+            var actualAuth = StockEnrollmentAuthority.ReadBounded(Path.Combine(directory, "auth.json"));
+            if (api) RequireApiAuth(actualAuth, placeholder!);
             if (StockEnrollmentAuthority.ReadText(Path.Combine(directory, "config.toml")) != expected
-                || !CryptographicOperations.FixedTimeEquals(
-                    SHA256.HashData(StockEnrollmentAuthority.ReadBounded(Path.Combine(directory, "auth.json"))),
+                || !api && !CryptographicOperations.FixedTimeEquals(SHA256.HashData(actualAuth),
                     SHA256.HashData(StockEnrollmentAuthority.ReadBounded(Path.Combine(home, ".codex-host", "auth.json")))))
                 throw new InvalidOperationException("stock_enrollment_native_not_prepared");
         }
-        catch (Exception ex) when (ex is StockIdentityDenied or IOException or UnauthorizedAccessException or ArgumentException or FormatException
+        catch (Exception ex) when (ex is StockIdentityDenied or IOException or UnauthorizedAccessException or JsonException or ArgumentException or KeyNotFoundException or FormatException
             || ex is InvalidOperationException && !ex.Message.StartsWith("stock_enrollment_", StringComparison.Ordinal))
         { throw new InvalidOperationException("stock_enrollment_native_not_prepared"); }
+    }
+
+    private const string ApiLogin = "forced_login_method = \"api\"\n";
+
+    // Syntax is a refusal check, NOT proof of stock issuance or secret isolation. Outside
+    // provider attachment/readiness and exact runtime binding remain the orchestrator's job.
+    private static string? ApiPlaceholder(IConfiguration configuration, string home, Func<string, string?> environment)
+    {
+        var mode = configuration["Agent:NativeAuthMode"];
+        var reference = configuration["Agent:ProviderApiKeyEnvRef"];
+        if (string.IsNullOrEmpty(mode) && string.IsNullOrEmpty(reference)) return null;
+        if (mode != "api_key" || reference is null || !System.Text.RegularExpressions.Regex.IsMatch(reference, @"\A[A-Z_][A-Z0-9_]{0,127}\z"))
+            Deny("stock_enrollment_native_auth_invalid");
+        // Never read the host credential reference in the workload. Stock supplies the standard
+        // child environment variable after outside attachment, containing only an issued handle.
+        var value = environment("OPENAI_API_KEY");
+        if (value is null || value.Length > 1024 || !System.Text.RegularExpressions.Regex.IsMatch(value,
+            @"\Aopenshell:resolve:env:(?:v[0-9]+_|s[A-Za-z0-9_]+_)?OPENAI_API_KEY\z"))
+            Deny("stock_enrollment_native_auth_invalid");
+        if (Path.Exists(Path.Combine(home, ".codex-host"))) Deny("stock_enrollment_native_cache_forbidden");
+        return value;
+    }
+
+    private static void RequireApiAuth(byte[] bytes, string placeholder)
+    {
+        using var json = JsonDocument.Parse(bytes);
+        StockRequestProof.Unique(json.RootElement);
+        if (json.RootElement.EnumerateObject().Count() != 1
+            || json.RootElement.GetProperty("OPENAI_API_KEY").GetString() != placeholder)
+            Deny("stock_enrollment_native_not_prepared");
+    }
+
+    internal static void PrepareNative(IConfiguration configuration, string home, StockBrokerIdentity binding,
+        string rootFile = HarnessDefaults.CodexRootTomlContainerPath, Func<string, string?>? environment = null)
+    {
+        if (!OperatingSystem.IsLinux()) Deny("stock_enrollment_nonroot_required");
+        environment ??= Environment.GetEnvironmentVariable;
+        try
+        {
+            // Recheck admission before any writes, including direct invocation of the preparation mode.
+            var authority = StockEnrollmentAuthority.Load(configuration["StockOpenShell:AuthorityFile"]!);
+            binding.RequireBinding(authority);
+            var placeholder = ApiPlaceholder(configuration, home, environment);
+            var api = placeholder is not null;
+            var options = configuration.GetSection(AgentOptions.Section).Get<AgentOptions>()!;
+            var root = HarnessDefaults.Build(AgentHarness.InputFor(options, _ => null)!).CodexRootToml;
+            if (StockEnrollmentAuthority.ReadText(rootFile) != root) Deny("stock_enrollment_native_config_mismatch");
+            var tools = configuration.GetSection("Agent:AllowedTools").GetChildren().Select(c => c.Value)
+                .Where(t => t is "mcp__memory__memory_get" or "mcp__memory__memory_search" or "mcp__memory__memory_list")
+                .Select(t => t!["mcp__memory__".Length..]).ToArray();
+            var config = (api ? ApiLogin : "") + root + "\n[mcp_servers.memory]\nurl = "
+                + JsonSerializer.Serialize($"https://{authority.MemoryHost}/mcp")
+                + "\nenabled_tools = " + JsonSerializer.Serialize(tools) + "\n";
+            var directory = Path.Combine(home, ".codex");
+            if (api)
+            {
+                if (Path.Exists(directory)) RequirePrivateDirectory(directory);
+                else Directory.CreateDirectory(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                foreach (var leaf in new[] { "auth.json", "config.toml" })
+                    if (Path.Exists(Path.Combine(directory, leaf))) RequirePrivateFile(Path.Combine(directory, leaf));
+                var authPath = Path.Combine(directory, "auth.json");
+                if (File.Exists(authPath)) RequireApiAuth(StockEnrollmentAuthority.ReadBounded(authPath), placeholder!);
+            }
+            else Directory.CreateDirectory(directory);
+            var auth = api ? JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, string?> { ["OPENAI_API_KEY"] = placeholder })
+                : StockEnrollmentAuthority.ReadBounded(Path.Combine(home, ".codex-host", "auth.json"));
+            PrivateWrite(Path.Combine(directory, "auth.json"), auth);
+            PrivateWrite(Path.Combine(directory, "config.toml"), System.Text.Encoding.UTF8.GetBytes(config));
+            RequirePrepared(configuration, binding, home, _ => placeholder);
+        }
+        catch (Exception ex) when (ex is StockIdentityDenied or IOException or UnauthorizedAccessException or JsonException
+            or ArgumentException or KeyNotFoundException or FormatException || ex is InvalidOperationException
+            && !ex.Message.StartsWith("stock_enrollment_", StringComparison.Ordinal))
+        { throw new InvalidOperationException("stock_enrollment_native_not_prepared"); }
+    }
+
+    private static void RequirePrivateDirectory(string path)
+    {
+        if (!OperatingSystem.IsLinux()) Deny("stock_enrollment_nonroot_required");
+        // Refuse symlink ancestors too, rather than trusting a private mode on an escaped leaf.
+        for (var current = new DirectoryInfo(path); current is not null; current = current.Parent)
+            if (current.LinkTarget is not null) Deny("stock_enrollment_native_path_invalid");
+        if (!Directory.Exists(path) || (File.GetUnixFileMode(path) & ~(
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute)) != 0)
+            Deny("stock_enrollment_native_path_invalid");
+    }
+
+    private static void RequirePrivateFile(string path)
+    {
+        if (!OperatingSystem.IsLinux()) Deny("stock_enrollment_nonroot_required");
+        var file = new FileInfo(path);
+        if (file.LinkTarget is not null || !file.Exists || (file.Attributes & FileAttributes.Directory) != 0
+            || File.GetUnixFileMode(path) != (UnixFileMode.UserRead | UnixFileMode.UserWrite))
+            Deny("stock_enrollment_native_path_invalid");
+    }
+
+    private static void PrivateWrite(string path, byte[] bytes)
+    {
+        if (!OperatingSystem.IsLinux()) Deny("stock_enrollment_nonroot_required");
+        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            using (var file = new FileStream(temporary, new FileStreamOptions { Mode = FileMode.CreateNew,
+                Access = FileAccess.Write, UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite }))
+            { file.Write(bytes); file.Flush(true); }
+            File.Move(temporary, path, overwrite: true);
+        }
+        finally { File.Delete(temporary); }
     }
 
     [System.Diagnostics.CodeAnalysis.DoesNotReturn]

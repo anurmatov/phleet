@@ -61,6 +61,7 @@ interface AgentsViewProps {
   onReprovisionConfirm: (agentName: string) => void
   onReprovisionCancel: (agentName: string) => void
   onStop: (agentName: string) => void
+  revokeFeedback: Record<string, { ok: boolean; text: string }>
   onRevoke: (agentName: string) => void
   onStart: (agentName: string) => void
   onCancel: (agentName: string) => void
@@ -137,6 +138,7 @@ export default function AgentsView({
   onReprovisionCancel,
   onStop,
   onRevoke,
+  revokeFeedback,
   onStart,
   onCancel,
   onCancelConfirm,
@@ -217,6 +219,7 @@ export default function AgentsView({
             onReprovisionCancel={() => onReprovisionCancel(agent.agentName)}
             onStop={() => onStop(agent.agentName)}
             onRevoke={() => onRevoke(agent.agentName)}
+            revokeFeedback={revokeFeedback[agent.agentName]}
             onStart={() => onStart(agent.agentName)}
             onCancel={() => onCancel(agent.agentName)}
             onCancelConfirm={() => onCancelConfirm(agent.agentName)}

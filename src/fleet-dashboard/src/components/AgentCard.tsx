@@ -45,6 +45,7 @@ interface AgentCardProps {
   onStop: () => void
   onStart: () => void
   onRevoke: () => void
+  revokeFeedback?: { ok: boolean; text: string }
   onCancel: () => void
   onCancelConfirm: () => void
   onCancelCancel: () => void
@@ -82,7 +83,7 @@ export default function AgentCard({
   workflows,
   onRestart, onRestartConfirm, onRestartCancel,
   onReprovision, onReprovisionConfirm, onReprovisionCancel,
-  onStop, onStart, onRevoke,
+  onStop, onStart, onRevoke, revokeFeedback,
   onCancel, onCancelConfirm, onCancelCancel,
   onDeleteClick, onDeleteConfirm, onDeleteCancel,
   onBgCancel,
@@ -259,6 +260,9 @@ export default function AgentCard({
       {(ss === 'success' || ss === 'error') && (
         <div className={`row-feedback row-feedback-${ss}`}>{ssmsg}</div>
       )}
+      {revokeFeedback && (
+        <div className={`row-feedback row-feedback-${revokeFeedback.ok ? 'success' : 'error'}`} role="status">{revokeFeedback.text}</div>
+      )}
       {(sts === 'success' || sts === 'error') && (
         <div className={`row-feedback row-feedback-${sts}`}>{stsmsg}</div>
       )}
@@ -392,6 +396,9 @@ export default function AgentCard({
 
           {/* Mobile-only action buttons (shown in drawer on mobile) */}
           <div className="agent-row-detail-actions">
+            {managed.canRevoke && (
+              <button className="row-btn" onClick={onRevoke} title="Revoke the managed runtime">revoke runtime</button>
+            )}
             <button
               className={`row-btn${isDead ? ' row-btn-dim' : rs === 'confirming' ? ' confirming' : ''}`}
               title="Restart"

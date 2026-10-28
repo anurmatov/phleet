@@ -1,3 +1,4 @@
+import { revokeOutcome } from './managedStock'
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import type {
   AgentState,
@@ -749,15 +750,14 @@ export default function App() {
     setReprovisionAllState('idle')
   }
 
+  const [revokeFeedback, setRevokeFeedback] = useState<Record<string, { ok: boolean; text: string }>>({})
+
   function handleRevoke(agentName: string) {
     if (!window.confirm(`Revoke the managed runtime for ${agentName}? Its admission, provider, broker identity and sandbox are stopped; nothing is replaced.`)) return
     apiFetch(`/api/agents/${encodeURIComponent(agentName)}/revoke`, { method: 'POST' })
-      .then(async r => {
-        const b = await r.json().catch(() => ({}))
-        const detail = Array.isArray(b?.errors) && b.errors.length ? `: ${b.errors.join(', ')}` : ''
-        setStopMsg(prev => ({ ...prev, [agentName]: r.ok ? 'Runtime revoked' : `${b?.error ?? `Error ${r.status}`}${detail}` }))
-      })
-      .catch(() => setStopMsg(prev => ({ ...prev, [agentName]: 'Request failed' })))
+      .then(async r => { const body = await r.json().catch(() => null); setRevokeFeedback(prev => ({ ...prev, [agentName]: revokeOutcome(r.status, body) })) })
+      .catch(() => setRevokeFeedback(prev => ({ ...prev, [agentName]: { ok: false, text: 'Request failed' } })))
+      .finally(() => setTimeout(() => setRevokeFeedback(prev => { const next = { ...prev }; delete next[agentName]; return next }), 8000))
   }
 
   function handleStop(agentName: string) {
@@ -1828,6 +1828,7 @@ export default function App() {
             reprovisionMsg={reprovisionMsg}
             stopStates={stopStates}
             stopMsg={stopMsg}
+            revokeFeedback={revokeFeedback}
             startStates={startStates}
             startMsg={startMsg}
             cancelStates={cancelStates}

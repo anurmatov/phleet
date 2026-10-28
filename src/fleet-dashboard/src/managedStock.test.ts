@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { savedRuntimeSelection, policyResponse, managedRuntimeView } from './managedStock.ts'
+import { savedRuntimeSelection, policyResponse, managedRuntimeView, revokeOutcome } from './managedStock.ts'
 
 test('save pins exact desired version and contains no applied fields', () => {
   assert.deepEqual(savedRuntimeSelection({ runtimeKind: 'openshell', sandboxPolicyVersionId: '17', nativeAuthMode: 'api_key', providerApiKeyEnvRef: 'TEST_API_KEY' }), {
@@ -25,4 +25,10 @@ test('managed card view blocks start on unresolved holds and offers revoke only 
   assert.equal(managedRuntimeView({ appliedRuntimeKind: 'openshell', managedState: 'applied' }).startBlocked, false)
   assert.equal(managedRuntimeView({ appliedRuntimeKind: 'openshell', managedState: 'busy' }).canRevoke, false)
   assert.equal(managedRuntimeView({ appliedRuntimeKind: 'openshell', managedState: 'revoked' }).startBlocked, true)
+})
+
+test('revoke outcome reports success, the named code and every unresolved leg', () => {
+  assert.deepEqual(revokeOutcome(200, { message: 'revoked' }), { ok: true, text: 'Runtime revoked' })
+  assert.deepEqual(revokeOutcome(502, { error: 'revoke_unresolved', errors: ['broker:x', 'stop:y'] }), { ok: false, text: 'revoke_unresolved: broker:x, stop:y' })
+  assert.deepEqual(revokeOutcome(503, null), { ok: false, text: 'Error 503' })
 })

@@ -36,3 +36,10 @@ export function managedRuntimeView(agent: { runtimeKind?: string; appliedRuntime
     canRevoke: applied && state !== 'busy' && state !== 'revoked',
   }
 }
+
+/** #492: the operator-visible result of POST /api/agents/{name}/revoke, including every unresolved leg. */
+export function revokeOutcome(status: number, body: { message?: string; error?: string; errors?: unknown } | null): { ok: boolean; text: string } {
+  if (status >= 200 && status < 300) return { ok: true, text: 'Runtime revoked' }
+  const errors = Array.isArray(body?.errors) ? body!.errors.filter((e): e is string => typeof e === 'string') : []
+  return { ok: false, text: `${body?.error ?? `Error ${status}`}${errors.length ? `: ${errors.join(', ')}` : ''}` }
+}

@@ -481,7 +481,9 @@ one per process:
   directory. A lane is replaced when the agent's record binding changes, for example a new epoch. A
   lane that fails to connect stays refused until then, because there is no stock reconnect loop.
   `check_acto_status` keeps its stock refusal for a managed target. To return an agent to the ordinary
-  connection, remove its record and restart the Bridge.
+  connection, apply Docker: the verified OpenShell-to-Docker handoff marks the record `retired`, which
+  releases the lane and the ordinary-traffic hold. Never delete or edit authority records by hand; a
+  failed retirement stays `needs_attention` until an operator reconciles and revokes.
 - **Observer.** The orchestrator's stock observer keeps one `-observer` receiver for each active
   record. It uses that record's `BrokerHost` and `<agent>.observer.password` and reconciles every 30 s:
   new or re-enrolled records get a receiver, and vanished, revoked or changed ones are closed. A failed

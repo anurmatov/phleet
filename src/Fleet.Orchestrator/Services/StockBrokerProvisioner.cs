@@ -71,8 +71,9 @@ public sealed class StockBrokerProvisioner(IConfiguration config, ICredentialsRe
     }
 
     /// <summary>
-    /// Exact anchored permissions for one role. Workload: its own queue plus relay/topic exchanges;
-    /// control: relay exchange and bridge reply queue; observer: heartbeat topic and queue.
+    /// Exact anchored permissions for one role. Workload: its own queue plus relay/group/topic exchanges
+    /// (it binds its queue to <c>fleet.group</c>); control: the <c>fleet.group</c> direct exchange the
+    /// bridge lane declares, binds and publishes on, and the bridge reply queue; observer: heartbeat topic and queue.
     /// </summary>
     internal static (string Configure, string Write, string Read) Permissions(string role, string agentQueue)
     {
@@ -81,8 +82,8 @@ public sealed class StockBrokerProvisioner(IConfiguration config, ICredentialsRe
         {
             "workload" => (Any(RelayExchange, GroupExchange, HeartbeatExchange, agentQueue),
                 Any(RelayExchange, GroupExchange, HeartbeatExchange, agentQueue),
-                Any(RelayExchange, agentQueue)),
-            "control" => (Any(RelayExchange, BridgeReplyQueue), Any(RelayExchange, BridgeReplyQueue), Any(RelayExchange, BridgeReplyQueue)),
+                Any(RelayExchange, GroupExchange, agentQueue)),
+            "control" => (Any(GroupExchange, BridgeReplyQueue), Any(GroupExchange, BridgeReplyQueue), Any(GroupExchange, BridgeReplyQueue)),
             "observer" => (Any(HeartbeatExchange, HeartbeatQueue), Any(HeartbeatQueue), Any(HeartbeatExchange, HeartbeatQueue)),
             _ => throw new ArgumentOutOfRangeException(nameof(role)),
         };

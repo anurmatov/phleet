@@ -301,7 +301,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     {
         var (configure, write, read) = StockBrokerProvisioner.Permissions("workload", "fleet.agent.agent1");
         Assert.Equal(@"^(fleet\.relay|fleet\.group|fleet\.orchestrator|fleet\.agent\.agent1)$", configure);
-        Assert.Equal(@"^(fleet\.relay|fleet\.agent\.agent1)$", read);
+        Assert.Equal(@"^(fleet\.relay|fleet\.group|fleet\.agent\.agent1)$", read);
         Assert.Equal(configure, write);
         var observer = StockBrokerProvisioner.Permissions("observer", "fleet.agent.agent1");
         Assert.Equal(@"^(fleet\.orchestrator\.heartbeats)$", observer.Write);

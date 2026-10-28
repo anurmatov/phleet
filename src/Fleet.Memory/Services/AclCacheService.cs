@@ -37,6 +37,7 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
     // Keyed by lowercase agent name, value is list of lowercase project names (or ["*"] for wildcard).
     private volatile Dictionary<string, List<string>> _cache = [];
     private volatile bool _isAvailable = false;
+    private readonly AsyncLocal<Dictionary<string, List<string>>?> _verifiedSnapshot = new();
     private DateTimeOffset _cacheLoadedAt = DateTimeOffset.MinValue;
 
     private CancellationTokenSource? _cts;
@@ -51,6 +52,13 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
         _orchestratorOptions = orchestratorOptions;
         _logger = logger;
         _http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+    }
+
+    internal AclCacheService(IOptions<AclOptions> aclOptions, IOptions<OrchestratorOptions> orchestratorOptions,
+        ILogger<AclCacheService> logger, HttpClient http) : this(aclOptions, orchestratorOptions, logger)
+    {
+        _http.Dispose();
+        _http = http;
     }
 
     // ── IHostedService ────────────────────────────────────────────────────────
@@ -113,7 +121,7 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
     /// True once the cache has been successfully populated at least once.
     /// False during cold-start before the first successful fetch.
     /// </summary>
-    public bool IsAvailable => _isAvailable;
+    public bool IsAvailable => _verifiedSnapshot.Value is not null || _isAvailable;
 
     /// <summary>
     /// Determines whether the given agent can read the given memory project.
@@ -128,7 +136,7 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
             return (true, null);
 
         var name = agentName.ToLowerInvariant();
-        var cache = _cache;
+        var cache = _verifiedSnapshot.Value ?? _cache;
         var opts = _aclOptions.Value;
 
         // Wildcard check
@@ -233,6 +241,66 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
     /// <summary>Refresh the cache; retains stale on failure (not fail-closed like initial).</summary>
     public async Task RefreshAsync(CancellationToken ct = default)
         => await FetchWithRetryAsync(isInitial: false, ct);
+
+    // A request-local snapshot avoids a slower legacy/background refresh replacing a fresh
+    // authorization snapshot between admission and tool execution. Never falls back to _cache.
+    internal async Task<Dictionary<string, List<string>>?> LoadVerifiedSnapshotAsync(CancellationToken ct)
+    {
+        try
+        {
+            var url = $"{_orchestratorOptions.Value.BaseUrl.TrimEnd('/')}/internal/agent-project-access";
+            var response = await _http.GetFromJsonAsync<AclResponse>(url, ct);
+            if (response is null) return null;
+            var snapshot = response.Acl.ToDictionary(p => p.Key.ToLowerInvariant(),
+                p => p.Value.Select(project => project.ToLowerInvariant()).ToList(), StringComparer.OrdinalIgnoreCase);
+            var operatorAgent = _aclOptions.Value.AclOperatorAgent.Trim().ToLowerInvariant();
+            if (operatorAgent.Length != 0 && (!snapshot.TryGetValue(operatorAgent, out var projects) || !projects.Contains("*"))) return null;
+            return snapshot;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException
+            or InvalidOperationException or ArgumentException)
+        {
+            return null;
+        }
+    }
+    internal IDisposable UseVerifiedSnapshot(Dictionary<string, List<string>> snapshot)
+    {
+        var previous = _verifiedSnapshot.Value;
+        _verifiedSnapshot.Value = snapshot;
+        return new SnapshotScope(() => _verifiedSnapshot.Value = previous);
+    }
+    private sealed class SnapshotScope(Action restore) : IDisposable
+    {
+        public void Dispose() => restore();
+    }
+
+    // Read existing grants/config through the existing orchestrator GET. This neither creates
+    // grants nor accepts a workload-provided tool list. Unknown/old responses fail closed.
+    public async Task<(bool Available, bool Allowed)> CanUseVerifiedMemoryRouteAsync(
+        string agent, string memoryHost, string? tool, CancellationToken ct)
+    {
+        try
+        {
+            var url = $"{_orchestratorOptions.Value.BaseUrl.TrimEnd('/')}/api/agents/{Uri.EscapeDataString(agent)}/config";
+            var config = await _http.GetFromJsonAsync<System.Text.Json.JsonElement>(url, ct);
+            if (config.GetProperty("name").GetString() != agent || !config.GetProperty("isEnabled").GetBoolean()) return (true, false);
+            var endpoints = config.GetProperty("mcpEndpoints").EnumerateArray().Where(endpoint =>
+                endpoint.GetProperty("transportType").GetString() == "http"
+                && endpoint.GetProperty("url").GetString() == $"https://{memoryHost}/mcp").ToArray();
+            if (endpoints.Length != 1) return (true, false);
+            if (tool is null) return (true, true);
+            var name = endpoints[0].GetProperty("mcpName").GetString();
+            if (string.IsNullOrEmpty(name)) return (true, false);
+            return (true, config.GetProperty("tools").EnumerateArray().Any(grant =>
+                grant.GetProperty("toolName").GetString() == $"mcp__{name}__{tool}"
+                && grant.GetProperty("isEnabled").GetBoolean()));
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException
+            or InvalidOperationException or KeyNotFoundException)
+        {
+            return (false, false);
+        }
+    }
 
     private async Task FetchOnceAsync(CancellationToken ct)
     {

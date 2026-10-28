@@ -3,6 +3,7 @@ using System.Text.Json;
 using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Models;
 using Fleet.Shared;
+using Fleet.Shared.Security;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
@@ -19,6 +20,9 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
     internal static readonly JsonSerializerOptions HeartbeatJsonOptions =
         new() { PropertyNameCaseInsensitive = true };
 
+    private readonly StockBrokerIdentity? _stockBroker;
+    private readonly StockRuntimeMutationHold _hold;
+    internal Func<ConnectionFactory, CancellationToken, Task<IConnection>>? Connect { get; init; }
     private readonly RabbitMqOptions _rabbitConfig;
     private readonly AgentRegistry _registry;
     private readonly AgentConfigPublisherService _publisher;
@@ -36,8 +40,17 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
         AgentRegistry registry,
         AgentConfigPublisherService publisher,
         IConfiguration configuration,
-        ILogger<HeartbeatConsumerService> logger)
+        ILogger<HeartbeatConsumerService> logger,
+        StockRuntimeMutationHold? hold = null)
+        : this(rabbitConfig, registry, publisher, configuration, logger, hold ?? new(configuration), null) { }
+
+    internal HeartbeatConsumerService(
+        IOptions<RabbitMqOptions> rabbitConfig, AgentRegistry registry, AgentConfigPublisherService publisher,
+        IConfiguration configuration, ILogger<HeartbeatConsumerService> logger,
+        StockRuntimeMutationHold hold, StockBrokerIdentity? stockBroker)
     {
+        _stockBroker = stockBroker;
+        _hold = hold;
         _rabbitConfig = rabbitConfig.Value;
         _registry = registry;
         _publisher = publisher;
@@ -63,12 +76,16 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
             NetworkRecoveryInterval = TimeSpan.FromSeconds(5),
         };
 
-        _connection = await RabbitMqConnectionHelper.ConnectWithRetryAsync(factory, _logger, ct);
+        _stockBroker?.Configure(factory);
+        _connection = Connect is not null ? await Connect(factory, ct) : _stockBroker is null
+            ? await RabbitMqConnectionHelper.ConnectWithRetryAsync(factory, _logger, ct) : await factory.CreateConnectionAsync(ct);
         IsConnected = true;
         _connection.ConnectionShutdownAsync += (_, args) =>
         {
             IsConnected = false;
-            _logger.LogWarning("RabbitMQ connection lost (reason: {Reason}) — auto-recovery in progress", args.ReplyText);
+            if (_stockBroker is null)
+                _logger.LogWarning("RabbitMQ connection lost (reason: {Reason}) — auto-recovery in progress", args.ReplyText);
+            else _logger.LogWarning("Stock broker connection lost; manual reconciliation required");
             return Task.CompletedTask;
         };
         _connection.RecoverySucceededAsync += (_, _) =>
@@ -111,14 +128,21 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
         await DisposeAsync();
     }
 
-    private Task OnMessageReceived(object sender, BasicDeliverEventArgs ea)
+    internal Task OnMessageReceived(object sender, BasicDeliverEventArgs ea)
     {
         // Route by routing key prefix before attempting deserialization.
-        if (ea.RoutingKey.StartsWith("access-request.", StringComparison.OrdinalIgnoreCase))
+        if (_stockBroker is null && ea.RoutingKey.StartsWith("access-request.", StringComparison.OrdinalIgnoreCase))
             return HandleAccessRequestAsync(ea);
 
         try
         {
+            if (_stockBroker is not null)
+            {
+                var expected = ea.RoutingKey.StartsWith("registration.", StringComparison.Ordinal) ? "registration." : "heartbeat.";
+                _stockBroker.RequireDelivery(ea.BasicProperties.UserId, "workload", ea.Exchange, _rabbitConfig.Exchange,
+                    ea.RoutingKey, expected + _stockBroker.Agent);
+                if (ea.Body.Length > 262144) throw new StockIdentityDenied("broker_size");
+            }
             var json = Encoding.UTF8.GetString(ea.Body.Span);
             var heartbeat = DeserializeHeartbeat(json);
 
@@ -128,8 +152,23 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
                 return Task.CompletedTask;
             }
 
+            if (_stockBroker is not null)
+            {
+                if (heartbeat.AgentName != _stockBroker.Agent)
+                    throw new StockIdentityDenied("broker_agent_mismatch");
+                // Authenticated telemetry is not authority to select a Docker or HTTP target.
+                if (heartbeat.ContainerName is not null || heartbeat.Endpoint is not null)
+                    throw new StockIdentityDenied("broker_runtime_selector");
+            }
+            // Ordinary telemetry cannot overwrite the separately authenticated enrollment.
+            if (_stockBroker is null && _hold.IsEnrolledAgent(heartbeat.AgentName))
+                return Task.CompletedTask;
             _logger.LogDebug("Heartbeat from {Agent} via key={RoutingKey}", heartbeat.AgentName, ea.RoutingKey);
             _registry.UpdateAgent(heartbeat);
+        }
+        catch (Exception) when (_stockBroker is not null)
+        {
+            _logger.LogWarning("Stock heartbeat delivery denied");
         }
         catch (Exception ex)
         {
@@ -155,6 +194,8 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
                 _logger.LogWarning("Received null or unparseable access-request payload (routingKey={RoutingKey})", ea.RoutingKey);
                 return;
             }
+
+            if (_hold.IsEnrolledAgent(payload.TargetAgent)) return;
 
             var ctoAgent = _configuration["FLEET_CTO_AGENT"];
             if (string.IsNullOrWhiteSpace(ctoAgent))
@@ -204,9 +245,14 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
 
     public async ValueTask DisposeAsync()
     {
-        if (_channel is not null)
-            await _channel.CloseAsync();
-        if (_connection is not null)
-            await _connection.CloseAsync();
+        try
+        {
+            if (_channel is not null) await _channel.CloseAsync();
+        }
+        finally
+        {
+            if (_connection is not null) await _connection.CloseAsync();
+            IsConnected = false;
+        }
     }
 }

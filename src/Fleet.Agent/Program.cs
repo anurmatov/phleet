@@ -15,7 +15,25 @@ using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddAgentCoreServices(builder.Configuration);
+// Refuse stock enrollment before any registration. This catch must terminate direct dotnet
+// starts too, rather than relying on unhandled-exception behavior on a particular platform.
+var validateStockOnly = args.Contains("--validate-stock-enrollment", StringComparer.Ordinal);
+try
+{
+    if (validateStockOnly) StockOpenShellEnrollment.Validate(builder.Configuration);
+    else builder.Services.AddAgentCoreServices(builder.Configuration);
+}
+catch (InvalidOperationException ex) when (ex.Message.StartsWith("stock_enrollment_", StringComparison.Ordinal))
+{
+    Console.Error.WriteLine(ex.Message);
+    Environment.Exit(1);
+    return;
+}
+if (validateStockOnly)
+{
+    if (builder.Configuration.GetValue<bool>("StockOpenShell:Enabled")) Console.WriteLine("stock");
+    return;
+}
 
 // Determine mode from command-line args
 var isCliMode = args.Any(a => a == "--task");
@@ -29,9 +47,13 @@ else
 if (!isCliMode && (builder.Configuration.GetValue<bool>("Journal:FilesEnabled") || builder.Configuration.GetValue<bool>("Journal:SendEnabled")))
     builder.WebHost.ConfigureKestrel(options => options.ListenAnyIP(8080));
 
+var stockMode = builder.Configuration.GetValue<bool>("StockOpenShell:Enabled");
 var app = builder.Build();
 app.Use(async (context, next) =>
 {
+    // This profile uses the authenticated broker for control, never legacy HTTP control routes.
+    if (stockMode && context.Request.Path != "/health")
+    { context.Response.StatusCode = 404; return; }
     if (context.Request.Path.Value == JournalFilesListener.Path) { context.Response.StatusCode = 404; return; }
     await next(context);
 });

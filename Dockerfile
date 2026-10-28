@@ -5,7 +5,7 @@ RUN dotnet restore src/Fleet.Agent/Fleet.Agent.csproj
 COPY src/ src/
 RUN dotnet publish src/Fleet.Agent/Fleet.Agent.csproj -c Release -o /app
 
-FROM mcr.microsoft.com/dotnet/sdk:10.0
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS agent-runtime
 WORKDIR /app
 
 ARG CLAUDE_CODE_VERSION=2.1.280
@@ -97,5 +97,35 @@ RUN test -f /opt/fleet/acceptance_plan.py && python3 /opt/fleet/acceptance_plan.
 
 COPY gh-auth.sh /app/gh-auth.sh
 COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh /app/gh-auth.sh
+COPY stock-entrypoint.sh /app/stock-entrypoint.sh
+RUN chmod +x /app/entrypoint.sh /app/stock-entrypoint.sh /app/gh-auth.sh
+RUN bash -n /app/stock-entrypoint.sh
 ENTRYPOINT ["/app/entrypoint.sh"]
+
+# Explicit opt-in build target. The final default stage preserves legacy root startup.
+FROM agent-runtime AS stock-agent
+# COPY can retain owner-only read bits from a restrictive local build context.
+# Shell scripts need read as well as execute access for the stock runtime user.
+RUN chmod 0755 /app/entrypoint.sh /app/stock-entrypoint.sh /app/gh-auth.sh
+# These copied artifacts are public content, not credentials or operator mounts.
+RUN find /app/skills -type d -exec chmod 0755 {} + && \
+    find /app/skills -type f -exec chmod 0644 {} + && \
+    chmod 0755 /opt/fleet && chmod 0644 /opt/fleet/acceptance_plan.py
+RUN groupadd --gid 10001 stockworker && \
+    useradd --uid 10001 --gid 10001 --create-home --home-dir /home/agent stockworker && \
+    chown 10001:10001 /workspace
+ENV HOME=/home/agent
+USER 10001:10001
+WORKDIR /home/agent
+RUN test "$(id -u)" = 10001 && test "$(id -g)" = 10001 && \
+    test -w "$PWD" && test -w /workspace && \
+    test -r /app/Fleet.Agent.dll && test ! -w /app && \
+    for script in /app/entrypoint.sh /app/stock-entrypoint.sh /app/gh-auth.sh; do \
+        test -r "$script" && test -x "$script" && bash -n "$script" || exit 1; \
+    done
+RUN test -r /app/skills/fleet-review/SKILL.md && \
+    find /app/skills -type f -exec cat {} + > /dev/null && \
+    test -r /opt/fleet/acceptance_plan.py && \
+    python3 /opt/fleet/acceptance_plan.py --help > /dev/null
+
+FROM agent-runtime AS default

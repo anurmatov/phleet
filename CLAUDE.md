@@ -229,6 +229,16 @@ passed through, Codex `sol`/`terra`/`luna` mapped in `HarnessDefaults.CodexModel
 Codex does not resolve them) — plus a **custom…** free-text entry (#465); dated ids keep working, never rewritten. The dashboard dialog is sectioned and shows the effective settings
 and the `harnessExtra` textarea. See `docs/providers/harness-defaults.md`.
 
+## Stock OpenShell enrollment
+
+See `docs/openshell-stock.md`: the draft connects the stock authenticated HTTP hook,
+dedicated memory identity/session/ACL receiver, epoch-bound AMQP control/completion
+and a non-root Codex daemon/native-client profile. Source fixtures do not establish
+runtime acceptance: an authorized exact-build whole-agent E2E, review and CI remain required.
+`StockOpenShell:Enabled`, `EnrollmentFile`, `AuthorityFile` and `BrokerPasswordFile` are startup-only;
+the first two file aliases select one operator-owned public enrollment record on the workload.
+Default provisioning and the ordinary memory receiver remain unchanged without opt-in configuration.
+
 ## Project contexts
 
 Every assignment renders the project's canonical context (the version row `CurrentVersion` points

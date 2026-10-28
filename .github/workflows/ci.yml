@@ -745,6 +745,61 @@ jobs:
       - name: Build the image
         run: docker build -t fleet:agent-ci .
 
+      - name: Build the opt-in stock image from restrictive context modes
+        run: |
+          set -euo pipefail
+          restore_context_modes() {
+            chmod 0755 entrypoint.sh stock-entrypoint.sh
+            chmod 0644 gh-auth.sh scripts/acceptance_plan.py
+            find skills -type d -exec chmod 0755 {} +
+            find skills -type f -exec chmod 0644 {} +
+          }
+          trap restore_context_modes EXIT
+          chmod 0600 entrypoint.sh stock-entrypoint.sh gh-auth.sh
+          find skills -type d -exec chmod 0700 {} +
+          find skills -type f -exec chmod 0600 {} +
+          chmod 0600 scripts/acceptance_plan.py
+          docker build --target stock-agent -t fleet:stock-agent-ci .
+
+      - name: Stock and default image identity and workspace
+        run: |
+          set -euo pipefail
+          [ "$(docker image inspect fleet:stock-agent-ci --format '{{.Config.User}}')" = "10001:10001" ]
+          [ "$(docker image inspect fleet:stock-agent-ci --format '{{.Config.WorkingDir}}')" = "/home/agent" ]
+          [ "$(docker image inspect fleet:agent-ci --format '{{.Config.User}}')" = "" ]
+          [ "$(docker image inspect fleet:agent-ci --format '{{.Config.WorkingDir}}')" = "/app" ]
+          # No credentials, mounts, enrollment or product entrypoint: filesystem probes only.
+          docker run --rm --network none --entrypoint sh fleet:stock-agent-ci -c '
+            set -eu
+            test "$(id -u)" = 10001
+            test "$(id -g)" = 10001
+            test "$PWD" = /home/agent
+            test ! -w /app
+            test -r /app/Fleet.Agent.dll
+            for script in /app/entrypoint.sh /app/stock-entrypoint.sh /app/gh-auth.sh; do
+              test -r "$script"
+              test -x "$script"
+              bash -n "$script"
+            done
+            test -r /app/skills/fleet-review/SKILL.md
+            find /app/skills -type f -exec cat {} + > /dev/null
+            test -r /opt/fleet/acceptance_plan.py
+            python3 /opt/fleet/acceptance_plan.py --help > /dev/null
+            for directory in "$PWD" /workspace; do
+              probe=$(mktemp "$directory/workspace-probe.XXXXXX")
+              printf "owned workspace probe\n" > "$probe"
+              cp "$probe" "$probe.copy"
+              cmp "$probe" "$probe.copy"
+              rm "$probe" "$probe.copy"
+            done
+          '
+          docker run --rm --network none --entrypoint sh fleet:agent-ci -c '
+            set -eu
+            test "$(id -u)" = 0
+            test "$PWD" = /app
+            test -r /app/Fleet.Agent.dll
+          '
+
       - name: mc runs and reports the pinned release
         run: docker run --rm --entrypoint mc fleet:agent-ci --version
 
@@ -831,7 +886,7 @@ jobs:
 
       - name: Clean up
         if: always()
-        run: docker image rm -f fleet:agent-ci || true
+        run: docker image rm -f fleet:agent-ci fleet:stock-agent-ci || true
 
   # The journal object-store provisioner runs inside the pinned MinIO client image, and that image
   # has no `sed`, `awk`, `grep` or `envsubst`. This job is what stops init.sh from ever again

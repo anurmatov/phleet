@@ -3,6 +3,8 @@ using System.Text;
 using System.Text.Json;
 using Fleet.Bridge.Configuration;
 using Fleet.Shared;
+using Fleet.Shared.Security;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
@@ -16,6 +18,7 @@ namespace Fleet.Bridge.Services;
 /// </summary>
 public sealed class BridgeRelayService : IAsyncDisposable
 {
+    private readonly StockBrokerIdentity? _stockBroker;
     private readonly RabbitMqOptions _rabbitConfig;
     private readonly ILogger<BridgeRelayService> _logger;
 
@@ -48,20 +51,28 @@ public sealed class BridgeRelayService : IAsyncDisposable
     public BridgeRelayService(
         IOptions<BridgeOptions> bridgeConfig,
         IOptions<RabbitMqOptions> rabbitConfig,
-        ILogger<BridgeRelayService> logger)
+        ILogger<BridgeRelayService> logger, IConfiguration? configuration = null)
     {
+        if (configuration is not null)
+            _stockBroker = StockBrokerIdentity.Optional(configuration["StockOpenShell:AuthorityFile"],
+                configuration["StockOpenShell:BrokerPasswordFile"], "control");
         var opts = bridgeConfig.Value;
         TargetAgent = opts.TargetAgent;
         BridgeChatId = opts.BridgeChatId;
         _timeoutSeconds = opts.TimeoutSeconds;
         _rabbitConfig = rabbitConfig.Value;
         _logger = logger;
+        Connect = (factory, ct) => _stockBroker is null
+            ? RabbitMqConnectionHelper.ConnectWithRetryAsync(factory, _logger, ct) : factory.CreateConnectionAsync(ct);
     }
+
+    internal Func<ConnectionFactory, CancellationToken, Task<IConnection>> Connect { get; init; }
 
     public bool IsEnabled => _rabbitConfig.Host.Length > 0;
 
     public async Task InitializeAsync(CancellationToken ct)
     {
+        if (_stockBroker is not null && !IsEnabled) throw new StockIdentityDenied("broker_target");
         if (!IsEnabled || _initialized)
             return;
 
@@ -77,10 +88,13 @@ public sealed class BridgeRelayService : IAsyncDisposable
                 NetworkRecoveryInterval = TimeSpan.FromSeconds(5),
             };
 
-            _connection = await RabbitMqConnectionHelper.ConnectWithRetryAsync(factory, _logger, ct);
+            _stockBroker?.Configure(factory);
+            _connection = await Connect(factory, ct);
             _connection.ConnectionShutdownAsync += (_, args) =>
             {
-                _logger.LogWarning("RabbitMQ connection lost (reason: {Reason}) — auto-recovery in progress", args.ReplyText);
+                if (_stockBroker is null)
+                    _logger.LogWarning("RabbitMQ connection lost (reason: {Reason}) — auto-recovery in progress", args.ReplyText);
+                else _logger.LogWarning("Stock broker connection lost; manual reconciliation required");
                 return Task.CompletedTask;
             };
 
@@ -106,6 +120,10 @@ public sealed class BridgeRelayService : IAsyncDisposable
 
             _initialized = true;
             _logger.LogInformation("BridgeRelayService initialized on exchange {Exchange}", _rabbitConfig.Exchange);
+        }
+        catch (Exception) when (_stockBroker is not null)
+        {
+            throw new StockIdentityDenied("broker_startup_denied");
         }
         catch (Exception ex)
         {
@@ -140,9 +158,10 @@ public sealed class BridgeRelayService : IAsyncDisposable
                 CorrelationId: correlationId);
 
             var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
-            var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
+            var props = _stockBroker?.Properties() ?? new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
 
             var target = TargetAgent.ToLowerInvariant();
+            if (_stockBroker is not null && target != _stockBroker.Agent) throw new StockIdentityDenied("broker_target");
             await _publishChannel.BasicPublishAsync(
                 _rabbitConfig.Exchange, routingKey: target, mandatory: false,
                 basicProperties: props, body: body, cancellationToken: ct);
@@ -159,6 +178,7 @@ public sealed class BridgeRelayService : IAsyncDisposable
             if (completedTask == tcs.Task)
                 return await tcs.Task;
 
+            if (_stockBroker is not null) return "Error: stock control outcome unconfirmed; manual reconciliation required.";
             return $"Timeout: Acto did not respond within {(int)timeout.TotalSeconds} seconds. He may be busy with another task.";
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -167,7 +187,12 @@ public sealed class BridgeRelayService : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
+            if (_stockBroker is not null) return "Error: stock control outcome unconfirmed; manual reconciliation required.";
             return $"Timeout: Acto did not respond within the configured timeout.";
+        }
+        catch (Exception) when (_stockBroker is not null)
+        {
+            return "Error: stock control admission denied.";
         }
         catch (Exception ex)
         {
@@ -185,6 +210,7 @@ public sealed class BridgeRelayService : IAsyncDisposable
     /// </summary>
     public async Task<string> CheckStatusAsync(CancellationToken ct)
     {
+        if (_stockBroker is not null) return "Error: stock status route is not enrolled.";
         if (!_initialized || _publishChannel is null)
             return "Error: Bridge relay service is not connected to RabbitMQ.";
 
@@ -235,10 +261,19 @@ public sealed class BridgeRelayService : IAsyncDisposable
     {
         try
         {
+            if (_stockBroker is not null)
+            {
+                _stockBroker.RequireDelivery(ea.BasicProperties.UserId, "workload", ea.Exchange, _rabbitConfig.Exchange,
+                    ea.RoutingKey, "bridge");
+                if (ea.Body.Length > 262144) throw new StockIdentityDenied("broker_size");
+            }
             var json = Encoding.UTF8.GetString(ea.Body.Span);
             var message = JsonSerializer.Deserialize<RelayMessage>(json);
             if (message is null)
                 return Task.CompletedTask;
+            if (_stockBroker is not null && (message.Sender != _stockBroker.Agent || message.Type != "bridge-response"
+                || !Guid.TryParseExact(message.CorrelationId, "N", out _)))
+                throw new StockIdentityDenied("broker_route_denied");
 
             _logger.LogInformation("Bridge received message type={Type}, correlationId={CorrelationId}, from={Sender}",
                 message.Type, message.CorrelationId, message.Sender);
@@ -262,6 +297,10 @@ public sealed class BridgeRelayService : IAsyncDisposable
                     }
                 }
             }
+        }
+        catch (Exception) when (_stockBroker is not null)
+        {
+            _logger.LogWarning("Stock broker completion denied");
         }
         catch (Exception ex)
         {

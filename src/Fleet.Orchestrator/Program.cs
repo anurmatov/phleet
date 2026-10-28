@@ -35,6 +35,7 @@ builder.Services.AddHttpClient();
 builder.Services.AddSingleton<TaskHistoryStore>();
 builder.Services.AddSingleton<AgentRegistry>();
 builder.Services.AddSingleton<DockerService>();
+builder.Services.AddSingleton<StockRuntimeMutationHold>();
 builder.Services.AddSingleton<ContainerProvisioningService>();
 builder.Services.AddSingleton<JournalTokenService>();
 builder.Services.AddSingleton(_ => new TelegramMembershipClient());
@@ -58,6 +59,8 @@ builder.Services.AddSingleton<AgentConfigPublisherService>();
 builder.Services.AddSingleton<HeartbeatConsumerService>();
 builder.Services.AddSingleton<IRabbitMqStatus>(sp => sp.GetRequiredService<HeartbeatConsumerService>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<HeartbeatConsumerService>());
+// A distinct hosted service/connection must never replace the default-vhost consumer.
+builder.Services.AddHostedService<StockHeartbeatObserverService>();
 
 builder.Services.AddHostedService<AgentStateMonitorService>();
 
@@ -195,6 +198,8 @@ if (!string.IsNullOrWhiteSpace(orchestratorAuthToken))
         await next(context);
     });
 }
+
+app.UseStockLegacyRuntimeGuard(app.Configuration);
 
 // Config API auth — ORCHESTRATOR_CONFIG_TOKEN gates /api/config/* (all methods).
 // Separate from ORCHESTRATOR_AUTH_TOKEN so peers can read config without full admin access.

@@ -22,11 +22,17 @@ public sealed class PeerConfigHostedService : IHostedService, IAsyncDisposable
         BridgeRelayService relay,
         TelegramNotifier notifier,
         ILogger<PeerConfigHostedService> logger)
+        : this(relay, notifier, logger, PeerConfigClient.FromEnvironment(logger))
+    {
+    }
+
+    internal PeerConfigHostedService(BridgeRelayService relay, TelegramNotifier notifier,
+        ILogger<PeerConfigHostedService> logger, PeerConfigClient client)
     {
         _relay = relay;
         _notifier = notifier;
         _logger = logger;
-        _client = PeerConfigClient.FromEnvironment(logger);
+        _client = client;
         _client.OnChanged = OnConfigSnapshotReceived;
     }
 

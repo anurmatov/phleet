@@ -331,8 +331,10 @@ public sealed class StockOpenShellRuntime(
 
     public Task<Result> ApplyAsync(string name, CancellationToken ct) => RunAsync(name, "apply", ApplyCoreAsync, ct);
     public Task<Result> StartAsync(string name, CancellationToken ct) => RunAsync(name, "start", StartCoreAsync, ct);
-    public Task<Result> StopAsync(string name, CancellationToken ct) => RunAsync(name, "stop", StopCoreAsync, ct);
-    public Task<Result> RevokeAsync(string name, CancellationToken ct) => RunAsync(name, "revoke", RevokeCoreAsync, ct);
+    // Stop and revoke are cleanup: every leg has its own bounded deadline, and a caller (client)
+    // disconnect never cancels them midway.
+    public Task<Result> StopAsync(string name, CancellationToken ct) => RunAsync(name, "stop", StopCoreAsync, CancellationToken.None);
+    public Task<Result> RevokeAsync(string name, CancellationToken ct) => RunAsync(name, "revoke", RevokeCoreAsync, CancellationToken.None);
 
     public async Task<Result> RestartAsync(string name, CancellationToken ct)
     {
@@ -673,7 +675,8 @@ public sealed class StockOpenShellRuntime(
             if (errors.Count == 0 && await StopVerifiedAsync(applied, ct) is { } quiet) errors.Add(quiet);
             if (errors.Count == 0 && await StageAsync(applied, ct) is { } staged) errors.Add(staged);
             if (errors.Count == 0 && await DownloadWorkspaceAsync(agent, applied, DockerWorkspaceDir(agent), ct) is { } workspace) errors.Add(workspace);
-            if (await StopVerifiedAsync(applied, ct) is { } stopped) errors.Add(stopped);
+            using (var cleanup = new CancellationTokenSource(FanoutTimeout))
+                if (await StopVerifiedAsync(applied, cleanup.Token) is { } stopped) errors.Add(stopped);
             if (errors.Count > 0) return Hold(record, 502, "openshell_to_docker_unresolved", [.. errors]);
             record = record with { State = "revoked" };
             await checkpoint(record);
@@ -939,7 +942,9 @@ public sealed class StockOpenShellRuntime(
         string code, IReadOnlyList<string> errors, CancellationToken ct)
     {
         var all = errors.ToList();
-        if (await StopVerifiedAsync(binding, ct) is { } stop) all.Add("stop:" + stop);
+        // Cleanup uses its own bounded deadline, never the caller's token.
+        using var cleanup = new CancellationTokenSource(FanoutTimeout);
+        if (await StopVerifiedAsync(binding, cleanup.Token) is { } stop) all.Add("stop:" + stop);
         return Hold(record, 502, code, [.. all]);
     }
 
@@ -1075,8 +1080,9 @@ public sealed class StockOpenShellRuntime(
     {
         var errors = new List<string>();
         var targets = new[] { record.Applied, record.Candidate }.OfType<ManagedBinding>().DistinctBy(b => b.Epoch).ToList();
-        using var overall = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        overall.CancelAfter(FanoutTimeout);
+        // Cleanup legs run to their own bounded deadlines; the caller's token is never linked, so a
+        // client disconnect cannot cancel them or the Stop.
+        using var overall = new CancellationTokenSource(FanoutTimeout);
         var legs = new List<Task<string?>>
         {
             Leg("admission", _ =>

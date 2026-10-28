@@ -88,4 +88,20 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         Assert.Equal((409, "revoked"), (start.Status, start.Code));
         Assert.DoesNotContain(_t._cli.Calls, c => Verb(c, "start"));
     }
+
+    [Fact]
+    public async Task Client_disconnect_never_cancels_revoke_cleanup_legs_or_stop()
+    {
+        var binding = _t.Binding("fleet-agent1-55555555", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        using var disconnected = new CancellationTokenSource();
+        disconnected.Cancel();
+
+        var revoke = await _t.Runtime().RevokeAsync("agent1", disconnected.Token);
+
+        Assert.True(revoke.Ok, revoke.Code + ":" + string.Join(",", revoke.Errors));
+        Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+        Assert.Equal("revoked", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+    }
 }

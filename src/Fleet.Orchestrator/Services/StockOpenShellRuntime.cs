@@ -670,6 +670,8 @@ public sealed class StockOpenShellRuntime(
     {
         if (record.Applied is { } applied)
         {
+            // The workspace copy-out and revoke record live under ConfigDir: refuse before any write.
+            if (DescribeConfigDirFault() is { } dirFault) return (record, null, null, Result.Refused(409, dirFault));
             // Cut off (unless already revoked), quiesce every writer, start into staging (no daemon),
             // copy the workspace out, then stop and verify. Any failure still attempts a bounded Stop.
             var errors = new List<string>();
@@ -1309,8 +1311,26 @@ public sealed class StockOpenShellRuntime(
             if (info.LinkTarget is not null || (File.GetUnixFileMode(ConfigDir) & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite
                 | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute)) != 0)
                 return "managed_config_dir_not_private";
+            // Owned by this process's effective UID, and no linked ancestor can redirect trust/state writes.
+            try { RefuseLinkedAncestors(ConfigDir); }
+            catch (IOException) { return "managed_config_dir_not_private"; }
+            if (OwnerUid(ConfigDir) is not { } owner || owner != GetEffectiveUid()) return "managed_config_dir_not_owned";
         }
         return null;
+    }
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "geteuid")]
+    private static extern uint GetEffectiveUid();
+
+    /// <summary>The runtime's own lstat (PAL FileStatus: Flags, Mode, Uid, ...); null when unobservable.</summary>
+    [System.Runtime.InteropServices.DllImport("libSystem.Native", EntryPoint = "SystemNative_LStat")]
+    private static extern int LStat([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, byte[] status);
+
+    internal static uint? OwnerUid(string path)
+    {
+        var status = new byte[512];
+        try { return LStat(path, status) == 0 ? BitConverter.ToUInt32(status, 8) : null; }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException) { return null; }
     }
 
     /// <summary>Operator-owned trust fields; the orchestrator fills only identity, epoch and state.</summary>

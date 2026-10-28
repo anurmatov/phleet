@@ -1,6 +1,8 @@
 using System.Text.Json.Nodes;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Fleet.Orchestrator.Tests;
 
@@ -88,4 +90,39 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         Assert.Equal(0, stops);
         Assert.Empty(_t._broker.Puts);
     }
+
+    [Fact]
+    public async Task Config_dir_with_a_linked_ancestor_or_foreign_owner_refuses_before_any_write()
+    {
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+        var runtime = _t.Runtime(); // writes the fixture's private ConfigDir
+        var link = Path.Combine(Path.GetDirectoryName(_t._dir)!, "linked-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateSymbolicLink(link, Path.GetDirectoryName(_t._dir)!);
+        try
+        {
+            var linked = new StockOpenShellRuntime(new Microsoft.Extensions.Configuration.ConfigurationBuilder().AddInMemoryCollection(
+                    new Dictionary<string, string?> { ["StockOpenShell:ManagedEnabled"] = "true", ["StockOpenShell:ConfigDir"] = Path.Combine(link, Path.GetFileName(_t._dir)) }).Build(),
+                _t._cli, null!, _t._store, _t._host, _t._broker.Credentials,
+                new Microsoft.Extensions.DependencyInjection.ServiceCollection().BuildServiceProvider(),
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<StockOpenShellRuntime>.Instance);
+            Assert.Equal("managed_config_dir_not_private", await DirFault(linked));
+        }
+        finally { Directory.Delete(link); }
+
+        Assert.Null(await DirFault(runtime));
+        if (StockOpenShellRuntime.OwnerUid(_t._dir) == 0)
+        {
+            File.SetUnixFileMode(_t._dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            Assert.Equal(0, Chown(_t._dir, 65534, 65534));
+            try { Assert.Equal("managed_config_dir_not_owned", await DirFault(runtime)); }
+            finally { Chown(_t._dir, 0, 0); }
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "chown")]
+    private static extern int Chown([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, uint owner, uint group);
+
+    private Task<string?> DirFault(StockOpenShellRuntime runtime) =>
+        Task.FromResult((string?)typeof(StockOpenShellRuntime).GetMethod("DescribeConfigDirFault",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.Invoke(runtime, null));
 }

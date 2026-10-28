@@ -6,6 +6,29 @@ namespace Fleet.Orchestrator.Data;
 
 public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> options) : DbContext(options)
 {
+    public DbSet<SandboxPolicy> SandboxPolicies => Set<SandboxPolicy>();
+    public DbSet<SandboxPolicyVersion> SandboxPolicyVersions => Set<SandboxPolicyVersion>();
+
+    private void CheckImmutablePolicies()
+    {
+        ChangeTracker.DetectChanges();
+        if (ChangeTracker.Entries().Any(e => (e.Entity is SandboxPolicyVersion or SandboxPolicy)
+                && e.State is EntityState.Modified or EntityState.Deleted))
+            throw new InvalidOperationException("Sandbox policies are append-only; save a new version.");
+    }
+
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        CheckImmutablePolicies();
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    public override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
+    {
+        CheckImmutablePolicies();
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
+
     public DbSet<Agent> Agents => Set<Agent>();
     public DbSet<AgentTool> AgentTools => Set<AgentTool>();
     public DbSet<AgentProject> AgentProjects => Set<AgentProject>();
@@ -50,6 +73,26 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<SandboxPolicy>(e =>
+        {
+            e.ToTable("sandbox_policies");
+            e.HasIndex(p => p.Name).IsUnique();
+        });
+        modelBuilder.Entity<SandboxPolicyVersion>(e =>
+        {
+            e.ToTable("sandbox_policy_versions");
+            e.HasIndex(v => new { v.PolicyId, v.Version }).IsUnique();
+            e.HasOne(v => v.Policy).WithMany(p => p.Versions).HasForeignKey(v => v.PolicyId).OnDelete(DeleteBehavior.Restrict);
+            e.Property(v => v.Yaml).HasColumnType("longtext");
+            e.Property(v => v.ProviderProfileHashes).HasColumnType("longtext");
+        });
+        modelBuilder.Entity<Agent>(e =>
+        {
+            e.Property(a => a.RuntimeKind).HasDefaultValue("docker");
+            e.Property(a => a.AppliedRuntimeKind).HasDefaultValue("docker");
+            e.HasOne<SandboxPolicyVersion>().WithMany().HasForeignKey(a => a.SandboxPolicyVersionId).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<SandboxPolicyVersion>().WithMany().HasForeignKey(a => a.AppliedSandboxPolicyVersionId).OnDelete(DeleteBehavior.Restrict);
+        });
         modelBuilder.Entity<Agent>(e =>
         {
             e.ToTable("agents");

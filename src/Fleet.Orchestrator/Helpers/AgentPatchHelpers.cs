@@ -1,5 +1,6 @@
 using Fleet.Orchestrator.Data;
 using Fleet.Shared;
+using Microsoft.EntityFrameworkCore;
 
 namespace Fleet.Orchestrator.Helpers;
 
@@ -153,4 +154,32 @@ internal static class AgentPatchHelpers
             return ($"Invalid CodexSandboxMode '{input}'. Valid values: {string.Join(", ", ValidCodexSandboxModes)}.", null);
         return (null, input);
     }
+
+    internal sealed record RuntimeSelectionFault(int Status, string Code);
+    internal static async Task<RuntimeSelectionFault?> ApplyRuntimeSelectionAsync(
+        OrchestratorDbContext db, Agent agent, string? kind, int? version, string? auth, string? keyRef)
+    {
+        var runtime = kind ?? agent.RuntimeKind;
+        var policy = version == 0 ? null : version ?? agent.SandboxPolicyVersionId;
+        var mode = auth == "" ? null : auth ?? agent.NativeAuthMode;
+        var reference = keyRef == "" ? null : keyRef ?? agent.ProviderApiKeyEnvRef;
+        if (runtime is not ("docker" or "openshell")) return new(400, "invalid_runtime_kind");
+        if (mode is not (null or "api_key")) return new(400, "unsupported_native_auth_mode");
+        if (reference is not null && !System.Text.RegularExpressions.Regex.IsMatch(reference, @"^[A-Za-z_][A-Za-z0-9_]{0,127}\z"))
+            return new(400, "invalid_provider_key_reference");
+        if (policy is not null && !await db.SandboxPolicyVersions.AnyAsync(v => v.Id == policy))
+            return new(404, "sandbox_policy_version_not_found");
+        if (runtime == "openshell" && (agent.Provider != "codex" || agent.LocalBaseUrl is not null || policy is null || mode != "api_key" || reference is null || agent.MountDockerSock))
+            return new(400, "openshell_requires_codex_api_key_policy_and_no_socket");
+        agent.RuntimeKind = runtime;
+        agent.SandboxPolicyVersionId = policy;
+        agent.NativeAuthMode = mode;
+        agent.ProviderApiKeyEnvRef = reference;
+        return null;
+    }
+
+    internal static bool RuntimePending(Agent agent) => agent.RuntimeKind != agent.AppliedRuntimeKind
+        || agent.SandboxPolicyVersionId != agent.AppliedSandboxPolicyVersionId;
+    internal static string? RuntimeApplyFault(Agent agent) => agent.RuntimeKind != "docker"
+        || agent.AppliedRuntimeKind != "docker" || RuntimePending(agent) ? "managed_runtime_unavailable" : null;
 }

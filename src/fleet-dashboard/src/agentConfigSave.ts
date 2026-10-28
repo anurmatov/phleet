@@ -1,3 +1,4 @@
+import { savedRuntimeSelection } from './managedStock.ts'
 import type { ConfigEdits } from './types'
 import { projectPayload } from './projectAssignments.ts'
 import { parseWarmupTimeoutSeconds } from './warmupTimeout.ts'
@@ -32,6 +33,7 @@ export function configSaveBody(edits: ConfigEdits, savedHarnessExtra: string | n
   const envRefs = parseEnvRefs(edits.envRefs)
   const body: Record<string, unknown> = {
     ...localModel.body,
+    ...savedRuntimeSelection(edits),
     memoryLimitMb,
     isEnabled: edits.isEnabled,
     image: edits.image,

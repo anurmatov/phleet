@@ -359,3 +359,43 @@ docker build \
 
 These commands build artifacts only. They do not create broker users, install
 trust, enroll an agent, or authorize runtime activation.
+
+## Saved managed policies (no activation)
+
+The dashboard's **Sandbox policies** page creates a named policy with immutable version 1,
+then appends versions. Select an exact version in **Model & runtime**, select API-key auth and
+an existing environment reference name, then **Save**. API-key billing is separate from subscription
+OAuth. Never paste credentials into YAML, profile hashes or reference fields.
+
+This release stores desired selection only. Applied runtime/binding is read-only and remains
+unchanged on save or heartbeat. Existing Docker and operator-managed stock profiles and service
+grants are unchanged. Managed apply/reprovision is unavailable (`managed_runtime_unavailable`,
+HTTP 409 on apply), without lifecycle actions or fallback. Start/Stop/cancel continue targeting
+applied Docker while a new selection is pending. An applied non-Docker binding is held rather
+than routed to a same-named Docker container. No managed binding can be created in this slice.
+
+All `/api/sandbox-policies` reads and writes require `Orchestrator:AuthToken`, including in dev
+mode. Create with `POST /api/sandbox-policies` (`name`, `yaml`, optional `providerProfileHashes`
+object mapping profile names to lowercase SHA256 content hashes). List with GET; append using
+`POST /api/sandbox-policies/{id}/versions` (`version`, `yaml`, `providerProfileHashes`). GET the
+versions list or `/versions/{version}`. Version IDs, not “latest”, are stored on agents.
+Supported YAML is a bounded subset of the pinned [stock authored schema](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/crates/openshell-policy-schema/src/lib.rs):
+`version: 1`, `filesystem_policy` (absolute read-only/read-write paths and include_workdir),
+`process` (named user/group), `landlock`, and `network_policies` (binary paths, host/port,
+protocol, automatic TLS, enforcement/access presets and credential_binding).
+Advanced rules/middleware, aliases, anchors, tags and unknown fields return 400, never silently
+lose fields. Each explicit credential binding requires its pinned profile content hash. These
+operator-supplied hashes are persisted immutably; this save-only release does not contact a gateway
+or establish that the installed profiles match. Future apply must independently verify them.
+
+400 means invalid/unsupported input; 404 means missing policy/version; 409 means name/version
+conflict or unavailable apply; 503 means database/auth configuration unavailable, not an empty
+list. Retry a save only after reading the stored versions if its outcome is uncertain.
+
+The additive migration retains old agents/grants with Docker defaults and null selections.
+For rollback keep the additive schema and all saved versions; do not delete referenced versions.
+A database restore must retain policy bytes/hashes, exact selections and applied bindings.
+Run `dotnet test tests/Fleet.Orchestrator.Tests --filter FullyQualifiedName~ManagedStockMySql`
+with `FLEET_ORCHESTRATOR_MIGRATION_CONNECTION` pointing only to a disposable MySQL 8 server;
+the suite creates/drops uniquely owned databases and uses mysql/mysqldump for restore/query.
+Missing MySQL is a failure, not a skip. Runtime integration is a separate slice under [#489](https://github.com/anurmatov/phleet/issues/489).

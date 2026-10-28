@@ -26,6 +26,9 @@ export interface JournalHeartbeat {
 }
 
 export interface AgentState {
+  runtimeKind?: string
+  appliedRuntimeKind?: string
+  runtimePending?: boolean
   agentName: string
   displayName: string | null
   shortName: string | null
@@ -123,6 +126,10 @@ export interface McpEndpointEntry {
 }
 
 export interface CreateForm {
+  runtimeKind?: string
+  sandboxPolicyVersionId?: string
+  nativeAuthMode?: string
+  providerApiKeyEnvRef?: string
   name: string
   displayName: string
   role: string
@@ -161,6 +168,14 @@ export interface CreateForm {
 }
 
 export interface AgentConfig {
+  runtimeKind?: string
+  sandboxPolicyVersionId?: number | null
+  nativeAuthMode?: string | null
+  providerApiKeyEnvRef?: string | null
+  appliedRuntimeKind?: string
+  appliedSandboxPolicyVersionId?: number | null
+  runtimePending?: boolean
+
   agentName: string
   model: string
   memoryLimitMb: number
@@ -212,6 +227,10 @@ export interface AgentConfig {
 }
 
 export interface ConfigEdits {
+  runtimeKind?: string
+  sandboxPolicyVersionId?: string
+  nativeAuthMode?: string
+  providerApiKeyEnvRef?: string
   model: string
   memoryLimitMb: string
   isEnabled: boolean
@@ -346,7 +365,7 @@ export type StopStartState = 'idle' | 'confirming' | 'pending' | 'success' | 'er
 export type WfActionState = 'idle' | 'confirming-cancel' | 'confirming-restart' | 'confirming-terminate' | 'pending' | 'success' | 'error'
 export type CancelState = 'idle' | 'confirming' | 'cancelling' | 'success' | 'error'
 export type ConfigSaveState = 'idle' | 'saving' | 'success' | 'error'
-export type ActiveView = 'agents' | 'workflows' | 'instructions' | 'project-contexts' | 'output-styles' | 'wf-definitions' | 'alerts' | 'schedules' | 'namespaces' | 'repositories' | 'credentials' | 'memory' | 'epic-grants'
+export type ActiveView = 'sandbox-policies' | 'agents' | 'workflows' | 'instructions' | 'project-contexts' | 'output-styles' | 'wf-definitions' | 'alerts' | 'schedules' | 'namespaces' | 'repositories' | 'credentials' | 'memory' | 'epic-grants'
 
 // ── Memory types ──────────────────────────────────────────────────────────────
 

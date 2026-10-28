@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Helpers;
 using System.Text.Json;
 using Fleet.Orchestrator.Data;
 using Fleet.Shared;
@@ -73,6 +74,10 @@ public sealed class ContainerProvisioningService(
 
         if (agent is null)
             return ProvisionPreview.NotFound(agentName);
+
+        if (AgentPatchHelpers.RuntimeApplyFault(agent) is { } blocker)
+            return new ProvisionPreview(agentName, agent.ContainerName, "", new ContainerSpec("", 0, [], [], []), null,
+                [$"desired={agent.RuntimeKind}; applied={agent.AppliedRuntimeKind}; policy={agent.SandboxPolicyVersionId}; {blocker}"]);
 
         var envFile = config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env";
         var envValues = LoadEnvFile(envFile);
@@ -397,6 +402,9 @@ public sealed class ContainerProvisioningService(
         if (agent is null)
             return ProvisionResult.Fail(agentName, "agent not found in DB");
 
+        if (AgentPatchHelpers.RuntimeApplyFault(agent) is { } runtimeFault)
+            return ProvisionResult.Fail(agentName, runtimeFault);
+
         if (DescribePrimaryHumanFault() is { } priorityFault)
             return ProvisionResult.Fail(agentName, priorityFault);
         // #386: PV1, before Docker is called or any file is generated.
@@ -531,6 +539,8 @@ public sealed class ContainerProvisioningService(
         if (agent is null)
             return ProvisionResult.Fail(agentName, "agent not found in DB");
 
+        if (agent.AppliedRuntimeKind != "docker")
+            return ProvisionResult.Fail(agentName, "managed_runtime_unavailable");
         var existing = await docker.InspectContainerAsync(agent.ContainerName, ct);
         if (existing is null)
             return ProvisionResult.Fail(agentName,
@@ -566,6 +576,9 @@ public sealed class ContainerProvisioningService(
 
         if (DescribePrimaryHumanFault() is { } priorityFault)
             return ProvisionResult.Fail(agentName, priorityFault);
+
+        if (await DescribeManagedRuntimeFaultAsync(agentName, ct) is { } runtimeFault)
+            return ProvisionResult.Fail(agentName, runtimeFault);
 
         // #386: PV1 likewise keep the old container.
         if (await DescribeProviderPreflightFaultAsync(agentName, ct) is { } providerFault)
@@ -1766,6 +1779,14 @@ public sealed class ContainerProvisioningService(
     /// </summary>
     public static int GetEffectiveHostPort(Agent agent) => agent.HostPort ?? (8080 + agent.Id);
 
+    private async Task<string?> DescribeManagedRuntimeFaultAsync(string name, CancellationToken ct)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        var agent = await db.Agents.AsNoTracking().FirstOrDefaultAsync(a => a.Name == name, ct);
+        return agent is null ? "agent not found in DB" : AgentPatchHelpers.RuntimeApplyFault(agent);
+    }
+
     /// <summary>
     /// Returns the base URL for proxying HTTP requests to an agent.
     /// Prefers container-name routing on the Docker network when a container name is available.
@@ -1773,6 +1794,7 @@ public sealed class ContainerProvisioningService(
     /// </summary>
     public string GetAgentBaseUrl(Agent agent)
     {
+        if (agent.AppliedRuntimeKind != "docker") throw new InvalidOperationException("managed_runtime_unavailable");
         if (RuntimeHold.Denies(agent.Name)) throw new InvalidOperationException(StockRuntimeMutationHold.Reason);
 
         if (!string.IsNullOrWhiteSpace(agent.ContainerName))

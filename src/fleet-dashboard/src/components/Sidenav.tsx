@@ -60,6 +60,7 @@ export default function Sidenav({
         </button>
 
         <div className="sidenav-section-label" style={{ marginTop: 16 }}>Agent Config</div>
+        <button className={`sidenav-item${activeView === 'sandbox-policies' ? ' active' : ''}`} onClick={() => { onNavigate('sandbox-policies'); onNavClose() }}><span className="sidenav-item-label">Sandbox policies</span></button>
 
         <button
           className={`sidenav-item${activeView === 'instructions' ? ' active' : ''}`}

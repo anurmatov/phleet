@@ -14,6 +14,7 @@ public sealed class AgentLogsTool(AgentRegistry registry, DockerService docker, 
         [Description("Number of log lines to tail (default 100, max 500)")] int tail = 100)
     {
         if (runtimeHold.Denies(name)) return StockRuntimeMutationHold.Reason;
+        if (await runtimeHold.DescribeAppliedFaultAsync(name) is { } appliedFault) return appliedFault;
 
         tail = Math.Clamp(tail, 1, 500);
 

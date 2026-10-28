@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Helpers;
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
@@ -45,10 +46,23 @@ public sealed class AgentRegistry
             LastSeen      = DateTimeOffset.MinValue,
             RegisteredAt  = now,
             IsDbOnly      = true,
+            RuntimeKind = dbAgent.RuntimeKind,
+            AppliedRuntimeKind = dbAgent.AppliedRuntimeKind,
+            RuntimePending = AgentPatchHelpers.RuntimePending(dbAgent),
         };
         // Only add if not already present (heartbeat may have arrived first)
         if (_agents.TryAdd(dbAgent.Name, state))
             BroadcastIfChanged(state, force: true);
+        else UpdateRuntimeSelection(dbAgent);
+    }
+
+    public void UpdateRuntimeSelection(Agent agent)
+    {
+        if (!_agents.TryGetValue(agent.Name, out var state)) return;
+        state.RuntimeKind = agent.RuntimeKind;
+        state.AppliedRuntimeKind = agent.AppliedRuntimeKind;
+        state.RuntimePending = AgentPatchHelpers.RuntimePending(agent);
+        BroadcastIfChanged(state, force: true);
     }
 
     public void UpdateAgent(AgentHeartbeat heartbeat)

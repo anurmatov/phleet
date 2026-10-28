@@ -125,6 +125,11 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
     agent.LocalBaseUrl = localModel.LocalBaseUrl;
     agent.ContextWindow = localModel.ContextWindow;
 
+    if (await AgentPatchHelpers.ApplyRuntimeSelectionAsync(db, agent, body.RuntimeKind, body.SandboxPolicyVersionId,
+            body.NativeAuthMode, body.ProviderApiKeyEnvRef) is { } runtimeFault)
+        return Results.Json(new { error = runtimeFault.Code }, statusCode: runtimeFault.Status);
+    if (body.Provision != false && AgentPatchHelpers.RuntimeApplyFault(agent) is { } blocker)
+        return Results.Conflict(new { error = blocker });
     db.Agents.Add(agent);
     await db.SaveChangesAsync();
 
@@ -254,7 +259,7 @@ app.MapPost("/api/agents", async (HttpRequest request, IServiceScopeFactory scop
     }
 
     return Results.Created($"/api/agents/{name}", new { message = $"Agent '{name}' created (not provisioned — use POST /api/agents/{name}/reprovision when ready)", agentName = name });
-});
+}).AddEndpointFilter(SandboxPolicyEndpoints.DatabaseErrors);
 
         return app;
     }

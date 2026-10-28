@@ -14,6 +14,15 @@ public class Agent
     public required string ContainerName { get; set; }
     public bool IsEnabled { get; set; } = true;
 
+    // Desired selection only. Applied fields are owned by verified runtime apply, never a save/heartbeat.
+    [MaxLength(16)] public string RuntimeKind { get; set; } = "docker";
+    public int? SandboxPolicyVersionId { get; set; }
+    [MaxLength(16)] public string? NativeAuthMode { get; set; }
+    [MaxLength(128)] public string? ProviderApiKeyEnvRef { get; set; }
+    [MaxLength(16)] public string AppliedRuntimeKind { get; set; } = "docker";
+    public int? AppliedSandboxPolicyVersionId { get; set; }
+    public string? AppliedRuntimeBinding { get; set; }
+
     // Behavior
     public string PermissionMode { get; set; } = "acceptEdits";
     public int MaxTurns { get; set; } = 50;
@@ -567,4 +576,24 @@ public class CredentialsAudit
 
     [MaxLength(255)]
     public string Actor { get; set; } = "CEO";
+}
+
+public class SandboxPolicy
+{
+    public int Id { get; set; }
+    [MaxLength(100)] public required string Name { get; set; }
+    public List<SandboxPolicyVersion> Versions { get; set; } = [];
+}
+
+public class SandboxPolicyVersion
+{
+    public int Id { get; set; }
+    public int PolicyId { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    public SandboxPolicy Policy { get; set; } = null!;
+    public int Version { get; set; }
+    public required string Yaml { get; set; }
+    [MaxLength(64)] public required string Sha256 { get; set; }
+    public string ProviderProfileHashes { get; set; } = "{}";
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }

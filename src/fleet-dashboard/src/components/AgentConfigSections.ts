@@ -27,6 +27,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
   { id: 'general', label: 'General', fields: [{ key: 'isEnabled' }, { key: 'shortName' }] },
   {
     id: 'model', label: 'Model & runtime', fields: [
+      { key: 'runtimeKind' }, { key: 'sandboxPolicyVersionId' }, { key: 'nativeAuthMode' }, { key: 'providerApiKeyEnvRef' },
       { key: 'provider' },
       { key: 'model' },
       // LocalModelFields: runs on, server URL or server, model tag, context window.

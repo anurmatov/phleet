@@ -423,3 +423,12 @@ isolated-stack verification and rollout remain separate from source/CI evidence.
 |---|---|---|
 | `FLEET_EPIC_WATCHER_ENABLED` | `false` | `EpicDriverWatcher__Enabled` |
 | `FLEET_EPIC_WATCHER_INTERVAL_SECONDS` | `300` | `EpicDriverWatcher__IntervalSeconds` |
+
+### Save-only managed runtime selection (#491)
+
+`SandboxPolicyEndpoints` authenticates reads and writes with the operator token. Policies and
+versions are append-only; agent saves update desired selection only. Never write applied bindings
+from config or heartbeats, resolve a reference to a credential during save, or provision Docker as
+fallback for unavailable managed apply. Existing manual stock profiles/grants remain separate.
+The focused tests are `ManagedStockRuntime` and real-MySQL `ManagedStockMySql` (missing DB fails).
+See `docs/openshell-stock.md` for the explicitly supported authored YAML subset and rollback limits.

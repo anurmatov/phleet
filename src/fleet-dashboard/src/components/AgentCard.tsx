@@ -119,6 +119,7 @@ export default function AgentCard({
         <div className="agent-row-summary" onClick={onExpand}>
           <span className="agent-row-dot">{statusDot(agent.effectiveStatus)}</span>
           <span className="agent-row-name">{agent.agentName}</span>
+          {agent.runtimePending && <span className="agent-row-queue-badge" title={`Desired ${agent.runtimeKind}; applied ${agent.appliedRuntimeKind}`}>runtime pending</span>}
           {agent.model && <span className="agent-model agent-row-model">{agent.model}</span>}
           <span className="agent-row-task">
             {agent.currentTask

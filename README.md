@@ -136,12 +136,13 @@ The rest of this README is the plumbing — configuration, deployment, troublesh
 - `fleet-bridge` — RabbitMQ relay
 - `fleet-dashboard` — web UI at http://localhost:3700
 
-## Stock OpenShell integration (runtime unqualified)
+## Stock OpenShell integration (manual opt-in)
 
 The [manual stock whole-agent profile](docs/openshell-stock.md) connects outside enrollment,
 verified memory and broker control/completion to a non-root Codex daemon/native-client path.
-This draft has source fixtures, not an authorized whole-agent E2E or runtime acceptance;
-default provisioning stays unchanged and deployment/merge remain separately gated.
+It is a bounded, experimental profile, not automatic provisioning or a general rollout.
+Each deployment needs explicit operator enrollment and its own exact-build runtime qualification;
+CI and source fixtures do not establish that qualification.
 
 ## Platform support
 

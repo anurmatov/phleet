@@ -945,14 +945,22 @@ public sealed class StockOpenShellRuntime(
         return "staging_unconfirmed";
     }
 
-    /// <summary>Writes this boot's activation; the launcher consumes it and starts the daemon.</summary>
+    /// <summary>
+    /// The launcher writes the ready marker (its own PID) only after preparation succeeded, then execs
+    /// the daemon under that PID; readiness is that PID actually running the daemon.
+    /// </summary>
+    internal const string DaemonReadyScript =
+        "test ! -f \"$HOME/.fleet-staged\" && p=$(cat \"$HOME/.fleet-ready\") && [ -n \"$p\" ]"
+        + " && grep -qa 'Fleet.Agent.dll' \"/proc/$p/cmdline\" && ! grep -qa 'prepare-stock-native' \"/proc/$p/cmdline\"";
+
+    /// <summary>Writes this boot's activation; the launcher consumes it, prepares and starts the daemon.</summary>
     private async Task<string?> ActivateAsync(ManagedBinding binding, CancellationToken ct)
     {
         if (await ExecAsync(binding, "printf 1 > \"$HOME/.fleet-activate\"", ct) != 0) return "activation_unknown";
         var until = DateTimeOffset.UtcNow + StopSettle;
         while (DateTimeOffset.UtcNow < until)
         {
-            if (await ExecAsync(binding, "test ! -f \"$HOME/.fleet-staged\"", ct) == 0)
+            if (await ExecAsync(binding, DaemonReadyScript, ct) == 0)
                 return await VerifyIdentityAsync(binding, ct) is { } after ? after.Code : null;
             await Task.Delay(Poll, ct);
         }

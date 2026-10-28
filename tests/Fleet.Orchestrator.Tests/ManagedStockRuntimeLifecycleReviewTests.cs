@@ -27,4 +27,33 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         Assert.Equal("Ready", _t._cli.Sandboxes[binding.SandboxName].Phase);
         Assert.Equal("applied", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
     }
+
+    [Fact]
+    public async Task Start_whose_preparation_fails_after_activation_is_never_recorded_applied()
+    {
+        var binding = _t.Binding("fleet-agent1-22222222", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
+        // Activation consumed (no staged marker) but preparation failed: no ready marker, no daemon.
+        _t._cli.OnExec = script => script.Contains(".fleet-ready") ? 1 : 0;
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+
+        var result = await _t.Runtime().StartAsync("agent1", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal("activation_unconfirmed", result.Code);
+        Assert.NotEqual("applied", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+        Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+    }
+
+    [Fact]
+    public async Task Apply_records_applied_only_after_the_daemon_ready_check()
+    {
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+        _t._cli.OnExec = script => script == StockOpenShellRuntime.DaemonReadyScript ? 1 : 0;
+
+        var result = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.False(result.Ok);
+        Assert.NotEqual("applied", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+    }
 }

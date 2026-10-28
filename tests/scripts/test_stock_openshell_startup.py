@@ -28,6 +28,50 @@ class StockStartupTests(unittest.TestCase):
                 (root / "calls").read_text().splitlines())
             self.assertEqual("", result.stdout)
 
+    def _staged_boot(self, prepare_ok):
+        script = (ROOT / "stock-entrypoint.sh").read_text()
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory)
+        root = Path(directory)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "id").write_text("#!/bin/sh\nprintf 10001")
+        (bin_dir / "dotnet").write_text(
+            '#!/bin/sh\ncase "$*" in *--prepare-stock-native*)\n'
+            '  [ -f "$HOME/.fleet-ready" ] && echo early >> "$MARKER"\n'
+            + ('  printf "%s" "$HOME"; exit 0;;\n' if prepare_ok else '  exit 1;;\n') +
+            'esac\nstaged=no; [ -f "$HOME/.fleet-staged" ] && staged=yes\n'
+            'printf "daemon %s ready=%s staged=%s\\n" "$$" "$(cat "$HOME/.fleet-ready")" "$staged" >> "$MARKER"\n')
+        (bin_dir / "id").chmod(0o700)
+        (bin_dir / "dotnet").chmod(0o700)
+        (root / ".fleet-ready").write_text("stale")
+        process = subprocess.Popen(["/bin/bash", "--noprofile", "--norc", "-c", script],
+            env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": directory, "MARKER": str(root / "calls"),
+                 "FLEET_STOCK_STAGED": "1", "FLEET_STOCK_STAGE_SECONDS": "5"},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for _ in range(100):
+            if (root / ".fleet-staged").exists() and not (root / ".fleet-ready").exists():
+                break
+            subprocess.run(["sleep", "0.05"])
+        (root / ".fleet-activate").write_text("1")
+        process.communicate(timeout=10)
+        return process.returncode, root
+
+    def test_staged_boot_acknowledges_readiness_only_after_preparation(self):
+        code, root = self._staged_boot(prepare_ok=True)
+        self.assertEqual(0, code)
+        lines = (root / "calls").read_text().splitlines()
+        self.assertEqual(1, len(lines))
+        pid = lines[0].split()[1]
+        self.assertEqual(f"daemon {pid} ready={pid} staged=no", lines[0])
+
+    def test_failed_staged_preparation_never_acknowledges_readiness(self):
+        code, root = self._staged_boot(prepare_ok=False)
+        self.assertNotEqual(0, code)
+        self.assertFalse((root / ".fleet-ready").exists())
+        self.assertTrue((root / ".fleet-staged").exists())
+        self.assertFalse((root / "calls").exists())
+
     def test_actual_preparation_command_cannot_fall_back_to_ordinary_start(self):
         assembly = ROOT / "src/Fleet.Agent/bin/Release/net10.0/Fleet.Agent.dll"
         self.assertTrue(assembly.is_file(), "build Release Fleet.Agent first")

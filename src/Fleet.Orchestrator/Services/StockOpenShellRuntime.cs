@@ -1037,8 +1037,8 @@ public sealed class StockOpenShellRuntime(
         if (await LifecycleAsync("stop", binding, ct) is { } fault) errors.Add(fault);
         else if (await QuiescentAsync(binding, ct) is { } quiet) errors.Add(quiet);
         if (errors.Count > 0) return Hold(record, 502, "stop_unresolved", [.. errors]);
-        // A successful Stop never clears an earlier unresolved hold or its errors.
-        return record.State == "needs_attention" || record.Candidate is not null
+        // A successful Stop never clears an earlier unresolved hold or its errors, nor a revoke.
+        return record.State is "needs_attention" or "revoked" || record.Candidate is not null
             ? (record, null, null, Result.Done("stopped_held"))
             : (record with { State = "stopped", Errors = [] }, null, null, Result.Done("stopped"));
     }

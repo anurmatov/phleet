@@ -71,4 +71,21 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         Assert.NotEmpty(lifecycle);
         Assert.Equal("stop", lifecycle[0]);
     }
+
+    [Fact]
+    public async Task Stop_after_revoke_keeps_the_binding_revoked_so_start_refuses()
+    {
+        var binding = _t.Binding("fleet-agent1-44444444", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        var runtime = _t.Runtime();
+        Assert.True((await runtime.RevokeAsync("agent1", default)).Ok);
+
+        await runtime.StopAsync("agent1", default);
+        var start = await runtime.StartAsync("agent1", default);
+
+        Assert.Equal("revoked", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+        Assert.Equal((409, "revoked"), (start.Status, start.Code));
+        Assert.DoesNotContain(_t._cli.Calls, c => Verb(c, "start"));
+    }
 }

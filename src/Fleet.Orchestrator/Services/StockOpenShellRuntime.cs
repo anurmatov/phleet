@@ -982,6 +982,11 @@ public sealed class StockOpenShellRuntime(
         if (record.State is "needs_attention" or "revoked" || record.Candidate is not null)
             return (record, null, null, Result.Refused(409, record.Candidate is not null ? "unresolved_candidate" : record.State, record.Errors));
         if (await GenerationFaultAsync(binding, ct) is { } generation) return await HoldForGenerationAsync(agent, record, generation, ct);
+        // A repeat Start on an applied, running binding never re-stages or stops it: success when
+        // Ready, otherwise a mutation-free refusal.
+        if (record.State == "applied" && await GetAsync(binding.SandboxName, ct) is { } live && live.Id == binding.SandboxId
+            && live.Phase is not ("Stopped" or "Completed" or "Error"))
+            return (record, null, null, live.Phase == "Ready" ? Result.Done("started") : Result.Refused(409, "sandbox_not_stopped"));
         // Every boot is staged; the daemon starts only with this boot's activation.
         if ((await StageAsync(binding, ct) ?? await ActivateAsync(binding, ct)) is { } fault)
             return await HoldStoppedAsync(record, binding, fault, [], ct);

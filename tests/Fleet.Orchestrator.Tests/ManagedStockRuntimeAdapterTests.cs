@@ -21,10 +21,10 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     private const string BotToken = "424242:synthetic-bot-secret-never-in-argv";
     private const string IngestToken = "cj1.ingest.agent1.synthetic-journal-mac-never-in-argv";
     private readonly string _dir = Directory.CreateTempSubdirectory("managed-stock-").FullName;
-    private readonly FakeCli _cli = new();
-    private readonly FakeStore _store = new();
-    private readonly FakeHost _host = new();
-    private readonly FakeBroker _broker = new();
+    internal readonly FakeCli _cli = new();
+    internal readonly FakeStore _store = new();
+    internal readonly FakeHost _host = new();
+    internal readonly FakeBroker _broker = new();
 
     public void Dispose() => Directory.Delete(_dir, recursive: true);
 
@@ -934,7 +934,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     private string _generatedSettings = "{\"Agent\":{\"Name\":\"agent1\"}}";
     private string DockerWorkspaceDir => Path.Combine(_dir, "docker-workspace");
 
-    private StockOpenShellRuntime Runtime(Func<string, Task<bool>>? dockerStop = null)
+    internal StockOpenShellRuntime Runtime(Func<string, Task<bool>>? dockerStop = null)
     {
         Directory.CreateDirectory(_dir);
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(_dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
@@ -986,7 +986,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         return new ConfigurationBuilder().AddInMemoryCollection(values).Build();
     }
 
-    private Agent ManagedAgent(string desired, string applied, ManagedRecord? record = null)
+    internal Agent ManagedAgent(string desired, string applied, ManagedRecord? record = null)
     {
         var agent = ManagedStockRuntimeTests.Agent();
         agent.ShortName = "agent1";
@@ -1002,7 +1002,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         return agent;
     }
 
-    private ManagedBinding Binding(string name, Guid epoch) =>
+    internal ManagedBinding Binding(string name, Guid epoch) =>
         new(name, Guid.NewGuid().ToString(), epoch, "stock-agent:synthetic", 1, new string('b', 64), "api_key",
             "SYNTHETIC_API_KEY", "fleet-agent1-openai", _host.Generation);
 
@@ -1016,7 +1016,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
 
     internal sealed record Call(List<string> Args, IReadOnlyDictionary<string, string>? SecretEnv);
 
-    private sealed class FakeCli : IStockCli
+    internal sealed class FakeCli : IStockCli
     {
         public readonly List<Call> Calls = [];
         public readonly Dictionary<string, (string Id, string Phase)> Sandboxes = new();
@@ -1043,7 +1043,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
                 ("sandbox", "stop") => Phase(Name(2), "Stopped"),
                 ("sandbox", "download") => Transfer(Name(2), () => Download(args[4])),
                 ("sandbox", "upload") => Transfer(Name(2), () => { Uploads.Add((args[4], File.Exists(args[3]) ? File.ReadAllText(args[3]) : null)); return new(0, ""); }),
-                ("sandbox", "exec") => Transfer(args[3], () => new(0, "")),
+                ("sandbox", "exec") => Transfer(args[3], () => new(OnExec?.Invoke(args[^1]) ?? 0, "")),
                 ("sandbox", "list") => ListFails ? new(1, "") : new(0, "[]"),
                 ("profile", "export") => new(0, ProfileYaml),
                 _ => new(0, ""),
@@ -1064,6 +1064,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         public readonly List<(string Remote, string? Content)> Uploads = [];
         public bool SwapOnLogs;
         public Action? OnCreate;
+        public Func<string, int>? OnExec;
 
         // Pinned SSH admission accepts transfers only for a running (Ready) sandbox.
         private StockCliResult Transfer(string name, Func<StockCliResult> action) =>
@@ -1091,7 +1092,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         }
     }
 
-    private sealed class FakeStore : IManagedBindingStore
+    internal sealed class FakeStore : IManagedBindingStore
     {
         private readonly List<Agent> _agents = [];
         public bool RejectNextSwap;
@@ -1117,7 +1118,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         }
     }
 
-    private sealed class FakeHost : IStockHostView
+    internal sealed class FakeHost : IStockHostView
     {
         public string Generation = "gateway-1@start";
         public Task<string?> GatewayGenerationAsync(CancellationToken ct) => Task.FromResult<string?>(Generation);
@@ -1127,7 +1128,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         public Task<IReadOnlyList<string>?> DockerContainerStatesAsync(string containerName, CancellationToken ct) => Task.FromResult(DockerStates);
     }
 
-    private sealed class FakeBroker : HttpMessageHandler
+    internal sealed class FakeBroker : HttpMessageHandler
     {
         public readonly List<string> Puts = [];
         public readonly List<string> Deletes = [];
@@ -1166,7 +1167,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         }
     }
 
-    private sealed class FakeCredentials : ICredentialsReader
+    internal sealed class FakeCredentials : ICredentialsReader
     {
         public readonly Dictionary<string, string> Extra = new();
         public string? Get(string key) => key switch

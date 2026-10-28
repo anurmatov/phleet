@@ -52,9 +52,15 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.Equal(_cli.Sandboxes[record.Applied!.SandboxName].Id, record.Applied.SandboxId);
 
         var verbs = _cli.Calls.Select(c => string.Join(' ', c.Args.Take(2))).ToList();
-        Assert.True(verbs.IndexOf("sandbox create") < verbs.IndexOf("sandbox start"));
-        Assert.Single(verbs, v => v == "sandbox start");
-        Assert.Equal(0, putsAtCreate); // broker users exist only after the refused allocation
+        Assert.DoesNotContain("sandbox start", verbs); // created straight into the staged launcher
+        Assert.True(verbs.IndexOf("sandbox create") < verbs.IndexOf("sandbox upload"));
+        Assert.Equal(0, putsAtCreate); // broker users exist only after staging
+        Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "exec"]) && c.Args[^1].Contains(".fleet-activate"));
+        // N5/F15: the guest gets the active enrollment bound to the exact UUID/epoch, accepted by the real loader.
+        var guestFile = Path.Combine(_dir, "guest-enrollment.json");
+        File.WriteAllText(guestFile, _cli.Uploads.Last(u => u.Remote == "/trust/enrollment.json").Content!);
+        var loaded = Fleet.Shared.Security.StockEnrollmentAuthority.Load(guestFile);
+        Assert.Equal((record.Applied!.SandboxId, record.Applied.Epoch), (loaded.SandboxId, loaded.Epoch));
         var create = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
         Assert.Contains("--no-auto-providers", create.Args);
         Assert.Equal("never", create.Args[create.Args.IndexOf("--restart-policy") + 1]);
@@ -345,7 +351,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.Contains(_cli.Calls, c => c.Args.Take(3).SequenceEqual(["policy", "set", binding.SandboxName]));
         Assert.Single(_cli.Calls, c => c.Args.SequenceEqual(["sandbox", "start", binding.SandboxName]));
         var verbs = _cli.Calls.Select(c => string.Join(' ', c.Args.Take(3))).ToList();
-        Assert.True(verbs.IndexOf("sandbox upload " + binding.SandboxName) < verbs.IndexOf("sandbox stop " + binding.SandboxName));
+        Assert.True(verbs.IndexOf("sandbox stop " + binding.SandboxName) < verbs.IndexOf("sandbox upload " + binding.SandboxName)); // N6: writers quiesced first
         Assert.Contains("sandbox provider attach", verbs); // provider re-attached after the reuse revocation
     }
 
@@ -362,10 +368,12 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
 
         Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
         var create = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
-        var staged = create.Args.Single(a => a.EndsWith(":/workspace", StringComparison.Ordinal))[..^":/workspace".Length];
+        var staged = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && c.Args[4] == "/workspace").Args[3];
         Assert.True(File.Exists(Path.Combine(staged, "marker.txt")));
         Assert.False(Directory.Exists(Path.Combine(staged, ".generated")));
-        Assert.DoesNotContain("--", create.Args); // canonical image entrypoint, no trailing command with --upload
+        Assert.Equal(["--", "/app/stock-entrypoint.sh"], create.Args.TakeLast(2)); // explicit canonical launcher
+        Assert.Contains("FLEET_STOCK_STAGED=1", create.Args);
+        Assert.DoesNotContain("--upload", create.Args);
         Assert.False(Directory.Exists(Path.Combine(staged, "codex")));
 
         _store.Get("agent1").RuntimeKind = "docker";
@@ -483,18 +491,22 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     }
 
     [Fact]
-    public async Task Stopped_sandbox_is_not_reprovisioned_or_switched_through_ssh_transfers()
+    public async Task Stopped_sandbox_reprovisions_and_rolls_back_through_staging_without_an_extra_daemon_start()
     {
         var binding = Binding("fleet-agent1-55555555", Guid.NewGuid());
         _cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
         var agent = _store.Add(ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
         var runtime = Runtime();
 
-        Assert.Equal("managed_reprovision_requires_running", (await runtime.ApplyAsync("agent1", default)).Code);
+        Assert.Equal("applied_openshell", (await runtime.ApplyAsync("agent1", default)).Code);
         agent.RuntimeKind = "docker";
-        Assert.Equal("workspace_transfer_requires_running", (await runtime.ApplyAsync("agent1", default)).Code);
-        Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) || c.Args.Take(2).SequenceEqual(["sandbox", "download"]));
-        Assert.Equal("openshell", _store.Get("agent1").AppliedRuntimeKind);
+        Assert.Equal("applied_docker", (await runtime.ApplyAsync("agent1", default)).Code);
+
+        Assert.Contains(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "download"]));
+        Assert.Equal("docker", _store.Get("agent1").AppliedRuntimeKind);
+        // Only the reprovision activated the daemon; the Docker rollback staged without launching it.
+        Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "exec"]) && c.Args[^1].Contains(".fleet-activate"));
+        Assert.Equal("Stopped", _cli.Sandboxes[binding.SandboxName].Phase);
     }
 
     [Fact]
@@ -531,6 +543,23 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
 
         Assert.True(run.TimedOut);
         Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(1.5), (DateTime.UtcNow - started).ToString());
+    }
+
+    [Fact]
+    public async Task Failed_cut_still_attempts_a_bounded_stop_and_keeps_every_error()
+    {
+        var binding = Binding("fleet-agent1-66666666", Guid.NewGuid());
+        _cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _store.Add(ManagedAgent(desired: "docker", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        _broker.FailDeletes = true;
+
+        var result = await Runtime().ApplyAsync("agent1", default);
+
+        Assert.Equal("openshell_to_docker_unresolved", result.Code);
+        Assert.Contains(result.Errors, e => e.StartsWith("broker:", StringComparison.Ordinal));
+        Assert.Contains(_cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+        Assert.Equal("Stopped", _cli.Sandboxes[binding.SandboxName].Phase);
+        Assert.Empty(_dockerProvisions);
     }
 
     // ── fixtures ───────────────────────────────────────────────────────────
@@ -644,7 +673,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
                 ("sandbox", "start") => Phase(Name(2), "Ready"),
                 ("sandbox", "stop") => Phase(Name(2), "Stopped"),
                 ("sandbox", "download") => Transfer(Name(2), () => Download(args[4])),
-                ("sandbox", "upload") => Transfer(Name(2), () => new(0, "")),
+                ("sandbox", "upload") => Transfer(Name(2), () => { Uploads.Add((args[4], File.Exists(args[3]) ? File.ReadAllText(args[3]) : null)); return new(0, ""); }),
+                ("sandbox", "exec") => Transfer(args[3], () => new(0, "")),
                 ("sandbox", "list") => ListFails ? new(1, "") : new(0, "[]"),
                 ("profile", "export") => new(0, ProfileYaml),
                 _ => new(0, ""),
@@ -657,11 +687,12 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             if (args.Contains("--upload") && args.Contains("--")) return new(2, "");
             OnCreate?.Invoke();
             var name = args[args.ToList().IndexOf("--name") + 1];
-            Sandboxes[name] = (Guid.NewGuid().ToString(), "Error"); // the revoked allocation refused before intake
+            Sandboxes[name] = (Guid.NewGuid().ToString(), "Ready"); // the explicit launcher waits, staged, without a daemon
             return CreateTimesOut ? new(-1, "", TimedOut: true) : new(0, "");
         }
 
         public bool ListFails;
+        public readonly List<(string Remote, string? Content)> Uploads = [];
         public bool SwapOnLogs;
         public Action? OnCreate;
 

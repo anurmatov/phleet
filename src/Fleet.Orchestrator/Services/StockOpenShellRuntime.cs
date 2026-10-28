@@ -578,14 +578,15 @@ public sealed class StockOpenShellRuntime(
     {
         if (record.Applied is { } applied)
         {
-            // Stock SSH transfers need a running sandbox: cut it off (admission, broker, provider) while it
-            // still runs, copy the workspace out, then stop and verify quiescence.
-            if (await GetAsync(applied.SandboxName, ct) is not { Phase: "Ready" }) return Hold(record, 409, "workspace_transfer_requires_running");
-            var cut = await RevokeFanoutAsync(agent.Name, record, ct, stop: false);
-            if (cut.Count > 0) return Hold(record, 409, "revoke_unresolved", [.. cut]);
-            if (await DownloadWorkspaceAsync(agent, applied, DockerWorkspaceDir(agent), ct) is { } workspace) return Hold(record, 502, workspace);
-            var stopped = await LifecycleAsync("stop", applied, ct) ?? await QuiescentAsync(applied, ct);
-            if (stopped is not null) return Hold(record, 502, "stop_unresolved", stopped);
+            // Cut off (unless already revoked), quiesce every writer, start into staging (no daemon),
+            // copy the workspace out, then stop and verify. Any failure still attempts a bounded Stop.
+            var errors = new List<string>();
+            if (record.State != "revoked") errors.AddRange(await RevokeFanoutAsync(agent.Name, record, ct, stop: false));
+            if (errors.Count == 0 && await StopVerifiedAsync(applied, ct) is { } quiet) errors.Add(quiet);
+            if (errors.Count == 0 && await StageAsync(applied, ct) is { } staged) errors.Add(staged);
+            if (errors.Count == 0 && await DownloadWorkspaceAsync(agent, applied, DockerWorkspaceDir(agent), ct) is { } workspace) errors.Add(workspace);
+            if (await StopVerifiedAsync(applied, ct) is { } stopped) errors.Add(stopped);
+            if (errors.Count > 0) return Hold(record, 502, "openshell_to_docker_unresolved", [.. errors]);
             record = record with { State = "revoked" };
             await checkpoint(record);
         }
@@ -609,16 +610,14 @@ public sealed class StockOpenShellRuntime(
         if (generation is null) return (record, null, null, Result.Refused(503, "gateway_unavailable"));
         var image = config["StockOpenShell:AgentImage"]!;
 
-        // Reprovision keeps the verified running sandbox, so its persistent workspace survives the new epoch.
+        // Reprovision and stopped/revoked rollback keep the verified sandbox and its persistent workspace.
         var reuse = agent.AppliedRuntimeKind == "openshell" && record.Applied is not null;
         if (reuse)
         {
             var old = record.Applied!;
             if (old.GatewayGeneration != generation) return (record, null, null, Result.Refused(409, "gateway_generation_changed"));
             if (old.Image != image) return (record, null, null, Result.Refused(409, "managed_image_change_requires_revoke"));
-            if (await GetAsync(old.SandboxName, ct) is not { } current || current.Id != old.SandboxId)
-                return (record, null, null, Result.Refused(409, "sandbox_identity_changed"));
-            if (current.Phase != "Ready") return (record, null, null, Result.Refused(409, "managed_reprovision_requires_running"));
+            if (await VerifyIdentityAsync(old, ct) is { } identity) return (record, null, null, identity);
         }
         var epoch = Guid.NewGuid();
         var candidate = reuse
@@ -640,32 +639,16 @@ public sealed class StockOpenShellRuntime(
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or JsonException)
         { return Hold(applying, 500, "managed_files_failed"); }
-
         var key = credentials.Get(agent.ProviderApiKeyEnvRef!);
         if (string.IsNullOrEmpty(key)) return Hold(applying, 409, "provider_key_reference_unresolved");
         var secret = new Dictionary<string, string> { ["OPENAI_API_KEY"] = key };
 
         if (reuse)
         {
-            // Cut the running sandbox off from the old epoch, stage the new inputs while SSH admission
-            // still accepts it, then stop and verify before policy, provider and activation.
-            var cut = await RevokeFanoutAsync(agent.Name, record, ct, stop: false);
-            if (cut.Count > 0) return Hold(applying, 409, "revoke_unresolved", [.. cut]);
-            foreach (var (local, remote) in new[] { ("app", "/app"), ("trust", "/trust") })
-            {
-                if (await VerifyIdentityAsync(candidate, ct) is { } identity) return Hold(applying, 409, identity.Code);
-                var upload = await cli.RunAsync(["sandbox", "upload", candidate.SandboxName, Path.Combine(bundle, local), remote], null, LegTimeout, ct);
-                if (upload.ExitCode != 0 || upload.TimedOut) return Hold(applying, 502, "input_upload_unknown");
-            }
-            if ((await LifecycleAsync("stop", candidate, ct) ?? await QuiescentAsync(candidate, ct)) is { } stopped) return Hold(applying, 502, stopped);
-            if (record.Applied!.PolicyVersionId != policy.Id)
-            {
-                var set = await cli.RunAsync(["policy", "set", candidate.SandboxName, "--policy", Path.Combine(epochDir, "policy.yaml"), "--wait"], null, LegTimeout, ct);
-                if (set.ExitCode != 0 || set.TimedOut) return Hold(applying, 502, "policy_update_unknown");
-            }
-            if (await EnsureProviderAsync(candidate.Provider, secret, ct) is { } providerFault) return Hold(applying, 502, providerFault);
-            var attach = await cli.RunAsync(["sandbox", "provider", "attach", candidate.SandboxName, candidate.Provider], null, LegTimeout, ct);
-            if (attach.ExitCode != 0 || attach.TimedOut) return Hold(applying, 502, "provider_attach_unknown");
+            // Cut the old epoch (unless already revoked), then quiesce every writer before any input changes.
+            var cut = record.State == "revoked" ? [] : await RevokeFanoutAsync(agent.Name, record, ct, stop: false);
+            if (cut.Count > 0) return await HoldStoppedAsync(applying, candidate, "revoke_unresolved", cut, ct);
+            if (await StopVerifiedAsync(candidate, ct) is { } quiet) return await HoldStoppedAsync(applying, candidate, quiet, [], ct);
         }
         else
         {
@@ -676,14 +659,12 @@ public sealed class StockOpenShellRuntime(
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return Hold(applying, 500, "workspace_stage_failed"); }
             }
             if (await EnsureProviderAsync(candidate.Provider, secret, ct) is { } providerFault) return Hold(applying, 502, providerFault);
-            // Pinned contract: uploads with the image's canonical entrypoint, no trailing command. The
-            // workload refuses intake (its broker users do not exist yet and admission is revoked).
+            // Pinned contract: an explicit canonical launcher, staged; no --upload with a trailing command.
             var create = await cli.RunAsync([
                 "sandbox", "create", "--name", candidate.SandboxName, "--from", candidate.Image,
                 "--policy", Path.Combine(epochDir, "policy.yaml"), "--provider", candidate.Provider, "--no-auto-providers",
                 "--restart-policy", "never", "--label", "fleet.agent=" + agent.Name, "--label", "fleet.epoch=" + epoch.ToString("N"),
-                "--upload", Path.Combine(bundle, "app") + ":/app", "--upload", Path.Combine(bundle, "trust") + ":/trust",
-                "--upload", Path.Combine(bundle, "workspace") + ":/workspace", "--detach"], null, TimeSpan.FromMinutes(5), ct);
+                "--env", "FLEET_STOCK_STAGED=1", "--detach", "--", Entrypoint], null, TimeSpan.FromMinutes(5), ct);
             // Whatever create reported, record any sandbox that now exists so cleanup keeps its identity.
             if (await GetAsync(candidate.SandboxName, ct) is { } made)
             {
@@ -692,16 +673,41 @@ public sealed class StockOpenShellRuntime(
                 await checkpoint(applying);
             }
             if (create.ExitCode != 0 || create.TimedOut || string.IsNullOrEmpty(candidate.SandboxId))
-                return Hold(applying, 502, "sandbox_create_unknown");
-            if (await SettleStoppedAsync(candidate, ct) is { } settle) return Hold(applying, 502, settle);
+                return string.IsNullOrEmpty(candidate.SandboxId) ? Hold(applying, 502, "sandbox_create_unknown")
+                    : await HoldStoppedAsync(applying, candidate, "sandbox_create_unknown", [], ct);
         }
 
-        // Broker users exist only now, with the passwords staged in the bundle; then bind the UUID and start once.
+        // Staging: the launcher waits without a daemon, so transfers race no native task or file writer.
+        if (await StageAsync(candidate, ct) is { } stage) return await HoldStoppedAsync(applying, candidate, stage, [], ct);
+        foreach (var (local, remote) in reuse ? new[] { ("app", "/app"), ("trust", "/trust") }
+                     : [("app", "/app"), ("trust", "/trust"), ("workspace", "/workspace")])
+            if (await UploadAsync(candidate, Path.Combine(bundle, local), remote, ct) is { } upload)
+                return await HoldStoppedAsync(applying, candidate, upload, [], ct);
+        if (reuse)
+        {
+            if (record.Applied!.PolicyVersionId != policy.Id)
+            {
+                var set = await cli.RunAsync(["policy", "set", candidate.SandboxName, "--policy", Path.Combine(epochDir, "policy.yaml"), "--wait"], null, LegTimeout, ct);
+                if (set.ExitCode != 0 || set.TimedOut) return await HoldStoppedAsync(applying, candidate, "policy_update_unknown", [], ct);
+            }
+            if (await EnsureProviderAsync(candidate.Provider, secret, ct) is { } providerFault) return await HoldStoppedAsync(applying, candidate, providerFault, [], ct);
+            var attach = await cli.RunAsync(["sandbox", "provider", "attach", candidate.SandboxName, candidate.Provider], null, LegTimeout, ct);
+            if (attach.ExitCode != 0 || attach.TimedOut) return await HoldStoppedAsync(applying, candidate, "provider_attach_unknown", [], ct);
+        }
+
+        // Broker users exist only now; then the outside and guest enrollments carry the exact UUID/epoch.
         var created = await broker.CreateEpochAsync(epoch, agent.ShortName, ct, passwords);
-        if (!created.Ok) return Hold(applying, 502, created.Code!, [.. created.OwnedPartials]);
-        try { WriteRecord(AuthorityPath(agent.Name), Authority(template, agent.Name, candidate.SandboxId, epoch, policy.Sha256, "active")); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return Hold(applying, 500, "managed_files_failed"); }
-        if (await LifecycleAsync("start", candidate, ct) is { } start) return Hold(applying, 502, start);
+        if (!created.Ok) return await HoldStoppedAsync(applying, candidate, created.Code!, [.. created.OwnedPartials], ct);
+        try
+        {
+            var active = Authority(template, agent.Name, candidate.SandboxId, epoch, policy.Sha256, "active");
+            WriteRecord(AuthorityPath(agent.Name), active);
+            WriteRecord(Path.Combine(bundle, "trust", "enrollment.json"), active);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return await HoldStoppedAsync(applying, candidate, "managed_files_failed", [], ct); }
+        if (await UploadAsync(candidate, Path.Combine(bundle, "trust", "enrollment.json"), "/trust/enrollment.json", ct) is { } enrollment)
+            return await HoldStoppedAsync(applying, candidate, enrollment, [], ct);
+        if (await ActivateAsync(candidate, ct) is { } activate) return await HoldStoppedAsync(applying, candidate, activate, [], ct);
         return (record with { State = "applied", Applied = candidate, Candidate = null, Errors = [] }, "openshell", policy.Id, Result.Done("applied_openshell"));
     }
 
@@ -714,6 +720,70 @@ public sealed class StockOpenShellRuntime(
         return run.ExitCode == 0 && !run.TimedOut ? null : "provider_setup_unknown";
     }
 
+    /// <summary>Any failure after staging still attempts one bounded, verified Stop and keeps every error.</summary>
+    private async Task<(ManagedRecord, string?, int?, Result)> HoldStoppedAsync(ManagedRecord record, ManagedBinding binding,
+        string code, IReadOnlyList<string> errors, CancellationToken ct)
+    {
+        var all = errors.ToList();
+        if (await StopVerifiedAsync(binding, ct) is { } stop) all.Add("stop:" + stop);
+        return Hold(record, 502, code, [.. all]);
+    }
+
+    /// <summary>Stop if needed, then confirm no workload/native-supervisor container remains.</summary>
+    private async Task<string?> StopVerifiedAsync(ManagedBinding binding, CancellationToken ct)
+    {
+        var sandbox = await GetAsync(binding.SandboxName, ct);
+        if (sandbox is null) return "sandbox_unobservable";
+        if (sandbox.Value.Id != binding.SandboxId) return "sandbox_identity_changed";
+        if (sandbox.Value.Phase is not ("Stopped" or "Completed" or "Error") && await LifecycleAsync("stop", binding, ct) is { } stop) return stop;
+        return await QuiescentAsync(binding, ct);
+    }
+
+    /// <summary>Start into the staged launcher (no daemon) and wait until it reports staged.</summary>
+    private async Task<string?> StageAsync(ManagedBinding binding, CancellationToken ct)
+    {
+        var sandbox = await GetAsync(binding.SandboxName, ct);
+        if (sandbox is null) return "sandbox_unobservable";
+        if (sandbox.Value.Id != binding.SandboxId) return "sandbox_identity_changed";
+        // A just-created sandbox already runs the staged launcher; a stopped one boots into it.
+        if (sandbox.Value.Phase is "Stopped" or "Completed" or "Error" && await LifecycleAsync("start", binding, ct) is { } start) return start;
+        var until = DateTimeOffset.UtcNow + StopSettle;
+        while (DateTimeOffset.UtcNow < until)
+        {
+            if (await ExecAsync(binding, "test -f \"$HOME/.fleet-staged\"", ct) == 0) return null;
+            await Task.Delay(Poll, ct);
+        }
+        return "staging_unconfirmed";
+    }
+
+    /// <summary>Writes this boot's activation; the launcher consumes it and starts the daemon.</summary>
+    private async Task<string?> ActivateAsync(ManagedBinding binding, CancellationToken ct)
+    {
+        if (await ExecAsync(binding, "printf 1 > \"$HOME/.fleet-activate\"", ct) != 0) return "activation_unknown";
+        var until = DateTimeOffset.UtcNow + StopSettle;
+        while (DateTimeOffset.UtcNow < until)
+        {
+            if (await ExecAsync(binding, "test ! -f \"$HOME/.fleet-staged\"", ct) == 0)
+                return await VerifyIdentityAsync(binding, ct) is { } after ? after.Code : null;
+            await Task.Delay(Poll, ct);
+        }
+        return "activation_unconfirmed";
+    }
+
+    private async Task<int> ExecAsync(ManagedBinding binding, string script, CancellationToken ct)
+    {
+        if (await VerifyIdentityAsync(binding, ct) is not null) return -1;
+        var run = await cli.RunAsync(["sandbox", "exec", "-n", binding.SandboxName, "--", "sh", "-c", script], null, LegTimeout, ct);
+        return run.TimedOut ? -1 : run.ExitCode;
+    }
+
+    private async Task<string?> UploadAsync(ManagedBinding binding, string local, string remote, CancellationToken ct)
+    {
+        if (await VerifyIdentityAsync(binding, ct) is { } identity) return identity.Code;
+        var run = await cli.RunAsync(["sandbox", "upload", binding.SandboxName, local, remote], null, LegTimeout, ct);
+        return run.ExitCode == 0 && !run.TimedOut ? null : "input_upload_unknown";
+    }
+
     private async Task<(ManagedRecord, string?, int?, Result)> StartCoreAsync(Agent agent, ManagedRecord record,
         Func<ManagedRecord, Task> checkpoint, CancellationToken ct)
     {
@@ -723,7 +793,9 @@ public sealed class StockOpenShellRuntime(
         if (record.State is "needs_attention" or "revoked" || record.Candidate is not null)
             return (record, null, null, Result.Refused(409, record.Candidate is not null ? "unresolved_candidate" : record.State, record.Errors));
         if (await GenerationFaultAsync(binding, ct) is { } generation) return await HoldForGenerationAsync(agent, record, generation, ct);
-        if (await LifecycleAsync("start", binding, ct) is { } fault) return Hold(record, 502, fault);
+        // Every boot is staged; the daemon starts only with this boot's activation.
+        if ((await StageAsync(binding, ct) ?? await ActivateAsync(binding, ct)) is { } fault)
+            return await HoldStoppedAsync(record, binding, fault, [], ct);
         return (record with { State = "applied", Errors = [] }, null, null, Result.Done("started"));
     }
 

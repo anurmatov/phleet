@@ -86,10 +86,10 @@ public sealed class AcceptanceDefinitionTests
         var steps = WorkflowDefinitionValidator.Walk(SeedHarness.Parse("UwePrImplementationWorkflow")).ToList();
         var loops = steps.OfType<LoopStep>().ToDictionary(x => x.Name!);
         Assert.Equal(60, loops["outer_loop"].MaxIterations);
-        Assert.Equal(5, loops["consensus_loop"].MaxIterations);
+        Assert.Equal(50, loops["consensus_loop"].MaxIterations);
         Assert.Equal(12, loops["ci_wait_loop"].MaxIterations);
         Assert.Equal(16, loops["cleanup_wait_loop"].MaxIterations);
-        foreach (var name in new[] { "check_early_exit_in_consensus", "exit_if_consensus_failed", "exit_before_ceo_gate", "outer_exit_check", "outer_exhaustion_notification", "proceed_to_merge_check", "map_terminal_decision" })
+        foreach (var name in new[] { "check_early_exit_in_consensus", "exit_if_consensus_failed", "exit_before_ceo_gate", "outer_exit_check", "outer_exhaustion_notification", "proceed_to_merge_check", "map_terminal_decision", "fail_on_technical_outcome" })
             Assert.Contains("STOPPED", steps.OfType<BranchStep>().Single(s => s.Name == name).On);
         foreach (var write in steps.OfType<SetAttributeStep>().Where(w => w.Attributes.ContainsKey("Acceptance")))
         { Assert.True(write.Required); Assert.False(write.IgnoreFailure); }

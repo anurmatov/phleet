@@ -34,6 +34,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         var agent = _store.Add(ManagedAgent(desired: "openshell", applied: "docker"));
         var dockerStops = 0;
         _host.DockerStates = ["running"];
+        var putsAtCreate = -1;
+        _cli.OnCreate = () => putsAtCreate = _broker.Puts.Count;
         var runtime = Runtime(dockerStop: _ => { dockerStops++; _host.DockerStates = ["exited"]; return Task.FromResult(true); });
 
         var result = await runtime.ApplyAsync("agent1", default);
@@ -50,9 +52,9 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.Equal(_cli.Sandboxes[record.Applied!.SandboxName].Id, record.Applied.SandboxId);
 
         var verbs = _cli.Calls.Select(c => string.Join(' ', c.Args.Take(2))).ToList();
-        Assert.True(verbs.IndexOf("sandbox create") < verbs.IndexOf("sandbox upload"));
-        Assert.True(verbs.IndexOf("sandbox upload") < verbs.IndexOf("sandbox start"));
+        Assert.True(verbs.IndexOf("sandbox create") < verbs.IndexOf("sandbox start"));
         Assert.Single(verbs, v => v == "sandbox start");
+        Assert.Equal(0, putsAtCreate); // broker users exist only after the refused allocation
         var create = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
         Assert.Contains("--no-auto-providers", create.Args);
         Assert.Equal("never", create.Args[create.Args.IndexOf("--restart-policy") + 1]);
@@ -342,6 +344,9 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
         Assert.Contains(_cli.Calls, c => c.Args.Take(3).SequenceEqual(["policy", "set", binding.SandboxName]));
         Assert.Single(_cli.Calls, c => c.Args.SequenceEqual(["sandbox", "start", binding.SandboxName]));
+        var verbs = _cli.Calls.Select(c => string.Join(' ', c.Args.Take(3))).ToList();
+        Assert.True(verbs.IndexOf("sandbox upload " + binding.SandboxName) < verbs.IndexOf("sandbox stop " + binding.SandboxName));
+        Assert.Contains("sandbox provider attach", verbs); // provider re-attached after the reuse revocation
     }
 
     [Fact]
@@ -350,6 +355,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Directory.CreateDirectory(Path.Combine(DockerWorkspaceDir, ".generated"));
         File.WriteAllText(Path.Combine(DockerWorkspaceDir, "marker.txt"), "keep");
         File.WriteAllText(Path.Combine(DockerWorkspaceDir, ".generated", "appsettings.json"), "{\"secret\":true}");
+        Directory.CreateDirectory(Path.Combine(DockerWorkspaceDir, "codex"));
+        File.WriteAllText(Path.Combine(DockerWorkspaceDir, "codex", "auth.json"), "{\"synthetic\":true}");
         _store.Add(ManagedAgent(desired: "openshell", applied: "docker"));
         var runtime = Runtime();
 
@@ -358,12 +365,13 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         var staged = create.Args.Single(a => a.EndsWith(":/workspace", StringComparison.Ordinal))[..^":/workspace".Length];
         Assert.True(File.Exists(Path.Combine(staged, "marker.txt")));
         Assert.False(Directory.Exists(Path.Combine(staged, ".generated")));
-        Assert.Equal("/app/stock-entrypoint.sh", create.Args[^1]);
-        Assert.Equal("--", create.Args[^2]);
+        Assert.DoesNotContain("--", create.Args); // canonical image entrypoint, no trailing command with --upload
+        Assert.False(Directory.Exists(Path.Combine(staged, "codex")));
 
         _store.Get("agent1").RuntimeKind = "docker";
         Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
         Assert.Equal("from sandbox", File.ReadAllText(Path.Combine(DockerWorkspaceDir, "marker-back.txt")));
+        Assert.True(Directory.Exists(Path.Combine(DockerWorkspaceDir, "only-dir"))); // contents layout kept, not flattened
         Assert.Equal(["agent1:openshell"], _dockerProvisions); // Docker ran while the managed hold was still applied
         Assert.Equal("docker", _store.Get("agent1").AppliedRuntimeKind);
     }
@@ -440,6 +448,89 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         var slow = await cli.RunAsync(["slow"], null, TimeSpan.FromMilliseconds(300), default);
         Assert.True(slow.TimedOut);
         Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(10));
+    }
+
+    // ── #492 review blockers (2be4e3a0) ────────────────────────────────────
+
+    [Fact]
+    public async Task Logs_across_a_uuid_swap_are_discarded_and_held()
+    {
+        var binding = Binding("fleet-agent1-44444444", Guid.NewGuid());
+        _cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _store.Add(ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        _cli.SwapOnLogs = true;
+
+        var (result, logs) = await Runtime().LogsAsync("agent1", 10, default);
+
+        Assert.Equal("sandbox_identity_changed", result.Code);
+        Assert.Null(logs);
+        var record = ManagedRecord.Parse(_store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal("needs_attention", record.State);
+        Assert.Contains("sandbox_identity_changed", record.Errors);
+    }
+
+    [Fact]
+    public async Task Unverified_gateway_client_trust_refuses_before_old_runtime_stop()
+    {
+        _store.Add(ManagedAgent(desired: "openshell", applied: "docker"));
+        _cli.ListFails = true;
+        var stops = 0;
+
+        var result = await Runtime(dockerStop: _ => { stops++; return Task.FromResult(true); }).ApplyAsync("agent1", default);
+
+        Assert.Equal("gateway_client_unverified", result.Code);
+        Assert.Equal(0, stops);
+    }
+
+    [Fact]
+    public async Task Stopped_sandbox_is_not_reprovisioned_or_switched_through_ssh_transfers()
+    {
+        var binding = Binding("fleet-agent1-55555555", Guid.NewGuid());
+        _cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
+        var agent = _store.Add(ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+        var runtime = Runtime();
+
+        Assert.Equal("managed_reprovision_requires_running", (await runtime.ApplyAsync("agent1", default)).Code);
+        agent.RuntimeKind = "docker";
+        Assert.Equal("workspace_transfer_requires_running", (await runtime.ApplyAsync("agent1", default)).Code);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) || c.Args.Take(2).SequenceEqual(["sandbox", "download"]));
+        Assert.Equal("openshell", _store.Get("agent1").AppliedRuntimeKind);
+    }
+
+    [Fact]
+    public async Task Symlinked_workspace_source_or_ancestor_refuses_without_writing_outside()
+    {
+        var outside = Directory.CreateTempSubdirectory("outside-").FullName;
+        try
+        {
+            File.WriteAllText(Path.Combine(outside, "victim.txt"), "original");
+            Directory.CreateDirectory(DockerWorkspaceDir);
+            Directory.CreateSymbolicLink(Path.Combine(DockerWorkspaceDir, "escape"), outside);
+            _store.Add(ManagedAgent(desired: "openshell", applied: "docker"));
+
+            var result = await Runtime().ApplyAsync("agent1", default);
+
+            Assert.Equal("workspace_stage_failed", result.Code);
+            Assert.Equal("original", File.ReadAllText(Path.Combine(outside, "victim.txt")));
+            Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+            Assert.Throws<IOException>(() => StockOpenShellRuntime.RefuseLinkedAncestors(Path.Combine(DockerWorkspaceDir, "escape", "child")));
+        }
+        finally { Directory.Delete(outside, recursive: true); }
+    }
+
+    [Fact]
+    public async Task Inherited_pipe_after_parent_exit_does_not_extend_the_deadline()
+    {
+        var script = Path.Combine(_dir, "fake-openshell-pipe");
+        File.WriteAllText(script, "#!/bin/sh\n(sleep 5 &)\nexit 0\n");
+        File.SetUnixFileMode(script, (UnixFileMode)0b111_000_000);
+        var cli = new ProcessStockCli(Config(new() { ["StockOpenShell:CliPath"] = script }));
+
+        var started = DateTime.UtcNow;
+        var run = await cli.RunAsync(["x"], null, TimeSpan.FromMilliseconds(300), default);
+
+        Assert.True(run.TimedOut);
+        Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(1.5), (DateTime.UtcNow - started).ToString());
     }
 
     // ── fixtures ───────────────────────────────────────────────────────────
@@ -546,13 +637,15 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
                 ("--version", _) => new(0, Version + "\n"),
                 ("provider", "get") => new(1, ""),
                 ("provider", _) => new(0, ""),
-                ("logs", _) => new(0, "line\n"),
+                ("logs", _) => SwapOnLogs ? Swap(Name(1)) : new(0, "line\n"),
                 ("sandbox", "create") => Create(args),
                 ("sandbox", "get") => Sandboxes.TryGetValue(Name(2), out var s)
                     ? new(0, JsonSerializer.Serialize(new { id = s.Id, name = Name(2), phase = s.Phase })) : new(1, ""),
                 ("sandbox", "start") => Phase(Name(2), "Ready"),
                 ("sandbox", "stop") => Phase(Name(2), "Stopped"),
-                ("sandbox", "download") => Download(args[4]),
+                ("sandbox", "download") => Transfer(Name(2), () => Download(args[4])),
+                ("sandbox", "upload") => Transfer(Name(2), () => new(0, "")),
+                ("sandbox", "list") => ListFails ? new(1, "") : new(0, "[]"),
                 ("profile", "export") => new(0, ProfileYaml),
                 _ => new(0, ""),
             };
@@ -560,16 +653,34 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
 
         private StockCliResult Create(IReadOnlyList<string> args)
         {
+            // Pinned contract: --upload cannot be combined with a trailing command.
+            if (args.Contains("--upload") && args.Contains("--")) return new(2, "");
+            OnCreate?.Invoke();
             var name = args[args.ToList().IndexOf("--name") + 1];
             Sandboxes[name] = (Guid.NewGuid().ToString(), "Error"); // the revoked allocation refused before intake
             return CreateTimesOut ? new(-1, "", TimedOut: true) : new(0, "");
         }
 
+        public bool ListFails;
+        public bool SwapOnLogs;
+        public Action? OnCreate;
+
+        // Pinned SSH admission accepts transfers only for a running (Ready) sandbox.
+        private StockCliResult Transfer(string name, Func<StockCliResult> action) =>
+            Sandboxes.TryGetValue(name, out var s) && s.Phase == "Ready" ? action() : new(1, "");
+
+        // The pinned CLI extracts the directory's contents directly into the destination.
         private static StockCliResult Download(string staging)
         {
-            Directory.CreateDirectory(Path.Combine(staging, "workspace"));
-            File.WriteAllText(Path.Combine(staging, "workspace", "marker-back.txt"), "from sandbox");
+            File.WriteAllText(Path.Combine(staging, "marker-back.txt"), "from sandbox");
+            Directory.CreateDirectory(Path.Combine(staging, "only-dir"));
             return new(0, "");
+        }
+
+        private StockCliResult Swap(string name)
+        {
+            Sandboxes[name] = (Guid.NewGuid().ToString(), "Ready");
+            return new(0, "line\n");
         }
 
         private StockCliResult Phase(string name, string phase)

@@ -93,7 +93,8 @@ public sealed class StockBrokerProvisioner(IConfiguration config, ICredentialsRe
     /// their exact permissions. An existing vhost or user is not ours and refuses; no default-vhost
     /// or global grant is written.
     /// </summary>
-    public async Task<Outcome> CreateEpochAsync(Guid epoch, string agentShortName, CancellationToken ct)
+    public async Task<Outcome> CreateEpochAsync(Guid epoch, string agentShortName, CancellationToken ct,
+        IReadOnlyDictionary<string, string>? provided = null)
     {
         if (DescribePreflightFault() is { } fault) return new(false, fault, []);
         var owned = new List<string>();
@@ -113,7 +114,8 @@ public sealed class StockBrokerProvisioner(IConfiguration config, ICredentialsRe
             foreach (var role in Roles)
             {
                 var user = Principal(epoch, role);
-                var password = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
+                // Pre-staged passwords let the workload carry its secret before its user exists.
+                var password = provided?.GetValueOrDefault(role) ?? Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
                 await PutAsync(http, $"api/users/{Uri.EscapeDataString(user)}", new { password, tags = "" }, ct);
                 owned.Add("user:" + user);
                 var (configure, write, read) = Permissions(role, agentQueue);

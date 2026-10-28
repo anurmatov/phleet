@@ -30,7 +30,6 @@ public interface IStockCli
 public sealed class ProcessStockCli(IConfiguration config) : IStockCli
 {
     internal const int OutputLimit = 1_000_000;
-    private static readonly TimeSpan SettleTimeout = TimeSpan.FromSeconds(5);
 
     public async Task<StockCliResult> RunAsync(IReadOnlyList<string> args, IReadOnlyDictionary<string, string>? secretEnv,
         TimeSpan timeout, CancellationToken ct)
@@ -59,26 +58,25 @@ public sealed class ProcessStockCli(IConfiguration config) : IStockCli
             process.StandardInput.Close();
             var stdout = ReadBoundedAsync(process.StandardOutput);
             var stderr = ReadBoundedAsync(process.StandardError);
+            // One deadline for the child AND both output drains: an inherited pipe never extends it.
+            var clock = Stopwatch.StartNew();
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
             deadline.CancelAfter(timeout);
-            try { await process.WaitForExitAsync(deadline.Token); }
-            catch (OperationCanceledException)
+            try
             {
-                try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
-                try { await Task.WhenAll(stdout, stderr).WaitAsync(SettleTimeout, CancellationToken.None); }
-                catch (Exception ex) when (ex is TimeoutException or IOException or ObjectDisposedException) { }
-                return new(-1, "", TimedOut: true);
+                await process.WaitForExitAsync(deadline.Token);
+                var remaining = timeout - clock.Elapsed;
+                if (remaining <= TimeSpan.Zero) throw new TimeoutException();
+                await Task.WhenAll(stdout, stderr).WaitAsync(remaining, ct);
             }
-            // A grandchild holding the pipes open must not extend the deadline either.
-            try { await Task.WhenAll(stdout, stderr).WaitAsync(SettleTimeout, CancellationToken.None); }
-            catch (Exception ex) when (ex is TimeoutException or IOException or ObjectDisposedException)
+            catch (Exception ex) when (ex is OperationCanceledException or TimeoutException)
             {
                 try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
                 return new(-1, "", TimedOut: true);
             }
             var output = await stdout;
             // Over-limit output is never parsed as a partial document.
-            return output is null ? new(-1, "", TimedOut: false) : new(process.ExitCode, output);
+            return output is null ? new(-1, "") : new(process.ExitCode, output);
         }
     }
 
@@ -246,7 +244,7 @@ public sealed class StockOpenShellRuntime(
     internal static readonly string Instance = Guid.NewGuid().ToString("N");
     internal static readonly string[] MemoryTools = ["memory_get", "memory_search", "memory_list"];
     /// <summary>Account/control state that never crosses a runtime switch with the workspace.</summary>
-    internal static readonly string[] PrivateWorkspaceEntries = [".generated", "claude", ".claude", ".codex", ".codex-host", ".mcp.json"];
+    internal static readonly string[] PrivateWorkspaceEntries = [".generated", "claude", ".claude", "codex", ".codex", ".codex-host", "gemini", ".gemini", ".ssh", ".mcp.json"];
 
     internal TimeSpan LegTimeout { get; init; } = TimeSpan.FromSeconds(30);
     internal TimeSpan FanoutTimeout { get; init; } = TimeSpan.FromSeconds(120);
@@ -316,8 +314,9 @@ public sealed class StockOpenShellRuntime(
     }
 
     /// <summary>
-    /// Stock-authenticated, generation- and exact-UUID-checked <c>sandbox exec</c> to the agent's
-    /// managed loopback cancel route. A timeout or other failure is an unconfirmed cancellation.
+    /// Stock-authenticated <c>sandbox exec</c> to the agent's managed loopback cancel route, with
+    /// generation and exact-UUID checks before and after. A changed generation or identity is
+    /// persisted as a hold. A timeout or other failure is an unconfirmed cancellation.
     /// </summary>
     public async Task<Result> CancelAsync(string name, string? taskId, CancellationToken ct)
     {
@@ -325,14 +324,15 @@ public sealed class StockOpenShellRuntime(
         var (agent, record, fault) = await ReadAsync(name, ct);
         if (fault is not null) return fault;
         if (agent!.AppliedRuntimeKind != "openshell" || record!.Applied is not { } binding) return Result.Refused(409, "managed_binding_missing");
+        if (record.State is "needs_attention" or "revoked") return Result.Refused(409, record.State, record.Errors);
         var path = taskId is null ? "/cancel" : "/cancel/" + Uri.EscapeDataString(taskId);
         if (!Regex.IsMatch(path, @"\A/cancel(/[A-Za-z0-9%._~-]{1,256})?\z")) return Result.Refused(400, "invalid_task_id");
-        if (await GenerationFaultAsync(binding, ct) is { } generation) return Result.Refused(409, generation);
-        if (await VerifyIdentityAsync(binding, ct) is { } identity) return identity;
+        if (await GuardAsync(agent, binding, ct) is { } before) return before;
         const string script = "exec 3<>/dev/tcp/127.0.0.1/8080 || exit 2; "
             + "printf 'POST %s HTTP/1.0\\r\\nContent-Length: 0\\r\\n\\r\\n' \"$1\" >&3; "
             + "IFS= read -r status <&3; case \"$status\" in *' 200 '*) exit 0;; *' 404 '*) exit 4;; esac; exit 1";
         var run = await cli.RunAsync(["sandbox", "exec", "-n", binding.SandboxName, "--", "bash", "-c", script, "cancel", path], null, LegTimeout, ct);
+        if (await GuardAsync(agent, binding, ct) is { } after) return after;
         return run switch
         {
             { Missing: true } => Result.Refused(503, "stock_cli_missing"),
@@ -349,10 +349,45 @@ public sealed class StockOpenShellRuntime(
         var (agent, record, fault) = await ReadAsync(name, ct);
         if (fault is not null) return (fault, null);
         if (agent!.AppliedRuntimeKind != "openshell" || record!.Applied is not { } binding) return (Result.Refused(409, "managed_binding_missing"), null);
-        if (await GenerationFaultAsync(binding, ct) is { } generation) return (Result.Refused(409, generation), null);
-        if (await VerifyIdentityAsync(binding, ct) is { } identity) return (identity, null);
+        if (await GuardAsync(agent, binding, ct) is { } before) return (before, null);
         var run = await cli.RunAsync(["logs", binding.SandboxName, "-n", Math.Clamp(lines, 1, 1000).ToString()], null, LegTimeout, ct);
+        // Output read across a UUID swap belongs to another sandbox: discard it and hold.
+        if (await GuardAsync(agent, binding, ct) is { } after) return (after, null);
         return run.ExitCode == 0 && !run.TimedOut ? (Result.Done("logs"), run.Stdout) : (Result.Refused(502, "stock_logs_unavailable"), null);
+    }
+
+    /// <summary>
+    /// Generation and exact-UUID guard for status/action paths outside the operation envelope. A
+    /// changed generation or identity is persisted as <c>needs_attention</c>; unobservable is refused.
+    /// </summary>
+    private async Task<Result?> GuardAsync(Agent agent, ManagedBinding binding, CancellationToken ct)
+    {
+        var fault = await GenerationFaultAsync(binding, ct);
+        if (fault is null && await VerifyIdentityAsync(binding, ct) is { } identity) fault = identity.Code;
+        if (fault is null) return null;
+        if (fault is "gateway_generation_changed" or "sandbox_identity_changed")
+        {
+            try
+            {
+                if (await store.LoadAsync(agent.Name, ct) is { } fresh && ManagedRecord.Parse(fresh.AppliedRuntimeBinding) is { Operation: null } current
+                    && current.State != "needs_attention"
+                    && await store.SwapAsync(fresh.Id, fresh.AppliedRuntimeBinding, (current with { State = "needs_attention", Errors = [.. current.Errors, fault] }).Serialize(), null, null, ct))
+                    await PublishAsync(agent.Name);
+            }
+            catch (Exception ex) when (ex is DbException or InvalidOperationException or JsonException) { }
+        }
+        return Result.Refused(409, fault);
+    }
+
+    /// <summary>Pushes the persisted runtime state to the registry/WebSocket so dashboards update live.</summary>
+    private async Task PublishAsync(string name)
+    {
+        try
+        {
+            if (services.GetService<AgentRegistry>() is { } registry && await store.LoadAsync(name, CancellationToken.None) is { } fresh)
+                registry.UpdateRuntimeSelection(fresh);
+        }
+        catch (Exception ex) when (ex is DbException or InvalidOperationException) { }
     }
 
     /// <summary>
@@ -409,8 +444,17 @@ public sealed class StockOpenShellRuntime(
         if (version.ExitCode != 0 || tokens.Length < 2 || tokens[0] != "openshell"
             || !(tokens[1] == PinnedCliVersion || tokens[1].StartsWith(PinnedCliVersion + "+", StringComparison.Ordinal)))
             return "stock_cli_version_mismatch";
+        // Authenticated gateway client trust (mTLS/JWT material in ConfigDir), not only a running container.
+        var probe = await cli.RunAsync(["sandbox", "list", "-o", "json", "--page-size", "1"], null, LegTimeout, ct);
+        if (probe.Missing || probe.TimedOut || probe.ExitCode != 0 || !IsJson(probe.Stdout)) return "gateway_client_unverified";
         if (await ProfileHashFaultAsync(policy, ct) is { } profileFault) return profileFault;
         return await host.GatewayGenerationAsync(ct) is null ? "gateway_unavailable" : null;
+    }
+
+    private static bool IsJson(string text)
+    {
+        try { using var _ = JsonDocument.Parse(text); return true; }
+        catch (JsonException) { return false; }
     }
 
     /// <summary>Each pinned provider profile's exported YAML must hash to the version's saved value.</summary>
@@ -457,6 +501,7 @@ public sealed class StockOpenShellRuntime(
                 throw new InvalidOperationException("managed_checkpoint_conflict");
             saved = json;
             current = next with { Operation = operation };
+            await PublishAsync(agent.Name);
         }
 
         (ManagedRecord Next, string? AppliedKind, int? AppliedPolicy, Result Result) outcome;
@@ -479,6 +524,7 @@ public sealed class StockOpenShellRuntime(
             // Post-action DB failure: the claimed operation stays recorded and is reported as interrupted next time.
             return Result.Refused(503, kind + "_state_unknown", outcome.Result.Errors);
         }
+        await PublishAsync(name);
         logger.LogInformation("Managed {Kind} for {Agent}: {Code}", kind, name, outcome.Result.Code);
         return outcome.Result;
     }
@@ -523,7 +569,7 @@ public sealed class StockOpenShellRuntime(
     }
 
     /// <summary>
-    /// OpenShell→Docker: revoke and stop the verified binding, bring its workspace back, then run the
+    /// OpenShell→Docker: cut off, copy the workspace out while running, stop and verify, then run the
     /// ordinary Docker provisioning while this operation still holds the agent. Applied Docker is
     /// published only after that Docker transition succeeded.
     /// </summary>
@@ -532,9 +578,14 @@ public sealed class StockOpenShellRuntime(
     {
         if (record.Applied is { } applied)
         {
-            var errors = await RevokeFanoutAsync(agent.Name, record, ct);
-            if (errors.Count > 0) return Hold(record, 409, "revoke_unresolved", [.. errors]);
-            if (await DownloadWorkspaceAsync(agent, applied, ct) is { } workspace) return Hold(record, 502, workspace);
+            // Stock SSH transfers need a running sandbox: cut it off (admission, broker, provider) while it
+            // still runs, copy the workspace out, then stop and verify quiescence.
+            if (await GetAsync(applied.SandboxName, ct) is not { Phase: "Ready" }) return Hold(record, 409, "workspace_transfer_requires_running");
+            var cut = await RevokeFanoutAsync(agent.Name, record, ct, stop: false);
+            if (cut.Count > 0) return Hold(record, 409, "revoke_unresolved", [.. cut]);
+            if (await DownloadWorkspaceAsync(agent, applied, DockerWorkspaceDir(agent), ct) is { } workspace) return Hold(record, 502, workspace);
+            var stopped = await LifecycleAsync("stop", applied, ct) ?? await QuiescentAsync(applied, ct);
+            if (stopped is not null) return Hold(record, 502, "stop_unresolved", stopped);
             record = record with { State = "revoked" };
             await checkpoint(record);
         }
@@ -547,7 +598,7 @@ public sealed class StockOpenShellRuntime(
     private async Task<(ManagedRecord, string?, int?, Result)> ApplyOpenShellAsync(Agent agent, ManagedRecord record,
         Func<ManagedRecord, Task> checkpoint, CancellationToken ct)
     {
-        // Every prerequisite, including the generated native inputs, is checked before the old runtime stops.
+        // Every prerequisite, including gateway client trust and generated inputs, precedes any old-runtime action.
         if (await DescribePreflightFaultAsync(agent, ct) is { } preflight) return (record, null, null, Result.Refused(409, preflight));
         string generated;
         try { generated = await GeneratedInputsAsync(agent, ct); }
@@ -556,48 +607,36 @@ public sealed class StockOpenShellRuntime(
         var policy = (await store.LoadPolicyAsync(agent.SandboxPolicyVersionId!.Value, ct))!;
         var generation = await host.GatewayGenerationAsync(ct);
         if (generation is null) return (record, null, null, Result.Refused(503, "gateway_unavailable"));
+        var image = config["StockOpenShell:AgentImage"]!;
 
-        // Reprovision keeps the same verified sandbox, so its persistent workspace survives the new epoch.
+        // Reprovision keeps the verified running sandbox, so its persistent workspace survives the new epoch.
         var reuse = agent.AppliedRuntimeKind == "openshell" && record.Applied is not null;
         if (reuse)
         {
-            if (record.Applied!.GatewayGeneration != generation) return (record, null, null, Result.Refused(409, "gateway_generation_changed"));
-            if (await VerifyIdentityAsync(record.Applied, ct) is { } identity) return (record, null, null, identity);
+            var old = record.Applied!;
+            if (old.GatewayGeneration != generation) return (record, null, null, Result.Refused(409, "gateway_generation_changed"));
+            if (old.Image != image) return (record, null, null, Result.Refused(409, "managed_image_change_requires_revoke"));
+            if (await GetAsync(old.SandboxName, ct) is not { } current || current.Id != old.SandboxId)
+                return (record, null, null, Result.Refused(409, "sandbox_identity_changed"));
+            if (current.Phase != "Ready") return (record, null, null, Result.Refused(409, "managed_reprovision_requires_running"));
         }
         var epoch = Guid.NewGuid();
         var candidate = reuse
-            ? record.Applied! with { Epoch = epoch, PolicyVersionId = policy.Id, PolicySha256 = policy.Sha256, KeyRef = agent.ProviderApiKeyEnvRef!, Image = config["StockOpenShell:AgentImage"]!, GatewayGeneration = generation }
-            : new ManagedBinding($"fleet-{agent.Name}-{epoch.ToString("N")[..8]}", "", epoch, config["StockOpenShell:AgentImage"]!,
+            ? record.Applied! with { Epoch = epoch, PolicyVersionId = policy.Id, PolicySha256 = policy.Sha256, KeyRef = agent.ProviderApiKeyEnvRef!, GatewayGeneration = generation }
+            : new ManagedBinding($"fleet-{agent.Name}-{epoch.ToString("N")[..8]}", "", epoch, image,
                 policy.Id, policy.Sha256, "api_key", agent.ProviderApiKeyEnvRef!, $"fleet-{agent.Name}-openai", generation);
         var applying = record with { State = "applying", Candidate = candidate, Errors = [] };
         await checkpoint(applying);
 
-        // Quiesce the old runtime: exact Docker observation, or revoke of the old epoch.
-        string? staged = null;
-        if (agent.AppliedRuntimeKind == "docker")
-        {
-            if (await StopDockerAsync(agent) is { } dockerFault) return Hold(applying, 409, dockerFault);
-            try { staged = StageWorkspace(agent, Path.Combine(ConfigDir, "managed", agent.Name, epoch.ToString("N"), "workspace-in")); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return Hold(applying, 500, "workspace_stage_failed"); }
-        }
-        else if (record.Applied is not null)
-        {
-            var errors = await RevokeFanoutAsync(agent.Name, record, ct);
-            if (errors.Count > 0) return Hold(applying, 409, "revoke_unresolved", [.. errors]);
-        }
-
-        // Broker epoch resources; partials are held with the candidate for cleanup, never activated.
-        var created = await broker.CreateEpochAsync(epoch, agent.ShortName, ct);
-        if (!created.Ok) return Hold(applying, 502, created.Code!, [.. created.OwnedPartials]);
-
         var template = LoadTemplate()!;
         var epochDir = Path.Combine(ConfigDir, "managed", agent.Name, epoch.ToString("N"));
+        var passwords = StockBrokerProvisioner.Roles.ToDictionary(r => r, _ => Convert.ToHexStringLower(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)));
         string bundle;
         try
         {
-            WriteBrokerPasswords(agent.Name, created.Passwords!);
+            WriteBrokerPasswords(agent.Name, passwords);
             WriteRecord(AuthorityPath(agent.Name), Authority(template, agent.Name, reuse ? candidate.SandboxId : "pending", epoch, policy.Sha256, "revoked"));
-            bundle = await BuildBundleAsync(agent, template, generated, epochDir, created.Passwords!["workload"], epoch, policy, reuse ? candidate.SandboxId : "pending");
+            bundle = await BuildBundleAsync(agent, template, generated, epochDir, passwords["workload"], epoch, policy, reuse ? candidate.SandboxId : "pending");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or JsonException)
         { return Hold(applying, 500, "managed_files_failed"); }
@@ -605,39 +644,46 @@ public sealed class StockOpenShellRuntime(
         var key = credentials.Get(agent.ProviderApiKeyEnvRef!);
         if (string.IsNullOrEmpty(key)) return Hold(applying, 409, "provider_key_reference_unresolved");
         var secret = new Dictionary<string, string> { ["OPENAI_API_KEY"] = key };
-        var exists = await cli.RunAsync(["provider", "get", candidate.Provider], null, LegTimeout, ct);
-        var provider = await cli.RunAsync(exists.ExitCode == 0
-            ? ["provider", "update", candidate.Provider, "--credential", "OPENAI_API_KEY"]
-            : ["provider", "create", "--name", candidate.Provider, "--type", "openai", "--credential", "OPENAI_API_KEY"], secret, LegTimeout, ct);
-        if (provider.ExitCode != 0 || provider.TimedOut) return Hold(applying, 502, "provider_setup_unknown");
 
         if (reuse)
         {
-            // Same UUID and workspace: stage the new policy and inputs into the stopped sandbox.
+            // Cut the running sandbox off from the old epoch, stage the new inputs while SSH admission
+            // still accepts it, then stop and verify before policy, provider and activation.
+            var cut = await RevokeFanoutAsync(agent.Name, record, ct, stop: false);
+            if (cut.Count > 0) return Hold(applying, 409, "revoke_unresolved", [.. cut]);
+            foreach (var (local, remote) in new[] { ("app", "/app"), ("trust", "/trust") })
+            {
+                if (await VerifyIdentityAsync(candidate, ct) is { } identity) return Hold(applying, 409, identity.Code);
+                var upload = await cli.RunAsync(["sandbox", "upload", candidate.SandboxName, Path.Combine(bundle, local), remote], null, LegTimeout, ct);
+                if (upload.ExitCode != 0 || upload.TimedOut) return Hold(applying, 502, "input_upload_unknown");
+            }
+            if ((await LifecycleAsync("stop", candidate, ct) ?? await QuiescentAsync(candidate, ct)) is { } stopped) return Hold(applying, 502, stopped);
             if (record.Applied!.PolicyVersionId != policy.Id)
             {
                 var set = await cli.RunAsync(["policy", "set", candidate.SandboxName, "--policy", Path.Combine(epochDir, "policy.yaml"), "--wait"], null, LegTimeout, ct);
                 if (set.ExitCode != 0 || set.TimedOut) return Hold(applying, 502, "policy_update_unknown");
             }
-            foreach (var (local, remote) in new[] { ("app", "/app"), ("trust", "/trust") })
-            {
-                var upload = await cli.RunAsync(["sandbox", "upload", candidate.SandboxName, Path.Combine(bundle, local), remote], null, LegTimeout, ct);
-                if (upload.ExitCode != 0 || upload.TimedOut) return Hold(applying, 502, "input_upload_unknown");
-            }
+            if (await EnsureProviderAsync(candidate.Provider, secret, ct) is { } providerFault) return Hold(applying, 502, providerFault);
+            var attach = await cli.RunAsync(["sandbox", "provider", "attach", candidate.SandboxName, candidate.Provider], null, LegTimeout, ct);
+            if (attach.ExitCode != 0 || attach.TimedOut) return Hold(applying, 502, "provider_attach_unknown");
         }
         else
         {
-            // Create once with staged inputs and the canonical daemon; the revoked copy refuses intake.
-            var args = new List<string>
+            if (agent.AppliedRuntimeKind == "docker")
             {
+                if (await StopDockerAsync(agent) is { } dockerFault) return Hold(applying, 409, dockerFault);
+                try { StageWorkspace(agent, Path.Combine(bundle, "workspace")); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return Hold(applying, 500, "workspace_stage_failed"); }
+            }
+            if (await EnsureProviderAsync(candidate.Provider, secret, ct) is { } providerFault) return Hold(applying, 502, providerFault);
+            // Pinned contract: uploads with the image's canonical entrypoint, no trailing command. The
+            // workload refuses intake (its broker users do not exist yet and admission is revoked).
+            var create = await cli.RunAsync([
                 "sandbox", "create", "--name", candidate.SandboxName, "--from", candidate.Image,
                 "--policy", Path.Combine(epochDir, "policy.yaml"), "--provider", candidate.Provider, "--no-auto-providers",
                 "--restart-policy", "never", "--label", "fleet.agent=" + agent.Name, "--label", "fleet.epoch=" + epoch.ToString("N"),
                 "--upload", Path.Combine(bundle, "app") + ":/app", "--upload", Path.Combine(bundle, "trust") + ":/trust",
-                "--upload", (staged ?? Path.Combine(bundle, "workspace")) + ":/workspace",
-                "--detach", "--", Entrypoint,
-            };
-            var create = await cli.RunAsync(args, null, TimeSpan.FromMinutes(5), ct);
+                "--upload", Path.Combine(bundle, "workspace") + ":/workspace", "--detach"], null, TimeSpan.FromMinutes(5), ct);
             // Whatever create reported, record any sandbox that now exists so cleanup keeps its identity.
             if (await GetAsync(candidate.SandboxName, ct) is { } made)
             {
@@ -650,19 +696,22 @@ public sealed class StockOpenShellRuntime(
             if (await SettleStoppedAsync(candidate, ct) is { } settle) return Hold(applying, 502, settle);
         }
 
-        // Bind the actual UUID, activate, then one Start.
-        try
-        {
-            WriteRecord(AuthorityPath(agent.Name), Authority(template, agent.Name, candidate.SandboxId, epoch, policy.Sha256, "active"));
-            WriteRecord(Path.Combine(bundle, "trust", "enrollment.json"), Authority(template, agent.Name, candidate.SandboxId, epoch, policy.Sha256, "active"));
-        }
+        // Broker users exist only now, with the passwords staged in the bundle; then bind the UUID and start once.
+        var created = await broker.CreateEpochAsync(epoch, agent.ShortName, ct, passwords);
+        if (!created.Ok) return Hold(applying, 502, created.Code!, [.. created.OwnedPartials]);
+        try { WriteRecord(AuthorityPath(agent.Name), Authority(template, agent.Name, candidate.SandboxId, epoch, policy.Sha256, "active")); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return Hold(applying, 500, "managed_files_failed"); }
-        var activate = await cli.RunAsync(["sandbox", "upload", candidate.SandboxName, Path.Combine(bundle, "trust", "enrollment.json"), "/trust/enrollment.json"],
-            null, LegTimeout, ct);
-        if (activate.ExitCode != 0 || activate.TimedOut) return Hold(applying, 502, "enrollment_upload_unknown");
         if (await LifecycleAsync("start", candidate, ct) is { } start) return Hold(applying, 502, start);
-
         return (record with { State = "applied", Applied = candidate, Candidate = null, Errors = [] }, "openshell", policy.Id, Result.Done("applied_openshell"));
+    }
+
+    private async Task<string?> EnsureProviderAsync(string provider, IReadOnlyDictionary<string, string> secret, CancellationToken ct)
+    {
+        var exists = await cli.RunAsync(["provider", "get", provider], null, LegTimeout, ct);
+        var run = await cli.RunAsync(exists.ExitCode == 0
+            ? ["provider", "update", provider, "--credential", "OPENAI_API_KEY"]
+            : ["provider", "create", "--name", provider, "--type", "openai", "--credential", "OPENAI_API_KEY"], secret, LegTimeout, ct);
+        return run.ExitCode == 0 && !run.TimedOut ? null : "provider_setup_unknown";
     }
 
     private async Task<(ManagedRecord, string?, int?, Result)> StartCoreAsync(Agent agent, ManagedRecord record,
@@ -722,7 +771,7 @@ public sealed class StockOpenShellRuntime(
     /// verified binding, as independent legs with their own deadline so a hung leg never suppresses
     /// Stop. Returns every unresolved error; an empty list is the only clean result.
     /// </summary>
-    internal async Task<List<string>> RevokeFanoutAsync(string agentName, ManagedRecord record, CancellationToken ct)
+    internal async Task<List<string>> RevokeFanoutAsync(string agentName, ManagedRecord record, CancellationToken ct, bool stop = true)
     {
         var errors = new List<string>();
         var targets = new[] { record.Applied, record.Candidate }.OfType<ManagedBinding>().DistinctBy(b => b.Epoch).ToList();
@@ -757,7 +806,7 @@ public sealed class StockOpenShellRuntime(
                 var run = await cli.RunAsync(["sandbox", "provider", "detach", target.SandboxName, target.Provider], null, LegTimeout, token);
                 return run.ExitCode == 0 && !run.TimedOut ? null : "provider_detach_unknown";
             }));
-            legs.Add(Leg("stop:" + target.SandboxName, async token =>
+            if (stop) legs.Add(Leg("stop:" + target.SandboxName, async token =>
                 await LifecycleAsync("stop", target, token) ?? await QuiescentAsync(target, token)));
         }
         foreach (var leg in await Task.WhenAll(legs))
@@ -850,18 +899,19 @@ public sealed class StockOpenShellRuntime(
     private string DockerWorkspaceDir(Agent agent) => DockerWorkspace?.Invoke(agent)
         ?? Path.Combine(config["Provisioning:BaseDir"] ?? throw new InvalidOperationException("Provisioning:BaseDir is required"), "workspaces", agent.ContainerName);
 
-    /// <summary>The Docker workspace without account/control state, for the managed sandbox's /workspace.</summary>
-    private string StageWorkspace(Agent agent, string target)
+    /// <summary>The Docker workspace without account/control state, into the bundle's /workspace.</summary>
+    private void StageWorkspace(Agent agent, string target)
     {
         var source = DockerWorkspaceDir(agent);
-        PrivateDirectory(target);
         if (Directory.Exists(source)) CopyTree(source, target, PrivateWorkspaceEntries);
         WriteText(Path.Combine(target, ".mcp.json"), MemoryMcp(LoadTemplate()!));
-        return target;
     }
 
-    /// <summary>OpenShell→Docker: the sandbox workspace comes back into the Docker workspace, control state excluded.</summary>
-    private async Task<string?> DownloadWorkspaceAsync(Agent agent, ManagedBinding binding, CancellationToken ct)
+    /// <summary>
+    /// Copies the running sandbox's /workspace into <paramref name="target"/>, control state excluded.
+    /// The pinned CLI extracts the directory's contents straight into the destination; no re-rooting.
+    /// </summary>
+    private async Task<string?> DownloadWorkspaceAsync(Agent agent, ManagedBinding binding, string target, CancellationToken ct)
     {
         var staging = Path.Combine(ConfigDir, "managed", agent.Name, binding.Epoch.ToString("N"), "workspace-out");
         try
@@ -870,17 +920,11 @@ public sealed class StockOpenShellRuntime(
             PrivateDirectory(staging);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return "workspace_stage_failed"; }
-        if (await VerifyIdentityAsync(binding, ct) is { } identity) return identity.Code;
+        if (await VerifyIdentityAsync(binding, ct) is { } before) return before.Code;
         var download = await cli.RunAsync(["sandbox", "download", binding.SandboxName, "/workspace", staging], null, TimeSpan.FromMinutes(5), ct);
         if (download.ExitCode != 0 || download.TimedOut) return "workspace_download_unknown";
-        try
-        {
-            var target = DockerWorkspaceDir(agent);
-            Directory.CreateDirectory(target);
-            var root = Directory.GetDirectories(staging).Length == 1 && Directory.GetFiles(staging).Length == 0 ? Directory.GetDirectories(staging)[0] : staging;
-            CopyTree(root, target, PrivateWorkspaceEntries);
-            return null;
-        }
+        if (await VerifyIdentityAsync(binding, ct) is { } after) return after.Code;
+        try { CopyTree(staging, target, PrivateWorkspaceEntries); return null; }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return "workspace_restore_failed"; }
     }
 
@@ -996,19 +1040,35 @@ public sealed class StockOpenShellRuntime(
             if (entry.LinkTarget is not null) throw new IOException("symlink_refused");
     }
 
+    /// <summary>Refuses symlinks in the source tree, on either root's ancestors, or at any destination entry.</summary>
     private static void CopyTree(string source, string target, IReadOnlyCollection<string> exclude)
     {
+        RefuseLinkedAncestors(source);
         RefuseLinks(source);
+        RefuseLinkedAncestors(target);
         Copy(source, target, top: true);
 
         void Copy(string from, string to, bool top)
         {
+            if (new DirectoryInfo(to).LinkTarget is not null) throw new IOException("symlink_refused");
             Directory.CreateDirectory(to);
             foreach (var dir in Directory.GetDirectories(from))
                 if (!(top && exclude.Contains(Path.GetFileName(dir)))) Copy(dir, Path.Combine(to, Path.GetFileName(dir)), false);
             foreach (var file in Directory.GetFiles(from))
-                if (!(top && exclude.Contains(Path.GetFileName(file)))) File.Copy(file, Path.Combine(to, Path.GetFileName(file)), overwrite: true);
+            {
+                if (top && exclude.Contains(Path.GetFileName(file))) continue;
+                var dest = Path.Combine(to, Path.GetFileName(file));
+                if (new FileInfo(dest).LinkTarget is not null) throw new IOException("symlink_refused");
+                File.Copy(file, dest, overwrite: true);
+            }
         }
+    }
+
+    /// <summary>Every existing component of the path, up to the root, must be a real directory.</summary>
+    internal static void RefuseLinkedAncestors(string path)
+    {
+        for (var dir = new DirectoryInfo(Path.GetFullPath(path)); dir is not null; dir = dir.Parent)
+            if (dir.LinkTarget is not null) throw new IOException("symlink_refused");
     }
 
     private static void PrivateDirectory(string path)

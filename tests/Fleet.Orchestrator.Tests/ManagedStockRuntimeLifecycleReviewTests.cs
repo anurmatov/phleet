@@ -161,4 +161,24 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
         Assert.DoesNotContain(_t._cli.Calls, c => Verb(c, "start"));
     }
+
+    [Fact]
+    public async Task Start_whose_daemon_acknowledges_while_the_sandbox_is_in_error_is_never_recorded_applied()
+    {
+        var binding = _t.Binding("fleet-agent1-99999999", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
+        // The PID/cmdline check passes, but the exact UUID is then observed in Error (review F4).
+        _t._cli.OnExec = script =>
+        {
+            if (script == StockOpenShellRuntime.DaemonReadyScript) _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Error");
+            return 0;
+        };
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+
+        var result = await _t.Runtime().StartAsync("agent1", default);
+
+        Assert.False(result.Ok);
+        Assert.NotEqual("applied", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+        Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+    }
 }

@@ -1007,8 +1007,14 @@ public sealed class StockOpenShellRuntime(
         var until = DateTimeOffset.UtcNow + StopSettle;
         while (DateTimeOffset.UtcNow < until)
         {
+            // Applied only when the daemon is up AND the exact UUID is observed Ready (never Error/Completed).
             if (await ExecAsync(binding, DaemonReadyScript, ct) == 0)
-                return await VerifyIdentityAsync(binding, ct) is { } after ? after.Code : null;
+            {
+                var after = await GetAsync(binding.SandboxName, ct);
+                if (after is null) return "sandbox_unobservable";
+                if (after.Value.Id != binding.SandboxId) return "sandbox_identity_changed";
+                if (after.Value.Phase == "Ready") return null;
+            }
             await Task.Delay(Poll, ct);
         }
         return "activation_unconfirmed";

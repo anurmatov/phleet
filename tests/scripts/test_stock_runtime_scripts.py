@@ -1,5 +1,6 @@
 """#492 rollout guard and gateway backup scripts, with stubbed curl/docker (no network, no Docker)."""
 import os
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -74,6 +75,24 @@ class RolloutGuardTests(unittest.TestCase):
         self.assertEqual(self.run_guard("--image", "x", STUB_DOCKER_RC="1").returncode, 1)
 
 
+class DefaultOffComposeTests(unittest.TestCase):
+    """The dormant openshell profile must never break default installs (#492 review N1/F7)."""
+
+    def test_example_has_no_required_interpolation(self):
+        text = (ROOT / "docker-compose.example.yml").read_text()
+        self.assertNotIn(":?", text)
+
+    def test_default_off_compose_config_is_valid(self):
+        probe = subprocess.run(["docker", "compose", "version"], capture_output=True, text=True) if shutil.which("docker") else None
+        if probe is None or probe.returncode != 0:
+            self.skipTest("docker compose unavailable here; CI runs this check")
+        env = {k: v for k, v in os.environ.items() if not k.startswith("FLEET_STOCK_") and k != "FLEET_DOCKER_GID"}
+        env.setdefault("FLEET_BASE_DIR", tempfile.gettempdir())
+        result = subprocess.run(["docker", "compose", "-f", str(ROOT / "docker-compose.example.yml"), "config", "--quiet"],
+                                env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class GatewayBackupTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -124,6 +143,14 @@ class GatewayBackupTests(unittest.TestCase):
                 for p in self.backups.glob("gateway-*"):
                     if (p / "INVALID").exists():
                         import shutil; shutil.rmtree(p)
+
+    def test_linked_trust_ancestor_or_state_dir_is_invalid(self):
+        real = Path(self.tmp.name, "real-jwt")
+        shutil.move(str(self.state / "tls" / "jwt"), real)
+        (self.state / "tls" / "jwt").symlink_to(real, target_is_directory=True)
+        result = self.run_backup()
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse((self.backups / "last-success").exists())
 
     def test_keeps_seven_complete_snapshots_and_leaves_invalid_ones(self):
         self.backups.mkdir(mode=0o700)

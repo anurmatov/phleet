@@ -35,8 +35,19 @@ REQUIRED = ["tls/gateway.pem", "tls/gateway-key.pem", "tls/client-ca.pem",
 def regular(path):
     return os.path.lexists(path) and stat.S_ISREG(os.lstat(path).st_mode)
 
-missing = [p for p in ["gateway.db", *REQUIRED] if not regular(os.path.join(state, p))]
-if not regular(config):
+def linked(path):
+    """True when the path or any existing ancestor is a symlink (a linked trust root is not coverage)."""
+    path = os.path.abspath(path)
+    while True:
+        if os.path.islink(path):
+            return True
+        parent = os.path.dirname(path)
+        if parent == path:
+            return False
+        path = parent
+
+missing = [p for p in ["gateway.db", *REQUIRED] if not regular(os.path.join(state, p)) or linked(os.path.join(state, p))]
+if not regular(config) or linked(config):
     missing.append("CONFIG_FILE")
 if missing:
     sys.exit("coverage_incomplete: " + ", ".join(missing))
@@ -71,6 +82,11 @@ for path in before:
     shutil.copy2(path, dest)
 if fingerprint(trust_files()) != before:
     sys.exit("trust_files_changed_during_backup")
+for required in REQUIRED:
+    if not os.path.isfile(os.path.join(out, "state", required)):
+        sys.exit("coverage_incomplete_in_snapshot: " + required)
+if not os.path.isfile(os.path.join(out, "config", os.path.basename(config))):
+    sys.exit("coverage_incomplete_in_snapshot: CONFIG_FILE")
 sums = []
 for root, _, names in os.walk(out):
     for name in sorted(names):

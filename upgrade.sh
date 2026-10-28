@@ -136,6 +136,15 @@ case "$MEDIA_STORE" in
     ;;
 esac
 
+# #492: an enabled managed runtime needs a digest-pinned gateway image and a numeric docker group id
+# for the optional openshell profile; validated here instead of failing every default-off compose run.
+if [[ "$(read_env_var "$ENV_FILE" FLEET_STOCK_MANAGED_ENABLED)" == "true" ]]; then
+  [[ "$(read_env_var "$ENV_FILE" FLEET_STOCK_GATEWAY_IMAGE)" == *@sha256:* ]] \
+    || { fail "FLEET_STOCK_GATEWAY_IMAGE must name the pinned stock gateway image by @sha256 digest"; exit 1; }
+  [[ "$(read_env_var "$ENV_FILE" FLEET_DOCKER_GID)" =~ ^[0-9]+$ ]] \
+    || { fail "FLEET_DOCKER_GID must be the host docker group id"; exit 1; }
+fi
+
 # #492: after the other preflights and before anything is stopped or replaced, refuse an orchestrator that cannot read managed
 # bindings while any exist. An unavailable preflight refuses; it is never read as "none".
 ORCHESTRATOR_AUTH_TOKEN=$(read_env_var "$ENV_FILE" ORCHESTRATOR_AUTH_TOKEN) \

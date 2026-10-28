@@ -835,12 +835,14 @@ services:
   # gateway restart must be planned (owned sandboxes stopped first), never automatic.
   openshell-gateway:
     profiles: ["openshell"]
-    image: ${FLEET_STOCK_GATEWAY_IMAGE:?set FLEET_STOCK_GATEWAY_IMAGE to the pinned stock gateway image@sha256 digest}
+    # Dormant defaults keep every default-off `docker compose` command valid; upgrade validates the
+    # real values when the managed runtime is enabled, and an unset image cannot be pulled.
+    image: ${FLEET_STOCK_GATEWAY_IMAGE:-openshell-gateway-image-not-configured}
     container_name: openshell-gateway
     network_mode: host
     restart: "no"
     user: "1000:1000"
-    group_add: ["${FLEET_DOCKER_GID:?set FLEET_DOCKER_GID to the host docker group id}"]
+    group_add: ["${FLEET_DOCKER_GID:-nogroup}"]
     command: []
     environment:
       OPENSHELL_GATEWAY_CONFIG: /etc/openshell/gateway.toml

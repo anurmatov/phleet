@@ -1009,12 +1009,22 @@ section "[5/7] Building Docker images..."
 # credential refs, the stock CLI's mTLS client cert/key and python3 sqlite3. Default-off returns at once.
 stock_managed_preflight "$ENV_FILE" "$FLEET_BASE_DIR/openshell-client" \
   || { fail "managed runtime is enabled but its prerequisites are incomplete; see docs/openshell-stock.md"; exit 1; }
+# #492 §16: like upgrade, an enabled managed runtime needs a fresh, successful gateway backup first.
+stock_backup_freshness "$ENV_FILE" "$SCRIPT_DIR" \
+  || { fail "managed runtime gateway backup is missing, failed or stale; run scripts/backup-stock-gateway.sh first"; exit 1; }
 
 # #492: a re-run rebuilds or (with --skip-build) still replaces the orchestrator. Refuse while managed
 # bindings exist and the target cannot read them; an unavailable preflight refuses rather than meaning "none".
+# --skip-build starts the existing local fleet:orchestrator image, so the guard inspects that image;
+# a build checks the Dockerfile it is about to build.
+if $SKIP_BUILD; then
+  STOCK_ROLLOUT_TARGET=(--image fleet:orchestrator)
+else
+  STOCK_ROLLOUT_TARGET=(--dockerfile "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile")
+fi
 if ! $DRY_RUN; then
   ORCHESTRATOR_AUTH_TOKEN=$(read_env_var "$ENV_FILE" ORCHESTRATOR_AUTH_TOKEN) \
-    bash "$SCRIPT_DIR/scripts/check-stock-runtime-rollout.sh" --dockerfile "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile" \
+    bash "$SCRIPT_DIR/scripts/check-stock-runtime-rollout.sh" "${STOCK_ROLLOUT_TARGET[@]}" \
     || { fail "managed runtime rollout guard refused this orchestrator replacement"; exit 1; }
 fi
 

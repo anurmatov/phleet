@@ -593,7 +593,8 @@ answer refuses. Ordered rollback:
 4. roll back the orchestrator image;
 5. Start if needed.
 
-`setup.sh` re-runs call the same guard before rebuilding the orchestrator. **CI jobs and any external
+`setup.sh` re-runs call the same guard before rebuilding the orchestrator; with `--skip-build` they
+check `--image fleet:orchestrator`, the existing local image they will start, instead of the Dockerfile. **CI jobs and any external
 deploy integration that replace the orchestrator must run
 `scripts/check-stock-runtime-rollout.sh --image <exact orchestrator image>` first and stop on a nonzero
 exit.** Administrator Docker commands that bypass this procedure are not protected.
@@ -607,7 +608,7 @@ and exits nonzero. Linked OS ancestors above `STATE_DIR` (macOS `/var` -> `/priv
 linked `STATE_DIR` or anything under it still refuses. Staleness is surfaced by
 `scripts/check-stock-gateway-backup.sh BACKUP_DIR [MAX_AGE_HOURS]` (default 26): it exits nonzero when
 `last-success` is missing, malformed, older than the limit or not newer than `last-failure`. With
-`FLEET_STOCK_MANAGED_ENABLED=true`, `upgrade.sh` runs it against `FLEET_STOCK_BACKUP_DIR` (limit
+`FLEET_STOCK_MANAGED_ENABLED=true`, `setup.sh` and `upgrade.sh` run it against `FLEET_STOCK_BACKUP_DIR` (limit
 `FLEET_STOCK_BACKUP_MAX_AGE_HOURS`) before the rollout guard and refuses on a missing, failed or stale
 backup; wire the same check into host monitoring. Snapshots contain keys: keep
 them host-local unless an operator-approved encrypted transfer exists. To restore, stop the gateway

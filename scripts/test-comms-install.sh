@@ -150,7 +150,7 @@ cmp "$FRESH/.env.example" "$DIR/example-before"
 echo 'PASS fresh full dry-run exits zero without real config or leftover previews'
 # --skip-build still replaces the orchestrator, so the rollout guard must run before the build branch.
 guard_line=$(grep -n 'check-stock-runtime-rollout.sh' "$ROOT/setup.sh" | head -1 | cut -d: -f1)
-skip_line=$(grep -n '^if \$SKIP_BUILD; then' "$ROOT/setup.sh" | head -1 | cut -d: -f1)
+skip_line=$(grep -n 'warn "Skipping image builds (--skip-build)"' "$ROOT/setup.sh" | head -1 | cut -d: -f1)
 [[ -n "$guard_line" && -n "$skip_line" && "$guard_line" -lt "$skip_line" ]]
 echo 'PASS setup.sh runs the rollout guard regardless of --skip-build'
 # #492 F8: an enabled managed runtime refuses incomplete trust before any lifecycle change.
@@ -230,3 +230,39 @@ pre_line=$(grep -n '^stock_managed_preflight ' "$ROOT/setup.sh" | head -1 | cut 
 [[ -n "$pre_line" && "$pre_line" -lt "$guard_line" ]]
 grep -q '^source "$SCRIPT_DIR/scripts/lib/stock-managed-preflight.sh"$' "$ROOT/setup.sh"
 echo 'PASS setup.sh runs the shared managed preflight before the rollout guard'
+# #492 review F9r: setup.sh also runs the backup freshness check, after the shared preflight and
+# before the rollout guard, exactly like upgrade.
+fresh_line=$(grep -n '^stock_backup_freshness "\$ENV_FILE" "\$SCRIPT_DIR"' "$ROOT/setup.sh" | head -1 | cut -d: -f1)
+[[ -n "$fresh_line" && "$pre_line" -lt "$fresh_line" && "$fresh_line" -lt "$guard_line" ]]
+echo 'PASS setup.sh runs the gateway backup freshness check before the rollout guard'
+# #492 review F9r: run setup.sh's own guard block. --skip-build inspects the local fleet:orchestrator
+# image it will start; a build checks the Dockerfile. Stubbed docker, no network.
+block=$(awk '/^stock_backup_freshness /{on=1} on{print} on&&/^fi$/{n++; if(n==2) exit}' "$ROOT/setup.sh")
+[[ "$block" == *'--image fleet:orchestrator'* ]]
+GUARDBIN="$DIR/guardbin"; mkdir -p "$GUARDBIN"
+cat > "$GUARDBIN/docker" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$CALLS"
+[[ "$*" == 'image inspect --format'*' fleet:orchestrator' ]] && printf '1'
+exit 0
+MOCK
+chmod +x "$GUARDBIN/docker"
+run_setup_guard() {
+  : > "$CALLS"
+  PATH="$GUARDBIN:$PATH" SKIP_BUILD="$1" DRY_RUN=false SCRIPT_DIR="$DIR" ENV_FILE="$ENV" BLOCK="$block" bash -c '
+    set -euo pipefail
+    read_env_var() { echo fixture-token; }
+    stock_backup_freshness() { echo "freshness $*" >> "$CALLS"; }
+    fail() { echo "FAIL: $*" >&2; }
+    eval "$BLOCK"' > "$DIR/output" 2>&1 || { cat "$DIR/output" >&2; exit 1; }
+}
+run_setup_guard true
+grep -q '^freshness ' "$CALLS"
+grep -q '^image inspect --format .* fleet:orchestrator$' "$CALLS"
+grep -q 'OK: target supports managed bindings' "$DIR/output"
+echo 'PASS setup.sh --skip-build guards the fleet:orchestrator image it starts'
+run_setup_guard false
+grep -q '^freshness ' "$CALLS"
+if grep -q '^image inspect' "$CALLS"; then exit 1; fi
+grep -q 'OK: target supports managed bindings' "$DIR/output"
+echo 'PASS setup.sh build run guards the orchestrator Dockerfile'

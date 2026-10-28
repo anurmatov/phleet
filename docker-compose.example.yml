@@ -335,6 +335,8 @@ services:
       # If you're not using gemini, create an empty placeholder file:
       #   touch ${FLEET_BASE_DIR}/.gemini-credentials.json
       - ${FLEET_BASE_DIR}/.gemini-credentials.json:/root/.gemini/oauth_creds.json
+      # #488: durable record of workflow failures not yet delivered (used only when the notifier is on).
+      - ${FLEET_BASE_DIR}/temporal-bridge:/var/lib/fleet-temporal-bridge
     environment:
       - RabbitMq__Host=rabbitmq
       - TemporalBridge__TemporalAddress=temporal-server:7233

@@ -21,13 +21,22 @@ public sealed class WorkflowFailureNotifierOptions
     public int PollIntervalSeconds { get; set; } = 60;
 
     /// <summary>
-    /// How far back a poll looks for closed failed runs. Bounds what a restart re-examines; it must
-    /// stay below the notification namespace's retention, which is what remembers sent notices.
+    /// How far back a poll looks for newly closed failed runs. Failures already recorded stay in
+    /// <see cref="StateFile"/> until delivered, whatever their age.
     /// </summary>
     public int LookbackHours { get; set; } = 6;
 
-    /// <summary>Send attempts per failure before it is parked as an error until the next restart.</summary>
+    /// <summary>
+    /// Delivery attempts per failure (a failed hand-over or a notification run that closed without
+    /// delivering) before it is parked. Parked records persist and stay visible.
+    /// </summary>
     public int MaxDeliveryAttempts { get; set; } = 5;
+
+    /// <summary>
+    /// Durable record of every failure not yet delivered, so a restart resumes it whatever its age.
+    /// Mount its directory on a volume. Empty keeps state in memory only (reported as not durable).
+    /// </summary>
+    public string StateFile { get; set; } = "/var/lib/fleet-temporal-bridge/workflow-failures.json";
 
     /// <summary>Namespace and task queue of the existing NotifyCtoWorkflow, the delivery path.</summary>
     public string NotificationNamespace { get; set; } = "fleet";

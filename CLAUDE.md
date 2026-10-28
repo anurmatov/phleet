@@ -351,13 +351,16 @@ no bridge restart during consensus).
 
 Off by default (`FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED=false` → bridge
 `WorkflowFailureNotifier__Enabled`; fresh setup writes it, upgrade adds it only when missing). When
-on, the bridge polls each configured namespace for runs that closed `Failed` or `TimedOut` and hands
-each one, once, to the existing `NotifyCtoWorkflow` for `FLEET_CTO_AGENT` (or
-`WorkflowFailureNotifier__CoordinatorAgent`). The deterministic id
-`workflow-failure-<namespace>-<runId>` plus Temporal's duplicate rejection is the dedup record.
-`Completed`, `Canceled`, `Terminated` and continue-as-new never notify. The notice carries identity,
-status and a type-name cause, never failure text or results. There is no recovery automation.
-Pending/parked state is served at bridge `GET /workflow-failures`. See
+on, the bridge polls each configured namespace for runs that closed `Failed` or `TimedOut`. Each
+failure is a record in a durable state file (`WorkflowFailureNotifier__StateFile`, compose mounts
+`${FLEET_BASE_DIR}/temporal-bridge`): pending, in flight, delivered or parked. Each attempt starts
+the existing `NotifyCtoWorkflow` for `FLEET_CTO_AGENT` (or
+`WorkflowFailureNotifier__CoordinatorAgent`) as `workflow-failure-<namespace>-<runId>-<attempt>`
+with `ReportDeliveryFailure` on. That flag defaults off, so `notify_cto` is unchanged. A failure
+counts as delivered only when that run completed; a failed hand-over or run is retried, up to
+`MaxDeliveryAttempts`, then parked. `Completed`, `Canceled`, `Terminated` and continue-as-new never
+notify. Notices carry identity, status and a fixed cause category, never failure text or error-type
+strings. There is no recovery automation. Bridge `GET /workflow-failures` shows the records. See
 `docs/workflow-failure-notifier.md`.
 
 ## Code Conventions

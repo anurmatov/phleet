@@ -1,6 +1,8 @@
 using System.Text;
+using System.Text.Json;
 using Fleet.Temporal.Configuration;
 using Fleet.Temporal.Mcp;
+using Fleet.Temporal.Workflows.Fleet;
 using Microsoft.Extensions.Options;
 using Temporalio.Api.Enums.V1;
 using Temporalio.Client;
@@ -20,19 +22,24 @@ public interface IWorkflowFailureSource
 {
     Task<IReadOnlyList<ClosedRun>> ListFailedAsync(string @namespace, DateTime sinceUtc, CancellationToken ct);
 
-    /// <summary>A structural cause category for the run, never its failure text.</summary>
+    /// <summary>One of the fixed <see cref="WorkflowFailureClassifier"/> categories, never failure text.</summary>
     Task<string> CauseAsync(ClosedRun run, CancellationToken ct);
 }
+
+/// <summary>What became of one notification run.</summary>
+public enum NotificationOutcome { Running, Delivered, Failed, Unknown }
 
 /// <summary>How a notification reaches the coordinator. Production starts the existing NotifyCtoWorkflow.</summary>
 public interface IFailureNotificationSender
 {
     /// <summary>
-    /// Starts the notification under <paramref name="notificationId"/>. Returns true when this call
-    /// started it, false when that id was already used, which is the restart dedup. Throws when the
-    /// delivery path is unavailable, so the failure stays pending.
+    /// Starts one delivery attempt under <paramref name="notificationId"/>. Returns false when that id
+    /// already exists (a start that was not recorded before a crash). Throws when the hand-over fails.
     /// </summary>
-    Task<bool> SendAsync(string notificationId, string coordinator, string text, CancellationToken ct);
+    Task<bool> StartAsync(string notificationId, string coordinator, string text, CancellationToken ct);
+
+    /// <summary>Delivered only when the notification run completed, i.e. the coordinator answered.</summary>
+    Task<NotificationOutcome> OutcomeAsync(string notificationId, CancellationToken ct);
 }
 
 /// <summary>
@@ -43,34 +50,36 @@ public interface IFailureNotificationSender
 /// Canceled, Terminated and continue-as-new are never treated as failures. A deliberate UWE
 /// <c>fail</c> step closes Failed with the <c>ExplicitFail</c> type and is labelled a business failure.
 ///
-/// Delivery reuses the NotifyCtoWorkflow path that <c>notify_cto</c> already uses. Each failure gets
-/// a deterministic notification workflow id, and Temporal's duplicate-id rejection is the persisted
-/// "already notified" record, so a restart or a repeat poll does not notify twice. What it confirms is
-/// that the notification was handed to that workflow; the agent-side delivery keeps that workflow's
-/// existing semantics. A failure that cannot be handed over stays pending with its attempt count and
-/// is retried on later polls, up to <see cref="WorkflowFailureNotifierOptions.MaxDeliveryAttempts"/>.
+/// Every discovered failure is a record in a small durable state file: pending, in flight, delivered
+/// or parked, with its attempt count. Each attempt starts the existing NotifyCtoWorkflow under
+/// <c>workflow-failure-&lt;namespace&gt;-&lt;runId&gt;-&lt;attempt&gt;</c> with delivery-failure reporting
+/// on, so the notification run closes Completed only when the coordinator answered and Failed when
+/// delivery did not happen. A failed hand-over or a failed notification run counts as an attempt; the
+/// record is retried on later polls and parked after <see cref="WorkflowFailureNotifierOptions.MaxDeliveryAttempts"/>.
+/// The per-attempt ids also let a lost state file be rebuilt from Temporal for failures still inside
+/// the lookback window.
 ///
-/// The notice carries identity, type, status and a cause category only: no failure message, inputs,
-/// results or logs. The coordinator reads details through its existing tools and their access rules,
-/// and decides what to do. Nothing here restarts, resumes or reserves anything.
+/// The notice carries identity, type, status and a fixed cause category only: no failure message,
+/// error-type text, inputs, results or logs. The coordinator reads details through its existing tools
+/// and their access rules, and decides what to do. Nothing here restarts, resumes or reserves anything.
 /// </summary>
 public sealed class WorkflowFailureNotifier : BackgroundService
 {
     internal const string NotificationIdPrefix = "workflow-failure-";
     internal const int MaxSendsPerCycle = 10;
+    internal static readonly TimeSpan ParkedRetention = TimeSpan.FromDays(30);
 
     private readonly WorkflowFailureNotifierOptions _options;
     private readonly IReadOnlyList<string> _namespaces;
     private readonly CtoAgentConfigService _ctoConfig;
     private readonly IWorkflowFailureSource _source;
     private readonly IFailureNotificationSender _sender;
+    private readonly WorkflowFailureStateFile _store;
     private readonly TimeProvider _time;
     private readonly ILogger<WorkflowFailureNotifier> _logger;
 
     private readonly Lock _gate = new();
-    private readonly Dictionary<string, PendingFailure> _pending = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, DateTime> _handled = new(StringComparer.Ordinal);
-    private int _sent;
+    private readonly Dictionary<string, FailureRecord> _records;
     private bool _warnedUnconfigured;
 
     public WorkflowFailureNotifier(
@@ -92,6 +101,8 @@ public sealed class WorkflowFailureNotifier : BackgroundService
         _sender = sender;
         _logger = logger;
         _time = time ?? TimeProvider.System;
+        _store = new WorkflowFailureStateFile(_options.StateFile, logger);
+        _records = _options.Enabled ? _store.Load() : new Dictionary<string, FailureRecord>(StringComparer.Ordinal);
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -102,8 +113,9 @@ public sealed class WorkflowFailureNotifier : BackgroundService
             return;
         }
 
-        _logger.LogInformation("Workflow failure notifier polling {Namespaces} every {Seconds}s",
-            string.Join(", ", _namespaces), _options.PollIntervalSeconds);
+        _logger.LogInformation("Workflow failure notifier polling {Namespaces} every {Seconds}s, state {State}",
+            string.Join(", ", _namespaces), _options.PollIntervalSeconds,
+            _store.Durable ? "durable" : "in memory only");
 
         while (!ct.IsCancellationRequested)
         {
@@ -113,7 +125,7 @@ public sealed class WorkflowFailureNotifier : BackgroundService
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
-                _logger.LogError(ex, "Workflow failure notifier cycle failed; retrying next poll");
+                _logger.LogError("Workflow failure notifier cycle failed ({Error}); retrying next poll", ex.GetType().Name);
             }
 
             await Task.Delay(TimeSpan.FromSeconds(Math.Max(5, _options.PollIntervalSeconds)), ct)
@@ -121,12 +133,34 @@ public sealed class WorkflowFailureNotifier : BackgroundService
         }
     }
 
-    /// <summary>One poll: discover new failures, then hand pending ones to the coordinator.</summary>
+    /// <summary>One poll: discover, settle in-flight attempts, start pending ones, prune, persist.</summary>
     public async Task RunCycleAsync(CancellationToken ct)
     {
         var now = _time.GetUtcNow().UtcDateTime;
-        var since = now.AddHours(-Math.Max(1, _options.LookbackHours));
+        await DiscoverAsync(now.AddHours(-Math.Max(1, _options.LookbackHours)), now, ct);
+        await SettleInFlightAsync(now, ct);
 
+        var coordinator = ResolveCoordinator();
+        if (coordinator is null)
+        {
+            if (!_warnedUnconfigured)
+                _logger.LogWarning(
+                    "Workflow failure notifier has no coordinator (WorkflowFailureNotifier:CoordinatorAgent and " +
+                    "FLEET_CTO_AGENT are empty); failures are held, not sent");
+            _warnedUnconfigured = true;
+        }
+        else
+        {
+            _warnedUnconfigured = false;
+            await StartPendingAsync(coordinator, now, ct);
+        }
+
+        Prune(now);
+        Persist();
+    }
+
+    private async Task DiscoverAsync(DateTime since, DateTime now, CancellationToken ct)
+    {
         foreach (var ns in _namespaces)
         {
             IReadOnlyList<ClosedRun> runs;
@@ -145,97 +179,136 @@ public sealed class WorkflowFailureNotifier : BackgroundService
             {
                 foreach (var run in runs)
                 {
-                    // Our own notifications are never notified about.
+                    // Our own notification runs are never notified about.
                     if (run.WorkflowId.StartsWith(NotificationIdPrefix, StringComparison.Ordinal)) continue;
-                    if (_handled.ContainsKey(run.Identity) || _pending.ContainsKey(run.Identity)) continue;
-                    _pending[run.Identity] = new PendingFailure(run);
+                    if (_records.ContainsKey(run.Identity)) continue;
+                    _records[run.Identity] = FailureRecord.From(run, now);
                 }
             }
         }
+    }
 
-        lock (_gate)
-        {
-            foreach (var old in _handled.Where(h => h.Value < since).Select(h => h.Key).ToList())
-                _handled.Remove(old);
-        }
+    private async Task SettleInFlightAsync(DateTime now, CancellationToken ct)
+    {
+        List<FailureRecord> inFlight;
+        lock (_gate) inFlight = _records.Values.Where(r => r.State == FailureState.InFlight).ToList();
 
-        var coordinator = ResolveCoordinator();
-        if (coordinator is null)
+        foreach (var record in inFlight)
         {
-            if (!_warnedUnconfigured)
+            NotificationOutcome outcome;
+            try
             {
-                _logger.LogWarning(
-                    "Workflow failure notifier has no coordinator (WorkflowFailureNotifier:CoordinatorAgent and " +
-                    "FLEET_CTO_AGENT are empty); failures are held, not sent");
-                _warnedUnconfigured = true;
+                outcome = await _sender.OutcomeAsync(record.NotificationId!, ct);
             }
-            return;
-        }
-        _warnedUnconfigured = false;
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                _logger.LogDebug("Outcome lookup for {Identity} failed: {Error}", record.Identity, ex.GetType().Name);
+                continue;
+            }
 
-        List<PendingFailure> batch;
+            lock (_gate)
+            {
+                switch (outcome)
+                {
+                    case NotificationOutcome.Delivered:
+                        record.State = FailureState.Delivered;
+                        record.UpdatedAt = now;
+                        _logger.LogInformation("Workflow failure {Identity} delivered ({Notification})",
+                            record.Identity, record.NotificationId);
+                        break;
+                    case NotificationOutcome.Failed:
+                        FailAttempt(record, WorkflowFailureClassifier.DeliveryFailed, now);
+                        break;
+                }
+            }
+        }
+    }
+
+    private async Task StartPendingAsync(string coordinator, DateTime now, CancellationToken ct)
+    {
+        List<FailureRecord> batch;
         lock (_gate)
         {
-            batch = _pending.Values
-                .Where(p => !p.Parked)
-                .OrderBy(p => p.Run.CloseTime)
+            batch = _records.Values
+                .Where(r => r.State == FailureState.Pending)
+                .OrderBy(r => r.CloseTime)
                 .Take(MaxSendsPerCycle)
                 .ToList();
         }
 
-        foreach (var pending in batch)
+        foreach (var record in batch)
         {
             ct.ThrowIfCancellationRequested();
-            await TrySendAsync(pending, coordinator, ct);
-        }
-    }
+            if (record.Cause is null)
+            {
+                try
+                {
+                    record.Cause = WorkflowFailureClassifier.Known(await _source.CauseAsync(record.Run, ct));
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested)
+                {
+                    // The notice is still worth sending; the coordinator can look the cause up.
+                    _logger.LogDebug("Cause lookup failed for {Identity}: {Error}", record.Identity, ex.GetType().Name);
+                    record.Cause = WorkflowFailureClassifier.Unknown;
+                }
+            }
 
-    private async Task TrySendAsync(PendingFailure pending, string coordinator, CancellationToken ct)
-    {
-        var run = pending.Run;
-        if (pending.Cause is null)
-        {
+            var id = NotificationId(record.Run, record.Attempts + 1);
             try
             {
-                pending.Cause = await _source.CauseAsync(run, ct);
+                var startedNow = await _sender.StartAsync(id, coordinator, ComposeNotice(record.Run, record.Cause), ct);
+                lock (_gate)
+                {
+                    record.State = FailureState.InFlight;
+                    record.NotificationId = id;
+                    record.UpdatedAt = now;
+                }
+                if (startedNow)
+                    _logger.LogInformation("Workflow failure {Identity} ({Cause}) handed to {Coordinator} as {Notification}",
+                        record.Identity, record.Cause, coordinator, id);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
-                // The notice is still worth sending; the coordinator can look the cause up.
-                _logger.LogDebug("Cause lookup failed for {Identity}: {Error}", run.Identity, ex.GetType().Name);
-                pending.Cause = "unknown";
+                _logger.LogDebug("Hand-over of {Identity} failed: {Error}", record.Identity, ex.GetType().Name);
+                lock (_gate) FailAttempt(record, WorkflowFailureClassifier.HandoverFailed, now);
             }
         }
+    }
 
-        try
+    private void FailAttempt(FailureRecord record, string error, DateTime now)
+    {
+        record.Attempts++;
+        record.LastError = error;
+        record.NotificationId = null;
+        record.UpdatedAt = now;
+        record.State = record.Attempts >= Math.Max(1, _options.MaxDeliveryAttempts) ? FailureState.Parked : FailureState.Pending;
+        if (record.State == FailureState.Parked)
+            _logger.LogError("Workflow failure {Identity} not delivered after {Attempts} attempts ({Error}); parked",
+                record.Identity, record.Attempts, error);
+        else
+            _logger.LogWarning("Workflow failure {Identity} still pending after attempt {Attempts} ({Error})",
+                record.Identity, record.Attempts, error);
+    }
+
+    private void Prune(DateTime now)
+    {
+        var lookback = now.AddHours(-Math.Max(1, _options.LookbackHours));
+        lock (_gate)
         {
-            var startedNow = await _sender.SendAsync(
-                NotificationId(run), coordinator, ComposeNotice(run, pending.Cause), ct);
-            lock (_gate)
-            {
-                _pending.Remove(run.Identity);
-                _handled[run.Identity] = run.CloseTime;
-                if (startedNow) _sent++;
-            }
-            if (startedNow)
-                _logger.LogInformation("Workflow failure {Identity} ({Cause}) handed to coordinator {Coordinator}",
-                    run.Identity, pending.Cause, coordinator);
+            // A delivered record is kept while discovery could still list its run; a parked one for 30 days.
+            foreach (var key in _records.Values
+                         .Where(r => (r.State == FailureState.Delivered && r.CloseTime < lookback)
+                                  || (r.State == FailureState.Parked && r.UpdatedAt < now - ParkedRetention))
+                         .Select(r => r.Identity).ToList())
+                _records.Remove(key);
         }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
-        {
-            lock (_gate)
-            {
-                pending.Attempts++;
-                pending.LastError = ex.GetType().Name;
-                pending.Parked = pending.Attempts >= Math.Max(1, _options.MaxDeliveryAttempts);
-            }
-            if (pending.Parked)
-                _logger.LogError("Workflow failure {Identity} not delivered after {Attempts} attempts ({Error}); parked",
-                    run.Identity, pending.Attempts, pending.LastError);
-            else
-                _logger.LogWarning("Workflow failure {Identity} pending, attempt {Attempts} failed ({Error})",
-                    run.Identity, pending.Attempts, pending.LastError);
-        }
+    }
+
+    private void Persist()
+    {
+        List<FailureRecord> snapshot;
+        lock (_gate) snapshot = _records.Values.ToList();
+        _store.Save(snapshot);
     }
 
     private string? ResolveCoordinator()
@@ -245,13 +318,13 @@ public sealed class WorkflowFailureNotifier : BackgroundService
         return string.IsNullOrWhiteSpace(configured) ? null : configured.Trim();
     }
 
-    /// <summary>Deterministic per failed run; the duplicate-id rejection on it is the dedup record.</summary>
-    internal static string NotificationId(ClosedRun run) => $"{NotificationIdPrefix}{run.Namespace}-{run.RunId}";
+    /// <summary>Deterministic per failed run and attempt; a lost state file is rebuilt from these.</summary>
+    internal static string NotificationId(ClosedRun run, int attempt) =>
+        $"{NotificationIdPrefix}{run.Namespace}-{run.RunId}-{attempt}";
 
     internal static string ComposeNotice(ClosedRun run, string cause)
     {
-        var business = cause.StartsWith(WorkflowFailureClassifier.ExplicitFailCategory, StringComparison.Ordinal)
-            ? " (explicit business failure)" : "";
+        var business = cause == WorkflowFailureClassifier.ExplicitFail ? " (explicit business failure)" : "";
         var sb = new StringBuilder();
         sb.AppendLine("[workflow-failure] A workflow closed because of failure.");
         sb.AppendLine($"namespace: {run.Namespace}");
@@ -259,85 +332,178 @@ public sealed class WorkflowFailureNotifier : BackgroundService
         sb.AppendLine($"runId: {run.RunId}");
         sb.AppendLine($"type: {run.WorkflowType}");
         sb.AppendLine($"status: {run.Status}");
-        sb.AppendLine($"cause: {cause}{business}");
+        sb.AppendLine($"cause: {WorkflowFailureClassifier.Known(cause)}{business}");
         sb.AppendLine($"closed: {run.CloseTime:yyyy-MM-ddTHH:mm:ssZ}");
         sb.AppendLine($"reference: temporal://{run.Namespace}/{Uri.EscapeDataString(run.WorkflowId)}/{run.RunId}");
         sb.AppendLine();
         sb.Append("The failure message, inputs and results are not copied here. Inspect the run with your " +
                   "existing Temporal tools, under their usual access rules, and decide whether to restart, resume " +
-                  "or leave it. Nothing was restarted automatically.");
+                  "or leave it. Nothing was restarted automatically. A short acknowledgement is enough.");
         return sb.ToString();
     }
 
-    /// <summary>Pending/error visibility for the status endpoint. Identity and counts only.</summary>
+    /// <summary>Pending/in-flight/parked visibility for the status endpoint. Identity and counts only.</summary>
     public WorkflowFailureNotifierStatus Snapshot()
     {
         lock (_gate)
         {
+            List<FailureRecordView> In(string state) =>
+                _records.Values.Where(r => r.State == state).OrderBy(r => r.CloseTime).Select(r => r.ToView()).ToList();
             return new WorkflowFailureNotifierStatus(
                 Enabled: _options.Enabled,
                 CoordinatorConfigured: ResolveCoordinator() is not null,
-                Sent: _sent,
-                Pending: _pending.Values.Where(p => !p.Parked).Select(p => p.ToView()).ToList(),
-                Parked: _pending.Values.Where(p => p.Parked).Select(p => p.ToView()).ToList());
+                Durable: _store.Durable,
+                Delivered: _records.Values.Count(r => r.State == FailureState.Delivered),
+                Pending: In(FailureState.Pending),
+                InFlight: In(FailureState.InFlight),
+                Parked: In(FailureState.Parked));
         }
-    }
-
-    private sealed class PendingFailure(ClosedRun run)
-    {
-        public ClosedRun Run { get; } = run;
-        public string? Cause { get; set; }
-        public int Attempts { get; set; }
-        public string? LastError { get; set; }
-        public bool Parked { get; set; }
-
-        public PendingFailureView ToView() =>
-            new(Run.Namespace, Run.WorkflowId, Run.RunId, Run.Status, Attempts, LastError);
     }
 }
 
-public sealed record PendingFailureView(
-    string Namespace, string WorkflowId, string RunId, string Status, int Attempts, string? LastError);
+public static class FailureState
+{
+    public const string Pending = "pending";
+    public const string InFlight = "in_flight";
+    public const string Delivered = "delivered";
+    public const string Parked = "parked";
+
+    public static bool IsKnown(string? s) => s is Pending or InFlight or Delivered or Parked;
+}
+
+/// <summary>The persisted per-failure record: identity, state and attempt count, no content.</summary>
+public sealed class FailureRecord
+{
+    public string Namespace { get; set; } = "";
+    public string WorkflowId { get; set; } = "";
+    public string RunId { get; set; } = "";
+    public string WorkflowType { get; set; } = "";
+    public string Status { get; set; } = "";
+    public DateTime CloseTime { get; set; }
+    public string State { get; set; } = FailureState.Pending;
+    public int Attempts { get; set; }
+    public string? Cause { get; set; }
+    public string? LastError { get; set; }
+    public string? NotificationId { get; set; }
+    public DateTime UpdatedAt { get; set; }
+
+    public string Identity => $"{Namespace}/{WorkflowId}/{RunId}";
+    public ClosedRun Run => new(Namespace, WorkflowId, RunId, WorkflowType, Status, CloseTime);
+
+    public static FailureRecord From(ClosedRun run, DateTime now) => new()
+    {
+        Namespace = run.Namespace, WorkflowId = run.WorkflowId, RunId = run.RunId,
+        WorkflowType = run.WorkflowType, Status = run.Status, CloseTime = run.CloseTime, UpdatedAt = now,
+    };
+
+    public FailureRecordView ToView() => new(Namespace, WorkflowId, RunId, Status, State, Attempts, LastError);
+}
+
+public sealed record FailureRecordView(
+    string Namespace, string WorkflowId, string RunId, string Status, string State, int Attempts, string? LastError);
 
 public sealed record WorkflowFailureNotifierStatus(
-    bool Enabled, bool CoordinatorConfigured, int Sent,
-    IReadOnlyList<PendingFailureView> Pending, IReadOnlyList<PendingFailureView> Parked);
+    bool Enabled, bool CoordinatorConfigured, bool Durable, int Delivered,
+    IReadOnlyList<FailureRecordView> Pending, IReadOnlyList<FailureRecordView> InFlight,
+    IReadOnlyList<FailureRecordView> Parked);
 
-/// <summary>Turns a close failure into a short category made of type names, never message text.</summary>
+/// <summary>
+/// The durable record of failures, written atomically (temp file, then rename) after every poll.
+/// An empty path, or a directory that cannot be written, keeps state in memory and says so.
+/// </summary>
+public sealed class WorkflowFailureStateFile(string? path, ILogger logger)
+{
+    private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
+    private bool _writable = !string.IsNullOrWhiteSpace(path);
+
+    public bool Durable => _writable;
+
+    public Dictionary<string, FailureRecord> Load()
+    {
+        var records = new Dictionary<string, FailureRecord>(StringComparer.Ordinal);
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return records;
+        try
+        {
+            foreach (var r in JsonSerializer.Deserialize<List<FailureRecord>>(File.ReadAllText(path), Json) ?? [])
+            {
+                if (string.IsNullOrEmpty(r.Namespace) || string.IsNullOrEmpty(r.RunId) || !FailureState.IsKnown(r.State)) continue;
+                // Only fixed categories ever leave this process, even if the file was edited.
+                r.Cause = r.Cause is null ? null : WorkflowFailureClassifier.Known(r.Cause);
+                r.LastError = r.LastError is null ? null : WorkflowFailureClassifier.Known(r.LastError);
+                if (r.State == FailureState.InFlight && string.IsNullOrEmpty(r.NotificationId)) r.State = FailureState.Pending;
+                records[r.Identity] = r;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            // Unreadable: start empty. Per-attempt notification ids still rebuild failures in the lookback.
+            logger.LogError("Workflow failure state {Path} unreadable ({Error}); starting empty", path, ex.GetType().Name);
+        }
+        return records;
+    }
+
+    public void Save(IReadOnlyCollection<FailureRecord> records)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+            var temp = path + ".tmp";
+            File.WriteAllText(temp, JsonSerializer.Serialize(records.OrderBy(r => r.Identity, StringComparer.Ordinal).ToList(), Json));
+            File.Move(temp, path, overwrite: true);
+            if (!_writable) logger.LogInformation("Workflow failure state {Path} is writable again", path);
+            _writable = true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            if (_writable)
+                logger.LogError("Workflow failure state {Path} not writable ({Error}); state is in memory only", path, ex.GetType().Name);
+            _writable = false;
+        }
+    }
+}
+
+/// <summary>
+/// Turns a close failure into one of a fixed set of categories. Caller-supplied text, including an
+/// application error type, never becomes part of a category.
+/// </summary>
 public static class WorkflowFailureClassifier
 {
-    /// <summary>The UWE <c>fail</c> step's error type (#424): a deliberate business failure.</summary>
-    public const string ExplicitFailCategory = "explicit_fail";
+    public const string ExplicitFail = "explicit_fail";            // UWE fail step (#424): business failure
+    public const string RefusedSignal = "refused_signal";          // UWE approver-only signal refusal
+    public const string ApplicationError = "application_error";
+    public const string ActivityFailure = "activity_failure";
+    public const string ActivityTimeout = "activity_timeout";
+    public const string ChildWorkflowFailure = "child_workflow_failure";
+    public const string WorkflowTimeout = "workflow_timeout";
+    public const string Canceled = "canceled";
+    public const string Terminated = "terminated";
+    public const string Unknown = "unknown";
+    public const string HandoverFailed = "handover_failed";        // the notification run could not be started
+    public const string DeliveryFailed = "delivery_failed";        // the notification run closed without delivering
+
+    private static readonly HashSet<string> All =
+    [
+        ExplicitFail, RefusedSignal, ApplicationError, ActivityFailure, ActivityTimeout, ChildWorkflowFailure,
+        WorkflowTimeout, Canceled, Terminated, Unknown, HandoverFailed, DeliveryFailed,
+    ];
 
     public static string Category(Exception? cause) => cause switch
     {
-        ApplicationFailureException { ErrorType: "ExplicitFail" } => ExplicitFailCategory,
-        ApplicationFailureException a => "application_error:" + Safe(a.ErrorType),
-        ActivityFailureException a => "activity_failure:" + Safe(a.ActivityType) + Inner(a.InnerException),
-        ChildWorkflowFailureException c => "child_workflow_failure:" + Safe(c.WorkflowType) + Inner(c.InnerException),
-        TimeoutFailureException t => "timeout:" + t.TimeoutType,
-        CanceledFailureException => "canceled",
-        TerminatedFailureException => "terminated",
-        null => "unknown",
-        _ => Safe(cause.GetType().Name),
+        ApplicationFailureException { ErrorType: "ExplicitFail" } => ExplicitFail,
+        ApplicationFailureException { ErrorType: "ReservedSignalName" } => RefusedSignal,
+        ApplicationFailureException => ApplicationError,
+        ActivityFailureException { InnerException: TimeoutFailureException } => ActivityTimeout,
+        ActivityFailureException => ActivityFailure,
+        ChildWorkflowFailureException => ChildWorkflowFailure,
+        TimeoutFailureException => WorkflowTimeout,
+        CanceledFailureException => Canceled,
+        TerminatedFailureException => Terminated,
+        _ => Unknown,
     };
 
-    private static string Inner(Exception? inner) => inner switch
-    {
-        null => "",
-        ApplicationFailureException a => "/" + Safe(a.ErrorType),
-        TimeoutFailureException t => "/timeout:" + t.TimeoutType,
-        _ => "/" + Safe(inner.GetType().Name),
-    };
-
-    /// <summary>Type names only: letters, digits and . _ - :, at most 80 characters.</summary>
-    internal static string Safe(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return "unspecified";
-        var kept = new string(value.Where(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or '-' or ':').ToArray());
-        if (kept.Length == 0) return "unspecified";
-        return kept.Length > 80 ? kept[..80] : kept;
-    }
+    /// <summary>The value itself when it is one of the fixed categories, otherwise <see cref="Unknown"/>.</summary>
+    public static string Known(string? value) => value is not null && All.Contains(value) ? value : Unknown;
 }
 
 /// <summary>Lists Failed and TimedOut runs through the bridge's per-namespace Temporal clients.</summary>
@@ -365,7 +531,7 @@ public sealed class TemporalWorkflowFailureSource(ITemporalClientFactory clientF
 
     public async Task<string> CauseAsync(ClosedRun run, CancellationToken ct)
     {
-        if (run.Status == "TimedOut") return "timeout:workflow_execution";
+        if (run.Status == "TimedOut") return WorkflowFailureClassifier.WorkflowTimeout;
 
         var client = await clientFactory.GetClientAsync(run.Namespace);
         try
@@ -373,7 +539,7 @@ public sealed class TemporalWorkflowFailureSource(ITemporalClientFactory clientF
             // Reads only the close event; the result is never deserialised into the notice.
             await client.GetWorkflowHandle(run.WorkflowId, runId: run.RunId)
                 .GetResultAsync<object?>(followRuns: false, rpcOptions: new RpcOptions { CancellationToken = ct });
-            return "unknown";
+            return WorkflowFailureClassifier.Unknown;
         }
         catch (WorkflowFailedException ex)
         {
@@ -382,12 +548,15 @@ public sealed class TemporalWorkflowFailureSource(ITemporalClientFactory clientF
     }
 }
 
-/// <summary>Starts the existing NotifyCtoWorkflow, the same delivery path <c>notify_cto</c> uses.</summary>
+/// <summary>
+/// Starts the existing NotifyCtoWorkflow, the same delivery path <c>notify_cto</c> uses, with
+/// delivery-failure reporting on so the run's own status is the delivery outcome.
+/// </summary>
 public sealed class TemporalFailureNotificationSender(
     ITemporalClientFactory clientFactory,
     IOptions<WorkflowFailureNotifierOptions> options) : IFailureNotificationSender
 {
-    public async Task<bool> SendAsync(string notificationId, string coordinator, string text, CancellationToken ct)
+    public async Task<bool> StartAsync(string notificationId, string coordinator, string text, CancellationToken ct)
     {
         var opts = options.Value;
         var client = await clientFactory.GetClientAsync(opts.NotificationNamespace);
@@ -395,10 +564,10 @@ public sealed class TemporalFailureNotificationSender(
         {
             await client.StartWorkflowAsync(
                 TemporalWorkflowDispatcher.NotifyCtoWorkflowType,
-                [new { TargetAgent = coordinator, TaskDescription = text }],
+                [new NotifyCtoWorkflowInput(coordinator, text, ReportDeliveryFailure: true)],
                 new WorkflowOptions(id: notificationId, taskQueue: opts.NotificationTaskQueue)
                 {
-                    // A closed or running notification with this id means it was already sent.
+                    // Each attempt has its own id; an existing one means this attempt already started.
                     IdReusePolicy = WorkflowIdReusePolicy.RejectDuplicate,
                     Rpc = new RpcOptions { CancellationToken = ct },
                 });
@@ -407,6 +576,29 @@ public sealed class TemporalFailureNotificationSender(
         catch (WorkflowAlreadyStartedException)
         {
             return false;
+        }
+    }
+
+    public async Task<NotificationOutcome> OutcomeAsync(string notificationId, CancellationToken ct)
+    {
+        var client = await clientFactory.GetClientAsync(options.Value.NotificationNamespace);
+        try
+        {
+            var description = await client.GetWorkflowHandle(notificationId)
+                .DescribeAsync(new WorkflowDescribeOptions { Rpc = new RpcOptions { CancellationToken = ct } });
+            return description.Status switch
+            {
+                WorkflowExecutionStatus.Running => NotificationOutcome.Running,
+                WorkflowExecutionStatus.Completed => NotificationOutcome.Delivered,
+                WorkflowExecutionStatus.Failed or WorkflowExecutionStatus.TimedOut
+                    or WorkflowExecutionStatus.Canceled or WorkflowExecutionStatus.Terminated => NotificationOutcome.Failed,
+                _ => NotificationOutcome.Unknown,
+            };
+        }
+        catch (RpcException ex) when (ex.Code == RpcException.StatusCode.NotFound)
+        {
+            // The attempt is gone (retention): it cannot be confirmed, so it counts as not delivered.
+            return NotificationOutcome.Failed;
         }
     }
 }

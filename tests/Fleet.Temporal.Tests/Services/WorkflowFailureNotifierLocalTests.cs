@@ -12,6 +12,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NSubstitute;
 using RabbitMQ.Client;
+using Temporalio.Api.Enums.V1;
 using Temporalio.Client;
 using Temporalio.Exceptions;
 using Temporalio.Worker;
@@ -20,27 +21,31 @@ using Temporalio.Workflows;
 namespace Fleet.Temporal.Tests.Services;
 
 /// <summary>
-/// The one connected check for #488, against a REAL local Temporal server: synthetic runs close
-/// Failed, TimedOut, explicitly failed, successfully with null, and canceled. The production
-/// notifier lists them through Temporal visibility and starts the real NotifyCtoWorkflow, whose real
-/// DelegateToAgentActivity publishes the directive. Only the broker edge is captured, addressed to a
-/// test coordinator, so no real agent or human is notified.
+/// The connected check for #488, against a REAL local Temporal server: synthetic runs close Failed
+/// (one with a secret-shaped error type), explicitly failed, TimedOut, successfully with null, and
+/// canceled. The production notifier lists them through Temporal visibility and starts the real
+/// NotifyCtoWorkflow, whose real DelegateToAgentActivity publishes the directive. Only the broker
+/// edge is substituted: it fails the first publish (an outage) and otherwise captures directives for a
+/// test coordinator, which answers them. No real agent or human is notified.
 /// </summary>
 [Collection("workflow-failure-local")]
-public class WorkflowFailureNotifierLocalTests : IClassFixture<LocalTemporalFixture>
+public class WorkflowFailureNotifierLocalTests : IClassFixture<LocalTemporalFixture>, IDisposable
 {
     private const string Coordinator = "test-coordinator";
-    private const string Secret = "sk-live-SECRET-hunter2";
+    private const string SecretType = "synthetic-secret-123";
 
     private readonly LocalTemporalFixture _fixture;
+    private readonly string _dir = Directory.CreateTempSubdirectory("wf-failure-local-").FullName;
 
     public WorkflowFailureNotifierLocalTests(LocalTemporalFixture fixture) => _fixture = fixture;
 
+    public void Dispose() => Directory.Delete(_dir, recursive: true);
+
     [Fact]
-    public async Task FailedRunsReachTheTestCoordinatorOnce_AndNonFailuresNever()
+    public async Task FailuresAreDeliveredOnceThroughAnOutageAndARestart_NonFailuresNever_NoSecretsLeak()
     {
         var queue = $"wf-failure-local-{Guid.NewGuid():N}";
-        var capture = new PublishCapture();
+        var capture = new PublishCapture { FailNext = 1 };
         var registry = new TaskCompletionRegistry(NullLogger<TaskCompletionRegistry>.Instance);
         var activity = new DelegateToAgentActivity(
             Options.Create(new RabbitMqOptions()),
@@ -67,40 +72,60 @@ public class WorkflowFailureNotifierLocalTests : IClassFixture<LocalTemporalFixt
             var source = new TemporalWorkflowFailureSource(factory);
             await WaitUntilListedAsync(source, ns, 3, tag);
 
-            var notifier = NewNotifier(factory, source, ns, queue);
-            var answering = AnswerEveryPublishAsync(capture, registry, expected: 3);
-            await notifier.RunCycleAsync(CancellationToken.None);
-            await answering;
+            using var answering = new CancellationTokenSource();
+            var coordinator = AnswerEveryDirectiveAsync(capture, registry, answering.Token);
 
-            var directives = capture.Directives.Where(d => d.Text.Contains(tag)).ToList();
+            var notifier = NewNotifier(factory, source, ns, queue);
+            var deadline = DateTime.UtcNow.AddSeconds(90);
+            while (notifier.Snapshot().Delivered < 3 && DateTime.UtcNow < deadline)
+            {
+                await notifier.RunCycleAsync(CancellationToken.None);
+                await Task.Delay(300);
+            }
+            var status = notifier.Snapshot();
+            Assert.Equal(3, status.Delivered);
+            Assert.True(status.Durable);
+            Assert.Empty(status.Pending);
+            Assert.Empty(status.InFlight);
+            Assert.Empty(status.Parked);
+
+            // The outage: one attempt's run closed Failed (not swallowed), and that failure was retried.
+            var failedAttempt = Assert.Single(capture.FailedTaskIds).Split('/')[0];
+            var description = await _fixture.Client.GetWorkflowHandle(failedAttempt).DescribeAsync();
+            Assert.Equal(WorkflowExecutionStatus.Failed, description.Status);
+            var retried = failedAttempt[..^1] + "2";
+            Assert.Equal(WorkflowExecutionStatus.Completed, (await _fixture.Client.GetWorkflowHandle(retried).DescribeAsync()).Status);
+
+            var directives = capture.Delivered.Where(d => d.Text.Contains(tag)).ToList();
             Assert.Equal(3, directives.Count);
             Assert.All(directives, d => Assert.Equal(Coordinator, d.RoutingKey));
-            Assert.All(directives, d => Assert.DoesNotContain("hunter2", d.Text));
-            Assert.All(directives, d => Assert.Contains("[fleet-wf:NotifyCtoWorkflow:workflow-failure-", d.Text));
+            Assert.All(capture.All, d => Assert.DoesNotContain(SecretType, d.Text));
+            Assert.All(capture.All, d => Assert.DoesNotContain("hunter2", d.Text));
+            Assert.Contains("cause: explicit_fail (explicit business failure)", For(directives, explicitFail).Text);
+            Assert.Contains("cause: application_error\n", For(directives, plainFail).Text);
+            Assert.Contains("status: TimedOut", For(directives, timedOut).Text);
+            Assert.DoesNotContain(capture.All, d => d.Text.Contains(success.Id) || d.Text.Contains(canceled.Id));
+            Assert.DoesNotContain(SecretType, File.ReadAllText(StatePath));
 
-            Assert.Contains("cause: explicit_fail (explicit business failure)", Single(directives, explicitFail).Text);
-            Assert.Contains("status: Failed", Single(directives, plainFail).Text);
-            Assert.Contains("cause: application_error:unspecified", Single(directives, plainFail).Text);
-            Assert.Contains("status: TimedOut", Single(directives, timedOut).Text);
-            Assert.DoesNotContain(directives, d => d.Text.Contains(success.Id) || d.Text.Contains(canceled.Id));
+            // A restart reloads the state file: nothing is notified again.
+            var published = capture.All.Count;
+            var restarted = NewNotifier(factory, source, ns, queue);
+            await restarted.RunCycleAsync(CancellationToken.None);
+            await restarted.RunCycleAsync(CancellationToken.None);
+            Assert.Equal(published, capture.All.Count);
+            Assert.Equal(3, restarted.Snapshot().Delivered);
 
-            // A repeat poll and a restarted notifier both meet the persisted notification ids.
-            await notifier.RunCycleAsync(CancellationToken.None);
-            await NewNotifier(factory, source, ns, queue).RunCycleAsync(CancellationToken.None);
-            Assert.Equal(3, capture.Directives.Count(d => d.Text.Contains(tag)));
-            Assert.Empty(notifier.Snapshot().Pending);
-            Assert.Equal(3, notifier.Snapshot().Sent);
+            answering.Cancel();
+            await coordinator;
         });
     }
 
-    private static (string Id, string RunId, string RoutingKey, string Text) Single(
-        List<(string RoutingKey, string Text)> directives, WorkflowHandle run)
-    {
-        var d = Assert.Single(directives, d => d.Text.Contains($"workflowId: {run.Id}\n") && d.Text.Contains($"runId: {run.ResultRunId}"));
-        return (run.Id, run.ResultRunId!, d.RoutingKey, d.Text);
-    }
+    private string StatePath => Path.Combine(_dir, "workflow-failures.json");
 
-    private static WorkflowFailureNotifier NewNotifier(ITemporalClientFactory factory, IWorkflowFailureSource source, string ns, string queue)
+    private static (string RoutingKey, string Text) For(List<(string RoutingKey, string Text)> directives, WorkflowHandle run) =>
+        Assert.Single(directives, d => d.Text.Contains($"workflowId: {run.Id}\n") && d.Text.Contains($"runId: {run.ResultRunId}"));
+
+    private WorkflowFailureNotifier NewNotifier(ITemporalClientFactory factory, IWorkflowFailureSource source, string ns, string queue)
     {
         var options = Options.Create(new WorkflowFailureNotifierOptions
         {
@@ -108,6 +133,7 @@ public class WorkflowFailureNotifierLocalTests : IClassFixture<LocalTemporalFixt
             CoordinatorAgent = Coordinator,
             NotificationNamespace = ns,
             NotificationTaskQueue = queue,
+            StateFile = StatePath,
         });
         return new WorkflowFailureNotifier(
             options, Options.Create(new TemporalBridgeOptions { Namespaces = [ns] }), new CtoAgentConfigService(),
@@ -140,19 +166,17 @@ public class WorkflowFailureNotifierLocalTests : IClassFixture<LocalTemporalFixt
         throw new TimeoutException("failed runs never appeared in visibility");
     }
 
-    /// <summary>The test coordinator: acknowledges each directive the way an agent's reply would.</summary>
-    private static async Task AnswerEveryPublishAsync(PublishCapture capture, TaskCompletionRegistry registry, int expected)
+    /// <summary>The test coordinator: acknowledges each delivered directive the way an agent's reply would.</summary>
+    private static async Task AnswerEveryDirectiveAsync(PublishCapture capture, TaskCompletionRegistry registry, CancellationToken ct)
     {
         var answered = new HashSet<string>();
-        var deadline = DateTime.UtcNow.AddSeconds(45);
-        while (answered.Count < expected && DateTime.UtcNow < deadline)
+        while (!ct.IsCancellationRequested)
         {
-            foreach (var taskId in capture.TaskIds.Where(t => !answered.Contains(t)))
+            foreach (var taskId in capture.DeliveredTaskIds.Where(t => !answered.Contains(t)))
                 if (registry.TryComplete(taskId, new AgentTaskResult("noted", "completed")))
                     answered.Add(taskId);
-            await Task.Delay(50);
+            await Task.Delay(50, CancellationToken.None);
         }
-        Assert.Equal(expected, answered.Count);
     }
 
     private sealed class FixedClientFactory(ITemporalClient client) : ITemporalClientFactory
@@ -160,12 +184,16 @@ public class WorkflowFailureNotifierLocalTests : IClassFixture<LocalTemporalFixt
         public Task<ITemporalClient> GetClientAsync(string @namespace) => Task.FromResult(client);
     }
 
+    /// <summary>The broker edge: fails the first <see cref="FailNext"/> publishes, captures the rest.</summary>
     private sealed class PublishCapture
     {
-        public ConcurrentQueue<(string RoutingKey, string Text)> Published { get; } = new();
-        public ConcurrentQueue<string> Ids { get; } = new();
-        public List<(string RoutingKey, string Text)> Directives => [.. Published];
-        public IEnumerable<string> TaskIds => Ids.ToArray();
+        private readonly ConcurrentQueue<(string RoutingKey, string Text, string TaskId, bool Failed)> _published = new();
+        public int FailNext;
+
+        public List<(string RoutingKey, string Text)> All => [.. _published.Select(p => (p.RoutingKey, p.Text))];
+        public List<(string RoutingKey, string Text)> Delivered => [.. _published.Where(p => !p.Failed).Select(p => (p.RoutingKey, p.Text))];
+        public IEnumerable<string> DeliveredTaskIds => _published.Where(p => !p.Failed).Select(p => p.TaskId).ToArray();
+        public List<string> FailedTaskIds => [.. _published.Where(p => p.Failed).Select(p => p.TaskId)];
 
         public IConnectionFactory Factory()
         {
@@ -176,8 +204,10 @@ public class WorkflowFailureNotifierLocalTests : IClassFixture<LocalTemporalFixt
                 .Returns(call =>
                 {
                     using var doc = JsonDocument.Parse(Encoding.UTF8.GetString(call.ArgAt<ReadOnlyMemory<byte>>(4).Span));
-                    Published.Enqueue((call.ArgAt<string>(1), doc.RootElement.GetProperty("Text").GetString() ?? ""));
-                    Ids.Enqueue(doc.RootElement.GetProperty("TaskId").GetString() ?? "");
+                    var failed = Interlocked.Decrement(ref FailNext) >= 0;
+                    _published.Enqueue((call.ArgAt<string>(1), doc.RootElement.GetProperty("Text").GetString() ?? "",
+                        doc.RootElement.GetProperty("TaskId").GetString() ?? "", failed));
+                    if (failed) throw new IOException("broker unavailable");
                     return ValueTask.CompletedTask;
                 });
             var connection = Substitute.For<IConnection>();
@@ -190,7 +220,7 @@ public class WorkflowFailureNotifierLocalTests : IClassFixture<LocalTemporalFixt
     }
 }
 
-/// <summary>Closes the way its <c>mode</c> says, carrying a fake secret in every failure message.</summary>
+/// <summary>Closes the way its <c>mode</c> says, carrying a fake secret in every failure.</summary>
 [Workflow]
 public class SyntheticOutcomeWorkflow
 {
@@ -200,9 +230,9 @@ public class SyntheticOutcomeWorkflow
         switch (mode)
         {
             case "explicit":
-                throw new ApplicationFailureException("validation failed sk-live-SECRET-hunter2", errorType: "ExplicitFail", nonRetryable: true);
+                throw new ApplicationFailureException("validation failed password=hunter2", errorType: "ExplicitFail", nonRetryable: true);
             case "error":
-                throw new ApplicationFailureException("upstream said password=sk-live-SECRET-hunter2", nonRetryable: true);
+                throw new ApplicationFailureException("upstream said password=hunter2", errorType: "synthetic-secret-123", nonRetryable: true);
             case "success":
                 return null;
             default:

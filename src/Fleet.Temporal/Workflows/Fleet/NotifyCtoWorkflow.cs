@@ -1,6 +1,7 @@
 using Fleet.Temporal.Activities;
 using Fleet.Temporal.Models;
 using Microsoft.Extensions.Logging;
+using Temporalio.Exceptions;
 using Temporalio.Workflows;
 
 namespace Fleet.Temporal.Workflows.Fleet;
@@ -17,6 +18,8 @@ namespace Fleet.Temporal.Workflows.Fleet;
 [Workflow]
 public class NotifyCtoWorkflow
 {
+    internal const string DeliveryFailedErrorType = "NotificationDeliveryFailed";
+
     private static readonly ActivityOptions DelegateOptions = new()
     {
         StartToCloseTimeout = TimeSpan.FromMinutes(17), // 15 min task + 2 min buffer
@@ -50,6 +53,12 @@ public class NotifyCtoWorkflow
         }
         catch (Exception)
         {
+            // A caller that tracks delivery (#488's failure notifier) asks for the failure to close
+            // the run Failed, so the outcome is visible. The message is fixed; no error text leaks.
+            if (input.ReportDeliveryFailure)
+                throw new ApplicationFailureException(
+                    "notification delivery failed", errorType: DeliveryFailedErrorType, nonRetryable: true);
+
             // ignoreFailure=true — escalation channel must not surface errors to callers.
             Workflow.Logger.LogWarning(
                 "NotifyCtoWorkflow: delegation to {Agent} failed — ignoring",
@@ -58,5 +67,8 @@ public class NotifyCtoWorkflow
     }
 }
 
-/// <summary>Input for <see cref="NotifyCtoWorkflow"/>.</summary>
-public record NotifyCtoWorkflowInput(string TargetAgent, string TaskDescription);
+/// <summary>
+/// Input for <see cref="NotifyCtoWorkflow"/>. <paramref name="ReportDeliveryFailure"/> defaults to
+/// false, so <c>notify_cto</c> and runs started before it existed keep swallowing failures.
+/// </summary>
+public record NotifyCtoWorkflowInput(string TargetAgent, string TaskDescription, bool ReportDeliveryFailure = false);

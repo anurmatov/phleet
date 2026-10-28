@@ -46,4 +46,26 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "provider", "detach", binding.SandboxName, "fleet-agent1-openai"]));
         Assert.Null(ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).Candidate);
     }
+
+    [Fact]
+    public async Task Reuse_apply_keeps_live_control_credentials_until_the_cut_succeeds()
+    {
+        var binding = _t.Binding("fleet-agent1-c3c3c3c3", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        var runtime = _t.Runtime();
+        var control = Path.Combine(_t._dir, "managed", "authority", "agent1.control.password");
+        Directory.CreateDirectory(Path.GetDirectoryName(control)!);
+        File.WriteAllText(control, "live-control");
+        _t.WriteAuthority("active");
+        _t._broker.FailDeletes = true; // the cut of the live epoch fails
+
+        var result = await runtime.ApplyAsync("agent1", default);
+
+        Assert.Equal("revoke_unresolved", result.Code);
+        Assert.Equal("live-control", File.ReadAllText(control));
+        Assert.Null(JsonNode.Parse(File.ReadAllText(_t.AuthorityPath()))!["Epoch"]); // the candidate epoch was never published
+        Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+        Assert.Empty(_t._broker.Puts);
+    }
 }

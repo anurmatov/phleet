@@ -710,8 +710,12 @@ public sealed class StockOpenShellRuntime(
         string bundle;
         try
         {
-            WriteBrokerPasswords(agent.Name, passwords);
-            WriteRecord(AuthorityPath(agent.Name), Authority(template, agent, reuse ? candidate.SandboxId : "pending", epoch, policy.Sha256, "revoked"));
+            // Reuse: the live epoch's control credentials and record change only after its cut (below).
+            if (!reuse)
+            {
+                WriteBrokerPasswords(agent.Name, passwords);
+                WriteRecord(AuthorityPath(agent.Name), Authority(template, agent, "pending", epoch, policy.Sha256, "revoked"));
+            }
             bundle = await BuildBundleAsync(agent, template, generated, epochDir, passwords["workload"], epoch, policy,
                 reuse ? candidate.SandboxId : "pending", botId, serviceSecrets.Select(s => s.Value));
         }
@@ -737,6 +741,12 @@ public sealed class StockOpenShellRuntime(
             var cut = record.State == "revoked" ? [] : await RevokeFanoutAsync(agent.Name, record, ct, stop: false);
             if (cut.Count > 0) return await HoldStoppedAsync(applying, candidate, "revoke_unresolved", cut, ct);
             if (await StopVerifiedAsync(candidate, ct) is { } quiet) return await HoldStoppedAsync(applying, candidate, quiet, [], ct);
+            try
+            {
+                WriteBrokerPasswords(agent.Name, passwords);
+                WriteRecord(AuthorityPath(agent.Name), Authority(template, agent, candidate.SandboxId, epoch, policy.Sha256, "revoked"));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return await HoldStoppedAsync(applying, candidate, "managed_files_failed", [], ct); }
         }
         else
         {

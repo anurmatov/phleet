@@ -82,14 +82,18 @@ class GatewayBackupTests(unittest.TestCase):
         with sqlite3.connect(self.state / "gateway.db") as db:
             db.execute("create table sandboxes(id text)")
             db.execute("insert into sandboxes values ('synthetic')")
-        (self.state / "tls" / "client-ca.pem").write_text("synthetic\n")
+        (self.state / "tls" / "jwt").mkdir()
+        for name in ("gateway.pem", "gateway-key.pem", "client-ca.pem", "jwt/signing.pem", "jwt/public.pem", "jwt/kid"):
+            (self.state / "tls" / name).write_text("synthetic\n")
+        self.config = Path(self.tmp.name, "gateway.toml")
+        self.config.write_text("[openshell]\nversion = 2\n")
         self.backups = Path(self.tmp.name, "backups")
 
     def tearDown(self):
         self.tmp.cleanup()
 
     def run_backup(self, state=None):
-        return subprocess.run(["bash", str(BACKUP), str(self.backups), str(state or self.state)], capture_output=True, text=True)
+        return subprocess.run(["bash", str(BACKUP), str(self.backups), str(self.config), str(state or self.state)], capture_output=True, text=True)
 
     def test_snapshot_is_complete_private_and_integrity_checked(self):
         result = self.run_backup()
@@ -103,7 +107,23 @@ class GatewayBackupTests(unittest.TestCase):
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600, path)
         with sqlite3.connect(snapshot / "gateway.db") as db:
             self.assertEqual(db.execute("select id from sandboxes").fetchone()[0], "synthetic")
-        self.assertIn("state/tls/client-ca.pem", (snapshot / "SHA256SUMS").read_text())
+        sums = (snapshot / "SHA256SUMS").read_text()
+        self.assertIn("state/tls/client-ca.pem", sums)
+        self.assertIn("config/gateway.toml", sums)
+
+    def test_incomplete_trust_or_config_coverage_is_invalid(self):
+        for missing in (self.state / "tls" / "jwt" / "kid", self.config):
+            with self.subTest(missing=missing.name):
+                content = missing.read_text()
+                missing.unlink()
+                result = self.run_backup()
+                missing.write_text(content)
+                self.assertEqual(result.returncode, 1)
+                self.assertFalse((self.backups / "last-success").exists())
+                self.assertTrue(any((p / "INVALID").exists() for p in self.backups.glob("gateway-*")))
+                for p in self.backups.glob("gateway-*"):
+                    if (p / "INVALID").exists():
+                        import shutil; shutil.rmtree(p)
 
     def test_keeps_seven_complete_snapshots_and_leaves_invalid_ones(self):
         self.backups.mkdir(mode=0o700)

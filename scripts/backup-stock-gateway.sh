@@ -2,42 +2,53 @@
 # Daily protected backup of the stock OpenShell gateway state (#492 §16). Run from the operator's
 # daily host backup job and before any gateway configuration change or upgrade.
 #
-#   backup-stock-gateway.sh BACKUP_DIR [STATE_DIR]     # STATE_DIR defaults to /var/lib/openshell
+#   backup-stock-gateway.sh BACKUP_DIR CONFIG_FILE [STATE_DIR]   # STATE_DIR defaults to /var/lib/openshell
 #
+# Coverage is complete or the run fails: gateway.db, the gateway TOML and every trust file it uses
+# (TLS server cert/key, client CA, JWT signing/public key and kid under STATE_DIR/tls) must exist.
 # SQLite is copied with the stdlib online backup API (never a raw copy of an open DB/WAL) and
-# integrity-checked. Config and trust files are copied as-is. Their inode/mtime is compared before
-# and after; any change, or any failure, leaves the snapshot marked INVALID and exits nonzero so the
-# operator alert fires. Directories are 0700 and files 0600; seven complete snapshots are kept.
-# Snapshots hold key material: keep them host-local unless an operator-approved encrypted transfer
-# exists. Never upload them to a public share or an unencrypted sync.
+# integrity-checked. Config and trust files are copied as-is, and their inode/mtime is compared
+# before and after; any change, missing file or failure leaves the snapshot marked INVALID and exits
+# nonzero so the operator alert fires. Directories are 0700, files 0600; seven complete snapshots
+# are kept. Snapshots hold key material: keep them host-local unless an operator-approved encrypted
+# transfer exists. Never upload them to a public share or an unencrypted sync.
 set -euo pipefail
 umask 077
 
-[[ $# -ge 1 && $# -le 2 ]] || { echo "usage: $0 BACKUP_DIR [STATE_DIR]" >&2; exit 2; }
+[[ $# -ge 2 && $# -le 3 ]] || { echo "usage: $0 BACKUP_DIR CONFIG_FILE [STATE_DIR]" >&2; exit 2; }
 BACKUP_DIR=$1
-STATE_DIR=${2:-/var/lib/openshell}
+CONFIG_FILE=$2
+STATE_DIR=${3:-/var/lib/openshell}
 KEEP=7
-[[ -f "$STATE_DIR/gateway.db" ]] || { echo "backup_failed: gateway.db not found" >&2; exit 1; }
 
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
 snapshot="$BACKUP_DIR/gateway-$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir "$snapshot"
 
-python3 - "$STATE_DIR" "$snapshot" <<'PY' || { : > "$snapshot/INVALID"; echo "backup_failed: snapshot marked INVALID" >&2; exit 1; }
+python3 - "$STATE_DIR" "$CONFIG_FILE" "$snapshot" <<'PY' || { : > "$snapshot/INVALID"; echo "backup_failed: snapshot marked INVALID" >&2; exit 1; }
 import hashlib, os, shutil, sqlite3, stat, sys
-state, out = sys.argv[1], sys.argv[2]
+state, config, out = sys.argv[1], sys.argv[2], sys.argv[3]
+REQUIRED = ["tls/gateway.pem", "tls/gateway-key.pem", "tls/client-ca.pem",
+            "tls/jwt/signing.pem", "tls/jwt/public.pem", "tls/jwt/kid"]
+
+def regular(path):
+    return os.path.lexists(path) and stat.S_ISREG(os.lstat(path).st_mode)
+
+missing = [p for p in ["gateway.db", *REQUIRED] if not regular(os.path.join(state, p))]
+if not regular(config):
+    missing.append("CONFIG_FILE")
+if missing:
+    sys.exit("coverage_incomplete: " + ", ".join(missing))
 
 def trust_files():
-    files = []
+    files = [config]
     for root, dirs, names in os.walk(state):
         dirs.sort()
         for name in sorted(names):
-            if name.startswith("gateway.db"):
-                continue  # the database is copied through the online backup API below
             path = os.path.join(root, name)
-            if not stat.S_ISREG(os.lstat(path).st_mode):
-                continue  # symlinks and special files are not followed
+            if name.startswith("gateway.db") or not stat.S_ISREG(os.lstat(path).st_mode):
+                continue  # the database goes through the online backup API; links are not followed
             files.append(path)
     return files
 
@@ -54,7 +65,8 @@ if target.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
     sys.exit("integrity_check_failed")
 target.close()
 for path in before:
-    dest = os.path.join(out, "state", os.path.relpath(path, state))
+    dest = os.path.join(out, "config", os.path.basename(path)) if path == config \
+        else os.path.join(out, "state", os.path.relpath(path, state))
     os.makedirs(os.path.dirname(dest), mode=0o700, exist_ok=True)
     shutil.copy2(path, dest)
 if fingerprint(trust_files()) != before:

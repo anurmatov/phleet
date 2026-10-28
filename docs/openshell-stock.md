@@ -455,10 +455,13 @@ answer refuses. Ordered rollback:
 4. roll back the orchestrator image;
 5. Start if needed.
 
-Administrator Docker commands that bypass this procedure are not protected.
+`setup.sh` re-runs call the same guard before rebuilding the orchestrator. **CI jobs and any external
+deploy integration that replace the orchestrator must run
+`scripts/check-stock-runtime-rollout.sh --image <exact orchestrator image>` first and stop on a nonzero
+exit.** Administrator Docker commands that bypass this procedure are not protected.
 
-**Backup.** Run `scripts/backup-stock-gateway.sh BACKUP_DIR [/var/lib/openshell]` from the
-operator's daily host job and before gateway changes. It takes a stdlib SQLite online backup with
+**Backup.** Run `scripts/backup-stock-gateway.sh BACKUP_DIR GATEWAY_TOML [/var/lib/openshell]` from the
+operator's daily host job and before gateway changes. It refuses incomplete coverage (database, gateway TOML, TLS cert/key/client CA, JWT keys and kid), then takes a stdlib SQLite online backup with
 an integrity check, copies config and trust files, and checks their inode/mtime before and after.
 Directories are 0700 and files 0600, and seven complete snapshots are kept. A failure or a
 changed trust file marks the snapshot `INVALID` and exits nonzero. Snapshots contain keys: keep

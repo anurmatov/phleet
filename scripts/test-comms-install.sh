@@ -6,7 +6,7 @@ DIR=$(mktemp -d)
 trap 'rm -rf "$DIR"' EXIT
 mkdir -p "$DIR/scripts/lib" "$DIR/fleet" "$DIR/bin"
 cp "$ROOT/setup.sh" "$ROOT/upgrade.sh" "$DIR/"
-cp "$ROOT/scripts/lib/comms-profiles.sh" "$DIR/scripts/lib/"
+cp "$ROOT/scripts/lib/comms-profiles.sh" "$ROOT/scripts/lib/stock-managed-preflight.sh" "$DIR/scripts/lib/"
 cp "$ROOT/docker-compose.example.yml" "$DIR/"
 # upgrade.sh runs the #492 managed-runtime rollout guard against the orchestrator Dockerfile.
 mkdir -p "$DIR/src/Fleet.Orchestrator"
@@ -136,7 +136,7 @@ echo 'PASS pinned image pull failure leaves lifecycle untouched'
 FRESH="$DIR/fresh"
 mkdir -p "$FRESH/scripts/lib" "$DIR/home/.gemini" "$DIR/previews"
 cp "$ROOT/setup.sh" "$ROOT/.env.example" "$ROOT/docker-compose.example.yml" "$FRESH/"
-cp "$ROOT/scripts/lib/comms-profiles.sh" "$FRESH/scripts/lib/"
+cp "$ROOT/scripts/lib/comms-profiles.sh" "$ROOT/scripts/lib/stock-managed-preflight.sh" "$FRESH/scripts/lib/"
 printf '%s\n' '{"refresh_token":"synthetic-fixture-token"}' > "$DIR/home/.gemini/oauth_creds.json"
 cp "$FRESH/.env.example" "$DIR/example-before"
 : > "$CALLS"
@@ -153,3 +153,67 @@ guard_line=$(grep -n 'check-stock-runtime-rollout.sh' "$ROOT/setup.sh" | head -1
 skip_line=$(grep -n '^if \$SKIP_BUILD; then' "$ROOT/setup.sh" | head -1 | cut -d: -f1)
 [[ -n "$guard_line" && -n "$skip_line" && "$guard_line" -lt "$skip_line" ]]
 echo 'PASS setup.sh runs the rollout guard regardless of --skip-build'
+# #492 F8: an enabled managed runtime refuses incomplete trust before any lifecycle change.
+sed -i.bak '/ pull "\*) exit 1 ;;/d' "$DIR/bin/docker"
+mkdir -p "$DIR/nosqlite"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$DIR/nosqlite/python3"
+chmod +x "$DIR/nosqlite/python3"
+CLIENT="$DIR/fleet/openshell-client"
+MTLS="$CLIENT/openshell/gateways/fixture/mtls"
+managed_fixture() {
+  cat > "$ENV" <<'ENV'
+FLEET_COMMS_ENABLED=false
+FLEET_EPIC_WATCHER_ENABLED=false
+FLEET_EPIC_WATCHER_INTERVAL_SECONDS=300
+FLEET_EPIC_GRANTS_ENABLED=false
+FLEET_EPIC_GRANTS_MAX_DAYS=14
+FLEET_EPIC_GRANTS_DENIED_REPOS=
+FLEET_AUTONOMY_ENABLED=false
+FLEET_STOCK_MANAGED_ENABLED=true
+FLEET_STOCK_GATEWAY_IMAGE=gateway.example.test/openshell@sha256:0000
+FLEET_DOCKER_GID=999
+FLEET_STOCK_BROKER_MANAGEMENT_URL=https://broker.example.test:15671
+FLEET_STOCK_BROKER_ADMIN_USER_REF=FIXTURE_BROKER_USER
+FLEET_STOCK_BROKER_ADMIN_PASSWORD_REF=FIXTURE_BROKER_PASSWORD
+FIXTURE_BROKER_USER=fixture-admin
+FIXTURE_BROKER_PASSWORD=fixture-password
+ENV
+  rm -rf "$CLIENT"; mkdir -p "$MTLS"
+  echo fixture-ca > "$CLIENT/broker-ca.pem"
+  echo fixture-cert > "$MTLS/tls.crt"
+  echo fixture-key > "$MTLS/tls.key"
+  : > "$CALLS"
+}
+managed_refuses() {
+  local why="$1" rc=0
+  PATH="${2:-$PATH}" bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1 || rc=$?
+  [[ "$rc" == 1 ]] || { cat "$DIR/output" >&2; exit 1; }
+  grep -q "managed runtime preflight: .*$why" "$DIR/output"
+  if grep -Eq ' down$| rm | up ' "$CALLS"; then exit 1; fi
+  echo "PASS managed upgrade refuses: $why"
+}
+managed_fixture
+bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1 || { cat "$DIR/output" >&2; exit 1; }
+if grep -q 'managed runtime preflight' "$DIR/output"; then exit 1; fi
+echo 'PASS managed upgrade with complete trust passes the preflight'
+managed_fixture; sed -i.bak 's|^FLEET_STOCK_BROKER_MANAGEMENT_URL=https:|FLEET_STOCK_BROKER_MANAGEMENT_URL=http:|' "$ENV"
+managed_refuses 'must be an https://'
+managed_fixture; rm "$CLIENT/broker-ca.pem"
+managed_refuses 'broker CA'
+managed_fixture; sed -i.bak '/^FIXTURE_BROKER_PASSWORD=/d' "$ENV"
+managed_refuses 'FLEET_STOCK_BROKER_ADMIN_PASSWORD_REF must name'
+managed_fixture; rm "$MTLS/tls.key"
+managed_refuses 'mTLS client cert/key'
+managed_fixture
+managed_refuses 'sqlite3' "$DIR/nosqlite:$PATH"
+# Default-off: none of that trust exists and python3 lacks sqlite3, yet nothing changes.
+managed_fixture; rm -rf "$CLIENT"
+sed -i.bak -e 's/^FLEET_STOCK_MANAGED_ENABLED=true$/FLEET_STOCK_MANAGED_ENABLED=false/' -e '/^FLEET_STOCK_BROKER/d' "$ENV"
+PATH="$DIR/nosqlite:$PATH" bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1 || { cat "$DIR/output" >&2; exit 1; }
+if grep -q 'managed runtime preflight' "$DIR/output"; then exit 1; fi
+echo 'PASS default-off upgrade skips the managed preflight'
+# setup.sh shares the helper and runs it before the rollout guard and any orchestrator replacement.
+pre_line=$(grep -n '^stock_managed_preflight ' "$ROOT/setup.sh" | head -1 | cut -d: -f1)
+[[ -n "$pre_line" && "$pre_line" -lt "$guard_line" ]]
+grep -q '^source "$SCRIPT_DIR/scripts/lib/stock-managed-preflight.sh"$' "$ROOT/setup.sh"
+echo 'PASS setup.sh runs the shared managed preflight before the rollout guard'

@@ -436,6 +436,12 @@ into the orchestrator at `/var/lib/fleet-openshell-client`:
   and optional `JournalHost` such as `"journal.example.test"`);
 - `broker-ca.pem`.
 
+With `FLEET_STOCK_MANAGED_ENABLED=true`, `setup.sh` and `upgrade.sh` refuse before replacing anything
+unless `FLEET_STOCK_BROKER_MANAGEMENT_URL` is `https://`, `broker-ca.pem` is readable, both
+`FLEET_STOCK_BROKER_ADMIN_*_REF` keys name non-empty `.env` keys, the stock CLI's mTLS client
+`openshell/gateways/<name>/mtls/tls.crt` and `tls.key` are readable here, and `python3 -c 'import sqlite3'`
+succeeds (`scripts/lib/stock-managed-preflight.sh`). Default-off installs skip these checks.
+
 The adapter writes per-agent records and control/observer broker passwords under
 `managed/authority/` (0600). Outside consumers select records by sandbox: set `StockOpenShell:AuthorityDirectory` to that
 `managed/authority` directory on `Fleet.StockIdentity` and each receiver (memory, Temporal, Telegram), keeping

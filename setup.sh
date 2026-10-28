@@ -105,6 +105,7 @@ SEED_EXAMPLE="$SCRIPT_DIR/seed.example.json"
 COMPOSE_PROJECT="fleet"
 
 source "$SCRIPT_DIR/scripts/lib/comms-profiles.sh"
+source "$SCRIPT_DIR/scripts/lib/stock-managed-preflight.sh"
 COMMS_DRY_RUN=$DRY_RUN
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1003,6 +1004,11 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 section "[5/7] Building Docker images..."
 # ─────────────────────────────────────────────────────────────────────────────
+
+# #492: an enabled managed runtime needs HTTPS broker management with the operator CA, resolvable
+# credential refs, the stock CLI's mTLS client cert/key and python3 sqlite3. Default-off returns at once.
+stock_managed_preflight "$ENV_FILE" "$FLEET_BASE_DIR/openshell-client" \
+  || { fail "managed runtime is enabled but its prerequisites are incomplete; see docs/openshell-stock.md"; exit 1; }
 
 # #492: a re-run rebuilds or (with --skip-build) still replaces the orchestrator. Refuse while managed
 # bindings exist and the target cannot read them; an unavailable preflight refuses rather than meaning "none".

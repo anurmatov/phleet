@@ -37,6 +37,7 @@ unset FLEET_COMMS_MEDIA_ENDPOINT FLEET_COMMS_MEDIA_BUCKET FLEET_COMMS_MEDIA_BACK
       FLEET_COMMS_MEDIA_STORE FLEET_COMMS_SEAWEEDFS_SIGNING_KEY
 
 source "$SCRIPT_DIR/scripts/lib/comms-profiles.sh"
+source "$SCRIPT_DIR/scripts/lib/stock-managed-preflight.sh"
 
 COMPOSE_EXAMPLE="$SCRIPT_DIR/docker-compose.example.yml"
 COMPOSE_FILE="$FLEET_BASE_DIR/docker-compose.yml"
@@ -144,6 +145,10 @@ if [[ "$(read_env_var "$ENV_FILE" FLEET_STOCK_MANAGED_ENABLED)" == "true" ]]; th
   [[ "$(read_env_var "$ENV_FILE" FLEET_DOCKER_GID)" =~ ^[0-9]+$ ]] \
     || { fail "FLEET_DOCKER_GID must be the host docker group id"; exit 1; }
 fi
+# #492: an enabled managed runtime also needs HTTPS broker management with the operator CA, resolvable
+# credential refs, the stock CLI's mTLS client cert/key and python3 sqlite3. Default-off returns at once.
+stock_managed_preflight "$ENV_FILE" "$FLEET_BASE_DIR/openshell-client" \
+  || { fail "managed runtime is enabled but its prerequisites are incomplete; see docs/openshell-stock.md"; exit 1; }
 
 # #492: after the other preflights and before anything is stopped or replaced, refuse an orchestrator that cannot read managed
 # bindings while any exist. An unavailable preflight refuses; it is never read as "none".

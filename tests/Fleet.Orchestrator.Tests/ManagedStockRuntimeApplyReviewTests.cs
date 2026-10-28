@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 
 namespace Fleet.Orchestrator.Tests;
@@ -66,6 +67,25 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         Assert.Equal("live-control", File.ReadAllText(control));
         Assert.Null(JsonNode.Parse(File.ReadAllText(_t.AuthorityPath()))!["Epoch"]); // the candidate epoch was never published
         Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+        Assert.Empty(_t._broker.Puts);
+    }
+
+    [Fact]
+    public async Task Every_selected_provider_profile_is_pinned_and_verified_before_the_old_runtime_stops()
+    {
+        var agent = _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+        agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "TELEGRAM_AGENT1_BOT_TOKEN" });
+        _t._broker.Credentials.Extra["TELEGRAM_AGENT1_BOT_TOKEN"] = "424242:synthetic-bot-secret-never-in-argv";
+        var pins = JsonNode.Parse(ManagedStockRuntimeAdapterTests.FakeStore.PinnedProfiles)!.AsObject();
+        pins.Remove(StockOpenShellRuntime.TelegramProfile);
+        _t._store.ProfileHashes = pins.ToJsonString();
+        var stops = 0;
+        _t._host.DockerStates = ["running"];
+
+        var result = await _t.Runtime(dockerStop: _ => { stops++; return Task.FromResult(true); }).ApplyAsync("agent1", default);
+
+        Assert.Equal("provider_profile_unpinned:" + StockOpenShellRuntime.TelegramProfile, result.Code);
+        Assert.Equal(0, stops);
         Assert.Empty(_t._broker.Puts);
     }
 }

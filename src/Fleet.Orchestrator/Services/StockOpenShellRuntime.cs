@@ -520,8 +520,18 @@ public sealed class StockOpenShellRuntime(
         // Authenticated gateway client trust (mTLS/JWT material in ConfigDir), not only a running container.
         var probe = await cli.RunAsync(["sandbox", "list", "-o", "json", "--page-size", "1"], null, LegTimeout, ct);
         if (probe.Missing || probe.TimedOut || probe.ExitCode != 0 || !IsJson(probe.Stdout)) return "gateway_client_unverified";
-        if (await ProfileHashFaultAsync(policy, ct) is { } profileFault) return profileFault;
+        if (await ProfileHashFaultAsync(policy, agent, ct) is { } profileFault) return profileFault;
         return await host.GatewayGenerationAsync(ct) is null ? "gateway_unavailable" : null;
+    }
+
+    /// <summary>The stock provider profiles this agent's apply attaches: the native key, then each outside service.</summary>
+    internal static IEnumerable<string> SelectedProfiles(Agent agent)
+    {
+        yield return "openai";
+        if (ContainerProvisioningService.HasTelegramBot(agent)) yield return TelegramProfile;
+        if (JournalCapture(agent)) yield return JournalProfile;
+        if (JournalRead(agent) || JournalFiles(agent)) yield return JournalReadProfile;
+        if (JournalFiles(agent) && JournalGrants.CrossChatEffective(agent)) yield return JournalCrossChatProfile;
     }
 
     private static bool IsJson(string text)
@@ -530,12 +540,16 @@ public sealed class StockOpenShellRuntime(
         catch (JsonException) { return false; }
     }
 
-    /// <summary>Each pinned provider profile's exported YAML must hash to the version's saved value.</summary>
-    private async Task<string?> ProfileHashFaultAsync(SandboxPolicyVersion policy, CancellationToken ct)
+    /// <summary>
+    /// Every provider profile the agent selects must be pinned, and each pinned profile's exported YAML
+    /// must hash to the version's saved value, before any old-runtime Stop.
+    /// </summary>
+    private async Task<string?> ProfileHashFaultAsync(SandboxPolicyVersion policy, Agent agent, CancellationToken ct)
     {
         Dictionary<string, string>? pinned;
         try { pinned = JsonSerializer.Deserialize<Dictionary<string, string>>(string.IsNullOrWhiteSpace(policy.ProviderProfileHashes) ? "{}" : policy.ProviderProfileHashes); }
         catch (JsonException) { return "provider_profile_hashes_invalid"; }
+        if (SelectedProfiles(agent).FirstOrDefault(p => pinned?.ContainsKey(p) != true) is { } unpinned) return "provider_profile_unpinned:" + unpinned;
         foreach (var (profile, hash) in pinned ?? [])
         {
             var export = await cli.RunAsync(["profile", "export", profile, "-o", "yaml"], null, LegTimeout, ct);

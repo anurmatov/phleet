@@ -1094,6 +1094,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
 
     internal sealed class FakeStore : IManagedBindingStore
     {
+        // Every selectable provider profile pinned to the synthetic export's SHA-256.
+        internal const string PinnedProfiles = "{\"openai\":\"b44acdcd83b1965ebff85528e0b56645a4714be483b6bc860fbbe562acade702\",\"telegram\":\"b44acdcd83b1965ebff85528e0b56645a4714be483b6bc860fbbe562acade702\",\"fleet-journal\":\"b44acdcd83b1965ebff85528e0b56645a4714be483b6bc860fbbe562acade702\",\"fleet-journal-read\":\"b44acdcd83b1965ebff85528e0b56645a4714be483b6bc860fbbe562acade702\",\"fleet-journal-cross-chat\":\"b44acdcd83b1965ebff85528e0b56645a4714be483b6bc860fbbe562acade702\"}";
         private readonly List<Agent> _agents = [];
         public bool RejectNextSwap;
         public readonly List<string> History = [];
@@ -1102,7 +1104,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         public Agent Get(string name) => _agents.Single(a => a.Name == name);
         public Task<Agent?> LoadAsync(string name, CancellationToken ct) => Task.FromResult(_agents.FirstOrDefault(a => a.Name == name));
         public Task<IReadOnlyList<Agent>> ListAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<Agent>>(_agents);
-        public string ProfileHashes = "{}";
+        public string ProfileHashes = PinnedProfiles;
         public Task<SandboxPolicyVersion?> LoadPolicyAsync(int id, CancellationToken ct) => Task.FromResult<SandboxPolicyVersion?>(
             id is 1 or 2 ? new SandboxPolicyVersion { Id = id, Version = id, Yaml = ManagedStockRuntimeTests.PolicyYaml, Sha256 = new string('b', 64), ProviderProfileHashes = ProfileHashes } : null);
 

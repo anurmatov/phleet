@@ -29,4 +29,21 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         Assert.Equal(["earlier_hold", "partial:user-x", "revoke_unresolved"], errors.Take(3));
         Assert.Contains(errors, e => e.StartsWith("broker:", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public async Task Revoke_detaches_the_union_of_applied_and_candidate_providers()
+    {
+        var binding = _t.Binding("fleet-agent1-b2b2b2b2", Guid.NewGuid());
+        var candidate = binding with { Epoch = Guid.NewGuid(), ServiceProviders = ["fleet-agent1-telegram"] };
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell",
+            record: new ManagedRecord { State = "needs_attention", Applied = binding, Candidate = candidate }));
+
+        var revoke = await _t.Runtime().RevokeAsync("agent1", default);
+
+        Assert.True(revoke.Ok, revoke.Message);
+        Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "provider", "detach", binding.SandboxName, "fleet-agent1-telegram"]));
+        Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "provider", "detach", binding.SandboxName, "fleet-agent1-openai"]));
+        Assert.Null(ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).Candidate);
+    }
 }

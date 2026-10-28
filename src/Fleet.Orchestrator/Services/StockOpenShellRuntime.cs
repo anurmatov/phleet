@@ -1076,12 +1076,14 @@ public sealed class StockOpenShellRuntime(
         }
         foreach (var target in targets.Where(t => !string.IsNullOrEmpty(t.SandboxId)).DistinctBy(t => t.SandboxId))
         {
+            // Applied and candidate may share one sandbox; detach the union of their providers.
+            var providers = targets.Where(t => t.SandboxId == target.SandboxId).SelectMany(t => t.AllProviders()).Distinct(StringComparer.Ordinal).ToList();
             legs.Add(Leg("detach:" + target.SandboxName, async token =>
             {
                 if (await VerifyIdentityAsync(target, token) is { } identity) return identity.Code;
                 // Every attached provider is detached; one failure does not skip the others.
                 var unresolved = false;
-                foreach (var provider in target.AllProviders())
+                foreach (var provider in providers)
                 {
                     var run = await cli.RunAsync(["sandbox", "provider", "detach", target.SandboxName, provider], null, LegTimeout, token);
                     unresolved |= run.ExitCode != 0 || run.TimedOut;

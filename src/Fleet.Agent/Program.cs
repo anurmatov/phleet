@@ -61,17 +61,8 @@ if (!isCliMode && (builder.Configuration.GetValue<bool>("Journal:FilesEnabled") 
 var stockMode = builder.Configuration.GetValue<bool>("StockOpenShell:Enabled");
 var managedStock = stockMode && builder.Configuration["Agent:NativeAuthMode"] == "api_key";
 var app = builder.Build();
-app.Use(async (context, next) =>
-{
-    // This profile uses the authenticated broker for control, never legacy HTTP control routes.
-    // Managed mode alone admits loopback POST cancel from the adapter's stock-authenticated exec.
-    if (stockMode && context.Request.Path != "/health"
-        && !StockOpenShellEnrollment.AllowsManagedLoopbackCancel(managedStock, context.Request.Method,
-            context.Request.Path.Value, context.Connection.RemoteIpAddress))
-    { context.Response.StatusCode = 404; return; }
-    if (context.Request.Path.Value == JournalFilesListener.Path) { context.Response.StatusCode = 404; return; }
-    await next(context);
-});
+// Stock profiles use the authenticated broker for control, never legacy HTTP control routes.
+app.UseControlGuard(stockMode, managedStock);
 
 // Refuses to start a misconfigured agent, before /health can answer ok for it.
 //
@@ -132,20 +123,7 @@ if (!isCliMode)
 
     app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
-    app.MapPost("/cancel", async (IServiceProvider sp) =>
-    {
-        var taskManager = sp.GetRequiredService<TaskManager>();
-        await taskManager.CancelAllAsync();
-        return Results.Ok(new { message = "All tasks cancelled and queue cleared" });
-    });
-
-    app.MapPost("/cancel/{**taskId}", async (string taskId, IServiceProvider sp) =>
-    {
-        var taskManager = sp.GetRequiredService<TaskManager>();
-        var decoded = Uri.UnescapeDataString(taskId);
-        var cancelled = await taskManager.CancelByBridgeTaskIdAsync(decoded);
-        return Results.Ok(new { cancelled, taskId = decoded });
-    });
+    app.MapCancelEndpoints();
 
     app.MapPost("/cancel_bg/{taskId}", async (string taskId, IServiceProvider sp) =>
     {

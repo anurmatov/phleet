@@ -5,6 +5,10 @@ using Fleet.Agent.Services;
 using Fleet.Shared;
 using Fleet.Shared.Security;
 using Microsoft.Extensions.Configuration;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Fleet.Agent.Tests;
 
@@ -280,4 +284,46 @@ public sealed class ManagedStockLoopbackCancelTests
     [Fact]
     public void Missing_remote_address_is_refused() =>
         Assert.False(StockOpenShellEnrollment.AllowsManagedLoopbackCancel(true, "POST", "/cancel", null));
+}
+
+/// <summary>
+/// #492: the shipped guard and cancel routes on a real Kestrel host over actual loopback TCP. Non-loopback
+/// refusal is covered by <see cref="ManagedStockLoopbackCancelTests"/>.
+/// </summary>
+public sealed class ManagedStockCancelHostTests
+{
+    private static async Task<(Microsoft.AspNetCore.Builder.WebApplication App, HttpClient Client)> HostAsync(bool stockMode, bool managed)
+    {
+        var builder = Microsoft.AspNetCore.Builder.WebApplication.CreateBuilder();
+        // Explicit loopback listen overrides any ASPNETCORE_HTTP_PORTS the host environment carries.
+        builder.WebHost.ConfigureKestrel(k => k.Listen(System.Net.IPAddress.Loopback, 0));
+        builder.Logging.ClearProviders();
+        var options = Microsoft.Extensions.Options.Options.Create(new AgentOptions { Name = "test", Role = "test", WorkDir = "/tmp", Provider = "codex" });
+        builder.Services.AddSingleton(new TaskManager(options, NSubstitute.Substitute.For<IAgentExecutor>(),
+            new SessionManager(), Microsoft.Extensions.Logging.Abstractions.NullLogger<TaskManager>.Instance));
+        var app = builder.Build();
+        app.UseControlGuard(stockMode, managed);
+        app.MapGet("/health", () => Microsoft.AspNetCore.Http.Results.Ok());
+        app.MapCancelEndpoints();
+        await app.StartAsync();
+        return (app, new HttpClient { BaseAddress = new Uri(app.Urls.First()) });
+    }
+
+    [Theory]
+    [InlineData(true, "POST", "/cancel", 200)]
+    [InlineData(true, "POST", "/cancel/task%201", 200)]
+    [InlineData(true, "GET", "/cancel", 404)]
+    [InlineData(true, "POST", "/cancel_bg/x", 404)]
+    [InlineData(false, "POST", "/cancel", 404)] // manual profile keeps the health-only surface
+    public async Task Managed_loopback_cancel_reaches_the_real_endpoint_only_when_admitted(bool managed, string method, string path, int status)
+    {
+        var (app, client) = await HostAsync(stockMode: true, managed);
+        try
+        {
+            using var response = await client.SendAsync(new HttpRequestMessage(new HttpMethod(method), path));
+            Assert.Equal(status, (int)response.StatusCode);
+            Assert.Equal(200, (int)(await client.GetAsync("/health")).StatusCode);
+        }
+        finally { client.Dispose(); await app.DisposeAsync(); }
+    }
 }

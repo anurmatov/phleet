@@ -148,3 +148,8 @@ cmp "$FRESH/.env.example" "$DIR/example-before"
 [[ -z "$(ls -A "$DIR/previews")" ]]
 ! grep -Eq '^build |^compose .* (pull|up|down|rm|run)|^network create ' "$CALLS"
 echo 'PASS fresh full dry-run exits zero without real config or leftover previews'
+# --skip-build still replaces the orchestrator, so the rollout guard must run before the build branch.
+guard_line=$(grep -n 'check-stock-runtime-rollout.sh' "$ROOT/setup.sh" | head -1 | cut -d: -f1)
+skip_line=$(grep -n '^if \$SKIP_BUILD; then' "$ROOT/setup.sh" | head -1 | cut -d: -f1)
+[[ -n "$guard_line" && -n "$skip_line" && "$guard_line" -lt "$skip_line" ]]
+echo 'PASS setup.sh runs the rollout guard regardless of --skip-build'

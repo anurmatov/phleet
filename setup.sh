@@ -1004,6 +1004,14 @@ fi
 section "[5/7] Building Docker images..."
 # ─────────────────────────────────────────────────────────────────────────────
 
+# #492: a re-run rebuilds or (with --skip-build) still replaces the orchestrator. Refuse while managed
+# bindings exist and the target cannot read them; an unavailable preflight refuses rather than meaning "none".
+if ! $DRY_RUN; then
+  ORCHESTRATOR_AUTH_TOKEN=$(read_env_var "$ENV_FILE" ORCHESTRATOR_AUTH_TOKEN) \
+    bash "$SCRIPT_DIR/scripts/check-stock-runtime-rollout.sh" --dockerfile "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile" \
+    || { fail "managed runtime rollout guard refused this orchestrator replacement"; exit 1; }
+fi
+
 if $SKIP_BUILD; then
   warn "Skipping image builds (--skip-build)"
 else
@@ -1027,14 +1035,6 @@ else
         exit 1
       fi
     fi
-  fi
-
-  # #492: a re-run rebuilds and replaces the orchestrator. Refuse while managed bindings exist and
-  # the target cannot read them; an unavailable preflight refuses rather than meaning "none".
-  if ! $DRY_RUN; then
-    ORCHESTRATOR_AUTH_TOKEN=$(read_env_var "$ENV_FILE" ORCHESTRATOR_AUTH_TOKEN) \
-      bash "$SCRIPT_DIR/scripts/check-stock-runtime-rollout.sh" --dockerfile "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile" \
-      || { fail "managed runtime rollout guard refused this orchestrator replacement"; exit 1; }
   fi
 
   build_image() {

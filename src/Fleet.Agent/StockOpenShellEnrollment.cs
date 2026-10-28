@@ -151,9 +151,10 @@ public static class StockOpenShellEnrollment
             if ((slots is null && ManagedRouteKeys.Any(key => !string.IsNullOrEmpty(configuration[key])))
                 || !SlotHolds(configuration, slots, TelegramTokenKey) || !SlotHolds(configuration, slots, JournalTokenKey)
                 || !SlotHolds(configuration, slots, JournalStockKey)
-                || !string.IsNullOrEmpty(configuration["Journal:ReadToken"]) || !string.IsNullOrEmpty(configuration["Journal:CrossChatToken"])
-                || configuration.GetValue<bool>("Journal:FilesEnabled") || configuration.GetValue<bool>("Journal:SendEnabled")
-                || configuration.GetValue<bool>("Journal:CrossChatEnabled")
+                || !SlotHolds(configuration, slots, JournalReadKey) || !SlotHolds(configuration, slots, JournalCrossChatKey)
+                // Files/send/cross-chat only with managed capture and its placeholder slots (#492).
+                || JournalFilesSelected(configuration) && (slots is null || !slots.ContainsKey(JournalReadKey))
+                || configuration.GetValue<bool>("Journal:CrossChatEnabled") && (slots is null || !slots.ContainsKey(JournalCrossChatKey))
                 || !string.IsNullOrEmpty(configuration["Conversations:SouthBaseUrl"]) || !string.IsNullOrEmpty(configuration["ClientChannel:OwnerPrincipalToken"]))
                 Deny("stock_enrollment_extra_route_unsupported");
             if (effectiveUid() is 0 or uint.MaxValue || !Path.IsPathFullyQualified(home) || home == "/root")
@@ -164,7 +165,7 @@ public static class StockOpenShellEnrollment
             StockRequestProof.Unique(mcp.RootElement);
             var servers = mcp.RootElement.GetProperty("mcpServers"); StockRequestProof.Unique(servers);
             // Exactly memory plus each first-party service route in the outside record, each at its exact host.
-            var routes = McpRoutes(authority);
+            var routes = McpRoutes(authority, configuration);
             if (mcp.RootElement.EnumerateObject().Count() != 1 || servers.EnumerateObject().Count() != routes.Count)
                 Deny("stock_enrollment_mcp_route_invalid");
             foreach (var (name, url, _) in routes)
@@ -231,13 +232,16 @@ public static class StockOpenShellEnrollment
     /// Memory, then each first-party service route of the outside record, then the comms-journal read
     /// route (#492), as (MCP name, exact URL, callable tools).
     /// </summary>
-    private static List<(string Name, string Url, IReadOnlyList<string> Tools)> McpRoutes(StockEnrollmentAuthority authority)
+    private static List<(string Name, string Url, IReadOnlyList<string> Tools)> McpRoutes(StockEnrollmentAuthority authority, IConfiguration configuration)
     {
         var routes = new List<(string, string, IReadOnlyList<string>)> { ("memory", $"https://{authority.MemoryHost}/mcp", StockServices.MemoryTools) };
         foreach (var (service, route) in (authority.Services ?? new Dictionary<string, StockServiceRoute>()).OrderBy(p => p.Key, StringComparer.Ordinal))
             routes.Add((StockServices.McpNames[service], $"https://{route.Host}/mcp", route.Tools));
         if (authority.JournalRead is { } journal)
             routes.Add((StockJournalReadRoute.McpName, $"https://{journal.Host}{journal.Path}", journal.Tools));
+        // The agent-local files/send listener: loopback inside the agent process, no egress, its own grant checks.
+        if (JournalFilesSelected(configuration))
+            routes.Add((StockCredentials.JournalFilesMcpName, StockCredentials.JournalFilesUrl, ["fetch_attachment", "send_attachment"]));
         return routes;
     }
 
@@ -249,7 +253,7 @@ public static class StockOpenShellEnrollment
     {
         var allowed = configuration.GetSection("Agent:AllowedTools").GetChildren().Select(c => c.Value).OfType<string>().ToArray();
         var text = new System.Text.StringBuilder();
-        foreach (var (name, url, tools) in McpRoutes(authority))
+        foreach (var (name, url, tools) in McpRoutes(authority, configuration))
         {
             var prefix = "mcp__" + name + "__";
             var enabled = allowed.Where(t => t.StartsWith(prefix, StringComparison.Ordinal)).Select(t => t[prefix.Length..])
@@ -291,6 +295,11 @@ public static class StockOpenShellEnrollment
     private const string TelegramTokenKey = $"{TelegramOptions.Section}:{nameof(TelegramOptions.BotToken)}";
     private const string JournalTokenKey = "Journal:IngestToken";
     private const string JournalStockKey = "Journal:StockPlaceholders";
+    private const string JournalReadKey = "Journal:ReadToken";
+    private const string JournalCrossChatKey = "Journal:CrossChatToken";
+
+    private static bool JournalFilesSelected(IConfiguration configuration) =>
+        configuration.GetValue<bool>("Journal:FilesEnabled") || configuration.GetValue<bool>("Journal:SendEnabled");
 
     /// <summary>Managed-only route selectors (nonsecret, written by the orchestrator) and the overlay's flag.</summary>
     private static readonly string[] ManagedRouteKeys = ["StockOpenShell:TelegramBotId", "StockOpenShell:JournalCapture", JournalStockKey];
@@ -321,6 +330,21 @@ public static class StockOpenShellEnrollment
             if (!StockCredentials.IsPlaceholder(placeholder, StockCredentials.JournalIngestToken)) Deny("stock_enrollment_journal_placeholder_invalid");
             slots[JournalTokenKey] = placeholder;
             slots[JournalStockKey] = "true";
+            // Files/send and cross-chat use the same derived read / cross-chat tokens as ordinary mode,
+            // kept outside; the agent's existing grant checks (requester-only, cross-chat rules) are unchanged.
+            if (JournalFilesSelected(configuration))
+            {
+                var read = environment(StockCredentials.JournalReadToken);
+                if (!StockCredentials.IsPlaceholder(read, StockCredentials.JournalReadToken)) Deny("stock_enrollment_journal_placeholder_invalid");
+                slots[JournalReadKey] = read;
+                if (configuration.GetValue<bool>("Journal:CrossChatEnabled"))
+                {
+                    var cross = environment(StockCredentials.JournalCrossChatToken);
+                    if (!configuration.GetValue<bool>("Journal:SendEnabled") || !StockCredentials.IsPlaceholder(cross, StockCredentials.JournalCrossChatToken))
+                        Deny("stock_enrollment_journal_placeholder_invalid");
+                    slots[JournalCrossChatKey] = cross;
+                }
+            }
         }
         return slots;
     }

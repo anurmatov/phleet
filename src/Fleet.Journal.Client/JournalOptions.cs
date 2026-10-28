@@ -71,19 +71,28 @@ public sealed class JournalOptions
         "^openshell:resolve:env:(?:v[0-9]+_|s[A-Za-z0-9_]+_)?FLEET_JOURNAL_INGEST_TOKEN$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    private static bool IsStockPlaceholder(string value, string key) =>
+        Regex.IsMatch(value.Trim(), "^openshell:resolve:env:(?:v[0-9]+_|s[A-Za-z0-9_]+_)?" + key + "$", RegexOptions.CultureInvariant);
+
     /// <summary>
     /// Why this configuration cannot start, or null. Never includes the token.
     /// </summary>
     public string? DescribeFault()
     {
-        if (StockPlaceholders && (FilesEnabled || SendEnabled || CrossChatEnabled
-            || !string.IsNullOrWhiteSpace(ReadToken) || !string.IsNullOrWhiteSpace(CrossChatToken)))
-            return "Journal:StockPlaceholders supports capture only; files, send and cross-chat are unavailable.";
-        if (CrossChatEnabled && (!SendEnabled || !Regex.IsMatch(CrossChatToken.Trim(),
+        // Managed stock mode (#492): each derived token is the placeholder stock issued for it; Comms still
+        // verifies the resolved token's subject, so the ordinary subject match has nothing to compare here.
+        if (StockPlaceholders)
+        {
+            if (CrossChatEnabled ? !SendEnabled || !IsStockPlaceholder(CrossChatToken, "FLEET_JOURNAL_CROSS_CHAT_TOKEN") : !string.IsNullOrWhiteSpace(CrossChatToken))
+                return "Journal:CrossChatEnabled requires send and the stock cross-chat placeholder.";
+            if ((FilesEnabled || SendEnabled) ? !Enabled || !IsStockPlaceholder(ReadToken, "FLEET_JOURNAL_READ_TOKEN") : !string.IsNullOrWhiteSpace(ReadToken))
+                return "Journal:FilesEnabled requires capture and the stock read placeholder.";
+        }
+        else if (CrossChatEnabled && (!SendEnabled || !Regex.IsMatch(CrossChatToken.Trim(),
             "^cj1\\.read-cross-chat\\.[A-Za-z0-9_-]{1,128}\\.[A-Za-z0-9_-]+={0,2}$", RegexOptions.CultureInvariant)
             || CrossChatToken.Trim().Split('.')[2] != Subject))
             return "Journal:CrossChatEnabled requires send and a matching-subject cross-chat token.";
-        if ((FilesEnabled || SendEnabled) && (!Enabled || !Regex.IsMatch(ReadToken.Trim(),
+        if (!StockPlaceholders && (FilesEnabled || SendEnabled) && (!Enabled || !Regex.IsMatch(ReadToken.Trim(),
             "^cj1\\.read\\.[A-Za-z0-9_-]{1,128}\\.[A-Za-z0-9_-]+={0,2}$", RegexOptions.CultureInvariant)
             || ReadToken.Trim().Split('.')[2] != Subject))
             return "Journal:FilesEnabled requires capture and a matching-subject journal read token.";

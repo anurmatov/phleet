@@ -178,7 +178,6 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     [InlineData("telegram", "telegram_bot_token_unresolved")]
     [InlineData("telegram_invalid", "telegram_bot_token_invalid")]
     [InlineData("journal", "managed_route_unsupported:journal")]
-    [InlineData("journal_send", "managed_route_unsupported:journal_files")]
     [InlineData("journal_receipts", "managed_route_unsupported:journal_tool_send_receipts")]
     [InlineData("journal_mcp", "managed_route_unsupported:mcp:fleet-comms-journal")]
     [InlineData("mcp", "managed_route_unsupported:mcp:other")]
@@ -199,12 +198,6 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
                 agent.JournalEnabled = true;
                 agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "TELEGRAM_AGENT1_BOT_TOKEN" });
                 _broker.Credentials.Extra["TELEGRAM_AGENT1_BOT_TOKEN"] = BotToken;
-                break;
-            case "journal_send": // files/send have no managed route: refused, not silently dropped
-                agent.JournalEnabled = true;
-                agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "TELEGRAM_AGENT1_BOT_TOKEN" });
-                _broker.Credentials.Extra["TELEGRAM_AGENT1_BOT_TOKEN"] = BotToken;
-                agent.Tools.Add(new AgentTool { ToolName = JournalGrants.SendGrant });
                 break;
             case "journal_receipts": // Telegram MCP sends would lose their receipts: refused, not silently unjournaled
                 agent.JournalEnabled = true;
@@ -796,6 +789,70 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.True((await runtime.RevokeAsync("agent1", default)).Ok);
         Assert.Equal(["fleet-agent1-openai", "fleet-agent1-journal-read"],
             _cli.Calls.Where(c => c.Args.Take(3).SequenceEqual(["sandbox", "provider", "detach"])).Select(c => c.Args[4]));
+    }
+
+    private const string CrossChatToken = "cj1.read-cross-chat.agent1.synthetic-cross-mac-never-in-argv";
+
+    [Fact]
+    public async Task Journal_files_send_and_cross_chat_apply_with_derived_tokens_only_in_outside_providers()
+    {
+        var agent = BotAndJournalAgent();
+        agent.Tools.Add(new AgentTool { ToolName = "mcp__fleet-journal-files__fetch_attachment", IsEnabled = true });
+        agent.Tools.Add(new AgentTool { ToolName = JournalGrants.SendGrant, IsEnabled = true });
+        agent.JournalCrossChatEnabled = true;
+        _generatedSettings = new JsonObject
+        {
+            ["Agent"] = new JsonObject { ["Name"] = "agent1" },
+            ["Telegram"] = new JsonObject { ["AllowedUserIds"] = new JsonArray(1001) },
+            ["Journal"] = new JsonObject
+            {
+                ["IngestToken"] = IngestToken, ["ExcludedChatIds"] = "", ["ReadToken"] = ReadToken, ["FilesEnabled"] = true,
+                ["SendEnabled"] = true, ["CrossChatEnabled"] = true, ["CrossChatToken"] = CrossChatToken,
+            },
+        }.ToJsonString();
+        _store.Add(agent);
+
+        var result = await Runtime().ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Message);
+        var read = Assert.Single(_cli.Calls, c => c.Args.Take(4).SequenceEqual(["provider", "create", "--name", "fleet-agent1-journal-read"]));
+        Assert.Equal(["provider", "create", "--name", "fleet-agent1-journal-read", "--type", "fleet-journal-read", "--credential", "FLEET_JOURNAL_READ_TOKEN"], read.Args);
+        Assert.Equal([("FLEET_JOURNAL_READ_TOKEN", ReadToken)], read.SecretEnv!.Select(p => (p.Key, p.Value)));
+        var cross = Assert.Single(_cli.Calls, c => c.Args.Take(4).SequenceEqual(["provider", "create", "--name", "fleet-agent1-journal-cross-chat"]));
+        Assert.Equal(["provider", "create", "--name", "fleet-agent1-journal-cross-chat", "--type", "fleet-journal-cross-chat", "--credential", "FLEET_JOURNAL_CROSS_CHAT_TOKEN"], cross.Args);
+        Assert.Equal([("FLEET_JOURNAL_CROSS_CHAT_TOKEN", CrossChatToken)], cross.SecretEnv!.Select(p => (p.Key, p.Value)));
+        foreach (var secret in new[] { Key, BotToken, IngestToken, ReadToken, CrossChatToken })
+            Assert.DoesNotContain(_cli.Calls, c => c.Args.Any(a => a.Contains(secret, StringComparison.Ordinal)));
+        var create = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        Assert.Equal(["fleet-agent1-openai", "fleet-agent1-telegram", "fleet-agent1-journal", "fleet-agent1-journal-read", "fleet-agent1-journal-cross-chat"],
+            create.Args.Select((a, i) => (a, i)).Where(p => p.a == "--provider").Select(p => create.Args[p.i + 1]));
+
+        var app = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && c.Args[4] == "/app").Args[3];
+        var bundle = Directory.GetParent(app)!.FullName;
+        foreach (var file in Directory.EnumerateFiles(bundle, "*", SearchOption.AllDirectories))
+            foreach (var secret in new[] { Key, BotToken, IngestToken, ReadToken, CrossChatToken, "synthetic-read-mac", "synthetic-cross-mac" })
+                Assert.DoesNotContain(secret, File.ReadAllText(file), StringComparison.Ordinal);
+        var journal = JsonNode.Parse(File.ReadAllText(Path.Combine(app, "appsettings.json")))!["Journal"]!;
+        Assert.Null(journal["ReadToken"]);
+        Assert.Null(journal["CrossChatToken"]);
+        Assert.True(journal["FilesEnabled"]!.GetValue<bool>() && journal["SendEnabled"]!.GetValue<bool>() && journal["CrossChatEnabled"]!.GetValue<bool>());
+        var mcp = JsonNode.Parse(File.ReadAllText(Path.Combine(bundle, "workspace", ".mcp.json")))!["mcpServers"]!;
+        Assert.Equal("{\"url\":\"http://127.0.0.1:8091/journal-files/v1/mcp\"}", mcp["fleet-journal-files"]!.ToJsonString());
+    }
+
+    [Fact]
+    public async Task Journal_files_without_their_derived_read_token_refuse_before_the_old_runtime_stops()
+    {
+        var agent = BotAndJournalAgent();
+        agent.Tools.Add(new AgentTool { ToolName = JournalGrants.SendGrant, IsEnabled = true });
+        _store.Add(agent);
+        var stops = 0;
+
+        var result = await Runtime(_ => { stops++; return Task.FromResult(true); }).ApplyAsync("agent1", default);
+
+        Assert.Equal("journal_token_unresolved", result.Code);
+        Assert.Equal(0, stops);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args[0] == "provider" || c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
     }
 
     [Fact]

@@ -236,13 +236,85 @@ public sealed class ManagedStockAgentTests
     private const string JournalPlaceholder = "openshell:resolve:env:v7_FLEET_JOURNAL_INGEST_TOKEN";
 
     /// <summary>The stock-issued child environment: placeholders only, under the provider credential names.</summary>
-    private static Func<string, string?> ChildEnvironment(string? telegram = TelegramPlaceholder, string? journal = JournalPlaceholder) => key => key switch
+    private static Func<string, string?> ChildEnvironment(string? telegram = TelegramPlaceholder, string? journal = JournalPlaceholder,
+        string? read = null, string? cross = null) => key => key switch
     {
         "OPENAI_API_KEY" => Placeholder,
         StockCredentials.TelegramBotToken => telegram,
         StockCredentials.JournalIngestToken => journal,
+        StockCredentials.JournalReadToken => read,
+        StockCredentials.JournalCrossChatToken => cross,
         _ => throw new Exception("unexpected environment read"),
     };
+
+    private const string CrossPlaceholder = "openshell:resolve:env:v7_FLEET_JOURNAL_CROSS_CHAT_TOKEN";
+
+    private static void SelectFilesSendCrossChat(Fixture f)
+    {
+        SelectBotAndJournal(f);
+        f.Settings["Journal:FilesEnabled"] = "True";
+        f.Settings["Journal:SendEnabled"] = "True";
+        f.Settings["Journal:CrossChatEnabled"] = "True";
+        File.WriteAllText(Path.Combine(f.Root[..^"root.toml".Length], ".mcp.json"),
+            "{\"mcpServers\":{\"memory\":{\"url\":\"https://memory.example.test/mcp\"},\"fleet-journal-files\":{\"url\":\"http://127.0.0.1:8091/journal-files/v1/mcp\"}}}");
+    }
+
+    [Fact]
+    public void Journal_files_send_and_cross_chat_accept_only_the_issued_placeholders()
+    {
+        using var f = new Fixture();
+        SelectFilesSendCrossChat(f);
+        f.Settings["Agent:AllowedTools:1"] = "mcp__fleet-journal-files__send_attachment";
+        var env = ChildEnvironment(read: ReadPlaceholder, cross: CrossPlaceholder);
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, env)!;
+
+        var overlay = StockOpenShellEnrollment.ManagedCredentialOverlay(c, env);
+        Assert.Equal(ReadPlaceholder, overlay["Journal:ReadToken"]);
+        Assert.Equal(CrossPlaceholder, overlay["Journal:CrossChatToken"]);
+        var daemon = new ConfigurationBuilder().AddInMemoryCollection(f.Settings).AddInMemoryCollection(overlay).Build();
+        Assert.NotNull(StockOpenShellEnrollment.Validate(daemon, f.Home, () => 10001, f.Root, env));
+        var journal = daemon.GetSection(Fleet.Journal.Client.JournalOptions.Section).Get<Fleet.Journal.Client.JournalOptions>()!;
+        Assert.Null(journal.DescribeFault());
+        Assert.True(journal.FilesEnabled && journal.SendEnabled && journal.CrossChatEnabled);
+
+        // The native config names the agent-local listener, narrowed to the granted tool.
+        StockOpenShellEnrollment.PrepareNative(daemon, f.Home, b, f.Root, env);
+        StockOpenShellEnrollment.RequirePrepared(daemon, b, f.Home, env);
+        Assert.Contains("\n[mcp_servers.fleet-journal-files]\nurl = \"http://127.0.0.1:8091/journal-files/v1/mcp\"\nenabled_tools = [\"send_attachment\"]\n",
+            File.ReadAllText(Path.Combine(f.Home, ".codex", "config.toml")));
+    }
+
+    [Theory]
+    [InlineData("read_literal")]
+    [InlineData("read_missing")]
+    [InlineData("read_foreign")]
+    [InlineData("cross_literal")]
+    [InlineData("cross_missing")]
+    [InlineData("cross_without_send")]
+    [InlineData("literal_read_slot")]
+    [InlineData("files_without_capture")]
+    public void Journal_files_send_and_cross_chat_refuse_literal_missing_or_foreign_tokens(string fault)
+    {
+        using var f = new Fixture();
+        SelectFilesSendCrossChat(f);
+        string? read = ReadPlaceholder, cross = CrossPlaceholder;
+        switch (fault)
+        {
+            case "read_literal": read = "cj1.read.agent1.synthetic-mac"; break;
+            case "read_missing": read = null; break;
+            case "read_foreign": read = CrossPlaceholder; break;
+            case "cross_literal": cross = "cj1.read-cross-chat.agent1.synthetic-mac"; break;
+            case "cross_missing": cross = null; break;
+            case "cross_without_send": f.Settings.Remove("Journal:SendEnabled"); break;
+            case "literal_read_slot": f.Settings["Journal:ReadToken"] = "cj1.read.agent1.synthetic-mac"; break;
+            case "files_without_capture": f.Settings.Remove("StockOpenShell:JournalCapture"); break;
+        }
+        var refusal = Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.Validate(f.Config(), f.Home, () => 10001, f.Root, ChildEnvironment(read: read, cross: cross)));
+        Assert.StartsWith("stock_enrollment_", refusal.Message);
+        Assert.DoesNotContain("synthetic", refusal.Message);
+    }
 
     private static void SelectBotAndJournal(Fixture f)
     {

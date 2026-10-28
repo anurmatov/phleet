@@ -263,6 +263,8 @@ public sealed class StockOpenShellRuntime(
     public const string JournalProfile = "fleet-journal";
     /// <summary>Separate profile for the comms-journal read MCP token, so its binary scope is the native Codex child only.</summary>
     public const string JournalReadProfile = "fleet-journal-read";
+    /// <summary>Profile for the derived cross-chat read token (cross-chat sends from the agent process).</summary>
+    public const string JournalCrossChatProfile = "fleet-journal-cross-chat";
     internal static readonly string Instance = Guid.NewGuid().ToString("N");
     internal static readonly string[] MemoryTools = ["memory_get", "memory_search", "memory_list"];
     /// <summary>Ordinary MCP endpoint name → first-party receiving service that verifies the outside assertion.</summary>
@@ -485,9 +487,6 @@ public sealed class StockOpenShellRuntime(
         // The agent's own bot token and derived journal ingest token stay outside in stock providers; the
         // workload gets only the public bot id and stock placeholders. Missing values refuse here.
         if (ContainerProvisioningService.HasTelegramBot(agent) && TelegramCredential(agent).Fault is { } telegramFault) return telegramFault;
-        // Journal files/send (and cross-chat, which needs send) have no managed route; refuse rather than drop them.
-        if ((ContainerProvisioningService.HasFilesGrant(agent) && JournalCapture(agent)) || JournalGrants.SendEffective(agent))
-            return "managed_route_unsupported:journal_files";
         // Tool-send receipts (#394) arrive on the ordinary broker, which the epoch identity cannot read; with
         // capture on, Telegram MCP sends would go unjournaled, so the combination refuses instead.
         if (JournalCapture(agent) && agent.McpEndpoints.Any(e => e.McpName == "fleet-telegram"))
@@ -825,6 +824,10 @@ public sealed class StockOpenShellRuntime(
     /// <summary>Journal capture exists exactly when ordinary provisioning would mint an ingest token.</summary>
     internal static bool JournalCapture(Agent agent) => agent.JournalEnabled && ContainerProvisioningService.HasTelegramBot(agent);
 
+    /// <summary>Files/send exist exactly when ordinary provisioning enables them (both need capture).</summary>
+    internal static bool JournalFiles(Agent agent) =>
+        JournalCapture(agent) && (ContainerProvisioningService.HasFilesGrant(agent) || JournalGrants.SendEffective(agent));
+
     /// <summary>The agent has the ordinary comms-journal read MCP endpoint (ordinary provisioning mints its read token).</summary>
     internal static bool JournalRead(Agent agent) => agent.McpEndpoints.Any(e => e.McpName == StockJournalReadRoute.McpName);
 
@@ -874,18 +877,34 @@ public sealed class StockOpenShellRuntime(
             if (string.IsNullOrEmpty(ingest)) return ([], null, "journal_token_unresolved");
             secrets.Add(new($"fleet-{agent.Name}-journal", JournalProfile, StockCredentials.JournalIngestToken, ingest));
         }
-        if (JournalRead(agent))
+        if (JournalRead(agent) || JournalFiles(agent))
         {
-            // The same derived per-agent read token ordinary provisioning puts in the MCP header (no switched identity).
-            string? read;
+            // The same derived per-agent read token ordinary provisioning puts in the MCP header and, for
+            // files/send, in Journal:ReadToken (no switched identity). Both must agree when both exist.
+            string? header = null, files = null;
             try
             {
-                read = JsonNode.Parse(File.ReadAllText(Path.Combine(generated, ".mcp.json")))?["mcpServers"]?[StockJournalReadRoute.McpName]?["headers"]?["Authorization"]?.GetValue<string>();
-                read = read is { } header && header.StartsWith("Bearer ", StringComparison.Ordinal) ? header["Bearer ".Length..] : null;
+                if (JournalRead(agent))
+                {
+                    header = JsonNode.Parse(File.ReadAllText(Path.Combine(generated, ".mcp.json")))?["mcpServers"]?[StockJournalReadRoute.McpName]?["headers"]?["Authorization"]?.GetValue<string>();
+                    header = header is { } value && value.StartsWith("Bearer ", StringComparison.Ordinal) ? value["Bearer ".Length..] : "";
+                }
+                if (JournalFiles(agent))
+                    files = JsonNode.Parse(File.ReadAllText(Path.Combine(generated, "appsettings.json")))?["Journal"]?["ReadToken"]?.GetValue<string>() ?? "";
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException) { read = null; }
-            if (string.IsNullOrWhiteSpace(read) || read.Any(char.IsWhiteSpace)) return ([], null, "journal_token_unresolved");
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException) { return ([], null, "journal_token_unresolved"); }
+            var read = header ?? files;
+            if (string.IsNullOrWhiteSpace(read) || read.Any(char.IsWhiteSpace) || files is not null && files != read)
+                return ([], null, "journal_token_unresolved");
             secrets.Add(new($"fleet-{agent.Name}-journal-read", JournalReadProfile, StockCredentials.JournalReadToken, read));
+        }
+        if (JournalFiles(agent) && JournalGrants.CrossChatEffective(agent))
+        {
+            string? cross;
+            try { cross = JsonNode.Parse(File.ReadAllText(Path.Combine(generated, "appsettings.json")))?["Journal"]?["CrossChatToken"]?.GetValue<string>(); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException) { cross = null; }
+            if (string.IsNullOrWhiteSpace(cross) || cross.Any(char.IsWhiteSpace)) return ([], null, "journal_token_unresolved");
+            secrets.Add(new($"fleet-{agent.Name}-journal-cross-chat", JournalCrossChatProfile, StockCredentials.JournalCrossChatToken, cross));
         }
         return (secrets, botId, null);
     }
@@ -1285,6 +1304,9 @@ public sealed class StockOpenShellRuntime(
         // No header here: the agent adds only the stock placeholder from its environment to its native config.
         if (JournalRead(agent) && JournalHost(template) is { } journalHost && JournalReadPath(agent) is { } path)
             servers[StockJournalReadRoute.McpName] = new JsonObject { ["url"] = $"https://{journalHost}{path}" };
+        // The agent-local files/send listener, exactly as ordinary provisioning names it.
+        if (JournalFiles(agent))
+            servers[StockCredentials.JournalFilesMcpName] = new JsonObject { ["url"] = StockCredentials.JournalFilesUrl };
         return new JsonObject { ["mcpServers"] = servers }.ToJsonString();
     }
 

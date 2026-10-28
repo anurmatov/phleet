@@ -44,7 +44,14 @@ public static class StockCredentials
     /// <summary>The agent's derived journal read token for the comms-journal read MCP (stock profile <c>fleet-journal</c>).</summary>
     public const string JournalReadToken = "FLEET_JOURNAL_READ_TOKEN";
 
-    public static readonly IReadOnlyList<string> ServiceKeys = [TelegramBotToken, JournalIngestToken, JournalReadToken];
+    /// <summary>The agent's derived cross-chat read token for cross-chat sends (stock profile <c>fleet-journal-cross-chat</c>).</summary>
+    public const string JournalCrossChatToken = "FLEET_JOURNAL_CROSS_CHAT_TOKEN";
+
+    /// <summary>The agent-local journal files/send MCP listener (in the agent process; no egress).</summary>
+    public const string JournalFilesMcpName = "fleet-journal-files";
+    public const string JournalFilesUrl = "http://127.0.0.1:8091/journal-files/v1/mcp";
+
+    public static readonly IReadOnlyList<string> ServiceKeys = [TelegramBotToken, JournalIngestToken, JournalReadToken, JournalCrossChatToken];
 
     /// <summary>
     /// Syntax only, the same source-supported handle forms as the native API key: a refusal check for

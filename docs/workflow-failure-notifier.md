@@ -59,20 +59,22 @@ To roll back, set it to `false` and recreate the bridge. The state file can stay
 
 Every first attempt hits an unreachable endpoint (closed port, 3 s connect timeout) and its run closes `Failed`. Attempt 2 then goes through the real broker and is delivered. A restarted notifier sends nothing, and no synthetic secret reaches the coordinator.
 
-It consumes the reply queue `fleet.agent.temporal-bridge`, so run it only against a disposable broker that no real bridge uses:
+It consumes the reply queue `fleet.agent.temporal-bridge`, so run it only through the owned recipe. It never points at a broker a real bridge uses:
 
 ```bash
-docker run -d --rm --name phleet488-rabbit \
-  -p 127.0.0.1:5672:5672 rabbitmq:3-management
-until docker exec phleet488-rabbit \
-  rabbitmq-diagnostics -q ping; do sleep 2; done
-FLEET_TEST_RABBITMQ_HOST=127.0.0.1 \
-  dotnet test tests/Fleet.Temporal.Tests -c Release \
-  --filter "FullyQualifiedName~WorkflowFailureNotifierRealBroker"
-docker rm -f phleet488-rabbit
+bash scripts/run-workflow-failure-real-broker.sh
 ```
 
-`FLEET_TEST_RABBITMQ_UNREACHABLE_PORT` (default `1`) sets the closed port used for the first attempts.
+The recipe:
+- creates its own Docker network and RabbitMQ container with no host port, and fails fast if either cannot be created;
+- waits at most `READY_SECONDS` (default 90) for the broker;
+- runs the test in a `mcr.microsoft.com/dotnet/sdk:10.0` container on that network, from a read-only copy of the repo;
+- removes only the network and container it created;
+- exits with the test's status, with `RESULT: PASS` or `RESULT: FAIL (exit N)`. A skipped or unmatched test is a failure (exit 3).
+
+The SDK container needs internet egress for NuGet restore and the Temporal dev-server download.
+`FLEET_TEST_RABBITMQ_UNREACHABLE_PORT` (default `1`) sets the closed port the first attempts use.
+`scripts/test-run-workflow-failure-real-broker.sh` checks the recipe's failure handling with a stub `docker`.
 
 ## Not covered
 

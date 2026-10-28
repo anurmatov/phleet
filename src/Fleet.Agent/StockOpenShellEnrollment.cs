@@ -167,10 +167,10 @@ public static class StockOpenShellEnrollment
             var routes = McpRoutes(authority);
             if (mcp.RootElement.EnumerateObject().Count() != 1 || servers.EnumerateObject().Count() != routes.Count)
                 Deny("stock_enrollment_mcp_route_invalid");
-            foreach (var (name, host, _) in routes)
+            foreach (var (name, url, _) in routes)
             {
                 var server = servers.GetProperty(name); StockRequestProof.Unique(server);
-                if (server.EnumerateObject().Count() != 1 || server.GetProperty("url").GetString() != $"https://{host}/mcp")
+                if (server.EnumerateObject().Count() != 1 || server.GetProperty("url").GetString() != url)
                     Deny("stock_enrollment_mcp_route_invalid");
             }
             if (!configuration.GetSection("Agent:AllowedTools").GetChildren().Any(c => c.Value is
@@ -205,7 +205,7 @@ public static class StockOpenShellEnrollment
             var root = HarnessDefaults.Build(AgentHarness.InputFor(options, _ => null)!).CodexRootToml;
             var placeholder = ApiPlaceholder(configuration, home, environment ?? Environment.GetEnvironmentVariable);
             var api = placeholder is not null;
-            var expected = (api ? ApiLogin : "") + root + NativeMcp(configuration, authority);
+            var expected = (api ? ApiLogin : "") + root + NativeMcp(configuration, authority, environment ?? Environment.GetEnvironmentVariable);
             var directory = Path.Combine(home, ".codex");
             if (api)
             {
@@ -227,12 +227,17 @@ public static class StockOpenShellEnrollment
 
     private const string ApiLogin = "forced_login_method = \"api\"\n";
 
-    /// <summary>Memory, then each first-party service route of the outside record, as (MCP name, host, callable tools).</summary>
-    private static List<(string Name, string Host, IReadOnlyList<string> Tools)> McpRoutes(StockEnrollmentAuthority authority)
+    /// <summary>
+    /// Memory, then each first-party service route of the outside record, then the comms-journal read
+    /// route (#492), as (MCP name, exact URL, callable tools).
+    /// </summary>
+    private static List<(string Name, string Url, IReadOnlyList<string> Tools)> McpRoutes(StockEnrollmentAuthority authority)
     {
-        var routes = new List<(string, string, IReadOnlyList<string>)> { ("memory", authority.MemoryHost, StockServices.MemoryTools) };
+        var routes = new List<(string, string, IReadOnlyList<string>)> { ("memory", $"https://{authority.MemoryHost}/mcp", StockServices.MemoryTools) };
         foreach (var (service, route) in (authority.Services ?? new Dictionary<string, StockServiceRoute>()).OrderBy(p => p.Key, StringComparer.Ordinal))
-            routes.Add((StockServices.McpNames[service], route.Host, route.Tools));
+            routes.Add((StockServices.McpNames[service], $"https://{route.Host}/mcp", route.Tools));
+        if (authority.JournalRead is { } journal)
+            routes.Add((StockJournalReadRoute.McpName, $"https://{journal.Host}{journal.Path}", journal.Tools));
         return routes;
     }
 
@@ -240,17 +245,26 @@ public static class StockOpenShellEnrollment
     /// The exact native MCP tables: one per route, enabled tools narrowed to the configured AllowedTools
     /// that the route permits (memory's read-only set, or the record's grants), never widened.
     /// </summary>
-    private static string NativeMcp(IConfiguration configuration, StockEnrollmentAuthority authority)
+    private static string NativeMcp(IConfiguration configuration, StockEnrollmentAuthority authority, Func<string, string?> environment)
     {
         var allowed = configuration.GetSection("Agent:AllowedTools").GetChildren().Select(c => c.Value).OfType<string>().ToArray();
         var text = new System.Text.StringBuilder();
-        foreach (var (name, host, tools) in McpRoutes(authority))
+        foreach (var (name, url, tools) in McpRoutes(authority))
         {
             var prefix = "mcp__" + name + "__";
             var enabled = allowed.Where(t => t.StartsWith(prefix, StringComparison.Ordinal)).Select(t => t[prefix.Length..])
                 .Where(t => tools.Contains(t, StringComparer.Ordinal)).ToArray();
-            text.Append("\n[mcp_servers.").Append(name).Append("]\nurl = ").Append(JsonSerializer.Serialize($"https://{host}/mcp"))
+            text.Append("\n[mcp_servers.").Append(name).Append("]\nurl = ").Append(JsonSerializer.Serialize(url))
                 .Append("\nenabled_tools = ").Append(JsonSerializer.Serialize(enabled)).Append('\n');
+            // #492: the comms-journal read MCP authenticates with the derived read token, which stays
+            // outside; the header carries exactly the placeholder stock issued in the child environment.
+            if (name == StockJournalReadRoute.McpName)
+            {
+                var placeholder = environment(StockCredentials.JournalReadToken);
+                if (!StockCredentials.IsPlaceholder(placeholder, StockCredentials.JournalReadToken))
+                    Deny("stock_enrollment_journal_read_placeholder_invalid");
+                text.Append("http_headers = { Authorization = ").Append(JsonSerializer.Serialize("Bearer " + placeholder)).Append(" }\n");
+            }
         }
         return text.ToString();
     }
@@ -344,7 +358,7 @@ public static class StockOpenShellEnrollment
             var options = configuration.GetSection(AgentOptions.Section).Get<AgentOptions>()!;
             var root = HarnessDefaults.Build(AgentHarness.InputFor(options, _ => null)!).CodexRootToml;
             if (StockEnrollmentAuthority.ReadText(rootFile) != root) Deny("stock_enrollment_native_config_mismatch");
-            var config = (api ? ApiLogin : "") + root + NativeMcp(configuration, authority);
+            var config = (api ? ApiLogin : "") + root + NativeMcp(configuration, authority, environment);
             var directory = Path.Combine(home, ".codex");
             RequireDirectoryAncestors(directory);
             if (api)
@@ -361,7 +375,7 @@ public static class StockOpenShellEnrollment
                 : StockEnrollmentAuthority.ReadBounded(Path.Combine(home, ".codex-host", "auth.json"));
             PrivateWrite(Path.Combine(directory, "auth.json"), auth);
             PrivateWrite(Path.Combine(directory, "config.toml"), System.Text.Encoding.UTF8.GetBytes(config));
-            RequirePrepared(configuration, binding, home, _ => placeholder);
+            RequirePrepared(configuration, binding, home, key => key == "OPENAI_API_KEY" ? placeholder : environment(key));
         }
         catch (Exception ex) when (ex is StockIdentityDenied or IOException or UnauthorizedAccessException or JsonException
             or ArgumentException or KeyNotFoundException or FormatException || ex is InvalidOperationException

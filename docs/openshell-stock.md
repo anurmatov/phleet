@@ -495,6 +495,7 @@ egress ([URL-path and header substitution](https://github.com/NVIDIA/OpenShell/b
 |---|---|---|
 | Own bot (`TELEGRAM_*_BOT_TOKEN` env ref) | The token is read from the host `.env` by that reference. It is submitted as provider `fleet-<agent>-telegram` (`--type telegram --credential TELEGRAM_BOT_TOKEN`), with the value only in the CLI's environment. | `StockOpenShell:TelegramBotId`, the public numeric id before `:`, plus the placeholder stock issues in `TELEGRAM_BOT_TOKEN`. Telegram.Bot is built with `<botId>:<placeholder>`, which passes its token validation. `StockTelegramHttpHandler` strips only `<botId>:`, so requests leave as exactly `https://api.telegram.org/bot<placeholder>/<method>` or `/file/bot<placeholder>/<path>`. Any other scheme, host, port, query or shape is refused, with no fallback. |
 | Journal capture (journal on and own bot, exactly when ordinary provisioning mints an ingest token) | The same derived per-agent ingest token is submitted as provider `fleet-<agent>-journal` (`--type fleet-journal --credential FLEET_JOURNAL_INGEST_TOKEN`). | `StockOpenShell:JournalCapture=true` and `Journal:BaseUrl=https://<JournalHost>`. The existing bearer header carries the placeholder from `FLEET_JOURNAL_INGEST_TOKEN`. |
+| `fleet-comms-journal` read MCP (the agent has that endpoint) | The same derived per-agent read token ordinary provisioning writes into the generated MCP header is submitted as provider `fleet-<agent>-journal-read` (`--type fleet-journal-read --credential FLEET_JOURNAL_READ_TOKEN`). The outside record gains `JournalRead` (`Host` = `JournalHost`, `Path` = the ordinary endpoint's path, `Tools` = the agent's enabled existing grants). | `.mcp.json` names `https://<JournalHost><path>` with no header. The agent writes the native `[mcp_servers.fleet-comms-journal]` table with `http_headers = { Authorization = "Bearer <placeholder>" }`, taking only the placeholder stock issued in `FLEET_JOURNAL_READ_TOKEN`; a literal, foreign or missing value refuses with `stock_enrollment_journal_read_placeholder_invalid`. |
 
 Comms still verifies the same token subject, so receiver ownership and grants do not change. Journal
 off, or journal without a bot, stays capture-off. The existing spool, drainer and SDK retries are
@@ -508,7 +509,10 @@ Operator inputs (nothing is generated; the policy YAML is stored as supplied):
 - Import two custom stock profiles: `telegram` (credential `env_vars: [TELEGRAM_BOT_TOKEN]`, endpoint
   `api.telegram.org:443`, `protocol: rest`) and `fleet-journal` (credential
   `env_vars: [FLEET_JOURNAL_INGEST_TOKEN]`, endpoint your journal host on `443`). Name the agent's
-  `dotnet` host binary in `binaries`, then pin both profiles' hashes in the policy version.
+  `dotnet` host binary in `binaries`, then pin both profiles' hashes in the policy version. An agent
+  with the `fleet-comms-journal` endpoint also needs `fleet-journal-read` (credential
+  `env_vars: [FLEET_JOURNAL_READ_TOKEN]`, the same journal host on `443`, the native Codex binary in
+  `binaries`), pinned the same way.
 - Add `"JournalHost": "journal.example.test"` to `managed-authority.json`. This is a TLS front for the
   Comms journal listener, an exact DNS name distinct from the memory and service hosts.
 - The authored sandbox policy must allow `api.telegram.org:443` and the journal host `:443` as
@@ -523,10 +527,10 @@ Refusal codes, all raised before the old runtime stops:
 - `managed_route_unsupported:journal`, when there is no `JournalHost`;
 - `managed_route_unsupported:journal_files`, for files/send grants, which cross-chat also needs.
 
-**Current limits, refused rather than dropped.** Journal files/send/cross-chat, the
-`fleet-comms-journal` read MCP and every other MCP name refuse apply with
-`managed_route_unsupported:<route>`. A supported endpoint without a configured receiving host refuses
-with `managed_route_unsupported:mcp:<name>`. Tool-send receipts (#394) are not consumed in stock
+**Current limits, refused rather than dropped.** Journal files/send/cross-chat and every MCP name
+other than memory, the first-party receivers and `fleet-comms-journal` refuse apply with
+`managed_route_unsupported:<route>`. A supported endpoint without a configured receiving host
+(for `fleet-comms-journal`, no `JournalHost`) refuses with `managed_route_unsupported:mcp:<name>`. Tool-send receipts (#394) are not consumed in stock
 mode, because the epoch broker identity has no receipt queue, so journal capture together with a
 `fleet-telegram` MCP grant refuses with `managed_route_unsupported:journal_tool_send_receipts`. A dedicated Fleet.Temporal receiver still
 starts its configured workers and the relay consumer on the fixed `fleet.agent.temporal-bridge`

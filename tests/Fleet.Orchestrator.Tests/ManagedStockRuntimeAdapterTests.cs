@@ -212,7 +212,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
                 _broker.Credentials.Extra["TELEGRAM_AGENT1_BOT_TOKEN"] = BotToken;
                 agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "fleet-telegram", Url = "https://telegram.example.test/mcp", TransportType = "http" });
                 break;
-            case "journal_mcp":
+            case "journal_mcp": // the read MCP is routed, but this installation names no journal listener host
                 agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "fleet-comms-journal", Url = "http://comms.example.test/journal/v1/mcp", TransportType = "http" });
                 break;
             case "mcp": agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "other", Url = "http://other/mcp", TransportType = "http" }); break;
@@ -735,6 +735,85 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             _cli.Calls.Where(c => c.Args.Take(3).SequenceEqual(["sandbox", "provider", "detach"])).Select(c => c.Args[4]));
     }
 
+    // ── comms-journal read MCP (#492) ───────────────────────────────────────
+
+    private const string ReadToken = "cj1.read.agent1.synthetic-read-mac-never-in-argv";
+
+    private Agent JournalReadAgent()
+    {
+        var agent = ManagedAgent(desired: "openshell", applied: "docker");
+        agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "fleet-comms-journal", Url = "http://comms.example.test/journal/v1/mcp?x=1", TransportType = "http" });
+        agent.Tools.Add(new AgentTool { ToolName = "mcp__fleet-comms-journal__get_message", IsEnabled = true });
+        agent.Tools.Add(new AgentTool { ToolName = "mcp__fleet-comms-journal__search_messages", IsEnabled = false });
+        _journalHost = "journal.example.test";
+        // Ordinary provisioning's own output: the derived per-agent read token in the MCP header.
+        _generatedMcp = new JsonObject
+        {
+            ["mcpServers"] = new JsonObject
+            {
+                ["fleet-comms-journal"] = new JsonObject
+                {
+                    ["type"] = "http", ["url"] = "http://comms.example.test/journal/v1/mcp",
+                    ["headers"] = new JsonObject { ["Authorization"] = "Bearer " + ReadToken },
+                },
+            },
+        }.ToJsonString();
+        return agent;
+    }
+
+    [Fact]
+    public async Task Comms_journal_read_mcp_applies_with_the_read_token_only_in_its_outside_provider()
+    {
+        _store.Add(JournalReadAgent());
+        var runtime = Runtime();
+
+        var result = await runtime.ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Message);
+        var read = Assert.Single(_cli.Calls, c => c.Args.Take(4).SequenceEqual(["provider", "create", "--name", "fleet-agent1-journal-read"]));
+        Assert.Equal(["provider", "create", "--name", "fleet-agent1-journal-read", "--type", "fleet-journal-read", "--credential", "FLEET_JOURNAL_READ_TOKEN"], read.Args);
+        Assert.Equal([("FLEET_JOURNAL_READ_TOKEN", ReadToken)], read.SecretEnv!.Select(p => (p.Key, p.Value)));
+        foreach (var secret in new[] { Key, ReadToken, "synthetic-read-mac" })
+            Assert.DoesNotContain(_cli.Calls, c => c.Args.Any(a => a.Contains(secret, StringComparison.Ordinal)));
+        var create = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        Assert.Equal(["fleet-agent1-openai", "fleet-agent1-journal-read"],
+            create.Args.Select((a, i) => (a, i)).Where(p => p.a == "--provider").Select(p => create.Args[p.i + 1]));
+
+        var app = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && c.Args[4] == "/app").Args[3];
+        var bundle = Directory.GetParent(app)!.FullName;
+        foreach (var file in Directory.EnumerateFiles(bundle, "*", SearchOption.AllDirectories))
+            foreach (var secret in new[] { Key, ReadToken, "synthetic-read-mac" })
+                Assert.DoesNotContain(secret, File.ReadAllText(file), StringComparison.Ordinal);
+        // The workload's MCP route: the journal listener host at the ordinary path, no header and no query.
+        var mcp = JsonNode.Parse(File.ReadAllText(Path.Combine(bundle, "workspace", ".mcp.json")))!["mcpServers"]!;
+        Assert.Equal("{\"url\":\"https://journal.example.test/journal/v1/mcp\"}", mcp["fleet-comms-journal"]!.ToJsonString());
+        // The outside record names the route and exactly the enabled existing grants.
+        var authority = Fleet.Shared.Security.StockEnrollmentAuthority.Load(Path.Combine(bundle, "trust", "enrollment.json"));
+        Assert.Equal("journal.example.test", authority.JournalRead!.Host);
+        Assert.Equal("/journal/v1/mcp", authority.JournalRead.Path);
+        Assert.Equal(["get_message"], authority.JournalRead.Tools);
+
+        Assert.True((await runtime.RevokeAsync("agent1", default)).Ok);
+        Assert.Equal(["fleet-agent1-openai", "fleet-agent1-journal-read"],
+            _cli.Calls.Where(c => c.Args.Take(3).SequenceEqual(["sandbox", "provider", "detach"])).Select(c => c.Args[4]));
+    }
+
+    [Fact]
+    public async Task Comms_journal_read_mcp_without_its_derived_token_refuses_before_the_old_runtime_stops()
+    {
+        _store.Add(JournalReadAgent());
+        _generatedMcp = "{\"mcpServers\":{}}";
+
+        var stops = 0;
+
+        var result = await Runtime(_ => { stops++; return Task.FromResult(true); }).ApplyAsync("agent1", default);
+
+        Assert.Equal("journal_token_unresolved", result.Code);
+        Assert.Equal(0, stops);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args[0] == "provider" || c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        Assert.Equal("docker", _store.Get("agent1").AppliedRuntimeKind);
+    }
+
     [Fact]
     public async Task Reprovision_without_the_bot_attaches_only_the_remaining_providers()
     {
@@ -794,6 +873,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     private (bool Ok, string Message) _dockerResult = (true, "provisioned");
     private JsonObject? _serviceHosts = new() { ["temporal"] = "temporal.example.test", ["telegram"] = "telegram.example.test" };
     private string? _journalHost;
+    private string? _generatedMcp;
     private string _generatedSettings = "{\"Agent\":{\"Name\":\"agent1\"}}";
     private string DockerWorkspaceDir => Path.Combine(_dir, "docker-workspace");
 
@@ -811,6 +891,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         }.ToJsonString());
         var generated = Directory.CreateDirectory(Path.Combine(_dir, "generated")).FullName;
         File.WriteAllText(Path.Combine(generated, "appsettings.json"), _generatedSettings);
+        if (_generatedMcp is not null) File.WriteAllText(Path.Combine(generated, ".mcp.json"), _generatedMcp);
         File.WriteAllText(Path.Combine(generated, Fleet.Shared.HarnessDefaults.CodexRootTomlFileName), "model = \"synthetic\"\n");
         return new StockOpenShellRuntime(Config(), _cli, Provisioner(), _store, _host, _broker.Credentials,
             new ServiceCollection().BuildServiceProvider(), NullLogger<StockOpenShellRuntime>.Instance)

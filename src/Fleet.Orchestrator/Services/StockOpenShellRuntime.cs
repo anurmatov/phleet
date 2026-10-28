@@ -261,6 +261,8 @@ public sealed class StockOpenShellRuntime(
     /// <summary>Operator-imported stock profile IDs for the agent's own bot and journal capture (#492).</summary>
     public const string TelegramProfile = "telegram";
     public const string JournalProfile = "fleet-journal";
+    /// <summary>Separate profile for the comms-journal read MCP token, so its binary scope is the native Codex child only.</summary>
+    public const string JournalReadProfile = "fleet-journal-read";
     internal static readonly string Instance = Guid.NewGuid().ToString("N");
     internal static readonly string[] MemoryTools = ["memory_get", "memory_search", "memory_list"];
     /// <summary>Ordinary MCP endpoint name → first-party receiving service that verifies the outside assertion.</summary>
@@ -490,9 +492,11 @@ public sealed class StockOpenShellRuntime(
         // capture on, Telegram MCP sends would go unjournaled, so the combination refuses instead.
         if (JournalCapture(agent) && agent.McpEndpoints.Any(e => e.McpName == "fleet-telegram"))
             return "managed_route_unsupported:journal_tool_send_receipts";
-        if (JournalCapture(agent) && services.GetService<JournalTokenService>()?.DescribeKeyFault() is { } journalKeyFault) return journalKeyFault;
-        // Only first-party HTTP MCP receivers that verify the outside assertion are routed; others refuse.
-        if (agent.McpEndpoints.FirstOrDefault(e => e.McpName != "memory" && !ServiceByMcpName.ContainsKey(e.McpName)) is { } extra)
+        if ((JournalCapture(agent) || JournalRead(agent)) && services.GetService<JournalTokenService>()?.DescribeKeyFault() is { } journalKeyFault) return journalKeyFault;
+        // Only first-party HTTP MCP receivers that verify the outside assertion, and the comms-journal read
+        // MCP (Comms verifies the derived read token resolved outside), are routed; others refuse.
+        if (agent.McpEndpoints.FirstOrDefault(e => e.McpName != "memory" && e.McpName != StockJournalReadRoute.McpName
+            && !ServiceByMcpName.ContainsKey(e.McpName)) is { } extra)
             return "managed_route_unsupported:mcp:" + extra.McpName;
         if (!agent.Tools.Any(t => t.IsEnabled && MemoryTools.Any(m => t.ToolName == "mcp__memory__" + m))) return "managed_memory_grant_missing";
         if (string.IsNullOrWhiteSpace(config["StockOpenShell:AgentImage"])) return "managed_agent_image_missing";
@@ -503,6 +507,9 @@ public sealed class StockOpenShellRuntime(
             return "managed_route_unsupported:mcp:" + unrouted.McpName;
         // Journal capture needs the operator's journal listener host as its route.
         if (JournalCapture(agent) && JournalHost(template) is null) return "managed_route_unsupported:journal";
+        // The read MCP targets the same journal listener host, at the ordinary endpoint's path.
+        if (JournalRead(agent) && (JournalHost(template) is null || JournalReadPath(agent) is null))
+            return "managed_route_unsupported:mcp:" + StockJournalReadRoute.McpName;
         if (broker.DescribePreflightFault() is { } brokerFault) return brokerFault;
         if (await broker.VerifyAccessAsync(ct) is { } accessFault) return accessFault;
         var version = await cli.RunAsync(["--version"], null, LegTimeout, ct);
@@ -818,6 +825,15 @@ public sealed class StockOpenShellRuntime(
     /// <summary>Journal capture exists exactly when ordinary provisioning would mint an ingest token.</summary>
     internal static bool JournalCapture(Agent agent) => agent.JournalEnabled && ContainerProvisioningService.HasTelegramBot(agent);
 
+    /// <summary>The agent has the ordinary comms-journal read MCP endpoint (ordinary provisioning mints its read token).</summary>
+    internal static bool JournalRead(Agent agent) => agent.McpEndpoints.Any(e => e.McpName == StockJournalReadRoute.McpName);
+
+    /// <summary>The ordinary endpoint's path (query dropped as ordinary provisioning does), or null when unroutable.</summary>
+    private static string? JournalReadPath(Agent agent) =>
+        agent.McpEndpoints.FirstOrDefault(e => e.McpName == StockJournalReadRoute.McpName) is { } endpoint
+        && Uri.TryCreate(ContainerProvisioningService.WithoutQuery(endpoint.Url), UriKind.Absolute, out var uri)
+        && Regex.IsMatch(uri.AbsolutePath, @"\A(?:/[A-Za-z0-9_-]{1,64}){1,8}\z") ? uri.AbsolutePath : null;
+
     private static string? JournalHost(JsonObject template) =>
         template["JournalHost"]?.GetValue<string>() is { Length: > 0 } host ? host : null;
 
@@ -857,6 +873,19 @@ public sealed class StockOpenShellRuntime(
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException) { ingest = null; }
             if (string.IsNullOrEmpty(ingest)) return ([], null, "journal_token_unresolved");
             secrets.Add(new($"fleet-{agent.Name}-journal", JournalProfile, StockCredentials.JournalIngestToken, ingest));
+        }
+        if (JournalRead(agent))
+        {
+            // The same derived per-agent read token ordinary provisioning puts in the MCP header (no switched identity).
+            string? read;
+            try
+            {
+                read = JsonNode.Parse(File.ReadAllText(Path.Combine(generated, ".mcp.json")))?["mcpServers"]?[StockJournalReadRoute.McpName]?["headers"]?["Authorization"]?.GetValue<string>();
+                read = read is { } header && header.StartsWith("Bearer ", StringComparison.Ordinal) ? header["Bearer ".Length..] : null;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException) { read = null; }
+            if (string.IsNullOrWhiteSpace(read) || read.Any(char.IsWhiteSpace)) return ([], null, "journal_token_unresolved");
+            secrets.Add(new($"fleet-{agent.Name}-journal-read", JournalReadProfile, StockCredentials.JournalReadToken, read));
         }
         return (secrets, botId, null);
     }
@@ -1209,6 +1238,17 @@ public sealed class StockOpenShellRuntime(
         record["StockCommit"] = StockCommit;
         record["PolicySha256"] = policySha;
         if (ServiceRoutes(template, agent) is { Count: > 0 } services) record["Services"] = services;
+        if (JournalRead(agent) && JournalHost(template) is { } journalHost && JournalReadPath(agent) is { } path)
+        {
+            // Exactly the agent's enabled grants on the ordinary endpoint name; nothing implicit or widened.
+            const string prefix = "mcp__" + StockJournalReadRoute.McpName + "__";
+            var tools = agent.Tools.Where(t => t.IsEnabled && t.ToolName.StartsWith(prefix, StringComparison.Ordinal))
+                .Select(t => t.ToolName[prefix.Length..]).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal);
+            record["JournalRead"] = new JsonObject
+            {
+                ["Host"] = journalHost, ["Path"] = path, ["Tools"] = new JsonArray([.. tools.Select(t => (JsonNode)t)]),
+            };
+        }
         return record;
     }
 
@@ -1242,6 +1282,9 @@ public sealed class StockOpenShellRuntime(
         var servers = new JsonObject { ["memory"] = new JsonObject { ["url"] = $"https://{template["MemoryHost"]!.GetValue<string>()}/mcp" } };
         foreach (var (service, route) in ServiceRoutes(template, agent))
             servers[StockServices.McpNames[service]] = new JsonObject { ["url"] = $"https://{route!["Host"]!.GetValue<string>()}/mcp" };
+        // No header here: the agent adds only the stock placeholder from its environment to its native config.
+        if (JournalRead(agent) && JournalHost(template) is { } journalHost && JournalReadPath(agent) is { } path)
+            servers[StockJournalReadRoute.McpName] = new JsonObject { ["url"] = $"https://{journalHost}{path}" };
         return new JsonObject { ["mcpServers"] = servers }.ToJsonString();
     }
 

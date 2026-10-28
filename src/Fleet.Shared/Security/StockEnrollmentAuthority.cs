@@ -41,7 +41,10 @@ public static class StockCredentials
     /// <summary>The agent's derived journal ingest token (stock profile <c>fleet-journal</c>).</summary>
     public const string JournalIngestToken = "FLEET_JOURNAL_INGEST_TOKEN";
 
-    public static readonly IReadOnlyList<string> ServiceKeys = [TelegramBotToken, JournalIngestToken];
+    /// <summary>The agent's derived journal read token for the comms-journal read MCP (stock profile <c>fleet-journal</c>).</summary>
+    public const string JournalReadToken = "FLEET_JOURNAL_READ_TOKEN";
+
+    public static readonly IReadOnlyList<string> ServiceKeys = [TelegramBotToken, JournalIngestToken, JournalReadToken];
 
     /// <summary>
     /// Syntax only, the same source-supported handle forms as the native API key: a refusal check for
@@ -64,6 +67,19 @@ public sealed record StockServiceRoute
     public string Query { get; init; } = "";
 }
 
+/// <summary>
+/// The comms-journal read MCP route (#492): the operator's journal listener host, the ordinary endpoint's
+/// path and the agent's existing tool grants on it. Comms authorizes with the derived per-agent read
+/// token, which stays outside; the workload's MCP header carries only the stock placeholder.
+/// </summary>
+public sealed record StockJournalReadRoute
+{
+    public const string McpName = "fleet-comms-journal";
+    public string Host { get; init; } = "";
+    public string Path { get; init; } = "";
+    public IReadOnlyList<string> Tools { get; init; } = [];
+}
+
 // One operator-owned file, read afresh at each admission. This is NOT a lifecycle or grant store.
 public sealed record StockEnrollmentAuthority
 {
@@ -83,6 +99,8 @@ public sealed record StockEnrollmentAuthority
     public string StockCommit { get; init; } = "";
     /// <summary>Optional non-memory routes by receiving service; absent in memory-only and older records.</summary>
     public IReadOnlyDictionary<string, StockServiceRoute>? Services { get; init; }
+    /// <summary>Optional comms-journal read MCP route; absent unless the agent has that endpoint.</summary>
+    public StockJournalReadRoute? JournalRead { get; init; }
 
     /// <summary>The exact receiving host for a service; an unenrolled service refuses.</summary>
     public string ServiceHost(string service) => service == StockServices.Memory ? MemoryHost
@@ -94,8 +112,14 @@ public sealed record StockEnrollmentAuthority
 
     private static bool ValidServices(StockEnrollmentAuthority record)
     {
-        if (record.Services is not { } services) return true;
         var hosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { record.MemoryHost };
+        if (record.JournalRead is { } journal && (Uri.CheckHostName(journal.Host) != UriHostNameType.Dns || !hosts.Add(journal.Host)
+            || journal.Path is null || !System.Text.RegularExpressions.Regex.IsMatch(journal.Path, @"\A(?:/[A-Za-z0-9_-]{1,64}){1,8}\z")
+            || journal.Tools is null || journal.Tools.Count > 128
+            || journal.Tools.Any(t => t is null || !System.Text.RegularExpressions.Regex.IsMatch(t, @"\A[A-Za-z0-9_.-]{1,128}\z"))
+            || journal.Tools.Distinct(StringComparer.Ordinal).Count() != journal.Tools.Count))
+            return false;
+        if (record.Services is not { } services) return true;
         foreach (var (service, route) in services)
         {
             if (!StockServices.McpNames.ContainsKey(service) || route is null || Uri.CheckHostName(route.Host) != UriHostNameType.Dns

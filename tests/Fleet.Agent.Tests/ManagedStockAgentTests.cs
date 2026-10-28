@@ -359,13 +359,70 @@ public sealed class ManagedStockAgentTests
         Assert.Equal("Bearer " + JournalPlaceholder, request.Authorization);
     }
 
+    // ── comms-journal read MCP (#492) ──────────────────────────────────────
+
+    private const string ReadPlaceholder = "openshell:resolve:env:v7_FLEET_JOURNAL_READ_TOKEN";
+    private static readonly StockJournalReadRoute JournalReadRoute = new()
+    {
+        Host = "journal.example.test", Path = "/journal/v1/mcp", Tools = ["get_message", "search_messages"],
+    };
+
+    private static Func<string, string?> ReadEnvironment(string? read = ReadPlaceholder) => key => key switch
+    {
+        "OPENAI_API_KEY" => Placeholder,
+        StockCredentials.JournalReadToken => read,
+        _ => throw new Exception("unexpected environment read"),
+    };
+
+    [Fact]
+    public void Comms_journal_read_mcp_carries_only_the_issued_placeholder_header_and_existing_grants()
+    {
+        using var f = new Fixture(JournalReadRoute);
+        f.Settings["Agent:AllowedTools:1"] = "mcp__fleet-comms-journal__get_message";
+        f.Settings["Agent:AllowedTools:2"] = "mcp__fleet-comms-journal__not_in_the_route";
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, ReadEnvironment())!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, ReadEnvironment());
+        StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, ReadEnvironment());
+        var config = File.ReadAllText(Path.Combine(f.Home, ".codex", "config.toml"));
+        Assert.Contains("\n[mcp_servers.fleet-comms-journal]\nurl = \"https://journal.example.test/journal/v1/mcp\"\nenabled_tools = [\"get_message\"]\n"
+            + "http_headers = { Authorization = \"Bearer " + ReadPlaceholder + "\" }\n", config);
+        Assert.DoesNotContain("cj1.", config);
+        // A literal in the environment after preparation no longer matches the prepared config.
+        Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, ReadEnvironment("cj1.read.agent1.synthetic-mac")));
+    }
+
+    [Theory]
+    [InlineData("cj1.read.agent1.synthetic-mac")]
+    [InlineData(null)]
+    [InlineData("openshell:resolve:env:v7_FLEET_JOURNAL_INGEST_TOKEN")]
+    [InlineData("openshell:resolve:env:v7_FLEET_JOURNAL_READ_TOKEN\" }\nurl = \"synthetic")]
+    public void Comms_journal_read_mcp_refuses_a_literal_missing_or_foreign_placeholder(string? read)
+    {
+        using var f = new Fixture(JournalReadRoute);
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, ReadEnvironment(read))!;
+        var refusal = Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, ReadEnvironment(read)));
+        Assert.Equal("stock_enrollment_journal_read_placeholder_invalid", refusal.Message);
+        Assert.False(File.Exists(Path.Combine(f.Home, ".codex", "config.toml")));
+    }
+
+    [Fact]
+    public void Comms_journal_read_mcp_must_be_exactly_the_record_route()
+    {
+        using var f = new Fixture(JournalReadRoute with { Path = "/journal/v1/other" });
+        File.WriteAllText(Path.Combine(f.Root[..^"root.toml".Length], ".mcp.json"),
+            "{\"mcpServers\":{\"memory\":{\"url\":\"https://memory.example.test/mcp\"},\"fleet-comms-journal\":{\"url\":\"https://journal.example.test/journal/v1/mcp\"}}}");
+        Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.Validate(f.Config(), f.Home, () => 10001, f.Root, ReadEnvironment()));
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly string _dir = Path.Combine(Path.GetTempPath(), "managed-agent-" + Guid.NewGuid().ToString("N"));
         public string Home => Path.Combine(_dir, "home");
         public string Root => Path.Combine(_dir, "root.toml");
         public Dictionary<string, string?> Settings { get; } = new();
-        public Fixture()
+        public Fixture(StockJournalReadRoute? journalRead = null)
         {
             Directory.CreateDirectory(Home);
             File.WriteAllText(Root, HarnessDefaults.Build(AgentHarness.InputFor(new AgentOptions { Name = "agent1", Role = "synthetic", Provider = "codex", WorkDir = _dir }, _ => null)!).CodexRootToml);
@@ -377,7 +434,8 @@ public sealed class ManagedStockAgentTests
                 State = "active", Agent = "agent1", SandboxId = "synthetic", Epoch = Guid.NewGuid(), ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5),
                 GatewayIssuer = "issuer", GatewayAudience = "audience", GatewayJwksPath = Path.Combine(_dir, "jwks"),
                 AssertionPrivateKeyPath = Path.Combine(_dir, "private"), AssertionPublicKeyPath = Path.Combine(_dir, "public"),
-                MemoryHost = "memory.example.test", BrokerHost = "broker.example.test", PolicySha256 = new string('b', 64), StockCommit = StockOpenShellEnrollment.StockCommit
+                MemoryHost = "memory.example.test", BrokerHost = "broker.example.test", PolicySha256 = new string('b', 64), StockCommit = StockOpenShellEnrollment.StockCommit,
+                JournalRead = journalRead,
             }));
             foreach (var (key, value) in new Dictionary<string, string?>
             {
@@ -387,7 +445,9 @@ public sealed class ManagedStockAgentTests
                 ["Agent:Model"] = "sol", ["Agent:WorkDir"] = _dir, ["Agent:AllowedTools:0"] = "mcp__memory__memory_get",
                 ["Agent:NativeAuthMode"] = "api_key", ["Agent:ProviderApiKeyEnvRef"] = "EXTERNAL_KEY_REF", ["RabbitMq:Host"] = "broker.example.test"
             }) Settings[key] = value;
-            File.WriteAllText(Path.Combine(_dir, ".mcp.json"), "{\"mcpServers\":{\"memory\":{\"url\":\"https://memory.example.test/mcp\"}}}");
+            File.WriteAllText(Path.Combine(_dir, ".mcp.json"), journalRead is null
+                ? "{\"mcpServers\":{\"memory\":{\"url\":\"https://memory.example.test/mcp\"}}}"
+                : "{\"mcpServers\":{\"memory\":{\"url\":\"https://memory.example.test/mcp\"},\"fleet-comms-journal\":{\"url\":\"https://" + journalRead.Host + journalRead.Path + "\"}}}");
         }
         public IConfiguration Config() => new ConfigurationBuilder().AddInMemoryCollection(Settings).Build();
         public void Dispose() => Directory.Delete(_dir, true);

@@ -562,6 +562,45 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.Empty(_dockerProvisions);
     }
 
+    [Fact]
+    public async Task Status_refresh_holds_and_stops_the_owned_sandbox_on_unexpected_gateway_restart()
+    {
+        var binding = Binding("fleet-agent1-77777777", Guid.NewGuid());
+        _cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _store.Add(ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        var runtime = Runtime();
+
+        await runtime.CheckGenerationAsync("agent1", default);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "stop"])); // unchanged: nothing to do
+
+        _host.Generation = "gateway-2@unexpected";
+        await runtime.CheckGenerationAsync("agent1", default);
+
+        var record = ManagedRecord.Parse(_store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal("needs_attention", record.State);
+        Assert.Contains("gateway_generation_changed", record.Errors);
+        Assert.Contains(_cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+        Assert.Equal("Stopped", _cli.Sandboxes[binding.SandboxName].Phase);
+    }
+
+    [Fact]
+    public async Task Cli_timeout_reaps_reparented_descendants()
+    {
+        var token = "7." + Random.Shared.Next(100000, 999999);
+        var script = Path.Combine(_dir, "fake-openshell-orphan");
+        File.WriteAllText(script, $"#!/bin/sh\n(sleep {token} &)\nsleep 30\n");
+        File.SetUnixFileMode(script, (UnixFileMode)0b111_000_000);
+        var cli = new ProcessStockCli(Config(new() { ["StockOpenShell:CliPath"] = script }));
+
+        Assert.True((await cli.RunAsync(["x"], null, TimeSpan.FromMilliseconds(300), default)).TimedOut);
+        await Task.Delay(300);
+
+        var survivors = Directory.EnumerateDirectories("/proc").Where(d => int.TryParse(Path.GetFileName(d), out _))
+            .Select(d => { try { return File.ReadAllText(Path.Combine(d, "cmdline")).Replace('\0', ' '); } catch (IOException) { return ""; } catch (UnauthorizedAccessException) { return ""; } })
+            .Where(c => c.Contains("sleep " + token, StringComparison.Ordinal)).ToList();
+        Assert.Empty(survivors);
+    }
+
     // ── fixtures ───────────────────────────────────────────────────────────
 
     private readonly List<string> _dockerProvisions = [];

@@ -35,13 +35,17 @@ public sealed class ProcessStockCli(IConfiguration config) : IStockCli
         TimeSpan timeout, CancellationToken ct)
     {
         var path = config["StockOpenShell:CliPath"];
-        var psi = new ProcessStartInfo(string.IsNullOrWhiteSpace(path) ? "openshell" : path)
+        var cliPath = string.IsNullOrWhiteSpace(path) ? "openshell" : path;
+        // Own session/process group, so a timeout reaps reparented descendants too.
+        var leader = !OperatingSystem.IsWindows() && File.Exists(SetsidPath);
+        var psi = new ProcessStartInfo(leader ? SetsidPath : cliPath)
         {
             UseShellExecute = false,
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
+        if (leader) psi.ArgumentList.Add(cliPath);
         foreach (var arg in args) psi.ArgumentList.Add(arg);
         foreach (var name in new[] { "OPENSHELL_GATEWAY_INSECURE", "OPENSHELL_GATEWAY_ENDPOINT", "OPENSHELL_GATEWAY" })
             psi.Environment.Remove(name);
@@ -71,6 +75,7 @@ public sealed class ProcessStockCli(IConfiguration config) : IStockCli
             }
             catch (Exception ex) when (ex is OperationCanceledException or TimeoutException)
             {
+                if (leader) _ = KillGroup(-process.Id, 9);
                 try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
                 return new(-1, "", TimedOut: true);
             }
@@ -79,6 +84,11 @@ public sealed class ProcessStockCli(IConfiguration config) : IStockCli
             return output is null ? new(-1, "") : new(process.ExitCode, output);
         }
     }
+
+    private const string SetsidPath = "/usr/bin/setsid";
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "kill", SetLastError = true)]
+    private static extern int KillGroup(int pid, int signal);
 
     private static async Task<string?> ReadBoundedAsync(StreamReader reader)
     {
@@ -365,7 +375,12 @@ public sealed class StockOpenShellRuntime(
         var fault = await GenerationFaultAsync(binding, ct);
         if (fault is null && await VerifyIdentityAsync(binding, ct) is { } identity) fault = identity.Code;
         if (fault is null) return null;
-        if (fault is "gateway_generation_changed" or "sandbox_identity_changed")
+        if (fault == "gateway_generation_changed")
+        {
+            await HandleUnexpectedRestartAsync(agent.Name, ct);
+            return Result.Refused(409, fault);
+        }
+        if (fault == "sandbox_identity_changed")
         {
             try
             {
@@ -378,6 +393,30 @@ public sealed class StockOpenShellRuntime(
         }
         return Result.Refused(409, fault);
     }
+
+    /// <summary>
+    /// Status refresh: an applied binding whose gateway generation changed is held and its verified
+    /// owned sandbox gets one bounded revoke/Stop fanout. Unobservable or busy states are left alone.
+    /// </summary>
+    public async Task CheckGenerationAsync(string name, CancellationToken ct)
+    {
+        if (!Enabled) return;
+        Agent? agent;
+        try { agent = await store.LoadAsync(name, ct); }
+        catch (Exception ex) when (ex is DbException or InvalidOperationException) { return; }
+        if (agent is not { AppliedRuntimeKind: "openshell" }) return;
+        ManagedRecord record;
+        try { record = ManagedRecord.Parse(agent.AppliedRuntimeBinding); }
+        catch (JsonException) { return; }
+        if (record is not { Operation: null, Applied: { } binding } || record.State is "needs_attention" or "revoked") return;
+        if (await host.GatewayGenerationAsync(ct) is { } current && current != binding.GatewayGeneration)
+            await HandleUnexpectedRestartAsync(name, ct);
+    }
+
+    private Task<Result> HandleUnexpectedRestartAsync(string name, CancellationToken ct) =>
+        RunAsync(name, "restart_hold", async (agent, record, _, token) => record.Applied is null
+            ? (record, null, null, Result.Refused(409, "managed_binding_missing"))
+            : await HoldForGenerationAsync(agent, record, "gateway_generation_changed", token), ct);
 
     /// <summary>Pushes the persisted runtime state to the registry/WebSocket so dashboards update live.</summary>
     private async Task PublishAsync(string name)

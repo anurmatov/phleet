@@ -16,8 +16,12 @@ public sealed class AgentStateMonitorService : BackgroundService
 
     private DateTimeOffset _lastContainerRefresh = DateTimeOffset.MinValue;
 
-    public AgentStateMonitorService(AgentRegistry registry, DockerService docker, ILogger<AgentStateMonitorService> logger)
+    private readonly StockOpenShellRuntime? _managed;
+
+    public AgentStateMonitorService(AgentRegistry registry, DockerService docker, ILogger<AgentStateMonitorService> logger,
+        StockOpenShellRuntime? managed = null)
     {
+        _managed = managed;
         _registry = registry;
         _docker   = docker;
         _logger   = logger;
@@ -41,6 +45,16 @@ public sealed class AgentStateMonitorService : BackgroundService
                     _registry.BroadcastStateIfChanged(agent);
                 }
             }
+
+            // #492: the existing status refresh also watches applied managed bindings for an
+            // unexpected gateway restart and runs the bounded revoke/verified-owned Stop handling.
+            if (_managed is { Enabled: true })
+                foreach (var agent in _registry.GetAll().Where(a => a.AppliedRuntimeKind == "openshell").ToList())
+                {
+                    try { await _managed.CheckGenerationAsync(agent.AgentName, stoppingToken); }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    { _logger.LogWarning("Managed generation check for {Agent} failed ({Type})", agent.AgentName, ex.GetType().Name); }
+                }
 
             // Refresh container start times periodically
             if (DateTimeOffset.UtcNow - _lastContainerRefresh >= ContainerRefreshInterval)

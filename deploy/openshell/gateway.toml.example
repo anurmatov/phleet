@@ -8,9 +8,10 @@
 version = 2
 
 [openshell.gateway]
-# Listener on the gateway container's private fleet-net interface only (no published host port, so
-# no clash with temporal-ui on 8080). The orchestrator's stock CLI client endpoint is
-# https://openshell-gateway:8443; the server cert must carry that DNS SAN. Never a public interface.
+# Container listener. Compose attaches it to fleet-net, where the orchestrator's stock CLI reaches
+# https://openshell-gateway:8443 over mTLS, and publishes it only as 127.0.0.1:8443 on the host, where
+# the trusted host-network supervisor calls back to https://127.0.0.1:8443. The server cert must carry
+# the openshell-gateway DNS SAN and the 127.0.0.1 IP SAN. Never a public (0.0.0.0) host interface.
 bind_address        = "0.0.0.0:8443"
 health_bind_address = "127.0.0.1:8081"
 log_level           = "info"

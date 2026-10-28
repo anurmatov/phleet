@@ -429,12 +429,27 @@ arrays, JSON output, TLS-skip/endpoint variables removed) and never falls back t
 Operator inputs live in the private `${FLEET_BASE_DIR}/openshell-client` directory (0700), mounted
 into the orchestrator at `/var/lib/fleet-openshell-client`:
 - stock CLI client metadata/trust (`XDG_CONFIG_HOME`); with the example `--profile openshell` gateway the
-  client endpoint is `https://openshell-gateway:8443` on `fleet-net` (no host port; the gateway cert
-  needs that DNS SAN), never the host loopback, which the orchestrator container cannot reach;
+  client endpoint is `https://openshell-gateway:8443` on `fleet-net`, authenticated with the mTLS
+  client cert/key (the gateway cert needs that DNS SAN), never the host loopback, which the
+  orchestrator container cannot reach;
 - `managed-authority.json` (gateway issuer/audience/JWKS, assertion key paths, memory and broker hosts,
   optional `ServiceHosts` such as `{"temporal": "temporal.example.test", "telegram": "telegram.example.test"}`
   and optional `JournalHost` such as `"journal.example.test"`);
 - `broker-ca.pem`.
+
+Gateway reachability (the design's network row) with the example `--profile openshell` unit:
+
+| Caller | Network | Endpoint | Authentication |
+|---|---|---|---|
+| Orchestrator stock CLI | private `fleet-net` bridge | `https://openshell-gateway:8443` | mTLS client cert/key from `openshell-client`; server cert DNS SAN `openshell-gateway` |
+| Trusted native supervisor (`network_mode=host`) | host loopback | `https://127.0.0.1:8443`, the gateway's loopback-only host binding `127.0.0.1:8443:8443` | the stock supervisor TLS/JWT path; server cert IP SAN `127.0.0.1` |
+
+The binding is published on `127.0.0.1` only, never `0.0.0.0`, and only when the dormant
+`openshell` profile runs, so a default-off install publishes nothing. Host and container port stay
+equal so the supervisor's default loopback callback matches the listener; the gateway health
+listener (`127.0.0.1:8081`) stays inside the container. The outside signer, receivers and broker
+stay on private networks with no public listener. Whether the pinned images use exactly this
+callback is part of each deployment's qualification, not something these source checks prove.
 
 With `FLEET_STOCK_MANAGED_ENABLED=true`, `setup.sh` and `upgrade.sh` refuse before replacing anything
 unless `FLEET_STOCK_BROKER_MANAGEMENT_URL` is `https://`, `broker-ca.pem` is readable, both

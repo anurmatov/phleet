@@ -1,5 +1,6 @@
 """#492 rollout guard and gateway backup scripts, with stubbed curl/docker (no network, no Docker)."""
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -82,6 +83,19 @@ class DefaultOffComposeTests(unittest.TestCase):
     def test_example_has_no_required_interpolation(self):
         text = (ROOT / "docker-compose.example.yml").read_text()
         self.assertNotIn(":?", text)
+
+    def test_gateway_is_reachable_on_fleet_net_and_loopback_only(self):
+        """#492 review F3/G1: CLI over fleet-net, host-network supervisor over a loopback-only binding."""
+        text = (ROOT / "docker-compose.example.yml").read_text()
+        start = text.index("\n  openshell-gateway:\n")
+        end = text.index("\nvolumes:\n", start)
+        service = text[start:end]
+        self.assertIn('profiles: ["openshell"]', service)
+        self.assertIn("      - fleet-net\n", service)
+        ports = re.findall(r'^\s+- "([^"]*:8443)"$', service, re.M)
+        self.assertEqual(ports, ["127.0.0.1:8443:8443"])
+        self.assertNotIn("0.0.0.0", service)
+        self.assertNotIn("network_mode", service)
 
     def test_default_off_compose_config_is_valid(self):
         probe = subprocess.run(["docker", "compose", "version"], capture_output=True, text=True) if shutil.which("docker") else None

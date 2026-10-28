@@ -924,7 +924,8 @@ public sealed class StockOpenShellRuntime(
         var sandbox = await GetAsync(binding.SandboxName, ct);
         if (sandbox is null) return "sandbox_unobservable";
         if (sandbox.Value.Id != binding.SandboxId) return "sandbox_identity_changed";
-        if (sandbox.Value.Phase is not ("Stopped" or "Completed" or "Error") && await LifecycleAsync("stop", binding, ct) is { } stop) return stop;
+        // Error/Completed may still leave a native supervisor running: only Stopped skips the verified Stop.
+        if (sandbox.Value.Phase != "Stopped" && await LifecycleAsync("stop", binding, ct) is { } stop) return stop;
         return await QuiescentAsync(binding, ct);
     }
 
@@ -1149,7 +1150,8 @@ public sealed class StockOpenShellRuntime(
             var sandbox = await GetAsync(binding.SandboxName, ct);
             if (sandbox is null) return "sandbox_unobservable";
             if (sandbox.Value.Id != binding.SandboxId) return "sandbox_identity_changed";
-            if (sandbox.Value.Phase is "Stopped" or "Completed" or "Error") return await QuiescentAsync(binding, ct);
+            if (sandbox.Value.Phase == "Stopped") return await QuiescentAsync(binding, ct);
+            if (sandbox.Value.Phase is "Completed" or "Error") return await LifecycleAsync("stop", binding, ct) ?? await QuiescentAsync(binding, ct);
             await Task.Delay(Poll, ct);
         }
         // The revoked allocation is still running: stop it explicitly rather than activating under it.

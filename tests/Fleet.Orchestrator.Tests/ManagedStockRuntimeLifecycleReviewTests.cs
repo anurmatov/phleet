@@ -56,4 +56,19 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         Assert.False(result.Ok);
         Assert.NotEqual("applied", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
     }
+
+    [Fact]
+    public async Task Error_phase_binding_gets_a_verified_stop_before_any_other_lifecycle_action()
+    {
+        var binding = _t.Binding("fleet-agent1-33333333", Guid.NewGuid());
+        // Error/Completed phases may leave a native supervisor running.
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Error");
+        _t._store.Add(_t.ManagedAgent(desired: "docker", applied: "openshell", record: new ManagedRecord { State = "revoked", Applied = binding }));
+
+        await _t.Runtime().ApplyAsync("agent1", default);
+
+        var lifecycle = _t._cli.Calls.Where(c => Verb(c, "stop") || Verb(c, "start")).Select(c => c.Args[1]).ToList();
+        Assert.NotEmpty(lifecycle);
+        Assert.Equal("stop", lifecycle[0]);
+    }
 }

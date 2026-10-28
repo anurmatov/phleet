@@ -33,7 +33,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     {
         var agent = _store.Add(ManagedAgent(desired: "openshell", applied: "docker"));
         var dockerStops = 0;
-        var runtime = Runtime(stopDocker: (_, _) => { dockerStops++; return Task.FromResult<string?>(null); });
+        _host.DockerStates = ["running"];
+        var runtime = Runtime(dockerStop: _ => { dockerStops++; _host.DockerStates = ["exited"]; return Task.FromResult(true); });
 
         var result = await runtime.ApplyAsync("agent1", default);
 
@@ -257,9 +258,197 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.False((await provisioner.CreateEpochAsync(Guid.NewGuid(), "agent1", default)).Ok);
     }
 
+    // ── #492 review blockers (b09f5f5a) ────────────────────────────────────
+
+    [Fact]
+    public async Task Candidate_epoch_and_name_are_persisted_before_broker_side_effects_and_kept_on_failure()
+    {
+        _store.Add(ManagedAgent(desired: "openshell", applied: "docker"));
+        _broker.FailPutContaining = "/api/vhosts/";
+
+        var result = await Runtime().ApplyAsync("agent1", default);
+
+        Assert.False(result.Ok);
+        var record = ManagedRecord.Parse(_store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal("needs_attention", record.State);
+        Assert.NotNull(record.Candidate);
+        Assert.NotEqual(Guid.Empty, record.Candidate!.Epoch);
+        Assert.StartsWith("fleet-agent1-", record.Candidate.SandboxName);
+        Assert.Contains(_store.History, h => ManagedRecord.Parse(h) is { Operation: not null, Candidate: not null });
+        Assert.Equal("needs_attention", (await Runtime().ApplyAsync("agent1", default)).Code); // held, never replayed
+    }
+
+    [Fact]
+    public async Task Create_timeout_keeps_the_observed_uuid_so_revoke_can_stop_that_exact_sandbox()
+    {
+        _store.Add(ManagedAgent(desired: "openshell", applied: "docker"));
+        _cli.CreateTimesOut = true;
+        var runtime = Runtime();
+
+        Assert.Equal("sandbox_create_unknown", (await runtime.ApplyAsync("agent1", default)).Code);
+        var candidate = ManagedRecord.Parse(_store.Get("agent1").AppliedRuntimeBinding).Candidate!;
+        Assert.Equal(_cli.Sandboxes[candidate.SandboxName].Id, candidate.SandboxId);
+
+        Assert.True((await runtime.RevokeAsync("agent1", default)).Ok);
+        Assert.Contains(_cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", candidate.SandboxName]));
+        Assert.Null(ManagedRecord.Parse(_store.Get("agent1").AppliedRuntimeBinding).Candidate);
+    }
+
+    [Theory]
+    [InlineData(null, "docker_observation_failed")]
+    [InlineData("running", "docker_quiescence_pending")]
+    public async Task Docker_observation_failure_or_survivor_is_never_read_as_absence(string? state, string code)
+    {
+        _store.Add(ManagedAgent(desired: "openshell", applied: "docker"));
+        _host.DockerStates = state is null ? null : [state];
+
+        var result = await Runtime(dockerStop: _ => Task.FromResult(true)).ApplyAsync("agent1", default);
+
+        Assert.Equal(code, result.Code);
+        Assert.Empty(_broker.Puts);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+    }
+
+    [Fact]
+    public async Task Successful_stop_keeps_an_unresolved_hold_and_start_stays_refused()
+    {
+        var binding = Binding("fleet-agent1-ffffffff", Guid.NewGuid());
+        _cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _store.Add(ManagedAgent(desired: "openshell", applied: "openshell",
+            record: new ManagedRecord { State = "needs_attention", Applied = binding, Errors = ["broker:unresolved"] }));
+        var runtime = Runtime();
+
+        Assert.Equal("stopped_held", (await runtime.StopAsync("agent1", default)).Code);
+        var record = ManagedRecord.Parse(_store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal(("needs_attention", "broker:unresolved"), (record.State, Assert.Single(record.Errors)));
+        Assert.Equal("needs_attention", (await runtime.StartAsync("agent1", default)).Code);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "start"]));
+    }
+
+    [Fact]
+    public async Task Managed_reprovision_reuses_the_same_sandbox_and_workspace_under_a_new_epoch()
+    {
+        var binding = Binding("fleet-agent1-11111111", Guid.NewGuid());
+        _cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        var agent = _store.Add(ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        agent.SandboxPolicyVersionId = 2;
+
+        var result = await Runtime().ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Message);
+        var applied = ManagedRecord.Parse(_store.Get("agent1").AppliedRuntimeBinding).Applied!;
+        Assert.Equal((binding.SandboxName, binding.SandboxId), (applied.SandboxName, applied.SandboxId));
+        Assert.NotEqual(binding.Epoch, applied.Epoch);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        Assert.Contains(_cli.Calls, c => c.Args.Take(3).SequenceEqual(["policy", "set", binding.SandboxName]));
+        Assert.Single(_cli.Calls, c => c.Args.SequenceEqual(["sandbox", "start", binding.SandboxName]));
+    }
+
+    [Fact]
+    public async Task Docker_workspace_moves_into_the_sandbox_without_control_state_and_back_out()
+    {
+        Directory.CreateDirectory(Path.Combine(DockerWorkspaceDir, ".generated"));
+        File.WriteAllText(Path.Combine(DockerWorkspaceDir, "marker.txt"), "keep");
+        File.WriteAllText(Path.Combine(DockerWorkspaceDir, ".generated", "appsettings.json"), "{\"secret\":true}");
+        _store.Add(ManagedAgent(desired: "openshell", applied: "docker"));
+        var runtime = Runtime();
+
+        Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
+        var create = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        var staged = create.Args.Single(a => a.EndsWith(":/workspace", StringComparison.Ordinal))[..^":/workspace".Length];
+        Assert.True(File.Exists(Path.Combine(staged, "marker.txt")));
+        Assert.False(Directory.Exists(Path.Combine(staged, ".generated")));
+        Assert.Equal("/app/stock-entrypoint.sh", create.Args[^1]);
+        Assert.Equal("--", create.Args[^2]);
+
+        _store.Get("agent1").RuntimeKind = "docker";
+        Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
+        Assert.Equal("from sandbox", File.ReadAllText(Path.Combine(DockerWorkspaceDir, "marker-back.txt")));
+        Assert.Equal(["agent1:openshell"], _dockerProvisions); // Docker ran while the managed hold was still applied
+        Assert.Equal("docker", _store.Get("agent1").AppliedRuntimeKind);
+    }
+
+    [Fact]
+    public async Task Failed_docker_transition_keeps_the_openshell_binding_held()
+    {
+        var binding = Binding("fleet-agent1-22222222", Guid.NewGuid());
+        _cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _store.Add(ManagedAgent(desired: "docker", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        _dockerResult = (false, "image missing");
+
+        var result = await Runtime().ApplyAsync("agent1", default);
+
+        Assert.Equal("docker_transition_failed", result.Code);
+        Assert.Equal("openshell", _store.Get("agent1").AppliedRuntimeKind);
+        Assert.Equal("needs_attention", ManagedRecord.Parse(_store.Get("agent1").AppliedRuntimeBinding).State);
+    }
+
+    [Fact]
+    public async Task Changed_generation_refuses_cancel_logs_and_stop_without_touching_the_sandbox_lifecycle()
+    {
+        var binding = Binding("fleet-agent1-33333333", Guid.NewGuid());
+        _cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _store.Add(ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        _host.Generation = "gateway-9@other";
+        var runtime = Runtime();
+
+        Assert.Equal("gateway_generation_changed", (await runtime.CancelAsync("agent1", null, default)).Code);
+        Assert.Equal("gateway_generation_changed", (await runtime.LogsAsync("agent1", 10, default)).Result.Code);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args[0] is "logs" || c.Args.Take(2).SequenceEqual(["sandbox", "exec"]));
+        Assert.Equal("gateway_generation_changed", (await runtime.StopAsync("agent1", default)).Code);
+        Assert.Equal("needs_attention", ManagedRecord.Parse(_store.Get("agent1").AppliedRuntimeBinding).State);
+    }
+
+    [Theory]
+    [InlineData("auth", "broker_management_auth_failed")]
+    [InlineData("profile", "provider_profile_hash_mismatch:openai")]
+    [InlineData("symlink", "managed_inputs_invalid")]
+    public async Task Broker_auth_profile_hashes_and_native_inputs_are_checked_before_old_runtime_stop(string fault, string code)
+    {
+        _store.Add(ManagedAgent(desired: "openshell", applied: "docker"));
+        var stops = 0;
+        var runtime = Runtime(dockerStop: _ => { stops++; return Task.FromResult(true); });
+        _host.DockerStates = ["running"];
+        switch (fault)
+        {
+            case "auth": _broker.WhoAmI = HttpStatusCode.Unauthorized; break;
+            case "profile": _store.ProfileHashes = "{\"openai\":\"" + new string('0', 64) + "\"}"; break;
+            case "symlink":
+                Directory.CreateSymbolicLink(Path.Combine(_dir, "generated", "roles"), Path.GetTempPath());
+                break;
+        }
+
+        var result = await runtime.ApplyAsync("agent1", default);
+
+        Assert.Equal(code, result.Code);
+        Assert.Equal(0, stops);
+        Assert.Empty(_broker.Puts);
+    }
+
+    [Fact]
+    public async Task Cli_runner_bounds_output_and_settles_within_the_deadline()
+    {
+        var script = Path.Combine(_dir, "fake-openshell");
+        File.WriteAllText(script, "#!/bin/sh\nif [ \"$1\" = big ]; then head -c 2000000 /dev/zero | tr '\\0' x; exit 0; fi\nsleep 30\n");
+        File.SetUnixFileMode(script, (UnixFileMode)0b111_000_000);
+        var cli = new ProcessStockCli(Config(new() { ["StockOpenShell:CliPath"] = script }));
+
+        var big = await cli.RunAsync(["big"], null, TimeSpan.FromSeconds(10), default);
+        Assert.Equal((-1, ""), (big.ExitCode, big.Stdout));
+
+        var started = DateTime.UtcNow;
+        var slow = await cli.RunAsync(["slow"], null, TimeSpan.FromMilliseconds(300), default);
+        Assert.True(slow.TimedOut);
+        Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(10));
+    }
+
     // ── fixtures ───────────────────────────────────────────────────────────
 
-    private StockOpenShellRuntime Runtime(Func<Agent, CancellationToken, Task<string?>>? stopDocker = null)
+    private readonly List<string> _dockerProvisions = [];
+    private (bool Ok, string Message) _dockerResult = (true, "provisioned");
+    private string DockerWorkspaceDir => Path.Combine(_dir, "docker-workspace");
+
+    private StockOpenShellRuntime Runtime(Func<string, Task<bool>>? dockerStop = null)
     {
         Directory.CreateDirectory(_dir);
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(_dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
@@ -280,7 +469,13 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             StopSettle = TimeSpan.FromSeconds(1),
             Poll = TimeSpan.FromMilliseconds(10),
             GenerateInputs = (_, _) => Task.FromResult(generated),
-            StopDocker = stopDocker ?? ((_, _) => Task.FromResult<string?>(null)),
+            DockerStop = dockerStop ?? (_ => Task.FromResult(true)),
+            ProvisionDocker = (name, _) =>
+            {
+                _dockerProvisions.Add(name + ":" + _store.Get(name).AppliedRuntimeKind);
+                return Task.FromResult(_dockerResult);
+            },
+            DockerWorkspace = _ => DockerWorkspaceDir,
         };
     }
 
@@ -338,6 +533,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         public readonly Dictionary<string, (string Id, string Phase)> Sandboxes = new();
         public readonly HashSet<string> Hang = [];
         public string Version = "openshell 0.1.5";
+        public bool CreateTimesOut;
+        public string ProfileYaml = "profile: synthetic\n";
 
         public async Task<StockCliResult> RunAsync(IReadOnlyList<string> args, IReadOnlyDictionary<string, string>? secretEnv, TimeSpan timeout, CancellationToken ct)
         {
@@ -355,6 +552,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
                     ? new(0, JsonSerializer.Serialize(new { id = s.Id, name = Name(2), phase = s.Phase })) : new(1, ""),
                 ("sandbox", "start") => Phase(Name(2), "Ready"),
                 ("sandbox", "stop") => Phase(Name(2), "Stopped"),
+                ("sandbox", "download") => Download(args[4]),
+                ("profile", "export") => new(0, ProfileYaml),
                 _ => new(0, ""),
             };
         }
@@ -363,6 +562,13 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         {
             var name = args[args.ToList().IndexOf("--name") + 1];
             Sandboxes[name] = (Guid.NewGuid().ToString(), "Error"); // the revoked allocation refused before intake
+            return CreateTimesOut ? new(-1, "", TimedOut: true) : new(0, "");
+        }
+
+        private static StockCliResult Download(string staging)
+        {
+            Directory.CreateDirectory(Path.Combine(staging, "workspace"));
+            File.WriteAllText(Path.Combine(staging, "workspace", "marker-back.txt"), "from sandbox");
             return new(0, "");
         }
 
@@ -378,13 +584,15 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     {
         private readonly List<Agent> _agents = [];
         public bool RejectNextSwap;
+        public readonly List<string> History = [];
 
         public Agent Add(Agent agent) { agent.Id = _agents.Count + 1; _agents.Add(agent); return agent; }
         public Agent Get(string name) => _agents.Single(a => a.Name == name);
         public Task<Agent?> LoadAsync(string name, CancellationToken ct) => Task.FromResult(_agents.FirstOrDefault(a => a.Name == name));
         public Task<IReadOnlyList<Agent>> ListAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<Agent>>(_agents);
+        public string ProfileHashes = "{}";
         public Task<SandboxPolicyVersion?> LoadPolicyAsync(int id, CancellationToken ct) => Task.FromResult<SandboxPolicyVersion?>(
-            id == 1 ? new SandboxPolicyVersion { Id = 1, Version = 1, Yaml = ManagedStockRuntimeTests.PolicyYaml, Sha256 = new string('b', 64) } : null);
+            id is 1 or 2 ? new SandboxPolicyVersion { Id = id, Version = id, Yaml = ManagedStockRuntimeTests.PolicyYaml, Sha256 = new string('b', 64), ProviderProfileHashes = ProfileHashes } : null);
 
         public Task<bool> SwapAsync(int agentId, string? expected, string next, string? appliedKind, int? appliedPolicyVersionId, CancellationToken ct)
         {
@@ -392,6 +600,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             if (RejectNextSwap) { RejectNextSwap = false; return Task.FromResult(false); }
             if (agent.AppliedRuntimeBinding != expected) return Task.FromResult(false);
             agent.AppliedRuntimeBinding = next;
+            History.Add(next);
             if (appliedKind is not null) { agent.AppliedRuntimeKind = appliedKind; agent.AppliedSandboxPolicyVersionId = appliedPolicyVersionId; }
             return Task.FromResult(true);
         }
@@ -403,6 +612,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         public Task<string?> GatewayGenerationAsync(CancellationToken ct) => Task.FromResult<string?>(Generation);
         public Task<IReadOnlyList<string>?> RunningSandboxContainersAsync(string sandboxId, CancellationToken ct) =>
             Task.FromResult<IReadOnlyList<string>?>([]);
+        public IReadOnlyList<string>? DockerStates = [];
+        public Task<IReadOnlyList<string>?> DockerContainerStatesAsync(string containerName, CancellationToken ct) => Task.FromResult(DockerStates);
     }
 
     private sealed class FakeBroker : HttpMessageHandler
@@ -412,13 +623,16 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         public readonly HashSet<string> Existing = [];
         public bool FailDeletes;
         public string? FailPutContaining;
+        public HttpStatusCode WhoAmI = HttpStatusCode.OK;
         public readonly FakeCredentials Credentials = new();
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             var path = request.RequestUri!.AbsolutePath;
             HttpStatusCode status;
-            if (request.Method == HttpMethod.Get)
+            if (request.Method == HttpMethod.Get && path.EndsWith("/api/whoami", StringComparison.Ordinal))
+                status = WhoAmI;
+            else if (request.Method == HttpMethod.Get)
                 status = Existing.Any(path.StartsWith) ? HttpStatusCode.OK : HttpStatusCode.NotFound;
             else if (request.Method == HttpMethod.Put)
             {

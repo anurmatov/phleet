@@ -54,6 +54,23 @@ public sealed class StockBrokerProvisioner(IConfiguration config, ICredentialsRe
     }
 
     /// <summary>
+    /// Authenticated reachability of the management API over the verified HTTPS trust, checked before
+    /// any old-runtime Stop: a TLS, auth or availability failure refuses apply.
+    /// </summary>
+    public async Task<string?> VerifyAccessAsync(CancellationToken ct)
+    {
+        if (DescribePreflightFault() is { } fault) return fault;
+        try
+        {
+            using var http = Client();
+            using var response = await http.GetAsync("api/whoami", ct);
+            return response.IsSuccessStatusCode ? null : Classify(response.StatusCode);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
+        { return "broker_management_unavailable"; }
+    }
+
+    /// <summary>
     /// Exact anchored permissions for one role. Workload: its own queue plus relay/topic exchanges;
     /// control: relay exchange and bridge reply queue; observer: heartbeat topic and queue.
     /// </summary>

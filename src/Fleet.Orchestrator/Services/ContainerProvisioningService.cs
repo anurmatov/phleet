@@ -380,6 +380,14 @@ public sealed class ContainerProvisioningService(
         string? imageOverride = null,
         IReadOnlyDictionary<string, int>? instructionVersionOverrides = null,
         CancellationToken ct = default)
+        => await ProvisionCoreAsync(agentName, imageOverride, instructionVersionOverrides, managedTransition: false, ct);
+
+    private async Task<ProvisionResult> ProvisionCoreAsync(
+        string agentName,
+        string? imageOverride,
+        IReadOnlyDictionary<string, int>? instructionVersionOverrides,
+        bool managedTransition,
+        CancellationToken ct)
     {
         if (RuntimeHold.Denies(agentName))
             return ProvisionResult.Fail(agentName, StockRuntimeMutationHold.Reason);
@@ -406,13 +414,11 @@ public sealed class ContainerProvisioningService(
         if (agent is null)
             return ProvisionResult.Fail(agentName, "agent not found in DB");
 
-        if (StockOpenShellRuntime.Owns(agent))
-        {
-            if (await DispatchManagedApplyAsync(agentName, ct) is { } managed) return managed;
-            // OpenShell→Docker completed its revoke/stop; continue with the ordinary Docker path.
-            return await ProvisionAsync(agentName, imageOverride, instructionVersionOverrides, ct);
-        }
-        if (AgentPatchHelpers.RuntimeApplyFault(agent) is { } runtimeFault)
+        // The managed adapter owns both runtime-switch directions; it calls back with managedTransition
+        // only while it still holds the agent, for the Docker leg of OpenShell→Docker.
+        if (!managedTransition && StockOpenShellRuntime.Owns(agent))
+            return await DispatchManagedApplyAsync(agentName, ct) ?? ProvisionResult.Fail(agentName, StockOpenShellRuntime.Unavailable);
+        if (!managedTransition && AgentPatchHelpers.RuntimeApplyFault(agent) is { } runtimeFault)
             return ProvisionResult.Fail(agentName, runtimeFault);
 
         if (DescribePrimaryHumanFault() is { } priorityFault)
@@ -1812,7 +1818,25 @@ public sealed class ContainerProvisioningService(
         if (agent is null || !StockOpenShellRuntime.Owns(agent)) return null;
         if (Managed() is not { Enabled: true } runtime) return ProvisionResult.Fail(name, StockOpenShellRuntime.Unavailable);
         var result = await runtime.ApplyAsync(name, ct);
-        return result is { Ok: true, Code: "applied_docker" } ? null : new ProvisionResult(name, result.Ok, result.Message);
+        return new ProvisionResult(name, result.Ok, result.Message);
+    }
+
+    /// <summary>
+    /// The Docker leg of an OpenShell→Docker apply, called by the managed adapter while it still holds
+    /// the agent's operation. Removes a leftover stopped container of the exact name, then provisions.
+    /// </summary>
+    internal async Task<(bool Ok, string Message)> ProvisionDockerTransitionAsync(string agentName, CancellationToken ct)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        var agent = await db.Agents.AsNoTracking().FirstOrDefaultAsync(a => a.Name == agentName, ct);
+        if (agent is null) return (false, "agent not found in DB");
+        var existing = await docker.ListContainersByNameAsync(agent.ContainerName, ct);
+        if (existing is null) return (false, "docker_observation_failed");
+        if (existing.Any(c => c.State is not ("exited" or "created" or "dead"))) return (false, "docker_container_running");
+        if (existing.Count > 0 && !await docker.RemoveContainerAsync(agent.ContainerName, ct)) return (false, "docker_remove_failed");
+        var result = await ProvisionCoreAsync(agentName, null, null, managedTransition: true, ct);
+        return (result.Success, result.Message);
     }
 
     /// <summary>

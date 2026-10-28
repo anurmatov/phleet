@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Data.Common;
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -22,11 +23,15 @@ public interface IStockCli
 
 /// <summary>
 /// Argument arrays only, never a shell. Client trust comes from the private ConfigDir. TLS-skip and
-/// alternate endpoint variables are removed from the child. Stderr is drained and discarded, because
-/// stock output may echo request content; callers report typed codes, not raw output.
+/// alternate endpoint variables are removed from the child. Output is read with a fixed cap and the
+/// child plus both readers settle inside the deadline; stderr is discarded because stock output may
+/// echo request content, so callers report typed codes, not raw output.
 /// </summary>
 public sealed class ProcessStockCli(IConfiguration config) : IStockCli
 {
+    internal const int OutputLimit = 1_000_000;
+    private static readonly TimeSpan SettleTimeout = TimeSpan.FromSeconds(5);
+
     public async Task<StockCliResult> RunAsync(IReadOnlyList<string> args, IReadOnlyDictionary<string, string>? secretEnv,
         TimeSpan timeout, CancellationToken ct)
     {
@@ -52,20 +57,44 @@ public sealed class ProcessStockCli(IConfiguration config) : IStockCli
         using (process)
         {
             process.StandardInput.Close();
-            var stdout = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
-            var stderr = process.StandardError.ReadToEndAsync(CancellationToken.None);
+            var stdout = ReadBoundedAsync(process.StandardOutput);
+            var stderr = ReadBoundedAsync(process.StandardError);
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
             deadline.CancelAfter(timeout);
             try { await process.WaitForExitAsync(deadline.Token); }
             catch (OperationCanceledException)
             {
                 try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
+                try { await Task.WhenAll(stdout, stderr).WaitAsync(SettleTimeout, CancellationToken.None); }
+                catch (Exception ex) when (ex is TimeoutException or IOException or ObjectDisposedException) { }
                 return new(-1, "", TimedOut: true);
             }
-            await stderr;
+            // A grandchild holding the pipes open must not extend the deadline either.
+            try { await Task.WhenAll(stdout, stderr).WaitAsync(SettleTimeout, CancellationToken.None); }
+            catch (Exception ex) when (ex is TimeoutException or IOException or ObjectDisposedException)
+            {
+                try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
+                return new(-1, "", TimedOut: true);
+            }
             var output = await stdout;
-            return new(process.ExitCode, output.Length > 1_000_000 ? "" : output);
+            // Over-limit output is never parsed as a partial document.
+            return output is null ? new(-1, "", TimedOut: false) : new(process.ExitCode, output);
         }
+    }
+
+    private static async Task<string?> ReadBoundedAsync(StreamReader reader)
+    {
+        var buffer = new char[8192];
+        var text = new StringBuilder();
+        var overflow = false;
+        int read;
+        while ((read = await reader.ReadAsync(buffer.AsMemory(), CancellationToken.None)) > 0)
+        {
+            if (overflow) continue; // keep draining so the child never blocks on a full pipe
+            if (text.Length + read > OutputLimit) { overflow = true; text.Clear(); continue; }
+            text.Append(buffer, 0, read);
+        }
+        return overflow ? null : text.ToString();
     }
 }
 
@@ -78,6 +107,9 @@ public interface IStockHostView
 
     /// <summary>Full IDs of workload/native-supervisor containers still running for a stock UUID; null when unobservable.</summary>
     Task<IReadOnlyList<string>?> RunningSandboxContainersAsync(string sandboxId, CancellationToken ct);
+
+    /// <summary>States of containers with exactly this name; empty when absent, null when unobservable.</summary>
+    Task<IReadOnlyList<string>?> DockerContainerStatesAsync(string containerName, CancellationToken ct);
 }
 
 public sealed class DockerStockHostView(DockerService docker, IConfiguration config) : IStockHostView
@@ -103,6 +135,12 @@ public sealed class DockerStockHostView(DockerService docker, IConfiguration con
         // The stock driver labels both the workload and its native supervisor with the sandbox UUID.
         var containers = await docker.ListContainersByLabelAsync("openshell.ai/sandbox-id=" + sandboxId, ct);
         return containers?.Where(c => c.State is "running" or "restarting" or "paused" or "created").Select(c => c.Id).ToList();
+    }
+
+    public async Task<IReadOnlyList<string>?> DockerContainerStatesAsync(string containerName, CancellationToken ct)
+    {
+        var containers = await docker.ListContainersByNameAsync(containerName, ct);
+        return containers?.Select(c => c.State).ToList();
     }
 }
 
@@ -186,9 +224,10 @@ public sealed class EfManagedBindingStore(IServiceScopeFactory scopes) : IManage
 
 /// <summary>
 /// Managed stock OpenShell lifecycle (#489/#492). One adapter for REST and MCP: apply transitions
-/// toward the desired runtime after the old one is quiescent; Start/Stop/cancel/logs/revoke act on
-/// the persisted applied binding. One operation per agent at a time (compare-and-set), unknown
-/// outcomes become <c>needs_attention</c> and are never replayed automatically.
+/// toward the desired runtime after the old one is verified quiescent; Start/Stop/cancel/logs/revoke
+/// act on the persisted applied binding. One operation per agent at a time (compare-and-set); the
+/// candidate's epoch/name/UUID is checkpointed before each external action; unknown outcomes become
+/// <c>needs_attention</c> and are never replayed or cleared by a later successful Stop.
 /// </summary>
 public sealed class StockOpenShellRuntime(
     IConfiguration config,
@@ -203,16 +242,21 @@ public sealed class StockOpenShellRuntime(
     public const string PinnedCliVersion = "0.1.5";
     public const string StockCommit = "bdb956f2cd65a635f1294fccf1d138d263bf650f";
     public const string Unavailable = "managed_runtime_unavailable";
+    public const string Entrypoint = "/app/stock-entrypoint.sh";
     internal static readonly string Instance = Guid.NewGuid().ToString("N");
     internal static readonly string[] MemoryTools = ["memory_get", "memory_search", "memory_list"];
+    /// <summary>Account/control state that never crosses a runtime switch with the workspace.</summary>
+    internal static readonly string[] PrivateWorkspaceEntries = [".generated", "claude", ".claude", ".codex", ".codex-host", ".mcp.json"];
 
     internal TimeSpan LegTimeout { get; init; } = TimeSpan.FromSeconds(30);
     internal TimeSpan FanoutTimeout { get; init; } = TimeSpan.FromSeconds(120);
     internal TimeSpan StopSettle { get; init; } = TimeSpan.FromSeconds(60);
     internal TimeSpan Poll { get; init; } = TimeSpan.FromSeconds(2);
-    /// <summary>Test seams; production uses the ordinary generator and Docker service.</summary>
+    /// <summary>Test seams; production uses the ordinary generator, Docker service and provisioning path.</summary>
     internal Func<string, CancellationToken, Task<string>>? GenerateInputs { get; init; }
-    internal Func<Agent, CancellationToken, Task<string?>>? StopDocker { get; init; }
+    internal Func<string, Task<bool>>? DockerStop { get; init; }
+    internal Func<string, CancellationToken, Task<(bool Ok, string Message)>>? ProvisionDocker { get; init; }
+    internal Func<Agent, string>? DockerWorkspace { get; init; }
 
     public sealed record Result(bool Ok, int Status, string Code, IReadOnlyList<string> Errors)
     {
@@ -272,8 +316,8 @@ public sealed class StockOpenShellRuntime(
     }
 
     /// <summary>
-    /// Stock-authenticated, exact-UUID-checked <c>sandbox exec</c> to the agent's managed loopback
-    /// cancel route. A timeout or other failure is an unconfirmed cancellation, not success.
+    /// Stock-authenticated, generation- and exact-UUID-checked <c>sandbox exec</c> to the agent's
+    /// managed loopback cancel route. A timeout or other failure is an unconfirmed cancellation.
     /// </summary>
     public async Task<Result> CancelAsync(string name, string? taskId, CancellationToken ct)
     {
@@ -283,6 +327,7 @@ public sealed class StockOpenShellRuntime(
         if (agent!.AppliedRuntimeKind != "openshell" || record!.Applied is not { } binding) return Result.Refused(409, "managed_binding_missing");
         var path = taskId is null ? "/cancel" : "/cancel/" + Uri.EscapeDataString(taskId);
         if (!Regex.IsMatch(path, @"\A/cancel(/[A-Za-z0-9%._~-]{1,256})?\z")) return Result.Refused(400, "invalid_task_id");
+        if (await GenerationFaultAsync(binding, ct) is { } generation) return Result.Refused(409, generation);
         if (await VerifyIdentityAsync(binding, ct) is { } identity) return identity;
         const string script = "exec 3<>/dev/tcp/127.0.0.1/8080 || exit 2; "
             + "printf 'POST %s HTTP/1.0\\r\\nContent-Length: 0\\r\\n\\r\\n' \"$1\" >&3; "
@@ -304,6 +349,7 @@ public sealed class StockOpenShellRuntime(
         var (agent, record, fault) = await ReadAsync(name, ct);
         if (fault is not null) return (fault, null);
         if (agent!.AppliedRuntimeKind != "openshell" || record!.Applied is not { } binding) return (Result.Refused(409, "managed_binding_missing"), null);
+        if (await GenerationFaultAsync(binding, ct) is { } generation) return (Result.Refused(409, generation), null);
         if (await VerifyIdentityAsync(binding, ct) is { } identity) return (identity, null);
         var run = await cli.RunAsync(["logs", binding.SandboxName, "-n", Math.Clamp(lines, 1, 1000).ToString()], null, LegTimeout, ct);
         return run.ExitCode == 0 && !run.TimedOut ? (Result.Done("logs"), run.Stdout) : (Result.Refused(502, "stock_logs_unavailable"), null);
@@ -330,7 +376,11 @@ public sealed class StockOpenShellRuntime(
         };
     }
 
-    /// <summary>Named blocker before any external action, or null when apply may proceed.</summary>
+    /// <summary>
+    /// Named blocker before any external mutation or old-runtime Stop, or null when apply may
+    /// proceed: identity/auth selection, routes, trust/config, broker HTTPS auth, pinned provider
+    /// profile hashes, CLI version and gateway observation.
+    /// </summary>
     public async Task<string?> DescribePreflightFaultAsync(Agent agent, CancellationToken ct)
     {
         if (!Enabled) return "managed_runtime_disabled";
@@ -340,8 +390,8 @@ public sealed class StockOpenShellRuntime(
             return "openshell_requires_codex_api_key_policy_and_no_socket";
         if (agent.Name != agent.ShortName || agent.Name != agent.Name.ToLowerInvariant() || !Regex.IsMatch(agent.Name, @"\A[a-z0-9][a-z0-9-]{0,40}\z"))
             return "managed_agent_name_unsupported";
-        if (agent.SandboxPolicyVersionId is null || await store.LoadPolicyAsync(agent.SandboxPolicyVersionId.Value, ct) is null)
-            return "sandbox_policy_version_not_found";
+        var policy = agent.SandboxPolicyVersionId is { } id ? await store.LoadPolicyAsync(id, ct) : null;
+        if (policy is null) return "sandbox_policy_version_not_found";
         if (string.IsNullOrEmpty(credentials.Get(agent.ProviderApiKeyEnvRef))) return "provider_key_reference_unresolved";
         // Ordinary-service routes are not yet available in managed mode; refuse rather than drop them.
         if (ContainerProvisioningService.HasTelegramBot(agent)) return "managed_route_unsupported:telegram";
@@ -352,51 +402,76 @@ public sealed class StockOpenShellRuntime(
         if (DescribeConfigDirFault() is { } dirFault) return dirFault;
         if (LoadTemplate() is null) return "managed_authority_template_invalid";
         if (broker.DescribePreflightFault() is { } brokerFault) return brokerFault;
+        if (await broker.VerifyAccessAsync(ct) is { } accessFault) return accessFault;
         var version = await cli.RunAsync(["--version"], null, LegTimeout, ct);
         if (version.Missing) return "stock_cli_missing";
         var tokens = version.Stdout.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (version.ExitCode != 0 || tokens.Length < 2 || tokens[0] != "openshell"
             || !(tokens[1] == PinnedCliVersion || tokens[1].StartsWith(PinnedCliVersion + "+", StringComparison.Ordinal)))
             return "stock_cli_version_mismatch";
+        if (await ProfileHashFaultAsync(policy, ct) is { } profileFault) return profileFault;
         return await host.GatewayGenerationAsync(ct) is null ? "gateway_unavailable" : null;
     }
 
-    // ── operation envelope: one writer per agent ───────────────────────────
+    /// <summary>Each pinned provider profile's exported YAML must hash to the version's saved value.</summary>
+    private async Task<string?> ProfileHashFaultAsync(SandboxPolicyVersion policy, CancellationToken ct)
+    {
+        Dictionary<string, string>? pinned;
+        try { pinned = JsonSerializer.Deserialize<Dictionary<string, string>>(string.IsNullOrWhiteSpace(policy.ProviderProfileHashes) ? "{}" : policy.ProviderProfileHashes); }
+        catch (JsonException) { return "provider_profile_hashes_invalid"; }
+        foreach (var (profile, hash) in pinned ?? [])
+        {
+            var export = await cli.RunAsync(["profile", "export", profile, "-o", "yaml"], null, LegTimeout, ct);
+            if (export.Missing || export.TimedOut || export.ExitCode != 0) return "provider_profile_unverifiable:" + profile;
+            var actual = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(export.Stdout)));
+            if (!string.Equals(actual, hash, StringComparison.Ordinal)) return "provider_profile_hash_mismatch:" + profile;
+        }
+        return null;
+    }
+
+    // ── operation envelope: one writer per agent, checkpointed progress ────
 
     private delegate Task<(ManagedRecord Next, string? AppliedKind, int? AppliedPolicy, Result Result)> Step(
-        Agent agent, ManagedRecord record, CancellationToken ct);
+        Agent agent, ManagedRecord record, Func<ManagedRecord, Task> checkpoint, CancellationToken ct);
 
     private async Task<Result> RunAsync(string name, string kind, Step step, CancellationToken ct)
     {
         if (!Enabled) return Result.Refused(409, Unavailable);
         var (agent, record, fault) = await ReadAsync(name, ct);
         if (fault is not null) return fault;
-        var claimed = record! with { Operation = kind + ":" + Instance };
-        var claimedJson = claimed.Serialize();
+        var operation = kind + ":" + Instance;
+        var current = record! with { Operation = operation };
+        var saved = current.Serialize();
         try
         {
-            if (!await store.SwapAsync(agent!.Id, agent.AppliedRuntimeBinding, claimedJson, null, null, ct))
+            if (!await store.SwapAsync(agent!.Id, agent.AppliedRuntimeBinding, saved, null, null, ct))
                 return Result.Refused(409, "managed_operation_conflict");
         }
         catch (Exception ex) when (ex is DbException or InvalidOperationException) { return Result.Refused(503, "runtime_state_unavailable"); }
 
-        (ManagedRecord Next, string? AppliedKind, int? AppliedPolicy, Result Result) outcome;
-        try
+        // Progress (candidate epoch/name/UUID) is durable before the external action it enables.
+        async Task Checkpoint(ManagedRecord next)
         {
-            using var overall = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            outcome = await step(agent, claimed, overall.Token);
+            var json = (next with { Operation = operation }).Serialize();
+            if (!await store.SwapAsync(agent.Id, saved, json, null, null, CancellationToken.None))
+                throw new InvalidOperationException("managed_checkpoint_conflict");
+            saved = json;
+            current = next with { Operation = operation };
         }
+
+        (ManagedRecord Next, string? AppliedKind, int? AppliedPolicy, Result Result) outcome;
+        try { outcome = await step(agent, current, Checkpoint, ct); }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             logger.LogWarning("Managed {Kind} for {Agent} ended unknown ({Type})", kind, name, ex.GetType().Name);
-            outcome = (claimed with { State = "needs_attention", Errors = [.. claimed.Errors, kind + "_unknown"] }, null, null,
+            outcome = (current with { State = "needs_attention", Errors = [.. current.Errors, kind + "_unknown"] }, null, null,
                 Result.Refused(500, kind + "_unknown"));
         }
 
         var final = outcome.Next with { Operation = null };
         try
         {
-            if (!await store.SwapAsync(agent.Id, claimedJson, final.Serialize(), outcome.AppliedKind, outcome.AppliedPolicy, CancellationToken.None))
+            if (!await store.SwapAsync(agent.Id, saved, final.Serialize(), outcome.AppliedKind, outcome.AppliedPolicy, CancellationToken.None))
                 return Result.Refused(409, "managed_state_changed_during_" + kind, outcome.Result.Errors);
         }
         catch (Exception ex) when (ex is DbException or InvalidOperationException)
@@ -432,153 +507,213 @@ public sealed class StockOpenShellRuntime(
         return (agent, record, null);
     }
 
+    private static (ManagedRecord, string?, int?, Result) Hold(ManagedRecord record, int status, string code, params string[] extra) =>
+        (record with { State = "needs_attention", Errors = [code, .. extra] }, null, null, Result.Refused(status, code, extra));
+
     // ── steps ──────────────────────────────────────────────────────────────
 
-    private async Task<(ManagedRecord, string?, int?, Result)> ApplyCoreAsync(Agent agent, ManagedRecord record, CancellationToken ct)
+    private async Task<(ManagedRecord, string?, int?, Result)> ApplyCoreAsync(Agent agent, ManagedRecord record,
+        Func<ManagedRecord, Task> checkpoint, CancellationToken ct)
     {
-        if (record.State == "needs_attention")
-            return (record, null, null, Result.Refused(409, "needs_attention", record.Errors));
+        if (record.State == "needs_attention") return (record, null, null, Result.Refused(409, "needs_attention", record.Errors));
+        if (record.Candidate is not null) return (record, null, null, Result.Refused(409, "unresolved_candidate"));
+        return agent.RuntimeKind == "docker"
+            ? await ApplyDockerAsync(agent, record, checkpoint, ct)
+            : await ApplyOpenShellAsync(agent, record, checkpoint, ct);
+    }
 
-        if (agent.RuntimeKind == "docker")
+    /// <summary>
+    /// OpenShell→Docker: revoke and stop the verified binding, bring its workspace back, then run the
+    /// ordinary Docker provisioning while this operation still holds the agent. Applied Docker is
+    /// published only after that Docker transition succeeded.
+    /// </summary>
+    private async Task<(ManagedRecord, string?, int?, Result)> ApplyDockerAsync(Agent agent, ManagedRecord record,
+        Func<ManagedRecord, Task> checkpoint, CancellationToken ct)
+    {
+        if (record.Applied is { } applied)
         {
-            // OpenShell→Docker: revoke and stop every verified binding first; any unresolved leg holds.
             var errors = await RevokeFanoutAsync(agent.Name, record, ct);
-            if (errors.Count > 0)
-                return (record with { State = "needs_attention", Errors = errors }, null, null, Result.Refused(409, "revoke_unresolved", errors));
-            // The previous binding is retained for custody; the Docker path continues in the caller.
-            return (record with { State = "revoked", Candidate = null, Errors = [] }, "docker", null, Result.Done("applied_docker"));
+            if (errors.Count > 0) return Hold(record, 409, "revoke_unresolved", [.. errors]);
+            if (await DownloadWorkspaceAsync(agent, applied, ct) is { } workspace) return Hold(record, 502, workspace);
+            record = record with { State = "revoked" };
+            await checkpoint(record);
         }
+        var provisioned = ProvisionDocker is { } provision ? await provision(agent.Name, ct)
+            : await services.GetRequiredService<ContainerProvisioningService>().ProvisionDockerTransitionAsync(agent.Name, ct);
+        if (!provisioned.Ok) return Hold(record, 502, "docker_transition_failed", provisioned.Message);
+        return (record with { State = "revoked", Candidate = null, Errors = [] }, "docker", null, Result.Done("applied_docker"));
+    }
 
-        if (await DescribePreflightFaultAsync(agent, ct) is { } preflight)
-            return (record, null, null, Result.Refused(409, preflight));
+    private async Task<(ManagedRecord, string?, int?, Result)> ApplyOpenShellAsync(Agent agent, ManagedRecord record,
+        Func<ManagedRecord, Task> checkpoint, CancellationToken ct)
+    {
+        // Every prerequisite, including the generated native inputs, is checked before the old runtime stops.
+        if (await DescribePreflightFaultAsync(agent, ct) is { } preflight) return (record, null, null, Result.Refused(409, preflight));
+        string generated;
+        try { generated = await GeneratedInputsAsync(agent, ct); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or JsonException)
+        { return (record, null, null, Result.Refused(409, "managed_inputs_invalid")); }
+        var policy = (await store.LoadPolicyAsync(agent.SandboxPolicyVersionId!.Value, ct))!;
+        var generation = await host.GatewayGenerationAsync(ct);
+        if (generation is null) return (record, null, null, Result.Refused(503, "gateway_unavailable"));
 
-        // Quiesce the old runtime before any new admission.
+        // Reprovision keeps the same verified sandbox, so its persistent workspace survives the new epoch.
+        var reuse = agent.AppliedRuntimeKind == "openshell" && record.Applied is not null;
+        if (reuse)
+        {
+            if (record.Applied!.GatewayGeneration != generation) return (record, null, null, Result.Refused(409, "gateway_generation_changed"));
+            if (await VerifyIdentityAsync(record.Applied, ct) is { } identity) return (record, null, null, identity);
+        }
+        var epoch = Guid.NewGuid();
+        var candidate = reuse
+            ? record.Applied! with { Epoch = epoch, PolicyVersionId = policy.Id, PolicySha256 = policy.Sha256, KeyRef = agent.ProviderApiKeyEnvRef!, Image = config["StockOpenShell:AgentImage"]!, GatewayGeneration = generation }
+            : new ManagedBinding($"fleet-{agent.Name}-{epoch.ToString("N")[..8]}", "", epoch, config["StockOpenShell:AgentImage"]!,
+                policy.Id, policy.Sha256, "api_key", agent.ProviderApiKeyEnvRef!, $"fleet-{agent.Name}-openai", generation);
+        var applying = record with { State = "applying", Candidate = candidate, Errors = [] };
+        await checkpoint(applying);
+
+        // Quiesce the old runtime: exact Docker observation, or revoke of the old epoch.
+        string? staged = null;
         if (agent.AppliedRuntimeKind == "docker")
         {
-            if (await StopDockerAsync(agent, ct) is { } dockerFault)
-                return (record, null, null, Result.Refused(409, dockerFault));
+            if (await StopDockerAsync(agent) is { } dockerFault) return Hold(applying, 409, dockerFault);
+            try { staged = StageWorkspace(agent, Path.Combine(ConfigDir, "managed", agent.Name, epoch.ToString("N"), "workspace-in")); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return Hold(applying, 500, "workspace_stage_failed"); }
         }
         else if (record.Applied is not null)
         {
             var errors = await RevokeFanoutAsync(agent.Name, record, ct);
-            if (errors.Count > 0)
-                return (record with { State = "needs_attention", Errors = errors }, null, null, Result.Refused(409, "revoke_unresolved", errors));
+            if (errors.Count > 0) return Hold(applying, 409, "revoke_unresolved", [.. errors]);
         }
 
-        var policy = (await store.LoadPolicyAsync(agent.SandboxPolicyVersionId!.Value, ct))!;
-        var generation = await host.GatewayGenerationAsync(ct);
-        if (generation is null) return (record, null, null, Result.Refused(503, "gateway_unavailable"));
-        var epoch = Guid.NewGuid();
-        var candidate = new ManagedBinding($"fleet-{agent.Name}-{epoch.ToString("N")[..8]}", "", epoch,
-            config["StockOpenShell:AgentImage"]!, policy.Id, policy.Sha256, "api_key", agent.ProviderApiKeyEnvRef!,
-            $"fleet-{agent.Name}-openai", generation);
-        var applying = record with { State = "applying", Candidate = candidate, Errors = [] };
-
-        // 1. Broker epoch resources; partials are held, never activated.
+        // Broker epoch resources; partials are held with the candidate for cleanup, never activated.
         var created = await broker.CreateEpochAsync(epoch, agent.ShortName, ct);
-        if (!created.Ok)
-            return (applying with { State = "needs_attention", Errors = [created.Code!, .. created.OwnedPartials] }, null, null,
-                Result.Refused(502, created.Code!, created.OwnedPartials));
+        if (!created.Ok) return Hold(applying, 502, created.Code!, [.. created.OwnedPartials]);
 
-        // 2. Revoked allocation outside, then the workload bundle and stock provider.
         var template = LoadTemplate()!;
         var epochDir = Path.Combine(ConfigDir, "managed", agent.Name, epoch.ToString("N"));
         string bundle;
         try
         {
             WriteBrokerPasswords(agent.Name, created.Passwords!);
-            WriteRecord(AuthorityPath(agent.Name), Authority(template, agent.Name, "pending", epoch, policy.Sha256, "revoked"));
-            bundle = await BuildBundleAsync(agent, template, epochDir, created.Passwords!["workload"], epoch, policy, ct);
+            WriteRecord(AuthorityPath(agent.Name), Authority(template, agent.Name, reuse ? candidate.SandboxId : "pending", epoch, policy.Sha256, "revoked"));
+            bundle = await BuildBundleAsync(agent, template, generated, epochDir, created.Passwords!["workload"], epoch, policy, reuse ? candidate.SandboxId : "pending");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or JsonException)
-        {
-            return (applying with { State = "needs_attention", Errors = ["managed_files_failed"] }, null, null, Result.Refused(500, "managed_files_failed"));
-        }
+        { return Hold(applying, 500, "managed_files_failed"); }
 
         var key = credentials.Get(agent.ProviderApiKeyEnvRef!);
-        if (string.IsNullOrEmpty(key)) return (applying with { State = "needs_attention", Errors = ["provider_key_reference_unresolved"] }, null, null, Result.Refused(409, "provider_key_reference_unresolved"));
+        if (string.IsNullOrEmpty(key)) return Hold(applying, 409, "provider_key_reference_unresolved");
         var secret = new Dictionary<string, string> { ["OPENAI_API_KEY"] = key };
         var exists = await cli.RunAsync(["provider", "get", candidate.Provider], null, LegTimeout, ct);
         var provider = await cli.RunAsync(exists.ExitCode == 0
             ? ["provider", "update", candidate.Provider, "--credential", "OPENAI_API_KEY"]
             : ["provider", "create", "--name", candidate.Provider, "--type", "openai", "--credential", "OPENAI_API_KEY"], secret, LegTimeout, ct);
-        if (provider.ExitCode != 0 || provider.TimedOut)
-            return (applying with { State = "needs_attention", Errors = ["provider_setup_unknown"] }, null, null, Result.Refused(502, "provider_setup_unknown"));
+        if (provider.ExitCode != 0 || provider.TimedOut) return Hold(applying, 502, "provider_setup_unknown");
 
-        // 3. Create once; the revoked copy makes the workload refuse before intake.
-        var create = await cli.RunAsync([
-            "sandbox", "create", "--name", candidate.SandboxName, "--from", candidate.Image,
-            "--policy", Path.Combine(epochDir, "policy.yaml"), "--provider", candidate.Provider, "--no-auto-providers",
-            "--restart-policy", "never", "--label", "fleet.agent=" + agent.Name, "--label", "fleet.epoch=" + epoch.ToString("N"),
-            "--upload", Path.Combine(bundle, "app") + ":/app", "--upload", Path.Combine(bundle, "trust") + ":/trust",
-            "--upload", Path.Combine(bundle, "workspace") + ":/workspace", "--detach"], null, TimeSpan.FromMinutes(5), ct);
-        var sandbox = await GetAsync(candidate.SandboxName, ct);
-        if (create.ExitCode != 0 || create.TimedOut || sandbox is null)
-            return (applying with { State = "needs_attention", Errors = ["sandbox_create_unknown"] }, null, null, Result.Refused(502, "sandbox_create_unknown"));
-        candidate = candidate with { SandboxId = sandbox.Value.Id };
-        applying = applying with { Candidate = candidate };
+        if (reuse)
+        {
+            // Same UUID and workspace: stage the new policy and inputs into the stopped sandbox.
+            if (record.Applied!.PolicyVersionId != policy.Id)
+            {
+                var set = await cli.RunAsync(["policy", "set", candidate.SandboxName, "--policy", Path.Combine(epochDir, "policy.yaml"), "--wait"], null, LegTimeout, ct);
+                if (set.ExitCode != 0 || set.TimedOut) return Hold(applying, 502, "policy_update_unknown");
+            }
+            foreach (var (local, remote) in new[] { ("app", "/app"), ("trust", "/trust") })
+            {
+                var upload = await cli.RunAsync(["sandbox", "upload", candidate.SandboxName, Path.Combine(bundle, local), remote], null, LegTimeout, ct);
+                if (upload.ExitCode != 0 || upload.TimedOut) return Hold(applying, 502, "input_upload_unknown");
+            }
+        }
+        else
+        {
+            // Create once with staged inputs and the canonical daemon; the revoked copy refuses intake.
+            var args = new List<string>
+            {
+                "sandbox", "create", "--name", candidate.SandboxName, "--from", candidate.Image,
+                "--policy", Path.Combine(epochDir, "policy.yaml"), "--provider", candidate.Provider, "--no-auto-providers",
+                "--restart-policy", "never", "--label", "fleet.agent=" + agent.Name, "--label", "fleet.epoch=" + epoch.ToString("N"),
+                "--upload", Path.Combine(bundle, "app") + ":/app", "--upload", Path.Combine(bundle, "trust") + ":/trust",
+                "--upload", (staged ?? Path.Combine(bundle, "workspace")) + ":/workspace",
+                "--detach", "--", Entrypoint,
+            };
+            var create = await cli.RunAsync(args, null, TimeSpan.FromMinutes(5), ct);
+            // Whatever create reported, record any sandbox that now exists so cleanup keeps its identity.
+            if (await GetAsync(candidate.SandboxName, ct) is { } made)
+            {
+                candidate = candidate with { SandboxId = made.Id };
+                applying = applying with { Candidate = candidate };
+                await checkpoint(applying);
+            }
+            if (create.ExitCode != 0 || create.TimedOut || string.IsNullOrEmpty(candidate.SandboxId))
+                return Hold(applying, 502, "sandbox_create_unknown");
+            if (await SettleStoppedAsync(candidate, ct) is { } settle) return Hold(applying, 502, settle);
+        }
 
-        // 4. Wait for the refused allocation to settle, bind the actual UUID, activate, then one Start.
-        if (await SettleStoppedAsync(candidate, ct) is { } settle)
-            return (applying with { State = "needs_attention", Errors = [settle] }, null, null, Result.Refused(502, settle));
+        // Bind the actual UUID, activate, then one Start.
         try
         {
             WriteRecord(AuthorityPath(agent.Name), Authority(template, agent.Name, candidate.SandboxId, epoch, policy.Sha256, "active"));
             WriteRecord(Path.Combine(bundle, "trust", "enrollment.json"), Authority(template, agent.Name, candidate.SandboxId, epoch, policy.Sha256, "active"));
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return (applying with { State = "needs_attention", Errors = ["managed_files_failed"] }, null, null, Result.Refused(500, "managed_files_failed"));
-        }
-        var upload = await cli.RunAsync(["sandbox", "upload", candidate.SandboxName, Path.Combine(bundle, "trust", "enrollment.json"), "/trust/enrollment.json"],
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return Hold(applying, 500, "managed_files_failed"); }
+        var activate = await cli.RunAsync(["sandbox", "upload", candidate.SandboxName, Path.Combine(bundle, "trust", "enrollment.json"), "/trust/enrollment.json"],
             null, LegTimeout, ct);
-        if (upload.ExitCode != 0 || upload.TimedOut)
-            return (applying with { State = "needs_attention", Errors = ["enrollment_upload_unknown"] }, null, null, Result.Refused(502, "enrollment_upload_unknown"));
-        if (await LifecycleAsync("start", candidate, ct) is { } start)
-            return (applying with { State = "needs_attention", Errors = [start] }, null, null, Result.Refused(502, start));
+        if (activate.ExitCode != 0 || activate.TimedOut) return Hold(applying, 502, "enrollment_upload_unknown");
+        if (await LifecycleAsync("start", candidate, ct) is { } start) return Hold(applying, 502, start);
 
         return (record with { State = "applied", Applied = candidate, Candidate = null, Errors = [] }, "openshell", policy.Id, Result.Done("applied_openshell"));
     }
 
-    private async Task<(ManagedRecord, string?, int?, Result)> StartCoreAsync(Agent agent, ManagedRecord record, CancellationToken ct)
+    private async Task<(ManagedRecord, string?, int?, Result)> StartCoreAsync(Agent agent, ManagedRecord record,
+        Func<ManagedRecord, Task> checkpoint, CancellationToken ct)
     {
         if (agent.AppliedRuntimeKind != "openshell" || record.Applied is not { } binding)
             return (record, null, null, Result.Refused(409, "managed_binding_missing"));
-        if (record.State is "needs_attention" or "revoked")
-            return (record, null, null, Result.Refused(409, record.State, record.Errors));
-        if (await host.GatewayGenerationAsync(ct) is not { } generation) return (record, null, null, Result.Refused(503, "gateway_unavailable"));
-        if (generation != binding.GatewayGeneration)
-        {
-            // Unexpected gateway restart/resume: hold and stop verified owned bindings once; no Start.
-            var errors = await RevokeFanoutAsync(agent.Name, record, ct);
-            return (record with { State = "needs_attention", Errors = ["gateway_generation_changed", .. errors] }, null, null,
-                Result.Refused(409, "gateway_generation_changed", errors));
-        }
-        if (await LifecycleAsync("start", binding, ct) is { } fault)
-            return (record with { State = "needs_attention", Errors = [fault] }, null, null, Result.Refused(502, fault));
+        // Unresolved holds survive Stop; only a clean revoke/apply reconciles them.
+        if (record.State is "needs_attention" or "revoked" || record.Candidate is not null)
+            return (record, null, null, Result.Refused(409, record.Candidate is not null ? "unresolved_candidate" : record.State, record.Errors));
+        if (await GenerationFaultAsync(binding, ct) is { } generation) return await HoldForGenerationAsync(agent, record, generation, ct);
+        if (await LifecycleAsync("start", binding, ct) is { } fault) return Hold(record, 502, fault);
         return (record with { State = "applied", Errors = [] }, null, null, Result.Done("started"));
     }
 
-    private async Task<(ManagedRecord, string?, int?, Result)> StopCoreAsync(Agent agent, ManagedRecord record, CancellationToken ct)
+    private async Task<(ManagedRecord, string?, int?, Result)> StopCoreAsync(Agent agent, ManagedRecord record,
+        Func<ManagedRecord, Task> checkpoint, CancellationToken ct)
     {
         if (agent.AppliedRuntimeKind != "openshell" || record.Applied is not { } binding)
             return (record, null, null, Result.Refused(409, "managed_binding_missing"));
+        if (await GenerationFaultAsync(binding, ct) is { } generation) return await HoldForGenerationAsync(agent, record, generation, ct);
         var errors = new List<string>();
         if (await LifecycleAsync("stop", binding, ct) is { } fault) errors.Add(fault);
         else if (await QuiescentAsync(binding, ct) is { } quiet) errors.Add(quiet);
-        return errors.Count == 0
-            ? (record with { State = "stopped", Errors = [] }, null, null, Result.Done("stopped"))
-            : (record with { State = "needs_attention", Errors = errors }, null, null, Result.Refused(502, "stop_unresolved", errors));
+        if (errors.Count > 0) return Hold(record, 502, "stop_unresolved", [.. errors]);
+        // A successful Stop never clears an earlier unresolved hold or its errors.
+        return record.State == "needs_attention" || record.Candidate is not null
+            ? (record, null, null, Result.Done("stopped_held"))
+            : (record with { State = "stopped", Errors = [] }, null, null, Result.Done("stopped"));
     }
 
-    private async Task<(ManagedRecord, string?, int?, Result)> RevokeCoreAsync(Agent agent, ManagedRecord record, CancellationToken ct)
+    private async Task<(ManagedRecord, string?, int?, Result)> RevokeCoreAsync(Agent agent, ManagedRecord record,
+        Func<ManagedRecord, Task> checkpoint, CancellationToken ct)
     {
         if (record.Applied is null && record.Candidate is null) return (record, null, null, Result.Refused(409, "managed_binding_missing"));
         var errors = await RevokeFanoutAsync(agent.Name, record, ct);
         return errors.Count == 0
             ? (record with { State = "revoked", Candidate = null, Errors = [] }, null, null, Result.Done("revoked"))
-            : (record with { State = "needs_attention", Errors = errors }, null, null, Result.Refused(502, "revoke_unresolved", errors));
+            : Hold(record, 502, "revoke_unresolved", [.. errors]);
     }
+
+    /// <summary>Changed/unobservable generation: hold, then one bounded revoke/Stop fanout; never Start.</summary>
+    private async Task<(ManagedRecord, string?, int?, Result)> HoldForGenerationAsync(Agent agent, ManagedRecord record, string generation, CancellationToken ct)
+    {
+        var errors = generation == "gateway_generation_changed" ? await RevokeFanoutAsync(agent.Name, record, ct) : [];
+        return Hold(record, 409, generation, [.. errors]);
+    }
+
+    private async Task<string?> GenerationFaultAsync(ManagedBinding binding, CancellationToken ct) =>
+        await host.GatewayGenerationAsync(ct) is not { } current ? "gateway_unavailable"
+            : current == binding.GatewayGeneration ? null : "gateway_generation_changed";
 
     // ── shared legs ────────────────────────────────────────────────────────
 
@@ -590,7 +725,7 @@ public sealed class StockOpenShellRuntime(
     internal async Task<List<string>> RevokeFanoutAsync(string agentName, ManagedRecord record, CancellationToken ct)
     {
         var errors = new List<string>();
-        var targets = new[] { record.Applied, record.Candidate }.OfType<ManagedBinding>().DistinctBy(b => b.SandboxName).ToList();
+        var targets = new[] { record.Applied, record.Candidate }.OfType<ManagedBinding>().DistinctBy(b => b.Epoch).ToList();
         using var overall = CancellationTokenSource.CreateLinkedTokenSource(ct);
         overall.CancelAfter(FanoutTimeout);
         var legs = new List<Task<string?>>
@@ -607,12 +742,15 @@ public sealed class StockOpenShellRuntime(
         };
         foreach (var target in targets)
         {
-            legs.Add(Leg("broker:" + target.SandboxName, async token =>
+            legs.Add(Leg("broker:" + target.Epoch.ToString("N"), async token =>
             {
                 var revoked = await broker.RevokeEpochAsync(target.Epoch, token);
                 return revoked.Ok ? null : string.Join(",", revoked.OwnedPartials.DefaultIfEmpty(revoked.Code ?? "broker_revoke_unresolved"));
             }));
             if (string.IsNullOrEmpty(target.SandboxId)) { errors.Add("unverified_target:" + target.SandboxName); continue; }
+        }
+        foreach (var target in targets.Where(t => !string.IsNullOrEmpty(t.SandboxId)).DistinctBy(t => t.SandboxId))
+        {
             legs.Add(Leg("detach:" + target.SandboxName, async token =>
             {
                 if (await VerifyIdentityAsync(target, token) is { } identity) return identity.Code;
@@ -694,15 +832,56 @@ public sealed class StockOpenShellRuntime(
         return running is null ? "quiescence_unobservable" : running.Count == 0 ? null : "quiescence_pending";
     }
 
-    private async Task<string?> StopDockerAsync(Agent agent, CancellationToken ct)
+    /// <summary>Exact-name Docker observation: failure is never read as absence.</summary>
+    private async Task<string?> StopDockerAsync(Agent agent)
     {
-        if (StopDocker is { } stop) return await stop(agent, ct);
-        var docker = services.GetRequiredService<DockerService>();
-        var status = await docker.GetContainerStatusAsync(agent.ContainerName);
-        if (status is null or "exited" or "created" or "dead") return null; // absent or not running
-        if (!await docker.StopContainerAsync(agent.ContainerName)) return "docker_stop_failed";
-        var after = await docker.GetContainerStatusAsync(agent.ContainerName);
-        return after is null or "exited" or "dead" ? null : "docker_quiescence_pending";
+        var states = await host.DockerContainerStatesAsync(agent.ContainerName, CancellationToken.None);
+        if (states is null) return "docker_observation_failed";
+        if (states.All(s => s is "exited" or "created" or "dead")) return null;
+        var stop = DockerStop ?? (name => services.GetRequiredService<DockerService>().StopContainerAsync(name));
+        if (!await stop(agent.ContainerName)) return "docker_stop_failed";
+        var after = await host.DockerContainerStatesAsync(agent.ContainerName, CancellationToken.None);
+        if (after is null) return "docker_observation_failed";
+        return after.All(s => s is "exited" or "created" or "dead") ? null : "docker_quiescence_pending";
+    }
+
+    // ── workspace: preserved across reprovision and runtime switches ──────
+
+    private string DockerWorkspaceDir(Agent agent) => DockerWorkspace?.Invoke(agent)
+        ?? Path.Combine(config["Provisioning:BaseDir"] ?? throw new InvalidOperationException("Provisioning:BaseDir is required"), "workspaces", agent.ContainerName);
+
+    /// <summary>The Docker workspace without account/control state, for the managed sandbox's /workspace.</summary>
+    private string StageWorkspace(Agent agent, string target)
+    {
+        var source = DockerWorkspaceDir(agent);
+        PrivateDirectory(target);
+        if (Directory.Exists(source)) CopyTree(source, target, PrivateWorkspaceEntries);
+        WriteText(Path.Combine(target, ".mcp.json"), MemoryMcp(LoadTemplate()!));
+        return target;
+    }
+
+    /// <summary>OpenShell→Docker: the sandbox workspace comes back into the Docker workspace, control state excluded.</summary>
+    private async Task<string?> DownloadWorkspaceAsync(Agent agent, ManagedBinding binding, CancellationToken ct)
+    {
+        var staging = Path.Combine(ConfigDir, "managed", agent.Name, binding.Epoch.ToString("N"), "workspace-out");
+        try
+        {
+            if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+            PrivateDirectory(staging);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return "workspace_stage_failed"; }
+        if (await VerifyIdentityAsync(binding, ct) is { } identity) return identity.Code;
+        var download = await cli.RunAsync(["sandbox", "download", binding.SandboxName, "/workspace", staging], null, TimeSpan.FromMinutes(5), ct);
+        if (download.ExitCode != 0 || download.TimedOut) return "workspace_download_unknown";
+        try
+        {
+            var target = DockerWorkspaceDir(agent);
+            Directory.CreateDirectory(target);
+            var root = Directory.GetDirectories(staging).Length == 1 && Directory.GetFiles(staging).Length == 0 ? Directory.GetDirectories(staging)[0] : staging;
+            CopyTree(root, target, PrivateWorkspaceEntries);
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return "workspace_restore_failed"; }
     }
 
     // ── files: private ConfigDir only, atomic replacement, 0700/0600 ───────
@@ -753,24 +932,39 @@ public sealed class StockOpenShellRuntime(
         return record;
     }
 
+    private static string MemoryMcp(JsonObject template) => new JsonObject
+    {
+        ["mcpServers"] = new JsonObject { ["memory"] = new JsonObject { ["url"] = $"https://{template["MemoryHost"]!.GetValue<string>()}/mcp" } },
+    }.ToJsonString();
+
     private void WriteBrokerPasswords(string agent, IReadOnlyDictionary<string, string> passwords)
     {
         foreach (var role in new[] { "control", "observer" })
             WriteText(Path.Combine(AuthorityDir, $"{agent}.{role}.password"), passwords[role]);
     }
 
-    private async Task<string> BuildBundleAsync(Agent agent, JsonObject template, string epochDir, string workloadPassword,
-        Guid epoch, SandboxPolicyVersion policy, CancellationToken ct)
+    /// <summary>The ordinary generated inputs, validated before any old-runtime Stop.</summary>
+    private async Task<string> GeneratedInputsAsync(Agent agent, CancellationToken ct)
     {
         var generated = GenerateInputs is { } generate ? await generate(agent.Name, ct)
             : await services.GetRequiredService<ContainerProvisioningService>().GenerateManagedInputsAsync(agent.Name, ct);
+        RefuseLinks(generated);
+        if (!File.Exists(Path.Combine(generated, Fleet.Shared.HarnessDefaults.CodexRootTomlFileName))) throw new InvalidOperationException("codex_root_missing");
+        if (JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(generated, "appsettings.json"), ct))?["Agent"] is not JsonObject)
+            throw new InvalidOperationException("generated_agent_section_missing");
+        return generated;
+    }
+
+    private async Task<string> BuildBundleAsync(Agent agent, JsonObject template, string generated, string epochDir, string workloadPassword,
+        Guid epoch, SandboxPolicyVersion policy, string sandboxId)
+    {
         var bundle = Path.Combine(epochDir, "bundle");
         PrivateDirectory(Path.Combine(bundle, "app"));
         PrivateDirectory(Path.Combine(bundle, "trust"));
         PrivateDirectory(Path.Combine(bundle, "workspace"));
         WriteText(Path.Combine(epochDir, "policy.yaml"), policy.Yaml);
 
-        var settings = JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(generated, "appsettings.json"), ct))!.AsObject();
+        var settings = JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(generated, "appsettings.json")))!.AsObject();
         settings["StockOpenShell"] = new JsonObject
         {
             ["Enabled"] = true,
@@ -778,34 +972,42 @@ public sealed class StockOpenShellRuntime(
             ["AuthorityFile"] = "/trust/enrollment.json",
             ["BrokerPasswordFile"] = "/trust/workload-broker-password",
         };
-        var agentNode = settings["Agent"]?.AsObject() ?? throw new InvalidOperationException("generated_agent_section_missing");
+        var agentNode = settings["Agent"]!.AsObject();
         agentNode["NativeAuthMode"] = "api_key";
         agentNode["ProviderApiKeyEnvRef"] = agent.ProviderApiKeyEnvRef;
         agentNode["WorkDir"] = "/workspace";
         (settings["RabbitMq"] ??= new JsonObject())["Host"] = template["BrokerHost"]!.GetValue<string>();
         WriteText(Path.Combine(bundle, "app", "appsettings.json"), settings.ToJsonString());
-        var root = Path.Combine(generated, Fleet.Shared.HarnessDefaults.CodexRootTomlFileName);
-        if (!File.Exists(root)) throw new InvalidOperationException("codex_root_missing");
-        File.Copy(root, Path.Combine(bundle, "app", Fleet.Shared.HarnessDefaults.CodexRootTomlFileName), overwrite: true);
+        File.Copy(Path.Combine(generated, Fleet.Shared.HarnessDefaults.CodexRootTomlFileName),
+            Path.Combine(bundle, "app", Fleet.Shared.HarnessDefaults.CodexRootTomlFileName), overwrite: true);
         foreach (var dir in new[] { "roles", "projects" })
-            if (Directory.Exists(Path.Combine(generated, dir))) CopyTree(Path.Combine(generated, dir), Path.Combine(bundle, "app", dir));
-        WriteText(Path.Combine(bundle, "workspace", ".mcp.json"), new JsonObject
-        {
-            ["mcpServers"] = new JsonObject { ["memory"] = new JsonObject { ["url"] = $"https://{template["MemoryHost"]!.GetValue<string>()}/mcp" } },
-        }.ToJsonString());
-        WriteRecord(Path.Combine(bundle, "trust", "enrollment.json"), Authority(template, agent.Name, "pending", epoch, policy.Sha256, "revoked"));
+            if (Directory.Exists(Path.Combine(generated, dir))) CopyTree(Path.Combine(generated, dir), Path.Combine(bundle, "app", dir), []);
+        WriteText(Path.Combine(bundle, "workspace", ".mcp.json"), MemoryMcp(template));
+        WriteRecord(Path.Combine(bundle, "trust", "enrollment.json"), Authority(template, agent.Name, sandboxId, epoch, policy.Sha256, "revoked"));
         WriteText(Path.Combine(bundle, "trust", "workload-broker-password"), workloadPassword);
         return bundle;
     }
 
-    private static void CopyTree(string source, string target)
+    /// <summary>Refuses any symlinked file or directory in a tree before any recursive privileged copy.</summary>
+    internal static void RefuseLinks(string root)
     {
-        PrivateDirectory(target);
-        foreach (var dir in Directory.GetDirectories(source)) CopyTree(dir, Path.Combine(target, Path.GetFileName(dir)));
-        foreach (var file in Directory.GetFiles(source))
+        if (new DirectoryInfo(root).LinkTarget is not null) throw new IOException("symlink_refused");
+        foreach (var entry in new DirectoryInfo(root).EnumerateFileSystemInfos("*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = 0 }))
+            if (entry.LinkTarget is not null) throw new IOException("symlink_refused");
+    }
+
+    private static void CopyTree(string source, string target, IReadOnlyCollection<string> exclude)
+    {
+        RefuseLinks(source);
+        Copy(source, target, top: true);
+
+        void Copy(string from, string to, bool top)
         {
-            if (new FileInfo(file).LinkTarget is not null) throw new IOException("generated_symlink_refused");
-            File.Copy(file, Path.Combine(target, Path.GetFileName(file)), overwrite: true);
+            Directory.CreateDirectory(to);
+            foreach (var dir in Directory.GetDirectories(from))
+                if (!(top && exclude.Contains(Path.GetFileName(dir)))) Copy(dir, Path.Combine(to, Path.GetFileName(dir)), false);
+            foreach (var file in Directory.GetFiles(from))
+                if (!(top && exclude.Contains(Path.GetFileName(file)))) File.Copy(file, Path.Combine(to, Path.GetFileName(file)), overwrite: true);
         }
     }
 

@@ -347,6 +347,19 @@ grants. A payload without `GrantId`, a wait without `visitVar` and a run outside
 behave exactly as before. See `docs/epic-grants.md` (threat model, scope, checks, deploy rule:
 no bridge restart during consensus).
 
+## Workflow failure notifier
+
+Off by default (`FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED=false` → bridge
+`WorkflowFailureNotifier__Enabled`; fresh setup writes it, upgrade adds it only when missing). When
+on, the bridge polls each configured namespace for runs that closed `Failed` or `TimedOut` and hands
+each one, once, to the existing `NotifyCtoWorkflow` for `FLEET_CTO_AGENT` (or
+`WorkflowFailureNotifier__CoordinatorAgent`). The deterministic id
+`workflow-failure-<namespace>-<runId>` plus Temporal's duplicate rejection is the dedup record.
+`Completed`, `Canceled`, `Terminated` and continue-as-new never notify. The notice carries identity,
+status and a type-name cause, never failure text or results. There is no recovery automation.
+Pending/parked state is served at bridge `GET /workflow-failures`. See
+`docs/workflow-failure-notifier.md`.
+
 ## Code Conventions
 
 - .NET 10, C# latest features

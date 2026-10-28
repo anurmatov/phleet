@@ -19,6 +19,7 @@ builder.Services.Configure<FleetMemoryOptions>(builder.Configuration.GetSection(
 builder.Services.Configure<FleetWorkflowOptions>(builder.Configuration.GetSection(FleetWorkflowOptions.Section));
 builder.Services.PostConfigure<FleetWorkflowOptions>(o => o.OrchestratorUrl = builder.Configuration["TemporalBridge:OrchestratorUrl"] ?? "");
 builder.Services.Configure<AuthTokenRefreshOptions>(builder.Configuration.GetSection(AuthTokenRefreshOptions.Section));
+builder.Services.Configure<WorkflowFailureNotifierOptions>(builder.Configuration.GetSection(WorkflowFailureNotifierOptions.Section));
 
 // RabbitMQ connection factory used by DelegateToAgentActivity for outbound publishes
 builder.Services.AddSingleton<IConnectionFactory>(sp =>
@@ -107,6 +108,13 @@ builder.Services.AddHostedService<SearchAttributeInitializer>();
 builder.Services.AddSingleton<TemporalClientFactory>();
 builder.Services.AddSingleton<ITemporalClientFactory>(sp => sp.GetRequiredService<TemporalClientFactory>());
 
+// #488: tells the configured coordinator when a workflow closes because of failure. Off unless
+// WorkflowFailureNotifier:Enabled=true; delivery reuses NotifyCtoWorkflow.
+builder.Services.AddSingleton<IWorkflowFailureSource, TemporalWorkflowFailureSource>();
+builder.Services.AddSingleton<IFailureNotificationSender, TemporalFailureNotificationSender>();
+builder.Services.AddSingleton<WorkflowFailureNotifier>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<WorkflowFailureNotifier>());
+
 var temporalOpts = builder.Configuration
     .GetSection(TemporalBridgeOptions.Section)
     .Get<TemporalBridgeOptions>() ?? new TemporalBridgeOptions();
@@ -175,5 +183,7 @@ FleetWorkflowConfig.Initialize(fleetWorkflowOptions);
 
 app.MapMcp();
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "fleet-temporal-bridge" }));
+// #488: pending/parked failure notices (identity and attempt counts, no content).
+app.MapGet("/workflow-failures", (WorkflowFailureNotifier notifier) => Results.Ok(notifier.Snapshot()));
 
 app.Run();

@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Services;
 using Microsoft.EntityFrameworkCore;
 using MySqlConnector;
 using YamlDotNet.Core;
@@ -87,15 +88,38 @@ public static class SandboxPolicyEndpoints
         app.MapPost("/api/agents/{name}/runtime/apply", async (string name, HttpContext http, CancellationToken ct) =>
         {
             if (Authenticate(http, app.Configuration) is { } denied) return denied;
-            var db = http.RequestServices.GetService<OrchestratorDbContext>();
-            if (db is null) return Results.Json(new { error = "policy_database_unavailable" }, statusCode: 503);
+            var runtime = http.RequestServices.GetService<StockOpenShellRuntime>();
+            if (runtime is not { Enabled: true }) return Results.Conflict(new { error = StockOpenShellRuntime.Unavailable });
             try
             {
-                var agent = await db.Agents.AsNoTracking().FirstOrDefaultAsync(a => a.Name == name, ct);
-                return agent is null ? Results.NotFound() : Results.Conflict(new { error = "managed_runtime_unavailable", message = "Selection is saved only; runtime apply is unavailable in this release." });
+                if (await runtime.KindsAsync(name, ct) is not { } kinds) return Results.NotFound();
+                if (kinds.Desired != "openshell" && kinds.Applied != "openshell")
+                    return Results.Conflict(new { error = "managed_apply_not_applicable" });
             }
-            catch (Exception ex) when (ex is DbException or Microsoft.EntityFrameworkCore.Storage.RetryLimitExceededException)
-            { return Results.Json(new { error = "policy_database_unavailable" }, statusCode: 503); }
+            catch (Exception ex) when (ex is DbException or InvalidOperationException)
+            { return Results.Json(new { error = "runtime_state_unavailable" }, statusCode: 503); }
+            // Reprovision runs the managed apply and, for OpenShell→Docker, the ordinary Docker path after it.
+            var result = await http.RequestServices.GetRequiredService<ContainerProvisioningService>().ReprovisionAsync(name, ct: ct);
+            return result.Success ? Results.Ok(new { message = result.Message }) : Results.Conflict(new { error = result.Message });
+        });
+        app.MapPost("/api/agents/{name}/revoke", async (string name, HttpContext http, CancellationToken ct) =>
+        {
+            if (Authenticate(http, app.Configuration) is { } denied) return denied;
+            var runtime = http.RequestServices.GetService<StockOpenShellRuntime>();
+            if (runtime is not { Enabled: true }) return Results.Conflict(new { error = StockOpenShellRuntime.Unavailable });
+            var result = await runtime.RevokeAsync(name, ct);
+            return result.Ok ? Results.Ok(new { message = result.Code })
+                : Results.Json(new { error = result.Code, errors = result.Errors }, statusCode: result.Status);
+        });
+        // The rollout guard's input: refuses replacement unless every count is zero. Never anonymous.
+        app.MapGet("/api/managed-runtime/rollback-preflight", async (HttpContext http, CancellationToken ct) =>
+        {
+            if (Authenticate(http, app.Configuration) is { } denied) return denied;
+            var runtime = http.RequestServices.GetService<StockOpenShellRuntime>();
+            if (runtime is null) return Results.Json(new { error = "runtime_state_unavailable" }, statusCode: 503);
+            try { return Results.Ok(await runtime.RollbackPreflightAsync(ct)); }
+            catch (Exception ex) when (ex is DbException or InvalidOperationException)
+            { return Results.Json(new { error = "runtime_state_unavailable" }, statusCode: 503); }
         });
         return app;
     }

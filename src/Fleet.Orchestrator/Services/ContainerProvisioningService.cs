@@ -76,8 +76,12 @@ public sealed class ContainerProvisioningService(
             return ProvisionPreview.NotFound(agentName);
 
         if (AgentPatchHelpers.RuntimeApplyFault(agent) is { } blocker)
+        {
+            if (StockOpenShellRuntime.Owns(agent) && Managed() is { Enabled: true } runtime)
+                blocker = await runtime.DescribePreflightFaultAsync(agent, ct) ?? "managed_apply_ready";
             return new ProvisionPreview(agentName, agent.ContainerName, "", new ContainerSpec("", 0, [], [], []), null,
                 [$"desired={agent.RuntimeKind}; applied={agent.AppliedRuntimeKind}; policy={agent.SandboxPolicyVersionId}; {blocker}"]);
+        }
 
         var envFile = config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env";
         var envValues = LoadEnvFile(envFile);
@@ -402,6 +406,12 @@ public sealed class ContainerProvisioningService(
         if (agent is null)
             return ProvisionResult.Fail(agentName, "agent not found in DB");
 
+        if (StockOpenShellRuntime.Owns(agent))
+        {
+            if (await DispatchManagedApplyAsync(agentName, ct) is { } managed) return managed;
+            // OpenShell→Docker completed its revoke/stop; continue with the ordinary Docker path.
+            return await ProvisionAsync(agentName, imageOverride, instructionVersionOverrides, ct);
+        }
         if (AgentPatchHelpers.RuntimeApplyFault(agent) is { } runtimeFault)
             return ProvisionResult.Fail(agentName, runtimeFault);
 
@@ -540,7 +550,11 @@ public sealed class ContainerProvisioningService(
             return ProvisionResult.Fail(agentName, "agent not found in DB");
 
         if (agent.AppliedRuntimeKind != "docker")
-            return ProvisionResult.Fail(agentName, "managed_runtime_unavailable");
+        {
+            if (Managed() is not { Enabled: true } runtime) return ProvisionResult.Fail(agentName, StockOpenShellRuntime.Unavailable);
+            var managedStop = await runtime.StopAsync(agentName, ct);
+            return new ProvisionResult(agentName, managedStop.Ok, managedStop.Message);
+        }
         var existing = await docker.InspectContainerAsync(agent.ContainerName, ct);
         if (existing is null)
             return ProvisionResult.Fail(agentName,
@@ -577,6 +591,7 @@ public sealed class ContainerProvisioningService(
         if (DescribePrimaryHumanFault() is { } priorityFault)
             return ProvisionResult.Fail(agentName, priorityFault);
 
+        if (await DispatchManagedApplyAsync(agentName, ct) is { } managed) return managed;
         if (await DescribeManagedRuntimeFaultAsync(agentName, ct) is { } runtimeFault)
             return ProvisionResult.Fail(agentName, runtimeFault);
 
@@ -1562,7 +1577,7 @@ public sealed class ContainerProvisioningService(
         return id;
     }
 
-    private static bool HasTelegramBot(Agent agent) => agent.EnvRefs.Any(e =>
+    internal static bool HasTelegramBot(Agent agent) => agent.EnvRefs.Any(e =>
         e.EnvKeyName.StartsWith("TELEGRAM_", StringComparison.OrdinalIgnoreCase)
         && e.EnvKeyName.EndsWith("_BOT_TOKEN", StringComparison.OrdinalIgnoreCase));
 
@@ -1778,6 +1793,53 @@ public sealed class ContainerProvisioningService(
     /// Uses the DB-stored value if set; otherwise computes deterministically as 8080 + agent.Id.
     /// </summary>
     public static int GetEffectiveHostPort(Agent agent) => agent.HostPort ?? (8080 + agent.Id);
+
+    private StockOpenShellRuntime? Managed()
+    {
+        using var scope = scopeFactory.CreateScope();
+        return scope.ServiceProvider.GetService<StockOpenShellRuntime>();
+    }
+
+    /// <summary>
+    /// Null when the agent is not managed or OpenShell→Docker finished and the Docker path should
+    /// continue; otherwise the managed apply outcome. Never falls back to Docker on a managed failure.
+    /// </summary>
+    private async Task<ProvisionResult?> DispatchManagedApplyAsync(string name, CancellationToken ct)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        var agent = await db.Agents.AsNoTracking().FirstOrDefaultAsync(a => a.Name == name, ct);
+        if (agent is null || !StockOpenShellRuntime.Owns(agent)) return null;
+        if (Managed() is not { Enabled: true } runtime) return ProvisionResult.Fail(name, StockOpenShellRuntime.Unavailable);
+        var result = await runtime.ApplyAsync(name, ct);
+        return result is { Ok: true, Code: "applied_docker" } ? null : new ProvisionResult(name, result.Ok, result.Message);
+    }
+
+    /// <summary>
+    /// The ordinary generated config, instructions and project contexts for a managed bundle, written
+    /// to the same <c>.generated</c> directory the Docker path uses. Returns that directory.
+    /// </summary>
+    internal async Task<string> GenerateManagedInputsAsync(string agentName, CancellationToken ct)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        var agent = await db.Agents
+            .Include(a => a.Tools).Include(a => a.Projects).Include(a => a.McpEndpoints).Include(a => a.EnvRefs)
+            .Include(a => a.TelegramUsers).Include(a => a.TelegramGroups).Include(a => a.Networks)
+            .Include(a => a.Instructions).ThenInclude(ai => ai.Instruction).ThenInclude(i => i.Versions)
+            .Include(a => a.CredentialMounts).ThenInclude(m => m.CredentialFile)
+            .AsSplitQuery().AsNoTracking()
+            .FirstOrDefaultAsync(a => a.Name == agentName, ct)
+            ?? throw new InvalidOperationException("agent_not_found");
+        var baseDir = config["Provisioning:BaseDir"] ?? throw new InvalidOperationException("Provisioning:BaseDir is required but not configured.");
+        var envValues = LoadEnvFile(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env");
+        envValues.TryGetValue("FLEET_CTO_AGENT", out var ctoAgentName);
+        var projectContexts = await ResolveProjectContextsAsync(agent);
+        await GenerateConfigFilesAsync(agent, baseDir, ctoAgentName ?? "");
+        await GenerateInstructionFilesAsync(agent, baseDir, null);
+        await GenerateProjectContextFilesAsync(agent, baseDir, projectContexts);
+        return Path.Combine(baseDir, "workspaces", agent.ContainerName, ".generated");
+    }
 
     private async Task<string?> DescribeManagedRuntimeFaultAsync(string name, CancellationToken ct)
     {

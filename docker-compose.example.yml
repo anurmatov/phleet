@@ -412,6 +412,8 @@ services:
       # via the Docker socket and passes host paths (workspaces, memories, env file)
       # as bind mounts — those paths must resolve identically on the host.
       - ${FLEET_BASE_DIR}:${FLEET_BASE_DIR}
+      # #492 managed runtime client trust, authority records and broker CA (0700, created by setup/upgrade).
+      - ${FLEET_BASE_DIR}/openshell-client:/var/lib/fleet-openshell-client
     env_file:
       - .env
     environment:
@@ -436,6 +438,17 @@ services:
       - EpicGrants__AutonomyEnabled=${FLEET_AUTONOMY_ENABLED:-false}
       - EpicDriverWatcher__Enabled=${FLEET_EPIC_WATCHER_ENABLED:-false}
       - EpicDriverWatcher__IntervalSeconds=${FLEET_EPIC_WATCHER_INTERVAL_SECONDS:-300}
+      # Managed stock OpenShell (#492): off unless FLEET_STOCK_MANAGED_ENABLED=true. Client trust,
+      # authority records and broker CA live in the private 0700 openshell-client directory.
+      - StockOpenShell__ManagedEnabled=${FLEET_STOCK_MANAGED_ENABLED:-false}
+      - StockOpenShell__ConfigDir=/var/lib/fleet-openshell-client
+      - StockOpenShell__BrokerCaFile=/var/lib/fleet-openshell-client/broker-ca.pem
+      - StockOpenShell__AgentImage=${FLEET_STOCK_AGENT_IMAGE:-}
+      - StockOpenShell__GatewayContainer=${FLEET_STOCK_GATEWAY_CONTAINER:-openshell-gateway}
+      - StockOpenShell__BrokerManagementUrl=${FLEET_STOCK_BROKER_MANAGEMENT_URL:-}
+      - StockOpenShell__BrokerAdminUserRef=${FLEET_STOCK_BROKER_ADMIN_USER_REF:-}
+      - StockOpenShell__BrokerAdminPasswordRef=${FLEET_STOCK_BROKER_ADMIN_PASSWORD_REF:-}
+      - StockOpenShell__BackupDir=${FLEET_STOCK_BACKUP_DIR:-}
     mem_limit: 512m
     restart: unless-stopped
     depends_on:

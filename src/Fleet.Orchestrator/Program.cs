@@ -37,6 +37,12 @@ builder.Services.AddSingleton<AgentRegistry>();
 builder.Services.AddSingleton<DockerService>();
 builder.Services.AddSingleton<StockRuntimeMutationHold>();
 builder.Services.AddSingleton<ContainerProvisioningService>();
+// #492 managed stock OpenShell: one thin adapter behind the existing lifecycle entry points.
+builder.Services.AddSingleton<IStockCli, ProcessStockCli>();
+builder.Services.AddSingleton<StockBrokerProvisioner>();
+builder.Services.AddSingleton<IManagedBindingStore, EfManagedBindingStore>();
+builder.Services.AddSingleton<IStockHostView, DockerStockHostView>();
+builder.Services.AddSingleton<StockOpenShellRuntime>();
 builder.Services.AddSingleton<JournalTokenService>();
 builder.Services.AddSingleton(_ => new TelegramMembershipClient());
 builder.Services.AddSingleton<CommsJournalStatusProxy>();

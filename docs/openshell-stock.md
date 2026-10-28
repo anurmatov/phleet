@@ -404,4 +404,64 @@ Missing MySQL is a failure, not a skip. Runtime integration is a separate slice 
 
 Explicit `Agent:NativeAuthMode=api_key` and `Agent:ProviderApiKeyEnvRef` prepare a private `auth.json` containing only the standard `OPENAI_API_KEY` placeholder and force Codex API login without a manual auth cache, using the [official OpenAI login-method setting](https://learn.chatgpt.com/docs/auth#enforce-a-login-method-or-workspace).
 The reference is never resolved inside the workload, and placeholder syntax is not proof of stock issuance, acknowledged provider attachment, or secret isolation.
-Managed apply remains unavailable until the remaining runtime, broker and receiving-service identity paths are implemented and reviewed, while the existing manual profile still requires its original auth input.
+With `StockOpenShell:ManagedEnabled=true` the managed runtime below performs apply; the existing manual profile still requires its original auth input.
+
+## Managed runtime (#492, default off)
+
+`StockOpenShell:ManagedEnabled=false` (`FLEET_STOCK_MANAGED_ENABLED`) keeps every agent on Docker and
+returns `managed_runtime_unavailable` as before. Enabled, one adapter (`StockOpenShellRuntime`) sits
+behind the existing REST and MCP entry points. It drives the pinned stock CLI (`0.1.5`, argument
+arrays, JSON output, TLS-skip/endpoint variables removed) and never falls back to Docker.
+
+| Operation | Behavior |
+|---|---|
+| Apply (`POST /api/agents/{name}/runtime/apply`, provision, reprovision) | Preflight first, with no external action: codex + API-key ref resolvable, exact policy version, private 0700 `ConfigDir`, authority template, HTTPS broker management with operator CA, CLI version, observable gateway. Then the old runtime is quiesced (Docker stop, or full revoke fanout of the old epoch), the broker epoch is created, a revoked allocation record is written, the provider is created/updated with the key only in the CLI's environment, and the sandbox is created once (`--restart-policy never`, `--no-auto-providers`). After the refused allocation settles, the record is bound to the actual UUID and activated, the active copy is uploaded, and one `sandbox start` runs. |
+| OpenShell→Docker | Revoke fanout for every verified binding, then `applied=docker`, and the ordinary Docker path continues. Any unresolved leg holds. |
+| Start/Stop/restart/cancel/logs | Act on the persisted applied binding only, with exact-UUID checks before and after each name-based stock call. A pending desired change never redirects them. |
+| `POST /api/agents/{name}/revoke` | Admission revoke, provider detach, broker revoke/connection close and Stop, as independent legs (30 s each, 120 s total). All unresolved errors are aggregated and the binding becomes `needs_attention`. |
+
+- **One writer per agent.** A compare-and-set on `agents.AppliedRuntimeBinding` admits one operation; a concurrent request gets 409.
+- **Interrupted or unknown outcomes.** An operation left by an earlier orchestrator process becomes `needs_attention` and is never replayed. Unknown outcomes, a changed sandbox UUID, an unobservable quiescence check and a changed gateway generation (container ID plus StartedAt) all hold, with no Start or replacement, until an operator reconciles and revokes.
+- **Cancel.** The adapter runs `sandbox exec` to POST the workload's loopback `/cancel` or `/cancel/{taskId}`. The agent admits only that route, and only when the actual connection address is loopback and `Agent:NativeAuthMode=api_key`; forwarded headers are ignored.
+- **Broker.** Per epoch: vhost `stock-<epoch>` plus `-workload`, `-control` and `-observer` users with random passwords, no tags, and exact anchored permissions built from the source queue/exchange names. Existing resources refuse, partial writes are reported as owned partials, and revoke closes connections and deletes the users while keeping the vhost for custody.
+
+Operator inputs live in the private `${FLEET_BASE_DIR}/openshell-client` directory (0700), mounted
+into the orchestrator at `/var/lib/fleet-openshell-client`:
+- stock CLI client metadata/trust (`XDG_CONFIG_HOME`);
+- `managed-authority.json` (gateway issuer/audience/JWKS, assertion key paths, memory and broker hosts);
+- `broker-ca.pem`.
+
+The adapter writes per-agent records and control/observer broker passwords under
+`managed/authority/` (0600). For one managed agent, point the existing outside consumers'
+`StockOpenShell:AuthorityFile` at `managed/authority/<agent>.json`. Multi-agent selection by
+sandbox UUID is not implemented yet. The orchestrator image carries
+`LABEL org.phleet.managed-stock-runtime=1`; the stock CLI is installed only with the
+`OPENSHELL_CLI_URL` and `OPENSHELL_CLI_SHA256` build args (digest and version checked).
+
+**Current limits, refused rather than dropped.** Managed agents are memory-only, like the manual
+profile: Telegram, journal and non-memory MCP grants refuse apply with
+`managed_route_unsupported:<route>`. The receiving-service identity for those routes, the stock
+gateway Compose unit, dashboard revoke/state controls, and the upload-into-stopped-sandbox step
+are not qualified. #493 owns the exact-build trial, with no installation or activation implied.
+
+**Rollout guard and rollback.** `scripts/check-stock-runtime-rollout.sh` runs in `upgrade.sh`
+before anything is stopped, and it is the operator rollback entrypoint (`--image IMAGE`). A target
+without the label needs the operator-authenticated `GET /api/managed-runtime/rollback-preflight` to
+report zero desired, applied and unresolved managed bindings. A nonzero, malformed or unavailable
+answer refuses. Ordered rollback:
+1. revoke;
+2. confirm quiescence and no unresolved errors;
+3. apply Docker;
+4. roll back the orchestrator image;
+5. Start if needed.
+
+Administrator Docker commands that bypass this procedure are not protected.
+
+**Backup.** Run `scripts/backup-stock-gateway.sh BACKUP_DIR [/var/lib/openshell]` from the
+operator's daily host job and before gateway changes. It takes a stdlib SQLite online backup with
+an integrity check, copies config and trust files, and checks their inode/mtime before and after.
+Directories are 0700 and files 0600, and seven complete snapshots are kept. A failure or a
+changed trust file marks the snapshot `INVALID` and exits nonzero. Snapshots contain keys: keep
+them host-local unless an operator-approved encrypted transfer exists. To restore, stop the gateway
+and every owned workload first, verify integrity and bindings before any admission, and keep the
+unexpected-resume hold.

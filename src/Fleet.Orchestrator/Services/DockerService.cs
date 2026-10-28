@@ -75,6 +75,30 @@ public sealed class DockerService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Read-only label query over all containers, running or not. Null means the observation failed;
+    /// it is never reported as "no containers" (#492 quiescence checks depend on that distinction).
+    /// </summary>
+    public async Task<IReadOnlyList<(string Id, string State)>?> ListContainersByLabelAsync(string label, CancellationToken ct = default)
+    {
+        try
+        {
+            var filters = Uri.EscapeDataString(JsonSerializer.Serialize(new Dictionary<string, string[]> { ["label"] = [label] }));
+            using var response = await _http.GetAsync($"/{DockerApiVer}/containers/json?all=true&filters={filters}", ct);
+            if (!response.IsSuccessStatusCode) return null;
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            return document.RootElement.EnumerateArray()
+                .Select(c => (c.GetProperty("Id").GetString() ?? "", c.GetProperty("State").GetString() ?? ""))
+                .ToList();
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException
+            or IOException or InvalidOperationException or KeyNotFoundException)
+        {
+            _logger.LogWarning("Docker label query unavailable");
+            return null;
+        }
+    }
+
     /// <summary>Returns the time the container was last started (State.StartedAt), or null if not found / not running.</summary>
     public async Task<DateTimeOffset?> GetContainerStartedAtAsync(string containerName)
     {

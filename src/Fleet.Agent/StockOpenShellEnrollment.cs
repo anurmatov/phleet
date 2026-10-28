@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Http;
 using System.Text.Json;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -16,6 +17,20 @@ namespace Fleet.Agent;
 /// </summary>
 public static class StockOpenShellEnrollment
 {
+    /// <summary>
+    /// The one HTTP exception in managed mode (#492): the adapter's stock-authenticated
+    /// <c>sandbox exec</c> reaches POST /cancel or /cancel/{taskId} from the workload's own loopback.
+    /// Only the actual connection address counts; forwarded headers are never read. Everything else,
+    /// and the existing manual profile, keeps the health-only surface.
+    /// </summary>
+    public static bool AllowsManagedLoopbackCancel(bool managed, string method, string? path, System.Net.IPAddress? remote)
+    {
+        if (!managed || !HttpMethods.IsPost(method) || remote is null) return false;
+        if (path is null || !System.Text.RegularExpressions.Regex.IsMatch(path, @"\A/cancel(/[^/]{1,256})?\z")) return false;
+        if (remote.IsIPv4MappedToIPv6) remote = remote.MapToIPv4();
+        return System.Net.IPAddress.IsLoopback(remote);
+    }
+
     public const string StockCommit = "bdb956f2cd65a635f1294fccf1d138d263bf650f";
     public const string ConfigurationKey = "StockOpenShell:EnrollmentFile";
     private static readonly HashSet<string> Fields = new(StringComparer.Ordinal)

@@ -260,3 +260,24 @@ public sealed class ManagedStockAgentTests
         public void Dispose() => Directory.Delete(_dir, true);
     }
 }
+
+/// <summary>#492: the managed adapter's loopback POST cancel is the only extra HTTP route.</summary>
+public sealed class ManagedStockLoopbackCancelTests
+{
+    [Theory]
+    [InlineData(true, "POST", "/cancel", "127.0.0.1", true)]
+    [InlineData(true, "POST", "/cancel/task%201", "::1", true)]
+    [InlineData(true, "POST", "/cancel", "::ffff:127.0.0.1", true)]
+    [InlineData(true, "POST", "/cancel", "10.0.0.5", false)]        // non-loopback, whatever headers say
+    [InlineData(true, "GET", "/cancel", "127.0.0.1", false)]
+    [InlineData(true, "POST", "/cancel_bg/x", "127.0.0.1", false)]
+    [InlineData(true, "POST", "/cancel/a/b", "127.0.0.1", false)]
+    [InlineData(true, "POST", "/memory", "127.0.0.1", false)]
+    [InlineData(false, "POST", "/cancel", "127.0.0.1", false)]      // manual profile keeps health-only
+    public void Only_managed_loopback_post_cancel_is_admitted(bool managed, string method, string path, string remote, bool allowed) =>
+        Assert.Equal(allowed, StockOpenShellEnrollment.AllowsManagedLoopbackCancel(managed, method, path, System.Net.IPAddress.Parse(remote)));
+
+    [Fact]
+    public void Missing_remote_address_is_refused() =>
+        Assert.False(StockOpenShellEnrollment.AllowsManagedLoopbackCancel(true, "POST", "/cancel", null));
+}

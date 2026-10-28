@@ -59,11 +59,15 @@ if (!isCliMode && (builder.Configuration.GetValue<bool>("Journal:FilesEnabled") 
     builder.WebHost.ConfigureKestrel(options => options.ListenAnyIP(8080));
 
 var stockMode = builder.Configuration.GetValue<bool>("StockOpenShell:Enabled");
+var managedStock = stockMode && builder.Configuration["Agent:NativeAuthMode"] == "api_key";
 var app = builder.Build();
 app.Use(async (context, next) =>
 {
     // This profile uses the authenticated broker for control, never legacy HTTP control routes.
-    if (stockMode && context.Request.Path != "/health")
+    // Managed mode alone admits loopback POST cancel from the adapter's stock-authenticated exec.
+    if (stockMode && context.Request.Path != "/health"
+        && !StockOpenShellEnrollment.AllowsManagedLoopbackCancel(managedStock, context.Request.Method,
+            context.Request.Path.Value, context.Connection.RemoteIpAddress))
     { context.Response.StatusCode = 404; return; }
     if (context.Request.Path.Value == JournalFilesListener.Path) { context.Response.StatusCode = 404; return; }
     await next(context);

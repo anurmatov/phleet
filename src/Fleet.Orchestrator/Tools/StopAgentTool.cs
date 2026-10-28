@@ -5,7 +5,7 @@ using ModelContextProtocol.Server;
 namespace Fleet.Orchestrator.Tools;
 
 [McpServerToolType]
-public sealed class StopAgentTool(AgentRegistry registry, DockerService docker, StockRuntimeMutationHold runtimeHold)
+public sealed class StopAgentTool(AgentRegistry registry, DockerService docker, StockRuntimeMutationHold runtimeHold, StockOpenShellRuntime? managed = null)
 {
     [McpServerTool(Name = "stop_agent")]
     [Description("Stop a fleet agent's Docker container gracefully (waits up to 10s before SIGKILL). Use with caution.")]
@@ -13,6 +13,7 @@ public sealed class StopAgentTool(AgentRegistry registry, DockerService docker, 
         [Description("Agent name (e.g. my-agent)")] string name)
     {
         if (runtimeHold.Denies(name)) return StockRuntimeMutationHold.Reason;
+        if (managed is not null && await managed.DispatchToolAsync(name, "stop") is { } managedResult) return managedResult;
         if (await runtimeHold.DescribeAppliedFaultAsync(name) is { } appliedFault) return appliedFault;
 
         var agent = registry.Get(name);

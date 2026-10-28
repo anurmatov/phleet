@@ -432,3 +432,7 @@ from config or heartbeats, resolve a reference to a credential during save, or p
 fallback for unavailable managed apply. Existing manual stock profiles/grants remain separate.
 The focused tests are `ManagedStockRuntime` and real-MySQL `ManagedStockMySql` (missing DB fails).
 See `docs/openshell-stock.md` for the explicitly supported authored YAML subset and rollback limits.
+Managed apply/lifecycle (#492) is `StockOpenShellRuntime` behind the same entry points, default off
+(`FLEET_STOCK_MANAGED_ENABLED=false`): applied binding only for Start/Stop/cancel, CAS per agent,
+unknown outcomes held as `needs_attention`, never a Docker fallback. `upgrade.sh` runs
+`scripts/check-stock-runtime-rollout.sh` before stopping anything.

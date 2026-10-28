@@ -1,0 +1,40 @@
+# Managed stock OpenShell gateway (#492) — example only. Keys follow the pinned upstream schema
+# (NVIDIA/OpenShell bdb956f2cd65a635f1294fccf1d138d263bf650f, docs/how-it-works/gateways/configuration.mdx).
+# Unlike upstream's local sample this keeps TLS on, refuses unauthenticated users and pins images
+# by digest. Replace every <placeholder>; never copy the insecure upstream sample or :latest tags.
+# Mount read-only into the gateway unit and clear the image's default CMD.
+
+[openshell]
+version = 2
+
+[openshell.gateway]
+# Private loopback listener on the gateway host only, never a public interface.
+bind_address        = "127.0.0.1:8080"
+health_bind_address = "127.0.0.1:8081"
+log_level           = "info"
+compute_driver      = "docker"
+disable_tls         = false
+
+[openshell.gateway.tls]
+cert_path      = "/var/lib/openshell/tls/gateway.pem"
+key_path       = "/var/lib/openshell/tls/gateway-key.pem"
+client_ca_path = "/var/lib/openshell/tls/client-ca.pem"
+
+[openshell.gateway.gateway_jwt]
+signing_key_path = "/var/lib/openshell/tls/jwt/signing.pem"
+public_key_path  = "/var/lib/openshell/tls/jwt/public.pem"
+kid_path         = "/var/lib/openshell/tls/jwt/kid"
+gateway_id       = "<gateway-id>"
+
+[openshell.gateway.auth]
+allow_unauthenticated_users = false
+
+[openshell.gateway.mtls_auth]
+enabled = true
+operator_enabled = true
+
+[openshell.drivers.docker]
+# Pin by digest. The workload image is the phleet stock-agent target; it is passed per sandbox.
+sandbox_runtime_image = "<stock sandbox runtime image>@sha256:<digest>"
+supervisor_image      = "<stock supervisor image>@sha256:<digest>"
+image_pull_policy     = "if_not_present"

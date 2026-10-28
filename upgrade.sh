@@ -19,7 +19,7 @@ unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY \
       FLEET_COMMS_AGENT_LABEL FLEET_COMMS_STORE_PROVISIONED
 # Epic grants (#436): .env is the record of the decision, never a stale shell export.
 unset FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS FLEET_AUTONOMY_ENABLED
-unset FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS
+unset FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS FLEET_STOCK_MANAGED_ENABLED
 # The journal decision in .env is preserved as it is: upgrade never asks, never flips it, and never
 # generates a key for a host that did not opt in. `conversations migrate` below applies 0004 either
 # way; it is additive.
@@ -94,11 +94,13 @@ add_missing_env_var() {
   ok "Added ${key}=${value} to .env"
 }
 add_missing_env_var FLEET_EPIC_WATCHER_ENABLED false
+mkdir -p "$FLEET_BASE_DIR/openshell-client" && chmod 700 "$FLEET_BASE_DIR/openshell-client"
 add_missing_env_var FLEET_EPIC_WATCHER_INTERVAL_SECONDS 300
 add_missing_env_var FLEET_EPIC_GRANTS_ENABLED false
 add_missing_env_var FLEET_EPIC_GRANTS_MAX_DAYS 14
 add_missing_env_var FLEET_EPIC_GRANTS_DENIED_REPOS ""
 add_missing_env_var FLEET_AUTONOMY_ENABLED false
+add_missing_env_var FLEET_STOCK_MANAGED_ENABLED false
 
 # ── Stop services ────────────────────────────────────────────────────────────
 section "[1/4] Stopping services..."
@@ -133,6 +135,12 @@ case "$MEDIA_STORE" in
     fi
     ;;
 esac
+
+# #492: after the other preflights and before anything is stopped or replaced, refuse an orchestrator that cannot read managed
+# bindings while any exist. An unavailable preflight refuses; it is never read as "none".
+ORCHESTRATOR_AUTH_TOKEN=$(read_env_var "$ENV_FILE" ORCHESTRATOR_AUTH_TOKEN) \
+  bash "$SCRIPT_DIR/scripts/check-stock-runtime-rollout.sh" --dockerfile "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile" \
+  || { fail "managed runtime rollout guard refused this orchestrator replacement"; exit 1; }
 
 if docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" ps --quiet 2>/dev/null | head -1 | grep -q .; then
   # `--profile comms` on down too, so an enabled service is actually stopped. When disabling, the
